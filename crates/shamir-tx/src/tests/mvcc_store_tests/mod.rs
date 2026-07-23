@@ -9,6 +9,7 @@ pub mod crud_tests;
 pub mod drain_tests;
 pub mod error_tests;
 pub mod gc_tests;
+pub mod get_at_many_tests;
 pub mod get_current_many_tests;
 pub mod history_tests;
 pub mod lock_tests;

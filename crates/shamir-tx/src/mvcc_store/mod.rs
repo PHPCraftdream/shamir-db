@@ -1048,6 +1048,117 @@ impl MvccStore {
         self.resolve_read(key, snapshot_version, cur_v).await
     }
 
+    /// cancel-safe: yes — read-only (same as [`Self::get_at`], applied to
+    /// many keys). CR-C3 (#778): vectored sibling of [`Self::get_at`] for
+    /// callers that need the AS-OF value of MANY keys against the SAME
+    /// `snapshot_version` (e.g. `TableManager::read_as_of`'s full-scan
+    /// enumeration, which previously awaited `get_at` once PER RECORD —
+    /// N sequential single-key `history.get` round-trips over the whole
+    /// matched set).
+    ///
+    /// **Partition, don't force-batch the fallback path.** Classifying a
+    /// key is a cheap in-memory `current_version` lookup (a `RecordCell`
+    /// map read, no I/O), so every input key is classified up front:
+    ///
+    /// - **Direct-path** (`cur_v > 0 && cur_v <= snapshot_version` — the
+    ///   COMMON case: no concurrent write landed on this key since the
+    ///   snapshot was pinned). The overlay is probed first per key (also
+    ///   in-memory, no I/O) — an overlay hit resolves immediately without
+    ///   ever touching `history`. The overlay-MISS subset's
+    ///   `encode_version_key(key, cur_v)` physical keys are collected into
+    ///   ONE `Vec` and resolved via a SINGLE `self.history.get_many(..)`
+    ///   call — this is the actual win: N sequential single-key gets
+    ///   collapse into one vectored call (disk backends override
+    ///   `get_many` to collapse N `spawn_blocking` calls into one).
+    /// - **Fallback-path** (`cur_v == 0` cold-start, or `cur_v >
+    ///   snapshot_version` — a concurrent write landed on THIS key after
+    ///   the snapshot was pinned, requiring the range-scan-newest-visible
+    ///   fallback in [`Self::resolve_read`]): kept on the EXISTING per-key
+    ///   `resolve_read` call, unbatched. This is intentionally NOT batched
+    ///   here — it is the rare path (fires only when a concurrent writer
+    ///   touched the SAME key after the caller's snapshot was pinned), and
+    ///   batching the range-scan fallback itself is a separate, harder
+    ///   problem (a versioned-index rewrite) explicitly out of scope for
+    ///   this "cheap first step" optimization.
+    ///
+    /// Results are reassembled in the ORIGINAL input `keys` order — callers
+    /// never need to re-sort or track which subset a given result came
+    /// from. Empty input returns `Ok(vec![])` with no I/O (mirrors
+    /// `Store::get_many`'s own early return).
+    pub async fn get_at_many(
+        &self,
+        keys: &[Bytes],
+        snapshot_version: u64,
+    ) -> DbResult<Vec<Option<Bytes>>> {
+        if keys.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        // Phase 1: classify each input key. For each slot we store the
+        // resolution category so Phase 3 can assemble the output in order.
+        enum Slot {
+            /// Resolved from the overlay — final answer already known.
+            Resolved(Option<Bytes>),
+            /// Direct-path, overlay miss — `miss_idx` is the position in
+            /// the `miss_keys` vector fed to `history.get_many`.
+            HistoryMiss { miss_idx: usize },
+            /// Fallback path (`cur_v == 0` or `cur_v > snapshot_version`) —
+            /// resolved per-key via the existing `resolve_read` below.
+            Fallback,
+        }
+
+        let len = keys.len();
+        let mut slots: Vec<Slot> = Vec::with_capacity(len);
+        let mut miss_keys: Vec<RecordKey> = Vec::new();
+
+        for key in keys {
+            let cur_v = self.current_version(key);
+            if cur_v == 0 || cur_v > snapshot_version {
+                slots.push(Slot::Fallback);
+                continue;
+            }
+            // Direct path — overlay probe first (in-memory, no I/O).
+            if let Some(val) = self.overlay.get(key, cur_v) {
+                let resolved = if val.is_empty() { None } else { Some(val) };
+                slots.push(Slot::Resolved(resolved));
+                continue;
+            }
+            // Overlay miss — needs the batched history lookup.
+            let vk = encode_version_key(key, cur_v);
+            let miss_idx = miss_keys.len();
+            miss_keys.push(vk.into());
+            slots.push(Slot::HistoryMiss { miss_idx });
+        }
+
+        // Phase 2: ONE batched history read for the whole direct-path
+        // overlay-miss subset.
+        let miss_results = if miss_keys.is_empty() {
+            Vec::new()
+        } else {
+            self.history.get_many(miss_keys).await?
+        };
+
+        // Phase 3: assemble the output vector in input order.
+        let mut out: Vec<Option<Bytes>> = Vec::with_capacity(len);
+        for (i, slot) in slots.iter().enumerate() {
+            match slot {
+                Slot::Resolved(val) => out.push(val.clone()),
+                Slot::HistoryMiss { miss_idx } => match &miss_results[*miss_idx] {
+                    Some(val) if val.is_empty() => out.push(None), // tombstone
+                    Some(val) => out.push(Some(val.clone())),
+                    None => out.push(None), // not found
+                },
+                Slot::Fallback => {
+                    let cur_v = self.current_version(&keys[i]);
+                    let val = self.resolve_read(&keys[i], snapshot_version, cur_v).await?;
+                    out.push(val);
+                }
+            }
+        }
+
+        Ok(out)
+    }
+
     /// Direct access to history store (for GC, recovery).
     pub fn history_store(&self) -> &Arc<dyn Store> {
         &self.history

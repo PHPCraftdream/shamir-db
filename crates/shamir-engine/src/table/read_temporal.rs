@@ -102,16 +102,24 @@ impl TableManager {
         while let Some(batch_result) = stream.next().await {
             let batch = batch_result?;
             records_scanned += batch.len() as u64;
-            for (id, _cow) in batch {
-                // Read the AS-OF value — this is NOT the current value; it is
-                // the value the record had at `version` (or None if it did not
-                // exist yet / was already deleted at that point).
-                let asof_bytes = mvcc.get_at(id.as_bytes(), version).await?;
+
+            // CR-C3 (#778): fetch the AS-OF value for the WHOLE batch in one
+            // vectored call instead of one `get_at` await per record. The
+            // ids are collected up front so `get_at_many` can partition them
+            // into a batched history.get_many subset (direct path) and a
+            // per-key fallback subset (concurrent-write range-scan) — see
+            // `MvccStore::get_at_many`'s doc comment. Zipping the results
+            // back against `batch` preserves order, so the filter/projection
+            // body below is byte-identical to the prior per-record loop.
+            let ids: Vec<Bytes> = batch.iter().map(|(id, _cow)| id.to_bytes()).collect();
+            let asof_values = mvcc.get_at_many(&ids, version).await?;
+
+            for ((id, _cow), asof_bytes) in batch.into_iter().zip(asof_values) {
                 let Some(bytes) = asof_bytes else {
                     // Record did not exist at this version — exclude it.
                     continue;
                 };
-                // bytes is already Bytes from get_at.
+                // bytes is already Bytes from get_at_many.
                 // Apply the WHERE filter to the AS-OF value (NOT the current
                 // value). This ensures `AsOf` semantics: the filter evaluates
                 // the world as it was at `version`.
