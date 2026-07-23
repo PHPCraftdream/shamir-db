@@ -301,8 +301,8 @@ impl Cursor {
 /// about differently).
 #[derive(Default)]
 pub struct CursorRegistry {
-    open: DashMap<u64, Arc<Cursor>>,
-    by_session: DashMap<[u8; 32], Arc<AtomicUsize>>,
+    open: DashMap<u64, Arc<Cursor>, THasher>,
+    by_session: DashMap<[u8; 32], Arc<AtomicUsize>, THasher>,
     reaped_tombstones: DashMap<u64, Instant, THasher>,
 }
 
@@ -417,10 +417,34 @@ impl CursorRegistry {
         Some(arc)
     }
 
+    /// Decrement the session's live open-cursor count and, if it just
+    /// reached zero, remove the `by_session` entry entirely — otherwise a
+    /// long-lived server leaks one `[u8; 32] -> Arc<AtomicUsize>` entry per
+    /// connection that ever opened a cursor (CR-B8 / #774, R-3).
+    ///
+    /// The decrement and the "now zero, so remove" check are combined into
+    /// ONE atomic step via `DashMap::remove_if`, whose predicate runs while
+    /// `dashmap` holds the shard's write lock for `owner_sid` (verified
+    /// against `dashmap` 6.1.0's `_remove_if`, which calls
+    /// `_yield_write_shard` before invoking the predicate and only releases
+    /// it after — see `dashmap::HashMap::_entry`, used by `register`'s
+    /// `.entry(owner_sid)`, which takes the SAME shard write lock). So this
+    /// decrement-then-maybe-remove is atomic relative to a concurrent
+    /// `register()`: either `register`'s `entry()` call happens strictly
+    /// before this `remove_if` (it sees the pre-decrement count, adds to
+    /// the same `Arc`, and this `remove_if`'s predicate then observes a
+    /// NON-zero result and does not remove), or strictly after (this
+    /// `remove_if` already removed the entry, `register`'s `entry()` finds
+    /// nothing and creates a fresh `AtomicUsize(0)` via `or_insert_with`,
+    /// correctly starting over for a session that just hit zero). Either
+    /// interleaving preserves correct cap accounting — a session can never
+    /// exceed `max_per_session` split across two independently-created
+    /// counters.
     fn free_session_slot(&self, owner_sid: &[u8; 32]) {
-        if let Some(counter) = self.by_session.get(owner_sid) {
-            counter.value().fetch_sub(1, Ordering::AcqRel);
-        }
+        self.by_session.remove_if(owner_sid, |_, counter| {
+            // Pre-decrement value == 1 means the NEW value is 0.
+            counter.fetch_sub(1, Ordering::AcqRel) == 1
+        });
     }
 
     /// Cursor ids idle past `idle_ttl` as of `now`. The background sweep
@@ -458,6 +482,19 @@ impl CursorRegistry {
             .get(sid)
             .map(|c| c.value().load(Ordering::Acquire))
             .unwrap_or(0)
+    }
+
+    /// Number of `by_session` entries currently tracked (test/diagnostic
+    /// probe only — asserts CR-B8's leak fix: a session's entry must be
+    /// removed once its live count reaches zero, not merely zeroed out).
+    /// NOT a hot-path method: `DashMap::len()` is fine here (unlike `scc`'s
+    /// banned O(N) `len()`, `dashmap`'s isn't on `clippy.toml`'s
+    /// `disallowed-methods` list), but production code should never need
+    /// this cardinality — only `open_count_for_session`'s O(1) per-session
+    /// lookup.
+    #[cfg(test)]
+    pub(crate) fn by_session_len(&self) -> usize {
+        self.by_session.len()
     }
 }
 

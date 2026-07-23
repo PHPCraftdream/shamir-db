@@ -26,6 +26,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use dashmap::DashMap;
+use shamir_collections::THasher;
 use shamir_tx::{SnapshotGuard, TxContext};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
@@ -183,8 +184,8 @@ impl InteractiveTx {
 /// surfaced to callers).
 #[derive(Default)]
 pub struct TxRegistry {
-    open: DashMap<u64, Arc<InteractiveTx>>,
-    by_session: DashMap<[u8; 32], u64>,
+    open: DashMap<u64, Arc<InteractiveTx>, THasher>,
+    by_session: DashMap<[u8; 32], u64, THasher>,
 }
 
 impl TxRegistry {

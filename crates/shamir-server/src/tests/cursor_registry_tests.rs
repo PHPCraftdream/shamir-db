@@ -210,6 +210,115 @@ async fn explicit_remove_does_not_tombstone() {
     ));
 }
 
+/// CR-B8 (#774, R-3): `free_session_slot` must not merely zero the
+/// session's counter — once the live count reaches zero, the `by_session`
+/// entry itself must be removed, or a long-lived server leaks one
+/// `[u8; 32] -> Arc<AtomicUsize>` entry per connection that ever opened a
+/// cursor. Covers both removal paths: explicit `remove` (CancelCursor) and
+/// `remove_for_idle_reap`.
+#[tokio::test]
+async fn by_session_entry_removed_after_explicit_remove_drains_to_zero() {
+    let reg = CursorRegistry::new();
+    let cursor = make_cursor(1).await;
+    reg.register(1, SID_A, cursor, 16).unwrap();
+    assert_eq!(reg.by_session_len(), 1);
+
+    reg.remove(1).expect("present");
+    assert_eq!(
+        reg.open_count_for_session(&SID_A),
+        0,
+        "count reads 0 via the map-miss fallback"
+    );
+    assert_eq!(
+        reg.by_session_len(),
+        0,
+        "the by_session entry itself must be gone, not merely zeroed"
+    );
+}
+
+#[tokio::test]
+async fn by_session_entry_removed_after_idle_reap_drains_to_zero() {
+    let reg = CursorRegistry::new();
+    let cursor = make_cursor(1).await;
+    reg.register(1, SID_A, cursor, 16).unwrap();
+    assert_eq!(reg.by_session_len(), 1);
+
+    let expired = reg.expired_ids(Instant::now(), Duration::ZERO);
+    assert_eq!(expired, vec![1]);
+    for id in expired {
+        reg.remove_for_idle_reap(id);
+    }
+
+    assert_eq!(reg.open_count_for_session(&SID_A), 0);
+    assert_eq!(
+        reg.by_session_len(),
+        0,
+        "the by_session entry itself must be gone, not merely zeroed"
+    );
+}
+
+/// Concurrency stress test proving the per-session cap is never violated
+/// and the `by_session` entry fully drains, across many interleaved
+/// concurrent register/remove cycles for the SAME session id. This is the
+/// test that would catch a TOCTOU bug in `free_session_slot`'s
+/// decrement-and-maybe-remove: if a racing `register` and `free_session_slot`
+/// interleaved unsafely, a session could end up exceeding `max_per_session`
+/// split across two independently-created counters, or the final
+/// `by_session` entry could linger non-zero / fail to be removed.
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn concurrent_register_remove_cycles_never_exceed_cap_and_fully_drain() {
+    let reg = Arc::new(CursorRegistry::new());
+    let cap: u32 = 4;
+    let tasks_count = 32u64;
+    let cycles_per_task = 25u64;
+
+    let mut handles = Vec::new();
+    for t in 0..tasks_count {
+        let reg = Arc::clone(&reg);
+        handles.push(tokio::spawn(async move {
+            for c in 0..cycles_per_task {
+                let seed = t * cycles_per_task + c + 1;
+                let cursor = make_cursor(seed).await;
+                let cursor_id = seed;
+                match reg.register(cursor_id, SID_A, cursor, cap) {
+                    Ok(_) => {
+                        // Verify the cap is never exceeded from this
+                        // vantage point (best-effort — other tasks may
+                        // concurrently mutate the count, but it must
+                        // never read ABOVE cap).
+                        assert!(reg.open_count_for_session(&SID_A) <= cap as usize);
+                        // Immediately remove so the slot frees up for
+                        // other concurrent tasks (interleaves the
+                        // zero-count-triggering remove with concurrent
+                        // registers, per the brief).
+                        reg.remove(cursor_id);
+                    }
+                    Err(CursorRegistryError::CursorLimitExceeded { limit }) => {
+                        assert_eq!(limit, cap);
+                    }
+                    Err(other) => panic!("unexpected error: {other:?}"),
+                }
+            }
+        }));
+    }
+
+    for h in handles {
+        h.await.unwrap();
+    }
+
+    // Final state: fully drained. No open cursors, no lingering
+    // by_session entry for this session (proves free_session_slot's
+    // decrement-and-maybe-remove never lost a decrement nor left a
+    // zero-count entry behind).
+    assert!(reg.is_empty());
+    assert_eq!(reg.open_count_for_session(&SID_A), 0);
+    assert_eq!(
+        reg.by_session_len(),
+        0,
+        "by_session must be fully drained once every cursor is removed"
+    );
+}
+
 /// The background reaper task actually reaps an idle-past-TTL cursor on its
 /// own schedule (paused virtual time — no real sleeping).
 #[tokio::test(start_paused = true)]
