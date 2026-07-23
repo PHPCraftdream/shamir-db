@@ -32,7 +32,7 @@
 //! because it requires a wire-protocol change.
 
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
@@ -76,6 +76,30 @@ pub enum BackupError {
     /// tampered or hand-modified snapshot.
     #[error("file present on disk but not listed in manifest: {0}")]
     UnmanifestedFile(PathBuf),
+    /// `verify_manifest`: `manifest.format_version` does not match the
+    /// format this build understands — refuse rather than interpret
+    /// entries under assumptions that may not hold for a different format.
+    #[error("unsupported manifest format_version: found {found}, expected {expected}")]
+    UnsupportedManifestFormatVersion { found: u32, expected: u32 },
+    /// `verify_manifest`: an entry's `path` is absolute or contains a `..`
+    /// (`ParentDir`) component — both can escape `snapshot_dir` when joined,
+    /// so a tampered/malicious manifest could make `verify_manifest` read a
+    /// file outside the snapshot directory.
+    #[error("unsafe manifest entry path (absolute or contains '..'): {0}")]
+    UnsafeManifestPath(String),
+    /// `verify_manifest`: the same `path` appears more than once in
+    /// `manifest.files` — a hand-crafted/tampered manifest could otherwise
+    /// have one entry's checksum shadow another's expectations.
+    #[error("duplicate manifest entry: {0}")]
+    DuplicateManifestEntry(String),
+    /// `backup()`: the destination (`to`, or its `<timestamp>` subdir) is
+    /// inside (or equal to) the source `data_dir` — backing up would
+    /// recursively copy the backup's own destination into itself.
+    #[error(
+        "backup destination is inside (or equal to) the source data_dir: \
+         from={from} to={to}"
+    )]
+    DestinationInsideSource { from: PathBuf, to: PathBuf },
 }
 
 /// Outcome of a successful backup.
@@ -144,6 +168,7 @@ pub fn backup(from: &Path, to: &Path) -> Result<BackupReport, BackupError> {
     if !from.is_dir() {
         return Err(BackupError::SourceNotDir(from.to_path_buf()));
     }
+    reject_destination_inside_source(from, to)?;
 
     let stamp = utc_timestamp();
     let dest_dir = to.join(stamp);
@@ -167,6 +192,73 @@ pub fn backup(from: &Path, to: &Path) -> Result<BackupReport, BackupError> {
         files_copied: files,
         manifest_path,
     })
+}
+
+/// Reject `to` (the backup destination root) when it is inside, or equal
+/// to, `from` (the source `data_dir`) — otherwise a
+/// `backup --to <data_dir>/somewhere` (or `backup --to <data_dir>`) would
+/// recursively back up the destination into itself, corrupting the
+/// operation.
+///
+/// `to`'s own `<timestamp>` subdirectory does not exist yet at call time
+/// (created later in [`backup`]), so this canonicalizes `to`'s nearest
+/// EXISTING ancestor (walking up via `Path::parent` until something
+/// resolves) rather than `to` itself, and compares that against `from`'s
+/// canonical path.
+fn reject_destination_inside_source(from: &Path, to: &Path) -> Result<(), BackupError> {
+    let from_canonical = from.canonicalize().map_err(|e| {
+        BackupError::Io(std::io::Error::new(
+            e.kind(),
+            format!("canonicalize source {}: {e}", from.display()),
+        ))
+    })?;
+
+    let to_canonical = canonicalize_nearest_existing_ancestor(to)?;
+
+    if to_canonical.starts_with(&from_canonical) {
+        return Err(BackupError::DestinationInsideSource {
+            from: from_canonical,
+            to: to.to_path_buf(),
+        });
+    }
+    Ok(())
+}
+
+/// Canonicalize `path` if it exists, else walk up `Path::parent` until an
+/// existing ancestor is found and canonicalize that instead. `path` itself
+/// is appended (non-canonicalized) onto the canonicalized ancestor so the
+/// result still reflects `path`'s full intended location relative to that
+/// ancestor.
+fn canonicalize_nearest_existing_ancestor(path: &Path) -> Result<PathBuf, BackupError> {
+    let mut suffix: Vec<std::ffi::OsString> = Vec::new();
+    let mut current = path;
+    loop {
+        if current.exists() {
+            let mut canonical = current.canonicalize().map_err(|e| {
+                BackupError::Io(std::io::Error::new(
+                    e.kind(),
+                    format!("canonicalize {}: {e}", current.display()),
+                ))
+            })?;
+            for component in suffix.iter().rev() {
+                canonical.push(component);
+            }
+            return Ok(canonical);
+        }
+        match current.parent() {
+            Some(parent) => {
+                if let Some(name) = current.file_name() {
+                    suffix.push(name.to_os_string());
+                }
+                current = parent;
+            }
+            None => {
+                // Reached the root without finding an existing ancestor —
+                // treat the (non-canonicalized) original path as-is.
+                return Ok(path.to_path_buf());
+            }
+        }
+    }
 }
 
 /// Walk `dest_dir` (a just-written snapshot), hash every file, and write
@@ -253,10 +345,22 @@ pub fn verify_manifest(snapshot_dir: &Path) -> Result<ManifestVerifyReport, Back
         BackupError::ManifestInvalid(format!("decode {}: {e}", manifest_path.display()))
     })?;
 
+    if manifest.format_version != MANIFEST_FORMAT_VERSION {
+        return Err(BackupError::UnsupportedManifestFormatVersion {
+            found: manifest.format_version,
+            expected: MANIFEST_FORMAT_VERSION,
+        });
+    }
+
     let mut accounted: shamir_collections::TFxSet<String> = new_fx_set_wc(manifest.files.len());
 
     let mut total_bytes = 0u64;
     for entry in &manifest.files {
+        reject_unsafe_manifest_path(&entry.path)?;
+        if accounted.contains(&entry.path) {
+            return Err(BackupError::DuplicateManifestEntry(entry.path.clone()));
+        }
+
         let file_path = snapshot_dir.join(&entry.path);
         let contents = fs::read(&file_path).map_err(|e| {
             BackupError::Io(std::io::Error::new(
@@ -297,6 +401,23 @@ pub fn verify_manifest(snapshot_dir: &Path) -> Result<ManifestVerifyReport, Back
         files_checked: manifest.files.len() as u64,
         total_bytes,
     })
+}
+
+/// Reject a manifest entry `path` that is absolute or contains a `..`
+/// (`ParentDir`) component — either would let `snapshot_dir.join(path)`
+/// escape `snapshot_dir` (an absolute `PathBuf::join` argument REPLACES the
+/// base entirely; a relative `..` component walks back out of it), letting
+/// a tampered/malicious manifest make [`verify_manifest`] read a file
+/// outside the snapshot directory.
+fn reject_unsafe_manifest_path(entry_path: &str) -> Result<(), BackupError> {
+    let path = Path::new(entry_path);
+    if path.is_absolute() {
+        return Err(BackupError::UnsafeManifestPath(entry_path.to_string()));
+    }
+    if path.components().any(|c| matches!(c, Component::ParentDir)) {
+        return Err(BackupError::UnsafeManifestPath(entry_path.to_string()));
+    }
+    Ok(())
 }
 
 /// Recursively collect every regular file under `dir` (rooted at `root`) as

@@ -20,16 +20,23 @@
 //!    BEFORE touching `data_dir` at all. A checksum mismatch or missing
 //!    manifest aborts the whole restore with no side effects.
 //! 3. **Copy to a TEMPORARY sibling directory** (same filesystem as
-//!    `data_dir`'s parent — required for the atomic rename in step 4).
-//! 4. **Atomic swap**: rename the CURRENT `data_dir` (if it exists) to a
+//!    `data_dir`'s parent — required for the atomic rename in step 5).
+//! 4. **Invalidate sessions IN THE STAGED COPY, before anything touches the
+//!    live `data_dir`**: open the `users` store INSIDE the temp dir (NOT
+//!    `data_dir`'s) and call `invalidate_all_tickets(now_ns)` there, then
+//!    release it. This validates that the staged snapshot's user store is
+//!    structurally loadable AND invalidates pre-restore resumption tickets
+//!    in the copy that is about to become live — a failure here (e.g. a
+//!    corrupt/unopenable `users` store in the snapshot) aborts the restore
+//!    with the CURRENT `data_dir` completely untouched, since the swap
+//!    (step 5) has not run yet.
+//! 5. **Atomic swap**: rename the CURRENT `data_dir` (if it exists) to a
 //!    `.pre_restore_backup_<timestamp>` sibling (preserved, NOT deleted —
-//!    the explicit rollback path), then rename the temp dir into place as
-//!    the new `data_dir`. A failure in the second rename triggers a
-//!    best-effort rollback of the first.
-//! 5. **Invalidate sessions**: open the restored `users` store and call
-//!    `invalidate_all_tickets(now_ns)` so no resumption ticket issued
-//!    before the restore point can still resume against the restored
-//!    state, then release it.
+//!    the explicit rollback path), then rename the temp dir (tickets
+//!    already invalidated in step 4) into place as the new `data_dir`. A
+//!    failure in the second rename triggers a best-effort rollback of the
+//!    first — this is a SEPARATE failure mode from step 4's, and is
+//!    unaffected by the step 4 reordering.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -98,7 +105,7 @@ pub struct RestoreReport {
 /// holds `data_dir`.
 ///
 /// `from` and `data_dir` MUST be on the same filesystem as `data_dir`'s
-/// parent directory, since step 3/4 relies on `fs::rename` being atomic
+/// parent directory, since step 3/5 relies on `fs::rename` being atomic
 /// (a cross-filesystem rename would silently fall back to copy+delete on
 /// some platforms, or fail outright — this function does not attempt to
 /// paper over that; `fs::rename`'s own error surfaces as-is).
@@ -133,7 +140,22 @@ pub fn restore(from: &Path, data_dir: &Path, force: bool) -> Result<RestoreRepor
     let mut files = 0u64;
     copy_dir_recursive(from, &temp_dir, &mut bytes, &mut files)?;
 
-    // ---- Step 4: atomic swap ----
+    // ---- Step 4: invalidate sessions IN THE STAGED COPY, before the swap.
+    // A failure here (e.g. a corrupt/unopenable `users` store in the
+    // snapshot) leaves `data_dir` completely untouched, since the swap
+    // below has not run yet. ----
+    let now_ns = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos() as u64)
+        .unwrap_or(0);
+    let users_invalidated = {
+        let users = FjallUserDirectory::open(temp_dir.join("users"))?;
+        let n = users.invalidate_all_tickets(now_ns)?;
+        drop(users); // release fjall's lock before the swap renames this tree
+        n
+    };
+
+    // ---- Step 5: atomic swap ----
     let pre_restore_backup = if data_dir.exists() {
         let backup_sibling = parent.join(format!(
             "{}.pre_restore_backup_{stamp}",
@@ -164,18 +186,6 @@ pub fn restore(from: &Path, data_dir: &Path, force: bool) -> Result<RestoreRepor
     } else {
         fs::rename(&temp_dir, data_dir)?;
         None
-    };
-
-    // ---- Step 5: invalidate sessions in the RESTORED data ----
-    let now_ns = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_nanos() as u64)
-        .unwrap_or(0);
-    let users_invalidated = {
-        let users = FjallUserDirectory::open(data_dir.join("users"))?;
-        let n = users.invalidate_all_tickets(now_ns)?;
-        drop(users); // release fjall's lock before returning
-        n
     };
 
     Ok(RestoreReport {
