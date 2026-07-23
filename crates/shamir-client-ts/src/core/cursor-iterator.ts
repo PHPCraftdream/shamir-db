@@ -82,10 +82,27 @@ export class CursorIterator implements AsyncIterableIterator<CursorRecord> {
   private _cursorId: CursorId | undefined;
   /** Not-yet-yielded records from the most recently fetched page. */
   private buffer: CursorRecord[] = [];
+  /** Read offset into `buffer` — see `position`'s own doc comment (P-5). */
+  private position = 0;
   /** Whether another `fetch_next` should be attempted once `buffer` drains. */
   private hasMore = true;
   /** Set once the cursor is known to be closed (drained or explicitly closed). */
   private done = false;
+  /**
+   * CR-C1 (R-10): internal serialization chain for `next()`. Two overlapping
+   * calls to `next()` (before the first resolves — e.g. a caller that
+   * doesn't `await` each iteration, or manually drives `.next()` from two
+   * spots) would otherwise both reach `sendRequest` concurrently; on the
+   * FIRST call both could race to issue `createCursor`, leaking the loser's
+   * cursor server-side until idle-timeout (nothing ever cancels it, since
+   * the caller only ends up holding the winner's `_cursorId`). Chaining
+   * every call's work onto this promise makes a second overlapping call
+   * queue behind the first instead of racing it.
+   */
+  private pending: Promise<IteratorResult<CursorRecord>> = Promise.resolve({
+    done: false,
+    value: undefined as unknown as CursorRecord,
+  });
 
   constructor(
     private readonly sendRequest: SendCursorRequest,
@@ -111,32 +128,60 @@ export class CursorIterator implements AsyncIterableIterator<CursorRecord> {
   }
 
   async next(): Promise<IteratorResult<CursorRecord>> {
+    // CR-C1 (R-10): chain onto the pending promise rather than running
+    // `doNext()` immediately — serializes overlapping `next()` calls so a
+    // second call queues behind the first instead of racing it (see
+    // `pending`'s doc comment). `.then()` runs `doNext()` only once the
+    // previous call's work (success OR failure) has settled; the NEW
+    // `pending` becomes this call's own result so a THIRD overlapping call
+    // queues behind this one in turn.
+    const result = this.pending.then(
+      () => this.doNext(),
+      () => this.doNext(),
+    );
+    this.pending = result;
+    return result;
+  }
+
+  /**
+   * The actual per-call `next()` work, run serialized behind `pending`. Uses
+   * a loop (not recursion) over empty-but-`hasMore` pages — a legal but
+   * pathological server response shape (e.g. every row on a page filtered
+   * client-invisible) — so a pathological "every page comes back empty but
+   * has_more stays true" server bug cannot grow this call's stack
+   * unboundedly (should never happen given CR-B4's `has_more` fix landed
+   * server-side, but a client shouldn't rely on server correctness for its
+   * own stack safety).
+   */
+  private async doNext(): Promise<IteratorResult<CursorRecord>> {
     if (this.done) {
       return { done: true, value: undefined };
     }
 
-    if (this.buffer.length === 0) {
-      if (this._cursorId === undefined) {
-        // First call: open the cursor.
-        const resp = await this.sendRequest(createCursor(this.db, this.query, this.pageSize));
-        this.applyPage(resp);
-      } else if (this.hasMore) {
-        const resp = await this.sendRequest(fetchNext(this._cursorId, this.pageSize));
-        this.applyPage(resp);
-      } else {
-        this.done = true;
-        return { done: true, value: undefined };
+    for (;;) {
+      if (this.position >= this.buffer.length) {
+        if (this._cursorId === undefined) {
+          // First call: open the cursor.
+          const resp = await this.sendRequest(createCursor(this.db, this.query, this.pageSize));
+          this.applyPage(resp);
+        } else if (this.hasMore) {
+          const resp = await this.sendRequest(fetchNext(this._cursorId, this.pageSize));
+          this.applyPage(resp);
+        } else {
+          this.done = true;
+          return { done: true, value: undefined };
+        }
       }
-    }
 
-    const value = this.buffer.shift();
-    if (value === undefined) {
+      if (this.position < this.buffer.length) {
+        const value = this.buffer[this.position];
+        this.position += 1;
+        return { done: false, value };
+      }
       // Buffer drained again immediately (e.g. a legal-but-pathological
-      // empty page with has_more still true) — recurse to try the next
-      // page rather than yielding a bogus `done`.
-      return this.next();
+      // empty page with has_more still true) — loop to try the next page
+      // rather than yielding a bogus `done` or recursing.
     }
-    return { done: false, value };
   }
 
   /**
@@ -153,6 +198,10 @@ export class CursorIterator implements AsyncIterableIterator<CursorRecord> {
     const page = resp as unknown as CursorPageResponse;
     this._cursorId = page.cursor_id;
     this.buffer = page.page.records;
+    // A fresh page always starts unread — reset the index-based read
+    // position (P-5: `buffer.shift()` was O(n) per read; an index avoids
+    // re-indexing the whole array on every record).
+    this.position = 0;
     this.hasMore = page.has_more;
   }
 
@@ -164,20 +213,38 @@ export class CursorIterator implements AsyncIterableIterator<CursorRecord> {
    *
    * Called automatically by the JS runtime on every `for await...of` early
    * exit (`break`, `return`, or an exception in the loop body) per the
-   * async-iterator protocol.
+   * async-iterator protocol — INCLUDING as part of unwinding an exception
+   * thrown from inside the loop body (JS's `IteratorClose` calls `.return()`
+   * during exception propagation, not just on a clean `break`). An
+   * unexpected `cancel_cursor` response kind is therefore swallowed (logged,
+   * not thrown): throwing here would REPLACE/mask whatever exception the
+   * loop body itself threw, which is almost always the wrong debugging
+   * experience for a caller chasing down their own bug, not a cursor
+   * protocol mismatch.
    */
   async return(): Promise<IteratorResult<CursorRecord>> {
     if (!this.done && this._cursorId !== undefined) {
       this.done = true;
-      const resp = await this.sendRequest(cancelCursor(this._cursorId));
-      if (resp.kind !== 'cursor_closed') {
-        throw new Error(
-          `unexpected DbResponse kind for cancel_cursor: ${(resp.kind as string) ?? 'missing'}`,
-        );
+      try {
+        const resp = await this.sendRequest(cancelCursor(this._cursorId));
+        if (resp.kind !== 'cursor_closed') {
+          // eslint-disable-next-line no-console
+          console.warn(
+            `CursorIterator: unexpected DbResponse kind for cancel_cursor: ${
+              (resp.kind as string) ?? 'missing'
+            }`,
+          );
+        }
+      } catch (err) {
+        // Same rationale: a cancel-cursor failure during IteratorClose must
+        // not mask whatever the loop body/original iteration was doing.
+        // eslint-disable-next-line no-console
+        console.warn('CursorIterator: cancel_cursor request failed during return()', err);
       }
     }
     this.done = true;
     this.buffer = [];
+    this.position = 0;
     return { done: true, value: undefined };
   }
 

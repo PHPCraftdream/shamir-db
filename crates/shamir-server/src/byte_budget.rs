@@ -119,15 +119,33 @@ impl ByteBudget {
             };
         };
 
+        // Fast path FIRST: try the CAS loop before touching `Notify` at all.
+        // CR-C1 (P-3): the `Notified` future used to be created AND
+        // `enable()`d on every single call, including the common uncontended
+        // case where this very first CAS succeeds and the future is
+        // immediately dropped unused — two `Notify`-related ops on every
+        // acquire, contended or not, which didn't match this module's own
+        // "lock-free CAS-loop fast path" description. Restructured so the
+        // `Notified` future is only constructed on the FIRST CAS failure,
+        // right before actually needing to park.
+        if let Some(guard) = self.try_cas(bytes, cap) {
+            return guard;
+        }
+
         loop {
-            // Register interest in the next notification BEFORE re-checking
-            // the CAS. This is `tokio::sync::Notify`'s documented race-free
-            // pattern: `notified()` returns a future that, once polled,
-            // stores itself as a waiter — so a `notify_waiters()` call that
-            // happens after this line (even before we `.await` it below) is
-            // not lost. Without this ordering there is a lost-wakeup window
-            // between "CAS failed" and "start waiting" where a concurrent
-            // release could notify into the void.
+            // Not enough room right now — register interest in the next
+            // notification BEFORE re-checking the CAS one more time. This is
+            // `tokio::sync::Notify`'s documented race-free pattern:
+            // `notified()` returns a future that, once polled, stores itself
+            // as a waiter — so a `notify_waiters()` call that happens after
+            // this line (even before we `.await` it below) is not lost. This
+            // reasoning is unchanged from before the restructure — only WHEN
+            // the `Notified` future is built moved (from "every call,
+            // upfront" to "only once the fast path has already failed"), not
+            // the invariant itself: without this ordering there would still
+            // be a lost-wakeup window between "CAS failed" and "start
+            // waiting" where a concurrent release could notify into the
+            // void.
             let notified = self.inner.notify.notified();
             tokio::pin!(notified);
             // Polling once here (via `enable()`) commits this waiter into
@@ -136,42 +154,56 @@ impl ByteBudget {
             // wakes us instead of being missed.
             notified.as_mut().enable();
 
-            // Fast path: CAS loop, no lock, no waiter registration.
-            let mut current = self.inner.used.load(Ordering::Acquire);
-            loop {
-                let after = current.saturating_add(bytes);
-                // Admit if there's room, OR if the budget is currently
-                // empty (current == 0) — guarantees an oversized request
-                // eventually gets a turn instead of deadlocking forever
-                // when `bytes > cap`.
-                if after <= cap || current == 0 {
-                    match self.inner.used.compare_exchange_weak(
-                        current,
-                        after,
-                        Ordering::AcqRel,
-                        Ordering::Acquire,
-                    ) {
-                        Ok(_) => {
-                            return ByteBudgetGuard {
-                                inner: Some(self.inner.clone()),
-                                bytes,
-                            };
-                        }
-                        Err(actual) => {
-                            current = actual;
-                            continue;
-                        }
-                    }
-                }
-                break;
+            // Re-check the CAS once more now that we're registered as a
+            // waiter — state may have changed between the previous attempt
+            // and this registration.
+            if let Some(guard) = self.try_cas(bytes, cap) {
+                return guard;
             }
 
-            // Not enough room right now — park until a release notifies us
-            // (the `enable()` above guarantees we don't miss a release that
+            // Still no room — park until a release notifies us (the
+            // `enable()` above guarantees we don't miss a release that
             // happened between the CAS failure and this await), then retry
             // the whole loop: state may have changed again by the time we
             // wake, so we re-check rather than assume we now have room.
             notified.await;
+        }
+    }
+
+    /// One pass of the lock-free CAS loop: `Some(guard)` if `bytes` was
+    /// admitted (either there was room, or the budget was empty — see
+    /// `acquire`'s doc comment on the oversized-request escape hatch),
+    /// `None` if the budget is currently too full and the caller must park.
+    /// Shared by both the pre-`Notify` fast-path attempt and the
+    /// post-registration re-check in `acquire` so the CAS logic itself is
+    /// not duplicated.
+    fn try_cas(&self, bytes: usize, cap: usize) -> Option<ByteBudgetGuard> {
+        let mut current = self.inner.used.load(Ordering::Acquire);
+        loop {
+            let after = current.saturating_add(bytes);
+            // Admit if there's room, OR if the budget is currently empty
+            // (current == 0) — guarantees an oversized request eventually
+            // gets a turn instead of deadlocking forever when `bytes > cap`.
+            if after <= cap || current == 0 {
+                match self.inner.used.compare_exchange_weak(
+                    current,
+                    after,
+                    Ordering::AcqRel,
+                    Ordering::Acquire,
+                ) {
+                    Ok(_) => {
+                        return Some(ByteBudgetGuard {
+                            inner: Some(self.inner.clone()),
+                            bytes,
+                        });
+                    }
+                    Err(actual) => {
+                        current = actual;
+                        continue;
+                    }
+                }
+            }
+            return None;
         }
     }
 

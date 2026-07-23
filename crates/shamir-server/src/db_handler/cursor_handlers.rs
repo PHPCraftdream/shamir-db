@@ -113,6 +113,19 @@ use super::handler::{session_actor, DbResponse, ShamirDbHandler};
 /// Resolve `(db_name, query.from.repo)` down to a `RepoInstance`, mirroring
 /// `tx_begin_as`'s `db.get_db(...)`/`db.get_repo(...)` idiom exactly
 /// (`crates/shamir-db/src/shamir_db/execute/db_tx.rs:70-81`).
+///
+/// CR-C1 (#776, B-5): both not-found cases set an EXPLICIT `code` rather
+/// than leaving it `None` and relying on `error_code()`'s legacy
+/// message-sniffing fallback (`alias.is_empty() && message.contains("not
+/// found") -> "unknown_db"`). That heuristic could not tell the two cases
+/// apart — a REPO-not-found error's message also contains "not found" with
+/// an empty alias, so it was silently misclassified as `unknown_db` too
+/// (misleading: the database exists, only the repo inside it doesn't).
+/// `unknown_db` is kept for the db-not-found case (preserves today's actual
+/// wire code, just makes it explicit instead of accidental); `unknown_repo`
+/// is a new, distinct code for the repo-not-found case (grepped for
+/// collisions against every other wire error code in the codebase before
+/// introducing it — none found).
 fn resolve_repo(
     db: &shamir_db::ShamirDb,
     db_name: &str,
@@ -121,13 +134,13 @@ fn resolve_repo(
     let dbi = db.get_db(db_name).ok_or_else(|| BatchError::QueryError {
         alias: String::new(),
         message: format!("Database '{}' not found", db_name),
-        code: None,
+        code: Some("unknown_db".to_string()),
     })?;
     dbi.get_repo(repo_name)
         .ok_or_else(|| BatchError::QueryError {
             alias: String::new(),
             message: format!("Repository '{}' not found", repo_name),
-            code: None,
+            code: Some("unknown_repo".to_string()),
         })
 }
 
@@ -937,6 +950,31 @@ impl ShamirDbHandler {
     /// has nothing to validate yet at this point — the stored default is
     /// only known AFTER the registry lookup succeeds — so validation for
     /// that path is deferred to just after the lookup, below.
+    ///
+    /// CR-C1 (P-6): this re-resolves `db -> repo -> table`
+    /// (`resolve_repo`/`repo.get_table`) and rebuilds the `FilterContext`/
+    /// interner handle on EVERY call, rather than caching a `TableManager`
+    /// handle on `Cursor`/`CursorState` across the cursor's lifetime. This
+    /// is a deliberate, re-verified tradeoff, not an oversight:
+    /// `RepoInstance::get_table` performs its "does this table still exist"
+    /// check freshly on each call (see its doc comment: the existence check
+    /// happens INSIDE the per-table `OnceCell` init closure, serialized
+    /// against a concurrent `remove_table`) — so a `DropTable` that commits
+    /// WHILE a cursor is open mid-scroll is observed on the very next
+    /// `FetchNext` as a clean engine error (routed through
+    /// `wrap_engine_err`/`error_code` like any other read failure), instead
+    /// of silently continuing to serve reads against a conceptually-dropped
+    /// table. A CACHED `TableManager` handle would paper over exactly that:
+    /// the handle itself has no lifecycle hook that revalidates the table
+    /// still exists in the current catalog, so a cursor holding one would
+    /// keep succeeding indefinitely after the table was dropped, until
+    /// something else (e.g. the underlying storage being torn down) finally
+    /// broke it in a much less legible way. The per-page cost of
+    /// re-resolution (a `DashMap`/`OnceCell` hit plus one interner fetch) is
+    /// accepted in exchange for this correctness property; see
+    /// `mid_scroll_drop_table_produces_clean_error_not_stale_reads` in
+    /// `tests/cursor_handler_tests.rs` for the behavior this decision
+    /// preserves.
     pub(super) async fn fetch_next(
         &self,
         session: &Session,

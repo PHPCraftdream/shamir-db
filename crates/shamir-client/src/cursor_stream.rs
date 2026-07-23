@@ -72,6 +72,36 @@ enum State<'a> {
     Exhausted,
 }
 
+/// CR-C1 (R-11): best-effort `CancelCursor` fired right before a
+/// mid-pagination `FetchNext` failure collapses the stream to
+/// `State::Exhausted`. Without this, a server cursor whose `FetchNext` failed
+/// (a wire error, or an unexpected response variant) stays pinned — the MVCC
+/// snapshot it holds is only reclaimed once the idle-timeout reaper sweeps it
+/// (up to `idle_timeout_secs`, FG-5b default 60s) — rather than being
+/// released immediately, the same way an explicit [`CursorStream::close`]
+/// would release it.
+///
+/// Deliberately swallows any error from the cancel round-trip itself (log
+/// only, never propagated) — the ORIGINAL error is what the caller asked
+/// for and must not be masked/replaced by a secondary cleanup failure, same
+/// "don't lose the real error" principle the module doc comment and R-10
+/// (the TS SDK's analogous fix) both apply. Does not block the stream on a
+/// slow cancel any longer than the single round-trip itself; there is no
+/// separate "don't wait" mechanism here since `step` (and therefore the
+/// whole stream) is already `await`-driven end to end — the caller only
+/// waits as long as it already does for any other in-flight request.
+async fn best_effort_cancel(client: &Client, cursor_id: CursorId) {
+    let req = cancel_cursor(cursor_id);
+    if let Err(e) = client.roundtrip(&req).await {
+        tracing::debug!(
+            ?e,
+            cursor_id = cursor_id.0,
+            "CursorStream: best-effort CancelCursor after a mid-pagination error failed \
+             (the cursor will still be reclaimed by the idle-timeout reaper)"
+        );
+    }
+}
+
 /// One step of the `unfold` state machine: `Some((item, next_state))` to
 /// yield `item` and continue, or `None` to end the stream.
 ///
@@ -149,14 +179,18 @@ async fn step(mut state: State<'_>) -> Option<(Result<QueryRecord, ClientError>,
                         has_more,
                     },
                     Ok(other) => {
+                        best_effort_cancel(client, cursor_id).await;
                         return Some((
                             Err(ClientError::Protocol(format!(
                                 "expected CursorPage, got {other:?}"
                             ))),
                             State::Exhausted,
-                        ))
+                        ));
                     }
-                    Err(e) => return Some((Err(e), State::Exhausted)),
+                    Err(e) => {
+                        best_effort_cancel(client, cursor_id).await;
+                        return Some((Err(e), State::Exhausted));
+                    }
                 }
             }
             State::Exhausted => return None,
@@ -200,15 +234,23 @@ impl<'a> CursorStream<'a> {
             page_size,
         };
 
-        // Wrap `step` so every successfully-opened cursor's id is mirrored
-        // into `cursor_id` above.
+        // Wrap `step` so the cursor id is mirrored into `cursor_id` above the
+        // moment `CreateCursor` succeeds. CR-C1 (P-5): every yielded item
+        // re-enters this closure (once per `step()` call, i.e. once per
+        // record after the first `Init -> Buffered` transition), but the id
+        // itself never changes for the life of the stream — so the
+        // `is_none()` guard below skips the mutex lock entirely on every
+        // yield after the very first, rather than re-locking and
+        // re-writing the SAME value on every single record.
         let inner = stream::unfold(initial, move |state| {
             let cursor_id_cell = cursor_id_for_stream.clone();
             async move {
                 let next = step(state).await;
                 if let Some((_, State::Buffered { cursor_id, .. })) = &next {
                     let mut guard = cursor_id_cell.lock().unwrap_or_else(|p| p.into_inner());
-                    *guard = Some(*cursor_id);
+                    if guard.is_none() {
+                        *guard = Some(*cursor_id);
+                    }
                 }
                 next
             }

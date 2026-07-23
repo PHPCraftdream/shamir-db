@@ -219,3 +219,74 @@ fn max_cursor_page_size_nonzero_is_accepted() {
     cfg.validate()
         .expect("max_cursor_page_size == 50_000 must pass validation");
 }
+
+// =============== CR-C1 (#776): idle_timeout_secs / max_cursors_per_session ===
+
+/// `idle_timeout_secs == 0` must be rejected at startup — a zero idle
+/// timeout would evict every cursor almost immediately (the reaper sweeps
+/// every few seconds), disabling the feature outright rather than expressing
+/// deliberate operator intent.
+#[test]
+fn cursor_idle_timeout_secs_zero_is_rejected() {
+    let mut cfg = Config::from_file(&deploy_path("server.small.example.ktav"))
+        .expect("server.small.example.ktav must parse");
+    cfg.security.cursors.idle_timeout_secs = 0;
+
+    let err = cfg
+        .validate()
+        .expect_err("idle_timeout_secs == 0 must fail validation");
+    let message = err.to_string();
+    assert!(
+        message.contains("idle_timeout_secs"),
+        "error message must name the offending field: {message}"
+    );
+}
+
+/// `idle_timeout_secs >= 1` must pass validation.
+#[test]
+fn cursor_idle_timeout_secs_nonzero_is_accepted() {
+    let mut cfg = Config::from_file(&deploy_path("server.small.example.ktav"))
+        .expect("server.small.example.ktav must parse");
+
+    cfg.security.cursors.idle_timeout_secs = 1;
+    cfg.validate()
+        .expect("idle_timeout_secs == 1 must pass validation");
+
+    cfg.security.cursors.idle_timeout_secs = 3600;
+    cfg.validate()
+        .expect("idle_timeout_secs == 3600 must pass validation");
+}
+
+/// `max_cursors_per_session == 0` must be rejected at startup — a zero cap
+/// would make every `CreateCursor` fail with `cursor_limit_exceeded`,
+/// silently disabling the whole feature.
+#[test]
+fn max_cursors_per_session_zero_is_rejected() {
+    let mut cfg = Config::from_file(&deploy_path("server.small.example.ktav"))
+        .expect("server.small.example.ktav must parse");
+    cfg.security.cursors.max_cursors_per_session = 0;
+
+    let err = cfg
+        .validate()
+        .expect_err("max_cursors_per_session == 0 must fail validation");
+    let message = err.to_string();
+    assert!(
+        message.contains("max_cursors_per_session"),
+        "error message must name the offending field: {message}"
+    );
+}
+
+/// `max_cursors_per_session >= 1` must pass validation.
+#[test]
+fn max_cursors_per_session_nonzero_is_accepted() {
+    let mut cfg = Config::from_file(&deploy_path("server.small.example.ktav"))
+        .expect("server.small.example.ktav must parse");
+
+    cfg.security.cursors.max_cursors_per_session = 1;
+    cfg.validate()
+        .expect("max_cursors_per_session == 1 must pass validation");
+
+    cfg.security.cursors.max_cursors_per_session = 1000;
+    cfg.validate()
+        .expect("max_cursors_per_session == 1000 must pass validation");
+}

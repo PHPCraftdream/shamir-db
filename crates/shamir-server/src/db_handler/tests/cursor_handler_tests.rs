@@ -18,7 +18,7 @@ use shamir_db::engine::table::TableConfig;
 use shamir_db::ShamirDb;
 
 use shamir_query_builder::batch::Batch;
-use shamir_query_builder::ddl::chmod;
+use shamir_query_builder::ddl::{chmod, drop_table};
 use shamir_query_builder::doc;
 use shamir_query_builder::write::insert;
 use shamir_query_types::admin::ResourceRef;
@@ -2008,5 +2008,166 @@ async fn keyset_path_exact_multiple_result_still_correct_untouched_by_this_task(
         fetch_next_calls, 1,
         "keyset path (already correct pre-CR-B4) needs exactly 1 FetchNext to drain \
          the remaining exact-multiple rows"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// CR-C1 (#776, P-6) — `fetch_next` re-resolves db -> repo -> table on EVERY
+// page rather than caching a `TableManager` handle on the cursor. This test
+// proves the behavior that decision is deliberately preserving: a `DropTable`
+// committed while a cursor is open mid-scroll must be observed as a clean
+// error on the NEXT FetchNext, not silently ignored (which a cached handle
+// would risk, since nothing on a cached `TableManager` re-checks the
+// catalog).
+// ---------------------------------------------------------------------------
+
+/// A `DropTable` that commits WHILE a cursor is open mid-scroll must cause
+/// the next `FetchNext` to fail cleanly (not panic, not silently keep
+/// returning rows as if the table still existed) -- proving `fetch_next`'s
+/// per-page `resolve_repo`/`get_table` re-resolution actually observes a
+/// concurrent schema change rather than serving stale reads against a
+/// conceptually-dropped table.
+#[tokio::test]
+async fn mid_scroll_drop_table_produces_clean_error_not_stale_reads() {
+    let handler = build_handler_with_rows(5, CursorLimitsCap::UNLIMITED).await;
+    let session = alice_session();
+    let owner = Actor::User(principal64([0xAB; 16]));
+
+    // page_size 2 over 5 rows -> multiple pages; cursor stays open after
+    // the first page.
+    let query = ReadQuery::new("items").order_by(OrderBy::asc("v"));
+    let resp = send(&handler, &session, create_cursor_req(query, 2)).await;
+    let cursor_id = match resp {
+        DbResponse::CursorPage {
+            cursor_id,
+            page,
+            has_more,
+        } => {
+            assert_eq!(page.records.len(), 2);
+            assert!(has_more, "5 rows / page_size 2 -> more pages remain");
+            cursor_id
+        }
+        other => panic!("expected CursorPage, got {other:?}"),
+    };
+
+    // Drop the table out from under the still-open cursor, via a SEPARATE,
+    // real DDL batch (not a fixture-level shortcut) -- exercises the actual
+    // concurrent-schema-change path.
+    let mut drop_batch = Batch::new();
+    drop_batch.drop_table("dt", drop_table("items"));
+    handler
+        .db()
+        .execute_as(owner, "app", &drop_batch.build())
+        .await
+        .expect("drop table must succeed");
+
+    // The next FetchNext must fail cleanly -- not panic, not a CursorPage
+    // (which would mean stale reads against a dropped table went through).
+    let resp = send(&handler, &session, fetch_next_req(cursor_id, 2)).await;
+    match resp {
+        DbResponse::Error { code, .. } => {
+            // Not asserting a specific code here (this is a generic engine
+            // "table not found" surfaced via `wrap_engine_err`, not one of
+            // the cursor-specific structured codes) -- the point is that it
+            // IS an error, not a silently-served page.
+            assert_ne!(
+                code, "",
+                "a concurrent drop_table mid-scroll must produce SOME clean error code"
+            );
+        }
+        other => panic!(
+            "expected a clean error after a concurrent drop_table mid-scroll \
+             (proving fetch_next's per-page re-resolution observes the schema \
+             change instead of serving stale reads), got {other:?}"
+        ),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// CR-C1 (#776, B-5) — `resolve_repo`'s db-not-found vs. repo-not-found cases
+// must produce DISTINCT wire error codes: `unknown_db` for a nonexistent
+// database (unchanged, now explicit instead of accidentally derived from
+// `error_code()`'s legacy message-sniffing heuristic) and the NEW
+// `unknown_repo` for a database that exists but whose repo does not.
+// Previously both cases fell into the SAME heuristic branch
+// (`alias.is_empty() && message.contains("not found")`) and were both
+// misreported as `unknown_db`, which is misleading when the database
+// genuinely exists and only the repo inside it doesn't.
+// ---------------------------------------------------------------------------
+
+/// `CreateCursor` against a database that does not exist at all still
+/// reports `unknown_db` (regression -- this task must not change the
+/// db-not-found wire code, only make it explicit).
+#[tokio::test]
+async fn create_cursor_against_unknown_db_reports_unknown_db() {
+    let handler = build_handler_with_rows(0, CursorLimitsCap::UNLIMITED).await;
+    let session = alice_session();
+
+    let query = ReadQuery::new("items");
+    let req = DbRequest::CreateCursor {
+        query_version: CURRENT_QUERY_LANG_VERSION,
+        db: "does_not_exist".to_string(),
+        query,
+        page_size: 10,
+    };
+    let resp = send(&handler, &session, req).await;
+    match resp {
+        DbResponse::Error { code, message } => {
+            assert_eq!(code, "unknown_db");
+            assert!(message.contains("not found"), "got {message:?}");
+        }
+        other => panic!("expected unknown_db Error, got {other:?}"),
+    }
+}
+
+/// `CreateCursor` against a database that DOES exist, but whose repo does
+/// not, must report the NEW distinct `unknown_repo` code -- not the
+/// misleading `unknown_db` a repo-not-found error used to fall back to.
+#[tokio::test]
+async fn create_cursor_against_unknown_repo_reports_unknown_repo_not_unknown_db() {
+    let handler = build_handler_with_rows(0, CursorLimitsCap::UNLIMITED).await;
+    let session = alice_session();
+
+    // `app` (the database `build_handler_with_rows` created) exists, but
+    // its query targets a repo ("does_not_exist_repo") that was never added.
+    let mut query = ReadQuery::new("items");
+    query.from.repo = "does_not_exist_repo".to_string();
+
+    let resp = send(&handler, &session, create_cursor_req(query, 10)).await;
+    match resp {
+        DbResponse::Error { code, message } => {
+            assert_eq!(
+                code, "unknown_repo",
+                "a repo-not-found error (db exists, repo doesn't) must NOT be reported as \
+                 unknown_db -- got message: {message:?}"
+            );
+            assert!(message.contains("not found"), "got {message:?}");
+        }
+        other => panic!("expected unknown_repo Error, got {other:?}"),
+    }
+}
+
+/// Sanity: `resolve_repo`'s two error paths map through `error_code()` to
+/// the expected structured codes directly at the `BatchError` level --
+/// belt-and-braces alongside the wire-level assertions above.
+#[test]
+fn resolve_repo_error_codes_are_distinct_structured_codes() {
+    let db_not_found = BatchError::QueryError {
+        alias: String::new(),
+        message: "Database 'x' not found".to_string(),
+        code: Some("unknown_db".to_string()),
+    };
+    let repo_not_found = BatchError::QueryError {
+        alias: String::new(),
+        message: "Repository 'y' not found".to_string(),
+        code: Some("unknown_repo".to_string()),
+    };
+    assert_eq!(
+        crate::db_handler::handler::error_code(&db_not_found),
+        "unknown_db"
+    );
+    assert_eq!(
+        crate::db_handler::handler::error_code(&repo_not_found),
+        "unknown_repo"
     );
 }

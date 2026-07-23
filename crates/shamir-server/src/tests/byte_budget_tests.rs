@@ -260,3 +260,84 @@ async fn grow_unchecked_on_unbounded_guard_is_a_noop() {
     drop(guard);
     assert_eq!(budget.used(), 0);
 }
+
+// ---------------------------------------------------------------------------
+// CR-C1 (P-3) — dedicated coverage for the `current == 0` oversized-acquire
+// escape hatch: a request bigger than the whole cap must still be admitted
+// once the budget is completely empty, rather than deadlocking forever.
+//
+// Fairness/starvation caveat (matches the module doc comment's own
+// "Fairness" section, which is explicit that this implementation gives
+// at-least-one-progress, not strict FIFO): admitting an oversized request
+// via `current == 0` means that request can, in principle, hold FAR more
+// than `cap` bytes reserved for as long as it likes. Under a pathological
+// release pattern (e.g. this guard never drops, or keeps being "topped up"
+// faster than it's released) any OTHER waiter that needs even one byte of
+// room is starved for as long as `used() > 0` — i.e. this path trades "never
+// deadlock on an oversized request" for "an oversized request, once
+// admitted, can itself become a long-lived head-of-line blocker." This is
+// the SAME class of tradeoff the module's "Fairness" section already
+// documents for ordinary contention (no strict FIFO), just with a starker
+// worst case since the oversized guard's `bytes_reserved()` can exceed the
+// entire cap.
+// ---------------------------------------------------------------------------
+
+/// A request larger than the entire cap is admitted immediately when the
+/// budget is empty (`current == 0`), rather than blocking forever.
+#[tokio::test]
+async fn acquire_oversized_request_admitted_via_current_eq_zero_escape_hatch() {
+    let budget = ByteBudget::new(Some(100));
+
+    // 500 > cap (100), but the budget starts empty — must not deadlock.
+    let guard = tokio::time::timeout(Duration::from_millis(200), budget.acquire(500))
+        .await
+        .expect(
+            "an oversized request against an EMPTY budget must be admitted immediately, \
+                 not block forever",
+        );
+    assert_eq!(
+        budget.used(),
+        500,
+        "the oversized reservation is accounted for at its real (over-cap) size"
+    );
+    assert_eq!(guard.bytes_reserved(), 500);
+
+    drop(guard);
+    assert_eq!(budget.used(), 0, "drop releases the full oversized amount");
+}
+
+/// The oversized-request escape hatch only fires when the budget is
+/// GENUINELY empty (`current == 0`) — an oversized request arriving while
+/// ANY bytes are already reserved must still wait its turn like any other
+/// over-cap acquire, rather than jumping the queue.
+#[tokio::test]
+async fn acquire_oversized_request_still_waits_when_budget_is_not_empty() {
+    let budget = ByteBudget::new(Some(100));
+
+    // Reserve a small amount first — budget.used() is now 1, not 0.
+    let small_guard = budget.acquire(1).await;
+    assert_eq!(budget.used(), 1);
+
+    let budget2 = budget.clone();
+    let waiter = tokio::spawn(async move { budget2.acquire(500).await });
+
+    tokio::task::yield_now().await;
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    assert!(
+        !waiter.is_finished(),
+        "an oversized acquire must still block while ANY bytes are reserved \
+         (current != 0), not just when bytes > cap"
+    );
+
+    // Releasing the small guard drops used() back to 0 — the oversized
+    // waiter's next CAS attempt now sees current == 0 and is admitted.
+    drop(small_guard);
+
+    let oversized_guard = tokio::time::timeout(Duration::from_millis(500), waiter)
+        .await
+        .expect("oversized acquire must be admitted once the budget reaches current == 0")
+        .expect("waiter task must not panic");
+    assert_eq!(budget.used(), 500);
+    drop(oversized_guard);
+    assert_eq!(budget.used(), 0);
+}

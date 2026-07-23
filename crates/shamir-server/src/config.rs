@@ -653,6 +653,39 @@ impl Config {
             ));
         }
 
+        // CR-C1 (#776): unlike `max_cursor_page_size` above, zero is not a
+        // legitimate value for either of these two fields — there is no
+        // sensible "0 means unlimited/disabled" reading for either, and both
+        // read as accidental misconfiguration rather than deliberate intent:
+        // - `idle_timeout_secs == 0` would evict every cursor almost
+        //   immediately (the reaper sweeps every `DEFAULT_CURSOR_REAPER_INTERVAL`,
+        //   currently 5s, so a cursor would rarely if ever survive to see a
+        //   second `FetchNext`) — indistinguishable from the operator
+        //   wanting the cursor feature to work at all.
+        // - `max_cursors_per_session == 0` would make `CreateCursor` always
+        //   fail with `cursor_limit_exceeded` (the CAS loop in
+        //   `CursorRegistry::register` rejects the very first cursor, since
+        //   `0 >= 0`), silently disabling the whole feature rather than
+        //   expressing a deliberate killswitch (an operator who wants that
+        //   should reach for a real feature flag / ACL denial, not an
+        //   overloaded zero).
+        // Both reject at config-load time rather than surfacing as a
+        // confusing runtime error on the very first cursor request.
+        if self.security.cursors.idle_timeout_secs == 0 {
+            return Err(ConfigError::Validation(
+                "security.cursors.idle_timeout_secs must be >= 1 (a zero idle timeout would \
+                 evict every cursor almost immediately, disabling the feature outright)"
+                    .into(),
+            ));
+        }
+        if self.security.cursors.max_cursors_per_session == 0 {
+            return Err(ConfigError::Validation(
+                "security.cursors.max_cursors_per_session must be >= 1 (zero would make every \
+                 CreateCursor fail with cursor_limit_exceeded, silently disabling the feature)"
+                    .into(),
+            ));
+        }
+
         if self.listeners.is_empty() {
             return Err(ConfigError::Validation(
                 "at least one listener is required".into(),

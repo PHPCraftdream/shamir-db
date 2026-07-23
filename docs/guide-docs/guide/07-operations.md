@@ -201,6 +201,20 @@ observability: {
 одновременно висящих в памяти ответов; действует только per-batch cap
 `max_result_size_bytes`.
 
+`security.cursors.*` (FG-5b — результирующие курсоры `CreateCursor`/
+`FetchNext`/`CancelCursor`):
+- `idle_timeout_secs` (default **60**) — сколько секунд курсор может
+  простоять без `FetchNext`, прежде чем фоновый reaper его закроет
+  (освобождая закреплённый MVCC snapshot). `0` отклоняется при старте —
+  нулевой idle-timeout закрыл бы почти любой курсор мгновенно.
+- `max_cursors_per_session` (default **16**) — сколько курсоров может быть
+  одновременно открыто в рамках одной сессии; `CreateCursor` сверх лимита
+  возвращает `cursor_limit_exceeded`. `0` отклоняется при старте — это
+  сделало бы `CreateCursor` невозможным вообще.
+- `max_cursor_page_size` (default **10000**) — верхняя граница `page_size`
+  для `CreateCursor`/`FetchNext`; запрос выше границы отклоняется целиком
+  (не обрезается молча). `0` отклоняется при старте по той же причине.
+
 ## 3. Observability: `/healthz`, `/readyz`, `/metrics`, `/info`
 
 Отдельный HTTP-сервер (по умолчанию `127.0.0.1:9090`) — **не** на
