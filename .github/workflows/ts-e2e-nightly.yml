@@ -57,7 +57,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6.0.3
-      - uses: dtolnay/rust-toolchain@1.93.0
+      - uses: dtolnay/rust-toolchain@1.100.0
       - uses: Swatinem/rust-cache@v2
       # Produce the release binary `e2e-harness.ts`'s `serverBinPath()` falls
       # back to at `<repo>/target/release/shamir-server`. No workflow in this
@@ -119,7 +119,7 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v6.0.3
-      - uses: dtolnay/rust-toolchain@1.93.0
+      - uses: dtolnay/rust-toolchain@1.100.0
       - uses: Swatinem/rust-cache@v2
       - uses: actions/setup-node@v4
         with:

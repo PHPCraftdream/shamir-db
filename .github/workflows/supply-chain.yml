@@ -70,7 +70,7 @@ jobs:
       # `cargo deny check` needs a Cargo.lock to resolve the graph; it does not
       # need a Rust toolchain to *check*, but `cargo-deny` shells out to cargo
       # for metadata, so we install the toolchain pinned by rust-toolchain.toml.
-      - uses: dtolnay/rust-toolchain@1.93.0
+      - uses: dtolnay/rust-toolchain@1.100.0
       - name: Install cargo-deny
         # Pinned: `--locked` only pins cargo-deny's OWN Cargo.lock during
         # its build, not which version gets installed. `--version` pins the
@@ -94,7 +94,7 @@ jobs:
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     steps:
       - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@1.93.0
+      - uses: dtolnay/rust-toolchain@1.100.0
       - name: Install cargo-audit
         # Pinned: same rationale as cargo-deny above.
         run: cargo install --locked --version 0.22.2 cargo-audit
@@ -117,7 +117,7 @@ jobs:
     if: github.event_name == 'workflow_dispatch'
     steps:
       - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@1.93.0
+      - uses: dtolnay/rust-toolchain@1.100.0
       - name: Install cargo-cyclonedx
         # Pinned: same rationale as cargo-deny above.
         run: cargo install --locked --version 0.5.9 cargo-cyclonedx
