@@ -139,7 +139,7 @@ async fn step(mut state: State<'_>) -> Option<(Result<QueryRecord, ClientError>,
                 if !has_more {
                     return None;
                 }
-                let req = fetch_next(cursor_id, page_size);
+                let req = fetch_next(cursor_id, Some(page_size));
                 match client.roundtrip(&req).await {
                     Ok(DbResponse::CursorPage { page, has_more, .. }) => State::Buffered {
                         client,

@@ -40,7 +40,7 @@ client                                              server
   │  CursorPage{ cursor_id, page, has_more }           │                    │
   │◄───────────────────────────────────────────────── │◄───────────────────┘
   │                                                    │
-  │  FetchNext{ cursor_id, page_size }   (repeatable)  │
+  │  FetchNext{ cursor_id, page_size? }  (repeatable)  │
   │ ─────────────────────────────────────────────────►│
   │  CursorPage{ cursor_id, page, has_more }           │
   │◄───────────────────────────────────────────────── │
@@ -110,10 +110,17 @@ Wire discriminator: `"op": "fetch_next"`.
 { "op": "fetch_next", "cursor_id": 7, "page_size": 200 }
 ```
 
-| Field       | Type   | Required | Description                                                                 |
-|-------------|--------|----------|------------------------------------------------------------------------------|
-| `cursor_id` | `u64`  | yes      | The cursor minted by `CreateCursor`.                                        |
-| `page_size` | `u32`  | yes      | Records for THIS page — may differ from `CreateCursor`'s or any prior `FetchNext`'s `page_size` (client-controlled per-call backpressure). |
+`page_size` is OPTIONAL (CR-B3, #769) — a request that omits it entirely still
+decodes cleanly:
+
+```msgpack
+{ "op": "fetch_next", "cursor_id": 7 }
+```
+
+| Field       | Type             | Required | Description                                                                 |
+|-------------|------------------|----------|------------------------------------------------------------------------------|
+| `cursor_id` | `u64`            | yes      | The cursor minted by `CreateCursor`.                                        |
+| `page_size` | `u32` (optional) | no       | Records for THIS page — when present, may differ from `CreateCursor`'s or any prior `FetchNext`'s `page_size` (client-controlled per-call backpressure). When ABSENT, the server falls back to the `page_size` given at `CreateCursor` time (that call's own field doubles as every subsequent omitted-`FetchNext`'s default — see §2). |
 
 On success the server replies with the next page as `CursorPage` (§4). Fetching an
 unknown cursor id → `cursor_not_found` (§5); fetching an idle-timeout-evicted cursor

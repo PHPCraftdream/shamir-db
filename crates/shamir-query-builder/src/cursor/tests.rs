@@ -48,14 +48,14 @@ fn create_cursor_with_version_pins_explicit_version() {
 
 #[test]
 fn fetch_next_builds_expected_request() {
-    let req = fetch_next(CursorId(7), 25);
+    let req = fetch_next(CursorId(7), Some(25));
     match req {
         DbRequest::FetchNext {
             cursor_id,
             page_size,
         } => {
             assert_eq!(cursor_id, CursorId(7));
-            assert_eq!(page_size, 25);
+            assert_eq!(page_size, Some(25));
         }
         other => panic!("expected DbRequest::FetchNext, got {other:?}"),
     }
@@ -63,11 +63,28 @@ fn fetch_next_builds_expected_request() {
 
 #[test]
 fn fetch_next_accepts_bare_u64_via_into() {
-    let req = fetch_next(7u64, 25);
+    let req = fetch_next(7u64, Some(25));
     assert!(matches!(
         req,
         DbRequest::FetchNext { cursor_id, .. } if cursor_id == CursorId(7)
     ));
+}
+
+#[test]
+fn fetch_next_none_omits_page_size_override() {
+    // CR-B3 (#769): omitting page_size falls back to the cursor's stored
+    // CreateCursor-time default server-side.
+    let req = fetch_next(CursorId(7), None);
+    match req {
+        DbRequest::FetchNext {
+            cursor_id,
+            page_size,
+        } => {
+            assert_eq!(cursor_id, CursorId(7));
+            assert_eq!(page_size, None);
+        }
+        other => panic!("expected DbRequest::FetchNext, got {other:?}"),
+    }
 }
 
 #[test]

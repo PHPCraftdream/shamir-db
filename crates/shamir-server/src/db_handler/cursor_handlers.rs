@@ -886,24 +886,38 @@ impl ShamirDbHandler {
 
     /// FG-5b FETCH_NEXT — look up the cursor, re-run the pinned read at the
     /// current bookmark, advance the bookmark, reply with the page.
+    ///
+    /// CR-B3 (#769): `page_size` is `Some(n)` for an explicit per-call
+    /// override (unchanged, client-controlled backpressure) or `None` to
+    /// fall back to the cursor's stored `CreateCursor`-time default
+    /// (`Cursor::default_page_size`). The `Some(n)` case is still validated
+    /// BEFORE the registry lookup (CR-A3's existing property — avoids a
+    /// wasted registry hit and avoids ever reaching the `has_more`
+    /// infinite-loop computation for a malformed request). The `None` case
+    /// has nothing to validate yet at this point — the stored default is
+    /// only known AFTER the registry lookup succeeds — so validation for
+    /// that path is deferred to just after the lookup, below.
     pub(super) async fn fetch_next(
         &self,
         session: &Session,
         cursor_id: CursorId,
-        page_size: u32,
+        page_size: Option<u32>,
     ) -> DbResponse {
-        // CR-A3: validate page_size BEFORE the registry lookup — it doesn't
-        // need the cursor, and this avoids a wasted registry hit (and,
-        // critically, avoids ever running the has_more == 0 >= 0 → true
-        // infinite-loop computation below) for a malformed request. A bad
-        // page_size on one FetchNext call must not corrupt or close the
-        // cursor — it isn't looked up at all here, so it stays untouched.
         let max_page_size = self.cursor_limits.max_cursor_page_size;
-        if page_size == 0 || page_size > max_page_size {
-            return error_response(&BatchError::InvalidPageSize {
-                page_size,
-                max: max_page_size,
-            });
+        if let Some(requested) = page_size {
+            // CR-A3: validate an explicit page_size BEFORE the registry
+            // lookup — it doesn't need the cursor, and this avoids a wasted
+            // registry hit (and, critically, avoids ever running the
+            // has_more == 0 >= 0 → true infinite-loop computation below) for
+            // a malformed request. A bad page_size on one FetchNext call
+            // must not corrupt or close the cursor — it isn't looked up at
+            // all here, so it stays untouched.
+            if requested == 0 || requested > max_page_size {
+                return error_response(&BatchError::InvalidPageSize {
+                    page_size: requested,
+                    max: max_page_size,
+                });
+            }
         }
 
         let cursor = match self
@@ -913,6 +927,26 @@ impl ShamirDbHandler {
             Ok(c) => c,
             Err(e) => return cursor_registry_error_response(cursor_id, e),
         };
+
+        // CR-B3: resolve the effective page size now that the cursor is
+        // known — `None` falls back to the stored `CreateCursor`-time
+        // default. Validate the resolved value again (defense-in-depth):
+        // the default was already validated once at `CreateCursor` time via
+        // CR-A3, so this should always pass in practice, but a stored value
+        // is never silently trusted. A failure here is a normal
+        // `InvalidPageSize` rejection — same shape as the `Some(n)` case
+        // above — and must NOT mutate/close the cursor (the "a bad
+        // page_size on one call must not corrupt the cursor" invariant
+        // CR-A3 already established): the lookup above only cloned an
+        // `Arc<Cursor>`, it did not touch registry/cursor state, so simply
+        // returning here leaves everything untouched.
+        let effective_page_size = page_size.unwrap_or_else(|| cursor.default_page_size());
+        if effective_page_size == 0 || effective_page_size > max_page_size {
+            return error_response(&BatchError::InvalidPageSize {
+                page_size: effective_page_size,
+                max: max_page_size,
+            });
+        }
 
         let repo = match resolve_repo(&self.db, cursor.db(), cursor.repo()) {
             Ok(r) => r,
@@ -963,7 +997,6 @@ impl ShamirDbHandler {
         };
 
         let base_query = state.query.clone();
-        let max_page_size = self.cursor_limits.max_cursor_page_size;
 
         // CR-A4 (#764): `state.mode` was pinned once at `create_cursor`
         // time and never re-derived here — see `PaginationMode`'s doc
@@ -991,7 +1024,7 @@ impl ShamirDbHandler {
                     &base_query,
                     &seek_key,
                     state.tie_skip,
-                    page_size,
+                    effective_page_size,
                     cursor.pinned_version(),
                     max_page_size,
                 )
@@ -1012,7 +1045,7 @@ impl ShamirDbHandler {
             _ => {
                 let mut next_query = base_query.clone();
                 next_query.pagination = Pagination::LimitOffset {
-                    limit: Some(page_size as u64),
+                    limit: Some(effective_page_size as u64),
                     offset: state.offset,
                 };
                 next_query.temporal = Temporal::AsOf {
@@ -1028,7 +1061,7 @@ impl ShamirDbHandler {
                         return error_response(&wrap_engine_err(e));
                     }
                 };
-                has_more = fetched.records.len() as u64 >= page_size as u64;
+                has_more = fetched.records.len() as u64 >= effective_page_size as u64;
                 new_offset = state.offset + fetched.records.len() as u64;
                 page = fetched;
                 new_seek_key = None;

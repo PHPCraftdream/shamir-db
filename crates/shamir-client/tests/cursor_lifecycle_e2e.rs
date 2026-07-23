@@ -180,6 +180,7 @@ async fn stream_cursor_idle_timeout_evicts_and_surfaces_cursor_expired() {
     let (handle, client, _temp) = boot(CursorLimitsConfig {
         max_cursors_per_session: 16,
         idle_timeout_secs: 1,
+        max_cursor_page_size: 10_000,
     })
     .await;
 
@@ -242,6 +243,7 @@ async fn stream_cursor_per_session_cap_rejects_third_cursor_but_not_other_sessio
     let (handle, client, _temp) = boot(CursorLimitsConfig {
         max_cursors_per_session: 2,
         idle_timeout_secs: 60,
+        max_cursor_page_size: 10_000,
     })
     .await;
 

@@ -58,9 +58,11 @@ pub fn create_cursor_with_version(
 }
 
 /// Build a [`DbRequest::FetchNext`] — fetch the next page from an
-/// already-open cursor. `page_size` may differ from the size used at
-/// `CreateCursor` time or any prior `FetchNext` call.
-pub fn fetch_next(cursor_id: impl Into<CursorId>, page_size: u32) -> DbRequest {
+/// already-open cursor. `page_size: Some(n)` requests `n` records for this
+/// page (may differ from the size used at `CreateCursor` time or any prior
+/// `FetchNext` call — client-controlled per-call backpressure); `None` falls
+/// back to the cursor's stored `CreateCursor`-time default.
+pub fn fetch_next(cursor_id: impl Into<CursorId>, page_size: Option<u32>) -> DbRequest {
     DbRequest::FetchNext {
         cursor_id: cursor_id.into(),
         page_size,

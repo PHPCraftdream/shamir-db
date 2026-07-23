@@ -280,7 +280,7 @@ fn create_cursor_query_version_defaults_when_absent() {
 fn fetch_next_request_roundtrip_and_tag() {
     let req = DbRequest::FetchNext {
         cursor_id: CursorId(42),
-        page_size: 10,
+        page_size: Some(10),
     };
     let v = to_qv(&req);
     assert_eq!(v.get("op").and_then(QueryValue::as_str), Some("fetch_next"));
@@ -291,7 +291,48 @@ fn fetch_next_request_roundtrip_and_tag() {
     assert!(matches!(
         back,
         DbRequest::FetchNext { cursor_id, page_size }
-            if cursor_id == CursorId(42) && page_size == 10
+            if cursor_id == CursorId(42) && page_size == Some(10)
+    ));
+}
+
+#[test]
+fn fetch_next_request_page_size_none_roundtrips() {
+    // Some(n) case above covers explicit per-call backpressure; this covers
+    // the CR-B3 fallback-to-CreateCursor-default case (#769) — `page_size:
+    // None` on the Rust side round-trips through msgpack (encodes as `null`,
+    // same as every other bare `Option<T>` field with no
+    // `skip_serializing_if`, e.g. `TxBegin::isolation`) back to `None`.
+    let req = DbRequest::FetchNext {
+        cursor_id: CursorId(42),
+        page_size: None,
+    };
+    let v = to_qv(&req);
+    assert_eq!(v.get("op").and_then(QueryValue::as_str), Some("fetch_next"));
+    assert_eq!(v.get("cursor_id").and_then(QueryValue::as_i64), Some(42));
+
+    let back: DbRequest = from_qv(v);
+    assert!(matches!(
+        back,
+        DbRequest::FetchNext { cursor_id, page_size }
+            if cursor_id == CursorId(42) && page_size.is_none()
+    ));
+}
+
+#[test]
+fn fetch_next_request_page_size_omitted_on_wire_defaults_to_none() {
+    // A minimal wire payload that never mentions `page_size` at all (e.g. an
+    // older/minimal client) must decode to `None`, mirroring the
+    // `#[serde(default)]` behavior `tx_begin_isolation_optional_and_query_version_defaults`
+    // already exercises for `TxBegin::isolation`.
+    let v = mpack!({
+        "op": "fetch_next",
+        "cursor_id": 42,
+    });
+    let back: DbRequest = from_qv(v);
+    assert!(matches!(
+        back,
+        DbRequest::FetchNext { cursor_id, page_size }
+            if cursor_id == CursorId(42) && page_size.is_none()
     ));
 }
 

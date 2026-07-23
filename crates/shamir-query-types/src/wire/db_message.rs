@@ -239,8 +239,13 @@ pub enum DbRequest {
     FetchNext {
         /// The cursor minted by [`DbRequest::CreateCursor`].
         cursor_id: CursorId,
-        /// Maximum records returned by this page.
-        page_size: u32,
+        /// `Some(n)` requests `n` records for THIS page (client-controlled
+        /// per-call backpressure, same as before). `None` (an omitted field
+        /// on the wire — msgpack's normal "missing key" semantics for an
+        /// `Option`) falls back to the cursor's stored `CreateCursor`-time
+        /// default (`Cursor::default_page_size`).
+        #[serde(default)]
+        page_size: Option<u32>,
     },
     /// Explicitly close (cancel) an open cursor, releasing its server-side
     /// state early (idle-timeout eviction is the implicit counterpart,

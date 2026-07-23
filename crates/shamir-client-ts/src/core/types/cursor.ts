@@ -39,12 +39,16 @@ export interface CreateCursorRequest {
 
 /**
  * `DbRequest::FetchNext` (`op: "fetch_next"`). Fetches the next page from an
- * already-open cursor. `page_size` may differ per call.
+ * already-open cursor. `page_size` may differ per call (explicit per-call
+ * backpressure); omitted (`undefined`) falls back to the cursor's stored
+ * `create_cursor`-time default, mirroring the Rust wire type's `Option<u32>`
+ * + `#[serde(default)]` (CR-B3, #769) — same optional-field convention as
+ * `CreateCursorRequest.query_version?`.
  */
 export interface FetchNextRequest {
   op: 'fetch_next';
   cursor_id: CursorId;
-  page_size: number;
+  page_size?: number;
 }
 
 /**

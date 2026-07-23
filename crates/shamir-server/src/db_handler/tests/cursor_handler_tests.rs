@@ -120,10 +120,22 @@ fn create_cursor_req(query: ReadQuery, page_size: u32) -> DbRequest {
     }
 }
 
+/// Explicit per-call `page_size` override (the pre-CR-B3 always-present
+/// shape) — wraps `Some(page_size)` so the many existing call sites below
+/// don't need to change.
 fn fetch_next_req(cursor_id: CursorId, page_size: u32) -> DbRequest {
     DbRequest::FetchNext {
         cursor_id,
-        page_size,
+        page_size: Some(page_size),
+    }
+}
+
+/// CR-B3 (#769): `FetchNext` that OMITS `page_size` — server falls back to
+/// the cursor's stored `CreateCursor`-time default.
+fn fetch_next_default_req(cursor_id: CursorId) -> DbRequest {
+    DbRequest::FetchNext {
+        cursor_id,
+        page_size: None,
     }
 }
 
@@ -977,6 +989,93 @@ async fn fetch_next_rejects_page_size_above_configured_max() {
         other => panic!(
             "cursor must remain usable after a rejected too-large page_size call, got {other:?}"
         ),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// CR-B3 (#769) — `FetchNext.page_size` is `Option<u32>`: `None` falls back
+// to the cursor's stored `CreateCursor`-time default (`Cursor::
+// default_page_size`), previously a dead field nothing ever consumed.
+// ---------------------------------------------------------------------------
+
+/// A `FetchNext` that OMITS `page_size` (sends `None`) must use the
+/// `CreateCursor`-time default page size, not some other value.
+#[tokio::test]
+async fn fetch_next_omitted_page_size_uses_create_cursor_default() {
+    let handler = build_handler_with_rows(5, CursorLimitsCap::UNLIMITED).await;
+    let session = alice_session();
+
+    // CreateCursor-time default is 2 — every FetchNext that omits page_size
+    // must keep returning 2-row pages until the data runs out.
+    let query = ReadQuery::new("items").order_by(OrderBy::asc("v"));
+    let resp = send(&handler, &session, create_cursor_req(query, 2)).await;
+    let cursor_id = match resp {
+        DbResponse::CursorPage {
+            cursor_id,
+            page,
+            has_more,
+        } => {
+            assert_eq!(page.records.len(), 2);
+            assert!(has_more);
+            cursor_id
+        }
+        other => panic!("expected CursorPage, got {other:?}"),
+    };
+
+    // Page 2: page_size omitted -> must still return 2 rows (the stored
+    // CreateCursor-time default), not some other count.
+    let resp = send(&handler, &session, fetch_next_default_req(cursor_id)).await;
+    match resp {
+        DbResponse::CursorPage { page, has_more, .. } => {
+            assert_eq!(
+                page.records.len(),
+                2,
+                "omitted page_size must fall back to the CreateCursor-time default (2)"
+            );
+            assert!(has_more, "4 of 5 consumed -> one more row remains");
+        }
+        other => panic!("expected CursorPage, got {other:?}"),
+    }
+
+    // Page 3: page_size omitted again -> final row, has_more -> false.
+    let resp = send(&handler, &session, fetch_next_default_req(cursor_id)).await;
+    match resp {
+        DbResponse::CursorPage { page, has_more, .. } => {
+            assert_eq!(page.records.len(), 1, "only 1 row left");
+            assert!(!has_more, "last page must report has_more == false");
+        }
+        other => panic!("expected CursorPage, got {other:?}"),
+    }
+}
+
+/// Regression: an explicit `Some(n)` on `FetchNext` must still override the
+/// `CreateCursor`-time default — the existing per-call-backpressure
+/// behavior is unchanged by CR-B3.
+#[tokio::test]
+async fn fetch_next_explicit_page_size_still_overrides_default() {
+    let handler = build_handler_with_rows(5, CursorLimitsCap::UNLIMITED).await;
+    let session = alice_session();
+
+    // CreateCursor-time default is 2, but this FetchNext explicitly asks
+    // for 1 row.
+    let query = ReadQuery::new("items").order_by(OrderBy::asc("v"));
+    let resp = send(&handler, &session, create_cursor_req(query, 2)).await;
+    let cursor_id = match resp {
+        DbResponse::CursorPage { cursor_id, .. } => cursor_id,
+        other => panic!("expected CursorPage, got {other:?}"),
+    };
+
+    let resp = send(&handler, &session, fetch_next_req(cursor_id, 1)).await;
+    match resp {
+        DbResponse::CursorPage { page, has_more, .. } => {
+            assert_eq!(
+                page.records.len(),
+                1,
+                "explicit Some(1) must override the CreateCursor-time default (2)"
+            );
+            assert!(has_more);
+        }
+        other => panic!("expected CursorPage, got {other:?}"),
     }
 }
 

@@ -165,7 +165,7 @@ async fn close_mid_stream_reaches_the_server() {
 
     // Drive a raw FetchNext against the same cursor_id — proves close()
     // actually removed it from the server's registry.
-    let probe_req: DbRequest = crate::builder::cursor::fetch_next(cursor_id, 2);
+    let probe_req: DbRequest = crate::builder::cursor::fetch_next(cursor_id, Some(2));
     let resp = client.roundtrip(&probe_req).await;
     match resp {
         Err(crate::ClientError::Db { code, .. }) => {

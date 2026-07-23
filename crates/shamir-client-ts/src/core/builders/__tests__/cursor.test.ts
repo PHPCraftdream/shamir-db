@@ -38,6 +38,24 @@ describe('fetchNext', () => {
       page_size: 25,
     });
   });
+
+  it('omits page_size from the wire shape when pageSize is not provided (CR-B3, #769)', () => {
+    const req = fetchNext(7);
+    expect(req).toEqual({
+      op: 'fetch_next',
+      cursor_id: 7,
+    });
+    expect('page_size' in req).toBe(false);
+  });
+
+  it('omits page_size from the wire shape when pageSize is explicitly undefined', () => {
+    const req = fetchNext(7, undefined);
+    expect(req).toEqual({
+      op: 'fetch_next',
+      cursor_id: 7,
+    });
+    expect('page_size' in req).toBe(false);
+  });
 });
 
 describe('cancelCursor', () => {
@@ -68,6 +86,15 @@ describe('Batch static cursor helpers', () => {
       cursor_id: 7,
       page_size: 25,
     });
+  });
+
+  it('Batch.fetchNext omits page_size when pageSize is not provided (CR-B3, #769)', () => {
+    const req = Batch.fetchNext(7);
+    expect(req).toEqual({
+      op: 'fetch_next',
+      cursor_id: 7,
+    });
+    expect('page_size' in req).toBe(false);
   });
 
   it('Batch.cancelCursor forwards to the cancelCursor builder', () => {

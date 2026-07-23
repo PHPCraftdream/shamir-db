@@ -113,7 +113,7 @@ fn create_cursor_req(page_size: u32) -> DbRequest {
 fn fetch_next_req(cursor_id: CursorId, page_size: u32) -> DbRequest {
     DbRequest::FetchNext {
         cursor_id,
-        page_size,
+        page_size: Some(page_size),
     }
 }
 

@@ -61,14 +61,21 @@ export function createCursor(
 /**
  * Build a `DbRequest::FetchNext` — fetch the next page from an already-open
  * cursor. `pageSize` may differ from the size used at `createCursor` time or
- * any prior `fetchNext` call.
+ * any prior `fetchNext` call (explicit per-call backpressure); omit it (or
+ * pass `undefined`) to fall back to the cursor's stored `createCursor`-time
+ * default (CR-B3, #769). `page_size` is only included in the returned
+ * object when `pageSize` is defined — never emitted as `page_size:
+ * undefined` — mirroring the conditional-assignment convention every other
+ * optional wire field in this crate's builders already uses (e.g.
+ * `ddl.ts`'s `opts?.field !== undefined` checks).
  */
-export function fetchNext(cursorId: CursorId, pageSize: number): FetchNextRequest {
-  return {
+export function fetchNext(cursorId: CursorId, pageSize?: number): FetchNextRequest {
+  const req: FetchNextRequest = {
     op: 'fetch_next',
     cursor_id: cursorId,
-    page_size: pageSize,
   };
+  if (pageSize !== undefined) req.page_size = pageSize;
+  return req;
 }
 
 /**

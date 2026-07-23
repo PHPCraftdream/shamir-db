@@ -423,9 +423,11 @@ export class Batch {
 
   /**
    * Build a `DbRequest::FetchNext` — fetch the next page from an
-   * already-open cursor. `pageSize` may differ per call.
+   * already-open cursor. `pageSize` may differ per call (explicit
+   * per-call backpressure); omit it to fall back to the cursor's stored
+   * `createCursor`-time default (CR-B3, #769).
    */
-  static fetchNext(cursorId: CursorId, pageSize: number): FetchNextRequest {
+  static fetchNext(cursorId: CursorId, pageSize?: number): FetchNextRequest {
     return buildFetchNext(cursorId, pageSize);
   }
 
