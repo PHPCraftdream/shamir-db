@@ -171,10 +171,20 @@ async fn exhaustion_blocks_until_release() {
     assert!(matches!(resp2, DbResponse::Batch { .. }));
     let guard2 = guard2.expect("bounded budget must stash a guard");
 
+    // Tolerance: `one_response` was measured from a SEPARATE execution
+    // (`measure_one_response_size`); a response's serialized size can vary
+    // by a few bytes call-to-call (e.g. a timing-derived stats field
+    // crossing a msgpack varint width boundary), observed in CI as an
+    // off-by-1..2-byte mismatch on macOS/Windows runners. The invariant
+    // under test is "the budget accumulated roughly 2x, not just 1x" — a
+    // 16-byte tolerance is generous against encoding jitter while still
+    // catching a real accounting bug (which would be off by a whole
+    // response's worth of bytes, not a handful).
+    let used = budget.used();
     assert!(
-        budget.used() >= one_response * 2,
-        "two in-flight responses must reserve at least 2x one response's bytes (used={}, one={})",
-        budget.used(),
+        used + 16 >= one_response * 2,
+        "two in-flight responses must reserve at least ~2x one response's bytes (used={}, one={})",
+        used,
         one_response,
     );
 
