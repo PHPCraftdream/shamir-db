@@ -34,6 +34,32 @@ function tableRef(repo: string | undefined, table: string): TableRefWire {
   return !repo || repo === 'main' ? table : [repo, table];
 }
 
+// ── CAS version guard ────────────────────────────────────────────────
+
+/**
+ * Validate a caller-supplied CAS version before it is placed on an
+ * `expected_version` wire field. A `bigint` passes straight through
+ * unchecked (it has no IEEE-754 precision concern). A `number` is checked
+ * with `Number.isSafeInteger`: a version above `2^53` would silently round
+ * under double precision, corrupting CAS semantics — the caller almost
+ * certainly meant to pass the `bigint` they got back from a decoded
+ * response (see `QueryResult.versions`, `types/batch.ts`) instead of
+ * narrowing it via `Number(...)`.
+ */
+export function assertSafeVersion(
+  version: number | bigint,
+  context: string,
+): void {
+  if (typeof version === 'number' && !Number.isSafeInteger(version)) {
+    throw new TypeError(
+      `${context}: version ${version} is not a safe integer — values above ` +
+        '2^53 silently round under IEEE-754 double precision, which would ' +
+        'corrupt CAS semantics. Pass the bigint you read back from ' +
+        '`QueryResult.versions` instead of narrowing it with Number(...).',
+    );
+  }
+}
+
 // ── insert ───────────────────────────────────────────────────────────
 
 /**
@@ -69,7 +95,7 @@ export class UpdateBuilder {
   private whereFilter: Filter | null = null;
   private setValue: WireValue | null = null;
   private selectValue: UpdateSelect | null = null;
-  private expectedVersionValue: number | null = null;
+  private expectedVersionValue: number | bigint | null = null;
 
   /** @internal Use `update()` to create an instance. */
   static create(tableRef: TableRefWire): UpdateBuilder {
@@ -115,8 +141,17 @@ export class UpdateBuilder {
    * server rejects the update with `version_conflict` unless every matched row
    * is currently at exactly this version. The version comes from
    * `QueryResult.versions` (read-side `.withVersion()`).
+   *
+   * Accepts both `number` and `bigint` — `QueryResult.versions` may hand back
+   * a `bigint` for a version outside the safe-integer range (`framing.ts`'s
+   * decoder, `useBigInt64: true`). A `bigint` passes straight through
+   * unmodified: the encoder's `promoteWideInts` already emits any `bigint`
+   * as a genuine msgpack uint64/int64, so no conversion is needed here. A
+   * plain `number` is validated with `Number.isSafeInteger` — see
+   * {@link assertSafeVersion}.
    */
-  expectedVersion(version: number): this {
+  expectedVersion(version: number | bigint): this {
+    assertSafeVersion(version, 'UpdateBuilder.expectedVersion');
     this.expectedVersionValue = version;
     return this;
   }
@@ -184,7 +219,7 @@ export function del(
     repo?: string;
     returning?: boolean;
     returningFields?: string[];
-    expectedVersion?: number;
+    expectedVersion?: number | bigint;
   },
 ): DeleteOp {
   const op: DeleteOp = { delete_from: tableRef(opts?.repo, table), where };
@@ -193,8 +228,10 @@ export function del(
   } else if (opts?.returning) {
     op.select = {};
   }
-  if (opts?.expectedVersion !== undefined)
+  if (opts?.expectedVersion !== undefined) {
+    assertSafeVersion(opts.expectedVersion, 'del(opts.expectedVersion)');
     op.expected_version = opts.expectedVersion;
+  }
   return op;
 }
 

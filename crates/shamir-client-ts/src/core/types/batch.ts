@@ -224,8 +224,14 @@ export interface QueryResult {
    * `expected_version` on a subsequent UPDATE/DELETE for optimistic CAS.
    * Omitted when not requested or when the read path cannot structurally
    * attribute a version (aggregates, ORDER BY reordering, non-MVCC table).
+   *
+   * On the wire this is a bare `u64` per entry, so it round-trips as a
+   * plain number/bigint — never a wrapped object (same rationale as
+   * `CursorId`, see `types/cursor.ts`): `framing.ts`'s decoder
+   * (`useBigInt64: true`) hands back a genuine `bigint` for any version
+   * outside the safe-integer range, to avoid silently losing precision.
    */
-  versions?: number[];
+  versions?: (number | bigint)[];
 }
 
 /** Transaction metadata (present on transactional batches). */

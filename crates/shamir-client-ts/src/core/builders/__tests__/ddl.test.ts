@@ -934,6 +934,23 @@ describe('setTableSchema', () => {
     const op = ddl.setTableSchema('users', [], { repo: 'hot' });
     expect(op.repo).toBe('hot');
   });
+
+  // ── expectedVersion: number | bigint CAS guard (CR-B6) ─────────────
+
+  it('accepts a bigint expectedVersion and forwards it unmodified', () => {
+    const bigVersion = 2n ** 60n;
+    const op = ddl.setTableSchema('users', [], { expectedVersion: bigVersion });
+    expect(op.expected_version).toBe(bigVersion);
+    expect(typeof op.expected_version).toBe('bigint');
+  });
+
+  it('throws TypeError on an unsafe number expectedVersion', () => {
+    expect(() =>
+      ddl.setTableSchema('users', [], {
+        expectedVersion: Number.MAX_SAFE_INTEGER + 2,
+      }),
+    ).toThrow(TypeError);
+  });
 });
 
 describe('addSchemaRule', () => {

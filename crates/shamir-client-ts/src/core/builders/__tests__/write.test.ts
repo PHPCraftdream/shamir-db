@@ -368,6 +368,97 @@ describe('computed-write parity (filter.* inside write values)', () => {
   });
 });
 
+// ── expectedVersion: number | bigint CAS guard (CR-B6) ───────────────
+
+describe('UpdateBuilder.expectedVersion', () => {
+  it('accepts a bigint and forwards the exact same bigint value (no narrowing)', () => {
+    const bigVersion = 2n ** 60n;
+    const op = write.update('users')
+      .set({ x: 1 })
+      .expectedVersion(bigVersion)
+      .build();
+    expect(op.expected_version).toBe(bigVersion);
+    expect(typeof op.expected_version).toBe('bigint');
+  });
+
+  it('accepts a safe number unchanged (regression guard)', () => {
+    const op = write.update('users')
+      .set({ x: 1 })
+      .expectedVersion(42)
+      .build();
+    expect(op.expected_version).toBe(42);
+    expect(typeof op.expected_version).toBe('number');
+  });
+
+  it('throws TypeError on an unsafe number (Number.MAX_SAFE_INTEGER + 2)', () => {
+    expect(() =>
+      write.update('users')
+        .set({ x: 1 })
+        .expectedVersion(Number.MAX_SAFE_INTEGER + 2),
+    ).toThrow(TypeError);
+    expect(() =>
+      write.update('users')
+        .set({ x: 1 })
+        .expectedVersion(Number.MAX_SAFE_INTEGER + 2),
+    ).toThrow(/safe integer|precision/i);
+  });
+
+  it('throws TypeError on an unsafe number (2 ** 60)', () => {
+    expect(() =>
+      write.update('users').set({ x: 1 }).expectedVersion(2 ** 60),
+    ).toThrow(TypeError);
+  });
+});
+
+describe('del opts.expectedVersion', () => {
+  it('accepts a bigint and forwards the exact same bigint value (no narrowing)', () => {
+    const bigVersion = 2n ** 60n;
+    const op = write.del('users', filter.eq('id', 1), {
+      expectedVersion: bigVersion,
+    });
+    expect(op.expected_version).toBe(bigVersion);
+    expect(typeof op.expected_version).toBe('bigint');
+  });
+
+  it('accepts a safe number unchanged (regression guard)', () => {
+    const op = write.del('users', filter.eq('id', 1), {
+      expectedVersion: 42,
+    });
+    expect(op.expected_version).toBe(42);
+    expect(typeof op.expected_version).toBe('number');
+  });
+
+  it('throws TypeError on an unsafe number', () => {
+    expect(() =>
+      write.del('users', filter.eq('id', 1), {
+        expectedVersion: Number.MAX_SAFE_INTEGER + 2,
+      }),
+    ).toThrow(TypeError);
+    expect(() =>
+      write.del('users', filter.eq('id', 1), {
+        expectedVersion: 2 ** 60,
+      }),
+    ).toThrow(/safe integer|precision/i);
+  });
+});
+
+// ── QueryResult.versions: type-level bigint acceptance (CR-B6) ───────
+
+describe('QueryResult.versions type widening', () => {
+  it('a versions array mixing number and bigint compiles and is usable', () => {
+    // Type-level check: the real gate is `tsc --noEmit` passing on this
+    // snippet, not a runtime assertion — see CR-B6 brief.
+    const versions: import('../../types/batch.js').QueryResult['versions'] = [
+      1,
+      2n ** 60n,
+      42,
+    ];
+    expect(versions).toBeDefined();
+    expect(versions).toHaveLength(3);
+    expect(typeof versions![1]).toBe('bigint');
+  });
+});
+
 // ── UpdateReturnMode values are lowercase strings ────────────────────
 
 describe('UpdateReturnMode values', () => {

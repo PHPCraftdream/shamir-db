@@ -140,7 +140,11 @@ export interface SetTableSchemaOp {
   set_table_schema: string;
   repo: string;
   schema: FieldRuleDto[];
-  expected_version?: number;
+  /** Schema-revision CAS guard — same `u64` wire shape and precision
+   * concern as `UpdateOp.expected_version` (see `types/write.ts`): a
+   * `number | bigint` here lets a `bigint` schema version round-trip
+   * without narrowing. */
+  expected_version?: number | bigint;
 }
 
 /** Add (or replace by path) a single rule in a table's schema. */

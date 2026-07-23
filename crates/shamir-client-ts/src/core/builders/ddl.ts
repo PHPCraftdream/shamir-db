@@ -74,6 +74,7 @@ import {
   canonicalSetRetention,
   canonicalPurgeHistory,
 } from '../hmac.js';
+import { assertSafeVersion } from './write.js';
 
 // ── Helpers ─────────────────────────────────────────────────────────
 
@@ -883,15 +884,17 @@ export function field(path: string[]): FieldBuilder {
 export function setTableSchema(
   table: string,
   schema: FieldRuleDto[],
-  opts?: { repo?: string; expectedVersion?: number },
+  opts?: { repo?: string; expectedVersion?: number | bigint },
 ): SetTableSchemaOp {
   const op: SetTableSchemaOp = {
     set_table_schema: table,
     repo: repoOrDefault(opts?.repo),
     schema,
   };
-  if (opts?.expectedVersion !== undefined)
+  if (opts?.expectedVersion !== undefined) {
+    assertSafeVersion(opts.expectedVersion, 'setTableSchema(opts.expectedVersion)');
     op.expected_version = opts.expectedVersion;
+  }
   return op;
 }
 

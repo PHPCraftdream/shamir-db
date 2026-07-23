@@ -175,8 +175,10 @@ export interface UpdateOp {
   select?: UpdateSelect;
   /** Optimistic-concurrency (CAS) version guard (FG-2). When set, the server
    * rejects the update with `version_conflict` unless every matched row is at
-   * exactly this version (from `QueryResult.versions`). Omitted = disabled. */
-  expected_version?: number;
+   * exactly this version (from `QueryResult.versions`). Omitted = disabled.
+   * `number | bigint` for the same reason as `QueryResult.versions` — a
+   * version read back as a `bigint` must round-trip here without narrowing. */
+  expected_version?: number | bigint;
 }
 
 /**
@@ -202,8 +204,8 @@ export interface DeleteOp {
   where: Filter;
   select?: DeleteSelect;
   /** Optimistic-concurrency (CAS) version guard (FG-2). Same semantics as
-   * `UpdateOp.expected_version`. */
-  expected_version?: number;
+   * `UpdateOp.expected_version`, including the `number | bigint` widening. */
+  expected_version?: number | bigint;
 }
 
 /** Union of all write operation wire shapes. */
