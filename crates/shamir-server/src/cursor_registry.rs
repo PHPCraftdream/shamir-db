@@ -89,6 +89,27 @@ pub enum CursorRegistryError {
     CursorOwnershipMismatch,
 }
 
+/// CR-A4 (#764): which coordinate system a cursor's bookmark resumes from,
+/// decided ONCE at `create_cursor` time (see [`Cursor::new`]) from whether
+/// the caller's query has a simple single-column ORDER BY — never
+/// re-derived per `FetchNext` call. Pinning the mode up front closes a
+/// latent hazard where a later page could otherwise flip coordinate
+/// systems mid-scroll (e.g. if a projection quirk made one page's
+/// `seek_key` extraction fail, silently falling back to the row-count
+/// `offset` bookmark for that page only) — a flip like that could
+/// duplicate or skip rows, since the two bookmark kinds are not
+/// interchangeable positions in the same scan.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PaginationMode {
+    /// Boundary-filter seek on the single ORDER BY column (`seek_key` +
+    /// `tie_skip`), CR-A4's inclusive-boundary + skip-past-ties scheme.
+    Keyset,
+    /// Plain row-count `offset`, used when the query has no ORDER BY (or
+    /// not a simple single-column one) — no field to build a boundary
+    /// filter on.
+    Offset,
+}
+
 /// Mutable per-cursor pagination state, guarded by the cursor's
 /// `tokio::sync::Mutex` (a `FetchNext` mutates it across the async engine
 /// read call — the same across-`.await` lock pattern `InteractiveTx.ctx`
@@ -100,16 +121,43 @@ pub struct CursorState {
     /// current bookmark — this stored copy's `from`/`select`/`where`/
     /// `order_by` are the caller's original request and never mutated.
     pub query: ReadQuery,
+    /// CR-A4 (#764): the pagination coordinate system this cursor was
+    /// pinned to at `create_cursor` time — see [`PaginationMode`]. Decided
+    /// once, never re-derived per `FetchNext`.
+    pub mode: PaginationMode,
     /// Current keyset seek key — the last row's (single-column) ORDER BY
-    /// value, used to build a `field > seek_key` (or `<` for DESC) boundary
-    /// filter on the next `FetchNext`. Only set when the caller's query
-    /// carries an `order_by`; `None` when there is no ORDER BY (see
-    /// `offset` below) OR before the first `FetchNext` (the initial page
-    /// has nothing to seek past yet).
+    /// value, used to build an INCLUSIVE `field >= seek_key` (or `<=` for
+    /// DESC) boundary filter on the next `FetchNext` (CR-A4: was `>`/`<`,
+    /// which silently dropped tied rows straddling a page boundary — see
+    /// `db_handler::cursor_handlers::boundary_filter`). Only set when
+    /// `mode == PaginationMode::Keyset`; `None` before the first
+    /// `FetchNext` (the initial page has nothing to seek past yet).
     pub seek_key: Option<shamir_types::types::value::QueryValue>,
-    /// Row-count bookmark used when the caller's query has NO `order_by`.
+    /// CR-A4 (#764): how many rows EXACTLY equal to `seek_key` have
+    /// already been returned to the client (across all prior pages, for
+    /// the CURRENT run of ties ending at `seek_key`). Since the cursor's
+    /// read path (`TableManager::read_as_of`) never attaches a record's
+    /// `_id` to a projected row (confirmed: `_id` is only ever attached on
+    /// the WRITE-result path and the Latest-temporal sorted-index seek
+    /// path — `read_as_of` -> `apply_select_value_bytes` discards the
+    /// `RecordId` outright — see this task's brief,
+    /// `docs/dev-artifacts/prompts/post-alpha/11-cr-a4-keyset-tie-breaker.md`),
+    /// a real `RecordId`-based "skip past last_id" is not available on
+    /// this path. `tie_skip` is the substitute: since `list_stream`'s
+    /// enumeration order is stable and `apply_order_by_qv`'s sort is
+    /// stable (`Vec::sort_by`, a documented std guarantee) across two
+    /// `read_as_of` calls at the SAME pinned version with no concurrent
+    /// write, the Nth row (by return order) among rows tied at
+    /// `seek_key` is deterministic — so "skip the first `tie_skip` rows
+    /// equal to `seek_key` in the next fetch" reproduces exactly the same
+    /// effect "skip past last_id" would if `_id` were available. `0` when
+    /// there is no active tie run to skip past (i.e. `seek_key` is set but
+    /// no page has ended mid-tie yet — the boundary row is included
+    /// zero times, so nothing needs skipping).
+    pub tie_skip: u64,
+    /// Row-count bookmark used when `mode == PaginationMode::Offset`.
     /// Without a caller-specified total order there is no field to build a
-    /// `Gt`/`Lt` boundary filter on, so `FetchNext` instead resumes via
+    /// `Gte`/`Lte` boundary filter on, so `FetchNext` instead resumes via
     /// `Pagination::LimitOffset { offset, limit }` against the pinned
     /// snapshot's stable (but engine-internal, insertion-order) full scan.
     pub offset: u64,
@@ -150,10 +198,14 @@ pub struct Cursor {
 }
 
 impl Cursor {
-    /// Build a parked cursor.
+    /// Build a parked cursor. `mode` is decided ONCE by the caller (see
+    /// `db_handler::cursor_handlers::create_cursor`, CR-A4 #764) from
+    /// whether `query` has a simple single-column ORDER BY, and never
+    /// re-derived afterward.
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         query: ReadQuery,
+        mode: PaginationMode,
         snapshot: SnapshotGuard,
         pinned_version: u64,
         default_page_size: u32,
@@ -164,7 +216,9 @@ impl Cursor {
         Self {
             state: tokio::sync::Mutex::new(CursorState {
                 query,
+                mode,
                 seek_key: None,
+                tie_skip: 0,
                 offset: 0,
                 exhausted: false,
             }),

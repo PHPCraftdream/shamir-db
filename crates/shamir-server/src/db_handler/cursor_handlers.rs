@@ -26,21 +26,70 @@
 //! `(skip=0, take=limit)` — i.e. return PAGE ONE FOREVER, never advancing.
 //!
 //! Instead, the bookmark is built explicitly:
-//! - **With an ORDER BY** (single column): the seek key from the last row
-//!   of the previous page is AND-combined into the query's `where` as a
-//!   `Gt`/`Lt` boundary (direction-dependent), and pagination stays
-//!   `LimitOffset { offset: 0, limit: page_size }` — the boundary filter
-//!   does the seeking, the LIMIT just caps the page. This reproduces the
-//!   same "ties on the boundary value are skipped" behavior as
-//!   `Pagination::After` without a tie-breaker (a pre-existing, documented
-//!   limitation elsewhere in this codebase, not a new one).
-//! - **Without an ORDER BY**: there is no field to build a boundary filter
-//!   on, so the bookmark is a plain row-count `offset` that advances by
-//!   `page_size` each `FetchNext`, resumed via `Pagination::LimitOffset`.
-//!   This relies on the pinned-snapshot full scan being stable across
-//!   calls at the SAME pinned version (no concurrent write can be observed
-//!   — see the AsOf pin above — so the enumeration order the engine
-//!   produces for a fixed `(table, version)` pair is deterministic).
+//! - **With an ORDER BY** (single column, `PaginationMode::Keyset`): the
+//!   seek key from the last row of the previous page is AND-combined into
+//!   the query's `where` as an INCLUSIVE `Gte`/`Lte` boundary
+//!   (direction-dependent), and pagination stays
+//!   `LimitOffset { offset: 0, limit }` — the boundary filter does the
+//!   seeking, the LIMIT just caps the internal fetch. CR-A4 (#764): the
+//!   boundary is inclusive (not `Gt`/`Lt`) specifically so a run of ROWS
+//!   TIED on the ORDER BY value straddling a page boundary is never
+//!   silently dropped — see `boundary_filter` and `fetch_next`'s
+//!   skip-past-tie-run logic below for the mechanics.
+//! - **Without an ORDER BY** (`PaginationMode::Offset`): there is no field
+//!   to build a boundary filter on, so the bookmark is a plain row-count
+//!   `offset` that advances by `page_size` each `FetchNext`, resumed via
+//!   `Pagination::LimitOffset`. This relies on the pinned-snapshot full
+//!   scan being stable across calls at the SAME pinned version (no
+//!   concurrent write can be observed — see the AsOf pin above — so the
+//!   enumeration order the engine produces for a fixed `(table, version)`
+//!   pair is deterministic).
+//!
+//! `PaginationMode` is decided ONCE, at `create_cursor` time (see
+//! `CursorState::mode`) — never re-derived per `FetchNext` — so a later
+//! page can never flip coordinate systems mid-scroll.
+//!
+//! # CR-A4 (#764) — keyset tie-breaker for duplicate ORDER BY values
+//!
+//! Brief: `docs/dev-artifacts/prompts/post-alpha/11-cr-a4-keyset-tie-breaker.md`.
+//!
+//! Problem: a bare `field > last_value` / `field < last_value` boundary
+//! silently skips every row tied with `last_value` once the page boundary
+//! falls inside a run of equal ORDER BY values — permanent, silent data
+//! loss, no error.
+//!
+//! `_id`/`RecordId` is NOT available as a comparable field on this read
+//! path: `TableManager::read_as_of`'s non-fast-path projection helpers
+//! (`apply_select_value_bytes` / `try_project_page_only_bytes` in
+//! `shamir-engine`'s `read_exec.rs`) explicitly discard the `RecordId` of
+//! each matched row before projecting — confirmed by grep across the
+//! engine crate: `_id` is attached ONLY on the write-result path
+//! (`InsertedRecord`) and the Latest-temporal SORTED-INDEX keyset-seek
+//! fast path (`try_plan_keyset_seek`), which `Temporal::AsOf` structurally
+//! cannot reach (`read_impl` routes `AsOf` straight to `read_as_of` before
+//! any index-scan planning). Building a Filter-level `_id` comparison to
+//! plug this gap would be a materially bigger, riskier change than this
+//! task needs (the brief explicitly rules it out).
+//!
+//! Instead: the boundary filter is made INCLUSIVE (`Gte`/`Lte` instead of
+//! `Gt`/`Lt`), so the previous page's exact boundary row (and every row
+//! tied with it) is refetched. `CursorState::tie_skip` then counts how
+//! many rows AT THAT EXACT VALUE have already been handed to the client —
+//! `fetch_next` skips that many equal-valued rows from the front of the
+//! (stably re-sorted) refetch before handing out `page_size` new rows.
+//! This is sound because `list_stream`'s enumeration order and
+//! `apply_order_by_qv`'s sort (`Vec::sort_by`, stable per Rust std) are
+//! both deterministic across repeat `read_as_of` calls at the SAME pinned
+//! version with no concurrent write — so the Nth tied row (by return
+//! order) is the same physical row every time, making "skip the first
+//! `tie_skip` tied rows" behave exactly like "skip past last_id" would.
+//! (A concurrent DELETE/INSERT between calls could disturb this guarantee
+//! — that's CR-B1/#767's territory, not this task's.)
+//!
+//! When the tie run at the boundary is itself larger than one internal
+//! fetch, `fetch_next` retries with a doubled internal limit (capped by
+//! `cursor_limits.max_cursor_page_size`) until either `page_size` new rows
+//! are collected or the fetch stops growing (true end of data).
 
 use shamir_connect::server::session::Session;
 use shamir_db::engine::query::filter::eval_context::FilterContext;
@@ -57,7 +106,7 @@ use shamir_types::types::common::{new_map, TMap};
 use shamir_types::types::value::QueryValue;
 
 use crate::byte_budget::stash_guard;
-use crate::cursor_registry::{Cursor, CursorRegistryError};
+use crate::cursor_registry::{Cursor, CursorRegistryError, PaginationMode};
 
 use super::handler::{session_actor, DbResponse, ShamirDbHandler};
 
@@ -212,13 +261,20 @@ async fn build_filter_context<'a>(
     Ok(FilterContext::new(interner, resolved_refs).with_actor(actor))
 }
 
-/// Build the boundary filter `field > seek_key` (ASC) / `field < seek_key`
-/// (DESC) for the SOLE ORDER BY column, AND-combined with the caller's
-/// original `where` (if any). Only single-segment field paths are
-/// supported — mirrors the brief's guidance that a keyset seek needs the
-/// ORDER BY column's value; multi-column ORDER BY / nested field paths
-/// fall back to the `None` (row-count `offset`) bookmark instead (see
-/// `seek_key_for_query`).
+/// Build the INCLUSIVE boundary filter `field >= seek_key` (ASC) /
+/// `field <= seek_key` (DESC) for the SOLE ORDER BY column, AND-combined
+/// with the caller's original `where` (if any). Only single-segment field
+/// paths are supported — mirrors the brief's guidance that a keyset seek
+/// needs the ORDER BY column's value; multi-column ORDER BY / nested field
+/// paths fall back to the `None` (row-count `offset`) bookmark instead
+/// (see `pagination_mode_for_query`).
+///
+/// CR-A4 (#764): INCLUSIVE (`Gte`/`Lte`), not `Gt`/`Lt` — the boundary row
+/// itself (and every row tied with it) is deliberately refetched so
+/// `fetch_next`'s skip-past-tie-run logic can distinguish "already
+/// returned" ties from "not yet returned" ties by COUNTING, since a real
+/// per-row identity (`_id`/`RecordId`) is not available on this read path
+/// (see the module doc comment).
 fn boundary_filter(base_query: &ReadQuery, seek_key: &QueryValue) -> Option<Filter> {
     let order_by = base_query.order_by.as_ref()?;
     if order_by.items.len() != 1 {
@@ -230,11 +286,11 @@ fn boundary_filter(base_query: &ReadQuery, seek_key: &QueryValue) -> Option<Filt
     }
     let value = query_value_to_filter_value(seek_key)?;
     let boundary = match item.direction {
-        OrderDirection::Asc => Filter::Gt {
+        OrderDirection::Asc => Filter::Gte {
             field: item.field.clone(),
             value,
         },
-        OrderDirection::Desc => Filter::Lt {
+        OrderDirection::Desc => Filter::Lte {
             field: item.field.clone(),
             value,
         },
@@ -249,25 +305,305 @@ fn boundary_filter(base_query: &ReadQuery, seek_key: &QueryValue) -> Option<Filt
 
 /// Whether this query's ORDER BY is a single, simple (top-level-field)
 /// column — the only shape [`boundary_filter`] can build a seek from. When
-/// `false`, `FetchNext` falls back to the row-count `offset` bookmark.
-fn has_simple_single_column_order_by(query: &ReadQuery) -> bool {
+/// `false`, the cursor is pinned to [`PaginationMode::Offset`] (the
+/// row-count bookmark) for its WHOLE lifetime (CR-A4 #764: decided once at
+/// `create_cursor` time, never re-derived per `FetchNext` — see the module
+/// doc comment on why flip-flopping bookmark kinds mid-scroll is unsafe).
+fn pagination_mode_for_query(query: &ReadQuery) -> PaginationMode {
     match &query.order_by {
-        Some(ob) => ob.items.len() == 1 && ob.items[0].field.len() == 1,
-        None => false,
+        Some(ob) if ob.items.len() == 1 && ob.items[0].field.len() == 1 => PaginationMode::Keyset,
+        _ => PaginationMode::Offset,
     }
 }
 
-/// Extract the seek value (the sole ORDER BY column's value on the LAST
-/// row of a page) for the next `FetchNext`'s boundary filter. `None` when
-/// the field is absent from the projected row (e.g. not selected) — the
-/// caller then falls back to the row-count bookmark for correctness rather
-/// than silently repeating page 1.
-fn seek_value_from_last_record(query: &ReadQuery, last: &QueryRecord) -> Option<QueryValue> {
+/// Extract the sole ORDER BY column's value from a record. `None` when the
+/// field is absent from the projected row (e.g. not selected) — callers
+/// treat this as "can't build/refresh a keyset bookmark from this page"
+/// (see call sites).
+///
+/// Precondition: only meaningful when `pagination_mode_for_query(query) ==
+/// PaginationMode::Keyset` (single-column simple ORDER BY) — callers only
+/// invoke this in that case.
+fn order_by_field_value(query: &ReadQuery, record: &QueryRecord) -> Option<QueryValue> {
     let order_by = query.order_by.as_ref()?;
     if order_by.items.len() != 1 || order_by.items[0].field.len() != 1 {
         return None;
     }
-    last.get_value(&order_by.items[0].field[0]).cloned()
+    record.get_value(&order_by.items[0].field[0]).cloned()
+}
+
+/// Whether two `QueryValue`s represent the SAME ORDER BY boundary value,
+/// for CR-A4's tie-run counting. Compares through `FilterValue` (the same
+/// conversion `boundary_filter` already uses to build the `Gte`/`Lte`
+/// comparison) rather than inventing a new equality relation — `FilterValue`
+/// derives `PartialEq`. A value with no `FilterValue` equivalent (e.g.
+/// `Map`/`Set`/`Dec`/`Big`) can never compare equal here; that's fine,
+/// because such a value could not have produced a boundary filter in the
+/// first place (`query_value_to_filter_value` would already have returned
+/// `None` in `boundary_filter`, falling back to the offset bookmark).
+fn same_boundary_value(a: &QueryValue, b: &QueryValue) -> bool {
+    match (
+        query_value_to_filter_value(a),
+        query_value_to_filter_value(b),
+    ) {
+        (Some(fa), Some(fb)) => fa == fb,
+        _ => false,
+    }
+}
+
+/// Outcome of [`fetch_keyset_page`]: the up-to-`page_size` NEW rows for
+/// this `FetchNext` call (as a full `QueryResult`, carrying whatever
+/// `stats`/etc. the last internal fetch produced — `stats.records_returned`
+/// is corrected to the actual post-skip/post-take count), plus the
+/// refreshed bookmark (`next_seek_key`/`next_tie_skip`) and whether more
+/// data remains beyond this page.
+struct KeysetPage {
+    result: QueryResult,
+    next_seek_key: Option<QueryValue>,
+    next_tie_skip: u64,
+    has_more: bool,
+}
+
+/// Compute the next bookmark (`next_seek_key`, `next_tie_skip`) for the tail
+/// of a just-produced page.
+///
+/// `full_fetch` is the WHOLE internal fetch this call made (before slicing
+/// out the client-visible `out` rows) and `consumed_from_front` is how many
+/// of `full_fetch`'s LEADING rows are accounted for by `out` PLUS whatever
+/// was skipped ahead of it (i.e. `skip_count + out.len()`) — every row in
+/// `full_fetch[..consumed_from_front]` has now been handed to the client at
+/// some point (this call or an earlier one).
+///
+/// CR-A4 (#764) correctness point: `next_tie_skip` must count ties RELATIVE
+/// TO THE BOUNDARY, not just within `out` — when the new seek value is the
+/// SAME as the value at `full_fetch[0]` (i.e. the boundary didn't move
+/// because the last row handed out is still tied with earlier-consumed
+/// rows), the count must include those earlier-consumed rows too, or a
+/// later `FetchNext` will under-count `tie_skip`, re-skip too few ties, and
+/// re-return rows that were already handed out — this manifested as an
+/// infinite duplicate-returning loop before this fix (verified while
+/// debugging this task: a `bookmark_from_last`-from-`out`-only version
+/// caused `create_fetch_cancel`-style drains to never terminate on an
+/// all-tied result set). Counting from `full_fetch[0]` forward is safe
+/// specifically because everything at or before `consumed_from_front` is,
+/// by construction, tied with the SAME boundary value the bookmark is
+/// currently seeking on (the WHERE clause is `>= seek_key`, so nothing
+/// before that value could appear).
+fn bookmark_from_tail(
+    base_query: &ReadQuery,
+    full_fetch: &[QueryRecord],
+    consumed_from_front: usize,
+) -> (Option<QueryValue>, u64) {
+    match full_fetch
+        .get(..consumed_from_front)
+        .and_then(|s| s.last())
+        .and_then(|r| order_by_field_value(base_query, r))
+    {
+        Some(last_value) => {
+            let count = full_fetch[..consumed_from_front]
+                .iter()
+                .rev()
+                .take_while(|r| {
+                    order_by_field_value(base_query, r)
+                        .is_some_and(|v| same_boundary_value(&v, &last_value))
+                })
+                .count() as u64;
+            (Some(last_value), count)
+        }
+        None => (None, 0),
+    }
+}
+
+/// CR-A4 (#764) core: run the inclusive-boundary keyset seek, skip past the
+/// `tie_skip` rows already handed to the client on prior pages, and retry
+/// with a growing internal fetch limit when the boundary's tie run is
+/// itself larger than one internal fetch.
+///
+/// `seek_key`/`tie_skip` are the CURRENT bookmark (from `CursorState`);
+/// `page_size` is the number of NEW rows the caller wants; `limit_ceiling`
+/// bounds how large the internal fetch may grow (reusing
+/// `cursor_limits.max_cursor_page_size` per the brief, so this can't
+/// runaway).
+///
+/// Each internal fetch asks for `internal_limit + 1` rows (one extra "peek"
+/// row) so the TRUE end-of-data can be told apart from "the fetch just
+/// happened to return exactly `internal_limit` rows" — without the peek,
+/// `fetched == internal_limit` is ambiguous (could mean "that's all there
+/// is" or "there's more, ask for a bigger limit"), which caused a genuine
+/// infinite retry loop when a tie run's total size was an exact multiple of
+/// a fetch's limit (found and fixed while building this task).
+#[allow(clippy::too_many_arguments)]
+async fn fetch_keyset_page(
+    table: &TableManager,
+    ctx: &FilterContext<'_>,
+    base_query: &ReadQuery,
+    seek_key: &QueryValue,
+    tie_skip: u64,
+    page_size: u32,
+    pinned_version: u64,
+    limit_ceiling: u32,
+) -> Result<KeysetPage, BatchError> {
+    let page_size_u64 = page_size as u64;
+    let ceiling_u64 = limit_ceiling as u64;
+    // The internal fetch must be AT LEAST big enough to contain every
+    // already-consumed tied row (`tie_skip`) plus one more — otherwise the
+    // skip-count walk below can run out of fetched rows before it finds all
+    // `tie_skip` ties, is forced to fall back to "skip nothing" (brief §5's
+    // documented safety net for a GENUINELY missing boundary row), and would
+    // then re-return already-consumed rows forever on a tie run bigger than
+    // `page_size` (found and fixed while building this task: a tie run of
+    // 10 with `page_size: 2` looped without this floor, since `tie_skip`
+    // grows past a bare `page_size`-sized fetch long before the retry
+    // doubling catches up). Starting at `max(page_size, tie_skip + 1)`
+    // guarantees the very first fetch in this call can already account for
+    // every previously-consumed tie.
+    let mut internal_limit: u64 = page_size_u64
+        .max(tie_skip.saturating_add(1))
+        .min(ceiling_u64)
+        .max(1);
+
+    // boundary_filter only returns None when the seek value has no
+    // `FilterValue` equivalent — callers only reach this function with a
+    // `seek_key` that already produced one at bookmark-build time (see
+    // `create_cursor`/`fetch_next`), so this is infallible in practice;
+    // treat a (theoretical) `None` as a hard engine error rather than
+    // silently mis-seeking.
+    let Some(filter) = boundary_filter(base_query, seek_key) else {
+        return Err(BatchError::QueryError {
+            alias: String::new(),
+            message: "cursor: keyset seek key has no comparable filter form".to_string(),
+            code: None,
+        });
+    };
+
+    loop {
+        let mut query = base_query.clone();
+        query.r#where = Some(filter.clone());
+        // Peek-ahead: fetch one MORE row than `internal_limit` so a fetch
+        // returning exactly `internal_limit` rows can be told apart from
+        // one that ran out of data early (see the peek-ahead doc comment
+        // above). `page.records` may therefore hold up to
+        // `internal_limit + 1` rows; everything from `internal_limit`
+        // onward is peek-only and never handed to the client directly by
+        // this fetch (it's re-fetched for real on a LATER internal
+        // iteration or a later `FetchNext`, if still needed).
+        query.pagination = Pagination::LimitOffset {
+            limit: Some(internal_limit.saturating_add(1)),
+            offset: 0,
+        };
+        query.temporal = Temporal::AsOf {
+            at: At::Version(pinned_version),
+        };
+
+        let page = table
+            .read_with_encoding(&query, ctx, Default::default())
+            .await
+            .map_err(wrap_engine_err)?;
+
+        let fetched = page.records.len() as u64;
+        // Strictly fewer rows than we asked for (limit+1) means the
+        // underlying data ran out somewhere at or before `internal_limit`
+        // — i.e. there is NOTHING beyond what `page.records` already holds.
+        let data_exhausted = fetched <= internal_limit;
+
+        // Skip past the `tie_skip` rows exactly equal to `seek_key` that a
+        // prior page already returned. If fewer than `tie_skip` matching
+        // rows are found (brief §5: the boundary row was concurrently
+        // deleted, or some other R-1/#767-territory anomaly), do NOT skip
+        // anything — treating the whole `>=` result as new risks a
+        // duplicate, which is the documented, strictly-less-bad failure
+        // mode versus silently losing a row.
+        let mut skip_count = 0usize;
+        let mut ties_seen = 0u64;
+        for record in &page.records {
+            if ties_seen >= tie_skip {
+                break;
+            }
+            match order_by_field_value(base_query, record) {
+                Some(v) if same_boundary_value(&v, seek_key) => {
+                    ties_seen += 1;
+                    skip_count += 1;
+                }
+                _ => break,
+            }
+        }
+        if ties_seen < tie_skip {
+            skip_count = 0;
+        }
+
+        // Only rows strictly within `internal_limit` (excluding the
+        // peek-only tail) are real candidates to hand to the client this
+        // iteration.
+        let usable_len = (fetched.min(internal_limit) as usize).saturating_sub(skip_count);
+
+        // Stop retrying once either the post-skip usable slice already
+        // covers a full page, or the underlying fetch came back short of
+        // what we asked for (the data is genuinely exhausted — growing the
+        // limit further would fetch nothing new).
+        if usable_len as u64 >= page_size_u64 || data_exhausted {
+            let take = (page_size_u64 as usize).min(usable_len);
+            let consumed_from_front = skip_count + take;
+
+            // More pages remain iff there's any row beyond
+            // `consumed_from_front` in THIS fetch (including the peek row,
+            // or unused usable rows we chose not to take because `take`
+            // was capped at `page_size`).
+            let has_more = consumed_from_front < page.records.len();
+
+            return Ok(finish_keyset_page(
+                base_query, page, skip_count, take, has_more,
+            ));
+        }
+
+        if internal_limit >= ceiling_u64 {
+            // Hit the retry ceiling with still not enough usable rows — the
+            // tie run genuinely exceeds the configured cap. Return what we
+            // have; `has_more` reflects whatever is left after this
+            // (already-maxed) fetch.
+            let consumed_from_front = skip_count + usable_len;
+            let has_more = consumed_from_front < page.records.len();
+            return Ok(finish_keyset_page(
+                base_query, page, skip_count, usable_len, has_more,
+            ));
+        }
+
+        internal_limit = internal_limit.saturating_mul(2).min(ceiling_u64);
+    }
+}
+
+/// Build the final [`KeysetPage`] from a raw internal fetch: slice out
+/// `page.records[skip_count..skip_count + take]` as the NEW rows for this
+/// call, correct `stats.records_returned` to match, and compute the
+/// refreshed bookmark from the tail of `page.records` up through
+/// `skip_count + take` (see [`bookmark_from_tail`] for why the count must
+/// span the whole consumed prefix, not just the newly-returned `out` rows).
+fn finish_keyset_page(
+    base_query: &ReadQuery,
+    mut page: QueryResult,
+    skip_count: usize,
+    take: usize,
+    has_more: bool,
+) -> KeysetPage {
+    let consumed_from_front = skip_count + take;
+    let (next_seek_key, next_tie_skip) = if has_more {
+        bookmark_from_tail(base_query, &page.records, consumed_from_front)
+    } else {
+        (None, 0)
+    };
+    let out: Vec<QueryRecord> = page
+        .records
+        .drain(skip_count..consumed_from_front)
+        .collect();
+    if let Some(stats) = page.stats.as_mut() {
+        stats.records_returned = out.len() as u64;
+    }
+    page.records = out;
+    KeysetPage {
+        result: page,
+        next_seek_key,
+        next_tie_skip,
+        has_more,
+    }
 }
 
 impl ShamirDbHandler {
@@ -379,12 +715,32 @@ impl ShamirDbHandler {
         }
 
         let has_more = page.records.len() as u64 >= page_size as u64;
-        let seek_key = if has_more && has_simple_single_column_order_by(&query) {
-            page.records
+        let mode = pagination_mode_for_query(&query);
+        let (seek_key, tie_skip) = if has_more && mode == PaginationMode::Keyset {
+            match page
+                .records
                 .last()
-                .and_then(|r| seek_value_from_last_record(&query, r))
+                .and_then(|r| order_by_field_value(&query, r))
+            {
+                Some(last_value) => {
+                    // CR-A4: how many rows in THIS page already share the
+                    // last row's ORDER BY value — that many must be
+                    // skipped from the front of the next (inclusive)
+                    // refetch so they aren't handed to the client twice.
+                    let tie_skip = page
+                        .records
+                        .iter()
+                        .filter(|r| {
+                            order_by_field_value(&query, r)
+                                .is_some_and(|v| same_boundary_value(&v, &last_value))
+                        })
+                        .count() as u64;
+                    (Some(last_value), tie_skip)
+                }
+                None => (None, 0),
+            }
         } else {
-            None
+            (None, 0)
         };
         let offset = page.records.len() as u64;
 
@@ -414,6 +770,7 @@ impl ShamirDbHandler {
 
         let cursor = Cursor::new(
             query,
+            mode,
             guard,
             pinned_version,
             page_size,
@@ -424,6 +781,7 @@ impl ShamirDbHandler {
         {
             let mut state = cursor.state().lock().await;
             state.seek_key = seek_key;
+            state.tie_skip = tie_skip;
             state.offset = offset;
             state.exhausted = !has_more;
         }
@@ -528,45 +886,69 @@ impl ShamirDbHandler {
         };
 
         let base_query = state.query.clone();
-        let mut next_query = base_query.clone();
-        let boundary = state
-            .seek_key
-            .as_ref()
-            .and_then(|k| boundary_filter(&base_query, k));
-        match boundary {
-            Some(filter) => {
-                // Boundary-filter bookmark: the seek does the work, LIMIT
-                // just caps the page.
-                next_query.r#where = Some(filter);
-                next_query.pagination = Pagination::LimitOffset {
-                    limit: Some(page_size as u64),
-                    offset: 0,
+        let max_page_size = self.cursor_limits.max_cursor_page_size;
+
+        // CR-A4 (#764): `state.mode` was pinned once at `create_cursor`
+        // time and never re-derived here — see `PaginationMode`'s doc
+        // comment for why flip-flopping bookmark kinds mid-scroll is
+        // unsafe. `Keyset` additionally requires a `seek_key` to seek
+        // from; a `Keyset`-mode cursor with `seek_key == None` (e.g. the
+        // ORDER BY field was absent from a page's projection) falls back
+        // to the row-count bookmark for THIS call only, matching the
+        // pre-CR-A4 "can't build a seek from this page" safety net.
+        let (page, new_seek_key, new_tie_skip, has_more, new_offset);
+        match (state.mode, state.seek_key.clone()) {
+            (PaginationMode::Keyset, Some(seek_key)) => {
+                let outcome = match fetch_keyset_page(
+                    &table,
+                    &ctx,
+                    &base_query,
+                    &seek_key,
+                    state.tie_skip,
+                    page_size,
+                    cursor.pinned_version(),
+                    max_page_size,
+                )
+                .await
+                {
+                    Ok(o) => o,
+                    Err(e) => {
+                        drop(state);
+                        return error_response(&e);
+                    }
                 };
+                new_offset = state.offset + outcome.result.records.len() as u64;
+                page = outcome.result;
+                new_seek_key = outcome.next_seek_key;
+                new_tie_skip = outcome.next_tie_skip;
+                has_more = outcome.has_more;
             }
-            None => {
-                // Row-count bookmark: no ORDER BY, the seek field wasn't in
-                // the projected row on a prior page, or the seek value's
-                // type has no `FilterValue` equivalent — any case where a
-                // boundary filter can't be built. Falling back here (rather
-                // than silently reusing a stale/empty `where`) is what
-                // keeps this correct instead of re-returning page 1 forever.
+            _ => {
+                let mut next_query = base_query.clone();
                 next_query.pagination = Pagination::LimitOffset {
                     limit: Some(page_size as u64),
                     offset: state.offset,
                 };
+                next_query.temporal = Temporal::AsOf {
+                    at: At::Version(cursor.pinned_version()),
+                };
+                let fetched = match table
+                    .read_with_encoding(&next_query, &ctx, Default::default())
+                    .await
+                {
+                    Ok(p) => p,
+                    Err(e) => {
+                        drop(state);
+                        return error_response(&wrap_engine_err(e));
+                    }
+                };
+                has_more = fetched.records.len() as u64 >= page_size as u64;
+                new_offset = state.offset + fetched.records.len() as u64;
+                page = fetched;
+                new_seek_key = None;
+                new_tie_skip = 0;
             }
         }
-        next_query.temporal = Temporal::AsOf {
-            at: At::Version(cursor.pinned_version()),
-        };
-
-        let page = match table
-            .read_with_encoding(&next_query, &ctx, Default::default())
-            .await
-        {
-            Ok(p) => p,
-            Err(e) => return error_response(&wrap_engine_err(e)),
-        };
 
         // CR-A5: gate BEFORE mutating the cursor's bookmark state
         // (seek_key/offset/exhausted) or removing it from the registry on
@@ -579,16 +961,9 @@ impl ShamirDbHandler {
             return error_response(&e);
         }
 
-        let has_more = page.records.len() as u64 >= page_size as u64;
-        let new_seek_key = if has_more && has_simple_single_column_order_by(&base_query) {
-            page.records
-                .last()
-                .and_then(|r| seek_value_from_last_record(&base_query, r))
-        } else {
-            None
-        };
         state.seek_key = new_seek_key;
-        state.offset += page.records.len() as u64;
+        state.tie_skip = new_tie_skip;
+        state.offset = new_offset;
         state.exhausted = !has_more;
         drop(state);
         cursor.bump_activity();

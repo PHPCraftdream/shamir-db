@@ -7,7 +7,9 @@ use std::time::{Duration, Instant};
 
 use shamir_query_types::read::ReadQuery;
 
-use crate::cursor_registry::{spawn_reaper_task, Cursor, CursorRegistry, CursorRegistryError};
+use crate::cursor_registry::{
+    spawn_reaper_task, Cursor, CursorRegistry, CursorRegistryError, PaginationMode,
+};
 
 const SID_A: [u8; 32] = [0xAA; 32];
 const SID_B: [u8; 32] = [0xBB; 32];
@@ -20,6 +22,7 @@ async fn make_cursor(seed: u64) -> Cursor {
     let version = guard.version();
     Cursor::new(
         ReadQuery::new("items"),
+        PaginationMode::Offset,
         guard,
         version,
         10,
@@ -120,6 +123,7 @@ async fn per_session_cap_is_scoped_per_session() {
     // SID_A is at cap, but SID_B has its own independent slot.
     let c2 = Cursor::new(
         ReadQuery::new("items"),
+        PaginationMode::Offset,
         shamir_tx::RepoTxGate::new(0, 2).open_snapshot().await,
         0,
         10,

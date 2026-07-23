@@ -979,3 +979,308 @@ async fn fetch_next_rejects_page_size_above_configured_max() {
         ),
     }
 }
+
+// ---------------------------------------------------------------------------
+// CR-A4 (#764) — keyset tie-breaker: duplicate ORDER BY values at a page
+// boundary must never silently lose (or duplicate) rows.
+//
+// `build_handler_with_rows` seeds `v` as a strictly-increasing sequence
+// (`0..n`), which never exercises a tie. These tests seed `app.main.items`
+// with an explicit, caller-chosen `score` sequence (allowing duplicates)
+// plus a strictly-unique `seq` field so every row is identifiable even when
+// its `score` collides with others — the assertion oracle for "no loss, no
+// duplication" is "every `seq` appears in the drained set exactly once".
+// ---------------------------------------------------------------------------
+
+/// Build a handler over an in-memory `ShamirDb` with `app.main.items`, owned
+/// by alice, seeded with one row per entry in `scores`: `{ seq: i, score:
+/// scores[i] }`. `seq` is a strictly-increasing insertion-order tiebreaker
+/// field distinct from `score`, letting tests identify every row uniquely
+/// even when many rows share the same `score`.
+async fn build_handler_with_scores(
+    scores: &[i64],
+    cursor_limits: CursorLimitsCap,
+) -> ShamirDbHandler {
+    let shamir = ShamirDb::init_memory().await.expect("init shamir");
+    let owner = Actor::User(principal64([0xAB; 16]));
+    shamir.create_db_as("app", owner.clone()).await;
+    let cfg =
+        RepoConfig::new("main", BoxRepoFactory::in_memory()).add_table(TableConfig::new("items"));
+    shamir
+        .add_repo_as("app", cfg, owner.clone())
+        .await
+        .expect("add repo");
+
+    if !scores.is_empty() {
+        let mut b = Batch::new();
+        for (i, score) in scores.iter().enumerate() {
+            b.insert(
+                format!("i{i}"),
+                insert("items").row(doc! { "seq" => i as i64, "score" => *score }),
+            );
+        }
+        let batch = b.build();
+        shamir
+            .execute_as(owner, "app", &batch)
+            .await
+            .expect("seed rows");
+    }
+
+    ShamirDbHandler::new(Arc::new(shamir)).with_cursor_limits(cursor_limits)
+}
+
+/// Drain a cursor (already created, first page already consumed by the
+/// caller) via repeated `FetchNext(page_size)` calls until `has_more ==
+/// false`, collecting every page's rows' `seq` values (via
+/// `get_value_i64("seq")`) into the given accumulator.
+async fn drain_seqs(
+    handler: &ShamirDbHandler,
+    session: &Session,
+    cursor_id: CursorId,
+    page_size: u32,
+    out: &mut Vec<i64>,
+) {
+    loop {
+        let resp = send(handler, session, fetch_next_req(cursor_id, page_size)).await;
+        match resp {
+            DbResponse::CursorPage { page, has_more, .. } => {
+                for r in &page.records {
+                    out.push(
+                        r.get_value_i64("seq")
+                            .expect("every row must carry a seq field"),
+                    );
+                }
+                if !has_more {
+                    break;
+                }
+            }
+            other => panic!("expected CursorPage while draining, got {other:?}"),
+        }
+    }
+}
+
+/// The review's exact scenario: 4 rows all tied at `score: 10`,
+/// `page_size: 2` — draining the whole cursor must return each of the 4
+/// rows exactly once (no loss from the old exclusive `Gt` boundary, no
+/// duplication from the new inclusive `Gte` + skip-past-tie-run scheme).
+#[tokio::test]
+async fn keyset_tie_run_exactly_one_page_boundary_no_loss() {
+    let handler = build_handler_with_scores(&[10, 10, 10, 10], CursorLimitsCap::UNLIMITED).await;
+    let session = alice_session();
+
+    let query = ReadQuery::new("items").order_by(OrderBy::asc("score"));
+    let resp = send(&handler, &session, create_cursor_req(query, 2)).await;
+    let (cursor_id, mut seqs) = match resp {
+        DbResponse::CursorPage {
+            cursor_id,
+            page,
+            has_more,
+        } => {
+            assert!(has_more, "4 rows / page_size 2 -> more pages remain");
+            let seqs: Vec<i64> = page
+                .records
+                .iter()
+                .map(|r| r.get_value_i64("seq").expect("seq present"))
+                .collect();
+            (cursor_id, seqs)
+        }
+        other => panic!("expected CursorPage, got {other:?}"),
+    };
+
+    drain_seqs(&handler, &session, cursor_id, 2, &mut seqs).await;
+
+    seqs.sort_unstable();
+    assert_eq!(
+        seqs,
+        vec![0, 1, 2, 3],
+        "every one of the 4 tied rows must appear exactly once across the whole cursor lifetime"
+    );
+}
+
+/// Larger randomized-duplicates case: 20 rows, ORDER BY column has only 4
+/// distinct values (heavy duplication), several `page_size`s — the drained
+/// set of `seq`s must equal the full `0..20` set exactly (a `HashSet`
+/// length check catches both loss AND duplication in one assertion).
+#[tokio::test]
+async fn keyset_heavy_duplication_no_loss_no_duplication_across_page_sizes() {
+    use shamir_collections::TFxSet;
+
+    // 20 rows, 4 distinct score buckets (0, 1, 2, 3), heavily interleaved so
+    // ties are NOT contiguous by insertion order alone once ORDER BY sorts
+    // them into buckets.
+    let scores: Vec<i64> = (0..20).map(|i| i % 4).collect();
+
+    for &page_size in &[1u32, 3, 5, 7, 20] {
+        let handler = build_handler_with_scores(&scores, CursorLimitsCap::UNLIMITED).await;
+        let session = alice_session();
+
+        let query = ReadQuery::new("items").order_by(OrderBy::asc("score"));
+        let resp = send(&handler, &session, create_cursor_req(query, page_size)).await;
+        let (cursor_id, mut seqs, has_more) = match resp {
+            DbResponse::CursorPage {
+                cursor_id,
+                page,
+                has_more,
+            } => {
+                let seqs: Vec<i64> = page
+                    .records
+                    .iter()
+                    .map(|r| r.get_value_i64("seq").expect("seq present"))
+                    .collect();
+                (cursor_id, seqs, has_more)
+            }
+            other => panic!("page_size {page_size}: expected CursorPage, got {other:?}"),
+        };
+
+        if has_more {
+            drain_seqs(&handler, &session, cursor_id, page_size, &mut seqs).await;
+        }
+
+        let set: TFxSet<i64> = seqs.iter().copied().collect();
+        assert_eq!(
+            set.len(),
+            20,
+            "page_size {page_size}: every one of the 20 rows must appear exactly once \
+             (set.len() != seqs.len() would mean a duplicate; set.len() < 20 would mean a loss) \
+             -- got {} rows, {} unique",
+            seqs.len(),
+            set.len()
+        );
+        assert_eq!(
+            seqs.len(),
+            20,
+            "page_size {page_size}: total rows returned across the whole cursor lifetime must be exactly 20"
+        );
+    }
+}
+
+/// Boundary run larger than one page: a tie run of 10 identical `score`
+/// values with `page_size: 2` — proves the bounded-retry-with-growing-limit
+/// logic actually clears a tie run that spans MANY internal fetch attempts
+/// (a single `page_size`-sized fetch can only see 2 of the 10 tied rows).
+#[tokio::test]
+async fn keyset_tie_run_larger_than_one_page_uses_bounded_retry() {
+    // 10 rows tied at score=5, then 2 more distinct trailing rows so the
+    // cursor has something to report after the tie run clears.
+    let mut scores = vec![5i64; 10];
+    scores.push(6);
+    scores.push(7);
+
+    let handler = build_handler_with_scores(&scores, CursorLimitsCap::UNLIMITED).await;
+    let session = alice_session();
+
+    let query = ReadQuery::new("items").order_by(OrderBy::asc("score"));
+    let resp = send(&handler, &session, create_cursor_req(query, 2)).await;
+    let (cursor_id, mut seqs) = match resp {
+        DbResponse::CursorPage {
+            cursor_id,
+            page,
+            has_more,
+        } => {
+            assert!(has_more);
+            let seqs: Vec<i64> = page
+                .records
+                .iter()
+                .map(|r| r.get_value_i64("seq").expect("seq present"))
+                .collect();
+            (cursor_id, seqs)
+        }
+        other => panic!("expected CursorPage, got {other:?}"),
+    };
+
+    drain_seqs(&handler, &session, cursor_id, 2, &mut seqs).await;
+
+    seqs.sort_unstable();
+    assert_eq!(
+        seqs,
+        (0..12).collect::<Vec<i64>>(),
+        "the 10-row tie run plus 2 trailing rows must all surface exactly once, \
+         proving the growing-internal-limit retry clears a tie run bigger than one page"
+    );
+}
+
+/// Pagination mode pinned at creation: a cursor's `PaginationMode` is
+/// decided once from the ORIGINAL query and never re-derived per
+/// `FetchNext`. This is a behavioral proxy (internal state isn't exposed
+/// through the wire protocol): a cursor whose ORDER BY column is absent
+/// from an EARLIER page's projection (so a naive per-call re-derivation
+/// might have tried to fall back to a row-count bookmark for that call)
+/// must still page correctly end-to-end when the field IS present on every
+/// page (the common, correct case) -- proving the mode decision made at
+/// creation is stable across the whole scroll, not re-evaluated call by
+/// call in a way that could flip-flop.
+#[tokio::test]
+async fn keyset_pagination_mode_pinned_at_creation_stays_stable() {
+    let handler = build_handler_with_scores(&[1, 1, 2, 2, 3, 3], CursorLimitsCap::UNLIMITED).await;
+    let session = alice_session();
+
+    let query = ReadQuery::new("items").order_by(OrderBy::asc("score"));
+    let resp = send(&handler, &session, create_cursor_req(query, 2)).await;
+    let (cursor_id, mut seqs) = match resp {
+        DbResponse::CursorPage {
+            cursor_id,
+            page,
+            has_more,
+        } => {
+            assert!(has_more);
+            let seqs: Vec<i64> = page
+                .records
+                .iter()
+                .map(|r| r.get_value_i64("seq").expect("seq present"))
+                .collect();
+            (cursor_id, seqs)
+        }
+        other => panic!("expected CursorPage, got {other:?}"),
+    };
+
+    // Multiple FetchNext calls in a row, all against the SAME cursor, all
+    // still Keyset-mode (never flips to Offset mid-scroll even though
+    // several consecutive pages land exactly on a tie boundary).
+    drain_seqs(&handler, &session, cursor_id, 2, &mut seqs).await;
+
+    seqs.sort_unstable();
+    assert_eq!(
+        seqs,
+        vec![0, 1, 2, 3, 4, 5],
+        "all 6 rows (3 tie-pairs) must surface exactly once under a pinned Keyset mode"
+    );
+}
+
+/// Regression guard: the existing no-duplicates multi-page test
+/// (`create_fetch_cancel_happy_path_paginates_all_rows`, unchanged above)
+/// stays green under the CR-A4 inclusive-boundary rewrite -- this test adds
+/// an explicit non-tied, strictly-increasing-score regression check using
+/// the SAME `build_handler_with_scores` helper this file's CR-A4 tests use,
+/// so the tie-breaker change is proven not to alter behavior for the common
+/// (non-tied) case.
+#[tokio::test]
+async fn keyset_no_ties_regression_every_row_returned_once_in_order() {
+    let scores: Vec<i64> = (0..7).collect(); // 0,1,2,3,4,5,6 -- all distinct
+    let handler = build_handler_with_scores(&scores, CursorLimitsCap::UNLIMITED).await;
+    let session = alice_session();
+
+    let query = ReadQuery::new("items").order_by(OrderBy::asc("score"));
+    let resp = send(&handler, &session, create_cursor_req(query, 3)).await;
+    let (cursor_id, mut seqs) = match resp {
+        DbResponse::CursorPage {
+            cursor_id,
+            page,
+            has_more,
+        } => {
+            assert!(has_more);
+            let seqs: Vec<i64> = page
+                .records
+                .iter()
+                .map(|r| r.get_value_i64("seq").expect("seq present"))
+                .collect();
+            (cursor_id, seqs)
+        }
+        other => panic!("expected CursorPage, got {other:?}"),
+    };
+
+    drain_seqs(&handler, &session, cursor_id, 3, &mut seqs).await;
+
+    // No ties -> insertion order == score order == seq order; must come
+    // back in strict ascending order with no loss or duplication.
+    assert_eq!(seqs, vec![0, 1, 2, 3, 4, 5, 6]);
+}
