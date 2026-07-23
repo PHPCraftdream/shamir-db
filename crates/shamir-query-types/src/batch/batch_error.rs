@@ -175,6 +175,33 @@ pub enum BatchError {
     /// Wire error code: `cursor_temporal_not_supported`.
     CursorTemporalNotSupported,
 
+    /// CR-B5 (#771): `CreateCursor` rejected because `ReadQuery.with_version`
+    /// was `true`.
+    ///
+    /// `with_version = true` requests a per-record version stamp on each
+    /// returned row, for later optimistic-CAS use (the FG-2 contour, see
+    /// `docs/guide-docs/client-server-protocol-spec/OPTIMISTIC_CONCURRENCY.md`).
+    /// A cursor's every internal read (both `create_cursor`'s first page and
+    /// every `fetch_next`) goes through `Temporal::AsOf { at:
+    /// At::Version(pinned_version) }`, and that read path
+    /// (`TableManager::read_as_of` in `shamir-engine`'s `read_temporal.rs`,
+    /// its final `QueryResult` construction) hard-codes `versions: None`.
+    /// Honoring `with_version` through a cursor would therefore either
+    /// silently produce no versions (the bug this variant closes) or require
+    /// threading real historical per-record versions through the whole
+    /// `AsOf` pipeline — out of scope here. Rather than silently downgrading
+    /// the caller's request (a correctness-relevant feature quietly stops
+    /// working), `CreateCursor` rejects the combination outright with this
+    /// distinct, named error, mirroring `CursorTemporalNotSupported`'s
+    /// scope-cut precedent immediately above.
+    ///
+    /// A future task could thread REAL historical versions through the
+    /// `AsOf` pipeline so cursors can honor `with_version` too — tracked as
+    /// a possible follow-up, not attempted here.
+    ///
+    /// Wire error code: `cursor_with_version_not_supported`.
+    CursorWithVersionNotSupported,
+
     /// CR-A3: `CreateCursor`/`FetchNext` rejected because `page_size` was
     /// outside the valid `1..=max` range.
     ///
@@ -310,6 +337,14 @@ impl std::fmt::Display for BatchError {
                     "CreateCursor only supports Temporal::Latest queries (a cursor pins a \
                      live MVCC snapshot; AsOf/History cursors are out of scope for now — see \
                      FG-5b)"
+                )
+            }
+            BatchError::CursorWithVersionNotSupported => {
+                write!(
+                    f,
+                    "CreateCursor does not support with_version = true (a cursor's internal \
+                     reads use the AsOf temporal path, which does not attach per-record \
+                     versions — see FG-5b / CR-B5)"
                 )
             }
             BatchError::InvalidPageSize { page_size, max } => {

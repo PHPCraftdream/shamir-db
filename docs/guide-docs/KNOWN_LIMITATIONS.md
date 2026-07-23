@@ -182,11 +182,18 @@ artifact).
   `create_cursor` and
   `crates/shamir-query-types/src/batch/batch_error.rs`'s
   `BatchError::CursorTemporalNotSupported`.
-- **`CreateCursor`/`FetchNext` do not yet reject `with_version: true`.**
-  Combining cursor pagination with per-record CAS version stamps
-  (`ReadQuery::with_version`) is unsupported/unverified today and may
-  produce confusing results; avoid combining the two until this is
-  explicitly rejected or supported (tracked separately).
+- **Cursors do not support `with_version: true`.** CR-B5: `CreateCursor`
+  rejects `query.with_version == true` outright with
+  `cursor_with_version_not_supported`, the same "reject, don't silently
+  downgrade" discipline as the `Temporal::Latest`-only scope cut above — a
+  cursor's every internal read runs at a pinned `Temporal::AsOf` snapshot,
+  and that read path does not attach per-record versions, so honoring the
+  flag would silently produce no versions instead of the real per-record
+  stamps a plain (non-cursor) `with_version: true` read returns. See
+  `crates/shamir-server/src/db_handler/cursor_handlers.rs`'s
+  `create_cursor` and
+  `crates/shamir-query-types/src/batch/batch_error.rs`'s
+  `BatchError::CursorWithVersionNotSupported`.
 
 ## 7. Numbers
 

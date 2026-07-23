@@ -600,6 +600,99 @@ fn cursor_temporal_not_supported_is_a_distinct_batch_error_variant() {
 }
 
 // ---------------------------------------------------------------------------
+// CR-B5 (#771) — reject `with_version = true` at `CreateCursor`.
+//
+// A cursor's every internal read (both `create_cursor`'s first page and
+// every `fetch_next`) rewrites `temporal` to `Temporal::AsOf { at:
+// At::Version(pinned_version) }`, and that read path hard-codes
+// `versions: None` on the `QueryResult` it returns. Without this rejection,
+// `ReadQuery.with_version = true` would silently produce NO per-record
+// versions when the query is run through a cursor instead of a plain read —
+// a correctness-relevant feature (the FG-2 optimistic-CAS contour) quietly
+// stopping to work with no error. `CreateCursor` must reject the
+// combination outright instead.
+// ---------------------------------------------------------------------------
+
+/// `CreateCursor` with `query.with_version = true` must return the new,
+/// distinct error code — NOT a `CursorPage` with silently-missing versions.
+#[tokio::test]
+async fn create_cursor_rejects_with_version_true() {
+    let handler = build_handler_with_rows(3, CursorLimitsCap::UNLIMITED).await;
+    let session = alice_session();
+
+    let mut query = ReadQuery::new("items").order_by(OrderBy::asc("v"));
+    query.with_version = true;
+
+    let resp = send(&handler, &session, create_cursor_req(query, 2)).await;
+    match resp {
+        DbResponse::Error { code, message } => {
+            assert_eq!(code, "cursor_with_version_not_supported");
+            assert!(
+                message.contains("with_version"),
+                "message should explain the rejected flag: {message}"
+            );
+        }
+        other => panic!(
+            "with_version = true must be rejected with a distinct error, not accepted \
+             (which would silently return a CursorPage missing per-record versions), \
+             got {other:?}"
+        ),
+    }
+    assert_eq!(
+        handler.cursor_registry().len(),
+        0,
+        "a rejected with_version=true CreateCursor must not register a cursor"
+    );
+}
+
+/// Sanity: the `BatchError` variant this rejection maps through is a real,
+/// distinct enum member — belt-and-braces alongside the wire-level
+/// assertion above, mirroring `cursor_temporal_not_supported_is_a_distinct_
+/// batch_error_variant`'s pattern.
+#[test]
+fn cursor_with_version_not_supported_is_a_distinct_batch_error_variant() {
+    let e = BatchError::CursorWithVersionNotSupported;
+    assert_eq!(
+        crate::db_handler::handler::error_code(&e),
+        "cursor_with_version_not_supported"
+    );
+}
+
+/// Regression guard: a PLAIN (non-cursor) read with `with_version = true`
+/// still returns real per-record versions — proves this task's cursor-side
+/// rejection didn't touch the working, non-cursor batch `Execute`/`Read`
+/// path.
+#[tokio::test]
+async fn plain_read_with_version_true_still_returns_versions_regression() {
+    let handler = build_handler_with_rows(3, CursorLimitsCap::UNLIMITED).await;
+    let owner = Actor::User(principal64([0xAB; 16]));
+
+    let mut batch = Batch::new();
+    batch.query(
+        "r",
+        shamir_query_builder::query::Query::from("items").with_version(),
+    );
+    let resp = handler
+        .db()
+        .execute_as(owner, "app", &batch.build())
+        .await
+        .expect("plain read must succeed");
+
+    let result = resp.results.get("r").expect("alias r present");
+    assert_eq!(result.records.len(), 3, "all 3 seeded rows returned");
+    assert!(
+        result.versions.is_some(),
+        "with_version=true on a PLAIN (non-cursor) read must still attach versions \
+         (regression guard: this task must not touch the working non-cursor path)"
+    );
+    assert_eq!(
+        result.versions.as_ref().unwrap().len(),
+        3,
+        "one version per returned record"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // CR-A1 (#760) — ACL/DAC enforcement on the cursor create/fetch path.
 //
 // `build_handler_with_rows` creates `app.main.items` owned by alice

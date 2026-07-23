@@ -710,6 +710,21 @@ impl ShamirDbHandler {
             return error_response(&BatchError::CursorTemporalNotSupported);
         }
 
+        // Scope cut (CR-B5, #771): a cursor's every internal read (this
+        // first page and every later `fetch_next`) rewrites `temporal` to
+        // `Temporal::AsOf { at: At::Version(pinned_version) }` below — and
+        // that read path hard-codes `versions: None` on its `QueryResult`
+        // (`TableManager::read_as_of` in `shamir-engine`'s
+        // `read_temporal.rs`). Honoring `with_version = true` here would
+        // therefore silently produce NO per-record versions, breaking the
+        // FG-2 optimistic-CAS contour a client might expect to still work
+        // after switching a `.withVersion()` read to a cursor. Reject
+        // outright rather than silently drop the flag — see
+        // `BatchError::CursorWithVersionNotSupported`'s doc comment.
+        if query.with_version {
+            return error_response(&BatchError::CursorWithVersionNotSupported);
+        }
+
         let repo_name = query.from.repo.clone();
         let table_name = query.from.table.clone();
 

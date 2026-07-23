@@ -84,6 +84,33 @@ fn cursor_temporal_not_supported_distinguishable_from_other_cursor_errors() {
 }
 
 #[test]
+fn cursor_with_version_not_supported_display_mentions_with_version() {
+    // CR-B5 (#771): `CreateCursor` on a query with `with_version = true` is
+    // rejected with a distinct error rather than silently producing a
+    // `CursorPage` whose records carry no versions (the AsOf read path a
+    // cursor's internal reads always use hard-codes `versions: None`).
+    let err = BatchError::CursorWithVersionNotSupported;
+    let msg = err.to_string();
+    assert!(
+        msg.contains("with_version"),
+        "Display should name the rejected flag: {msg}"
+    );
+}
+
+#[test]
+fn cursor_with_version_not_supported_distinguishable_from_other_cursor_errors() {
+    let with_version_err = BatchError::CursorWithVersionNotSupported;
+    let temporal_err = BatchError::CursorTemporalNotSupported;
+    let not_found = BatchError::CursorNotFound {
+        cursor_id: CursorId(1),
+    };
+    assert_ne!(with_version_err, temporal_err);
+    assert_ne!(with_version_err, not_found);
+    assert_ne!(with_version_err.to_string(), temporal_err.to_string());
+    assert_ne!(with_version_err.to_string(), not_found.to_string());
+}
+
+#[test]
 fn invalid_page_size_display_mentions_the_range() {
     // CR-A3: `page_size == 0` (and `page_size > max`) is rejected with a
     // distinct, specific error — the message must state the valid range so
@@ -166,6 +193,7 @@ fn cursor_errors_have_no_structured_code_via_batch_error_code() {
     );
     assert_eq!(BatchError::CursorLimitExceeded { limit: 5 }.code(), None);
     assert_eq!(BatchError::CursorTemporalNotSupported.code(), None);
+    assert_eq!(BatchError::CursorWithVersionNotSupported.code(), None);
     assert_eq!(
         BatchError::InvalidPageSize {
             page_size: 0,
