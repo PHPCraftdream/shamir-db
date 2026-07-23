@@ -23,7 +23,7 @@ use shamir_query_builder::doc;
 use shamir_query_builder::write::insert;
 use shamir_query_types::admin::ResourceRef;
 use shamir_query_types::batch::BatchError;
-use shamir_query_types::read::{OrderBy, ReadQuery, Temporal};
+use shamir_query_types::read::{OrderBy, ReadQuery, Select, Temporal};
 use shamir_query_types::wire::{CursorId, DbRequest, DbResponse};
 
 use crate::db_handler::config::CursorLimitsCap;
@@ -1475,6 +1475,448 @@ async fn keyset_no_ties_regression_every_row_returned_once_in_order() {
     // No ties -> insertion order == score order == seq order; must come
     // back in strict ascending order with no loss or duplication.
     assert_eq!(seqs, vec![0, 1, 2, 3, 4, 5, 6]);
+}
+
+// ---------------------------------------------------------------------------
+// CR-C2 (#777) — cursor test-coverage gaps.
+//
+// `pagination_mode_for_query` picks `PaginationMode::Keyset` ONLY when the
+// query has EXACTLY one `ORDER BY` item on a single (non-nested) field --
+// every other shape (no `ORDER BY` at all, multi-column `ORDER BY`, a
+// projection that excludes the sole ORDER BY column) falls back to
+// `PaginationMode::Offset` (the row-count bookmark path). Every existing
+// cursor test up to this point used a single-column `OrderBy::asc`/`desc`,
+// so the offset fallback itself had zero DIRECT coverage of its own (the
+// CR-B4 peek-ahead tests above exercise the offset branch too, but only for
+// the has_more/exact-multiple edge, not "does full multi-page pagination
+// with no ORDER BY at all ever lose or duplicate a row", multi-column
+// ORDER BY, varying page_size mid-lifecycle, or concurrent FetchNext).
+// ---------------------------------------------------------------------------
+
+/// Gap 1: NO `order_by` at all, multiple pages -- draining the whole cursor
+/// must surface every one of the original rows exactly once. This is the
+/// most basic no-ORDER-BY pagination coverage this file has never had (the
+/// existing no-ORDER-BY tests above are narrowly scoped to the has_more
+/// peek-ahead edge case, not general multi-page correctness).
+#[tokio::test]
+async fn offset_path_no_order_by_full_pagination_every_row_once() {
+    // 7 rows, page_size 3 -> pages of 3, 3, 1.
+    let handler = build_handler_with_rows(7, CursorLimitsCap::UNLIMITED).await;
+    let session = alice_session();
+
+    let query = ReadQuery::new("items"); // no .order_by(...) at all
+    let resp = send(&handler, &session, create_cursor_req(query, 3)).await;
+    let (cursor_id, mut seen_vs) = match resp {
+        DbResponse::CursorPage {
+            cursor_id,
+            page,
+            has_more,
+        } => {
+            assert_eq!(page.records.len(), 3, "first page must have page_size rows");
+            assert!(has_more, "7 rows / page_size 3 -> more pages remain");
+            let vs: Vec<i64> = page
+                .records
+                .iter()
+                .map(|r| r.get_value_i64("v").expect("v present"))
+                .collect();
+            (cursor_id, vs)
+        }
+        other => panic!("expected CursorPage, got {other:?}"),
+    };
+
+    loop {
+        let resp = send(&handler, &session, fetch_next_req(cursor_id, 3)).await;
+        match resp {
+            DbResponse::CursorPage { page, has_more, .. } => {
+                for r in &page.records {
+                    seen_vs.push(r.get_value_i64("v").expect("v present"));
+                }
+                if !has_more {
+                    break;
+                }
+            }
+            other => panic!("expected CursorPage, got {other:?}"),
+        }
+    }
+
+    seen_vs.sort_unstable();
+    assert_eq!(
+        seen_vs,
+        (0..7).collect::<Vec<i64>>(),
+        "every one of the 7 rows must appear exactly once across the whole \
+         cursor lifetime with NO order_by at all (pages of 3, 3, 1)"
+    );
+}
+
+/// Gap 2: a MULTI-COLUMN `ORDER BY` also falls back to the offset bookmark
+/// (`pagination_mode_for_query` requires `items.len() == 1`), regardless of
+/// whether the extra column is semantically inert -- draining the whole
+/// cursor must still surface every row exactly once. `v` is unique per row
+/// in this fixture, so `id` as a second sort key never actually breaks a
+/// tie; the POINT of this test is that `ob.items.len() == 2` alone routes to
+/// `PaginationMode::Offset`, which had no direct multi-column coverage.
+#[tokio::test]
+async fn offset_path_multi_column_order_by_falls_back_correctly() {
+    let handler = build_handler_with_rows(7, CursorLimitsCap::UNLIMITED).await;
+    let session = alice_session();
+
+    let query = ReadQuery::new("items").order_by(OrderBy::new([
+        shamir_query_types::read::OrderByItem::asc("v"),
+        shamir_query_types::read::OrderByItem::asc("id"),
+    ]));
+    let resp = send(&handler, &session, create_cursor_req(query, 3)).await;
+    let (cursor_id, mut seen_vs) = match resp {
+        DbResponse::CursorPage {
+            cursor_id,
+            page,
+            has_more,
+        } => {
+            assert_eq!(page.records.len(), 3, "first page must have page_size rows");
+            assert!(has_more, "7 rows / page_size 3 -> more pages remain");
+            let vs: Vec<i64> = page
+                .records
+                .iter()
+                .map(|r| r.get_value_i64("v").expect("v present"))
+                .collect();
+            (cursor_id, vs)
+        }
+        other => panic!("expected CursorPage, got {other:?}"),
+    };
+
+    loop {
+        let resp = send(&handler, &session, fetch_next_req(cursor_id, 3)).await;
+        match resp {
+            DbResponse::CursorPage { page, has_more, .. } => {
+                for r in &page.records {
+                    seen_vs.push(r.get_value_i64("v").expect("v present"));
+                }
+                if !has_more {
+                    break;
+                }
+            }
+            other => panic!("expected CursorPage, got {other:?}"),
+        }
+    }
+
+    seen_vs.sort_unstable();
+    assert_eq!(
+        seen_vs,
+        (0..7).collect::<Vec<i64>>(),
+        "a two-column ORDER BY (v asc, id asc) must still route through the \
+         offset bookmark (items.len() != 1 -> PaginationMode::Offset) and \
+         page every row exactly once, with no loss or duplication"
+    );
+}
+
+/// Gap 3: `page_size` VARYING across `FetchNext` calls on the offset path --
+/// `CreateCursor` with one page_size, then a sequence of `FetchNext` calls
+/// each requesting a DIFFERENT explicit page_size. Every existing test uses
+/// the SAME size for every call; this is a documented capability
+/// (`FetchNext`'s `page_size` may differ per call -- CURSORS.md Sec.3) with
+/// no prior test exercising an actual size CHANGE mid-lifecycle. Asserts
+/// both that every row appears exactly once overall AND that each
+/// individual page's row count matches what was actually requested (capped
+/// by remaining data).
+#[tokio::test]
+async fn offset_path_varying_page_size_across_fetch_next_calls() {
+    // 10 rows: CreateCursor(page_size=2), then FetchNext(5), FetchNext(1),
+    // FetchNext(whatever's left).
+    let handler = build_handler_with_rows(10, CursorLimitsCap::UNLIMITED).await;
+    let session = alice_session();
+
+    let query = ReadQuery::new("items"); // no ORDER BY -> offset path
+    let resp = send(&handler, &session, create_cursor_req(query, 2)).await;
+    let (cursor_id, mut seen_vs) = match resp {
+        DbResponse::CursorPage {
+            cursor_id,
+            page,
+            has_more,
+        } => {
+            assert_eq!(page.records.len(), 2, "CreateCursor page_size=2");
+            assert!(has_more);
+            let vs: Vec<i64> = page
+                .records
+                .iter()
+                .map(|r| r.get_value_i64("v").expect("v present"))
+                .collect();
+            (cursor_id, vs)
+        }
+        other => panic!("expected CursorPage, got {other:?}"),
+    };
+
+    // Page 2: FetchNext(page_size=5) -- 8 rows remain, so a full 5-row page
+    // comes back with has_more still true.
+    let resp = send(&handler, &session, fetch_next_req(cursor_id, 5)).await;
+    match resp {
+        DbResponse::CursorPage { page, has_more, .. } => {
+            assert_eq!(
+                page.records.len(),
+                5,
+                "explicit page_size=5 must be honored exactly (8 rows remain, more than 5)"
+            );
+            assert!(has_more, "3 rows still remain after this page");
+            for r in &page.records {
+                seen_vs.push(r.get_value_i64("v").expect("v present"));
+            }
+        }
+        other => panic!("expected CursorPage, got {other:?}"),
+    }
+
+    // Page 3: FetchNext(page_size=1) -- 3 rows remain, request only 1.
+    let resp = send(&handler, &session, fetch_next_req(cursor_id, 1)).await;
+    match resp {
+        DbResponse::CursorPage { page, has_more, .. } => {
+            assert_eq!(
+                page.records.len(),
+                1,
+                "explicit page_size=1 must be honored exactly (2 rows still remain after)"
+            );
+            assert!(has_more, "2 rows still remain after this page");
+            for r in &page.records {
+                seen_vs.push(r.get_value_i64("v").expect("v present"));
+            }
+        }
+        other => panic!("expected CursorPage, got {other:?}"),
+    }
+
+    // Page 4: FetchNext(page_size=100, "whatever's left") -- only 2 rows
+    // remain, capped by remaining data rather than the requested size.
+    let resp = send(&handler, &session, fetch_next_req(cursor_id, 100)).await;
+    match resp {
+        DbResponse::CursorPage { page, has_more, .. } => {
+            assert_eq!(
+                page.records.len(),
+                2,
+                "requested page_size=100 must be capped by the 2 rows actually remaining"
+            );
+            assert!(!has_more, "last page must report has_more == false");
+            for r in &page.records {
+                seen_vs.push(r.get_value_i64("v").expect("v present"));
+            }
+        }
+        other => panic!("expected CursorPage, got {other:?}"),
+    }
+
+    seen_vs.sort_unstable();
+    assert_eq!(
+        seen_vs,
+        (0..10).collect::<Vec<i64>>(),
+        "every one of the 10 rows must appear exactly once across a lifetime \
+         where page_size CHANGED on every single FetchNext call (2, 5, 1, 100)"
+    );
+}
+
+/// Gap 4: CONCURRENT `FetchNext` on the SAME cursor, from the same session.
+/// `fetch_next`'s `state = cursor.state().lock().await` is a
+/// `tokio::sync::Mutex` (see `cursor_registry.rs::Cursor::state`), held
+/// across the whole internal read + bookmark-advance, so two concurrent
+/// `FetchNext` calls against the SAME cursor are fully serialized by that
+/// lock -- there is no partial-interleaving window where both calls could
+/// observe (or advance from) the same `state.offset`. Whichever call
+/// acquires the mutex first reads and advances the bookmark BEFORE the
+/// second call's lock acquisition even begins its own read, so the two
+/// calls always produce two DISJOINT, correctly-sequenced pages (page N and
+/// page N+1) -- never overlapping, never skipping a row. This test asserts
+/// exactly that observed, mutex-serialized property: the combined rows from
+/// both concurrent calls have no duplicates and no losses relative to the
+/// data remaining at that point in the cursor's lifecycle.
+#[tokio::test]
+async fn offset_path_concurrent_fetch_next_same_cursor_serializes_disjoint_pages() {
+    let handler = build_handler_with_rows(8, CursorLimitsCap::UNLIMITED).await;
+    let session = alice_session();
+
+    let query = ReadQuery::new("items"); // no ORDER BY -> offset path
+    let resp = send(&handler, &session, create_cursor_req(query, 2)).await;
+    let (cursor_id, mut seen_vs) = match resp {
+        DbResponse::CursorPage {
+            cursor_id,
+            page,
+            has_more,
+        } => {
+            assert!(has_more, "8 rows / page_size 2 -> more pages remain");
+            let vs: Vec<i64> = page
+                .records
+                .iter()
+                .map(|r| r.get_value_i64("v").expect("v present"))
+                .collect();
+            (cursor_id, vs)
+        }
+        other => panic!("expected CursorPage, got {other:?}"),
+    };
+
+    // 6 rows remain (v = 2..8). Fire two FetchNext(page_size=2) calls at
+    // (as close to) the same time against the SAME cursor_id, same session.
+    // The cursor's tokio::sync::Mutex serializes the two internal
+    // read+bookmark-advance sequences, so this must produce two DISJOINT
+    // 2-row pages covering 4 of the remaining 6 rows, with has_more == true
+    // on both (since 2 rows still remain after either ordering).
+    let fut_a = send(&handler, &session, fetch_next_req(cursor_id, 2));
+    let fut_b = send(&handler, &session, fetch_next_req(cursor_id, 2));
+    let (resp_a, resp_b) = tokio::join!(fut_a, fut_b);
+
+    for resp in [resp_a, resp_b] {
+        match resp {
+            DbResponse::CursorPage { page, has_more, .. } => {
+                assert_eq!(
+                    page.records.len(),
+                    2,
+                    "each concurrent call must still get a full 2-row page \
+                     (the mutex serializes them into two proper sequential pages)"
+                );
+                assert!(
+                    has_more,
+                    "4 of 8 consumed so far by these two pages -> more pages remain"
+                );
+                for r in &page.records {
+                    seen_vs.push(r.get_value_i64("v").expect("v present"));
+                }
+            }
+            other => panic!("expected CursorPage from a concurrent FetchNext, got {other:?}"),
+        }
+    }
+
+    seen_vs.sort_unstable();
+    assert_eq!(
+        seen_vs,
+        vec![0, 1, 2, 3, 4, 5],
+        "the mutex-serialized concurrent calls must together cover exactly \
+         the first page (v=0,1) plus the next 4 rows (v=2..6), no duplicates, \
+         no losses -- proving two DISJOINT, correctly-sequenced pages, never \
+         overlapping"
+    );
+
+    // Drain the rest sequentially to confirm the cursor's bookmark ended up
+    // in a fully consistent state after the concurrent pair (not just that
+    // the two concurrent pages individually looked right).
+    loop {
+        let resp = send(&handler, &session, fetch_next_req(cursor_id, 2)).await;
+        match resp {
+            DbResponse::CursorPage { page, has_more, .. } => {
+                for r in &page.records {
+                    seen_vs.push(r.get_value_i64("v").expect("v present"));
+                }
+                if !has_more {
+                    break;
+                }
+            }
+            other => panic!("expected CursorPage, got {other:?}"),
+        }
+    }
+
+    seen_vs.sort_unstable();
+    assert_eq!(
+        seen_vs,
+        (0..8).collect::<Vec<i64>>(),
+        "after the concurrent pair plus draining the rest sequentially, all \
+         8 rows must appear exactly once with no loss or duplication"
+    );
+}
+
+/// Gap 5: an "unprojected-seek-field" query -- `ORDER BY v` (single column,
+/// otherwise keyset-ELIGIBLE per `pagination_mode_for_query`, which only
+/// inspects `order_by`, not `select`) but whose `SELECT` projection
+/// EXCLUDES `v`. This drives `order_by_field_value` to return `None` (the
+/// field isn't present on the projected `QueryRecord`), both at
+/// `create_cursor` time (`page.records.last().and_then(|r|
+/// order_by_field_value(&query, r))` -> `None`) and would at any subsequent
+/// `fetch_next` call.
+///
+/// Traced behavior (verified by reading `create_cursor`/`fetch_next`, not
+/// guessed): `mode` is still pinned to `PaginationMode::Keyset` at creation
+/// (decided purely from `order_by`'s shape, per `pagination_mode_for_query`
+/// -- `select` never enters that decision). But `seek_key` ends up `None`
+/// because `order_by_field_value` can't extract `v` from an unprojected
+/// row. `fetch_next`'s dispatch is `match (state.mode, state.seek_key.clone())`
+/// -- `(Keyset, None)` does NOT match the `(Keyset, Some(seek_key))` arm, so
+/// EVERY subsequent `fetch_next` call falls through to the `_ =>` arm, i.e.
+/// the SAME row-count offset-bookmark branch the no-ORDER-BY path uses.
+/// `state.offset` is tracked identically in both branches (advanced by the
+/// actual returned-row count, `page.records.len()` at creation and
+/// `fetched.records.len()` on each subsequent call), so this degrades
+/// cleanly to correct offset-mode pagination -- not a broken/untested
+/// state. This is NOT a bug: it's the documented "can't build/refresh a
+/// keyset bookmark from this page" fallback the module doc comment on
+/// `order_by_field_value` describes, verified here to still page every row
+/// correctly end-to-end.
+#[tokio::test]
+async fn keyset_eligible_but_unprojected_order_by_field_falls_back_to_offset_correctly() {
+    let handler = build_handler_with_rows(7, CursorLimitsCap::UNLIMITED).await;
+    let session = alice_session();
+
+    // ORDER BY v (single column -> keyset-eligible per pagination_mode_for_
+    // query), but SELECT projects only "id" -- v is excluded from the
+    // returned rows, so order_by_field_value can never extract a seek key.
+    let query = ReadQuery::new("items")
+        .select(Select::fields(["id"]))
+        .order_by(OrderBy::asc("v"));
+    let resp = send(&handler, &session, create_cursor_req(query, 3)).await;
+    let (cursor_id, mut seen_ids) = match resp {
+        DbResponse::CursorPage {
+            cursor_id,
+            page,
+            has_more,
+        } => {
+            assert_eq!(page.records.len(), 3, "first page must have page_size rows");
+            assert!(has_more, "7 rows / page_size 3 -> more pages remain");
+            // v is NOT projected -- confirm that directly, so this test
+            // actually exercises the gap it claims to (not silently passing
+            // because the projection accidentally still included v).
+            for r in &page.records {
+                assert!(
+                    r.get_value_i64("v").is_none(),
+                    "v must be excluded from the projection for this test to be meaningful"
+                );
+            }
+            let ids: Vec<String> = page
+                .records
+                .iter()
+                .map(|r| {
+                    r.get_value("id")
+                        .and_then(|v| v.as_str().map(str::to_string))
+                        .expect("id present (it IS projected)")
+                })
+                .collect();
+            (cursor_id, ids)
+        }
+        other => panic!("expected CursorPage, got {other:?}"),
+    };
+
+    loop {
+        let resp = send(&handler, &session, fetch_next_req(cursor_id, 3)).await;
+        match resp {
+            DbResponse::CursorPage { page, has_more, .. } => {
+                for r in &page.records {
+                    assert!(
+                        r.get_value_i64("v").is_none(),
+                        "v must stay excluded from every subsequent page's projection too"
+                    );
+                    seen_ids.push(
+                        r.get_value("id")
+                            .and_then(|v| v.as_str().map(str::to_string))
+                            .expect("id present"),
+                    );
+                }
+                if !has_more {
+                    break;
+                }
+            }
+            other => panic!("expected CursorPage, got {other:?}"),
+        }
+    }
+
+    seen_ids.sort_unstable();
+    let expected: Vec<String> = (0..7).map(|i| format!("k{i:03}")).collect();
+    assert_eq!(
+        seen_ids, expected,
+        "KNOWN GAP CHECKED, NOT A BUG: even though ORDER BY's field (v) is \
+         excluded from the SELECT projection (order_by_field_value can never \
+         extract a seek key, so seek_key stays None forever after creation), \
+         fetch_next's (Keyset, None) dispatch falls through to the SAME \
+         row-count offset-bookmark branch the no-ORDER-BY path uses -- every \
+         row must still appear exactly once, in insertion order (id order == \
+         v order == insertion order in this fixture), with no loss or \
+         duplication"
+    );
 }
 
 // ---------------------------------------------------------------------------
