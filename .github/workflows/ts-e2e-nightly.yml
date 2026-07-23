@@ -68,7 +68,7 @@ jobs:
       # drift); a no-op when Cargo.lock is current.
       - name: Build shamir-server (release)
         run: cargo build --release --locked -p shamir-server
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v6.4.0
         with:
           node-version: '22'
           cache: npm
@@ -121,7 +121,7 @@ jobs:
       - uses: actions/checkout@v6.0.3
       - uses: dtolnay/rust-toolchain@1.93.0
       - uses: Swatinem/rust-cache@v2
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v6.4.0
         with:
           node-version: '22'
           cache: npm

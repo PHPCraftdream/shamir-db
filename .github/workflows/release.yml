@@ -224,7 +224,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6.0.3
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v6.4.0
         with:
           # Node 22 = active LTS. `shamir-client-ts/package.json` declares
           # no `engines` floor; `shamir-client-node`'s is `>=18`, so 22
@@ -267,7 +267,7 @@ jobs:
       # drift); a no-op when Cargo.lock is current.
       - name: Build shamir-server (release)
         run: cargo build --release --locked -p shamir-server
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v6.4.0
         with:
           node-version: '22'
           cache: npm
