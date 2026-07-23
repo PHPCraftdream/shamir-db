@@ -304,3 +304,54 @@ fn backup_rejects_destination_equal_to_source() {
         "expected DestinationInsideSource when to == from, got {err:?}"
     );
 }
+
+// ----------------------------------------------------------------------------
+// CR-C4: streaming SHA-256 must produce byte-identical digests/sizes to a
+// whole-file fs::read + sha256(&contents) computation, for a file large
+// enough to span many fixed-size buffer reads (a few MiB, deterministic
+// content so the test is reproducible).
+// ----------------------------------------------------------------------------
+
+/// Deterministic (not random) multi-MiB content: a repeating byte pattern
+/// derived from the running index, long enough to span several 1 MiB
+/// streaming-buffer reads.
+fn deterministic_large_content(len: usize) -> Vec<u8> {
+    (0..len).map(|i| (i % 256) as u8).collect()
+}
+
+#[test]
+fn backup_manifest_hash_matches_streamed_large_file() {
+    let src = TempDir::new().unwrap();
+    let dst = TempDir::new().unwrap();
+
+    // ~6 MiB: several full 1 MiB buffer passes plus a partial tail read.
+    let big_len = 6 * 1024 * 1024 + 12_345;
+    let big_content = deterministic_large_content(big_len);
+    fs::write(src.path().join("big.bin"), &big_content).unwrap();
+
+    let expected_sha256 = hex::encode(shamir_connect::common::crypto::sha256(&big_content));
+
+    let report = backup(src.path(), dst.path()).unwrap();
+    let manifest_raw = fs::read(&report.manifest_path).unwrap();
+    let manifest: Manifest = serde_json::from_slice(&manifest_raw).unwrap();
+
+    let entry = manifest
+        .files
+        .iter()
+        .find(|f| f.path == "big.bin")
+        .expect("big.bin must be in the manifest");
+    assert_eq!(
+        entry.size_bytes, big_len as u64,
+        "streamed size_bytes must match whole-file length"
+    );
+    assert_eq!(
+        entry.sha256, expected_sha256,
+        "streamed collect_manifest_entries digest must match whole-file sha256"
+    );
+
+    // verify_manifest() re-hashes every file via its OWN streaming path —
+    // must also agree bit-for-bit with the whole-file digest.
+    let verify_report = verify_manifest(&report.dest_dir).expect("snapshot must verify");
+    assert_eq!(verify_report.files_checked, 1);
+    assert_eq!(verify_report.total_bytes, big_len as u64);
+}

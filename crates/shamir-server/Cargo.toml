@@ -80,6 +80,10 @@ base64 = "0.22"
 # Hex encoding for HMAC-derived identifiers (e.g. `user_hash`) in log fields
 # where the plaintext identity must not appear (audit C3).
 hex = "0.4"
+# Streaming SHA-256 for backup/restore manifest hashing (backup.rs) — reads
+# each file through a fixed-size buffer instead of materializing the whole
+# file via fs::read. Same version pin as shamir-connect/Cargo.toml.
+sha2 = "0.10"
 # JSON — used ONLY for the backup manifest (`manifest.json`), which is
 # deliberately human/tooling-readable rather than msgpack. This is NOT a
 # query/config surface, so it does not fall under the workspace's

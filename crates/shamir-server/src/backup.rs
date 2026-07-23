@@ -32,14 +32,41 @@
 //! because it requires a wire-protocol change.
 
 use std::fs;
+use std::io::Read;
 use std::path::{Component, Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 use shamir_collections::new_fx_set_wc;
-use shamir_connect::common::crypto::sha256;
+
+/// Size of the fixed, reused buffer streaming hash reads are chunked
+/// through — chosen so a large fjall SST/journal file is hashed without
+/// ever materializing the whole file in RAM at once.
+const HASH_STREAM_BUFFER_SIZE: usize = 1024 * 1024;
+
+/// Stream `path`'s full contents through a fixed-size buffer into a running
+/// SHA-256 hasher, returning `(digest, size_bytes)`. Produces a
+/// byte-identical result to `sha256(&fs::read(path)?)`, but never holds more
+/// than [`HASH_STREAM_BUFFER_SIZE`] bytes of file content in memory at once —
+/// unlike `fs::read`, whose peak memory is proportional to the file size.
+fn hash_file_streaming(path: &Path) -> std::io::Result<([u8; 32], u64)> {
+    let mut file = fs::File::open(path)?;
+    let mut buf = vec![0u8; HASH_STREAM_BUFFER_SIZE];
+    let mut hasher = Sha256::new();
+    let mut size_bytes = 0u64;
+    loop {
+        let n = file.read(&mut buf)?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buf[..n]);
+        size_bytes += n as u64;
+    }
+    Ok((hasher.finalize().into(), size_bytes))
+}
 
 /// Name of the manifest file written into every snapshot directory.
 pub const MANIFEST_FILE_NAME: &str = "manifest.json";
@@ -304,9 +331,7 @@ fn collect_manifest_entries(
             if rel == MANIFEST_FILE_NAME {
                 continue;
             }
-            let contents = fs::read(&path)?;
-            let size_bytes = contents.len() as u64;
-            let digest = sha256(&contents);
+            let (digest, size_bytes) = hash_file_streaming(&path)?;
             entries.push(ManifestFileEntry {
                 path: rel,
                 sha256: hex::encode(digest),
@@ -362,14 +387,13 @@ pub fn verify_manifest(snapshot_dir: &Path) -> Result<ManifestVerifyReport, Back
         }
 
         let file_path = snapshot_dir.join(&entry.path);
-        let contents = fs::read(&file_path).map_err(|e| {
+        let (digest, actual_size) = hash_file_streaming(&file_path).map_err(|e| {
             BackupError::Io(std::io::Error::new(
                 e.kind(),
                 format!("manifest entry {}: {e}", entry.path),
             ))
         })?;
-        let actual_size = contents.len() as u64;
-        let actual_sha256 = hex::encode(sha256(&contents));
+        let actual_sha256 = hex::encode(digest);
 
         if actual_size != entry.size_bytes || actual_sha256 != entry.sha256 {
             return Err(BackupError::ChecksumMismatch {
