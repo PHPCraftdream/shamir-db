@@ -623,6 +623,129 @@ async fn create_cursor_denies_non_owner_without_grant() {
     );
 }
 
+// ---------------------------------------------------------------------------
+// CR-A2 (#761) — an already-exhausted first page must NOT be registered:
+// no MVCC pin, no per-session cap slot held for a cursor no SDK will ever
+// call `FetchNext` against.
+// ---------------------------------------------------------------------------
+
+/// Rapid-fire single-page `CreateCursor` calls (each `has_more == false`)
+/// must never trip the per-session cursor cap, no matter how many are
+/// issued in a row on the same session — none of them are actually
+/// registered.
+#[tokio::test]
+async fn exhausted_first_page_cursors_never_exhaust_the_session_cap() {
+    let cap = 2usize;
+    let handler = build_handler_with_rows(
+        1,
+        CursorLimitsCap {
+            max_cursors_per_session: cap,
+            idle_timeout_secs: u64::MAX,
+        },
+    )
+    .await;
+    let session = alice_session();
+
+    // 1 row in the table, page_size 10 -> every CreateCursor's first page
+    // exhausts the whole result (`has_more == false`). Issue more than `cap`
+    // of these in a row on the SAME session.
+    for i in 0..(cap * 3) {
+        let query = ReadQuery::new("items");
+        let resp = send(&handler, &session, create_cursor_req(query, 10)).await;
+        match resp {
+            DbResponse::CursorPage { page, has_more, .. } => {
+                assert_eq!(page.records.len(), 1);
+                assert!(
+                    !has_more,
+                    "single row / page_size 10 must exhaust on page 1"
+                );
+            }
+            other => panic!("iteration {i}: expected CursorPage, got {other:?}"),
+        }
+        assert_eq!(
+            handler.cursor_registry().len(),
+            0,
+            "iteration {i}: an exhausted first page must never be registered"
+        );
+    }
+}
+
+/// Empty table: `CreateCursor` returns an empty page with `has_more ==
+/// false` and is not registered either (the review's explicit "empty
+/// table" case).
+#[tokio::test]
+async fn create_cursor_over_empty_table_is_not_registered() {
+    let handler = build_handler_with_rows(0, CursorLimitsCap::UNLIMITED).await;
+    let session = alice_session();
+
+    let query = ReadQuery::new("items");
+    let resp = send(&handler, &session, create_cursor_req(query, 10)).await;
+    match resp {
+        DbResponse::CursorPage { page, has_more, .. } => {
+            assert!(page.records.is_empty(), "empty table -> empty page");
+            assert!(!has_more, "empty table -> has_more must be false");
+        }
+        other => panic!("expected CursorPage, got {other:?}"),
+    }
+    assert_eq!(
+        handler.cursor_registry().len(),
+        0,
+        "an empty-table cursor must not be registered"
+    );
+}
+
+/// A `FetchNext` against the id returned by an exhausted (never-registered)
+/// `CreateCursor` gets a clean `cursor_not_found`, not a panic.
+#[tokio::test]
+async fn fetch_next_against_never_registered_exhausted_cursor_is_clean_not_found() {
+    let handler = build_handler_with_rows(1, CursorLimitsCap::UNLIMITED).await;
+    let session = alice_session();
+
+    let query = ReadQuery::new("items");
+    let resp = send(&handler, &session, create_cursor_req(query, 10)).await;
+    let cursor_id = match resp {
+        DbResponse::CursorPage {
+            cursor_id,
+            has_more,
+            ..
+        } => {
+            assert!(!has_more);
+            cursor_id
+        }
+        other => panic!("expected CursorPage, got {other:?}"),
+    };
+
+    let resp = send(&handler, &session, fetch_next_req(cursor_id, 10)).await;
+    match resp {
+        DbResponse::Error { code, .. } => assert_eq!(code, "cursor_not_found"),
+        other => panic!("expected cursor_not_found, got {other:?}"),
+    }
+}
+
+/// Regression guard: a query that DOES span multiple pages must still
+/// register normally on its first (non-exhausted) page — this fix must not
+/// accidentally skip registration when `has_more` is actually `true`.
+#[tokio::test]
+async fn multi_page_first_page_is_still_registered() {
+    let handler = build_handler_with_rows(5, CursorLimitsCap::UNLIMITED).await;
+    let session = alice_session();
+
+    let query = ReadQuery::new("items").order_by(OrderBy::asc("v"));
+    let resp = send(&handler, &session, create_cursor_req(query, 2)).await;
+    match resp {
+        DbResponse::CursorPage { page, has_more, .. } => {
+            assert_eq!(page.records.len(), 2);
+            assert!(has_more, "5 rows / page_size 2 -> more pages remain");
+        }
+        other => panic!("expected CursorPage, got {other:?}"),
+    }
+    assert_eq!(
+        handler.cursor_registry().len(),
+        1,
+        "a non-exhausted first page must still be registered"
+    );
+}
+
 /// Positive control: alice (the owner) creates a cursor on her own table →
 /// succeeds normally, proving the new authorize_access calls don't regress
 /// the legitimate owner path.

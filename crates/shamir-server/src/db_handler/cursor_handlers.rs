@@ -311,6 +311,29 @@ impl ShamirDbHandler {
         let offset = page.records.len() as u64;
 
         let cursor_id = self.next_cursor_id();
+
+        if !has_more {
+            // The entire result fit on the first page — no `FetchNext` will
+            // ever be issued (both the Rust and TS SDKs stop iterating as
+            // soon as `has_more == false`). Registering it anyway would park
+            // a live `SnapshotGuard` MVCC pin and a per-session registry
+            // slot for no reason until the idle-timeout reaper eventually
+            // reclaims it. Returning here instead lets `page` (built above)
+            // go out with the response while `guard` (never wrapped into a
+            // `Cursor` for this branch) drops immediately via RAII, and the
+            // per-session cursor cap is never touched by an already-
+            // exhausted cursor. The minted `cursor_id` is handed to the
+            // client unregistered: a later `FetchNext`/`CancelCursor` against
+            // it falls through to the existing not-found / idempotent-close
+            // paths, which is the accurate answer for an id that never
+            // existed in the registry.
+            return DbResponse::CursorPage {
+                cursor_id: CursorId(cursor_id),
+                page,
+                has_more,
+            };
+        }
+
         let cursor = Cursor::new(
             query,
             guard,
