@@ -24,7 +24,7 @@ jobs:
         os: [ubuntu-latest, windows-latest, macos-latest]
     steps:
       - uses: actions/checkout@v6.0.3
-      - uses: dtolnay/rust-toolchain@1.93.0
+      - uses: dtolnay/rust-toolchain@1.100.0
       # Pinned to nextest@0.9.137 — same baseline as ci.yml's test/integration
       # jobs (see ci.yml's nextest pin comment for the guard-coupling rationale).
       - uses: taiki-e/install-action@v2
