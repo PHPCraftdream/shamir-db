@@ -111,6 +111,39 @@ fn invalid_page_size_distinguishable_from_other_cursor_errors() {
 }
 
 #[test]
+fn cursor_page_too_large_display_mentions_size_and_max() {
+    // CR-A5: a cursor page whose serialized size exceeds
+    // `max_result_size_bytes` is rejected with a distinct error naming both
+    // the offending size and the configured cap.
+    let err = BatchError::CursorPageTooLarge {
+        size: 5_000_000,
+        max: 1_000_000,
+    };
+    let msg = err.to_string();
+    assert!(
+        msg.contains("5000000"),
+        "Display must mention the rejected size: {msg}"
+    );
+    assert!(
+        msg.contains("1000000"),
+        "Display must mention the configured max: {msg}"
+    );
+}
+
+#[test]
+fn cursor_page_too_large_distinguishable_from_other_cursor_errors() {
+    let too_large = BatchError::CursorPageTooLarge {
+        size: 5_000_000,
+        max: 1_000_000,
+    };
+    let not_found = BatchError::CursorNotFound {
+        cursor_id: CursorId(1),
+    };
+    assert_ne!(too_large, not_found);
+    assert_ne!(too_large.to_string(), not_found.to_string());
+}
+
+#[test]
 fn cursor_errors_have_no_structured_code_via_batch_error_code() {
     // `BatchError::code()` only ever returns `Some` for `QueryError` — the
     // new cursor variants correctly fall through to `None` there. The
@@ -137,6 +170,14 @@ fn cursor_errors_have_no_structured_code_via_batch_error_code() {
         BatchError::InvalidPageSize {
             page_size: 0,
             max: 10_000
+        }
+        .code(),
+        None
+    );
+    assert_eq!(
+        BatchError::CursorPageTooLarge {
+            size: 5_000_000,
+            max: 1_000_000
         }
         .code(),
         None

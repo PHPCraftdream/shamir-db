@@ -676,5 +676,8 @@ pub(super) fn error_code(e: &BatchError) -> &str {
         // CR-A3: `page_size == 0` (infinite-loop hazard) or `page_size` above
         // `max_cursor_page_size` (unbounded materialization hazard).
         BatchError::InvalidPageSize { .. } => "invalid_page_size",
+        // CR-A5: a cursor page's serialized size exceeded
+        // `max_result_size_bytes`; rejected outright, never truncated.
+        BatchError::CursorPageTooLarge { .. } => "cursor_page_too_large",
     }
 }

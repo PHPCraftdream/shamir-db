@@ -48,12 +48,15 @@ use shamir_db::engine::repo::RepoInstance;
 use shamir_db::engine::table::TableManager;
 use shamir_db::query::batch::BatchError;
 use shamir_db::query::filter::Filter;
-use shamir_db::query::read::{At, OrderDirection, Pagination, QueryRecord, ReadQuery, Temporal};
+use shamir_db::query::read::{
+    At, OrderDirection, Pagination, QueryRecord, QueryResult, ReadQuery, Temporal,
+};
 use shamir_query_types::filter::query_value_to_filter_value;
 use shamir_query_types::wire::CursorId;
 use shamir_types::types::common::{new_map, TMap};
 use shamir_types::types::value::QueryValue;
 
+use crate::byte_budget::stash_guard;
 use crate::cursor_registry::{Cursor, CursorRegistryError};
 
 use super::handler::{session_actor, DbResponse, ShamirDbHandler};
@@ -135,6 +138,56 @@ fn error_response(e: &BatchError) -> DbResponse {
         code: super::handler::error_code(e).to_string(),
         message: e.to_string(),
     }
+}
+
+/// CR-A5: gate a cursor page against BOTH the per-page byte-size cap
+/// (`query_limits.max_result_size_bytes`) and the RI-15 global in-flight
+/// response-byte budget, mirroring `ShamirDbHandler::execute`'s exact block
+/// (`handler.rs`'s `DbRequest::Execute` path) — measure the serialized
+/// `page` ONCE (matching `execute()`'s choice to measure the payload alone,
+/// i.e. `BatchResponse`/here `QueryResult`, not the full `DbResponse`
+/// envelope), then either reject (too large — no budget acquired, there is
+/// nothing to write) or acquire from `self.byte_budget` and stash the guard
+/// for the writer task to release after the socket write completes.
+///
+/// Returns `Err(too_large_error)` when the page must be rejected; `Ok(())`
+/// when the caller may proceed to return the `CursorPage` response (a guard
+/// has already been stashed for it, if the budget is bounded).
+async fn enforce_page_budget(
+    handler: &ShamirDbHandler,
+    page: &QueryResult,
+) -> Result<(), BatchError> {
+    // Only serialize when at least one of the two gates is actually active —
+    // an unbounded budget AND an effectively-unlimited size cap (the UNIT
+    // TEST default) must stay a pure no-op, same as `execute()`'s
+    // `self.byte_budget.cap().is_some()` short-circuit.
+    let budget_active = handler.byte_budget.cap().is_some();
+    let cap_active = handler.query_limits.max_result_size_bytes < usize::MAX;
+    if !budget_active && !cap_active {
+        return Ok(());
+    }
+
+    let Ok(bytes) = rmp_serde::to_vec_named(page) else {
+        // Mirrors `execute()`: a serialization failure here is swallowed
+        // (the `if let Ok(...)` in `execute()` silently skips the acquire
+        // on `Err`) rather than treated as a hard error — the response
+        // still goes out, just without budget accounting for it.
+        return Ok(());
+    };
+
+    if cap_active && bytes.len() > handler.query_limits.max_result_size_bytes {
+        return Err(BatchError::CursorPageTooLarge {
+            size: bytes.len(),
+            max: handler.query_limits.max_result_size_bytes,
+        });
+    }
+
+    if budget_active {
+        let guard = handler.byte_budget.acquire(bytes.len()).await;
+        stash_guard(guard);
+    }
+
+    Ok(())
 }
 
 /// Build the `FilterContext` a cursor's `FetchNext` reads through — mirrors
@@ -312,6 +365,18 @@ impl ShamirDbHandler {
             Ok(p) => p,
             Err(e) => return error_response(&wrap_engine_err(e)),
         };
+
+        // CR-A5: gate the page against the per-page byte-size cap and the
+        // RI-15 global byte budget BEFORE deciding whether to register the
+        // cursor — a rejected page must not mint a registered cursor (there
+        // is nothing to `FetchNext` against; the client never receives this
+        // page's bytes at all), and this covers BOTH success returns below
+        // (the CR-A2 "exhausted first page, not registered" early return and
+        // the normal registered return) since both hand the SAME `page` back
+        // over the wire.
+        if let Err(e) = enforce_page_budget(self, &page).await {
+            return error_response(&e);
+        }
 
         let has_more = page.records.len() as u64 >= page_size as u64;
         let seek_key = if has_more && has_simple_single_column_order_by(&query) {
@@ -502,6 +567,17 @@ impl ShamirDbHandler {
             Ok(p) => p,
             Err(e) => return error_response(&wrap_engine_err(e)),
         };
+
+        // CR-A5: gate BEFORE mutating the cursor's bookmark state
+        // (seek_key/offset/exhausted) or removing it from the registry on
+        // exhaustion — a rejected page must leave the cursor exactly as it
+        // was before this call, so the client can retry `FetchNext` (e.g.
+        // with a smaller `page_size`) against an untouched bookmark instead
+        // of one that silently advanced past records it never received.
+        if let Err(e) = enforce_page_budget(self, &page).await {
+            drop(state);
+            return error_response(&e);
+        }
 
         let has_more = page.records.len() as u64 >= page_size as u64;
         let new_seek_key = if has_more && has_simple_single_column_order_by(&base_query) {

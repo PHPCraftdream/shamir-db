@@ -194,6 +194,25 @@ pub enum BatchError {
         /// `1..=max`).
         max: u32,
     },
+
+    /// CR-A5: a `CreateCursor`/`FetchNext` page's serialized size exceeded
+    /// `security.query_limits.max_result_size_bytes`.
+    ///
+    /// The page is rejected outright, never truncated — truncating would
+    /// silently corrupt the `has_more`/bookmark contract (a truncated page
+    /// would advance the bookmark past records the caller never actually
+    /// received), the same reasoning CR-A3 used for `page_size`. Measured
+    /// once (the same serialization the byte-budget acquire would otherwise
+    /// perform) and rejected BEFORE any budget bytes are reserved for it —
+    /// there is nothing to write, so nothing should be charged.
+    ///
+    /// Wire error code: `cursor_page_too_large`.
+    CursorPageTooLarge {
+        /// The rejected page's serialized size, in bytes.
+        size: usize,
+        /// The configured `max_result_size_bytes` cap.
+        max: usize,
+    },
 }
 
 impl std::fmt::Display for BatchError {
@@ -298,6 +317,13 @@ impl std::fmt::Display for BatchError {
                     f,
                     "page_size must be between 1 and {} (got {})",
                     max, page_size
+                )
+            }
+            BatchError::CursorPageTooLarge { size, max } => {
+                write!(
+                    f,
+                    "cursor page too large: {} bytes exceeds max_result_size_bytes ({})",
+                    size, max
                 )
             }
         }
