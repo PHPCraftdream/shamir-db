@@ -187,14 +187,6 @@ artifact).
   (`ReadQuery::with_version`) is unsupported/unverified today and may
   produce confusing results; avoid combining the two until this is
   explicitly rejected or supported (tracked separately).
-- **A cursor's "stable snapshot" can still be disturbed by a concurrent
-  DELETE.** A cursor pins an MVCC snapshot version at `CreateCursor` time,
-  but each `FetchNext` re-enumerates the table's CURRENT id set (not a
-  truly frozen id set) before reading each matched id at the pinned
-  version — a row deleted between two `FetchNext` calls stops being
-  enumerated at all, so it silently disappears from the cursor's remaining
-  pages (and, on the no-ORDER-BY offset-bookmark path, shifts subsequent
-  offsets). Tracked separately as a hardening item.
 
 ## 7. Numbers
 

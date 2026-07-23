@@ -75,14 +75,25 @@ impl TableManager {
         let filter_cb: Option<FilterNode> =
             query.r#where.as_ref().map(|f| compile_filter(f, interner));
 
-        // ── 3. Enumerate every record id via the same full-scan streaming that
-        //       the normal no-index read path uses. For each id, read the AS-OF
-        //       value from the MVCC history (`get_at`). Records that did not yet
-        //       exist at `version` return `None` and are excluded.
+        // ── 3. Enumerate every record id via a tombstone-INCLUSIVE variant of
+        //       the same full-scan streaming that the normal no-index read
+        //       path uses. For each id, read the AS-OF value from the MVCC
+        //       history (`get_at`). Records that did not yet exist at
+        //       `version` return `None` and are excluded.
+        //
+        //       CR-B1 (#767): `list_stream` (-> `MvccStore::current_stream`)
+        //       suppresses any key whose CURRENT winner is a tombstone —
+        //       correct for the normal Latest read path, but wrong here: a
+        //       key deleted AFTER `version` must still be considered, because
+        //       its pre-delete value at `version` is exactly what AsOf must
+        //       return. `list_stream_with_tombstones` includes those keys in
+        //       enumeration so they get a `get_at(id, version)` attempt below
+        //       (which resolves the pre-delete value); it does not change the
+        //       WHAT-IS-RETURNED logic in this loop at all.
         //
         //       NOTE: secondary/sorted indexes reflect the CURRENT state and are
         //       intentionally NOT used here. A versioned index is a later slice.
-        let stream = self.list_stream(FULL_SCAN_BATCH);
+        let stream = self.list_stream_with_tombstones(FULL_SCAN_BATCH);
         futures::pin_mut!(stream);
 
         let mut matched: Vec<(RecordId, Bytes)> = Vec::new();

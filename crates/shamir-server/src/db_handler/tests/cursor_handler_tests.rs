@@ -1284,3 +1284,206 @@ async fn keyset_no_ties_regression_every_row_returned_once_in_order() {
     // back in strict ascending order with no loss or duplication.
     assert_eq!(seqs, vec![0, 1, 2, 3, 4, 5, 6]);
 }
+
+// ---------------------------------------------------------------------------
+// CR-B1 (#767) — cursor snapshot stability vs. concurrent DELETE.
+//
+// `CreateCursor`/`FetchNext` read every page via `Temporal::AsOf { at:
+// pinned_version }` (see `create_cursor`'s `guard.version()` pin above). The
+// bug: `read_as_of`'s enumeration source (`TableManager::list_stream` ->
+// `MvccStore::current_stream`) suppresses any key whose CURRENT winner is a
+// tombstone -- so a row alive at the cursor's pinned version, but deleted by
+// a separate concurrent write mid-scroll, silently vanishes from every
+// subsequent page instead of surfacing its pinned pre-delete value.
+// ---------------------------------------------------------------------------
+
+/// A row that has NOT yet been fetched is deleted (via a separate batch)
+/// while the cursor is mid-scroll. Draining the rest of the cursor must
+/// still surface that row exactly once (its pinned pre-delete value) --
+/// before the fix, `read_as_of`'s enumeration drops it entirely because its
+/// current winner is now a tombstone.
+#[tokio::test]
+async fn cursor_still_returns_a_row_deleted_mid_scroll() {
+    let handler = build_handler_with_rows(5, CursorLimitsCap::UNLIMITED).await;
+    let session = alice_session();
+
+    // Small page_size so multiple FetchNext calls are needed to drain all 5
+    // rows (v = 0..5), ordered so the delete target (v=2) is not yet fetched
+    // after the first page.
+    let query = ReadQuery::new("items").order_by(OrderBy::asc("v"));
+    let resp = send(&handler, &session, create_cursor_req(query, 2)).await;
+    let cursor_id = match resp {
+        DbResponse::CursorPage {
+            cursor_id, page, ..
+        } => {
+            let vs: Vec<i64> = page
+                .records
+                .iter()
+                .map(|r| r.get_value_i64("v").unwrap())
+                .collect();
+            assert_eq!(vs, vec![0, 1], "first page covers v=0,1 only");
+            cursor_id
+        }
+        other => panic!("expected CursorPage, got {other:?}"),
+    };
+
+    // Concurrent DELETE of a row NOT yet fetched (v=2, "k002") via a
+    // separate, real batch call -- the cursor's pinned snapshot predates
+    // this delete.
+    let owner = Actor::User(principal64([0xAB; 16]));
+    let mut del = Batch::new();
+    del.delete(
+        "d",
+        shamir_query_builder::write::delete("items")
+            .where_(shamir_query_builder::filter::eq("id", "k002")),
+    );
+    handler
+        .db()
+        .execute_as(owner, "app", &del.build())
+        .await
+        .expect("concurrent delete must commit");
+
+    // Sanity: a fresh, non-cursor read no longer sees the deleted row.
+    let mut fresh = Batch::new();
+    fresh.query("r", shamir_query_builder::query::Query::from("items"));
+    let fresh_resp = handler
+        .db()
+        .execute_as(Actor::System, "app", &fresh.build())
+        .await
+        .expect("fresh read");
+    let fresh_result = fresh_resp.results.get("r").expect("alias r present");
+    assert_eq!(
+        fresh_result.records.len(),
+        4,
+        "sanity: the concurrent delete is visible to a fresh, non-cursor read"
+    );
+
+    // Drain the rest of the cursor. Every row alive at the cursor's pinned
+    // version (v = 0..5, INCLUDING the since-deleted v=2) must appear
+    // exactly once across all pages.
+    let mut total_seen = 2usize; // first page already consumed above
+    let mut seen_vs: Vec<i64> = vec![0, 1];
+    loop {
+        let resp = send(&handler, &session, fetch_next_req(cursor_id, 2)).await;
+        match resp {
+            DbResponse::CursorPage { page, has_more, .. } => {
+                total_seen += page.records.len();
+                for r in &page.records {
+                    seen_vs.push(r.get_value_i64("v").expect("v present"));
+                }
+                if !has_more {
+                    break;
+                }
+            }
+            other => panic!("expected CursorPage, got {other:?}"),
+        }
+    }
+
+    seen_vs.sort_unstable();
+    assert_eq!(
+        total_seen, 5,
+        "cursor must still see all 5 rows pinned at CreateCursor time, \
+         including the one deleted mid-scroll"
+    );
+    assert_eq!(
+        seen_vs,
+        vec![0, 1, 2, 3, 4],
+        "every row alive at the pinned snapshot (v=0..5) must appear exactly \
+         once, including v=2 which was deleted AFTER the cursor was created \
+         but BEFORE it was fetched"
+    );
+}
+
+/// Companion regression guard: an UPDATE (not a delete) to a not-yet-fetched
+/// row mid-scroll must still show the cursor's PINNED-version value, not the
+/// post-update one -- proving this fix (which widens `read_as_of`'s
+/// enumeration to include tombstoned keys) does not change the update case,
+/// which already worked (the row's current winner is non-empty either way,
+/// so it was never excluded from enumeration).
+#[tokio::test]
+async fn cursor_keeps_pinned_value_for_a_row_updated_mid_scroll() {
+    let handler = build_handler_with_rows(5, CursorLimitsCap::UNLIMITED).await;
+    let session = alice_session();
+
+    let query = ReadQuery::new("items").order_by(OrderBy::asc("v"));
+    let resp = send(&handler, &session, create_cursor_req(query, 2)).await;
+    let cursor_id = match resp {
+        DbResponse::CursorPage {
+            cursor_id, page, ..
+        } => {
+            let vs: Vec<i64> = page
+                .records
+                .iter()
+                .map(|r| r.get_value_i64("v").unwrap())
+                .collect();
+            assert_eq!(vs, vec![0, 1], "first page covers v=0,1 only");
+            cursor_id
+        }
+        other => panic!("expected CursorPage, got {other:?}"),
+    };
+
+    // Concurrent UPDATE of a row NOT yet fetched (v=2, "k002") -> v=9999,
+    // via a separate, real batch call.
+    let owner = Actor::User(principal64([0xAB; 16]));
+    let mut upd = Batch::new();
+    upd.update(
+        "u",
+        shamir_query_builder::write::update("items")
+            .where_(shamir_query_builder::filter::eq("id", "k002"))
+            .set(shamir_query_builder::doc! { "v" => 9999_i64 }),
+    );
+    handler
+        .db()
+        .execute_as(owner, "app", &upd.build())
+        .await
+        .expect("concurrent update must commit");
+
+    // Sanity: a fresh, non-cursor read sees the updated value.
+    let mut fresh = Batch::new();
+    fresh.query("r", shamir_query_builder::query::Query::from("items"));
+    let fresh_resp = handler
+        .db()
+        .execute_as(Actor::System, "app", &fresh.build())
+        .await
+        .expect("fresh read");
+    let fresh_result = fresh_resp.results.get("r").expect("alias r present");
+    let fresh_vs: Vec<i64> = fresh_result
+        .records
+        .iter()
+        .map(|r| r.get_value_i64("v").expect("v present"))
+        .collect();
+    assert!(
+        fresh_vs.contains(&9999),
+        "sanity: the concurrent update is visible to a fresh, non-cursor read"
+    );
+
+    // Drain the rest of the cursor -- the pinned pre-update value (v=2) must
+    // still surface, never the post-update value (v=9999).
+    let mut seen_vs: Vec<i64> = vec![0, 1];
+    loop {
+        let resp = send(&handler, &session, fetch_next_req(cursor_id, 2)).await;
+        match resp {
+            DbResponse::CursorPage { page, has_more, .. } => {
+                for r in &page.records {
+                    seen_vs.push(r.get_value_i64("v").expect("v present"));
+                }
+                if !has_more {
+                    break;
+                }
+            }
+            other => panic!("expected CursorPage, got {other:?}"),
+        }
+    }
+
+    seen_vs.sort_unstable();
+    assert_eq!(
+        seen_vs,
+        vec![0, 1, 2, 3, 4],
+        "cursor must keep returning the PINNED-version value (v=2), not the \
+         post-update value (v=9999), across the rest of its pages"
+    );
+    assert!(
+        !seen_vs.contains(&9999),
+        "the post-update value must never appear in any page of this cursor"
+    );
+}

@@ -61,6 +61,54 @@ impl TableManager {
         }
     }
 
+    /// CR-B1 (#767): like [`list_stream`], but a tombstoned CURRENT winner is
+    /// yielded (empty `RecordCow`) instead of being suppressed from
+    /// enumeration.
+    ///
+    /// Used ONLY by `TableManager::read_as_of`'s enumeration source. A
+    /// cursor's / `AsOf` read's pinned snapshot version can predate a
+    /// concurrent DELETE — the deleted key's CURRENT winner is now a
+    /// tombstone, but the pinned version should still see the pre-delete
+    /// value. `list_stream`'s enumeration (via `MvccStore::current_stream`)
+    /// suppresses that key entirely, so `read_as_of` never even attempts an
+    /// as-of `get_at` for it. This variant emits it so `read_as_of`'s
+    /// `get_at(id, pinned_version)` call gets a chance to resolve the
+    /// pre-delete value; a non-MVCC table has no tombstone concept, so it
+    /// falls back to the plain [`list_stream`] (no behavior change there).
+    ///
+    /// `list_stream` itself is completely untouched — every other caller of
+    /// it keeps the CURRENT-state-only enumeration.
+    pub(crate) fn list_stream_with_tombstones(
+        &self,
+        batch_size: usize,
+    ) -> impl futures::Stream<Item = DbResult<Vec<(RecordId, RecordCow)>>> + '_ {
+        type DynStream<'a> = std::pin::Pin<
+            Box<dyn futures::Stream<Item = DbResult<Vec<(RecordId, RecordCow)>>> + Send + 'a>,
+        >;
+        if let Some(mvcc) = self.mvcc_store_ref() {
+            let mvcc = Arc::clone(mvcc);
+            let s: DynStream<'_> = Box::pin(async_stream::stream! {
+                let mut raw = mvcc.current_stream_with_tombstones(batch_size);
+                while let Some(batch_result) = raw.next().await {
+                    let batch_bytes = match batch_result {
+                        Ok(b) => b,
+                        Err(e) => {
+                            yield Err(e);
+                            return;
+                        }
+                    };
+                    for decoded in Table::decode_raw_batch(batch_bytes) {
+                        yield decoded;
+                    }
+                }
+            });
+            s
+        } else {
+            let s: DynStream<'_> = Box::pin(self.table.list_stream(batch_size));
+            s
+        }
+    }
+
     /// Like [`list_stream`], but applies a bytes-level pre-filter before
     /// decoding each record to `InnerValue`.  Rows that the pre-filter
     /// definitively rejects (`Some(false)`) are skipped without a full

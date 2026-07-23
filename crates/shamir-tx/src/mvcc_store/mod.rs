@@ -1146,6 +1146,47 @@ impl MvccStore {
         &self,
         batch: usize,
     ) -> impl futures::Stream<Item = DbResult<Vec<(Bytes, Bytes)>>> + Send {
+        self.current_stream_impl(batch, false)
+    }
+
+    /// CR-B1 (#767): like [`current_stream`](Self::current_stream), but a
+    /// tombstoned CURRENT winner is emitted (with an empty value) instead of
+    /// being suppressed.
+    ///
+    /// Used ONLY by `TableManager::list_stream_with_tombstones`, in turn used
+    /// ONLY by `read_as_of`'s enumeration. Every other caller of the
+    /// tombstone-suppressing `current_stream` (`table_manager_sorted_index.rs`,
+    /// `table_manager_replication.rs`, `migration/coordinator.rs`, the normal
+    /// `Latest` read path) is unaffected — they keep calling `current_stream`
+    /// unchanged.
+    ///
+    /// Why this is needed: a cursor's / `AsOf` read's pinned MVCC snapshot
+    /// version can be OLDER than a concurrent DELETE that has since made a
+    /// key's CURRENT winner a tombstone. `current_stream`'s enumeration
+    /// suppresses that key entirely, so `read_as_of` never even attempts a
+    /// `get_at(id, pinned_version)` call for it — the pre-delete value the
+    /// pinned snapshot should still see silently vanishes. Emitting the
+    /// tombstone here just means more ids get a `get_at` attempt in
+    /// `read_as_of`'s loop; `get_at` itself already correctly resolves each
+    /// id at the pinned version regardless of the key's CURRENT state.
+    pub fn current_stream_with_tombstones(
+        &self,
+        batch: usize,
+    ) -> impl futures::Stream<Item = DbResult<Vec<(Bytes, Bytes)>>> + Send {
+        self.current_stream_impl(batch, true)
+    }
+
+    /// Shared implementation behind [`current_stream`](Self::current_stream)
+    /// and
+    /// [`current_stream_with_tombstones`](Self::current_stream_with_tombstones).
+    /// `include_tombstones` selects which of the two semantics
+    /// `StreamingGroupByState`'s flush points apply — see
+    /// `version_entry.rs`'s `flush_group`/`drain_overlay`.
+    fn current_stream_impl(
+        &self,
+        batch: usize,
+        include_tombstones: bool,
+    ) -> impl futures::Stream<Item = DbResult<Vec<(Bytes, Bytes)>>> + Send {
         use futures::stream::unfold;
 
         let history = Arc::clone(&self.history);
@@ -1177,6 +1218,7 @@ impl MvccStore {
                 batch_size: batch,
                 floor,
                 overlay,
+                include_tombstones,
             },
             |state| async move {
                 match state {
@@ -1185,6 +1227,7 @@ impl MvccStore {
                         batch_size,
                         floor,
                         overlay,
+                        include_tombstones,
                     } => {
                         // Boundary: the store now yields `RecordKey` keys; the
                         // group-by state machine is `Bytes`-keyed throughout, so
@@ -1206,6 +1249,7 @@ impl MvccStore {
                             last_val: None,
                             last_ver: 0,
                             out_batch: Vec::new(),
+                            include_tombstones,
                         };
                         s.drain_and_emit().await
                     }

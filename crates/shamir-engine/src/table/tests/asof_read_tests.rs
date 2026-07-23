@@ -29,6 +29,15 @@ use crate::table::TableManager;
 // ─────────────────────────────────────────────────────────────────────────────
 
 async fn make_mvcc_table() -> (TableManager, Arc<MvccStore>) {
+    let (tbl, mvcc, _gate) = make_mvcc_table_with_gate().await;
+    (tbl, mvcc)
+}
+
+/// Like [`make_mvcc_table`], but also returns the [`RepoTxGate`] directly —
+/// needed by tests that must pin a live snapshot (`gate.open_snapshot()`)
+/// the way a cursor does, since `MvccStore` does not expose its gate back
+/// out (it is `pub(super)` inside `shamir-tx`).
+async fn make_mvcc_table_with_gate() -> (TableManager, Arc<MvccStore>, Arc<RepoTxGate>) {
     let data: Arc<dyn Store> = Arc::new(InMemoryStore::new());
     let info: Arc<dyn Store> = Arc::new(InMemoryStore::new());
     let history: Arc<dyn Store> = Arc::new(InMemoryStore::new());
@@ -43,7 +52,7 @@ async fn make_mvcc_table() -> (TableManager, Arc<MvccStore>) {
     mvcc.set_retention(Retention::keep_history()).unwrap();
 
     let tbl = base.with_mvcc_store(Arc::clone(&mvcc));
-    (tbl, mvcc)
+    (tbl, mvcc, gate)
 }
 
 async fn intern_fields(tbl: &TableManager) {
@@ -349,6 +358,69 @@ async fn asof_timestamp_resolves_or_errors() {
     assert_eq!(name, "alice");
 
     let _ = mvcc;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// CR-B1 (#767): a concurrent DELETE must not make a row vanish from
+// `read_as_of` at a pinned version that precedes the delete.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// A row alive at a pinned snapshot version is then DELETEd by a separate
+/// write. `read_as_of` at the pinned (pre-delete) version must still return
+/// the row — `current_stream`'s enumeration suppresses tombstoned keys
+/// entirely (the CURRENT winner is empty), so before the fix `read_as_of`
+/// never even attempts a `get_at` call for this id and silently drops it.
+#[tokio::test]
+async fn asof_still_sees_row_deleted_after_the_pinned_version() {
+    let (tbl, mvcc, gate) = make_mvcc_table_with_gate().await;
+    intern_fields(&tbl).await;
+
+    let interner = tbl.interner().get().await.unwrap();
+    let name_key = interner.touch_ind("name").unwrap().into_key();
+    let n_key = interner.touch_ind("n").unwrap().into_key();
+    tbl.interner().persist().await.unwrap();
+
+    // v1: {name: alice, n: 1} — pin a snapshot at this version.
+    let id = insert_first(&tbl, &build_record(&name_key, &n_key, "alice", 1)).await;
+    let v1 = mvcc.version_of(&id.to_bytes());
+
+    // A live snapshot pin, mirroring a cursor's `gate.open_snapshot()` — this
+    // guarantees the MVCC GC floor cannot advance past v1 while it's held.
+    let _snapshot = gate.open_snapshot().await;
+
+    // Concurrent DELETE — a separate write path removes the row entirely.
+    mvcc.delete_versioned(RecordKey::from_slice(id.as_bytes()))
+        .await
+        .unwrap();
+
+    let interner = tbl.interner().get().await.unwrap();
+    let refs = new_map();
+    let ctx = FilterContext::new(interner, &refs);
+
+    // AsOf(v1) must still see the pre-delete value — the row was alive then.
+    let q = ReadQuery::new("t")
+        .select(Select::fields(["n", "name"]))
+        .into_with_temporal(Temporal::AsOf {
+            at: At::Version(v1),
+        });
+    let result = tbl.read(&q, &ctx).await.unwrap();
+    assert_eq!(
+        result.records.len(),
+        1,
+        "AsOf(v1) must still return the row deleted AFTER v1 (bug: current_stream's \
+         tombstone-suppression drops it from enumeration entirely)"
+    );
+    let n = result.records[0].get_value_i64("n").unwrap();
+    assert_eq!(n, 1, "AsOf(v1) must return the pre-delete value n=1");
+
+    // Sanity: Latest must NOT see the now-deleted row.
+    let q_latest = ReadQuery::new("t").select(Select::fields(["n"]));
+    let res_latest = tbl.read(&q_latest, &ctx).await.unwrap();
+    assert_eq!(
+        res_latest.records.len(),
+        0,
+        "Latest must not see the deleted row"
+    );
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

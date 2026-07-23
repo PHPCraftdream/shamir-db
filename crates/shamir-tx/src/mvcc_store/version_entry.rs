@@ -67,6 +67,12 @@ pub(super) enum StreamingGroupByState {
         floor: u64,
         /// P1b: overlay winners `≤ floor` to merge into the stream.
         overlay: OverlayWinners,
+        /// CR-B1: when `true`, a tombstoned winner is emitted (empty value)
+        /// instead of being suppressed. Used ONLY by
+        /// `current_stream_with_tombstones` — `current_stream` itself always
+        /// passes `false`, preserving its existing CURRENT-state semantics
+        /// for every other caller.
+        include_tombstones: bool,
     },
     Streaming {
         stream: BoxedLogStream,
@@ -83,6 +89,8 @@ pub(super) enum StreamingGroupByState {
         last_ver: u64,
         /// Output batch being built.
         out_batch: Vec<(Bytes, Bytes)>,
+        /// CR-B1: see `Start::include_tombstones`.
+        include_tombstones: bool,
     },
     /// P1b: history stream exhausted — drain the leftover overlay-only keys
     /// (those never matched by a history key) in batches.
@@ -90,6 +98,8 @@ pub(super) enum StreamingGroupByState {
         batch_size: usize,
         /// Leftover overlay winners as a stack (popped to emit).
         leftover: Vec<(Bytes, (u64, Bytes))>,
+        /// CR-B1: see `Start::include_tombstones`.
+        include_tombstones: bool,
     },
     Done,
 }
@@ -97,14 +107,18 @@ pub(super) enum StreamingGroupByState {
 impl StreamingGroupByState {
     /// P1b: merge a flushed history group `(key, hist_ver, hist_val)` with its
     /// overlay winner (if present), pushing the survivor onto `out_batch`.
-    /// Removes the consumed key from `overlay`. Tombstone (empty) survivors are
-    /// suppressed.
+    /// Removes the consumed key from `overlay`. Tombstone (empty) survivors
+    /// are suppressed UNLESS `include_tombstones` is `true` (CR-B1:
+    /// `current_stream_with_tombstones`'s enumeration — the winner is emitted
+    /// regardless, so a caller like `read_as_of` still gets a `get_at`
+    /// attempt for a since-deleted key).
     fn flush_group(
         overlay: &mut OverlayWinners,
         out_batch: &mut Vec<(Bytes, Bytes)>,
         key: Bytes,
         hist_ver: u64,
         hist_val: Bytes,
+        include_tombstones: bool,
     ) {
         // shift_remove keeps remaining keys for the overlay-only drain phase.
         let winner = match overlay.shift_remove(&key) {
@@ -115,7 +129,7 @@ impl StreamingGroupByState {
             // History newer (or overlay absent for this key) → history wins.
             _ => hist_val,
         };
-        if !winner.is_empty() {
+        if include_tombstones || !winner.is_empty() {
             out_batch.push((key, winner));
         }
     }
@@ -134,6 +148,7 @@ impl StreamingGroupByState {
             mut last_val,
             mut last_ver,
             mut out_batch,
+            include_tombstones,
         ) = match self {
             StreamingGroupByState::Streaming {
                 stream,
@@ -144,14 +159,24 @@ impl StreamingGroupByState {
                 last_val,
                 last_ver,
                 out_batch,
+                include_tombstones,
             } => (
-                stream, batch_size, floor, overlay, cur_key, last_val, last_ver, out_batch,
+                stream,
+                batch_size,
+                floor,
+                overlay,
+                cur_key,
+                last_val,
+                last_ver,
+                out_batch,
+                include_tombstones,
             ),
             // P1b: overlay-only drain phase.
             StreamingGroupByState::DrainOverlay {
                 batch_size,
                 leftover,
-            } => return Self::drain_overlay(batch_size, leftover),
+                include_tombstones,
+            } => return Self::drain_overlay(batch_size, leftover, include_tombstones),
             _ => return None,
         };
         let mut stream = stream;
@@ -175,6 +200,7 @@ impl StreamingGroupByState {
                                         ck,
                                         last_ver,
                                         lv,
+                                        include_tombstones,
                                     );
                                 }
                                 cur_key = Some(orig_bytes);
@@ -197,6 +223,7 @@ impl StreamingGroupByState {
                                 last_val,
                                 last_ver,
                                 out_batch,
+                                include_tombstones,
                             },
                         ));
                     }
@@ -213,21 +240,30 @@ impl StreamingGroupByState {
                             last_val,
                             last_ver,
                             out_batch,
+                            include_tombstones,
                         },
                     ))
                 }
                 None => {
                     // History stream ended — flush final history group.
                     if let (Some(ck), Some(lv)) = (cur_key.take(), last_val.take()) {
-                        Self::flush_group(&mut overlay, &mut out_batch, ck, last_ver, lv);
+                        Self::flush_group(
+                            &mut overlay,
+                            &mut out_batch,
+                            ck,
+                            last_ver,
+                            lv,
+                            include_tombstones,
+                        );
                     }
                     // P1b: leftover overlay keys never matched a history key →
-                    // overlay-only. Emit non-tombstone ones in the drain phase.
+                    // overlay-only. Emit non-tombstone ones in the drain phase
+                    // (unless `include_tombstones`).
                     let leftover: Vec<(Bytes, (u64, Bytes))> = overlay.drain(..).collect();
                     if out_batch.is_empty() {
                         // Nothing from history this round — go straight to the
                         // overlay drain (which may itself yield None when empty).
-                        return Self::drain_overlay(batch_size, leftover);
+                        return Self::drain_overlay(batch_size, leftover, include_tombstones);
                     }
                     let emit: Vec<_> = out_batch;
                     if leftover.is_empty() {
@@ -238,6 +274,7 @@ impl StreamingGroupByState {
                         StreamingGroupByState::DrainOverlay {
                             batch_size,
                             leftover,
+                            include_tombstones,
                         },
                     ));
                 }
@@ -245,13 +282,18 @@ impl StreamingGroupByState {
         }
     }
 
-    /// P1b: emit a batch of leftover overlay-only keys (non-tombstone),
-    /// returning the next `DrainOverlay`/`Done` state. Yields `None` when no
-    /// non-tombstone leftovers remain.
-    fn drain_overlay(batch_size: usize, mut leftover: Vec<(Bytes, (u64, Bytes))>) -> GroupByStep {
+    /// P1b: emit a batch of leftover overlay-only keys, returning the next
+    /// `DrainOverlay`/`Done` state. Tombstone (empty) leftovers are skipped
+    /// UNLESS `include_tombstones` is `true` (CR-B1). Yields `None` when no
+    /// leftovers remain to emit.
+    fn drain_overlay(
+        batch_size: usize,
+        mut leftover: Vec<(Bytes, (u64, Bytes))>,
+        include_tombstones: bool,
+    ) -> GroupByStep {
         let mut out: Vec<(Bytes, Bytes)> = Vec::new();
         while let Some((key, (_ver, val))) = leftover.pop() {
-            if !val.is_empty() {
+            if include_tombstones || !val.is_empty() {
                 out.push((key, val));
             }
             if out.len() >= batch_size.max(1) {
@@ -260,6 +302,7 @@ impl StreamingGroupByState {
                     StreamingGroupByState::DrainOverlay {
                         batch_size,
                         leftover,
+                        include_tombstones,
                     },
                 ));
             }
