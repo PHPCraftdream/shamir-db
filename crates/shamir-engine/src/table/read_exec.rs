@@ -51,12 +51,18 @@ type DynBatchStream<'a> = std::pin::Pin<
 // `versions` stays `None` for them even when the client asks (the wire field
 // is documented as opt-in assistance, never a correctness contract).
 //
-// Helper below is called only on read paths where records preserve scan order
-// (no ORDER BY / DISTINCT / GROUP BY / aggregates — those reorder rows AFTER
-// the per-row version is read, and the parallel `versions` array would
-// silently drift out of alignment). For those reorder paths we deliberately
-// leave `versions = None` even when `with_version == true`; the brief calls
-// this out as an acceptable, documented exception.
+// Helper below is called on read paths where each output row maps 1:1 to
+// exactly one source row whose `RecordId` (and therefore whose version) is
+// known: order-preserving scans, AND the plain-ORDER BY path in
+// `read_collecting` which threads each row's `RecordId` through the sort so
+// the version array stays aligned after the reorder (F-7, #797).
+//
+// GROUP BY, aggregates, and DISTINCT COLLAPSE many source rows into one
+// output row, so no single version applies to the collapsed result —
+// `read_collecting` now REJECTS `with_version` for those combinations at
+// request time (a hard `DbError::Validation`) rather than silently returning
+// `versions = None`. ORDER BY alone does not collapse row identity (it only
+// reorders), so it is permitted and the ids are threaded through the sort.
 // ============================================================================
 
 /// Build the `QueryResult::versions` array for `ids` when the client asked
@@ -308,6 +314,32 @@ impl TableManager {
                 skipped: false,
                 versions: None,
             });
+        }
+
+        // F-7 (#797): `with_version` asks for a per-record version array that
+        // is only well-defined when each output row maps 1:1 to exactly one
+        // source row. GROUP BY, aggregates, and DISTINCT all COLLAPSE many
+        // source rows into one output row, so no single version applies to the
+        // collapsed result — reject these combinations at request time rather
+        // than silently returning `versions: None` (the earlier documented
+        // FG-2 tradeoff). Plain ORDER BY (no collapse) is permitted and handled
+        // inside `read_collecting` by carrying each row's RecordId through the
+        // sort.
+        //
+        // Placed here (before the count(*) / min aggregate shortcuts and the
+        // index/vector fast paths) so EVERY aggregate shape — including the
+        // O(1) `count(*)` shortcut, which would otherwise silently return
+        // `versions: None` — gets the same hard, clear error.
+        if query.with_version
+            && (query.group_by.is_some()
+                || exec::has_aggregates(&query.select)
+                || query.select.distinct)
+        {
+            return Err(DbError::Validation(
+                "with_version is not supported with GROUP BY, aggregates, or DISTINCT: \
+                 no single version applies to a collapsed row"
+                    .to_string(),
+            ));
         }
 
         // Opt #2 (1000×-class): `SELECT count(*) FROM table` (no WHERE,
@@ -847,6 +879,12 @@ impl TableManager {
         let has_agg = exec::has_aggregates(&query.select);
         let needs_raw = has_group_by || has_agg;
 
+        // F-7 (#797): the with_version + (GROUP BY | aggregate | DISTINCT)
+        // combination is rejected up-front in `read_impl` before any dispatch,
+        // so by the time we reach here with `with_version == true` we are
+        // guaranteed to be on the plain-ORDER BY path (no row collapse) — the
+        // id-threading logic below is correct under that invariant.
+
         // AGG #54 — compute the referenced top-level field id set ONCE per
         // query. When provably complete + concrete (`Some`), the Borrowed arm
         // below decodes ONLY those subtrees instead of the full record tree;
@@ -881,6 +919,17 @@ impl TableManager {
         // Bytes + per-row RecordView instead of a full InnerValue tree.
         let mut raw_acc: Vec<(RecordId, Bytes)> = Vec::new();
         let mut rec_acc: Vec<crate::query::read::QueryRecord> = Vec::new();
+        // F-7 (#797): plain ORDER BY + with_version — track each surviving
+        // row's RecordId alongside rec_acc so the per-record versions array
+        // can be rebuilt after the sort reorders rows. Only allocated when the
+        // client asked for versions AND this table is MVCC-backed (mirrors the
+        // tracking_versions pattern in read_counting and the index2 path).
+        let tracking_versions = query.with_version && self.mvcc_store_ref().is_some();
+        let mut id_acc: Vec<RecordId> = if tracking_versions {
+            Vec::with_capacity(16)
+        } else {
+            Vec::new()
+        };
         let proj = if !needs_raw {
             Some(exec::SelectProjection::new(
                 &query.select,
@@ -915,6 +964,9 @@ impl TableManager {
                                 rec_acc.push(crate::query::read::QueryRecord::Direct(
                                     proj.as_ref().unwrap().project_value(&view, interner),
                                 ));
+                                if tracking_versions {
+                                    id_acc.push(id);
+                                }
                             }
                         }
                     }
@@ -939,6 +991,9 @@ impl TableManager {
                                 rec_acc.push(crate::query::read::QueryRecord::Direct(
                                     proj.as_ref().unwrap().project_value(&record, interner),
                                 ));
+                                if tracking_versions {
+                                    id_acc.push(id);
+                                }
                             }
                         }
                     }
@@ -977,8 +1032,10 @@ impl TableManager {
             && !query.select.distinct
             && !has_group_by
             && !has_agg
-            && !query.count_total;
+            && !query.count_total
+            && !query.with_version;
 
+        let mut paged_ids: Vec<RecordId> = Vec::new();
         let (paged, pagination) = if use_topk {
             let order_by = query.order_by.as_ref().unwrap();
             let skip = skip_resolved as usize;
@@ -999,12 +1056,46 @@ impl TableManager {
             // `fast_path_pagination` helper (count_total == false → total
             // None). Returning a bare `None` here once silently dropped
             // pagination for every `ORDER BY` + `LIMIT` query.
+            //
+            // F-7 (#797): `with_version` is likewise excluded from the top-K
+            // gate for the same reason — the heap-based `apply_order_by_topk`
+            // carries only `BinaryHeap<QueryValue>` entries and cannot thread a
+            // companion `RecordId` vector through the reorder. Forcing the
+            // full-sort fallback lets the plain-ORDER-BY + with_version path
+            // carry each row's id (via `apply_order_by_qv_with_ids`) and
+            // rebuild the per-record versions array. Threading ids through the
+            // heap is a separate, larger change explicitly out of scope here.
             (topk_result, exec::fast_path_pagination(&query.pagination))
         } else {
             if let Some(ref order_by) = query.order_by {
-                exec::apply_order_by_qv(&mut qv_result, order_by);
+                if tracking_versions {
+                    // F-7 (#797): plain ORDER BY + with_version — sort the
+                    // records AND the companion id_acc with the SAME
+                    // permutation so the per-record versions array stays
+                    // aligned with records after the reorder.
+                    exec::apply_order_by_qv_with_ids(&mut qv_result, &mut id_acc, order_by);
+                } else {
+                    exec::apply_order_by_qv(&mut qv_result, order_by);
+                }
             }
-            exec::apply_pagination(qv_result, &query.pagination, query.count_total)
+            if tracking_versions {
+                // Zip records+ids so a single `apply_pagination` slices BOTH
+                // in lockstep (skip/take), keeping versions[i] aligned with
+                // records[i] after pagination. Unzip into the page and the
+                // paged id slice used below to build `versions`.
+                let paired: Vec<(shamir_types::types::value::QueryValue, RecordId)> =
+                    qv_result.into_iter().zip(id_acc.into_iter()).collect();
+                let (sliced, pg) =
+                    exec::apply_pagination(paired, &query.pagination, query.count_total);
+                let mut recs = Vec::with_capacity(sliced.len());
+                for (r, i) in sliced {
+                    recs.push(r);
+                    paged_ids.push(i);
+                }
+                (recs, pg)
+            } else {
+                exec::apply_pagination(qv_result, &query.pagination, query.count_total)
+            }
         };
         let final_records: Vec<crate::query::read::QueryRecord> = paged
             .into_iter()
@@ -1014,6 +1105,13 @@ impl TableManager {
         let elapsed = start.elapsed();
         let records_returned = final_records.len() as u64;
         let records = final_records;
+
+        // F-7 (#797): build the per-record versions array from the FINAL,
+        // paginated id slice (paged_ids), not the pre-pagination full list —
+        // only the surviving page's ids map to the surviving page's records.
+        // collect_versions returns None when with_version is false or the
+        // table has no MVCC backing (mirrors the existing FG-2 pattern).
+        let versions = collect_versions(query.with_version, self.mvcc_store_ref(), &paged_ids);
 
         Ok(QueryResult {
             records,
@@ -1027,7 +1125,7 @@ impl TableManager {
             value: None,
             explain: None,
             skipped: false,
-            versions: None,
+            versions,
         })
     }
 

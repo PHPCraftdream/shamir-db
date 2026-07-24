@@ -10,7 +10,9 @@ pub use crate::query::read::aggregate::{
     apply_aggregate_all, apply_group_by, validate_aggregate_select,
 };
 use crate::query::read::hashable_query_value::HashableQueryValue;
-pub use crate::query::read::order::{apply_order_by_qv, apply_order_by_topk};
+pub use crate::query::read::order::{
+    apply_order_by_qv, apply_order_by_qv_with_ids, apply_order_by_topk,
+};
 pub use crate::query::read::select_projection::SelectProjection;
 pub use crate::query::read::{Pagination, PaginationInfo, Select, SelectItem};
 use indexmap::IndexSet;

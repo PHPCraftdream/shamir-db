@@ -9,6 +9,7 @@ use smallvec::SmallVec;
 
 use crate::query::filter::numeric_cmp::cmp_i64_f64;
 use crate::query::read::{NullsOrder, OrderBy, OrderByItem, OrderDirection};
+use shamir_types::types::record_id::RecordId;
 use shamir_types::types::value::QueryValue;
 
 // ============================================================================
@@ -24,8 +25,51 @@ use shamir_types::types::value::QueryValue;
 /// separate, lower-priority item), and `Bin`/`Set` map to `Other` (unsortable,
 /// preserving insertion order via stable sort).
 pub fn apply_order_by_qv(records: &mut Vec<QueryValue>, order_by: &OrderBy) {
+    if let Some(idx) = qv_sort_permutation(records, order_by) {
+        apply_permutation(records, &idx);
+    }
+}
+
+/// Like [`apply_order_by_qv`] but applies the IDENTICAL permutation to a
+/// companion `RecordId` vector in lockstep, so `ids[i]` stays aligned with
+/// `records[i]` after the sort.
+///
+/// **Invariant:** `records.len() == ids.len()` — the caller (which built both
+/// vectors in lockstep during the scan loop) guarantees this; a
+/// `debug_assert!` guards it.
+///
+/// Used by the plain-ORDER BY + `with_version` read path: a plain sort
+/// reorders rows but does not collapse row identity (unlike GROUP BY /
+/// aggregates / DISTINCT), so each surviving output row still maps 1:1 to
+/// exactly one source row whose `RecordId` — and therefore whose MVCC version
+/// — is well-defined. Carrying the ids through the sort lets the per-record
+/// `versions` array be rebuilt from the repositioned ids.
+pub fn apply_order_by_qv_with_ids(
+    records: &mut Vec<QueryValue>,
+    ids: &mut Vec<RecordId>,
+    order_by: &OrderBy,
+) {
+    debug_assert_eq!(
+        records.len(),
+        ids.len(),
+        "apply_order_by_qv_with_ids: records and ids must have the same length (caller invariant)"
+    );
+    if let Some(idx) = qv_sort_permutation(records, order_by) {
+        apply_permutation(records, &idx);
+        apply_permutation(ids, &idx);
+    }
+}
+
+/// Compute the ORDER BY sort permutation for `records` as an index array
+/// (Phase 1: pre-resolve keys, Phase 2: sort the index array by those keys).
+///
+/// Returns `None` when no sort is needed (empty ORDER BY or ≤1 record) so
+/// callers can treat it as a no-op without re-checking those conditions. Both
+/// `apply_order_by_qv` and `apply_order_by_qv_with_ids` share this so the key
+/// resolution / comparison logic is written once.
+fn qv_sort_permutation(records: &[QueryValue], order_by: &OrderBy) -> Option<Vec<usize>> {
     if order_by.items.is_empty() || records.len() <= 1 {
-        return;
+        return None;
     }
 
     // Phase 1: pre-resolve canonical sort keys per record.
@@ -37,15 +81,19 @@ pub fn apply_order_by_qv(records: &mut Vec<QueryValue>, order_by: &OrderBy) {
     // Phase 2: sort index array by pre-resolved keys.
     let mut idx: Vec<usize> = (0..records.len()).collect();
     idx.sort_by(|&a, &b| compare_qv_preresolved(&keys[a], &keys[b], &order_by.items));
+    Some(idx)
+}
 
-    // Phase 3: apply permutation — swap each element into position.
-    // We drain the records into a temp vec and pick by index (no Default needed).
-    let mut tmp: Vec<Option<QueryValue>> = records.drain(..).map(Some).collect();
-    let sorted: Vec<QueryValue> = idx
-        .into_iter()
-        .map(|i| tmp[i].take().expect("permutation index used twice"))
-        .collect();
-    *records = sorted;
+/// Apply an index permutation in place (Phase 3) — reorders `v` so that the
+/// new `v[i]` is the old `v[idx[i]]`. Drains into a temp `Option<T>` vec and
+/// picks by index (no `Default` bound needed, so this works for `QueryValue`,
+/// which has none). The permutation must be a valid reordering of `0..v.len()`;
+/// each index is taken exactly once.
+fn apply_permutation<T>(v: &mut Vec<T>, idx: &[usize]) {
+    let mut tmp: Vec<Option<T>> = v.drain(..).map(Some).collect();
+    for &i in idx {
+        v.push(tmp[i].take().expect("permutation index used twice"));
+    }
 }
 
 /// Bounded top-K ORDER BY: returns the first `skip + take` records in order,
