@@ -115,9 +115,14 @@ fn lossy_f64<T: ToPrimitive>(v: &T) -> f64 {
 /// way, `f.floor()` is an exact integer value within `[-2^63, 2^63 - 1]`,
 /// i.e. `i64`'s full range, so `f.floor() as i64` is a lossless cast. From
 /// there, comparing `i` against `f_floor_i64` as plain integers settles
-/// everything except the exact-equal case, where the sign of `f.fract()`
-/// (0 vs positive — `f` is finite and `f >= f.floor()` always) breaks the
-/// tie: `i == f.floor()` and `f.fract() > 0.0` means `f > i`.
+/// everything except the exact-equal case, where comparing `f` against
+/// `f_floor` directly breaks the tie: `i == f.floor()` and `f > f_floor`
+/// means `f > i`. This must compare against `f_floor`, NOT `f.fract()` --
+/// `f.fract()` is `f - f.trunc()` (truncation-based, sign-preserving), so
+/// for negative `f` it is negative or zero, never positive, even when `f`
+/// has a nonzero fractional part (e.g. `(-0.5_f64).fract() == -0.5`). Only
+/// `f - f.floor()` is guaranteed `>= 0` for every finite `f`, positive or
+/// negative alike.
 #[inline]
 fn cmp_i64_f64(i: i64, f: f64) -> Option<Ordering> {
     if f.is_nan() {
@@ -149,11 +154,14 @@ fn cmp_i64_f64(i: i64, f: f64) -> Option<Ordering> {
     let f_floor_i64 = f_floor as i64;
     match i.cmp(&f_floor_i64) {
         Ordering::Equal => {
-            // i == floor(f) exactly. If f had a nonzero fractional part,
-            // f > floor(f) == i, so i < f. (For |f| >= 2^53 this branch
-            // never triggers since fract() is always 0 there -- covered
-            // for completeness at lower magnitudes.)
-            if f.fract() > 0.0 {
+            // i == floor(f) exactly. f >= f_floor always (floor rounds
+            // DOWN, never up) -- f > f_floor iff f has ANY nonzero
+            // fractional part, positive or negative f alike. Comparing
+            // against f_floor directly (not f.fract(), which is
+            // TRUNC-based and sign-preserving -- negative for negative
+            // fractional f, the bug this replaces) is correct for every
+            // sign.
+            if f > f_floor {
                 Some(Ordering::Less)
             } else {
                 Some(Ordering::Equal)

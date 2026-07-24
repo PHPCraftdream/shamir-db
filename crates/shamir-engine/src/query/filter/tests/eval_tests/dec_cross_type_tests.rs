@@ -426,6 +426,119 @@ fn compare_values_int_f64_fractional_tie_break() {
     );
 }
 
+// ============================================================================
+// W-1 (#788) -- cmp_i64_f64's tie-break used trunc-based f.fract(), which is
+// sign-preserving (negative for negative fractional f), not floor-based;
+// fixed to compare directly against f_floor instead.
+// ============================================================================
+
+/// THE core regression this task exists to fix: `Int(-1)` vs `F64(-0.5)`
+/// must be `Less`, NOT `Equal`. Under the OLD bug, `f.fract() > 0.0` was
+/// `(-0.5).fract() > 0.0` == `-0.5 > 0.0` == `false`, wrongly reporting
+/// `Equal` (`-1 == floor(-0.5) == -1`, and the tie-break itself was wrong).
+#[test]
+fn compare_values_int_f64_negative_fractional_tie_break_regression() {
+    // Setup-invariant sanity check: proves the OLD code's premise
+    // ("f.fract() >= 0 always") was false, and confirms floor() is the
+    // correct floor value used by the tie-break.
+    assert_eq!((-0.5_f64).floor(), -1.0);
+    assert!(
+        (-0.5_f64).fract() < 0.0,
+        "fract() is trunc-based and sign-preserving -- negative here, \
+         proving the old fract()-sign premise false"
+    );
+
+    assert_eq!(
+        compare_values(&QueryValue::Int(-1), &QueryValue::F64(-0.5)),
+        Some(Ordering::Less)
+    );
+}
+
+/// Mirror at `-5` / `-4.5`: `Int(-5)` vs `F64(-4.5)` must be `Less`.
+#[test]
+fn compare_values_int_f64_negative_fractional_tie_break_mirror_minus_five() {
+    assert_eq!((-4.5_f64).floor(), -5.0);
+    assert!((-4.5_f64).fract() < 0.0);
+
+    assert_eq!(
+        compare_values(&QueryValue::Int(-5), &QueryValue::F64(-4.5)),
+        Some(Ordering::Less)
+    );
+}
+
+/// Reversed-argument-order mirror for both regression cases above: proves
+/// the `(F64, Int)` arm's `.map(Ordering::reverse)` still composes correctly
+/// with the fixed comparator.
+#[test]
+fn compare_values_f64_int_negative_fractional_tie_break_reversed() {
+    assert_eq!(
+        compare_values(&QueryValue::F64(-0.5), &QueryValue::Int(-1)),
+        Some(Ordering::Greater)
+    );
+    assert_eq!(
+        compare_values(&QueryValue::F64(-4.5), &QueryValue::Int(-5)),
+        Some(Ordering::Greater)
+    );
+}
+
+/// Positive-fraction regression guard: CR-D3's own
+/// `compare_values_int_f64_fractional_tie_break` case (i = 5 vs f = 5.5 /
+/// f = 4.5) must still pass unchanged after the fix -- the positive-fraction
+/// path was already correct and must not regress.
+#[test]
+fn compare_values_int_f64_positive_fractional_tie_break_still_correct() {
+    assert_eq!(
+        compare_values(&QueryValue::Int(5), &QueryValue::F64(5.5)),
+        Some(Ordering::Less)
+    );
+    assert_eq!(
+        compare_values(&QueryValue::Int(5), &QueryValue::F64(4.5)),
+        Some(Ordering::Greater)
+    );
+}
+
+/// Exact-integer-valued negative `f64`: `Int(-3)` vs `F64(-3.0)` must be
+/// `Equal` -- proves the fix doesn't break the true-equal case for negative
+/// operands (`f > f_floor` is `false` when `f` has no fractional part).
+#[test]
+fn compare_values_int_f64_exact_integer_negative_operand_is_equal() {
+    assert_eq!(
+        compare_values(&QueryValue::Int(-3), &QueryValue::F64(-3.0)),
+        Some(Ordering::Equal)
+    );
+}
+
+/// `QvSortKey` mirror: an `ORDER BY` over a column mixing `Int(-5)` /
+/// `F64(-4.5)` / `Int(-6)` must sort to the correct total order
+/// `Int(-6) < Int(-5) < F64(-4.5)`, not the old bug's `Int(-5)` and
+/// `F64(-4.5)` comparing `Equal`.
+#[test]
+fn order_by_mixed_int_and_f64_negative_fractional_exact_total_order() {
+    use crate::query::read::order::apply_order_by_qv;
+    use crate::query::read::OrderBy;
+    use shamir_types::types::common::new_map_wc;
+
+    fn qv_map(pairs: &[(&str, QueryValue)]) -> QueryValue {
+        let mut m = new_map_wc(pairs.len());
+        for (k, v) in pairs {
+            m.insert((*k).to_string(), v.clone());
+        }
+        QueryValue::Map(m)
+    }
+
+    let mut qvs = vec![
+        qv_map(&[("v", QueryValue::F64(-4.5))]),
+        qv_map(&[("v", QueryValue::Int(-6))]),
+        qv_map(&[("v", QueryValue::Int(-5))]),
+    ];
+
+    apply_order_by_qv(&mut qvs, &OrderBy::asc("v"));
+
+    assert_eq!(qvs[0]["v"], QueryValue::Int(-6));
+    assert_eq!(qvs[1]["v"], QueryValue::Int(-5));
+    assert_eq!(qvs[2]["v"], QueryValue::F64(-4.5));
+}
+
 /// NaN unchanged: `compare_values(Int(5), F64(NAN))` still returns `None` --
 /// the existing, unmodified NaN convention.
 #[test]

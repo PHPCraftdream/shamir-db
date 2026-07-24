@@ -201,8 +201,11 @@ fn cmp_i64_big(i: i64, b: &BigInt) -> std::cmp::Ordering {
 /// `f64`'s 11-bit exponent covers every integer up to `2^63` in magnitude
 /// exactly at the boundaries (`i64::MIN == -2^63`, `i64::MAX == 2^63 - 1`,
 /// both exact powers of two); any finite `f` within that range has an exact,
-/// losslessly-`i64`-castable `floor()`, so a bounds-check + floor/fract
-/// tie-break is exact with no `BigInt` needed.
+/// losslessly-`i64`-castable `floor()`, so a bounds-check + a tie-break
+/// comparing directly against `f_floor` (NOT `f.fract()`, which is
+/// truncation-based and sign-preserving -- negative for negative fractional
+/// `f` -- so it cannot be used to detect "any nonzero fractional part"
+/// across signs) is exact with no `BigInt` needed.
 #[inline]
 fn cmp_i64_f64(i: i64, f: f64) -> Option<std::cmp::Ordering> {
     if f.is_nan() {
@@ -227,7 +230,14 @@ fn cmp_i64_f64(i: i64, f: f64) -> Option<std::cmp::Ordering> {
     let f_floor_i64 = f_floor as i64;
     match i.cmp(&f_floor_i64) {
         std::cmp::Ordering::Equal => {
-            if f.fract() > 0.0 {
+            // i == floor(f) exactly. f >= f_floor always (floor rounds
+            // DOWN, never up) -- f > f_floor iff f has ANY nonzero
+            // fractional part, positive or negative f alike. Comparing
+            // against f_floor directly (not f.fract(), which is
+            // TRUNC-based and sign-preserving -- negative for negative
+            // fractional f, the bug this replaces) is correct for every
+            // sign.
+            if f > f_floor {
                 Some(std::cmp::Ordering::Less)
             } else {
                 Some(std::cmp::Ordering::Equal)
