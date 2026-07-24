@@ -68,7 +68,7 @@ pub fn notify_ready() {
     #[cfg(target_os = "linux")]
     {
         // Best-effort; no-op if $NOTIFY_SOCKET is unset (not under systemd).
-        let _ = sd_notify::notify(false, &[sd_notify::NotifyState::Ready]);
+        let _ = sd_notify::notify(&[sd_notify::NotifyState::Ready]);
     }
 }
 
