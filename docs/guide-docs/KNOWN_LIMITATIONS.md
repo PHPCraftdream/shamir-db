@@ -96,6 +96,34 @@ artifact).
   column add/rename/drop-with-data-transform facility here). See
   `crates/shamir-db/src/shamir_db/execute/admin_migration.rs:19` (entry
   point) and the `dst_engine` resolution at lines 90-98.
+- **The migration API is experimental, opt-in only, and DISABLED BY
+  DEFAULT.** `StartMigration` is rejected with a structured
+  `experimental_feature_disabled` error unless an operator has first
+  called `ShamirDb::enable_experimental_migration_api()`; the live
+  `shamir-server` never calls this, so no regular client can trigger a
+  migration. This gate exists because the feature has several known,
+  unfixed correctness gaps (all tracked as future work):
+  - **No write interception.** `MigrationShadowLog` is constructed at
+    `StartMigration` time, but nothing in production code ever appends
+    to it — a write landing on the source table between the initial
+    snapshot copy and the final commit is silently lost from the
+    destination. `CommitMigration` only compares record COUNTS, so an
+    in-place field edit (no row-count change) is not even detected as a
+    discrepancy.
+  - **Only `dst_engine: "in_memory"` is supported** — not useful for a
+    real durability-preserving migration.
+  - **Non-durable coordinator state.** `MigrationCoordinator` lives
+    only in the in-memory `ShamirDb::active_migrations` map — a server
+    restart mid-migration loses all state, with no recovery path.
+  - **`try_lock`-based duplicate-start guard.** Lock contention (a
+    legitimately concurrent, in-progress operation) is indistinguishable
+    from "no migration running," so a second `StartMigration` can race
+    in.
+  - **No post-commit history / list-all-migrations capability.**
+  See `crates/shamir-db/src/shamir_db/shamir_db/core.rs`
+  (`enable_experimental_migration_api` / `experimental_migration_enabled`)
+  for the gate and `crates/shamir-db/src/shamir_db/execute/admin_migration.rs`
+  for the entry-point check.
 
 ## 3. Indexes
 

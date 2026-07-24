@@ -37,6 +37,28 @@ impl ShamirAdminExecutor {
         let err_access =
             |e: shamir_types::access::AccessError| err_code("access_denied", e.to_string());
 
+        // Experimental-feature gate (#795 / F-5). The online migration API
+        // is disabled by default; a disabled feature is not even an authz
+        // question, so check the flag FIRST — before the authorize call —
+        // and reject with a structured error that names the opt-in method
+        // and the unfixed correctness gaps. This is the only entry point
+        // gated (Commit/Rollback/Status become unreachable for any caller
+        // who never opted in, so they don't re-check).
+        if !self.shamir.experimental_migration_enabled() {
+            return Err(err_code(
+                "experimental_feature_disabled",
+                "StartMigration is experimental and disabled by default. \
+                 It is not yet crash-safe or online-safe: writes to the source \
+                 table during an in-flight migration are lost from the \
+                 destination (no write interception), only the in_memory \
+                 dst_engine is supported, and the MigrationCoordinator state \
+                 is non-durable (a server restart mid-migration loses all \
+                 state). To opt in for internal testing, call \
+                 ShamirDb::enable_experimental_migration_api()."
+                    .to_string(),
+            ));
+        }
+
         self.shamir
             .authorize_access(
                 &self.actor,

@@ -31,6 +31,13 @@ use shamir_query_builder::Query;
 
 async fn setup() -> ShamirDb {
     let shamir = ShamirDb::init_memory().await.unwrap();
+    // F-5 (#795): the migration API is gated as experimental and disabled
+    // by default. These index-preservation tests exercise the REAL
+    // mechanism end-to-end and have nothing to do with the unfixed
+    // write-interception gap, so opt in here (the exact "opt-in for
+    // internal testing, disabled for real clients" posture the gate is
+    // going for).
+    shamir.enable_experimental_migration_api();
     let db = shamir.create_db("testdb").await;
     let repo_config = RepoConfig::new("src_repo", BoxRepoFactory::in_memory())
         .add_table(TableConfig::new("docs"));

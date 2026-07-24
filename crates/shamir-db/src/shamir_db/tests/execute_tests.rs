@@ -266,6 +266,12 @@ async fn test_migration_lifecycle_in_memory() {
     use shamir_query_builder::ddl;
 
     let shamir = setup_shamir().await;
+    // F-5 (#795): the migration API is gated as experimental and disabled
+    // by default; this test exercises the StartMigration success path, so
+    // opt in (the shared setup_shamir() helper is intentionally NOT
+    // modified — it's shared with CRUD tests and with the gate-off
+    // rejection test below).
+    shamir.enable_experimental_migration_api();
 
     // Seed some data
     let mut b = Batch::new();
@@ -328,6 +334,9 @@ async fn test_migration_rollback() {
     use shamir_query_builder::ddl;
 
     let shamir = setup_shamir().await;
+    // F-5 (#795): opt in to the experimental migration API — this test
+    // exercises the StartMigration success path before rolling back.
+    shamir.enable_experimental_migration_api();
 
     // Seed
     let mut b = Batch::new();
@@ -388,6 +397,98 @@ async fn test_migration_unknown_id() {
         err,
         crate::query::batch::BatchError::QueryError { .. }
     ));
+}
+
+// ============================================================================
+// F-5 (#795): the online migration API is gated as experimental, disabled
+// by default. The next two tests pin the gate's on/off behavior at the
+// execute() level (the index-preservation tests in
+// `tests/migration_index2.rs` incidentally cover the ON path via their
+// own setup; these two pin both transitions deliberately).
+// ============================================================================
+
+/// A fresh `ShamirDb` (no `enable_experimental_migration_api()` call)
+/// must reject `StartMigration` with a structured `QueryError` whose
+/// `code` is `experimental_feature_disabled` and whose message names the
+/// opt-in method — not a panic, not a generic / unclassified error.
+#[tokio::test]
+async fn test_start_migration_rejected_without_experimental_opt_in() {
+    use shamir_query_builder::ddl;
+
+    let shamir = setup_shamir().await;
+    // Deliberately do NOT call shamir.enable_experimental_migration_api().
+
+    let mut b = Batch::new();
+    b.id(1);
+    b.start_migration("mig", ddl::start_migration("users", "cold", "in_memory"));
+    let req = b.to_request_via_msgpack();
+    let err = shamir.execute("testdb", &req).await.unwrap_err();
+
+    // Structured error with the specific code, NOT a generic QueryError.
+    match err {
+        crate::query::batch::BatchError::QueryError { code, message, .. } => {
+            assert_eq!(
+                code.as_deref(),
+                Some("experimental_feature_disabled"),
+                "expected experimental_feature_disabled code, got code={code:?}, msg={message}"
+            );
+            // The message must tell the caller exactly what to do and why.
+            assert!(
+                message.contains("enable_experimental_migration_api"),
+                "message must name the opt-in method; got: {message}"
+            );
+        }
+        other => panic!("expected QueryError, got {other:?}"),
+    }
+
+    // Sanity: no migration was started (the gate short-circuits before any
+    // state is touched). The destination repo must not have been created.
+    let db = shamir.get_db("testdb").expect("testdb exists");
+    assert!(
+        !db.has_repo("cold"),
+        "the experimental gate must short-circuit before the dst repo is created"
+    );
+    assert!(
+        shamir.active_migrations().is_empty(),
+        "no MigrationCoordinator should be registered when the gate rejects"
+    );
+}
+
+/// After `enable_experimental_migration_api()` the same `StartMigration`
+/// op proceeds normally (returns `cutover_ready`). This is the dedicated
+/// ON-path counterpart to the test above.
+#[tokio::test]
+async fn test_start_migration_succeeds_after_experimental_opt_in() {
+    use shamir_query_builder::ddl;
+
+    let shamir = setup_shamir().await;
+    shamir.enable_experimental_migration_api();
+
+    // Seed one row so the source table exists and is non-empty.
+    let mut b = Batch::new();
+    b.id(0);
+    b.op_silent("s", insert("users").row(doc().set("name", "Alice")));
+    shamir
+        .execute("testdb", &b.to_request_via_msgpack())
+        .await
+        .unwrap();
+
+    let mut b = Batch::new();
+    b.id(1);
+    b.start_migration("mig", ddl::start_migration("users", "cold", "in_memory"));
+    let resp = shamir
+        .execute("testdb", &b.to_request_via_msgpack())
+        .await
+        .expect("StartMigration must succeed after enable_experimental_migration_api()");
+    let mig = &resp.results["mig"].records[0];
+    assert_eq!(mig.get_value_str("phase"), Some("cutover_ready"));
+    assert!(
+        shamir
+            .active_migrations()
+            .iter()
+            .any(|e| e.value().targets_table("main", "users")),
+        "a MigrationCoordinator targeting main/users must be registered after a successful StartMigration"
+    );
 }
 
 // ============================================================================

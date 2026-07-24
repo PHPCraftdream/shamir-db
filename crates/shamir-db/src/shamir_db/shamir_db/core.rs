@@ -120,6 +120,16 @@ pub struct ShamirDb {
     /// `ListOp::Users` / owner-delegation scope lookup read real directory
     /// state. When `None`, names resolve to `None` (degraded but safe).
     pub(super) principal_resolver: Option<Arc<dyn PrincipalResolver>>,
+    /// Experimental-feature gate for the online storage-engine migration
+    /// API (`StartMigration` / `CommitMigration` / `RollbackMigration` /
+    /// `MigrationStatus`). Defaults to `false` — no client can begin a
+    /// migration until an operator explicitly calls
+    /// [`Self::enable_experimental_migration_api`]. `Relaxed` ordering is
+    /// sufficient: this is a coarse, rarely-toggled admin switch set
+    /// once at process startup, not a hot-path atomic. Shared via `Arc`
+    /// so all `ShamirDb` clones observe the toggle (matches the
+    /// established `Arc<...>` shared-state pattern on this struct).
+    pub(super) experimental_migration_enabled: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl ShamirDb {
@@ -177,6 +187,7 @@ impl ShamirDb {
             data_root,
             user_admin_port: None,
             principal_resolver: None,
+            experimental_migration_enabled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         };
 
         // Load existing databases from system store
@@ -510,6 +521,52 @@ impl ShamirDb {
 
     pub fn active_migrations(&self) -> &Arc<DashMap<String, Arc<MigrationCoordinator>, THasher>> {
         &self.active_migrations
+    }
+
+    /// Opt in to the **experimental** online storage-engine migration API
+    /// (`StartMigration` / `CommitMigration` / `RollbackMigration` /
+    /// `MigrationStatus`).
+    ///
+    /// ⚠️ **This API is UNSAFE for production use today.** It is disabled
+    /// by default; no client can begin a migration until an operator
+    /// explicitly calls this method, and the live `shamir-server` never
+    /// calls it. The known, unfixed correctness gaps (tracked as future
+    /// work) are:
+    ///
+    /// - **No write interception.** The `MigrationShadowLog` constructed
+    ///   at `StartMigration` time is never appended to by production
+    ///   write paths — writes landing on the source table between the
+    ///   initial snapshot copy and the final commit are silently lost
+    ///   from the destination. `CommitMigration` only compares record
+    ///   COUNTS, so an in-place field edit (no row-count change) isn't
+    ///   even detected as a discrepancy.
+    /// - **`dst_engine: "in_memory"` only.** Not useful for a real
+    ///   durability-preserving migration.
+    /// - **Non-durable coordinator state.** `MigrationCoordinator`
+    ///   state lives only in the in-memory `active_migrations` map — a
+    ///   server restart mid-migration loses all state with no recovery
+    ///   path.
+    /// - **`try_lock`-based duplicate-start guard.** Lock contention
+    ///   (a legitimately concurrent, in-progress operation) is
+    ///   indistinguishable from "no migration running," so a second
+    ///   `StartMigration` can race in.
+    /// - **No list-all-migrations / post-commit history** capability.
+    ///
+    /// Calling this flips the gate to "enabled" for the remainder of the
+    /// process lifetime (there is intentionally no `disable` counterpart).
+    pub fn enable_experimental_migration_api(&self) {
+        self.experimental_migration_enabled
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Current state of the experimental migration-API gate. `false` by
+    /// default; `true` after [`Self::enable_experimental_migration_api`]
+    /// has been called. `handle_start_migration` consults this before
+    /// doing any other work — see
+    /// `crate::shamir_db::execute::admin_migration`.
+    pub fn experimental_migration_enabled(&self) -> bool {
+        self.experimental_migration_enabled
+            .load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// Base directory for durable repos. `Some` when the system store
