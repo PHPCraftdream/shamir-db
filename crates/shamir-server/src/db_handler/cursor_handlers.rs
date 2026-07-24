@@ -1085,6 +1085,23 @@ impl ShamirDbHandler {
             Err(e) => return error_response(&e),
         };
 
+        // W-4 (#790, Wave D review): reserve the RI-15 upfront budget slice
+        // BEFORE the CR-D2 null probe below, not just before the first-page
+        // read — the probe's own `read_with_encoding` call is the SAME cost
+        // class as the first-page read (full pinned-snapshot scan; see
+        // `order_by_column_contains_null`'s doc comment), so it was
+        // previously running with zero admission-gate protection: a burst of
+        // concurrent `CreateCursor` calls against a keyset-eligible,
+        // null-containing query could all run the probe simultaneously,
+        // unthrottled by the very budget mechanism the first-page read right
+        // after it is subject to. Widening the single upfront reservation to
+        // cover BOTH reads (rather than reserving twice) is safe:
+        // `enforce_page_budget`'s later `shrink_to`/`grow_unchecked` step
+        // only cares about the FINAL measured size of `response`, never
+        // about when the reservation started, so moving the acquire earlier
+        // changes nothing about the eventual shrink/grow math.
+        let budget_guard = reserve_page_budget_upfront(self).await;
+
         // CR-D2 (#783, release blocker): a query's ORDER BY SHAPE alone
         // (`pagination_mode_for_query`) cannot tell whether the column's
         // DATA is actually safe for the keyset boundary-filter scheme — a
@@ -1126,15 +1143,6 @@ impl ShamirDbHandler {
         first_query.temporal = Temporal::AsOf {
             at: At::Version(pinned_version),
         };
-
-        // CR-B2: reserve an upfront, pessimistic slice of the RI-15 budget
-        // BEFORE running the pinned-version read below — this is what
-        // actually bounds execution-time memory for a cursor page, not
-        // just write-path residency. `None` when there's no natural
-        // upfront estimate (unbounded budget or inactive per-page cap);
-        // `enforce_page_budget` falls back to its post-hoc-only acquire in
-        // that case.
-        let budget_guard = reserve_page_budget_upfront(self).await;
 
         let mut page = match table
             .read_with_encoding(&first_query, &ctx, Default::default())
@@ -1409,6 +1417,21 @@ impl ShamirDbHandler {
         // additional information either order), but nothing stops a future
         // change from making the ORDER matter, so keeping the two handlers
         // consistent is worth the pure reshuffle.
+        //
+        // W-6 (#790, Wave D review): NOT quite a pure reshuffle after all —
+        // a db dropped between `CreateCursor` and this `FetchNext` now
+        // surfaces as `access_denied`, not `unknown_db`, for a non-admin
+        // actor. Verified mechanism (NOT resource_meta's fail-closed path —
+        // `ShamirDb::remove_db` only deletes the db's own catalogue row,
+        // which `resource_meta` treats as a plain not-found default-open,
+        // not a storage error): the TARGET TABLE's own real, still-
+        // persisted ACL (untouched by `remove_db`) denies a non-owner
+        // directly, under the NEW order, before `resolve_repo` ever gets a
+        // chance to run and return `unknown_db` for the now-missing db.
+        // Either way this is a deliberate, accepted consequence of
+        // authorizing before resolving, documented here since it was not
+        // explicitly called out when the reorder landed (CR-D5/N-9) — see
+        // `fetch_next_after_db_dropped_mid_scroll_surfaces_access_denied_not_unknown_db`.
         //
         // Re-authorize on every FetchNext, not just at CreateCursor time: a
         // pinned snapshot only bounds WHAT DATA a cursor can see, not

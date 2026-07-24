@@ -136,6 +136,124 @@ fn swap_failure_with_successful_rollback_gets_new_message_and_leaves_data_dir_in
 }
 
 // ----------------------------------------------------------------------------
+// W-5(a) (#790, Wave D review): the step-5 FIRST rename's failure path must
+// clean up the staged temp_dir too, same as steps 3/4 — previously a bare
+// `?` orphaned it with no reference anywhere in the error message.
+// ----------------------------------------------------------------------------
+
+/// Forces `restore()`'s step-5 FIRST rename (`data_dir -> backup_sibling`)
+/// to fail, by holding an open file handle inside the PRE-EXISTING
+/// `data_dir` itself (unlike the rollback test above, which locks the
+/// STAGED temp dir to fail the SECOND rename) — on Windows, an open handle
+/// inside a directory blocks `fs::rename` of that directory. `data_dir`
+/// exists synchronously before `restore()` is even called here, so (unlike
+/// the second-rename test) no background watcher thread is needed: the
+/// handle can simply be opened up front and held for the whole call.
+///
+/// Asserts: the error is a plain `RestoreError::Io` (nothing has been
+/// staged for a rollback yet — this is NOT `SwapFailedRollbackSucceeded`/
+/// `SwapPartialFailure`, those are the SECOND rename's failure shapes), AND
+/// the staged `*.restore_tmp_*` temp_dir is cleaned up (W-5(a)'s fix,
+/// reusing the same `cleanup_staged_temp_dir` helper N-6 already added for
+/// steps 3/4) rather than orphaned on disk with no pointer to it.
+#[test]
+fn step5_first_rename_failure_cleans_up_staged_temp_dir() {
+    let root = TempDir::new().unwrap();
+    let snapshot = make_snapshot(root.path());
+
+    let data_dir = root.path().join("data_dir");
+    fs::create_dir_all(&data_dir).unwrap();
+    fs::write(data_dir.join("original.txt"), b"ORIGINAL PRE-RESTORE DATA").unwrap();
+
+    // Hold an open read handle inside `data_dir` itself for the whole
+    // `restore()` call — blocks the FIRST rename
+    // (`fs::rename(data_dir, &backup_sibling)`) with a sharing violation on
+    // Windows, before the second rename is ever attempted.
+    let held = fs::File::open(data_dir.join("original.txt")).unwrap();
+
+    let err = restore(&snapshot, &data_dir, true).unwrap_err();
+
+    assert!(
+        matches!(err, RestoreError::Io(_)),
+        "the FIRST rename's failure must surface as a plain RestoreError::Io \
+         (nothing has been staged for a rollback yet, so this must NOT be \
+         SwapFailedRollbackSucceeded/SwapPartialFailure, which are the SECOND \
+         rename's failure shapes), got: {err:?}"
+    );
+
+    let leftover = fs::read_dir(root.path())
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .any(|e| e.file_name().to_string_lossy().contains(".restore_tmp_"));
+    assert!(
+        !leftover,
+        "the staged *.restore_tmp_* dir must be cleaned up after a step-5 \
+         FIRST-rename failure (W-5(a), #790) -- it survived, meaning the \
+         cleanup did not run or failed silently"
+    );
+
+    // data_dir itself must be untouched -- the first rename never actually
+    // completed (it failed), so the original content is exactly as it was.
+    let original = fs::read_to_string(data_dir.join("original.txt")).unwrap();
+    assert_eq!(original, "ORIGINAL PRE-RESTORE DATA");
+
+    drop(held);
+}
+
+// ----------------------------------------------------------------------------
+// W-5(b) (#790, Wave D review): the staged temp_dir is now created with a
+// single atomic `fs::create_dir` call instead of a separate `exists()` check
+// followed by `create_dir_all` -- closing a check-then-act TOCTOU. The
+// operator-facing "already exists" message must stay identical.
+// ----------------------------------------------------------------------------
+
+/// A pre-existing directory already occupying the computed `temp_dir` name
+/// must still be reported via the SAME `AlreadyExists`-shaped
+/// `RestoreError::Io` message as before the `fs::create_dir` swap -- the
+/// underlying detection mechanism changed (a single atomic syscall instead
+/// of a separate `exists()` probe), but the operator-facing behavior must
+/// not.
+#[test]
+fn preexisting_temp_dir_name_collision_still_reports_already_exists() {
+    let root = TempDir::new().unwrap();
+    let snapshot = make_snapshot(root.path());
+
+    let data_dir = root.path().join("data_dir");
+
+    // `restore()` computes `temp_dir` deterministically as
+    // `{parent}/{data_dir_name}.restore_tmp_{stamp}` where `stamp` is a
+    // second-granularity UTC `YYYYMMDD_HHMMSS` timestamp taken INSIDE
+    // `restore()` itself -- there is no hook to read it back directly, so
+    // pre-create a directory at the name `crate::backup::utc_timestamp()`
+    // produces right here, immediately before calling `restore()`, to
+    // minimize (though not with absolute certainty eliminate) the
+    // vanishingly small second-boundary race between this call and
+    // `restore()`'s own internal timestamp.
+    let stamp = crate::backup::utc_timestamp();
+    let temp_dir = root.path().join(format!("data_dir.restore_tmp_{stamp}"));
+    fs::create_dir_all(&temp_dir).unwrap();
+
+    let err = restore(&snapshot, &data_dir, true).unwrap_err();
+
+    match &err {
+        RestoreError::Io(io_err) => {
+            assert_eq!(
+                io_err.kind(),
+                std::io::ErrorKind::AlreadyExists,
+                "expected an AlreadyExists io error, got: {io_err:?}"
+            );
+        }
+        other => panic!("expected RestoreError::Io(AlreadyExists), got: {other:?}"),
+    }
+    let msg = err.to_string();
+    assert!(
+        msg.contains("temporary restore dir already exists"),
+        "the AlreadyExists message text must be unchanged by the \
+         create_dir_all -> create_dir mechanism swap: {msg}"
+    );
+}
+
+// ----------------------------------------------------------------------------
 // N-6: staged temp dir cleanup on an EARLIER (step 3/4) failure.
 // ----------------------------------------------------------------------------
 

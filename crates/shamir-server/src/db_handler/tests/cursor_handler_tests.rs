@@ -925,6 +925,76 @@ async fn fetch_next_denies_after_permission_revoked_mid_scroll() {
     }
 }
 
+/// W-6 (#790, Wave D review): regression guard pinning the EXACT (accepted,
+/// documented) behavior change from CR-D5/N-9's `fetch_next` authorize-
+/// before-resolve reorder — a db dropped between `CreateCursor` and a later
+/// `FetchNext` now surfaces as `access_denied`, NOT `unknown_db`, for a
+/// non-admin actor.
+///
+/// Mechanism (see the comment at `fetch_next`'s N-9/W-6 authorize call
+/// site): `ShamirDb::remove_db` only deletes the db's OWN catalogue row
+/// (`TABLE_DATABASES`) plus the in-memory `dbs` registry entry — the
+/// table's own persisted ACL (`TABLE_TABLES`, untouched) survives. Under
+/// the NEW order, `authorize_cursor_read` runs first and denies bob (a
+/// non-owner) via that still-real, still-enforced table ACL BEFORE
+/// `resolve_repo` ever gets a chance to run and return `unknown_db` for
+/// the now-missing db. This is NOT a bug fix — it is a regression guard for
+/// the intentionally-accepted new behavior (the review calls it
+/// "defensible" / "arguably more correct"); it must never silently flip
+/// back to `unknown_db` without that being a deliberate, reviewed change.
+#[tokio::test]
+async fn fetch_next_after_db_dropped_mid_scroll_surfaces_access_denied_not_unknown_db() {
+    let handler = build_handler_with_rows(5, CursorLimitsCap::UNLIMITED).await;
+    let bob = other_session();
+
+    // Bob needs Execute on every ancestor (db/store/table) to CREATE the
+    // cursor at all -- open all three first (same setup
+    // `fetch_next_denies_after_permission_revoked_mid_scroll` uses), then
+    // narrow the table back down below before the db itself is dropped.
+    open_app_main_items(&handler, 0o777).await;
+
+    let query = ReadQuery::new("items").order_by(OrderBy::asc("v"));
+    let resp = send(&handler, &bob, create_cursor_req(query, 2)).await;
+    let cursor_id = match resp {
+        DbResponse::CursorPage { cursor_id, .. } => cursor_id,
+        other => panic!("expected CursorPage once opened, got {other:?}"),
+    };
+
+    // Re-close the table to its enforced-default 0o700 (owner-only) AND
+    // drop the db's own catalogue/registry entry -- mirrors "db dropped
+    // mid-scroll": the table's real ACL (denying bob) survives the drop
+    // untouched, only the db's own row/registry entry disappears.
+    let alice_owner = Actor::User(principal64([0xAB; 16]));
+    let resource = ResourceRef::Table {
+        table: ["app".into(), "main".into(), "items".into()],
+    };
+    let mut close_batch = Batch::new();
+    close_batch.chmod("close", chmod(resource, 0o700));
+    handler
+        .db()
+        .execute_as(alice_owner, "app", &close_batch.build())
+        .await
+        .expect("owner chmod back to 0o700 must succeed");
+
+    let removed = handler.db().remove_db("app").await;
+    assert!(removed, "sanity: the db must have actually been removed");
+
+    let resp = send(&handler, &bob, fetch_next_req(cursor_id, 2)).await;
+    match resp {
+        DbResponse::Error { code, .. } => {
+            assert_eq!(
+                code, "access_denied",
+                "a db dropped mid-scroll must surface as access_denied (the NEW, \
+                 accepted CR-D5/N-9 authorize-before-resolve order), not unknown_db \
+                 (the OLD, pre-reorder behavior) -- see W-6 (#790)"
+            );
+        }
+        other => {
+            panic!("expected access_denied for a db dropped mid-scroll (W-6, #790), got {other:?}")
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // CR-A3 (#762) — server-side page_size validation: page_size == 0 must
 // never reach the has_more == `0 >= 0 -> true` infinite-loop computation,

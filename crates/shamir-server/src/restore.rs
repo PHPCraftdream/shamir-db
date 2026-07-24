@@ -20,8 +20,13 @@
 //!    BEFORE touching `data_dir` at all. A checksum mismatch or missing
 //!    manifest aborts the whole restore with no side effects.
 //! 3. **Copy to a TEMPORARY sibling directory** (same filesystem as
-//!    `data_dir`'s parent — required for the atomic rename in step 5). A
-//!    copy failure here best-effort removes the staged temp dir
+//!    `data_dir`'s parent — required for the atomic rename in step 5). The
+//!    temp dir is created with `fs::create_dir` (W-5(b), #790: NOT
+//!    `create_dir_all` — a single atomic syscall that itself fails with
+//!    `AlreadyExists` if the target is already there, closing the
+//!    check-then-act TOCTOU a separate `exists()` probe used to leave open;
+//!    safe here because `parent` is guaranteed to already exist). A copy
+//!    failure here best-effort removes the staged temp dir
 //!    ([`cleanup_staged_temp_dir`]) before propagating the original error.
 //! 4. **Invalidate sessions IN THE STAGED COPY, before anything touches the
 //!    live `data_dir`**: open the `users` store INSIDE the temp dir (NOT
@@ -35,18 +40,22 @@
 //! 5. **Atomic swap**: rename the CURRENT `data_dir` (if it exists) to a
 //!    `.pre_restore_backup_<timestamp>` sibling (preserved, NOT deleted —
 //!    the explicit rollback path), then rename the temp dir (tickets
-//!    already invalidated in step 4) into place as the new `data_dir`. A
-//!    failure in the second rename triggers a best-effort rollback of the
-//!    first — this is a SEPARATE failure mode from step 4's, and is
-//!    unaffected by the step 4 reordering. The rollback's own outcome
-//!    determines WHICH of two distinct errors is returned:
+//!    already invalidated in step 4) into place as the new `data_dir`. If
+//!    the FIRST rename fails (W-5(a), #790: nothing has been staged for a
+//!    rollback yet, the pre-existing `data_dir` is untouched), the staged
+//!    `temp_dir` is best-effort cleaned up the same way steps 3/4 already
+//!    do, then the original error propagates. A failure in the SECOND
+//!    rename instead triggers a best-effort rollback of the first — this is
+//!    a SEPARATE failure mode from the first rename's, and is unaffected by
+//!    the step 4 reordering. The rollback's own outcome determines WHICH of
+//!    two distinct errors is returned:
 //!    [`RestoreError::SwapFailedRollbackSucceeded`] (rollback worked —
 //!    `data_dir` is intact again, nothing to manually rename) or
 //!    [`RestoreError::SwapPartialFailure`] (rollback ALSO failed —
 //!    `data_dir` is genuinely missing, operator must manually intervene).
-//!    `temp_dir` is deliberately left on disk in BOTH cases (never cleaned
-//!    up here) — each error message documents exactly why it's still
-//!    there.
+//!    `temp_dir` is deliberately left on disk in BOTH of those two cases
+//!    (never cleaned up there) — each error message documents exactly why
+//!    it's still there.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -151,21 +160,37 @@ pub fn restore(from: &Path, data_dir: &Path, force: bool) -> Result<RestoreRepor
 
     // ---- Step 3: copy to a temporary sibling directory ----
     let stamp = restore_timestamp();
+    // `parent` necessarily already exists: either it's `data_dir.parent()`
+    // (a real, operator-configured `data_dir` sits inside an already-
+    // existing directory), or `data_dir` has no parent at all (it IS a
+    // filesystem root, e.g. `/` or `C:\`), in which case `parent` falls back
+    // to `data_dir` itself — a root that trivially always exists. Either
+    // way, `fs::create_dir` below (which, unlike `create_dir_all`, does NOT
+    // create missing parents) is safe to use directly.
     let parent = data_dir.parent().unwrap_or(data_dir);
     let temp_dir = parent.join(format!(
         "{}.restore_tmp_{stamp}",
         dir_name(data_dir, "data_dir")
     ));
-    if temp_dir.exists() {
-        return Err(RestoreError::Io(std::io::Error::new(
-            std::io::ErrorKind::AlreadyExists,
-            format!(
-                "temporary restore dir already exists: {}",
-                temp_dir.display()
-            ),
-        )));
+    // W-5(b) (#790, Wave D review): a separate `exists()` check followed by
+    // `create_dir_all` was a check-then-act TOCTOU (a second concurrent
+    // `restore()` call could create `temp_dir` in the gap between the check
+    // and the create). `fs::create_dir` closes this atomically — it is a
+    // single syscall that itself fails with `ErrorKind::AlreadyExists` if
+    // the target already exists, so there is no window between "check" and
+    // "create" at all.
+    if let Err(e) = fs::create_dir(&temp_dir) {
+        if e.kind() == std::io::ErrorKind::AlreadyExists {
+            return Err(RestoreError::Io(std::io::Error::new(
+                std::io::ErrorKind::AlreadyExists,
+                format!(
+                    "temporary restore dir already exists: {}",
+                    temp_dir.display()
+                ),
+            )));
+        }
+        return Err(RestoreError::Io(e));
     }
-    fs::create_dir_all(&temp_dir)?;
     let mut bytes = 0u64;
     let mut files = 0u64;
     if let Err(e) = copy_dir_recursive(from, &temp_dir, &mut bytes, &mut files) {
@@ -202,7 +227,20 @@ pub fn restore(from: &Path, data_dir: &Path, force: bool) -> Result<RestoreRepor
             "{}.pre_restore_backup_{stamp}",
             dir_name(data_dir, "data_dir")
         ));
-        fs::rename(data_dir, &backup_sibling)?;
+        if let Err(e) = fs::rename(data_dir, &backup_sibling) {
+            // W-5(a) (#790, Wave D review): this is the FIRST rename of the
+            // swap, distinct from the second rename's failure paths below
+            // (`SwapFailedRollbackSucceeded`/`SwapPartialFailure`) — nothing
+            // has been staged for a rollback yet (the pre-existing
+            // `data_dir` is still in place, untouched), and `temp_dir` is
+            // the fully-staged (copied, tickets-invalidated) snapshot with
+            // no further use once this error propagates. Left uncleaned,
+            // this was the same orphaned-`temp_dir`-with-no-message-
+            // reference gap N-6 already fixed for steps 3/4, just missed for
+            // this specific step-5 sub-case.
+            cleanup_staged_temp_dir(&temp_dir);
+            return Err(RestoreError::Io(e));
+        }
         match fs::rename(&temp_dir, data_dir) {
             Ok(()) => Some(backup_sibling),
             Err(e) => {
