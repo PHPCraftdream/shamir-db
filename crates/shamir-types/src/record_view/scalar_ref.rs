@@ -69,6 +69,54 @@ impl<'a> PartialEq for ScalarRef<'a> {
 
 impl<'a> Eq for ScalarRef<'a> {}
 
+/// Exact `i64` vs `f64` comparison — F-2 (#791) follow-up.
+///
+/// `scalar_ref_cmp`/`scalar_ref_cmp_qv` are the HOT comparison path for
+/// `FilterNode::Compare` (every ordinary `Eq`/`Gt`/`Gte`/`Lt`/`Lte` WHERE
+/// clause whose field resolves to a borrowed scalar) — more heavily hit
+/// than any of the fast-path sites consolidated in
+/// `shamir-engine::query::filter::numeric_cmp`. This crate sits BELOW
+/// `shamir-engine` in the dependency graph, so it cannot reuse that
+/// module; this is the same exact bounds-check + floor/fract technique
+/// (CR-D3, #784), reproduced here because the two crates cannot share a
+/// single copy without introducing a new shared crate — out of scope for
+/// F-2, which is an engine-internal consolidation. See
+/// `shamir-engine::query::filter::numeric_cmp::cmp_i64_f64`'s doc comment
+/// for the full derivation of why this technique is exact.
+#[inline]
+fn cmp_i64_f64(i: i64, f: f64) -> Option<Ordering> {
+    if f.is_nan() {
+        return None;
+    }
+    if f.is_infinite() {
+        return Some(if f > 0.0 {
+            Ordering::Less
+        } else {
+            Ordering::Greater
+        });
+    }
+    const I64_MIN_AS_F64: f64 = -9223372036854775808.0; // -2^63, exact
+    const I64_MAX_EXCLUSIVE_UPPER_BOUND: f64 = 9223372036854775808.0; // 2^63, exact
+    if f < I64_MIN_AS_F64 {
+        return Some(Ordering::Greater);
+    }
+    if f >= I64_MAX_EXCLUSIVE_UPPER_BOUND {
+        return Some(Ordering::Less);
+    }
+    let f_floor = f.floor();
+    let f_floor_i64 = f_floor as i64;
+    match i.cmp(&f_floor_i64) {
+        Ordering::Equal => {
+            if f > f_floor {
+                Some(Ordering::Less)
+            } else {
+                Some(Ordering::Equal)
+            }
+        }
+        other => Some(other),
+    }
+}
+
 /// Lossy `Decimal` → `f64` (NaN on overflow). Used for cross-type comparison
 /// where one side is a float — mirrors the accepted f64-precision tradeoff of
 /// the existing `Int`↔`F64` arms.
@@ -104,8 +152,10 @@ pub fn scalar_ref_cmp(a: ScalarRef<'_>, b: &InnerValue) -> Option<Ordering> {
         (ScalarRef::Null, InnerValue::Null) => Some(Ordering::Equal),
         (ScalarRef::Bool(a), InnerValue::Bool(b)) => Some(a.cmp(b)),
         (ScalarRef::Int(a), InnerValue::Int(b)) => Some(a.cmp(b)),
-        (ScalarRef::Int(a), InnerValue::F64(b)) => (a as f64).partial_cmp(b),
-        (ScalarRef::F64(a), InnerValue::Int(b)) => a.partial_cmp(&(*b as f64)),
+        // Int<->F64: F-2 (#791) follow-up — exact via `cmp_i64_f64` (see its
+        // doc comment), replacing the lossy `a as f64`/`*b as f64` casts.
+        (ScalarRef::Int(a), InnerValue::F64(b)) => cmp_i64_f64(a, *b),
+        (ScalarRef::F64(a), InnerValue::Int(b)) => cmp_i64_f64(*b, a).map(Ordering::reverse),
         (ScalarRef::F64(a), InnerValue::F64(b)) => a.partial_cmp(b),
         (ScalarRef::Str(a), InnerValue::Str(b)) => Some(a.cmp(b.as_str())),
         // Dec cross-type: record field (Int/F64) vs literal Dec. Int↔Dec is
@@ -132,8 +182,10 @@ pub fn scalar_ref_cmp_qv(a: ScalarRef<'_>, b: &QueryValue) -> Option<Ordering> {
         (ScalarRef::Null, QueryValue::Null) => Some(Ordering::Equal),
         (ScalarRef::Bool(a), QueryValue::Bool(b)) => Some(a.cmp(b)),
         (ScalarRef::Int(a), QueryValue::Int(b)) => Some(a.cmp(b)),
-        (ScalarRef::Int(a), QueryValue::F64(b)) => (a as f64).partial_cmp(b),
-        (ScalarRef::F64(a), QueryValue::Int(b)) => a.partial_cmp(&(*b as f64)),
+        // Int<->F64: F-2 (#791) follow-up — exact via `cmp_i64_f64` (see its
+        // doc comment), replacing the lossy `a as f64`/`*b as f64` casts.
+        (ScalarRef::Int(a), QueryValue::F64(b)) => cmp_i64_f64(a, *b),
+        (ScalarRef::F64(a), QueryValue::Int(b)) => cmp_i64_f64(*b, a).map(Ordering::reverse),
         (ScalarRef::F64(a), QueryValue::F64(b)) => a.partial_cmp(b),
         (ScalarRef::Str(a), QueryValue::Str(b)) => Some(a.cmp(b.as_str())),
         // Dec cross-type (see `scalar_ref_cmp` for rationale).

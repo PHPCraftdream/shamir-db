@@ -7,6 +7,7 @@ use rust_decimal::prelude::ToPrimitive;
 use rust_decimal::Decimal;
 use smallvec::SmallVec;
 
+use crate::query::filter::numeric_cmp::cmp_i64_f64;
 use crate::query::read::{NullsOrder, OrderBy, OrderByItem, OrderDirection};
 use shamir_types::types::value::QueryValue;
 
@@ -196,57 +197,6 @@ fn cmp_i64_big(i: i64, b: &BigInt) -> std::cmp::Ordering {
     BigInt::from(i).cmp(b)
 }
 
-/// Exact `i64` vs `f64` comparison — CR-D3 (#784), mirrors
-/// `resolve.rs::cmp_i64_f64` (see its doc comment for the full derivation).
-/// `f64`'s 11-bit exponent covers every integer up to `2^63` in magnitude
-/// exactly at the boundaries (`i64::MIN == -2^63`, `i64::MAX == 2^63 - 1`,
-/// both exact powers of two); any finite `f` within that range has an exact,
-/// losslessly-`i64`-castable `floor()`, so a bounds-check + a tie-break
-/// comparing directly against `f_floor` (NOT `f.fract()`, which is
-/// truncation-based and sign-preserving -- negative for negative fractional
-/// `f` -- so it cannot be used to detect "any nonzero fractional part"
-/// across signs) is exact with no `BigInt` needed.
-#[inline]
-fn cmp_i64_f64(i: i64, f: f64) -> Option<std::cmp::Ordering> {
-    if f.is_nan() {
-        return None;
-    }
-    if f.is_infinite() {
-        return Some(if f > 0.0 {
-            std::cmp::Ordering::Less
-        } else {
-            std::cmp::Ordering::Greater
-        });
-    }
-    const I64_MIN_AS_F64: f64 = -9223372036854775808.0; // -2^63, exact
-    const I64_MAX_EXCLUSIVE_UPPER_BOUND: f64 = 9223372036854775808.0; // 2^63, exact
-    if f < I64_MIN_AS_F64 {
-        return Some(std::cmp::Ordering::Greater);
-    }
-    if f >= I64_MAX_EXCLUSIVE_UPPER_BOUND {
-        return Some(std::cmp::Ordering::Less);
-    }
-    let f_floor = f.floor();
-    let f_floor_i64 = f_floor as i64;
-    match i.cmp(&f_floor_i64) {
-        std::cmp::Ordering::Equal => {
-            // i == floor(f) exactly. f >= f_floor always (floor rounds
-            // DOWN, never up) -- f > f_floor iff f has ANY nonzero
-            // fractional part, positive or negative f alike. Comparing
-            // against f_floor directly (not f.fract(), which is
-            // TRUNC-based and sign-preserving -- negative for negative
-            // fractional f, the bug this replaces) is correct for every
-            // sign.
-            if f > f_floor {
-                Some(std::cmp::Ordering::Less)
-            } else {
-                Some(std::cmp::Ordering::Equal)
-            }
-        }
-        other => Some(other),
-    }
-}
-
 /// Exact `Decimal` vs `BigInt` comparison via cross-multiplication — CR-C5
 /// (#780), mirrors `resolve.rs::cmp_big_dec` (see its doc comment for the
 /// full derivation). `Decimal == mantissa / 10^scale`; cross-multiplying by
@@ -369,9 +319,11 @@ fn compare_qv_sort_keys(
         // re-verification finding (see `resolve.rs::compare_values`'s
         // matching `(Int, F64)` arm for the full writeup): the plain
         // `as f64` cast was lossy for large `i64` magnitudes with NO `Big`
-        // involved. Now exact via `cmp_i64_f64`, keeping the EXISTING
-        // `.unwrap_or(Equal)` NaN fallback convention this function
-        // established for every other cross-type arm.
+        // involved. Now exact via the shared `numeric_cmp::cmp_i64_f64`
+        // (F-2, #791 — consolidated out of a byte-for-byte duplicate that
+        // used to live here), keeping the EXISTING `.unwrap_or(Equal)` NaN
+        // fallback convention this function established for every other
+        // cross-type arm.
         (QvSortKey::I64(x), QvSortKey::F64(y)) => {
             cmp_i64_f64(*x, *y).unwrap_or(std::cmp::Ordering::Equal)
         }

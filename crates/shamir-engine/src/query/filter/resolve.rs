@@ -13,6 +13,7 @@ use super::compile::compile_filter;
 use super::cond_cache::cond_cache_get;
 use super::eval_context::FilterContext;
 use super::filter_node::CompactPath;
+use super::numeric_cmp::cmp_i64_f64;
 use crate::query::filter::{FilterExpr, FilterExprOp, FilterValue};
 use crate::query::read::QueryResult;
 
@@ -91,84 +92,6 @@ pub(super) fn intern_field_path_compact(
 #[inline]
 fn lossy_f64<T: ToPrimitive>(v: &T) -> f64 {
     v.to_f64().unwrap_or(f64::NAN)
-}
-
-/// Exact `i64` vs `f64` comparison — CR-D3 (#784).
-///
-/// `f64` has an 11-bit exponent, enough to represent every integer up to
-/// `2^63` in MAGNITUDE (though not every value at high magnitude, since the
-/// 52-bit mantissa runs out of precision past `2^53`) — this is exactly what
-/// makes a bounds-check + `floor`/`fract` technique exact without
-/// arbitrary-precision arithmetic (no `BigInt` needed, unlike `Big`↔`F64`
-/// which is an inherent, unfixable approximation because `F64` itself is the
-/// imprecise side there).
-///
-/// `i64::MIN == -2^63` and `i64::MAX == 2^63 - 1` — both `-2^63` and `2^63`
-/// are exact powers of two, always exactly representable as `f64` literals.
-/// `f < -2^63` means `f < i64::MIN <= i`, so `i > f`. `f >= 2^63` means
-/// `f >= i64::MAX + 1 > i64::MAX >= i`, so `i < f`. For finite `f` in
-/// `[-2^63, 2^63)`: any `f64` with `|f| >= 2^53` has no fractional bits
-/// available at all (the entire 52-bit mantissa is consumed by the integer
-/// part at that exponent), so `f.fract() == 0.0` identically and
-/// `f.floor() == f` exactly for that whole magnitude range; below `2^53`,
-/// `floor`/`fract` behave as normal exact-integer-valued doubles. Either
-/// way, `f.floor()` is an exact integer value within `[-2^63, 2^63 - 1]`,
-/// i.e. `i64`'s full range, so `f.floor() as i64` is a lossless cast. From
-/// there, comparing `i` against `f_floor_i64` as plain integers settles
-/// everything except the exact-equal case, where comparing `f` against
-/// `f_floor` directly breaks the tie: `i == f.floor()` and `f > f_floor`
-/// means `f > i`. This must compare against `f_floor`, NOT `f.fract()` --
-/// `f.fract()` is `f - f.trunc()` (truncation-based, sign-preserving), so
-/// for negative `f` it is negative or zero, never positive, even when `f`
-/// has a nonzero fractional part (e.g. `(-0.5_f64).fract() == -0.5`). Only
-/// `f - f.floor()` is guaranteed `>= 0` for every finite `f`, positive or
-/// negative alike.
-#[inline]
-fn cmp_i64_f64(i: i64, f: f64) -> Option<Ordering> {
-    if f.is_nan() {
-        return None; // preserve the EXISTING NaN convention this codebase
-                     // already uses for F64<->F64 (partial_cmp's own NaN
-                     // handling) -- do not invent new NaN semantics here.
-    }
-    if f.is_infinite() {
-        return Some(if f > 0.0 {
-            Ordering::Less
-        } else {
-            Ordering::Greater
-        }); // any finite i64 is < +inf, > -inf.
-    }
-    // f is finite from here on. Bound f against i64's range using EXACT
-    // powers of two.
-    const I64_MIN_AS_F64: f64 = -9223372036854775808.0; // -2^63, exact
-    const I64_MAX_EXCLUSIVE_UPPER_BOUND: f64 = 9223372036854775808.0; // 2^63, exact
-    if f < I64_MIN_AS_F64 {
-        return Some(Ordering::Greater); // i (>= i64::MIN) > f
-    }
-    if f >= I64_MAX_EXCLUSIVE_UPPER_BOUND {
-        return Some(Ordering::Less); // i (<= i64::MAX) < f
-    }
-    // f is finite and within [-2^63, 2^63) -- f.floor() is an exact integer
-    // value in that range, losslessly representable as i64 (see derivation
-    // above).
-    let f_floor = f.floor();
-    let f_floor_i64 = f_floor as i64;
-    match i.cmp(&f_floor_i64) {
-        Ordering::Equal => {
-            // i == floor(f) exactly. f >= f_floor always (floor rounds
-            // DOWN, never up) -- f > f_floor iff f has ANY nonzero
-            // fractional part, positive or negative f alike. Comparing
-            // against f_floor directly (not f.fract(), which is
-            // TRUNC-based and sign-preserving -- negative for negative
-            // fractional f, the bug this replaces) is correct for every
-            // sign.
-            if f > f_floor {
-                Some(Ordering::Less)
-            } else {
-                Some(Ordering::Equal)
-            }
-        }
-        other => Some(other),
-    }
 }
 
 /// Exact `Decimal` vs `BigInt` comparison via cross-multiplication —

@@ -16,6 +16,7 @@ pub mod field_path_cache;
 pub mod filter_node;
 pub mod fts;
 pub mod index_range;
+pub(crate) mod numeric_cmp;
 pub mod query_ref_cache;
 pub mod resolve;
 

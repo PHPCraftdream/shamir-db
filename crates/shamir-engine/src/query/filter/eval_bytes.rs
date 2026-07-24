@@ -40,6 +40,7 @@
 use std::cmp::Ordering;
 
 use super::filter_node::{CompareOp, FilterNode};
+use super::numeric_cmp::{cmp_i64_f64, cmp_u64_f64};
 use crate::query::filter::FilterValue;
 use shamir_types::core::interner::InternerKey;
 use shamir_types::types::value::QueryValue;
@@ -465,12 +466,18 @@ fn compare_raw_to_filter(raw: &RawScalar<'_>, fv: &FilterValue) -> Option<Orderi
         // Float vs Float
         (RawScalar::F64(a), FilterValue::Float(b)) => a.partial_cmp(b),
         (RawScalar::F32(a), FilterValue::Float(b)) => (*a as f64).partial_cmp(b),
-        // Int (signed) vs Float (widening)
-        (RawScalar::I64(a), FilterValue::Float(b)) => (*a as f64).partial_cmp(b),
-        // Int (unsigned) vs Float (widening)
-        (RawScalar::U64(a), FilterValue::Float(b)) => (*a as f64).partial_cmp(b),
-        // Float vs Int (widening)
-        (RawScalar::F64(a), FilterValue::Int(b)) => a.partial_cmp(&(*b as f64)),
+        // Int (signed) vs Float — F-2 (#791): exact via the shared
+        // `numeric_cmp::cmp_i64_f64` (bounds-check + floor/fract), NOT the
+        // lossy `*a as f64` cast this replaced, which could round a large
+        // `i64` to a DIFFERENT `f64` than what's actually stored.
+        (RawScalar::I64(a), FilterValue::Float(b)) => cmp_i64_f64(*a, *b),
+        // Int (unsigned) vs Float — F-2 (#791): same exactness fix, via the
+        // `u64`-bounded sibling `cmp_u64_f64`.
+        (RawScalar::U64(a), FilterValue::Float(b)) => cmp_u64_f64(*a, *b),
+        // Float vs Int (widening) — F-2 (#791): exact via `cmp_i64_f64`,
+        // reversed since `cmp_i64_f64(i, f)` orders `i` vs `f`, but here the
+        // float is the LHS.
+        (RawScalar::F64(a), FilterValue::Int(b)) => cmp_i64_f64(*b, *a).map(Ordering::reverse),
         (RawScalar::F32(a), FilterValue::Int(b)) => (*a as f64).partial_cmp(&(*b as f64)),
 
         // Str vs Str — compare as bytes (UTF-8 is byte-ordered correctly for Ord)

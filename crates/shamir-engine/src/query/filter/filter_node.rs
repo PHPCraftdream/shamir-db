@@ -26,6 +26,7 @@ use smallvec::SmallVec;
 
 use super::eval_context::FilterContext;
 use super::fts::{fts_word_matches, fts_word_matches_or, fts_word_matches_vec};
+use super::numeric_cmp::cmp_i64_f64;
 use super::resolve::{compare_values, is_column_query_ref, resolve_filter_query};
 use crate::query::filter::FilterValue;
 
@@ -48,22 +49,46 @@ use crate::query::filter::FilterValue;
 fn set_contains_coercing(set: &TSet<QueryValue>, sr: ScalarRef<'_>) -> bool {
     match sr {
         ScalarRef::Int(n) => {
-            // Same-type probe + cross-type F64 probe.
-            set.contains(&QueryValue::Int(n)) || set.contains(&QueryValue::F64(n as f64))
+            // Same-type probe.
+            if set.contains(&QueryValue::Int(n)) {
+                return true;
+            }
+            // Cross-type F64 probe — F-2 (#791): `n as f64` is only a
+            // valid probe key when it round-trips back to `n` exactly
+            // (`cmp_i64_f64(n, n as f64) == Equal`). For `|n| >= 2^53`,
+            // `n as f64` can round to a DIFFERENT f64 than what the set
+            // actually stores — probing that rounded value would be a
+            // false miss (the real equal f64, if any, differs from the
+            // rounded one) or, if the set happens to also contain that
+            // unrelated rounded f64 under a different filter entry, a
+            // false hit. Skip the probe entirely once exactness can't be
+            // guaranteed; `TSet<QueryValue>` cannot be range-probed for
+            // "any f64 equal to n" without a linear scan, and no in-set
+            // f64 can equal an out-of-round-trip-range n anyway.
+            let f = n as f64;
+            if cmp_i64_f64(n, f) == Some(Ordering::Equal) {
+                set.contains(&QueryValue::F64(f))
+            } else {
+                false
+            }
         }
         ScalarRef::F64(f) => {
             // Same-type probe.
             if set.contains(&QueryValue::F64(f)) {
                 return true;
             }
-            // Cross-type Int probe — only when f is a whole number in i64 range.
-            // Matches scalar_ref_cmp_qv's `F64(a) vs Int(b)` arm which does
-            // `a.partial_cmp(&(*b as f64))`. Equality holds iff a == b as f64,
-            // which for integer-valued f means f == (f as i64) as f64.
-            if f.is_finite() && f.fract() == 0.0 {
-                // Clamp to i64 range to avoid UB / overflow.
-                if f >= i64::MIN as f64 && f <= i64::MAX as f64 {
-                    return set.contains(&QueryValue::Int(f as i64));
+            // Cross-type Int probe — F-2 (#791): exact via the shared
+            // `numeric_cmp::cmp_i64_f64` instead of the old lossy bounds
+            // clamp (`f >= i64::MIN as f64 && f <= i64::MAX as f64`), which
+            // had the same off-by-one risk W-1/CR-D3 fixed elsewhere:
+            // `i64::MAX as f64` rounds UP to `2^63` (since `i64::MAX ==
+            // 2^63 - 1` is not exactly representable as `f64`), so `f ==
+            // 2^63.0` incorrectly passed the old `<=` check. This function
+            // only needs an equality test, not full ordering, so probe
+            // every candidate `i64` whose `cmp_i64_f64` result is `Equal`.
+            if f.is_finite() {
+                if let Some(n) = exact_i64_equal_to_f64(f) {
+                    return set.contains(&QueryValue::Int(n));
                 }
             }
             false
@@ -72,6 +97,28 @@ fn set_contains_coercing(set: &TSet<QueryValue>, sr: ScalarRef<'_>) -> bool {
         ScalarRef::Bool(b) => set.contains(&QueryValue::Bool(b)),
         ScalarRef::Str(s) => set.contains(&QueryValue::Str(s.to_string())),
         ScalarRef::Bin(b) => set.contains(&QueryValue::Bin(b.to_vec())),
+    }
+}
+
+/// If `f` has an exact `i64` equivalent (`cmp_i64_f64(n, f) ==
+/// Some(Equal)`), return that `n`. Otherwise `None` — either `f` has a
+/// nonzero fractional part or is out of `i64`'s range.
+///
+/// `f.floor() as i64` is the only candidate that could possibly be equal
+/// (any other integer differs from `f` by at least 1), so this is a single
+/// `cmp_i64_f64` probe, not a search.
+#[inline]
+fn exact_i64_equal_to_f64(f: f64) -> Option<i64> {
+    const I64_MIN_AS_F64: f64 = -9223372036854775808.0; // -2^63, exact
+    const I64_MAX_EXCLUSIVE_UPPER_BOUND: f64 = 9223372036854775808.0; // 2^63, exact
+    if !(I64_MIN_AS_F64..I64_MAX_EXCLUSIVE_UPPER_BOUND).contains(&f) {
+        return None;
+    }
+    let candidate = f.floor() as i64;
+    if cmp_i64_f64(candidate, f) == Some(std::cmp::Ordering::Equal) {
+        Some(candidate)
+    } else {
+        None
     }
 }
 
@@ -88,25 +135,46 @@ fn set_contains_coercing(set: &TSet<QueryValue>, sr: ScalarRef<'_>) -> bool {
 /// value list happens to be fully literal.
 ///
 /// Coercion rules (identical to [`set_contains_coercing`]):
-/// - `Int(n)`  → probe `Int(n)` AND `F64(n as f64)`.
-/// - `F64(f)`  → probe `F64(f)` AND if `f.fract()==0 && f.is_finite()` and
-///   `f` fits in `i64`, also `Int(f as i64)`.
+/// - `Int(n)`  → probe `Int(n)` AND, if `n as f64` round-trips exactly back
+///   to `n`, `F64(n as f64)`.
+/// - `F64(f)`  → probe `F64(f)` AND, if `f` has an exact `i64` equivalent,
+///   `Int(that i64)`.
 /// - Other types → single exact probe (no cross-type coercion).
+///
+/// F-2 (#791): both cross-type probes now go through the shared exact
+/// comparator (`numeric_cmp::cmp_i64_f64` via [`exact_i64_equal_to_f64`] /
+/// the round-trip check below) instead of the old lossy `as f64`/`as i64`
+/// casts + a bounds clamp that had the same off-by-one risk W-1/CR-D3 fixed
+/// elsewhere (`i64::MAX as f64` rounds up to the exact power of two `2^63`,
+/// so a naive `f <= i64::MAX as f64` clamp wrongly passes `f == 2^63.0`).
 #[inline]
 fn set_contains_coercing_qv(set: &TSet<QueryValue>, qv: &QueryValue) -> bool {
     match qv {
         QueryValue::Int(n) => {
-            // Same-type probe + cross-type F64 probe.
-            set.contains(qv) || set.contains(&QueryValue::F64(*n as f64))
+            // Same-type probe.
+            if set.contains(qv) {
+                return true;
+            }
+            // Cross-type F64 probe — only when `*n as f64` round-trips
+            // exactly back to `n` (see `set_contains_coercing`'s `Int` arm
+            // for the full derivation of why this guard is required).
+            let f = *n as f64;
+            if cmp_i64_f64(*n, f) == Some(Ordering::Equal) {
+                set.contains(&QueryValue::F64(f))
+            } else {
+                false
+            }
         }
         QueryValue::F64(f) => {
             // Same-type probe.
             if set.contains(qv) {
                 return true;
             }
-            // Cross-type Int probe — only when f is a whole number in i64 range.
-            if f.is_finite() && f.fract() == 0.0 && *f >= i64::MIN as f64 && *f <= i64::MAX as f64 {
-                return set.contains(&QueryValue::Int(*f as i64));
+            // Cross-type Int probe — exact via `exact_i64_equal_to_f64`.
+            if f.is_finite() {
+                if let Some(n) = exact_i64_equal_to_f64(*f) {
+                    return set.contains(&QueryValue::Int(n));
+                }
             }
             false
         }
@@ -126,20 +194,20 @@ fn swap_remove_coercing_qv(set: &mut TSet<QueryValue>, qv: &QueryValue) -> bool 
     match qv {
         QueryValue::Int(n) => {
             if set.swap_remove(qv) {
-                true
+                return true;
+            }
+            let f = *n as f64;
+            if cmp_i64_f64(*n, f) == Some(Ordering::Equal) {
+                set.swap_remove(&QueryValue::F64(f))
             } else {
-                set.swap_remove(&QueryValue::F64(*n as f64))
+                false
             }
         }
         QueryValue::F64(f) => {
             if set.swap_remove(qv) {
                 true
-            } else if f.is_finite()
-                && f.fract() == 0.0
-                && *f >= i64::MIN as f64
-                && *f <= i64::MAX as f64
-            {
-                set.swap_remove(&QueryValue::Int(*f as i64))
+            } else if let Some(n) = f.is_finite().then(|| exact_i64_equal_to_f64(*f)).flatten() {
+                set.swap_remove(&QueryValue::Int(n))
             } else {
                 false
             }

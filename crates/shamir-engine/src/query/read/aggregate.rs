@@ -26,6 +26,7 @@ use rust_decimal::prelude::ToPrimitive;
 
 use crate::function::builtin_aggs;
 use crate::query::filter::eval::{compare_values, resolve_filter_query};
+use crate::query::filter::numeric_cmp::cmp_i64_f64;
 use crate::query::filter::{compile_filter, FilterContext, FilterValue, FnCall};
 use crate::query::read::exec::pre_intern_select_keys;
 use crate::query::read::{AggFunc, AggregateField, GroupBy, QueryResult, Select, SelectItem};
@@ -103,8 +104,13 @@ impl OwnedScalar {
             (OwnedScalar::Null, ScalarRef::Null) => Some(Ordering::Equal),
             (OwnedScalar::Bool(b), ScalarRef::Bool(a)) => Some(b.cmp(&a)),
             (OwnedScalar::Int(b), ScalarRef::Int(a)) => Some(b.cmp(&a)),
-            (OwnedScalar::Int(b), ScalarRef::F64(a)) => (*b as f64).partial_cmp(&a),
-            (OwnedScalar::F64(b), ScalarRef::Int(a)) => b.partial_cmp(&(a as f64)),
+            // Int<->F64: F-2 (#791), exact via the shared
+            // `numeric_cmp::cmp_i64_f64` — replaces the lossy `*b as f64`/
+            // `a as f64` casts, which could round a large `i64` running
+            // extreme (or incoming value) to a DIFFERENT `f64` than what it
+            // actually represents (same class of bug as W-1/CR-D3).
+            (OwnedScalar::Int(b), ScalarRef::F64(a)) => cmp_i64_f64(*b, a),
+            (OwnedScalar::F64(b), ScalarRef::Int(a)) => cmp_i64_f64(a, *b).map(Ordering::reverse),
             (OwnedScalar::F64(b), ScalarRef::F64(a)) => b.partial_cmp(&a),
             (OwnedScalar::Str(b), ScalarRef::Str(a)) => Some(b.as_ref().cmp(a)),
             // Bin and cross-family pairs are non-comparable (mirrors

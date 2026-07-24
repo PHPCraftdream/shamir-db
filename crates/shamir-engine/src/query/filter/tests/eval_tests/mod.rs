@@ -13,6 +13,7 @@ mod fts_tests;
 mod in_query_ref_column_tests;
 mod logical_tests;
 mod null_exists_tests;
+mod numeric_cmp_cross_path_tests;
 mod query_ref_tests;
 mod resolve_compare_tests;
 mod string_regex_tests;
