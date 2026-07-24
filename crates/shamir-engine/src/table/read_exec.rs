@@ -976,18 +976,23 @@ impl TableManager {
             && take_resolved.is_some()
             && !query.select.distinct
             && !has_group_by
-            && !has_agg;
+            && !has_agg
+            && !query.count_total;
 
         let (paged, pagination) = if use_topk {
             let order_by = query.order_by.as_ref().unwrap();
             let skip = skip_resolved as usize;
             let take = take_resolved.unwrap() as usize;
             let topk_result = exec::apply_order_by_topk(qv_result, order_by, skip, take);
-            // count_total with top-K: we don't know the total from the
-            // heap alone — but we tracked records_scanned. For true
-            // count_total, the full-sort path is needed; top-K is memory-opt
-            // only. Guard: count_total is already excluded above via the
-            // `read_counting` path dispatch.
+            // count_total=true is excluded from the top-K gate above, so a
+            // query that asks for a true total (ORDER BY + LIMIT + count_total)
+            // falls through to the `else` branch below, which uses the full
+            // sort (`apply_order_by_qv`) + `apply_pagination` — that path
+            // honors count_total by computing Some(records.len() as u64)
+            // before slicing. The top-K heap cannot supply a total (it only
+            // sees K rows), so routing count_total away from it is the only
+            // way to satisfy the flag; the O(N)-memory full sort is the
+            // intended, correct tradeoff.
             //
             // #128 regression fix: the top-K LIMIT fast path emits the same
             // pagination metadata as every other LIMIT path, via the shared

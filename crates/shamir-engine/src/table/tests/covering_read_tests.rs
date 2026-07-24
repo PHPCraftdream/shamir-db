@@ -364,3 +364,98 @@ async fn limit_queries_all_emit_pagination_contract() {
         "plain SELECT + LIMIT must emit pagination"
     );
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// F-6 / #796 regression — count_total=true must exclude the top-K LIMIT fast path
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// The top-K read path (`use_topk` in `read_exec.rs`) is a bounded heap that
+/// only ever sees K rows, so it cannot supply a true total. Before the fix the
+/// `use_topk` gate did not check `query.count_total`, so an
+/// `ORDER BY + LIMIT + count_total=true` query was silently served by the heap
+/// and got `total_count: None` back via `fast_path_pagination` — ignoring the
+/// flag. The gate now adds `&& !query.count_total`, which routes such queries
+/// to the full-sort branch (`apply_order_by_qv` + `apply_pagination`) that
+/// correctly computes `Some(records.len())` before slicing.
+///
+/// This test uses a plain (no-index) MVCC table to force the in-memory top-K
+/// heap path when `count_total` is absent, and the full-sort path when it is
+/// present. It asserts:
+///   1. `count_total=true`  → `total_count == Some(<true row count>)`, AND the
+///      returned page is still the correct top-K (sort order preserved).
+///   2. `count_total=false` → `total_count == None` (the intentional top-K
+///      fast-path behavior is unchanged when the flag is not set, guarding
+///      against accidentally always taking the slow path now).
+#[tokio::test]
+async fn count_total_true_excludes_topk_fast_path() {
+    let tbl = make_plain_mvcc_table().await;
+    insert_record(&tbl, 10, "a@example.com").await;
+    insert_record(&tbl, 20, "b@example.com").await;
+    insert_record(&tbl, 30, "c@example.com").await;
+    insert_record(&tbl, 40, "d@example.com").await;
+    insert_record(&tbl, 50, "e@example.com").await;
+    const TOTAL_ROWS: u64 = 5;
+
+    let interner = tbl.interner().get().await.unwrap();
+    let refs = new_map();
+    let ctx = FilterContext::new(interner, &refs);
+
+    // (1) ORDER BY score DESC LIMIT 2 + count_total=true → must NOT take the
+    //     top-K heap; the full-sort path must report the TRUE total.
+    let with_total = ReadQuery::new("t")
+        .order_by(OrderBy::desc("score"))
+        .limit(2)
+        .count_total(true);
+    let result = tbl.read(&with_total, &ctx).await.unwrap();
+
+    assert_eq!(
+        result.records.len(),
+        2,
+        "LIMIT 2 still yields exactly two rows even with count_total"
+    );
+    // Sort order is preserved by the full-sort fallback.
+    let scores: Vec<i64> = result
+        .records
+        .iter()
+        .filter_map(|r| r.get_value_i64("score"))
+        .collect();
+    assert_eq!(
+        scores,
+        vec![50, 40],
+        "full-sort fallback must still return the highest scores in order"
+    );
+
+    let pagination = result
+        .pagination
+        .as_ref()
+        .expect("count_total=true must emit pagination metadata");
+    assert_eq!(
+        pagination.total_count,
+        Some(TOTAL_ROWS),
+        "F-6 regression: count_total=true on ORDER BY + LIMIT must report \
+         the TRUE total row count, not None (top-K heap was wrongly taken)"
+    );
+
+    // (2) Same query WITHOUT count_total → the top-K fast path is still taken
+    //     and total_count is None (the intentional fast-path behavior is
+    //     unchanged; this guards against always routing to the slow path).
+    let no_total = ReadQuery::new("t")
+        .order_by(OrderBy::desc("score"))
+        .limit(2);
+    let result = tbl.read(&no_total, &ctx).await.unwrap();
+    assert_eq!(
+        result.records.len(),
+        2,
+        "LIMIT 2 yields exactly two rows on the top-K fast path"
+    );
+    let pagination = result
+        .pagination
+        .as_ref()
+        .expect("top-K fast path must still emit pagination metadata (#128)");
+    assert_eq!(
+        pagination.total_count,
+        Option::None,
+        "count_total omitted → top-K fast path is taken and total_count is \
+         None (do not always take the slow path)"
+    );
+}
