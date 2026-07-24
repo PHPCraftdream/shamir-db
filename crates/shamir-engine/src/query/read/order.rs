@@ -196,6 +196,47 @@ fn cmp_i64_big(i: i64, b: &BigInt) -> std::cmp::Ordering {
     BigInt::from(i).cmp(b)
 }
 
+/// Exact `i64` vs `f64` comparison — CR-D3 (#784), mirrors
+/// `resolve.rs::cmp_i64_f64` (see its doc comment for the full derivation).
+/// `f64`'s 11-bit exponent covers every integer up to `2^63` in magnitude
+/// exactly at the boundaries (`i64::MIN == -2^63`, `i64::MAX == 2^63 - 1`,
+/// both exact powers of two); any finite `f` within that range has an exact,
+/// losslessly-`i64`-castable `floor()`, so a bounds-check + floor/fract
+/// tie-break is exact with no `BigInt` needed.
+#[inline]
+fn cmp_i64_f64(i: i64, f: f64) -> Option<std::cmp::Ordering> {
+    if f.is_nan() {
+        return None;
+    }
+    if f.is_infinite() {
+        return Some(if f > 0.0 {
+            std::cmp::Ordering::Less
+        } else {
+            std::cmp::Ordering::Greater
+        });
+    }
+    const I64_MIN_AS_F64: f64 = -9223372036854775808.0; // -2^63, exact
+    const I64_MAX_EXCLUSIVE_UPPER_BOUND: f64 = 9223372036854775808.0; // 2^63, exact
+    if f < I64_MIN_AS_F64 {
+        return Some(std::cmp::Ordering::Greater);
+    }
+    if f >= I64_MAX_EXCLUSIVE_UPPER_BOUND {
+        return Some(std::cmp::Ordering::Less);
+    }
+    let f_floor = f.floor();
+    let f_floor_i64 = f_floor as i64;
+    match i.cmp(&f_floor_i64) {
+        std::cmp::Ordering::Equal => {
+            if f.fract() > 0.0 {
+                Some(std::cmp::Ordering::Less)
+            } else {
+                Some(std::cmp::Ordering::Equal)
+            }
+        }
+        other => Some(other),
+    }
+}
+
 /// Exact `Decimal` vs `BigInt` comparison via cross-multiplication — CR-C5
 /// (#780), mirrors `resolve.rs::cmp_big_dec` (see its doc comment for the
 /// full derivation). `Decimal == mantissa / 10^scale`; cross-multiplying by
@@ -314,17 +355,18 @@ fn compare_qv_sort_keys(
         (QvSortKey::F64(x), QvSortKey::F64(y)) => {
             x.partial_cmp(y).unwrap_or(std::cmp::Ordering::Equal)
         }
-        // CR-C5 (#780) re-verification finding, OUT OF SCOPE for this task's
-        // fix (see `resolve.rs::compare_values`'s matching `(Int, F64)` arm
-        // for the full writeup): this `as f64` cast is ALSO lossy for large
-        // `i64` magnitudes with NO `Big` involved (`i64::MAX` is far above
-        // `2^53`, and plain `I64` sort keys are not range-limited below
-        // that threshold). Tracked as a separate follow-up, not fixed here.
-        (QvSortKey::I64(x), QvSortKey::F64(y)) => (*x as f64)
-            .partial_cmp(y)
-            .unwrap_or(std::cmp::Ordering::Equal),
-        (QvSortKey::F64(x), QvSortKey::I64(y)) => x
-            .partial_cmp(&(*y as f64))
+        // I64<->F64: CR-D3 (#784), follow-up to CR-C5 (#780)'s own
+        // re-verification finding (see `resolve.rs::compare_values`'s
+        // matching `(Int, F64)` arm for the full writeup): the plain
+        // `as f64` cast was lossy for large `i64` magnitudes with NO `Big`
+        // involved. Now exact via `cmp_i64_f64`, keeping the EXISTING
+        // `.unwrap_or(Equal)` NaN fallback convention this function
+        // established for every other cross-type arm.
+        (QvSortKey::I64(x), QvSortKey::F64(y)) => {
+            cmp_i64_f64(*x, *y).unwrap_or(std::cmp::Ordering::Equal)
+        }
+        (QvSortKey::F64(x), QvSortKey::I64(y)) => cmp_i64_f64(*y, *x)
+            .map(std::cmp::Ordering::reverse)
             .unwrap_or(std::cmp::Ordering::Equal),
         // Dec: exact for Dec/Dec and I64↔Dec (`Decimal` represents every i64
         // exactly); F64↔Dec uses the f64 fallback (mirrors I64↔F64 style).

@@ -93,6 +93,76 @@ fn lossy_f64<T: ToPrimitive>(v: &T) -> f64 {
     v.to_f64().unwrap_or(f64::NAN)
 }
 
+/// Exact `i64` vs `f64` comparison — CR-D3 (#784).
+///
+/// `f64` has an 11-bit exponent, enough to represent every integer up to
+/// `2^63` in MAGNITUDE (though not every value at high magnitude, since the
+/// 52-bit mantissa runs out of precision past `2^53`) — this is exactly what
+/// makes a bounds-check + `floor`/`fract` technique exact without
+/// arbitrary-precision arithmetic (no `BigInt` needed, unlike `Big`↔`F64`
+/// which is an inherent, unfixable approximation because `F64` itself is the
+/// imprecise side there).
+///
+/// `i64::MIN == -2^63` and `i64::MAX == 2^63 - 1` — both `-2^63` and `2^63`
+/// are exact powers of two, always exactly representable as `f64` literals.
+/// `f < -2^63` means `f < i64::MIN <= i`, so `i > f`. `f >= 2^63` means
+/// `f >= i64::MAX + 1 > i64::MAX >= i`, so `i < f`. For finite `f` in
+/// `[-2^63, 2^63)`: any `f64` with `|f| >= 2^53` has no fractional bits
+/// available at all (the entire 52-bit mantissa is consumed by the integer
+/// part at that exponent), so `f.fract() == 0.0` identically and
+/// `f.floor() == f` exactly for that whole magnitude range; below `2^53`,
+/// `floor`/`fract` behave as normal exact-integer-valued doubles. Either
+/// way, `f.floor()` is an exact integer value within `[-2^63, 2^63 - 1]`,
+/// i.e. `i64`'s full range, so `f.floor() as i64` is a lossless cast. From
+/// there, comparing `i` against `f_floor_i64` as plain integers settles
+/// everything except the exact-equal case, where the sign of `f.fract()`
+/// (0 vs positive — `f` is finite and `f >= f.floor()` always) breaks the
+/// tie: `i == f.floor()` and `f.fract() > 0.0` means `f > i`.
+#[inline]
+fn cmp_i64_f64(i: i64, f: f64) -> Option<Ordering> {
+    if f.is_nan() {
+        return None; // preserve the EXISTING NaN convention this codebase
+                     // already uses for F64<->F64 (partial_cmp's own NaN
+                     // handling) -- do not invent new NaN semantics here.
+    }
+    if f.is_infinite() {
+        return Some(if f > 0.0 {
+            Ordering::Less
+        } else {
+            Ordering::Greater
+        }); // any finite i64 is < +inf, > -inf.
+    }
+    // f is finite from here on. Bound f against i64's range using EXACT
+    // powers of two.
+    const I64_MIN_AS_F64: f64 = -9223372036854775808.0; // -2^63, exact
+    const I64_MAX_EXCLUSIVE_UPPER_BOUND: f64 = 9223372036854775808.0; // 2^63, exact
+    if f < I64_MIN_AS_F64 {
+        return Some(Ordering::Greater); // i (>= i64::MIN) > f
+    }
+    if f >= I64_MAX_EXCLUSIVE_UPPER_BOUND {
+        return Some(Ordering::Less); // i (<= i64::MAX) < f
+    }
+    // f is finite and within [-2^63, 2^63) -- f.floor() is an exact integer
+    // value in that range, losslessly representable as i64 (see derivation
+    // above).
+    let f_floor = f.floor();
+    let f_floor_i64 = f_floor as i64;
+    match i.cmp(&f_floor_i64) {
+        Ordering::Equal => {
+            // i == floor(f) exactly. If f had a nonzero fractional part,
+            // f > floor(f) == i, so i < f. (For |f| >= 2^53 this branch
+            // never triggers since fract() is always 0 there -- covered
+            // for completeness at lower magnitudes.)
+            if f.fract() > 0.0 {
+                Some(Ordering::Less)
+            } else {
+                Some(Ordering::Equal)
+            }
+        }
+        other => Some(other),
+    }
+}
+
 /// Exact `Decimal` vs `BigInt` comparison via cross-multiplication —
 /// CR-C5 (#780).
 ///
@@ -145,27 +215,18 @@ where
         (Value::Null, Value::Null) => Some(Ordering::Equal),
         (Value::Bool(a), Value::Bool(b)) => Some(a.cmp(b)),
         (Value::Int(a), Value::Int(b)) => Some(a.cmp(b)),
-        // CR-C5 (#780) re-verification finding, OUT OF SCOPE for this task's
-        // fix (flagged as a follow-up, not fixed here): this `as f64` cast
-        // is ALSO lossy for large `i64` magnitudes, with NO `Big` involved.
-        // `i64::MAX` (~9.2e18) is far above `2^53` (~9e15) where `f64` stops
-        // representing every integer exactly, and there is no promotion
-        // rule that keeps `Value::Int` below that threshold — a plain
-        // `i64` column is `Int` all the way to `i64::MAX`; only values that
-        // overflow `i64` entirely (`u64 > i64::MAX`) promote to `Big`. So
-        // e.g. `i64::MAX` and `i64::MAX - 1` collapse to the SAME `f64` here
-        // too (verified: `(i64::MAX) as f64 == (i64::MAX - 1) as f64`).
-        // Unlike `Big<->Int` above (trivial: `i64` -> `BigInt` is always
-        // lossless), an EXACT `Int<->F64` fix requires exact dyadic-rational
-        // comparison (decomposing the `f64` into its exact mantissa/exponent
-        // and cross-multiplying in arbitrary precision, e.g. via
-        // `num-rational`/`BigInt`) — a materially larger change than this
-        // task's surgical Big-focused scope, and one that would touch a far
-        // hotter, more general path (every plain `Int` vs `F64` comparison
-        // in the engine, not just the rare `Big` case). Tracked as a
-        // separate follow-up rather than attempted here.
-        (Value::Int(a), Value::F64(b)) => (*a as f64).partial_cmp(b),
-        (Value::F64(a), Value::Int(b)) => a.partial_cmp(&(*b as f64)),
+        // Int<->F64: CR-D3 (#784), follow-up to CR-C5 (#780)'s own
+        // re-verification finding — the plain `as f64` cast was lossy for
+        // large `i64` magnitudes with NO `Big` involved (`i64::MAX` is far
+        // above `2^53`, and a plain `i64` column stays `Int` all the way to
+        // `i64::MAX`; only values that overflow `i64` entirely promote to
+        // `Big`). Now exact via `cmp_i64_f64`'s bounds-check + floor/fract
+        // technique — no `BigInt` needed, since `f64`'s 11-bit exponent
+        // already covers `i64`'s full magnitude range exactly at the
+        // boundaries, and any in-range value's `floor()` is a lossless i64
+        // cast (see `cmp_i64_f64`'s doc comment for the full derivation).
+        (Value::Int(a), Value::F64(b)) => cmp_i64_f64(*a, *b),
+        (Value::F64(a), Value::Int(b)) => cmp_i64_f64(*b, *a).map(Ordering::reverse),
         (Value::F64(a), Value::F64(b)) => a.partial_cmp(b),
         (Value::Str(a), Value::Str(b)) => Some(a.cmp(b)),
         // Dec: exact for Dec/Dec and Int↔Dec (`Decimal` represents every

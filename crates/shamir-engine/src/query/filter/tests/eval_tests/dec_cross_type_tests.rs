@@ -329,6 +329,163 @@ fn order_by_mixed_int_and_big_close_values_exact_total_order() {
 }
 
 // ============================================================================
+// CR-D3 (#784) — exact plain `Int`<->`F64` comparison (no `Big` involved).
+// ============================================================================
+
+/// THE core regression this task exists to fix: two distinct large `i64`
+/// values near `i64::MAX`'s magnitude that collapse to the SAME `f64` under
+/// the OLD `as f64` cast (`f64`'s 52-bit mantissa can't distinguish every
+/// integer once the magnitude exceeds `2^53`) must still compare correctly
+/// (not both `Equal`) against that shared `f64` operand.
+///
+/// `a = 9223372036854774784`, `b = a - 500`: both close enough to
+/// `i64::MAX`'s magnitude (~9.2e18, `f64`'s ULP there is 1024) that
+/// `a as f64 == b as f64` -- the naive cast genuinely collapses them, but
+/// they remain 500 apart as exact `i64` values.
+#[test]
+fn compare_values_int_large_neighbors_collapsed_by_naive_f64_cast_stay_distinct() {
+    let a: i64 = 9223372036854774784;
+    let b: i64 = a - 500;
+
+    // Sanity: confirm the naive `as f64` casts of both operands really do
+    // collapse to the same value -- otherwise this wouldn't be a meaningful
+    // precision-loss regression test.
+    assert_eq!(
+        a as f64, b as f64,
+        "test setup invariant: a and b must collapse to the same f64 for \
+         this to be a meaningful precision-loss regression test"
+    );
+
+    let f_operand = QueryValue::F64(a as f64);
+
+    // f == a exactly (a as f64 round-trips to a, see cmp_i64_f64's
+    // derivation) -- Eq.
+    assert_eq!(
+        compare_values(&QueryValue::Int(a), &f_operand),
+        Some(Ordering::Equal)
+    );
+    // b < a == f -- Less, NOT Equal (the old cast would report Equal here
+    // too, since b as f64 == a as f64 == f).
+    assert_eq!(
+        compare_values(&QueryValue::Int(b), &f_operand),
+        Some(Ordering::Less)
+    );
+    assert_eq!(
+        compare_values(&f_operand, &QueryValue::Int(b)),
+        Some(Ordering::Greater)
+    );
+    assert_ne!(
+        compare_values(&QueryValue::Int(b), &f_operand),
+        Some(Ordering::Equal),
+        "b and a must not both collapse to equal against the shared f64"
+    );
+}
+
+/// Boundary at `2^63`: `f = 2^63` (exactly at the exclusive upper bound) vs
+/// `i = i64::MAX` -- `f` is strictly greater than any representable `i64`,
+/// so this must report `Less` (i < f).
+#[test]
+fn compare_values_int_max_vs_f64_two_pow_63_boundary() {
+    let two_pow_63: f64 = 9223372036854775808.0; // 2^63, exact f64 literal
+    assert_eq!(
+        compare_values(&QueryValue::Int(i64::MAX), &QueryValue::F64(two_pow_63)),
+        Some(Ordering::Less)
+    );
+    assert_eq!(
+        compare_values(&QueryValue::F64(two_pow_63), &QueryValue::Int(i64::MAX)),
+        Some(Ordering::Greater)
+    );
+}
+
+/// `i64::MIN` boundary: `f = -2^63` (exactly `i64::MIN` as `f64`) vs
+/// `i = i64::MIN` -- must report `Equal`.
+#[test]
+fn compare_values_int_min_vs_f64_negative_two_pow_63_boundary() {
+    let neg_two_pow_63: f64 = -9223372036854775808.0; // -2^63, exact f64 literal
+    assert_eq!(
+        compare_values(&QueryValue::Int(i64::MIN), &QueryValue::F64(neg_two_pow_63)),
+        Some(Ordering::Equal)
+    );
+    assert_eq!(
+        compare_values(&QueryValue::F64(neg_two_pow_63), &QueryValue::Int(i64::MIN)),
+        Some(Ordering::Equal)
+    );
+}
+
+/// Fractional tie-break: `i = 5` vs `f = 5.5` -- `i < f` -> `Less`; `i = 5`
+/// vs `f = 4.5` -- `i > f` -> `Greater`.
+#[test]
+fn compare_values_int_f64_fractional_tie_break() {
+    assert_eq!(
+        compare_values(&QueryValue::Int(5), &QueryValue::F64(5.5)),
+        Some(Ordering::Less)
+    );
+    assert_eq!(
+        compare_values(&QueryValue::Int(5), &QueryValue::F64(4.5)),
+        Some(Ordering::Greater)
+    );
+}
+
+/// NaN unchanged: `compare_values(Int(5), F64(NAN))` still returns `None` --
+/// the existing, unmodified NaN convention.
+#[test]
+fn compare_values_int_vs_f64_nan_is_none() {
+    assert_eq!(
+        compare_values(&QueryValue::Int(5), &QueryValue::F64(f64::NAN)),
+        None
+    );
+    assert_eq!(
+        compare_values(&QueryValue::F64(f64::NAN), &QueryValue::Int(5)),
+        None
+    );
+}
+
+/// `QvSortKey` mirror: the same large-`i64`-neighbors-collapse scenario
+/// through `apply_order_by_qv`/`compare_qv_sort_keys`, proving a mixed
+/// `Int`+`F64` `ORDER BY` column now produces a correct total order at this
+/// boundary (not the old "compares Equal, falls back to insertion order"
+/// behavior).
+#[test]
+fn order_by_mixed_int_and_f64_close_values_exact_total_order() {
+    use crate::query::read::order::apply_order_by_qv;
+    use crate::query::read::OrderBy;
+    use shamir_types::types::common::new_map_wc;
+
+    fn qv_map(pairs: &[(&str, QueryValue)]) -> QueryValue {
+        let mut m = new_map_wc(pairs.len());
+        for (k, v) in pairs {
+            m.insert((*k).to_string(), v.clone());
+        }
+        QueryValue::Map(m)
+    }
+
+    // a and b are 500 apart but collapse to the SAME f64 under the OLD naive
+    // `as f64` cast (both land in the same 1024-wide f64 ULP bucket at this
+    // magnitude); c is far enough below to land in a genuinely different,
+    // lower f64 bucket. True order: c < b < a. Under the OLD bug, `a`/`b`
+    // would tie (Equal) against any F64 probe in their shared bucket instead
+    // of resolving via a genuine `Int`/`Int` comparison -- this exercises the
+    // fix through the F64-vs-F64-bucket-boundary path (c as a real F64
+    // value), not the same-value-both-ways case already covered directly by
+    // `compare_values_int_large_neighbors_collapsed_by_naive_f64_cast_stay_distinct`.
+    let a: i64 = 9223372036854774784;
+    let b: i64 = a - 500;
+    let c: i64 = a - 1200;
+
+    let mut qvs = vec![
+        qv_map(&[("v", QueryValue::Int(a))]),
+        qv_map(&[("v", QueryValue::F64(c as f64))]),
+        qv_map(&[("v", QueryValue::Int(b))]),
+    ];
+
+    apply_order_by_qv(&mut qvs, &OrderBy::asc("v"));
+
+    assert_eq!(qvs[0]["v"], QueryValue::F64(c as f64));
+    assert_eq!(qvs[1]["v"], QueryValue::Int(b));
+    assert_eq!(qvs[2]["v"], QueryValue::Int(a));
+}
+
+// ============================================================================
 // Part 1c — $expr as_f64: arithmetic over a Dec operand
 // ============================================================================
 

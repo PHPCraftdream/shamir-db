@@ -244,6 +244,25 @@ artifact).
   `ORDER BY`'s `QvSortKey` gained a numeric `Big` variant). See
   [`client-server-protocol-spec/NUMERIC_WIRE_SEMANTICS.md`](client-server-protocol-spec/NUMERIC_WIRE_SEMANTICS.md)
   for the full contract.
+- **Plain `Int`↔`F64` comparison is now exact (CR-D3).** A cross-type
+  comparison between a plain `Int` (`i64`, no `Big` involved) and an `F64`
+  previously cast the `i64` to `f64` before comparing — since `f64`'s
+  52-bit mantissa cannot represent every integer above `2^53`, this could
+  silently collapse distinct large `i64` values (e.g. `i64::MAX` and
+  `i64::MAX - 1`) onto the same `f64`, corrupting `Eq`/`Gt`/`Gte`/`Lt`/`Lte`
+  filters and `ORDER BY` over columns like nanosecond timestamps or
+  63-bit ids/hashes. Fixed in both `compare_values`
+  (`crates/shamir-engine/src/query/filter/resolve.rs`) and `ORDER BY`'s
+  `QvSortKey` ordering (`crates/shamir-engine/src/query/read/order.rs`) via
+  an exact bounds-check + `floor`/`fract` technique — no `BigInt` needed:
+  `f64`'s 11-bit exponent already covers every integer magnitude up to
+  `2^63` exactly at the boundaries (`i64::MIN`/`i64::MAX` bound-check
+  against exact `±2^63` `f64` literals), and any in-range `f64`'s
+  `floor()` is losslessly castable to `i64`, so the residual tie only
+  needs a `fract()` check. `Int`↔`Int` and `Int`↔`Dec` were already exact
+  and remain unaffected; `Big`↔`F64` remains a deliberate, accepted
+  approximation (see the FG-6/CR-C5 entry above) since `F64` is itself an
+  inherently imprecise column type there.
 
 ## 8. `ttl_ms`
 
