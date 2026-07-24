@@ -319,6 +319,60 @@ async fn concurrent_register_remove_cycles_never_exceed_cap_and_fully_drain() {
     );
 }
 
+/// F-9 (#799) core regression: a cursor whose `state()` lock is HELD (as it
+/// would be for the whole duration of an in-progress `FetchNext` — see
+/// `db_handler::cursor_handlers::fetch_next`, which holds the guard from
+/// before the read work starts until just before `bump_activity()`) must
+/// NOT appear in `expired_ids`, even though its `last_activity_nanos`
+/// timestamp makes `is_expired` report `true` (zero idle-ttl, same
+/// "shrink the timeout under test" trick the other tests in this file use).
+/// Once the guard is released, the SAME still-idle cursor DOES appear.
+#[tokio::test]
+async fn expired_ids_skips_cursor_with_lock_held_by_in_flight_fetch() {
+    let reg = CursorRegistry::new();
+    let cursor = make_cursor(1).await;
+    let arc = reg.register(1, SID_A, cursor, 16).unwrap();
+
+    // Simulate an in-progress FetchNext: acquire and hold the state lock.
+    let guard = arc.state().lock().await;
+
+    // Idle by timestamp (zero ttl), but the lock is held -> must be
+    // excluded from the reap set.
+    let expired = reg.expired_ids(Instant::now(), Duration::ZERO);
+    assert!(
+        expired.is_empty(),
+        "a cursor with its state lock held (in-flight fetch) must not be reaped"
+    );
+
+    // Release the simulated in-flight fetch's lock.
+    drop(guard);
+
+    // Same cursor, still idle by timestamp, now uncontended -> reapable.
+    let expired = reg.expired_ids(Instant::now(), Duration::ZERO);
+    assert_eq!(
+        expired,
+        vec![1],
+        "once the lock is released the still-idle cursor is reapable again"
+    );
+}
+
+/// F-9 (#799) regression guard: proves the `try_lock` guard does not
+/// accidentally make EVERY cursor unreapable — a genuinely idle, unlocked
+/// cursor is still reaped exactly as before this fix.
+#[tokio::test]
+async fn expired_ids_still_reaps_genuinely_idle_unlocked_cursor() {
+    let reg = CursorRegistry::new();
+    let cursor = make_cursor(1).await;
+    reg.register(1, SID_A, cursor, 16).unwrap();
+
+    let expired = reg.expired_ids(Instant::now(), Duration::ZERO);
+    assert_eq!(
+        expired,
+        vec![1],
+        "an idle cursor with no lock contention must still be reaped"
+    );
+}
+
 /// The background reaper task actually reaps an idle-past-TTL cursor on its
 /// own schedule (paused virtual time — no real sleeping).
 #[tokio::test(start_paused = true)]

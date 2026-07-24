@@ -463,10 +463,38 @@ impl CursorRegistry {
 
     /// Cursor ids idle past `idle_ttl` as of `now`. The background sweep
     /// removes each via [`Self::remove_for_idle_reap`].
+    ///
+    /// F-9 (#799): a cursor is only included if it is ALSO uncontended —
+    /// `state().try_lock()` succeeds. `fetch_next`
+    /// (`db_handler::cursor_handlers`) holds `cursor.state().lock().await`
+    /// for the ENTIRE duration of a `FetchNext` (including the actual
+    /// keyset/offset page scan), only dropping it right before
+    /// `bump_activity()` at the very end. `bump_activity` is the ONLY thing
+    /// that moves `last_activity_nanos`, and it fires once, at the END of a
+    /// successful `FetchNext` — so a `FetchNext` whose own execution time
+    /// (large `page_size`, expensive scan, slow keyset boundary search)
+    /// exceeds `idle_ttl` looks exactly as idle to `is_expired` as a
+    /// genuinely abandoned cursor, even though it is being actively used the
+    /// whole time. `try_lock()` reliably tells the two apart: it fails
+    /// while a `FetchNext` is in flight (the lock is held) and succeeds
+    /// immediately otherwise. The returned guard is dropped right away — a
+    /// pure availability probe, not something held across this filter.
+    ///
+    /// Residual (documented, not fixed): this narrows the race to a MUCH
+    /// smaller window than before (a fetch running for the entire
+    /// `idle_ttl` can no longer be reaped mid-flight, since `try_lock` fails
+    /// throughout), but does NOT make the check-then-remove sequence fully
+    /// atomic — this method only collects a list; the reaper's sweep loop
+    /// calls `remove_for_idle_reap` per id in a SEPARATE later pass. A new
+    /// `FetchNext` could theoretically start and acquire the lock in the gap
+    /// between these two passes. That residual window is single-reaper-
+    /// tick-local, not `idle_ttl`-sized — many orders of magnitude smaller
+    /// than the bug this closes — and is accepted rather than fused into one
+    /// atomic check-and-remove step per entry.
     pub fn expired_ids(&self, now: Instant, idle_ttl: Duration) -> Vec<u64> {
         self.open
             .iter()
-            .filter(|e| e.value().is_expired(now, idle_ttl))
+            .filter(|e| e.value().is_expired(now, idle_ttl) && e.value().state().try_lock().is_ok())
             .map(|e| *e.key())
             .collect()
     }
