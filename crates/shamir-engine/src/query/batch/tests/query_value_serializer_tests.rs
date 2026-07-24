@@ -372,3 +372,120 @@ fn kitchen_sink() {
     let m = results_map([("rich", rich), ("simple", simple)]);
     assert_parity("kitchen sink", &m);
 }
+
+// ── F-8 (#798): serialize_u64 must promote to Big above i64::MAX ──────────────
+
+#[test]
+fn u64_fits_in_i64_stays_int() {
+    // Values <= i64::MAX stay as Int — the unchanged half of the Unified u64
+    // contract. Confirms the F-8 fix didn't alter the in-bounds behaviour.
+    assert_eq!(
+        to_query_value(&42u64).unwrap(),
+        QueryValue::Int(42),
+        "small u64 stays Int"
+    );
+    assert_eq!(
+        to_query_value(&(i64::MAX as u64)).unwrap(),
+        QueryValue::Int(i64::MAX),
+        "i64::MAX boundary stays Int"
+    );
+}
+
+#[test]
+fn u64_above_i64_max_promotes_to_big() {
+    // Values > i64::MAX promote losslessly to Big — matches
+    // `ValueVisitor::visit_u64`'s "Unified u64 contract". Before F-8 the plain
+    // `v as i64` cast silently sign-flipped these (e.g. `u64::MAX` -> `Int(-1)`).
+    let boundary = (i64::MAX as u64) + 1;
+    assert_eq!(
+        to_query_value(&boundary).unwrap(),
+        QueryValue::Big(num_bigint::BigInt::from(boundary)),
+        "i64::MAX + 1 promotes to Big"
+    );
+    assert_eq!(
+        to_query_value(&u64::MAX).unwrap(),
+        QueryValue::Big(num_bigint::BigInt::from(u64::MAX)),
+        "u64::MAX promotes to Big (not Int(-1))"
+    );
+
+    // Exact numeric round-trip — the Big value's full magnitude is preserved,
+    // not just its variant tag.
+    match to_query_value(&u64::MAX).unwrap() {
+        QueryValue::Big(b) => {
+            assert_eq!(
+                b.to_string(),
+                u64::MAX.to_string(),
+                "Big round-trips u64::MAX exactly"
+            );
+        }
+        other => panic!("u64::MAX must promote to Big, got {other:?}"),
+    }
+}
+
+#[test]
+fn u64_overflow_field_promotes_in_real_stats_and_pagination() {
+    // End-to-end + differential: `QueryStats` / `PaginationInfo` carry raw
+    // `u64` counter fields that flow through `serialize_u64`. With values >
+    // `i64::MAX` they must promote to `Big` in BOTH the new `to_query_value`
+    // path AND the old msgpack round-trip — proving the F-8 fix reaches the
+    // real call sites this serializer exists to serve AND that the two paths
+    // now agree (they did NOT before F-8 for values above `i64::MAX`).
+    let res = QueryResult {
+        records: vec![QueryRecord::Direct(mpack!({ "id": 1 }))],
+        stats: Some(QueryStats {
+            index_used: None,
+            records_scanned: u64::MAX,
+            records_returned: (i64::MAX as u64) + 1,
+            // A u64 that still fits stays Int end-to-end.
+            execution_time_us: 42,
+        }),
+        pagination: Some(PaginationInfo {
+            // `Option<u64>` field — `Some(u64::MAX)` must also promote.
+            total_count: Some(u64::MAX),
+            total_pages: None,
+            current_page: None,
+            page_size: Some(7),
+            has_next: false,
+            has_prev: false,
+        }),
+        value: None,
+        explain: None,
+        skipped: false,
+        versions: None,
+    };
+    let m = results_map([("huge", res)]);
+
+    // Differential parity: new path must match old msgpack round-trip. The old
+    // path promotes via `ValueVisitor::visit_u64`; before F-8 the new path
+    // sign-flipped, so this assertion would have FAILED on this input.
+    assert_parity("u64 overflow stats/pagination", &m);
+
+    // Directly confirm the promoted Big values land with exact magnitude in the
+    // new path (not sign-flipped Ints), and that in-bounds u64 fields stay Int.
+    let new = to_query_value(&m).expect("new ok");
+    assert_eq!(
+        &new["huge"]["stats"]["records_scanned"],
+        &QueryValue::Big(num_bigint::BigInt::from(u64::MAX)),
+        "records_scanned=u64::MAX must promote to Big"
+    );
+    assert_eq!(
+        &new["huge"]["stats"]["records_returned"],
+        &QueryValue::Big(num_bigint::BigInt::from((i64::MAX as u64) + 1)),
+        "records_returned=i64::MAX+1 must promote to Big"
+    );
+    assert_eq!(
+        &new["huge"]["stats"]["execution_time_us"],
+        &QueryValue::Int(42),
+        "execution_time_us=42 stays Int"
+    );
+    assert_eq!(
+        &new["huge"]["pagination"]["total_count"],
+        &QueryValue::Big(num_bigint::BigInt::from(u64::MAX)),
+        "pagination.total_count=u64::MAX must promote to Big"
+    );
+    assert_eq!(
+        &new["huge"]["pagination"]["page_size"],
+        &QueryValue::Int(7),
+        "pagination.page_size=7 stays Int"
+    );
+}

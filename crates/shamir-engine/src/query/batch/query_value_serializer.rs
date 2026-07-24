@@ -46,6 +46,7 @@
 
 use std::fmt;
 
+use num_bigint::BigInt;
 use serde::ser::{
     self, Serialize, SerializeMap, SerializeSeq, SerializeStruct, SerializeTuple,
     SerializeTupleStruct, Serializer,
@@ -128,8 +129,8 @@ impl Serializer for QueryValueSerializer {
         Ok(QueryValue::Int(v))
     }
 
-    // All unsigned ints land in `Value::Int` — matches `ValueVisitor::visit_u64`
-    // (`value as i64`) and `visit_i64` after msgpack's fixint re-encoding.
+    // `u8`/`u16`/`u32` can never exceed `i64::MAX`, so they always land in
+    // `Value::Int` — matches `visit_i64` after msgpack's fixint re-encoding.
     fn serialize_u8(self, v: u8) -> Result<QueryValue, QvSerError> {
         Ok(QueryValue::Int(v as i64))
     }
@@ -139,8 +140,19 @@ impl Serializer for QueryValueSerializer {
     fn serialize_u32(self, v: u32) -> Result<QueryValue, QvSerError> {
         Ok(QueryValue::Int(v as i64))
     }
+    // `u64` follows `ValueVisitor::visit_u64`'s "Unified u64 contract": values
+    // that fit in `i64` decode as a plain `Int`; values above `i64::MAX` promote
+    // losslessly to `Big` (an arbitrary-precision `BigInt`) instead of silently
+    // wrapping via `v as i64` (which sign-flips `u64::MAX` to `-1`). This keeps
+    // wire-shape parity with the old msgpack round-trip for huge counters
+    // (`QueryStats::records_scanned` / `PaginationInfo::total_count` / …) that
+    // legitimately exceed `i64::MAX`.
     fn serialize_u64(self, v: u64) -> Result<QueryValue, QvSerError> {
-        Ok(QueryValue::Int(v as i64))
+        if v <= i64::MAX as u64 {
+            Ok(QueryValue::Int(v as i64))
+        } else {
+            Ok(QueryValue::Big(BigInt::from(v)))
+        }
     }
 
     fn serialize_f32(self, v: f32) -> Result<QueryValue, QvSerError> {
