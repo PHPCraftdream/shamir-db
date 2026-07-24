@@ -156,6 +156,83 @@ describe('CursorIterator', () => {
   });
 
   // -------------------------------------------------------------------
+  // N-9 (CR-D5, #786): return() must serialize behind an in-flight next()
+  // so a late-resolving fetch_next cannot repopulate the buffer AFTER
+  // return() already cleared it (manual-driving overlap — `for await...of`
+  // never overlaps a next() with a return() this way).
+  // -------------------------------------------------------------------
+
+  it('return() overlapping an in-flight next() does not let the buffer get repopulated', async () => {
+    let resolveFetchNext!: (v: Record<string, unknown>) => void;
+
+    const sendRequest: SendCursorRequest = vi.fn((req: object) => {
+      const r = req as { op: string };
+      if (r.op === 'create_cursor') {
+        // has_more: true so a follow-up next() issues a real fetch_next
+        // round-trip that we can hold open.
+        return Promise.resolve(page(7, [{ id: 'a' }], true));
+      }
+      if (r.op === 'fetch_next') {
+        return new Promise((resolve) => {
+          resolveFetchNext = resolve;
+        });
+      }
+      if (r.op === 'cancel_cursor') {
+        return Promise.resolve({ kind: 'cursor_closed' });
+      }
+      throw new Error(`unexpected op in test: ${r.op}`);
+    });
+
+    const iter = new CursorIterator(sendRequest, 'app', query, 10);
+
+    // Drain the first (already-buffered) record so the SECOND next() call
+    // below is the one that actually reaches out for fetch_next.
+    const first = await iter.next();
+    expect(first).toEqual({ done: false, value: { id: 'a' } });
+
+    // Fire an overlapping next() (issues fetch_next, held open above) and
+    // return() BEFORE that fetch_next round-trip resolves — the manual-
+    // driving race this task closes.
+    const nextPromise = iter.next();
+    const returnPromise = iter.return();
+
+    // `next()` chains its work onto `pending` (see cursor-iterator.ts's doc
+    // comment), so `doNext()` — and its `sendRequest(fetch_next)` call —
+    // runs as a microtask rather than synchronously inside `next()` itself.
+    // Flush the microtask queue so `resolveFetchNext` is actually assigned
+    // before we call it.
+    await Promise.resolve();
+    await Promise.resolve();
+
+    // Let the in-flight fetch_next resolve with a NEW page — if return()'s
+    // cleanup ran before this, the buffer would be repopulated with these
+    // rows right after return() supposedly cleared it.
+    resolveFetchNext(page(7, [{ id: 'late' }], false));
+
+    const nextResult = await nextPromise;
+    const returnResult = await returnPromise;
+
+    // The queued next() still resolves with the in-flight page's data (it
+    // was already promised to the caller before return() ran) — return()
+    // does not retroactively cancel a next() call that already started.
+    expect(nextResult).toEqual({ done: false, value: { id: 'late' } });
+    expect(returnResult).toEqual({ done: true, value: undefined });
+
+    // The core guarantee: once return() has SETTLED, the buffer must be
+    // empty and the iterator done — the late fetch_next resolution must not
+    // have left anything behind for a LATER next() call to hand out.
+    const afterReturn = await iter.next();
+    expect(afterReturn).toEqual({ done: true, value: undefined });
+
+    // cancel_cursor must actually have been sent — return() didn't skip its
+    // own work despite the overlap.
+    const cancelCalls = (sendRequest as ReturnType<typeof vi.fn>).mock.calls.filter(
+      (call: unknown[]) => (call[0] as { op: string }).op === 'cancel_cursor',
+    );
+    expect(cancelCalls.length).toBe(1);
+  });
+
+  // -------------------------------------------------------------------
   // P-5 (TS): repeated-empty-page loop (not recursion) + index-based
   // buffer reads still return records in order.
   // -------------------------------------------------------------------

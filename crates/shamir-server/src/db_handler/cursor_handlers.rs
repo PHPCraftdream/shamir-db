@@ -987,12 +987,32 @@ impl ShamirDbHandler {
         let guard = gate.open_snapshot().await;
         let pinned_version = guard.version();
 
-        // Temporal-read drain caveat (query_runner.rs): flush the repo's
-        // in-memory overlay to durable history once, up front, so the
-        // pinned version's `AsOf` reads are coherent for the cursor's
-        // whole lifetime (the pinned version never changes across fetches,
-        // so a single drain here suffices — unlike a one-shot AsOf/History
-        // read, which drains on every call).
+        // N-7 (CR-D5, #786): best-effort PERFORMANCE optimization, not a
+        // correctness requirement — confirmed by reading `read_temporal.rs`'s
+        // `read_as_of` (this cursor's whole read path, since every
+        // `create_cursor`/`fetch_next` read is `Temporal::AsOf`) and the
+        // `MvccStore` overlay-merge machinery it calls into:
+        //
+        // - `read_as_of`'s enumeration source
+        //   (`list_stream_with_tombstones` -> `MvccStore::
+        //   current_stream_with_tombstones` -> `current_stream_impl`)
+        //   explicitly merges the in-memory overlay
+        //   (`self.overlay.snapshot_le(floor)`) with durable `history` at
+        //   stream-open time — a key that exists ONLY in the overlay (never
+        //   drained) is enumerated exactly as if it were already durable.
+        // - Its per-id point read (`MvccStore::get_at_many`/`get_at`) probes
+        //   the overlay FIRST, per key, before ever touching `history` — an
+        //   overlay-only `(key, version)` pair resolves correctly with no
+        //   drain required.
+        //
+        // So an `AsOf` read at the pinned version is ALREADY coherent
+        // whether or not this drain has run — this call flushes the repo's
+        // in-memory overlay into durable history + reclaims WAL segments
+        // once, up front, purely so every `FetchNext` for this cursor's
+        // lifetime reads through the (cheaper) durable-history path instead
+        // of paying the overlay-merge cost on every call. If it fails, reads
+        // remain correct (via the overlay-aware path above) but keep paying
+        // that cost for the cursor's lifetime instead — logged, not fatal.
         if let Err(e) = repo.drainer().drain_all(&repo).await {
             tracing::warn!(?e, db = db_name, repo = %repo_name, "create_cursor: drain_all failed");
         }
@@ -1297,11 +1317,6 @@ impl ShamirDbHandler {
             });
         }
 
-        let repo = match resolve_repo(&self.db, cursor.db(), cursor.repo()) {
-            Ok(r) => r,
-            Err(e) => return error_response(&e),
-        };
-
         let mut state = cursor.state().lock().await;
         if state.exhausted {
             self.cursor_registry.remove(cursor_id.0);
@@ -1317,6 +1332,16 @@ impl ShamirDbHandler {
 
         let table_name = state.query.from.table.clone();
 
+        // N-9 (CR-D5, #786): authorize BEFORE resolving the repo, matching
+        // `create_cursor`'s order (`authorize_cursor_read` then
+        // `resolve_repo`) — this used to be the other way around here, a
+        // gratuitous asymmetry between the two handlers with no behavior
+        // difference (the session already owns the cursor by the time
+        // `fetch_next` runs, so `resolve_repo`'s error path leaked no
+        // additional information either order), but nothing stops a future
+        // change from making the ORDER matter, so keeping the two handlers
+        // consistent is worth the pure reshuffle.
+        //
         // Re-authorize on every FetchNext, not just at CreateCursor time: a
         // pinned snapshot only bounds WHAT DATA a cursor can see, not
         // whether the actor SHOULD still be allowed to see it — a
@@ -1333,6 +1358,11 @@ impl ShamirDbHandler {
             drop(state);
             return error_response(&e);
         }
+
+        let repo = match resolve_repo(&self.db, cursor.db(), cursor.repo()) {
+            Ok(r) => r,
+            Err(e) => return error_response(&e),
+        };
 
         let table = match repo.get_table(&table_name).await {
             Ok(t) => t,

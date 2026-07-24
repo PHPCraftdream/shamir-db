@@ -728,9 +728,7 @@ pub(super) fn error_code(e: &BatchError) -> &str {
         }
         BatchError::CrossRepoNotSupported { .. } => "tx_cross_repo_not_supported",
         BatchError::NestingTooDeep { .. } => "nesting_too_deep",
-        // FG-5a: wire error codes reserved for the cursor protocol; actual
-        // cap/eviction enforcement (the only place these variants are
-        // currently constructed) lands in FG-5b.
+        // FG-5b: wire error codes for the cursor protocol.
         BatchError::CursorNotFound { .. } => "cursor_not_found",
         BatchError::CursorExpired { .. } => "cursor_expired",
         BatchError::CursorLimitExceeded { .. } => "cursor_limit_exceeded",

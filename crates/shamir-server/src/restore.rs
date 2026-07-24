@@ -20,7 +20,9 @@
 //!    BEFORE touching `data_dir` at all. A checksum mismatch or missing
 //!    manifest aborts the whole restore with no side effects.
 //! 3. **Copy to a TEMPORARY sibling directory** (same filesystem as
-//!    `data_dir`'s parent — required for the atomic rename in step 5).
+//!    `data_dir`'s parent — required for the atomic rename in step 5). A
+//!    copy failure here best-effort removes the staged temp dir
+//!    ([`cleanup_staged_temp_dir`]) before propagating the original error.
 //! 4. **Invalidate sessions IN THE STAGED COPY, before anything touches the
 //!    live `data_dir`**: open the `users` store INSIDE the temp dir (NOT
 //!    `data_dir`'s) and call `invalidate_all_tickets(now_ns)` there, then
@@ -29,14 +31,22 @@
 //!    in the copy that is about to become live — a failure here (e.g. a
 //!    corrupt/unopenable `users` store in the snapshot) aborts the restore
 //!    with the CURRENT `data_dir` completely untouched, since the swap
-//!    (step 5) has not run yet.
+//!    (step 5) has not run yet. Same best-effort temp-dir cleanup as step 3.
 //! 5. **Atomic swap**: rename the CURRENT `data_dir` (if it exists) to a
 //!    `.pre_restore_backup_<timestamp>` sibling (preserved, NOT deleted —
 //!    the explicit rollback path), then rename the temp dir (tickets
 //!    already invalidated in step 4) into place as the new `data_dir`. A
 //!    failure in the second rename triggers a best-effort rollback of the
 //!    first — this is a SEPARATE failure mode from step 4's, and is
-//!    unaffected by the step 4 reordering.
+//!    unaffected by the step 4 reordering. The rollback's own outcome
+//!    determines WHICH of two distinct errors is returned:
+//!    [`RestoreError::SwapFailedRollbackSucceeded`] (rollback worked —
+//!    `data_dir` is intact again, nothing to manually rename) or
+//!    [`RestoreError::SwapPartialFailure`] (rollback ALSO failed —
+//!    `data_dir` is genuinely missing, operator must manually intervene).
+//!    `temp_dir` is deliberately left on disk in BOTH cases (never cleaned
+//!    up here) — each error message documents exactly why it's still
+//!    there.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -73,6 +83,26 @@ pub enum RestoreError {
     SwapPartialFailure {
         data_dir: PathBuf,
         pre_restore_backup: PathBuf,
+        temp_dir: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    /// N-6: the swap's final rename (temp_dir -> data_dir) failed, but the
+    /// best-effort ROLLBACK (pre_restore_backup -> data_dir) SUCCEEDED —
+    /// `data_dir` is intact again, holding the ORIGINAL pre-restore data.
+    /// Distinct from [`Self::SwapPartialFailure`] (rollback also failed,
+    /// data_dir genuinely missing): here nothing needs manual renaming, so
+    /// the message must NOT tell the operator to rename anything — the
+    /// restored (but not swapped in) copy is left at `temp_dir` purely for
+    /// inspection/retry.
+    #[error(
+        "restore's final swap step failed ({source}); the automatic rollback \
+         SUCCEEDED — {data_dir} is intact and contains the ORIGINAL \
+         pre-restore data. The restored copy (not swapped in) is left at \
+         {temp_dir} for inspection or retry; no manual action is needed."
+    )]
+    SwapFailedRollbackSucceeded {
+        data_dir: PathBuf,
         temp_dir: PathBuf,
         #[source]
         source: std::io::Error,
@@ -138,7 +168,14 @@ pub fn restore(from: &Path, data_dir: &Path, force: bool) -> Result<RestoreRepor
     fs::create_dir_all(&temp_dir)?;
     let mut bytes = 0u64;
     let mut files = 0u64;
-    copy_dir_recursive(from, &temp_dir, &mut bytes, &mut files)?;
+    if let Err(e) = copy_dir_recursive(from, &temp_dir, &mut bytes, &mut files) {
+        // N-6: the error message for this failure gives the operator no
+        // reference to `temp_dir` at all — clean it up best-effort (log,
+        // don't let a cleanup failure mask the original error) rather than
+        // leaving an orphaned `*.restore_tmp_*` directory behind.
+        cleanup_staged_temp_dir(&temp_dir);
+        return Err(RestoreError::Io(e));
+    }
 
     // ---- Step 4: invalidate sessions IN THE STAGED COPY, before the swap.
     // A failure here (e.g. a corrupt/unopenable `users` store in the
@@ -148,11 +185,15 @@ pub fn restore(from: &Path, data_dir: &Path, force: bool) -> Result<RestoreRepor
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_nanos() as u64)
         .unwrap_or(0);
-    let users_invalidated = {
-        let users = FjallUserDirectory::open(temp_dir.join("users"))?;
-        let n = users.invalidate_all_tickets(now_ns)?;
-        drop(users); // release fjall's lock before the swap renames this tree
-        n
+    let users_invalidated = match open_and_invalidate_users(&temp_dir, now_ns) {
+        Ok(n) => n,
+        Err(e) => {
+            // N-6: same rationale as the step-3 copy failure above — this
+            // error's message has no reference to `temp_dir` either, so it
+            // would otherwise be orphaned on disk.
+            cleanup_staged_temp_dir(&temp_dir);
+            return Err(e);
+        }
     };
 
     // ---- Step 5: atomic swap ----
@@ -168,6 +209,11 @@ pub fn restore(from: &Path, data_dir: &Path, force: bool) -> Result<RestoreRepor
                 // Best-effort rollback: put the pre-restore backup back so
                 // data_dir is not left missing.
                 if fs::rename(&backup_sibling, data_dir).is_err() {
+                    // Rollback ALSO failed: data_dir is genuinely missing —
+                    // both `backup_sibling` and `temp_dir` exist, operator
+                    // must manually choose and rename one to `data_dir`.
+                    // `temp_dir` MUST survive on disk here — do NOT clean it
+                    // up, the error message points the operator at it.
                     return Err(RestoreError::SwapPartialFailure {
                         data_dir: data_dir.to_path_buf(),
                         pre_restore_backup: backup_sibling,
@@ -175,9 +221,13 @@ pub fn restore(from: &Path, data_dir: &Path, force: bool) -> Result<RestoreRepor
                         source: e,
                     });
                 }
-                return Err(RestoreError::SwapPartialFailure {
+                // Rollback SUCCEEDED: data_dir is intact again, holding the
+                // ORIGINAL pre-restore data. `temp_dir` (the restored-but-
+                // not-swapped-in copy) is deliberately left on disk for
+                // inspection/retry — do NOT clean it up here, the error
+                // message points the operator at it.
+                return Err(RestoreError::SwapFailedRollbackSucceeded {
                     data_dir: data_dir.to_path_buf(),
-                    pre_restore_backup: backup_sibling,
                     temp_dir,
                     source: e,
                 });
@@ -194,6 +244,39 @@ pub fn restore(from: &Path, data_dir: &Path, force: bool) -> Result<RestoreRepor
         users_invalidated,
         pre_restore_backup,
     })
+}
+
+/// Step 4 body: open the staged copy's `users` store and invalidate every
+/// ticket. Split out of [`restore`] so both callers (the real step and the
+/// N-6 cleanup-on-failure path around it) share one `?`-propagating body.
+///
+/// N-9/N-6 note: `FjallUserDirectory::open` materializes an empty `users`
+/// store when the snapshot lacks one — cosmetic (a restored server needs
+/// SOME `users` store to open regardless), not a bug; documented here since
+/// it's otherwise an undocumented side effect of this call.
+fn open_and_invalidate_users(temp_dir: &Path, now_ns: u64) -> Result<usize, RestoreError> {
+    let users = FjallUserDirectory::open(temp_dir.join("users"))?;
+    let n = users.invalidate_all_tickets(now_ns)?;
+    drop(users); // release fjall's lock before the swap renames this tree
+    Ok(n)
+}
+
+/// N-6: best-effort removal of the staged `*.restore_tmp_*` directory after
+/// a step-3 (copy) or step-4 (invalidate) failure — those error messages
+/// give the operator no reference to `temp_dir` at all, so an orphaned copy
+/// left behind would just be disk-space debt with no discoverable pointer
+/// to it. Deliberately NOT used on the step-5 (swap) failure paths, where
+/// `temp_dir` must survive exactly as documented in `RestoreError`'s
+/// messages. A cleanup failure is logged, never propagated — it must not
+/// mask the original error that triggered this cleanup attempt.
+fn cleanup_staged_temp_dir(temp_dir: &Path) {
+    if let Err(e) = fs::remove_dir_all(temp_dir) {
+        tracing::warn!(
+            temp_dir = %temp_dir.display(),
+            error = %e,
+            "restore: failed to clean up staged temp dir after an earlier failure"
+        );
+    }
 }
 
 /// Attempt to open `data_dir/server_meta` (mirrors `server_launcher.rs`'s

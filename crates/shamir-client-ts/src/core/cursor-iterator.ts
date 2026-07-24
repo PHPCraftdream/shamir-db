@@ -221,8 +221,35 @@ export class CursorIterator implements AsyncIterableIterator<CursorRecord> {
    * loop body itself threw, which is almost always the wrong debugging
    * experience for a caller chasing down their own bug, not a cursor
    * protocol mismatch.
+   *
+   * N-9 (CR-D5, #786): a manual driver (calling `.next()` and `.return()`
+   * directly rather than via `for await...of`, which always awaits each
+   * `next()` before the next call) can overlap an in-flight `next()` with a
+   * `return()` call. Without waiting for `pending` first, this method's own
+   * cleanup (`buffer = []`, `position = 0`) could run BEFORE the in-flight
+   * `doNext()` finishes and calls `applyPage`, which would repopulate
+   * `buffer`/`position`/`hasMore` right after `return()` just cleared them —
+   * silently undoing the cancellation from the caller's point of view.
+   * Awaiting `this.pending` first serializes against that in-flight call,
+   * mirroring `next()`'s own chaining convention (see `pending`'s doc
+   * comment above), so this method's cleanup always runs LAST.
+   *
+   * One related case is deliberately left as-is, not fixed: `return()`
+   * called while the FIRST `next()` is still in flight (before
+   * `_cursorId` is even known yet) skips the server-side `cancel_cursor`
+   * call entirely below (the `this._cursorId !== undefined` guard), leaving
+   * that cursor to the idle-timeout backstop — this mirrors the Rust SDK's
+   * own documented reliance on the idle-timeout reaper for a `Drop`-based
+   * early abandonment, so it's an accepted, understood gap rather than an
+   * oversight.
    */
   async return(): Promise<IteratorResult<CursorRecord>> {
+    // Serialize against any in-flight next()/doNext() — see the doc comment
+    // above. Swallow a rejection the same way `next()`'s own `.then(...,
+    // () => this.doNext())` does: this call only cares that the prior work
+    // has SETTLED before its own cleanup runs, not what it resolved to.
+    await this.pending.catch(() => undefined);
+
     if (!this.done && this._cursorId !== undefined) {
       this.done = true;
       try {
