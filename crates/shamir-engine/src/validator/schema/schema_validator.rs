@@ -342,6 +342,10 @@ impl RecordValidator for SchemaValidator {
             }
         })
     }
+
+    fn as_schema_rules(&self) -> Option<&[FieldRule]> {
+        Some(&self.rules)
+    }
 }
 
 // ── helpers ───────────────────────────────────────────────────────────────────

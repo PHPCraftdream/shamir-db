@@ -1256,11 +1256,72 @@ async fn fetch_next_explicit_page_size_still_overrides_default() {
 // duplication" is "every `seq` appears in the drained set exactly once".
 // ---------------------------------------------------------------------------
 
+/// F-1 (#792): register a `SchemaValidator` declaring `field` as `ty`
+/// (`required`), and bind it to `db_name.repo_name.table_name` — the minimal
+/// setup that makes `order_by_column_is_schema_typed_scalar` prove a column
+/// homogeneous so a cursor over it can reach `PaginationMode::Keyset` at all.
+///
+/// Registers the `SchemaValidator` DIRECTLY into the live `ValidatorRegistry`
+/// (`db.validators().register(...)`) rather than via `ShamirDb::
+/// register_native_validator` — that facade wraps the validator in a
+/// `NativeRecordValidator` closure (see `crates/shamir-db/tests/
+/// declarative_schema_e2e.rs`'s `register_and_bind_schema`), which would lose
+/// the concrete `SchemaValidator` type this task's new
+/// `RecordValidator::as_schema_rules` downcast hook needs to see. Registering
+/// the compiled `SchemaValidator` directly (mirroring `ValidatorRegistry::
+/// register`'s own doc comment: "Look up a compiled validator by id") skips
+/// only the catalogue-row persistence step, which none of these in-memory,
+/// single-process tests need.
+async fn bind_schema(
+    db: &ShamirDb,
+    db_name: &str,
+    repo_name: &str,
+    table_name: &str,
+    field: &str,
+    ty: shamir_db::engine::validator::schema::TypeTag,
+) {
+    use shamir_db::engine::validator::schema::{Constraints, FieldRule, SchemaValidator};
+    use shamir_db::engine::validator::WriteOp;
+    use shamir_types::types::record_id::RecordId;
+
+    let field_rule = FieldRule {
+        path: vec![field.to_string()],
+        ty,
+        constraints: Constraints {
+            required: true,
+            ..Constraints::default()
+        },
+    };
+    let schema = SchemaValidator::new(vec![field_rule]);
+    let id = RecordId::new();
+    db.validators()
+        .register(id, format!("{table_name}_{field}_schema"), Arc::new(schema))
+        .expect("register schema validator");
+    db.bind_validator(
+        db_name,
+        repo_name,
+        table_name,
+        &format!("{table_name}_{field}_schema"),
+        vec![WriteOp::Insert, WriteOp::Update, WriteOp::Upsert],
+        1000,
+    )
+    .await
+    .expect("bind schema validator");
+}
+
 /// Build a handler over an in-memory `ShamirDb` with `app.main.items`, owned
 /// by alice, seeded with one row per entry in `scores`: `{ seq: i, score:
 /// scores[i] }`. `seq` is a strictly-increasing insertion-order tiebreaker
 /// field distinct from `score`, letting tests identify every row uniquely
 /// even when many rows share the same `score`.
+///
+/// F-1 (#792): binds a schema declaring `score: Int, required` so these
+/// tests keep exercising genuine `PaginationMode::Keyset` mechanics (tie-run
+/// bookmarks, CR-D1's ceiling fallback, etc.) — every caller of this helper
+/// predates the schema-typed-scalar gate and its whole point is Keyset-mode
+/// coverage, not the schemaless-conservative-default this task adds (that
+/// default has its own dedicated tests, see `order_by_column_is_schema_typed_
+/// scalar`'s regression tests below).
 async fn build_handler_with_scores(
     scores: &[i64],
     cursor_limits: CursorLimitsCap,
@@ -1274,6 +1335,15 @@ async fn build_handler_with_scores(
         .add_repo_as("app", cfg, owner.clone())
         .await
         .expect("add repo");
+    bind_schema(
+        &shamir,
+        "app",
+        "main",
+        "items",
+        "score",
+        shamir_db::engine::validator::schema::TypeTag::Int,
+    )
+    .await;
 
     if !scores.is_empty() {
         let mut b = Batch::new();
@@ -2074,22 +2144,24 @@ async fn offset_path_concurrent_fetch_next_same_cursor_serializes_disjoint_pages
 /// `fetch_next` call.
 ///
 /// Traced behavior (verified by reading `create_cursor`/`fetch_next`, not
-/// guessed): `mode` is still pinned to `PaginationMode::Keyset` at creation
-/// (decided purely from `order_by`'s shape, per `pagination_mode_for_query`
-/// -- `select` never enters that decision). But `seek_key` ends up `None`
-/// because `order_by_field_value` can't extract `v` from an unprojected
-/// row. `fetch_next`'s dispatch is `match (state.mode, state.seek_key.clone())`
-/// -- `(Keyset, None)` does NOT match the `(Keyset, Some(seek_key))` arm, so
-/// EVERY subsequent `fetch_next` call falls through to the `_ =>` arm, i.e.
-/// the SAME row-count offset-bookmark branch the no-ORDER-BY path uses.
-/// `state.offset` is tracked identically in both branches (advanced by the
-/// actual returned-row count, `page.records.len()` at creation and
-/// `fetched.records.len()` on each subsequent call), so this degrades
-/// cleanly to correct offset-mode pagination -- not a broken/untested
-/// state. This is NOT a bug: it's the documented "can't build/refresh a
-/// keyset bookmark from this page" fallback the module doc comment on
-/// `order_by_field_value` describes, verified here to still page every row
-/// correctly end-to-end.
+/// guessed): pre-F-1 (#792), `mode` was pinned to `PaginationMode::Keyset`
+/// at creation (decided purely from `order_by`'s shape, per
+/// `pagination_mode_for_query` -- `select` never enters that decision), and
+/// `seek_key` ended up `None` because `order_by_field_value` can't extract
+/// `v` from an unprojected row -- `fetch_next`'s `(Keyset, None)` dispatch
+/// falls through to the SAME row-count offset-bookmark branch the
+/// no-ORDER-BY path uses. Since F-1, `build_handler_with_rows`'s table has
+/// no schema bound at all, so the NEW schema-typed-scalar gate ALSO now
+/// pins `mode` to `PaginationMode::Offset` directly at creation (before the
+/// unprojected-field question is even reached) -- a stricter, earlier
+/// reason for the SAME degrade-to-offset outcome. Either mechanism lands on
+/// the identical offset-bookmark branch (`state.offset` is tracked
+/// identically regardless of which one triggered), so this test's
+/// end-to-end assertion (every row pages correctly) is unaffected by which
+/// mechanism is responsible. This is NOT a bug: it's the documented "can't
+/// build/refresh a keyset bookmark from this page" fallback the module doc
+/// comment on `order_by_field_value` describes, verified here to still page
+/// every row correctly end-to-end.
 #[tokio::test]
 async fn keyset_eligible_but_unprojected_order_by_field_falls_back_to_offset_correctly() {
     let handler = build_handler_with_rows(7, CursorLimitsCap::UNLIMITED).await;
@@ -3130,19 +3202,23 @@ async fn null_probe_regression_non_null_column_stays_keyset() {
     );
 }
 
-/// Mixed-type / NaN: documented, still-open limitation (see CURSORS.md and
-/// KNOWN_LIMITATIONS.md §6) -- neither is cheaply detectable with the
-/// existing filter AST the way `Filter::IsNull` makes the Null case cheap
-/// (there is no "is this field a different QueryValue variant than X" or
-/// "is this F64 field NaN" filter primitive today), so this task's fix tier
-/// does NOT extend to these. This test PINS the current (accepted) gap: an
-/// ORDER BY column containing `NaN` values silently drops the NaN-valued
-/// row(s) once the keyset boundary scan passes page 1 -- proving the gap is
-/// tracked by a test, not silently unverified. If a future task closes this
-/// gap, this test's assertion (`< scores.len()`, i.e. loss occurs) should
-/// flip to an exact-equality "no loss" assertion instead.
+/// NaN in an `F64` `ORDER BY` column: documented, still-open limitation for
+/// the KEYSET boundary-filter scheme itself (see CURSORS.md and
+/// KNOWN_LIMITATIONS.md §6) -- `NaN`'s `partial_cmp` always returns `None`
+/// (`compare_values`'s `(F64, F64)` arm), so `field >= seek_key` would
+/// silently drop a NaN row past page 1 if this column ever reached keyset
+/// mode. F-1 (#792) does not (and cannot, without a new NaN-detection
+/// primitive -- out of scope) close this directly; instead it closes it
+/// INDIRECTLY for every `F64` column, schema-typed or not: an `F64` `ORDER BY`
+/// column can no longer reach keyset mode AT ALL (this table is schemaless,
+/// so `order_by_column_is_schema_typed_scalar` already returns `false` before
+/// any schema-type check even applies -- see the schema-typed `F64`-exclusion
+/// regression test below for the schema-bound case specifically). This test
+/// now pins the NEW behavior: `PaginationMode::Offset` from creation, and
+/// NO row loss (a plain offset-bookmarked full scan never runs `NaN` through
+/// `compare_values`'s boundary-filter comparison at all).
 #[tokio::test]
-async fn nan_order_by_value_is_a_documented_still_open_limitation() {
+async fn nan_order_by_value_forces_offset_mode_no_loss() {
     let shamir = ShamirDb::init_memory().await.expect("init shamir");
     let owner = Actor::User(principal64([0xAB; 16]));
     shamir.create_db_as("app", owner.clone()).await;
@@ -3153,10 +3229,12 @@ async fn nan_order_by_value_is_a_documented_still_open_limitation() {
         .await
         .expect("add repo");
 
-    // 3 real-valued rows (0.0, 1.0, 2.0) + 2 NaN-valued rows. NaN's
-    // `partial_cmp` always returns `None` (`compare_values`'s
-    // `(F64, F64) => a.partial_cmp(b)` arm), so `field >= seek_key`
-    // evaluates to `false` for a NaN row on every page past the first.
+    // 3 real-valued rows (0.0, 1.0, 2.0) + 2 NaN-valued rows. Before F-1,
+    // NaN's `partial_cmp` always returning `None` (`compare_values`'s
+    // `(F64, F64) => a.partial_cmp(b)` arm) made `field >= seek_key`
+    // evaluate to `false` for a NaN row on every page past the first --
+    // silent loss under Keyset mode. After F-1, this schemaless `F64` column
+    // never reaches Keyset mode at all.
     let mut b = Batch::new();
     for i in 0..3 {
         b.insert(
@@ -3198,20 +3276,21 @@ async fn nan_order_by_value_is_a_documented_still_open_limitation() {
         other => panic!("expected CursorPage, got {other:?}"),
     };
 
-    // Still Keyset -- NaN detection is explicitly NOT part of this task's
-    // fix tier (documented limitation, not a fix), so the existence probe
-    // must not (and structurally cannot, since it only checks IS NULL) catch
-    // this case.
+    // F-1 (#792): a schemaless `F64` ORDER BY column must never reach
+    // Keyset mode -- the schema-typed-scalar gate rejects it (no bound
+    // schema at all) BEFORE the pre-existing Null-only existence probe
+    // even runs, closing the NaN silent-loss gap indirectly by removing
+    // this column's access to the keyset boundary-filter scheme entirely.
     assert_eq!(
         pinned_mode(&handler, cursor_id, &ALICE_SID),
-        PaginationMode::Keyset,
-        "NaN is not NULL -- the Null-only existence probe must not affect this case, \
-         by design (mixed-type/NaN detection is out of this task's fix tier)"
+        PaginationMode::Offset,
+        "an F64 ORDER BY column (schemaless here) must fall back to PaginationMode::Offset \
+         from creation -- F-1's schema-typed-scalar gate never admits F64 columns into \
+         Keyset mode, regardless of schema, since NaN cannot be ruled out"
     );
 
-    // Bounded drain (NaN can't livelock this path -- has_more legitimately
-    // reaches false once the keyset scan's real-valued rows are exhausted --
-    // but bound it anyway as cheap insurance).
+    // Bounded drain -- offset-mode pagination cannot livelock; bounded anyway
+    // as cheap insurance.
     for _ in 0..10 {
         if !has_more {
             break;
@@ -3234,15 +3313,12 @@ async fn nan_order_by_value_is_a_documented_still_open_limitation() {
     }
 
     seqs.sort_unstable();
-    assert!(
-        seqs.len() < 5,
-        "documented, still-open limitation: a NaN-valued ORDER BY row is expected to be \
-         silently dropped by the current keyset boundary-filter scheme once the scan passes \
-         page 1 -- got {} of 5 rows back ({:?}); if this now equals 5, the limitation has been \
-         closed and this test's assertion should be flipped to an exact-equality \"no loss\" \
-         check instead",
-        seqs.len(),
-        seqs
+    assert_eq!(
+        seqs,
+        vec![0, 1, 2, 3, 4],
+        "under Offset mode, every row -- including BOTH NaN-score rows -- must appear exactly \
+         once; offset pagination never runs a NaN value through compare_values's boundary-filter \
+         comparison, so the pre-F-1 silent-loss failure mode cannot occur here"
     );
 }
 
@@ -3352,6 +3428,15 @@ async fn build_handler_with_big_scores(
 /// Same as [`build_handler_with_dec_scores`] but for `Bin` (`Vec<u8>`) --
 /// each row's `score` is a distinct single-byte binary value so an ASC keyset
 /// scan (if it worked) would have a well-defined order.
+///
+/// F-1 (#792): binds a schema declaring `score: Bin, required` -- `Bin` IS
+/// one of the accepted `TypeTag`s in the schema-typed-scalar gate (it's a
+/// fixed, non-container, never-`NaN` scalar), so this keeps the cursor
+/// eligible for `Keyset` mode, letting this test keep exercising the actual
+/// W-2 per-value mechanism (`safe_seek_key` excluding `Bin` unconditionally,
+/// since `compare_values` has no `(Bin, Bin)` comparison arm regardless of
+/// schema) instead of being short-circuited to `Offset` before that
+/// mechanism is ever reached.
 async fn build_handler_with_bin_scores(
     scores: &[u8],
     cursor_limits: CursorLimitsCap,
@@ -3365,6 +3450,15 @@ async fn build_handler_with_bin_scores(
         .add_repo_as("app", cfg, owner.clone())
         .await
         .expect("add repo");
+    bind_schema(
+        &shamir,
+        "app",
+        "main",
+        "items",
+        "score",
+        shamir_db::engine::validator::schema::TypeTag::Bin,
+    )
+    .await;
 
     let mut b = Batch::new();
     for (i, score) in scores.iter().enumerate() {
@@ -3380,22 +3474,29 @@ async fn build_handler_with_bin_scores(
     ShamirDbHandler::new(Arc::new(shamir)).with_cursor_limits(cursor_limits)
 }
 
-/// W-3 regression: a keyset cursor over a `Dec` ORDER BY column.
+/// W-3 regression, updated for F-1 (#792): a cursor over a `Dec` ORDER BY
+/// column.
 ///
-/// BEFORE the fix: `query_value_to_filter_value` returns `None` for
-/// `QueryValue::Dec`, so `boundary_filter` returns `None` and
-/// `fetch_keyset_page` hard-errors ("cursor: keyset seek key has no
-/// comparable filter form") on the second `FetchNext`. AFTER the fix:
-/// `safe_seek_key` detects the unconvertible `Dec` value at the first-page
-/// bookmark-build site, so `seek_key` is `None` from the start -- the cursor
-/// transparently rides the offset-bookmark safety net (still reported as
-/// `PaginationMode::Keyset` in `state.mode`, per CR-A4: the MODE is pinned
-/// once from the query's SHAPE and never re-derived; it's the per-call
-/// `seek_key` that degrades to the offset path, exactly mirroring the
-/// pre-existing "ORDER BY field absent from projection" safety net) -- every
-/// row appears exactly once, no hard error.
+/// Pre-F-1 behavior (still exercised by the mechanism itself, just no
+/// longer reachable from a schemaless setup): BEFORE W-3's fix,
+/// `query_value_to_filter_value` returning `None` for `QueryValue::Dec` made
+/// `boundary_filter` return `None` and `fetch_keyset_page` hard-error
+/// ("cursor: keyset seek key has no comparable filter form") on the second
+/// `FetchNext`. AFTER W-3's fix (unchanged by this task): `safe_seek_key`
+/// would detect the unconvertible `Dec` value and degrade `seek_key` to
+/// `None`, riding the offset-bookmark safety net while `state.mode` stayed
+/// `Keyset` (pinned from shape).
+///
+/// F-1 (#792) changes what actually gates this: `Dec` has no accepted
+/// `TypeTag` in the schema-typed-scalar gate (only `Int`/`Bool`/`String`/
+/// `Bin` qualify), so a `Dec` ORDER BY column can never reach `Keyset` mode
+/// at all anymore, schema-bound or not -- the gate now short-circuits the
+/// whole keyset attempt BEFORE `safe_seek_key`'s per-value mechanism would
+/// ever run. This test now pins `PaginationMode::Offset` from creation
+/// (rather than the old "Keyset shape, but `seek_key` empties per-call"
+/// story) -- the end-to-end no-loss, no-hard-error guarantee is unchanged.
 #[tokio::test]
-async fn dec_order_by_value_uses_offset_fallback_not_hard_error() {
+async fn dec_order_by_value_now_forces_offset_mode_no_hard_error() {
     let scores = [5, 3, 1, 4, 2];
     let handler = build_handler_with_dec_scores(&scores, CursorLimitsCap::UNLIMITED).await;
     let session = alice_session();
@@ -3419,39 +3520,33 @@ async fn dec_order_by_value_uses_offset_fallback_not_hard_error() {
         other => panic!("expected CursorPage, got {other:?}"),
     };
 
-    // The query SHAPE is still keyset-eligible (single simple-field ORDER
-    // BY, no Null probe hit -- `Dec` isn't Null) -- CR-A4's mode is pinned
-    // from shape, not from the per-value convertibility check this task
-    // adds. What actually protects correctness is `seek_key` itself falling
-    // back to the offset bookmark per-call, verified by `has_more`/`seqs`
-    // below rather than by asserting `mode == Offset` here.
     assert_eq!(
         pinned_mode(&handler, cursor_id, &ALICE_SID),
-        PaginationMode::Keyset,
-        "a Dec ORDER BY column is not Null, so the CR-D2 create-time probe does not (and \
-         should not) reroute the whole cursor -- W-3's fix is a per-bookmark fallback, not a \
-         create-time mode change"
+        PaginationMode::Offset,
+        "F-1 (#792): Dec has no accepted TypeTag in the schema-typed-scalar gate, so this \
+         schemaless Dec column must fall back to PaginationMode::Offset from creation -- \
+         W-3's per-value safe_seek_key fallback is no longer reachable here at all"
     );
 
-    // Draining must NOT hard-error -- before the fix, this loop's second
-    // `FetchNext` would return `DbResponse::Error` with `code:
-    // "cursor_error"`/`query_error` instead of a `CursorPage`.
+    // Draining must NOT hard-error -- before W-3's fix, this loop's second
+    // `FetchNext` would have returned `DbResponse::Error` instead of a
+    // `CursorPage`. That guarantee still holds under Offset mode.
     drain_seqs(&handler, &session, cursor_id, 2, &mut seqs).await;
 
     seqs.sort_unstable();
     assert_eq!(
         seqs,
         vec![0, 1, 2, 3, 4],
-        "every row must appear exactly once via the offset-bookmark fallback -- before the fix \
-         this scenario hard-errored instead of completing the drain at all"
+        "every row must appear exactly once via offset-mode pagination -- no hard error, no loss"
     );
 }
 
-/// W-3 regression: same as the `Dec` test above, but for `Big`
-/// (`num_bigint::BigInt`) -- the brief calls out both types explicitly since
-/// `compare_values`/`query_value_to_filter_value` treat them as siblings.
+/// W-3 regression, updated for F-1 (#792): same as the `Dec` test above, but
+/// for `Big` (`num_bigint::BigInt`) -- `Big` has no `TypeTag` variant at all
+/// (checked `type_tag.rs`), so it can never pass the schema-typed-scalar
+/// gate under ANY schema, exactly like `Dec`.
 #[tokio::test]
-async fn big_order_by_value_uses_offset_fallback_not_hard_error() {
+async fn big_order_by_value_now_forces_offset_mode_no_hard_error() {
     let scores = [5, 3, 1, 4, 2];
     let handler = build_handler_with_big_scores(&scores, CursorLimitsCap::UNLIMITED).await;
     let session = alice_session();
@@ -3477,9 +3572,9 @@ async fn big_order_by_value_uses_offset_fallback_not_hard_error() {
 
     assert_eq!(
         pinned_mode(&handler, cursor_id, &ALICE_SID),
-        PaginationMode::Keyset,
-        "a Big ORDER BY column is not Null, so the CR-D2 create-time probe does not reroute \
-         the whole cursor -- W-3's fix is a per-bookmark fallback"
+        PaginationMode::Offset,
+        "F-1 (#792): Big has no TypeTag at all, so this schemaless Big column must fall \
+         back to PaginationMode::Offset from creation"
     );
 
     drain_seqs(&handler, &session, cursor_id, 2, &mut seqs).await;
@@ -3488,8 +3583,7 @@ async fn big_order_by_value_uses_offset_fallback_not_hard_error() {
     assert_eq!(
         seqs,
         vec![0, 1, 2, 3, 4],
-        "every row must appear exactly once via the offset-bookmark fallback -- before the fix \
-         this scenario hard-errored on the second FetchNext instead of completing the drain"
+        "every row must appear exactly once via offset-mode pagination -- no hard error, no loss"
     );
 }
 
@@ -3532,8 +3626,9 @@ async fn bin_order_by_value_uses_offset_fallback_not_silent_drop() {
     assert_eq!(
         pinned_mode(&handler, cursor_id, &ALICE_SID),
         PaginationMode::Keyset,
-        "a Bin ORDER BY column is not Null, so the CR-D2 create-time probe does not reroute \
-         the whole cursor -- W-2's fix is a per-bookmark fallback, same mechanism as W-3"
+        "a schema-typed Bin ORDER BY column passes F-1's schema-typed-scalar gate (Bin is an \
+         accepted TypeTag) and is not Null, so neither create-time probe reroutes the whole \
+         cursor -- W-2's fix is a per-bookmark fallback, same mechanism as W-3"
     );
 
     drain_seqs(&handler, &session, cursor_id, 2, &mut seqs).await;
@@ -3548,11 +3643,17 @@ async fn bin_order_by_value_uses_offset_fallback_not_silent_drop() {
     );
 }
 
-/// W-2 regression, `List` variant: same scenario as `Bin` above, but for
-/// `QueryValue::List` (converts to `FilterValue::Array` fine, but
-/// `compare_values` has no `(List, List)` arm either).
+/// W-2 regression, `List` variant, updated for F-1 (#792): same scenario as
+/// `Bin` above, but for `QueryValue::List` (converts to `FilterValue::Array`
+/// fine, but `compare_values` has no `(List, List)` arm either). Unlike
+/// `Bin`, `List` is a CONTAINER type -- `TypeTag::List` is excluded from the
+/// schema-typed-scalar gate's accepted set regardless of schema (containers
+/// can hold heterogeneous/nested values, so schema enforcement of the outer
+/// type alone doesn't prove the boundary-filter comparison is safe) -- so
+/// this column can never reach `Keyset` mode at all, schema-bound or not,
+/// same as the `Dec`/`Big` tests above.
 #[tokio::test]
-async fn list_order_by_value_uses_offset_fallback_not_silent_drop() {
+async fn list_order_by_value_now_forces_offset_mode_no_silent_drop() {
     let shamir = ShamirDb::init_memory().await.expect("init shamir");
     let owner = Actor::User(principal64([0xAB; 16]));
     shamir.create_db_as("app", owner.clone()).await;
@@ -3602,9 +3703,10 @@ async fn list_order_by_value_uses_offset_fallback_not_silent_drop() {
 
     assert_eq!(
         pinned_mode(&handler, cursor_id, &ALICE_SID),
-        PaginationMode::Keyset,
-        "a List ORDER BY column is not Null, so the CR-D2 create-time probe does not reroute \
-         the whole cursor -- W-2's fix is a per-bookmark fallback"
+        PaginationMode::Offset,
+        "F-1 (#792): List is a container TypeTag, excluded from the schema-typed-scalar gate \
+         regardless of schema -- this column must fall back to PaginationMode::Offset from \
+         creation"
     );
 
     drain_seqs(&handler, &session, cursor_id, 2, &mut seqs).await;
@@ -3613,8 +3715,7 @@ async fn list_order_by_value_uses_offset_fallback_not_silent_drop() {
     assert_eq!(
         seqs,
         vec![0, 1, 2, 3, 4],
-        "every row must appear exactly once via the offset-bookmark fallback -- before the fix \
-         every row past page 1 was silently dropped with a clean has_more: false"
+        "every row must appear exactly once via offset-mode pagination -- no silent drop"
     );
 }
 
@@ -3623,6 +3724,13 @@ async fn list_order_by_value_uses_offset_fallback_not_silent_drop() {
 /// AND must still actually exercise the real Keyset code path -- this fix
 /// must not accidentally start routing safe types through the new fallback
 /// check.
+///
+/// F-1 (#792): `String` is one of the accepted `TypeTag`s in the
+/// schema-typed-scalar gate, so this test binds a schema declaring
+/// `score: String, required` -- without it, this schemaless column would now
+/// (correctly) fall back to `PaginationMode::Offset` from creation, same as
+/// every other schemaless column, and this test would no longer exercise
+/// genuine Keyset-mode seeking at all.
 #[tokio::test]
 async fn str_order_by_regression_still_uses_real_keyset_seek() {
     let shamir = ShamirDb::init_memory().await.expect("init shamir");
@@ -3634,6 +3742,15 @@ async fn str_order_by_regression_still_uses_real_keyset_seek() {
         .add_repo_as("app", cfg, owner.clone())
         .await
         .expect("add repo");
+    bind_schema(
+        &shamir,
+        "app",
+        "main",
+        "items",
+        "score",
+        shamir_db::engine::validator::schema::TypeTag::String,
+    )
+    .await;
 
     let mut b = Batch::new();
     let labels = ["ee", "cc", "aa", "dd", "bb"];
@@ -3735,11 +3852,17 @@ async fn int_order_by_regression_still_uses_real_keyset_seek() {
     );
 }
 
-/// Regression guard: an `F64` ORDER BY column (no NaN, no ties) must also
-/// remain unaffected -- distinct from the `int_order_by_regression` test to
-/// cover the OTHER previously-safe numeric scalar type explicitly.
+/// Regression guard: an `F64` ORDER BY column (no NaN, no ties) must still
+/// paginate correctly -- but, since F-1 (#792), via `PaginationMode::Offset`,
+/// not genuine keyset seeking. `F64` is UNCONDITIONALLY excluded from the
+/// schema-typed-scalar gate's accepted `TypeTag` set (schema enforcement
+/// cannot rule out `NaN` on an `F64` field, per `FieldRule::check_f64`), so
+/// this column can never reach Keyset mode regardless of whether a schema is
+/// bound -- distinct from the `int_order_by_regression` test, which DOES
+/// stay Keyset for the OTHER previously-safe numeric scalar type once a
+/// schema is bound.
 #[tokio::test]
-async fn f64_order_by_regression_still_uses_real_keyset_seek() {
+async fn f64_order_by_regression_paginates_correctly_via_offset() {
     let shamir = ShamirDb::init_memory().await.expect("init shamir");
     let owner = Actor::User(principal64([0xAB; 16]));
     shamir.create_db_as("app", owner.clone()).await;
@@ -3789,8 +3912,9 @@ async fn f64_order_by_regression_still_uses_real_keyset_seek() {
 
     assert_eq!(
         pinned_mode(&handler, cursor_id, &ALICE_SID),
-        PaginationMode::Keyset,
-        "F64 must stay Keyset mode -- unaffected by the new Bin/List/Dec/Big safety check"
+        PaginationMode::Offset,
+        "F-1 (#792): F64 must NEVER reach Keyset mode -- the schema-typed-scalar gate \
+         unconditionally excludes F64 (NaN cannot be ruled out even under a schema)"
     );
 
     drain_seqs(&handler, &session, cursor_id, 2, &mut seqs).await;
@@ -3799,7 +3923,474 @@ async fn f64_order_by_regression_still_uses_real_keyset_seek() {
     assert_eq!(
         seqs,
         vec![0, 1, 2, 3, 4],
-        "regression: a non-NaN F64 ORDER BY column must still page correctly via genuine \
-         keyset seeking"
+        "regression: a non-NaN F64 ORDER BY column must still page correctly, now via \
+         offset-mode pagination"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// F-1 (#792, release blocker) — keyset cursor: gate on schema-typed
+// homogeneous scalar.
+//
+// Two residual gaps left open by CR-D2/W-2/W-3 (mixed `QueryValue` type in
+// one ORDER BY column; `NaN` in an `F64` column) have no cheap runtime probe
+// the way `Null` has `Filter::IsNull`. Instead of a probe, `create_cursor`
+// now gates keyset eligibility on the table's bound SCHEMA (if any): a
+// schema-enforced, fixed, non-container scalar `TypeTag` (`Int`/`Bool`/
+// `String`/`Bin`) on the ORDER BY column proves every row satisfying that
+// schema is provably homogeneous by construction (mixed-type is
+// impossible). `F64`/`Dec`/`Big`/containers/`Any` stay excluded even under
+// schema (schema enforcement does not reject `NaN` on `F64`, and containers
+// can hold heterogeneous nested values). A column with NO bound schema at
+// all (the common schemaless-document case) keeps using
+// `PaginationMode::Offset` unconditionally, conservative by default.
+// ---------------------------------------------------------------------------
+
+/// A table with a schema declaring the ORDER BY field as `Int` and
+/// `required: true` -> cursor uses `PaginationMode::Keyset`. This is the
+/// core positive case the schema gate exists to enable.
+#[tokio::test]
+async fn schema_typed_int_required_order_by_uses_keyset_mode() {
+    let shamir = ShamirDb::init_memory().await.expect("init shamir");
+    let owner = Actor::User(principal64([0xAB; 16]));
+    shamir.create_db_as("app", owner.clone()).await;
+    let cfg =
+        RepoConfig::new("main", BoxRepoFactory::in_memory()).add_table(TableConfig::new("items"));
+    shamir
+        .add_repo_as("app", cfg, owner.clone())
+        .await
+        .expect("add repo");
+    bind_schema(
+        &shamir,
+        "app",
+        "main",
+        "items",
+        "score",
+        shamir_db::engine::validator::schema::TypeTag::Int,
+    )
+    .await;
+
+    let mut b = Batch::new();
+    for i in 0..5i64 {
+        b.insert(
+            format!("i{i}"),
+            insert("items").row(doc! { "seq" => i, "score" => 4 - i }),
+        );
+    }
+    let batch = b.build();
+    shamir
+        .execute_as(owner, "app", &batch)
+        .await
+        .expect("seed rows");
+
+    let handler =
+        ShamirDbHandler::new(Arc::new(shamir)).with_cursor_limits(CursorLimitsCap::UNLIMITED);
+    let session = alice_session();
+
+    let query = ReadQuery::new("items").order_by(OrderBy::asc("score"));
+    let resp = send(&handler, &session, create_cursor_req(query, 2)).await;
+    let (cursor_id, mut seqs) = match resp {
+        DbResponse::CursorPage {
+            cursor_id,
+            page,
+            has_more,
+        } => {
+            assert!(has_more, "5 rows / page_size 2 -> more pages remain");
+            let seqs: Vec<i64> = page
+                .records
+                .iter()
+                .map(|r| r.get_value_i64("seq").expect("seq present"))
+                .collect();
+            (cursor_id, seqs)
+        }
+        other => panic!("expected CursorPage, got {other:?}"),
+    };
+
+    assert_eq!(
+        pinned_mode(&handler, cursor_id, &ALICE_SID),
+        PaginationMode::Keyset,
+        "a schema-typed Int (required) ORDER BY column must pass the schema-typed-scalar \
+         gate and use PaginationMode::Keyset"
+    );
+
+    drain_seqs(&handler, &session, cursor_id, 2, &mut seqs).await;
+
+    seqs.sort_unstable();
+    assert_eq!(
+        seqs,
+        vec![0, 1, 2, 3, 4],
+        "every row must appear exactly once"
+    );
+}
+
+/// A table with a schema declaring the ORDER BY field as `F64` -> cursor
+/// falls back to `Offset` even though the shape check alone would have
+/// picked `Keyset` -- regression test proving the `F64` exclusion holds even
+/// when a schema IS bound (schema enforcement cannot rule out `NaN` on an
+/// `F64` field, per `FieldRule::check_f64`, so `F64` is excluded
+/// unconditionally, not just for schemaless columns).
+#[tokio::test]
+async fn schema_typed_f64_order_by_still_forces_offset_mode() {
+    let shamir = ShamirDb::init_memory().await.expect("init shamir");
+    let owner = Actor::User(principal64([0xAB; 16]));
+    shamir.create_db_as("app", owner.clone()).await;
+    let cfg =
+        RepoConfig::new("main", BoxRepoFactory::in_memory()).add_table(TableConfig::new("items"));
+    shamir
+        .add_repo_as("app", cfg, owner.clone())
+        .await
+        .expect("add repo");
+    bind_schema(
+        &shamir,
+        "app",
+        "main",
+        "items",
+        "score",
+        shamir_db::engine::validator::schema::TypeTag::F64,
+    )
+    .await;
+
+    let mut b = Batch::new();
+    for i in 0..5i64 {
+        b.insert(
+            format!("i{i}"),
+            insert("items").row(doc! { "seq" => i, "score" => (4 - i) as f64 }),
+        );
+    }
+    let batch = b.build();
+    shamir
+        .execute_as(owner, "app", &batch)
+        .await
+        .expect("seed rows");
+
+    let handler =
+        ShamirDbHandler::new(Arc::new(shamir)).with_cursor_limits(CursorLimitsCap::UNLIMITED);
+    let session = alice_session();
+
+    let query = ReadQuery::new("items").order_by(OrderBy::asc("score"));
+    let resp = send(&handler, &session, create_cursor_req(query, 2)).await;
+    let (cursor_id, mut seqs) = match resp {
+        DbResponse::CursorPage {
+            cursor_id,
+            page,
+            has_more,
+        } => {
+            assert!(has_more, "5 rows / page_size 2 -> more pages remain");
+            let seqs: Vec<i64> = page
+                .records
+                .iter()
+                .map(|r| r.get_value_i64("seq").expect("seq present"))
+                .collect();
+            (cursor_id, seqs)
+        }
+        other => panic!("expected CursorPage, got {other:?}"),
+    };
+
+    assert_eq!(
+        pinned_mode(&handler, cursor_id, &ALICE_SID),
+        PaginationMode::Offset,
+        "F64 must be excluded from the schema-typed-scalar gate even when a schema IS \
+         bound -- schema enforcement cannot rule out NaN on an F64 field"
+    );
+
+    drain_seqs(&handler, &session, cursor_id, 2, &mut seqs).await;
+
+    seqs.sort_unstable();
+    assert_eq!(
+        seqs,
+        vec![0, 1, 2, 3, 4],
+        "every row must appear exactly once"
+    );
+}
+
+/// A table with NO schema bound at all (schemaless) -> cursor falls back to
+/// `Offset` -- regression test for the conservative default, using a plain
+/// `Int` ORDER BY column that WOULD have been keyset-eligible under the OLD
+/// shape-only gate.
+#[tokio::test]
+async fn schemaless_table_order_by_forces_offset_mode() {
+    // build_handler_with_rows seeds a schemaless `app.main.items` table with
+    // no validator bound at all.
+    let handler = build_handler_with_rows(5, CursorLimitsCap::UNLIMITED).await;
+    let session = alice_session();
+
+    let query = ReadQuery::new("items").order_by(OrderBy::asc("v"));
+    let resp = send(&handler, &session, create_cursor_req(query, 2)).await;
+    let (cursor_id, mut seen_vs) = match resp {
+        DbResponse::CursorPage {
+            cursor_id,
+            page,
+            has_more,
+        } => {
+            assert!(has_more, "5 rows / page_size 2 -> more pages remain");
+            let vs: Vec<i64> = page
+                .records
+                .iter()
+                .map(|r| r.get_value_i64("v").expect("v present"))
+                .collect();
+            (cursor_id, vs)
+        }
+        other => panic!("expected CursorPage, got {other:?}"),
+    };
+
+    assert_eq!(
+        pinned_mode(&handler, cursor_id, &ALICE_SID),
+        PaginationMode::Offset,
+        "F-1 (#792): a table with NO schema validator bound at all must fall back to \
+         PaginationMode::Offset unconditionally, even for an otherwise keyset-shape-eligible \
+         Int ORDER BY column -- the conservative default for the common schemaless-document \
+         case"
+    );
+
+    loop {
+        let resp = send(&handler, &session, fetch_next_req(cursor_id, 2)).await;
+        match resp {
+            DbResponse::CursorPage { page, has_more, .. } => {
+                for r in &page.records {
+                    seen_vs.push(r.get_value_i64("v").expect("v present"));
+                }
+                if !has_more {
+                    break;
+                }
+            }
+            other => panic!("expected CursorPage, got {other:?}"),
+        }
+    }
+
+    seen_vs.sort_unstable();
+    assert_eq!(
+        seen_vs,
+        (0..5).collect::<Vec<i64>>(),
+        "every row must appear exactly once under offset-mode pagination"
+    );
+}
+
+/// A table with a schema declaring the field as `Int` but the field is
+/// `nullable`/optional (not `required`) -> schema gate still passes (keyset
+/// attempted), but the EXISTING null probe still catches an actual null row
+/// and falls back correctly -- proves the two mechanisms compose: the schema
+/// gate only proves "no SECOND non-null type is possible", not "never null"
+/// (that remains the null probe's job, unchanged by this task).
+#[tokio::test]
+async fn schema_typed_nullable_int_composes_with_existing_null_probe() {
+    let shamir = ShamirDb::init_memory().await.expect("init shamir");
+    let owner = Actor::User(principal64([0xAB; 16]));
+    shamir.create_db_as("app", owner.clone()).await;
+    let cfg =
+        RepoConfig::new("main", BoxRepoFactory::in_memory()).add_table(TableConfig::new("items"));
+    shamir
+        .add_repo_as("app", cfg, owner.clone())
+        .await
+        .expect("add repo");
+
+    // Nullable (NOT required) Int schema on `score`.
+    {
+        use shamir_db::engine::validator::schema::{
+            Constraints, FieldRule, SchemaValidator, TypeTag,
+        };
+        use shamir_db::engine::validator::WriteOp;
+        use shamir_types::types::record_id::RecordId;
+
+        let constraints = Constraints {
+            nullable: true,
+            ..Constraints::default()
+        };
+        let rule = FieldRule {
+            path: vec!["score".to_string()],
+            ty: TypeTag::Int,
+            constraints,
+        };
+        let schema = SchemaValidator::new(vec![rule]);
+        let id = RecordId::new();
+        shamir
+            .validators()
+            .register(id, "items_score_nullable_schema", Arc::new(schema))
+            .expect("register schema validator");
+        shamir
+            .bind_validator(
+                "app",
+                "main",
+                "items",
+                "items_score_nullable_schema",
+                vec![WriteOp::Insert, WriteOp::Update, WriteOp::Upsert],
+                1000,
+            )
+            .await
+            .expect("bind schema validator");
+    }
+
+    // 3 rows with a real Int score, 2 rows with an explicit Null score.
+    let mut b = Batch::new();
+    for i in 0..3i64 {
+        b.insert(
+            format!("i{i}"),
+            insert("items").row(doc! { "seq" => i, "score" => i }),
+        );
+    }
+    for i in 3..5i64 {
+        b.insert(
+            format!("i{i}"),
+            insert("items").row(doc! { "seq" => i, "score" => FilterValue::Null }),
+        );
+    }
+    let batch = b.build();
+    shamir
+        .execute_as(owner, "app", &batch)
+        .await
+        .expect("seed rows");
+
+    let handler =
+        ShamirDbHandler::new(Arc::new(shamir)).with_cursor_limits(CursorLimitsCap::UNLIMITED);
+    let session = alice_session();
+
+    let query = ReadQuery::new("items").order_by(OrderBy::asc("score"));
+    let resp = send(&handler, &session, create_cursor_req(query, 2)).await;
+    let (cursor_id, mut seqs) = match resp {
+        DbResponse::CursorPage {
+            cursor_id,
+            page,
+            has_more,
+        } => {
+            assert!(has_more, "5 rows / page_size 2 -> more pages remain");
+            let seqs: Vec<i64> = page
+                .records
+                .iter()
+                .map(|r| r.get_value_i64("seq").expect("seq present"))
+                .collect();
+            (cursor_id, seqs)
+        }
+        other => panic!("expected CursorPage, got {other:?}"),
+    };
+
+    // The schema gate itself passes (Int is accepted, and the gate does not
+    // check required/nullable) -- but the pre-existing null probe still
+    // detects the actual Null rows in the data and falls the WHOLE cursor
+    // back to Offset, exactly as it did before this task for any
+    // null-containing column.
+    assert_eq!(
+        pinned_mode(&handler, cursor_id, &ALICE_SID),
+        PaginationMode::Offset,
+        "a nullable (not required) Int-typed column passes the schema gate itself, but the \
+         EXISTING null probe must still detect the actual Null rows and fall the whole cursor \
+         back to Offset -- the two mechanisms must compose, not conflict"
+    );
+
+    drain_seqs(&handler, &session, cursor_id, 2, &mut seqs).await;
+
+    seqs.sort_unstable();
+    assert_eq!(
+        seqs,
+        vec![0, 1, 2, 3, 4],
+        "every row -- including both Null-score rows -- must appear exactly once"
+    );
+}
+
+/// Core regression this task fixes, end-to-end: a mixed-`QueryValue`-type
+/// `ORDER BY` column (some rows `Int`, some rows `Str`) over a SCHEMALESS
+/// table. Under the OLD shape-only gate (`pagination_mode_for_query` alone),
+/// this cursor would have been pinned to `PaginationMode::Keyset` from
+/// creation (a single simple-field ORDER BY is all that check looks at) and
+/// would have silently dropped every row of the type NOT sorted onto page 1
+/// once the scan passed page 1 (the exact CR-D2 failure shape, but for a
+/// value-type mismatch instead of Null). Under the NEW gate, this schemaless
+/// column has no bound schema at all, so it is correctly refused keyset
+/// eligibility and falls back to `Offset` from creation -- proving no silent
+/// row loss occurs for this scenario end-to-end (create cursor, drain every
+/// page, assert every row surfaces exactly once).
+#[tokio::test]
+async fn mixed_type_order_by_column_no_longer_silently_drops_rows() {
+    let shamir = ShamirDb::init_memory().await.expect("init shamir");
+    let owner = Actor::User(principal64([0xAB; 16]));
+    shamir.create_db_as("app", owner.clone()).await;
+    let cfg =
+        RepoConfig::new("main", BoxRepoFactory::in_memory()).add_table(TableConfig::new("items"));
+    shamir
+        .add_repo_as("app", cfg, owner.clone())
+        .await
+        .expect("add repo");
+
+    // 3 rows with an Int score (0, 1, 2), 2 rows with a Str score ("a", "b")
+    // -- a mixed-type column, no schema bound at all.
+    let mut b = Batch::new();
+    for i in 0..3i64 {
+        b.insert(
+            format!("i{i}"),
+            insert("items").row(doc! { "seq" => i, "score" => i }),
+        );
+    }
+    let str_scores = ["a", "b"];
+    for (j, s) in str_scores.iter().enumerate() {
+        let i = 3 + j as i64;
+        b.insert(
+            format!("i{i}"),
+            insert("items").row(doc! { "seq" => i, "score" => s.to_string() }),
+        );
+    }
+    let batch = b.build();
+    shamir
+        .execute_as(owner, "app", &batch)
+        .await
+        .expect("seed rows");
+
+    let handler =
+        ShamirDbHandler::new(Arc::new(shamir)).with_cursor_limits(CursorLimitsCap::UNLIMITED);
+    let session = alice_session();
+
+    let query = ReadQuery::new("items").order_by(OrderBy::asc("score"));
+    let resp = send(&handler, &session, create_cursor_req(query, 2)).await;
+    let (cursor_id, mut seqs) = match resp {
+        DbResponse::CursorPage {
+            cursor_id, page, ..
+        } => {
+            let seqs: Vec<i64> = page
+                .records
+                .iter()
+                .map(|r| r.get_value_i64("seq").expect("seq present"))
+                .collect();
+            (cursor_id, seqs)
+        }
+        other => panic!("expected CursorPage, got {other:?}"),
+    };
+
+    assert_eq!(
+        pinned_mode(&handler, cursor_id, &ALICE_SID),
+        PaginationMode::Offset,
+        "F-1 (#792): a mixed-type (Int + Str) ORDER BY column with NO schema bound must be \
+         refused keyset eligibility from creation -- this is the core regression this task \
+         fixes: the OLD shape-only gate would have picked Keyset here and silently dropped \
+         rows of whichever type didn't land on page 1"
+    );
+
+    // Bounded drain (offset-mode pagination cannot livelock; bounded anyway
+    // as cheap insurance against a regression reintroducing one).
+    let mut has_more = true;
+    for _ in 0..10 {
+        if !has_more {
+            break;
+        }
+        let resp = send(&handler, &session, fetch_next_req(cursor_id, 2)).await;
+        match resp {
+            DbResponse::CursorPage {
+                page, has_more: hm, ..
+            } => {
+                for r in &page.records {
+                    seqs.push(
+                        r.get_value_i64("seq")
+                            .expect("every row must carry a seq field"),
+                    );
+                }
+                has_more = hm;
+            }
+            other => panic!("expected CursorPage, got {other:?}"),
+        }
+    }
+
+    seqs.sort_unstable();
+    assert_eq!(
+        seqs,
+        vec![0, 1, 2, 3, 4],
+        "every row -- both Int-scored and Str-scored -- must appear exactly once via \
+         offset-mode pagination; before this task's fix, this scenario would have silently \
+         dropped rows of one type once the keyset scan passed page 1"
     );
 }

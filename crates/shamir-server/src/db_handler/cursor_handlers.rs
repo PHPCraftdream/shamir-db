@@ -98,6 +98,7 @@ use shamir_connect::server::session::Session;
 use shamir_db::engine::query::filter::eval_context::FilterContext;
 use shamir_db::engine::repo::RepoInstance;
 use shamir_db::engine::table::TableManager;
+use shamir_db::engine::validator::schema::TypeTag;
 use shamir_db::query::batch::BatchError;
 use shamir_db::query::filter::Filter;
 use shamir_db::query::read::{
@@ -412,6 +413,100 @@ fn pagination_mode_for_query(query: &ReadQuery) -> PaginationMode {
         Some(ob) if ob.items.len() == 1 && ob.items[0].field.len() == 1 => PaginationMode::Keyset,
         _ => PaginationMode::Offset,
     }
+}
+
+/// F-1 (#792, release blocker): is `query`'s sole ORDER BY column proven
+/// homogeneous (no second `QueryValue` type possible, and never `NaN`) by a
+/// bound schema, so the keyset boundary-filter scheme is safe to attempt at
+/// all?
+///
+/// # The two gaps this closes (for schema-typed columns only)
+///
+/// `KNOWN_LIMITATIONS.md`'s "Keyset-mode cursors" section documents two
+/// STILL OPEN gaps that CR-D2/W-2/W-3 do not close, because there is no
+/// cheap runtime probe for either:
+///
+/// - **Mixed `QueryValue` type in one column** (e.g. some rows store `Int`,
+///   others `Str`, in the same field path) — a mixed-type column can defeat
+///   `compare_values`/`QvSortKey` in ways no single existence probe can
+///   detect without a full scan.
+/// - **`NaN` in an `F64` column** — `NaN`'s `partial_cmp` always returns
+///   `None`, silently dropping that row past page 1 the same way, and also
+///   breaks the tie-run counter (`f64`'s `PartialEq` is always `false` for
+///   `NaN`).
+///
+/// A schema-enforced, fixed, non-container scalar `TypeTag` on the ORDER BY
+/// path proves every row satisfying that schema holds the SAME `QueryValue`
+/// variant for that field — mixed-type is impossible by construction. This
+/// closes gap 1 for schema-typed columns. It does NOT close gap 2: checked
+/// `FieldRule::check_f64` (`validator/schema/field_rule.rs`) — it never
+/// rejects `NaN`, so a schema-declared `F64` field can still hold one.
+/// Therefore only `TypeTag` values that can never be `NaN` or a container
+/// are accepted here: `Int`, `Bool`, `String`, `Bin`. `F64`/`Dec`/`Big`/
+/// `List`/`Map`/`Set`/`Any`/`Null` are rejected — those columns keep using
+/// `PaginationMode::Offset` unconditionally, regardless of schema, until a
+/// follow-up task closes the NaN case specifically (out of scope here).
+///
+/// # Not a substitute for the null probe
+///
+/// This gate does NOT check `required`/`nullable` — a schema-typed field
+/// that is merely `nullable`/optional still passes here (it only needs to
+/// prove "no SECOND non-null type is possible", not "never null"). The
+/// EXISTING [`order_by_column_contains_null`] probe still runs afterward
+/// exactly as before and independently closes the null/missing case; the
+/// two mechanisms compose rather than one replacing the other.
+///
+/// # Why this must run BEFORE the null probe
+///
+/// This is a **pure metadata check — no read/scan of the data** (unlike
+/// `order_by_column_contains_null`, which runs a real `read_with_encoding`
+/// probe against the pinned snapshot). Running it first short-circuits the
+/// whole keyset attempt for schemaless tables (the common case) without
+/// paying for a probe read at all.
+///
+/// # Conservative defaults
+///
+/// Returns `false` (not schema-typed — fall back to `Offset`) for: no
+/// validator registry bound to the table at all, a bound validator that is
+/// not a `SchemaValidator` (via `RecordValidator::as_schema_rules`'s
+/// downcast hook), no `FieldRule` for the exact ORDER BY path, multiple
+/// schema validators bound that disagree on the type for the same path
+/// (ambiguous — never merged/reconciled), or an excluded `TypeTag`.
+fn order_by_column_is_schema_typed_scalar(table: &TableManager, field: &[String]) -> bool {
+    let Some(registry) = table.validator_registry_ref() else {
+        return false;
+    };
+    let bindings = table.validator_bindings();
+
+    // Collect the `TypeTag` from every bound SchemaValidator's FieldRule
+    // that matches `field` exactly. Ambiguous (disagreeing) or absent
+    // matches both fall back to "not schema-typed" — see the doc comment.
+    let mut matched_ty: Option<TypeTag> = None;
+    for binding in bindings.iter() {
+        let Some(validator) = registry.get_by_id(&binding.validator_id) else {
+            continue;
+        };
+        let Some(rules) = validator.as_schema_rules() else {
+            continue;
+        };
+        for rule in rules {
+            if rule.path == field {
+                match matched_ty {
+                    None => matched_ty = Some(rule.ty),
+                    Some(existing) if existing == rule.ty => {}
+                    // Two bound schema validators disagree on the type for
+                    // the same path — conservative: treat as not
+                    // schema-typed rather than trying to reconcile.
+                    Some(_) => return false,
+                }
+            }
+        }
+    }
+
+    matches!(
+        matched_ty,
+        Some(TypeTag::Int | TypeTag::Bool | TypeTag::String | TypeTag::Bin)
+    )
 }
 
 /// CR-D2 (#783, release blocker): does `query`'s sole ORDER BY column
@@ -1038,7 +1133,20 @@ impl ShamirDbHandler {
             Ok(r) => r,
             Err(e) => return error_response(&e),
         };
-        let table = match repo.get_table(&table_name).await {
+        // F-1 (#792): `ShamirDb::get_table` (NOT `RepoInstance::get_table`)
+        // is used here specifically because it injects the global
+        // `ValidatorRegistry` (`table.set_validator_registry(...)`) into the
+        // returned `TableManager` clone — `RepoInstance::get_table` alone
+        // does not (`validator_registry` is a plain `Option<Arc<..>>` field,
+        // not shared via `ArcSwap`/a cell, so it only affects whichever
+        // clone it's set on). Without this, `order_by_column_is_schema_typed_
+        // scalar`'s `table.validator_registry_ref()` would always see `None`
+        // regardless of what's bound via `bind_validator`, silently
+        // defeating the new schema-typed-scalar gate for every cursor. Reads
+        // don't otherwise need the registry (validators are a write-path
+        // concept), so this is a registry-injection fix, not a behavior
+        // change to what a cursor's read can see.
+        let table = match self.db.get_table(db_name, &repo_name, &table_name).await {
             Ok(t) => t,
             Err(e) => return error_response(&wrap_engine_err(e)),
         };
@@ -1113,7 +1221,34 @@ impl ShamirDbHandler {
         // column before running the first page at all — if found, the
         // WHOLE cursor falls back to `PaginationMode::Offset` from
         // creation, closing the null/missing case unconditionally.
+        //
+        // F-1 (#792, release blocker): BEFORE that probe, gate keyset
+        // eligibility on the ORDER BY column's SCHEMA-enforced type (see
+        // `order_by_column_is_schema_typed_scalar`'s doc comment) — this is
+        // a pure metadata check (no read/scan), so it runs first and
+        // short-circuits the whole keyset attempt (including the null
+        // probe's real snapshot read) for schemaless columns / excluded
+        // `TypeTag`s, closing the "mixed `QueryValue` type in one column"
+        // and (partially, via the `F64` exclusion) "NaN in an F64 column"
+        // silent-row-loss gaps that CR-D2/W-2/W-3 left open. When the gate
+        // DOES pass, the null probe below still runs exactly as before —
+        // this gate proves "no second non-null type is possible", not
+        // "never null"; that's still the null probe's job.
         let mut mode = pagination_mode_for_query(&query);
+        if mode == PaginationMode::Keyset {
+            // `pagination_mode_for_query` only returns `Keyset` when
+            // `query.order_by` is `Some` with exactly one single-segment
+            // field — both already validated, so this is infallible here.
+            let order_by_field = &query
+                .order_by
+                .as_ref()
+                .expect("pagination_mode_for_query returned Keyset without an order_by")
+                .items[0]
+                .field;
+            if !order_by_column_is_schema_typed_scalar(&table, order_by_field) {
+                mode = PaginationMode::Offset;
+            }
+        }
         if mode == PaginationMode::Keyset {
             match order_by_column_contains_null(&table, &ctx, &query, pinned_version).await {
                 Ok(true) => mode = PaginationMode::Offset,
@@ -1450,12 +1585,26 @@ impl ShamirDbHandler {
             return error_response(&e);
         }
 
-        let repo = match resolve_repo(&self.db, cursor.db(), cursor.repo()) {
-            Ok(r) => r,
-            Err(e) => return error_response(&e),
-        };
+        // `resolve_repo` is still called here (its `RepoInstance` result is
+        // now unused) purely for its distinct `unknown_db`/`unknown_repo`
+        // error classification (CR-C1) ahead of `ShamirDb::get_table`'s own,
+        // less-specific not-found error below.
+        if let Err(e) = resolve_repo(&self.db, cursor.db(), cursor.repo()) {
+            return error_response(&e);
+        }
 
-        let table = match repo.get_table(&table_name).await {
+        // F-1 (#792): `ShamirDb::get_table`, not `RepoInstance::get_table` —
+        // see `create_cursor`'s matching call site for why (registry
+        // injection). `state.mode` is pinned once at `create_cursor` and
+        // never re-derived here, so this fix isn't exercised by the schema
+        // gate itself on THIS path today, but keeping both handlers
+        // consistent avoids reintroducing the same silent-`None`-registry
+        // gap for any future `fetch_next` logic that needs it.
+        let table = match self
+            .db
+            .get_table(cursor.db(), cursor.repo(), &table_name)
+            .await
+        {
             Ok(t) => t,
             Err(e) => return error_response(&wrap_engine_err(e)),
         };

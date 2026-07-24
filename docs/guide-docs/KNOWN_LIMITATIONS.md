@@ -195,12 +195,14 @@ artifact).
   `crates/shamir-query-types/src/batch/batch_error.rs`'s
   `BatchError::CursorWithVersionNotSupported`.
 - **Keyset-mode cursors: `Null`/missing and `Bin`/`List`/`Dec`/`Big` `ORDER BY`
-  values are handled; mixed-type and `NaN` `ORDER BY` values are NOT (CR-D2
-  #783, W-2/W-3 #789).** A keyset cursor's page boundary is an inclusive
-  `field >= seek_key` (ASC) / `field <= seek_key` (DESC) filter — any row whose
-  `ORDER BY` value cannot be compared to `seek_key` makes that filter
-  unresolvable (`false`), silently excluding the row from every page after the
-  first with a clean `has_more: false` at the end (no error). Current state:
+  values are handled; mixed-type `ORDER BY` values are handled for
+  schema-typed scalar columns; `NaN` `ORDER BY` values are mitigated (no
+  keyset attempt) but not detected (CR-D2 #783, W-2/W-3 #789, F-1 #792).** A
+  keyset cursor's page boundary is an inclusive `field >= seek_key` (ASC) /
+  `field <= seek_key` (DESC) filter — any row whose `ORDER BY` value cannot be
+  compared to `seek_key` makes that filter unresolvable (`false`), silently
+  excluding the row from every page after the first with a clean `has_more:
+  false` at the end (no error). Current state:
   - **`Null` / missing value — CLOSED.** `CreateCursor` now runs one cheap
     `WHERE <order_by_field> IS NULL LIMIT 1` existence probe against the
     same pinned snapshot the first page reads, before running that first
@@ -235,38 +237,74 @@ artifact).
     the SILENT ROW LOSS (converts it into the documented, understood
     offset-mode degradation instead).
   - **Mixed `QueryValue` type in one `ORDER BY` column (e.g. some rows
-    `Int`, some `Str`) — STILL OPEN.** Not detected; such a cursor may
-    silently drop every row of the "other" type(s) once the scan passes
-    page 1. There is no existing cheap filter primitive for "is this field
-    a different type than X" to probe for this at `CreateCursor` time (unlike
-    the `Null` case, which `Filter::IsNull` already covers).
-  - **`NaN` in an `F64` `ORDER BY` column — STILL OPEN.** Not detected;
-    `NaN`'s `partial_cmp` always returns `None` (`compare_values`'s
-    `(F64, F64)` arm), so a `NaN`-valued row is silently dropped the same
-    way once the scan passes page 1. `NaN` additionally breaks the keyset
-    tie-run counter's equality check (`f64`'s `PartialEq` on `NaN` is always
-    `false`). There is no existing cheap "is this field NaN" filter
-    primitive to probe for this either.
-  - A full fix for the mixed-type/`NaN` cases would need either a new
-    cheap detection primitive or a two-phase scan design (a keyset phase
-    over comparable values, followed by an offset-bookmarked tail phase for
-    the incomparable rows) — both are explicitly out of scope for CR-D2;
-    avoid keyset-eligible cursors over an `ORDER BY` column that may hold
-    mixed types or `NaN` until a follow-up closes this. See
+    `Int`, some `Str`) — CLOSED for schema-typed scalar columns (F-1, #792);
+    STILL OPEN for schemaless columns.** There is no existing cheap filter
+    primitive for "is this field a different type than X" to probe for this
+    at `CreateCursor` time the way `Filter::IsNull` covers the `Null` case, so
+    a runtime probe was never viable here. Instead, `create_cursor` gates
+    keyset eligibility on the table's SCHEMA when one is bound: if the
+    `ORDER BY` column has a schema-enforced, fixed, non-container scalar
+    `TypeTag` (`Int`, `Bool`, `String`, or `Bin`), every row satisfying that
+    schema is provably homogeneous by construction — mixed-type is
+    impossible — so keyset mode is safe. A column with no schema-enforced
+    scalar type (schemaless documents, `Any`-typed fields, multiple bound
+    schemas that disagree on the type for the column, or no schema validator
+    bound to the table at all) is NOT eligible and falls back to
+    row-count-offset pagination unconditionally — the conservative default.
+    This is a pure metadata check (no read/scan), so it runs BEFORE the
+    `Null`-value existence probe above and short-circuits the whole keyset
+    attempt for ineligible columns without paying for that probe's real
+    snapshot read. See
+    `crates/shamir-server/src/db_handler/cursor_handlers.rs`'s
+    `order_by_column_is_schema_typed_scalar` and the new
+    `RecordValidator::as_schema_rules` downcast hook
+    (`crates/shamir-engine/src/validator/record_validator.rs`) that lets
+    cursor code ask a bound validator "are you a `SchemaValidator`, and if
+    so what are your rules?" without the trait becoming a general `dyn Any`
+    grab-bag.
+  - **`NaN` in an `F64` `ORDER BY` column — STILL OPEN, but MITIGATED (no
+    keyset attempt at all), schema or not.** Checked `FieldRule::check_f64`
+    (`crates/shamir-engine/src/validator/schema/field_rule.rs`): the schema
+    validator's `F64` type check does NOT reject `NaN`, so schema enforcement
+    cannot close this gap the way it closes the mixed-type gap above — even a
+    schema-declared `F64` field can still hold a `NaN` value. `NaN`'s
+    `partial_cmp` always returns `None` (`compare_values`'s `(F64, F64)`
+    arm), so a `NaN`-valued row would still be silently dropped the same way
+    if this column ever reached the keyset boundary-filter scheme; `NaN`
+    additionally breaks the keyset tie-run counter's equality check (`f64`'s
+    `PartialEq` on `NaN` is always `false`). F-1 (#792) mitigates this
+    WITHOUT detecting `NaN` directly: `F64` (along with `Dec`/`Big`/
+    containers/`Any`) is excluded from the schema-typed-scalar gate's
+    accepted `TypeTag` set entirely, so an `F64` `ORDER BY` column —
+    schema-typed or not — can no longer reach keyset mode at all. The column
+    always paginates via row-count-offset instead, so the "silent loss"
+    framing no longer applies to it — it never runs a `NaN` value through
+    `compare_values`'s boundary-filter comparison in the first place. A real
+    NaN-detection fix (a new cheap primitive, or a two-phase scan design: a
+    keyset phase over comparable values plus an offset-bookmarked tail phase
+    for the rest) remains explicitly out of scope. See
     `crates/shamir-server/src/db_handler/tests/cursor_handler_tests.rs`'s
-    `nan_order_by_value_is_a_documented_still_open_limitation` for a test
-    pinning the current (accepted) gap.
-  - **W-7 (#789): the residual mixed-type/`NaN` gap can also DUPLICATE rows,
-    not just omit them.** If a keyset cursor over such a column later falls
-    back to row-count-offset pagination for some other reason mid-scroll
-    (e.g. CR-D1's tie-run-ceiling fallback), `state.offset` undercounts the
-    true position in the global sorted order — the earlier keyset pages
-    silently SKIPPED the incomparable rows via the boundary filter without
-    ever counting them into `offset`. Resuming a plain `LimitOffset` scan from
-    that undercounted `offset` can therefore re-return some rows already
-    handed out on an earlier page, in addition to (still) omitting the
-    incomparable rows themselves — both directions of corruption are possible
-    from the same root cause.
+    `nan_order_by_value_forces_offset_mode_no_loss` for the regression test
+    covering this mitigation.
+  - **W-7 (#789): the residual mixed-type/`NaN` gap can also DUPLICATE
+    rows, not just omit them — this is now moot for `F64`/excluded-`TypeTag`
+    columns.** The original W-7 finding was that if a keyset cursor over an
+    incomparable-value column later fell back to row-count-offset pagination
+    for some OTHER reason mid-scroll (e.g. CR-D1's tie-run-ceiling fallback),
+    `state.offset` would undercount the true position in the global sorted
+    order — earlier keyset pages had silently SKIPPED the incomparable rows
+    via the boundary filter without ever counting them into `offset` —
+    causing a resumed offset scan to re-return already-handed-out rows in
+    addition to (still) omitting the incomparable ones. Since F-1 (#792), an
+    `F64` column (or any column excluded from the schema-typed-scalar gate)
+    never enters keyset mode in the first place, so there is no
+    keyset-then-offset transition mid-scroll for `state.offset` to
+    undercount across — this specific duplication mechanism cannot trigger
+    for those columns anymore. It remains a theoretical concern only for a
+    schema-typed `Int`/`Bool`/`String`/`Bin` column combined with some OTHER
+    keyset→offset trigger (e.g. CR-D1's ceiling fallback), which is an
+    orthogonal, already-accepted mechanism unrelated to value-type
+    incomparability.
 
 ## 7. Numbers
 

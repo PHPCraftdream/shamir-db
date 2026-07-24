@@ -197,4 +197,23 @@ pub trait RecordValidator: Send + Sync {
     fn transforms(&self) -> Vec<(Vec<String>, super::TransformSpec)> {
         Vec::new()
     }
+
+    /// Downcast hook for callers that need read-only schema-rule
+    /// introspection without the `RecordValidator` trait becoming a general
+    /// `dyn Any` grab-bag.
+    ///
+    /// Used by the keyset-cursor schema-safety gate (F-1, #792,
+    /// `crates/shamir-server/src/db_handler/cursor_handlers.rs`'s
+    /// `order_by_column_is_schema_typed_scalar`) to ask "is this bound
+    /// validator a [`SchemaValidator`](super::schema::SchemaValidator), and
+    /// if so what are its rules?" — a schema-enforced, fixed, non-container
+    /// scalar type on the ORDER BY column proves the column is homogeneous
+    /// by construction, closing the "mixed `QueryValue` type in one column"
+    /// keyset gap for schema-typed tables.
+    ///
+    /// Default `None`; only [`SchemaValidator`](super::schema::SchemaValidator)
+    /// overrides it.
+    fn as_schema_rules(&self) -> Option<&[super::schema::FieldRule]> {
+        None
+    }
 }

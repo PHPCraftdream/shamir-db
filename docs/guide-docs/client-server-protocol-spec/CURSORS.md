@@ -16,10 +16,15 @@
 > `Null`/missing value is now detected at `CreateCursor` time and the WHOLE
 > cursor falls back to row-count-offset pagination instead — see §1.1. W-2/W-3
 > (#789): the SAME class of gap for `Bin`/`List`/`Dec`/`Big` `ORDER BY` values is
-> now also closed (a per-bookmark check, not a create-time probe) — see §1.1. A
-> mixed-type or `NaN`-containing `ORDER BY` column is NOT detected and remains a
-> known limitation (silent row loss, and possible row DUPLICATION once the
-> offset-mode fallback engages) — see §1.1 and `KNOWN_LIMITATIONS.md` §6.
+> now also closed (a per-bookmark check, not a create-time probe) — see §1.1.
+> F-1 (#792): the residual "mixed `QueryValue` type in one column" gap is now
+> CLOSED for `ORDER BY` columns with a schema-enforced `Int`/`Bool`/`String`/
+> `Bin` type (a schema-typed scalar column is provably homogeneous by
+> construction); it remains open, by design, for schemaless columns of those
+> same value-shapes. `NaN` in an `F64` column remains open too, but an `F64`
+> column — schema-typed or not — never attempts keyset mode at all anymore, so
+> neither residual gap can silently drop or duplicate a row — see §1.1 and
+> `KNOWN_LIMITATIONS.md` §6.
 
 ---
 
@@ -131,26 +136,50 @@ checks (and does not check) before committing to keyset mode.
     for that call, the same documented, degraded-but-correct behavior CR-A4's
     safety net already provides. See
     `crates/shamir-server/src/db_handler/cursor_handlers.rs`'s `safe_seek_key`.
-- **Mixed-`QueryValue`-type or `NaN`-containing `ORDER BY` column (STILL OPEN, not
-  fixed by CR-D2):** the SAME class of bug applies to a column holding more than
-  one `QueryValue` variant (e.g. some rows `Int`, some `Str`) or an `F64` column
-  containing `NaN` — the boundary comparison is unresolvable for those rows too,
-  and they are silently dropped once the scan passes page 1. Unlike the `Null`
-  case, there is no existing cheap filter primitive (e.g. an "is this field a
-  different type than X" or "is this field NaN" check) to probe for this at
-  `CreateCursor` time, so it is NOT detected and NOT fixed — see
-  `KNOWN_LIMITATIONS.md` §6 for the precise, current-state disclosure. Avoid
-  keyset-eligible cursors over an `ORDER BY` column that may hold mixed types or
-  `NaN` until this is closed. **Additionally (W-7 #789):** once the residual
-  incomparable rows accumulate and the cursor happens to fall back to
-  row-count-offset pagination for some OTHER reason mid-scroll (e.g. CR-D1's
-  tie-run-ceiling fallback), `state.offset` undercounts the true position in the
-  global sorted order — earlier keyset pages already silently SKIPPED the
-  incomparable rows via the boundary filter without counting them into
-  `offset`. The subsequent offset-mode scan can therefore return some rows a
-  second time (DUPLICATE), not just omit others — both failure directions are
-  possible from the same root cause, not only the row-loss direction described
-  above.
+- **Mixed-`QueryValue`-type `ORDER BY` column (CLOSED for schema-typed scalar
+  columns, F-1 #792; STILL OPEN for schemaless columns):** a column holding
+  more than one `QueryValue` variant (e.g. some rows `Int`, some `Str`) makes
+  the boundary comparison unresolvable for the "other" type's rows, silently
+  dropping them once the scan passes page 1 — the same failure shape as the
+  `Null` case, but with no cheap runtime probe available (unlike `Null`, there
+  is no "does this field ever hold a second type" filter primitive; detecting
+  it would need either a new filter primitive or a full scan). Instead of a
+  runtime probe, the server gates keyset eligibility on the table's **schema**
+  when one is bound: at `CreateCursor` time, if the `ORDER BY` column has a
+  schema-enforced, fixed, non-container scalar type (`Int`, `Bool`, `String`,
+  or `Bin`), every row satisfying that schema is provably homogeneous by
+  construction — mixed-type is impossible — so keyset mode is safe from this
+  angle. A column with no schema-enforced scalar type (schemaless documents,
+  `Any`-typed fields, multiple bound schemas that disagree on the type for the
+  column, or no schema validator bound to the table at all) is NOT eligible
+  for keyset mode and unconditionally falls back to row-count-offset
+  pagination — the conservative default for the common schemaless-document
+  case. This check is a pure metadata check (no read/scan) and runs BEFORE the
+  `Null`-value existence probe described above, short-circuiting the whole
+  keyset attempt (including that probe's real snapshot read) for ineligible
+  columns.
+- **`NaN` in an `F64` `ORDER BY` column (STILL OPEN — mitigated, not closed):**
+  `NaN`'s `partial_cmp` always returns `None`, so the boundary comparison is
+  unresolvable for a `NaN` row the same way — and `NaN` also breaks the
+  keyset tie-run counter's equality check (`f64`'s `PartialEq` on `NaN` is
+  always `false`). Schema enforcement does NOT close this: the schema
+  validator's `F64` type check does not reject `NaN`, so even a
+  schema-declared `F64` field can still hold one. F-1 (#792) therefore
+  excludes `F64` (along with `Dec`/`Big`/containers/`Any`) from the
+  schema-typed-scalar gate's accepted `TypeTag` set entirely — an `F64` `ORDER
+  BY` column, schema-typed or not, can no longer reach keyset mode at all.
+  This does not fix NaN detection (a real fix needs a new NaN-detection
+  primitive or constraint, explicitly out of scope here), but it does mean the
+  column always paginates via row-count-offset instead — no keyset attempt is
+  ever made, so the "silent loss" framing from the previous revision of this
+  document no longer applies to `F64` columns; they simply never reach the
+  code path that could lose or duplicate a row this way. **W-7 (#789)'s
+  keyset→offset mid-scroll duplicate-row interaction is therefore also moot
+  for `F64`/mixed-type-excluded columns** — they never enter keyset mode to
+  begin with, so there is no keyset-then-offset transition for `state.offset`
+  to undercount across. Offset-mode pagination has its own, separate,
+  already-documented and accepted duplicate-row tradeoff under concurrent
+  writes (unrelated to this mechanism) — see the cost-model note above.
 
 ---
 
