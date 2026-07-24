@@ -380,8 +380,22 @@ impl ShamirAdminExecutor {
 
         let new_version = current_version + 1;
 
+        // F-4 — precompile gate: prove the serialised schema round-trips into
+        // `Vec<FieldRule>` BEFORE we touch the catalogue. If this fails,
+        // nothing has been persisted yet, so there is nothing to roll back —
+        // return the error immediately (validate → precompile → persist →
+        // activate). Previously this ran AFTER `save_table_meta`, so a
+        // schema that failed to parse left the catalogue holding an
+        // unparseable (never-activated) schema.
+        let rules = parse_schema(&schema_qv, interner)
+            .map_err(|e: shamir_storage::error::DbError| err_code("bad_schema", e.to_string()))?;
+
+        // Snapshot the pre-mutation catalogue record so we can roll back to it
+        // if activation (compile_table_schema) fails after we persist.
+        let rec_prev = rec.clone();
+
         // Mutate the catalogue record in place.
-        map_insert(&mut rec, SCHEMA_FIELD, schema_qv.clone());
+        map_insert(&mut rec, SCHEMA_FIELD, schema_qv);
         map_insert(
             &mut rec,
             SCHEMA_VALIDATOR_ID_FIELD,
@@ -393,7 +407,7 @@ impl ShamirAdminExecutor {
             QueryValue::Int(new_version as i64),
         );
 
-        // Persist.
+        // Persist the catalogue (now that the schema is proven well-formed).
         self.shamir
             .system_store()
             .save_table_meta(&rec)
@@ -408,13 +422,29 @@ impl ShamirAdminExecutor {
             .await
             .map_err(|e| err_code("internal_error", e.to_string()))?;
 
-        // Compile + register + auto-bind the validator (live, in-process).
-        let rules = parse_schema(&schema_qv, interner)
-            .map_err(|e: shamir_storage::error::DbError| err_code("bad_schema", e.to_string()))?;
-        self.shamir
+        // Activate: compile + register + auto-bind the validator (live,
+        // in-process). If this fails after a successful catalogue write, roll
+        // the catalogue back to the pre-mutation record (best-effort
+        // compensating write) so the persisted state reflects the still-working
+        // old schema rather than a new one that was never activated. The
+        // ORIGINAL activation error is returned to the caller; a rollback-write
+        // failure is secondary information and only logged (matches the
+        // best-effort cleanup pattern used elsewhere, e.g. restore.rs).
+        if let Err(activation_err) = self
+            .shamir
             .compile_table_schema(db, repo, table, schema_validator_id, rules)
             .await
-            .map_err(|e| err_code("internal_error", e.to_string()))?;
+        {
+            if let Err(rollback_err) = self.shamir.system_store().save_table_meta(&rec_prev).await {
+                log::warn!(
+                    "admin_schema::handle_set_table_schema: catalogue rollback \
+                     for '{db}/{repo}/{table}' FAILED after activation error \
+                     ({activation_err}): {rollback_err}. The catalogue may now \
+                     hold a schema that was never activated."
+                );
+            }
+            return Err(err_code("internal_error", activation_err.to_string()));
+        }
 
         Ok(admin_result(mpack!({
             "set_table_schema": @(QueryValue::Str(table.clone())),
@@ -509,7 +539,16 @@ impl ShamirAdminExecutor {
             .unwrap_or(0) as u64;
         let new_version = current_version + 1;
 
-        map_insert(&mut rec, SCHEMA_FIELD, schema_qv.clone());
+        // F-4 — precompile gate: prove the serialised schema round-trips into
+        // `Vec<FieldRule>` BEFORE we touch the catalogue (see
+        // handle_set_table_schema for the full rationale).
+        let compiled_rules = parse_schema(&schema_qv, interner)
+            .map_err(|e: shamir_storage::error::DbError| err_code("bad_schema", e.to_string()))?;
+
+        // Snapshot the pre-mutation catalogue record for activation rollback.
+        let rec_prev = rec.clone();
+
+        map_insert(&mut rec, SCHEMA_FIELD, schema_qv);
         map_insert(
             &mut rec,
             SCHEMA_VALIDATOR_ID_FIELD,
@@ -535,12 +574,23 @@ impl ShamirAdminExecutor {
             .await
             .map_err(|e| err_code("internal_error", e.to_string()))?;
 
-        let compiled_rules = parse_schema(&schema_qv, interner)
-            .map_err(|e: shamir_storage::error::DbError| err_code("bad_schema", e.to_string()))?;
-        self.shamir
+        // Activate, rolling back the catalogue write on activation failure
+        // (see handle_set_table_schema for the full rationale).
+        if let Err(activation_err) = self
+            .shamir
             .compile_table_schema(db, repo, table, schema_validator_id, compiled_rules)
             .await
-            .map_err(|e| err_code("internal_error", e.to_string()))?;
+        {
+            if let Err(rollback_err) = self.shamir.system_store().save_table_meta(&rec_prev).await {
+                log::warn!(
+                    "admin_schema::handle_add_schema_rule: catalogue rollback \
+                     for '{db}/{repo}/{table}' FAILED after activation error \
+                     ({activation_err}): {rollback_err}. The catalogue may now \
+                     hold a schema that was never activated."
+                );
+            }
+            return Err(err_code("internal_error", activation_err.to_string()));
+        }
 
         Ok(admin_result(mpack!({
             "add_schema_rule": @(QueryValue::Str(table.clone())),
@@ -612,7 +662,16 @@ impl ShamirAdminExecutor {
             .unwrap_or(0) as u64;
         let new_version = current_version + 1;
 
-        map_insert(&mut rec, SCHEMA_FIELD, schema_qv.clone());
+        // Recompile (even if empty — an empty schema validator accepts all).
+        // F-4 — precompile gate BEFORE we touch the catalogue (see
+        // handle_set_table_schema for the full rationale).
+        let compiled_rules = parse_schema(&schema_qv, interner)
+            .map_err(|e: shamir_storage::error::DbError| err_code("bad_schema", e.to_string()))?;
+
+        // Snapshot the pre-mutation catalogue record for activation rollback.
+        let rec_prev = rec.clone();
+
+        map_insert(&mut rec, SCHEMA_FIELD, schema_qv);
         map_insert(
             &mut rec,
             SCHEMA_VALIDATOR_ID_FIELD,
@@ -638,13 +697,23 @@ impl ShamirAdminExecutor {
             .await
             .map_err(|e| err_code("internal_error", e.to_string()))?;
 
-        // Recompile (even if empty — an empty schema validator accepts all).
-        let compiled_rules = parse_schema(&schema_qv, interner)
-            .map_err(|e: shamir_storage::error::DbError| err_code("bad_schema", e.to_string()))?;
-        self.shamir
+        // Activate, rolling back the catalogue write on activation failure
+        // (see handle_set_table_schema for the full rationale).
+        if let Err(activation_err) = self
+            .shamir
             .compile_table_schema(db, repo, table, schema_validator_id, compiled_rules)
             .await
-            .map_err(|e| err_code("internal_error", e.to_string()))?;
+        {
+            if let Err(rollback_err) = self.shamir.system_store().save_table_meta(&rec_prev).await {
+                log::warn!(
+                    "admin_schema::handle_remove_schema_rule: catalogue rollback \
+                     for '{db}/{repo}/{table}' FAILED after activation error \
+                     ({activation_err}): {rollback_err}. The catalogue may now \
+                     hold a schema that was never activated."
+                );
+            }
+            return Err(err_code("internal_error", activation_err.to_string()));
+        }
 
         Ok(admin_result(mpack!({
             "remove_schema_rule": @(QueryValue::Str(table.clone())),

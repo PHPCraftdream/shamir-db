@@ -179,22 +179,48 @@ fn parse_one_rule(item: &QueryValue, interner: &Interner) -> DbResult<FieldRule>
         .get("default")
         .and_then(|qv| parse_one_rule_default(qv, item));
 
-    let array_of = item
-        .get("array_of")
-        .and_then(|v| v.as_str())
-        .and_then(|s| parse_type_tag(s).ok());
+    // F-4: `array_of`/`format`/`compare`/`foreign_key` now distinguish "field
+    // absent" (legitimate default / None) from "field present but does not
+    // parse" (hard error). Previously a typo'd or malformed value silently
+    // collapsed to `None` (or `NoAction` for FK actions), making the DDL
+    // report success while dropping the constraint.
+
+    // `array_of`: present-but-unparseable type tag → error (was silent None).
+    let array_of = match item.get("array_of") {
+        Some(v) => {
+            let s = v.as_str().ok_or_else(|| {
+                DbError::Validation(format!("schema 'array_of' must be a Str, got {:?}", v))
+            })?;
+            Some(parse_type_tag(s).map_err(|_e: DbError| {
+                DbError::Validation(format!("schema 'array_of' has unknown type tag: '{s}'"))
+            })?)
+        }
+        None => None,
+    };
 
     // Phase B — scalar-bridge, format, cross-field compare.
     let scalar = item
         .get("scalar")
         .and_then(|v| v.as_str())
         .map(|s| s.to_string());
-    let format = item
-        .get("format")
-        .and_then(|v| v.as_str())
-        .and_then(shamir_engine::validator::schema::FormatKind::parse);
-    let compare = item.get("compare").and_then(parse_cross_field_compare);
-    let foreign_key = item.get("foreign_key").and_then(parse_foreign_key_ref);
+    // `format`: present-but-unrecognised name → error (was silent None).
+    let format = match item.get("format") {
+        Some(v) => {
+            let s = v.as_str().ok_or_else(|| {
+                DbError::Validation(format!("schema 'format' must be a Str, got {:?}", v))
+            })?;
+            Some(
+                shamir_engine::validator::schema::FormatKind::parse(s).ok_or_else(|| {
+                    DbError::Validation(format!("schema 'format' has unknown format: '{s}'"))
+                })?,
+            )
+        }
+        None => None,
+    };
+    // `compare`/`foreign_key`: outer key absent → Ok(None); present-but-
+    // malformed inside → Err (was silent None).
+    let compare = parse_cross_field_compare(item)?;
+    let foreign_key = parse_foreign_key_ref(item)?;
     let unique = item
         .get("unique")
         .and_then(|v| v.as_bool())
@@ -273,43 +299,95 @@ fn parse_num_constraint(
     }
 }
 
-/// Parse a foreign-key reference from a catalogue Map.
+/// Parse a foreign-key reference from a catalogue rule Map.
 ///
 /// Catalogue shape:
 /// ```text
 /// { "foreign_key": { "ref_table": "parent", "ref_field": "id" } }
 /// ```
+///
+/// Returns:
+/// - `Ok(None)` when the `"foreign_key"` key is absent (no FK constraint).
+/// - `Err(DbError::Validation)` when the key is present but malformed (not a
+///   Map, missing `ref_table`/`ref_field`, or an unrecognised `on_delete`/
+///   `on_update` action string) — F-4: was previously silently collapsed to
+///   `None`, conflating "garbled" with "absent".
+/// - `Ok(Some(..))` on success.
 fn parse_foreign_key_ref(
-    v: &QueryValue,
-) -> Option<shamir_engine::validator::schema::ForeignKeyRef> {
-    let map = v.as_object()?;
-    let ref_table = map.get("ref_table")?.as_str()?.to_string();
-    let ref_field = map.get("ref_field")?.as_str()?.to_string();
-    // Phase D: parse on_delete action. Legacy catalogue rows without the
-    // field get NoAction (the FkAction serde/wire default), preserving
-    // backward compatibility.
-    let on_delete = match map.get("on_delete").and_then(|v| v.as_str()) {
-        Some("restrict") => shamir_engine::validator::schema::FkAction::Restrict,
-        Some("cascade") => shamir_engine::validator::schema::FkAction::Cascade,
-        Some("set_null") => shamir_engine::validator::schema::FkAction::SetNull,
-        _ => shamir_engine::validator::schema::FkAction::NoAction,
+    item: &QueryValue,
+) -> DbResult<Option<shamir_engine::validator::schema::ForeignKeyRef>> {
+    // Outer key absent → no FK constraint.
+    let v = match item.get("foreign_key") {
+        Some(v) => v,
+        None => return Ok(None),
     };
-    // Phase ②.2a: parse on_update action (surface only; enforcement in ②.2b).
-    // Legacy rows without the field default to NoAction, mirroring on_delete.
-    let on_update = match map.get("on_update").and_then(|v| v.as_str()) {
-        Some("restrict") => shamir_engine::validator::schema::FkAction::Restrict,
-        Some("cascade") => shamir_engine::validator::schema::FkAction::Cascade,
-        Some("set_null") => shamir_engine::validator::schema::FkAction::SetNull,
-        _ => shamir_engine::validator::schema::FkAction::NoAction,
-    };
-    Some(
+    let map = v
+        .as_object()
+        .ok_or_else(|| DbError::Validation("schema 'foreign_key' must be a Map".to_string()))?;
+    let ref_table = map
+        .get("ref_table")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| {
+            DbError::Validation("schema 'foreign_key.ref_table' must be a Str".to_string())
+        })?
+        .to_string();
+    let ref_field = map
+        .get("ref_field")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| {
+            DbError::Validation("schema 'foreign_key.ref_field' must be a Str".to_string())
+        })?
+        .to_string();
+    // Phase D / ②.2a: parse on_delete / on_update actions. Legacy catalogue
+    // rows without the fields get NoAction (the FkAction serde/wire default),
+    // preserving backward compatibility. A PRESENT-but-unrecognised string is
+    // now a hard error (F-4: was previously silently downgraded to NoAction).
+    let on_delete = parse_fk_action(v, "on_delete")?;
+    let on_update = parse_fk_action(v, "on_update")?;
+    Ok(Some(
         shamir_engine::validator::schema::ForeignKeyRef::with_actions(
             ref_table, ref_field, on_delete, on_update,
         ),
-    )
+    ))
 }
 
-/// Parse a cross-field compare constraint from a rule map.
+/// Parse an `on_delete` / `on_update` referential action from a foreign-key
+/// Map value.
+///
+/// - Field **absent** → `FkAction::NoAction` (documented backward-compat
+///   default for legacy rows; do not change — see `parse_foreign_key_ref`).
+/// - Field **present** but not a `Str`, or an unrecognised action string →
+///   hard `DbError::Validation` (F-4: was previously silently downgraded to
+///   `NoAction`, conflating "garbled" with "absent").
+fn parse_fk_action(
+    fk_map: &QueryValue,
+    field: &str,
+) -> DbResult<shamir_engine::validator::schema::FkAction> {
+    use shamir_engine::validator::schema::FkAction;
+    let Some(v) = fk_map.get(field) else {
+        return Ok(FkAction::NoAction);
+    };
+    let s = v.as_str().ok_or_else(|| {
+        DbError::Validation(format!(
+            "schema 'foreign_key.{field}' must be a Str, got {:?}",
+            v
+        ))
+    })?;
+    let action = match s {
+        "no_action" => FkAction::NoAction,
+        "restrict" => FkAction::Restrict,
+        "cascade" => FkAction::Cascade,
+        "set_null" => FkAction::SetNull,
+        _ => {
+            return Err(DbError::Validation(format!(
+                "schema 'foreign_key.{field}' has unknown action: '{s}'"
+            )));
+        }
+    };
+    Ok(action)
+}
+
+/// Parse a cross-field compare constraint from a catalogue rule Map.
 ///
 /// Catalogue shape:
 /// ```text
@@ -317,21 +395,47 @@ fn parse_foreign_key_ref(
 /// ```
 /// The `other` path is a list of plain field-name strings (NOT interned ids —
 /// cross-field paths are declarative and not stored on the interned hot path).
+///
+/// Returns:
+/// - `Ok(None)` when the `"compare"` key is absent (no compare constraint).
+/// - `Err(DbError::Validation)` when the key is present but malformed (not a
+///   Map, `other` missing/not-a-List/empty/non-string elements, `op` missing/
+///   not-a-Str/unrecognised) — F-4: was previously silently collapsed to
+///   `None`.
+/// - `Ok(Some(..))` on success.
 fn parse_cross_field_compare(
-    v: &QueryValue,
-) -> Option<shamir_engine::validator::schema::CrossFieldCompare> {
+    item: &QueryValue,
+) -> DbResult<Option<shamir_engine::validator::schema::CrossFieldCompare>> {
     use shamir_engine::validator::schema::{CompareOp, CrossFieldCompare};
 
-    let map = v.as_object()?;
-    let other_arr = map.get("other")?.as_array()?;
+    // Outer key absent → no compare constraint.
+    let v = match item.get("compare") {
+        Some(v) => v,
+        None => return Ok(None),
+    };
+    let map = v
+        .as_object()
+        .ok_or_else(|| DbError::Validation("schema 'compare' must be a Map".to_string()))?;
+    let other_arr = map.get("other").and_then(|v| v.as_array()).ok_or_else(|| {
+        DbError::Validation("schema 'compare.other' must be a List[Str]".to_string())
+    })?;
     let other: Vec<String> = other_arr
         .iter()
-        .filter_map(|s| s.as_str().map(String::from))
-        .collect();
+        .map(|s| {
+            s.as_str().map(String::from).ok_or_else(|| {
+                DbError::Validation("schema 'compare.other' must be a List[Str]".to_string())
+            })
+        })
+        .collect::<DbResult<Vec<_>>>()?;
     if other.is_empty() {
-        return None;
+        return Err(DbError::Validation(
+            "schema 'compare.other' must not be empty".to_string(),
+        ));
     }
-    let op_str = map.get("op")?.as_str()?;
+    let op_str = map
+        .get("op")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| DbError::Validation("schema 'compare.op' must be a Str".to_string()))?;
     let op = match op_str {
         "<" => CompareOp::Lt,
         "<=" => CompareOp::Le,
@@ -339,9 +443,13 @@ fn parse_cross_field_compare(
         "!=" => CompareOp::Ne,
         ">=" => CompareOp::Ge,
         ">" => CompareOp::Gt,
-        _ => return None,
+        _ => {
+            return Err(DbError::Validation(format!(
+                "schema 'compare.op' has unknown operator: '{op_str}'"
+            )));
+        }
     };
-    Some(CrossFieldCompare::new(other, op))
+    Ok(Some(CrossFieldCompare::new(other, op)))
 }
 
 // ── Schema validator name ───────────────────────────────────────────────

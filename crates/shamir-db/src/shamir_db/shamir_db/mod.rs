@@ -9,6 +9,9 @@ pub(crate) mod schema_management;
 mod table_management;
 mod validator_management;
 
+#[cfg(test)]
+mod tests;
+
 pub(super) const SYSTEM_DB_NAME: &str = "__system__";
 
 pub use artifact_kind::{ArtifactKind, KIND_FIELD};
