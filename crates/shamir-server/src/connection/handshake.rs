@@ -407,23 +407,18 @@ async fn run_handshake<F: Framer>(
     // a failure here must NEVER abort an otherwise-successful login; the
     // boot-time TTL sweep (`server_launcher.rs`) is the backstop for
     // anything missed here.
+    //
+    // F-3: ordering is rotate-FIRST → consume-on-success → delete-file-last.
+    // If the rotate fails the token metadata row is LEFT active so the next
+    // login attempt (or the next boot's TTL sweep) gets another chance —
+    // this makes the whole operation naturally retryable. Mirrors the
+    // sweep's ordering in `server_launcher.rs`. Same `kdf` this login just
+    // verified against, same `now_ns` already computed for the lockout
+    // pre-check.
     if ctx.meta.bootstrap_token_active()
         && ctx.meta.bootstrap_username().as_deref() == Some(username.as_str())
     {
-        if let Some(path) = ctx.meta.bootstrap_token_path() {
-            if let Err(e) = std::fs::remove_file(&path) {
-                if e.kind() != std::io::ErrorKind::NotFound {
-                    tracing::warn!(?path, ?e, "bootstrap: failed to delete token file on login");
-                }
-            }
-        }
-        if let Err(e) = ctx.meta.consume_bootstrap_token() {
-            tracing::warn!(?e, "bootstrap: failed to consume token record on login");
-        }
-        // Rotate AFTER the file/meta cleanup above, mirroring the sweep's
-        // ordering — same `kdf` this login itself just verified against,
-        // same `now_ns` already computed for the lockout pre-check.
-        if let Err(e) = crate::bootstrap::rotate_bootstrap_credential_to_random(
+        match crate::bootstrap::rotate_bootstrap_credential_to_random(
             &ctx.user_dir,
             username.as_str(),
             kdf,
@@ -431,7 +426,33 @@ async fn run_handshake<F: Framer>(
         )
         .await
         {
-            tracing::warn!(?e, "bootstrap: failed to rotate SCRAM credential on login");
+            Ok(()) => {
+                // Read the token file path BEFORE `consume_bootstrap_token()`
+                // clears the row — the same "read username/path before
+                // consuming" constraint the original code respected.
+                let token_path = ctx.meta.bootstrap_token_path();
+                if let Err(e) = ctx.meta.consume_bootstrap_token() {
+                    tracing::warn!(?e, "bootstrap: failed to consume token record on login");
+                }
+                if let Some(path) = token_path {
+                    if let Err(e) = std::fs::remove_file(&path) {
+                        if e.kind() != std::io::ErrorKind::NotFound {
+                            tracing::warn!(
+                                ?path,
+                                ?e,
+                                "bootstrap: failed to delete token file on login"
+                            );
+                        }
+                    }
+                }
+            }
+            Err(e) => {
+                tracing::warn!(
+                    ?e,
+                    "bootstrap: failed to rotate SCRAM credential on login \
+                     -- token left active for retry"
+                );
+            }
         }
     }
 

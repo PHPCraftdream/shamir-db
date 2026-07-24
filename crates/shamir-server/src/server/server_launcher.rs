@@ -169,45 +169,62 @@ impl ServerLauncher {
         // below: a previously-issued token from an earlier `RandomToken`
         // boot can still be outstanding and expired even if this boot is
         // `Skip`/`Password`. Best-effort — an I/O failure deleting the file,
-        // or a rotation failure, is logged and does not fail boot;
-        // `consume_bootstrap_token` is called regardless so the meta row is
-        // cleared either way. CR-A6: also rotates the account's SCRAM
-        // credential to a fresh random value — without this an unused,
-        // TTL-expired token would still work as the account's password
-        // forever, contradicting the "one-time token" guarantee. The
-        // username MUST be read BEFORE `consume_bootstrap_token()` clears
-        // the bookkeeping row (order matters).
+        // or a rotation failure, is logged and does not fail boot. CR-A6:
+        // also rotates the account's SCRAM credential to a fresh random
+        // value — without this an unused, TTL-expired token would still
+        // work as the account's password forever, contradicting the
+        // "one-time token" guarantee.
+        //
+        // F-3: ordering is rotate-FIRST → consume-on-success → delete-file-
+        // last. If the rotate fails — or there is no username to rotate —
+        // the token metadata row is LEFT active so the next boot's sweep
+        // gets another chance. The username MUST be read BEFORE
+        // `consume_bootstrap_token()` clears the bookkeeping row (order
+        // matters); the token path is likewise read before consume.
         {
             let now_ns = UnixNanos::now().as_u64();
             if meta.bootstrap_token_expired(now_ns) {
                 let expired_username = meta.bootstrap_username();
-                if let Some(path) = meta.bootstrap_token_path() {
-                    if let Err(e) = std::fs::remove_file(&path) {
-                        if e.kind() != std::io::ErrorKind::NotFound {
-                            tracing::warn!(
-                                ?path,
-                                ?e,
-                                "bootstrap: failed to delete expired token file"
-                            );
+
+                let rotated_ok = match expired_username {
+                    Some(name) => {
+                        match crate::bootstrap::rotate_bootstrap_credential_to_random(
+                            &user_dir,
+                            &name,
+                            kdf_for_bootstrap,
+                            now_ns,
+                        )
+                        .await
+                        {
+                            Ok(()) => true,
+                            Err(e) => {
+                                tracing::warn!(
+                                    ?e,
+                                    "bootstrap: failed to rotate SCRAM credential for expired \
+                                     token -- token left active for retry"
+                                );
+                                false
+                            }
                         }
                     }
-                }
-                if let Err(e) = meta.consume_bootstrap_token() {
-                    tracing::warn!(?e, "bootstrap: failed to consume expired token record");
-                }
-                if let Some(name) = expired_username {
-                    if let Err(e) = crate::bootstrap::rotate_bootstrap_credential_to_random(
-                        &user_dir,
-                        &name,
-                        kdf_for_bootstrap,
-                        now_ns,
-                    )
-                    .await
-                    {
-                        tracing::warn!(
-                            ?e,
-                            "bootstrap: failed to rotate SCRAM credential for expired token"
-                        );
+                    None => false,
+                };
+
+                if rotated_ok {
+                    let expired_token_path = meta.bootstrap_token_path();
+                    if let Err(e) = meta.consume_bootstrap_token() {
+                        tracing::warn!(?e, "bootstrap: failed to consume expired token record");
+                    }
+                    if let Some(path) = expired_token_path {
+                        if let Err(e) = std::fs::remove_file(&path) {
+                            if e.kind() != std::io::ErrorKind::NotFound {
+                                tracing::warn!(
+                                    ?path,
+                                    ?e,
+                                    "bootstrap: failed to delete expired token file"
+                                );
+                            }
+                        }
                     }
                 }
             }

@@ -1,5 +1,7 @@
 use std::fs;
+use std::path::PathBuf;
 
+use shamir_connect::common::crypto::sha256;
 use shamir_connect::common::kdf_params::KdfParams;
 use shamir_connect::common::scram::DerivedKeys;
 use shamir_connect::common::time::UnixNanos;
@@ -9,6 +11,7 @@ use crate::bootstrap::{
     ensure_superuser, rotate_bootstrap_credential_to_random, BootstrapOutcome, BootstrapPolicy,
     DEFAULT_BOOTSTRAP_NAME,
 };
+use crate::server_meta::ServerMetaStore;
 use crate::user_directory::FjallUserDirectory;
 use shamir_connect::server::admin::UserDirectory;
 
@@ -205,5 +208,113 @@ async fn rotate_bootstrap_credential_invalidates_old_password() {
     assert!(
         !would_still_verify,
         "the OLD token must no longer verify against the ROTATED record"
+    );
+}
+
+/// F-3 regression: exercises the SAME "rotate-first → consume-on-success →
+/// delete-file-last" ordering that `connection/handshake.rs` (first-login
+/// path) and `server/server_launcher.rs` (TTL sweep) both apply. Proves
+/// that a rotation failure leaves the token metadata row ACTIVE (not
+/// consumed) and the token file on disk, so a retry — once the user
+/// directory has the user — correctly consumes + deletes.
+///
+/// This test calls `rotate_bootstrap_credential_to_random` directly (it is
+/// `pub(crate)`) against a real `ServerMetaStore` + `FjallUserDirectory`,
+/// replicating the exact three-step sequence the production code performs.
+/// The full end-to-end sweep-path version lives in
+/// `tests/bootstrap_token_lifecycle_e2e.rs::
+///  ttl_sweep_rotation_failure_leaves_token_active_for_retry`.
+#[tokio::test]
+async fn f3_rotation_failure_leaves_token_active_then_retry_consumes() {
+    let dir = TempDir::new().unwrap();
+    let dir_path = dir.path();
+    let meta = ServerMetaStore::open_or_init(dir_path.join("server_meta")).unwrap();
+    let user_dir = FjallUserDirectory::open(dir_path.join("users.redb")).unwrap();
+    let kdf = fast_kdf();
+
+    let token_path: PathBuf = dir_path.join("bootstrap_token.txt");
+    fs::write(&token_path, b"the-bootstrap-token").unwrap();
+    meta.set_bootstrap_token(
+        DEFAULT_BOOTSTRAP_NAME,
+        sha256(b"the-bootstrap-token"),
+        u64::MAX, // far-future expiry — the ordering is the same regardless
+        token_path.clone(),
+    )
+    .unwrap();
+    assert!(meta.bootstrap_token_active());
+
+    // --- Step 1: rotation FAILS (no "admin" user in the directory yet). ---
+    // Per the F-3 reordering, the caller must NOT consume the token or
+    // delete the file — leave them for a retry.
+    let rotate_err = rotate_bootstrap_credential_to_random(
+        &user_dir,
+        DEFAULT_BOOTSTRAP_NAME,
+        kdf,
+        UnixNanos::now().as_u64(),
+    )
+    .await;
+    assert!(
+        rotate_err.is_err(),
+        "rotation must fail when the user does not exist in the directory"
+    );
+
+    // The caller (handshake / sweep code) sees the Err and skips consume +
+    // delete. Assert the token is still fully intact.
+    assert!(
+        meta.bootstrap_token_active(),
+        "F-3: token must stay ACTIVE after rotation failure — not consumed"
+    );
+    assert!(
+        token_path.exists(),
+        "F-3: token file must NOT be deleted after rotation failure"
+    );
+    assert_eq!(
+        meta.bootstrap_username().as_deref(),
+        Some(DEFAULT_BOOTSTRAP_NAME),
+        "F-3: bootstrap username must survive a rotation failure"
+    );
+
+    // --- Step 2: create the user, then retry — rotation now succeeds. ---
+    ensure_superuser(
+        &user_dir,
+        dir_path,
+        DEFAULT_BOOTSTRAP_NAME,
+        BootstrapPolicy::Password(b"some-password"),
+        &kdf,
+    )
+    .unwrap();
+
+    let rotate_ok = rotate_bootstrap_credential_to_random(
+        &user_dir,
+        DEFAULT_BOOTSTRAP_NAME,
+        kdf,
+        UnixNanos::now().as_u64(),
+    )
+    .await;
+    assert!(
+        rotate_ok.is_ok(),
+        "rotation must succeed once the user exists"
+    );
+
+    // Per the F-3 reordering: on rotate success, read the token path
+    // BEFORE consume, then consume, then delete the file.
+    let path_before_consume = meta.bootstrap_token_path();
+    assert_eq!(
+        path_before_consume.as_ref(),
+        Some(&token_path),
+        "token path must still be readable before consume"
+    );
+    meta.consume_bootstrap_token().unwrap();
+    if let Some(p) = path_before_consume {
+        let _ = fs::remove_file(&p);
+    }
+
+    assert!(
+        !meta.bootstrap_token_active(),
+        "F-3: token must be CONSUMED after successful rotation"
+    );
+    assert!(
+        !token_path.exists(),
+        "F-3: token file must be DELETED after successful rotation"
     );
 }

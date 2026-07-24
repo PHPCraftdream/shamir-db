@@ -217,3 +217,90 @@ async fn ttl_sweep_rotates_unused_expired_token_credential() {
 
     handle2.shutdown().await;
 }
+
+/// F-3 regression: if the TTL sweep's credential rotation fails (here: the
+/// token references a username that does NOT yet exist in the user
+/// directory, so `update_credentials` returns "user not found"), the sweep
+/// must LEAVE the token metadata row active and the token file on disk —
+/// NOT consume the row first (the old, buggy ordering consumed the row
+/// before attempting the rotate, permanently defeating the retry).
+///
+/// Flow:
+/// 1. Pre-seed `server_meta` with an ALREADY-EXPIRED bootstrap token for
+///    `"admin"`, and write the token file. The user directory is empty.
+/// 2. Boot #1 (`Password` mode): the sweep runs BEFORE the bootstrap step,
+///    tries to rotate `"admin"` → fails (user doesn't exist) → token stays
+///    active. The bootstrap step THEN creates `"admin"`.
+/// 3. Verify: token still active, token file still on disk.
+/// 4. Boot #2 (`Skip` mode): the sweep retries, `"admin"` now exists →
+///    rotation succeeds → token consumed + file deleted.
+/// 5. Verify: token consumed, file gone.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn ttl_sweep_rotation_failure_leaves_token_active_for_retry() {
+    let temp = TempDir::new().expect("tempdir");
+
+    let token_path = temp.path().join("bootstrap_token.txt");
+
+    // Pre-seed: an expired bootstrap token for "admin" (who does NOT exist
+    // in the user directory yet) + the token file on disk.
+    {
+        let meta = ServerMetaStore::open_or_init(temp.path().join("server_meta"))
+            .expect("pre-seed server_meta");
+        std::fs::write(&token_path, b"fake-bootstrap-token").expect("write token file");
+        meta.set_bootstrap_token(
+            "admin",
+            shamir_connect::common::crypto::sha256(b"fake-bootstrap-token"),
+            1, // already-past expiry (1 ns since epoch)
+            token_path.clone(),
+        )
+        .expect("set expired bootstrap token for non-existent user");
+    }
+
+    // Boot #1 (Password mode): sweep runs first and fails to rotate "admin"
+    // (user doesn't exist yet) → token stays active. Bootstrap step then
+    // creates "admin" — but the sweep has already run, so the token is NOT
+    // retried this boot.
+    let handle1 = common::spawn_with_password(&temp, b"some-password", "127.0.0.1:0").await;
+    handle1.shutdown().await;
+
+    // After boot #1: token still active, file still on disk — the sweep's
+    // rotation failure must NOT have consumed the token.
+    {
+        let meta = ServerMetaStore::open_or_init(temp.path().join("server_meta"))
+            .expect("reopen server_meta after boot #1");
+        assert!(
+            meta.bootstrap_token_active(),
+            "F-3: token must stay active after sweep rotation failure (user \
+             did not exist at sweep time)"
+        );
+        assert!(
+            token_path.exists(),
+            "F-3: token file must NOT be deleted after sweep rotation failure"
+        );
+    }
+
+    // Boot #2 (Skip mode): "admin" now exists (created by boot #1's
+    // bootstrap step). The sweep retries → rotation succeeds → token
+    // consumed + file deleted.
+    let config = common::make_test_config(&temp, "127.0.0.1:0");
+    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+    let handle2 = shamir_server::server::ServerLauncher {
+        config,
+        bootstrap: shamir_server::server::BootstrapMode::Skip,
+    }
+    .launch()
+    .await
+    .expect("boot #2 — sweep retry must succeed");
+    handle2.shutdown().await;
+
+    let meta = ServerMetaStore::open_or_init(temp.path().join("server_meta"))
+        .expect("reopen server_meta after boot #2");
+    assert!(
+        !meta.bootstrap_token_active(),
+        "F-3: token must be consumed after successful retry rotation"
+    );
+    assert!(
+        !token_path.exists(),
+        "F-3: token file must be deleted after successful retry rotation"
+    );
+}
