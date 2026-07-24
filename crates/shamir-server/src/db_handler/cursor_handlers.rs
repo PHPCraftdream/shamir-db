@@ -529,6 +529,59 @@ fn order_by_field_value(query: &ReadQuery, record: &QueryRecord) -> Option<Query
     record.get_value(&order_by.items[0].field[0]).cloned()
 }
 
+/// W-2/W-3 (#789, Wave D review): is `candidate` safe to hand to
+/// `boundary_filter` as a keyset `seek_key`?
+///
+/// Two independent gaps closed here, both symptoms of the same root cause —
+/// `seek_key` was previously set from whatever raw `QueryValue` the ORDER BY
+/// column held, with no check that this specific VALUE can actually
+/// round-trip through the boundary-filter scheme:
+///
+/// - **W-3** (`Dec`/`Big`/anything else `query_value_to_filter_value`
+///   refuses): these do not convert to a `FilterValue` at all, so
+///   `boundary_filter` would return `None` and `fetch_keyset_page`'s
+///   `let Some(filter) = boundary_filter(..) else { return Err(..) }` would
+///   hard-error on every `FetchNext` past page 1 — even though `Dec`/`Big`
+///   values ARE perfectly comparable via `compare_values`, the bookmark
+///   mechanism just can't express them as a `Filter` literal.
+/// - **W-2** (`Bin`/`List`): these DO convert to a `FilterValue`
+///   (`Binary`/`Array`), so `boundary_filter` builds a filter that LOOKS
+///   valid — but `compare_values` (`shamir-engine`'s `query/filter/
+///   resolve.rs`) has no `(Bin, Bin)`/`(List, List)` comparison arm (its own
+///   doc comment: "only the scalar arms... participate"), so the boundary
+///   filter can never actually match any row — permanent silent data loss
+///   past page 1, the exact CR-D2 failure shape. Investigated whether
+///   `order.rs`'s `QvSortKey` machinery already established a working total
+///   order for `Bin`/`List` that this could mirror/reuse (the more complete
+///   fix, option (a) from the brief): it does NOT — `QvSortKey::
+///   from_query_value` maps `Bin`/`Set`/`List`/`Map` ALL to `QvSortKey::
+///   Other`, an explicitly UNSORTABLE bucket that Rust's stable sort merely
+///   preserves in insertion order (see that function's own doc comment:
+///   "Bin`/`Set` map to `Other` (unsortable, preserving insertion order via
+///   stable sort)"). There is no existing total order to extend
+///   `compare_values` with — inventing one (e.g. lexicographic `Vec<u8>`/
+///   recursive `List` comparison) would ALSO have to change ORDER BY's own
+///   sort semantics to stay consistent (today's ORDER BY does not actually
+///   sort `Bin`/`List` at all), which is a materially bigger change than
+///   this polish-batch task's scope warrants. So: option (b) — detect
+///   `Bin`/`List` as unsafe-for-keyset the same way as an unconvertible
+///   value, converting the silent data loss into the SAME documented
+///   offset-mode degradation CR-A4's existing safety net already provides
+///   for "ORDER BY field absent from projection".
+///
+/// Both sub-cases are treated identically by callers: a `None` return here
+/// is handed straight to the EXISTING "no seek_key" safety net (a
+/// `Keyset`-mode cursor with `seek_key == None` falls back to the row-count
+/// offset bookmark for that call) — no new fallback mechanism invented.
+fn safe_seek_key(candidate: QueryValue) -> Option<QueryValue> {
+    match candidate {
+        // W-2: convertible to a FilterValue but not comparable via
+        // `compare_values` — would silently match nothing past page 1.
+        QueryValue::Bin(_) | QueryValue::List(_) => None,
+        other => query_value_to_filter_value(&other).map(|_| other),
+    }
+}
+
 /// Whether two `QueryValue`s represent the SAME ORDER BY boundary value,
 /// for CR-A4's tie-run counting. Compares through `FilterValue` (the same
 /// conversion `boundary_filter` already uses to build the `Gte`/`Lte`
@@ -628,7 +681,16 @@ fn bookmark_from_tail(
                         .is_some_and(|v| same_boundary_value(&v, &last_value))
                 })
                 .count() as u64;
-            (Some(last_value), count)
+            // W-2/W-3 (#789): the tie count above is computed against the
+            // RAW extracted value (equality via `same_boundary_value` is
+            // fine for any value shape), but the value actually returned as
+            // the bookmark must first clear `safe_seek_key` — an
+            // unconvertible (`Dec`/`Big`) or uncomparable-via-`compare_values`
+            // (`Bin`/`List`) value is treated exactly like "no seek_key",
+            // routing this call's caller straight into the existing
+            // Keyset-with-`seek_key == None` offset-bookmark fallback for
+            // THIS call only (see `safe_seek_key`'s doc comment).
+            (safe_seek_key(last_value), count)
         }
         None => (None, 0),
     }
@@ -1106,6 +1168,12 @@ impl ShamirDbHandler {
                     // last row's ORDER BY value — that many must be
                     // skipped from the front of the next (inclusive)
                     // refetch so they aren't handed to the client twice.
+                    // Tie count is against the RAW extracted value (see
+                    // `bookmark_from_tail`'s matching comment); W-2/W-3
+                    // (#789): the value actually stored as the bookmark
+                    // must first clear `safe_seek_key`, else this cursor
+                    // falls back to the row-count offset bookmark for this
+                    // call, same as the pre-existing "no seek_key" case.
                     let tie_skip = page
                         .records
                         .iter()
@@ -1114,7 +1182,7 @@ impl ShamirDbHandler {
                                 .is_some_and(|v| same_boundary_value(&v, &last_value))
                         })
                         .count() as u64;
-                    (Some(last_value), tie_skip)
+                    (safe_seek_key(last_value), tie_skip)
                 }
                 None => (None, 0),
             }
@@ -1382,9 +1450,13 @@ impl ShamirDbHandler {
         // comment for why flip-flopping bookmark kinds mid-scroll is
         // unsafe. `Keyset` additionally requires a `seek_key` to seek
         // from; a `Keyset`-mode cursor with `seek_key == None` (e.g. the
-        // ORDER BY field was absent from a page's projection) falls back
-        // to the row-count bookmark for THIS call only, matching the
-        // pre-CR-A4 "can't build a seek from this page" safety net.
+        // ORDER BY field was absent from a page's projection, OR — W-2/W-3
+        // (#789) — the last row's ORDER BY value was a `Dec`/`Big` value
+        // with no `FilterValue` equivalent, or a `Bin`/`List` value that
+        // converts fine but has no `compare_values` arm to ever match
+        // against, see `safe_seek_key`) falls back to the row-count
+        // bookmark for THIS call only, matching the pre-CR-A4 "can't build
+        // a seek from this page" safety net.
         //
         // CR-D1 (#782, release blocker): there is now a SECOND, narrower
         // reason a Keyset-mode cursor ends up on the offset bookmark for a

@@ -194,13 +194,13 @@ artifact).
   `create_cursor` and
   `crates/shamir-query-types/src/batch/batch_error.rs`'s
   `BatchError::CursorWithVersionNotSupported`.
-- **Keyset-mode cursors: `Null`/missing `ORDER BY` values are handled;
-  mixed-type and `NaN` `ORDER BY` values are NOT (CR-D2, #783).** A
-  keyset cursor's page boundary is an inclusive `field >= seek_key` (ASC) /
-  `field <= seek_key` (DESC) filter — any row whose `ORDER BY` value cannot
-  be compared to `seek_key` makes that filter unresolvable (`false`),
-  silently excluding the row from every page after the first with a clean
-  `has_more: false` at the end (no error). Current state:
+- **Keyset-mode cursors: `Null`/missing and `Bin`/`List`/`Dec`/`Big` `ORDER BY`
+  values are handled; mixed-type and `NaN` `ORDER BY` values are NOT (CR-D2
+  #783, W-2/W-3 #789).** A keyset cursor's page boundary is an inclusive
+  `field >= seek_key` (ASC) / `field <= seek_key` (DESC) filter — any row whose
+  `ORDER BY` value cannot be compared to `seek_key` makes that filter
+  unresolvable (`false`), silently excluding the row from every page after the
+  first with a clean `has_more: false` at the end (no error). Current state:
   - **`Null` / missing value — CLOSED.** `CreateCursor` now runs one cheap
     `WHERE <order_by_field> IS NULL LIMIT 1` existence probe against the
     same pinned snapshot the first page reads, before running that first
@@ -209,6 +209,31 @@ artifact).
     unconditionally. See
     `crates/shamir-server/src/db_handler/cursor_handlers.rs`'s
     `order_by_column_contains_null` and `create_cursor`.
+  - **`Dec`/`Big` value — CLOSED (W-3, #789).** These have no `FilterValue`
+    equivalent, so the boundary filter could not even be built — before this
+    fix, every `FetchNext` past page 1 hard-errored ("cursor: keyset seek key
+    has no comparable filter form") instead of silently dropping rows. Now
+    detected the moment the candidate bookmark value is extracted (both at
+    `CreateCursor` and at each `FetchNext` bookmark refresh): an unconvertible
+    value is treated exactly like the pre-existing "no seek_key" case, and the
+    cursor degrades to row-count-offset pagination for that call only. See
+    `crates/shamir-server/src/db_handler/cursor_handlers.rs`'s `safe_seek_key`.
+  - **`Bin`/`List` value — CLOSED (W-2, #789).** Unlike `Dec`/`Big`, these DO
+    convert to a `FilterValue` (`Binary`/`Array`), so the boundary filter looked
+    valid but could never match anything (`compare_values` has no comparison
+    arm for `Bin`/`Bin` or `List`/`List`), silently dropping every row past page
+    1 — the same failure shape as the `Null` case. Investigated extending
+    `compare_values` with a real total order for these types (mirroring
+    `ORDER BY`'s own sort-key machinery): `ORDER BY` does NOT actually sort
+    `Bin`/`List`/`Set`/`Map` today (they land in an explicit "unsortable"
+    bucket, order preserved via stable sort only), so there is no existing
+    total order to reuse, and inventing one would need to change `ORDER BY`'s
+    own semantics too to stay self-consistent — out of scope for this
+    polish-batch task. Fixed instead via the SAME "detect as unsafe, fall back
+    to the existing no-seek-key safety net" mechanism as `Dec`/`Big` (see
+    `safe_seek_key`) — narrower than a full total-order fix, but fully closes
+    the SILENT ROW LOSS (converts it into the documented, understood
+    offset-mode degradation instead).
   - **Mixed `QueryValue` type in one `ORDER BY` column (e.g. some rows
     `Int`, some `Str`) — STILL OPEN.** Not detected; such a cursor may
     silently drop every row of the "other" type(s) once the scan passes
@@ -231,6 +256,17 @@ artifact).
     `crates/shamir-server/src/db_handler/tests/cursor_handler_tests.rs`'s
     `nan_order_by_value_is_a_documented_still_open_limitation` for a test
     pinning the current (accepted) gap.
+  - **W-7 (#789): the residual mixed-type/`NaN` gap can also DUPLICATE rows,
+    not just omit them.** If a keyset cursor over such a column later falls
+    back to row-count-offset pagination for some other reason mid-scroll
+    (e.g. CR-D1's tie-run-ceiling fallback), `state.offset` undercounts the
+    true position in the global sorted order — the earlier keyset pages
+    silently SKIPPED the incomparable rows via the boundary filter without
+    ever counting them into `offset`. Resuming a plain `LimitOffset` scan from
+    that undercounted `offset` can therefore re-return some rows already
+    handed out on an earlier page, in addition to (still) omitting the
+    incomparable rows themselves — both directions of corruption are possible
+    from the same root cause.
 
 ## 7. Numbers
 

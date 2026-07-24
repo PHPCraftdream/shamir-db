@@ -150,6 +150,11 @@ windows-service = "0.8"
 [dev-dependencies]
 tokio = { version = "1", features = ["test-util"] }
 serial_test = "3"
+# W-2/W-3 (#789): construct QueryValue::Dec/Big test fixtures for keyset
+# cursor bookmark-typing regression tests (cursor_handler_tests.rs). Same
+# version pins as shamir-types/Cargo.toml.
+rust_decimal = { version = "1.40.0", features = ["serde"] }
+num-bigint = { version = "0.4", features = ["serde"] }
 # Compiles the echo WAT fixture used by create_function wire-gating tests.
 wat = "1.226"
 # E2E test in `tests/mvp_e2e.rs` runs a real client through TLS+SCRAM —

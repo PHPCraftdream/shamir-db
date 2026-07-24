@@ -14,9 +14,12 @@
 > values) has also landed — see §6 and the R-6 cost-model note below for what has
 > NOT yet landed. CR-D2 (#783): a keyset-eligible `ORDER BY` column containing a
 > `Null`/missing value is now detected at `CreateCursor` time and the WHOLE
-> cursor falls back to row-count-offset pagination instead — see §1.1. A
+> cursor falls back to row-count-offset pagination instead — see §1.1. W-2/W-3
+> (#789): the SAME class of gap for `Bin`/`List`/`Dec`/`Big` `ORDER BY` values is
+> now also closed (a per-bookmark check, not a create-time probe) — see §1.1. A
 > mixed-type or `NaN`-containing `ORDER BY` column is NOT detected and remains a
-> known limitation (silent row loss) — see §1.1 and `KNOWN_LIMITATIONS.md` §6.
+> known limitation (silent row loss, and possible row DUPLICATION once the
+> offset-mode fallback engages) — see §1.1 and `KNOWN_LIMITATIONS.md` §6.
 
 ---
 
@@ -101,6 +104,33 @@ checks (and does not check) before committing to keyset mode.
   seeking via the boundary filter) — a consumer building strict cost expectations
   around "my `ORDER BY` column is simple, so this must be keyset-mode" should not
   assume that holds once the column's data can contain nulls.
+- **`Bin`/`List`/`Dec`/`Big` `ORDER BY` value (CLOSED, W-2/W-3 #789):** two
+  related gaps, both now closed by the SAME "treat as unsafe, fall back to the
+  existing no-seek-key safety net" mechanism, checked per-bookmark (not a
+  create-time probe like the `Null` case above, since this is a per-VALUE
+  property, not a per-column one):
+  - `Dec`/`Big` values have no `FilterValue` equivalent at all, so the keyset
+    boundary filter could not even be BUILT from one — before this fix, this
+    surfaced as a hard error on the second and later `FetchNext` calls ("cursor:
+    keyset seek key has no comparable filter form"), even though `Dec`/`Big`
+    values are perfectly comparable by the engine otherwise.
+  - `Bin`/`List` values DO convert to a `FilterValue` (so a boundary filter
+    LOOKS valid), but the engine's `compare_values` has no comparison arm for
+    them — the filter could never actually match any row, silently dropping
+    every subsequent page (the exact CR-D2 failure shape). This is a narrower
+    fix than fully solving "total-order a `Bin`/`List` column" (`ORDER BY`
+    itself does not sort these types today — they land in an explicit
+    "unsortable" bucket preserved in insertion order — so there is no existing
+    total order for the boundary filter to reuse; extending `compare_values`
+    alone would only be self-consistent with a matching `ORDER BY` sort change,
+    a larger undertaking left to a future task).
+  - Either shape is now detected the moment a candidate bookmark value is
+    extracted (both at `CreateCursor`'s first-page bookmark and at each
+    `FetchNext`'s bookmark refresh) and treated exactly like the pre-existing
+    "no seek_key" case: the cursor degrades to the row-count-offset bookmark
+    for that call, the same documented, degraded-but-correct behavior CR-A4's
+    safety net already provides. See
+    `crates/shamir-server/src/db_handler/cursor_handlers.rs`'s `safe_seek_key`.
 - **Mixed-`QueryValue`-type or `NaN`-containing `ORDER BY` column (STILL OPEN, not
   fixed by CR-D2):** the SAME class of bug applies to a column holding more than
   one `QueryValue` variant (e.g. some rows `Int`, some `Str`) or an `F64` column
@@ -111,7 +141,16 @@ checks (and does not check) before committing to keyset mode.
   `CreateCursor` time, so it is NOT detected and NOT fixed — see
   `KNOWN_LIMITATIONS.md` §6 for the precise, current-state disclosure. Avoid
   keyset-eligible cursors over an `ORDER BY` column that may hold mixed types or
-  `NaN` until this is closed.
+  `NaN` until this is closed. **Additionally (W-7 #789):** once the residual
+  incomparable rows accumulate and the cursor happens to fall back to
+  row-count-offset pagination for some OTHER reason mid-scroll (e.g. CR-D1's
+  tie-run-ceiling fallback), `state.offset` undercounts the true position in the
+  global sorted order — earlier keyset pages already silently SKIPPED the
+  incomparable rows via the boundary filter without counting them into
+  `offset`. The subsequent offset-mode scan can therefore return some rows a
+  second time (DUPLICATE), not just omit others — both failure directions are
+  possible from the same root cause, not only the row-loss direction described
+  above.
 
 ---
 

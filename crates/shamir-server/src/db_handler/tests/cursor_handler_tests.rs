@@ -25,6 +25,7 @@ use shamir_query_types::admin::ResourceRef;
 use shamir_query_types::batch::BatchError;
 use shamir_query_types::read::{OrderBy, ReadQuery, Select, Temporal};
 use shamir_query_types::wire::{CursorId, DbRequest, DbResponse};
+use shamir_types::types::value::QueryValue;
 
 use crate::cursor_registry::PaginationMode;
 use crate::db_handler::config::CursorLimitsCap;
@@ -3172,5 +3173,563 @@ async fn nan_order_by_value_is_a_documented_still_open_limitation() {
          check instead",
         seqs.len(),
         seqs
+    );
+}
+
+// ---------------------------------------------------------------------------
+// W-2 + W-3 (#789, Wave D review, https://github.com/, findings W-2/W-3) --
+// keyset cursor bookmark typing gaps for `Bin`/`List` (W-2) and `Dec`/`Big`
+// (W-3) ORDER BY columns.
+//
+// Root cause (shared with CR-D2): `seek_key` was set from whatever raw
+// `QueryValue` the ORDER BY column held, with no check that this specific
+// VALUE can round-trip through `boundary_filter`'s `query_value_to_filter_value`
+// call AND actually be matched by `compare_values`.
+//
+// - W-3 (`Dec`/`Big`): `query_value_to_filter_value` returns `None` for these
+//   (no `FilterValue` equivalent) -- BEFORE the fix, `boundary_filter` itself
+//   returned `None` and `fetch_keyset_page`'s
+//   `let Some(filter) = boundary_filter(..) else { return Err(..) }` hard-
+//   errored ("cursor: keyset seek key has no comparable filter form") on every
+//   `FetchNext` past page 1.
+// - W-2 (`Bin`/`List`): these DO convert to a `FilterValue`, but
+//   `compare_values` has no `(Bin, Bin)`/`(List, List)` comparison arm --
+//   BEFORE the fix, the boundary filter silently matched nothing past page 1
+//   (the CR-D2 failure shape: `has_more: false`, no error, rows just vanish).
+//
+// Fix (this task): `safe_seek_key` (`cursor_handlers.rs`) filters a candidate
+// bookmark value through `query_value_to_filter_value`'s convertibility AND
+// explicitly excludes `Bin`/`List` (chosen over extending `compare_values`
+// with a real `Bin`/`List` total order -- see `safe_seek_key`'s doc comment
+// for why: `order.rs`'s `QvSortKey` does NOT already solve this, since
+// `Bin`/`List` map to the explicitly-unsortable `QvSortKey::Other` bucket
+// today, so there is no existing total order to reuse/mirror). Either way,
+// `None` routes into the SAME pre-existing "no seek_key" safety net a
+// Keyset-mode cursor already has: fall back to the row-count offset bookmark
+// for that call.
+// ---------------------------------------------------------------------------
+
+use num_bigint::BigInt;
+use rust_decimal::Decimal;
+
+/// Build `app.main.items` with a `score` (ORDER BY) column of type `Dec`
+/// (`rust_decimal::Decimal`), via `Doc::set_value` (the only way to inject a
+/// `QueryValue::Dec` into a row -- `FilterValue`, which `doc!`'s `.set()`
+/// targets, has no `Dec` variant at all). `seq` is always present so drained
+/// rows can be identified uniquely.
+async fn build_handler_with_dec_scores(
+    scores: &[i64],
+    cursor_limits: CursorLimitsCap,
+) -> ShamirDbHandler {
+    let shamir = ShamirDb::init_memory().await.expect("init shamir");
+    let owner = Actor::User(principal64([0xAB; 16]));
+    shamir.create_db_as("app", owner.clone()).await;
+    let cfg =
+        RepoConfig::new("main", BoxRepoFactory::in_memory()).add_table(TableConfig::new("items"));
+    shamir
+        .add_repo_as("app", cfg, owner.clone())
+        .await
+        .expect("add repo");
+
+    let mut b = Batch::new();
+    for (i, score) in scores.iter().enumerate() {
+        let row =
+            doc! { "seq" => i as i64 }.set_value("score", QueryValue::Dec(Decimal::from(*score)));
+        b.insert(format!("i{i}"), insert("items").row(row));
+    }
+    let batch = b.build();
+    shamir
+        .execute_as(owner, "app", &batch)
+        .await
+        .expect("seed rows");
+
+    ShamirDbHandler::new(Arc::new(shamir)).with_cursor_limits(cursor_limits)
+}
+
+/// Same as [`build_handler_with_dec_scores`] but for `Big`
+/// (`num_bigint::BigInt`) -- large enough to force the `Big` promotion (any
+/// `i64` literal already round-trips through `QueryValue::Big` directly here
+/// since the row is built by hand, not via wire-encoded literal promotion).
+async fn build_handler_with_big_scores(
+    scores: &[i64],
+    cursor_limits: CursorLimitsCap,
+) -> ShamirDbHandler {
+    let shamir = ShamirDb::init_memory().await.expect("init shamir");
+    let owner = Actor::User(principal64([0xAB; 16]));
+    shamir.create_db_as("app", owner.clone()).await;
+    let cfg =
+        RepoConfig::new("main", BoxRepoFactory::in_memory()).add_table(TableConfig::new("items"));
+    shamir
+        .add_repo_as("app", cfg, owner.clone())
+        .await
+        .expect("add repo");
+
+    let mut b = Batch::new();
+    for (i, score) in scores.iter().enumerate() {
+        let row =
+            doc! { "seq" => i as i64 }.set_value("score", QueryValue::Big(BigInt::from(*score)));
+        b.insert(format!("i{i}"), insert("items").row(row));
+    }
+    let batch = b.build();
+    shamir
+        .execute_as(owner, "app", &batch)
+        .await
+        .expect("seed rows");
+
+    ShamirDbHandler::new(Arc::new(shamir)).with_cursor_limits(cursor_limits)
+}
+
+/// Same as [`build_handler_with_dec_scores`] but for `Bin` (`Vec<u8>`) --
+/// each row's `score` is a distinct single-byte binary value so an ASC keyset
+/// scan (if it worked) would have a well-defined order.
+async fn build_handler_with_bin_scores(
+    scores: &[u8],
+    cursor_limits: CursorLimitsCap,
+) -> ShamirDbHandler {
+    let shamir = ShamirDb::init_memory().await.expect("init shamir");
+    let owner = Actor::User(principal64([0xAB; 16]));
+    shamir.create_db_as("app", owner.clone()).await;
+    let cfg =
+        RepoConfig::new("main", BoxRepoFactory::in_memory()).add_table(TableConfig::new("items"));
+    shamir
+        .add_repo_as("app", cfg, owner.clone())
+        .await
+        .expect("add repo");
+
+    let mut b = Batch::new();
+    for (i, score) in scores.iter().enumerate() {
+        let row = doc! { "seq" => i as i64 }.set_value("score", QueryValue::Bin(vec![*score]));
+        b.insert(format!("i{i}"), insert("items").row(row));
+    }
+    let batch = b.build();
+    shamir
+        .execute_as(owner, "app", &batch)
+        .await
+        .expect("seed rows");
+
+    ShamirDbHandler::new(Arc::new(shamir)).with_cursor_limits(cursor_limits)
+}
+
+/// W-3 regression: a keyset cursor over a `Dec` ORDER BY column.
+///
+/// BEFORE the fix: `query_value_to_filter_value` returns `None` for
+/// `QueryValue::Dec`, so `boundary_filter` returns `None` and
+/// `fetch_keyset_page` hard-errors ("cursor: keyset seek key has no
+/// comparable filter form") on the second `FetchNext`. AFTER the fix:
+/// `safe_seek_key` detects the unconvertible `Dec` value at the first-page
+/// bookmark-build site, so `seek_key` is `None` from the start -- the cursor
+/// transparently rides the offset-bookmark safety net (still reported as
+/// `PaginationMode::Keyset` in `state.mode`, per CR-A4: the MODE is pinned
+/// once from the query's SHAPE and never re-derived; it's the per-call
+/// `seek_key` that degrades to the offset path, exactly mirroring the
+/// pre-existing "ORDER BY field absent from projection" safety net) -- every
+/// row appears exactly once, no hard error.
+#[tokio::test]
+async fn dec_order_by_value_uses_offset_fallback_not_hard_error() {
+    let scores = [5, 3, 1, 4, 2];
+    let handler = build_handler_with_dec_scores(&scores, CursorLimitsCap::UNLIMITED).await;
+    let session = alice_session();
+
+    let query = ReadQuery::new("items").order_by(OrderBy::asc("score"));
+    let resp = send(&handler, &session, create_cursor_req(query, 2)).await;
+    let (cursor_id, mut seqs) = match resp {
+        DbResponse::CursorPage {
+            cursor_id,
+            page,
+            has_more,
+        } => {
+            assert!(has_more, "5 rows / page_size 2 -> more pages remain");
+            let seqs: Vec<i64> = page
+                .records
+                .iter()
+                .map(|r| r.get_value_i64("seq").expect("seq present"))
+                .collect();
+            (cursor_id, seqs)
+        }
+        other => panic!("expected CursorPage, got {other:?}"),
+    };
+
+    // The query SHAPE is still keyset-eligible (single simple-field ORDER
+    // BY, no Null probe hit -- `Dec` isn't Null) -- CR-A4's mode is pinned
+    // from shape, not from the per-value convertibility check this task
+    // adds. What actually protects correctness is `seek_key` itself falling
+    // back to the offset bookmark per-call, verified by `has_more`/`seqs`
+    // below rather than by asserting `mode == Offset` here.
+    assert_eq!(
+        pinned_mode(&handler, cursor_id, &ALICE_SID),
+        PaginationMode::Keyset,
+        "a Dec ORDER BY column is not Null, so the CR-D2 create-time probe does not (and \
+         should not) reroute the whole cursor -- W-3's fix is a per-bookmark fallback, not a \
+         create-time mode change"
+    );
+
+    // Draining must NOT hard-error -- before the fix, this loop's second
+    // `FetchNext` would return `DbResponse::Error` with `code:
+    // "cursor_error"`/`query_error` instead of a `CursorPage`.
+    drain_seqs(&handler, &session, cursor_id, 2, &mut seqs).await;
+
+    seqs.sort_unstable();
+    assert_eq!(
+        seqs,
+        vec![0, 1, 2, 3, 4],
+        "every row must appear exactly once via the offset-bookmark fallback -- before the fix \
+         this scenario hard-errored instead of completing the drain at all"
+    );
+}
+
+/// W-3 regression: same as the `Dec` test above, but for `Big`
+/// (`num_bigint::BigInt`) -- the brief calls out both types explicitly since
+/// `compare_values`/`query_value_to_filter_value` treat them as siblings.
+#[tokio::test]
+async fn big_order_by_value_uses_offset_fallback_not_hard_error() {
+    let scores = [5, 3, 1, 4, 2];
+    let handler = build_handler_with_big_scores(&scores, CursorLimitsCap::UNLIMITED).await;
+    let session = alice_session();
+
+    let query = ReadQuery::new("items").order_by(OrderBy::asc("score"));
+    let resp = send(&handler, &session, create_cursor_req(query, 2)).await;
+    let (cursor_id, mut seqs) = match resp {
+        DbResponse::CursorPage {
+            cursor_id,
+            page,
+            has_more,
+        } => {
+            assert!(has_more, "5 rows / page_size 2 -> more pages remain");
+            let seqs: Vec<i64> = page
+                .records
+                .iter()
+                .map(|r| r.get_value_i64("seq").expect("seq present"))
+                .collect();
+            (cursor_id, seqs)
+        }
+        other => panic!("expected CursorPage, got {other:?}"),
+    };
+
+    assert_eq!(
+        pinned_mode(&handler, cursor_id, &ALICE_SID),
+        PaginationMode::Keyset,
+        "a Big ORDER BY column is not Null, so the CR-D2 create-time probe does not reroute \
+         the whole cursor -- W-3's fix is a per-bookmark fallback"
+    );
+
+    drain_seqs(&handler, &session, cursor_id, 2, &mut seqs).await;
+
+    seqs.sort_unstable();
+    assert_eq!(
+        seqs,
+        vec![0, 1, 2, 3, 4],
+        "every row must appear exactly once via the offset-bookmark fallback -- before the fix \
+         this scenario hard-errored on the second FetchNext instead of completing the drain"
+    );
+}
+
+/// W-2 regression (option (b) chosen -- see `safe_seek_key`'s doc comment):
+/// a keyset cursor over a `Bin` ORDER BY column must ride the offset-mode
+/// fallback (every row exactly once), not the OLD silent drop.
+///
+/// BEFORE the fix: `Bin` converts fine to `FilterValue::Binary`, so
+/// `boundary_filter` built a filter that LOOKED valid, but `compare_values`
+/// has no `(Bin, Bin)` arm -- the filter matched nothing past page 1, and the
+/// cursor reported a clean `has_more: false` having silently dropped every
+/// remaining row. AFTER the fix: `safe_seek_key` explicitly excludes `Bin`,
+/// so `seek_key` is `None` from the first page onward and the cursor rides
+/// the offset bookmark instead.
+#[tokio::test]
+async fn bin_order_by_value_uses_offset_fallback_not_silent_drop() {
+    let scores: [u8; 5] = [50, 30, 10, 40, 20];
+    let handler = build_handler_with_bin_scores(&scores, CursorLimitsCap::UNLIMITED).await;
+    let session = alice_session();
+
+    let query = ReadQuery::new("items").order_by(OrderBy::asc("score"));
+    let resp = send(&handler, &session, create_cursor_req(query, 2)).await;
+    let (cursor_id, mut seqs) = match resp {
+        DbResponse::CursorPage {
+            cursor_id,
+            page,
+            has_more,
+        } => {
+            assert!(has_more, "5 rows / page_size 2 -> more pages remain");
+            let seqs: Vec<i64> = page
+                .records
+                .iter()
+                .map(|r| r.get_value_i64("seq").expect("seq present"))
+                .collect();
+            (cursor_id, seqs)
+        }
+        other => panic!("expected CursorPage, got {other:?}"),
+    };
+
+    assert_eq!(
+        pinned_mode(&handler, cursor_id, &ALICE_SID),
+        PaginationMode::Keyset,
+        "a Bin ORDER BY column is not Null, so the CR-D2 create-time probe does not reroute \
+         the whole cursor -- W-2's fix is a per-bookmark fallback, same mechanism as W-3"
+    );
+
+    drain_seqs(&handler, &session, cursor_id, 2, &mut seqs).await;
+
+    seqs.sort_unstable();
+    assert_eq!(
+        seqs,
+        vec![0, 1, 2, 3, 4],
+        "every row must appear exactly once via the offset-bookmark fallback -- before the fix \
+         every row past page 1 was silently dropped with a clean has_more: false, the exact \
+         CR-D2 failure shape"
+    );
+}
+
+/// W-2 regression, `List` variant: same scenario as `Bin` above, but for
+/// `QueryValue::List` (converts to `FilterValue::Array` fine, but
+/// `compare_values` has no `(List, List)` arm either).
+#[tokio::test]
+async fn list_order_by_value_uses_offset_fallback_not_silent_drop() {
+    let shamir = ShamirDb::init_memory().await.expect("init shamir");
+    let owner = Actor::User(principal64([0xAB; 16]));
+    shamir.create_db_as("app", owner.clone()).await;
+    let cfg =
+        RepoConfig::new("main", BoxRepoFactory::in_memory()).add_table(TableConfig::new("items"));
+    shamir
+        .add_repo_as("app", cfg, owner.clone())
+        .await
+        .expect("add repo");
+
+    let mut b = Batch::new();
+    for i in 0..5i64 {
+        let row = doc! { "seq" => i }.set_value(
+            "score",
+            QueryValue::List(vec![QueryValue::Int(i), QueryValue::Int(i)]),
+        );
+        b.insert(format!("i{i}"), insert("items").row(row));
+    }
+    let batch = b.build();
+    shamir
+        .execute_as(owner, "app", &batch)
+        .await
+        .expect("seed rows");
+
+    let handler =
+        ShamirDbHandler::new(Arc::new(shamir)).with_cursor_limits(CursorLimitsCap::UNLIMITED);
+    let session = alice_session();
+
+    let query = ReadQuery::new("items").order_by(OrderBy::asc("score"));
+    let resp = send(&handler, &session, create_cursor_req(query, 2)).await;
+    let (cursor_id, mut seqs) = match resp {
+        DbResponse::CursorPage {
+            cursor_id,
+            page,
+            has_more,
+        } => {
+            assert!(has_more, "5 rows / page_size 2 -> more pages remain");
+            let seqs: Vec<i64> = page
+                .records
+                .iter()
+                .map(|r| r.get_value_i64("seq").expect("seq present"))
+                .collect();
+            (cursor_id, seqs)
+        }
+        other => panic!("expected CursorPage, got {other:?}"),
+    };
+
+    assert_eq!(
+        pinned_mode(&handler, cursor_id, &ALICE_SID),
+        PaginationMode::Keyset,
+        "a List ORDER BY column is not Null, so the CR-D2 create-time probe does not reroute \
+         the whole cursor -- W-2's fix is a per-bookmark fallback"
+    );
+
+    drain_seqs(&handler, &session, cursor_id, 2, &mut seqs).await;
+
+    seqs.sort_unstable();
+    assert_eq!(
+        seqs,
+        vec![0, 1, 2, 3, 4],
+        "every row must appear exactly once via the offset-bookmark fallback -- before the fix \
+         every row past page 1 was silently dropped with a clean has_more: false"
+    );
+}
+
+/// Regression guard: a `Str` ORDER BY column (one of the types that was
+/// ALREADY safe, per CR-D2's own regression-test convention) must stay green
+/// AND must still actually exercise the real Keyset code path -- this fix
+/// must not accidentally start routing safe types through the new fallback
+/// check.
+#[tokio::test]
+async fn str_order_by_regression_still_uses_real_keyset_seek() {
+    let shamir = ShamirDb::init_memory().await.expect("init shamir");
+    let owner = Actor::User(principal64([0xAB; 16]));
+    shamir.create_db_as("app", owner.clone()).await;
+    let cfg =
+        RepoConfig::new("main", BoxRepoFactory::in_memory()).add_table(TableConfig::new("items"));
+    shamir
+        .add_repo_as("app", cfg, owner.clone())
+        .await
+        .expect("add repo");
+
+    let mut b = Batch::new();
+    let labels = ["ee", "cc", "aa", "dd", "bb"];
+    for (i, label) in labels.iter().enumerate() {
+        b.insert(
+            format!("i{i}"),
+            insert("items").row(doc! { "seq" => i as i64, "score" => label.to_string() }),
+        );
+    }
+    let batch = b.build();
+    shamir
+        .execute_as(owner, "app", &batch)
+        .await
+        .expect("seed rows");
+
+    let handler =
+        ShamirDbHandler::new(Arc::new(shamir)).with_cursor_limits(CursorLimitsCap::UNLIMITED);
+    let session = alice_session();
+
+    let query = ReadQuery::new("items").order_by(OrderBy::asc("score"));
+    let resp = send(&handler, &session, create_cursor_req(query, 2)).await;
+    let (cursor_id, mut seqs) = match resp {
+        DbResponse::CursorPage {
+            cursor_id,
+            page,
+            has_more,
+        } => {
+            assert!(has_more, "5 rows / page_size 2 -> more pages remain");
+            let seqs: Vec<i64> = page
+                .records
+                .iter()
+                .map(|r| r.get_value_i64("seq").expect("seq present"))
+                .collect();
+            (cursor_id, seqs)
+        }
+        other => panic!("expected CursorPage, got {other:?}"),
+    };
+
+    assert_eq!(
+        pinned_mode(&handler, cursor_id, &ALICE_SID),
+        PaginationMode::Keyset,
+        "a Str ORDER BY column was already safe pre-this-task -- must stay Keyset mode, not \
+         get accidentally routed through the new Bin/List/Dec/Big fallback check"
+    );
+
+    drain_seqs(&handler, &session, cursor_id, 2, &mut seqs).await;
+
+    seqs.sort_unstable();
+    assert_eq!(
+        seqs,
+        vec![0, 1, 2, 3, 4],
+        "regression: a Str ORDER BY column must still page correctly via genuine keyset \
+         seeking (labels sort aa < bb < cc < dd < ee -- seq order after sort is 2,4,1,3,0, but \
+         every seq must still appear exactly once)"
+    );
+}
+
+/// Regression guard: an `Int` ORDER BY column with duplicate-value tie runs
+/// (the review's own CR-A4 scenario) must remain unaffected by this task's
+/// new per-value safety check -- `Int` is trivially convertible AND
+/// comparable, so `safe_seek_key` must be a no-op for it.
+#[tokio::test]
+async fn int_order_by_regression_still_uses_real_keyset_seek() {
+    let handler = build_handler_with_scores(&[10, 10, 10, 10], CursorLimitsCap::UNLIMITED).await;
+    let session = alice_session();
+
+    let query = ReadQuery::new("items").order_by(OrderBy::asc("score"));
+    let resp = send(&handler, &session, create_cursor_req(query, 2)).await;
+    let (cursor_id, mut seqs) = match resp {
+        DbResponse::CursorPage {
+            cursor_id,
+            page,
+            has_more,
+        } => {
+            assert!(has_more, "4 rows / page_size 2 -> more pages remain");
+            let seqs: Vec<i64> = page
+                .records
+                .iter()
+                .map(|r| r.get_value_i64("seq").expect("seq present"))
+                .collect();
+            (cursor_id, seqs)
+        }
+        other => panic!("expected CursorPage, got {other:?}"),
+    };
+
+    assert_eq!(
+        pinned_mode(&handler, cursor_id, &ALICE_SID),
+        PaginationMode::Keyset,
+        "Int must stay Keyset mode -- unaffected by the new Bin/List/Dec/Big safety check"
+    );
+
+    drain_seqs(&handler, &session, cursor_id, 2, &mut seqs).await;
+
+    seqs.sort_unstable();
+    assert_eq!(
+        seqs,
+        vec![0, 1, 2, 3],
+        "regression: Int tie-run handling (CR-A4) must remain intact"
+    );
+}
+
+/// Regression guard: an `F64` ORDER BY column (no NaN, no ties) must also
+/// remain unaffected -- distinct from the `int_order_by_regression` test to
+/// cover the OTHER previously-safe numeric scalar type explicitly.
+#[tokio::test]
+async fn f64_order_by_regression_still_uses_real_keyset_seek() {
+    let shamir = ShamirDb::init_memory().await.expect("init shamir");
+    let owner = Actor::User(principal64([0xAB; 16]));
+    shamir.create_db_as("app", owner.clone()).await;
+    let cfg =
+        RepoConfig::new("main", BoxRepoFactory::in_memory()).add_table(TableConfig::new("items"));
+    shamir
+        .add_repo_as("app", cfg, owner.clone())
+        .await
+        .expect("add repo");
+
+    let mut b = Batch::new();
+    let values = [5.5f64, 3.3, 1.1, 4.4, 2.2];
+    for (i, v) in values.iter().enumerate() {
+        b.insert(
+            format!("i{i}"),
+            insert("items").row(doc! { "seq" => i as i64, "score" => *v }),
+        );
+    }
+    let batch = b.build();
+    shamir
+        .execute_as(owner, "app", &batch)
+        .await
+        .expect("seed rows");
+
+    let handler =
+        ShamirDbHandler::new(Arc::new(shamir)).with_cursor_limits(CursorLimitsCap::UNLIMITED);
+    let session = alice_session();
+
+    let query = ReadQuery::new("items").order_by(OrderBy::asc("score"));
+    let resp = send(&handler, &session, create_cursor_req(query, 2)).await;
+    let (cursor_id, mut seqs) = match resp {
+        DbResponse::CursorPage {
+            cursor_id,
+            page,
+            has_more,
+        } => {
+            assert!(has_more, "5 rows / page_size 2 -> more pages remain");
+            let seqs: Vec<i64> = page
+                .records
+                .iter()
+                .map(|r| r.get_value_i64("seq").expect("seq present"))
+                .collect();
+            (cursor_id, seqs)
+        }
+        other => panic!("expected CursorPage, got {other:?}"),
+    };
+
+    assert_eq!(
+        pinned_mode(&handler, cursor_id, &ALICE_SID),
+        PaginationMode::Keyset,
+        "F64 must stay Keyset mode -- unaffected by the new Bin/List/Dec/Big safety check"
+    );
+
+    drain_seqs(&handler, &session, cursor_id, 2, &mut seqs).await;
+
+    seqs.sort_unstable();
+    assert_eq!(
+        seqs,
+        vec![0, 1, 2, 3, 4],
+        "regression: a non-NaN F64 ORDER BY column must still page correctly via genuine \
+         keyset seeking"
     );
 }
