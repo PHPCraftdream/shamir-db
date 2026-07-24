@@ -101,6 +101,62 @@ async fn build_handler(
     handler
 }
 
+/// Same as [`build_handler`], but lets the caller install a bounded
+/// `CursorLimitsCap` instead of the hardcoded `UNLIMITED` — needed by the
+/// CR-D4 register-failure regression test below, which must be able to
+/// actually trip `cursor_limit_exceeded`.
+async fn build_handler_with_cursor_limits(
+    n_rows: usize,
+    byte_budget: ByteBudget,
+    query_limits: QueryLimitsCap,
+    cursor_limits: CursorLimitsCap,
+) -> ShamirDbHandler {
+    let shamir = ShamirDb::init_memory().await.expect("init shamir");
+    let owner = Actor::User(principal64([0xAB; 16]));
+    shamir.create_db_as("app", owner.clone()).await;
+    let cfg =
+        RepoConfig::new("main", BoxRepoFactory::in_memory()).add_table(TableConfig::new("items"));
+    shamir
+        .add_repo_as("app", cfg, owner)
+        .await
+        .expect("add repo");
+
+    let handler = ShamirDbHandler::new(Arc::new(shamir))
+        .with_query_limits(query_limits)
+        .with_byte_budget(byte_budget)
+        .with_cursor_limits(cursor_limits);
+
+    if n_rows > 0 {
+        let padding = "x".repeat(256);
+        let mut b = Batch::new();
+        for i in 0..n_rows {
+            b.insert(
+                format!("i{i}"),
+                insert("items").row(
+                    doc! { "id" => format!("k{i:03}"), "pad" => padding.clone(), "v" => i as i64 },
+                ),
+            );
+        }
+        let session = alice_session();
+        let conn = ConnectionServices::without_push(0);
+        let resp = handler
+            .execute(
+                &session,
+                CURRENT_QUERY_LANG_VERSION,
+                "app",
+                b.build(),
+                &conn,
+            )
+            .await;
+        assert!(
+            matches!(resp, crate::db_handler::handler::DbResponse::Batch { .. }),
+            "seed insert batch must succeed, got: {resp:?}"
+        );
+    }
+
+    handler
+}
+
 fn create_cursor_req(page_size: u32) -> DbRequest {
     DbRequest::CreateCursor {
         query_version: CURRENT_QUERY_LANG_VERSION,
@@ -135,6 +191,30 @@ async fn send_with_guard(
             .expect("handle must not error at the protocol level");
         let resp: DbResponse = rmp_serde::from_slice(&resp_bytes).expect("decode response");
         (resp, take_stashed_guard())
+    })
+    .await
+}
+
+/// Same as [`send_with_guard`], but also returns the raw wire bytes
+/// `handle()` produced — needed by the CR-D4 single-serialization
+/// regression test below, which asserts those bytes are byte-identical to a
+/// fresh re-encode of the decoded response (mirrors
+/// `byte_budget_upfront_reserve_tests::wire_bytes_are_byte_identical_to_the_bytes_measured_for_the_budget`'s
+/// approach for the plain `Execute` path, applied to the cursor path).
+async fn send_with_guard_and_bytes(
+    handler: &ShamirDbHandler,
+    session: &Session,
+    req: DbRequest,
+) -> (DbResponse, Vec<u8>, Option<ByteBudgetGuard>) {
+    let bytes = rmp_serde::to_vec_named(&req).expect("encode request");
+    let conn = ConnectionServices::without_push(0);
+    run_with_guard_slot(async {
+        let resp_bytes = handler
+            .handle(session, &bytes, &conn)
+            .await
+            .expect("handle must not error at the protocol level");
+        let resp: DbResponse = rmp_serde::from_slice(&resp_bytes).expect("decode response");
+        (resp, resp_bytes, take_stashed_guard())
     })
     .await
 }
@@ -593,4 +673,173 @@ async fn page_within_size_cap_is_accepted_and_still_acquires_budget() {
     );
     drop(guard);
     assert_eq!(budget.used(), 0);
+}
+
+// ---------------------------------------------------------------------------
+// CR-D4 (#785, N-4) — cursor path single-serialization: the FULL
+// `DbResponse::CursorPage` envelope is measured/stashed exactly once,
+// mirroring `execute()`'s real behavior, and a `register()` failure must
+// never leak stale `CursorPage` bytes into the wire response.
+// ---------------------------------------------------------------------------
+
+/// `CreateCursor`'s wire bytes (the ones `handle()` actually returns for a
+/// successful, registered page) are byte-identical to an independent fresh
+/// re-encode of the SAME decoded response — proves the stashed bytes were
+/// measured against the FULL `DbResponse::CursorPage` envelope (not just the
+/// inner `page`) and were never allowed to diverge from what's actually
+/// returned.
+#[tokio::test]
+async fn create_cursor_wire_bytes_are_byte_identical_to_a_fresh_reencode() {
+    let handler = build_handler(
+        50,
+        ByteBudget::new(Some(usize::MAX)),
+        QueryLimitsCap::UNLIMITED,
+    )
+    .await;
+    let session = alice_session();
+
+    // page_size 2 of 50 rows -> has_more == true -> the cursor is
+    // registered (exercises the `register()`-succeeds stash path, not just
+    // the simpler `!has_more` early return).
+    let (resp, wire_bytes, guard) =
+        send_with_guard_and_bytes(&handler, &session, create_cursor_req(2)).await;
+    assert!(matches!(
+        resp,
+        DbResponse::CursorPage { has_more: true, .. }
+    ));
+    let _guard = guard.expect("bounded budget must stash a guard for an accepted page");
+
+    let decoded: DbResponse = rmp_serde::from_slice(&wire_bytes).expect("decode wire bytes");
+    let reencoded = rmp_serde::to_vec_named(&decoded).expect("reencode decoded response");
+    assert_eq!(
+        wire_bytes, reencoded,
+        "wire bytes must be byte-identical to a fresh serialize of the same logical \
+         DbResponse::CursorPage value — proves the stashed bytes matched the full envelope \
+         actually returned, not a divergent inner-`page`-only measurement"
+    );
+}
+
+/// Same proof for `FetchNext` — its stash path has no further branching
+/// after the budget gate, but this still guards against the response being
+/// rebuilt (rather than reused) after the stash point.
+#[tokio::test]
+async fn fetch_next_wire_bytes_are_byte_identical_to_a_fresh_reencode() {
+    let handler = build_handler(
+        50,
+        ByteBudget::new(Some(usize::MAX)),
+        QueryLimitsCap::UNLIMITED,
+    )
+    .await;
+    let session = alice_session();
+
+    let (resp0, _b0, guard0) =
+        send_with_guard_and_bytes(&handler, &session, create_cursor_req(2)).await;
+    let cursor_id = match resp0 {
+        DbResponse::CursorPage {
+            cursor_id,
+            has_more: true,
+            ..
+        } => cursor_id,
+        other => panic!("expected CursorPage with has_more, got {other:?}"),
+    };
+    drop(guard0);
+
+    let (resp, wire_bytes, guard) =
+        send_with_guard_and_bytes(&handler, &session, fetch_next_req(cursor_id, 2)).await;
+    assert!(matches!(resp, DbResponse::CursorPage { .. }));
+    let _guard = guard.expect("bounded budget must stash a guard for an accepted page");
+
+    let decoded: DbResponse = rmp_serde::from_slice(&wire_bytes).expect("decode wire bytes");
+    let reencoded = rmp_serde::to_vec_named(&decoded).expect("reencode decoded response");
+    assert_eq!(
+        wire_bytes, reencoded,
+        "FetchNext wire bytes must be byte-identical to a fresh serialize of the same \
+         logical DbResponse::CursorPage value"
+    );
+}
+
+/// The specific correctness risk the brief's "subtlety" section calls out:
+/// `create_cursor`'s page clears the budget/size gate (so
+/// `enforce_page_budget` already measured and would-be-stashed bytes for a
+/// `CursorPage` response), but `cursor_registry.register()` THEN fails with
+/// `CursorLimitExceeded` because the session is already at its cap. The
+/// wire response actually served must be the `cursor_limit_exceeded` error
+/// — NOT the abandoned `CursorPage` bytes a naive stash-before-register-
+/// outcome-is-known implementation would leak.
+#[tokio::test]
+async fn register_failure_does_not_leak_stale_cursor_page_bytes() {
+    let cap = 1u32;
+    let handler = build_handler_with_cursor_limits(
+        10,
+        ByteBudget::new(Some(usize::MAX)),
+        QueryLimitsCap::UNLIMITED,
+        CursorLimitsCap {
+            max_cursors_per_session: cap as usize,
+            idle_timeout_secs: u64::MAX,
+            max_cursor_page_size: u32::MAX,
+        },
+    )
+    .await;
+    let session = alice_session();
+
+    // First CreateCursor: page_size 2 of 10 rows -> has_more == true ->
+    // registers successfully, consuming the ONE cursor slot the session is
+    // capped at.
+    let (resp1, _wire1, guard1) =
+        send_with_guard_and_bytes(&handler, &session, create_cursor_req(2)).await;
+    assert!(
+        matches!(resp1, DbResponse::CursorPage { has_more: true, .. }),
+        "first CreateCursor must succeed and register, got: {resp1:?}"
+    );
+    drop(guard1);
+
+    // Second CreateCursor: the page itself is well within every byte/size
+    // gate (identical query/page_size to the first) — it clears
+    // `enforce_page_budget` fine, but `cursor_registry.register()` must then
+    // fail because the session is already at `max_cursors_per_session = 1`.
+    let (resp2, wire2, guard2) =
+        send_with_guard_and_bytes(&handler, &session, create_cursor_req(2)).await;
+
+    match &resp2 {
+        DbResponse::Error { code, .. } => {
+            assert_eq!(
+                code, "cursor_limit_exceeded",
+                "expected cursor_limit_exceeded, got error code {code:?}"
+            );
+        }
+        DbResponse::CursorPage { .. } => {
+            panic!(
+                "register() should have failed (session already at cap) but the response is \
+                 still a CursorPage — this is the exact stale-stash wire-corruption bug CR-D4 \
+                 must prevent"
+            );
+        }
+        other => panic!("expected cursor_limit_exceeded, got {other:?}"),
+    }
+
+    // The WIRE bytes actually served must decode to the SAME error, not a
+    // stashed-then-reused stale `CursorPage` encoding from before
+    // `register()` ran.
+    let decoded_from_wire: DbResponse =
+        rmp_serde::from_slice(&wire2).expect("decode wire bytes for the rejected attempt");
+    match decoded_from_wire {
+        DbResponse::Error { code, .. } => assert_eq!(code, "cursor_limit_exceeded"),
+        other => panic!(
+            "wire bytes for the register()-failure response must decode to \
+             cursor_limit_exceeded, got {other:?}"
+        ),
+    }
+
+    // `enforce_page_budget` DID already acquire (and stash) a RI-15 guard
+    // for the abandoned `CursorPage` before `register()` ran — that
+    // reservation is real (bytes were genuinely measured) and still needs
+    // to be released once the writer task finishes writing whatever
+    // response actually goes out (here, the small error response), same as
+    // any other request's guard. This is orthogonal to the bug this test
+    // guards against: stashing a byte-budget RESERVATION for a page that
+    // never ships is harmless bookkeeping (it gets released right after);
+    // stashing that page's SERIALIZED BYTES for reuse as the wire response
+    // is the actual corruption risk, and the assertions above already prove
+    // that did NOT happen.
+    drop(guard2);
 }

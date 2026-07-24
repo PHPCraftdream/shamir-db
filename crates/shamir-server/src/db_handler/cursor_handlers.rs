@@ -108,7 +108,7 @@ use shamir_query_types::wire::CursorId;
 use shamir_types::types::common::{new_map, TMap};
 use shamir_types::types::value::QueryValue;
 
-use crate::byte_budget::{stash_guard, ByteBudgetGuard};
+use crate::byte_budget::{stash_guard, stash_serialized_response, ByteBudgetGuard};
 use crate::cursor_registry::{Cursor, CursorRegistryError, PaginationMode};
 
 use super::handler::{session_actor, DbResponse, ShamirDbHandler};
@@ -233,16 +233,30 @@ async fn reserve_page_budget_upfront(handler: &ShamirDbHandler) -> Option<ByteBu
     )
 }
 
-/// CR-A5 (+ CR-B2): gate a cursor page against BOTH the per-page byte-size
-/// cap (`query_limits.max_result_size_bytes`) and the RI-15 global in-flight
-/// response-byte budget, mirroring `ShamirDbHandler::execute`'s exact block
-/// (`handler.rs`'s `DbRequest::Execute` path) — measure the serialized
-/// `page` ONCE (matching `execute()`'s choice to measure the payload alone,
-/// i.e. `BatchResponse`/here `QueryResult`, not the full `DbResponse`
-/// envelope), then either reject (too large — no budget acquired/held,
-/// there is nothing to write) or finalize the budget reservation and stash
-/// the guard for the writer task to release after the socket write
-/// completes.
+/// CR-A5 (+ CR-B2, CR-D4): gate a cursor page against BOTH the per-page
+/// byte-size cap (`query_limits.max_result_size_bytes`) and the RI-15 global
+/// in-flight response-byte budget, mirroring `ShamirDbHandler::execute`'s
+/// exact block (`handler.rs`'s `DbRequest::Execute` path) — measure the
+/// serialized `response` (the FULL `DbResponse::CursorPage { cursor_id,
+/// page, has_more }` wire envelope, not just the inner `page`/`QueryResult`
+/// payload — this is what `execute()` itself actually measures for the
+/// plain path too: `&final_response`, i.e. the whole `DbResponse`) ONCE,
+/// then either reject (too large — no budget acquired/held, there is
+/// nothing to write) or finalize the budget reservation.
+///
+/// CR-D4 (#785, N-4): unlike the pre-existing version of this function, this
+/// does NOT call `stash_serialized_response` itself — it only RETURNS the
+/// serialized bytes on success. The caller (`create_cursor`/`fetch_next`)
+/// stashes them only once it has confirmed the `response` value passed in
+/// here really is the one being returned to the client. This matters
+/// concretely for `create_cursor`'s `has_more` branch: after this function
+/// accepts the page, the caller still calls `self.cursor_registry.register`,
+/// which can ITSELF fail and produce a COMPLETELY DIFFERENT `DbResponse`
+/// (`CursorLimitExceeded`/`cursor_error`). Stashing here, before that
+/// outcome is known, would leak stale `CursorPage` bytes into the wire
+/// response on a `register()` failure — a real wire-corruption bug, not
+/// just a missed optimization. See `create_cursor`'s call site for exactly
+/// where the stash actually happens.
 ///
 /// `upfront_guard` is whatever [`reserve_page_budget_upfront`] already
 /// reserved before the page was built (`Some` when both gates were active
@@ -256,14 +270,15 @@ async fn reserve_page_budget_upfront(handler: &ShamirDbHandler) -> Option<ByteBu
 /// size) — the upfront reserve only affects WHEN the RI-15 budget is
 /// acquired, never the `CursorPageTooLarge` rejection logic.
 ///
-/// Returns `Err(too_large_error)` when the page must be rejected; `Ok(())`
-/// when the caller may proceed to return the `CursorPage` response (a guard
-/// has already been stashed for it, if the budget is bounded).
+/// Returns `Err(too_large_error)` when the page must be rejected; on
+/// success, returns the serialized bytes for `response` — the RI-15 guard
+/// (if any) has already been stashed via [`stash_guard`], but the SERIALIZED
+/// BYTES have deliberately not been stashed (see above).
 async fn enforce_page_budget(
     handler: &ShamirDbHandler,
-    page: &QueryResult,
+    response: &DbResponse,
     upfront_guard: Option<ByteBudgetGuard>,
-) -> Result<(), BatchError> {
+) -> Result<Option<Vec<u8>>, BatchError> {
     // Only serialize when at least one of the two gates is actually active —
     // an unbounded budget AND an effectively-unlimited size cap (the UNIT
     // TEST default) must stay a pure no-op, same as `execute()`'s
@@ -271,17 +286,18 @@ async fn enforce_page_budget(
     let budget_active = handler.byte_budget.cap().is_some();
     let cap_active = handler.query_limits.max_result_size_bytes < usize::MAX;
     if !budget_active && !cap_active {
-        return Ok(());
+        return Ok(None);
     }
 
-    let Ok(bytes) = rmp_serde::to_vec_named(page) else {
+    let Ok(bytes) = rmp_serde::to_vec_named(response) else {
         // Mirrors `execute()`: a serialization failure here is swallowed
         // (the `if let Ok(...)` in `execute()` silently skips the acquire
         // on `Err`) rather than treated as a hard error — the response
-        // still goes out, just without budget accounting for it. Any
-        // upfront reservation is simply dropped as-is (releasing the
-        // pessimistic estimate untouched).
-        return Ok(());
+        // still goes out, just without budget accounting for it (and
+        // without any bytes to hand back for stashing). Any upfront
+        // reservation is simply dropped as-is (releasing the pessimistic
+        // estimate untouched).
+        return Ok(None);
     };
 
     if cap_active && bytes.len() > handler.query_limits.max_result_size_bytes {
@@ -318,7 +334,7 @@ async fn enforce_page_budget(
         stash_guard(guard);
     }
 
-    Ok(())
+    Ok(Some(bytes))
 }
 
 /// Build the `FilterContext` a cursor's `FetchNext` reads through — mirrors
@@ -1059,20 +1075,6 @@ impl ShamirDbHandler {
             }
         }
 
-        // CR-A5 (+ CR-B2): gate the page against the per-page byte-size cap
-        // and the RI-15 global byte budget BEFORE deciding whether to
-        // register the cursor — a rejected page must not mint a registered
-        // cursor (there is nothing to `FetchNext` against; the client never
-        // receives this page's bytes at all), and this covers BOTH success
-        // returns below (the CR-A2 "exhausted first page, not registered"
-        // early return and the normal registered return) since both hand
-        // the SAME `page` back over the wire. `budget_guard` (reserved
-        // upfront, before the read above) is shrunk to the actual size here
-        // rather than acquired fresh.
-        if let Err(e) = enforce_page_budget(self, &page, budget_guard).await {
-            return error_response(&e);
-        }
-
         let (seek_key, tie_skip) = if has_more && mode == PaginationMode::Keyset {
             match page
                 .records
@@ -1101,7 +1103,40 @@ impl ShamirDbHandler {
         };
         let offset = page.records.len() as u64;
 
+        // CR-D4 (#785, N-4): mint `cursor_id` BEFORE the budget/size check
+        // (instead of after, as it was pre-CR-D4) so the FULL `DbResponse`
+        // value (below) already exists at the point `enforce_page_budget`
+        // needs to measure it — mirroring `execute()`'s real behavior of
+        // serializing the whole wire envelope, not just the inner `page`.
+        // Minting slightly earlier and never using it (on the too-large or
+        // `register()`-failure paths below) simply "burns" an id — harmless,
+        // `next_cursor_id()` is a plain counter bump with no other side
+        // effect, the same tradeoff RI-15's own upfront reserve already
+        // accepts elsewhere (reserved-then-released on a rejected path).
         let cursor_id = self.next_cursor_id();
+        let response = DbResponse::CursorPage {
+            cursor_id: CursorId(cursor_id),
+            page,
+            has_more,
+        };
+
+        // CR-A5 (+ CR-B2, CR-D4): gate the FULL response against the
+        // per-page byte-size cap and the RI-15 global byte budget BEFORE
+        // deciding whether to register the cursor — a rejected page must
+        // not mint a registered cursor (there is nothing to `FetchNext`
+        // against; the client never receives this page's bytes at all).
+        // `budget_guard` (reserved upfront, before the read above) is
+        // shrunk to the actual size here rather than acquired fresh.
+        //
+        // The returned `bytes` are deliberately NOT stashed yet (see
+        // `enforce_page_budget`'s doc comment) — the `has_more` branch below
+        // still has to clear `cursor_registry.register`, which can itself
+        // fail and produce a DIFFERENT response; stashing here would leak
+        // stale `CursorPage` bytes into that failure's wire response.
+        let bytes = match enforce_page_budget(self, &response, budget_guard).await {
+            Ok(bytes) => bytes,
+            Err(e) => return error_response(&e),
+        };
 
         if !has_more {
             // The entire result fit on the first page — no `FetchNext` will
@@ -1109,20 +1144,20 @@ impl ShamirDbHandler {
             // soon as `has_more == false`). Registering it anyway would park
             // a live `SnapshotGuard` MVCC pin and a per-session registry
             // slot for no reason until the idle-timeout reaper eventually
-            // reclaims it. Returning here instead lets `page` (built above)
-            // go out with the response while `guard` (never wrapped into a
-            // `Cursor` for this branch) drops immediately via RAII, and the
-            // per-session cursor cap is never touched by an already-
-            // exhausted cursor. The minted `cursor_id` is handed to the
-            // client unregistered: a later `FetchNext`/`CancelCursor` against
-            // it falls through to the existing not-found / idempotent-close
-            // paths, which is the accurate answer for an id that never
-            // existed in the registry.
-            return DbResponse::CursorPage {
-                cursor_id: CursorId(cursor_id),
-                page,
-                has_more,
-            };
+            // reclaims it. Returning here instead lets `response` (built
+            // above) go out while `guard` (never wrapped into a `Cursor` for
+            // this branch) drops immediately via RAII, and the per-session
+            // cursor cap is never touched by an already-exhausted cursor.
+            // The minted `cursor_id` is handed to the client unregistered: a
+            // later `FetchNext`/`CancelCursor` against it falls through to
+            // the existing not-found / idempotent-close paths, which is the
+            // accurate answer for an id that never existed in the registry.
+            //
+            // This `response` IS the final return value — safe to stash now.
+            if let Some(bytes) = bytes {
+                stash_serialized_response(bytes);
+            }
+            return response;
         }
 
         let cursor = Cursor::new(
@@ -1149,12 +1184,21 @@ impl ShamirDbHandler {
             cursor,
             self.cursor_limits.max_cursors_per_session as u32,
         ) {
-            Ok(_) => DbResponse::CursorPage {
-                cursor_id: CursorId(cursor_id),
-                page,
-                has_more,
-            },
+            Ok(_) => {
+                // `response` is now confirmed final — safe to stash.
+                if let Some(bytes) = bytes {
+                    stash_serialized_response(bytes);
+                }
+                response
+            }
             Err(CursorRegistryError::CursorLimitExceeded { limit }) => {
+                // `bytes` (the stale `CursorPage` encoding) is discarded here
+                // — deliberately NOT stashed. Stashing it would serve the
+                // client the abandoned `CursorPage` instead of this actual
+                // `CursorLimitExceeded` error (the exact wire-corruption bug
+                // this task's "subtlety" section warns about). This rare
+                // failure path takes the pre-existing fresh-encode hit in
+                // `RequestHandler::handle`, same as any other error response.
                 error_response(&BatchError::CursorLimitExceeded { limit })
             }
             Err(_) => DbResponse::Error {
@@ -1434,23 +1478,44 @@ impl ShamirDbHandler {
             }
         }
 
-        // CR-A5 (+ CR-B2): gate BEFORE mutating the cursor's bookmark state
-        // (seek_key/offset/exhausted/mode) or removing it from the registry
-        // on exhaustion — a rejected page must leave the cursor exactly as
-        // it was before this call, so the client can retry `FetchNext`
-        // (e.g. with a smaller `page_size`) against an untouched bookmark
-        // instead of one that silently advanced past records it never
-        // received. This also protects CR-D1's mode flip below: a page
-        // that gets rejected here must NOT have already committed the
-        // cursor to `Offset` mode — the client retrying with a smaller
-        // `page_size` should still see the same Keyset-mode stuck
+        // CR-D4 (#785, N-4): build the FULL `DbResponse` now — `cursor_id`
+        // (function parameter) and `has_more` are both already known at this
+        // point, and there is NO further branch between here and the actual
+        // return (unlike `create_cursor`'s `register()` branch), so this
+        // value is unconditionally the final response once it clears the
+        // budget gate below.
+        let response = DbResponse::CursorPage {
+            cursor_id,
+            page,
+            has_more,
+        };
+
+        // CR-A5 (+ CR-B2, CR-D4): gate the FULL response BEFORE mutating the
+        // cursor's bookmark state (seek_key/offset/exhausted/mode) or
+        // removing it from the registry on exhaustion — a rejected page must
+        // leave the cursor exactly as it was before this call, so the client
+        // can retry `FetchNext` (e.g. with a smaller `page_size`) against an
+        // untouched bookmark instead of one that silently advanced past
+        // records it never received. This also protects CR-D1's mode flip
+        // below: a page that gets rejected here must NOT have already
+        // committed the cursor to `Offset` mode — the client retrying with a
+        // smaller `page_size` should still see the same Keyset-mode stuck
         // condition (and get another chance at a real fallback page), not
         // an already-flipped cursor whose triggering page was thrown away.
         // `budget_guard` (reserved upfront, before the read above) is
         // shrunk to the actual size here rather than acquired fresh.
-        if let Err(e) = enforce_page_budget(self, &page, budget_guard).await {
-            drop(state);
-            return error_response(&e);
+        let bytes = match enforce_page_budget(self, &response, budget_guard).await {
+            Ok(bytes) => bytes,
+            Err(e) => {
+                drop(state);
+                return error_response(&e);
+            }
+        };
+        // Safe to stash now: `response` is unconditionally the value this
+        // call returns from here on (no further failure branch can produce
+        // a different `DbResponse`).
+        if let Some(bytes) = bytes {
+            stash_serialized_response(bytes);
         }
 
         state.seek_key = new_seek_key;
@@ -1470,11 +1535,9 @@ impl ShamirDbHandler {
             self.cursor_registry.remove(cursor_id.0);
         }
 
-        DbResponse::CursorPage {
-            cursor_id,
-            page,
-            has_more,
-        }
+        // The SAME value already serialized above — not rebuilt, so it can
+        // never accidentally diverge from what was stashed.
+        response
     }
 
     /// FG-5b CANCEL — idempotent close. Canceling an unknown/already-closed
