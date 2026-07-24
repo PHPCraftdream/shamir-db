@@ -41,6 +41,22 @@ fn make_snapshot(root: &Path) -> std::path::PathBuf {
 /// it) renames back cleanly. Asserts the NEW `SwapFailedRollbackSucceeded`
 /// message: `data_dir` is intact (holds the ORIGINAL pre-restore content),
 /// no manual rename instruction, `temp_dir` still on disk for inspection.
+///
+/// `#[cfg(windows)]`: this failure-forcing mechanism is inherently a
+/// Windows/NTFS behavior (an open handle blocks a rename of its containing
+/// directory) — on POSIX, `rename(2)` does NOT check for open file
+/// descriptors inside either directory at all, so the held handle here
+/// would not make the rename fail, and `restore()` would simply succeed,
+/// making `.unwrap_err()` panic. There is no equivalent portable trick that
+/// blocks specifically the SECOND rename (`temp_dir -> data_dir`) without
+/// also blocking the FIRST (`data_dir -> backup_sibling`) this test relies
+/// on succeeding — a POSIX-side regression test for this exact code path
+/// would need a dedicated test hook inside `restore()` itself, which is out
+/// of proportion for this coverage. The code path itself is NOT
+/// Windows-specific (`fs::rename`'s `Err` arm is handled identically on
+/// every platform) — only this test's ABILITY to trigger that arm
+/// deterministically is.
+#[cfg(windows)]
 #[test]
 fn swap_failure_with_successful_rollback_gets_new_message_and_leaves_data_dir_intact() {
     let root = TempDir::new().unwrap();
@@ -156,6 +172,12 @@ fn swap_failure_with_successful_rollback_gets_new_message_and_leaves_data_dir_in
 /// the staged `*.restore_tmp_*` temp_dir is cleaned up (W-5(a)'s fix,
 /// reusing the same `cleanup_staged_temp_dir` helper N-6 already added for
 /// steps 3/4) rather than orphaned on disk with no pointer to it.
+///
+/// `#[cfg(windows)]`: same platform limitation as
+/// `swap_failure_with_successful_rollback_gets_new_message_and_leaves_data_dir_intact`
+/// above — an open file handle only blocks a directory rename on
+/// Windows/NTFS, not on POSIX (`rename(2)` does not check for open fds).
+#[cfg(windows)]
 #[test]
 fn step5_first_rename_failure_cleans_up_staged_temp_dir() {
     let root = TempDir::new().unwrap();
