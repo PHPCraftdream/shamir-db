@@ -409,3 +409,37 @@ artifact).
   data-expiration/TTL-eviction feature: there is no automatic deletion of
   "expired" records: an evicted entry is written to the durable backend,
   never dropped.
+
+## 9. Backup / Restore durability
+
+- **fsync is applied to copied files, the manifest, and each rename's
+  containing directory — but directory-fsync is a no-op on non-unix
+  (Windows), and true power-loss crash recovery is not unit-tested (F-12,
+  #802).** `backup::copy_dir_recursive` now re-opens each just-copied
+  destination file and calls `sync_all()` (propagating a failure as
+  `BackupError::Io`/`RestoreError::Io` — content durability is the point),
+  and `write_manifest` uses `File::create` + `write_all` + `sync_all`
+  instead of a bare `fs::write`, so the manifest is durable before
+  `backup()` returns success. `restore()`'s step-5 atomic swap calls a
+  new `fsync_dir` helper on the containing `parent` directory after EACH
+  successful `fs::rename` (both swap-path renames, the rollback rename,
+  and the fresh-target single rename) — this closes the classic "you
+  fsync'd the file but not the directory" gap on ext4/xfs, where a bare
+  `fs::rename` can return success before the directory-entry update is on
+  stable storage. Directory-fsync failures are logged but NOT propagated
+  (matching `shamir-wal`'s `wal_segment.rs::fsync_parent_dir` precedent:
+  a missing dir-fsync degrades the power-loss window but does not corrupt
+  data). **Windows / non-unix: `fsync_dir` is a documented no-op** — this
+  workspace already decided (in `wal_segment.rs`'s `#[cfg(not(unix))]`
+  stub) that Windows does not need this specific directory-entry
+  durability guarantee; that rationale carries into backup/restore
+  unchanged. **True power-loss crash injection is outside what a portable
+  unit test can exercise** (there is no way to truncate the OS page cache
+  mid-syscall from a `#[test]`); the regression guard is the
+  interrupted-copy test in `crates/shamir-server/src/tests/
+  restore_tests.rs` (`copy_step_failure_propagates_and_leaves_data_dir_
+  untouched`), which verifies the closest portable proxy: a failure
+  during `restore()`'s copy step propagates cleanly and leaves `data_dir`
+  completely untouched. See `crates/shamir-server/src/restore.rs`'s
+  `fsync_dir` and `crates/shamir-server/src/backup.rs`'s
+  `copy_dir_recursive`/`write_manifest`.

@@ -427,6 +427,36 @@ shamir-server`; либо wrapper-скрипт `stop → backup → restart`. Н�
 `docs/guide-docs/client-server-protocol-spec/IMPLEMENTATION_GUIDE.md` §5.7 и
 `SECURITY_MODEL.md` §4.4.
 
+### Durability (fsync) гарантии backup/restore (F-12, #802)
+
+Backup и restore теперь явно fsync'ируют каждый скопированный файл, manifest и
+каталог после каждого atomic rename, чтобы данные реально достигали stable
+storage до возвращения успеха (а не оставались в OS page cache):
+
+- **`copy_dir_recursive`** (общий для `backup()` и `restore()`'s step 3):
+  после `fs::copy` файл переоткрывается на запись и вызывается `sync_all()`.
+  Ошибка файлового sync'а **пропагируется** как `BackupError::Io` /
+  `RestoreError::Io` — корректность содержимого файла IS the point (по
+  прецеденту `segment_meta.rs`, где файловый `sync_all` тоже жёстко
+  протагируется).
+- **`write_manifest`**: `fs::write` заменён на `File::create` + `write_all` +
+  `sync_all` — manifest durable до того, как `backup()` вернёт успех.
+- **`restore()` step 5**: после КАЖДОГО успешного `fs::rename` (оба
+  swap-rename, rollback-rename и single fresh-target rename) вызывается
+  `fsync_dir(parent)` — fsync содержащего каталога, чтобы directory-entry
+  update самого rename'а был durable. Это закрывает классический gap «you
+  fsync'd the file but not the directory» на ext4/xfs. Ошибка каталогового
+  fsync **только логируется**, не пропагируется (по прецеденту
+  `wal_segment.rs::fsync_parent_dir` — деградация power-loss window, но не
+  corruption); `RestoreError` не получил нового варианта.
+
+**Windows / non-unix caveat:** `fsync_dir` — documented no-op (этот workspace
+уже решил в `wal_segment.rs`'s `#[cfg(not(unix))]` stub, что Windows не требует
+этой конкретной directory-entry durability guarantee). Истинное power-loss
+crash-тестирование непортативно и не покрывается unit-тестом; регрессионный
+guard — interrupted-copy тест в `tests/restore_tests.rs`, проверяющий ближайший
+портативный прокси. См. `KNOWN_LIMITATIONS.md` §9.
+
 ## 9. Capacity planning
 
 Подробная таблица — в `docs/dev-artifacts/ops/CAPACITY_PLANNING.md`. Кратко:

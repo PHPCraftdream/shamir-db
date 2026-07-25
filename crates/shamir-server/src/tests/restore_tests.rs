@@ -1,6 +1,11 @@
 //! N-6 (CR-D5, #786): unit coverage for `restore.rs`'s step-5 swap-failure
 //! error-message split and the step-3/step-4 staged-temp-dir cleanup.
 //!
+//! F-12 (#802): extended with a happy-path round-trip regression (proving the
+//! new `sync_all`/`fsync_dir` calls don't break the existing flow) and an
+//! interrupted-copy fault-injection test (the closest portable proxy to
+//! crash-durability verification).
+//!
 //! These are narrow, filesystem-only unit tests (no server boot) — the full
 //! restore lifecycle (real `users`/`server_meta` stores, session
 //! invalidation, actual server reboot) is already covered end-to-end by
@@ -358,5 +363,257 @@ fn step4_invalidation_failure_cleans_up_staged_temp_dir() {
     assert!(
         !data_dir.exists(),
         "data_dir must not have been created — restore failed before step 5"
+    );
+}
+
+// ----------------------------------------------------------------------------
+// F-12 (#802): fsync durability — regression + fault-injection coverage.
+// ----------------------------------------------------------------------------
+
+/// F-12 (#802) happy-path regression: a full `backup()` → `restore()` round
+/// trip into a fresh target must still succeed and produce byte-identical
+/// data, proving the new `sync_all` calls in `copy_dir_recursive`/
+/// `write_manifest` (backup.rs) and the `fsync_dir` calls after each rename
+/// in `restore()`'s step 5 don't silently break or slow the existing flow.
+///
+/// This exercises the FRESH-TARGET path (no pre-existing `data_dir`), which
+/// hits restore's single `fs::rename(&temp_dir, data_dir)` + `fsync_dir`.
+/// The swap path (pre-existing `data_dir`) is structurally covered by the
+/// Windows-only swap-failure tests above (they exercise the two-rename +
+/// rollback code paths), so this test focuses on the happy-path correctness
+/// of the most common restore scenario.
+///
+/// `restore()`'s step 4 opens `users` via `FjallUserDirectory::open`, which
+/// materializes an empty `users` store when the snapshot lacks one (see
+/// `restore.rs`'s `open_and_invalidate_users` doc) — so the restored
+/// `data_dir` may contain a `users` dir the source didn't have. This test
+/// verifies the source's ACTUAL files round-trip byte-identically, not that
+/// the full directory tree is a superset-free match.
+#[test]
+fn backup_restore_round_trip_into_fresh_target_is_byte_identical() {
+    let root = TempDir::new().unwrap();
+
+    // Build a multi-file source: flat + nested files, varying sizes.
+    let src = root.path().join("src");
+    fs::create_dir_all(&src).unwrap();
+    fs::write(src.join("a.txt"), b"hello").unwrap();
+    fs::write(src.join("b.bin"), vec![42u8; 4096]).unwrap();
+    let nested = src.join("nested/deep");
+    fs::create_dir_all(&nested).unwrap();
+    fs::write(nested.join("c.txt"), b"world").unwrap();
+
+    // Backup → snapshot dir.
+    let dst = root.path().join("snapshot_dest");
+    fs::create_dir_all(&dst).unwrap();
+    let report = backup(&src, &dst).expect("backup must succeed with fsync");
+    assert!(report.manifest_path.exists(), "manifest must be on disk");
+
+    // Restore into a fresh data_dir (no pre-existing dir → else branch, single
+    // rename + fsync_dir).
+    let data_dir = root.path().join("data_dir");
+    let restore_report =
+        restore(&report.dest_dir, &data_dir, true).expect("restore must succeed with fsync");
+
+    // Every source file must be byte-identical in the restored data_dir.
+    assert_eq!(
+        fs::read(data_dir.join("a.txt")).unwrap(),
+        b"hello",
+        "restored a.txt must match source"
+    );
+    assert_eq!(
+        fs::read(data_dir.join("b.bin")).unwrap(),
+        vec![42u8; 4096],
+        "restored b.bin must match source"
+    );
+    assert_eq!(
+        fs::read(data_dir.join("nested/deep/c.txt")).unwrap(),
+        b"world",
+        "restored nested/deep/c.txt must match source"
+    );
+
+    // The manifest in the SNAPSHOT dir (written by the new write+sync path)
+    // must still verify — proving the durable manifest matches the copied
+    // (and now fsync'd) files. We verify the SNAPSHOT, not data_dir: restore's
+    // step 4 opens `users` via `FjallUserDirectory::open`, which materializes
+    // a `users` keyspace dir inside data_dir that the snapshot's manifest
+    // never listed — so `verify_manifest(data_dir)` would (correctly) reject
+    // those files as `UnmanifestedFile`.
+    let verify = crate::backup::verify_manifest(&report.dest_dir)
+        .expect("snapshot manifest must verify after the new write+sync path");
+    assert_eq!(
+        verify.files_checked, report.files_copied,
+        "verify_manifest must check the same file count backup reported"
+    );
+
+    // No orphaned temp dir should remain after a successful restore.
+    let leftover = fs::read_dir(root.path())
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .any(|e| e.file_name().to_string_lossy().contains(".restore_tmp_"));
+    assert!(
+        !leftover,
+        "no *.restore_tmp_* dir should survive a successful restore"
+    );
+
+    // users_invalidated is 0 for a snapshot with no pre-existing users store
+    // (open_and_invalidate_users creates an empty one with no tickets).
+    assert_eq!(
+        restore_report.users_invalidated, 0,
+        "no tickets to invalidate in a users-less snapshot"
+    );
+
+    // The fresh-target path returns None for pre_restore_backup.
+    assert!(
+        restore_report.pre_restore_backup.is_none(),
+        "fresh-target restore must not create a pre_restore_backup sibling"
+    );
+}
+
+/// F-12 (#802) interrupted-copy safety: forces `copy_dir_recursive`'s COPY
+/// step (restore's step 3) to fail partway through a multi-file snapshot by
+/// holding an open no-share handle on one of the source files — on Windows,
+/// `fs::copy`'s internal source-open fails with a sharing violation. Asserts:
+/// the copy error propagates as `RestoreError::Io`, the staged
+/// `*.restore_tmp_*` dir is cleaned up (existing N-6 behavior still holds
+/// with the new sync call added to the copy loop), and — the key NEW
+/// assertion for this task — `data_dir` (and its pre-existing content) is
+/// completely untouched, since step 5 never ran.
+///
+/// This is the closest portable proxy to "crash between copy and rename":
+/// whatever state existed before the interrupted copy is exactly what
+/// remains after. True power-loss crash injection (verifying post-rename
+/// directory entries survive an actual power failure) is outside what a
+/// portable unit test can exercise — see `fsync_dir`'s doc in `restore.rs`.
+///
+/// **Fault-injection timing:** a no-share handle on the source file blocks
+/// BOTH `verify_manifest`'s hash step (step 2) AND `copy_dir_recursive`'s
+/// copy step (step 3), since both open the source for reading. Step 2 runs
+/// first and synchronously, so the handle CANNOT be held from the start —
+/// a background watcher thread polls for the staged `*.restore_tmp_*` dir's
+/// appearance (which only happens AFTER step 2 passes, at the start of step
+/// 3) and only THEN grabs the no-share handle, so the lock is active during
+/// the copy but not during the verify. To give the watcher enough time,
+/// the snapshot contains several large "decoy" files (alphabetically before
+/// the locked file) that `copy_dir_recursive` copies first — each copy +
+/// fsync takes ~1-5ms, so the watcher has ample polling cycles to react
+/// before the locked file is reached. On NTFS, `fs::read_dir` returns
+/// entries in B-tree collation (alphabetical) order, so `z_locked.txt` is
+/// reliably reached after every `a_decoy_*` file.
+///
+/// `#[cfg(windows)]`: the no-share handle blocking `fs::copy`'s source open
+/// is inherently a Windows/NTFS behavior (`OpenOptionsExt::share_mode` is
+/// Windows-only). The code path itself is NOT Windows-specific
+/// (`copy_dir_recursive`'s `Err` propagation is identical on every platform)
+/// — only this test's ABILITY to trigger that arm deterministically is.
+#[cfg(windows)]
+#[test]
+fn copy_step_failure_propagates_and_leaves_data_dir_untouched() {
+    use std::os::windows::fs::OpenOptionsExt;
+
+    let root = TempDir::new().unwrap();
+
+    // Build a multi-file snapshot: several large decoy files (alphabetically
+    // before the locked file) + one that will be un-copyable. On NTFS,
+    // `fs::read_dir` returns entries in B-tree collation order, so the
+    // `a_decoy_*` files are copied before `z_locked.txt` — giving the
+    // watcher thread time to lock it after temp_dir appears.
+    let src = root.path().join("src");
+    fs::create_dir_all(&src).unwrap();
+    // 256 KB decoys: each copy + fsync takes ~1-5ms, so 4 decoys give the
+    // watcher ~4-20ms of window before `z_locked.txt` is reached.
+    for i in 0..4u8 {
+        fs::write(src.join(format!("a_decoy_{i}.bin")), vec![i; 256 * 1024]).unwrap();
+    }
+    fs::write(src.join("z_locked.txt"), b"this file will fail to copy").unwrap();
+
+    let dst = root.path().join("snapshot_dest");
+    fs::create_dir_all(&dst).unwrap();
+    let snapshot = backup(&src, &dst)
+        .expect("backup of unlocked source ok")
+        .dest_dir;
+
+    // Pre-existing data_dir with known content — must survive the failed
+    // restore completely untouched (step 5 never ran).
+    let data_dir = root.path().join("data_dir");
+    fs::create_dir_all(&data_dir).unwrap();
+    fs::write(data_dir.join("original.txt"), b"ORIGINAL PRE-RESTORE DATA").unwrap();
+
+    // Watcher: poll for temp_dir's appearance (step 2 verify passed, step 3
+    // copy is starting), then immediately grab a no-share handle on the
+    // source's `z_locked.txt`. The handle persists (stored in `held`) until
+    // after `restore()` returns, so the lock is active when copy_dir_recursive
+    // reaches that file.
+    let parent = root.path().to_path_buf();
+    let locked_src = snapshot.join("z_locked.txt");
+    let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let stop2 = stop.clone();
+    let held: std::sync::Arc<std::sync::Mutex<Option<std::fs::File>>> =
+        std::sync::Arc::new(std::sync::Mutex::new(None));
+    let held2 = held.clone();
+    let watcher = std::thread::spawn(move || {
+        while !stop2.load(std::sync::atomic::Ordering::SeqCst) {
+            if let Ok(entries) = fs::read_dir(&parent) {
+                for entry in entries.flatten() {
+                    if entry
+                        .file_name()
+                        .to_string_lossy()
+                        .contains(".restore_tmp_")
+                    {
+                        if let Ok(f) = std::fs::OpenOptions::new()
+                            .read(true)
+                            .share_mode(0)
+                            .open(&locked_src)
+                        {
+                            *held2.lock().unwrap() = Some(f);
+                            return;
+                        }
+                    }
+                }
+            }
+            std::thread::sleep(std::time::Duration::from_micros(100));
+        }
+    });
+
+    let result = restore(&snapshot, &data_dir, true);
+
+    // Stop the watcher and release the held handle (it may or may not have
+    // grabbed it depending on timing, but either way the handle must be
+    // dropped so the test doesn't leak it).
+    stop.store(true, std::sync::atomic::Ordering::SeqCst);
+    let _ = watcher.join();
+    drop(held);
+
+    let err = result.expect_err(
+        "restore must fail at the copy step — if this panics, the watcher \
+         didn't lock z_locked.txt in time (the decoy files should have been \
+         copied first on NTFS, giving the watcher ample time)",
+    );
+    assert!(
+        matches!(err, RestoreError::Io(_)),
+        "expected a copy-step Io failure (sharing violation on z_locked.txt), \
+         got: {err:?}"
+    );
+
+    // The staged *.restore_tmp_* dir must be cleaned up (N-6 behavior, still
+    // holding with the new sync call in the copy loop).
+    let leftover = fs::read_dir(root.path())
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .any(|e| e.file_name().to_string_lossy().contains(".restore_tmp_"));
+    assert!(
+        !leftover,
+        "the staged *.restore_tmp_* dir must be cleaned up after a step-3 \
+         (copy) failure — it survived, meaning the N-6 cleanup did not run \
+         or failed silently"
+    );
+
+    // data_dir itself must be completely untouched — step 5 never ran, so the
+    // pre-existing content is exactly as it was. This is the key NEW
+    // assertion for F-12: the interrupted copy left no partial/corrupt state
+    // in the live data_dir.
+    let original = fs::read_to_string(data_dir.join("original.txt")).unwrap();
+    assert_eq!(
+        original, "ORIGINAL PRE-RESTORE DATA",
+        "data_dir content must be byte-identical to its pre-restore state"
     );
 }

@@ -32,7 +32,7 @@
 //! because it requires a wire-protocol change.
 
 use std::fs;
-use std::io::Read;
+use std::io::{Read, Write};
 use std::path::{Component, Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -306,7 +306,18 @@ fn write_manifest(dest_dir: &Path) -> Result<PathBuf, BackupError> {
     let manifest_path = dest_dir.join(MANIFEST_FILE_NAME);
     let json = serde_json::to_vec_pretty(&manifest)
         .map_err(|e| BackupError::ManifestInvalid(format!("encode: {e}")))?;
-    fs::write(&manifest_path, json)?;
+    // F-12 (#802): write + fsync so the manifest itself is durable before
+    // `backup()` returns success — a bare `fs::write` leaves the bytes in the
+    // OS page cache. Matches `segment_meta.rs`'s file-sync step (propagate —
+    // the manifest's content correctness IS the point). This file is NOT
+    // renamed into place (it's the final artifact, written AFTER the files it
+    // lists), so there is no accompanying directory-fsync here (unlike
+    // restore's swap in `restore.rs`, which renames and fsyncs the parent).
+    {
+        let mut f = fs::File::create(&manifest_path)?;
+        f.write_all(&json)?;
+        f.sync_all()?;
+    }
     Ok(manifest_path)
 }
 
@@ -517,6 +528,22 @@ pub(crate) fn copy_dir_recursive(
             copy_dir_recursive(&path, &target, bytes, files)?;
         } else if ft.is_file() {
             let n = fs::copy(&path, &target)?;
+            // F-12 (#802): fsync the just-copied file so its bytes reach
+            // stable storage before this function returns — `fs::copy`
+            // leaves them in the OS page cache, not yet durable. Since
+            // `fs::copy` doesn't hand back an open file handle, re-open the
+            // destination for write (NOT `.create(true)`/`.truncate(true)`,
+            // which would wipe what was just copied) and sync it. A failed
+            // FILE sync propagates (content durability IS the point —
+            // matching the wal_segment.rs/segment_meta.rs precedent where
+            // the file's own `sync_all` is a hard error, unlike the
+            // best-effort directory fsync). This single change fixes
+            // file-durability for BOTH `backup()` and `restore()`'s step-3
+            // copy, which share this function.
+            fs::OpenOptions::new()
+                .write(true)
+                .open(&target)?
+                .sync_all()?;
             *bytes += n;
             *files += 1;
         } else {

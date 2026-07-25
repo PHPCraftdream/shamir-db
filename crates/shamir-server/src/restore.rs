@@ -241,8 +241,18 @@ pub fn restore(from: &Path, data_dir: &Path, force: bool) -> Result<RestoreRepor
             cleanup_staged_temp_dir(&temp_dir);
             return Err(RestoreError::Io(e));
         }
+        // F-12 (#802): fsync the containing directory so this first rename's
+        // directory-entry change (data_dir → backup_sibling) is durable — a
+        // bare `fs::rename` can return before the directory-entry update
+        // itself reaches stable storage. Log-only (see `fsync_dir`'s doc).
+        fsync_dir(parent);
         match fs::rename(&temp_dir, data_dir) {
-            Ok(()) => Some(backup_sibling),
+            Ok(()) => {
+                // F-12 (#802): fsync for the second rename
+                // (temp_dir → data_dir), same rationale as above.
+                fsync_dir(parent);
+                Some(backup_sibling)
+            }
             Err(e) => {
                 // Best-effort rollback: put the pre-restore backup back so
                 // data_dir is not left missing.
@@ -259,6 +269,10 @@ pub fn restore(from: &Path, data_dir: &Path, force: bool) -> Result<RestoreRepor
                         source: e,
                     });
                 }
+                // F-12 (#802): fsync for the rollback rename
+                // (backup_sibling → data_dir), same rationale — even on the
+                // rollback path, the directory-entry change should be durable.
+                fsync_dir(parent);
                 // Rollback SUCCEEDED: data_dir is intact again, holding the
                 // ORIGINAL pre-restore data. `temp_dir` (the restored-but-
                 // not-swapped-in copy) is deliberately left on disk for
@@ -273,6 +287,10 @@ pub fn restore(from: &Path, data_dir: &Path, force: bool) -> Result<RestoreRepor
         }
     } else {
         fs::rename(&temp_dir, data_dir)?;
+        // F-12 (#802): fsync the containing directory so this fresh-target
+        // rename (temp_dir → data_dir) is durable — same rationale as the
+        // swap-path renames above. Log-only (see `fsync_dir`'s doc).
+        fsync_dir(parent);
         None
     };
 
@@ -315,6 +333,73 @@ fn cleanup_staged_temp_dir(temp_dir: &Path) {
             "restore: failed to clean up staged temp dir after an earlier failure"
         );
     }
+}
+
+/// Fsync the directory at `dir` so a rename's directory-entry update is
+/// durable (F-12, #802). On ext4/xfs, a successful `fs::rename` can return
+/// before the directory-entry change itself is on stable storage — a power
+/// loss shortly after a "successful" rename can leave the filesystem
+/// reflecting the PRE-rename state on next boot (the classic "you fsync'd
+/// the file but not the directory" gap). This makes `restore()`'s atomic
+/// swap actually crash-durable.
+///
+/// Failures are logged but NOT propagated (matching `shamir-wal`'s
+/// `wal_segment.rs::fsync_parent_dir` precedent): a missing directory fsync
+/// degrades the power-loss window but does not corrupt data, and refusing
+/// an otherwise-successful rename over a non-fatal dir-fsync would be worse
+/// than the degraded window. This asymmetry — file `sync_all()` propagates
+/// (content durability matters), directory fsync logs only (best-effort) —
+/// is the established workspace convention (see `segment_meta.rs`'s file-sync
+/// step, which propagates, vs `wal_segment.rs`'s directory fsync, which
+/// logs). Since the directory fsync is log-only, it introduces NO new error
+/// path into `restore()`'s return type (`RestoreError` needs no new variant).
+///
+/// **Windows / non-unix: directory fsync is a no-op here** — the specific
+/// durability guarantee this targets (directory-entry durability after
+/// rename) is provided by the filesystem's own rename semantics on those
+/// platforms. This matches `wal_segment.rs`'s own `#[cfg(not(unix))]`
+/// rationale exactly — this workspace already decided Windows doesn't need
+/// this specific guarantee, and that decision carries into the backup/restore
+/// path unchanged.
+///
+/// **Test scope note:** true power-loss crash injection (verifying a
+/// post-rename directory entry survives an actual power failure) is outside
+/// what a portable unit test can exercise — there is no way to truncate the
+/// OS page cache mid-syscall from a `#[test]`. The regression guard for this
+/// task is the interrupted-copy test in `tests/restore_tests.rs`
+/// (`copy_step_failure_propagates_and_leaves_data_dir_untouched`), which
+/// verifies the closest portable proxy: a failure during `restore()`'s copy
+/// step propagates cleanly and leaves `data_dir` completely untouched.
+#[cfg(unix)]
+fn fsync_dir(dir: &Path) {
+    match fs::File::open(dir) {
+        Ok(dir_f) => {
+            if let Err(e) = dir_f.sync_all() {
+                tracing::warn!(
+                    dir = %dir.display(),
+                    error = %e,
+                    "restore: directory fsync after rename failed; \
+                     rename durability is not guaranteed on power loss \
+                     (F-12, #802) — the rename itself succeeded"
+                );
+            }
+        }
+        Err(e) => {
+            tracing::warn!(
+                dir = %dir.display(),
+                error = %e,
+                "restore: directory open for fsync after rename failed; \
+                 rename durability is not guaranteed on power loss (F-12, #802)"
+            );
+        }
+    }
+}
+
+#[cfg(not(unix))]
+fn fsync_dir(_dir: &Path) {
+    // Windows / non-unix: directory fsync is not required for the durability
+    // guarantee this targets (see the doc on the unix variant above). No-op —
+    // matches wal_segment.rs's `#[cfg(not(unix))]` rationale exactly.
 }
 
 /// Attempt to open `data_dir/server_meta` (mirrors `server_launcher.rs`'s
