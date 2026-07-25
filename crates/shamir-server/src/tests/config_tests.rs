@@ -84,6 +84,14 @@ fn small_profile_parses_and_validates() {
         32 * 1024 * 1024,
         "small profile max_result_size_bytes"
     );
+
+    // F-11: every shipped profile must set a finite inflight-response budget
+    // (4× max_result_size_bytes); never `None` again.
+    assert_eq!(
+        cfg.security.query_limits.max_inflight_response_bytes,
+        Some(128 * 1024 * 1024),
+        "small profile max_inflight_response_bytes"
+    );
 }
 
 /// The all-fields reference example was previously never loaded by any
@@ -124,6 +132,14 @@ fn medium_profile_parses_and_validates() {
         cfg.security.query_limits.max_result_size_bytes,
         64 * 1024 * 1024,
         "medium profile max_result_size_bytes"
+    );
+
+    // F-11: every shipped profile must set a finite inflight-response budget
+    // (4× max_result_size_bytes); never `None` again.
+    assert_eq!(
+        cfg.security.query_limits.max_inflight_response_bytes,
+        Some(256 * 1024 * 1024),
+        "medium profile max_inflight_response_bytes"
     );
 }
 
