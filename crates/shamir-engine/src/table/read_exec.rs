@@ -11,8 +11,8 @@ use futures::StreamExt;
 use crate::query::filter::eval::{compile_filter, intern_field_path, FilterNode};
 use crate::query::filter::eval_context::FilterContext;
 use crate::query::read::{
-    exec, ExplainPlan, GroupBy, PaginationInfo, PlanType, QueryRecord, QueryResult, QueryStats,
-    ReadQuery, Select, SelectItem, Temporal,
+    exec, CorruptRecordRef, ExplainPlan, GroupBy, PaginationInfo, PlanType, QueryRecord,
+    QueryResult, QueryStats, ReadQuery, Select, SelectItem, Temporal,
 };
 use bytes::Bytes;
 use serde_bytes::ByteBuf;
@@ -313,6 +313,7 @@ impl TableManager {
                 explain: Some(plan),
                 skipped: false,
                 versions: None,
+                corrupt_records: Vec::new(),
             });
         }
 
@@ -414,6 +415,7 @@ impl TableManager {
                                     self.mvcc_store_ref(),
                                     std::slice::from_ref(&id),
                                 ),
+                                corrupt_records: Vec::new(),
                             });
                         }
                     }
@@ -440,6 +442,7 @@ impl TableManager {
                     explain: None,
                     skipped: false,
                     versions: None,
+                    corrupt_records: Vec::new(),
                 });
             }
         }
@@ -516,6 +519,10 @@ impl TableManager {
                 } else {
                     Vec::new()
                 };
+                // F-10 (#800): rows that fail to decode are still skipped from
+                // `records` (unchanged behaviour) but reported here instead of
+                // silently vanishing from the result set.
+                let mut corrupt: Vec<CorruptRecordRef> = Vec::new();
                 for (maybe_bytes, rid) in raw_records.into_iter().zip(rids_slice.iter()) {
                     let bytes = match maybe_bytes {
                         Some(b) => b,
@@ -529,10 +536,22 @@ impl TableManager {
                                     &iv, interner,
                                 ) {
                                     Ok(q) => q,
-                                    Err(_) => continue,
+                                    Err(_) => {
+                                        corrupt.push(CorruptRecordRef {
+                                            table: self.name().to_string(),
+                                            id: *rid,
+                                        });
+                                        continue;
+                                    }
                                 }
                             }
-                            Err(_) => continue,
+                            Err(_) => {
+                                corrupt.push(CorruptRecordRef {
+                                    table: self.name().to_string(),
+                                    id: *rid,
+                                });
+                                continue;
+                            }
                         },
                     };
                     if tracking_versions {
@@ -566,6 +585,7 @@ impl TableManager {
                         self.mvcc_store_ref(),
                         &survivor_ids,
                     ),
+                    corrupt_records: corrupt,
                 });
             }
         }
@@ -616,6 +636,7 @@ impl TableManager {
                             explain: None,
                             skipped: false,
                             versions: None,
+                            corrupt_records: Vec::new(),
                         });
                     }
                 }
@@ -697,6 +718,7 @@ impl TableManager {
                                     self.mvcc_store_ref(),
                                     std::slice::from_ref(&id),
                                 ),
+                                corrupt_records: Vec::new(),
                             });
                         }
                     }
@@ -940,6 +962,11 @@ impl TableManager {
             None
         };
 
+        // F-10 (#800): rows that fail to decode are still skipped from the
+        // result set (unchanged behaviour) but reported here instead of
+        // silently vanishing.
+        let mut corrupt: Vec<CorruptRecordRef> = Vec::new();
+
         while let Some(batch_result) = stream.next().await {
             let batch = batch_result?;
             records_scanned += batch.len() as u64;
@@ -948,7 +975,14 @@ impl TableManager {
                     RecordCow::Borrowed(b) => {
                         let view = match shamir_types::record_view::RecordView::new(&b) {
                             Ok(v) => v,
-                            Err(_) => continue, // malformed row → skip
+                            Err(_) => {
+                                // malformed row → skip, but report it.
+                                corrupt.push(CorruptRecordRef {
+                                    table: self.name().to_string(),
+                                    id,
+                                });
+                                continue;
+                            }
                         };
                         let passes = match filter_cb {
                             Some(cb) => cb.matches(&view, ctx),
@@ -984,8 +1018,14 @@ impl TableManager {
                                 // arm avoids the re-encode).
                                 match record.to_bytes() {
                                     Ok(bytes) => raw_acc.push((id, bytes)),
-                                    // Malformed tree — skip defensively.
-                                    Err(_) => continue,
+                                    // Malformed tree — skip defensively, but report it.
+                                    Err(_) => {
+                                        corrupt.push(CorruptRecordRef {
+                                            table: self.name().to_string(),
+                                            id,
+                                        });
+                                        continue;
+                                    }
                                 }
                             } else {
                                 rec_acc.push(crate::query::read::QueryRecord::Direct(
@@ -1126,6 +1166,7 @@ impl TableManager {
             explain: None,
             skipped: false,
             versions,
+            corrupt_records: corrupt,
         })
     }
 
@@ -1175,6 +1216,10 @@ impl TableManager {
         } else {
             Vec::new()
         };
+        // F-10 (#800): rows that fail to decode are still skipped from the
+        // result set (unchanged behaviour) but reported here instead of
+        // silently vanishing.
+        let mut corrupt: Vec<CorruptRecordRef> = Vec::new();
 
         while let Some(batch_result) = stream.next().await {
             let batch = batch_result?;
@@ -1220,7 +1265,14 @@ impl TableManager {
                     RecordCow::Borrowed(b) => {
                         let view = match shamir_types::record_view::RecordView::new(b) {
                             Ok(v) => v,
-                            Err(_) => continue, // malformed row → skip
+                            Err(_) => {
+                                // malformed row → skip, but report it.
+                                corrupt.push(CorruptRecordRef {
+                                    table: self.name().to_string(),
+                                    id: *id,
+                                });
+                                continue;
+                            }
                         };
                         count_row!(&view);
                     }
@@ -1252,6 +1304,7 @@ impl TableManager {
             explain: None,
             skipped: false,
             versions: collect_versions(query.with_version, self.mvcc_store_ref(), &version_ids),
+            corrupt_records: corrupt,
         })
     }
 
@@ -1328,6 +1381,10 @@ impl TableManager {
         } else {
             Vec::new()
         };
+        // F-10 (#800): rows that fail to decode are still skipped from the
+        // result set (unchanged behaviour) but reported here instead of
+        // silently vanishing.
+        let mut corrupt: Vec<CorruptRecordRef> = Vec::new();
 
         while let Some(batch_result) = stream.next().await {
             if done {
@@ -1343,7 +1400,14 @@ impl TableManager {
                         RecordCow::Borrowed(b) => {
                             let view = match shamir_types::record_view::RecordView::new(b) {
                                 Ok(v) => v,
-                                Err(_) => continue,
+                                Err(_) => {
+                                    // malformed row → skip, but report it.
+                                    corrupt.push(CorruptRecordRef {
+                                        table: self.name().to_string(),
+                                        id: *id,
+                                    });
+                                    continue;
+                                }
                             };
                             let passes = match filter_cb {
                                 Some(cb) => cb.matches(&view, ctx),
@@ -1464,7 +1528,14 @@ impl TableManager {
                     RecordCow::Borrowed(b) => {
                         let view = match shamir_types::record_view::RecordView::new(b) {
                             Ok(v) => v,
-                            Err(_) => continue, // malformed row → skip
+                            Err(_) => {
+                                // malformed row → skip, but report it.
+                                corrupt.push(CorruptRecordRef {
+                                    table: self.name().to_string(),
+                                    id: *id,
+                                });
+                                continue;
+                            }
                         };
                         stream_row!(&view);
                     }
@@ -1497,6 +1568,7 @@ impl TableManager {
             explain: None,
             skipped: false,
             versions: collect_versions(query.with_version, self.mvcc_store_ref(), &version_ids),
+            corrupt_records: corrupt,
         })
     }
 
@@ -1668,6 +1740,9 @@ impl TableManager {
                             // residual predicate so the pre-filter path sees the
                             // caller's own in-tx writes (read-your-own-writes),
                             // identical to the post-filter path.
+                            // F-10 (#800): staged rows that fail to decode
+                            // against the residual predicate are reported here.
+                            let mut corrupt: Vec<CorruptRecordRef> = Vec::new();
                             let ranked = self
                                 .merge_staged_filtered(
                                     hnsw,
@@ -1678,6 +1753,7 @@ impl TableManager {
                                     residual_cb.as_ref(),
                                     ctx,
                                     tx,
+                                    &mut corrupt,
                                 )
                                 .await;
                             return self
@@ -1689,6 +1765,7 @@ impl TableManager {
                                     start,
                                     &ranked,
                                     "pre_filter",
+                                    corrupt,
                                 )
                                 .await;
                         } else if selectivity <= CO_FILTER_MAX_SELECTIVITY {
@@ -1698,6 +1775,9 @@ impl TableManager {
                                 .await
                                 .map_err(|e| DbError::Internal(e.to_string()))?;
                             // VR-5 (Б-5) — same staged merge as pre-filter above.
+                            // F-10 (#800): same corrupt-record reporting as
+                            // the pre-filter branch above.
+                            let mut corrupt: Vec<CorruptRecordRef> = Vec::new();
                             let ranked = self
                                 .merge_staged_filtered(
                                     hnsw,
@@ -1708,6 +1788,7 @@ impl TableManager {
                                     residual_cb.as_ref(),
                                     ctx,
                                     tx,
+                                    &mut corrupt,
                                 )
                                 .await;
                             return self
@@ -1719,6 +1800,7 @@ impl TableManager {
                                     start,
                                     &ranked,
                                     "co_filter",
+                                    corrupt,
                                 )
                                 .await;
                         }
@@ -1733,13 +1815,22 @@ impl TableManager {
             .max(k) // never below k
             .min(MAX_TOPK);
         let mut last_ranked: Vec<(RecordId, f32)>;
-        // Survivors carry their already-resolved record bytes so the projection
-        // below reuses them instead of re-fetching — the residual pass has
-        // already read every candidate through `get_many_bytes_tx` (order is
-        // ANN rank order, preserved by the byte fetch).
-        let mut last_survivors: Vec<bytes::Bytes>;
+        // Survivors carry their already-resolved record bytes (plus the
+        // originating RecordId, for F-10 corrupt-record reporting below) so
+        // the projection loop reuses them instead of re-fetching — the
+        // residual pass has already read every candidate through
+        // `get_many_bytes_tx` (order is ANN rank order, preserved by the byte
+        // fetch).
+        let mut last_survivors: Vec<(RecordId, bytes::Bytes)>;
+        // F-10 (#800): rows that fail to decode are still skipped from the
+        // result set (unchanged behaviour) but reported here instead of
+        // silently vanishing. Reset each retry iteration — a wider k′ rescans
+        // an expanded candidate set from scratch, so a corrupt row from a
+        // narrower attempt would otherwise be double-reported.
+        let mut corrupt: Vec<CorruptRecordRef> = Vec::new();
 
         loop {
+            corrupt.clear();
             let result = backend
                 .lookup_tx(
                     table_token,
@@ -1774,7 +1865,7 @@ impl TableManager {
             let raw_records = self.get_many_bytes_tx(&rids, tx).await?;
             last_survivors = Vec::with_capacity(candidates);
 
-            for maybe_bytes in raw_records.iter() {
+            for (maybe_bytes, rid) in raw_records.iter().zip(rids.iter()) {
                 let bytes = match maybe_bytes {
                     Some(b) => b,
                     None => continue, // deleted/tombstoned — skip
@@ -1784,13 +1875,23 @@ impl TableManager {
                         // Evaluate the residual predicate on the record.
                         match shamir_types::record_view::RecordView::new(bytes) {
                             Ok(view) => cb.matches(&view, ctx),
-                            Err(_) => continue, // malformed — skip
+                            Err(_) => {
+                                // malformed → skip, but report it. `corrupt`
+                                // is reset each retry iteration (see above),
+                                // so the final value reflects only the
+                                // winning pass.
+                                corrupt.push(CorruptRecordRef {
+                                    table: self.name().to_string(),
+                                    id: *rid,
+                                });
+                                continue;
+                            }
                         }
                     }
                     None => true,
                 };
                 if passes {
-                    last_survivors.push(bytes.clone());
+                    last_survivors.push((*rid, bytes.clone()));
                 }
             }
 
@@ -1821,7 +1922,7 @@ impl TableManager {
         // loop, so no second round-trip to the store/staging.
         let proj = exec::SelectProjection::new(&query.select, interner, ctx.scalars.clone());
         let mut records: Vec<QueryRecord> = Vec::with_capacity(last_survivors.len());
-        for bytes in &last_survivors {
+        for (rid, bytes) in &last_survivors {
             let qv = match shamir_types::record_view::RecordView::new(bytes) {
                 Ok(view) => proj.project_value(&view, interner),
                 Err(_) => match InnerValue::from_bytes(bytes.clone()) {
@@ -1829,9 +1930,21 @@ impl TableManager {
                         &iv, interner,
                     ) {
                         Ok(q) => q,
-                        Err(_) => continue,
+                        Err(_) => {
+                            corrupt.push(CorruptRecordRef {
+                                table: self.name().to_string(),
+                                id: *rid,
+                            });
+                            continue;
+                        }
                     },
-                    Err(_) => continue,
+                    Err(_) => {
+                        corrupt.push(CorruptRecordRef {
+                            table: self.name().to_string(),
+                            id: *rid,
+                        });
+                        continue;
+                    }
                 },
             };
             records.push(QueryRecord::Direct(qv));
@@ -1858,6 +1971,7 @@ impl TableManager {
             explain: None,
             skipped: false,
             versions: None,
+            corrupt_records: corrupt,
         })
     }
 
@@ -1958,6 +2072,12 @@ impl TableManager {
     /// `TxContext::staged_vectors_for(table_token)`. `residual_cb` is the
     /// compiled residual predicate (None when the filtered-vector query has
     /// no residual — then every staged vector passes).
+    ///
+    /// F-10 (#800): `corrupt` accumulates `(table, id)` for staged rows whose
+    /// bytes fail to decode against the residual predicate — the row is still
+    /// excluded from the merge (unchanged behaviour), but the caller's
+    /// `QueryResult::corrupt_records` now surfaces it instead of silently
+    /// dropping it.
     #[allow(clippy::too_many_arguments)]
     async fn merge_staged_filtered<'a>(
         &self,
@@ -1969,6 +2089,7 @@ impl TableManager {
         residual_cb: Option<&FilterNode>,
         ctx: &FilterContext<'_>,
         tx: Option<&shamir_tx::TxContext>,
+        corrupt: &mut Vec<CorruptRecordRef>,
     ) -> Vec<(RecordId, f32)> {
         // No staged vectors or no tx → nothing to merge (committed-only path).
         let staged = match (staged, tx) {
@@ -2027,7 +2148,14 @@ impl TableManager {
                 None => true,
                 Some(cb) => match shamir_types::record_view::RecordView::new(bytes) {
                     Ok(view) => cb.matches(&view, ctx),
-                    Err(_) => continue, // malformed — skip
+                    Err(_) => {
+                        // malformed → skip, but report it.
+                        corrupt.push(CorruptRecordRef {
+                            table: self.name().to_string(),
+                            id: entry.0,
+                        });
+                        continue;
+                    }
                 },
             };
             if passes {
@@ -2055,6 +2183,12 @@ impl TableManager {
     /// V3.2: shared helper for pre-filter and co-filter paths. Takes the
     /// ranked `(RecordId, f32)` pairs, resolves them to record bytes,
     /// projects, and returns the QueryResult with the given `index_tag`.
+    ///
+    /// F-10 (#800): `corrupt` is the corrupt-record list already collected by
+    /// `merge_staged_filtered` (staged rows dropped from the residual pass);
+    /// this function extends it with any committed rows that fail to decode
+    /// during projection below, and the union becomes
+    /// `QueryResult::corrupt_records`.
     #[allow(clippy::too_many_arguments)]
     async fn build_filtered_vector_result(
         &self,
@@ -2065,12 +2199,13 @@ impl TableManager {
         start: Instant,
         ranked: &[(RecordId, f32)],
         index_tag: &str,
+        mut corrupt: Vec<CorruptRecordRef>,
     ) -> DbResult<QueryResult> {
         let rids: Vec<RecordId> = ranked.iter().map(|(r, _)| *r).collect();
         let raw_records = self.get_many_bytes_tx(&rids, tx).await?;
         let proj = exec::SelectProjection::new(&query.select, interner, ctx.scalars.clone());
         let mut records: Vec<QueryRecord> = Vec::with_capacity(ranked.len());
-        for maybe_bytes in raw_records.iter() {
+        for (maybe_bytes, rid) in raw_records.iter().zip(rids.iter()) {
             let bytes = match maybe_bytes {
                 Some(b) => b,
                 None => continue,
@@ -2083,10 +2218,22 @@ impl TableManager {
                             &iv, interner,
                         ) {
                             Ok(q) => q,
-                            Err(_) => continue,
+                            Err(_) => {
+                                corrupt.push(CorruptRecordRef {
+                                    table: self.name().to_string(),
+                                    id: *rid,
+                                });
+                                continue;
+                            }
                         }
                     }
-                    Err(_) => continue,
+                    Err(_) => {
+                        corrupt.push(CorruptRecordRef {
+                            table: self.name().to_string(),
+                            id: *rid,
+                        });
+                        continue;
+                    }
                 },
             };
             records.push(QueryRecord::Direct(qv));
@@ -2111,6 +2258,7 @@ impl TableManager {
             explain: None,
             skipped: false,
             versions: None,
+            corrupt_records: corrupt,
         })
     }
 
@@ -2397,6 +2545,14 @@ pub(super) fn try_project_page_only_bytes(
     let page_end = skip.saturating_add(take).min(total_matches);
     let page_slice = &matched[page_start..page_end];
 
+    // F-10 (#800): this is a free function (no `&self`, no table name) whose
+    // `Option<(Vec<QueryRecord>, Option<PaginationInfo>)>` return has no
+    // `QueryResult` to attach a `corrupt_records` entry to — both call sites
+    // (`read_index_scan.rs`, `read_temporal.rs`) are outside this task's
+    // `read_exec.rs`-only scope. A row that fails to decode here is still
+    // skipped (unchanged behaviour); reporting it would require threading a
+    // corrupt-record accumulator through this function's signature AND both
+    // out-of-scope callers, which the brief for #800 explicitly defers.
     let proj = exec::SelectProjection::new(&query.select, interner, scalars.clone());
     let mut paged: Vec<crate::query::read::QueryRecord> = Vec::with_capacity(page_slice.len());
     for (_, bytes) in page_slice {

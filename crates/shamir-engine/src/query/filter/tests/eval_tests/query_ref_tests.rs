@@ -31,6 +31,7 @@ fn test_query_ref_eq() {
             explain: None,
             skipped: false,
             versions: None,
+            corrupt_records: vec![],
         },
     );
 
@@ -67,6 +68,7 @@ fn test_query_ref_no_match() {
             explain: None,
             skipped: false,
             versions: None,
+            corrupt_records: vec![],
         },
     );
 

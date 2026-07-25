@@ -21,6 +21,7 @@ pub(super) fn admin_result(data: QueryValue) -> QueryResult {
         explain: None,
         skipped: false,
         versions: None,
+        corrupt_records: Vec::new(),
     }
 }
 

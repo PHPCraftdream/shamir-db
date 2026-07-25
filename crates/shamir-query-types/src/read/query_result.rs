@@ -59,8 +59,29 @@ pub struct QueryStats {
     pub execution_time_us: u64,
 }
 
-/// Query result
+/// A single record that failed to decode during a scan — reported instead
+/// of silently dropped from the result set.
+///
+/// The row is still skipped from `QueryResult::records` (unchanged
+/// behaviour); this struct only makes that skip visible to the caller
+/// instead of the result count silently coming up one row short.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CorruptRecordRef {
+    /// Name of the table the corrupt record belongs to.
+    pub table: String,
+    /// The record's id (still resolvable even though its VALUE failed to
+    /// decode — ids are read independently of the value payload).
+    pub id: shamir_types::types::record_id::RecordId,
+}
+
+/// Query result
+///
+/// Derives `Default` (F-10, #800) so that adding a field here does not force
+/// hand-editing every one of the ~90 existing `QueryResult { .. }` literal
+/// construction sites scattered across the workspace — every field already
+/// has a natural `Default` (`Vec::new()`, `None`, `false`), so this derive is
+/// purely mechanical, not a behavioural change.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct QueryResult {
     /// Result records.
     pub records: Vec<QueryRecord>,
@@ -106,4 +127,10 @@ pub struct QueryResult {
     /// assistance, never a correctness contract.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub versions: Option<Vec<u64>>,
+    /// Records that failed to decode during this scan — dropped from
+    /// `records`, but reported here as `(table, id)` pairs instead of
+    /// silently vanishing. Empty (and omitted from the wire) on the common
+    /// case where nothing was corrupt.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub corrupt_records: Vec<CorruptRecordRef>,
 }

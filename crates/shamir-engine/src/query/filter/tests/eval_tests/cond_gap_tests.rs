@@ -233,6 +233,7 @@ fn test_cond_then_branch_is_query_ref() {
             explain: None,
             skipped: false,
             versions: None,
+            corrupt_records: vec![],
         },
     );
     let ctx = FilterContext::new(&interner, &refs);

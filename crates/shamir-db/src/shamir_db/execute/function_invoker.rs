@@ -61,6 +61,7 @@ impl FunctionInvoker for ShamirFunctionInvoker {
             explain: None,
             skipped: false,
             versions: None,
+            corrupt_records: Vec::new(),
         })
     }
 }

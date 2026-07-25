@@ -333,6 +333,37 @@ artifact).
     keyset→offset trigger (e.g. CR-D1's ceiling fallback), which is an
     orthogonal, already-accepted mechanism unrelated to value-type
     incomparability.
+- **Corrupt-record reporting covers `read_exec.rs`'s scan paths only; two
+  sibling files still silently skip corrupt records (F-10, #800).** A row
+  whose value bytes fail to decode inside a scan is not aborted (a single
+  corrupt row aborting an otherwise-successful query over millions of good
+  rows would be worse than a documented gap): it is skipped from
+  `QueryResult.records` (unchanged) and now reported via the new
+  `QueryResult.corrupt_records: Vec<CorruptRecordRef>` field
+  (`crates/shamir-query-types/src/read/query_result.rs`) instead of
+  silently vanishing from the result count. Each entry is a `{ table,
+  id }` pair — the id is still resolvable even though the value failed to
+  decode, since ids are read independently of the value payload. The
+  field is omitted from the wire when empty
+  (`#[serde(default, skip_serializing_if = "Vec::is_empty")]`), so an old
+  peer that doesn't know about it never observes it, and a new peer
+  reading an old response gets an empty `Vec` by default. Coverage as of
+  F-10: all ~14 decode-failure sites in
+  `crates/shamir-engine/src/table/read_exec.rs` (`read_collecting`,
+  `read_counting`, `read_streaming`, the index2 fast path, and the
+  filtered-vector-scan / `merge_staged_filtered` /
+  `build_filtered_vector_result` trio) populate `corrupt_records`. **Two
+  sibling files were explicitly left out of scope and still skip corrupt
+  records without reporting them**: `crates/shamir-engine/src/table/
+  table_manager_index_mgmt.rs` and `crates/shamir-engine/src/table/
+  table_manager_streaming.rs` (same `Err(_) => continue` pattern, not yet
+  wired into `corrupt_records` — tracked as follow-up work). Also not
+  wired: `try_project_page_only_bytes`'s LIMIT push-down fallback in
+  `read_exec.rs` itself is a free function with no `QueryResult` in scope
+  to attach a corrupt entry to, and its two callers
+  (`crates/shamir-engine/src/table/read_index_scan.rs`,
+  `crates/shamir-engine/src/table/read_temporal.rs`) are themselves out of
+  this task's scope — see the comment at that call site for detail.
 
 ## 7. Numbers
 

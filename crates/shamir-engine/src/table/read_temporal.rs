@@ -163,6 +163,7 @@ impl TableManager {
                 explain: None,
                 skipped: false,
                 versions: None,
+                corrupt_records: Vec::new(),
             });
         }
 
@@ -202,6 +203,7 @@ impl TableManager {
             explain: None,
             skipped: false,
             versions: None,
+            corrupt_records: Vec::new(),
         })
     }
 
@@ -404,6 +406,7 @@ impl TableManager {
             explain: None,
             skipped: false,
             versions: None,
+            corrupt_records: Vec::new(),
         })
     }
 }

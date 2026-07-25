@@ -286,6 +286,7 @@ fn build_resolved_refs_excludes_explicit_only_edge() {
             explain: None,
             skipped: false,
             versions: None,
+            corrupt_records: vec![],
         },
     );
 
@@ -313,6 +314,7 @@ fn build_resolved_refs_includes_dataflow_edge() {
             explain: None,
             skipped: false,
             versions: None,
+            corrupt_records: vec![],
         },
     );
 
@@ -342,6 +344,7 @@ fn build_resolved_refs_includes_both_edge() {
             explain: None,
             skipped: false,
             versions: None,
+            corrupt_records: vec![],
         },
     );
 

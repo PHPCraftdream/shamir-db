@@ -180,6 +180,7 @@ impl TableManager {
                                     explain: None,
                                     skipped: false,
                                     versions: None,
+                                    corrupt_records: Vec::new(),
                                 });
                             }
 
@@ -210,6 +211,7 @@ impl TableManager {
                                 explain: None,
                                 skipped: false,
                                 versions: None,
+                                corrupt_records: Vec::new(),
                             });
                         }
                     }
@@ -299,6 +301,7 @@ impl TableManager {
                 explain: None,
                 skipped: false,
                 versions: None,
+                corrupt_records: Vec::new(),
             })
         } else {
             // ── Plain SELECT branch (S3 — zero-copy RecordView lens) ─────────
@@ -347,6 +350,7 @@ impl TableManager {
                     explain: None,
                     skipped: false,
                     versions: None,
+                    corrupt_records: Vec::new(),
                 });
             }
 
@@ -375,6 +379,7 @@ impl TableManager {
                 explain: None,
                 skipped: false,
                 versions: versions_from_matched(query, self.mvcc_store_ref(), &matched),
+                corrupt_records: Vec::new(),
             })
         }
     }
@@ -455,6 +460,7 @@ impl TableManager {
                 let ids: Vec<RecordId> = matched.iter().map(|(id, _)| *id).collect();
                 super::read_exec::collect_versions(query.with_version, self.mvcc_store_ref(), &ids)
             },
+            corrupt_records: Vec::new(),
         })
     }
 
@@ -598,6 +604,7 @@ impl TableManager {
             explain: None,
             skipped: false,
             versions: None,
+            corrupt_records: Vec::new(),
         })
     }
     ///
@@ -715,6 +722,7 @@ impl TableManager {
                 explain: None,
                 skipped: false,
                 versions: None,
+                corrupt_records: Vec::new(),
             })
         } else {
             // ── Plain SELECT branch (S3 — zero-copy RecordView lens) ─────────
@@ -764,6 +772,7 @@ impl TableManager {
                     explain: None,
                     skipped: false,
                     versions: None,
+                    corrupt_records: Vec::new(),
                 });
             }
 
@@ -798,6 +807,7 @@ impl TableManager {
                 explain: None,
                 skipped: false,
                 versions: versions_from_matched(query, self.mvcc_store_ref(), &matched),
+                corrupt_records: Vec::new(),
             })
         }
     }

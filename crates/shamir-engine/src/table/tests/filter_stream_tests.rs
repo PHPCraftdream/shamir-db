@@ -370,6 +370,7 @@ async fn test_filter_stream_with_query_ref() {
             explain: None,
             skipped: false,
             versions: None,
+            corrupt_records: vec![],
         },
     );
 
@@ -455,6 +456,7 @@ async fn test_filter_stream_query_ref_in_and() {
             explain: None,
             skipped: false,
             versions: None,
+            corrupt_records: vec![],
         },
     );
     refs.insert(
@@ -467,6 +469,7 @@ async fn test_filter_stream_query_ref_in_and() {
             explain: None,
             skipped: false,
             versions: None,
+            corrupt_records: vec![],
         },
     );
 
@@ -509,6 +512,7 @@ async fn test_filter_stream_query_ref_in_or_with_literal() {
             explain: None,
             skipped: false,
             versions: None,
+            corrupt_records: vec![],
         },
     );
 
@@ -550,6 +554,7 @@ async fn test_filter_stream_not_query_ref() {
             explain: None,
             skipped: false,
             versions: None,
+            corrupt_records: vec![],
         },
     );
 
@@ -589,6 +594,7 @@ async fn test_filter_stream_deep_nesting_with_multiple_query_refs() {
             explain: None,
             skipped: false,
             versions: None,
+            corrupt_records: vec![],
         },
     );
     refs.insert(
@@ -601,6 +607,7 @@ async fn test_filter_stream_deep_nesting_with_multiple_query_refs() {
             explain: None,
             skipped: false,
             versions: None,
+            corrupt_records: vec![],
         },
     );
 
@@ -694,6 +701,7 @@ async fn test_filter_stream_mixed_query_ref_field_ref_literal() {
             explain: None,
             skipped: false,
             versions: None,
+            corrupt_records: vec![],
         },
     );
 
@@ -799,6 +807,7 @@ async fn test_filter_stream_in_query_ref_column() {
             explain: None,
             skipped: false,
             versions: None,
+            corrupt_records: vec![],
         },
     );
 
@@ -841,6 +850,7 @@ async fn test_filter_stream_not_in_query_ref_column() {
             explain: None,
             skipped: false,
             versions: None,
+            corrupt_records: vec![],
         },
     );
 
@@ -888,6 +898,7 @@ async fn test_filter_stream_in_query_ref_nested_and() {
             explain: None,
             skipped: false,
             versions: None,
+            corrupt_records: vec![],
         },
     );
     refs.insert(
@@ -900,6 +911,7 @@ async fn test_filter_stream_in_query_ref_nested_and() {
             explain: None,
             skipped: false,
             versions: None,
+            corrupt_records: vec![],
         },
     );
 
@@ -948,6 +960,7 @@ async fn test_filter_stream_not_in_query_ref_with_or() {
             explain: None,
             skipped: false,
             versions: None,
+            corrupt_records: vec![],
         },
     );
 

@@ -375,6 +375,7 @@ fn cursor_page_response_roundtrip_and_tag() {
             explain: None,
             skipped: false,
             versions: None,
+            corrupt_records: vec![],
         },
         has_more: true,
     };

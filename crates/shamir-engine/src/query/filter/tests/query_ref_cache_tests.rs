@@ -49,6 +49,7 @@ fn call_result(value: QueryValue) -> QueryResult {
         explain: None,
         skipped: false,
         versions: None,
+        corrupt_records: vec![],
     }
 }
 
@@ -65,6 +66,7 @@ fn read_result(field: &str, val: QueryValue) -> QueryResult {
         explain: None,
         skipped: false,
         versions: None,
+        corrupt_records: vec![],
     }
 }
 

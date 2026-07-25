@@ -38,6 +38,7 @@ fn ref_map(alias: &str, records: Vec<QueryRecord>) -> TMap<String, QueryResult> 
             explain: None,
             skipped: false,
             versions: None,
+            corrupt_records: vec![],
         },
     );
     refs

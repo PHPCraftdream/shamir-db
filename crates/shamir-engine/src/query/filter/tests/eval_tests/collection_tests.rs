@@ -99,6 +99,7 @@ fn test_in_query_ref_column() {
             explain: None,
             skipped: false,
             versions: None,
+            corrupt_records: vec![],
         },
     );
 
@@ -139,6 +140,7 @@ fn test_in_query_ref_column_no_match() {
             explain: None,
             skipped: false,
             versions: None,
+            corrupt_records: vec![],
         },
     );
 
@@ -178,6 +180,7 @@ fn test_not_in_query_ref_column() {
             explain: None,
             skipped: false,
             versions: None,
+            corrupt_records: vec![],
         },
     );
 
