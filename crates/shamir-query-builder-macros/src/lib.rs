@@ -153,14 +153,16 @@ pub fn filter(input: TokenStream) -> TokenStream {
 /// // Insert
 /// let ins = q!(insert into users values { "name" => "Alice", "age" => 30 });
 ///
-/// // Update with complex where
-/// let upd = q!(update users set { "tier" => "gold" } where total > 1000 && !is_null(email));
+/// // Update with complex where (F-13, #803: q!(update/delete/upsert ...)
+/// // now yields a Result, mirroring Update::build()/Delete::build()/
+/// // Upsert::build())
+/// let upd = q!(update users set { "tier" => "gold" } where total > 1000 && !is_null(email)).unwrap();
 ///
 /// // Delete with complex where
-/// let del = q!(delete from users where status == "deleted" && age < 18);
+/// let del = q!(delete from users where status == "deleted" && age < 18).unwrap();
 ///
 /// // Upsert
-/// let ups = q!(upsert cache key { "id" => "k1" } value { "v" => 42 });
+/// let ups = q!(upsert cache key { "id" => "k1" } value { "v" => 42 }).unwrap();
 ///
 /// // Call stored procedure
 /// let res = q!(call my_proc(1, "hello"));

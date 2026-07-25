@@ -210,7 +210,7 @@ async fn restricted_table_stranger_denied_delete() {
 
     let mut b = Batch::new();
     b.id("d");
-    b.delete("d", q!(delete from items where name == "widget"));
+    b.delete("d", q!(delete from items where name == "widget").unwrap());
     let del_req = b.to_request_via_msgpack();
 
     // Stranger denied

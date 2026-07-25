@@ -29,10 +29,12 @@ mod conds;
 mod into_select_item;
 #[allow(clippy::module_inception)]
 mod query;
+mod query_build_error;
 
 pub use conds::*;
 pub use into_select_item::*;
 pub use query::*;
+pub use query_build_error::*;
 
 #[cfg(test)]
 mod tests;

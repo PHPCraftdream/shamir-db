@@ -487,7 +487,8 @@ fn into_batch_op_update_op() {
     let op = write::update("t")
         .where_(filter::eq("id", 1))
         .set(doc().set("x", 2))
-        .build();
+        .build()
+        .unwrap();
     let batch_op = op.into_batch_op();
     match batch_op {
         shamir_query_types::batch::BatchOp::Update(_) => {}
@@ -501,7 +502,8 @@ fn into_batch_op_set_op() {
     let op = write::upsert("t")
         .key(shamir_types::mpack!("k"))
         .value(doc().set("v", 1))
-        .build();
+        .build()
+        .unwrap();
     let batch_op = op.into_batch_op();
     match batch_op {
         shamir_query_types::batch::BatchOp::Set(_) => {}
@@ -512,7 +514,10 @@ fn into_batch_op_set_op() {
 #[test]
 fn into_batch_op_delete_op() {
     use crate::batch::IntoBatchOp;
-    let op = write::delete("t").where_(filter::eq("id", 1)).build();
+    let op = write::delete("t")
+        .where_(filter::eq("id", 1))
+        .build()
+        .unwrap();
     let batch_op = op.into_batch_op();
     match batch_op {
         shamir_query_types::batch::BatchOp::Delete(_) => {}

@@ -392,6 +392,14 @@ export class Query {
     if (this.havingFilter !== null && this.groupFields === null) {
       throw new Error('having() requires groupBy()');
     }
+    if (
+      this.paginationMode === 'page' &&
+      (this.pageNumber === 0 || this.pageSize === 0)
+    ) {
+      throw new Error(
+        'page() requires a 1-based page number and a non-zero page size',
+      );
+    }
 
     const q: ReadQuery = { from: this.from };
 

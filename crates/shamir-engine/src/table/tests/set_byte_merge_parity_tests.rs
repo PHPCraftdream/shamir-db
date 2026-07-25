@@ -388,7 +388,8 @@ async fn set_update_indexed_field_reflected_in_index() {
     let set_op = write::upsert("users")
         .key(doc().set("email", "a@b.c"))
         .value(doc().set("email", "a@b.c").set("city", "LA"))
-        .build();
+        .build()
+        .unwrap();
     let result = set_via_implicit_tx(&repo, &table, &set_op).await.unwrap();
     assert_eq!(result.affected, 1);
     assert_eq!(
@@ -408,7 +409,8 @@ async fn set_update_indexed_field_reflected_in_index() {
     let find_la = write::upsert("users")
         .key(doc().set("city", "LA"))
         .value(doc().set("city", "LA").set("flag", true))
-        .build();
+        .build()
+        .unwrap();
     let la = set_via_implicit_tx(&repo, &table, &find_la).await.unwrap();
     assert_eq!(
         la.records[0].get_value_owned("_created"),
@@ -418,7 +420,8 @@ async fn set_update_indexed_field_reflected_in_index() {
     let find_nyc = write::upsert("users")
         .key(doc().set("city", "NYC"))
         .value(doc().set("city", "NYC").set("flag", true))
-        .build();
+        .build()
+        .unwrap();
     let nyc = set_via_implicit_tx(&repo, &table, &find_nyc).await.unwrap();
     assert_eq!(
         nyc.records[0].get_value_owned("_created"),
@@ -435,7 +438,8 @@ async fn set_insert_new_record_counter_delta() {
     let op = write::upsert("t")
         .key(doc().set("email", "a@b.c"))
         .value(doc().set("email", "a@b.c").set("name", "alice"))
-        .build();
+        .build()
+        .unwrap();
     let tx = set_into_tx(&tbl, &op).await;
 
     let token = tbl.table_token();
@@ -466,7 +470,8 @@ async fn set_update_introduces_new_field() {
     let set_op = write::upsert("users")
         .key(doc().set("email", "a@b.c"))
         .value(doc().set("score", 100_i64))
-        .build();
+        .build()
+        .unwrap();
     let result = set_via_implicit_tx(&repo, &table, &set_op).await.unwrap();
     assert_eq!(
         result.records[0].get_value_owned("_created"),
@@ -511,7 +516,8 @@ async fn set_update_unique_indexed_field() {
     let set_op = write::upsert("users")
         .key(doc().set("email", "a@b.c"))
         .value(doc().set("email", "a@b.c").set("name", "ALICE"))
-        .build();
+        .build()
+        .unwrap();
     let result = set_via_implicit_tx(&repo, &table, &set_op).await.unwrap();
     assert_eq!(
         result.records[0].get_value_owned("_created"),
@@ -528,7 +534,8 @@ async fn set_update_unique_indexed_field() {
     let set_new = write::upsert("users")
         .key(doc().set("email", "c@d.e"))
         .value(doc().set("email", "c@d.e").set("name", "carol"))
-        .build();
+        .build()
+        .unwrap();
     let result = set_via_implicit_tx(&repo, &table, &set_new).await.unwrap();
     assert_eq!(
         result.records[0].get_value_owned("_created"),
@@ -565,7 +572,8 @@ async fn set_tx_update_path_counter_delta_zero() {
     let op = write::upsert("t")
         .key(mpack!({ "email": "a@b.c" }))
         .value(mpack!({ "name": "bob" }))
-        .build();
+        .build()
+        .unwrap();
     let tx = set_into_tx(&tbl, &op).await;
 
     let token = tbl.table_token();
@@ -594,7 +602,8 @@ async fn set_tx_noop_skips_staging() {
     let op = write::upsert("t")
         .key(mpack!({ "email": "a@b.c" }))
         .value(mpack!({ "name": "alice" }))
-        .build();
+        .build()
+        .unwrap();
     let tx = set_into_tx(&tbl, &op).await;
 
     let token = tbl.table_token();
@@ -678,7 +687,8 @@ async fn set_merge_omitting_created_at_preserves_original() {
     let op_ins = write::upsert("users")
         .key(doc().set("email", "a@b.c"))
         .value(doc().set("email", "a@b.c").set("name", "alice"))
-        .build();
+        .build()
+        .unwrap();
     let res_ins = set_via_implicit_tx(&repo, &table, &op_ins).await.unwrap();
     assert_eq!(
         res_ins.records[0].get_value_owned("_created"),
@@ -695,7 +705,8 @@ async fn set_merge_omitting_created_at_preserves_original() {
     let op_merge = write::upsert("users")
         .key(doc().set("email", "a@b.c"))
         .value(doc().set("name", "ALICE"))
-        .build();
+        .build()
+        .unwrap();
     let res_merge = set_via_implicit_tx(&repo, &table, &op_merge).await.unwrap();
     assert_eq!(
         res_merge.records[0].get_value_owned("_created"),
@@ -724,7 +735,8 @@ async fn set_insert_new_key_still_stamps_created_at() {
     let op = write::upsert("users")
         .key(doc().set("email", "new@b.c"))
         .value(doc().set("email", "new@b.c").set("name", "newbie"))
-        .build();
+        .build()
+        .unwrap();
     let res = set_via_implicit_tx(&repo, &table, &op).await.unwrap();
     assert_eq!(
         res.records[0].get_value_owned("_created"),
@@ -754,7 +766,8 @@ async fn set_merge_explicit_created_at_is_used() {
     let op_ins = write::upsert("users")
         .key(doc().set("email", "a@b.c"))
         .value(doc().set("email", "a@b.c").set("name", "alice"))
-        .build();
+        .build()
+        .unwrap();
     set_via_implicit_tx(&repo, &table, &op_ins).await.unwrap();
 
     // MERGE with an explicit created_at — must override the original.
@@ -762,7 +775,8 @@ async fn set_merge_explicit_created_at_is_used() {
     let op_merge = write::upsert("users")
         .key(doc().set("email", "a@b.c"))
         .value(doc().set("created_at", explicit_ts))
-        .build();
+        .build()
+        .unwrap();
     let res = set_via_implicit_tx(&repo, &table, &op_merge).await.unwrap();
     assert_eq!(
         res.records[0].get_value_owned("_created"),

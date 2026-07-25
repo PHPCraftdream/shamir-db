@@ -103,7 +103,8 @@ fn test_update_with_filter() {
     let op = write::update("users")
         .where_(filter::eq("id", 1_i64))
         .set(doc().set("name", "New Name").set("status", "active"))
-        .build();
+        .build()
+        .unwrap();
 
     assert_eq!(op.update, TableRef::new("users"));
     assert!(op.where_clause.is_some());
@@ -115,7 +116,8 @@ fn test_update_with_filter() {
 fn test_update_without_filter() {
     let op = write::update("products")
         .set(doc().set("status", "discontinued"))
-        .build();
+        .build()
+        .unwrap();
 
     assert_eq!(op.update, TableRef::new("products"));
     assert!(op.where_clause.is_none());
@@ -127,7 +129,8 @@ fn test_update_with_complex_filter() {
     let op = write::update("orders")
         .where_(filter::eq("status", "pending").and(filter::lt("created_at", "2024-01-01")))
         .set(doc().set("status", "expired"))
-        .build();
+        .build()
+        .unwrap();
 
     assert_eq!(op.update, TableRef::new("orders"));
     assert!(op.where_clause.is_some());
@@ -146,7 +149,8 @@ fn test_update_full_record() {
                 .set("status", "active")
                 .set("created_at", "2024-01-15T10:30:00Z"),
         )
-        .build();
+        .build()
+        .unwrap();
 
     assert_eq!(op.update, TableRef::new("users"));
     assert_eq!(op.set["id"], 1);
@@ -160,7 +164,8 @@ fn test_update_roundtrip() {
     let op = write::update("users")
         .where_(filter::eq("id", 1_i64))
         .set(doc().set("name", "Updated"))
-        .build();
+        .build()
+        .unwrap();
 
     let bytes = rmp_serde::to_vec_named(&op).unwrap();
     let decoded: UpdateOp = rmp_serde::from_slice(&bytes).unwrap();
@@ -174,7 +179,8 @@ fn test_update_roundtrip() {
 fn test_update_serializes_without_optional_where() {
     let op = write::update("users")
         .set(doc().set("status", "active"))
-        .build();
+        .build()
+        .unwrap();
 
     // No where_clause in the built op.
     assert!(op.where_clause.is_none());
@@ -196,7 +202,8 @@ fn test_update_select_changed_mode() {
         .where_(filter::eq("status", "inactive"))
         .set(doc().set("status", "active"))
         .returning(UpdateReturnMode::Changed)
-        .build();
+        .build()
+        .unwrap();
 
     assert_eq!(op.update, TableRef::new("users"));
     assert!(op.select.is_some());
@@ -214,7 +221,8 @@ fn test_update_select_all_mode() {
         .where_(filter::eq("id", 1_i64))
         .set(doc().set("name", "Updated"))
         .returning(UpdateReturnMode::All)
-        .build();
+        .build()
+        .unwrap();
 
     let select = op.select.unwrap();
     assert_eq!(
@@ -229,7 +237,8 @@ fn test_update_select_unchanged_mode() {
         .where_(filter::eq("id", 1_i64))
         .set(doc().set("status", "active"))
         .returning(UpdateReturnMode::Unchanged)
-        .build();
+        .build()
+        .unwrap();
 
     let select = op.select.unwrap();
     assert_eq!(
@@ -244,7 +253,8 @@ fn test_update_select_with_fields() {
         .where_(filter::eq("id", 1_i64))
         .set(doc().set("name", "Updated").set("status", "active"))
         .returning_fields(UpdateReturnMode::Changed, ["id", "name", "status"])
-        .build();
+        .build()
+        .unwrap();
 
     let select = op.select.unwrap();
     assert_eq!(
@@ -268,7 +278,8 @@ fn test_update_select_roundtrip() {
         .where_(filter::eq("id", 1_i64))
         .set(doc().set("name", "Updated"))
         .returning_fields(UpdateReturnMode::Changed, ["id", "name"])
-        .build();
+        .build()
+        .unwrap();
 
     let bytes = rmp_serde::to_vec_named(&op).unwrap();
     let decoded: UpdateOp = rmp_serde::from_slice(&bytes).unwrap();
@@ -289,7 +300,8 @@ fn test_update_without_select() {
     let op = write::update("users")
         .where_(filter::eq("id", 1_i64))
         .set(doc().set("name", "Updated"))
-        .build();
+        .build()
+        .unwrap();
 
     assert!(op.select.is_none());
 }
@@ -299,7 +311,8 @@ fn test_update_select_serializes_without_optional_fields() {
     let op = write::update("users")
         .set(doc().set("status", "active"))
         .returning(UpdateReturnMode::Changed)
-        .build();
+        .build()
+        .unwrap();
     // Verify no fields key is set when returning_fields was not called.
     let sel = op.select.unwrap();
     assert!(sel.fields.is_none());
@@ -316,7 +329,8 @@ fn test_update_select_default_mode() {
     let op = write::update("users")
         .set(doc().set("status", "active"))
         .returning(UpdateReturnMode::Changed)
-        .build();
+        .build()
+        .unwrap();
 
     let bytes = rmp_serde::to_vec_named(&op).unwrap();
     let decoded: UpdateOp = rmp_serde::from_slice(&bytes).unwrap();
@@ -336,7 +350,8 @@ fn test_set_by_primary_key() {
     let op = write::upsert("users")
         .key(doc().set("id", 1_i64))
         .value(doc().set("name", "Alice").set("email", "alice@example.com"))
-        .build();
+        .build()
+        .unwrap();
 
     assert_eq!(op.set, TableRef::new("users"));
     assert_eq!(op.key["id"], 1);
@@ -349,7 +364,8 @@ fn test_set_by_unique_field() {
     let op = write::upsert("users")
         .key(doc().set("email", "alice@example.com"))
         .value(doc().set("name", "Alice Updated"))
-        .build();
+        .build()
+        .unwrap();
 
     assert_eq!(op.set, TableRef::new("users"));
     assert_eq!(op.key["email"], "alice@example.com");
@@ -361,7 +377,8 @@ fn test_set_composite_key() {
     let op = write::upsert("order_items")
         .key(doc().set("order_id", 1_i64).set("product_id", 5_i64))
         .value(doc().set("qty", 3_i64).set("price", 19.99))
-        .build();
+        .build()
+        .unwrap();
 
     assert_eq!(op.set, TableRef::new("order_items"));
     assert_eq!(op.key["order_id"], 1);
@@ -375,7 +392,8 @@ fn test_set_roundtrip() {
     let op = write::upsert("users")
         .key(doc().set("id", 1_i64))
         .value(doc().set("name", "Alice"))
-        .build();
+        .build()
+        .unwrap();
 
     let bytes = rmp_serde::to_vec_named(&op).unwrap();
     let decoded: SetOp = rmp_serde::from_slice(&bytes).unwrap();
@@ -393,7 +411,8 @@ fn test_set_roundtrip() {
 fn test_delete_with_filter() {
     let op = write::delete("users")
         .where_(filter::eq("status", "inactive"))
-        .build();
+        .build()
+        .unwrap();
 
     assert_eq!(op.delete_from, TableRef::new("users"));
 }
@@ -402,7 +421,8 @@ fn test_delete_with_filter() {
 fn test_delete_with_complex_filter() {
     let op = write::delete("logs")
         .where_(filter::lt("created_at", "2023-01-01").and(filter::eq("archived", true)))
-        .build();
+        .build()
+        .unwrap();
 
     assert_eq!(op.delete_from, TableRef::new("logs"));
 }
@@ -411,7 +431,8 @@ fn test_delete_with_complex_filter() {
 fn test_delete_by_id() {
     let op = write::delete("users")
         .where_(filter::eq("id", 42_i64))
-        .build();
+        .build()
+        .unwrap();
 
     assert_eq!(op.delete_from, TableRef::new("users"));
 }
@@ -421,7 +442,8 @@ fn test_delete_roundtrip() {
     // Msgpack roundtrip: build op → serialize → deserialize → verify fields.
     let op = write::delete("users")
         .where_(filter::eq("id", 1_i64))
-        .build();
+        .build()
+        .unwrap();
 
     let bytes = rmp_serde::to_vec_named(&op).unwrap();
     let decoded: DeleteOp = rmp_serde::from_slice(&bytes).unwrap();

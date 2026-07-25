@@ -15,6 +15,7 @@ use shamir_query_types::admin::{ReplDirection, ReplMode, ReplScope, ReplStream};
 use shamir_query_types::batch::BatchOp;
 
 use crate::batch::IntoBatchOp;
+use crate::write::BuilderError;
 
 // ============================================================================
 // ReplScope helper
@@ -231,8 +232,9 @@ pub fn drop_subscription(name: impl Into<String>) -> BatchOp {
 /// Begin an `ALTER SUBSCRIPTION` on an existing subscription.
 ///
 /// Exactly one terminal (`.pause()` / `.resume()` / `.set_profile()`) must be
-/// called before `.build()`; `.build()` without a terminal call panics (the op
-/// DTO requires a non-default `SubAction`).
+/// called before `.build()`; `.build()` without a terminal call returns
+/// [`Err(BuilderError::MissingAction)`](crate::write::BuilderError::MissingAction)
+/// (the op DTO requires a non-default `SubAction`).
 pub fn alter_subscription(name: impl Into<String>) -> AlterSubscriptionBuilder {
     AlterSubscriptionBuilder {
         name: name.into(),
@@ -265,27 +267,34 @@ impl AlterSubscriptionBuilder {
         self
     }
 
-    /// Finalize into a [`BatchOp`]. Panics if no terminal action was set.
-    pub fn build(self) -> BatchOp {
-        let action = self.action.expect(
-            "alter_subscription().build() requires a terminal action (pause/resume/set_profile)",
-        );
-        BatchOp::AlterSubscription(AlterSubscriptionOp {
+    /// Finalize into a [`BatchOp`].
+    ///
+    /// Returns [`Err(BuilderError::MissingAction)`](BuilderError::MissingAction)
+    /// if no terminal action (`.pause()` / `.resume()` / `.set_profile()`) was
+    /// set — the `AlterSubscriptionOp` DTO requires a non-default `SubAction`.
+    pub fn build(self) -> Result<BatchOp, BuilderError> {
+        Ok(BatchOp::AlterSubscription(AlterSubscriptionOp {
             alter_subscription: self.name,
-            action,
-        })
+            action: self.action.ok_or(BuilderError::MissingAction)?,
+        }))
     }
 }
 
 impl From<AlterSubscriptionBuilder> for BatchOp {
     fn from(b: AlterSubscriptionBuilder) -> Self {
+        // The `From` conversion is the infallible escape hatch used by the
+        // ergonomic `Batch::*` API (which itself is infallible). It preserves
+        // the historical panic-on-malformed-builder behavior; callers wanting
+        // a typed error should call `.build()` directly.
         b.build()
+            .expect("AlterSubscriptionBuilder::into(): terminal action is required")
     }
 }
 
 impl IntoBatchOp for AlterSubscriptionBuilder {
     fn into_batch_op(self) -> BatchOp {
         self.build()
+            .expect("AlterSubscriptionBuilder::into_batch_op(): terminal action is required")
     }
 }
 

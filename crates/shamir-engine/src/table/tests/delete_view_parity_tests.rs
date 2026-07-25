@@ -287,7 +287,8 @@ async fn execute_delete_tx_removes_regular_and_unique_index_entries() {
     // Delete via the production implicit-tx path (migrated RecordView lens).
     let op = write::delete("users")
         .where_(filter::eq("city", "NYC"))
-        .build();
+        .build()
+        .unwrap();
     let refs = new_map();
     delete_via_tx(&repo, &table, &op, &refs).await.unwrap();
 

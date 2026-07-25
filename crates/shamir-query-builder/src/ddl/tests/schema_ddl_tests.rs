@@ -419,7 +419,8 @@ fn field_one_of_wire() {
                 .string()
                 .one_of(vec![mpack!("active"), mpack!("archived")]),
         )
-        .build();
+        .build()
+        .unwrap();
     let j = roundtrip(&op);
     assert_eq!(j["rule"]["one_of"], mpack!(["active", "archived"]));
 }
@@ -429,7 +430,8 @@ fn field_one_of_wire() {
 fn field_one_of_absent_when_none() {
     let op = ddl::add_schema_rule("users")
         .rule(ddl::field(["status"]).string())
-        .build();
+        .build()
+        .unwrap();
     let bytes = rmp_serde::to_vec_named(&op).unwrap();
     let j: shamir_types::types::value::QueryValue = rmp_serde::from_slice(&bytes).unwrap();
     assert!(
@@ -448,7 +450,8 @@ fn field_one_of_absent_when_none() {
 fn field_default_int_wire() {
     let op = ddl::add_schema_rule("users")
         .rule(ddl::field(["count"]).int().default(mpack!(5)))
-        .build();
+        .build()
+        .unwrap();
     let j = roundtrip(&op);
     assert_eq!(j["rule"]["default"], mpack!(5));
 }
@@ -458,7 +461,8 @@ fn field_default_int_wire() {
 fn field_default_str_wire() {
     let op = ddl::add_schema_rule("users")
         .rule(ddl::field(["role"]).string().default(mpack!("guest")))
-        .build();
+        .build()
+        .unwrap();
     let j = roundtrip(&op);
     assert_eq!(j["rule"]["default"], mpack!("guest"));
 }
@@ -469,7 +473,8 @@ fn field_default_str_wire() {
 fn field_default_absent_when_none() {
     let op = ddl::add_schema_rule("users")
         .rule(ddl::field(["status"]).string())
-        .build();
+        .build()
+        .unwrap();
     let bytes = rmp_serde::to_vec_named(&op).unwrap();
     let j: shamir_types::types::value::QueryValue = rmp_serde::from_slice(&bytes).unwrap();
     assert!(
@@ -487,7 +492,8 @@ fn field_default_absent_when_none() {
 fn field_set_type_tag_wire() {
     let op = ddl::add_schema_rule("users")
         .rule(ddl::field(["tags"]).set())
-        .build();
+        .build()
+        .unwrap();
     let j = roundtrip(&op);
     assert_eq!(j["rule"]["type"], "set");
 }
@@ -497,9 +503,19 @@ fn field_set_type_tag_wire() {
 fn field_null_type_tag_wire() {
     let op = ddl::add_schema_rule("users")
         .rule(ddl::field(["erased"]).null_type())
-        .build();
+        .build()
+        .unwrap();
     let j = roundtrip(&op);
     assert_eq!(j["rule"]["type"], "null");
+}
+
+/// `add_schema_rule(...).build()` with no `.rule(...)` returns Err (formerly a
+/// panic via `.expect`).
+#[test]
+fn add_schema_rule_without_rule_returns_err() {
+    use crate::write::BuilderError;
+    let err = ddl::add_schema_rule("users").build().unwrap_err();
+    assert_eq!(err, BuilderError::MissingRule);
 }
 
 // ============================================================================

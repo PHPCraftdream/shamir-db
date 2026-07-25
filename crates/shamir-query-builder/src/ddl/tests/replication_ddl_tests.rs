@@ -226,7 +226,7 @@ fn drop_subscription_basic() {
 
 #[test]
 fn alter_subscription_pause() {
-    let op = ddl::alter_subscription("sub1").pause().build();
+    let op = ddl::alter_subscription("sub1").pause().build().unwrap();
     match op {
         BatchOp::AlterSubscription(a) => {
             assert_eq!(a.alter_subscription, "sub1");
@@ -238,7 +238,7 @@ fn alter_subscription_pause() {
 
 #[test]
 fn alter_subscription_resume() {
-    let op = ddl::alter_subscription("sub1").resume().build();
+    let op = ddl::alter_subscription("sub1").resume().build().unwrap();
     match op {
         BatchOp::AlterSubscription(a) => {
             assert_eq!(a.action, SubAction::Resume);
@@ -251,13 +251,23 @@ fn alter_subscription_resume() {
 fn alter_subscription_set_profile() {
     let op = ddl::alter_subscription("sub1")
         .set_profile("fast_profile")
-        .build();
+        .build()
+        .unwrap();
     match op {
         BatchOp::AlterSubscription(a) => {
             assert_eq!(a.action, SubAction::SetProfile("fast_profile".to_string()));
         }
         _ => panic!("expected AlterSubscription"),
     }
+}
+
+/// `alter_subscription(...).build()` with no terminal action returns Err
+/// (formerly a panic via `.expect`).
+#[test]
+fn alter_subscription_without_action_returns_err() {
+    use crate::write::BuilderError;
+    let err = ddl::alter_subscription("sub1").build().unwrap_err();
+    assert_eq!(err, BuilderError::MissingAction);
 }
 
 // ============================================================================

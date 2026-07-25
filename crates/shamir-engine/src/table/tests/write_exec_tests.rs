@@ -257,7 +257,8 @@ async fn test_execute_update_with_filter() {
     let op = write::update("users")
         .where_(filter::eq("status", "active"))
         .set(doc().set("status", "premium"))
-        .build();
+        .build()
+        .unwrap();
 
     let result = update_via_tx(&repo, &table, &op, &refs).await.unwrap();
 
@@ -278,7 +279,8 @@ async fn test_execute_update_returns_changed() {
         .where_(filter::eq("status", "active"))
         .set(doc().set("status", "premium"))
         .returning(UpdateReturnMode::Changed)
-        .build();
+        .build()
+        .unwrap();
 
     let result = update_via_tx(&repo, &table, &op, &refs).await.unwrap();
 
@@ -303,7 +305,8 @@ async fn test_execute_update_no_match() {
     let op = write::update("users")
         .where_(filter::eq("status", "deleted"))
         .set(doc().set("status", "active"))
-        .build();
+        .build()
+        .unwrap();
 
     let result = update_via_tx(&repo, &table, &op, &refs).await.unwrap();
     assert_eq!(result.affected, 0);
@@ -318,7 +321,8 @@ async fn test_execute_update_all_records() {
     let op = write::update("users")
         .set(doc().set("verified", true))
         .returning(UpdateReturnMode::All)
-        .build();
+        .build()
+        .unwrap();
 
     let result = update_via_tx(&repo, &table, &op, &refs).await.unwrap();
     assert_eq!(result.affected, 3);
@@ -341,7 +345,8 @@ async fn test_execute_update_unchanged_mode() {
         .where_(filter::eq("status", "active"))
         .set(doc().set("status", "active"))
         .returning(UpdateReturnMode::Unchanged)
-        .build();
+        .build()
+        .unwrap();
 
     let result = update_via_tx(&repo, &table, &op, &refs).await.unwrap();
     // Nothing actually changed
@@ -361,7 +366,8 @@ async fn test_execute_delete_with_filter() {
 
     let op = write::delete("users")
         .where_(filter::eq("status", "inactive"))
-        .build();
+        .build()
+        .unwrap();
 
     let result = delete_via_tx(&repo, &table, &op, &refs).await.unwrap();
 
@@ -377,7 +383,8 @@ async fn test_execute_delete_no_match() {
 
     let op = write::delete("users")
         .where_(filter::eq("status", "deleted"))
-        .build();
+        .build()
+        .unwrap();
 
     let result = delete_via_tx(&repo, &table, &op, &refs).await.unwrap();
     assert_eq!(result.affected, 0);
@@ -392,7 +399,8 @@ async fn test_execute_delete_multiple() {
     // Delete all active users (Alice, Bob)
     let op = write::delete("users")
         .where_(filter::eq("status", "active"))
-        .build();
+        .build()
+        .unwrap();
 
     let result = delete_via_tx(&repo, &table, &op, &refs).await.unwrap();
     assert_eq!(result.affected, 2);
@@ -412,7 +420,8 @@ async fn test_execute_delete_returning_returns_deleted_rows() {
     let op = write::delete("users")
         .where_(filter::eq("status", "active"))
         .returning()
-        .build();
+        .build()
+        .unwrap();
 
     let result = delete_via_tx(&repo, &table, &op, &refs).await.unwrap();
     assert_eq!(result.affected, 2);
@@ -444,7 +453,8 @@ async fn test_execute_delete_returning_fields_projects() {
     let op = write::delete("users")
         .where_(filter::eq("status", "inactive"))
         .returning_fields(["name"])
-        .build();
+        .build()
+        .unwrap();
 
     let result = delete_via_tx(&repo, &table, &op, &refs).await.unwrap();
     assert_eq!(result.affected, 1);
@@ -470,7 +480,8 @@ async fn test_execute_delete_without_returning_has_empty_records() {
     // compatibility with every existing caller.
     let op = write::delete("users")
         .where_(filter::eq("status", "active"))
-        .build();
+        .build()
+        .unwrap();
 
     let result = delete_via_tx(&repo, &table, &op, &refs).await.unwrap();
     assert_eq!(result.affected, 2);
@@ -550,7 +561,8 @@ async fn test_execute_update_returning_fields_projects() {
         .where_(filter::eq("status", "active"))
         .set(doc().set("status", "premium"))
         .returning_fields(UpdateReturnMode::Changed, ["name", "status"])
-        .build();
+        .build()
+        .unwrap();
 
     let result = update_via_tx(&repo, &table, &op, &refs).await.unwrap();
     assert_eq!(result.affected, 2);
@@ -593,7 +605,8 @@ async fn test_insert_update_delete_pipeline() {
         .where_(filter::eq("name", "Bob"))
         .set(doc().set("score", 75_i64))
         .returning(UpdateReturnMode::Changed)
-        .build();
+        .build()
+        .unwrap();
     let r = update_via_tx(&repo, &table, &update_op, &refs)
         .await
         .unwrap();
@@ -606,7 +619,8 @@ async fn test_insert_update_delete_pipeline() {
     // 3. Delete: remove low scorers
     let delete_op = write::delete("users")
         .where_(filter::lt("score", 80_i64))
-        .build();
+        .build()
+        .unwrap();
     let r = delete_via_tx(&repo, &table, &delete_op, &refs)
         .await
         .unwrap();
@@ -626,7 +640,8 @@ async fn test_execute_set_insert_new() {
     let op = write::upsert("users")
         .key(doc().set("email", "alice@example.com"))
         .value(doc().set("email", "alice@example.com").set("name", "Alice"))
-        .build();
+        .build()
+        .unwrap();
 
     let result = set_via_tx(&repo, &table, &op).await.unwrap();
 
@@ -658,7 +673,8 @@ async fn test_execute_set_update_existing() {
                 .set("status", "vip")
                 .set("score", 100_i64),
         )
-        .build();
+        .build()
+        .unwrap();
 
     let result = set_via_tx(&repo, &table, &op).await.unwrap();
 
@@ -688,7 +704,8 @@ async fn test_execute_set_no_match_inserts() {
     let op = write::upsert("users")
         .key(doc().set("name", "Zara"))
         .value(doc().set("name", "Zara").set("age", 22_i64))
-        .build();
+        .build()
+        .unwrap();
 
     let result = set_via_tx(&repo, &table, &op).await.unwrap();
 
@@ -749,7 +766,8 @@ async fn test_interner_persisted_after_update() {
     // Update with a brand new field key
     let op = write::update("users")
         .set(doc().set("completely_new_key", 42_i64))
-        .build();
+        .build()
+        .unwrap();
     update_via_tx(&repo, &table, &op, &refs).await.unwrap();
 
     // The new key should be persisted
@@ -776,7 +794,8 @@ async fn test_interner_persisted_after_set() {
                 .set("unique_field_xyz", "val")
                 .set("another_new_field", 99_i64),
         )
-        .build();
+        .build()
+        .unwrap();
     set_via_tx(&repo, &table, &op).await.unwrap();
 
     let interner = table.interner().get().await.unwrap();
@@ -829,7 +848,8 @@ async fn test_set_computed_field() {
                 .set("email", "X@Y.Z")
                 .set("email_norm", func("strings/lower", [col("email")])),
         )
-        .build();
+        .build()
+        .unwrap();
 
     let result = set_via_tx(&repo, &table, &op).await.unwrap();
     assert_eq!(
@@ -882,7 +902,8 @@ async fn test_set_nontx_insert_parity() {
                 .set("name", "Parity")
                 .set("score", 42_i64),
         )
-        .build();
+        .build()
+        .unwrap();
 
     let result = set_via_tx(&repo, &table, &op).await.unwrap();
 
@@ -939,7 +960,8 @@ async fn test_set_nontx_update_parity() {
                 .set("status", "vip")
                 .set("badge", "gold"),
         )
-        .build();
+        .build()
+        .unwrap();
 
     let result = set_via_tx(&repo, &table, &op).await.unwrap();
 

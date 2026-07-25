@@ -9,6 +9,7 @@ use shamir_query_types::filter::FilterValue;
 use shamir_types::types::value::QueryValue;
 
 use crate::batch::IntoBatchOp;
+use crate::write::BuilderError;
 
 // ── field() fluent API ─────────────────────────────────────────────────
 
@@ -483,26 +484,32 @@ impl AddSchemaRuleBuilder {
 
     /// Finalize into a [`BatchOp`].
     ///
-    /// # Panics
-    /// Panics if no rule was set.
-    pub fn build(self) -> BatchOp {
-        BatchOp::AddSchemaRule(AddSchemaRuleOp {
+    /// Returns [`Err(BuilderError::MissingRule)`](BuilderError::MissingRule)
+    /// if [`AddSchemaRuleBuilder::rule`] was never called.
+    pub fn build(self) -> Result<BatchOp, BuilderError> {
+        Ok(BatchOp::AddSchemaRule(AddSchemaRuleOp {
             add_schema_rule: self.table,
             repo: self.repo,
-            rule: self.rule.expect("AddSchemaRuleBuilder: rule is required"),
-        })
+            rule: self.rule.ok_or(BuilderError::MissingRule)?,
+        }))
     }
 }
 
 impl From<AddSchemaRuleBuilder> for BatchOp {
     fn from(b: AddSchemaRuleBuilder) -> Self {
+        // The `From` conversion is the infallible escape hatch used by the
+        // ergonomic `Batch::*` API (which itself is infallible). It preserves
+        // the historical panic-on-malformed-builder behavior; callers wanting
+        // a typed error should call `.build()` directly.
         b.build()
+            .expect("AddSchemaRuleBuilder::into(): rule is required")
     }
 }
 
 impl IntoBatchOp for AddSchemaRuleBuilder {
     fn into_batch_op(self) -> BatchOp {
         self.build()
+            .expect("AddSchemaRuleBuilder::into_batch_op(): rule is required")
     }
 }
 

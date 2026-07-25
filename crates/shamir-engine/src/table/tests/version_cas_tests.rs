@@ -65,7 +65,8 @@ async fn commit_update(repo: &RepoInstance, tbl: &TableManager, name: &str, new_
     let op = write::update("t")
         .where_(filter::eq("name", name))
         .set(shamir_types::types::value::QueryValue::Map(m))
-        .build();
+        .build()
+        .unwrap();
     tbl.execute_update_tx(
         &op,
         &ctx,
@@ -173,7 +174,8 @@ async fn expected_version_matching_succeeds_stale_fails() {
         .where_(filter::eq("name", "alice2"))
         .set(mpack!({ "name": "alice3" }))
         .expected_version(v1)
-        .build();
+        .build()
+        .unwrap();
     let (mut tx, _g) = repo.begin_tx(IsolationLevel::Serializable).await.unwrap();
     let result = tbl
         .execute_update_tx(
@@ -211,7 +213,8 @@ async fn expected_version_matching_succeeds_stale_fails() {
         .where_(filter::eq("name", "alice2"))
         .set(mpack!({ "name": "alice3" }))
         .expected_version(fresh_v)
-        .build();
+        .build()
+        .unwrap();
     let (mut tx2, _g2) = repo.begin_tx(IsolationLevel::Serializable).await.unwrap();
     let result_ok = tbl
         .execute_update_tx(
@@ -242,7 +245,8 @@ async fn expected_version_zero_match_is_noop() {
         .where_(filter::eq("name", "nonexistent"))
         .set(mpack!({ "name": "x" }))
         .expected_version(42)
-        .build();
+        .build()
+        .unwrap();
     let (mut tx, _g) = repo.begin_tx(IsolationLevel::Serializable).await.unwrap();
     let result = tbl
         .execute_update_tx(
@@ -311,6 +315,7 @@ async fn concurrent_cas_exactly_one_wins() {
             .set(QueryValue::Map(m))
             .expected_version(v1)
             .build()
+            .unwrap()
     };
 
     let repo_a = repo.clone();
@@ -396,7 +401,8 @@ async fn concurrent_cas_exactly_one_wins() {
         .where_(filter::eq("name", "counter"))
         .set(mpack!({ "name": "retry_succeeded" }))
         .expected_version(fresh_v)
-        .build();
+        .build()
+        .unwrap();
     let (mut tx3, _g3) = repo.begin_tx(IsolationLevel::Serializable).await.unwrap();
     tbl.execute_update_tx(
         &retry_op,
@@ -453,6 +459,7 @@ async fn concurrent_cas_exactly_one_wins_under_snapshot() {
             .set(QueryValue::Map(m))
             .expected_version(v1)
             .build()
+            .unwrap()
     };
 
     let repo_a = repo.clone();
@@ -552,7 +559,8 @@ async fn concurrent_cas_exactly_one_wins_under_snapshot() {
         .where_(filter::eq("name", "counter"))
         .set(mpack!({ "name": "retry_succeeded" }))
         .expected_version(fresh_v)
-        .build();
+        .build()
+        .unwrap();
     let (mut tx3, _g3) = repo.begin_tx(IsolationLevel::Snapshot).await.unwrap();
     tbl.execute_update_tx(
         &retry_op,
@@ -605,7 +613,8 @@ async fn non_cas_snapshot_writes_to_different_keys_do_not_serialize() {
         let op = write::update("t")
             .where_(filter::eq("name", "alice"))
             .set(mpack!({ "name": "alice2" }))
-            .build();
+            .build()
+            .unwrap();
         tbl_a
             .execute_update_tx(
                 &op,
@@ -627,7 +636,8 @@ async fn non_cas_snapshot_writes_to_different_keys_do_not_serialize() {
         let op = write::update("t")
             .where_(filter::eq("name", "bob"))
             .set(mpack!({ "name": "bob2" }))
-            .build();
+            .build()
+            .unwrap();
         tbl_b
             .execute_update_tx(
                 &op,

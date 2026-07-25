@@ -759,7 +759,8 @@ async fn pessimistic_batch_timeout_releases_level3_locks_for_subsequent_tx() {
                 write::update("users")
                     .set(doc().set("v", 10_i64))
                     .where_(filter::eq("k", 1_i64))
-                    .build(),
+                    .build()
+                    .unwrap(),
             ),
             return_result: false,
             after: Vec::new(),
@@ -843,7 +844,8 @@ async fn pessimistic_batch_timeout_releases_level3_locks_for_subsequent_tx() {
                 write::update("users")
                     .set(doc().set("v", 99_i64))
                     .where_(filter::eq("k", 1_i64))
-                    .build(),
+                    .build()
+                    .unwrap(),
             ),
             return_result: true,
             after: Vec::new(),

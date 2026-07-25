@@ -11,6 +11,7 @@ use crate::val::IntoFieldPath;
 
 use super::conds::{where_methods, Conds};
 use super::into_select_item::IntoSelectItem;
+use super::QueryBuildError;
 
 /// Fluent builder for [`ReadQuery`].
 ///
@@ -325,7 +326,52 @@ impl Query {
     // ── terminal ────────────────────────────────────────────────
 
     /// Consume the builder and produce the wire-ready [`ReadQuery`].
+    ///
+    /// This is the **permissive / legacy** terminal: it performs no validation
+    /// (e.g. `having()` without `group_by()`, or `page=0`, are emitted as-is)
+    /// and never fails. It is kept infallible for backward compatibility with
+    /// the many existing call sites.
+    ///
+    /// For the validating sibling that mirrors the checks the TS builder
+    /// (`shamir-client-ts`) enforces, use [`Query::try_build`].
     pub fn build(self) -> ReadQuery {
+        self.build_inner()
+    }
+
+    /// Consume the builder, run the client-side validation pass, and produce
+    /// the wire-ready [`ReadQuery`].
+    ///
+    /// This is the **fallible / validating** sibling of [`Query::build`]. It
+    /// constructs the identical [`ReadQuery`] as `build()`, but first rejects
+    /// semantically ill-formed queries (matching what the TS builder throws in
+    /// `build()`):
+    /// - [`QueryBuildError::HavingWithoutGroupBy`] — `.having(f)` without a
+    ///   prior `.group_by(...)`.
+    /// - [`QueryBuildError::InvalidPage`] / [`QueryBuildError::InvalidPageSize`]
+    ///   — `page()` with `page == 0` / `page_size == 0`.
+    ///
+    /// `build()` is unchanged and remains the lenient path for existing call
+    /// sites; new code that wants the parity checks should prefer `try_build()`.
+    pub fn try_build(self) -> Result<ReadQuery, QueryBuildError> {
+        if self.having.is_some() && self.group_by_fields.is_empty() {
+            return Err(QueryBuildError::HavingWithoutGroupBy);
+        }
+        if let Pagination::Page { page, page_size } = &self.pagination {
+            if *page == 0 {
+                return Err(QueryBuildError::InvalidPage { page: *page });
+            }
+            if *page_size == 0 {
+                return Err(QueryBuildError::InvalidPageSize {
+                    page_size: *page_size,
+                });
+            }
+        }
+        Ok(self.build_inner())
+    }
+
+    /// Shared construction used by both [`build`](Query::build) (permissive)
+    /// and [`try_build`](Query::try_build) (validating).
+    fn build_inner(self) -> ReadQuery {
         let group_by = if !self.group_by_fields.is_empty() || self.having.is_some() {
             Some(GroupBy {
                 fields: self.group_by_fields,

@@ -5,13 +5,15 @@ use shamir_query_types::write::{UpdateOp, UpdateSelect};
 use shamir_query_types::TableRef;
 use shamir_types::types::value::QueryValue;
 
+use super::BuilderError;
+
 pub use shamir_query_types::write::UpdateReturnMode;
 
 /// Builder for [`UpdateOp`].
 pub struct Update {
     table_ref: TableRef,
     where_clause: Option<Filter>,
-    set_value: QueryValue,
+    set_value: Option<QueryValue>,
     select: Option<UpdateSelect>,
     expected_version: Option<u64>,
 }
@@ -27,7 +29,7 @@ impl Update {
         Self {
             table_ref: TableRef::new(table),
             where_clause: None,
-            set_value: QueryValue::Null,
+            set_value: None,
             select: None,
             expected_version: None,
         }
@@ -38,7 +40,7 @@ impl Update {
         Self {
             table_ref: TableRef::with_repo(repo, table),
             where_clause: None,
-            set_value: QueryValue::Null,
+            set_value: None,
             select: None,
             expected_version: None,
         }
@@ -55,7 +57,7 @@ impl Update {
     /// Accepts a [`Doc`](super::doc::Doc) (via `Into<QueryValue>`) or any
     /// `QueryValue` directly (e.g. from `mpack!({...})`).
     pub fn set(mut self, doc: impl Into<QueryValue>) -> Self {
-        self.set_value = doc.into();
+        self.set_value = Some(doc.into());
         self
     }
 
@@ -94,13 +96,19 @@ impl Update {
     }
 
     /// Consume the builder and produce the wire DTO.
-    pub fn build(self) -> UpdateOp {
-        UpdateOp {
+    ///
+    /// Returns [`Err(BuilderError::MissingSetValue)`](BuilderError::MissingSetValue)
+    /// if [`Update::set`] was never called — an update with no payload is a
+    /// no-op/mistake. A deliberate `.set(QueryValue::Null)` still builds
+    /// successfully (the sentinel-vs-real-null ambiguity of the old
+    /// `QueryValue::Null` default is gone: absence is tracked explicitly).
+    pub fn build(self) -> Result<UpdateOp, BuilderError> {
+        Ok(UpdateOp {
             update: self.table_ref,
             where_clause: self.where_clause,
-            set: self.set_value,
+            set: self.set_value.ok_or(BuilderError::MissingSetValue)?,
             select: self.select,
             expected_version: self.expected_version,
-        }
+        })
     }
 }

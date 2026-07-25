@@ -219,7 +219,8 @@ fn update_basic() {
     let op = update("users")
         .where_(filter::eq("id", 1_i64))
         .set(doc().set("name", "Bob"))
-        .build();
+        .build()
+        .unwrap();
     let bytes = rmp_serde::to_vec_named(&op).unwrap();
     let got: QueryValue = rmp_serde::from_slice(&bytes).unwrap();
     assert_eq!(got["update"], QueryValue::Str("users".to_string()));
@@ -240,7 +241,8 @@ fn update_with_returning_all() {
         .where_(filter::eq("id", 1_i64))
         .set(doc().set("active", false))
         .returning(UpdateReturnMode::All)
-        .build();
+        .build()
+        .unwrap();
     let bytes = rmp_serde::to_vec_named(&op).unwrap();
     let got: QueryValue = rmp_serde::from_slice(&bytes).unwrap();
     assert_eq!(
@@ -260,7 +262,8 @@ fn update_with_returning_fields() {
         .where_(filter::eq("id", 1_i64))
         .set(doc().set("name", "X"))
         .returning_fields(UpdateReturnMode::Changed, ["id", "name"])
-        .build();
+        .build()
+        .unwrap();
     let bytes = rmp_serde::to_vec_named(&op).unwrap();
     let got: QueryValue = rmp_serde::from_slice(&bytes).unwrap();
     assert_eq!(
@@ -276,7 +279,8 @@ fn update_with_returning_fields() {
 fn update_with_repo() {
     let op = Update::with_repo("hot", "sessions")
         .set(mpack!({"renewed": true}))
-        .build();
+        .build()
+        .unwrap();
     let bytes = rmp_serde::to_vec_named(&op).unwrap();
     let got: QueryValue = rmp_serde::from_slice(&bytes).unwrap();
     assert_eq!(got["update"], mpack!(["hot", "sessions"]));
@@ -285,7 +289,10 @@ fn update_with_repo() {
 #[test]
 fn update_no_where() {
     // An update without where is valid (updates all records).
-    let op = update("users").set(doc().set("active", false)).build();
+    let op = update("users")
+        .set(doc().set("active", false))
+        .build()
+        .unwrap();
     let bytes = rmp_serde::to_vec_named(&op).unwrap();
     let got: QueryValue = rmp_serde::from_slice(&bytes).unwrap();
     if let QueryValue::Map(ref m) = got {
@@ -302,7 +309,8 @@ fn upsert_basic() {
     let op = upsert("cache")
         .key(mpack!("session:abc"))
         .value(doc().set("data", "payload"))
-        .build();
+        .build()
+        .unwrap();
     let bytes = rmp_serde::to_vec_named(&op).unwrap();
     let got: QueryValue = rmp_serde::from_slice(&bytes).unwrap();
     assert_eq!(got["set"], QueryValue::Str("cache".to_string()));
@@ -317,7 +325,8 @@ fn upsert_with_repo() {
     let op = Upsert::with_repo("hot", "kv")
         .key(mpack!("k1"))
         .value(mpack!(42))
-        .build();
+        .build()
+        .unwrap();
     let bytes = rmp_serde::to_vec_named(&op).unwrap();
     let got: QueryValue = rmp_serde::from_slice(&bytes).unwrap();
     assert_eq!(got["set"], mpack!(["hot", "kv"]));
@@ -332,7 +341,8 @@ fn upsert_with_doc_value() {
     let op = upsert("users")
         .key(mpack!({"email": "a@x.com"}))
         .value(doc().set("name", "Alice").set("age", 30))
-        .build();
+        .build()
+        .unwrap();
     let bytes = rmp_serde::to_vec_named(&op).unwrap();
     let got: QueryValue = rmp_serde::from_slice(&bytes).unwrap();
     assert_eq!(got["value"]["name"], QueryValue::Str("Alice".to_string()));
@@ -347,7 +357,8 @@ fn upsert_with_doc_value() {
 fn delete_basic() {
     let op = delete("sessions")
         .where_(filter::eq("expired", true))
-        .build();
+        .build()
+        .unwrap();
     let expected = mpack!({
         "delete_from": "sessions",
         "where": {
@@ -363,7 +374,8 @@ fn delete_basic() {
 fn delete_with_repo() {
     let op = Delete::with_repo("hot", "sessions")
         .where_(filter::eq("expired", true))
-        .build();
+        .build()
+        .unwrap();
     let bytes = rmp_serde::to_vec_named(&op).unwrap();
     let got: QueryValue = rmp_serde::from_slice(&bytes).unwrap();
     assert_eq!(got["delete_from"], mpack!(["hot", "sessions"]));
@@ -374,7 +386,7 @@ fn delete_complex_where() {
     use crate::filter::FilterExt;
 
     let f = filter::eq("status", "inactive").and(filter::lt("last_seen", 1000_i64));
-    let op = delete("users").where_(f).build();
+    let op = delete("users").where_(f).build().unwrap();
     let bytes = rmp_serde::to_vec_named(&op).unwrap();
     let got: QueryValue = rmp_serde::from_slice(&bytes).unwrap();
     assert_eq!(got["delete_from"], QueryValue::Str("users".to_string()));
@@ -385,9 +397,49 @@ fn delete_complex_where() {
 }
 
 #[test]
-#[should_panic(expected = "Delete::build() requires a where clause")]
-fn delete_without_where_panics() {
-    let _ = delete("users").build();
+fn delete_without_where_returns_err() {
+    // build() now returns Err instead of panicking.
+    let err = delete("users").build().unwrap_err();
+    assert_eq!(err, BuilderError::MissingWhereClause);
+}
+
+#[test]
+fn update_without_set_returns_err() {
+    let err = update("users").build().unwrap_err();
+    assert_eq!(err, BuilderError::MissingSetValue);
+}
+
+#[test]
+fn update_set_null_still_builds() {
+    // Regression for the representation fix: a deliberate .set(QueryValue::Null)
+    // must build successfully — absence is tracked explicitly, not via the Null
+    // sentinel, so a real Null value is distinguishable from "never called".
+    let op = update("users").set(QueryValue::Null).build().unwrap();
+    assert_eq!(op.set, QueryValue::Null);
+}
+
+#[test]
+fn upsert_without_key_returns_err() {
+    let err = upsert("cache").value(mpack!({"v": 1})).build().unwrap_err();
+    assert_eq!(err, BuilderError::MissingKey);
+}
+
+#[test]
+fn upsert_without_value_returns_err() {
+    let err = upsert("cache").key(mpack!("k")).build().unwrap_err();
+    assert_eq!(err, BuilderError::MissingValue);
+}
+
+#[test]
+fn upsert_key_null_value_null_still_builds() {
+    // Both set deliberately to Null — must build Ok (representation fix).
+    let op = upsert("cache")
+        .key(QueryValue::Null)
+        .value(QueryValue::Null)
+        .build()
+        .unwrap();
+    assert_eq!(op.key, QueryValue::Null);
+    assert_eq!(op.value, QueryValue::Null);
 }
 
 // ============================================================================
@@ -424,7 +476,8 @@ fn upsert_with_computed_value() {
                 .set("raw_name", "ALICE")
                 .set("name", func("strings/lower", [col("raw_name")])),
         )
-        .build();
+        .build()
+        .unwrap();
     let bytes = rmp_serde::to_vec_named(&op).unwrap();
     let got: QueryValue = rmp_serde::from_slice(&bytes).unwrap();
     assert_eq!(

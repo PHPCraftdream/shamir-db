@@ -68,7 +68,8 @@ fn canonical_ops() -> Vec<(&'static str, BatchOp)> {
             "alter_subscription_set_profile",
             ddl::alter_subscription("sub1")
                 .set_profile("cluster2")
-                .build(),
+                .build()
+                .unwrap(),
         ),
         ("list_publications", ddl::list_publications()),
         ("list_subscriptions", ddl::list_subscriptions()),

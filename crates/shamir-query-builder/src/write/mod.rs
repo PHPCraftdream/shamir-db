@@ -51,12 +51,14 @@
 //!     .build();
 //! ```
 
+mod builder_error;
 mod delete;
 mod doc;
 mod insert;
 mod update;
 mod upsert;
 
+pub use builder_error::*;
 pub use delete::*;
 pub use doc::*;
 pub use insert::*;

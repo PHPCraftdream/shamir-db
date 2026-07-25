@@ -290,6 +290,18 @@ describe('pagination', () => {
     });
   });
 
+  it('page(0, ...) throws on build', () => {
+    expect(() => Query.from('items').page(0, 25).build()).toThrow(
+      /page\(\) requires a 1-based page number/,
+    );
+  });
+
+  it('page(..., 0) throws on build', () => {
+    expect(() => Query.from('items').page(1, 0).build()).toThrow(
+      /non-zero page size/,
+    );
+  });
+
   it('countTotal sets the flag only when true', () => {
     expect(Query.from('items').countTotal().build().count_total).toBe(true);
     expect(Query.from('items').build().count_total).toBeUndefined();

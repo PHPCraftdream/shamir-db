@@ -4,12 +4,16 @@ use shamir_query_types::filter::Filter;
 use shamir_query_types::write::{DeleteOp, DeleteSelect};
 use shamir_query_types::TableRef;
 
+use super::BuilderError;
+
 /// Builder for [`DeleteOp`].
 ///
 /// The WHERE clause is **required** by the wire DTO for safety. Calling
-/// [`Delete::build`] without a prior [`Delete::where_`] call will panic
-/// with a clear message. This is a deliberate programmer-error guard —
-/// accidentally deleting all records in a table should never be silent.
+/// [`Delete::build`] without a prior [`Delete::where_`] call returns
+/// [`Err(BuilderError::MissingWhereClause)`](BuilderError::MissingWhereClause)
+/// rather than silently deleting every row in the table. This is a deliberate
+/// programmer-error guard — accidentally deleting all records in a table should
+/// never be silent.
 pub struct Delete {
     table_ref: TableRef,
     where_clause: Option<Filter>,
@@ -80,18 +84,15 @@ impl Delete {
 
     /// Consume the builder and produce the wire DTO.
     ///
-    /// # Panics
-    ///
-    /// Panics if [`Delete::where_`] was not called. The `DeleteOp` wire
-    /// type requires a filter — omitting it is always a programmer bug.
-    pub fn build(self) -> DeleteOp {
-        DeleteOp {
+    /// Returns [`Err(BuilderError::MissingWhereClause)`](BuilderError::MissingWhereClause)
+    /// if [`Delete::where_`] was not called. The `DeleteOp` wire type requires a
+    /// filter — omitting it is always a programmer bug.
+    pub fn build(self) -> Result<DeleteOp, BuilderError> {
+        Ok(DeleteOp {
             delete_from: self.table_ref,
-            where_clause: self.where_clause.expect(
-                "Delete::build() requires a where clause — call .where_(filter) before .build()",
-            ),
+            where_clause: self.where_clause.ok_or(BuilderError::MissingWhereClause)?,
             select: self.select,
             expected_version: self.expected_version,
-        }
+        })
     }
 }

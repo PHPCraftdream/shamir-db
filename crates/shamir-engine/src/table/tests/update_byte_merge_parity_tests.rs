@@ -414,7 +414,8 @@ async fn update_indexed_field_reflected_in_index() {
         .where_(filter::eq("city", "NYC"))
         .set(doc().set("city", "LA"))
         .returning(UpdateReturnMode::Changed)
-        .build();
+        .build()
+        .unwrap();
     let result = update_via_tx(&repo, &table, &update_op, &refs)
         .await
         .unwrap();
@@ -431,7 +432,8 @@ async fn update_indexed_field_reflected_in_index() {
     let find_nyc = w::update("users")
         .where_(filter::eq("city", "NYC"))
         .set(doc().set("dummy", true))
-        .build();
+        .build()
+        .unwrap();
     let nyc_result = update_via_tx(&repo, &table, &find_nyc, &refs)
         .await
         .unwrap();
@@ -445,7 +447,8 @@ async fn update_indexed_field_reflected_in_index() {
         .where_(filter::eq("city", "LA"))
         .set(doc().set("dummy", true))
         .returning(UpdateReturnMode::Changed)
-        .build();
+        .build()
+        .unwrap();
     let la_result = update_via_tx(&repo, &table, &find_la, &refs).await.unwrap();
     assert_eq!(la_result.affected, 1, "new index entry for LA should exist");
 }
@@ -466,7 +469,8 @@ async fn update_new_field_with_returning() {
     let update_op = w::update("users")
         .set(doc().set("email", "bob@example.com"))
         .returning(UpdateReturnMode::All)
-        .build();
+        .build()
+        .unwrap();
     let result = update_via_tx(&repo, &table, &update_op, &refs)
         .await
         .unwrap();

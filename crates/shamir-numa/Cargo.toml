@@ -6,6 +6,12 @@ edition = "2021"
 license = "MIT OR Apache-2.0"
 description = "NUMA topology abstraction + per-node replicated read-mostly state for S.H.A.M.I.R."
 
+[lib]
+# Doctests are banned project-wide — they recompile the crate per example and
+# dominate `cargo test` wall-clock. Examples stay in the docs as illustration
+# (rendered, not executed); behavioural coverage lives in the `tests/` modules.
+doctest = false
+
 [lints]
 workspace = true
 

@@ -505,23 +505,26 @@ fn q_update_with_complex_where() {
     let from_macro = q!(
         update users set { "tier" => "gold" }
         where total > 1000 && !is_null(email)
-    );
+    )
+    .unwrap();
     let from_builder = write::update("users")
         .set(write::doc().set("tier", "gold"))
         .where_(filter_mod::and([
             filter_mod::gt("total", 1000),
             filter_mod::not(filter_mod::is_null("email")),
         ]))
-        .build();
+        .build()
+        .unwrap();
     assert_same_wire_value(&from_macro, &from_builder);
 }
 
 #[test]
 fn q_update_without_where() {
-    let from_macro = q!(update users set { "active" => false });
+    let from_macro = q!(update users set { "active" => false }).unwrap();
     let from_builder = write::update("users")
         .set(write::doc().set("active", false))
-        .build();
+        .build()
+        .unwrap();
     assert_same_wire_value(&from_macro, &from_builder);
 }
 
@@ -532,7 +535,8 @@ fn q_delete_complex_where() {
     let from_macro = q!(
         delete from users
         where status == "deleted" && (in_(role, ["banned"]) || is_null(email)) && age < 18
-    );
+    )
+    .unwrap();
     let from_builder = write::delete("users")
         .where_(filter_mod::and([
             filter_mod::and([
@@ -544,7 +548,8 @@ fn q_delete_complex_where() {
             ]),
             filter_mod::lt("age", 18),
         ]))
-        .build();
+        .build()
+        .unwrap();
     assert_same_wire_value(&from_macro, &from_builder);
 }
 
@@ -554,11 +559,13 @@ fn q_delete_complex_where() {
 fn q_upsert_key_value() {
     let from_macro = q!(
         upsert cache key { "id" => "k1" } value { "v" => 42 }
-    );
+    )
+    .unwrap();
     let from_builder = write::upsert("cache")
         .key(write::doc().set("id", "k1"))
         .value(write::doc().set("v", 42))
-        .build();
+        .build()
+        .unwrap();
     assert_same_wire_value(&from_macro, &from_builder);
 }
 

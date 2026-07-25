@@ -121,7 +121,8 @@ async fn update_validator_runs_when_bound() {
     let op_ok = write::update("users")
         .where_(filter::eq("name", "Alice"))
         .set(doc().set("status", "premium"))
-        .build();
+        .build()
+        .unwrap();
     let res_ok = update_via_tx(&repo, &table, &op_ok, &refs).await;
     assert!(
         res_ok.is_ok(),
@@ -133,7 +134,8 @@ async fn update_validator_runs_when_bound() {
     let op_bad = write::update("users")
         .where_(filter::eq("name", "Alice"))
         .set(doc().set("status", "banned"))
-        .build();
+        .build()
+        .unwrap();
     let res_bad = update_via_tx(&repo, &table, &op_bad, &refs).await;
     assert!(
         res_bad.is_err(),
@@ -167,7 +169,8 @@ async fn update_returning_correct_without_validators() {
     let op = write::update("users")
         .set(doc().set("status", "premium"))
         .returning(UpdateReturnMode::All)
-        .build();
+        .build()
+        .unwrap();
     let result = update_via_tx(&repo, &table, &op, &refs).await.unwrap();
 
     assert_eq!(result.affected, 2);
@@ -235,7 +238,8 @@ async fn set_merge_validator_runs_when_bound() {
     let op_ins = write::upsert("users")
         .key(mpack_key("name", "Alice"))
         .value(doc().set("name", "Alice").set("status", "active"))
-        .build();
+        .build()
+        .unwrap();
     let res_ins = set_via_tx(&repo, &table, &op_ins).await;
     assert!(
         res_ins.is_ok(),
@@ -251,7 +255,8 @@ async fn set_merge_validator_runs_when_bound() {
     let op_merge_bad = write::upsert("users")
         .key(mpack_key("name", "Alice"))
         .value(doc().set("name", "Alice").set("status", "banned"))
-        .build();
+        .build()
+        .unwrap();
     let res_merge_bad = set_via_tx(&repo, &table, &op_merge_bad).await;
     assert!(
         res_merge_bad.is_err(),
@@ -263,7 +268,8 @@ async fn set_merge_validator_runs_when_bound() {
     let op_merge_ok = write::upsert("users")
         .key(mpack_key("name", "Alice"))
         .value(doc().set("name", "Alice").set("status", "premium"))
-        .build();
+        .build()
+        .unwrap();
     let res_merge_ok = set_via_tx(&repo, &table, &op_merge_ok).await;
     assert!(
         res_merge_ok.is_ok(),

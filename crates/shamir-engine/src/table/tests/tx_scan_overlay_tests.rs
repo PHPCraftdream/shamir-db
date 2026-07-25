@@ -88,7 +88,8 @@ async fn update_matches_staged_insert_fallback_arm() {
     let update_op = write::update("t")
         .where_(filter::eq("name", "Alice"))
         .set(row(vec![("status", QueryValue::Str("active".into()))]))
-        .build();
+        .build()
+        .unwrap();
     let result = table
         .execute_update_tx(
             &update_op,
@@ -172,7 +173,8 @@ async fn update_matches_staged_insert_index_arm() {
     let update_op = write::update("t")
         .where_(filter::eq("status", "pending"))
         .set(row(vec![("status", QueryValue::Str("active".into()))]))
-        .build();
+        .build()
+        .unwrap();
     let result = table
         .execute_update_tx(
             &update_op,
@@ -231,7 +233,8 @@ async fn delete_matches_staged_insert_fallback_arm() {
     let ctx = FilterContext::new(interner, &refs);
     let delete_op = write::delete("t")
         .where_(filter::eq("name", "Alice"))
-        .build();
+        .build()
+        .unwrap();
     let result = table
         .execute_delete_tx(
             &delete_op,
@@ -300,7 +303,8 @@ async fn delete_matches_staged_insert_index_arm() {
     let ctx = FilterContext::new(interner, &refs);
     let delete_op = write::delete("t")
         .where_(filter::eq("status", "pending"))
-        .build();
+        .build()
+        .unwrap();
     let result = table
         .execute_delete_tx(
             &delete_op,

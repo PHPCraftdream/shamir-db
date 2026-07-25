@@ -268,7 +268,10 @@ async fn execute_update_tx_stages_via_update_tx() {
 
     let mut tx = TxContext::new(TxId::new(50), 0, u64::MAX, IsolationLevel::Snapshot);
 
-    let op = write::update("t").set(mpack!({ "name": "alice" })).build();
+    let op = write::update("t")
+        .set(mpack!({ "name": "alice" }))
+        .build()
+        .unwrap();
 
     let refs = new_map();
     let ctx = FilterContext::new(interner, &refs);
@@ -299,7 +302,10 @@ async fn execute_update_tx_no_match_zero_affected() {
 
     let mut tx = TxContext::new(TxId::new(51), 0, u64::MAX, IsolationLevel::Snapshot);
 
-    let op = write::update("t").set(mpack!({ "name": "alice" })).build();
+    let op = write::update("t")
+        .set(mpack!({ "name": "alice" }))
+        .build()
+        .unwrap();
 
     let interner = tbl.interner().get().await.unwrap();
     let refs = new_map();
@@ -325,7 +331,10 @@ async fn execute_delete_tx_stages_via_delete_tx() {
 
     let mut tx = TxContext::new(TxId::new(52), 0, u64::MAX, IsolationLevel::Snapshot);
 
-    let op = write::delete("t").where_(filter::and(vec![])).build();
+    let op = write::delete("t")
+        .where_(filter::and(vec![]))
+        .build()
+        .unwrap();
 
     let interner = tbl.interner().get().await.unwrap();
     let refs = new_map();
@@ -358,7 +367,10 @@ async fn execute_delete_tx_no_match_zero_affected() {
 
     let mut tx = TxContext::new(TxId::new(53), 0, u64::MAX, IsolationLevel::Snapshot);
 
-    let op = write::delete("t").where_(filter::and(vec![])).build();
+    let op = write::delete("t")
+        .where_(filter::and(vec![]))
+        .build()
+        .unwrap();
 
     let interner = tbl.interner().get().await.unwrap();
     let refs = new_map();
@@ -385,7 +397,8 @@ async fn execute_set_tx_insert_path() {
     let op = write::upsert("t")
         .key(mpack!({ "email": "a@b.c" }))
         .value(mpack!({ "email": "a@b.c", "name": "alice" }))
-        .build();
+        .build()
+        .unwrap();
 
     let result = tbl
         .execute_set_tx(&op, &mut tx, None, &shamir_types::access::Actor::System)
@@ -422,7 +435,8 @@ async fn execute_set_tx_update_path() {
     let op = write::upsert("t")
         .key(mpack!({ "email": "a@b.c" }))
         .value(mpack!({ "name": "bob" }))
-        .build();
+        .build()
+        .unwrap();
 
     let result = tbl
         .execute_set_tx(&op, &mut tx, None, &shamir_types::access::Actor::System)

@@ -167,7 +167,8 @@ async fn execute_update_leaves_table_consistent_on_success() {
     let op = write::update("users")
         .where_(filter::eq("city", "city_0"))
         .set(mpack!({ "score": 999 }))
-        .build();
+        .build()
+        .unwrap();
 
     let result = super::write_exec_tests::update_via_tx(&repo, &table, &op, &refs)
         .await
@@ -184,7 +185,8 @@ async fn execute_delete_leaves_table_consistent_on_success() {
 
     let op = write::delete("users")
         .where_(filter::eq("city", "city_1"))
-        .build();
+        .build()
+        .unwrap();
 
     let result = super::write_exec_tests::delete_via_tx(&repo, &table, &op, &refs)
         .await

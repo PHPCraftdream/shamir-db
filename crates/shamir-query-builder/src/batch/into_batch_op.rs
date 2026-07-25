@@ -48,7 +48,10 @@ impl IntoBatchOp for UpdateOp {
 
 impl IntoBatchOp for crate::write::Update {
     fn into_batch_op(self) -> BatchOp {
-        BatchOp::Update(self.build())
+        BatchOp::Update(
+            self.build()
+                .expect("Update::into_batch_op(): set payload is required"),
+        )
     }
 }
 
@@ -60,7 +63,10 @@ impl IntoBatchOp for SetOp {
 
 impl IntoBatchOp for crate::write::Upsert {
     fn into_batch_op(self) -> BatchOp {
-        BatchOp::Set(self.build())
+        BatchOp::Set(
+            self.build()
+                .expect("Upsert::into_batch_op(): key and value are required"),
+        )
     }
 }
 
@@ -72,7 +78,10 @@ impl IntoBatchOp for DeleteOp {
 
 impl IntoBatchOp for crate::write::Delete {
     fn into_batch_op(self) -> BatchOp {
-        BatchOp::Delete(self.build())
+        BatchOp::Delete(
+            self.build()
+                .expect("Delete::into_batch_op(): where clause is required"),
+        )
     }
 }
 

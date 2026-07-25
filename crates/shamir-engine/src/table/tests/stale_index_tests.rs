@@ -112,7 +112,8 @@ async fn test_stale_index_entry_skipped_in_lookup_records_via_index() {
     // because "status_idx" covers the Eq condition.
     let op = write::delete("users")
         .where_(filter::eq("status", "active"))
-        .build();
+        .build()
+        .unwrap();
 
     // This is the critical assertion: the operation must NOT error.
     // On the pre-fix code it would propagate NotFound for the stale id.
