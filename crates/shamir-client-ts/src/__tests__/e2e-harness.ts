@@ -175,6 +175,15 @@ export function writeKtavConfig(
     port: number;
     origin: string;
     cursors?: { maxCursorsPerSession?: number; idleTimeoutSecs?: number };
+    /**
+     * Opt the spawned test server into the experimental online
+     * storage-migration API (`StartMigration`/`CommitMigration`/
+     * `RollbackMigration`/`MigrationStatus`). Defaults to `false`. Only the
+     * e2e-ddl migration-lifecycle blocks set this — the feature has known
+     * gaps (see KNOWN_LIMITATIONS.md §2) and is disabled by default in every
+     * shipped `deploy/*.ktav` profile.
+     */
+    enableExperimentalMigrationApi?: boolean;
   },
 ): string {
   const certPath = path.join(dir, 'cert.pem').replace(/\\/g, '/');
@@ -229,7 +238,7 @@ security: {
         max_result_size_bytes:    10485760
         max_execution_time_secs:  30
         max_queries_per_batch:    32
-    }${cursorsBlock}
+    }${cursorsBlock}${opts.enableExperimentalMigrationApi ? '\n    enable_experimental_migration_api: true' : ''}
 }
 
 audit: {
@@ -269,6 +278,7 @@ export function generateSelfSignedCert(dir: string): boolean {
 export async function startServer(opts?: {
   port?: number;
   cursors?: { maxCursorsPerSession?: number; idleTimeoutSecs?: number };
+  enableExperimentalMigrationApi?: boolean;
 }): Promise<ServerHandle> {
   assertServerBinaryFresh();
   const port = opts?.port ?? await getFreePort();
@@ -284,6 +294,7 @@ export async function startServer(opts?: {
     port,
     origin: ORIGIN,
     cursors: opts?.cursors,
+    enableExperimentalMigrationApi: opts?.enableExperimentalMigrationApi,
   });
   const child = spawn(
     SERVER_BIN,

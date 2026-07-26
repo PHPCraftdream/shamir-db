@@ -371,6 +371,22 @@ impl ServerLauncher {
                 .with_principal_resolver(resolver),
         );
 
+        // F-15: opt into the experimental online storage-migration API when
+        // the operator explicitly set `security.enable_experimental_migration_api`
+        // in the config file. This single `Arc<ShamirDb>` (via its internal
+        // `Arc<AtomicBool>` toggle) is the SAME instance every wire-level
+        // `StartMigration` handler reads `experimental_migration_enabled()`
+        // from, so this one boot-time toggle suffices for the whole process.
+        // The flag is `false` by default — the feature has known correctness
+        // gaps (see KNOWN_LIMITATIONS.md §2); never enable in production.
+        if config.security.enable_experimental_migration_api {
+            shamir.enable_experimental_migration_api();
+            tracing::warn!(
+                "experimental online storage-migration API is ENABLED — see \
+                 KNOWN_LIMITATIONS.md §2 for known gaps; do not use in production"
+            );
+        }
+
         // Task #559 §8: one-time boot audit (read-only, WARN-log only, no
         // auto-apply). Diffs shamir-db's Store B against the directory and
         // logs WARN lines for usernames/roles/superuser grants that were

@@ -159,4 +159,15 @@ impl ServerHandle {
     pub fn first_tls_exporter_addr(&self) -> Option<SocketAddr> {
         self.bound_addrs.iter().filter_map(|a| *a).next()
     }
+
+    /// Whether the experimental online storage-migration API
+    /// (`StartMigration`/`CommitMigration`/`RollbackMigration`/
+    /// `MigrationStatus`) is enabled on this booted server. `true` only when
+    /// `security.enable_experimental_migration_api` was set in the config at
+    /// boot — the default is `false`. Exposed primarily so integration tests
+    /// can assert the boot-time wiring in `server_launcher.rs` flipped the
+    /// toggle that every `StartMigration` handler reads.
+    pub fn experimental_migration_enabled(&self) -> bool {
+        self.shamir.experimental_migration_enabled()
+    }
 }

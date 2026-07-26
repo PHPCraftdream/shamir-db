@@ -7,7 +7,9 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::config::{Config, ConnectionSecurity, CursorLimitsConfig, QueryLimitsConfig};
+use crate::config::{
+    Config, ConnectionSecurity, CursorLimitsConfig, QueryLimitsConfig, SecurityConfig,
+};
 
 /// Resolve `<workspace>/deploy/<name>` from this crate's `CARGO_MANIFEST_DIR`.
 ///
@@ -305,4 +307,117 @@ fn max_cursors_per_session_nonzero_is_accepted() {
     cfg.security.cursors.max_cursors_per_session = 1000;
     cfg.validate()
         .expect("max_cursors_per_session == 1000 must pass validation");
+}
+
+// =============== F-15: enable_experimental_migration_api default/opt-in ====
+
+/// Default `enable_experimental_migration_api` is `false` — the experimental
+/// online storage-migration API must stay disabled unless an operator
+/// explicitly opts in. Mirrors `default_max_inflight_response_bytes_is_none`'s
+/// "safe-by-default" pinning.
+#[test]
+fn default_enable_experimental_migration_api_is_false() {
+    assert!(
+        !SecurityConfig::default().enable_experimental_migration_api,
+        "experimental migration API must default to disabled (false)"
+    );
+}
+
+/// No shipped example profile must set the flag to `true` — it is unsafe as
+/// an always-on default (see KNOWN_LIMITATIONS.md §2). Pinning every shipped
+/// profile here catches a future accidental opt-in in `deploy/`.
+#[test]
+fn shipped_profiles_leave_experimental_migration_api_disabled() {
+    for name in [
+        "server.example.ktav",
+        "server.small.example.ktav",
+        "server.medium.example.ktav",
+    ] {
+        let cfg = Config::from_file(&deploy_path(name)).expect("{name} must parse");
+        assert!(
+            !cfg.security.enable_experimental_migration_api,
+            "{name} must not set enable_experimental_migration_api (must stay false by default)"
+        );
+    }
+}
+
+/// Minimal valid ktav with a `security:` block that OMITS the field — the
+/// serde `#[serde(default)]` on the field must resolve it to `false`, so a
+/// config that predates this knob keeps today's safe-by-default behavior.
+#[test]
+fn enable_experimental_migration_api_defaults_false_when_omitted() {
+    let src = "\
+data_dir: /var/lib/shamir-db
+
+kdf_defaults: {
+    memory_kb: 131072
+    time: 4
+    parallelism: 1
+    argon2_version: 19
+}
+
+listeners: [
+    {
+        kind: tcp
+        addr: 127.0.0.1:7331
+        profile: tls_exporter
+    }
+]
+
+tls: {
+    cert_path: /var/lib/shamir-db/cert.pem
+    key_path: /var/lib/shamir-db/key.pem
+}
+
+security: {
+    auth_init_rate_per_second: 10
+}
+";
+    let cfg: Config = ktav::from_str(src).expect("parse ok");
+    cfg.validate().expect("validate ok");
+    assert!(
+        !cfg.security.enable_experimental_migration_api,
+        "omitted enable_experimental_migration_api must default to false"
+    );
+}
+
+/// When the operator explicitly sets `enable_experimental_migration_api:
+/// true` inside `security:`, it must round-trip to `true` — this is the
+/// config-file knob the live server reads at boot to opt into the
+/// experimental migration API.
+#[test]
+fn enable_experimental_migration_api_parses_true_when_set() {
+    let src = "\
+data_dir: /var/lib/shamir-db
+
+kdf_defaults: {
+    memory_kb: 131072
+    time: 4
+    parallelism: 1
+    argon2_version: 19
+}
+
+listeners: [
+    {
+        kind: tcp
+        addr: 127.0.0.1:7331
+        profile: tls_exporter
+    }
+]
+
+tls: {
+    cert_path: /var/lib/shamir-db/cert.pem
+    key_path: /var/lib/shamir-db/key.pem
+}
+
+security: {
+    enable_experimental_migration_api: true
+}
+";
+    let cfg: Config = ktav::from_str(src).expect("parse ok");
+    cfg.validate().expect("validate ok");
+    assert!(
+        cfg.security.enable_experimental_migration_api,
+        "explicit enable_experimental_migration_api: true must round-trip to true"
+    );
 }

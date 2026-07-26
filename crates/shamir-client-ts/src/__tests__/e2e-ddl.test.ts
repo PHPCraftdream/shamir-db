@@ -36,7 +36,13 @@ describe.skipIf(!SERVER_AVAILABLE)(
     let client: ShamirClient | null = null;
 
     beforeAll(async () => {
-      server = await startServer();
+      // F-15: opt the shared test server into the experimental online
+      // storage-migration API so the migration-lifecycle `it()` blocks
+      // (§9 below) can exercise start→status→rollback /
+      // start→commit→dst-readable against a server that has genuinely opted
+      // in. Safe for this whole file: every other block exercises unrelated
+      // DDL ops (createDb/createTable/etc.) that never touch migration.
+      server = await startServer({ enableExperimentalMigrationApi: true });
       try {
         client = await connectAdmin(HOST, server.port);
       } catch (e) {

@@ -239,6 +239,18 @@ pub struct SecurityConfig {
     /// second. Default 10. Must be in `1..=100_000`.
     #[serde(default = "default_auth_init_rate_per_second")]
     pub auth_init_rate_per_second: u32,
+    /// Opt into the experimental online storage-migration API
+    /// (`StartMigration`/`CommitMigration`/`RollbackMigration`/
+    /// `MigrationStatus`). DISABLED BY DEFAULT — this feature has several
+    /// known, unresolved gaps documented in `KNOWN_LIMITATIONS.md` §2: no
+    /// write interception (writes to the source table during an in-flight
+    /// migration are lost from the destination), only the in-memory
+    /// dst_engine is supported, and migration coordinator state is
+    /// non-durable (a server restart mid-migration loses all state). Enable
+    /// only for internal testing against a disposable data_dir — never in
+    /// a production deployment.
+    #[serde(default)]
+    pub enable_experimental_migration_api: bool,
 }
 
 impl Default for SecurityConfig {
@@ -249,6 +261,7 @@ impl Default for SecurityConfig {
             tx: Default::default(),
             cursors: Default::default(),
             auth_init_rate_per_second: default_auth_init_rate_per_second(),
+            enable_experimental_migration_api: false,
         }
     }
 }

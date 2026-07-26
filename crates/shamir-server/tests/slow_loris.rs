@@ -67,6 +67,7 @@ fn config_with_short_timeout(temp: &TempDir, timeout_ms: u64) -> Config {
             tx: Default::default(),
             cursors: Default::default(),
             auth_init_rate_per_second: 1000,
+            enable_experimental_migration_api: false,
         },
         audit: Default::default(),
         observability: shamir_server::config::ObservabilityConfig {
