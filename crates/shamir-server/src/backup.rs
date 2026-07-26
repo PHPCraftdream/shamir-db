@@ -42,6 +42,8 @@ use thiserror::Error;
 
 use shamir_collections::new_fx_set_wc;
 
+use crate::restore::fsync_dir;
+
 /// Size of the fixed, reused buffer streaming hash reads are chunked
 /// through — chosen so a large fjall SST/journal file is hashed without
 /// ever materializing the whole file in RAM at once.
@@ -188,6 +190,24 @@ pub struct ManifestVerifyReport {
 /// honest cost for a correctness-critical manifest. `manifest.json` itself
 /// is not included in its own `files` list (it is written after the list is
 /// computed).
+///
+/// F-19 (#812): after `write_manifest` returns successfully, `dest_dir`
+/// itself is fsync'd once via [`fsync_dir`] (reused from `restore.rs`) —
+/// `copy_dir_recursive` and `write_manifest` fsync each file's CONTENT, but
+/// neither previously synced the DIRECTORY ENTRIES they create under
+/// `dest_dir` (the copied files and `manifest.json`). A single fsync of
+/// `dest_dir` after the last write into it covers every entry added directly
+/// to that directory: `fsync` on a directory flushes all of its current
+/// entry metadata, not just recently-added entries, so one call after the
+/// last write is sufficient for the top-level directory. `copy_dir_recursive`
+/// itself now ALSO fsyncs every directory it writes into (once per
+/// recursion level, at the end of its loop — see that function's doc), so
+/// nested subdirectories of a fjall table tree get their own entries made
+/// durable too, not just `dest_dir`'s immediate children. Same "fsync'd the
+/// file, not the directory" gap class F-12 (#802) already closed for
+/// `restore()`'s renames — this closes it for `backup()`'s plain creates.
+/// Log-only on failure, matching `fsync_dir`'s existing contract (see its
+/// doc in `restore.rs`) — this does not change `backup()`'s error surface.
 pub fn backup(from: &Path, to: &Path) -> Result<BackupReport, BackupError> {
     if !from.exists() {
         return Err(BackupError::SourceMissing(from.to_path_buf()));
@@ -212,6 +232,11 @@ pub fn backup(from: &Path, to: &Path) -> Result<BackupReport, BackupError> {
     copy_dir_recursive(from, &dest_dir, &mut bytes, &mut files)?;
 
     let manifest_path = write_manifest(&dest_dir)?;
+
+    // F-19 (#812): fsync dest_dir itself so every directory entry added to
+    // it (copied files, manifest.json, any subdirectories) is durable — see
+    // this function's doc for why a single call here suffices.
+    fsync_dir(&dest_dir);
 
     Ok(BackupReport {
         dest_dir,
@@ -512,6 +537,12 @@ fn unix_to_ymd_hms(secs: u64) -> (i32, u32, u32, u32, u32, u32) {
 
 /// `pub(crate)` — reused by `restore.rs` to copy a snapshot into a
 /// temporary sibling directory before the atomic swap into `data_dir`.
+///
+/// F-19 (#812): fsyncs `dst` once every entry this call added to it has been
+/// written (see the `fsync_dir(dst)` call at the end of this function) — so
+/// every directory this function writes into, at every recursion level,
+/// gets its own directory-entry fsync, not just the top-level destination a
+/// caller passes in.
 pub(crate) fn copy_dir_recursive(
     src: &Path,
     dst: &Path,
@@ -553,5 +584,20 @@ pub(crate) fn copy_dir_recursive(
             tracing::warn!(path = %path.display(), "backup: skipping non-regular file");
         }
     }
+    // F-19 (#812): fsync `dst` once every entry this invocation added to it
+    // (copied files, newly-created subdirectories) has been written — this
+    // makes those DIRECTORY ENTRIES durable, not just the copied files'
+    // CONTENT (handled above). A directory fsync flushes all of a
+    // directory's current entry metadata, not just recently-added entries,
+    // so one call after this loop is sufficient for `dst`'s own entries.
+    // Symmetric across recursion levels: each nested subdirectory gets its
+    // OWN entries (its children) made durable by ITS OWN invocation's fsync
+    // here — the top-level `dst` (`backup()`'s `dest_dir`) additionally gets
+    // a final fsync from `backup()` itself, after `write_manifest` adds
+    // `manifest.json` (which this function never sees). Log-only on
+    // failure, same contract as `fsync_dir`'s other call sites — does not
+    // change this function's error surface. Benefits `restore()`'s step-3
+    // copy too, since it shares this function.
+    fsync_dir(dst);
     Ok(())
 }

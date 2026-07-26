@@ -335,13 +335,20 @@ fn cleanup_staged_temp_dir(temp_dir: &Path) {
     }
 }
 
-/// Fsync the directory at `dir` so a rename's directory-entry update is
-/// durable (F-12, #802). On ext4/xfs, a successful `fs::rename` can return
-/// before the directory-entry change itself is on stable storage — a power
-/// loss shortly after a "successful" rename can leave the filesystem
-/// reflecting the PRE-rename state on next boot (the classic "you fsync'd
-/// the file but not the directory" gap). This makes `restore()`'s atomic
-/// swap actually crash-durable.
+/// Fsync the directory at `dir` so a rename's (or, since F-19/#812, a plain
+/// `create`'s) directory-entry update is durable (F-12, #802). On ext4/xfs,
+/// a successful `fs::rename` can return before the directory-entry change
+/// itself is on stable storage — a power loss shortly after a "successful"
+/// rename can leave the filesystem reflecting the PRE-rename state on next
+/// boot (the classic "you fsync'd the file but not the directory" gap).
+/// This makes `restore()`'s atomic swap actually crash-durable.
+///
+/// F-19 (#812): also reused by `backup.rs`'s `backup()`, which never renames
+/// anything but does create brand-new directory entries (files and
+/// subdirectories) under a freshly-created `dest_dir` — the same
+/// "fsync'd the file, not the directory" gap applies to plain creates, not
+/// just renames. Made `pub(crate)` for that reuse; behavior is unchanged
+/// (log-only on failure, `#[cfg(not(unix))]` no-op).
 ///
 /// Failures are logged but NOT propagated (matching `shamir-wal`'s
 /// `wal_segment.rs::fsync_parent_dir` precedent): a missing directory fsync
@@ -371,7 +378,7 @@ fn cleanup_staged_temp_dir(temp_dir: &Path) {
 /// verifies the closest portable proxy: a failure during `restore()`'s copy
 /// step propagates cleanly and leaves `data_dir` completely untouched.
 #[cfg(unix)]
-fn fsync_dir(dir: &Path) {
+pub(crate) fn fsync_dir(dir: &Path) {
     match fs::File::open(dir) {
         Ok(dir_f) => {
             if let Err(e) = dir_f.sync_all() {
@@ -396,7 +403,7 @@ fn fsync_dir(dir: &Path) {
 }
 
 #[cfg(not(unix))]
-fn fsync_dir(_dir: &Path) {
+pub(crate) fn fsync_dir(_dir: &Path) {
     // Windows / non-unix: directory fsync is not required for the durability
     // guarantee this targets (see the doc on the unix variant above). No-op —
     // matches wal_segment.rs's `#[cfg(not(unix))]` rationale exactly.

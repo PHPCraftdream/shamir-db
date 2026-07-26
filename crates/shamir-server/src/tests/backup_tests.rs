@@ -319,6 +319,83 @@ fn deterministic_large_content(len: usize) -> Vec<u8> {
     (0..len).map(|i| (i % 256) as u8).collect()
 }
 
+// ----------------------------------------------------------------------------
+// F-19 (#812): backup()'s destination directory (and, since copy_dir_recursive
+// now fsyncs every directory it writes into, its nested subdirectories too)
+// gets its own directory-entry fsync, closing the "fsync'd the file, not the
+// directory" gap for `backup()`'s plain creates (F-12/#802 only closed this
+// for `restore()`'s renames). `fsync_dir` is intentionally log-only on
+// failure (see its doc in `restore.rs`) and there is no test-double/mock in
+// this codebase for observing an fsync syscall happen — per the brief and
+// KNOWN_LIMITATIONS.md §9's own "Test scope note", the portable regression
+// guard is a happy-path test proving `backup()` still succeeds (without
+// erroring) with the new directory-fsync calls engaged on the return path.
+// ----------------------------------------------------------------------------
+
+#[test]
+fn backup_fsyncs_dest_dir_after_success() {
+    let src = TempDir::new().unwrap();
+    let dst = TempDir::new().unwrap();
+
+    fs::write(src.path().join("a.txt"), b"hello").unwrap();
+    fs::write(src.path().join("b.bin"), vec![7u8; 2048]).unwrap();
+
+    // No error must occur — `fsync_dir(&dest_dir)` runs on the success path,
+    // after `write_manifest`, and is log-only on failure so it must never
+    // cause `backup()` itself to fail.
+    let report = backup(src.path(), dst.path()).expect("backup must succeed with dest_dir fsync");
+
+    // The directory (and everything written into it) must still be exactly
+    // as `copy_dir_recursive`/`write_manifest` left it — the fsync call is
+    // side-effect-free from the caller's perspective.
+    assert!(report.dest_dir.join("a.txt").exists());
+    assert!(report.dest_dir.join("b.bin").exists());
+    assert!(report.manifest_path.exists());
+    assert_eq!(fs::read(report.dest_dir.join("a.txt")).unwrap(), b"hello");
+}
+
+#[test]
+fn backup_fsyncs_nested_subdirectories_without_error() {
+    let src = TempDir::new().unwrap();
+    let dst = TempDir::new().unwrap();
+
+    // A fake table dir with multiple nested levels — exercises
+    // `copy_dir_recursive`'s per-recursion-level `fsync_dir(dst)` call, not
+    // just the single top-level `dest_dir` fsync in `backup()` itself.
+    fs::write(src.path().join("top.txt"), b"top-level").unwrap();
+    let level1 = src.path().join("table_a");
+    fs::create_dir_all(&level1).unwrap();
+    fs::write(level1.join("segment.sst"), vec![1u8; 512]).unwrap();
+    let level2 = level1.join("journal");
+    fs::create_dir_all(&level2).unwrap();
+    fs::write(level2.join("wal.jnl"), vec![2u8; 256]).unwrap();
+    let level3 = level2.join("deeper");
+    fs::create_dir_all(&level3).unwrap();
+    fs::write(level3.join("leaf.bin"), vec![3u8; 128]).unwrap();
+
+    let report = backup(src.path(), dst.path()).expect("backup with nested subdirs must succeed");
+
+    assert!(report.dest_dir.join("top.txt").exists());
+    assert!(report.dest_dir.join("table_a/segment.sst").exists());
+    assert!(report.dest_dir.join("table_a/journal/wal.jnl").exists());
+    assert!(report
+        .dest_dir
+        .join("table_a/journal/deeper/leaf.bin")
+        .exists());
+    assert_eq!(report.files_copied, 4);
+
+    // The manifest must list every nested file with a root-relative,
+    // forward-slash path (regression: nested-dir fsync must not disturb the
+    // existing manifest-collection walk).
+    let manifest: Manifest =
+        serde_json::from_slice(&fs::read(&report.manifest_path).unwrap()).unwrap();
+    assert_eq!(manifest.files.len(), 4);
+    assert!(manifest
+        .files
+        .iter()
+        .any(|f| f.path == "table_a/journal/deeper/leaf.bin"));
+}
+
 #[test]
 fn backup_manifest_hash_matches_streamed_large_file() {
     let src = TempDir::new().unwrap();

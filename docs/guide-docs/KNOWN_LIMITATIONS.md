@@ -455,34 +455,77 @@ artifact).
 
 ## 9. Backup / Restore durability
 
-- **fsync is applied to copied files, the manifest, and each rename's
-  containing directory — but directory-fsync is a no-op on non-unix
-  (Windows), and true power-loss crash recovery is not unit-tested (F-12,
-  #802).** `backup::copy_dir_recursive` now re-opens each just-copied
-  destination file and calls `sync_all()` (propagating a failure as
-  `BackupError::Io`/`RestoreError::Io` — content durability is the point),
-  and `write_manifest` uses `File::create` + `write_all` + `sync_all`
-  instead of a bare `fs::write`, so the manifest is durable before
-  `backup()` returns success. `restore()`'s step-5 atomic swap calls a
-  new `fsync_dir` helper on the containing `parent` directory after EACH
-  successful `fs::rename` (both swap-path renames, the rollback rename,
-  and the fresh-target single rename) — this closes the classic "you
-  fsync'd the file but not the directory" gap on ext4/xfs, where a bare
-  `fs::rename` can return success before the directory-entry update is on
-  stable storage. Directory-fsync failures are logged but NOT propagated
-  (matching `shamir-wal`'s `wal_segment.rs::fsync_parent_dir` precedent:
-  a missing dir-fsync degrades the power-loss window but does not corrupt
-  data). **Windows / non-unix: `fsync_dir` is a documented no-op** — this
-  workspace already decided (in `wal_segment.rs`'s `#[cfg(not(unix))]`
-  stub) that Windows does not need this specific directory-entry
-  durability guarantee; that rationale carries into backup/restore
-  unchanged. **True power-loss crash injection is outside what a portable
-  unit test can exercise** (there is no way to truncate the OS page cache
-  mid-syscall from a `#[test]`); the regression guard is the
-  interrupted-copy test in `crates/shamir-server/src/tests/
-  restore_tests.rs` (`copy_step_failure_propagates_and_leaves_data_dir_
-  untouched`), which verifies the closest portable proxy: a failure
-  during `restore()`'s copy step propagates cleanly and leaves `data_dir`
-  completely untouched. See `crates/shamir-server/src/restore.rs`'s
-  `fsync_dir` and `crates/shamir-server/src/backup.rs`'s
-  `copy_dir_recursive`/`write_manifest`.
+- **fsync is applied to copied files, the manifest, each rename's
+  containing directory, and (F-19, #812) `backup()`'s own destination
+  directory — but this is best-effort power-loss protection, NOT a
+  blanket crash-durability guarantee: directory-fsync is a no-op on
+  non-unix (Windows), directory-fsync failures are intentionally
+  swallowed rather than failing the operation, and true power-loss crash
+  recovery is not (and cannot be) unit-tested (F-12, #802; F-19, #812).**
+  `backup::copy_dir_recursive` re-opens each just-copied destination file
+  and calls `sync_all()` (propagating a failure as
+  `BackupError::Io`/`RestoreError::Io` — content durability is the
+  point), and `write_manifest` uses `File::create` + `write_all` +
+  `sync_all` instead of a bare `fs::write`, so both file content and the
+  manifest are durable before `backup()` returns success. Separately,
+  DIRECTORY ENTRIES (as opposed to file content) are made durable via a
+  `fsync_dir` helper (`restore.rs`, `pub(crate)` — shared with `backup.rs`
+  since F-19):
+  - `restore()`'s step-5 atomic swap calls `fsync_dir` on the containing
+    `parent` directory after EACH successful `fs::rename` (both swap-path
+    renames, the rollback rename, and the fresh-target single rename) —
+    this closes the classic "you fsync'd the file but not the directory"
+    gap on ext4/xfs, where a bare `fs::rename` can return success before
+    the directory-entry update is on stable storage.
+  - **(F-19, #812)** `backup()` previously left this same gap open for its
+    OWN destination directory: `copy_dir_recursive` and `write_manifest`
+    synced file CONTENT but never the DIRECTORY ENTRIES they create under
+    `dest_dir`. `backup()` now calls `fsync_dir(&dest_dir)` once, after
+    `write_manifest` returns successfully — a directory fsync flushes all
+    of a directory's CURRENT entry metadata (not just recently-added
+    entries), so one call after the last write covers every entry added to
+    `dest_dir` by both the copy and the manifest write. `copy_dir_recursive`
+    itself additionally calls `fsync_dir` on every directory it writes
+    into (once per recursion level, after that level's loop completes), so
+    nested subdirectories of a fjall table tree (which `copy_dir_recursive`
+    recurses into) get their own entries made durable too, not just
+    `dest_dir`'s immediate children. This also benefits `restore()`'s
+    step-3 staging copy, which shares `copy_dir_recursive`.
+  - Directory-fsync failures (in ALL of the call sites above) are logged
+    but **deliberately NOT propagated as errors** — this is an intentional
+    design choice (matching `shamir-wal`'s `wal_segment.rs::fsync_parent_dir`
+    precedent), not an oversight: a missing directory-entry fsync narrows
+    the power-loss window (an as-yet-un-synced entry could revert to its
+    pre-operation state after a crash) but does not corrupt already-durable
+    file content, and refusing an otherwise-successful backup/restore
+    over a non-fatal directory-fsync failure would trade a real, completed
+    operation for a strictly worse outcome. Concretely: **a
+    directory-fsync failure means the affected directory entries are NOT
+    guaranteed to survive a crash occurring before the next unrelated
+    fsync of that directory reaches disk** — callers that need a hard
+    guarantee here (rather than the best-effort protection this section
+    describes) must arrange their own external verification (e.g. running
+    `verify_manifest` again after a suspected crash, or a filesystem-level
+    `sync`/`fsync` audit) — there is no in-process "strict mode" that
+    escalates this to a hard error, and none is planned; see the
+    discussion in `docs/dev-artifacts/prompts/post-alpha/
+    54-f19-backup-dest-dir-fsync.md` for why a strict-mode config knob was
+    considered and deliberately not added.
+  - **Windows / non-unix: `fsync_dir` is a documented no-op** — this
+    workspace already decided (in `wal_segment.rs`'s `#[cfg(not(unix))]`
+    stub) that Windows does not need this specific directory-entry
+    durability guarantee; that rationale carries into backup/restore
+    unchanged. On Windows, the guarantees this section describes reduce to
+    file-content fsync only.
+  - **True power-loss crash injection is outside what a portable unit test
+    can exercise** (there is no way to truncate the OS page cache
+    mid-syscall from a `#[test]`); the regression guards are the
+    interrupted-copy test in `crates/shamir-server/src/tests/
+    restore_tests.rs` (`copy_step_failure_propagates_and_leaves_data_dir_
+    untouched`) and the happy-path `backup()`-destination-directory-fsync
+    tests in `crates/shamir-server/src/tests/backup_tests.rs` — both verify
+    the closest portable proxy (a failure propagates cleanly / a success
+    path with directory-fsync engaged completes without error), not actual
+    crash survival. See `crates/shamir-server/src/restore.rs`'s
+    `fsync_dir` and `crates/shamir-server/src/backup.rs`'s `backup`,
+    `copy_dir_recursive`, and `write_manifest`.
