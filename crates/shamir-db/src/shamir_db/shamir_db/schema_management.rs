@@ -488,8 +488,17 @@ impl ShamirDb {
     /// (not an ALTER's `replace_artifact`) and a LATER step in the same call
     /// (`get_table` / `add_validator_binding`) fails, the fresh registration
     /// is undone (`ValidatorRegistry::remove`) before returning `Err`, so no
-    /// orphaned validator survives in the registry. An ALTER's
-    /// `replace_artifact` is never undone here — see the inline rationale.
+    /// orphaned validator survives in the registry.
+    ///
+    /// **ALTER rollback symmetry (F-27b, #827):** an ALTER's
+    /// `replace_artifact` swaps the LIVE compiled validator in place — the
+    /// NEW rules start being enforced the instant the swap runs, before
+    /// `activation_result` is even known. If a LATER step then fails, the
+    /// OLD compiled artifact (captured just before the swap) is put straight
+    /// back via a second `replace_artifact` call, so the registry's live
+    /// artifact matches the catalogue's `rec_prev` rollback (still pointing
+    /// at the SAME `schema_validator_id`, expecting the OLD rules to be
+    /// live) — see the inline rationale.
     pub(crate) async fn compile_table_schema(
         &self,
         db_name: &str,
@@ -508,18 +517,32 @@ impl ShamirDb {
         // Only a fresh registration is undone on later failure — see the
         // rollback at the bottom of this function.
         //
-        // WHY the `replace_artifact` (ALTER) branch must NEVER be undone here:
-        // it swaps an EXISTING, previously-working validator's artifact in
-        // place, preserving its name + table bindings (RCU). Rolling it back
-        // would need the OLD artifact restored (not a bare removal), and that
-        // is already handled at the catalogue level — `admin_schema.rs`'s
-        // `save_table_meta(&rec_prev)` restores the pre-mutation record, which
-        // still points at the SAME `schema_validator_id`, so the swapped
-        // artifact remains the live validator for the still-active old schema.
-        // A bare `ValidatorRegistry::remove` here would instead DELETE the
-        // validator entirely, orphaning the unchanged catalogue reference and
-        // breaking the previously-working schema.
+        // WHY the `replace_artifact` (ALTER) branch must NEVER be undone via
+        // a bare `remove` here: it swaps an EXISTING, previously-working
+        // validator's artifact in place, preserving its name + table bindings
+        // (RCU). Rolling it back needs the OLD artifact restored (F-27b,
+        // below), not a bare removal — `ValidatorRegistry::remove` would
+        // instead DELETE the validator entirely, orphaning the unchanged
+        // catalogue reference and breaking the previously-working schema.
         let freshly_registered = self.validators.id_for_name(&name).is_none();
+
+        // F-27b (#827): capture the artifact that's about to be replaced, so
+        // it can be put back if a later step fails — see the restore at the
+        // bottom of this function. `None` when `freshly_registered` (nothing
+        // to restore — the fresh-registration rollback removes instead).
+        //
+        // `prior_artifact` should only be `None` here if the registry's
+        // name→id and id→artifact maps have desynced (a `name_to_id` entry
+        // with no matching `by_id` entry) — `register` always inserts both
+        // together, so this registry invariant should already prevent it.
+        // If it ever happens there is simply nothing to restore; that's a
+        // safe no-op, not a case worth inventing extra handling for.
+        let prior_artifact: Option<Arc<dyn RecordValidator>> = if freshly_registered {
+            None
+        } else {
+            self.validators.get_by_id(&schema_validator_id)
+        };
+
         if freshly_registered {
             self.validators
                 .register(schema_validator_id, &name, validator)
@@ -584,10 +607,20 @@ impl ShamirDb {
         // never ran before the failure, so the freshly-registered validator
         // was never bound to anything; `ValidatorRegistry::remove` does not
         // itself check binding state, but there is nothing to be bound here.
-        // The ALTER branch (`freshly_registered == false`) is deliberately
-        // NOT undone — see the rationale above.
-        if activation_result.is_err() && freshly_registered {
-            self.validators.remove(&schema_validator_id);
+        //
+        // F-27b (#827): if the ALTER branch's `replace_artifact` ran above but
+        // a LATER step then failed, put the OLD compiled validator back —
+        // symmetric with the catalogue's `rec_prev` rollback, which still
+        // points at this same `schema_validator_id` expecting the OLD rules
+        // to be what's live. Without this, the live registry would keep
+        // enforcing the NEW (never-fully-activated) rules under an id the
+        // catalogue believes still holds the OLD schema.
+        if activation_result.is_err() {
+            if freshly_registered {
+                self.validators.remove(&schema_validator_id);
+            } else if let Some(old) = prior_artifact {
+                self.validators.replace_artifact(&schema_validator_id, old);
+            }
         }
 
         activation_result

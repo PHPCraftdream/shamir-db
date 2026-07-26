@@ -52,6 +52,30 @@
 //! name collision. A secondary hardening additionally checks
 //! `replace_artifact`'s return value so any FUTURE path that could recreate
 //! a collision fails loudly.
+//!
+//! ## F-27b (#827) — the ALTER-path gap F-24 deliberately left open
+//!
+//! F-24 was scoped to the FRESH-registration case only: the ALTER branch
+//! (`ValidatorRegistry::replace_artifact`, taken when `schema_validator_id`
+//! already exists) was, by design, left un-undone on later failure, because
+//! undoing a `replace_artifact` requires restoring the OLD compiled
+//! validator, not just removing an entry.
+//!
+//! That left a real divergence: `replace_artifact` overwrites the LIVE
+//! compiled validator with the NEW (attempted) rules the instant it runs —
+//! well before `activation_result` is known. If a LATER step
+//! (`get_table` / `add_validator_binding`) then fails, the caller
+//! (`admin_schema.rs`) rolls the CATALOGUE back to `rec_prev` (the OLD
+//! schema's data, unchanged `schema_validator_id`) — but the registry kept
+//! enforcing the NEW (never-fully-activated) rules under that same id. The
+//! catalogue said the OLD schema was active; the live enforcement gate
+//! actually ran the NEW schema's rules.
+//!
+//! F-27b closes this: `compile_table_schema` now captures the live artifact
+//! via `ValidatorRegistry::get_by_id` immediately before calling
+//! `replace_artifact`, and restores it with a second `replace_artifact` call
+//! if a later step fails — symmetric with the catalogue's `rec_prev`
+//! rollback.
 
 use std::sync::Arc;
 
@@ -279,5 +303,175 @@ async fn stale_name_collision_is_rejected_not_silently_no_oped() {
     assert!(
         db.validators().get_by_id(&id2).is_none(),
         "attempted id2 must not have been inserted"
+    );
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// F-27b (#827) tests below — the ALTER-path gap F-24 deliberately left
+// open: `replace_artifact` swaps in the NEW compiled validator immediately,
+// and (before this fix) a later activation failure left it live forever
+// even though the caller rolls the CATALOGUE back to the OLD schema.
+// ═══════════════════════════════════════════════════════════════════════
+
+/// Build a `FieldRule` with a distinct, single-segment `path` so tests can
+/// tell an "old" rule set apart from a "new" one after the fact via
+/// `RecordValidator::as_schema_rules()` — `SchemaValidator` is the only
+/// implementor that overrides this downcast hook, returning `&[FieldRule]`
+/// directly (no `Arc::ptr_eq` needed: the rule content itself is the marker).
+fn tagged_rule(tag: &str) -> shamir_engine::validator::schema::FieldRule {
+    use shamir_engine::validator::schema::constraints::Constraints;
+    use shamir_engine::validator::schema::type_tag::TypeTag;
+    shamir_engine::validator::schema::FieldRule {
+        path: vec![tag.to_string()],
+        ty: TypeTag::String,
+        constraints: Constraints::default(),
+        keyset_safe: false,
+    }
+}
+
+/// Resolve the live validator for `id` and return its first rule's `path[0]`
+/// tag — the marker `tagged_rule` embeds — via the `as_schema_rules()`
+/// downcast hook. Panics if the id doesn't resolve or isn't a
+/// `SchemaValidator`, which would itself be a test-setup bug.
+fn live_rule_tag(db: &ShamirDb, id: &RecordId) -> String {
+    let artifact = db
+        .validators()
+        .get_by_id(id)
+        .expect("validator id must resolve");
+    let rules = artifact
+        .as_schema_rules()
+        .expect("artifact must be a SchemaValidator");
+    rules[0].path[0].clone()
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// Test 5 — core F-27b regression: an ALTER's `replace_artifact` swap is
+// undone (restoring the OLD compiled artifact) when a LATER step fails.
+// This is the divergence this task closes: before the fix, the registry
+// kept enforcing the NEW (never-fully-activated) rules while the catalogue
+// (at the `admin_schema.rs` level, not exercised directly here) rolls back
+// to the OLD schema under the same `schema_validator_id`.
+// ═══════════════════════════════════════════════════════════════════════
+
+#[tokio::test]
+async fn alter_replace_artifact_restores_old_artifact_on_activation_failure() {
+    let db = db_without_tables().await;
+    let name = schema_validator_name("testdb", "main", "ghost_table");
+    let id = RecordId::system("f27b_alter");
+
+    // Simulate a pre-existing, previously-active schema validator (the state
+    // an ALTER starts from), tagged "old" so it can be told apart from the
+    // attempted "new" rules below.
+    let old: Arc<dyn RecordValidator> = Arc::new(SchemaValidator::new(vec![tagged_rule("old")]));
+    db.validators()
+        .register(id, &name, old)
+        .expect("precondition register must succeed");
+    assert_eq!(live_rule_tag(&db, &id), "old", "precondition: old is live");
+
+    // ALTER attempt with NEW rules for a non-existent table — `id_for_name`
+    // finds `id` → takes the `replace_artifact` branch → `get_table` (a
+    // LATER step) then fails.
+    let result = db
+        .compile_table_schema(
+            "testdb",
+            "main",
+            "ghost_table",
+            id,
+            vec![tagged_rule("new")],
+        )
+        .await;
+    assert!(
+        result.is_err(),
+        "activation must fail for a missing table even on the ALTER path"
+    );
+
+    // F-27b core guarantee: the registry's live artifact is the OLD one
+    // again, not the NEW (failed) one. Before the fix, `replace_artifact`
+    // had already swapped in "new" and nothing put "old" back.
+    assert_eq!(
+        db.validators().id_for_name(&name),
+        Some(id),
+        "ALTER: the validator name must still resolve to the same id"
+    );
+    assert_eq!(
+        live_rule_tag(&db, &id),
+        "old",
+        "F-27b: a failed ALTER activation must restore the OLD compiled \
+         artifact — the live registry must match the catalogue's rec_prev \
+         rollback, not the never-fully-activated NEW rules"
+    );
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// Test 6 — fresh-registration case is unaffected by the F-27b change. This
+// duplicates F-24's own assertions inline (rather than merely relying on
+// the untouched original test elsewhere in this file) so this task's own
+// test run demonstrates the fresh-registration path still behaves
+// identically after the ALTER-branch change.
+// ═══════════════════════════════════════════════════════════════════════
+
+#[tokio::test]
+async fn f27b_fresh_registration_path_is_unaffected() {
+    let db = db_without_tables().await;
+    let name = schema_validator_name("testdb", "main", "ghost_table");
+    let id = RecordId::system("f27b_fresh");
+
+    assert!(db.validators().id_for_name(&name).is_none());
+
+    let result = db
+        .compile_table_schema("testdb", "main", "ghost_table", id, no_rules())
+        .await;
+    assert!(result.is_err(), "activation must fail for a missing table");
+
+    // Same as F-24's guarantee: a fresh registration is fully undone, not
+    // "restored" to some prior artifact (there was none).
+    assert_eq!(
+        db.validators().id_for_name(&name),
+        None,
+        "fresh registration must still be undone on failure after F-27b"
+    );
+    assert!(
+        db.validators().get_by_id(&id).is_none(),
+        "fresh registration must still be undone on failure after F-27b"
+    );
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// Test 7 — successful ALTER still ends with the NEW artifact live. Guards
+// against the restore logic firing unconditionally instead of only on
+// `activation_result.is_err()`.
+// ═══════════════════════════════════════════════════════════════════════
+
+#[tokio::test]
+async fn alter_replace_artifact_keeps_new_artifact_on_success() {
+    let db = db_without_tables().await;
+    let name = schema_validator_name("testdb", "main", "users");
+    let id = RecordId::system("f27b_ok");
+
+    // Pre-existing "old" validator + a real table so activation can succeed.
+    let old: Arc<dyn RecordValidator> = Arc::new(SchemaValidator::new(vec![tagged_rule("old")]));
+    db.validators()
+        .register(id, &name, old)
+        .expect("precondition register must succeed");
+
+    let mut b = Batch::new();
+    b.id(1);
+    b.create_repo("cr", ddl::create_repo("main").tables(["users"]));
+    db.execute("testdb", &b.to_request_via_msgpack())
+        .await
+        .expect("create_repo must succeed");
+
+    // Full happy-path ALTER: replace_artifact swaps in "new", and activation
+    // (get_table + add_validator_binding + add_binding) succeeds.
+    db.compile_table_schema("testdb", "main", "users", id, vec![tagged_rule("new")])
+        .await
+        .expect("ALTER activation must succeed for an existing table");
+
+    // The NEW artifact must be the one left live — the restore-on-failure
+    // logic must not have fired for a successful call.
+    assert_eq!(
+        live_rule_tag(&db, &id),
+        "new",
+        "a successful ALTER must leave the NEW artifact live, not restore the old one"
     );
 }

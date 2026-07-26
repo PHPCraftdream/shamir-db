@@ -116,12 +116,23 @@ artifact).
   they run before the fail-closed gate, so the write is rejected anyway.)
   F-24 closes it at the source: a FRESH registration is undone
   (`ValidatorRegistry::remove`) if any later step in the same call fails,
-  restoring the registry to its pre-call state; an ALTER's
-  `replace_artifact` is deliberately never undone (it swaps an existing,
-  previously-working validator — the catalogue-level `rec_prev` rollback
-  handles that), and `replace_artifact`'s return value is now checked so any
-  future path that could recreate a stale name collision fails loudly. See
+  restoring the registry to its pre-call state; and `replace_artifact`'s
+  return value is now checked so any future path that could recreate a stale
+  name collision fails loudly. See
   `crates/shamir-db/src/shamir_db/shamir_db/tests/schema_rollback_tests.rs`.
+  **The ALTER-path counterpart is now ALSO closed — CLOSED (F-27b, #827).**
+  F-24 deliberately left an ALTER's `replace_artifact` never undone on later
+  failure, reasoning that the catalogue-level `rec_prev` rollback (still
+  pointing at the same `schema_validator_id`) covered it — but
+  `replace_artifact` swaps the LIVE compiled validator in place the instant
+  it runs, well before a later step's failure is known, so the registry kept
+  enforcing the NEW (never-fully-activated) rules while the rolled-back
+  catalogue said the OLD schema was active: a real persisted/live state
+  divergence, not just a memory leak. F-27b closes it by capturing the live
+  artifact via `ValidatorRegistry::get_by_id` immediately before
+  `replace_artifact` runs, and restoring it with a second `replace_artifact`
+  call if a later step fails — so the registry's live artifact always
+  matches what the catalogue believes is active.
 - **The "migration" API changes the storage engine, not the schema.**
   `StartMigration`/`CommitMigration`/`RollbackMigration`/`MigrationStatus`
   copy a table's raw `data_store` bytes to a new backend keyed by
