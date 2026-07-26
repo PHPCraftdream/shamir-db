@@ -134,7 +134,8 @@ fn main() {
         &select_all,
         &interner,
         ScalarResolver::builtins_only(),
-    );
+    )
+    .unwrap();
     let t_select = t1.elapsed();
     let (a2, b2, d2) = snapshot();
 

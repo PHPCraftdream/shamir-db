@@ -63,6 +63,15 @@ export type SelectItem =
       distinct: boolean;
     }
   | { type: 'function'; name: string; args: FilterValue[]; alias?: string }
+  /**
+   * Computed SELECT expression. Accepted by this type and the wire/parser,
+   * but F-26 (#819): the server currently REJECTS any query whose `select`
+   * contains this variant with a typed `select_expression_not_supported`
+   * error at execution time (no evaluator implemented yet) — it is never
+   * silently dropped from the projected result. Kept in the type for a
+   * future real implementation; a client constructing one today gets a
+   * clear rejection, not missing data.
+   */
   | { type: 'expr'; expr: unknown; alias?: string };
 
 /** Projection set (`Select`). `distinct` is always present on the wire. */

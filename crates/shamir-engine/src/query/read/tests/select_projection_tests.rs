@@ -45,7 +45,7 @@ fn project_value_select_all_returns_all_fields() {
     );
 
     let select = Select::all();
-    let proj = SelectProjection::new(&select, &interner, ScalarResolver::builtins_only());
+    let proj = SelectProjection::new(&select, &interner, ScalarResolver::builtins_only()).unwrap();
     let qval = proj.project_value(&record, &interner);
 
     match &qval {
@@ -85,7 +85,7 @@ fn project_value_field_projection_returns_named_fields_only() {
         ],
         distinct: false,
     };
-    let proj = SelectProjection::new(&select, &interner, ScalarResolver::builtins_only());
+    let proj = SelectProjection::new(&select, &interner, ScalarResolver::builtins_only()).unwrap();
     let qval = proj.project_value(&record, &interner);
 
     match &qval {
@@ -132,7 +132,7 @@ fn project_value_missing_field_is_null() {
         ],
         distinct: false,
     };
-    let proj = SelectProjection::new(&select, &interner, ScalarResolver::builtins_only());
+    let proj = SelectProjection::new(&select, &interner, ScalarResolver::builtins_only()).unwrap();
     let qval = proj.project_value(&record, &interner);
 
     match &qval {
@@ -157,7 +157,7 @@ fn project_value_empty_items_returns_all() {
         items: vec![],
         distinct: false,
     };
-    let proj = SelectProjection::new(&select, &interner, ScalarResolver::builtins_only());
+    let proj = SelectProjection::new(&select, &interner, ScalarResolver::builtins_only()).unwrap();
     let qval = proj.project_value(&record, &interner);
 
     match &qval {
@@ -219,7 +219,7 @@ fn project_value_cond_function_projection_caches_and_evaluates_per_record() {
 
     // Built ONCE — this is what populates `funcs_cond_cache` internally via
     // `prescan_cond_cache`, the real production call site under test.
-    let proj = SelectProjection::new(&select, &interner, ScalarResolver::builtins_only());
+    let proj = SelectProjection::new(&select, &interner, ScalarResolver::builtins_only()).unwrap();
 
     let record_high = make_record(&interner, vec![("score", InnerValue::Int(80))]);
     let record_low = make_record(&interner, vec![("score", InnerValue::Int(20))]);
@@ -296,7 +296,7 @@ fn project_value_user_scalar_resolves_through_projection() {
     };
 
     let resolver = resolver_with_user_scalar();
-    let proj = SelectProjection::new(&select, &interner, resolver);
+    let proj = SelectProjection::new(&select, &interner, resolver).unwrap();
 
     let record = make_record(&interner, vec![("n", InnerValue::Int(21))]);
     let qval = proj.project_value(&record, &interner);
@@ -329,7 +329,7 @@ fn project_value_builtins_only_still_works() {
         distinct: false,
     };
 
-    let proj = SelectProjection::new(&select, &interner, ScalarResolver::builtins_only());
+    let proj = SelectProjection::new(&select, &interner, ScalarResolver::builtins_only()).unwrap();
 
     let record = make_record(&interner, vec![("s", InnerValue::Str("hello".into()))]);
     let qval = proj.project_value(&record, &interner);

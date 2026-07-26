@@ -125,7 +125,8 @@ fn main() {
         &select_all,
         &interner,
         ScalarResolver::builtins_only(),
-    );
+    )
+    .unwrap();
 
     let order_by_score = OrderBy {
         items: vec![OrderByItem {

@@ -7,6 +7,7 @@ use crate::query::filter::{
 };
 use crate::query::read::{QueryResult, Select, SelectItem};
 use shamir_funclib::scalar_resolver::ScalarResolver;
+use shamir_storage::error::{DbError, DbResult};
 use shamir_types::codecs::interned::inner_value_to_query_value;
 use shamir_types::core::interner::{Interner, InternerKey};
 use shamir_types::record_view::RecordRef;
@@ -75,7 +76,17 @@ pub struct SelectProjection {
 
 impl SelectProjection {
     /// Build a reusable projection from a Select + Interner.
-    pub fn new(select: &Select, interner: &Interner, scalars: ScalarResolver) -> Self {
+    ///
+    /// F-26 (#819): `SelectItem::Expression` (computed SELECT expressions)
+    /// is accepted by the wire/parser but has no evaluator — silently
+    /// projecting it would return a result row with that field simply
+    /// absent, no error. This is the single production choke point every
+    /// read plan (full scan, index2, temporal, cursor) funnels through, so
+    /// rejecting it here — rather than in each read-plan file — guarantees
+    /// every entry point rejects it, including a `Select` built directly by
+    /// Rust code that bypasses the wire parser. Returns `Err` instead of
+    /// silently dropping the item.
+    pub fn new(select: &Select, interner: &Interner, scalars: ScalarResolver) -> DbResult<Self> {
         let is_all =
             select.items.is_empty() || select.items.iter().any(|i| matches!(i, SelectItem::All));
 
@@ -104,6 +115,18 @@ impl SelectProjection {
                         };
                         funcs.push((key, fv));
                     }
+                    SelectItem::Expression { .. } => {
+                        // F-26 (#819): computed SELECT expressions are
+                        // accepted at the wire/parser layer but have no
+                        // evaluator implemented yet. Reject with a typed,
+                        // stable code (mirrors `validate_aggregate_select`'s
+                        // `DbError::Validation("<code>")` convention in
+                        // `aggregate.rs`) instead of silently dropping the
+                        // item from the projected output.
+                        return Err(DbError::Validation(
+                            "select_expression_not_supported".to_string(),
+                        ));
+                    }
                     _ => {}
                 }
             }
@@ -128,7 +151,7 @@ impl SelectProjection {
             prescan_query_ref_cache(fv, &mut funcs_query_ref_cache);
         }
 
-        Self {
+        Ok(Self {
             is_all,
             fields,
             funcs,
@@ -137,7 +160,7 @@ impl SelectProjection {
             funcs_field_path_cache,
             funcs_query_ref_cache,
             scalars,
-        }
+        })
     }
 
     /// Project a single record to QueryValue.

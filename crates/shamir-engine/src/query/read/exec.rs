@@ -17,6 +17,7 @@ pub use crate::query::read::select_projection::SelectProjection;
 pub use crate::query::read::{Pagination, PaginationInfo, Select, SelectItem};
 use indexmap::IndexSet;
 use shamir_funclib::scalar_resolver::ScalarResolver;
+use shamir_storage::error::DbResult;
 use shamir_types::core::interner::Interner;
 use shamir_types::types::record_id::RecordId;
 use shamir_types::types::value::{InnerValue, QueryValue};
@@ -29,17 +30,21 @@ use shamir_types::types::value::{InnerValue, QueryValue};
 ///
 /// QueryValue-native projection. Aggregate items are skipped (handled by the
 /// aggregate pipeline).
+///
+/// F-26 (#819): fallible — `SelectProjection::new` rejects
+/// `SelectItem::Expression` (computed SELECT expressions have no evaluator
+/// yet) instead of silently dropping the field from the output.
 pub fn apply_select_value(
     records: &[(RecordId, InnerValue)],
     select: &Select,
     interner: &Interner,
     scalars: ScalarResolver,
-) -> Vec<QueryValue> {
-    let proj = SelectProjection::new(select, interner, scalars);
-    records
+) -> DbResult<Vec<QueryValue>> {
+    let proj = SelectProjection::new(select, interner, scalars)?;
+    Ok(records
         .iter()
         .map(|(_, record)| proj.project_value(record, interner))
-        .collect()
+        .collect())
 }
 
 // ============================================================================

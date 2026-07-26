@@ -111,7 +111,15 @@ pub enum SelectItem {
         alias: Option<String>,
     },
 
-    /// Expression (future: computed fields)
+    /// Expression (computed fields) — accepted by the wire DTO, parser, and
+    /// TS type, but F-26 (#819): REJECTED at execution time with a typed
+    /// error (`select_expression_not_supported`, see
+    /// `crates/shamir-engine/src/query/read/select_projection.rs`'s
+    /// `SelectProjection::new` and `crates/shamir-engine/src/query/read/
+    /// aggregate.rs`'s `validate_aggregate_select`). No evaluator exists yet
+    /// — a query with this variant in its SELECT errors out instead of
+    /// silently returning a result row missing the computed field. The wire
+    /// shape is kept intact for a future real implementation.
     #[serde(rename = "expr")]
     Expression {
         expr: SelectExpr,

@@ -78,7 +78,8 @@ fn select_all() {
         &select,
         &interner,
         ScalarResolver::builtins_only(),
-    );
+    )
+    .unwrap();
     assert_eq!(result.len(), 4);
     assert_eq!(result[0]["name"], "Alice");
     assert_eq!(result[0]["age"], 30_i64);
@@ -95,7 +96,8 @@ fn select_specific_fields() {
         &select,
         &interner,
         ScalarResolver::builtins_only(),
-    );
+    )
+    .unwrap();
     assert_eq!(result.len(), 4);
     assert_eq!(result[0]["name"], "Alice");
     assert_eq!(result[0]["age"], 30_i64);
@@ -120,7 +122,8 @@ fn select_with_alias() {
         &select,
         &interner,
         ScalarResolver::builtins_only(),
-    );
+    )
+    .unwrap();
     assert_eq!(result[0]["user_name"], "Alice");
     match &result[0] {
         QueryValue::Map(m) => assert!(!m.contains_key("name")),
@@ -142,7 +145,8 @@ fn select_nonexistent_field_returns_null() {
         &select,
         &interner,
         ScalarResolver::builtins_only(),
-    );
+    )
+    .unwrap();
     assert_eq!(result[0]["name"], "Alice");
     assert!(result[0]["nonexistent"].is_null());
 }
@@ -169,7 +173,8 @@ fn select_scalar_function_projection() {
         &select,
         &interner,
         ScalarResolver::builtins_only(),
-    );
+    )
+    .unwrap();
     assert_eq!(result[0]["name"], "Alice");
     assert_eq!(result[0]["upper_name"], "ALICE");
     assert_eq!(result[1]["upper_name"], "BOB");
@@ -194,7 +199,8 @@ fn select_scalar_function_nested_and_literal() {
         &select,
         &interner,
         ScalarResolver::builtins_only(),
-    );
+    )
+    .unwrap();
     assert_eq!(result[0]["shout"], "NYC!");
 }
 
@@ -212,7 +218,8 @@ fn select_scalar_function_unknown_is_null() {
         &select,
         &interner,
         ScalarResolver::builtins_only(),
-    );
+    )
+    .unwrap();
     match &result[0] {
         QueryValue::Map(m) => assert_eq!(m.get("x"), Some(&QueryValue::Null)),
         _ => panic!("expected QueryValue::Map"),
@@ -981,6 +988,39 @@ fn validate_rejects_args_on_unsupported_aggregate() {
     let err = validate_aggregate_select(&select).unwrap_err();
     match err {
         DbError::Validation(msg) => assert!(msg.contains("agg_params_not_supported"), "got: {msg}"),
+        other => panic!("expected Validation error, got {other:?}"),
+    }
+}
+
+#[test]
+fn validate_rejects_select_expression_mixed_into_aggregate_select() {
+    // F-26 (#819): a computed `SelectItem::Expression` mixed into an
+    // aggregate SELECT (alongside a legitimate CountAll) must be rejected
+    // with the SAME stable code as the plain-projection reject
+    // (`SelectProjection::new`) — `build_aggregate_object`'s match used to
+    // silently drop `Expression` items (`SelectItem::All |
+    // SelectItem::Expression { .. } => {}`), which would have returned a
+    // result row missing the computed field with no error.
+    let select = Select {
+        items: vec![
+            select::count_all("cnt"),
+            SelectItem::Expression {
+                expr: shamir_query_types::read::SelectExpr::Literal {
+                    value: shamir_query_types::read::SelectExprValue::Int(1),
+                },
+                alias: Some("computed".into()),
+            },
+        ],
+        distinct: false,
+    };
+    let err = validate_aggregate_select(&select).unwrap_err();
+    match err {
+        DbError::Validation(msg) => {
+            assert!(
+                msg.contains("select_expression_not_supported"),
+                "got: {msg}"
+            )
+        }
         other => panic!("expected Validation error, got {other:?}"),
     }
 }

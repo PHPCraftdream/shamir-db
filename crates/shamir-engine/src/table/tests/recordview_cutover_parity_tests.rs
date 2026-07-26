@@ -183,7 +183,8 @@ async fn run_tree(tbl: &TableManager, query: &ReadQuery) -> QueryResult {
         .collect();
 
     // Project
-    let proj = SelectProjection::new(&query.select, interner, ScalarResolver::builtins_only());
+    let proj =
+        SelectProjection::new(&query.select, interner, ScalarResolver::builtins_only()).unwrap();
     let records: Vec<QueryRecord> = matched
         .iter()
         .map(|(_, record)| QueryRecord::Direct(proj.project_value(record, interner)))

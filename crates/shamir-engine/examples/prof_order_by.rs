@@ -74,7 +74,8 @@ fn main() {
         &select_all,
         &interner,
         ScalarResolver::builtins_only(),
-    );
+    )
+    .unwrap();
     let t_select = t1.elapsed();
     println!("apply_select_value:      {t_select:?}");
 

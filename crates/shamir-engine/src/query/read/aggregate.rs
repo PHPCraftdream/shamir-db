@@ -867,6 +867,21 @@ pub fn validate_aggregate_select(select: &Select) -> shamir_storage::error::DbRe
                 // Min/Max: distinct is a correct no-op (min/max of a set ==
                 // min/max of its distinct subset). Allow silently.
             }
+            // F-26 (#819): `build_aggregate_object`'s match on `SelectItem`
+            // silently drops `Expression` items (`SelectItem::All |
+            // SelectItem::Expression { .. } => {}`) — a computed field mixed
+            // into an aggregate SELECT would otherwise vanish from the
+            // output with no error, same as the plain-projection hole this
+            // task closes. `validate_aggregate_select` is the one function
+            // every aggregate execution path (GROUP BY, aggregate-all,
+            // across every read plan) calls before building results, so
+            // rejecting here catches it uniformly. Same stable code as the
+            // plain-projection reject (`SelectProjection::new`).
+            SelectItem::Expression { .. } => {
+                return Err(shamir_storage::error::DbError::Validation(
+                    "select_expression_not_supported".to_string(),
+                ));
+            }
             _ => {}
         }
     }
@@ -998,6 +1013,14 @@ pub(super) fn build_aggregate_object(
                 };
                 func_slots.push((key, fv));
             }
+            // F-26 (#819): `SelectItem::Expression` reaching this point is
+            // unreachable in production — every caller of
+            // `build_aggregate_object` (`apply_group_by`,
+            // `apply_aggregate_all`) is only invoked after
+            // `validate_aggregate_select` has already rejected it. Kept as a
+            // silent no-op (not a `debug_assert`/`unreachable!`) rather than
+            // panicking, matching this file's existing skip-defensively
+            // convention for malformed input.
             SelectItem::All | SelectItem::Expression { .. } => {}
         }
     }

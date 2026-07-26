@@ -147,7 +147,7 @@ impl TableManager {
         let has_agg = exec::has_aggregates(&query.select);
 
         if let Some((paged, pagination)) =
-            try_project_page_only_bytes(query, &matched, interner, ctx.scalars.clone())
+            try_project_page_only_bytes(query, &matched, interner, ctx.scalars.clone())?
         {
             let records_returned = paged.len() as u64;
             return Ok(QueryResult {
@@ -175,7 +175,7 @@ impl TableManager {
             exec::validate_aggregate_select(&query.select)?;
             exec::apply_aggregate_all(&matched, &query.select, interner, ctx.scalars.clone())
         } else {
-            apply_select_value_bytes(&matched, &query.select, interner, ctx.scalars.clone())
+            apply_select_value_bytes(&matched, &query.select, interner, ctx.scalars.clone())?
         };
 
         if query.select.distinct {
@@ -355,7 +355,7 @@ impl TableManager {
                 &query.select,
                 interner,
                 ctx.scalars.clone(),
-            );
+            )?;
             // apply_select_value returns one QueryValue per input record.
             let row_qv = projected
                 .pop()

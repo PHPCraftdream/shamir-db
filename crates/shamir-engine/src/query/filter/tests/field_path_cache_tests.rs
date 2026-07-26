@@ -372,7 +372,7 @@ fn select_projection_caches_field_ref_and_evaluates_per_record() {
 
     // Built ONCE — this populates `funcs_field_path_cache` internally via
     // `prescan_field_path_cache`, the real production call site under test.
-    let proj = SelectProjection::new(&select, &interner, ScalarResolver::builtins_only());
+    let proj = SelectProjection::new(&select, &interner, ScalarResolver::builtins_only()).unwrap();
 
     let record_a = make_record_2(&interner, "alice", 0);
     let record_b = make_record_2(&interner, "bob", 0);

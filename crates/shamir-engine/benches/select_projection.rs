@@ -110,7 +110,8 @@ fn main() {
                 &select_all,
                 &interner,
                 ScalarResolver::builtins_only(),
-            );
+            )
+            .unwrap();
             black_box(projected);
         });
     }
@@ -126,7 +127,8 @@ fn main() {
                 &select_few,
                 &interner,
                 ScalarResolver::builtins_only(),
-            );
+            )
+            .unwrap();
             black_box(projected);
         });
     }
@@ -144,7 +146,8 @@ fn main() {
                     &select_all,
                     &interner,
                     ScalarResolver::builtins_only(),
-                );
+                )
+                .unwrap();
                 let bytes = rmp_serde::to_vec_named(&projected).unwrap();
                 black_box(bytes);
             },

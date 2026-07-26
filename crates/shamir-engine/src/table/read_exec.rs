@@ -957,7 +957,7 @@ impl TableManager {
                 &query.select,
                 interner,
                 ctx.scalars.clone(),
-            ))
+            )?)
         } else {
             None
         };
@@ -1192,7 +1192,7 @@ impl TableManager {
         let skip = skip as usize;
         let limit = take.map(|t| t as usize);
 
-        let proj = exec::SelectProjection::new(&query.select, interner, ctx.scalars.clone());
+        let proj = exec::SelectProjection::new(&query.select, interner, ctx.scalars.clone())?;
 
         // When a tx context is present, use tx-aware list_stream_tx so SSI
         // read-set recording is fused into this single scan (see read_collecting).
@@ -1357,7 +1357,7 @@ impl TableManager {
         // If projection interning failed, fall back to Name for the whole query.
         let use_id_encoding = use_id_encoding && (id_is_all || id_projection_ids.is_some());
 
-        let proj = exec::SelectProjection::new(&query.select, interner, ctx.scalars.clone());
+        let proj = exec::SelectProjection::new(&query.select, interner, ctx.scalars.clone())?;
 
         // When a tx context is present, use tx-aware list_stream_tx so SSI
         // read-set recording is fused into this single scan (see read_collecting).
@@ -1920,7 +1920,7 @@ impl TableManager {
 
         // Project survivors into query records — bytes already resolved in the
         // loop, so no second round-trip to the store/staging.
-        let proj = exec::SelectProjection::new(&query.select, interner, ctx.scalars.clone());
+        let proj = exec::SelectProjection::new(&query.select, interner, ctx.scalars.clone())?;
         let mut records: Vec<QueryRecord> = Vec::with_capacity(last_survivors.len());
         for (rid, bytes) in &last_survivors {
             let qv = match shamir_types::record_view::RecordView::new(bytes) {
@@ -2203,7 +2203,7 @@ impl TableManager {
     ) -> DbResult<QueryResult> {
         let rids: Vec<RecordId> = ranked.iter().map(|(r, _)| *r).collect();
         let raw_records = self.get_many_bytes_tx(&rids, tx).await?;
-        let proj = exec::SelectProjection::new(&query.select, interner, ctx.scalars.clone());
+        let proj = exec::SelectProjection::new(&query.select, interner, ctx.scalars.clone())?;
         let mut records: Vec<QueryRecord> = Vec::with_capacity(ranked.len());
         for (maybe_bytes, rid) in raw_records.iter().zip(rids.iter()) {
             let bytes = match maybe_bytes {
@@ -2446,20 +2446,20 @@ pub(super) fn try_project_page_only(
     matched: &[(RecordId, InnerValue)],
     interner: &Interner,
     scalars: ScalarResolver,
-) -> Option<(Vec<crate::query::read::QueryRecord>, Option<PaginationInfo>)> {
+) -> DbResult<Option<(Vec<crate::query::read::QueryRecord>, Option<PaginationInfo>)>> {
     // Gate: every condition below disables the push-down.
     if query.order_by.is_some()
         || query.group_by.is_some()
         || query.select.distinct
         || exec::has_aggregates(&query.select)
     {
-        return None;
+        return Ok(None);
     }
 
     // Need pagination or count_total — otherwise the original path is
     // already O(matches) and there's nothing to push down.
     if query.pagination.is_none() && !query.count_total {
-        return None;
+        return Ok(None);
     }
 
     let (skip_u64, take_u64) = query.pagination.resolve();
@@ -2467,7 +2467,10 @@ pub(super) fn try_project_page_only(
     // whole tail and we'd still project every row. Skip-only optimisation
     // (no limit, offset > 0) would only save the prefix — not worth it
     // here; let the fall-through path handle it.
-    let take = take_u64? as usize;
+    let Some(take_u64) = take_u64 else {
+        return Ok(None);
+    };
+    let take = take_u64 as usize;
     let skip = skip_u64 as usize;
 
     let total_matches = matched.len();
@@ -2478,7 +2481,7 @@ pub(super) fn try_project_page_only(
     let page_end = skip.saturating_add(take).min(total_matches);
     let page_slice = &matched[page_start..page_end];
 
-    let proj = exec::SelectProjection::new(&query.select, interner, scalars.clone());
+    let proj = exec::SelectProjection::new(&query.select, interner, scalars.clone())?;
     let mut paged: Vec<crate::query::read::QueryRecord> = Vec::with_capacity(page_slice.len());
     for (_, record) in page_slice {
         paged.push(crate::query::read::QueryRecord::Direct(
@@ -2509,7 +2512,7 @@ pub(super) fn try_project_page_only(
         Some(PaginationInfo::compute(&query.pagination, total_for_info))
     };
 
-    Some((paged, pagination))
+    Ok(Some((paged, pagination)))
 }
 
 /// Byte-level twin of [`try_project_page_only`] — works on raw `Bytes`
@@ -2522,20 +2525,23 @@ pub(super) fn try_project_page_only_bytes(
     matched: &[(RecordId, Bytes)],
     interner: &Interner,
     scalars: ScalarResolver,
-) -> Option<(Vec<crate::query::read::QueryRecord>, Option<PaginationInfo>)> {
+) -> DbResult<Option<(Vec<crate::query::read::QueryRecord>, Option<PaginationInfo>)>> {
     // Same eligibility gate as the InnerValue variant.
     if query.order_by.is_some()
         || query.group_by.is_some()
         || query.select.distinct
         || exec::has_aggregates(&query.select)
     {
-        return None;
+        return Ok(None);
     }
     if query.pagination.is_none() && !query.count_total {
-        return None;
+        return Ok(None);
     }
     let (skip_u64, take_u64) = query.pagination.resolve();
-    let take = take_u64? as usize;
+    let Some(take_u64) = take_u64 else {
+        return Ok(None);
+    };
+    let take = take_u64 as usize;
     let skip = skip_u64 as usize;
 
     let total_matches = matched.len();
@@ -2553,7 +2559,7 @@ pub(super) fn try_project_page_only_bytes(
     // skipped (unchanged behaviour); reporting it would require threading a
     // corrupt-record accumulator through this function's signature AND both
     // out-of-scope callers, which the brief for #800 explicitly defers.
-    let proj = exec::SelectProjection::new(&query.select, interner, scalars.clone());
+    let proj = exec::SelectProjection::new(&query.select, interner, scalars.clone())?;
     let mut paged: Vec<crate::query::read::QueryRecord> = Vec::with_capacity(page_slice.len());
     for (_, bytes) in page_slice {
         let qv = match shamir_types::record_view::RecordView::new(bytes) {
@@ -2584,20 +2590,23 @@ pub(super) fn try_project_page_only_bytes(
         Some(PaginationInfo::compute(&query.pagination, total_for_info))
     };
 
-    Some((paged, pagination))
+    Ok(Some((paged, pagination)))
 }
 
 /// Byte-level twin of [`exec::apply_select_value`] — projects raw `Bytes`
 /// rows via zero-copy `RecordView` instead of decoded `InnerValue`.
 /// Bare-scalar / non-map records fall back to `InnerValue::from_bytes`.
+///
+/// F-26 (#819): fallible — `SelectProjection::new` rejects
+/// `SelectItem::Expression`.
 pub(super) fn apply_select_value_bytes(
     matched: &[(RecordId, Bytes)],
     select: &crate::query::read::Select,
     interner: &Interner,
     scalars: ScalarResolver,
-) -> Vec<QueryValue> {
-    let proj = exec::SelectProjection::new(select, interner, scalars.clone());
-    matched
+) -> DbResult<Vec<QueryValue>> {
+    let proj = exec::SelectProjection::new(select, interner, scalars.clone())?;
+    Ok(matched
         .iter()
         .map(
             |(_, bytes)| match shamir_types::record_view::RecordView::new(bytes) {
@@ -2608,5 +2617,5 @@ pub(super) fn apply_select_value_bytes(
                 },
             },
         )
-        .collect()
+        .collect())
 }

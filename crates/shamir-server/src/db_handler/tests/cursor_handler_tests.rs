@@ -23,7 +23,9 @@ use shamir_query_builder::doc;
 use shamir_query_builder::write::insert;
 use shamir_query_types::admin::ResourceRef;
 use shamir_query_types::batch::BatchError;
-use shamir_query_types::read::{OrderBy, ReadQuery, Select, Temporal};
+use shamir_query_types::read::{
+    OrderBy, ReadQuery, Select, SelectExpr, SelectExprValue, SelectItem, Temporal,
+};
 use shamir_query_types::wire::{CursorId, DbRequest, DbResponse};
 use shamir_types::types::value::QueryValue;
 
@@ -657,6 +659,58 @@ fn cursor_with_version_not_supported_is_a_distinct_batch_error_variant() {
     assert_eq!(
         crate::db_handler::handler::error_code(&e),
         "cursor_with_version_not_supported"
+    );
+}
+
+/// F-26 (#819) — a cursor's every internal read rewrites `temporal` to
+/// `Temporal::AsOf { at: At::Version(pinned_version) }` internally
+/// (`create_cursor`'s doc comment above), routing through
+/// `TableManager::read_as_of` in `shamir-engine`'s `read_temporal.rs` —
+/// exercising the SAME `SelectProjection::new` reject as a plain temporal
+/// read, but through the cursor wire entry point specifically. A computed
+/// `SelectItem::Expression` in the cursor's SELECT must surface as a clean
+/// `DbResponse::Error`, not a `CursorPage` silently missing the computed
+/// field.
+#[tokio::test]
+async fn create_cursor_rejects_select_expression() {
+    let handler = build_handler_with_rows(3, CursorLimitsCap::UNLIMITED).await;
+    let session = alice_session();
+
+    let query = ReadQuery::new("items").select(Select {
+        items: vec![
+            SelectItem::Field {
+                path: vec!["v".to_string()],
+                alias: None,
+            },
+            SelectItem::Expression {
+                expr: SelectExpr::Literal {
+                    value: SelectExprValue::Int(1),
+                },
+                alias: Some("bogus".to_string()),
+            },
+        ],
+        distinct: false,
+    });
+
+    let resp = send(&handler, &session, create_cursor_req(query, 2)).await;
+    match resp {
+        DbResponse::Error { message, .. } => {
+            assert!(
+                message.contains("select_expression_not_supported"),
+                "expected the select_expression_not_supported code in the \
+                 error message, got: {message}"
+            );
+        }
+        other => panic!(
+            "a computed SelectItem::Expression must be rejected, not accepted \
+             (which would silently return a CursorPage missing the computed \
+             field), got {other:?}"
+        ),
+    }
+    assert_eq!(
+        handler.cursor_registry().len(),
+        0,
+        "a rejected CreateCursor must not register a cursor"
     );
 }
 

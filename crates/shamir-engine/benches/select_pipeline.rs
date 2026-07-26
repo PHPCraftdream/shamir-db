@@ -147,24 +147,30 @@ fn main() {
         let records = records.clone();
         let select_5 = select_5.clone();
         h.bench("apply_select_value/5_fields_1000_records", move || {
-            black_box(apply_select_value(
-                &records,
-                &select_5,
-                interner,
-                ScalarResolver::builtins_only(),
-            ));
+            black_box(
+                apply_select_value(
+                    &records,
+                    &select_5,
+                    interner,
+                    ScalarResolver::builtins_only(),
+                )
+                .unwrap(),
+            );
         });
     }
     {
         let records = records.clone();
         let select_all = select_all.clone();
         h.bench("apply_select_value/select_all_1000_records", move || {
-            black_box(apply_select_value(
-                &records,
-                &select_all,
-                interner,
-                ScalarResolver::builtins_only(),
-            ));
+            black_box(
+                apply_select_value(
+                    &records,
+                    &select_all,
+                    interner,
+                    ScalarResolver::builtins_only(),
+                )
+                .unwrap(),
+            );
         });
     }
 
@@ -175,7 +181,8 @@ fn main() {
         &select_5,
         interner,
         ScalarResolver::builtins_only(),
-    );
+    )
+    .unwrap();
     let order_by_single = OrderBy {
         items: vec![OrderByItem {
             field: vec!["age".to_string()],

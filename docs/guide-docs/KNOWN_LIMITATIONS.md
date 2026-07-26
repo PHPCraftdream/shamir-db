@@ -374,6 +374,26 @@ artifact).
   (`crates/shamir-engine/src/table/read_index_scan.rs`,
   `crates/shamir-engine/src/table/read_temporal.rs`) are themselves out of
   this task's scope — see the comment at that call site for detail.
+- **`SelectItem::Expression` (computed SELECT fields) is REJECTED at
+  execution time, not silently ignored (F-26, #819, closed).** The variant
+  is accepted at every layer of the contract — wire DTO
+  (`crates/shamir-query-types/src/read/select_expr.rs`), parser
+  (`crates/shamir-engine/src/query/read/parser.rs`), and the public TS type
+  (`crates/shamir-client-ts/src/core/types/query.ts`) — but no evaluator
+  exists yet. Before F-26, `SelectProjection::new`
+  (`crates/shamir-engine/src/query/read/select_projection.rs`) silently
+  dropped the item from the projected output via a bare `_ => {}` catch-all
+  — a syntactically valid query with a computed field in its `SELECT`
+  returned a result set with that field simply absent, no error. Fixed by
+  rejecting the variant with a typed `select_expression_not_supported`
+  error at the two production choke points every read plan funnels
+  through: `SelectProjection::new` (full scan, index2, temporal, and
+  cursor read plans — a cursor's every internal read routes through the
+  temporal AsOf path) and `validate_aggregate_select`
+  (`crates/shamir-engine/src/query/read/aggregate.rs`, covering GROUP BY /
+  aggregate-all queries). The wire shape is kept intact for a future real
+  expression-evaluator implementation — only execution-time rejection was
+  added.
 
 ## 7. Numbers
 

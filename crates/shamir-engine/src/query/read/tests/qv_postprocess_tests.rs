@@ -593,7 +593,8 @@ fn select_value_specific_fields() {
         &select,
         &interner,
         ScalarResolver::builtins_only(),
-    );
+    )
+    .unwrap();
     assert_eq!(result.len(), 4);
 
     assert_eq!(result[0]["name"], QueryValue::Str("Alice".into()));
@@ -616,7 +617,8 @@ fn select_value_all_returns_all_fields() {
         &select,
         &interner,
         ScalarResolver::builtins_only(),
-    );
+    )
+    .unwrap();
     assert_eq!(result.len(), 4);
 
     // All four fields present
@@ -638,7 +640,8 @@ fn path_b_distinct_order_qv() {
         &select,
         &interner,
         ScalarResolver::builtins_only(),
-    );
+    )
+    .unwrap();
     // 4 rows: {city:NYC,age:30},{city:LA,age:25},{city:NYC,age:35},{city:LA,age:25}
     // After distinct: {NYC,30},{LA,25},{NYC,35} → 3 distinct rows
     let q_distinct = apply_distinct_qv(qv_result);

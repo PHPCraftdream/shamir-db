@@ -424,7 +424,7 @@ fn select_projection_wires_query_ref_cache_and_evaluates_per_record() {
 
     // Built ONCE — this populates `funcs_query_ref_cache` internally via
     // `prescan_query_ref_cache`, the real production call site under test.
-    let proj = SelectProjection::new(&select, &interner, ScalarResolver::builtins_only());
+    let proj = SelectProjection::new(&select, &interner, ScalarResolver::builtins_only()).unwrap();
 
     let rec_a = null_record();
     let rec_b = null_record();
