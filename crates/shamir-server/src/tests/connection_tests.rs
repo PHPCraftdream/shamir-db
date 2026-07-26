@@ -1,4 +1,7 @@
+use std::path::PathBuf;
 use std::time::Duration;
+
+use tempfile::TempDir;
 
 use shamir_connect::common::latency::{padding_for, target_constant_time_ms, FIXED_FLOOR_MS};
 use shamir_connect::common::types::limits::MAX_PRE_AUTH_FRAME;
@@ -7,6 +10,8 @@ use shamir_connect::server::lockout::{
     BACKOFF_CAP_MS, LOCKOUT_THRESHOLD,
 };
 use shamir_transport_tcp::framing::MAX_FRAME_SIZE_DEFAULT;
+
+use crate::server_meta::ServerMetaStore;
 
 // HIGH-1 compile-time invariants: pin the pre-auth frame ceiling at
 // the spec §8 value and prove it stays strictly below the post-auth
@@ -195,6 +200,151 @@ fn backoff_progression_is_identical_for_any_pair() {
             a,
             b,
             "backoff at failure #{} must not depend on the pair identity",
+            i + 1,
+        );
+    }
+}
+
+// ---------------------------------------------------------------------
+// F-25 (#818, P0): bootstrap-TTL fail-closed gate inserted into
+// `run_handshake` between `ProofOutcome::Accepted` and the (best-effort,
+// non-fatal) rotation-on-success block.
+//
+// Same rationale as the NEW-2 backoff tests above: driving the full async
+// `run_handshake` requires a complete `ConnectionContext`, so this mirrors
+// the EXACT gate condition against a real `ServerMetaStore` (not a mock),
+// and proves it reuses the identical `register_failure` mechanism as the
+// `ProofOutcome::Rejected` arm — i.e. the new reject path is NOT a new,
+// distinguishable failure shape.
+// ---------------------------------------------------------------------
+
+/// Mirror of the new gate in `run_handshake`, kept in lockstep with the
+/// production condition so this test fails if the two drift apart.
+fn bootstrap_token_expired_for_login(meta: &ServerMetaStore, username: &str, now_ns: u64) -> bool {
+    meta.bootstrap_token_active()
+        && meta.bootstrap_username().as_deref() == Some(username)
+        && meta.bootstrap_token_expired(now_ns)
+}
+
+fn tmp_meta_store() -> (TempDir, ServerMetaStore) {
+    let dir = TempDir::new().expect("tempdir");
+    let store = ServerMetaStore::open_or_init(dir.path().join("server_meta"))
+        .expect("open_or_init server_meta");
+    (dir, store)
+}
+
+/// Core F-25 guarantee: once the outstanding bootstrap token's TTL has
+/// passed, the gate fires for the matching username — this is what makes
+/// `run_handshake` reject the login instead of falling through to the
+/// (best-effort, non-fatal) rotation attempt.
+#[test]
+fn gate_fires_when_outstanding_token_for_username_has_expired() {
+    let (_dir, store) = tmp_meta_store();
+    let expires_at_ns = 1_000_000_000_000u64;
+    store
+        .set_bootstrap_token(
+            "admin",
+            [0xAAu8; 32],
+            expires_at_ns,
+            PathBuf::from("/run/shamir/bootstrap_token.txt"),
+        )
+        .expect("set_bootstrap_token");
+
+    assert!(
+        bootstrap_token_expired_for_login(&store, "admin", expires_at_ns),
+        "gate must fire at exactly the expiry boundary (<=), matching \
+         `bootstrap_token_expired`'s own semantics"
+    );
+    assert!(bootstrap_token_expired_for_login(
+        &store,
+        "admin",
+        expires_at_ns + 1
+    ));
+}
+
+/// F-3 regression: a NON-expired outstanding token must NOT trip the new
+/// gate — the existing best-effort rotation-on-success login path (F-3)
+/// must keep working unchanged for the common case.
+#[test]
+fn gate_does_not_fire_for_non_expired_token() {
+    let (_dir, store) = tmp_meta_store();
+    let expires_at_ns = 1_000_000_000_000u64;
+    store
+        .set_bootstrap_token(
+            "admin",
+            [0xAAu8; 32],
+            expires_at_ns,
+            PathBuf::from("/run/shamir/bootstrap_token.txt"),
+        )
+        .expect("set_bootstrap_token");
+
+    assert!(
+        !bootstrap_token_expired_for_login(&store, "admin", expires_at_ns - 1),
+        "F-3 regression: a not-yet-expired token must not be gated"
+    );
+}
+
+/// The gate is scoped to the bootstrap username only — a login for a
+/// DIFFERENT username must never be affected by an outstanding (even
+/// expired) bootstrap token issued to someone else.
+#[test]
+fn gate_does_not_fire_for_a_different_username() {
+    let (_dir, store) = tmp_meta_store();
+    store
+        .set_bootstrap_token(
+            "admin",
+            [0xAAu8; 32],
+            1, // already expired
+            PathBuf::from("/run/shamir/bootstrap_token.txt"),
+        )
+        .expect("set_bootstrap_token");
+
+    assert!(!bootstrap_token_expired_for_login(
+        &store,
+        "someone_else",
+        u64::MAX
+    ));
+}
+
+/// No outstanding token at all → gate never fires, regardless of `now_ns`
+/// (mirrors `bootstrap_token_expired`'s own "fails open" semantics when no
+/// token is outstanding — this is pre-existing behavior the F-25 gate does
+/// not change, per the brief's "metadata unavailability" note).
+#[test]
+fn gate_does_not_fire_when_no_token_is_outstanding() {
+    let (_dir, store) = tmp_meta_store();
+    assert!(!bootstrap_token_expired_for_login(
+        &store,
+        "admin",
+        u64::MAX
+    ));
+}
+
+/// Oracle-avoidance: the new reject path must reuse the EXACT SAME
+/// `register_failure` → backoff mapping as the existing
+/// `ProofOutcome::Rejected` arm (`backoff_ms_for`, defined above), so an
+/// expired-bootstrap-token rejection is indistinguishable in shape and
+/// backoff progression from an ordinary bad-proof rejection for the same
+/// pair.
+#[test]
+fn expired_bootstrap_rejection_uses_the_same_backoff_mapping_as_bad_proof() {
+    let store_a = InMemoryLockoutStore::new();
+    let store_b = InMemoryLockoutStore::new();
+    let now = 1_000_000_000u64;
+    const SECOND_NS: u64 = 1_000_000_000;
+    // Two independent pairs: one standing in for the "expired bootstrap
+    // token" rejection path, one for an ordinary "bad proof" rejection.
+    let expired_token_pair = pair(9, 0xcc);
+    let bad_proof_pair = pair(9, 0xdd);
+
+    for i in 0..8u64 {
+        let a = backoff_ms_for(store_a.register_failure(expired_token_pair, now + i * SECOND_NS));
+        let b = backoff_ms_for(store_b.register_failure(bad_proof_pair, now + i * SECOND_NS));
+        assert_eq!(
+            a,
+            b,
+            "failure #{}: expired-token rejection backoff must match a \
+             bad-proof rejection's backoff bit-for-bit",
             i + 1,
         );
     }

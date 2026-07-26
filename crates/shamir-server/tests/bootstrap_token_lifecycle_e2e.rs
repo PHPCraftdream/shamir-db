@@ -304,3 +304,99 @@ async fn ttl_sweep_rotation_failure_leaves_token_active_for_retry() {
         "F-3: token file must be deleted after successful retry rotation"
     );
 }
+
+/// F-25 (#818, P0): the login path must be FAIL-CLOSED with respect to the
+/// bootstrap token TTL, not just the boot-time sweep. Before this fix,
+/// `run_handshake` never called `ServerMeta::bootstrap_token_expired` — it
+/// only checked `bootstrap_token_active()` + username match before a
+/// best-effort/non-fatal rotation attempt, so a login for the outstanding
+/// bootstrap username succeeded regardless of whether the token's TTL had
+/// already passed, as long as the SCRAM proof itself verified.
+///
+/// Reproduces the exact race the boot-time sweep can leave behind: the
+/// token metadata row is ALREADY EXPIRED but the sweep's own rotation
+/// attempt fails (here: because the target username doesn't exist in the
+/// user directory yet at sweep time — same precondition as
+/// `ttl_sweep_rotation_failure_leaves_token_active_for_retry` above), so the
+/// row stays active+expired for the rest of the boot. The bootstrap step
+/// that follows then creates the account using the SAME string as both its
+/// real SCRAM password AND the (stale) token's hash source — mirroring the
+/// real `RandomToken` narrative where the token IS the account's password —
+/// without depending on `ensure_superuser`'s internally-generated random
+/// value (which can't be pre-seeded into a not-yet-created account before
+/// boot).
+///
+/// A real SCRAM login using that (still technically valid, not-yet-rotated)
+/// password must now be REJECTED — even though the proof verifies
+/// successfully against the account's current credential — because the
+/// outstanding token for that username has expired. Without the F-25 fix
+/// this same login succeeds (rotation, attempted again on login, now
+/// succeeds because the account exists by then, and the non-fatal rotation
+/// path never gated the login itself).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn login_rejected_when_outstanding_bootstrap_token_has_already_expired() {
+    let temp = TempDir::new().expect("tempdir");
+    let token_path = temp.path().join("bootstrap_token.txt");
+    let token_value: &[u8] = b"expired-bootstrap-token-value";
+
+    // Pre-seed an ALREADY-EXPIRED bootstrap-token bookkeeping row for
+    // "admin", who does NOT exist in the user directory yet — the
+    // boot-time TTL sweep's rotation attempt therefore fails (user not
+    // found) and leaves the row active+expired for the whole boot, exactly
+    // as in `ttl_sweep_rotation_failure_leaves_token_active_for_retry`.
+    {
+        let meta = ServerMetaStore::open_or_init(temp.path().join("server_meta"))
+            .expect("pre-seed server_meta");
+        std::fs::write(&token_path, token_value).expect("write token file");
+        meta.set_bootstrap_token(
+            "admin",
+            shamir_connect::common::crypto::sha256(token_value),
+            1, // already-past expiry (1 ns since epoch)
+            token_path.clone(),
+        )
+        .expect("set expired bootstrap token for non-existent user");
+    }
+
+    // Boot (Password mode) with the account's real password set to the
+    // SAME value as the pre-seeded token. The sweep runs FIRST (before this
+    // bootstrap step creates "admin"), fails to rotate (user doesn't exist
+    // yet), and leaves the token row outstanding+expired for the rest of
+    // this boot's lifetime.
+    let handle = common::spawn_with_password(&temp, token_value, "127.0.0.1:0").await;
+    let addr = handle.first_tls_exporter_addr().expect("bound");
+
+    // A real SCRAM login with the correct (still-valid, not-yet-rotated)
+    // bootstrap password must be REJECTED — fail-closed per F-25 — even
+    // though the proof itself verifies successfully against the account's
+    // current credential.
+    let login = Client::connect(ConnectOptions {
+        addr,
+        server_name: "localhost".to_string(),
+        username: "admin".to_string(),
+        password: Zeroizing::new(token_value.to_vec()),
+        accept_new_host: true,
+        trusted_pin: None,
+        connect_timeout: None,
+        request_timeout: None,
+    })
+    .await;
+    assert!(
+        login.is_err(),
+        "F-25: a login for the outstanding bootstrap username must be \
+         rejected once its token's TTL has expired, regardless of whether \
+         the proof itself verifies"
+    );
+
+    handle.shutdown().await;
+
+    // The reject must happen BEFORE the rotation-attempt block (per the
+    // brief): the token metadata row must be UNCHANGED — still active, not
+    // consumed — after the rejected attempt.
+    let meta = ServerMetaStore::open_or_init(temp.path().join("server_meta"))
+        .expect("reopen server_meta after shutdown");
+    assert!(
+        meta.bootstrap_token_active(),
+        "F-25: the rejected login must not have touched the outstanding \
+         bootstrap token row (the rotation attempt must not have run)"
+    );
+}

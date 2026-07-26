@@ -395,6 +395,49 @@ async fn run_handshake<F: Framer>(
         }
     };
 
+    // F-25 (#818, P0): fail-closed bootstrap TTL check. The rotation block
+    // below is best-effort/non-fatal by design (F-3) so an outstanding
+    // bootstrap token whose TTL has already expired must be rejected HERE,
+    // before any session is granted -- otherwise a login against an expired
+    // (but not-yet-rotated) bootstrap credential would still succeed if the
+    // rotation attempt also fails (e.g. the same storage outage that left
+    // the boot-time TTL sweep's own rotation incomplete). Reject with the
+    // SAME failure shape as a wrong-proof rejection (`HandshakeError::BadProof`,
+    // same `register_failure`/`audit_emit` pattern as the `ProofOutcome::Rejected`
+    // arm above) so this is indistinguishable from a bad password to an
+    // outside observer -- no oracle telling an attacker "the password was
+    // right, only the timing was wrong."
+    //
+    // `bootstrap_token_active()`/`bootstrap_token_expired()` both fail OPEN
+    // (return `false`) if `ctx.meta`'s underlying blob read errors -- see
+    // `server_meta.rs`. That is pre-existing behavior this check does not
+    // change or worsen: the surrounding `if` already relies on
+    // `bootstrap_token_active()` failing open the same way to decide whether
+    // a bootstrap token is outstanding at all, so this expiry check does not
+    // introduce any NEW fail-open beyond what already exists here.
+    //
+    // Must run BEFORE `reset_on_success` -- a login that's about to be
+    // rejected must not reset the pair's lockout counter.
+    if ctx.meta.bootstrap_token_active()
+        && ctx.meta.bootstrap_username().as_deref() == Some(username.as_str())
+        && ctx.meta.bootstrap_token_expired(now_ns)
+    {
+        let backoff_ms = match ctx.lockout.register_failure(pair, now_ns) {
+            FailureOutcome::Backoff { delay_ms } => delay_ms,
+            FailureOutcome::LockedOut => BACKOFF_CAP_MS,
+        };
+        tracing::info!(user_hash = %hex::encode(uhash), "auth_failed: bootstrap token expired");
+        audit_emit(
+            ctx,
+            "auth_failed",
+            username.as_str(),
+            subnet,
+            None,
+            "bootstrap_token_expired",
+        );
+        return Err(HandshakeError::BadProof { backoff_ms });
+    }
+
     // Reset lockout on success per spec §5.2.5 NORMATIVE.
     ctx.lockout.reset_on_success(pair);
 
