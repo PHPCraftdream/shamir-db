@@ -18,7 +18,7 @@ use shamir_db::engine::table::TableConfig;
 use shamir_db::ShamirDb;
 
 use shamir_query_builder::batch::Batch;
-use shamir_query_builder::ddl::{chmod, drop_table};
+use shamir_query_builder::ddl::{add_schema_rule, chmod, drop_table, field, set_table_schema};
 use shamir_query_builder::doc;
 use shamir_query_builder::write::insert;
 use shamir_query_types::admin::ResourceRef;
@@ -1260,6 +1260,12 @@ async fn fetch_next_explicit_page_size_still_overrides_default() {
 /// (`required`), and bind it to `db_name.repo_name.table_name` — the minimal
 /// setup that makes `order_by_column_is_schema_typed_scalar` prove a column
 /// homogeneous so a cursor over it can reach `PaginationMode::Keyset` at all.
+/// F-17 (#810) additionally requires the matched rule's `keyset_safe` proof
+/// to be `true`; this helper is called BEFORE any row is seeded, so the
+/// `FieldRule` below is constructed with `keyset_safe: true` directly
+/// (mirroring what `stamp_keyset_safe` would compute at bind time on a
+/// genuinely empty table), keeping every existing Keyset-mode test path
+/// unchanged.
 ///
 /// Registers the `SchemaValidator` DIRECTLY into the live `ValidatorRegistry`
 /// (`db.validators().register(...)`) rather than via `ShamirDb::
@@ -1291,6 +1297,9 @@ async fn bind_schema(
             required: true,
             ..Constraints::default()
         },
+        // F-17 (#810): schema bound BEFORE rows are seeded — the table is
+        // empty, so the column IS provably homogeneous by construction.
+        keyset_safe: true,
     };
     let schema = SchemaValidator::new(vec![field_rule]);
     let id = RecordId::new();
@@ -1321,7 +1330,9 @@ async fn bind_schema(
 /// predates the schema-typed-scalar gate and its whole point is Keyset-mode
 /// coverage, not the schemaless-conservative-default this task adds (that
 /// default has its own dedicated tests, see `order_by_column_is_schema_typed_
-/// scalar`'s regression tests below).
+/// scalar`'s regression tests below). F-17 (#810): `bind_schema` stamps
+/// `keyset_safe: true` (table is empty at this point), so the gate still
+/// passes and Keyset mode is reached exactly as before.
 async fn build_handler_with_scores(
     scores: &[i64],
     cursor_limits: CursorLimitsCap,
@@ -3436,7 +3447,9 @@ async fn build_handler_with_big_scores(
 /// W-2 per-value mechanism (`safe_seek_key` excluding `Bin` unconditionally,
 /// since `compare_values` has no `(Bin, Bin)` comparison arm regardless of
 /// schema) instead of being short-circuited to `Offset` before that
-/// mechanism is ever reached.
+/// mechanism is ever reached. F-17 (#810): `bind_schema` stamps
+/// `keyset_safe: true` (table is empty at bind time), so the gate still
+/// passes exactly as before.
 async fn build_handler_with_bin_scores(
     scores: &[u8],
     cursor_limits: CursorLimitsCap,
@@ -3803,8 +3816,7 @@ async fn str_order_by_regression_still_uses_real_keyset_seek() {
         seqs,
         vec![0, 1, 2, 3, 4],
         "regression: a Str ORDER BY column must still page correctly via genuine keyset \
-         seeking (labels sort aa < bb < cc < dd < ee -- seq order after sort is 2,4,1,3,0, but \
-         every seq must still appear exactly once)"
+         seeking (labels sort aa < bb < cc < dd < ee)"
     );
 }
 
@@ -4009,8 +4021,8 @@ async fn schema_typed_int_required_order_by_uses_keyset_mode() {
     assert_eq!(
         pinned_mode(&handler, cursor_id, &ALICE_SID),
         PaginationMode::Keyset,
-        "a schema-typed Int (required) ORDER BY column must pass the schema-typed-scalar \
-         gate and use PaginationMode::Keyset"
+        "a schema-typed Int (required) ORDER BY column passes the schema gate and reaches Keyset \
+         mode -- bind_schema sets keyset_safe: true (table was empty at bind time)"
     );
 
     drain_seqs(&handler, &session, cursor_id, 2, &mut seqs).await;
@@ -4199,6 +4211,8 @@ async fn schema_typed_nullable_int_composes_with_existing_null_probe() {
             path: vec!["score".to_string()],
             ty: TypeTag::Int,
             constraints,
+            // F-17 (#810): schema bound BEFORE rows are seeded.
+            keyset_safe: true,
         };
         let schema = SchemaValidator::new(vec![rule]);
         let id = RecordId::new();
@@ -4392,5 +4406,306 @@ async fn mixed_type_order_by_column_no_longer_silently_drops_rows() {
         "every row -- both Int-scored and Str-scored -- must appear exactly once via \
          offset-mode pagination; before this task's fix, this scenario would have silently \
          dropped rows of one type once the keyset scan passed page 1"
+    );
+}
+
+/// F-17 (#810) core regression: the EXACT scenario from the finding -- a
+/// schemaless table with ALREADY-MIXED-TYPE data in the ORDER BY field, THEN
+/// a schema rule declaring that field `Int` is bound AFTER the fact via the
+/// real DDL path (`set_table_schema`).
+///
+/// Under the OLD F-1 gate (`order_by_column_is_schema_typed_scalar`), binding
+/// an `Int` schema rule would have made the gate return `true` (Keyset
+/// enabled) even though the pre-existing `Str` rows silently violate it --
+/// `compare_values` has no `(Int, Str)` cross-type arm, so those rows would
+/// vanish from later pages with a clean `has_more: false`. F-17's fix stamps
+/// `keyset_safe = (table.count() == 0)` at bind time; since the table is
+/// non-empty here, `keyset_safe: false` is recorded and the gate refuses
+/// keyset eligibility, so this cursor falls back to `PaginationMode::Offset`
+/// and every row -- including the pre-schema mixed-type ones -- is returned
+/// exactly once.
+#[tokio::test]
+async fn schema_bound_after_mixed_type_data_still_falls_back_to_offset() {
+    let shamir = ShamirDb::init_memory().await.expect("init shamir");
+    let owner = Actor::User(principal64([0xAB; 16]));
+    shamir.create_db_as("app", owner.clone()).await;
+    let cfg =
+        RepoConfig::new("main", BoxRepoFactory::in_memory()).add_table(TableConfig::new("items"));
+    shamir
+        .add_repo_as("app", cfg, owner.clone())
+        .await
+        .expect("add repo");
+
+    // Step 1-2: insert MIXED-TYPE data into `score` BEFORE any schema is
+    // bound -- 3 rows with an Int score, 2 rows with a Str score. This is
+    // legal for a schemaless document table.
+    let mut b = Batch::new();
+    for i in 0..3i64 {
+        b.insert(
+            format!("i{i}"),
+            insert("items").row(doc! { "seq" => i, "score" => i }),
+        );
+    }
+    let str_scores = ["a", "b"];
+    for (j, s) in str_scores.iter().enumerate() {
+        let i = 3 + j as i64;
+        b.insert(
+            format!("i{i}"),
+            insert("items").row(doc! { "seq" => i, "score" => s.to_string() }),
+        );
+    }
+    let batch = b.build();
+    shamir
+        .execute_as(owner.clone(), "app", &batch)
+        .await
+        .expect("seed rows");
+
+    // Step 3: NOW bind a schema declaring `score: Int, required` via the
+    // real DDL path -- after the mixed-type data already exists. The DDL
+    // handler validates the rule's shape but never scans pre-existing rows;
+    // `stamp_keyset_safe` computes `table.count() == 0` which is FALSE (5
+    // rows exist), so `keyset_safe: false` is recorded.
+    let mut b = Batch::new();
+    b.set_table_schema(
+        "ss",
+        set_table_schema("items").rules(vec![field(["score"]).int().required().build()]),
+    );
+    shamir
+        .execute_as(owner, "app", &b.build())
+        .await
+        .expect("set_table_schema should succeed");
+
+    let handler =
+        ShamirDbHandler::new(Arc::new(shamir)).with_cursor_limits(CursorLimitsCap::UNLIMITED);
+    let session = alice_session();
+
+    // Step 4: open a keyset-requesting cursor ordering by `score`.
+    let query = ReadQuery::new("items").order_by(OrderBy::asc("score"));
+    let resp = send(&handler, &session, create_cursor_req(query, 2)).await;
+    let (cursor_id, mut seqs) = match resp {
+        DbResponse::CursorPage {
+            cursor_id, page, ..
+        } => {
+            let seqs: Vec<i64> = page
+                .records
+                .iter()
+                .map(|r| r.get_value_i64("seq").expect("seq present"))
+                .collect();
+            (cursor_id, seqs)
+        }
+        other => panic!("expected CursorPage, got {other:?}"),
+    };
+
+    // Step 5: assert Offset mode -- `keyset_safe: false` was stamped because
+    // the table was non-empty at bind time, so the gate does NOT trust the
+    // post-hoc schema binding as proof of homogeneity for the pre-existing
+    // mixed-type rows.
+    assert_eq!(
+        pinned_mode(&handler, cursor_id, &ALICE_SID),
+        PaginationMode::Offset,
+        "F-17 (#810): keyset_safe is false (table was non-empty at bind time), so even with an \
+         Int schema rule bound AFTER mixed-type data was inserted, the cursor must fall back to \
+         PaginationMode::Offset -- the pre-existing Str rows would otherwise be silently dropped \
+         by compare_values' boundary filter under Keyset mode"
+    );
+
+    // Step 6: drain the full cursor and assert every row -- including the
+    // pre-schema mixed-type Str-scored rows -- is returned exactly once.
+    let mut has_more = true;
+    for _ in 0..10 {
+        if !has_more {
+            break;
+        }
+        let resp = send(&handler, &session, fetch_next_req(cursor_id, 2)).await;
+        match resp {
+            DbResponse::CursorPage {
+                page, has_more: hm, ..
+            } => {
+                for r in &page.records {
+                    seqs.push(
+                        r.get_value_i64("seq")
+                            .expect("every row must carry a seq field"),
+                    );
+                }
+                has_more = hm;
+            }
+            other => panic!("expected CursorPage, got {other:?}"),
+        }
+    }
+
+    seqs.sort_unstable();
+    assert_eq!(
+        seqs,
+        vec![0, 1, 2, 3, 4],
+        "every row -- including both pre-schema Str-scored rows (seq 3, 4) -- must appear \
+         exactly once via offset-mode pagination; under the OLD F-1 gate, the post-hoc schema \
+         binding would have enabled Keyset mode and silently dropped the Str rows past page 1"
+    );
+}
+
+/// F-17 (#810): a schema bound on an EMPTY table via the DDL path must
+/// stamp `keyset_safe: true` and the cursor must reach genuine
+/// `PaginationMode::Keyset`. This is the "persistence round-trip" proof:
+/// the flag is persisted in the catalogue, recompiled into the engine-side
+/// `FieldRule`, and consumed by the gate.
+#[tokio::test]
+async fn ddl_schema_on_empty_table_reaches_keyset_mode() {
+    let shamir = ShamirDb::init_memory().await.expect("init shamir");
+    let owner = Actor::User(principal64([0xAB; 16]));
+    shamir.create_db_as("app", owner.clone()).await;
+    let cfg =
+        RepoConfig::new("main", BoxRepoFactory::in_memory()).add_table(TableConfig::new("items"));
+    shamir
+        .add_repo_as("app", cfg, owner.clone())
+        .await
+        .expect("add repo");
+
+    // Bind schema on an EMPTY table → keyset_safe: true.
+    let mut b = Batch::new();
+    b.set_table_schema(
+        "ss",
+        set_table_schema("items").rules(vec![field(["score"]).int().required().build()]),
+    );
+    shamir
+        .execute_as(owner.clone(), "app", &b.build())
+        .await
+        .expect("set_table_schema should succeed");
+
+    // NOW seed rows (all Int, conforming to the schema).
+    let mut b = Batch::new();
+    for i in 0..5i64 {
+        b.insert(
+            format!("i{i}"),
+            insert("items").row(doc! { "seq" => i, "score" => i * 10 }),
+        );
+    }
+    shamir
+        .execute_as(owner, "app", &b.build())
+        .await
+        .expect("seed rows");
+
+    let handler =
+        ShamirDbHandler::new(Arc::new(shamir)).with_cursor_limits(CursorLimitsCap::UNLIMITED);
+    let session = alice_session();
+
+    let query = ReadQuery::new("items").order_by(OrderBy::asc("score"));
+    let resp = send(&handler, &session, create_cursor_req(query, 2)).await;
+    let (cursor_id, mut seqs) = match resp {
+        DbResponse::CursorPage {
+            cursor_id, page, ..
+        } => {
+            let seqs: Vec<i64> = page
+                .records
+                .iter()
+                .map(|r| r.get_value_i64("seq").expect("seq present"))
+                .collect();
+            (cursor_id, seqs)
+        }
+        other => panic!("expected CursorPage, got {other:?}"),
+    };
+
+    assert_eq!(
+        pinned_mode(&handler, cursor_id, &ALICE_SID),
+        PaginationMode::Keyset,
+        "F-17 (#810): schema bound on empty table → keyset_safe: true, so the gate passes and \
+         the cursor reaches genuine Keyset mode"
+    );
+
+    drain_seqs(&handler, &session, cursor_id, 2, &mut seqs).await;
+    seqs.sort_unstable();
+    assert_eq!(
+        seqs,
+        vec![0, 1, 2, 3, 4],
+        "every row must appear exactly once under Keyset mode"
+    );
+}
+
+/// F-17 (#810): upsert-by-path with an IDENTICAL rule must preserve the
+/// prior `keyset_safe` proof. A rule bound on an empty table (keyset_safe:
+/// true) is re-declared via `add_schema_rule` AFTER rows have been seeded
+/// (table now non-empty). Because the rule's path AND type are unchanged,
+/// `stamp_keyset_safe` preserves the prior proof instead of recomputing
+/// (which would incorrectly flip it to false and degrade a working cursor
+/// to Offset for no reason).
+#[tokio::test]
+async fn upsert_identical_rule_preserves_keyset_safe_proof() {
+    let shamir = ShamirDb::init_memory().await.expect("init shamir");
+    let owner = Actor::User(principal64([0xAB; 16]));
+    shamir.create_db_as("app", owner.clone()).await;
+    let cfg =
+        RepoConfig::new("main", BoxRepoFactory::in_memory()).add_table(TableConfig::new("items"));
+    shamir
+        .add_repo_as("app", cfg, owner.clone())
+        .await
+        .expect("add repo");
+
+    // Step 1: bind schema on an EMPTY table → keyset_safe: true.
+    let rule = field(["score"]).int().required().build();
+    let mut b = Batch::new();
+    b.set_table_schema("ss", set_table_schema("items").rules(vec![rule]));
+    shamir
+        .execute_as(owner.clone(), "app", &b.build())
+        .await
+        .expect("set_table_schema should succeed");
+
+    // Step 2: seed rows (table is now non-empty).
+    let mut b = Batch::new();
+    for i in 0..4i64 {
+        b.insert(
+            format!("i{i}"),
+            insert("items").row(doc! { "seq" => i, "score" => i * 10 }),
+        );
+    }
+    shamir
+        .execute_as(owner.clone(), "app", &b.build())
+        .await
+        .expect("seed rows");
+
+    // Step 3: re-declare the SAME rule via add_schema_rule. The table is
+    // non-empty, but since the rule's path + type are UNCHANGED,
+    // stamp_keyset_safe preserves the prior keyset_safe: true.
+    let mut b = Batch::new();
+    b.add_schema_rule(
+        "ar",
+        add_schema_rule("items").rule(field(["score"]).int().required().build()),
+    );
+    shamir
+        .execute_as(owner, "app", &b.build())
+        .await
+        .expect("add_schema_rule should succeed");
+
+    let handler =
+        ShamirDbHandler::new(Arc::new(shamir)).with_cursor_limits(CursorLimitsCap::UNLIMITED);
+    let session = alice_session();
+
+    let query = ReadQuery::new("items").order_by(OrderBy::asc("score"));
+    let resp = send(&handler, &session, create_cursor_req(query, 2)).await;
+    let (cursor_id, mut seqs) = match resp {
+        DbResponse::CursorPage {
+            cursor_id, page, ..
+        } => {
+            let seqs: Vec<i64> = page
+                .records
+                .iter()
+                .map(|r| r.get_value_i64("seq").expect("seq present"))
+                .collect();
+            (cursor_id, seqs)
+        }
+        other => panic!("expected CursorPage, got {other:?}"),
+    };
+
+    assert_eq!(
+        pinned_mode(&handler, cursor_id, &ALICE_SID),
+        PaginationMode::Keyset,
+        "F-17 (#810): upsert of an identical rule preserves the prior keyset_safe: true proof \
+         (the table was non-empty at re-declaration time, but the rule's path + type are unchanged)"
+    );
+
+    drain_seqs(&handler, &session, cursor_id, 2, &mut seqs).await;
+    seqs.sort_unstable();
+    assert_eq!(
+        seqs,
+        vec![0, 1, 2, 3],
+        "every row exactly once under Keyset mode"
     );
 }

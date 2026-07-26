@@ -35,6 +35,7 @@ fn rule_with_unique(path: &str, ty: TypeTag) -> FieldRule {
             unique: true,
             ..Default::default()
         },
+        keyset_safe: false,
     }
 }
 
@@ -84,6 +85,7 @@ async fn unique_null_value_skips() {
             nullable: true,
             ..Default::default()
         },
+        keyset_safe: false,
     };
     let sv = SchemaValidator::new(vec![rule]);
     let qv = fields_from(vec![("email", QueryValue::Null)]);

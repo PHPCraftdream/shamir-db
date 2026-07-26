@@ -352,6 +352,7 @@ async fn unique_validator_sees_staged_row_in_same_tx() {
             unique: true,
             ..Default::default()
         },
+        keyset_safe: false,
     };
     let validator = Arc::new(SchemaValidator::new(vec![rule])) as Arc<dyn RecordValidator>;
     let reg = Arc::new(ValidatorRegistry::new());

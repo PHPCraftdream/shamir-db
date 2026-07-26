@@ -294,6 +294,57 @@ async fn validate_fk_indexes(
     Ok(())
 }
 
+/// F-17 (#810) — Stamp the server-computed `keyset_safe` proof onto each
+/// rule in `new_rules` right before persisting.
+///
+/// For each rule:
+/// - If a rule with the **same path AND same type tag** existed in
+///   `prev_rules`, preserve its previously-recorded `keyset_safe` value
+///   (an unchanged rule's proof doesn't expire just because the table is
+///   now non-empty — it was proven at its original bind time).
+/// - Otherwise (genuinely new path, or type-changed), compute a fresh
+///   `table.count().await? == 0` check.  This is O(1) (stored counter),
+///   and captures the table state at the exact moment the rule is bound.
+///
+/// **Client-supplied `keyset_safe` is always ignored** — the server
+/// overwrites it unconditionally here.
+async fn stamp_keyset_safe(
+    shamir: &ShamirDb,
+    db: &str,
+    repo: &str,
+    table: &str,
+    prev_rules: &[FieldRuleDto],
+    new_rules: &mut [FieldRuleDto],
+) -> Result<(), BatchError> {
+    let table_handle = match shamir.get_table(db, repo, table).await {
+        Ok(t) => t,
+        Err(_) => {
+            return Err(err_code(
+                "internal_error",
+                format!("table '{db}/{repo}/{table}' not found for keyset_safe check"),
+            ));
+        }
+    };
+    let count = table_handle
+        .count()
+        .await
+        .map_err(|e| err_code("internal_error", e.to_string()))?;
+    let table_empty = count == 0;
+
+    for rule in new_rules.iter_mut() {
+        let preserved = prev_rules
+            .iter()
+            .find(|prev| prev.path == rule.path && prev.r#type == rule.r#type);
+        rule.keyset_safe = match preserved {
+            // Unchanged rule — preserve its prior proof.
+            Some(prev) => prev.keyset_safe,
+            // New or type-changed rule — fresh emptiness proof.
+            None => table_empty,
+        };
+    }
+    Ok(())
+}
+
 impl ShamirAdminExecutor {
     pub(super) async fn handle_set_table_schema(
         &self,
@@ -366,8 +417,29 @@ impl ShamirAdminExecutor {
         // the silent runtime skip into an explicit error).
         validate_no_self_referential_cascade(table, &op.schema)?;
 
+        // F-17 (#810) — stamp the server-computed `keyset_safe` proof onto
+        // each rule. Read the PREVIOUS rules from the catalogue so that
+        // unchanged rules (same path + same type) preserve their prior
+        // proof, and only genuinely new/type-changed rules get a fresh
+        // `table.count() == 0` check. Client-supplied `keyset_safe` is
+        // ignored unconditionally.
+        let prev_rules: Vec<FieldRuleDto> = match rec.get(SCHEMA_FIELD) {
+            Some(qv) => dto_list_from_catalogue(qv, interner),
+            None => Vec::new(),
+        };
+        let mut stamped_rules = op.schema.clone();
+        stamp_keyset_safe(
+            &self.shamir,
+            db,
+            repo,
+            table,
+            &prev_rules,
+            &mut stamped_rules,
+        )
+        .await?;
+
         // Serialise the DTO rules into the catalogue form (interning paths).
-        let schema_qv = serialise_rules(&op.schema, interner);
+        let schema_qv = serialise_rules(&stamped_rules, interner);
 
         // schema_validator_id: reuse if present (ALTER), else mint a new one.
         let schema_validator_id = match rec.get(SCHEMA_VALIDATOR_ID_FIELD).and_then(|v| v.as_str())
@@ -497,6 +569,10 @@ impl ShamirAdminExecutor {
             None => Vec::new(),
         };
 
+        // F-17 (#810) — snapshot the previous rules for keyset_safe
+        // preservation (unchanged rules keep their prior proof).
+        let prev_rules = rules.clone();
+
         // Upsert by path: replace if a rule with the same path exists.
         let new_rule = &op.rule;
         if let Some(pos) = rules.iter().position(|r| r.path == new_rule.path) {
@@ -523,6 +599,12 @@ impl ShamirAdminExecutor {
 
         // Reject self-referential ON DELETE CASCADE at DDL time.
         validate_no_self_referential_cascade(table, std::slice::from_ref(new_rule))?;
+
+        // F-17 (#810) — stamp the server-computed `keyset_safe` proof. Only
+        // the upserted rule (new path or type-changed) gets a fresh
+        // `table.count() == 0` check; all other rules preserve their prior
+        // proof from the catalogue.
+        stamp_keyset_safe(&self.shamir, db, repo, table, &prev_rules, &mut rules).await?;
 
         // Re-serialise + persist.
         let schema_qv = serialise_rules(&rules, interner);
@@ -825,6 +907,12 @@ fn serialise_one_rule_catalogue(rule: &FieldRuleDto, interner: &Interner) -> Que
     // Constraints (optional fields, only inserted when present).
     insert_constraint_fields(&mut m, &rule.constraints);
 
+    // F-17 (#810) — persist `keyset_safe` only when true (omit when false
+    // so legacy catalogue rows stay byte-identical).
+    if rule.keyset_safe {
+        m.insert("keyset_safe".to_string(), QueryValue::Bool(true));
+    }
+
     QueryValue::Map(m)
 }
 
@@ -848,6 +936,12 @@ fn serialise_one_rule_flat(rule: &FieldRuleDto) -> QueryValue {
     m.insert("type".to_string(), QueryValue::Str(rule.r#type.clone()));
 
     insert_constraint_fields(&mut m, &rule.constraints);
+
+    // F-17 (#810) — include `keyset_safe` when true (same omit-when-false
+    // contract as the catalogue form).
+    if rule.keyset_safe {
+        m.insert("keyset_safe".to_string(), QueryValue::Bool(true));
+    }
 
     QueryValue::Map(m)
 }
@@ -1077,6 +1171,11 @@ fn dto_one_from_catalogue(item: &QueryValue, interner: &Interner) -> Option<Fiel
         path,
         r#type,
         constraints,
+        // F-17 (#810) — absent in pre-fix rows = false (unproven).
+        keyset_safe: m
+            .get("keyset_safe")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false),
     })
 }
 

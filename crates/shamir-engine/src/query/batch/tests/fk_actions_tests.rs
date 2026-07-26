@@ -79,6 +79,7 @@ fn bind_fk_validator(
             nullable,
             ..Default::default()
         },
+        keyset_safe: false,
     }]);
 
     let validator_id = RecordId::from_ts(9001);

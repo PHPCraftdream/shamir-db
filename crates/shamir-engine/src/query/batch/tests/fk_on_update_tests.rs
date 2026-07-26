@@ -89,6 +89,7 @@ fn bind_fk_validator(
             nullable,
             ..Default::default()
         },
+        keyset_safe: false,
     }]);
 
     let validator_id = RecordId::from_ts(validator_id as i64);
@@ -1342,6 +1343,7 @@ fn bind_self_ref_on_update(
             nullable: true,
             ..Default::default()
         },
+        keyset_safe: false,
     }]);
 
     let vid = RecordId::from_ts(validator_id as i64);

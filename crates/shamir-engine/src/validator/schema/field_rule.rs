@@ -31,6 +31,18 @@ pub struct FieldRule {
     pub ty: TypeTag,
     /// Additional constraints (min/max/len/unsigned/one_of/...).
     pub constraints: Constraints,
+    /// Server-computed proof that this rule was bound while the table had
+    /// zero rows — i.e. every row the table has ever held was validated
+    /// against this rule, making the column provably homogeneous for the
+    /// keyset-cursor safety gate
+    /// (`order_by_column_is_schema_typed_scalar`).
+    ///
+    /// Defaults to `false` (unproven) for rules constructed directly
+    /// (tests, rule_builder).  Set to `true` only by the DDL handlers
+    /// (`handle_add_schema_rule`/`handle_set_table_schema`) when
+    /// `table.count() == 0` at bind time — see
+    /// [`crate::admin::types::schema_ops::FieldRuleDto::keyset_safe`].
+    pub keyset_safe: bool,
 }
 
 impl FieldRule {

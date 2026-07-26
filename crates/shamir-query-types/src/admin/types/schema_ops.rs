@@ -41,6 +41,29 @@ pub struct FieldRuleDto {
     /// Optional constraints (flattened into the same JSON/msgpack object).
     #[serde(flatten)]
     pub constraints: ConstraintsDto,
+    /// Server-computed proof that this rule was bound while the table had
+    /// zero rows — i.e. every row the table has ever held was validated
+    /// against this rule from the start, making the column provably
+    /// homogeneous for the keyset-cursor safety gate
+    /// (`order_by_column_is_schema_typed_scalar`,
+    /// `crates/shamir-server/src/db_handler/cursor_handlers.rs`).
+    ///
+    /// **SERVER-COMPUTED ONLY.** A client MAY send this field (it's part
+    /// of the same wire DTO used for requests), but the server MUST ignore
+    /// whatever the client sent and overwrite it with a freshly-computed
+    /// `table.count().await? == 0` check at the exact moment the rule is
+    /// bound (`handle_add_schema_rule`/`handle_set_table_schema`) — never
+    /// trust client input for a correctness-relevant safety flag.
+    ///
+    /// The serde default is `false` (unproven) so that catalogue records
+    /// persisted by code BEFORE this field existed load as NOT
+    /// keyset-safe — the honest, conservative choice (those tables fall
+    /// back to `PaginationMode::Offset` until their schema is re-declared).
+    #[serde(
+        default,
+        skip_serializing_if = "crate::admin::types::schema_ops::is_false"
+    )]
+    pub keyset_safe: bool,
 }
 
 /// Constraint fields carried alongside a [`FieldRuleDto`].

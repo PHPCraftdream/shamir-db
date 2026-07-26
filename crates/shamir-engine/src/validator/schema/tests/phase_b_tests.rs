@@ -58,6 +58,7 @@ fn rule_with(path: &str, ty: TypeTag, constraints: Constraints) -> FieldRule {
         path: vec![path.to_string()],
         ty,
         constraints,
+        keyset_safe: false,
     }
 }
 

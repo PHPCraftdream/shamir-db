@@ -172,6 +172,7 @@ async fn one_of_via_schema() {
             ]),
             ..Default::default()
         },
+        keyset_safe: false,
     }];
     let qv = fields_from(vec![("status", QueryValue::Str("deleted".into()))]);
     let v = run_schema(rules, Some(&qv)).await;

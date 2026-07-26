@@ -35,6 +35,7 @@ fn simple_rule(path: &str, ty: TypeTag) -> FieldRule {
         path: vec![path.to_string()],
         ty,
         constraints: Constraints::default(),
+        keyset_safe: false,
     }
 }
 
@@ -174,6 +175,7 @@ fn int_min_max_accept() {
             max: Some(Num::Int(150)),
             ..Default::default()
         },
+        keyset_safe: false,
     };
     let qv = fields_from(vec![("age", QueryValue::Int(25))]);
     assert!(check_rule(&rule, &qv).is_ok());
@@ -188,6 +190,7 @@ fn int_min_reject() {
             min: Some(Num::Int(0)),
             ..Default::default()
         },
+        keyset_safe: false,
     };
     let qv = fields_from(vec![("age", QueryValue::Int(-1))]);
     let v = check_rule(&rule, &qv);
@@ -203,6 +206,7 @@ fn int_max_reject() {
             max: Some(Num::Int(150)),
             ..Default::default()
         },
+        keyset_safe: false,
     };
     let qv = fields_from(vec![("age", QueryValue::Int(200))]);
     let v = check_rule(&rule, &qv);
@@ -218,6 +222,7 @@ fn int_unsigned_reject_negative() {
             unsigned: true,
             ..Default::default()
         },
+        keyset_safe: false,
     };
     let qv = fields_from(vec![("count", QueryValue::Int(-5))]);
     let v = check_rule(&rule, &qv);
@@ -233,6 +238,7 @@ fn int_unsigned_accept_zero() {
             unsigned: true,
             ..Default::default()
         },
+        keyset_safe: false,
     };
     let qv = fields_from(vec![("count", QueryValue::Int(0))]);
     assert!(check_rule(&rule, &qv).is_ok());
@@ -248,6 +254,7 @@ fn f64_min_max_accept() {
             max: Some(Num::F64(100.0)),
             ..Default::default()
         },
+        keyset_safe: false,
     };
     let qv = fields_from(vec![("score", QueryValue::F64(50.5))]);
     assert!(check_rule(&rule, &qv).is_ok());
@@ -262,6 +269,7 @@ fn f64_out_of_range() {
             max: Some(Num::F64(100.0)),
             ..Default::default()
         },
+        keyset_safe: false,
     };
     let qv = fields_from(vec![("score", QueryValue::F64(100.1))]);
     let v = check_rule(&rule, &qv);
@@ -279,6 +287,7 @@ fn string_exact_len_accept() {
             len: Some(5),
             ..Default::default()
         },
+        keyset_safe: false,
     };
     let qv = fields_from(vec![("zip", QueryValue::Str("12345".into()))]);
     assert!(check_rule(&rule, &qv).is_ok());
@@ -293,6 +302,7 @@ fn string_exact_len_reject() {
             len: Some(5),
             ..Default::default()
         },
+        keyset_safe: false,
     };
     let qv = fields_from(vec![("zip", QueryValue::Str("1234".into()))]);
     let v = check_rule(&rule, &qv);
@@ -308,6 +318,7 @@ fn string_max_len_accept() {
             max_len: Some(10),
             ..Default::default()
         },
+        keyset_safe: false,
     };
     let qv = fields_from(vec![("name", QueryValue::Str("alice".into()))]);
     assert!(check_rule(&rule, &qv).is_ok());
@@ -322,6 +333,7 @@ fn string_max_len_reject() {
             max_len: Some(3),
             ..Default::default()
         },
+        keyset_safe: false,
     };
     let qv = fields_from(vec![("name", QueryValue::Str("alice".into()))]);
     let v = check_rule(&rule, &qv);
@@ -337,6 +349,7 @@ fn string_min_len_reject() {
             min_len: Some(5),
             ..Default::default()
         },
+        keyset_safe: false,
     };
     let qv = fields_from(vec![("name", QueryValue::Str("ab".into()))]);
     let v = check_rule(&rule, &qv);
@@ -354,6 +367,7 @@ fn list_exact_len_accept() {
             len: Some(2),
             ..Default::default()
         },
+        keyset_safe: false,
     };
     let qv = fields_from(vec![(
         "items",
@@ -371,6 +385,7 @@ fn list_exact_len_reject() {
             len: Some(2),
             ..Default::default()
         },
+        keyset_safe: false,
     };
     let qv = fields_from(vec![("items", QueryValue::List(vec![QueryValue::Int(1)]))]);
     let v = check_rule(&rule, &qv);
@@ -386,6 +401,7 @@ fn list_max_len_reject() {
             max_len: Some(1),
             ..Default::default()
         },
+        keyset_safe: false,
     };
     let qv = fields_from(vec![(
         "items",
@@ -404,6 +420,7 @@ fn list_min_len_reject() {
             min_len: Some(3),
             ..Default::default()
         },
+        keyset_safe: false,
     };
     let qv = fields_from(vec![("items", QueryValue::List(vec![QueryValue::Int(1)]))]);
     let v = check_rule(&rule, &qv);
@@ -421,6 +438,7 @@ fn array_of_string_accept() {
             array_of: Some(TypeTag::String),
             ..Default::default()
         },
+        keyset_safe: false,
     };
     let qv = fields_from(vec![(
         "tags",
@@ -441,6 +459,7 @@ fn array_of_string_reject_mixed() {
             array_of: Some(TypeTag::String),
             ..Default::default()
         },
+        keyset_safe: false,
     };
     let qv = fields_from(vec![(
         "tags",
@@ -459,6 +478,7 @@ fn array_of_int_accept_empty() {
             array_of: Some(TypeTag::Int),
             ..Default::default()
         },
+        keyset_safe: false,
     };
     let qv = fields_from(vec![("ids", QueryValue::List(vec![]))]);
     assert!(check_rule(&rule, &qv).is_ok());
@@ -478,6 +498,7 @@ fn one_of_accept() {
             ]),
             ..Default::default()
         },
+        keyset_safe: false,
     };
     let qv = fields_from(vec![("status", QueryValue::Str("active".into()))]);
     assert!(check_rule(&rule, &qv).is_ok());
@@ -495,6 +516,7 @@ fn one_of_reject() {
             ]),
             ..Default::default()
         },
+        keyset_safe: false,
     };
     let qv = fields_from(vec![("status", QueryValue::Str("deleted".into()))]);
     let v = check_rule(&rule, &qv);
@@ -514,6 +536,7 @@ fn one_of_int_accept() {
             ]),
             ..Default::default()
         },
+        keyset_safe: false,
     };
     let qv = fields_from(vec![("priority", QueryValue::Int(2))]);
     assert!(check_rule(&rule, &qv).is_ok());
@@ -528,6 +551,7 @@ fn one_of_const_single_element() {
             one_of: Some(vec![QueryValue::Int(1)]),
             ..Default::default()
         },
+        keyset_safe: false,
     };
     let qv = fields_from(vec![("version", QueryValue::Int(1))]);
     assert!(check_rule(&rule, &qv).is_ok());
@@ -548,6 +572,7 @@ fn nested_path_accepts() {
             len: Some(5),
             ..Default::default()
         },
+        keyset_safe: false,
     };
 
     let mut addr = new_map();
@@ -562,6 +587,7 @@ fn nested_path_wrong_type() {
         path: vec!["address".into(), "zip".into()],
         ty: TypeTag::String,
         constraints: Constraints::default(),
+        keyset_safe: false,
     };
 
     let mut addr = new_map();

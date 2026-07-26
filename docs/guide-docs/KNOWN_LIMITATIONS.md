@@ -224,8 +224,10 @@ artifact).
   `BatchError::CursorWithVersionNotSupported`.
 - **Keyset-mode cursors: `Null`/missing and `Bin`/`List`/`Dec`/`Big` `ORDER BY`
   values are handled; mixed-type `ORDER BY` values are handled for
-  schema-typed scalar columns; `NaN` `ORDER BY` values are mitigated (no
-  keyset attempt) but not detected (CR-D2 #783, W-2/W-3 #789, F-1 #792).** A
+  schema-typed scalar columns whose rule was bound while the table was
+  empty (F-17 #810 tightened this from F-1 #792's original, unverified
+  claim); `NaN` `ORDER BY` values are mitigated (no keyset attempt) but
+  not detected (CR-D2 #783, W-2/W-3 #789, F-1 #792, F-17 #810).** A
   keyset cursor's page boundary is an inclusive `field >= seek_key` (ASC) /
   `field <= seek_key` (DESC) filter — any row whose `ORDER BY` value cannot be
   compared to `seek_key` makes that filter unresolvable (`false`), silently
@@ -265,31 +267,39 @@ artifact).
     the SILENT ROW LOSS (converts it into the documented, understood
     offset-mode degradation instead).
   - **Mixed `QueryValue` type in one `ORDER BY` column (e.g. some rows
-    `Int`, some `Str`) — CLOSED for schema-typed scalar columns (F-1, #792);
-    STILL OPEN for schemaless columns.** There is no existing cheap filter
-    primitive for "is this field a different type than X" to probe for this
-    at `CreateCursor` time the way `Filter::IsNull` covers the `Null` case, so
-    a runtime probe was never viable here. Instead, `create_cursor` gates
-    keyset eligibility on the table's SCHEMA when one is bound: if the
-    `ORDER BY` column has a schema-enforced, fixed, non-container scalar
-    `TypeTag` (`Int`, `Bool`, `String`, or `Bin`), every row satisfying that
-    schema is provably homogeneous by construction — mixed-type is
-    impossible — so keyset mode is safe. A column with no schema-enforced
-    scalar type (schemaless documents, `Any`-typed fields, multiple bound
-    schemas that disagree on the type for the column, or no schema validator
-    bound to the table at all) is NOT eligible and falls back to
-    row-count-offset pagination unconditionally — the conservative default.
-    This is a pure metadata check (no read/scan), so it runs BEFORE the
-    `Null`-value existence probe above and short-circuits the whole keyset
-    attempt for ineligible columns without paying for that probe's real
-    snapshot read. See
+    `Int`, some `Str`) — CLOSED for schema-typed scalar columns whose rule
+    was bound while the table was empty (F-1 #792, tightened by F-17
+    #810); STILL OPEN for schemaless columns and for a schema declared
+    onto an already-populated table's column.** F-1 (#792) added a gate
+    (`order_by_column_is_schema_typed_scalar`) that trusted a bound
+    schema rule's non-container scalar `TypeTag` (`Int`/`Bool`/`String`/
+    `Bin`) as proof of column homogeneity — but `add_schema_rule`/
+    `set_table_schema` (`crates/shamir-db/src/shamir_db/execute/
+    admin_schema.rs`) validate a new rule's SHAPE only and never
+    backfill-validate the table's EXISTING rows, so a schemaless table
+    with mixed-type data that later got a schema rule bound after the
+    fact would have made the F-1 gate return `true` (Keyset enabled)
+    even though pre-existing rows aren't homogeneous — `compare_values`
+    has no cross-type comparison arm, so those rows silently vanish from
+    later pages. F-17 (#810) closes this properly: each schema rule now
+    carries a server-computed `keyset_safe` proof, stamped
+    `table.count().await? == 0` at the exact moment the rule is bound
+    (persisted in the catalogue; preserved, not recomputed, when an
+    unchanged rule is re-declared via upsert-by-path). The keyset gate
+    now requires BOTH an accepted `TypeTag` AND `keyset_safe == true`.
+    A schema bound BEFORE any row is written is genuinely, provably
+    homogeneous (schema enforcement has covered 100% of the table's
+    history) and keeps reaching real `PaginationMode::Keyset` exactly as
+    before. A schema declared onto an already-populated table's column
+    is NOT proven safe for that column and falls back to
+    `PaginationMode::Offset`, same as a schemaless column, until that
+    rule is proven safe some other way — a full retroactive
+    backfill-validation scan is out of scope for this task, tracked
+    separately if ever needed. See
     `crates/shamir-server/src/db_handler/cursor_handlers.rs`'s
-    `order_by_column_is_schema_typed_scalar` and the new
-    `RecordValidator::as_schema_rules` downcast hook
-    (`crates/shamir-engine/src/validator/record_validator.rs`) that lets
-    cursor code ask a bound validator "are you a `SchemaValidator`, and if
-    so what are your rules?" without the trait becoming a general `dyn Any`
-    grab-bag.
+    `order_by_column_is_schema_typed_scalar` and
+    `crates/shamir-db/src/shamir_db/execute/admin_schema.rs`'s
+    `stamp_keyset_safe`.
   - **`NaN` in an `F64` `ORDER BY` column — STILL OPEN, but MITIGATED (no
     keyset attempt at all), schema or not.** Checked `FieldRule::check_f64`
     (`crates/shamir-engine/src/validator/schema/field_rule.rs`): the schema

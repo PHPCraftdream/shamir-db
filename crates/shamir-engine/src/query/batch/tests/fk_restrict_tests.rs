@@ -79,6 +79,7 @@ async fn setup_fk_test(on_delete: FkAction) -> FkTestResolver {
             required: true,
             ..Default::default()
         },
+        keyset_safe: false,
     }]);
 
     let validator_id = RecordId::from_ts(9001);
@@ -411,6 +412,7 @@ async fn setup_self_ref_fk_test(on_delete: FkAction) -> FkTestResolver {
             nullable: true,
             ..Default::default()
         },
+        keyset_safe: false,
     }]);
 
     let validator_id = RecordId::from_ts(9002);

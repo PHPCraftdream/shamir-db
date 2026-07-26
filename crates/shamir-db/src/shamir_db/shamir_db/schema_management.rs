@@ -256,10 +256,19 @@ fn parse_one_rule(item: &QueryValue, interner: &Interner) -> DbResult<FieldRule>
         auto_now_add,
     };
 
+    // F-17 (#810) — `keyset_safe` proof: absent in pre-fix catalogue rows
+    // (serde/manual default = false = unproven). The DDL handlers stamp
+    // `true` only when `table.count() == 0` at bind time.
+    let keyset_safe = item
+        .get("keyset_safe")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+
     Ok(FieldRule {
         path,
         ty,
         constraints,
+        keyset_safe,
     })
 }
 

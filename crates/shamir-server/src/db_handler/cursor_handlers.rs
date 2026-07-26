@@ -415,63 +415,25 @@ fn pagination_mode_for_query(query: &ReadQuery) -> PaginationMode {
     }
 }
 
-/// F-1 (#792, release blocker): is `query`'s sole ORDER BY column proven
+/// F-1 (#792, release blocker): is `query`'s sole ORDER BY column provably
 /// homogeneous (no second `QueryValue` type possible, and never `NaN`) by a
-/// bound schema, so the keyset boundary-filter scheme is safe to attempt at
-/// all?
+/// bound schema, so the keyset boundary-filter scheme is safe to attempt?
 ///
-/// # The two gaps this closes (for schema-typed columns only)
+/// # F-17 (#810): the `keyset_safe` proof
 ///
-/// `KNOWN_LIMITATIONS.md`'s "Keyset-mode cursors" section documents two
-/// STILL OPEN gaps that CR-D2/W-2/W-3 do not close, because there is no
-/// cheap runtime probe for either:
-///
-/// - **Mixed `QueryValue` type in one column** (e.g. some rows store `Int`,
-///   others `Str`, in the same field path) — a mixed-type column can defeat
-///   `compare_values`/`QvSortKey` in ways no single existence probe can
-///   detect without a full scan.
-/// - **`NaN` in an `F64` column** — `NaN`'s `partial_cmp` always returns
-///   `None`, silently dropping that row past page 1 the same way, and also
-///   breaks the tie-run counter (`f64`'s `PartialEq` is always `false` for
-///   `NaN`).
-///
-/// A schema-enforced, fixed, non-container scalar `TypeTag` on the ORDER BY
-/// path proves every row satisfying that schema holds the SAME `QueryValue`
-/// variant for that field — mixed-type is impossible by construction. This
-/// closes gap 1 for schema-typed columns. It does NOT close gap 2: checked
-/// `FieldRule::check_f64` (`validator/schema/field_rule.rs`) — it never
-/// rejects `NaN`, so a schema-declared `F64` field can still hold one.
-/// Therefore only `TypeTag` values that can never be `NaN` or a container
-/// are accepted here: `Int`, `Bool`, `String`, `Bin`. `F64`/`Dec`/`Big`/
-/// `List`/`Map`/`Set`/`Any`/`Null` are rejected — those columns keep using
-/// `PaginationMode::Offset` unconditionally, regardless of schema, until a
-/// follow-up task closes the NaN case specifically (out of scope here).
-///
-/// # Not a substitute for the null probe
-///
-/// This gate does NOT check `required`/`nullable` — a schema-typed field
-/// that is merely `nullable`/optional still passes here (it only needs to
-/// prove "no SECOND non-null type is possible", not "never null"). The
-/// EXISTING [`order_by_column_contains_null`] probe still runs afterward
-/// exactly as before and independently closes the null/missing case; the
-/// two mechanisms compose rather than one replacing the other.
-///
-/// # Why this must run BEFORE the null probe
-///
-/// This is a **pure metadata check — no read/scan of the data** (unlike
-/// `order_by_column_contains_null`, which runs a real `read_with_encoding`
-/// probe against the pinned snapshot). Running it first short-circuits the
-/// whole keyset attempt for schemaless tables (the common case) without
-/// paying for a probe read at all.
+/// The TypeTag check alone is **not sufficient**: `add_schema_rule`/
+/// `set_table_schema` validate the new rule's *shape* but never scan the
+/// table's EXISTING rows against it. A schemaless table with mixed-type
+/// data can have a schema declared *after the fact*. The fix stamps
+/// `keyset_safe = (table.count() == 0)` at bind time — persisted in the
+/// catalogue, preserved for unchanged rules on re-declaration. The gate
+/// requires BOTH an accepted `TypeTag` AND `keyset_safe == true`.
 ///
 /// # Conservative defaults
 ///
-/// Returns `false` (not schema-typed — fall back to `Offset`) for: no
-/// validator registry bound to the table at all, a bound validator that is
-/// not a `SchemaValidator` (via `RecordValidator::as_schema_rules`'s
-/// downcast hook), no `FieldRule` for the exact ORDER BY path, multiple
-/// schema validators bound that disagree on the type for the same path
-/// (ambiguous — never merged/reconciled), or an excluded `TypeTag`.
+/// Returns `false` for: no validator bound, no matching `FieldRule`,
+/// disagreeing types across validators, an excluded `TypeTag`, or a
+/// matched rule whose `keyset_safe` proof is `false`.
 fn order_by_column_is_schema_typed_scalar(table: &TableManager, field: &[String]) -> bool {
     let Some(registry) = table.validator_registry_ref() else {
         return false;
@@ -482,6 +444,10 @@ fn order_by_column_is_schema_typed_scalar(table: &TableManager, field: &[String]
     // that matches `field` exactly. Ambiguous (disagreeing) or absent
     // matches both fall back to "not schema-typed" — see the doc comment.
     let mut matched_ty: Option<TypeTag> = None;
+    // F-17 (#810) — every matching rule must carry `keyset_safe == true`
+    // for the gate to pass. A single unproven rule (schema declared onto a
+    // non-empty table) is enough to disqualify the column.
+    let mut all_keyset_safe = true;
     for binding in bindings.iter() {
         let Some(validator) = registry.get_by_id(&binding.validator_id) else {
             continue;
@@ -491,6 +457,9 @@ fn order_by_column_is_schema_typed_scalar(table: &TableManager, field: &[String]
         };
         for rule in rules {
             if rule.path == field {
+                if !rule.keyset_safe {
+                    all_keyset_safe = false;
+                }
                 match matched_ty {
                     None => matched_ty = Some(rule.ty),
                     Some(existing) if existing == rule.ty => {}
@@ -503,10 +472,11 @@ fn order_by_column_is_schema_typed_scalar(table: &TableManager, field: &[String]
         }
     }
 
-    matches!(
-        matched_ty,
-        Some(TypeTag::Int | TypeTag::Bool | TypeTag::String | TypeTag::Bin)
-    )
+    all_keyset_safe
+        && matches!(
+            matched_ty,
+            Some(TypeTag::Int | TypeTag::Bool | TypeTag::String | TypeTag::Bin)
+        )
 }
 
 /// CR-D2 (#783, release blocker): does `query`'s sole ORDER BY column
@@ -1223,17 +1193,14 @@ impl ShamirDbHandler {
         // creation, closing the null/missing case unconditionally.
         //
         // F-1 (#792, release blocker): BEFORE that probe, gate keyset
-        // eligibility on the ORDER BY column's SCHEMA-enforced type (see
-        // `order_by_column_is_schema_typed_scalar`'s doc comment) — this is
-        // a pure metadata check (no read/scan), so it runs first and
-        // short-circuits the whole keyset attempt (including the null
-        // probe's real snapshot read) for schemaless columns / excluded
-        // `TypeTag`s, closing the "mixed `QueryValue` type in one column"
-        // and (partially, via the `F64` exclusion) "NaN in an F64 column"
-        // silent-row-loss gaps that CR-D2/W-2/W-3 left open. When the gate
-        // DOES pass, the null probe below still runs exactly as before —
-        // this gate proves "no second non-null type is possible", not
-        // "never null"; that's still the null probe's job.
+        // eligibility on the ORDER BY column's SCHEMA-enforced type. F-17
+        // (#810) adds a `keyset_safe` proof requirement: the schema must
+        // have been bound while the table was empty (verified via a
+        // persisted `table.count() == 0`-at-bind-time check), so a schema
+        // declared onto an already-populated table's column falls back to
+        // `Offset`. When the gate DOES pass, the null probe below still
+        // runs — this gate proves "no second non-null type is possible",
+        // not "never null".
         let mut mode = pagination_mode_for_query(&query);
         if mode == PaginationMode::Keyset {
             // `pagination_mode_for_query` only returns `Keyset` when

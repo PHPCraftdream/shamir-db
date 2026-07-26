@@ -36,6 +36,7 @@ fn rule_with_fk(path: &str, ty: TypeTag, ref_table: &str, ref_field: &str) -> Fi
             foreign_key: Some(ForeignKeyRef::new(ref_table, ref_field)),
             ..Default::default()
         },
+        keyset_safe: false,
     }
 }
 
@@ -92,6 +93,7 @@ async fn fk_null_value_skips() {
             nullable: true,
             ..Default::default()
         },
+        keyset_safe: false,
     };
     let sv = SchemaValidator::new(vec![rule]);
     let qv = fields_from(vec![("dept_id", QueryValue::Null)]);

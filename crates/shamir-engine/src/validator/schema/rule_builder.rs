@@ -268,6 +268,7 @@ impl RuleBuilder {
             path: self.path,
             ty: self.ty,
             constraints: self.constraints,
+            keyset_safe: false,
         }
     }
 }

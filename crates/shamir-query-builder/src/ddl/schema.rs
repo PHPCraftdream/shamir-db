@@ -379,6 +379,9 @@ impl FieldBuilder {
             path: self.path,
             r#type: self.ty,
             constraints: self.constraints,
+            // F-17 (#810) — client-side builder never sets this; the server
+            // overwrites it unconditionally at bind time.
+            keyset_safe: false,
         }
     }
 }
