@@ -483,6 +483,13 @@ impl ShamirDb {
     /// The validator is registered under `schema_validator_id` with
     /// `ArtifactKind::Declarative` and auto-bound to all write ops at
     /// priority 500.
+    ///
+    /// **Rollback symmetry (F-24, #817):** if this is a FRESH registration
+    /// (not an ALTER's `replace_artifact`) and a LATER step in the same call
+    /// (`get_table` / `add_validator_binding`) fails, the fresh registration
+    /// is undone (`ValidatorRegistry::remove`) before returning `Err`, so no
+    /// orphaned validator survives in the registry. An ALTER's
+    /// `replace_artifact` is never undone here — see the inline rationale.
     pub(crate) async fn compile_table_schema(
         &self,
         db_name: &str,
@@ -494,38 +501,96 @@ impl ShamirDb {
         let name = schema_validator_name(db_name, repo_name, table_name);
         let validator: Arc<dyn RecordValidator> = Arc::new(SchemaValidator::new(rules));
 
-        // If already registered (e.g. ALTER replacing), swap the artifact.
-        if self.validators.id_for_name(&name).is_some() {
-            self.validators
-                .replace_artifact(&schema_validator_id, validator);
-        } else {
+        // F-24 (#817): track whether THIS call performed a FRESH registration
+        // (the table's first-ever schema, or a boot-pass materialisation) vs
+        // an ALTER's `replace_artifact` (a previously-active, still-valid
+        // schema version whose validator already existed before this call).
+        // Only a fresh registration is undone on later failure — see the
+        // rollback at the bottom of this function.
+        //
+        // WHY the `replace_artifact` (ALTER) branch must NEVER be undone here:
+        // it swaps an EXISTING, previously-working validator's artifact in
+        // place, preserving its name + table bindings (RCU). Rolling it back
+        // would need the OLD artifact restored (not a bare removal), and that
+        // is already handled at the catalogue level — `admin_schema.rs`'s
+        // `save_table_meta(&rec_prev)` restores the pre-mutation record, which
+        // still points at the SAME `schema_validator_id`, so the swapped
+        // artifact remains the live validator for the still-active old schema.
+        // A bare `ValidatorRegistry::remove` here would instead DELETE the
+        // validator entirely, orphaning the unchanged catalogue reference and
+        // breaking the previously-working schema.
+        let freshly_registered = self.validators.id_for_name(&name).is_none();
+        if freshly_registered {
             self.validators
                 .register(schema_validator_id, &name, validator)
                 .map_err(|e| DbError::Validation(e.to_string()))?;
+        } else {
+            // F-24 (#817) secondary hardening: `replace_artifact` returns
+            // `false` (a silent no-op) when the passed `schema_validator_id`
+            // is NOT the one registered under `name` — exactly the
+            // stale-name-collision shape the escalation analysis hinged on
+            // (a failed first-schema call orphaning a validator under `name`,
+            // then a retry minting a NEW id and no-op'ing here). The primary
+            // fix below (undoing fresh registrations on failure) already
+            // eliminates the known path to such a collision; this assertion
+            // makes any FUTURE path that could recreate one fail loudly
+            // instead of leaving the catalogue pointing at an unregistered
+            // validator id.
+            let replaced = self
+                .validators
+                .replace_artifact(&schema_validator_id, validator);
+            if !replaced {
+                return Err(DbError::Validation(format!(
+                    "schema_validator_id {schema_validator_id} is not the id registered \
+                     under name '{name}' (stale name collision) — refusing to activate"
+                )));
+            }
         }
 
-        // Auto-bind to the table (idempotent — the table's info-twin
-        // deduplicates by validator_id).
-        let table = self.get_table(db_name, repo_name, table_name).await?;
-        let binding = ValidatorBinding {
-            validator_id: schema_validator_id,
-            ops: vec![
-                WriteOp::Insert,
-                WriteOp::Update,
-                WriteOp::Upsert,
-                WriteOp::Delete,
-            ]
-            .into(),
-            priority: SCHEMA_VALIDATOR_PRIORITY,
-        };
-        table.add_validator_binding(binding).await?;
+        // Activation: resolve the table, bind the validator to it, and record
+        // the global `bound_in` reference. Captured as a single `Result` so a
+        // failure in ANY later step can be unwound symmetrically below —
+        // mirroring the catalogue-level `rec_prev` rollback the caller
+        // (`admin_schema.rs`) performs on this function's `Err`.
+        let activation_result: DbResult<()> = async {
+            // Auto-bind to the table (idempotent — the table's info-twin
+            // deduplicates by validator_id).
+            let table = self.get_table(db_name, repo_name, table_name).await?;
+            let binding = ValidatorBinding {
+                validator_id: schema_validator_id,
+                ops: vec![
+                    WriteOp::Insert,
+                    WriteOp::Update,
+                    WriteOp::Upsert,
+                    WriteOp::Delete,
+                ]
+                .into(),
+                priority: SCHEMA_VALIDATOR_PRIORITY,
+            };
+            table.add_validator_binding(binding).await?;
 
-        // Track in the global registry's bound_in.
-        let table_ref = Self::table_ref_str(db_name, repo_name, table_name);
-        self.validators
-            .add_binding(&schema_validator_id, &table_ref);
+            // Track in the global registry's bound_in.
+            let table_ref = Self::table_ref_str(db_name, repo_name, table_name);
+            self.validators
+                .add_binding(&schema_validator_id, &table_ref);
+            Ok(())
+        }
+        .await;
 
-        Ok(())
+        // F-24 (#817): if a FRESH registration succeeded above but a LATER
+        // step (`get_table` / `add_validator_binding`) failed, undo exactly
+        // that registration — restoring the registry to its pre-call state so
+        // no orphan survives. Safe because `add_binding` (the LAST step above)
+        // never ran before the failure, so the freshly-registered validator
+        // was never bound to anything; `ValidatorRegistry::remove` does not
+        // itself check binding state, but there is nothing to be bound here.
+        // The ALTER branch (`freshly_registered == false`) is deliberately
+        // NOT undone — see the rationale above.
+        if activation_result.is_err() && freshly_registered {
+            self.validators.remove(&schema_validator_id);
+        }
+
+        activation_result
     }
 
     /// Boot-pass: compile declarative schemas for all tables that have a

@@ -88,6 +88,40 @@ artifact).
   auto-bound schema validator is registered under a name that embeds the
   table path, so a rename would orphan it; the guard refuses up-front. See
   `crates/shamir-db/tests/rename_table_e2e.rs:139-144`.
+- **A failed schema activation no longer leaks an in-memory validator —
+  CLOSED (F-24, #817).** `ShamirDb::compile_table_schema`
+  (`crates/shamir-db/src/shamir_db/shamir_db/schema_management.rs`)
+  registers the schema validator as its FIRST side effect, then resolves the
+  table and binds the validator. Before F-24, a failure in a LATER step
+  (`get_table` / `add_validator_binding`) returned `Err` while leaving the
+  freshly-registered validator permanently orphaned in
+  `ValidatorRegistry::by_id` / `name_to_id`. The caller
+  (`admin_schema.rs`) rolled the CATALOGUE back to `rec_prev` but had no way
+  to undo the in-memory registration. This was not purely a cosmetic leak:
+  for a table's FIRST schema declaration that failed this way, a RETRY of the
+  same DDL minted a NEW `schema_validator_id` (the rolled-back catalogue
+  carries none), took the `replace_artifact(&new_id)` branch (the orphan
+  still held the name), silently no-op'ed (the new id was not registered), and
+  ended up with the catalogue pointing at an id that had NO entry in
+  `ValidatorRegistry::by_id`. **Investigated + corrected severity:** this is
+  NOT the "silent schema-validation bypass" a first read suggests — the write
+  path's main validator gate (`run_validators_loop` in
+  `crates/shamir-engine/src/table/table_manager_validators.rs`) is
+  FAIL-CLOSED on a `get_by_id` miss, surfacing as
+  `DbError::ValidatorInvalid("validator <id> not found in registry
+  (fail-closed)")` and rejecting the write; so the practical impact was an
+  AVAILABILITY bug (the affected table became permanently unwritable until
+  the dangling catalogue reference was repaired), not silent wrong data.
+  (`schema_defaults` / `schema_transforms` do silently skip on a miss, but
+  they run before the fail-closed gate, so the write is rejected anyway.)
+  F-24 closes it at the source: a FRESH registration is undone
+  (`ValidatorRegistry::remove`) if any later step in the same call fails,
+  restoring the registry to its pre-call state; an ALTER's
+  `replace_artifact` is deliberately never undone (it swaps an existing,
+  previously-working validator — the catalogue-level `rec_prev` rollback
+  handles that), and `replace_artifact`'s return value is now checked so any
+  future path that could recreate a stale name collision fails loudly. See
+  `crates/shamir-db/src/shamir_db/shamir_db/tests/schema_rollback_tests.rs`.
 - **The "migration" API changes the storage engine, not the schema.**
   `StartMigration`/`CommitMigration`/`RollbackMigration`/`MigrationStatus`
   copy a table's raw `data_store` bytes to a new backend keyed by
