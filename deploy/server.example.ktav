@@ -78,6 +78,12 @@ security: {
         max_result_size_bytes:    1073741824
         max_execution_time_secs:  60
         max_queries_per_batch:    100
+        # RI-15 global upfront-reserve budget on total in-flight response
+        # bytes. Sized at 4× max_result_size_bytes (1 GiB × 4 = 4
+        # concurrent batches; CR-B2 reserves upfront, so concurrency ≈
+        # inflight / max_result — see docs/guide-docs/guide/07-operations.md).
+        # 4 GiB.
+        max_inflight_response_bytes: 4294967296
     }
 }
 
