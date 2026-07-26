@@ -445,8 +445,8 @@ async fn create_cursor_rejects_past_per_session_cap() {
 /// Create a cursor, don't touch it, advance the reaper's idle-ttl clock via
 /// a manual sweep call (no real sleeping — mirrors
 /// `tx_registry_tests`'s `reaper_contract_past_deadline_tx_is_removed`
-/// style, driving `expired_ids`/`remove_for_idle_reap` directly rather than
-/// sleeping the real production duration).
+/// style, driving `sweep_and_reap` directly rather than sleeping the real
+/// production duration).
 #[tokio::test]
 async fn idle_timeout_eviction_then_fetch_returns_expired() {
     let handler = build_handler_with_rows(
@@ -473,15 +473,8 @@ async fn idle_timeout_eviction_then_fetch_returns_expired() {
     // directly-callable sweep (no real 60s sleep, no background task
     // needed for this assertion).
     let registry = handler.cursor_registry();
-    let expired = registry.expired_ids(std::time::Instant::now(), Duration::ZERO);
-    assert_eq!(
-        expired,
-        vec![cursor_id.0],
-        "cursor must be idle-expired at ttl=0"
-    );
-    for id in expired {
-        registry.remove_for_idle_reap(id);
-    }
+    let reaped = registry.sweep_and_reap(std::time::Instant::now(), Duration::ZERO);
+    assert_eq!(reaped, 1, "cursor must be idle-expired at ttl=0");
     assert!(registry.is_empty());
 
     // A subsequent FetchNext against the evicted id reports the expired
@@ -516,7 +509,7 @@ async fn background_reaper_evicts_idle_cursor() {
     // non-zero idle_ttl here would never actually elapse in real time no
     // matter how far the virtual clock advances. Zero idle-ttl isolates
     // the assertion to "the reaper's sweep loop fires on schedule and
-    // calls remove_for_idle_reap", mirroring
+    // calls sweep_and_reap", mirroring
     // `cursor_registry_tests::reaper_task_reaps_idle_cursor`'s fix and
     // `tx_registry_tests::reaper_task_reaps_past_deadline_tx`'s analogous
     // zero-deadline trick.

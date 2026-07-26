@@ -135,43 +135,40 @@ async fn per_session_cap_is_scoped_per_session() {
     assert_eq!(reg.len(), 2);
 }
 
-/// `expired_ids` correctly identifies an idle-past-TTL cursor (activity
-/// bump defers it, mirroring `tx_registry_tests`'s idle-ttl coverage).
+/// `sweep_and_reap` correctly identifies and removes an idle-past-TTL
+/// cursor (activity bump defers it, mirroring `tx_registry_tests`'s
+/// idle-ttl coverage).
 #[tokio::test]
-async fn expired_ids_identifies_idle_past_ttl_cursor() {
+async fn sweep_and_reap_identifies_idle_past_ttl_cursor() {
     let reg = CursorRegistry::new();
     let cursor = make_cursor(1).await;
     let arc = reg.register(1, SID_A, cursor, 16).unwrap();
 
-    // Zero idle-ttl reaps any inactive cursor immediately.
-    let expired = reg.expired_ids(Instant::now(), Duration::ZERO);
-    assert_eq!(expired, vec![1]);
-
-    // Bump activity — with a generous TTL it's no longer expired.
+    // Bump activity first — with a generous TTL it's not expired, so the
+    // sweep is a no-op.
     arc.bump_activity();
-    assert!(reg
-        .expired_ids(Instant::now(), Duration::from_secs(3600))
-        .is_empty());
+    assert_eq!(
+        reg.sweep_and_reap(Instant::now(), Duration::from_secs(3600)),
+        0
+    );
+    assert_eq!(reg.len(), 1);
+
+    // Zero idle-ttl reaps any inactive cursor immediately.
+    assert_eq!(reg.sweep_and_reap(Instant::now(), Duration::ZERO), 1);
+    assert!(reg.is_empty());
 }
 
-/// Sweep workflow: `expired_ids` yields the reaped set; `remove_for_idle_reap`
-/// drops the `Cursor` (RAII release of the `SnapshotGuard`) and tombstones
-/// the id so a racing `FetchNext` sees `CursorExpired`, not `CursorNotFound`.
+/// Sweep workflow: `sweep_and_reap` removes the idle-expired cursor (RAII
+/// release of the `SnapshotGuard`) and tombstones the id so a racing
+/// `FetchNext` sees `CursorExpired`, not `CursorNotFound`.
 #[tokio::test]
 async fn reap_tombstones_id_so_later_lookup_reports_expired_not_not_found() {
     let reg = CursorRegistry::new();
     let cursor = make_cursor(1).await;
     reg.register(1, SID_A, cursor, 16).unwrap();
 
-    let expired = reg.expired_ids(Instant::now(), Duration::ZERO);
-    assert_eq!(expired, vec![1]);
-    for id in expired {
-        let arc = reg.remove_for_idle_reap(id);
-        assert!(
-            arc.is_some(),
-            "remove yields the parked cursor for RAII drop"
-        );
-    }
+    let reaped = reg.sweep_and_reap(Instant::now(), Duration::ZERO);
+    assert_eq!(reaped, 1);
     assert!(reg.is_empty());
 
     // The distinguishing behavior: a later FetchNext-style lookup against
@@ -243,11 +240,8 @@ async fn by_session_entry_removed_after_idle_reap_drains_to_zero() {
     reg.register(1, SID_A, cursor, 16).unwrap();
     assert_eq!(reg.by_session_len(), 1);
 
-    let expired = reg.expired_ids(Instant::now(), Duration::ZERO);
-    assert_eq!(expired, vec![1]);
-    for id in expired {
-        reg.remove_for_idle_reap(id);
-    }
+    let reaped = reg.sweep_and_reap(Instant::now(), Duration::ZERO);
+    assert_eq!(reaped, 1);
 
     assert_eq!(reg.open_count_for_session(&SID_A), 0);
     assert_eq!(
@@ -319,58 +313,94 @@ async fn concurrent_register_remove_cycles_never_exceed_cap_and_fully_drain() {
     );
 }
 
-/// F-9 (#799) core regression: a cursor whose `state()` lock is HELD (as it
-/// would be for the whole duration of an in-progress `FetchNext` — see
-/// `db_handler::cursor_handlers::fetch_next`, which holds the guard from
-/// before the read work starts until just before `bump_activity()`) must
-/// NOT appear in `expired_ids`, even though its `last_activity_nanos`
-/// timestamp makes `is_expired` report `true` (zero idle-ttl, same
-/// "shrink the timeout under test" trick the other tests in this file use).
-/// Once the guard is released, the SAME still-idle cursor DOES appear.
+/// F-20 (#813) core regression — the residual F-9 (#799) left open: a
+/// cursor that has been looked up via `get_owned_for_fetch` (simulating a
+/// `FetchNext` that has started but not yet reached `cursor.state().lock()`
+/// — i.e. exactly the "between get and lock" gap a plain `try_lock()` probe
+/// at removal time would NOT catch, since nothing is locked yet) must NOT
+/// be reaped while the returned `FetchLease` is held, even though its
+/// `last_activity_nanos` timestamp makes `is_expired` report `true` (zero
+/// idle-ttl, same "shrink the timeout under test" trick the other tests in
+/// this file use). Once the lease is dropped (simulating fetch completion),
+/// the SAME still-idle cursor IS reaped.
 #[tokio::test]
-async fn expired_ids_skips_cursor_with_lock_held_by_in_flight_fetch() {
-    let reg = CursorRegistry::new();
-    let cursor = make_cursor(1).await;
-    let arc = reg.register(1, SID_A, cursor, 16).unwrap();
-
-    // Simulate an in-progress FetchNext: acquire and hold the state lock.
-    let guard = arc.state().lock().await;
-
-    // Idle by timestamp (zero ttl), but the lock is held -> must be
-    // excluded from the reap set.
-    let expired = reg.expired_ids(Instant::now(), Duration::ZERO);
-    assert!(
-        expired.is_empty(),
-        "a cursor with its state lock held (in-flight fetch) must not be reaped"
-    );
-
-    // Release the simulated in-flight fetch's lock.
-    drop(guard);
-
-    // Same cursor, still idle by timestamp, now uncontended -> reapable.
-    let expired = reg.expired_ids(Instant::now(), Duration::ZERO);
-    assert_eq!(
-        expired,
-        vec![1],
-        "once the lock is released the still-idle cursor is reapable again"
-    );
-}
-
-/// F-9 (#799) regression guard: proves the `try_lock` guard does not
-/// accidentally make EVERY cursor unreapable — a genuinely idle, unlocked
-/// cursor is still reaped exactly as before this fix.
-#[tokio::test]
-async fn expired_ids_still_reaps_genuinely_idle_unlocked_cursor() {
+async fn sweep_and_reap_skips_cursor_with_fetch_lease_held_state_unlocked() {
     let reg = CursorRegistry::new();
     let cursor = make_cursor(1).await;
     reg.register(1, SID_A, cursor, 16).unwrap();
 
-    let expired = reg.expired_ids(Instant::now(), Duration::ZERO);
+    // Simulate a FetchNext that has looked up the cursor but has NOT yet
+    // locked `state()` — the exact gap F-9's `try_lock`-only check would
+    // have gotten wrong (try_lock would still succeed here).
+    let (_arc, lease) = reg.get_owned_for_fetch(1, &SID_A).unwrap();
+
+    // Idle by timestamp (zero ttl), state() completely uncontended, but the
+    // lease is held -> must be excluded from the reap set.
+    let reaped = reg.sweep_and_reap(Instant::now(), Duration::ZERO);
     assert_eq!(
-        expired,
-        vec![1],
-        "an idle cursor with no lock contention must still be reaped"
+        reaped, 0,
+        "a cursor with its FetchLease held must not be reaped, even with state() unlocked"
     );
+    assert_eq!(reg.len(), 1);
+
+    // Release the lease (simulating fetch completion).
+    drop(lease);
+
+    // Same cursor, still idle by timestamp, now uncontended -> reapable.
+    let reaped = reg.sweep_and_reap(Instant::now(), Duration::ZERO);
+    assert_eq!(
+        reaped, 1,
+        "once the lease is dropped the still-idle cursor is reapable again"
+    );
+    assert!(reg.is_empty());
+}
+
+/// F-9 (#799) regression guard, still holding under the new mechanism: a
+/// cursor whose `state()` lock is directly HELD (e.g. an in-progress
+/// `FetchNext` that has already reached `cursor.state().lock().await`) is
+/// also covered by the lease — `get_owned_for_fetch` is called before the
+/// lock is ever taken in `fetch_next`, so the lease is already held by the
+/// time `state()` is locked. This test exercises the lease directly, since
+/// `state()` contention is no longer an independent reap-gate signal
+/// (`in_flight` is the sole gate now — see `sweep_and_reap`'s doc comment).
+#[tokio::test]
+async fn sweep_and_reap_skips_cursor_with_fetch_lease_held_state_locked() {
+    let reg = CursorRegistry::new();
+    let cursor = make_cursor(1).await;
+    reg.register(1, SID_A, cursor, 16).unwrap();
+
+    let (arc, lease) = reg.get_owned_for_fetch(1, &SID_A).unwrap();
+    let guard = arc.state().lock().await;
+
+    let reaped = reg.sweep_and_reap(Instant::now(), Duration::ZERO);
+    assert_eq!(
+        reaped, 0,
+        "a cursor with its FetchLease held and state() locked must not be reaped"
+    );
+
+    drop(guard);
+    drop(lease);
+
+    let reaped = reg.sweep_and_reap(Instant::now(), Duration::ZERO);
+    assert_eq!(reaped, 1, "once both are released the cursor is reapable");
+}
+
+/// F-9 (#799) regression guard, adapted to `in_flight`: proves the lease
+/// mechanism does not accidentally make EVERY cursor unreapable — a
+/// genuinely idle, never-fetched cursor (no `FetchLease` ever taken) is
+/// still reaped exactly as before this fix.
+#[tokio::test]
+async fn sweep_and_reap_still_reaps_genuinely_idle_never_fetched_cursor() {
+    let reg = CursorRegistry::new();
+    let cursor = make_cursor(1).await;
+    reg.register(1, SID_A, cursor, 16).unwrap();
+
+    let reaped = reg.sweep_and_reap(Instant::now(), Duration::ZERO);
+    assert_eq!(
+        reaped, 1,
+        "an idle cursor with no in-flight fetch must still be reaped"
+    );
+    assert!(reg.is_empty());
 }
 
 /// The background reaper task actually reaps an idle-past-TTL cursor on its

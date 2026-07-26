@@ -356,8 +356,52 @@ artifact).
     some OTHER keyset→offset trigger (e.g. CR-D1's ceiling fallback), which
     is an orthogonal, already-accepted mechanism unrelated to value-type
     incomparability.
-- **Corrupt-record reporting covers `read_exec.rs`'s scan paths only; two
-  sibling files still silently skip corrupt records (F-10, #800).** A row
+- **Idle-cursor reaper could reap a cursor mid-`FetchNext` — CLOSED (F-9
+  #799, residual fully closed by F-20 #813).** The reaper evicts a cursor
+  once it has been idle past `idle_ttl`
+  (`crates/shamir-server/src/cursor_registry.rs`), but `bump_activity()`
+  (the only thing that advances a cursor's idle clock) fires exactly once,
+  at the very END of a successful `FetchNext` — so a `FetchNext` whose own
+  execution time (large `page_size`, an expensive scan, a slow keyset
+  boundary search) exceeded `idle_ttl` looked exactly as idle to the reaper
+  as a genuinely abandoned cursor, even though it was being actively used
+  the whole time, risking the reaper yanking the cursor's `Arc` (and its
+  pinned `SnapshotGuard`) out from under an in-flight fetch. F-9 (#799)
+  first mitigated this with a `state().try_lock()` probe: a cursor was only
+  reaped if its pagination-state mutex was NOT currently held, since
+  `fetch_next` holds that mutex for the fetch's entire duration. This
+  closed the big window (an entire `idle_ttl`-sized race) but left a
+  narrower residual, explicitly documented at the time: `try_lock()` was
+  only checked when the reaper COLLECTED the candidate id, in a separate,
+  earlier pass from the one that actually REMOVED it — a new `FetchNext`
+  could look up the cursor and be about to lock `state()` (nothing locked
+  yet, so `try_lock()` would still have succeeded) in the single-reaper-
+  tick-sized gap between those two passes, and still have its cursor
+  reaped out from under it. F-20 (#813) closes this fully: an `in_flight`
+  atomic counter on `Cursor`, incremented by the new
+  `CursorRegistry::get_owned_for_fetch` WHILE the registry's per-entry
+  read-guard is still held (before `fetch_next` ever reaches
+  `state().lock()`), covers the complete lookup-to-completion window with
+  no gap; and the reaper's collect-then-remove two-pass sweep was replaced
+  with a single atomic-per-entry `sweep_and_reap`, using `DashMap::retain`
+  so the expiry check, the `in_flight` check, and the actual removal all
+  happen while that entry's shard write-lock is held — no separate pass,
+  no window for a new fetch to land in between "decided expired" and
+  "removed". `try_lock()` was removed as a reap-gate (superseded by
+  `in_flight`, which covers a strict superset of its window) rather than
+  kept alongside it. See `crates/shamir-server/src/cursor_registry.rs`'s
+  `sweep_and_reap`/`get_owned_for_fetch`/`FetchLease` doc comments for the
+  full ordering argument.
+- **`max_inflight_response_bytes` missing from the base
+  `deploy/server.example.ktav` reference config — STILL OPEN (F-11 #802
+  residual; tracked follow-up F-21 #814).** The setting already appears in
+  `deploy/server.medium.example.ktav` and `deploy/server.small.example.ktav`
+  but not in the base `deploy/server.example.ktav`, so an operator starting
+  from the base reference config alone does not see this knob documented
+  inline. Not fixed here — tracked as its own follow-up task (mirroring how
+  the corrupt-record bullet above tracks its own sibling-file follow-up).
+- **Corrupt-record reporting covers `read_exec.rs`'s scan paths only; one
+  sibling file still silently skips corrupt records (F-10, #800).** A row
   whose value bytes fail to decode inside a scan is not aborted (a single
   corrupt row aborting an otherwise-successful query over millions of good
   rows would be worse than a documented gap): it is skipped from
@@ -375,16 +419,25 @@ artifact).
   `crates/shamir-engine/src/table/read_exec.rs` (`read_collecting`,
   `read_counting`, `read_streaming`, the index2 fast path, and the
   filtered-vector-scan / `merge_staged_filtered` /
-  `build_filtered_vector_result` trio) populate `corrupt_records`. **Two
-  sibling files were explicitly left out of scope and still skip corrupt
+  `build_filtered_vector_result` trio) populate `corrupt_records`. **One
+  sibling file was explicitly left out of scope and still skips corrupt
   records without reporting them**: `crates/shamir-engine/src/table/
-  table_manager_index_mgmt.rs` and `crates/shamir-engine/src/table/
-  table_manager_streaming.rs` (same `Err(_) => continue` pattern, not yet
-  wired into `corrupt_records` — tracked as follow-up work). Also not
-  wired: `try_project_page_only_bytes`'s LIMIT push-down fallback in
-  `read_exec.rs` itself is a free function with no `QueryResult` in scope
-  to attach a corrupt entry to, and its two callers
-  (`crates/shamir-engine/src/table/read_index_scan.rs`,
+  table_manager_streaming.rs` (same corrupt-VALUE-decode `Err(_) =>
+  false`/`continue` skip pattern as `read_exec.rs`, e.g. `filter_stream`'s
+  malformed-`RecordView` skip at ~line 185 and its ~line 321-323
+  counterpart, not yet wired into `corrupt_records` — tracked as follow-up
+  work). `crates/shamir-engine/src/table/table_manager_index_mgmt.rs`
+  does NOT have this pattern (re-verified for F-20/#813: its one `continue`,
+  ~line 854 inside the sorted-index rename-migration helper, is a
+  malformed-KEY length guard — `if key.len() < 9 { continue; }` — on a
+  physical index key during a background index-rename key migration, an
+  unrelated defensive skip, not a corrupt-record VALUE silently dropped
+  from a query result; it was previously miscited here alongside
+  `table_manager_streaming.rs` as having "the same" pattern, which this
+  correction removes). Also not wired: `try_project_page_only_bytes`'s
+  LIMIT push-down fallback in `read_exec.rs` itself is a free function
+  with no `QueryResult` in scope to attach a corrupt entry to, and its two
+  callers (`crates/shamir-engine/src/table/read_index_scan.rs`,
   `crates/shamir-engine/src/table/read_temporal.rs`) are themselves out of
   this task's scope — see the comment at that call site for detail.
 - **`SelectItem::Expression` (computed SELECT fields) is REJECTED at

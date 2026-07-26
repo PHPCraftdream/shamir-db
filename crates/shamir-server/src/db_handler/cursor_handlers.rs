@@ -1480,11 +1480,17 @@ impl ShamirDbHandler {
             }
         }
 
-        let cursor = match self
+        // F-20 (#813): `get_owned_for_fetch`, not `get_owned` — marks the
+        // cursor "in flight" for the reaper's `sweep_and_reap` for as long as
+        // `_fetch_lease` stays in scope (the rest of this function's body,
+        // across every early `return` below), closing the residual gap
+        // documented on `CursorRegistry::sweep_and_reap` between "cursor
+        // looked up" and "state() lock actually acquired".
+        let (cursor, _fetch_lease) = match self
             .cursor_registry
-            .get_owned(cursor_id.0, &session.session_id)
+            .get_owned_for_fetch(cursor_id.0, &session.session_id)
         {
-            Ok(c) => c,
+            Ok(pair) => pair,
             Err(e) => return cursor_registry_error_response(cursor_id, e),
         };
 

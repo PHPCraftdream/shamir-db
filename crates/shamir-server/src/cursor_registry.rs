@@ -30,7 +30,7 @@
 //! `[u8; 32] → Arc<AtomicUsize>`, a live open-count per session that
 //! `register` increments (rejecting over-cap) and `remove` decrements.
 
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -209,6 +209,12 @@ pub struct Cursor {
     created_at: Instant,
     /// Nanos since `created_at` of the last activity bump.
     last_activity_nanos: AtomicU64,
+    /// F-20 (#813): number of `FetchNext` calls currently in flight against
+    /// this cursor. Incremented by [`CursorRegistry::get_owned_for_fetch`]
+    /// WHILE the registry's per-entry read-guard is still held, decremented
+    /// by [`FetchLease`]'s `Drop`. See that method's doc comment for the
+    /// ordering argument this whole mechanism rests on.
+    in_flight: AtomicU32,
 }
 
 impl Cursor {
@@ -244,6 +250,7 @@ impl Cursor {
             repo,
             created_at: Instant::now(),
             last_activity_nanos: AtomicU64::new(0),
+            in_flight: AtomicU32::new(0),
         }
     }
 
@@ -296,6 +303,22 @@ impl Cursor {
     }
 }
 
+/// F-20 (#813): RAII lease marking a `FetchNext` in flight against a
+/// cursor. Returned by [`CursorRegistry::get_owned_for_fetch`] and held for
+/// the fetch's full duration (from lookup to completion, across every early
+/// `return` in `db_handler::cursor_handlers::fetch_next`) — decremented on
+/// `Drop`, so the cursor is marked contended for exactly as long as the
+/// fetch is genuinely in progress, no matter which exit path it takes. See
+/// `get_owned_for_fetch`'s doc comment for the ordering property this whole
+/// mechanism rests on.
+pub struct FetchLease(Arc<Cursor>);
+
+impl Drop for FetchLease {
+    fn drop(&mut self) {
+        self.0.in_flight.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
 /// The server-resident table of open result cursors.
 ///
 /// `open` maps `cursor_id → Cursor`; `by_session` tracks a LIVE per-session
@@ -305,7 +328,7 @@ impl Cursor {
 /// scc were in play here, but the intent — never materialise-then-count —
 /// applies equally to `dashmap`).
 ///
-/// `reaped_tombstones` is a short-lived marker set: `remove_for_idle_reap`
+/// `reaped_tombstones` is a short-lived marker set: `sweep_and_reap`
 /// inserts the id here (with a bounded self-expiry sweep alongside the
 /// regular cursor sweep) so a `FetchNext` against a JUST-reaped id can
 /// report `CursorExpired` instead of the less-specific `CursorNotFound` —
@@ -411,6 +434,63 @@ impl CursorRegistry {
         Ok(arc)
     }
 
+    /// F-20 (#813): like [`Self::get_owned`], but additionally marks the
+    /// cursor "in flight" for the lifetime of the returned [`FetchLease`] —
+    /// used ONLY by `fetch_next`, never by `cancel_cursor` or any other
+    /// caller (`get_owned` itself is untouched; existing callers/tests keep
+    /// its current `Result<Arc<Cursor>, CursorRegistryError>` shape).
+    ///
+    /// The critical property: `in_flight` is incremented WHILE the shard
+    /// read-guard returned by `self.open.get(...)` is still alive — before
+    /// it is dropped, and therefore strictly before this call returns. This
+    /// closes a gap a plain re-check-`try_lock`-at-removal would NOT close:
+    /// even re-checking `try_lock()` at the exact moment of removal leaves a
+    /// window between "`get_owned` returns the `Arc<Cursor>`" and "the
+    /// caller actually calls `cursor.state().lock().await`" during which
+    /// `try_lock()` would still succeed (nothing is locked yet) — a reaper
+    /// sweep landing in that exact gap would remove the cursor even though a
+    /// fetch is genuinely about to use it. Incrementing `in_flight` inside
+    /// the same critical section as the registry lookup has no such gap:
+    /// any reaper removal attempt for this key must run either strictly
+    /// before this lookup starts (observing this entry gone, or observing it
+    /// present and racing the increment safely under the same shard lock —
+    /// see `sweep_and_reap`'s doc comment for the other side of this
+    /// argument) or strictly after this lookup's read-guard is dropped — by
+    /// which point the increment (which happened before that drop) is
+    /// already visible to `sweep_and_reap`'s `Acquire` load. There is no
+    /// interleaving where a removal's predicate can observe `in_flight == 0`
+    /// while a lookup that already returned `Ok` is still "between get and
+    /// lock".
+    pub fn get_owned_for_fetch(
+        &self,
+        cursor_id: u64,
+        sid: &[u8; 32],
+    ) -> Result<(Arc<Cursor>, FetchLease), CursorRegistryError> {
+        let arc = match self.open.get(&cursor_id) {
+            Some(r) => {
+                // Increment WHILE the shard read-guard `r` is still alive —
+                // this is the ordering property the whole design rests on.
+                r.value().in_flight.fetch_add(1, Ordering::AcqRel);
+                Arc::clone(r.value())
+            }
+            None => {
+                return Err(if self.reaped_tombstones.contains_key(&cursor_id) {
+                    CursorRegistryError::CursorExpired
+                } else {
+                    CursorRegistryError::CursorNotFound
+                });
+            }
+        };
+        if &arc.owner_sid != sid {
+            // Undo the increment — no lease is returned on this error path,
+            // so nothing will ever call `FetchLease::drop` to balance it.
+            arc.in_flight.fetch_sub(1, Ordering::AcqRel);
+            return Err(CursorRegistryError::CursorOwnershipMismatch);
+        }
+        let lease = FetchLease(Arc::clone(&arc));
+        Ok((arc, lease))
+    }
+
     /// Remove a cursor (explicit `CancelCursor`, or the scan-exhausted
     /// auto-close on the last `FetchNext` page). Frees the session's slot.
     /// Does NOT tombstone — a deliberate close is not an error condition a
@@ -418,16 +498,6 @@ impl CursorRegistry {
     pub fn remove(&self, cursor_id: u64) -> Option<Arc<Cursor>> {
         let (_, arc) = self.open.remove(&cursor_id)?;
         self.free_session_slot(&arc.owner_sid);
-        Some(arc)
-    }
-
-    /// Remove a cursor because the reaper found it idle-expired, leaving a
-    /// tombstone so a racing `FetchNext` gets `CursorExpired` instead of
-    /// `CursorNotFound`.
-    pub fn remove_for_idle_reap(&self, cursor_id: u64) -> Option<Arc<Cursor>> {
-        let (_, arc) = self.open.remove(&cursor_id)?;
-        self.free_session_slot(&arc.owner_sid);
-        self.reaped_tombstones.insert(cursor_id, Instant::now());
         Some(arc)
     }
 
@@ -461,47 +531,72 @@ impl CursorRegistry {
         });
     }
 
-    /// Cursor ids idle past `idle_ttl` as of `now`. The background sweep
-    /// removes each via [`Self::remove_for_idle_reap`].
+    /// Sweep idle-expired, uncontended cursors in ONE atomic-per-entry pass
+    /// and remove them, leaving a tombstone for each so a racing `FetchNext`
+    /// gets `CursorExpired` instead of `CursorNotFound`. Returns the number
+    /// reaped.
     ///
-    /// F-9 (#799): a cursor is only included if it is ALSO uncontended —
-    /// `state().try_lock()` succeeds. `fetch_next`
-    /// (`db_handler::cursor_handlers`) holds `cursor.state().lock().await`
-    /// for the ENTIRE duration of a `FetchNext` (including the actual
-    /// keyset/offset page scan), only dropping it right before
-    /// `bump_activity()` at the very end. `bump_activity` is the ONLY thing
-    /// that moves `last_activity_nanos`, and it fires once, at the END of a
-    /// successful `FetchNext` — so a `FetchNext` whose own execution time
-    /// (large `page_size`, expensive scan, slow keyset boundary search)
-    /// exceeds `idle_ttl` looks exactly as idle to `is_expired` as a
-    /// genuinely abandoned cursor, even though it is being actively used the
-    /// whole time. `try_lock()` reliably tells the two apart: it fails
-    /// while a `FetchNext` is in flight (the lock is held) and succeeds
-    /// immediately otherwise. The returned guard is dropped right away — a
-    /// pure availability probe, not something held across this filter.
+    /// F-9 (#799) originally gated this on `state().try_lock()` succeeding:
+    /// `fetch_next` (`db_handler::cursor_handlers`) holds
+    /// `cursor.state().lock().await` for the ENTIRE duration of a
+    /// `FetchNext` (including the actual keyset/offset page scan), only
+    /// dropping it right before `bump_activity()` at the very end.
+    /// `bump_activity` is the ONLY thing that moves `last_activity_nanos`,
+    /// and it fires once, at the END of a successful `FetchNext` — so a
+    /// `FetchNext` whose own execution time (large `page_size`, expensive
+    /// scan, slow keyset boundary search) exceeds `idle_ttl` looked exactly
+    /// as idle to `is_expired` as a genuinely abandoned cursor, even though
+    /// it was being actively used the whole time. `try_lock()` told the two
+    /// apart, but F-9 only collected a list (this same method, formerly
+    /// named `expired_ids`) — the actual removal happened in the reaper's
+    /// sweep loop via a SEPARATE, later call to `remove_for_idle_reap`,
+    /// leaving a single-reaper-tick-sized gap in which a new `FetchNext`
+    /// could look up the cursor and be about to lock `state()` (so
+    /// `try_lock()` would still have succeeded) when the removal pass
+    /// reached it anyway.
     ///
-    /// Residual (documented, not fixed): this narrows the race to a MUCH
-    /// smaller window than before (a fetch running for the entire
-    /// `idle_ttl` can no longer be reaped mid-flight, since `try_lock` fails
-    /// throughout), but does NOT make the check-then-remove sequence fully
-    /// atomic — this method only collects a list; the reaper's sweep loop
-    /// calls `remove_for_idle_reap` per id in a SEPARATE later pass. A new
-    /// `FetchNext` could theoretically start and acquire the lock in the gap
-    /// between these two passes. That residual window is single-reaper-
-    /// tick-local, not `idle_ttl`-sized — many orders of magnitude smaller
-    /// than the bug this closes — and is accepted rather than fused into one
-    /// atomic check-and-remove step per entry.
-    pub fn expired_ids(&self, now: Instant, idle_ttl: Duration) -> Vec<u64> {
-        self.open
-            .iter()
-            .filter(|e| e.value().is_expired(now, idle_ttl) && e.value().state().try_lock().is_ok())
-            .map(|e| *e.key())
-            .collect()
+    /// F-20 (#813) closes that residual with TWO changes, combined: (1) an
+    /// `in_flight` counter (see [`Cursor`]/[`FetchLease`]) incremented by
+    /// [`Self::get_owned_for_fetch`] WHILE the registry's read-guard for
+    /// that entry is still held — covering the full lookup-to-completion
+    /// window, a strict superset of `try_lock`'s lock-to-unlock window, with
+    /// no gap between "looked up" and "about to lock"; and (2) folding the
+    /// expiry check, the in-flight check, and the actual removal into ONE
+    /// atomic step per entry via `DashMap::retain`, whose predicate runs
+    /// while that shard's write lock is held (same guarantee
+    /// `free_session_slot` already documents and relies on for
+    /// `remove_if` — see its doc comment for the citation of *why* this
+    /// `dashmap` 6.1.0 ordering guarantee holds). `try_lock()` on
+    /// `state()` is no longer used as a reap-gate: `in_flight` covers a
+    /// strict superset of the window it covered, so keeping both would be
+    /// two overlapping, redundant mechanisms — a single, understood one
+    /// is preferred (see `get_owned_for_fetch`'s doc comment for the
+    /// ordering argument in full).
+    pub fn sweep_and_reap(&self, now: Instant, idle_ttl: Duration) -> usize {
+        let mut reaped_owners: Vec<[u8; 32]> = Vec::new();
+        let mut reaped_ids: Vec<u64> = Vec::new();
+        self.open.retain(|id, cursor| {
+            let expired =
+                cursor.is_expired(now, idle_ttl) && cursor.in_flight.load(Ordering::Acquire) == 0;
+            if expired {
+                reaped_owners.push(cursor.owner_sid);
+                reaped_ids.push(*id);
+            }
+            !expired // keep everything that is NOT being reaped
+        });
+        for owner in &reaped_owners {
+            self.free_session_slot(owner);
+        }
+        let tombstoned_at = Instant::now();
+        for id in &reaped_ids {
+            self.reaped_tombstones.insert(*id, tombstoned_at);
+        }
+        reaped_ids.len()
     }
 
     /// Drop tombstones older than [`TOMBSTONE_TTL`] — called by the reaper
-    /// sweep alongside `expired_ids`/`remove_for_idle_reap` so the
-    /// tombstone set does not grow unbounded.
+    /// sweep alongside `sweep_and_reap` so the tombstone set does not grow
+    /// unbounded.
     pub fn sweep_tombstones(&self, now: Instant) {
         self.reaped_tombstones
             .retain(|_, inserted_at| now.saturating_duration_since(*inserted_at) < TOMBSTONE_TTL);
@@ -543,10 +638,10 @@ impl CursorRegistry {
 /// Spawn the periodic cursor reaper.
 ///
 /// Mirrors `crate::tx_registry::spawn_reaper_task`: loops every
-/// `reap_interval`, calling [`CursorRegistry::expired_ids`] with
-/// `idle_ttl`, then [`CursorRegistry::remove_for_idle_reap`] on each
-/// (dropping the `Arc<Cursor>` releases the `SnapshotGuard`, unpinning the
-/// MVCC GC floor). Also sweeps aged-out tombstones each tick.
+/// `reap_interval`, calling [`CursorRegistry::sweep_and_reap`] with
+/// `idle_ttl` (dropping each reaped `Arc<Cursor>` releases the
+/// `SnapshotGuard`, unpinning the MVCC GC floor). Also sweeps aged-out
+/// tombstones each tick.
 pub fn spawn_reaper_task(
     registry: Arc<CursorRegistry>,
     idle_ttl: Duration,
@@ -569,13 +664,9 @@ pub fn spawn_reaper_task(
                 _ = interval.tick() => {
                     let now = Instant::now();
                     registry.sweep_tombstones(now);
-                    let expired = registry.expired_ids(now, idle_ttl);
-                    if expired.is_empty() {
+                    let reaped = registry.sweep_and_reap(now, idle_ttl);
+                    if reaped == 0 {
                         continue;
-                    }
-                    let reaped = expired.len();
-                    for id in expired {
-                        let _ = registry.remove_for_idle_reap(id);
                     }
                     tracing::info!(reaped, "cursor_reaper: evicted idle-timeout cursors");
                 }
