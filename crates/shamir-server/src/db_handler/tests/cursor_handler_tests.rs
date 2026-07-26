@@ -3494,16 +3494,21 @@ async fn build_handler_with_big_scores(
 /// each row's `score` is a distinct single-byte binary value so an ASC keyset
 /// scan (if it worked) would have a well-defined order.
 ///
-/// F-1 (#792): binds a schema declaring `score: Bin, required` -- `Bin` IS
-/// one of the accepted `TypeTag`s in the schema-typed-scalar gate (it's a
-/// fixed, non-container, never-`NaN` scalar), so this keeps the cursor
-/// eligible for `Keyset` mode, letting this test keep exercising the actual
-/// W-2 per-value mechanism (`safe_seek_key` excluding `Bin` unconditionally,
-/// since `compare_values` has no `(Bin, Bin)` comparison arm regardless of
-/// schema) instead of being short-circuited to `Offset` before that
-/// mechanism is ever reached. F-17 (#810): `bind_schema` stamps
-/// `keyset_safe: true` (table is empty at bind time), so the gate still
-/// passes exactly as before.
+/// F-1 (#792): binds a schema declaring `score: Bin, required` -- at the
+/// time, `Bin` was (mistakenly) one of the accepted `TypeTag`s in the
+/// schema-typed-scalar gate, so this kept the cursor eligible for `Keyset`
+/// mode, exercising the W-2 per-value mechanism (`safe_seek_key` excluding
+/// `Bin` unconditionally, since `compare_values` has no `(Bin, Bin)`
+/// comparison arm) instead of being short-circuited to `Offset` before that
+/// mechanism was ever reached.
+///
+/// F-18 (#811): `Bin` is now EXCLUDED from the gate's accepted `TypeTag` set
+/// too -- `compare_values` never had a `(Bin, Bin)` arm, so a `Bin` column
+/// could never actually benefit from Keyset mode; it only paid for the
+/// null-probe read before degrading to the offset fallback on every call.
+/// The schema binding is kept here (rather than dropped) so this test still
+/// proves the exclusion holds even for a `keyset_safe: true`, schema-typed
+/// `Bin` column -- not just a schemaless one.
 async fn build_handler_with_bin_scores(
     scores: &[u8],
     cursor_limits: CursorLimitsCap,
@@ -3555,8 +3560,9 @@ async fn build_handler_with_bin_scores(
 /// `Keyset` (pinned from shape).
 ///
 /// F-1 (#792) changes what actually gates this: `Dec` has no accepted
-/// `TypeTag` in the schema-typed-scalar gate (only `Int`/`Bool`/`String`/
-/// `Bin` qualify), so a `Dec` ORDER BY column can never reach `Keyset` mode
+/// `TypeTag` in the schema-typed-scalar gate (only `Int`/`Bool`/`String`
+/// qualify -- `Bin` also qualified at F-1 time, but was excluded too by
+/// F-18 (#811)), so a `Dec` ORDER BY column can never reach `Keyset` mode
 /// at all anymore, schema-bound or not -- the gate now short-circuits the
 /// whole keyset attempt BEFORE `safe_seek_key`'s per-value mechanism would
 /// ever run. This test now pins `PaginationMode::Offset` from creation
@@ -3654,19 +3660,32 @@ async fn big_order_by_value_now_forces_offset_mode_no_hard_error() {
     );
 }
 
-/// W-2 regression (option (b) chosen -- see `safe_seek_key`'s doc comment):
-/// a keyset cursor over a `Bin` ORDER BY column must ride the offset-mode
-/// fallback (every row exactly once), not the OLD silent drop.
+/// W-2 regression, updated for F-18 (#811): a keyset-requesting cursor over
+/// a `Bin` ORDER BY column must ride the offset-mode bookmark (every row
+/// exactly once), not the OLD silent drop.
 ///
-/// BEFORE the fix: `Bin` converts fine to `FilterValue::Binary`, so
+/// BEFORE W-2's fix: `Bin` converts fine to `FilterValue::Binary`, so
 /// `boundary_filter` built a filter that LOOKED valid, but `compare_values`
 /// has no `(Bin, Bin)` arm -- the filter matched nothing past page 1, and the
 /// cursor reported a clean `has_more: false` having silently dropped every
-/// remaining row. AFTER the fix: `safe_seek_key` explicitly excludes `Bin`,
-/// so `seek_key` is `None` from the first page onward and the cursor rides
-/// the offset bookmark instead.
+/// remaining row. AFTER W-2's fix (still true, but no longer reachable from
+/// here): `safe_seek_key` would explicitly exclude `Bin`, so `seek_key` was
+/// `None` from the first page onward while `state.mode` stayed `Keyset`
+/// (pinned from shape) -- a per-CALL fallback.
+///
+/// AFTER F-18 (#811, this task): `Bin` is excluded from the schema-typed-
+/// scalar GATE itself (`order_by_column_is_schema_typed_scalar`'s accepted
+/// set narrowed to `Int | Bool | String`), since `compare_values` never had
+/// a `(Bin, Bin)` arm and a `Bin` column could therefore never actually
+/// benefit from Keyset mode -- it only paid for the null-probe read before
+/// degrading anyway. So this schema-typed `Bin` column now pins
+/// `PaginationMode::Offset` from `create_cursor` time, same as `Dec`/`Big`/
+/// `List` above -- W-2's per-call `safe_seek_key` mechanism is no longer
+/// reached at all for `Bin`, made moot by the gate-level exclusion. The
+/// end-to-end no-loss guarantee (every row exactly once, no silent drop) is
+/// unchanged.
 #[tokio::test]
-async fn bin_order_by_value_uses_offset_fallback_not_silent_drop() {
+async fn bin_order_by_value_now_forces_offset_mode_no_silent_drop() {
     let scores: [u8; 5] = [50, 30, 10, 40, 20];
     let handler = build_handler_with_bin_scores(&scores, CursorLimitsCap::UNLIMITED).await;
     let session = alice_session();
@@ -3692,10 +3711,12 @@ async fn bin_order_by_value_uses_offset_fallback_not_silent_drop() {
 
     assert_eq!(
         pinned_mode(&handler, cursor_id, &ALICE_SID),
-        PaginationMode::Keyset,
-        "a schema-typed Bin ORDER BY column passes F-1's schema-typed-scalar gate (Bin is an \
-         accepted TypeTag) and is not Null, so neither create-time probe reroutes the whole \
-         cursor -- W-2's fix is a per-bookmark fallback, same mechanism as W-3"
+        PaginationMode::Offset,
+        "F-18 (#811): Bin is now excluded from the schema-typed-scalar gate's accepted \
+         TypeTag set (compare_values never had a (Bin, Bin) arm, so Keyset mode could never \
+         actually benefit this column) -- this schema-typed Bin column must fall back to \
+         PaginationMode::Offset from creation, same as Dec/Big/List, not ride a per-call \
+         seek_key fallback under a Keyset-pinned mode"
     );
 
     drain_seqs(&handler, &session, cursor_id, 2, &mut seqs).await;
@@ -3704,21 +3725,25 @@ async fn bin_order_by_value_uses_offset_fallback_not_silent_drop() {
     assert_eq!(
         seqs,
         vec![0, 1, 2, 3, 4],
-        "every row must appear exactly once via the offset-bookmark fallback -- before the fix \
+        "every row must appear exactly once via offset-mode pagination -- before W-2's fix \
          every row past page 1 was silently dropped with a clean has_more: false, the exact \
-         CR-D2 failure shape"
+         CR-D2 failure shape; the gate-level exclusion (F-18) preserves that no-loss guarantee \
+         by a different mechanism"
     );
 }
 
 /// W-2 regression, `List` variant, updated for F-1 (#792): same scenario as
 /// `Bin` above, but for `QueryValue::List` (converts to `FilterValue::Array`
-/// fine, but `compare_values` has no `(List, List)` arm either). Unlike
-/// `Bin`, `List` is a CONTAINER type -- `TypeTag::List` is excluded from the
-/// schema-typed-scalar gate's accepted set regardless of schema (containers
-/// can hold heterogeneous/nested values, so schema enforcement of the outer
-/// type alone doesn't prove the boundary-filter comparison is safe) -- so
-/// this column can never reach `Keyset` mode at all, schema-bound or not,
-/// same as the `Dec`/`Big` tests above.
+/// fine, but `compare_values` has no `(List, List)` arm either). `List` is a
+/// CONTAINER type -- `TypeTag::List` is excluded from the schema-typed-scalar
+/// gate's accepted set regardless of schema (containers can hold
+/// heterogeneous/nested values, so schema enforcement of the outer type
+/// alone doesn't prove the boundary-filter comparison is safe) -- so this
+/// column can never reach `Keyset` mode at all, schema-bound or not, same as
+/// the `Dec`/`Big` tests above (and, since F-18 (#811), the `Bin` test above
+/// too -- though `Bin` is excluded for a different reason: a missing
+/// `compare_values` arm on an otherwise fixed, non-container scalar, not
+/// because it's a container).
 #[tokio::test]
 async fn list_order_by_value_now_forces_offset_mode_no_silent_drop() {
     let shamir = ShamirDb::init_memory().await.expect("init shamir");
@@ -3874,6 +3899,91 @@ async fn str_order_by_regression_still_uses_real_keyset_seek() {
     );
 }
 
+/// Positive keyset test for `Bool` (F-18, #811): both the `/crush` post-wave
+/// review and the deeper static-audit review flagged that `Bool` is one of
+/// the accepted `TypeTag`s in the schema-typed-scalar gate and is genuinely
+/// comparable via `compare_values` (`resolve.rs`'s `(Value::Bool(a),
+/// Value::Bool(b)) => Some(a.cmp(b))` arm, `false < true`) -- yet, unlike
+/// `Int`/`Str`, there was no POSITIVE test proving a schema-typed `Bool`
+/// ORDER BY column actually reaches `PaginationMode::Keyset` and pages
+/// correctly through genuine keyset seeking, not just the offset fallback.
+#[tokio::test]
+async fn bool_order_by_regression_uses_real_keyset_seek() {
+    let shamir = ShamirDb::init_memory().await.expect("init shamir");
+    let owner = Actor::User(principal64([0xAB; 16]));
+    shamir.create_db_as("app", owner.clone()).await;
+    let cfg =
+        RepoConfig::new("main", BoxRepoFactory::in_memory()).add_table(TableConfig::new("items"));
+    shamir
+        .add_repo_as("app", cfg, owner.clone())
+        .await
+        .expect("add repo");
+    bind_schema(
+        &shamir,
+        "app",
+        "main",
+        "items",
+        "score",
+        shamir_db::engine::validator::schema::TypeTag::Bool,
+    )
+    .await;
+
+    let mut b = Batch::new();
+    let flags = [true, false, true, false, true];
+    for (i, flag) in flags.iter().enumerate() {
+        b.insert(
+            format!("i{i}"),
+            insert("items").row(doc! { "seq" => i as i64, "score" => *flag }),
+        );
+    }
+    let batch = b.build();
+    shamir
+        .execute_as(owner, "app", &batch)
+        .await
+        .expect("seed rows");
+
+    let handler =
+        ShamirDbHandler::new(Arc::new(shamir)).with_cursor_limits(CursorLimitsCap::UNLIMITED);
+    let session = alice_session();
+
+    let query = ReadQuery::new("items").order_by(OrderBy::asc("score"));
+    let resp = send(&handler, &session, create_cursor_req(query, 2)).await;
+    let (cursor_id, mut seqs) = match resp {
+        DbResponse::CursorPage {
+            cursor_id,
+            page,
+            has_more,
+        } => {
+            assert!(has_more, "5 rows / page_size 2 -> more pages remain");
+            let seqs: Vec<i64> = page
+                .records
+                .iter()
+                .map(|r| r.get_value_i64("seq").expect("seq present"))
+                .collect();
+            (cursor_id, seqs)
+        }
+        other => panic!("expected CursorPage, got {other:?}"),
+    };
+
+    assert_eq!(
+        pinned_mode(&handler, cursor_id, &ALICE_SID),
+        PaginationMode::Keyset,
+        "a schema-typed Bool ORDER BY column is one of the accepted TypeTags in the \
+         schema-typed-scalar gate, and compare_values has a working (Bool, Bool) arm -- this \
+         must reach genuine PaginationMode::Keyset, not fall back to Offset"
+    );
+
+    drain_seqs(&handler, &session, cursor_id, 2, &mut seqs).await;
+
+    seqs.sort_unstable();
+    assert_eq!(
+        seqs,
+        vec![0, 1, 2, 3, 4],
+        "every row must appear exactly once via genuine keyset seeking over a Bool ORDER BY \
+         column (false < true, with tie runs on each side)"
+    );
+}
+
 /// Regression guard: an `Int` ORDER BY column with duplicate-value tie runs
 /// (the review's own CR-A4 scenario) must remain unaffected by this task's
 /// new per-value safety check -- `Int` is trivially convertible AND
@@ -4003,13 +4113,16 @@ async fn f64_order_by_regression_paginates_correctly_via_offset() {
 // the way `Null` has `Filter::IsNull`. Instead of a probe, `create_cursor`
 // now gates keyset eligibility on the table's bound SCHEMA (if any): a
 // schema-enforced, fixed, non-container scalar `TypeTag` (`Int`/`Bool`/
-// `String`/`Bin`) on the ORDER BY column proves every row satisfying that
+// `String`) on the ORDER BY column proves every row satisfying that
 // schema is provably homogeneous by construction (mixed-type is
 // impossible). `F64`/`Dec`/`Big`/containers/`Any` stay excluded even under
 // schema (schema enforcement does not reject `NaN` on `F64`, and containers
-// can hold heterogeneous nested values). A column with NO bound schema at
-// all (the common schemaless-document case) keeps using
-// `PaginationMode::Offset` unconditionally, conservative by default.
+// can hold heterogeneous nested values). `Bin` was originally accepted here
+// too but was excluded by F-18 (#811): `compare_values` never had a
+// `(Bin, Bin)` arm, so a `Bin` column could never actually benefit from
+// Keyset mode. A column with NO bound schema at all (the common
+// schemaless-document case) keeps using `PaginationMode::Offset`
+// unconditionally, conservative by default.
 // ---------------------------------------------------------------------------
 
 /// A table with a schema declaring the ORDER BY field as `Int` and

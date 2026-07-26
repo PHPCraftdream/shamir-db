@@ -265,15 +265,27 @@ artifact).
     to the existing no-seek-key safety net" mechanism as `Dec`/`Big` (see
     `safe_seek_key`) — narrower than a full total-order fix, but fully closes
     the SILENT ROW LOSS (converts it into the documented, understood
-    offset-mode degradation instead).
+    offset-mode degradation instead). **F-18 (#811) additionally excludes
+    `Bin` from the schema-typed-scalar gate's accepted `TypeTag` set itself**
+    (`Int`/`Bool`/`String` only, `List` was already excluded there as a
+    container type) — since `compare_values` never had a `(Bin, Bin)` arm, a
+    `Bin` column could never actually benefit from `PaginationMode::Keyset`;
+    it only paid for the null-probe read before degrading to the fallback
+    anyway. A schema-typed `Bin` column now pins `PaginationMode::Offset`
+    from `create_cursor` time, same as `Dec`/`Big`/`List` — `safe_seek_key`'s
+    per-value `Bin` exclusion above is no longer reachable for it (kept in
+    the code as defense in depth; still exercised as-is by `List`, `Dec`, and
+    `Big`, none of which changed).
   - **Mixed `QueryValue` type in one `ORDER BY` column (e.g. some rows
     `Int`, some `Str`) — CLOSED for schema-typed scalar columns whose rule
     was bound while the table was empty (F-1 #792, tightened by F-17
     #810); STILL OPEN for schemaless columns and for a schema declared
     onto an already-populated table's column.** F-1 (#792) added a gate
     (`order_by_column_is_schema_typed_scalar`) that trusted a bound
-    schema rule's non-container scalar `TypeTag` (`Int`/`Bool`/`String`/
-    `Bin`) as proof of column homogeneity — but `add_schema_rule`/
+    schema rule's non-container scalar `TypeTag` (originally `Int`/`Bool`/
+    `String`/`Bin`, narrowed by F-18 #811 to `Int`/`Bool`/`String` — see the
+    `Bin`/`List` bullet above) as proof of column homogeneity — but
+    `add_schema_rule`/
     `set_table_schema` (`crates/shamir-db/src/shamir_db/execute/
     admin_schema.rs`) validate a new rule's SHAPE only and never
     backfill-validate the table's EXISTING rows, so a schemaless table
@@ -339,9 +351,10 @@ artifact).
     keyset-then-offset transition mid-scroll for `state.offset` to
     undercount across — this specific duplication mechanism cannot trigger
     for those columns anymore. It remains a theoretical concern only for a
-    schema-typed `Int`/`Bool`/`String`/`Bin` column combined with some OTHER
-    keyset→offset trigger (e.g. CR-D1's ceiling fallback), which is an
-    orthogonal, already-accepted mechanism unrelated to value-type
+    schema-typed `Int`/`Bool`/`String` column (F-18 #811 narrowed the
+    accepted set from `Int`/`Bool`/`String`/`Bin`, see above) combined with
+    some OTHER keyset→offset trigger (e.g. CR-D1's ceiling fallback), which
+    is an orthogonal, already-accepted mechanism unrelated to value-type
     incomparability.
 - **Corrupt-record reporting covers `read_exec.rs`'s scan paths only; two
   sibling files still silently skip corrupt records (F-10, #800).** A row

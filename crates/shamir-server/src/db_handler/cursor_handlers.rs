@@ -429,11 +429,24 @@ fn pagination_mode_for_query(query: &ReadQuery) -> PaginationMode {
 /// catalogue, preserved for unchanged rules on re-declaration. The gate
 /// requires BOTH an accepted `TypeTag` AND `keyset_safe == true`.
 ///
+/// # F-18 (#811): `TypeTag::Bin` excluded from the accepted set
+///
+/// The accepted set is `Int | Bool | String` — `Bin` is deliberately NOT
+/// accepted. `shamir-engine`'s `compare_values` (`query/filter/resolve.rs`)
+/// has no `(Bin, Bin)` arm, so `safe_seek_key` (this file) always returns
+/// `None` for a `Bin`-typed seek key: a `Bin` column could never actually
+/// benefit from `PaginationMode::Keyset`, it would only pay for the
+/// null-probe read at `create_cursor` time before silently degrading to the
+/// per-call offset-bookmark fallback (W-2) on every `FetchNext` past the
+/// first. Excluding it at the gate is correctness-neutral (the fallback
+/// already prevented row loss) but avoids that wasted work.
+///
 /// # Conservative defaults
 ///
 /// Returns `false` for: no validator bound, no matching `FieldRule`,
-/// disagreeing types across validators, an excluded `TypeTag`, or a
-/// matched rule whose `keyset_safe` proof is `false`.
+/// disagreeing types across validators, an excluded `TypeTag` (including
+/// `Bin`, see above), or a matched rule whose `keyset_safe` proof is
+/// `false`.
 fn order_by_column_is_schema_typed_scalar(table: &TableManager, field: &[String]) -> bool {
     let Some(registry) = table.validator_registry_ref() else {
         return false;
@@ -475,7 +488,7 @@ fn order_by_column_is_schema_typed_scalar(table: &TableManager, field: &[String]
     all_keyset_safe
         && matches!(
             matched_ty,
-            Some(TypeTag::Int | TypeTag::Bool | TypeTag::String | TypeTag::Bin)
+            Some(TypeTag::Int | TypeTag::Bool | TypeTag::String)
         )
 }
 
