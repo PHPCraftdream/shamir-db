@@ -1,4 +1,5 @@
 pub mod changelog_store;
+pub mod fk_reverse_cache;
 pub mod group_commit;
 pub mod repo_config;
 pub mod repo_instance;
@@ -8,6 +9,9 @@ pub mod version_provider;
 #[cfg(test)]
 pub mod tests;
 
+pub use fk_reverse_cache::{
+    build_reverse_fk_entries, FkReverseCache, ReverseFkEntry, TaggedReverseFkEntry,
+};
 pub use repo_config::RepoConfig;
 pub use repo_instance::{repo_token, to_mvcc_retention, RepoInstance};
 pub use repo_types::{BoxRepo, BoxRepoFactory, RepoFactory};

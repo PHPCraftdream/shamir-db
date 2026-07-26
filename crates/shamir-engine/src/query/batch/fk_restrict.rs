@@ -36,20 +36,9 @@ use shamir_types::types::value::{InnerValue, QueryValue};
 use crate::query::batch::TableResolver;
 use crate::query::filter::{compile_filter, FilterContext, FilterNode};
 use crate::query::TableRef;
+use crate::repo::{build_reverse_fk_entries, ReverseFkEntry};
 use crate::table::record_cow::RecordCow;
 use crate::table::TableManager;
-
-/// A single reverse-FK reference: a child table + child field that references
-/// the parent table with `on_delete = Restrict`.
-struct RestrictRef {
-    /// The child table name (same repo as the parent).
-    child_table: String,
-    /// The child field path that holds the FK value (first segment only for
-    /// the child-row probe).
-    child_field: String,
-    /// The parent field that the child references (`ref_field`).
-    parent_ref_field: String,
-}
 
 /// Pre-delete RESTRICT gate.
 ///
@@ -148,10 +137,17 @@ pub(crate) async fn check_fk_restrict(
 
 /// Discover all child tables in the repo that have a FK pointing at
 /// `parent_table` with `on_delete = Restrict`.
+///
+/// F-28 Step 4 (#831): reads through the repo's cached reverse-FK map
+/// (`RepoInstance::fk_reverse_cache`) instead of re-running the O(tables)
+/// `collect_fk_refs()` scan on every call — a cache miss (never built, or
+/// invalidated by a schema mutation since the last build) pays that scan
+/// exactly once and seeds every parent table's entry in the repo, not just
+/// this one.
 async fn discover_restrict_refs(
     resolver: &dyn TableResolver,
     parent_table_ref: &TableRef,
-) -> Result<Vec<RestrictRef>, BatchError> {
+) -> Result<Vec<ReverseFkEntry>, BatchError> {
     let repo = resolver
         .resolve_repo(&parent_table_ref.repo)
         .await
@@ -161,31 +157,23 @@ async fn discover_restrict_refs(
             code: Some("fk_restrict".to_string()),
         })?;
 
-    let table_names = repo.list_table_names();
-    let mut refs = Vec::new();
+    let repo_name = parent_table_ref.repo.clone();
+    let all_for_parent = repo
+        .fk_reverse_cache()
+        .get_or_build_by_parent(&parent_table_ref.table, || async move {
+            build_reverse_fk_entries(resolver, &repo_name).await
+        })
+        .await
+        .map_err(|e| BatchError::QueryError {
+            alias: String::new(),
+            message: format!("fk_restrict: reverse-FK scan failed: {e}"),
+            code: Some("fk_restrict".to_string()),
+        })?;
 
-    for name in &table_names {
-        let child_ref = TableRef::with_repo(&parent_table_ref.repo, name);
-        let child_table = match resolver.resolve(&child_ref).await {
-            Ok(t) => t,
-            Err(_) => continue,
-        };
-
-        for (field_path, fk) in child_table.collect_fk_refs() {
-            if fk.ref_table == parent_table_ref.table && fk.on_delete == FkAction::Restrict {
-                // Use the first segment of the field path as the child field
-                // name (single-segment FK fields are the common case).
-                let child_field = field_path.join(".");
-                refs.push(RestrictRef {
-                    child_table: name.clone(),
-                    child_field,
-                    parent_ref_field: fk.ref_field.clone(),
-                });
-            }
-        }
-    }
-
-    Ok(refs)
+    Ok(all_for_parent
+        .into_iter()
+        .filter(|e| e.action == FkAction::Restrict)
+        .collect())
 }
 
 /// Scan the parent table for rows matching `where_clause` and extract the

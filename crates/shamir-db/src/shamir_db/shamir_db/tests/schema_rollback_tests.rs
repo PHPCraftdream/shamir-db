@@ -83,6 +83,7 @@ use shamir_engine::validator::schema::SchemaValidator;
 use shamir_engine::validator::RecordValidator;
 use shamir_query_builder::batch::Batch;
 use shamir_query_builder::ddl;
+use shamir_types::mpack;
 use shamir_types::types::record_id::RecordId;
 
 use super::super::schema_management::schema_validator_name;
@@ -473,5 +474,149 @@ async fn alter_replace_artifact_keeps_new_artifact_on_success() {
         live_rule_tag(&db, &id),
         "new",
         "a successful ALTER must leave the NEW artifact live, not restore the old one"
+    );
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// F-28 Step 4 (#831) — the cached reverse-FK map (`RepoInstance::
+// fk_reverse_cache`) must reflect the RESTORED (old) state after a
+// rolled-back `compile_table_schema` call, never a stale view of the
+// failed attempt. `compile_table_schema` invalidates the whole repo's
+// cache at its natural completion point — AFTER any F-27b restore-on-
+// failure has already settled — so the cache's next rebuild always
+// observes whatever ACTUALLY ended up live.
+//
+// This test builds a REAL repo with a REAL `foreign_key` reference (via a
+// successful `compile_table_schema` call — exactly the production DDL
+// path), warms the cache with a real DELETE that must be RESTRICTed, THEN
+// forces a SEPARATE `compile_table_schema` call (same repo, a distinct
+// `ghost_table` target) to fail — exercising the exact
+// F-24/F-27b-established failure trigger (`get_table` on a nonexistent
+// table) this file's other tests already use. Because invalidation is
+// whole-repo, this failed call still clears the cache for the WHOLE repo,
+// including the real FK-bearing table's entry. The assertion: after the
+// failed call, a delete on the FK's parent table must STILL be correctly
+// RESTRICTed — proving the post-invalidation rebuild reflects the
+// unchanged (old, still-live) FK reference, not something corrupted by the
+// failed, never-fully-activated attempt on `ghost_table`.
+// ═══════════════════════════════════════════════════════════════════════
+
+#[tokio::test]
+async fn fk_cache_reflects_restored_state_after_rolled_back_alter_elsewhere_in_repo() {
+    let db = ShamirDb::init_memory().await.unwrap();
+    db.create_db("testdb").await;
+
+    // Real repo with a real FK: employees.dept_id -> departments.dept_id,
+    // on_delete = Restrict.
+    let mut b = Batch::new();
+    b.id(1);
+    b.create_repo(
+        "cr",
+        ddl::create_repo("main").tables(["departments", "employees"]),
+    );
+    db.execute("testdb", &b.to_request_via_msgpack())
+        .await
+        .unwrap();
+
+    let fk_id = RecordId::system("f28s4_fk");
+    let rules = vec![shamir_engine::validator::schema::FieldRule {
+        path: vec!["dept_id".to_string()],
+        ty: shamir_engine::validator::schema::type_tag::TypeTag::Int,
+        constraints: shamir_engine::validator::schema::constraints::Constraints {
+            foreign_key: Some(
+                shamir_engine::validator::schema::ForeignKeyRef::with_on_delete(
+                    "departments",
+                    "dept_id",
+                    shamir_query_types::admin::FkAction::Restrict,
+                ),
+            ),
+            required: true,
+            ..Default::default()
+        },
+        keyset_safe: false,
+    }];
+    db.compile_table_schema("testdb", "main", "employees", fk_id, rules)
+        .await
+        .expect("real FK schema activation must succeed");
+
+    // Insert a department + a referencing employee (autocommit, real write
+    // path — same shape as declarative_schema_fk_autocommit_e2e.rs).
+    let mut b = Batch::new();
+    b.id(2);
+    b.insert(
+        "ins_dept",
+        shamir_query_builder::write::insert("departments")
+            .row(mpack!({ "dept_id": 100, "name": "Engineering" })),
+    );
+    db.execute("testdb", &b.to_request_via_msgpack())
+        .await
+        .unwrap();
+
+    let mut b = Batch::new();
+    b.id(3);
+    b.insert(
+        "ins_emp",
+        shamir_query_builder::write::insert("employees")
+            .row(mpack!({ "name": "Alice", "dept_id": 100 })),
+    );
+    db.execute("testdb", &b.to_request_via_msgpack())
+        .await
+        .unwrap();
+
+    // Warm the cache: deleting the department must be REJECTED (RESTRICT) —
+    // this is a real cache-aside miss+rebuild via the production delete path.
+    let mut b = Batch::new();
+    b.id(4);
+    b.delete(
+        "del_dept",
+        shamir_query_builder::write::delete("departments")
+            .where_(shamir_query_builder::filter::eq("dept_id", 100)),
+    );
+    let pre = db.execute("testdb", &b.to_request_via_msgpack()).await;
+    assert!(
+        pre.is_err(),
+        "precondition: delete must be RESTRICTed while the FK is live: {pre:?}"
+    );
+
+    // A SEPARATE compile_table_schema call in the SAME repo, targeting a
+    // nonexistent table, so `get_table` (the activation step) fails AFTER
+    // `compile_table_schema`'s fresh registration already ran — same
+    // deterministic failure trigger as this file's other tests. This call's
+    // whole-repo cache invalidation (F-28 Step 4) fires regardless of
+    // success/failure, clearing the warm cache built above.
+    let ghost_id = RecordId::system("f28s4_ghost");
+    let ghost_result = db
+        .compile_table_schema("testdb", "main", "ghost_table", ghost_id, no_rules())
+        .await;
+    assert!(
+        ghost_result.is_err(),
+        "activation must fail for a missing table"
+    );
+
+    // F-27b guarantee (already covered elsewhere): the real FK validator on
+    // `employees` is untouched by the unrelated failed call.
+    assert!(
+        db.validators().get_by_id(&fk_id).is_some(),
+        "the unrelated failed ghost_table call must not disturb employees' live FK validator"
+    );
+
+    // F-28 Step 4 core guarantee: the cache's next rebuild (triggered by the
+    // delete below) must reflect the RESTORED/unchanged state — the FK is
+    // still live, so the delete must STILL be rejected. Before this task's
+    // fix (no invalidation call, or an invalidation that failed to rebuild
+    // correctly) this could wrongly serve a stale/corrupted view.
+    let mut b = Batch::new();
+    b.id(5);
+    b.delete(
+        "del_dept",
+        shamir_query_builder::write::delete("departments")
+            .where_(shamir_query_builder::filter::eq("dept_id", 100)),
+    );
+    let post = db.execute("testdb", &b.to_request_via_msgpack()).await;
+    assert!(
+        post.is_err(),
+        "F-28 Step 4: delete must STILL be RESTRICTed after the unrelated \
+         rolled-back ALTER — the cache must rebuild to the correct live state, \
+         not a stale/corrupted view: {post:?}"
     );
 }

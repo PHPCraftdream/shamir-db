@@ -5,6 +5,7 @@ mod executor_tests;
 mod fk_actions_tests;
 mod fk_on_update_tests;
 mod fk_restrict_tests;
+mod fk_reverse_cache_tests;
 mod for_each_tests;
 mod planner_tests;
 mod query_value_serializer_tests;

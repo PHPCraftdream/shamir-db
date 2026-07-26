@@ -1,4 +1,5 @@
 use super::super::table::{TableConfig, TableManager};
+use super::fk_reverse_cache::FkReverseCache;
 use super::group_commit::GroupCommit;
 use super::repo_types::{BoxRepo, BoxRepoFactory, RepoFactory};
 use crate::query::batch::BatchError;
@@ -100,6 +101,17 @@ pub struct RepoInstance {
     /// passed to it. Shared across clones (one mutex per underlying repo,
     /// not per handle).
     marker_write_mutex: Arc<tokio::sync::Mutex<()>>,
+    /// F-28 Step 4 (#831): cached per-repo reverse-FK map (parent table name
+    /// → its reverse-FK entries) plus the child→parents reverse-reverse
+    /// index, replacing the O(tables) `collect_fk_refs()` scan
+    /// `fk_restrict.rs`/`fk_actions.rs` used to repeat on EVERY
+    /// delete/cascade-recursion-level. Lazily populated (cache-aside) and
+    /// invalidated wholesale on any schema mutation that can change what
+    /// that scan would discover — see [`FkReverseCache::invalidate`] and its
+    /// callers ([`add_table`](Self::add_table), [`remove_table`](Self::remove_table),
+    /// `ShamirDb::compile_table_schema`). Shared across clones (one cache
+    /// per underlying repo, not per handle).
+    fk_reverse_cache: Arc<FkReverseCache>,
 }
 
 /// Bundle of the per-repo changefeed and the store it journals into.
@@ -133,6 +145,7 @@ impl Clone for RepoInstance {
             // of the background handle must not resurrect liveness.
             live: self.live.clone(),
             marker_write_mutex: Arc::clone(&self.marker_write_mutex),
+            fk_reverse_cache: Arc::clone(&self.fk_reverse_cache),
         }
     }
 }
@@ -184,6 +197,7 @@ impl RepoInstance {
             repo_interner: Arc::new(OnceCell::new()),
             live: Some(Arc::new(())),
             marker_write_mutex: Arc::new(tokio::sync::Mutex::new(())),
+            fk_reverse_cache: Arc::new(FkReverseCache::new()),
         }
     }
 
@@ -274,6 +288,15 @@ impl RepoInstance {
     /// data writes through version-aware storage.
     pub fn per_table_mvcc(&self) -> &Arc<scc::HashMap<u64, Arc<shamir_tx::MvccStore>, THasher>> {
         &self.per_table_mvcc
+    }
+
+    /// F-28 Step 4 (#831): this repo's cached reverse-FK map. See
+    /// [`FkReverseCache`] for the cache-aside population + invalidation
+    /// contract. Used by `query::batch::fk_restrict`/`fk_actions`'s
+    /// discovery functions (via `TableResolver::resolve_repo`) and by
+    /// `ShamirDb::compile_table_schema`'s invalidation call.
+    pub fn fk_reverse_cache(&self) -> &Arc<FkReverseCache> {
+        &self.fk_reverse_cache
     }
     /// Atomic transaction telemetry counters.
     pub fn tx_metrics(&self) -> &Arc<shamir_tx::TxMetrics> {
@@ -420,17 +443,28 @@ impl RepoInstance {
     /// Also records `table_token_for(name) → name` in the reverse index so
     /// `table_by_token` resolves in O(1) (III.1). Re-registering an already
     /// known name is idempotent.
+    ///
+    /// F-28 Step 4 (#831): invalidates the cached reverse-FK map — a newly
+    /// registered table changes `list_table_names()`'s membership, which
+    /// `discover_restrict_refs`/`discover_action_refs` scan when rebuilding
+    /// the cache.
     pub fn add_table(&self, config: TableConfig) {
         register_token(&self.token_names, &config.name);
         self.configs.insert(config.name.clone(), config);
+        self.fk_reverse_cache.invalidate();
     }
 
     /// Remove a table from the repository.
     /// Returns true if the table existed and was removed.
+    ///
+    /// F-28 Step 4 (#831): invalidates the cached reverse-FK map on an
+    /// actual removal — same rationale as `add_table` (table membership
+    /// changed).
     pub fn remove_table(&self, table_name: &str) -> bool {
         let removed = self.configs.remove(table_name).is_some();
         if removed {
             self.tables.remove(table_name);
+            self.fk_reverse_cache.invalidate();
             // Drop the reverse-index entry only if it still points at the
             // table we removed. A (astronomically unlikely) token collision
             // could have left another name's mapping in place; never evict

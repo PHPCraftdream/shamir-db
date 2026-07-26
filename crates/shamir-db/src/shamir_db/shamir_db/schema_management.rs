@@ -623,6 +623,24 @@ impl ShamirDb {
             }
         }
 
+        // F-28 Step 4 (#831): invalidate the repo's cached reverse-FK map
+        // NOW — after any F-27b restore-on-failure above has already
+        // settled the live registry state, success or rollback. This
+        // function is the SOLE place a table's validator bindings +
+        // registry entry (what `TableManager::collect_fk_refs()` depends
+        // on) change together, so it is the correct single hook point: the
+        // cache's next rebuild (lazy, on the next delete/cascade's cache
+        // miss) is guaranteed to observe whatever ACTUALLY ended up live,
+        // never a stale pre-mutation or a never-fully-activated attempt.
+        // Best-effort: an unresolvable repo (should not happen — this
+        // function only runs for an already-known db/repo pair) just means
+        // there is no cache to invalidate; never fails the DDL over it.
+        if let Some(db) = self.get_db(db_name) {
+            if let Some(repo) = db.get_repo(repo_name) {
+                repo.fk_reverse_cache().invalidate();
+            }
+        }
+
         activation_result
     }
 

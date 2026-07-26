@@ -54,6 +54,7 @@ use shamir_types::types::value::{InnerValue, QueryValue};
 use crate::query::batch::TableResolver;
 use crate::query::filter::{compile_filter, FilterContext, FilterNode};
 use crate::query::TableRef;
+use crate::repo::{build_reverse_fk_entries, ReverseFkEntry};
 use crate::table::record_cow::RecordCow;
 use crate::table::TableManager;
 
@@ -290,7 +291,7 @@ async fn plan_cascade_recursive(
     }
 
     // 3. Group refs by child table and resolve handles.
-    let mut by_table: shamir_collections::TFxMap<String, Vec<DiscoveredRef>> =
+    let mut by_table: shamir_collections::TFxMap<String, Vec<ReverseFkEntry>> =
         shamir_collections::TFxMap::default();
     for rref in action_refs {
         by_table
@@ -584,7 +585,7 @@ async fn plan_cascade_for_ids(
     }
 
     // Group refs by child table and resolve handles.
-    let mut by_table: shamir_collections::TFxMap<String, Vec<DiscoveredRef>> =
+    let mut by_table: shamir_collections::TFxMap<String, Vec<ReverseFkEntry>> =
         shamir_collections::TFxMap::default();
     for rref in action_refs {
         by_table
@@ -895,20 +896,22 @@ fn null_out_field(
 
 // ── Discovery ────────────────────────────────────────────────────────────────
 
-/// A reverse-FK reference with its child table name, for discovery.
-struct DiscoveredRef {
-    child_table: String,
-    child_field: String,
-    parent_ref_field: String,
-    action: FkAction,
-}
-
 /// Discover all child tables with Cascade or SetNull FKs pointing at
 /// `parent_table`.
+///
+/// F-28 Step 4 (#831): reads through the repo's cached reverse-FK map
+/// (`RepoInstance::fk_reverse_cache`) instead of re-running the O(tables)
+/// `collect_fk_refs()` scan on every call/cascade-recursion-level — a cache
+/// miss (never built, or invalidated by a schema mutation since the last
+/// build) pays that scan exactly once and seeds every parent table's entry
+/// in the repo, not just this one. Shares the SAME cache (and the same
+/// underlying scan) `fk_restrict.rs`'s `discover_restrict_refs` populates —
+/// the cache carries every `on_delete` action; each caller filters what it
+/// needs.
 async fn discover_action_refs(
     resolver: &dyn TableResolver,
     parent_table_ref: &TableRef,
-) -> Result<Vec<DiscoveredRef>, BatchError> {
+) -> Result<Vec<ReverseFkEntry>, BatchError> {
     let repo = resolver
         .resolve_repo(&parent_table_ref.repo)
         .await
@@ -918,45 +921,38 @@ async fn discover_action_refs(
             code: Some("fk_actions".to_string()),
         })?;
 
-    let table_names = repo.list_table_names();
-    let mut refs = Vec::new();
+    let repo_name = parent_table_ref.repo.clone();
+    let all_for_parent = repo
+        .fk_reverse_cache()
+        .get_or_build_by_parent(&parent_table_ref.table, || async move {
+            build_reverse_fk_entries(resolver, &repo_name).await
+        })
+        .await
+        .map_err(|e| BatchError::QueryError {
+            alias: String::new(),
+            message: format!("fk_actions: reverse-FK scan failed: {e}"),
+            code: Some("fk_actions".to_string()),
+        })?;
 
-    for name in &table_names {
-        let is_self_ref = name == &parent_table_ref.table;
-        let child_ref = TableRef::with_repo(&parent_table_ref.repo, name);
-        let child_table = match resolver.resolve(&child_ref).await {
-            Ok(t) => t,
-            Err(_) => continue,
-        };
-
-        for (field_path, fk) in child_table.collect_fk_refs() {
-            if fk.ref_table != parent_table_ref.table {
-                continue;
+    let is_self_ref_table = &parent_table_ref.table;
+    Ok(all_for_parent
+        .into_iter()
+        .filter(|e| {
+            if !(e.action == FkAction::Cascade || e.action == FkAction::SetNull) {
+                return false;
             }
-            let action = fk.on_delete;
-            if action == FkAction::Cascade || action == FkAction::SetNull {
-                // Self-referential CASCADE is not supported by the table-name
-                // cascade cycle-guard (it would false-positive as a cycle even
-                // for the shallowest self-ref case); it is rejected at DDL time
-                // (`validate_no_self_referential_cascade`) and skipped here as
-                // defense-in-depth for any pre-existing schema predating that
-                // check.  Self-referential SET NULL is safe — it is a
-                // single-level mutation that never recurses (see the
-                // "Recurse for grandchildren (Cascade only)" gate below).
-                if is_self_ref && action == FkAction::Cascade {
-                    continue;
-                }
-                refs.push(DiscoveredRef {
-                    child_table: name.clone(),
-                    child_field: field_path.join("."),
-                    parent_ref_field: fk.ref_field.clone(),
-                    action,
-                });
-            }
-        }
-    }
-
-    Ok(refs)
+            // Self-referential CASCADE is not supported by the table-name
+            // cascade cycle-guard (it would false-positive as a cycle even
+            // for the shallowest self-ref case); it is rejected at DDL time
+            // (`validate_no_self_referential_cascade`) and skipped here as
+            // defense-in-depth for any pre-existing schema predating that
+            // check. Self-referential SET NULL is safe — it is a
+            // single-level mutation that never recurses (see the
+            // "Recurse for grandchildren (Cascade only)" gate below).
+            let is_self_ref = &e.child_table == is_self_ref_table;
+            !(is_self_ref && e.action == FkAction::Cascade)
+        })
+        .collect())
 }
 
 // ── Scan helpers (mirrors fk_restrict.rs) ────────────────────────────────────
