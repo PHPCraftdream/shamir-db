@@ -923,6 +923,29 @@ impl RepoInstance {
     /// `query::batch::query_runner` so the `shamir-db` system-store and
     /// admin user/role direct-delete callers can route their deletes through
     /// the same implicit-tx file-WAL path (retiring the V1 DELETE marker).
+    ///
+    /// F-28 Step 1 (#828): reimplemented as a thin wrapper over
+    /// [`begin_implicit_batch_tx`](Self::begin_implicit_batch_tx) /
+    /// [`commit_implicit_batch_tx`](Self::commit_implicit_batch_tx) — the
+    /// `stage` HRTB closure this method still accepts forces any captured
+    /// reference to satisfy `'a: 'static` (see those methods' docs), which is
+    /// why `query_runner`'s 4 implicit-arm call sites moved off this API onto
+    /// the split begin/commit pair directly. This wrapper is kept, unchanged
+    /// in signature and behavior, for its ~14 other existing callers.
+    ///
+    /// The two delegated calls are `Box::pin`'d: without it, this debug
+    /// (`opt-level = 0`) build inlines `begin_implicit_batch_tx`'s and
+    /// `commit_implicit_batch_tx`'s full `async fn` state machines into
+    /// THIS future's state machine on top of the original inline body,
+    /// growing every caller's stack frame by the sum of both — measured to
+    /// tip at least one pre-existing, unrelated `#[tokio::test]` deep in a
+    /// DDL admin call chain (`access_ddl::group_grant_via_ddl`) over the
+    /// default Windows thread stack, observed as a `has overflowed its
+    /// stack` abort with no logic change on that path at all. Boxing moves
+    /// each callee's state machine to the heap, keeping this fn's own frame
+    /// (and thus every one of `run_implicit_batch_tx`'s ~14 callers) at
+    /// pre-refactor size — verified by reproducing the failure/fix with the
+    /// delegation form isolated in a scratch worktree before landing this.
     pub async fn run_implicit_batch_tx<F>(
         &self,
         actor: Actor,
@@ -935,7 +958,35 @@ impl RepoInstance {
         )
             -> Pin<Box<dyn Future<Output = DbResult<WriteResult>> + Send + 't>>,
     {
-        let (mut tx, _guard) = self
+        let (mut tx, _guard) = Box::pin(self.begin_implicit_batch_tx(actor, alias)).await?;
+
+        // Stage the write into the tx. On error drop tx/_guard = RAII abort.
+        let wr = stage(&mut tx).await.map_err(|e| BatchError::QueryError {
+            alias: alias.to_string(),
+            message: e.to_string(),
+            code: e.code().map(str::to_owned),
+        })?;
+
+        // Commit — folds everything into one WalEntryV2 / one commit_version.
+        Box::pin(self.commit_implicit_batch_tx(tx, alias)).await?;
+        Ok(wr)
+    }
+
+    /// Open the implicit Snapshot batch tx exactly as `run_implicit_batch_tx`
+    /// does internally (set_actor + set_implicit(true)), returning the tx and
+    /// its SnapshotGuard so the CALLER can stage with ordinary straight-line
+    /// code that borrows freely (no HRTB) — see F-28 Step 1 (#828).
+    ///
+    /// The returned `TxContext` / `SnapshotGuard` are plain local variables:
+    /// both drop cleanly (RAII abort) on any early return/error the caller
+    /// hits between this call and [`commit_implicit_batch_tx`], exactly as
+    /// `run_implicit_batch_tx`'s internal `tx`/`_guard` did.
+    pub async fn begin_implicit_batch_tx(
+        &self,
+        actor: Actor,
+        alias: &str,
+    ) -> Result<(shamir_tx::TxContext, shamir_tx::SnapshotGuard), BatchError> {
+        let (mut tx, guard) = self
             .begin_tx(shamir_tx::IsolationLevel::Snapshot)
             .await
             .map_err(|e| BatchError::QueryError {
@@ -949,17 +1000,20 @@ impl RepoInstance {
         // the "0 = non-tx write" subscription contract). The internal tx_id
         // stays real for WAL / crash-injection seams.
         tx.set_implicit(true);
+        Ok((tx, guard))
+    }
 
-        // Stage the write into the tx. On error drop tx/_guard = RAII abort.
-        let wr = stage(&mut tx).await.map_err(|e| BatchError::QueryError {
-            alias: alias.to_string(),
-            message: e.to_string(),
-            code: e.code().map(str::to_owned),
-        })?;
-
-        // Commit — folds everything into one WalEntryV2 / one commit_version.
+    /// Commit an implicit batch tx with the canonical BatchError mapping —
+    /// same error-precedence/coding as `run_implicit_batch_tx`'s existing
+    /// commit-error handling (UniqueViolation -> "unique_violation",
+    /// CasConflict -> "version_conflict" per FG-7). See F-28 Step 1 (#828).
+    pub async fn commit_implicit_batch_tx(
+        &self,
+        tx: shamir_tx::TxContext,
+        alias: &str,
+    ) -> Result<(), BatchError> {
         match self.commit_tx(tx).await {
-            Ok(_outcome) => Ok(wr),
+            Ok(_outcome) => Ok(()),
             Err(commit_err) => {
                 let (message, code) = match commit_err {
                     crate::tx::CommitError::UniqueViolation { .. } => {

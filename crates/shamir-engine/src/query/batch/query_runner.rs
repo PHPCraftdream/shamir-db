@@ -972,26 +972,32 @@ impl<'a> QueryRunner<'a> {
                                     code: None,
                                 })?;
                         let return_result = entry.return_result;
-                        // Move owned copies into the staging closure so the
-                        // staged future borrows ONLY the tx (the `for<'t>`
-                        // HRTB requires no other caller-scope borrows).
-                        let owned_op: shamir_query_types::write::InsertOp = op_ref.clone();
-                        let owned_table = table.clone();
-                        let owned_actor = self.actor.clone();
-                        repo.run_implicit_batch_tx(self.actor.clone(), alias, move |tx| {
-                            Box::pin(async move {
-                                owned_table
-                                    .execute_insert_tx(
-                                        &owned_op,
-                                        tx,
-                                        return_result,
-                                        None,
-                                        &owned_actor,
-                                    )
-                                    .await
-                            })
-                        })
-                        .await?
+                        // F-28 Step 1: straight-line begin/execute/commit —
+                        // no HRTB closure, so `self.resolver` can be borrowed
+                        // normally (this also fixes D2: the implicit path was
+                        // wrongly passing `None` instead of the resolver,
+                        // causing every FK-constrained autocommit insert to
+                        // be rejected regardless of whether the referenced
+                        // row existed).
+                        let (mut tx, _guard) = repo
+                            .begin_implicit_batch_tx(self.actor.clone(), alias)
+                            .await?;
+                        let wr = table
+                            .execute_insert_tx(
+                                op_ref,
+                                &mut tx,
+                                return_result,
+                                Some(self.resolver),
+                                &self.actor,
+                            )
+                            .await
+                            .map_err(|e| BatchError::QueryError {
+                                alias: alias.to_string(),
+                                message: e.to_string(),
+                                code: None,
+                            })?;
+                        repo.commit_implicit_batch_tx(tx, alias).await?;
+                        wr
                     }
                 };
                 Ok(write_result_to_query_result_with_encoding(
@@ -1072,6 +1078,11 @@ impl<'a> QueryRunner<'a> {
                     // F4b-2: "everything is a transaction" — a non-tx update
                     // routes through the implicit single-op BATCH transaction
                     // (same pattern as INSERT in F4b-1).
+                    //
+                    // F-28 Step 1: straight-line begin/execute/commit — no
+                    // HRTB closure, so `self.resolver`/`ctx` can be borrowed
+                    // normally (this also fixes D2: the implicit path was
+                    // wrongly passing `None` instead of the resolver).
                     None => {
                         let repo =
                             self.resolver
@@ -1082,38 +1093,30 @@ impl<'a> QueryRunner<'a> {
                                     message: format!("resolve_repo({}): {}", table_ref.repo, e),
                                     code: None,
                                 })?;
-                        let owned_op: shamir_query_types::write::UpdateOp = op_ref.clone();
-                        let owned_table = table.clone();
-                        let owned_refs = resolved_refs.clone();
-                        let owned_params = self.params.clone();
-                        let owned_actor = self.actor.clone();
-                        let owned_alias = alias.to_string();
-                        repo.run_implicit_batch_tx(self.actor.clone(), alias, move |tx| {
-                            Box::pin(async move {
-                                // Apply child fan-out inside the implicit tx
-                                // BEFORE the parent update. The plan carries
-                                // pre-resolved child handles (no resolver
-                                // needed inside the closure).
-                                super::fk_on_update::apply_fk_update_plan(
-                                    fk_update_plan,
-                                    tx,
-                                    &owned_alias,
-                                )
-                                .await
-                                .map_err(|e| {
-                                    shamir_storage::error::DbError::Validation(e.to_string())
-                                })?;
-
-                                let interner = owned_table.interner().get().await?;
-                                let ctx = FilterContext::new(interner, &owned_refs)
-                                    .with_actor(owned_actor.clone())
-                                    .with_params(&owned_params);
-                                owned_table
-                                    .execute_update_tx(&owned_op, &ctx, tx, None, &owned_actor)
-                                    .await
-                            })
-                        })
-                        .await?
+                        let (mut tx, _guard) = repo
+                            .begin_implicit_batch_tx(self.actor.clone(), alias)
+                            .await?;
+                        // Apply child fan-out inside the implicit tx BEFORE
+                        // the parent update. The plan carries pre-resolved
+                        // child handles (no resolver needed here).
+                        super::fk_on_update::apply_fk_update_plan(fk_update_plan, &mut tx, alias)
+                            .await?;
+                        let wr = table
+                            .execute_update_tx(
+                                op_ref,
+                                &ctx,
+                                &mut tx,
+                                Some(self.resolver),
+                                &self.actor,
+                            )
+                            .await
+                            .map_err(|e| BatchError::QueryError {
+                                alias: alias.to_string(),
+                                message: e.to_string(),
+                                code: e.code().map(str::to_owned),
+                            })?;
+                        repo.commit_implicit_batch_tx(tx, alias).await?;
+                        wr
                     }
                 };
                 Ok(write_result_to_query_result_with_encoding(
@@ -1191,6 +1194,11 @@ impl<'a> QueryRunner<'a> {
                     // F4b-3: "everything is a transaction" — a non-tx delete
                     // routes through the implicit single-op BATCH transaction
                     // (same pattern as INSERT in F4b-1 and UPDATE in F4b-2).
+                    //
+                    // F-28 Step 1: straight-line begin/execute/commit — no
+                    // HRTB closure, so `self.resolver`/`ctx` can be borrowed
+                    // normally (this also fixes D2: the implicit path was
+                    // wrongly passing `None` instead of the resolver).
                     None => {
                         let repo =
                             self.resolver
@@ -1201,38 +1209,23 @@ impl<'a> QueryRunner<'a> {
                                     message: format!("resolve_repo({}): {}", table_ref.repo, e),
                                     code: None,
                                 })?;
-                        let owned_op: shamir_query_types::write::DeleteOp = op.clone();
-                        let owned_table = table.clone();
-                        let owned_refs = resolved_refs.clone();
-                        let owned_params = self.params.clone();
-                        let owned_actor = self.actor.clone();
-                        let owned_alias = alias.to_string();
-                        repo.run_implicit_batch_tx(self.actor.clone(), alias, move |tx| {
-                            Box::pin(async move {
-                                // Apply cascade/setnull inside the implicit tx
-                                // BEFORE the parent delete. The plan carries
-                                // pre-resolved child handles (no resolver needed
-                                // inside the closure).
-                                super::fk_actions::apply_cascade_plan(
-                                    cascade_plan,
-                                    tx,
-                                    &owned_alias,
-                                )
-                                .await
-                                .map_err(|e| {
-                                    shamir_storage::error::DbError::Validation(e.to_string())
-                                })?;
-
-                                let interner = owned_table.interner().get().await?;
-                                let ctx = FilterContext::new(interner, &owned_refs)
-                                    .with_actor(owned_actor.clone())
-                                    .with_params(&owned_params);
-                                owned_table
-                                    .execute_delete_tx(&owned_op, &ctx, tx, None, &owned_actor)
-                                    .await
-                            })
-                        })
-                        .await?
+                        let (mut tx, _guard) = repo
+                            .begin_implicit_batch_tx(self.actor.clone(), alias)
+                            .await?;
+                        // Apply cascade/setnull inside the implicit tx BEFORE
+                        // the parent delete. The plan carries pre-resolved
+                        // child handles (no resolver needed here).
+                        super::fk_actions::apply_cascade_plan(cascade_plan, &mut tx, alias).await?;
+                        let wr = table
+                            .execute_delete_tx(op, &ctx, &mut tx, Some(self.resolver), &self.actor)
+                            .await
+                            .map_err(|e| BatchError::QueryError {
+                                alias: alias.to_string(),
+                                message: e.to_string(),
+                                code: e.code().map(str::to_owned),
+                            })?;
+                        repo.commit_implicit_batch_tx(tx, alias).await?;
+                        wr
                     }
                 };
                 Ok(write_result_to_query_result_with_encoding(
@@ -1285,6 +1278,11 @@ impl<'a> QueryRunner<'a> {
                     // W3d-2: non-tx SET routes through the implicit single-op
                     // batch transaction (same pattern as DELETE in F5a, INSERT
                     // in F4b-1, UPDATE in F4b-2).
+                    //
+                    // F-28 Step 1: straight-line begin/execute/commit — no
+                    // HRTB closure, so `self.resolver` can be borrowed
+                    // normally (this also fixes D2: the implicit path was
+                    // wrongly passing `None` instead of the resolver).
                     None => {
                         let repo =
                             self.resolver
@@ -1295,17 +1293,19 @@ impl<'a> QueryRunner<'a> {
                                     message: format!("resolve_repo({}): {}", table_ref.repo, e),
                                     code: None,
                                 })?;
-                        let owned_op: shamir_query_types::write::SetOp = op_ref.clone();
-                        let owned_table = table.clone();
-                        let owned_actor = self.actor.clone();
-                        repo.run_implicit_batch_tx(self.actor.clone(), alias, move |tx| {
-                            Box::pin(async move {
-                                owned_table
-                                    .execute_set_tx(&owned_op, tx, None, &owned_actor)
-                                    .await
-                            })
-                        })
-                        .await?
+                        let (mut tx, _guard) = repo
+                            .begin_implicit_batch_tx(self.actor.clone(), alias)
+                            .await?;
+                        let wr = table
+                            .execute_set_tx(op_ref, &mut tx, Some(self.resolver), &self.actor)
+                            .await
+                            .map_err(|e| BatchError::QueryError {
+                                alias: alias.to_string(),
+                                message: e.to_string(),
+                                code: None,
+                            })?;
+                        repo.commit_implicit_batch_tx(tx, alias).await?;
+                        wr
                     }
                 };
                 Ok(write_result_to_query_result_with_encoding(
