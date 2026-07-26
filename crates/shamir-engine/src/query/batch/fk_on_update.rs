@@ -51,12 +51,23 @@
 //!
 //! ## Atomicity / TOCTOU
 //!
-//! Same as delete: the plan is resolved **before** the tx closure (the
-//! `resolver` cannot be captured into the HRTB closure of
-//! `run_implicit_batch_tx`), and the child mutations are applied **inside**
-//! the same implicit/explicit tx as the parent update so the commit is
-//! atomic.  The same pre-tx-vs-commit TOCTOU window applies and is acceptable
-//! for MVP (update-cascade tables are opt-in; window is small).
+//! Same as delete: the plan is resolved before the mutation calls, and the
+//! child mutations are applied **inside** the same implicit/explicit tx as
+//! the parent update so the commit is atomic.  As of F-28 Step 2, the plan's
+//! row-level probes (`collect_parent_values`, `child_has_reference`) read via
+//! `TableManager::list_stream_tx(Some(tx), ..)` — the calling transaction's
+//! own snapshot-plus-staged-writes view — instead of committed-only state.
+//! This closes the **in-tx** read-your-own-writes gap (D1): an old parent
+//! value changed/removed earlier in the SAME transaction, or a child row
+//! inserted/updated earlier in the same transaction, is now correctly
+//! reflected in the RESTRICT/CASCADE/SET NULL fan-out decision.
+//!
+//! What remains open is the **cross-transaction** race: a genuinely
+//! concurrent OTHER transaction's write landing between this plan and the
+//! eventual commit. Closing that window requires either a
+//! Serializable-isolation footprint fix or a per-table barrier lock —
+//! tracked separately as F-28 Step 3/4/5 (#830/#831/#832). This task does
+//! **not** claim that race is closed.
 
 use bytes::Bytes;
 use futures::StreamExt;
@@ -128,6 +139,7 @@ impl FkUpdatePlan {
 /// 3. **Cascade / SetNull** — collect child mutations for `old != new` pairs.
 ///
 /// Returns `Ok(plan)` to proceed (possibly empty), or `Err` to reject.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn plan_fk_on_update(
     resolver: &dyn TableResolver,
     parent_table_ref: &TableRef,
@@ -135,6 +147,7 @@ pub(crate) async fn plan_fk_on_update(
     update_op: &UpdateOp,
     ctx: &FilterContext<'_>,
     alias: &str,
+    tx: &shamir_tx::TxContext,
 ) -> Result<FkUpdatePlan, BatchError> {
     // 0. Extract the set-document field keys + scalar assignments.
     let set_fields: shamir_collections::TFxMap<String, QueryValue> = match &update_op.set {
@@ -228,6 +241,7 @@ pub(crate) async fn plan_fk_on_update(
         update_op.where_clause.as_ref(),
         ctx,
         &ref_fields,
+        tx,
     )
     .await
     .map_err(|e| BatchError::QueryError {
@@ -303,7 +317,7 @@ pub(crate) async fn plan_fk_on_update(
         //     changed, reject immediately (no partial application).
         if !restrict_fields.is_empty() {
             for (old, child_field) in &restrict_fields {
-                let exists = child_has_reference(&child_table, child_field, old)
+                let exists = child_has_reference(&child_table, child_field, old, tx)
                     .await
                     .map_err(|e| BatchError::QueryError {
                         alias: alias.to_string(),
@@ -354,8 +368,24 @@ pub(crate) async fn plan_fk_on_update(
             }
         }
 
+        // F-28 Step 2: resolve each probe's field id through the tx-layered
+        // interner — see `resolve_field_id_layered`'s doc. A child row
+        // inserted/updated earlier in this SAME tx may use a field name
+        // never touched outside this tx (overlay-only until commit); a
+        // base-only lookup would silently fail to match it.
+        let mut resolved_probes: Vec<(&QueryValue, &QueryValue, FkAction, &str, u64)> =
+            Vec::with_capacity(probes.len());
+        for (old, new, action, field) in &probes {
+            if let Some(field_id) = resolve_field_id_layered(interner, tx, field).await {
+                resolved_probes.push((old, new, *action, field, field_id));
+            }
+        }
+        if resolved_probes.is_empty() {
+            continue;
+        }
+
         let batch_size = 1000;
-        let stream = child_table.list_stream(batch_size);
+        let stream = child_table.list_stream_tx(Some(tx), batch_size);
         futures::pin_mut!(stream);
         while let Some(batch_result) = stream.next().await {
             let batch = batch_result.map_err(|e| BatchError::QueryError {
@@ -381,8 +411,9 @@ pub(crate) async fn plan_fk_on_update(
                 // can equal at most one `old` value, so at most one probe
                 // per field matches a given row — there is no per-field
                 // Cascade/SetNull conflict to resolve.
-                for (old, new, action, field) in &probes {
-                    if !record_field_matches_qv(bytes.as_ref(), field, old, interner) {
+                for (old, new, action, field, field_id) in &resolved_probes {
+                    let key = shamir_types::core::interner::InternerKey::new(*field_id);
+                    if !record_field_matches_by_id(bytes.as_ref(), &key, old) {
                         continue;
                     }
                     match action {
@@ -682,6 +713,7 @@ async fn collect_parent_values(
     where_clause: Option<&Filter>,
     ctx: &FilterContext<'_>,
     ref_fields: &[&str],
+    tx: &shamir_tx::TxContext,
 ) -> shamir_storage::error::DbResult<shamir_collections::TFxMap<String, Vec<QueryValue>>> {
     let interner = table.interner().get().await?;
     let callback = where_clause
@@ -695,7 +727,23 @@ async fn collect_parent_values(
         result.insert(field.to_string(), Vec::new());
     }
 
-    let stream = table.list_stream(batch_size);
+    // F-28 Step 2: resolve each ref_field's id through the tx-layered
+    // interner (base, then this tx's `interner_overlay`) once, up front —
+    // a ref_field touched for the first time earlier in this SAME tx only
+    // exists in the overlay until commit; a base-only lookup would silently
+    // drop it from every matched row's extracted values.
+    let mut field_ids: shamir_collections::TFxMap<&str, u64> =
+        shamir_collections::TFxMap::default();
+    for &field in ref_fields {
+        if let Some(id) = resolve_field_id_layered(interner, tx, field).await {
+            field_ids.insert(field, id);
+        }
+    }
+
+    // F-28 Step 2: tx-aware scan — overlays this tx's own staged writes so an
+    // old parent value changed/removed EARLIER in the same tx is correctly
+    // hidden/reflected (read-your-own-writes), closing D1 for this probe.
+    let stream = table.list_stream_tx(Some(tx), batch_size);
     futures::pin_mut!(stream);
     while let Some(batch_result) = stream.next().await {
         let batch = batch_result?;
@@ -707,8 +755,9 @@ async fn collect_parent_values(
             }
 
             for &field in ref_fields {
-                if let Some(field_id) = interner.get_ind(field) {
-                    let path = std::slice::from_ref(&field_id);
+                if let Some(&field_id) = field_ids.get(field) {
+                    let key = shamir_types::core::interner::InternerKey::new(field_id);
+                    let path = std::slice::from_ref(&key);
                     if let Ok(view) = RecordView::new(&bytes) {
                         if let Some(scalar) = view.scalar_at(path) {
                             let qv = scalar_ref_to_qv(scalar);
@@ -725,42 +774,103 @@ async fn collect_parent_values(
 
 /// Check whether any row in `child_table` has `field == value`.
 ///
-/// Mirrors `fk_restrict::child_has_reference`: index-fast / scan-fallback.
+/// Mirrors `fk_restrict::child_has_reference`: index-fast / scan-fallback,
+/// PLUS (F-28 Step 2) a staged-overlay probe on the index fast-path's empty
+/// result, since a staged-but-not-yet-committed insert/update is never
+/// reflected in the index (indexing happens at commit).
 async fn child_has_reference(
     table: &TableManager,
     field: &str,
     value: &QueryValue,
+    tx: &shamir_tx::TxContext,
 ) -> shamir_storage::error::DbResult<bool> {
     let interner = table.interner().get().await?;
 
-    // Fast path: single-field index lookup.
+    // F-28 Step 2: resolve the field id through the tx-layered interner
+    // (base, then this tx's `interner_overlay`) — a field first interned
+    // EARLIER IN THE SAME tx only exists in the overlay until commit; a
+    // base-only lookup would silently miss it. Mirrors
+    // `fk_restrict::child_has_reference`.
+    let field_id = resolve_field_id_layered(interner, tx, field).await;
+
+    // Fast path: single-field index lookup (only meaningful for a base id).
     if let Some(inner_value) = qv_scalar_to_inner(value) {
-        if let Some(field_id) = interner.get_ind(field) {
-            let field_path = [field_id.id()];
+        if let Some(base_field_id) = interner.get_ind(field) {
+            let field_path = [base_field_id.id()];
             if let Some(idx_name) = table.find_single_field_index(&field_path) {
                 let ids = table
                     .index_manager_ref()
                     .lookup_by_index(idx_name, std::slice::from_ref(&inner_value))
                     .await?;
-                return Ok(!ids.is_empty());
+                if !ids.is_empty() {
+                    return Ok(true);
+                }
+                // Index says no match — authoritative for the COMMITTED
+                // store, but cannot rule out a same-tx staged insert/update.
+                if let Some(field_id) = field_id {
+                    let key = shamir_types::core::interner::InternerKey::new(field_id);
+                    return Ok(staged_field_matches(tx, table.table_token(), &key, value));
+                }
+                return Ok(false);
             }
         }
     }
 
-    // Fallback: full scan with field match.
+    // Fallback: full scan with field match. Tx-aware: overlays this tx's own
+    // staged writes (read-your-own-writes, closing D1 for this probe).
+    let Some(field_id) = field_id else {
+        return Ok(false);
+    };
+    let key = shamir_types::core::interner::InternerKey::new(field_id);
     let batch_size = 1000;
-    let stream = table.list_stream(batch_size);
+    let stream = table.list_stream_tx(Some(tx), batch_size);
     futures::pin_mut!(stream);
     while let Some(batch_result) = stream.next().await {
         let batch = batch_result?;
         for (_, cow) in batch {
             let bytes: Bytes = cow_to_bytes(cow)?;
-            if record_field_matches_qv(bytes.as_ref(), field, value, interner) {
+            if record_field_matches_by_id(bytes.as_ref(), &key, value) {
                 return Ok(true);
             }
         }
     }
     Ok(false)
+}
+
+/// F-28 Step 2: resolve `field` to its interner id, checking `base` first
+/// and then this tx's `interner_overlay`. See the identical helper + doc
+/// comment in `fk_actions.rs` / `fk_restrict.rs` for the full rationale.
+async fn resolve_field_id_layered(
+    base: &shamir_types::core::interner::Interner,
+    tx: &shamir_tx::TxContext,
+    field: &str,
+) -> Option<u64> {
+    let layered = shamir_tx::LayeredInterner::Layered {
+        base,
+        overlay: &tx.interner_overlay,
+        next_overlay_id: &tx.next_overlay_id,
+    };
+    layered.get_id(field).await
+}
+
+/// F-28 Step 2: does this tx's own staged (uncommitted) write_set for
+/// `target_token` contain a row where `field_id == value`? Mirrors
+/// `fk_restrict::staged_field_matches` / `ValidatorDb::staged_field_matches`.
+fn staged_field_matches(
+    tx: &shamir_tx::TxContext,
+    target_token: u64,
+    field_id: &shamir_types::core::interner::InternerKey,
+    value: &QueryValue,
+) -> bool {
+    let Some(staging) = tx.write_set.get(&target_token) else {
+        return false;
+    };
+    staging.snapshot_ops().into_iter().any(|op| match op {
+        shamir_storage::types::KvOp::Set(_, ref bytes) => {
+            record_field_matches_by_id(bytes.as_ref(), field_id, value)
+        }
+        shamir_storage::types::KvOp::Remove(_) => false,
+    })
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
@@ -787,33 +897,34 @@ fn filter_matches(bytes: &Bytes, callback: &FilterNode, ctx: &FilterContext<'_>)
     }
 }
 
-fn record_field_matches_qv(
-    record_bytes: &[u8],
-    field: &str,
-    value: &QueryValue,
-    interner: &shamir_types::core::interner::Interner,
-) -> bool {
-    if let Some(field_id) = interner.get_ind(field) {
-        let path = std::slice::from_ref(&field_id);
-        if let Ok(view) = RecordView::new(record_bytes) {
-            if let Some(actual) = view.scalar_at(path) {
-                return scalar_ref_matches_qv(&actual, value);
-            }
-        }
-        if let Ok(tree) = InnerValue::from_bytes(Bytes::copy_from_slice(record_bytes)) {
-            if let Some(actual) = tree.scalar_at(path) {
-                return scalar_ref_matches_qv(&actual, value);
-            }
-        }
-    }
-    false
-}
-
 fn scalar_ref_matches_qv(actual: &ScalarRef<'_>, value: &QueryValue) -> bool {
     // Delegate to the cross-type-comparing `scalar_ref_cmp_qv` so that a parent
     // key stored as `Int(5)` matches a child FK field stored as `F64(5.0)` (and
     // vice-versa) — consistent with every other comparison layer in the engine.
     scalar_ref_cmp_qv(*actual, value) == Some(std::cmp::Ordering::Equal)
+}
+
+/// Keyed by an already-resolved `InternerKey` instead of a field name — the
+/// field id must come from [`resolve_field_id_layered`] (base + this tx's
+/// overlay), not a plain by-name interner lookup, since the matched row may
+/// be tx-overlay-sourced (`list_stream_tx`) and use an overlay-only field id.
+fn record_field_matches_by_id(
+    record_bytes: &[u8],
+    field_id: &shamir_types::core::interner::InternerKey,
+    value: &QueryValue,
+) -> bool {
+    let path = std::slice::from_ref(field_id);
+    if let Ok(view) = RecordView::new(record_bytes) {
+        if let Some(actual) = view.scalar_at(path) {
+            return scalar_ref_matches_qv(&actual, value);
+        }
+    }
+    if let Ok(tree) = InnerValue::from_bytes(Bytes::copy_from_slice(record_bytes)) {
+        if let Some(actual) = tree.scalar_at(path) {
+            return scalar_ref_matches_qv(&actual, value);
+        }
+    }
+    false
 }
 
 fn scalar_ref_to_qv(sr: ScalarRef<'_>) -> QueryValue {

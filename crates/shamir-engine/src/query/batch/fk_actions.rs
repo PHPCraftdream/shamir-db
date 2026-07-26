@@ -17,20 +17,29 @@
 //!
 //! The cascade/setnull mutations run **inside the same implicit/tx batch** as
 //! the parent delete so they commit atomically.  The full cascade tree
-//! (including grandchild discovery) is resolved at PLANNING time (before the
-//! tx closure) because the `resolver` cannot be captured into the HRTB
-//! closure of `run_implicit_batch_tx` — same constraint documented in D.1's
-//! TOCTOU note.  The actual row mutations (`delete_tx` / `update_tx_bytes`)
-//! run inside the closure against the pre-resolved handles.
+//! (including grandchild discovery) is now resolved **against the calling
+//! transaction's own snapshot-plus-staged-writes view** (F-28 Step 2), via
+//! `TableManager::list_stream_tx(Some(tx), ..)` and
+//! `read_one_tx_bytes(id, Some(tx))` — planning still happens before the
+//! actual mutation calls (`delete_tx` / `update_tx_bytes`) but now reads
+//! read-your-own-writes state rather than committed-only state.
 //!
 //! ## TOCTOU caveat
 //!
-//! Same as D.1: between the pre-tx discovery and the tx commit, a concurrent
-//! insert into a child table could create a new reference to the
-//! about-to-be-deleted parent row.  Tightening to an in-tx atomic check
-//! requires `Arc<dyn TableResolver>` (future refactor).  Acceptable for MVP:
-//! delete is not a hot path, FK-action tables are opt-in, and the window is
-//! small.
+//! F-28 Step 2 closes the **in-tx** read-your-own-writes gap (D1): a child
+//! row inserted earlier in the SAME transaction (before the parent delete
+//! that triggers this cascade) is now visible to `collect_parent_values` /
+//! `discover_action_refs`'s row-level scans, so it is correctly included in
+//! the cascade/setnull plan instead of silently orphaned. A child row staged
+//! as an UPDATE re-keying its FK away from the parent is likewise reflected
+//! via the tx overlay, not the stale committed value.
+//!
+//! What remains open is the **cross-transaction** race: a genuinely
+//! concurrent OTHER transaction inserting a new child reference between this
+//! plan and the eventual commit. Closing that window requires either a
+//! Serializable-isolation footprint fix or a per-table barrier lock —
+//! tracked separately as F-28 Step 3/4/5 (#830/#831/#832). This task does
+//! **not** claim that race is closed.
 
 use bytes::Bytes;
 use futures::StreamExt;
@@ -180,6 +189,7 @@ impl MutationDedup {
 /// planning time, collecting all child/grandchild rows that need to be
 /// deleted or nulled.  Returns a flat [`CascadePlan`] that the caller drives
 /// inside the tx via [`apply_cascade_plan`].
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn plan_cascade(
     resolver: &dyn TableResolver,
     parent_table_ref: &TableRef,
@@ -187,6 +197,7 @@ pub(crate) async fn plan_cascade(
     delete_where: &Filter,
     ctx: &FilterContext<'_>,
     alias: &str,
+    tx: &shamir_tx::TxContext,
 ) -> Result<CascadePlan, BatchError> {
     let mut mutations = Vec::new();
     let mut visited: shamir_collections::TFxSet<String> = shamir_collections::TFxSet::default();
@@ -203,6 +214,7 @@ pub(crate) async fn plan_cascade(
         &mut mutations,
         &mut dedup,
         &mut visited,
+        tx,
     )
     .await?;
 
@@ -226,6 +238,7 @@ async fn plan_cascade_recursive(
     mutations: &mut Vec<PendingMutation>,
     dedup: &mut MutationDedup,
     visited: &mut shamir_collections::TFxSet<String>,
+    tx: &shamir_tx::TxContext,
 ) -> Result<(), BatchError> {
     if depth >= CASCADE_DEPTH_LIMIT {
         return Err(BatchError::query_coded(
@@ -263,13 +276,14 @@ async fn plan_cascade_recursive(
         fields
     };
 
-    let parent_values = collect_parent_values(parent_table, delete_where, ctx, &parent_ref_fields)
-        .await
-        .map_err(|e| BatchError::QueryError {
-            alias: alias.to_string(),
-            message: format!("fk_actions: parent scan failed: {e}"),
-            code: Some("fk_actions".to_string()),
-        })?;
+    let parent_values =
+        collect_parent_values(parent_table, delete_where, ctx, &parent_ref_fields, tx)
+            .await
+            .map_err(|e| BatchError::QueryError {
+                alias: alias.to_string(),
+                message: format!("fk_actions: parent scan failed: {e}"),
+                code: Some("fk_actions".to_string()),
+            })?;
 
     if parent_values.values().all(|v| v.is_empty()) {
         return Ok(());
@@ -334,11 +348,31 @@ async fn plan_cascade_recursive(
                 code: Some("fk_actions".to_string()),
             })?;
 
+        // F-28 Step 2: resolve each probe's field id through the TX-LAYERED
+        // interner (base, then this tx's `interner_overlay`) — NOT base
+        // alone. A child row staged (inserted/updated) earlier in the SAME
+        // tx may use a field name that was interned for the first time in
+        // this tx (never in base yet, only in `tx.interner_overlay`); a
+        // base-only `interner.get_ind` lookup would return `None` for it and
+        // silently fail to match, even though `list_stream_tx` above already
+        // makes the staged row itself visible. Mirrors
+        // `ValidatorDb::exists_in_self`'s staged-writes step.
+        let mut resolved_probes: Vec<(u64, &QueryValue, FkAction, &str)> =
+            Vec::with_capacity(probes.len());
+        for (field, value, action) in &probes {
+            if let Some(field_id) = resolve_field_id_layered(interner, tx, field).await {
+                resolved_probes.push((field_id, value, *action, field));
+            }
+        }
+        if resolved_probes.is_empty() {
+            continue;
+        }
+
         let batch_size = 1000;
         let mut cascade_ids: Vec<RecordId> = Vec::new();
         let mut setnull_ids: Vec<(RecordId, String)> = Vec::new();
 
-        let stream = child_table.list_stream(batch_size);
+        let stream = child_table.list_stream_tx(Some(tx), batch_size);
         futures::pin_mut!(stream);
         while let Some(batch_result) = stream.next().await {
             let batch = batch_result.map_err(|e| BatchError::QueryError {
@@ -357,8 +391,9 @@ async fn plan_cascade_recursive(
                 // (a deleted row can't be nulled).
                 let mut row_action: Option<FkAction> = None;
                 let mut row_setnull_field: Option<String> = None;
-                for (field, value, action) in &probes {
-                    if record_field_matches_qv(bytes.as_ref(), field, value, interner) {
+                for (field_id, value, action, field_name) in &resolved_probes {
+                    let key = shamir_types::core::interner::InternerKey::new(*field_id);
+                    if record_field_matches_by_id(bytes.as_ref(), &key, value) {
                         match action {
                             FkAction::Cascade => {
                                 row_action = Some(FkAction::Cascade);
@@ -367,7 +402,7 @@ async fn plan_cascade_recursive(
                             FkAction::SetNull => {
                                 if row_action.is_none() {
                                     row_action = Some(FkAction::SetNull);
-                                    row_setnull_field = Some(field.to_string());
+                                    row_setnull_field = Some((*field_name).to_string());
                                 }
                             }
                             _ => {}
@@ -443,6 +478,7 @@ async fn plan_cascade_recursive(
                 mutations,
                 dedup,
                 path_guard.visited_mut(),
+                tx,
             ))
             .await?;
         }
@@ -463,6 +499,7 @@ async fn plan_cascade_for_ids(
     mutations: &mut Vec<PendingMutation>,
     dedup: &mut MutationDedup,
     visited: &mut shamir_collections::TFxSet<String>,
+    tx: &shamir_tx::TxContext,
 ) -> Result<(), BatchError> {
     if depth >= CASCADE_DEPTH_LIMIT {
         return Err(BatchError::query_coded(
@@ -510,14 +547,28 @@ async fn plan_cascade_for_ids(
         parent_values.insert(f.to_string(), Vec::new());
     }
 
+    // F-28 Step 2: resolve each ref_field's id through the tx-layered
+    // interner — `parent_ids` here are CASCADED CHILD rows (this fn recurses
+    // into grandchildren), which may themselves have been inserted/updated
+    // earlier in this SAME tx with a field name never touched outside it
+    // (overlay-only until commit). See `resolve_field_id_layered`'s doc.
+    let mut field_ids: shamir_collections::TFxMap<&str, u64> =
+        shamir_collections::TFxMap::default();
+    for &field in &parent_ref_fields {
+        if let Some(id) = resolve_field_id_layered(interner, tx, field).await {
+            field_ids.insert(field, id);
+        }
+    }
+
     for id in parent_ids {
-        let bytes = match parent_table.read_one_tx_bytes(*id, None).await {
+        let bytes = match parent_table.read_one_tx_bytes(*id, Some(tx)).await {
             Ok(Some(b)) => b,
             _ => continue,
         };
         for &field in &parent_ref_fields {
-            if let Some(field_id) = interner.get_ind(field) {
-                let path = std::slice::from_ref(&field_id);
+            if let Some(&field_id) = field_ids.get(field) {
+                let key = shamir_types::core::interner::InternerKey::new(field_id);
+                let path = std::slice::from_ref(&key);
                 if let Ok(view) = RecordView::new(&bytes) {
                     if let Some(scalar) = view.scalar_at(path) {
                         let qv = scalar_ref_to_qv(scalar);
@@ -591,11 +642,24 @@ async fn plan_cascade_for_ids(
                     code: Some("fk_actions".to_string()),
                 })?;
 
+        // F-28 Step 2: resolve each probe's field id through the tx-layered
+        // interner — see the sibling comment in `plan_cascade_recursive`.
+        let mut resolved_probes: Vec<(u64, &QueryValue, FkAction, &str)> =
+            Vec::with_capacity(probes.len());
+        for (field, value, action) in &probes {
+            if let Some(field_id) = resolve_field_id_layered(gc_interner, tx, field).await {
+                resolved_probes.push((field_id, value, *action, field));
+            }
+        }
+        if resolved_probes.is_empty() {
+            continue;
+        }
+
         let batch_size = 1000;
         let mut gc_cascade_ids: Vec<RecordId> = Vec::new();
         let mut gc_setnull_ids: Vec<(RecordId, String)> = Vec::new();
 
-        let stream = child_table.list_stream(batch_size);
+        let stream = child_table.list_stream_tx(Some(tx), batch_size);
         futures::pin_mut!(stream);
         while let Some(batch_result) = stream.next().await {
             let batch = batch_result.map_err(|e| BatchError::QueryError {
@@ -611,8 +675,9 @@ async fn plan_cascade_for_ids(
                 })?;
                 let mut row_action: Option<FkAction> = None;
                 let mut row_setnull_field: Option<String> = None;
-                for (field, value, action) in &probes {
-                    if record_field_matches_qv(bytes.as_ref(), field, value, gc_interner) {
+                for (field_id, value, action, field_name) in &resolved_probes {
+                    let key = shamir_types::core::interner::InternerKey::new(*field_id);
+                    if record_field_matches_by_id(bytes.as_ref(), &key, value) {
                         match action {
                             FkAction::Cascade => {
                                 row_action = Some(FkAction::Cascade);
@@ -621,7 +686,7 @@ async fn plan_cascade_for_ids(
                             FkAction::SetNull => {
                                 if row_action.is_none() {
                                     row_action = Some(FkAction::SetNull);
-                                    row_setnull_field = Some(field.to_string());
+                                    row_setnull_field = Some((*field_name).to_string());
                                 }
                             }
                             _ => {}
@@ -681,6 +746,7 @@ async fn plan_cascade_for_ids(
                 mutations,
                 dedup,
                 path_guard.visited_mut(),
+                tx,
             ))
             .await?;
         }
@@ -902,6 +968,7 @@ async fn collect_parent_values(
     where_clause: &Filter,
     ctx: &FilterContext<'_>,
     ref_fields: &[&str],
+    tx: &shamir_tx::TxContext,
 ) -> shamir_storage::error::DbResult<shamir_collections::TFxMap<String, Vec<QueryValue>>> {
     let interner = table.interner().get().await?;
     let callback = compile_filter(where_clause, interner);
@@ -913,7 +980,23 @@ async fn collect_parent_values(
         result.insert(field.to_string(), Vec::new());
     }
 
-    let stream = table.list_stream(batch_size);
+    // F-28 Step 2: resolve each ref_field's id through the tx-layered
+    // interner (base, then this tx's `interner_overlay`) once, up front —
+    // a ref_field touched for the first time earlier in this SAME tx only
+    // exists in the overlay until commit; a base-only lookup would silently
+    // drop it from every matched row's extracted values.
+    let mut field_ids: shamir_collections::TFxMap<&str, u64> =
+        shamir_collections::TFxMap::default();
+    for &field in ref_fields {
+        if let Some(id) = resolve_field_id_layered(interner, tx, field).await {
+            field_ids.insert(field, id);
+        }
+    }
+
+    // F-28 Step 2: tx-aware scan — overlays this tx's own staged writes so a
+    // parent row deleted/updated EARLIER in the same tx is correctly hidden/
+    // reflected (read-your-own-writes), closing D1 for this probe.
+    let stream = table.list_stream_tx(Some(tx), batch_size);
     futures::pin_mut!(stream);
     while let Some(batch_result) = stream.next().await {
         let batch = batch_result?;
@@ -925,8 +1008,9 @@ async fn collect_parent_values(
             }
 
             for &field in ref_fields {
-                if let Some(field_id) = interner.get_ind(field) {
-                    let path = std::slice::from_ref(&field_id);
+                if let Some(&field_id) = field_ids.get(field) {
+                    let key = shamir_types::core::interner::InternerKey::new(field_id);
+                    let path = std::slice::from_ref(&key);
                     if let Ok(view) = RecordView::new(&bytes) {
                         if let Some(scalar) = view.scalar_at(path) {
                             let qv = scalar_ref_to_qv(scalar);
@@ -963,34 +1047,63 @@ fn filter_matches(bytes: &Bytes, callback: &FilterNode, ctx: &FilterContext<'_>)
     }
 }
 
-fn record_field_matches_qv(
-    record_bytes: &[u8],
-    field: &str,
-    value: &QueryValue,
-    interner: &shamir_types::core::interner::Interner,
-) -> bool {
-    if let Some(field_id) = interner.get_ind(field) {
-        let path = std::slice::from_ref(&field_id);
-        if let Ok(view) = RecordView::new(record_bytes) {
-            if let Some(actual) = view.scalar_at(path) {
-                return scalar_ref_matches_qv(&actual, value);
-            }
-        }
-        if let Ok(tree) = InnerValue::from_bytes(Bytes::copy_from_slice(record_bytes)) {
-            if let Some(actual) = tree.scalar_at(path) {
-                return scalar_ref_matches_qv(&actual, value);
-            }
-        }
-    }
-    false
-}
-
 fn scalar_ref_matches_qv(actual: &ScalarRef<'_>, value: &QueryValue) -> bool {
     // Delegate to the cross-type-comparing `scalar_ref_cmp_qv` so that a parent
     // key stored as `Int(5)` matches a child FK field stored as `F64(5.0)` (and
     // vice-versa) — consistent with every other comparison layer in the engine
     // (`scalar_ref_cmp_qv`, `compare_values`, the coercing-set probes).
     scalar_ref_cmp_qv(*actual, value) == Some(std::cmp::Ordering::Equal)
+}
+
+/// Like `record_field_matches_qv`, but keyed by an already-resolved
+/// `InternerKey` instead of a field name. Used when matching against rows
+/// that may be tx-overlay-sourced (`list_stream_tx`), where the field id must
+/// be resolved via [`resolve_field_id_layered`] rather than a plain base-only
+/// `interner.get_ind` (a field name first interned earlier in the SAME tx
+/// only exists in `tx.interner_overlay`, not yet in base).
+fn record_field_matches_by_id(
+    record_bytes: &[u8],
+    field_id: &shamir_types::core::interner::InternerKey,
+    value: &QueryValue,
+) -> bool {
+    let path = std::slice::from_ref(field_id);
+    if let Ok(view) = RecordView::new(record_bytes) {
+        if let Some(actual) = view.scalar_at(path) {
+            return scalar_ref_matches_qv(&actual, value);
+        }
+    }
+    if let Ok(tree) = InnerValue::from_bytes(Bytes::copy_from_slice(record_bytes)) {
+        if let Some(actual) = tree.scalar_at(path) {
+            return scalar_ref_matches_qv(&actual, value);
+        }
+    }
+    false
+}
+
+/// F-28 Step 2: resolve `field` to its interner id, checking `base` first
+/// and then this tx's `interner_overlay` — mirrors
+/// `ValidatorDb::exists_in_self`'s staged-writes step (and
+/// `shamir_tx::LayeredInterner::get_id`, reimplemented inline here since
+/// `LayeredInterner` borrows `&TxContext` fields directly and this call site
+/// only has `tx: &shamir_tx::TxContext` on hand, not a pre-built wrapper).
+///
+/// A child/grandchild row inserted or updated EARLIER IN THE SAME tx may use
+/// a field name that has never been touched outside this tx — such a name is
+/// allocated only in `tx.interner_overlay`, never in `base`, until commit
+/// merges it. A base-only lookup would silently return `None` for it even
+/// though `list_stream_tx` already made the staged row itself visible,
+/// causing every probe against that field to falsely report "no match".
+async fn resolve_field_id_layered(
+    base: &shamir_types::core::interner::Interner,
+    tx: &shamir_tx::TxContext,
+    field: &str,
+) -> Option<u64> {
+    let layered = shamir_tx::LayeredInterner::Layered {
+        base,
+        overlay: &tx.interner_overlay,
+        next_overlay_id: &tx.next_overlay_id,
+    };
+    layered.get_id(field).await
 }
 
 fn scalar_ref_to_qv(sr: ScalarRef<'_>) -> QueryValue {

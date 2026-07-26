@@ -497,6 +497,73 @@ async fn self_referential_restrict_blocks_delete_when_subordinate_exists() {
     }
 }
 
+// ═══════════════════════════════════════════════════════════════════════════════
+// F-28 Step 2 (D1) — transactional [delete child; delete parent] under RESTRICT
+// must SUCCEED: the RESTRICT gate must see the child's staged delete (this
+// same tx), not the still-committed child row.
+//
+// Before F-28 Step 2, `check_fk_restrict`'s row probes read committed-only
+// state (`TableManager::list_stream` / a committed-only index lookup), so a
+// child row deleted EARLIER IN THE SAME transactional batch was still visible
+// to the RESTRICT gate — wrongly rejecting the parent delete with
+// `fk_restrict` even though, by commit time, the child would already be gone.
+// ═══════════════════════════════════════════════════════════════════════════════
+
+#[tokio::test]
+async fn transactional_delete_child_then_parent_succeeds_under_restrict() {
+    let resolver = setup_fk_test(FkAction::Restrict).await;
+
+    // Insert parent + child (separate, committed, autocommit batches).
+    let mut b = Batch::new();
+    b.id(1);
+    b.insert(
+        "ins_parent",
+        write::insert("parent").row(doc().set("id", 1).set("name", "Alice")),
+    );
+    let req = b.build();
+    execute_batch(&req, &resolver, None, None, Actor::System, "test")
+        .await
+        .unwrap();
+
+    let mut b = Batch::new();
+    b.id(2);
+    b.insert(
+        "ins_child",
+        write::insert("child").row(doc().set("parent_id", 1).set("label", "x")),
+    );
+    let req = b.build();
+    execute_batch(&req, &resolver, None, None, Actor::System, "test")
+        .await
+        .unwrap();
+
+    // ONE transactional batch: delete the child, THEN delete the parent.
+    // The RESTRICT gate on the parent delete must see the child's OWN staged
+    // delete (read-your-own-writes) and allow the parent delete to proceed.
+    let mut b = Batch::new();
+    b.id(3);
+    b.transactional();
+    b.delete(
+        "del_child",
+        write::delete("child").where_(filter::eq("parent_id", 1)),
+    );
+    b.delete(
+        "del_parent",
+        write::delete("parent").where_(filter::eq("id", 1)),
+    );
+    let req = b.build();
+    let resp = execute_batch(&req, &resolver, None, None, Actor::System, "test")
+        .await
+        .unwrap();
+
+    let info = resp.transaction.expect("transaction info present");
+    assert!(
+        info.is_committed(),
+        "transactional [delete child; delete parent] under RESTRICT must commit, got: {info:?}"
+    );
+    assert!(resp.results.contains_key("del_child"));
+    assert!(resp.results.contains_key("del_parent"));
+}
+
 #[tokio::test]
 async fn self_referential_restrict_allows_delete_when_no_subordinates() {
     let resolver = setup_self_ref_fk_test(FkAction::Restrict).await;

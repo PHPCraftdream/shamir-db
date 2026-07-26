@@ -1039,27 +1039,30 @@ impl<'a> QueryRunner<'a> {
 
                 // Phase ②.2b — ON UPDATE referential-action enforcement.
                 //
-                // Mirrors the delete-path (Phase D.1/D.2): build the fan-out
-                // plan BEFORE the tx closure (the resolver cannot be captured
-                // into the HRTB closure of `run_implicit_batch_tx` — same
-                // constraint as RESTRICT/CASCADE on delete). The plan carries
-                // pre-resolved child `TableManager` handles + the old→new
-                // value pairs; an empty plan (the common case — update does
-                // not touch a referenced parent field) is a fast no-op.
+                // F-28 Step 2: the fan-out plan is now built AFTER a `tx` is
+                // available (explicit tx, or the implicit tx begun below),
+                // and its row-level probes read via `list_stream_tx(Some(tx),
+                // ..)` — read-your-own-writes against this transaction's own
+                // staged writes. The plan still carries pre-resolved child
+                // `TableManager` handles + the old→new value pairs; an empty
+                // plan (the common case — update does not touch a referenced
+                // parent field) is a fast no-op.
                 //
-                // TOCTOU caveat: same as delete — see fk_on_update.rs docs.
-                let fk_update_plan = super::fk_on_update::plan_fk_on_update(
-                    self.resolver,
-                    table_ref,
-                    &table,
-                    op_ref,
-                    &ctx,
-                    alias,
-                )
-                .await?;
-
+                // TOCTOU caveat: see fk_on_update.rs docs — the in-tx RYOW gap
+                // (D1) is closed; the cross-transaction race remains open
+                // (F-28 Step 3/4/5).
                 let wr = match self.tx.as_deref_mut() {
                     Some(tx) => {
+                        let fk_update_plan = super::fk_on_update::plan_fk_on_update(
+                            self.resolver,
+                            table_ref,
+                            &table,
+                            op_ref,
+                            &ctx,
+                            alias,
+                            tx,
+                        )
+                        .await?;
                         // Apply child fan-out (cascade/setnull) inside the
                         // explicit tx, BEFORE the parent update. Child rows
                         // reference parent *values* (not row identity), so
@@ -1096,6 +1099,19 @@ impl<'a> QueryRunner<'a> {
                         let (mut tx, _guard) = repo
                             .begin_implicit_batch_tx(self.actor.clone(), alias)
                             .await?;
+                        // F-28 Step 2: build the plan AFTER the implicit tx
+                        // has begun, so its probes see this tx's own staged
+                        // writes (read-your-own-writes).
+                        let fk_update_plan = super::fk_on_update::plan_fk_on_update(
+                            self.resolver,
+                            table_ref,
+                            &table,
+                            op_ref,
+                            &ctx,
+                            alias,
+                            &tx,
+                        )
+                        .await?;
                         // Apply child fan-out inside the implicit tx BEFORE
                         // the parent update. The plan carries pre-resolved
                         // child handles (no resolver needed here).
@@ -1139,44 +1155,43 @@ impl<'a> QueryRunner<'a> {
                 })?;
 
                 // Phase D.1 — ON DELETE RESTRICT gate.
-                //
-                // TOCTOU caveat: this check runs BEFORE the delete, outside the
-                // atomic scope of the tx that performs the removal. A concurrent
-                // insert into a child table between this check and the delete
-                // could create a dangling reference. Tightening to an in-tx
-                // atomic check requires Arc<dyn TableResolver> (future refactor).
-                // Acceptable for MVP: delete is not a hot path, Restrict tables
-                // are opt-in, and the window is small.
-                super::fk_restrict::check_fk_restrict(
-                    self.resolver,
-                    table_ref,
-                    &table,
-                    &op.where_clause,
-                    &ctx,
-                    alias,
-                )
-                .await?;
-
                 // Phase D.2 — ON DELETE CASCADE + SET NULL.
                 //
-                // Build the cascade/setnull plan BEFORE the tx closure (the
-                // resolver cannot be captured into the HRTB closure — same
-                // constraint as the RESTRICT gate). The plan is owned data
-                // (pre-resolved child TableManager handles + parent values);
-                // the full cascade tree (including grandchildren) is resolved
-                // at planning time so no resolver is needed inside the tx.
-                let cascade_plan = super::fk_actions::plan_cascade(
-                    self.resolver,
-                    table_ref,
-                    &table,
-                    &op.where_clause,
-                    &ctx,
-                    alias,
-                )
-                .await?;
-
+                // F-28 Step 2: both the RESTRICT gate and the cascade/setnull
+                // plan are now built AFTER a `tx` is available (explicit tx,
+                // or the implicit tx begun below), and their row-level probes
+                // read via `list_stream_tx(Some(tx), ..)` — read-your-own-
+                // writes against this transaction's own staged writes. The
+                // cascade plan is still owned data (pre-resolved child
+                // TableManager handles + parent values); the full cascade
+                // tree (including grandchildren) is resolved at planning
+                // time so no resolver is needed inside the apply step.
+                //
+                // TOCTOU caveat: see fk_restrict.rs / fk_actions.rs docs —
+                // the in-tx RYOW gap (D1) is closed; the cross-transaction
+                // race remains open (F-28 Step 3/4/5).
                 let wr = match self.tx.as_deref_mut() {
                     Some(tx) => {
+                        super::fk_restrict::check_fk_restrict(
+                            self.resolver,
+                            table_ref,
+                            &table,
+                            &op.where_clause,
+                            &ctx,
+                            alias,
+                            tx,
+                        )
+                        .await?;
+                        let cascade_plan = super::fk_actions::plan_cascade(
+                            self.resolver,
+                            table_ref,
+                            &table,
+                            &op.where_clause,
+                            &ctx,
+                            alias,
+                            tx,
+                        )
+                        .await?;
                         // Apply cascade/setnull inside the explicit tx BEFORE
                         // the parent delete (child rows reference parent values,
                         // not parent row existence at mutation time; ordering
@@ -1212,6 +1227,29 @@ impl<'a> QueryRunner<'a> {
                         let (mut tx, _guard) = repo
                             .begin_implicit_batch_tx(self.actor.clone(), alias)
                             .await?;
+                        // F-28 Step 2: run the RESTRICT gate + build the
+                        // cascade plan AFTER the implicit tx has begun, so
+                        // their probes see this tx's own staged writes.
+                        super::fk_restrict::check_fk_restrict(
+                            self.resolver,
+                            table_ref,
+                            &table,
+                            &op.where_clause,
+                            &ctx,
+                            alias,
+                            &tx,
+                        )
+                        .await?;
+                        let cascade_plan = super::fk_actions::plan_cascade(
+                            self.resolver,
+                            table_ref,
+                            &table,
+                            &op.where_clause,
+                            &ctx,
+                            alias,
+                            &tx,
+                        )
+                        .await?;
                         // Apply cascade/setnull inside the implicit tx BEFORE
                         // the parent delete. The plan carries pre-resolved
                         // child handles (no resolver needed here).
