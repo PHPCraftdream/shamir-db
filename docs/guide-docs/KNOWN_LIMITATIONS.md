@@ -440,6 +440,15 @@ artifact).
   callers (`crates/shamir-engine/src/table/read_index_scan.rs`,
   `crates/shamir-engine/src/table/read_temporal.rs`) are themselves out of
   this task's scope — see the comment at that call site for detail.
+  **SDK surface (F-22, #815, closed):** `corrupt_records` is now typed on
+  the TS side too — `CorruptRecordRef` / `QueryResult.corrupt_records?` in
+  `crates/shamir-client-ts/src/core/types/batch.ts`. Also fixed as part of
+  F-22: `CorruptRecordRef.id` now serializes as a base58 string on the
+  wire (matching every other `RecordId` on the wire, e.g.
+  `InsertedRecord`'s `_id`), not raw msgpack bytes — an F-10-era oversight.
+  The Rust SDK (`shamir-client`/`shamir-sdk`) needed no change: both
+  return `shamir_query_types::read::QueryResult` directly, so
+  `result.corrupt_records` was already available to Rust consumers.
 - **`SelectItem::Expression` (computed SELECT fields) is REJECTED at
   execution time, not silently ignored (F-26, #819, closed).** The variant
   is accepted at every layer of the contract — wire DTO

@@ -1,7 +1,11 @@
 //! QueryResult and QueryStats — query execution results.
 
+use serde::de::{Deserializer, Error as DeError};
+use serde::ser::Serializer;
 use serde::{Deserialize, Serialize};
+use shamir_types::types::record_id::RecordId;
 use shamir_types::types::value::QueryValue;
+use std::str::FromStr;
 
 use super::query_record::QueryRecord;
 use super::PaginationInfo;
@@ -65,13 +69,43 @@ pub struct QueryStats {
 /// The row is still skipped from `QueryResult::records` (unchanged
 /// behaviour); this struct only makes that skip visible to the caller
 /// instead of the result count silently coming up one row short.
+///
+/// Wire shape: `{ "table": <str>, "id": <str> }` — `id` is the record's
+/// base58 string form (via `RecordId::to_string`/`FromStr`), the SAME
+/// convention every other `RecordId` uses on the wire (e.g.
+/// `InsertedRecord`'s `_id`, and a read result row's own `_id` field) —
+/// NOT raw msgpack bytes, despite `RecordId`'s own derived `Serialize`
+/// impl emitting `bin`. The Rust-side field stays typed as `RecordId` for
+/// ergonomic call sites; only the wire encoding is customised.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CorruptRecordRef {
     /// Name of the table the corrupt record belongs to.
     pub table: String,
     /// The record's id (still resolvable even though its VALUE failed to
-    /// decode — ids are read independently of the value payload).
-    pub id: shamir_types::types::record_id::RecordId,
+    /// decode — ids are read independently of the value payload). Encoded
+    /// on the wire as a base58 string (see struct doc comment), not raw
+    /// bytes.
+    #[serde(with = "id_as_base58_string")]
+    pub id: RecordId,
+}
+
+/// Custom (de)serialization for `CorruptRecordRef::id` — base58 string on
+/// the wire, typed `RecordId` in Rust. Mirrors `InsertedRecord`'s
+/// `id.to_string()` convention (`crates/shamir-query-types/src/write/
+/// inserted_record.rs`) rather than `RecordId`'s own derived `Serialize`
+/// (which emits raw msgpack `bin`).
+mod id_as_base58_string {
+    use super::{DeError, Deserializer, FromStr, RecordId, Serializer};
+    use serde::Deserialize;
+
+    pub fn serialize<S: Serializer>(id: &RecordId, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.collect_str(id)
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<RecordId, D::Error> {
+        let s = String::deserialize(deserializer)?;
+        RecordId::from_str(&s).map_err(DeError::custom)
+    }
 }
 
 /// Query result
@@ -131,6 +165,14 @@ pub struct QueryResult {
     /// `records`, but reported here as `(table, id)` pairs instead of
     /// silently vanishing. Empty (and omitted from the wire) on the common
     /// case where nothing was corrupt.
+    ///
+    /// SDK note (F-22, #815): `crates/shamir-client` and `shamir-sdk` return
+    /// this exact `QueryResult` type directly (no separate "SDK response"
+    /// wrapper struct) — any Rust consumer already has direct, typed field
+    /// access to `result.corrupt_records` / `CorruptRecordRef` with no
+    /// additional plumbing. The TypeScript SDK mirrors this shape as
+    /// `CorruptRecordRef` / `QueryResult.corrupt_records` in
+    /// `crates/shamir-client-ts/src/core/types/batch.ts`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub corrupt_records: Vec<CorruptRecordRef>,
 }

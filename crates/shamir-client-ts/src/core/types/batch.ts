@@ -189,6 +189,18 @@ export interface PaginationInfo {
 }
 
 /**
+ * A single record that failed to decode during a scan — reported instead
+ * of silently dropped from the result set. Mirrors
+ * `query_result.rs::CorruptRecordRef`. `id` is the record's base58
+ * `_id` string (same form as a normal read result row's `_id` field),
+ * not raw bytes.
+ */
+export interface CorruptRecordRef {
+  table: string;
+  id: string;
+}
+
+/**
  * Query result — every batch entry (read / write / DDL / admin) comes
  * back as a `QueryResult`.
  *
@@ -232,6 +244,16 @@ export interface QueryResult {
    * outside the safe-integer range, to avoid silently losing precision.
    */
   versions?: (number | bigint)[];
+  /**
+   * Records that failed to decode during this scan (F-22, #815) — dropped
+   * from `records`, but reported here as `{ table, id }` pairs instead of
+   * silently vanishing. Mirrors
+   * `query_result.rs::QueryResult.corrupt_records`
+   * (`#[serde(default, skip_serializing_if = "Vec::is_empty")]`) — omitted
+   * from the wire (and thus `undefined` here) on the common case where
+   * nothing was corrupt.
+   */
+  corrupt_records?: CorruptRecordRef[];
 }
 
 /** Transaction metadata (present on transactional batches). */
