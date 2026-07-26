@@ -369,3 +369,103 @@ async fn order_by_with_version_non_mvcc_keeps_versions_none() {
         "versions must stay None for a non-MVCC table even with with_version"
     );
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Test 6 — ORDER BY + LIMIT + with_version + count_total together (F-23/#816)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// F-23 (#816): pin the F-6∩F-7 interaction the post-wave `/crush` review
+/// (NF-5, `docs/dev-artifacts/research/2026-07-26-wave-f-post-review-crush/
+/// REPORT.md`) flagged as untested — `ORDER BY` + `LIMIT` + `with_version: true`
+/// + `count_total: true` ALL AT ONCE. Both F-6 (#796) and F-7 (#797)
+/// independently exclude the top-K heap fast path (the `use_topk` gate),
+/// routing the query onto the SHARED full-sort code path where
+/// `apply_order_by_qv_with_ids` threads `RecordId`s through the sort (for
+/// `with_version`) AND `apply_pagination` computes `total_count` (for
+/// `count_total`). This test asserts the two correctness concerns do not
+/// interfere on that shared path, in a single response:
+///   1. `records` are correctly sorted and paginated (LIMIT 2 of 5),
+///   2. `versions` is `Some(...)` and index-aligned with the paginated page,
+///   3. `pagination.total_count` is `Some(5)` — the TRUE total row count, not
+///      the page size — proving `count_total` and `with_version` compose.
+#[tokio::test]
+async fn order_by_limit_with_version_and_count_total_compose() {
+    let (tbl, mvcc) = make_plain_mvcc_table().await;
+    // Insert in deliberately NON-sorted order so ORDER BY truly reorders.
+    let rids = [
+        insert_scored(&tbl, 10).await,
+        insert_scored(&tbl, 50).await,
+        insert_scored(&tbl, 20).await,
+        insert_scored(&tbl, 40).await,
+        insert_scored(&tbl, 30).await,
+    ];
+    let inserted_scores = [10i64, 50, 20, 40, 30];
+
+    // Ground truth: each (score, version) straight from the MVCC store.
+    let mut truth_asc: Vec<(i64, u64)> = inserted_scores
+        .iter()
+        .zip(rids.iter())
+        .map(|(&s, rid)| (s, mvcc.version_of(rid.as_bytes())))
+        .collect();
+    truth_asc.sort_by_key(|(s, _)| *s);
+
+    let interner = tbl.interner().get().await.unwrap();
+    let refs = new_map();
+    let ctx = FilterContext::new(interner, &refs);
+
+    // ORDER BY score ASC LIMIT 2 OFFSET 1 → page is [20, 30] of the 5-row total,
+    // with BOTH with_version AND count_total demanded on the same query. Both
+    // flags exclude the top-K heap, so the shared full-sort path must serve
+    // id-threading AND total_count together.
+    let mut q = ReadQuery::new("t")
+        .order_by(OrderBy::asc("score"))
+        .limit(2)
+        .offset(1);
+    q.with_version = true;
+    q.count_total = true;
+    let res = tbl.read(&q, &ctx).await.unwrap();
+
+    // (1) records: correctly sorted ASC and paginated to the LIMIT/OFFSET slice.
+    let scores: Vec<i64> = res
+        .records
+        .iter()
+        .filter_map(|r| r.get_value_i64("score"))
+        .collect();
+    assert_eq!(scores, vec![20, 30], "paginated slice (skip 1, take 2)");
+
+    // (2) versions: Some(...), index-aligned with the paginated records, and
+    //     each entry is the canonical version of the row NOW at that position.
+    let versions = res
+        .versions
+        .as_ref()
+        .expect("ORDER BY + LIMIT + with_version + count_total must populate versions");
+    assert_eq!(
+        versions.len(),
+        scores.len(),
+        "versions must be index-aligned with the paginated records"
+    );
+    for (i, &score) in scores.iter().enumerate() {
+        let expected_v = truth_asc
+            .iter()
+            .find(|(s, _)| *s == score)
+            .map(|(_, v)| *v)
+            .unwrap();
+        assert_eq!(
+            versions[i], expected_v,
+            "paginated versions[{i}] must match the record at that page position (score {score})"
+        );
+    }
+
+    // (3) pagination.total_count: the TRUE total row count (5), NOT the page
+    //     size — proving count_total and with_version did not interfere on the
+    //     shared full-sort path.
+    let pagination = res
+        .pagination
+        .as_ref()
+        .expect("count_total=true must emit pagination metadata");
+    assert_eq!(
+        pagination.total_count,
+        Some(5),
+        "count_total=true with with_version must report the TRUE total row count"
+    );
+}
