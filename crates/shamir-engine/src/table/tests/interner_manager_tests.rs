@@ -1,8 +1,10 @@
 use crate::meta::MetaKey;
 use crate::table::interner_manager::InternerManager;
+use async_trait::async_trait;
 use bytes::Bytes;
+use shamir_storage::error::{DbError, DbResult};
 use shamir_storage::storage_in_memory::InMemoryStore;
-use shamir_storage::types::Store;
+use shamir_storage::types::{RecordKey, Store};
 use shamir_types::codecs::basic::bincode;
 use shamir_types::core::interner::{InternerKey, UserKey};
 use shamir_types::types::record_id::RecordId;
@@ -287,5 +289,112 @@ async fn corrupt_legacy_blob_is_fatal() {
     assert!(
         result.is_err(),
         "corrupt legacy interner blob must be fatal, not silently emptied (audit §2.6)"
+    );
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// F-27a (#820) — fault-injection seam: prove `InternerManager::persist()`
+// itself can genuinely fail (a real I/O error from the backing `Store`),
+// which is the precondition `admin_schema.rs`'s new catalogue-rollback
+// path (the compensating `save_table_meta(&rec_prev)` added alongside
+// `interner_mgr.persist()`) guards against. There is no existing
+// error-injection hook on `InternerManager`/`Interner` themselves — the
+// simplest reachable seam is a `Store` wrapper whose `set` (the exact
+// call `persist()` makes to write a new delta chunk) returns `Err`,
+// mirroring the `PausableInfoStore` wrapper pattern already established
+// in `crate::table::tests::stale_index_tests` for injecting faults at the
+// `Store` boundary.
+// ═══════════════════════════════════════════════════════════════════════
+
+type TestStream =
+    std::pin::Pin<Box<dyn futures::Stream<Item = Result<Vec<(RecordKey, Bytes)>, DbError>> + Send>>;
+
+/// A `Store` wrapper whose `set` unconditionally fails. Every other
+/// operation (including `get`, needed by `InternerManager::get()`'s
+/// initial load) delegates straight through to the inner store.
+struct FailingSetStore {
+    inner: Arc<dyn Store>,
+}
+
+impl FailingSetStore {
+    fn new(inner: Arc<dyn Store>) -> Self {
+        Self { inner }
+    }
+}
+
+#[async_trait]
+impl Store for FailingSetStore {
+    async fn insert(&self, value: Bytes) -> DbResult<RecordKey> {
+        self.inner.insert(value).await
+    }
+    async fn set(&self, _key: RecordKey, _value: Bytes) -> DbResult<bool> {
+        Err(DbError::Storage(
+            "FailingSetStore: injected write failure".to_string(),
+        ))
+    }
+    async fn get(&self, key: RecordKey) -> DbResult<Bytes> {
+        self.inner.get(key).await
+    }
+    async fn remove(&self, key: RecordKey) -> DbResult<bool> {
+        self.inner.remove(key).await
+    }
+    fn iter_stream(&self, batch_size: usize) -> TestStream {
+        self.inner.iter_stream(batch_size)
+    }
+    fn scan_prefix_stream(&self, prefix: Bytes, batch_size: usize) -> TestStream {
+        self.inner.scan_prefix_stream(prefix, batch_size)
+    }
+    fn iter_range_stream(
+        &self,
+        start_inclusive: Option<Bytes>,
+        end_inclusive: Option<Bytes>,
+        batch_size: usize,
+    ) -> TestStream {
+        self.inner
+            .iter_range_stream(start_inclusive, end_inclusive, batch_size)
+    }
+    fn iter_range_stream_reverse(
+        &self,
+        start_inclusive: Option<Bytes>,
+        end_inclusive: Option<Bytes>,
+        batch_size: usize,
+    ) -> TestStream {
+        self.inner
+            .iter_range_stream_reverse(start_inclusive, end_inclusive, batch_size)
+    }
+}
+
+/// Core regression: once a new key has been interned (so `persist()` has
+/// a genuine non-empty delta to write), a `set` failure on the backing
+/// store surfaces as an `Err` from `persist()` — this is the exact
+/// failure `admin_schema.rs`'s 3 DDL handlers now roll the catalogue back
+/// on, instead of leaving the just-written NEW schema durably persisted
+/// while its interned path ids never made it to disk.
+#[tokio::test]
+async fn persist_fails_when_backing_store_set_fails() {
+    let inner: Arc<dyn Store> = Arc::new(InMemoryStore::new());
+    let failing_store: Arc<dyn Store> = Arc::new(FailingSetStore::new(Arc::clone(&inner)));
+    let manager = InternerManager::new(failing_store);
+
+    // Intern a new key so `persist()` has a real delta (an empty delta is
+    // a documented no-op short-circuit, which would trivially "succeed"
+    // and not exercise the failure path at all).
+    let interner = manager.get().await.unwrap();
+    interner.touch_ind("new_field").unwrap();
+
+    let result = manager.persist().await;
+    assert!(
+        result.is_err(),
+        "persist() must surface the backing store's set() failure, got: {result:?}"
+    );
+
+    // The failed write must NOT have advanced the high-water mark — a
+    // later retry against a healthy store must still see the delta as
+    // pending (this is what makes the retry path recoverable rather than
+    // silently losing the never-persisted key forever).
+    assert_eq!(
+        manager.persisted_high_water(),
+        0,
+        "a failed persist() must not advance last_persisted_len"
     );
 }

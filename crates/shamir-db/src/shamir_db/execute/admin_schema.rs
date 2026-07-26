@@ -488,11 +488,24 @@ impl ShamirAdminExecutor {
 
         // Durably persist the repo interner so the schema path ids survive a
         // reopen — `boot_compile_schemas` de-interns them on restart. Mirrors
-        // the `interner().persist()` other DDL ops perform.
-        interner_mgr
-            .persist()
-            .await
-            .map_err(|e| err_code("internal_error", e.to_string()))?;
+        // the `interner().persist()` other DDL ops perform. If this fails
+        // after a successful catalogue write, roll the catalogue back to the
+        // pre-mutation record (best-effort compensating write) — otherwise
+        // the catalogue would durably reference field-path ids the interner
+        // never learned. The ORIGINAL persist error is returned to the
+        // caller; a rollback-write failure is secondary information and only
+        // logged (matches the activation-rollback pattern below).
+        if let Err(persist_err) = interner_mgr.persist().await {
+            if let Err(rollback_err) = self.shamir.system_store().save_table_meta(&rec_prev).await {
+                log::warn!(
+                    "admin_schema::handle_set_table_schema: catalogue rollback \
+                     for '{db}/{repo}/{table}' FAILED after interner persist error \
+                     ({persist_err}): {rollback_err}. The catalogue may now \
+                     hold a schema that was never activated."
+                );
+            }
+            return Err(err_code("internal_error", persist_err.to_string()));
+        }
 
         // Activate: compile + register + auto-bind the validator (live,
         // in-process). If this fails after a successful catalogue write, roll
@@ -650,11 +663,20 @@ impl ShamirAdminExecutor {
 
         // Durably persist the repo interner so the schema path ids survive a
         // reopen — `boot_compile_schemas` de-interns them on restart. Mirrors
-        // the `interner().persist()` other DDL ops perform.
-        interner_mgr
-            .persist()
-            .await
-            .map_err(|e| err_code("internal_error", e.to_string()))?;
+        // the `interner().persist()` other DDL ops perform. Roll the
+        // catalogue back to the pre-mutation record on failure (see
+        // handle_set_table_schema for the full rationale).
+        if let Err(persist_err) = interner_mgr.persist().await {
+            if let Err(rollback_err) = self.shamir.system_store().save_table_meta(&rec_prev).await {
+                log::warn!(
+                    "admin_schema::handle_add_schema_rule: catalogue rollback \
+                     for '{db}/{repo}/{table}' FAILED after interner persist error \
+                     ({persist_err}): {rollback_err}. The catalogue may now \
+                     hold a schema that was never activated."
+                );
+            }
+            return Err(err_code("internal_error", persist_err.to_string()));
+        }
 
         // Activate, rolling back the catalogue write on activation failure
         // (see handle_set_table_schema for the full rationale).
@@ -773,11 +795,20 @@ impl ShamirAdminExecutor {
 
         // Durably persist the repo interner so the schema path ids survive a
         // reopen — `boot_compile_schemas` de-interns them on restart. Mirrors
-        // the `interner().persist()` other DDL ops perform.
-        interner_mgr
-            .persist()
-            .await
-            .map_err(|e| err_code("internal_error", e.to_string()))?;
+        // the `interner().persist()` other DDL ops perform. Roll the
+        // catalogue back to the pre-mutation record on failure (see
+        // handle_set_table_schema for the full rationale).
+        if let Err(persist_err) = interner_mgr.persist().await {
+            if let Err(rollback_err) = self.shamir.system_store().save_table_meta(&rec_prev).await {
+                log::warn!(
+                    "admin_schema::handle_remove_schema_rule: catalogue rollback \
+                     for '{db}/{repo}/{table}' FAILED after interner persist error \
+                     ({persist_err}): {rollback_err}. The catalogue may now \
+                     hold a schema that was never activated."
+                );
+            }
+            return Err(err_code("internal_error", persist_err.to_string()));
+        }
 
         // Activate, rolling back the catalogue write on activation failure
         // (see handle_set_table_schema for the full rationale).
