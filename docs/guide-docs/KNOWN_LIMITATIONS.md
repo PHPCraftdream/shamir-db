@@ -207,8 +207,11 @@ artifact).
   DEFAULT.** `StartMigration` is rejected with a structured
   `experimental_feature_disabled` error unless an operator has first
   called `ShamirDb::enable_experimental_migration_api()`; the live
-  `shamir-server` never calls this, so no regular client can trigger a
-  migration. This gate exists because the feature has several known,
+  `shamir-server` only calls this when an operator explicitly sets
+  `security.enable_experimental_migration_api: true` in the config (F-15,
+  #808 — default `false`, and no shipped `deploy/*.ktav` profile sets it),
+  so no regular client can trigger a migration against a default
+  deployment. This gate exists because the feature has several known,
   unfixed correctness gaps (all tracked as future work):
   - **No write interception.** `MigrationShadowLog` is constructed at
     `StartMigration` time, but nothing in production code ever appends
@@ -230,7 +233,12 @@ artifact).
   See `crates/shamir-db/src/shamir_db/shamir_db/core.rs`
   (`enable_experimental_migration_api` / `experimental_migration_enabled`)
   for the gate and `crates/shamir-db/src/shamir_db/execute/admin_migration.rs`
-  for the entry-point check.
+  for the entry-point check. The live-server opt-in added by F-15 (#808)
+  lives in `crates/shamir-server/src/config.rs`'s
+  `SecurityConfig::enable_experimental_migration_api` (default `false`)
+  and is wired at boot in
+  `crates/shamir-server/src/server/server_launcher.rs` (the
+  `if config.security.enable_experimental_migration_api { ... }` block).
 
 ## 3. Indexes
 
@@ -523,13 +531,19 @@ artifact).
   `sweep_and_reap`/`get_owned_for_fetch`/`FetchLease` doc comments for the
   full ordering argument.
 - **`max_inflight_response_bytes` missing from the base
-  `deploy/server.example.ktav` reference config — STILL OPEN (F-11 #802
-  residual; tracked follow-up F-21 #814).** The setting already appears in
-  `deploy/server.medium.example.ktav` and `deploy/server.small.example.ktav`
-  but not in the base `deploy/server.example.ktav`, so an operator starting
-  from the base reference config alone does not see this knob documented
-  inline. Not fixed here — tracked as its own follow-up task (mirroring how
-  the corrupt-record bullet above tracks its own sibling-file follow-up).
+  `deploy/server.example.ktav` reference config — CLOSED (F-21, #814,
+  closing the F-11 #802 residual this bullet originally tracked as
+  open).** The setting already appeared in
+  `deploy/server.medium.example.ktav` and
+  `deploy/server.small.example.ktav` but was absent from the base
+  `deploy/server.example.ktav`, so an operator starting from the base
+  reference config alone did not see this knob documented inline. F-21
+  (#814) added it at `deploy/server.example.ktav:86`
+  (`max_inflight_response_bytes: 4294967296`), sized at 4× the base
+  config's own `max_result_size_bytes` (4 GiB / 1 GiB = 4) — matching
+  the medium (256 MiB / 64 MiB = 4) and small (128 MiB / 32 MiB = 4)
+  profiles' own 4× sizing convention — so all three shipped reference
+  profiles now document the knob inline.
 - **Corrupt-record reporting now covers every reachable engine read path
   except `table_manager_streaming.rs`'s `filter_stream`/`filter_stream_tx`
   (F-10 #800 + F-22 #815 + F-30 #823).** A row whose value bytes fail to
