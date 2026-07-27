@@ -192,8 +192,12 @@ async fn discover_restrict_refs(
     let repo_name = parent_table_ref.repo.clone();
     let all_for_parent = repo
         .fk_reverse_cache()
-        .get_or_build_by_parent(&parent_table_ref.table, || async move {
-            build_reverse_fk_entries(resolver, &repo_name).await
+        .get_or_build_by_parent(&parent_table_ref.table, || {
+            // F-36: `Fn` (re-callable) build closure so a
+            // generation-mismatched scan can retry under the same
+            // single-flight lock. Clone `repo_name` per call.
+            let repo_name = repo_name.clone();
+            async move { build_reverse_fk_entries(resolver, &repo_name).await }
         })
         .await
         .map_err(|e| BatchError::QueryError {

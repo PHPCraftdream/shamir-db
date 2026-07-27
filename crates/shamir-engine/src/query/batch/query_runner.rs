@@ -311,8 +311,14 @@ async fn require_footprint_if_fk_child(
     let repo_name = table_ref.repo.clone();
     let table_name = table_ref.table.clone();
     if let Err(e) = cache
-        .get_or_build_by_parent(&table_name, || async move {
-            crate::repo::build_reverse_fk_entries(resolver, &repo_name).await
+        .get_or_build_by_parent(&table_name, || {
+            // F-36: the build closure is `Fn` (re-callable) so a
+            // generation-mismatched scan can retry under the same
+            // single-flight lock. Clone `repo_name` per call (the captured
+            // `String` must not be moved out of the closure); `resolver` is
+            // `&dyn TableResolver` (trivially `Copy`).
+            let repo_name = repo_name.clone();
+            async move { crate::repo::build_reverse_fk_entries(resolver, &repo_name).await }
         })
         .await
     {
@@ -374,8 +380,11 @@ async fn implicit_tx_isolation_for_fk_parent(
     // in `require_footprint_if_fk_child`: this hook can be the very FIRST
     // FK-cache touch a repo sees.
     if cache
-        .get_or_build_by_parent(&table_name, || async move {
-            crate::repo::build_reverse_fk_entries(resolver, &repo_name).await
+        .get_or_build_by_parent(&table_name, || {
+            // F-36: `Fn` (re-callable) build closure — see the identical
+            // rationale in `require_footprint_if_fk_child`.
+            let repo_name = repo_name.clone();
+            async move { crate::repo::build_reverse_fk_entries(resolver, &repo_name).await }
         })
         .await
         .is_err()
