@@ -55,7 +55,7 @@ S.H.A.M.I.R. — самодостаточная база данных на Rust 
 - ✅ Batch query API (MessagePack/QueryValue): WHERE / SELECT / GROUP BY / ORDER BY / LIMIT / pagination
 - ✅ Cross-query references via `{"$query": "@alias[].field"}`
 - ✅ Admin DDL (Create/Drop Db / Repo / Table / Index, List)
-- ✅ Auth ops (Create/Drop User / Role, Grant / Revoke)
+- ✅ Auth ops (Create/Drop User, Grant / Revoke Role)
 - ✅ Secondary indexes + query planner
 - ✅ Wire protocol: TLS 1.3 + SCRAM-Argon2id + Ed25519 channel binding
 - ✅ Transports: TCP, WebSocket (native + browser)
