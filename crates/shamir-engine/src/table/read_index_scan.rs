@@ -331,11 +331,17 @@ impl TableManager {
             }
 
             let records_scanned = matched.len() as u64;
+            let mut corrupt: Vec<crate::query::read::CorruptRecordRef> = Vec::new();
 
             // Opt #3a (LIMIT push-down)
-            if let Some((paged, pagination)) =
-                try_project_page_only_bytes(query, &matched, interner, ctx.scalars.clone())?
-            {
+            if let Some((paged, pagination)) = try_project_page_only_bytes(
+                query,
+                &matched,
+                interner,
+                ctx.scalars.clone(),
+                self.name(),
+                &mut corrupt,
+            )? {
                 let records_returned = paged.len() as u64;
                 return Ok(QueryResult {
                     records: paged,
@@ -350,12 +356,18 @@ impl TableManager {
                     explain: None,
                     skipped: false,
                     versions: None,
-                    corrupt_records: Vec::new(),
+                    corrupt_records: corrupt,
                 });
             }
 
-            let mut result_qv =
-                apply_select_value_bytes(&matched, &query.select, interner, ctx.scalars.clone())?;
+            let mut result_qv = apply_select_value_bytes(
+                &matched,
+                &query.select,
+                interner,
+                ctx.scalars.clone(),
+                self.name(),
+                &mut corrupt,
+            )?;
 
             if let Some(ref order_by) = query.order_by {
                 exec::apply_order_by_qv(&mut result_qv, order_by);
@@ -379,7 +391,7 @@ impl TableManager {
                 explain: None,
                 skipped: false,
                 versions: versions_from_matched(query, self.mvcc_store_ref(), &matched),
-                corrupt_records: Vec::new(),
+                corrupt_records: corrupt,
             })
         }
     }
@@ -434,8 +446,15 @@ impl TableManager {
             }
         }
 
-        let result_qv =
-            apply_select_value_bytes(&matched, &query.select, interner, ctx.scalars.clone())?;
+        let mut corrupt: Vec<crate::query::read::CorruptRecordRef> = Vec::new();
+        let result_qv = apply_select_value_bytes(
+            &matched,
+            &query.select,
+            interner,
+            ctx.scalars.clone(),
+            self.name(),
+            &mut corrupt,
+        )?;
         let records_returned = result_qv.len() as u64;
         let result: Vec<QueryRecord> = result_qv.into_iter().map(QueryRecord::Direct).collect();
 
@@ -460,7 +479,7 @@ impl TableManager {
                 let ids: Vec<RecordId> = matched.iter().map(|(id, _)| *id).collect();
                 super::read_exec::collect_versions(query.with_version, self.mvcc_store_ref(), &ids)
             },
-            corrupt_records: Vec::new(),
+            corrupt_records: corrupt,
         })
     }
 
@@ -565,8 +584,15 @@ impl TableManager {
 
         // Project to QueryValue in value order — no sort, no exclusion
         // filter (both are now handled by the ordered early-stop walk).
-        let result_qv =
-            apply_select_value_bytes(&matched, &query.select, interner, ctx.scalars.clone())?;
+        let mut corrupt: Vec<crate::query::read::CorruptRecordRef> = Vec::new();
+        let result_qv = apply_select_value_bytes(
+            &matched,
+            &query.select,
+            interner,
+            ctx.scalars.clone(),
+            self.name(),
+            &mut corrupt,
+        )?;
 
         let records_scanned = matched.len() as u64;
         let records_returned = result_qv.len() as u64;
@@ -604,7 +630,7 @@ impl TableManager {
             explain: None,
             skipped: false,
             versions: None,
-            corrupt_records: Vec::new(),
+            corrupt_records: corrupt,
         })
     }
     ///
@@ -752,11 +778,17 @@ impl TableManager {
             }
 
             let records_scanned = matched.len() as u64;
+            let mut corrupt: Vec<crate::query::read::CorruptRecordRef> = Vec::new();
 
             // Opt #3a (LIMIT push-down)
-            if let Some((paged, pagination)) =
-                try_project_page_only_bytes(query, &matched, interner, ctx.scalars.clone())?
-            {
+            if let Some((paged, pagination)) = try_project_page_only_bytes(
+                query,
+                &matched,
+                interner,
+                ctx.scalars.clone(),
+                self.name(),
+                &mut corrupt,
+            )? {
                 let elapsed = start.elapsed();
                 let records_returned = paged.len() as u64;
                 return Ok(QueryResult {
@@ -772,12 +804,18 @@ impl TableManager {
                     explain: None,
                     skipped: false,
                     versions: None,
-                    corrupt_records: Vec::new(),
+                    corrupt_records: corrupt,
                 });
             }
 
-            let mut result_qv =
-                apply_select_value_bytes(&matched, &query.select, interner, ctx.scalars.clone())?;
+            let mut result_qv = apply_select_value_bytes(
+                &matched,
+                &query.select,
+                interner,
+                ctx.scalars.clone(),
+                self.name(),
+                &mut corrupt,
+            )?;
 
             if query.select.distinct {
                 result_qv = exec::apply_distinct_qv(result_qv);
@@ -807,7 +845,7 @@ impl TableManager {
                 explain: None,
                 skipped: false,
                 versions: versions_from_matched(query, self.mvcc_store_ref(), &matched),
-                corrupt_records: Vec::new(),
+                corrupt_records: corrupt,
             })
         }
     }

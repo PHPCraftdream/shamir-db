@@ -145,10 +145,16 @@ impl TableManager {
         // S4: matched is now Bytes-typed; all three branches consume Bytes.
         let has_group_by = query.group_by.is_some();
         let has_agg = exec::has_aggregates(&query.select);
+        let mut corrupt: Vec<crate::query::read::CorruptRecordRef> = Vec::new();
 
-        if let Some((paged, pagination)) =
-            try_project_page_only_bytes(query, &matched, interner, ctx.scalars.clone())?
-        {
+        if let Some((paged, pagination)) = try_project_page_only_bytes(
+            query,
+            &matched,
+            interner,
+            ctx.scalars.clone(),
+            self.name(),
+            &mut corrupt,
+        )? {
             let records_returned = paged.len() as u64;
             return Ok(QueryResult {
                 records: paged,
@@ -163,7 +169,7 @@ impl TableManager {
                 explain: None,
                 skipped: false,
                 versions: None,
-                corrupt_records: Vec::new(),
+                corrupt_records: corrupt,
             });
         }
 
@@ -175,7 +181,14 @@ impl TableManager {
             exec::validate_aggregate_select(&query.select)?;
             exec::apply_aggregate_all(&matched, &query.select, interner, ctx.scalars.clone())
         } else {
-            apply_select_value_bytes(&matched, &query.select, interner, ctx.scalars.clone())?
+            apply_select_value_bytes(
+                &matched,
+                &query.select,
+                interner,
+                ctx.scalars.clone(),
+                self.name(),
+                &mut corrupt,
+            )?
         };
 
         if query.select.distinct {
@@ -203,7 +216,7 @@ impl TableManager {
             explain: None,
             skipped: false,
             versions: None,
-            corrupt_records: Vec::new(),
+            corrupt_records: corrupt,
         })
     }
 
@@ -343,18 +356,22 @@ impl TableManager {
         // ── 5. Project each version's value bytes via the RecordView lens
         //     and attach `_version` and `_ts`.
         let mut out_records: Vec<QueryRecord> = Vec::with_capacity(rows.len());
+        let mut corrupt: Vec<crate::query::read::CorruptRecordRef> = Vec::new();
         for (id, version, ts, value_bytes) in rows {
             // Project directly from the version's storage bytes via the
             // RecordView lens (no full InnerValue decode for the common
             // map-record case; bare-scalar history values fall back to a
             // transient InnerValue inside the helper). A corrupt entry
             // (engine-written bytes — should never fire) yields a Null row
-            // rather than being skipped.
+            // (rather than being skipped) AND is now reported via
+            // `corrupt_records` (F-30/#823).
             let mut projected = apply_select_value_bytes(
                 &[(id, value_bytes)],
                 &query.select,
                 interner,
                 ctx.scalars.clone(),
+                self.name(),
+                &mut corrupt,
             )?;
             // apply_select_value returns one QueryValue per input record.
             let row_qv = projected
@@ -406,7 +423,7 @@ impl TableManager {
             explain: None,
             skipped: false,
             versions: None,
-            corrupt_records: Vec::new(),
+            corrupt_records: corrupt,
         })
     }
 }

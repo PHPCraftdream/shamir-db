@@ -530,33 +530,67 @@ artifact).
   from the base reference config alone does not see this knob documented
   inline. Not fixed here — tracked as its own follow-up task (mirroring how
   the corrupt-record bullet above tracks its own sibling-file follow-up).
-- **Corrupt-record reporting covers `read_exec.rs`'s scan paths only; one
-  sibling file still silently skips corrupt records (F-10, #800).** A row
-  whose value bytes fail to decode inside a scan is not aborted (a single
-  corrupt row aborting an otherwise-successful query over millions of good
-  rows would be worse than a documented gap): it is skipped from
-  `QueryResult.records` (unchanged) and now reported via the new
-  `QueryResult.corrupt_records: Vec<CorruptRecordRef>` field
-  (`crates/shamir-query-types/src/read/query_result.rs`) instead of
-  silently vanishing from the result count. Each entry is a `{ table,
-  id }` pair — the id is still resolvable even though the value failed to
-  decode, since ids are read independently of the value payload. The
-  field is omitted from the wire when empty
+- **Corrupt-record reporting now covers every reachable engine read path
+  except `table_manager_streaming.rs`'s `filter_stream`/`filter_stream_tx`
+  (F-10 #800 + F-22 #815 + F-30 #823).** A row whose value bytes fail to
+  decode inside a scan is not aborted (a single corrupt row aborting an
+  otherwise-successful query over millions of good rows would be worse
+  than a documented gap): it is skipped from `QueryResult.records`
+  (unchanged) and reported via `QueryResult.corrupt_records:
+  Vec<CorruptRecordRef>` (`crates/shamir-query-types/src/read/
+  query_result.rs`) instead of silently vanishing from the result count.
+  Each entry is a `{ table, id }` pair — the id is still resolvable even
+  though the value failed to decode, since ids are read independently of
+  the value payload. The field is omitted from the wire when empty
   (`#[serde(default, skip_serializing_if = "Vec::is_empty")]`), so an old
   peer that doesn't know about it never observes it, and a new peer
-  reading an old response gets an empty `Vec` by default. Coverage as of
-  F-10: all ~14 decode-failure sites in
-  `crates/shamir-engine/src/table/read_exec.rs` (`read_collecting`,
-  `read_counting`, `read_streaming`, the index2 fast path, and the
-  filtered-vector-scan / `merge_staged_filtered` /
-  `build_filtered_vector_result` trio) populate `corrupt_records`. **One
-  sibling file was explicitly left out of scope and still skips corrupt
-  records without reporting them**: `crates/shamir-engine/src/table/
-  table_manager_streaming.rs` (same corrupt-VALUE-decode `Err(_) =>
-  false`/`continue` skip pattern as `read_exec.rs`, e.g. `filter_stream`'s
-  malformed-`RecordView` skip at ~line 185 and its ~line 321-323
-  counterpart, not yet wired into `corrupt_records` — tracked as follow-up
-  work). `crates/shamir-engine/src/table/table_manager_index_mgmt.rs`
+  reading an old response gets an empty `Vec` by default.
+  - **F-10 (#800):** all ~14 decode-failure sites in
+    `crates/shamir-engine/src/table/read_exec.rs` (`read_collecting`,
+    `read_counting`, `read_streaming`, the index2 fast path, and the
+    filtered-vector-scan / `merge_staged_filtered` /
+    `build_filtered_vector_result` trio).
+  - **F-30 (#823, this entry's latest extension):** `read_exec.rs`'s two
+    byte-level free functions, `try_project_page_only_bytes` (LIMIT
+    push-down fallback) and `apply_select_value_bytes` — previously
+    documented as out of scope because they have no `QueryResult` directly
+    in scope — now take a `&mut Vec<CorruptRecordRef>` accumulator
+    parameter (mirroring F-10's own convention) that each of their ~10
+    real call sites populates and threads to its own eventual
+    `QueryResult` construction: `crates/shamir-engine/src/table/
+    read_index_scan.rs` (`read_sorted_index_scan`, `read_order_limit_fast`,
+    `read_keyset_seek`, `read_index_scan`'s plain-SELECT branch) and
+    `crates/shamir-engine/src/table/read_temporal.rs` (`read_as_of`,
+    `read_history`).
+  - **Still NOT wired, and expected to stay that way:**
+    `crates/shamir-engine/src/table/table_manager_streaming.rs`'s
+    `filter_stream` (malformed-`RecordView` skip, `Err(_) => false`) and
+    `filter_stream_tx` (its ~line 321-323 counterpart, `Err(_) => false`).
+    These return a raw `Stream<Item = DbResult<Vec<(RecordId, RecordCow)>>>`,
+    not a `QueryResult` — there is no natural `corrupt_records` sink
+    without changing the stream's item type to carry corrupt markers
+    alongside matched rows, a real API redesign, not a small fix.
+    `filter_stream_tx` has no production caller (only
+    `crates/shamir-engine/src/table/tests/filter_stream_tests.rs` and
+    `crates/shamir-engine/src/tx/tests/ssi_phantom_tests/
+    predicate_capture_tests.rs` reach it) — genuinely dead code, so this is
+    moot for it today. `filter_stream` itself, however, DOES have a real
+    caller: `TableManager::lock_query_reads`
+    (`table_manager_streaming.rs`), the Pessimistic-isolation lock-acquisition
+    pre-pass invoked from `read_tx_with_encoding` for any WHERE-bearing
+    SELECT run under `IsolationLevel::Pessimistic` (reachable in production
+    via `crates/shamir-engine/src/query/batch/query_runner.rs`'s tx-scoped
+    SELECT handling) — correcting an earlier investigation that had judged
+    both methods unreached. This does not leave a silent reporting gap in
+    practice: `lock_query_reads` only uses `filter_stream`'s output to
+    acquire per-row locks (it builds no `QueryResult` and has none in
+    scope); the SAME query's actual data read runs separately through
+    `read_impl` (`read_exec.rs`), which — after this task — reports the
+    same corrupt row via `corrupt_records` regardless of which dispatch
+    branch it takes. Widening `filter_stream`'s stream item type so the
+    lock-acquisition pre-pass can *also* report independently is tracked as
+    its own future follow-up if ever needed, not done speculatively here.
+  `crates/shamir-engine/src/table/table_manager_index_mgmt.rs`
   does NOT have this pattern (re-verified for F-20/#813: its one `continue`,
   ~line 854 inside the sorted-index rename-migration helper, is a
   malformed-KEY length guard — `if key.len() < 9 { continue; }` — on a
@@ -564,12 +598,7 @@ artifact).
   unrelated defensive skip, not a corrupt-record VALUE silently dropped
   from a query result; it was previously miscited here alongside
   `table_manager_streaming.rs` as having "the same" pattern, which this
-  correction removes). Also not wired: `try_project_page_only_bytes`'s
-  LIMIT push-down fallback in `read_exec.rs` itself is a free function
-  with no `QueryResult` in scope to attach a corrupt entry to, and its two
-  callers (`crates/shamir-engine/src/table/read_index_scan.rs`,
-  `crates/shamir-engine/src/table/read_temporal.rs`) are themselves out of
-  this task's scope — see the comment at that call site for detail.
+  correction removes).
   **SDK surface (F-22, #815, closed):** `corrupt_records` is now typed on
   the TS side too — `CorruptRecordRef` / `QueryResult.corrupt_records?` in
   `crates/shamir-client-ts/src/core/types/batch.ts`. Also fixed as part of

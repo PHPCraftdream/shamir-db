@@ -2520,11 +2520,18 @@ pub(super) fn try_project_page_only(
 /// `RecordView` for projection. Bare-scalar / non-map records where
 /// `RecordView::new` fails are decoded via `InnerValue::from_bytes` as a
 /// fallback (records are NEVER silently dropped).
+///
+/// F-30 (#823): `table` + `corrupt` let a row that fails BOTH decode
+/// attempts be reported via the caller's `QueryResult::corrupt_records`
+/// instead of silently vanishing (unchanged row-skip behaviour, only the
+/// reporting changes — mirrors F-10/#800's convention in this same file).
 pub(super) fn try_project_page_only_bytes(
     query: &ReadQuery,
     matched: &[(RecordId, Bytes)],
     interner: &Interner,
     scalars: ScalarResolver,
+    table: &str,
+    corrupt: &mut Vec<CorruptRecordRef>,
 ) -> DbResult<Option<(Vec<crate::query::read::QueryRecord>, Option<PaginationInfo>)>> {
     // Same eligibility gate as the InnerValue variant.
     if query.order_by.is_some()
@@ -2551,22 +2558,20 @@ pub(super) fn try_project_page_only_bytes(
     let page_end = skip.saturating_add(take).min(total_matches);
     let page_slice = &matched[page_start..page_end];
 
-    // F-10 (#800): this is a free function (no `&self`, no table name) whose
-    // `Option<(Vec<QueryRecord>, Option<PaginationInfo>)>` return has no
-    // `QueryResult` to attach a `corrupt_records` entry to — both call sites
-    // (`read_index_scan.rs`, `read_temporal.rs`) are outside this task's
-    // `read_exec.rs`-only scope. A row that fails to decode here is still
-    // skipped (unchanged behaviour); reporting it would require threading a
-    // corrupt-record accumulator through this function's signature AND both
-    // out-of-scope callers, which the brief for #800 explicitly defers.
     let proj = exec::SelectProjection::new(&query.select, interner, scalars.clone())?;
     let mut paged: Vec<crate::query::read::QueryRecord> = Vec::with_capacity(page_slice.len());
-    for (_, bytes) in page_slice {
+    for (rid, bytes) in page_slice {
         let qv = match shamir_types::record_view::RecordView::new(bytes) {
             Ok(view) => proj.project_value(&view, interner),
             Err(_) => match InnerValue::from_bytes(bytes.as_ref()) {
                 Ok(iv) => proj.project_value(&iv, interner),
-                Err(_) => continue,
+                Err(_) => {
+                    corrupt.push(CorruptRecordRef {
+                        table: table.to_string(),
+                        id: *rid,
+                    });
+                    continue;
+                }
             },
         };
         paged.push(crate::query::read::QueryRecord::Direct(qv));
@@ -2599,21 +2604,35 @@ pub(super) fn try_project_page_only_bytes(
 ///
 /// F-26 (#819): fallible — `SelectProjection::new` rejects
 /// `SelectItem::Expression`.
+///
+/// F-30 (#823): `table` + `corrupt` let a row that fails BOTH decode
+/// attempts be reported via the caller's `QueryResult::corrupt_records`
+/// instead of silently becoming a `QueryValue::Null` placeholder row
+/// (unchanged row-skip-from-projection behaviour, only the reporting
+/// changes — mirrors F-10/#800's convention in this same file).
 pub(super) fn apply_select_value_bytes(
     matched: &[(RecordId, Bytes)],
     select: &crate::query::read::Select,
     interner: &Interner,
     scalars: ScalarResolver,
+    table: &str,
+    corrupt: &mut Vec<CorruptRecordRef>,
 ) -> DbResult<Vec<QueryValue>> {
     let proj = exec::SelectProjection::new(select, interner, scalars.clone())?;
     Ok(matched
         .iter()
         .map(
-            |(_, bytes)| match shamir_types::record_view::RecordView::new(bytes) {
+            |(rid, bytes)| match shamir_types::record_view::RecordView::new(bytes) {
                 Ok(view) => proj.project_value(&view, interner),
                 Err(_) => match InnerValue::from_bytes(bytes.as_ref()) {
                     Ok(iv) => proj.project_value(&iv, interner),
-                    Err(_) => QueryValue::Null,
+                    Err(_) => {
+                        corrupt.push(CorruptRecordRef {
+                            table: table.to_string(),
+                            id: *rid,
+                        });
+                        QueryValue::Null
+                    }
                 },
             },
         )

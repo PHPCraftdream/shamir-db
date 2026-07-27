@@ -4,6 +4,7 @@ pub mod asof_read_tests;
 pub mod bindings_len_tests;
 pub mod buffer_config_tests;
 pub mod concurrent_tests;
+pub mod corrupt_record_byte_path_tests;
 pub mod corrupt_record_tests;
 pub mod covering_read_tests;
 pub mod delete_view_parity_tests;
