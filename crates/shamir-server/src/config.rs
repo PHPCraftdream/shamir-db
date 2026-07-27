@@ -366,13 +366,41 @@ pub struct QueryLimitsConfig {
     #[serde(default = "default_max_queries_per_batch")]
     pub max_queries_per_batch: usize,
     /// RI-15 — global cap (bytes) on the SUM of in-flight response memory
-    /// across every concurrently-executing batch/connection. `None`
-    /// (default) = unbounded, preserving pre-RI-15 behavior: only the
-    /// per-batch `max_result_size_bytes` cap applies. When set, MUST be
+    /// across every concurrently-executing batch/connection. Only the
+    /// per-batch `max_result_size_bytes` cap gates a single response; without
+    /// this field nothing bounds the SUM across every concurrent
+    /// connection (`crates/shamir-server/src/byte_budget.rs`'s module doc:
+    /// worst case ~64 GiB buffered at `max_active_connections = 1000` × a
+    /// 64 MiB per-batch cap).
+    ///
+    /// F-29 (#822): the key being ABSENT resolves to a finite default,
+    /// `4 * default_max_result_size_bytes()` (256 MiB) — matches the
+    /// shipped `server.medium.example.ktav`/`server.small.example.ktav`
+    /// profiles' own "4x max_result_size_bytes" convention, and is derived
+    /// from (not hardcoded independent of) `default_max_result_size_bytes`
+    /// so the two stay in lockstep if that default ever changes.
+    /// `ByteBudget::acquire` never hard-errors on exhaustion — it waits
+    /// (bounded, wakes on release) until room frees up — so this default
+    /// change turns unbounded-memory-growth into bounded backpressure for
+    /// any deployment that was relying on the old unbounded default,
+    /// rather than introducing a new rejection/error path.
+    ///
+    /// An operator can still opt BACK into unbounded behavior by setting
+    /// the key EXPLICITLY to `null` in their `.ktav` — serde's `Option<T>`
+    /// deserialization honors an explicit null independently of
+    /// `#[serde(default = ...)]` (the default fn only runs when the key is
+    /// missing entirely), so this round-trips cleanly: absent → finite
+    /// default, explicit `null` → `None`/unbounded. `server_launcher.rs`
+    /// logs a `tracing::warn!` at boot whenever the resolved value is
+    /// `None`, since that is now an explicit escape hatch rather than "the
+    /// default nobody thought about".
+    ///
+    /// When set (to any `Some(_)`, including the new default), MUST be
     /// `>= max_result_size_bytes` — otherwise no single max-size batch
     /// could ever be admitted; `Config::validate` rejects that
-    /// configuration at startup.
-    #[serde(default)]
+    /// configuration at startup. The derived default trivially satisfies
+    /// this (it IS `4 * max_result_size_bytes`'s own default).
+    #[serde(default = "default_max_inflight_response_bytes")]
     pub max_inflight_response_bytes: Option<usize>,
 }
 
@@ -382,7 +410,7 @@ impl Default for QueryLimitsConfig {
             max_result_size_bytes: default_max_result_size_bytes(),
             max_execution_time_secs: default_max_execution_time_secs(),
             max_queries_per_batch: default_max_queries_per_batch(),
-            max_inflight_response_bytes: None,
+            max_inflight_response_bytes: default_max_inflight_response_bytes(),
         }
     }
 }
@@ -395,6 +423,14 @@ fn default_max_execution_time_secs() -> u64 {
 }
 fn default_max_queries_per_batch() -> usize {
     100
+}
+
+/// F-29 (#822): finite safe default for `max_inflight_response_bytes`,
+/// derived from (not hardcoded independent of) `default_max_result_size_bytes`
+/// so it automatically tracks that default — currently
+/// `4 * 64 MiB = 256 MiB`, matching the shipped medium profile's own value.
+fn default_max_inflight_response_bytes() -> Option<usize> {
+    Some(default_max_result_size_bytes() * 4)
 }
 
 #[derive(Debug, Clone, Deserialize)]

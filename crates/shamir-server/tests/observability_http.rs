@@ -304,3 +304,123 @@ async fn boot_path_still_rejects_non_loopback_bind_by_default() {
         "error should mention the observability bind rejection, got: {msg}"
     );
 }
+
+/// F-29 (#822): `/metrics` must expose the new RI-15 in-flight-response-byte
+/// budget gauges (`shamir_inflight_response_bytes_used`/`_cap`), registered
+/// at zero-touch so a Prometheus scraper sees them from the very first
+/// scrape (same convention as the existing `shamir_tx_*`/`shamir_gc_*`
+/// gauges). Exercises `observability::spawn_with_byte_budget` directly
+/// (mirrors `refuses_non_loopback_bind_without_opt_in`'s direct-`spawn`
+/// style) with a finite `ByteBudget`, so `_cap` must reflect that finite
+/// number, not the unbounded sentinel.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn metrics_exposes_finite_byte_budget_gauges() {
+    use shamir_server::byte_budget::ByteBudget;
+    use shamir_server::observability::{
+        spawn_with_byte_budget, ObservabilityError, ObservabilityState,
+    };
+
+    let state = ObservabilityState::new();
+    let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
+    let cap_bytes = 256 * 1024 * 1024_usize;
+    // The Prometheus recorder is global per-process, and nextest can run
+    // every `#[tokio::test]` in this binary concurrently — whichever gets
+    // there first wins the `install_recorder` race, so mirror
+    // `server_launcher.rs`'s own try-then-fallback pattern rather than
+    // assuming this test runs first (or that `/metrics` would 503 forever
+    // otherwise, which is the failure mode without this fallback).
+    let handle = match spawn_with_byte_budget(
+        addr,
+        state.clone(),
+        true,
+        None,
+        Some(ByteBudget::new(Some(cap_bytes))),
+        false,
+    )
+    .await
+    {
+        Ok(h) => h,
+        Err(ObservabilityError::RecorderInstall(_)) => spawn_with_byte_budget(
+            addr,
+            state,
+            false,
+            None,
+            Some(ByteBudget::new(Some(cap_bytes))),
+            false,
+        )
+        .await
+        .expect("spawn_with_byte_budget (recorder already installed)"),
+        Err(e) => panic!("spawn_with_byte_budget: {e}"),
+    };
+
+    let (status, body) = http_get(handle.bound_addr, "/metrics").await;
+    assert_eq!(status, 200, "metrics status");
+    assert!(
+        body.contains("shamir_inflight_response_bytes_used"),
+        "metrics body must include shamir_inflight_response_bytes_used, \
+         got first 800 bytes: {:?}",
+        &body.chars().take(800).collect::<String>()
+    );
+    assert!(
+        body.contains("shamir_inflight_response_bytes_cap"),
+        "metrics body must include shamir_inflight_response_bytes_cap, \
+         got first 800 bytes: {:?}",
+        &body.chars().take(800).collect::<String>()
+    );
+    // Zero-touch: used() starts at 0 (no outstanding guards).
+    assert!(
+        body.contains("shamir_inflight_response_bytes_used 0"),
+        "used gauge must start at 0, got: {:?}",
+        &body.chars().take(800).collect::<String>()
+    );
+    // The configured finite cap must appear verbatim (not the unbounded
+    // sentinel -1).
+    let expected_cap_line = format!("shamir_inflight_response_bytes_cap {cap_bytes}");
+    assert!(
+        body.contains(&expected_cap_line),
+        "cap gauge must reflect the configured finite cap ({cap_bytes}), got: {:?}",
+        &body.chars().take(800).collect::<String>()
+    );
+
+    handle.shutdown().await;
+}
+
+/// Companion to the above: when `byte_budget` is `None` (mirrors a
+/// deployment that explicitly opted into unbounded via
+/// `max_inflight_response_bytes: null`), `shamir_inflight_response_bytes_cap`
+/// must expose the unbounded sentinel (-1) rather than a misleading 0 (which
+/// would look like "cap of zero bytes", the opposite of unbounded).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn metrics_exposes_unbounded_sentinel_when_no_byte_budget() {
+    use shamir_server::observability::{
+        spawn_with_byte_budget, ObservabilityError, ObservabilityState,
+    };
+
+    let state = ObservabilityState::new();
+    let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
+    // Same try-then-fallback recorder-install race as
+    // `metrics_exposes_finite_byte_budget_gauges` above — the global
+    // Prometheus recorder can only be installed once per process, and
+    // nextest may run this test before or after another test in the same
+    // binary already installed it.
+    let handle = match spawn_with_byte_budget(addr, state.clone(), true, None, None, false).await {
+        Ok(h) => h,
+        Err(ObservabilityError::RecorderInstall(_)) => {
+            spawn_with_byte_budget(addr, state, false, None, None, false)
+                .await
+                .expect("spawn_with_byte_budget (recorder already installed)")
+        }
+        Err(e) => panic!("spawn_with_byte_budget: {e}"),
+    };
+
+    let (status, body) = http_get(handle.bound_addr, "/metrics").await;
+    assert_eq!(status, 200, "metrics status");
+    assert!(
+        body.contains("shamir_inflight_response_bytes_cap -1"),
+        "cap gauge must expose the unbounded sentinel (-1) when no \
+         ByteBudget is wired in, got first 800 bytes: {:?}",
+        &body.chars().take(800).collect::<String>()
+    );
+
+    handle.shutdown().await;
+}

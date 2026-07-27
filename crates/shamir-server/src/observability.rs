@@ -55,6 +55,8 @@ use tokio::net::TcpListener;
 use tokio::sync::Notify;
 use tokio::task::JoinHandle;
 
+use crate::byte_budget::ByteBudget;
+
 /// Live state shared between the HTTP handlers and the boot path.
 ///
 /// `ready` flips to `true` once `ServerLauncher::launch` has bound every
@@ -144,6 +146,15 @@ pub enum ObservabilityError {
 /// when no RepoTxGate is running yet; the gauges are still registered at
 /// zero so Prometheus scrapers see them from the first scrape.
 ///
+/// `byte_budget` — F-29 (#822): optional RI-15 global in-flight
+/// response-byte budget to bridge into Prometheus gauges
+/// (`shamir_inflight_response_bytes_used`/`_cap`), snapshotted every 5 s
+/// in the same background poller alongside `tx_metrics`. Pass `None` in
+/// contexts that don't construct a `ByteBudget` (e.g. tests that call
+/// `spawn` directly without a full server boot) — the gauges are still
+/// registered at zero so Prometheus scrapers see them from the first
+/// scrape.
+///
 /// `allow_public_metrics` — M-tier audit M5. When `false` (default for
 /// callers), a non-loopback `addr` triggers
 /// [`ObservabilityError::NonLoopbackBindRejected`] before any socket
@@ -157,6 +168,31 @@ pub async fn spawn(
     state: Arc<ObservabilityState>,
     install_recorder: bool,
     tx_metrics: Option<Arc<shamir_tx::TxMetrics>>,
+    allow_public_metrics: bool,
+) -> Result<ObservabilityHandle, ObservabilityError> {
+    spawn_with_byte_budget(
+        addr,
+        state,
+        install_recorder,
+        tx_metrics,
+        None,
+        allow_public_metrics,
+    )
+    .await
+}
+
+/// Same as [`spawn`], plus an optional [`ByteBudget`] to bridge into the
+/// `shamir_inflight_response_bytes_used`/`_cap` gauges (F-29, #822). Split
+/// out so `spawn`'s existing call sites/signature (already used directly by
+/// `observability_http.rs`'s tests) don't need updating just to add this one
+/// new optional argument.
+#[allow(clippy::too_many_arguments)]
+pub async fn spawn_with_byte_budget(
+    addr: SocketAddr,
+    state: Arc<ObservabilityState>,
+    install_recorder: bool,
+    tx_metrics: Option<Arc<shamir_tx::TxMetrics>>,
+    byte_budget: Option<ByteBudget>,
     allow_public_metrics: bool,
 ) -> Result<ObservabilityHandle, ObservabilityError> {
     // 0. M-tier audit M5: reject non-loopback binds without explicit
@@ -248,6 +284,26 @@ pub async fn spawn(
         "GC entries deleted"
     );
 
+    // RI-15 / F-29 (#822) — global in-flight response-byte budget gauges.
+    // `used()`/`cap()` are cheap `AtomicUsize` loads (see `byte_budget.rs`);
+    // snapshotted every poller cycle below alongside the tx/gc gauges.
+    metrics::describe_gauge!(
+        "shamir_inflight_response_bytes_used",
+        metrics::Unit::Bytes,
+        "Bytes currently reserved against the RI-15 global in-flight \
+         response-byte budget (sum across every concurrently-executing \
+         batch/connection)"
+    );
+    metrics::describe_gauge!(
+        "shamir_inflight_response_bytes_cap",
+        metrics::Unit::Bytes,
+        "Configured cap (bytes) on the RI-15 global in-flight \
+         response-byte budget. -1 means the budget is unbounded (operator \
+         explicitly opted out via `max_inflight_response_bytes: null`) — \
+         distinguishable from a legitimate cap because a real cap can \
+         never be negative"
+    );
+
     // Zero-touch registration so gauges appear in /metrics from first scrape.
     metrics::gauge!("shamir_tx_started_total").set(0.0);
     metrics::gauge!("shamir_tx_committed_total").set(0.0);
@@ -256,6 +312,14 @@ pub async fn spawn(
     metrics::gauge!("shamir_tx_aborted_storage_total").set(0.0);
     metrics::gauge!("shamir_gc_runs_total").set(0.0);
     metrics::gauge!("shamir_gc_entries_deleted_total").set(0.0);
+    metrics::gauge!("shamir_inflight_response_bytes_used").set(0.0);
+    metrics::gauge!("shamir_inflight_response_bytes_cap").set(
+        byte_budget
+            .as_ref()
+            .and_then(ByteBudget::cap)
+            .map(|c| c as f64)
+            .unwrap_or(-1.0),
+    );
 
     // 4. Background poller: refresh process metrics every 5 s. Cheap
     // (~30-50 µs of work). The first collect() is invoked synchronously
@@ -264,6 +328,7 @@ pub async fn spawn(
     let shutdown = Arc::new(Notify::new());
     let shutdown_for_poller = shutdown.clone();
     let tx_metrics_clone = tx_metrics;
+    let byte_budget_clone = byte_budget;
     let poller_task = tokio::spawn(async move {
         let mut interval = tokio::time::interval(Duration::from_secs(5));
         // Burn the immediate first tick — we already collected once.
@@ -283,6 +348,12 @@ pub async fn spawn(
                         metrics::gauge!("shamir_tx_aborted_storage_total").set(snap.txs_aborted_storage as f64);
                         metrics::gauge!("shamir_gc_runs_total").set(snap.gc_runs as f64);
                         metrics::gauge!("shamir_gc_entries_deleted_total").set(snap.gc_entries_deleted as f64);
+                    }
+                    // RI-15 / F-29 (#822): `used()` moves every request, so it
+                    // (unlike `cap()`, fixed at boot and already set once at
+                    // registration above) needs a fresh snapshot every cycle.
+                    if let Some(ref bb) = byte_budget_clone {
+                        metrics::gauge!("shamir_inflight_response_bytes_used").set(bb.used() as f64);
                     }
                 }
             }

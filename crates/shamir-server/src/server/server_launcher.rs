@@ -435,6 +435,28 @@ impl ServerLauncher {
                 }
             }
         }
+        // RI-15 — global in-flight response-byte budget. F-29 (#822): the
+        // code-level default is now finite
+        // (`default_max_inflight_response_bytes`, 4x `max_result_size_bytes`'s
+        // own default) — `None` here means the operator EXPLICITLY set
+        // `max_inflight_response_bytes: null`, opting back into unbounded
+        // (pre-RI-15) behavior: only the per-batch `max_result_size_bytes`
+        // cap applies, no ceiling on the SUM across concurrent connections.
+        // Warn at boot so that choice isn't silent. `Config::validate`
+        // already rejected a configured `Some(_)` value below
+        // `max_result_size_bytes` before boot reached this point.
+        let inflight_cap = config.security.query_limits.max_inflight_response_bytes;
+        if inflight_cap.is_none() {
+            tracing::warn!(
+                "security.query_limits.max_inflight_response_bytes is explicitly unbounded \
+                 (null) — no ceiling on the SUM of in-flight response bytes across every \
+                 concurrent connection; only the per-batch max_result_size_bytes cap applies. \
+                 This is an explicit opt-out of the F-29 finite default — confirm this is \
+                 intentional for this deployment"
+            );
+        }
+        let byte_budget = ByteBudget::new(inflight_cap);
+
         let handler_concrete: Arc<ShamirDbHandler> = Arc::new(
             ShamirDbHandler::with_admin(
                 shamir.clone(),
@@ -460,14 +482,7 @@ impl ServerLauncher {
                 idle_timeout_secs: config.security.cursors.idle_timeout_secs,
                 max_cursor_page_size: config.security.cursors.max_cursor_page_size,
             })
-            // RI-15 — global in-flight response-byte budget. `None` (the
-            // default) preserves pre-RI-15 behavior: unbounded, only the
-            // per-batch `max_result_size_bytes` cap above applies.
-            // `Config::validate` already rejected a configured value below
-            // `max_result_size_bytes` before boot reached this point.
-            .with_byte_budget(ByteBudget::new(
-                config.security.query_limits.max_inflight_response_bytes,
-            ))
+            .with_byte_budget(byte_budget.clone())
             .with_session_store(session_store.clone()),
         );
         let tx_registry_for_reaper = handler_concrete.tx_registry();
@@ -801,11 +816,16 @@ impl ServerLauncher {
             // default `false`). A non-loopback `addr` is rejected up-front
             // unless the operator has explicitly opted in.
             let allow_public_metrics = config.observability.allow_public_metrics;
-            let handle = match crate::observability::spawn(
+            // F-29 (#822): thread the same `ByteBudget` used by the request
+            // handler into the observability poller so
+            // `shamir_inflight_response_bytes_used`/`_cap` reflect the real
+            // RI-15 budget this server booted with, not a detached instance.
+            let handle = match crate::observability::spawn_with_byte_budget(
                 addr,
                 state.clone(),
                 true,
                 None,
+                Some(byte_budget.clone()),
                 allow_public_metrics,
             )
             .await
@@ -814,11 +834,12 @@ impl ServerLauncher {
                 Err(crate::observability::ObservabilityError::RecorderInstall(_)) => {
                     // Recorder already installed (typical in test process):
                     // re-spawn without trying to install again.
-                    crate::observability::spawn(
+                    crate::observability::spawn_with_byte_budget(
                         addr,
                         state.clone(),
                         false,
                         None,
+                        Some(byte_budget.clone()),
                         allow_public_metrics,
                     )
                     .await

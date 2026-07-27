@@ -145,16 +145,110 @@ fn medium_profile_parses_and_validates() {
     );
 }
 
-// =============== RI-15: max_inflight_response_bytes validation ===============
+// =============== RI-15 / F-29: max_inflight_response_bytes validation ======
 
-/// Default `max_inflight_response_bytes` is `None` (unbounded) — RI-15
-/// must not change behavior for operators who don't opt in.
+/// F-29 (#822): the code-level default is now a FINITE value
+/// (`4 * default_max_result_size_bytes()` = 256 MiB), not `None`/unbounded.
+/// `ByteBudget::acquire` never hard-errors on exhaustion (it waits, bounded,
+/// until room frees up — see `byte_budget.rs`), so this default change turns
+/// unbounded memory growth into bounded backpressure rather than a new
+/// rejection path for deployments that never configured this knob.
 #[test]
-fn default_max_inflight_response_bytes_is_none() {
+fn default_max_inflight_response_bytes_is_finite_256_mib() {
     assert_eq!(
         QueryLimitsConfig::default().max_inflight_response_bytes,
-        None,
-        "default must be unbounded so RI-15 preserves pre-existing behavior"
+        Some(256 * 1024 * 1024),
+        "code-level default max_inflight_response_bytes must be finite \
+         (4x the 64 MiB max_result_size_bytes default) after F-29"
+    );
+}
+
+/// A minimal `.ktav` that OMITS `max_inflight_response_bytes` entirely must
+/// resolve to the finite default via `#[serde(default = "...")]` — the same
+/// omitted-key path a pre-F-29 config file would take on upgrade.
+#[test]
+fn omitted_max_inflight_response_bytes_resolves_to_finite_default() {
+    let src = "\
+data_dir: /var/lib/shamir-db
+
+kdf_defaults: {
+    memory_kb: 131072
+    time: 4
+    parallelism: 1
+    argon2_version: 19
+}
+
+listeners: [
+    {
+        kind: tcp
+        addr: 127.0.0.1:7331
+        profile: tls_exporter
+    }
+]
+
+tls: {
+    cert_path: /var/lib/shamir-db/cert.pem
+    key_path: /var/lib/shamir-db/key.pem
+}
+";
+    let cfg: Config = ktav::from_str(src).expect("parse ok");
+    cfg.validate().expect("validate ok");
+    assert_eq!(
+        cfg.security.query_limits.max_inflight_response_bytes,
+        Some(256 * 1024 * 1024),
+        "omitting the key entirely must resolve to the finite F-29 default"
+    );
+}
+
+/// F-29's escape hatch: an operator who EXPLICITLY sets
+/// `max_inflight_response_bytes: null` must still get a genuinely unbounded
+/// `Option<usize>` (`None`) — serde's `Option<T>` deserialization honors an
+/// explicit null independently of `#[serde(default = "...")]` (the default
+/// fn only ever runs when the key is missing entirely), so "key absent" and
+/// "key explicitly null" do NOT collapse to the same non-distinguishable
+/// case here. This is the deliberately-kept opt-back-into-unbounded path;
+/// `server_launcher.rs` logs a `tracing::warn!` when it observes this
+/// resolved `None` at boot (not independently asserted here — see this
+/// crate's existing convention: no log-capture test harness exists yet, so
+/// only the resolved `Option<usize>` value is checked, per this task's
+/// brief).
+#[test]
+fn explicit_null_max_inflight_response_bytes_stays_unbounded() {
+    let src = "\
+data_dir: /var/lib/shamir-db
+
+kdf_defaults: {
+    memory_kb: 131072
+    time: 4
+    parallelism: 1
+    argon2_version: 19
+}
+
+listeners: [
+    {
+        kind: tcp
+        addr: 127.0.0.1:7331
+        profile: tls_exporter
+    }
+]
+
+tls: {
+    cert_path: /var/lib/shamir-db/cert.pem
+    key_path: /var/lib/shamir-db/key.pem
+}
+
+security: {
+    query_limits: {
+        max_inflight_response_bytes: null
+    }
+}
+";
+    let cfg: Config = ktav::from_str(src).expect("parse ok");
+    cfg.validate().expect("validate ok");
+    assert_eq!(
+        cfg.security.query_limits.max_inflight_response_bytes, None,
+        "explicit `max_inflight_response_bytes: null` must round-trip to \
+         None (unbounded) — the escape hatch F-29 deliberately keeps"
     );
 }
 

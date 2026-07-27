@@ -310,6 +310,29 @@ artifact).
   `crates/shamir-server/src/config.rs:288-318` (`max_result_size_bytes`
   default) and `:330-366` (`max_active_connections`/
   `max_active_connections_per_ip` defaults).
+- **`max_inflight_response_bytes` (RI-15's global in-flight response-byte
+  budget) — code-level default is finite (F-29, 256 MiB).** The global cap
+  on the SUM of in-flight response bytes across every
+  concurrently-executing batch/connection now defaults to
+  `4 * max_result_size_bytes`'s own default (256 MiB), not unbounded — this
+  matches the shipped `server.medium.example.ktav`/
+  `server.small.example.ktav` profiles' own convention. `ByteBudget::acquire`
+  (`crates/shamir-server/src/byte_budget.rs`) never hard-errors when the
+  budget is exhausted — it waits (bounded, wakes on release) — so a
+  deployment relying on the old unbounded default gets bounded backpressure
+  under sustained saturation, not a new rejection path, after upgrading. An
+  operator who genuinely needs unbounded behavior can still opt back in by
+  setting `security.query_limits.max_inflight_response_bytes: null`
+  explicitly in their `.ktav` (an omitted key resolves to the finite
+  default; an explicit `null` still resolves to `None`/unbounded — these are
+  distinguishable because `#[serde(default = "...")]`'s default function
+  only runs when the key is absent, not when it is present-but-null); the
+  server logs a `tracing::warn!` at boot whenever it observes this resolved
+  `None`, since it is now a deliberate escape hatch rather than an
+  unexamined default. See `crates/shamir-server/src/config.rs`'s
+  `default_max_inflight_response_bytes` and
+  `crates/shamir-server/src/server/server_launcher.rs`'s boot-time
+  `ByteBudget::new` construction.
 - **Cursors only support `Temporal::Latest` reads.** `AsOf`/`History`
   queries are rejected outright at `CreateCursor` with
   `cursor_temporal_not_supported`, not silently downgraded to `Latest`. See
