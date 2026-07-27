@@ -333,18 +333,35 @@ async fn require_footprint_if_fk_child(
 ///
 /// Returns [`IsolationLevel::Serializable`](shamir_tx::IsolationLevel::Serializable)
 /// iff `table_ref`'s table is flagged (via `RepoInstance::fk_reverse_cache`)
-/// as an FK parent with at least one non-`NoAction` `on_delete`/`on_update`
-/// action — i.e. a RESTRICT/CASCADE/SET NULL fan-out is about to run against
-/// it. Upgrading to Serializable is what makes the fan-out's child-table
-/// scans (`fk_restrict.rs`/`fk_actions.rs`/`fk_on_update.rs`) record a real
-/// `TableScan` SSI predicate, closing the cross-transaction TOCTOU race
-/// between "scan found no conflicting child row" and this tx's eventual
-/// commit. Falls back to `Snapshot` (byte-identical prior behavior) on any
-/// resolve failure or when the table has no FK-relevant role — this is a
-/// pure opportunistic upgrade, never a hard requirement for the write.
+/// as an FK parent with at least one non-`NoAction` action for the
+/// operation kind `op` selects — `FkParentOpKind::Delete` consults
+/// `FkReverseCache::is_fk_parent_with_delete_action` (the `on_delete`
+/// flag), `FkParentOpKind::Update` consults
+/// `FkReverseCache::is_fk_parent_with_update_action` (the `on_update`
+/// flag). I.e. a RESTRICT/CASCADE/SET NULL fan-out is about to run against
+/// it on that path. Upgrading to Serializable is what makes the fan-out's
+/// child-table scans (`fk_restrict.rs`/`fk_actions.rs`/`fk_on_update.rs`)
+/// record a real `TableScan` SSI predicate, closing the cross-transaction
+/// TOCTOU race between "scan found no conflicting child row" and this tx's
+/// eventual commit. Falls back to `Snapshot` (byte-identical prior behavior)
+/// on any resolve failure or when the table has no FK-relevant role for the
+/// given operation kind — this is a pure opportunistic upgrade, never a
+/// hard requirement for the write.
+///
+/// F-35: `op` was added because the cache used to carry only a single
+/// `action` field (always `on_delete`), so the UPDATE arm — which needs the
+/// `on_update` flag — silently never upgraded for an `on_delete = NoAction,
+/// on_update = Restrict/Cascade/SetNull` FK. The two arms now ask the
+/// cache the question matching their operation kind.
+enum FkParentOpKind {
+    Delete,
+    Update,
+}
+
 async fn implicit_tx_isolation_for_fk_parent(
     resolver: &dyn TableResolver,
     table_ref: &TableRef,
+    op: FkParentOpKind,
 ) -> shamir_tx::IsolationLevel {
     let repo = match resolver.resolve_repo(&table_ref.repo).await {
         Ok(repo) => repo,
@@ -365,7 +382,11 @@ async fn implicit_tx_isolation_for_fk_parent(
     {
         return shamir_tx::IsolationLevel::Snapshot;
     }
-    if cache.is_fk_parent_with_action(&table_ref.table) {
+    let is_fk_parent = match op {
+        FkParentOpKind::Delete => cache.is_fk_parent_with_delete_action(&table_ref.table),
+        FkParentOpKind::Update => cache.is_fk_parent_with_update_action(&table_ref.table),
+    };
+    if is_fk_parent {
         shamir_tx::IsolationLevel::Serializable
     } else {
         shamir_tx::IsolationLevel::Snapshot
@@ -1322,8 +1343,12 @@ impl<'a> QueryRunner<'a> {
                                     message: format!("resolve_repo({}): {}", table_ref.repo, e),
                                     code: None,
                                 })?;
-                        let isolation =
-                            implicit_tx_isolation_for_fk_parent(self.resolver, table_ref).await;
+                        let isolation = implicit_tx_isolation_for_fk_parent(
+                            self.resolver,
+                            table_ref,
+                            FkParentOpKind::Update,
+                        )
+                        .await;
                         retry_on_tx_conflict(|| async {
                             let (mut tx, _guard) = repo
                                 .begin_implicit_batch_tx_with_isolation(
@@ -1483,8 +1508,12 @@ impl<'a> QueryRunner<'a> {
                                     message: format!("resolve_repo({}): {}", table_ref.repo, e),
                                     code: None,
                                 })?;
-                        let isolation =
-                            implicit_tx_isolation_for_fk_parent(self.resolver, table_ref).await;
+                        let isolation = implicit_tx_isolation_for_fk_parent(
+                            self.resolver,
+                            table_ref,
+                            FkParentOpKind::Delete,
+                        )
+                        .await;
                         retry_on_tx_conflict(|| async {
                             let (mut tx, _guard) = repo
                                 .begin_implicit_batch_tx_with_isolation(

@@ -40,12 +40,19 @@ use crate::query::batch::TableResolver;
 use crate::query::TableRef;
 
 /// A single reverse-FK reference: a child table + child field that
-/// references some parent table with the given `on_delete` action.
+/// references some parent table with the given `on_delete`/`on_update`
+/// actions.
 ///
 /// Shared shape for both `fk_restrict.rs` (RESTRICT-only discovery) and
 /// `fk_actions.rs` (CASCADE/SET NULL discovery) — the two discovery
-/// functions filter this same cached list by `action` instead of running
-/// two independent O(tables) scans with two near-duplicate row shapes.
+/// functions filter this same cached list by `on_delete` instead of running
+/// two independent O(tables) scans with two near-duplicate row shapes. The
+/// `on_update` field is carried alongside (free — `FkAction` is a plain
+/// `Copy` enum) so the cache's O(1) role-flag helpers can answer the
+/// isolation-upgrade question for the implicit UPDATE path independently of
+/// the DELETE path (F-35: previously a single `action` field stored only
+/// `on_delete`, so an `on_delete = NoAction, on_update = Restrict` FK never
+/// got the Serializable upgrade for its implicit UPDATE).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReverseFkEntry {
     /// The child table name (same repo as the parent).
@@ -55,7 +62,9 @@ pub struct ReverseFkEntry {
     /// The parent field the child references (`ref_field`).
     pub parent_ref_field: String,
     /// The `on_delete` referential action declared on this FK.
-    pub action: FkAction,
+    pub on_delete: FkAction,
+    /// The `on_update` referential action declared on this FK.
+    pub on_update: FkAction,
 }
 
 /// One repo-wide reverse-FK reference, tagged with the PARENT table it
@@ -155,22 +164,43 @@ impl FkReverseCache {
     }
 
     /// O(1) role-flag helper for F-28 Step 5: is `table` referenced by ANY
-    /// FK with a non-`NoAction` `on_delete`/`on_update` (i.e. is it a parent
-    /// worth an isolation upgrade at implicit-delete/update-begin time)?
-    /// Derived from the SAME cached rows `get_or_build_by_parent` serves —
-    /// no second structure. Returns `false` on a cold/invalidated cache
-    /// without triggering a rebuild (a pure peek); callers needing an
-    /// authoritative answer call
-    /// [`get_or_build_by_parent`](Self::get_or_build_by_parent) first so the
-    /// cache is warm (see `query_runner.rs`'s
+    /// FK with a non-`NoAction` `on_delete` action (i.e. is it a parent
+    /// worth an isolation upgrade at implicit-DELETE-begin time)? Derived
+    /// from the SAME cached rows `get_or_build_by_parent` serves — no second
+    /// structure. Returns `false` on a cold/invalidated cache without
+    /// triggering a rebuild (a pure peek); callers needing an authoritative
+    /// answer call [`get_or_build_by_parent`](Self::get_or_build_by_parent)
+    /// first so the cache is warm (see `query_runner.rs`'s
     /// `implicit_tx_isolation_for_fk_parent`, which does exactly that).
-    pub fn is_fk_parent_with_action(&self, table: &str) -> bool {
+    pub fn is_fk_parent_with_delete_action(&self, table: &str) -> bool {
         let guard = self.state.load();
         match guard.as_ref() {
             Some(cache) => cache
                 .by_parent
                 .get(table)
-                .is_some_and(|entries| entries.iter().any(|e| e.action != FkAction::NoAction)),
+                .is_some_and(|entries| entries.iter().any(|e| e.on_delete != FkAction::NoAction)),
+            None => false,
+        }
+    }
+
+    /// O(1) role-flag helper for F-28 Step 5 / F-35: is `table` referenced
+    /// by ANY FK with a non-`NoAction` `on_update` action (i.e. is it a
+    /// parent worth an isolation upgrade at implicit-UPDATE-begin time)?
+    ///
+    /// Symmetric with [`is_fk_parent_with_delete_action`](Self::is_fk_parent_with_delete_action)
+    /// but keyed on `on_update` — the two are consulted independently so a
+    /// FK shaped `on_delete = NoAction, on_update = Restrict` upgrades the
+    /// implicit UPDATE path (this helper) without upgrading the implicit
+    /// DELETE path (the sibling helper). Same cold-cache pure-peek semantics
+    /// — see `query_runner.rs`'s `implicit_tx_isolation_for_fk_parent`,
+    /// which warms the cache before peeking.
+    pub fn is_fk_parent_with_update_action(&self, table: &str) -> bool {
+        let guard = self.state.load();
+        match guard.as_ref() {
+            Some(cache) => cache
+                .by_parent
+                .get(table)
+                .is_some_and(|entries| entries.iter().any(|e| e.on_update != FkAction::NoAction)),
             None => false,
         }
     }
@@ -180,9 +210,9 @@ impl FkReverseCache {
     /// `require_footprint_for` at insert/update-staging time)? Derived from
     /// the child→parents reverse-reverse index built alongside `by_parent`
     /// in the SAME rebuild. Same cold-cache semantics as
-    /// [`is_fk_parent_with_action`](Self::is_fk_parent_with_action) — see
-    /// `query_runner.rs`'s `require_footprint_if_fk_child`, which warms the
-    /// cache before peeking.
+    /// [`is_fk_parent_with_delete_action`](Self::is_fk_parent_with_delete_action)
+    /// — see `query_runner.rs`'s `require_footprint_if_fk_child`, which warms
+    /// the cache before peeking.
     pub fn is_fk_child(&self, table: &str) -> bool {
         let guard = self.state.load();
         match guard.as_ref() {
@@ -263,7 +293,8 @@ pub async fn build_reverse_fk_entries(
                     child_table: name.clone(),
                     child_field: field_path.join("."),
                     parent_ref_field: fk.ref_field.clone(),
-                    action: fk.on_delete,
+                    on_delete: fk.on_delete,
+                    on_update: fk.on_update,
                 },
             });
         }

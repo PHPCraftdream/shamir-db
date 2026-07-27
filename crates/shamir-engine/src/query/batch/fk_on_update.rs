@@ -68,7 +68,7 @@
 //! transaction's write landing between this plan and the eventual commit —
 //! is now closed for the IMPLICIT update path the same way `fk_restrict.rs`
 //! closes it for delete: `query_runner.rs`'s implicit UPDATE arm checks
-//! `FkReverseCache::is_fk_parent_with_action` and opens the implicit tx as
+//! `FkReverseCache::is_fk_parent_with_update_action` and opens the implicit tx as
 //! `Serializable` when this table is an FK parent with a non-`NoAction`
 //! `on_update` action (symmetric with the DELETE arm's upgrade — the
 //! `list_stream_tx` child-table scans in `plan_fk_on_update` above are the

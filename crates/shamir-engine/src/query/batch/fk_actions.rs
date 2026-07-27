@@ -41,7 +41,7 @@
 //! eventual commit — is now closed the same way `fk_restrict.rs` closes it:
 //! the parent-side implicit-delete isolation upgrade
 //! (`query_runner.rs`'s `implicit_tx_isolation_for_fk_parent`, gated on
-//! `FkReverseCache::is_fk_parent_with_action`) plus the child-side footprint
+//! `FkReverseCache::is_fk_parent_with_delete_action`) plus the child-side footprint
 //! widening (`require_footprint_if_fk_child`, gated on
 //! `FkReverseCache::is_fk_child`) — see `fk_restrict.rs`'s module doc for
 //! the full mechanism description and
@@ -343,7 +343,7 @@ async fn plan_cascade_recursive(
         for r in &refs {
             if let Some(vals) = parent_values.get(r.parent_ref_field.as_str()) {
                 for v in vals {
-                    probes.push((r.child_field.as_str(), v, r.action));
+                    probes.push((r.child_field.as_str(), v, r.on_delete));
                 }
             }
         }
@@ -644,7 +644,7 @@ async fn plan_cascade_for_ids(
         for r in &refs {
             if let Some(vals) = parent_values.get(r.parent_ref_field.as_str()) {
                 for v in vals {
-                    probes.push((r.child_field.as_str(), v, r.action));
+                    probes.push((r.child_field.as_str(), v, r.on_delete));
                 }
             }
         }
@@ -963,7 +963,7 @@ async fn discover_action_refs(
     Ok(all_for_parent
         .into_iter()
         .filter(|e| {
-            if !(e.action == FkAction::Cascade || e.action == FkAction::SetNull) {
+            if !(e.on_delete == FkAction::Cascade || e.on_delete == FkAction::SetNull) {
                 return false;
             }
             // Self-referential CASCADE is not supported by the table-name
@@ -975,7 +975,7 @@ async fn discover_action_refs(
             // single-level mutation that never recurses (see the
             // "Recurse for grandchildren (Cascade only)" gate below).
             let is_self_ref = &e.child_table == is_self_ref_table;
-            !(is_self_ref && e.action == FkAction::Cascade)
+            !(is_self_ref && e.on_delete == FkAction::Cascade)
         })
         .collect())
 }

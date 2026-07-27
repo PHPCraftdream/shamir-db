@@ -26,7 +26,7 @@
 //! `docs/dev-artifacts/research/f28-s3-mechanism-decision.md`):
 //!
 //! - **Parent side**: `query_runner.rs`'s implicit DELETE arm checks
-//!   `FkReverseCache::is_fk_parent_with_action` and opens the implicit tx as
+//!   `FkReverseCache::is_fk_parent_with_delete_action` and opens the implicit tx as
 //!   `Serializable` (instead of `Snapshot`) when this table is an FK parent
 //!   with a non-`NoAction` `on_delete` action. Under Serializable,
 //!   `child_has_reference`'s `list_stream_tx` call above records a real
@@ -204,7 +204,7 @@ async fn discover_restrict_refs(
 
     Ok(all_for_parent
         .into_iter()
-        .filter(|e| e.action == FkAction::Restrict)
+        .filter(|e| e.on_delete == FkAction::Restrict)
         .collect())
 }
 

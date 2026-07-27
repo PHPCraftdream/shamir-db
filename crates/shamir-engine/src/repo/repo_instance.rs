@@ -1034,10 +1034,11 @@ impl RepoInstance {
     ///
     /// F-28 Step 5 (S3-C): the query-runner's implicit DELETE/UPDATE arms use
     /// this to upgrade to `Serializable` for a single implicit tx when the
-    /// target table is flagged (`FkReverseCache::is_fk_parent_with_action`)
-    /// as an FK parent with a non-`NoAction` `on_delete`/`on_update` — the
-    /// Serializable predicate check is what closes the cross-transaction
-    /// TOCTOU race between the FK reverse-check scan and this tx's commit
+    /// target table is flagged (`FkReverseCache::is_fk_parent_with_delete_action`
+    /// / `is_fk_parent_with_update_action`) as an FK parent with a
+    /// non-`NoAction` `on_delete`/`on_update` — the Serializable predicate
+    /// check is what closes the cross-transaction TOCTOU race between the FK
+    /// reverse-check scan and this tx's commit
     /// (see `fk_restrict.rs`/`fk_actions.rs`/`fk_on_update.rs`'s module docs).
     /// Every other implicit-tx caller keeps calling
     /// [`begin_implicit_batch_tx`](Self::begin_implicit_batch_tx), which
