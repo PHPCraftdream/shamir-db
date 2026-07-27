@@ -34,12 +34,25 @@
 //! as an UPDATE re-keying its FK away from the parent is likewise reflected
 //! via the tx overlay, not the stale committed value.
 //!
-//! What remains open is the **cross-transaction** race: a genuinely
-//! concurrent OTHER transaction inserting a new child reference between this
-//! plan and the eventual commit. Closing that window requires either a
-//! Serializable-isolation footprint fix or a per-table barrier lock —
-//! tracked separately as F-28 Step 3/4/5 (#830/#831/#832). This task does
-//! **not** claim that race is closed.
+//! ## Cross-transaction race — CLOSED (F-28 Step 5, S3-C)
+//!
+//! The **cross-transaction** race — a genuinely concurrent OTHER
+//! transaction inserting a new child reference between this plan and the
+//! eventual commit — is now closed the same way `fk_restrict.rs` closes it:
+//! the parent-side implicit-delete isolation upgrade
+//! (`query_runner.rs`'s `implicit_tx_isolation_for_fk_parent`, gated on
+//! `FkReverseCache::is_fk_parent_with_action`) plus the child-side footprint
+//! widening (`require_footprint_if_fk_child`, gated on
+//! `FkReverseCache::is_fk_child`) — see `fk_restrict.rs`'s module doc for
+//! the full mechanism description and
+//! `crates/shamir-engine/src/query/batch/tests/fk_race_closure_tests.rs`
+//! for the deterministic end-to-end proof (a CASCADE-shaped race is
+//! action-agnostic to this mechanism — it protects any Serializable scan of
+//! the child table regardless of what the caller does with the result).
+//!
+//! Residual scope: same as `fk_restrict.rs` — closed for the **implicit**
+//! delete path; an explicit tx that stays Snapshot is unaffected unless the
+//! caller itself opens it Serializable.
 
 use bytes::Bytes;
 use futures::StreamExt;
@@ -365,9 +378,17 @@ async fn plan_cascade_recursive(
                 resolved_probes.push((field_id, value, *action, field));
             }
         }
-        if resolved_probes.is_empty() {
-            continue;
-        }
+        // F-28 Step 5 (memo §2.4): do NOT `continue` here when
+        // `resolved_probes` is empty (e.g. every probed field was never
+        // interned — a brand-new/empty child table). `list_stream_tx` below
+        // records the Serializable `TableScan` predicate at CONSTRUCTION
+        // time, before it is even polled; skipping the scan entirely would
+        // skip recording that predicate too, silently reopening the
+        // cross-transaction race for exactly the common case of a young
+        // child table. When `resolved_probes` is empty the per-row match
+        // loop below is naturally a no-op (0 iterations), so running the
+        // scan costs a harmless full pass with no matches — cheap insurance
+        // that keeps the SSI predicate recorded either way.
 
         let batch_size = 1000;
         let mut cascade_ids: Vec<RecordId> = Vec::new();
@@ -652,9 +673,13 @@ async fn plan_cascade_for_ids(
                 resolved_probes.push((field_id, value, *action, field));
             }
         }
-        if resolved_probes.is_empty() {
-            continue;
-        }
+        // F-28 Step 5 (memo §2.4): do NOT `continue` on an empty
+        // `resolved_probes` — see the identical rationale in
+        // `plan_cascade_recursive` above. `list_stream_tx` must run
+        // unconditionally so its Serializable `TableScan` predicate is
+        // recorded even for a grandchild table whose FK field was never
+        // interned; the per-row match loop below is a harmless no-op when
+        // `resolved_probes` is empty.
 
         let batch_size = 1000;
         let mut gc_cascade_ids: Vec<RecordId> = Vec::new();

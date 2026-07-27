@@ -17,12 +17,44 @@
 //! `[delete child; delete parent]` batch under `on_delete = Restrict` was
 //! wrongly rejected because the check saw the child as still committed.
 //!
-//! What remains open is the **cross-transaction** race: a genuinely
-//! concurrent OTHER transaction inserting a new child reference between this
-//! check and the eventual commit of the parent delete. Closing that window
-//! requires either a Serializable-isolation footprint fix or a per-table
-//! barrier lock — tracked separately as F-28 Step 3/4/5 (#830/#831/#832).
-//! This task does **not** claim that race is closed.
+//! ## Cross-transaction race — CLOSED (F-28 Step 5, S3-C)
+//!
+//! The **cross-transaction** race — a genuinely concurrent OTHER transaction
+//! inserting a new child reference between this check and the eventual
+//! commit of the parent delete — is now closed via targeted Serializable
+//! isolation + SSI footprint widening (S3-C, decided in the Step 3 spike,
+//! `docs/dev-artifacts/research/f28-s3-mechanism-decision.md`):
+//!
+//! - **Parent side**: `query_runner.rs`'s implicit DELETE arm checks
+//!   `FkReverseCache::is_fk_parent_with_action` and opens the implicit tx as
+//!   `Serializable` (instead of `Snapshot`) when this table is an FK parent
+//!   with a non-`NoAction` `on_delete` action. Under Serializable,
+//!   `child_has_reference`'s `list_stream_tx` call above records a real
+//!   `PredicateDep::TableScan` — including when the field id can't be
+//!   resolved (the scan still runs; see that function's doc).
+//! - **Child side**: the engine's insert/update/set staging path
+//!   (`query_runner.rs`'s `require_footprint_if_fk_child`) calls
+//!   `tx.require_footprint_for` on any write into a table flagged as an FK
+//!   child, regardless of that writer's OWN isolation level — so a plain
+//!   Snapshot insert into the child table still publishes a footprint the
+//!   Serializable delete's Phase 2-bis phantom check can conflict against.
+//!
+//! With both sides wired, the race resolves to: the racing insert commits
+//! first and the delete's commit aborts with `PhantomConflict` (surfaced as
+//! `tx_conflict`, with a bounded internal retry for the common
+//! already-resolved case — see `query_runner.rs`'s `retry_on_tx_conflict`);
+//! or the delete's own check/commit wins the race and the insert (if it
+//! runs after) observes the parent already gone. Neither interleaving can
+//! leave "delete succeeded AND a dangling child reference exists" — see
+//! `crates/shamir-engine/src/query/batch/tests/fk_race_closure_tests.rs`
+//! for the deterministic end-to-end proof.
+//!
+//! Residual scope: this closes the race for the **implicit** (autocommit)
+//! delete path, which is where F-28's brief scoped the fix. An EXPLICIT
+//! transaction that stays Snapshot for its own reasons does not get an
+//! automatic upgrade here — a caller wanting Serializable protection for an
+//! explicit tx opens it as `Serializable` itself (`begin_tx`), which this
+//! same machinery already protects once wired.
 
 use bytes::Bytes;
 use futures::StreamExt;
@@ -299,14 +331,30 @@ async fn child_has_reference(
     // Fallback: full scan with field match. Tx-aware: overlays this tx's own
     // staged writes so a staged insert/update/delete on the child table is
     // correctly reflected (read-your-own-writes, closing D1 for this probe).
+    //
+    // F-28 Step 5 (memo §2.4): `list_stream_tx` MUST run unconditionally here
+    // — even when `field_id` is unresolvable — because it records the
+    // Serializable `TableScan` predicate at CONSTRUCTION time (before the
+    // stream is even polled; see `TableManager::list_stream_tx`). A
+    // brand-new/empty child table whose FK field was never interned is
+    // exactly the common case a RESTRICT/CASCADE check hits, and skipping
+    // the scan entirely there would skip recording the predicate too — the
+    // scan (and its predicate recording) must run; only the row-level
+    // MATCH is skipped when the field id can't be resolved.
+    let batch_size = 1000;
+    // Construct the stream UNCONDITIONALLY — `list_stream_tx` records the
+    // Serializable `TableScan` predicate synchronously at construction time,
+    // before this line returns, regardless of whether `field_id` resolved or
+    // whether the stream is ever polled below.
+    let stream = table.list_stream_tx(Some(tx), batch_size);
     let Some(field_id) = field_id else {
         // Field doesn't exist anywhere (base or this tx's overlay) — no row,
-        // committed or staged, can possibly reference it.
+        // committed or staged, can possibly reference it. The predicate is
+        // already recorded (above); no row can match an unresolvable field,
+        // so there is nothing left to poll.
         return Ok(false);
     };
     let key = shamir_types::core::interner::InternerKey::new(field_id);
-    let batch_size = 1000;
-    let stream = table.list_stream_tx(Some(tx), batch_size);
     futures::pin_mut!(stream);
     while let Some(batch_result) = stream.next().await {
         let batch = batch_result?;

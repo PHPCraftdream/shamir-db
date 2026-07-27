@@ -610,13 +610,27 @@ async fn commit_tx_inner_legacy_async(
     // durable for `restore_on_open::replay_delta` to pick up.
     maybe_crash("phase5d_delta_async", repo).await;
 
+    // F-28 Step 5 (S3-C): record the SSI footprint BEFORE publish, mirroring
+    // `materialize.rs`'s documented Phase 6-bis-before-Phase-6 ordering and
+    // the lock-free `commit_tx_lockfree` path (which already got this order
+    // right — see its own `record_commit_writes` call below). `VersionGuard::
+    // commit()` is SYNCHRONOUS: it immediately does `completion.mark(
+    // Materialized)` + `last_committed.fetch_max(watermark)`, advancing the
+    // reader-visible floor with no `.await` in between. If the footprint were
+    // recorded AFTER that publish, a concurrent Serializable validator
+    // reading `last_committed()` in that narrow window could observe this
+    // tx's version as already-visible with NO footprint recorded for it yet —
+    // a missed phantom conflict. Recording first closes that window: by the
+    // time this tx's version becomes visible, its footprint is already in the
+    // lock-free `commit_write_log`.
+    gate.record_commit_writes(shamir_tx::build_footprint_from_tx(&tx, commit_version));
+
     // P0a: consume the RAII VersionGuard → mark(Materialized) + advance
     // last_committed_version from the watermark (fetch_max). Replaces the
     // prior manual mark + sync_last_committed_from_watermark +
     // publish_committed_max trio (identical watermark semantics). Closes H1:
     // a panic between WAL-durable and here drops the guard → Aborted.
     version_guard.commit();
-    gate.record_commit_writes(shamir_tx::build_footprint_from_tx(&tx, commit_version));
 
     // A4 (fix a): release Level-3 pessimistic locks AFTER the publish step
     // (`apply_data_phase` + `version_guard.commit()` above) is complete,

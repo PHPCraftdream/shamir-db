@@ -4,6 +4,7 @@ mod dos_gate_tests;
 mod executor_tests;
 mod fk_actions_tests;
 mod fk_on_update_tests;
+mod fk_race_closure_tests;
 mod fk_restrict_tests;
 mod fk_reverse_cache_tests;
 mod for_each_tests;

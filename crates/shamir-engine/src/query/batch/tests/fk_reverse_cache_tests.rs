@@ -312,14 +312,36 @@ async fn repeated_deletes_do_not_rerun_discovery_scan() {
     // measured from here on.
     resolver.resolve_calls.store(0, Ordering::SeqCst);
 
-    // First delete: cache miss (nothing has warmed it yet in this test) →
-    // discovery's rebuild calls `resolver.resolve()` once per table in the
-    // repo (2 tables: parent, child) IN ADDITION to `check_fk_restrict`'s own
-    // per-matched-ref child-table resolve (a fixed per-delete cost that also
-    // happens on a cache HIT — NOT part of the discovery scan itself). The
-    // first delete's resolve-count delta is therefore strictly larger than
-    // every subsequent (cache-hit) delete's delta by exactly that discovery
-    // scan's table count.
+    // F-28 Step 5 (#832): the seed inserts above ALREADY warmed the cache —
+    // `require_footprint_if_fk_child` (query_runner.rs's Insert `None` arm)
+    // calls `FkReverseCache::get_or_build_by_parent` on every insert to
+    // decide whether the inserted table is an FK child, so by the time the
+    // very first `insert_child` ran, the cache was built. Force an explicit
+    // invalidation here so delete #1 below still observes a genuine cache
+    // MISS — otherwise all three deletes would see an already-warm cache and
+    // this test's cache-miss-vs-cache-hit distinction would have nothing
+    // left to measure. Mirrors the same explicit-`invalidate()` pattern
+    // `cache_reflects_newly_added_fk_reference` (test 1, above) already uses
+    // to force a miss on demand.
+    resolver
+        .db
+        .get_repo(&resolver.repo)
+        .unwrap()
+        .fk_reverse_cache()
+        .invalidate();
+
+    // First delete: cache miss (forced above) → discovery's rebuild calls
+    // `resolver.resolve()` once per table in the repo (2 tables: parent,
+    // child) IN ADDITION to `check_fk_restrict`'s own per-matched-ref
+    // child-table resolve (a fixed per-delete cost that also happens on a
+    // cache HIT — NOT part of the discovery scan itself). The first delete's
+    // resolve-count delta is therefore strictly larger than every subsequent
+    // (cache-hit) delete's delta by exactly that discovery scan's table
+    // count. Note: F-28 Step 5's `implicit_tx_isolation_for_fk_parent` (also
+    // called from the Delete arm, before `check_fk_restrict`) pays this same
+    // miss cost — whichever of the two call sites reaches the cache first
+    // absorbs the O(tables) scan; the other sees an already-warm cache. The
+    // total resolve count for the miss delete is unaffected either way.
     let before_first = resolver.resolve_calls.load(Ordering::SeqCst);
     let r1 = try_delete_parent(&resolver, 1).await;
     assert!(r1.is_err(), "first delete must be rejected: {r1:?}");

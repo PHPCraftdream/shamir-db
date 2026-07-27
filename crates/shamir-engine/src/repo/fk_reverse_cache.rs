@@ -155,14 +155,15 @@ impl FkReverseCache {
     }
 
     /// O(1) role-flag helper for F-28 Step 5: is `table` referenced by ANY
-    /// FK with a non-`NoAction` `on_delete` (i.e. is it a parent worth an
-    /// isolation upgrade at implicit-delete-begin time)? Derived from the
-    /// SAME cached rows `get_or_build_by_parent` serves — no second
-    /// structure. Returns `false` on a cold/invalidated cache without
-    /// triggering a rebuild (a pure peek); callers needing an authoritative
-    /// answer should call [`get_or_build_by_parent`](Self::get_or_build_by_parent)
-    /// first so the cache is warm.
-    #[allow(dead_code)] // consumed by F-28 Step 5 (#832), not yet wired here.
+    /// FK with a non-`NoAction` `on_delete`/`on_update` (i.e. is it a parent
+    /// worth an isolation upgrade at implicit-delete/update-begin time)?
+    /// Derived from the SAME cached rows `get_or_build_by_parent` serves —
+    /// no second structure. Returns `false` on a cold/invalidated cache
+    /// without triggering a rebuild (a pure peek); callers needing an
+    /// authoritative answer call
+    /// [`get_or_build_by_parent`](Self::get_or_build_by_parent) first so the
+    /// cache is warm (see `query_runner.rs`'s
+    /// `implicit_tx_isolation_for_fk_parent`, which does exactly that).
     pub fn is_fk_parent_with_action(&self, table: &str) -> bool {
         let guard = self.state.load();
         match guard.as_ref() {
@@ -179,8 +180,9 @@ impl FkReverseCache {
     /// `require_footprint_for` at insert/update-staging time)? Derived from
     /// the child→parents reverse-reverse index built alongside `by_parent`
     /// in the SAME rebuild. Same cold-cache semantics as
-    /// [`is_fk_parent_with_action`](Self::is_fk_parent_with_action).
-    #[allow(dead_code)] // consumed by F-28 Step 5 (#832), not yet wired here.
+    /// [`is_fk_parent_with_action`](Self::is_fk_parent_with_action) — see
+    /// `query_runner.rs`'s `require_footprint_if_fk_child`, which warms the
+    /// cache before peeking.
     pub fn is_fk_child(&self, table: &str) -> bool {
         let guard = self.state.load();
         match guard.as_ref() {

@@ -210,6 +210,21 @@ pub struct TxContext {
     /// scan path can append through a shared `&TxContext`.
     pub predicate_set: crate::predicate_set::PredicateSet,
 
+    /// F-28 Step 5 (S3-C): table tokens this tx wants its commit footprint
+    /// published for, REGARDLESS of isolation level. Populated via
+    /// [`require_footprint_for`](Self::require_footprint_for) — the engine
+    /// calls this at insert/update staging time when the target table is
+    /// flagged (via `FkReverseCache::is_fk_child`) as an FK child, so a
+    /// concurrent Serializable FK-parent-delete's Phase 2-bis predicate
+    /// check has a footprint to conflict against even though this writer
+    /// itself is plain Snapshot isolation (see `build_footprint_from_tx`'s
+    /// widened gate in `repo_tx_gate.rs`).
+    ///
+    /// Empty for the overwhelming majority of txs (any table never flagged
+    /// as an FK child) — `TFxSet::is_empty()` is the single check that keeps
+    /// `build_footprint_from_tx` zero-overhead off this path.
+    pub footprint_tokens: TFxSet<u64>,
+
     /// Commit visibility / ack policy. Default `Synchronous` (no behaviour
     /// change). When set to `AsyncIndex`, the engine's `commit_tx` returns
     /// to the caller right after WAL durability + data apply + publish; the
@@ -294,6 +309,7 @@ impl TxContext {
             started_at: std::time::Instant::now(),
             unique_guards: Vec::new(),
             predicate_set: crate::predicate_set::PredicateSet::new(),
+            footprint_tokens: TFxSet::default(),
             visibility: CommitVisibility::default(),
             async_prefix_failed: false,
             actor: Actor::System,
@@ -528,6 +544,21 @@ impl TxContext {
         if self.isolation == IsolationLevel::Serializable {
             self.predicate_set.push(dep);
         }
+    }
+
+    /// F-28 Step 5 (S3-C): require this tx's commit footprint to be
+    /// published for `table_token`, regardless of isolation level.
+    ///
+    /// Called by the engine's insert/update/set staging path when the
+    /// target table is flagged as an FK child (`FkReverseCache::is_fk_child`)
+    /// — a plain Snapshot writer into such a table still needs its footprint
+    /// recorded in the commit-write log so a concurrent Serializable
+    /// FK-parent-delete's phantom check (Phase 2-bis) has something to
+    /// conflict against. Idempotent (a `TFxSet` insert of an already-present
+    /// token is a no-op). Returns `&mut Self` for builder-style chaining.
+    pub fn require_footprint_for(&mut self, table_token: u64) -> &mut Self {
+        self.footprint_tokens.insert(table_token);
+        self
     }
 
     /// Validate the read-set against current committed versions.

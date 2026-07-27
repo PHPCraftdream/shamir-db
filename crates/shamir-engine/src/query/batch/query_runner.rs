@@ -256,6 +256,178 @@ fn write_value_error_to_batch_error(alias: &str, err: WriteValueError) -> BatchE
     }
 }
 
+/// F-28 Step 5 (S3-C) — child-side hook: if `table_ref`'s table is flagged
+/// (via `RepoInstance::fk_reverse_cache`) as an FK child (it references some
+/// OTHER table via a foreign key), require this tx's commit footprint to be
+/// published for it, regardless of the tx's own isolation level.
+///
+/// This is the mechanism that makes a concurrent Serializable FK-parent
+/// delete's phantom check (Phase 2-bis) have something to conflict against
+/// even when THIS writer is plain Snapshot isolation (the overwhelming
+/// common case for an autocommit insert/update) — see
+/// `build_footprint_from_tx`'s widened gate in `shamir-tx`'s
+/// `repo_tx_gate.rs`. Called at insert/update/set STAGING time, before the
+/// write is staged, from both the explicit-tx and implicit-tx arms below —
+/// any Snapshot-isolation writer touching an FK-child table needs its
+/// footprint published, regardless of which path staged it.
+///
+/// Best-effort: a `resolve_repo` failure here is not a reason to fail the
+/// write itself (the table was already successfully resolved moments ago by
+/// the SAME call site — this is defense-in-depth for the SSI race window,
+/// not a correctness precondition for the write). Logged and skipped.
+///
+/// `FkReverseCache::is_fk_child` is a pure peek that returns `false` on a
+/// cold/never-built cache WITHOUT triggering a rebuild (see its doc
+/// comment) — the parent-side callers (`fk_restrict.rs`/`fk_actions.rs`)
+/// always warm it first via `get_or_build_by_parent` before peeking, but
+/// this child-side hook can run as the very FIRST FK-cache touch a repo
+/// ever sees (a child-table insert before any delete/cascade has run), so
+/// it warms the cache itself via the same `get_or_build_by_parent` +
+/// `build_reverse_fk_entries` pair before peeking — a cache miss pays the
+/// same one-time O(tables) scan `fk_restrict.rs`/`fk_actions.rs` already
+/// pay on their own first miss; a warm cache is an O(1) hit.
+async fn require_footprint_if_fk_child(
+    resolver: &dyn TableResolver,
+    table_ref: &TableRef,
+    table_token: u64,
+    tx: &mut shamir_tx::TxContext,
+) {
+    let repo = match resolver.resolve_repo(&table_ref.repo).await {
+        Ok(repo) => repo,
+        Err(e) => {
+            log::warn!(
+                "F-28 S3-C: require_footprint_if_fk_child: resolve_repo({}) failed: {e}",
+                table_ref.repo
+            );
+            return;
+        }
+    };
+    let cache = repo.fk_reverse_cache();
+    // Warm the cache (no-op if already warm) using this table as the
+    // nominal "parent" key — `get_or_build_by_parent` populates BOTH
+    // indices (by_parent AND by_child) from one repo-wide scan regardless
+    // of which table name is passed, so the by-parent result itself is
+    // discarded here; only the warming side-effect matters.
+    let repo_name = table_ref.repo.clone();
+    let table_name = table_ref.table.clone();
+    if let Err(e) = cache
+        .get_or_build_by_parent(&table_name, || async move {
+            crate::repo::build_reverse_fk_entries(resolver, &repo_name).await
+        })
+        .await
+    {
+        log::warn!(
+            "F-28 S3-C: require_footprint_if_fk_child: reverse-FK scan failed for repo '{}': {e}",
+            table_ref.repo
+        );
+        return;
+    }
+    if cache.is_fk_child(&table_ref.table) {
+        tx.require_footprint_for(table_token);
+    }
+}
+
+/// F-28 Step 5 (S3-C) — parent-side hook: decide the isolation level an
+/// IMPLICIT batch tx should open at for a delete/update against
+/// `table_ref`'s table.
+///
+/// Returns [`IsolationLevel::Serializable`](shamir_tx::IsolationLevel::Serializable)
+/// iff `table_ref`'s table is flagged (via `RepoInstance::fk_reverse_cache`)
+/// as an FK parent with at least one non-`NoAction` `on_delete`/`on_update`
+/// action — i.e. a RESTRICT/CASCADE/SET NULL fan-out is about to run against
+/// it. Upgrading to Serializable is what makes the fan-out's child-table
+/// scans (`fk_restrict.rs`/`fk_actions.rs`/`fk_on_update.rs`) record a real
+/// `TableScan` SSI predicate, closing the cross-transaction TOCTOU race
+/// between "scan found no conflicting child row" and this tx's eventual
+/// commit. Falls back to `Snapshot` (byte-identical prior behavior) on any
+/// resolve failure or when the table has no FK-relevant role — this is a
+/// pure opportunistic upgrade, never a hard requirement for the write.
+async fn implicit_tx_isolation_for_fk_parent(
+    resolver: &dyn TableResolver,
+    table_ref: &TableRef,
+) -> shamir_tx::IsolationLevel {
+    let repo = match resolver.resolve_repo(&table_ref.repo).await {
+        Ok(repo) => repo,
+        Err(_) => return shamir_tx::IsolationLevel::Snapshot,
+    };
+    let cache = repo.fk_reverse_cache();
+    let repo_name = table_ref.repo.clone();
+    let table_name = table_ref.table.clone();
+    // Warm the cache (no-op if already warm) — see the identical rationale
+    // in `require_footprint_if_fk_child`: this hook can be the very FIRST
+    // FK-cache touch a repo sees.
+    if cache
+        .get_or_build_by_parent(&table_name, || async move {
+            crate::repo::build_reverse_fk_entries(resolver, &repo_name).await
+        })
+        .await
+        .is_err()
+    {
+        return shamir_tx::IsolationLevel::Snapshot;
+    }
+    if cache.is_fk_parent_with_action(&table_ref.table) {
+        shamir_tx::IsolationLevel::Serializable
+    } else {
+        shamir_tx::IsolationLevel::Snapshot
+    }
+}
+
+/// F-28 Step 5 (S3-C) — bounded retry budget for an implicit FK-relevant
+/// delete/update that was opportunistically upgraded to Serializable.
+///
+/// Upgrading to Serializable means the implicit tx CAN now abort with
+/// `CommitError::PhantomConflict`/`SsiConflict` (surfaced as the coded
+/// `"tx_conflict"` — see `RepoInstance::commit_implicit_batch_tx`) in cases
+/// that used to always succeed under plain Snapshot (Snapshot never
+/// aborts). A genuine, persistent write-write race SHOULD abort and reach
+/// the caller — but an already-resolved race (the conflicting concurrent
+/// writer committed first and is simply gone by the next attempt) should
+/// not surface as a client-visible error for what is, from the caller's
+/// perspective, a perfectly ordinary single delete/update. Re-running the
+/// WHOLE attempt (re-plan the FK fan-out against the fresh snapshot, then
+/// re-commit) resolves that case transparently.
+///
+/// This codebase has no pre-existing generic "retry on tx_conflict" wrapper
+/// (searched `query_runner.rs` or a `db_execute.rs`-equivalent) to match, so
+/// this is intentionally minimal and tightly scoped: a small fixed bound
+/// (never unbounded), applied ONLY to the two call sites that perform this
+/// specific opportunistic isolation upgrade (implicit DELETE/UPDATE against
+/// an FK-flagged parent table). After the bound is exhausted the LAST
+/// error is returned unchanged (never swallowed) — the caller sees the same
+/// coded `tx_conflict` a non-retried commit would have produced.
+const FK_SERIALIZABLE_RETRY_ATTEMPTS: u32 = 3;
+
+/// Run `attempt` up to [`FK_SERIALIZABLE_RETRY_ATTEMPTS`] times, retrying
+/// only on a coded `"tx_conflict"` `BatchError` (the SSI/phantom/wound-wait
+/// abort family — see `RepoInstance::commit_implicit_batch_tx`'s mapping).
+/// Any other error, or the final attempt's error once the budget is
+/// exhausted, is returned as-is — never swallowed.
+///
+/// `attempt` is re-invoked from scratch on each retry (a fresh closure call),
+/// so the caller's body must be safe to re-run wholesale: re-resolve/re-plan
+/// against a fresh implicit tx, not resume a half-finished one. Both call
+/// sites below satisfy this — each `attempt` begins a brand-new implicit tx
+/// internally.
+async fn retry_on_tx_conflict<F, Fut, T>(mut attempt: F) -> Result<T, BatchError>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Result<T, BatchError>>,
+{
+    let mut last_err = None;
+    for _ in 0..FK_SERIALIZABLE_RETRY_ATTEMPTS {
+        match attempt().await {
+            Ok(v) => return Ok(v),
+            Err(e) if e.code() == Some("tx_conflict") => {
+                last_err = Some(e);
+                continue;
+            }
+            Err(e) => return Err(e),
+        }
+    }
+    // Budget exhausted — surface the last (coded) conflict unchanged.
+    Err(last_err.expect("loop runs at least once, so an exhausted budget always has an error"))
+}
+
 /// Encapsulates per-query execution context — resolver, admin, optional
 /// transaction state, and the [`Actor`] + db name (R2) for the
 /// transparent authorization gate.
@@ -940,20 +1112,34 @@ impl<'a> QueryRunner<'a> {
                     &subst_op
                 };
                 let wr = match self.tx.as_deref_mut() {
-                    Some(tx) => table
-                        .execute_insert_tx(
-                            op_ref,
+                    Some(tx) => {
+                        // F-28 Step 5 (S3-C): child-side hook — if this table
+                        // is an FK child, this tx's footprint must be
+                        // published regardless of isolation, so a concurrent
+                        // Serializable FK-parent-delete's phantom check has
+                        // something to conflict against.
+                        require_footprint_if_fk_child(
+                            self.resolver,
+                            table_ref,
+                            table.table_token(),
                             tx,
-                            entry.return_result,
-                            Some(self.resolver),
-                            &self.actor,
                         )
-                        .await
-                        .map_err(|e| BatchError::QueryError {
-                            alias: alias.to_string(),
-                            message: e.to_string(),
-                            code: None,
-                        })?,
+                        .await;
+                        table
+                            .execute_insert_tx(
+                                op_ref,
+                                tx,
+                                entry.return_result,
+                                Some(self.resolver),
+                                &self.actor,
+                            )
+                            .await
+                            .map_err(|e| BatchError::QueryError {
+                                alias: alias.to_string(),
+                                message: e.to_string(),
+                                code: None,
+                            })?
+                    }
                     // F4b-1: "everything is a transaction" — a non-tx insert is
                     // routed through the tx commit pipeline as an implicit
                     // single-op BATCH transaction (Snapshot isolation, so SSI
@@ -982,6 +1168,16 @@ impl<'a> QueryRunner<'a> {
                         let (mut tx, _guard) = repo
                             .begin_implicit_batch_tx(self.actor.clone(), alias)
                             .await?;
+                        // F-28 Step 5 (S3-C): child-side hook, implicit path —
+                        // see the identical comment on the explicit-tx arm
+                        // above.
+                        require_footprint_if_fk_child(
+                            self.resolver,
+                            table_ref,
+                            table.table_token(),
+                            &mut tx,
+                        )
+                        .await;
                         let wr = table
                             .execute_insert_tx(
                                 op_ref,
@@ -1049,10 +1245,24 @@ impl<'a> QueryRunner<'a> {
                 // parent field) is a fast no-op.
                 //
                 // TOCTOU caveat: see fk_on_update.rs docs — the in-tx RYOW gap
-                // (D1) is closed; the cross-transaction race remains open
-                // (F-28 Step 3/4/5).
+                // (D1) is closed. F-28 Step 5 closes the cross-transaction
+                // race for the IMPLICIT path (see below); see this file's
+                // module docs for the residual scope.
                 let wr = match self.tx.as_deref_mut() {
                     Some(tx) => {
+                        // F-28 Step 5 (S3-C): child-side hook — if this table
+                        // is itself an FK child of some OTHER table, this
+                        // tx's footprint must be published regardless of its
+                        // own isolation, so a concurrent Serializable
+                        // FK-parent-delete/update elsewhere has something to
+                        // conflict against.
+                        require_footprint_if_fk_child(
+                            self.resolver,
+                            table_ref,
+                            table.table_token(),
+                            tx,
+                        )
+                        .await;
                         let fk_update_plan = super::fk_on_update::plan_fk_on_update(
                             self.resolver,
                             table_ref,
@@ -1086,6 +1296,22 @@ impl<'a> QueryRunner<'a> {
                     // HRTB closure, so `self.resolver`/`ctx` can be borrowed
                     // normally (this also fixes D2: the implicit path was
                     // wrongly passing `None` instead of the resolver).
+                    //
+                    // F-28 Step 5 (S3-C): PARENT-side hook — an implicit
+                    // update against a table flagged as an FK parent with a
+                    // non-NoAction on_update action opens Serializable
+                    // instead of Snapshot, for the SAME reason as the DELETE
+                    // arm below: `plan_fk_on_update` runs the identical
+                    // `list_stream_tx(Some(tx), ..)` child-table scans
+                    // (RESTRICT/CASCADE/SET NULL) that DELETE's
+                    // `fk_restrict`/`fk_actions` run, reading child tables to
+                    // decide fan-out before the parent update commits. A
+                    // concurrent tx inserting a new child row referencing the
+                    // OLD parent value between this plan and commit exposes
+                    // the identical race (RESTRICT could wrongly allow the
+                    // rename past a reference that now dangles; CASCADE/SET
+                    // NULL could miss re-keying/nulling the new row). Same
+                    // bounded retry as DELETE.
                     None => {
                         let repo =
                             self.resolver
@@ -1096,43 +1322,65 @@ impl<'a> QueryRunner<'a> {
                                     message: format!("resolve_repo({}): {}", table_ref.repo, e),
                                     code: None,
                                 })?;
-                        let (mut tx, _guard) = repo
-                            .begin_implicit_batch_tx(self.actor.clone(), alias)
-                            .await?;
-                        // F-28 Step 2: build the plan AFTER the implicit tx
-                        // has begun, so its probes see this tx's own staged
-                        // writes (read-your-own-writes).
-                        let fk_update_plan = super::fk_on_update::plan_fk_on_update(
-                            self.resolver,
-                            table_ref,
-                            &table,
-                            op_ref,
-                            &ctx,
-                            alias,
-                            &tx,
-                        )
-                        .await?;
-                        // Apply child fan-out inside the implicit tx BEFORE
-                        // the parent update. The plan carries pre-resolved
-                        // child handles (no resolver needed here).
-                        super::fk_on_update::apply_fk_update_plan(fk_update_plan, &mut tx, alias)
-                            .await?;
-                        let wr = table
-                            .execute_update_tx(
+                        let isolation =
+                            implicit_tx_isolation_for_fk_parent(self.resolver, table_ref).await;
+                        retry_on_tx_conflict(|| async {
+                            let (mut tx, _guard) = repo
+                                .begin_implicit_batch_tx_with_isolation(
+                                    self.actor.clone(),
+                                    alias,
+                                    isolation,
+                                )
+                                .await?;
+                            // F-28 Step 5: child-side hook, implicit path.
+                            require_footprint_if_fk_child(
+                                self.resolver,
+                                table_ref,
+                                table.table_token(),
+                                &mut tx,
+                            )
+                            .await;
+                            // F-28 Step 2: build the plan AFTER the implicit
+                            // tx has begun, so its probes see this tx's own
+                            // staged writes (read-your-own-writes).
+                            let fk_update_plan = super::fk_on_update::plan_fk_on_update(
+                                self.resolver,
+                                table_ref,
+                                &table,
                                 op_ref,
                                 &ctx,
-                                &mut tx,
-                                Some(self.resolver),
-                                &self.actor,
+                                alias,
+                                &tx,
                             )
-                            .await
-                            .map_err(|e| BatchError::QueryError {
-                                alias: alias.to_string(),
-                                message: e.to_string(),
-                                code: e.code().map(str::to_owned),
-                            })?;
-                        repo.commit_implicit_batch_tx(tx, alias).await?;
-                        wr
+                            .await?;
+                            // Apply child fan-out inside the implicit tx
+                            // BEFORE the parent update. The plan carries
+                            // pre-resolved child handles (no resolver needed
+                            // here).
+                            super::fk_on_update::apply_fk_update_plan(
+                                fk_update_plan,
+                                &mut tx,
+                                alias,
+                            )
+                            .await?;
+                            let wr = table
+                                .execute_update_tx(
+                                    op_ref,
+                                    &ctx,
+                                    &mut tx,
+                                    Some(self.resolver),
+                                    &self.actor,
+                                )
+                                .await
+                                .map_err(|e| BatchError::QueryError {
+                                    alias: alias.to_string(),
+                                    message: e.to_string(),
+                                    code: e.code().map(str::to_owned),
+                                })?;
+                            repo.commit_implicit_batch_tx(tx, alias).await?;
+                            Ok(wr)
+                        })
+                        .await?
                     }
                 };
                 Ok(write_result_to_query_result_with_encoding(
@@ -1214,6 +1462,17 @@ impl<'a> QueryRunner<'a> {
                     // HRTB closure, so `self.resolver`/`ctx` can be borrowed
                     // normally (this also fixes D2: the implicit path was
                     // wrongly passing `None` instead of the resolver).
+                    //
+                    // F-28 Step 5 (S3-C): PARENT-side hook — an implicit
+                    // delete against a table flagged as an FK parent with a
+                    // non-NoAction on_delete action opens Serializable
+                    // instead of Snapshot, so the RESTRICT/CASCADE/SET NULL
+                    // child scans below record a real SSI predicate (closing
+                    // the cross-transaction race). Wrapped in a small bounded
+                    // retry (`retry_on_tx_conflict`) so an already-resolved
+                    // race doesn't surface as a client-visible error for what
+                    // looks like an ordinary single delete — see that
+                    // function's doc for the full rationale.
                     None => {
                         let repo =
                             self.resolver
@@ -1224,46 +1483,63 @@ impl<'a> QueryRunner<'a> {
                                     message: format!("resolve_repo({}): {}", table_ref.repo, e),
                                     code: None,
                                 })?;
-                        let (mut tx, _guard) = repo
-                            .begin_implicit_batch_tx(self.actor.clone(), alias)
+                        let isolation =
+                            implicit_tx_isolation_for_fk_parent(self.resolver, table_ref).await;
+                        retry_on_tx_conflict(|| async {
+                            let (mut tx, _guard) = repo
+                                .begin_implicit_batch_tx_with_isolation(
+                                    self.actor.clone(),
+                                    alias,
+                                    isolation,
+                                )
+                                .await?;
+                            // F-28 Step 2: run the RESTRICT gate + build the
+                            // cascade plan AFTER the implicit tx has begun, so
+                            // their probes see this tx's own staged writes.
+                            super::fk_restrict::check_fk_restrict(
+                                self.resolver,
+                                table_ref,
+                                &table,
+                                &op.where_clause,
+                                &ctx,
+                                alias,
+                                &tx,
+                            )
                             .await?;
-                        // F-28 Step 2: run the RESTRICT gate + build the
-                        // cascade plan AFTER the implicit tx has begun, so
-                        // their probes see this tx's own staged writes.
-                        super::fk_restrict::check_fk_restrict(
-                            self.resolver,
-                            table_ref,
-                            &table,
-                            &op.where_clause,
-                            &ctx,
-                            alias,
-                            &tx,
-                        )
-                        .await?;
-                        let cascade_plan = super::fk_actions::plan_cascade(
-                            self.resolver,
-                            table_ref,
-                            &table,
-                            &op.where_clause,
-                            &ctx,
-                            alias,
-                            &tx,
-                        )
-                        .await?;
-                        // Apply cascade/setnull inside the implicit tx BEFORE
-                        // the parent delete. The plan carries pre-resolved
-                        // child handles (no resolver needed here).
-                        super::fk_actions::apply_cascade_plan(cascade_plan, &mut tx, alias).await?;
-                        let wr = table
-                            .execute_delete_tx(op, &ctx, &mut tx, Some(self.resolver), &self.actor)
-                            .await
-                            .map_err(|e| BatchError::QueryError {
-                                alias: alias.to_string(),
-                                message: e.to_string(),
-                                code: e.code().map(str::to_owned),
-                            })?;
-                        repo.commit_implicit_batch_tx(tx, alias).await?;
-                        wr
+                            let cascade_plan = super::fk_actions::plan_cascade(
+                                self.resolver,
+                                table_ref,
+                                &table,
+                                &op.where_clause,
+                                &ctx,
+                                alias,
+                                &tx,
+                            )
+                            .await?;
+                            // Apply cascade/setnull inside the implicit tx
+                            // BEFORE the parent delete. The plan carries
+                            // pre-resolved child handles (no resolver needed
+                            // here).
+                            super::fk_actions::apply_cascade_plan(cascade_plan, &mut tx, alias)
+                                .await?;
+                            let wr = table
+                                .execute_delete_tx(
+                                    op,
+                                    &ctx,
+                                    &mut tx,
+                                    Some(self.resolver),
+                                    &self.actor,
+                                )
+                                .await
+                                .map_err(|e| BatchError::QueryError {
+                                    alias: alias.to_string(),
+                                    message: e.to_string(),
+                                    code: e.code().map(str::to_owned),
+                                })?;
+                            repo.commit_implicit_batch_tx(tx, alias).await?;
+                            Ok(wr)
+                        })
+                        .await?
                     }
                 };
                 Ok(write_result_to_query_result_with_encoding(
@@ -1305,14 +1581,25 @@ impl<'a> QueryRunner<'a> {
                         &subst_op
                     };
                 let wr = match self.tx.as_deref_mut() {
-                    Some(tx) => table
-                        .execute_set_tx(op_ref, tx, Some(self.resolver), &self.actor)
-                        .await
-                        .map_err(|e| BatchError::QueryError {
-                            alias: alias.to_string(),
-                            message: e.to_string(),
-                            code: None,
-                        })?,
+                    Some(tx) => {
+                        // F-28 Step 5 (S3-C): child-side hook — see the
+                        // identical comment on the Insert/Update arms above.
+                        require_footprint_if_fk_child(
+                            self.resolver,
+                            table_ref,
+                            table.table_token(),
+                            tx,
+                        )
+                        .await;
+                        table
+                            .execute_set_tx(op_ref, tx, Some(self.resolver), &self.actor)
+                            .await
+                            .map_err(|e| BatchError::QueryError {
+                                alias: alias.to_string(),
+                                message: e.to_string(),
+                                code: None,
+                            })?
+                    }
                     // W3d-2: non-tx SET routes through the implicit single-op
                     // batch transaction (same pattern as DELETE in F5a, INSERT
                     // in F4b-1, UPDATE in F4b-2).
@@ -1334,6 +1621,14 @@ impl<'a> QueryRunner<'a> {
                         let (mut tx, _guard) = repo
                             .begin_implicit_batch_tx(self.actor.clone(), alias)
                             .await?;
+                        // F-28 Step 5 (S3-C): child-side hook, implicit path.
+                        require_footprint_if_fk_child(
+                            self.resolver,
+                            table_ref,
+                            table.table_token(),
+                            &mut tx,
+                        )
+                        .await;
                         let wr = table
                             .execute_set_tx(op_ref, &mut tx, Some(self.resolver), &self.actor)
                             .await

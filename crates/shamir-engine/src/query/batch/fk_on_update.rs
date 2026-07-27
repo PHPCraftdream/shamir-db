@@ -62,12 +62,30 @@
 //! inserted/updated earlier in the same transaction, is now correctly
 //! reflected in the RESTRICT/CASCADE/SET NULL fan-out decision.
 //!
-//! What remains open is the **cross-transaction** race: a genuinely
-//! concurrent OTHER transaction's write landing between this plan and the
-//! eventual commit. Closing that window requires either a
-//! Serializable-isolation footprint fix or a per-table barrier lock —
-//! tracked separately as F-28 Step 3/4/5 (#830/#831/#832). This task does
-//! **not** claim that race is closed.
+//! ## Cross-transaction race — CLOSED for the implicit path (F-28 Step 5, S3-C)
+//!
+//! The **cross-transaction** race — a genuinely concurrent OTHER
+//! transaction's write landing between this plan and the eventual commit —
+//! is now closed for the IMPLICIT update path the same way `fk_restrict.rs`
+//! closes it for delete: `query_runner.rs`'s implicit UPDATE arm checks
+//! `FkReverseCache::is_fk_parent_with_action` and opens the implicit tx as
+//! `Serializable` when this table is an FK parent with a non-`NoAction`
+//! `on_update` action (symmetric with the DELETE arm's upgrade — the
+//! `list_stream_tx` child-table scans in `plan_fk_on_update` above are the
+//! SAME shape as `fk_restrict.rs`/`fk_actions.rs`'s, so they carry the
+//! identical cross-transaction race exposure and get the identical fix,
+//! including a bounded internal retry for the common already-resolved-race
+//! case). The child-side footprint widening
+//! (`require_footprint_if_fk_child`) is unconditional — it fires on every
+//! insert/update/set into an FK-child table regardless of which parent-side
+//! operation (delete or update) eventually checks against it. See
+//! `fk_restrict.rs`'s module doc for the full mechanism description and
+//! `crates/shamir-engine/src/query/batch/tests/fk_race_closure_tests.rs`
+//! for the deterministic end-to-end proof.
+//!
+//! Residual scope: same as `fk_restrict.rs`/`fk_actions.rs` — closed for the
+//! implicit path; an explicit tx that stays Snapshot is unaffected unless
+//! the caller itself opens it Serializable.
 
 use bytes::Bytes;
 use futures::StreamExt;
@@ -380,9 +398,14 @@ pub(crate) async fn plan_fk_on_update(
                 resolved_probes.push((old, new, *action, field, field_id));
             }
         }
-        if resolved_probes.is_empty() {
-            continue;
-        }
+        // F-28 Step 5 (memo §2.4): do NOT `continue` on an empty
+        // `resolved_probes` — `list_stream_tx` below records the
+        // Serializable `TableScan` predicate at construction time, before
+        // being polled. Skipping the scan when every probed field failed to
+        // resolve (e.g. a brand-new/empty child table) would silently skip
+        // recording that predicate too. The per-row loop below is a no-op
+        // when `resolved_probes` is empty, so running the scan anyway is
+        // cheap insurance.
 
         let batch_size = 1000;
         let stream = child_table.list_stream_tx(Some(tx), batch_size);
@@ -818,12 +841,18 @@ async fn child_has_reference(
 
     // Fallback: full scan with field match. Tx-aware: overlays this tx's own
     // staged writes (read-your-own-writes, closing D1 for this probe).
+    //
+    // F-28 Step 5 (memo §2.4): construct `list_stream_tx` UNCONDITIONALLY —
+    // it records the Serializable `TableScan` predicate synchronously at
+    // construction time (before this line returns), regardless of whether
+    // `field_id` resolved. See the identical fix + rationale in
+    // `fk_restrict.rs::child_has_reference`.
+    let batch_size = 1000;
+    let stream = table.list_stream_tx(Some(tx), batch_size);
     let Some(field_id) = field_id else {
         return Ok(false);
     };
     let key = shamir_types::core::interner::InternerKey::new(field_id);
-    let batch_size = 1000;
-    let stream = table.list_stream_tx(Some(tx), batch_size);
     futures::pin_mut!(stream);
     while let Some(batch_result) = stream.next().await {
         let batch = batch_result?;

@@ -935,37 +935,59 @@ pub fn record_conflicts(rec: &CommitWriteRecord, dep: &crate::predicate_set::Pre
 }
 
 /// PROPOSED (Phase C). Project the on-commit `TxContext` state into a
-/// `CommitWriteRecord`. Zero-cost off Serializable: returns an empty
+/// `CommitWriteRecord`. Zero-cost off the common path: returns an empty
 /// record whose `per_table` map is empty (no allocations except the
-/// stack-resident empty `HashMap`), and the caller's `record_commit_writes`
-/// no-ops on it.
+/// stack-resident empty `HashMap`) whenever the tx is Snapshot-isolated AND
+/// `footprint_tokens` is empty — the caller's `record_commit_writes`
+/// no-ops on the result either way.
 ///
 /// Called by `commit_tx::materialize` AT publish time.
 /// Inputs already collected by the existing pipeline:
 ///   - `tx.index_write_set` (tx_context.rs:72) — SetPosting keys per table.
 ///   - `tx.write_set`       (tx_context.rs:67) — touched tables (data).
 ///   - `tx.counter_deltas`  (tx_context.rs:93) — touched tables (counter).
+///
+/// F-28 Step 5 (S3-C): the per-table inclusion gate is
+/// `tx.isolation == Serializable OR tx.footprint_tokens.contains(&token)` —
+/// widened from the old whole-function `isolation != Serializable → empty`
+/// short-circuit. This lets a plain Snapshot writer publish a footprint for
+/// SPECIFIC tables the engine flagged via `TxContext::require_footprint_for`
+/// (an FK-child table), without publishing anything for its other tables.
+/// Off the common path (`footprint_tokens` empty, Snapshot isolation) this
+/// is a single `is_empty()` check per table — same zero-overhead shape as
+/// before for every existing caller that never touches `footprint_tokens`.
 pub fn build_footprint_from_tx(tx: &crate::TxContext, commit_version: u64) -> CommitWriteRecord {
     let mut rec = CommitWriteRecord {
         commit_version,
         per_table: TFxMap::default(),
     };
-    if tx.isolation != crate::IsolationLevel::Serializable {
-        // Zero-overhead: Snapshot/non-tx publishes nothing.
+
+    let serializable = tx.isolation == crate::IsolationLevel::Serializable;
+    // Zero-overhead invariant: off Serializable, a single `is_empty()` check
+    // on the (usually-empty) footprint-tokens set decides everything.
+    if !serializable && tx.footprint_tokens.is_empty() {
         return rec;
     }
+    let wants_footprint = |token: &u64| serializable || tx.footprint_tokens.contains(token);
 
     // Touched-bit: any table that ANY non-empty staging touched.
     for token in tx.write_set.keys() {
-        rec.per_table.entry(*token).or_default().touched = true;
+        if wants_footprint(token) {
+            rec.per_table.entry(*token).or_default().touched = true;
+        }
     }
     for token in tx.counter_deltas.keys() {
-        rec.per_table.entry(*token).or_default().touched = true;
+        if wants_footprint(token) {
+            rec.per_table.entry(*token).or_default().touched = true;
+        }
     }
 
     // Precise index-posting keys (only SetPosting; RemovePosting does not
     // introduce a phantom in a predicate — coarse `touched` covers it).
     for (token, op) in &tx.index_write_set {
+        if !wants_footprint(token) {
+            continue;
+        }
         // Index ops always touch their table even if SetPosting/Remove split.
         rec.per_table.entry(*token).or_default().touched = true;
         if let crate::IndexWriteOp::SetPosting { key, .. } = op {

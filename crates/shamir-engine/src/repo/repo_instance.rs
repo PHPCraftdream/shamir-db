@@ -1020,14 +1020,42 @@ impl RepoInstance {
         actor: Actor,
         alias: &str,
     ) -> Result<(shamir_tx::TxContext, shamir_tx::SnapshotGuard), BatchError> {
-        let (mut tx, guard) = self
-            .begin_tx(shamir_tx::IsolationLevel::Snapshot)
-            .await
-            .map_err(|e| BatchError::QueryError {
-                alias: alias.to_string(),
-                message: format!("implicit begin_tx: {}", e),
-                code: None,
-            })?;
+        self.begin_implicit_batch_tx_with_isolation(
+            actor,
+            alias,
+            shamir_tx::IsolationLevel::Snapshot,
+        )
+        .await
+    }
+
+    /// Like [`begin_implicit_batch_tx`](Self::begin_implicit_batch_tx), but
+    /// lets the caller pick the isolation level instead of hardcoding
+    /// `Snapshot`.
+    ///
+    /// F-28 Step 5 (S3-C): the query-runner's implicit DELETE/UPDATE arms use
+    /// this to upgrade to `Serializable` for a single implicit tx when the
+    /// target table is flagged (`FkReverseCache::is_fk_parent_with_action`)
+    /// as an FK parent with a non-`NoAction` `on_delete`/`on_update` — the
+    /// Serializable predicate check is what closes the cross-transaction
+    /// TOCTOU race between the FK reverse-check scan and this tx's commit
+    /// (see `fk_restrict.rs`/`fk_actions.rs`/`fk_on_update.rs`'s module docs).
+    /// Every other implicit-tx caller keeps calling
+    /// [`begin_implicit_batch_tx`](Self::begin_implicit_batch_tx), which
+    /// delegates here with `Snapshot` — byte-identical behavior, unchanged.
+    pub async fn begin_implicit_batch_tx_with_isolation(
+        &self,
+        actor: Actor,
+        alias: &str,
+        isolation: shamir_tx::IsolationLevel,
+    ) -> Result<(shamir_tx::TxContext, shamir_tx::SnapshotGuard), BatchError> {
+        let (mut tx, guard) =
+            self.begin_tx(isolation)
+                .await
+                .map_err(|e| BatchError::QueryError {
+                    alias: alias.to_string(),
+                    message: format!("implicit begin_tx: {}", e),
+                    code: None,
+                })?;
         // Provenance: thread the actor for commit-time attribution (R2).
         tx.set_actor(actor);
         // Mark implicit so the changefeed event reports tx_id == 0 (preserving
@@ -1060,6 +1088,16 @@ impl RepoInstance {
                     // `batch_execute.rs` / `db_tx.rs` / `group_commit.rs`.
                     crate::tx::CommitError::CasConflict { .. } => {
                         (commit_err.to_string(), Some("version_conflict".to_string()))
+                    }
+                    // F-28 Step 5: an implicit tx upgraded to Serializable
+                    // (FK-parent delete/update fan-out) can now abort with a
+                    // genuine SSI conflict — code it the same as the explicit
+                    // transactional-batch path (`batch_execute.rs`) does, so
+                    // client retry logic keyed on "tx_conflict" covers this
+                    // path too.
+                    crate::tx::CommitError::PhantomConflict { .. }
+                    | crate::tx::CommitError::SsiConflict { .. } => {
+                        (commit_err.to_string(), Some("tx_conflict".to_string()))
                     }
                     other => (other.to_string(), None),
                 };
