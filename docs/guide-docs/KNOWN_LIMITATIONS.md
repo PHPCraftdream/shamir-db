@@ -55,6 +55,11 @@ artifact).
     locking over a stream is a separate, harder problem and remains out
     of scope. See the "Streaming-scan SSI scope" doc comment at
     `crates/shamir-engine/src/table/table_manager_streaming.rs:163-168`.
+    (One specific instance of this general gap — a concurrent insert
+    racing a reverse-FK RESTRICT/CASCADE/SET NULL/ON UPDATE check — is
+    now closed for the implicit/autocommit path via targeted Serializable
+    isolation + footprint widening; see the `foreign_key` bullet in §2
+    "Schemas" below for the closure and its residual scope.)
   - **`AsOf`/`History` temporal reads do not get the transaction overlay.**
     `read_as_of`/`read_history` in `crates/shamir-engine/src/table/read_temporal.rs:45,209`
     take no `TxContext` parameter at all — point-in-time historical views
@@ -84,6 +89,63 @@ artifact).
   primitive in `crates/shamir-engine/src/validator/validator_db.rs:176-215`.
   No composite FK, no deferred constraints, and no self-referential
   cascade exist either.
+  - **The reverse-FK check TOCTOU (RESTRICT/CASCADE/SET NULL/ON UPDATE
+    checking a stale view of the child table) is now CLOSED for the
+    implicit (autocommit) path — CLOSED (F-28, #821, in 5 steps
+    #828-#832).** The originally documented gap: a concurrent insert into a
+    child table, landing between a parent DELETE/UPDATE's reverse-FK
+    check and that operation's own commit, could create a dangling
+    reference the check had no way to see. Closed via two mechanisms
+    covering two distinct sub-gaps, plus two additional bugs found and
+    fixed along the way:
+    - **In-transaction read-your-own-writes (D1) — F-28 Step 2 (#829).**
+      A transactional `[delete child; delete parent]` batch under
+      `on_delete = Restrict` was wrongly rejected, because the reverse-FK
+      probe/plan functions (`fk_restrict.rs`, `fk_actions.rs`,
+      `fk_on_update.rs`) read via a plain committed-store scan and so saw
+      the not-yet-committed child delete as still present; conversely
+      CASCADE could silently orphan a child inserted earlier in the same
+      transaction. Fixed by threading `tx: &TxContext` through those
+      checks so they read via `list_stream_tx`/`read_one_tx_bytes(Some(tx))`,
+      which overlays the transaction's own staged writes on the committed
+      stream.
+    - **Cross-transaction race (the original TOCTOU) — F-28 Step 5
+      (#832), mechanism S3-C.** A genuinely concurrent OTHER transaction's
+      insert into the child table, racing the parent operation's
+      check-then-commit window, is now closed via targeted Serializable
+      isolation + SSI footprint widening (decided over a per-table
+      barrier-lock alternative in the Step 3 spike memo, see
+      `docs/dev-artifacts/research/f28-s3-mechanism-decision.md`): an
+      implicit delete/update on an FK-parent table with a non-`NoAction`
+      action is upgraded from `Snapshot` to `Serializable` isolation at
+      begin time (recording a real `PredicateDep::TableScan` on the
+      reverse-FK probe), and any write into an FK-child table publishes
+      an SSI footprint token via `require_footprint_for` regardless of
+      that writer's own isolation level — so the two sides always have
+      something to conflict against. Whichever side commits first wins;
+      the loser aborts with `PhantomConflict`/`tx_conflict` (with a
+      bounded internal retry for the common case), and no interleaving
+      can leave "delete succeeded AND a dangling child reference exists."
+      Proven via deterministic end-to-end tests in
+      `crates/shamir-engine/src/query/batch/tests/fk_race_closure_tests.rs`.
+    - **Two additional, independent bugs found and fixed along the way:**
+      D2 (F-28 Step 1, #828) — autocommit inserts/updates into an
+      FK-constrained table were wrongly rejected because the implicit-tx
+      path passed the reverse-FK resolver as `None`, fixed by inverting
+      control on `RepoInstance::begin_implicit_batch_tx`/
+      `commit_implicit_batch_tx`; and D1 above (Step 2), listed here
+      again for completeness since it was discovered, not pre-supposed,
+      during this campaign.
+    - **Residual scope.** This closes the race for the IMPLICIT
+      (autocommit) delete/update path only. An EXPLICIT transaction that
+      the caller opens as `Snapshot` for its own reasons does not get an
+      automatic Serializable upgrade — a caller wanting the same
+      protection for an explicit transaction opens it `Serializable`
+      itself; the same footprint/predicate machinery already protects
+      that case once wired that way.
+    - See the "TOCTOU caveat" / "Cross-transaction race — CLOSED" doc
+      comments in `crates/shamir-engine/src/query/batch/fk_restrict.rs`
+      for the full mechanism writeup this summary is drawn from.
 - **Renaming a table with a bound declarative schema is rejected.** The
   auto-bound schema validator is registered under a name that embeds the
   table path, so a rename would orphan it; the guard refuses up-front. See
