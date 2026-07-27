@@ -34,6 +34,7 @@ pub mod s3_bytes_path_parity_tests;
 pub mod s9b_rebuild_on_open_tests;
 pub mod s_read_server_tests;
 pub mod s_write_server_tests;
+pub mod schema_activation_barrier_tests;
 pub mod seam_read_tests;
 pub mod select_expression_reject_tests;
 pub mod set_byte_merge_parity_tests;

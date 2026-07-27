@@ -61,6 +61,23 @@ pub struct TableManager {
     /// clone is observed by writers on every clone (same rationale as
     /// `bindings_len`). Loaded `Acquire` on the writer fast-path skip.
     pub(super) index2_create_barrier: Arc<std::sync::atomic::AtomicBool>,
+    /// F-37 (#845) — sibling of `index2_create_barrier`, raised for the
+    /// duration of a schema-activation DDL sequence (`set_table_schema` /
+    /// `add_schema_rule`) whose `keyset_safe` proof reads
+    /// `table.count() == 0` and then persists + activates a new schema rule.
+    /// While it is `true`, EVERY writer path also acquires
+    /// `unique_write_lock`, so no row can land between the count proof and
+    /// the schema's activation — the F-37 race that `lock_schema_rmw` does
+    /// NOT close (that lock only serializes schema DDL against OTHER schema
+    /// DDL in `admin_user_locks`, never against the write path in
+    /// `table_manager_crud.rs`). Sibling, NOT overload: `index2_create_barrier`
+    /// and this flag represent different in-flight conditions and are
+    /// independently settable/clearable. Shared across clones via `Arc`
+    /// (same rationale as `index2_create_barrier`); loaded `Acquire` on the
+    /// writer fast-path skip via [`needs_write_barrier`](Self::needs_write_barrier).
+    /// Set/cleared `Release` (under `unique_write_lock`) by the shamir-db DDL
+    /// handler via [`set_schema_activation_barrier`](Self::set_schema_activation_barrier).
+    pub(super) schema_activation_barrier: Arc<std::sync::atomic::AtomicBool>,
     pub(super) index2_registry: Arc<crate::index2::IndexRegistry>,
     pub(super) mvcc_store: Option<Arc<shamir_tx::MvccStore>>,
     /// Per-table validator bindings (S2). Lock-free reads via
@@ -154,6 +171,9 @@ impl Clone for TableManager {
             // Shared across clones so a `create_index_v2` in flight on any
             // clone forces writers on every clone onto the barrier.
             index2_create_barrier: Arc::clone(&self.index2_create_barrier),
+            // F-37 — shared across clones so a schema-activation DDL in flight
+            // on any clone forces writers on every clone onto the barrier.
+            schema_activation_barrier: Arc::clone(&self.schema_activation_barrier),
             index2_registry: Arc::clone(&self.index2_registry),
             mvcc_store: self.mvcc_store.clone(),
             validator_bindings: Arc::clone(&self.validator_bindings),
@@ -221,6 +241,7 @@ impl TableManager {
             verify_running: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             unique_write_lock: Arc::new(tokio::sync::Mutex::new(())),
             index2_create_barrier: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            schema_activation_barrier: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             index2_registry: Arc::new(crate::index2::IndexRegistry::new()),
             mvcc_store: None,
             validator_bindings,
@@ -371,6 +392,7 @@ impl TableManager {
             verify_running: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             unique_write_lock: Arc::new(tokio::sync::Mutex::new(())),
             index2_create_barrier: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            schema_activation_barrier: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             index2_registry: Arc::new(crate::index2::IndexRegistry::new()),
             mvcc_store: None,
             validator_bindings: Arc::new(arc_swap::ArcSwap::from_pointee(Vec::new())),
@@ -527,6 +549,30 @@ impl TableManager {
         Arc::clone(&self.unique_write_lock)
     }
 
+    /// F-37 (#845) — drive the schema-activation write barrier from outside
+    /// the engine crate (the shamir-db schema DDL handler in
+    /// `admin_schema.rs`). When `on == true`, every writer consulting
+    /// [`needs_write_barrier`](Self::needs_write_barrier) returns `true` and
+    /// serializes on [`unique_write_lock`](Self::unique_write_lock) — closing
+    /// the `keyset_safe` count-proof race (a concurrent INSERT/UPDATE can no
+    /// longer land between the `count() == 0` read and the schema's persist +
+    /// activate).
+    ///
+    /// `Release`-ordered to pair with the writer's `Acquire` load in
+    /// `needs_write_barrier`. **Callers MUST set/clear this while holding
+    /// `unique_write_lock`** (mirrors `index2_create_barrier`'s discipline in
+    /// `create_index_v2`): raise the flag under the lock so the
+    /// `count() == 0` proof that follows is a genuine snapshot no concurrent
+    /// writer can invalidate, and clear it (still under the lock) once
+    /// persist + activate have committed — the lock is then released, letting
+    /// queued writers proceed ordered AFTER the proof point. An RAII guard
+    /// that clears on drop (every exit path) is the sanctioned usage shape —
+    /// see `admin_schema.rs::SchemaActivationBarrierGuard`.
+    pub fn set_schema_activation_barrier(&self, on: bool) {
+        self.schema_activation_barrier
+            .store(on, std::sync::atomic::Ordering::Release);
+    }
+
     /// Borrow the table's sorted-index manager — used by the planner
     /// for range / order / min queries, and by DDL when a
     /// `create_index { sorted: true }` op lands.
@@ -551,12 +597,18 @@ impl TableManager {
     /// O(1) predicate: must this writer acquire `unique_write_lock` before
     /// its validate→write→index sequence?
     ///
-    /// `true` when EITHER the table has a legacy unique index (the original
-    /// reason the barrier exists — atomic unique-check + posting-write) OR an
-    /// index2 `create_index_v2` is currently in flight (#534 finding 1). The
-    /// barrier flag is loaded `Acquire` to pair with the `Release` store the
-    /// create path makes under the lock. Tables with neither condition keep
-    /// the lock-free fast path.
+    /// `true` when ANY of:
+    /// - the table has a legacy unique index (the original reason the barrier
+    ///   exists — atomic unique-check + posting-write),
+    /// - an index2 `create_index_v2` is currently in flight (#534 finding 1),
+    ///   OR
+    /// - a schema-activation DDL (`set_table_schema` / `add_schema_rule`) is
+    ///   currently in its `keyset_safe` count-proof → persist → activate
+    ///   window (F-37, #845).
+    ///
+    /// Each barrier flag is loaded `Acquire` to pair with the `Release` store
+    /// the corresponding create/DDL path makes under the lock. Tables with
+    /// none of these conditions keep the lock-free fast path.
     ///
     /// Consulted by the non-tx writer methods in `table_manager_crud.rs`
     /// (`insert`/`insert_many_returning_version`/`delete_returning_version`/
@@ -575,6 +627,9 @@ impl TableManager {
         self.index_manager.has_unique_indexes()
             || self
                 .index2_create_barrier
+                .load(std::sync::atomic::Ordering::Acquire)
+            || self
+                .schema_activation_barrier
                 .load(std::sync::atomic::Ordering::Acquire)
     }
 

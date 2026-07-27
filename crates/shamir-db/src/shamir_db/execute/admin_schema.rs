@@ -28,6 +28,7 @@
 //! [`parse_schema`]: shamir_db::shamir_db::schema_management::parse_schema
 
 use crate::access::{Action, ResourcePath};
+use crate::engine::table::TableManager;
 use crate::query::admin::{
     AddSchemaRuleOp, CompareDto, ConstraintsDto, FieldRuleDto, FkAction, ForeignKeyDto,
     GetTableSchemaOp, NumDto, RemoveSchemaRuleOp, SetTableSchemaOp,
@@ -94,6 +95,80 @@ async fn lock_schema_rmw(
         .or_insert_with(|| std::sync::Arc::new(tokio::sync::Mutex::new(())))
         .clone();
     arc.lock_owned().await
+}
+
+// ── F-37 (#845): schema-activation write barrier ───────────────────────────
+//
+// `lock_schema_rmw` above only serializes schema DDL against OTHER schema DDL
+// (a separate `admin_user_locks` map). It does NOT intersect with the actual
+// write path (`TableManager::insert`/`set`/etc in `table_manager_crud.rs`),
+// which knows nothing about `admin_user_locks`. So a concurrent writer could
+// land between `stamp_keyset_safe`'s `count() == 0` read and the schema's
+// persist+activate, writing a row under the about-to-be-activated rule before
+// `keyset_safe = true` is stamped — undermining the cursor gate that trusts it.
+//
+// The fix mirrors the existing unique-index DDL write-barrier pattern exactly
+// (see `TableManager::index2_create_barrier` + `create_index_v2`): hold the
+// table's shared `unique_write_lock` across the ENTIRE count→persist→activate
+// sequence AND raise a sibling `schema_activation_barrier` flag so every
+// writer consulting `needs_write_barrier()` serializes on that same lock.
+// `lock_schema_rmw` (DDL-vs-DDL) stays as-is — these are two independent
+// serialization axes.
+
+/// RAII guard that raises a table's `schema_activation_barrier` flag while
+/// held and clears it on drop — including every `?` early-return path inside
+/// a schema-activation DDL. Mirrors the engine's `Index2CreateBarrierGuard`
+/// (`table_manager_index_mgmt.rs`): the flag is `Release`-stored here, pairing
+/// with the writer's `Acquire` load in `needs_write_barrier`.
+///
+/// **Must be created while the caller already holds `unique_write_lock`**
+/// (see [`begin_schema_activation_barrier`]) — exactly as the engine's
+/// `Index2CreateBarrierGuard` is raised under `_uwl_guard`. The clear-on-drop
+/// then runs while the lock is still held (Rust drops locals in reverse
+/// declaration order: the barrier guard, declared AFTER the lock guard, drops
+/// FIRST), matching `create_index_v2`'s own clear-flag-then-release-lock
+/// sequence.
+struct SchemaActivationBarrierGuard<'a> {
+    table: &'a TableManager,
+}
+
+impl<'a> SchemaActivationBarrierGuard<'a> {
+    fn raise(table: &'a TableManager) -> Self {
+        table.set_schema_activation_barrier(true);
+        Self { table }
+    }
+}
+
+impl Drop for SchemaActivationBarrierGuard<'_> {
+    fn drop(&mut self) {
+        self.table.set_schema_activation_barrier(false);
+    }
+}
+
+/// Begin the schema-activation write barrier for `table`: take the table's
+/// shared `unique_write_lock` (the SAME lock the non-tx writer path takes
+/// when `needs_write_barrier()` is true) and return the handle + lock guard.
+/// The caller then constructs a [`SchemaActivationBarrierGuard`] against the
+/// returned handle so all three locals (`_barrier`, `_uwl_guard`, `_handle`)
+/// share one scope and drop in the right order (barrier clears first, then
+/// the lock releases) — the exact shape of `create_index_v2`'s
+/// `_uwl_guard` + `Index2CreateBarrierGuard` pair.
+///
+/// Call this immediately BEFORE the `stamp_keyset_safe` count-proof read so
+/// the subsequent count→persist→activate sequence is a genuine snapshot no
+/// concurrent writer can invalidate.
+async fn begin_schema_activation_barrier(
+    shamir: &ShamirDb,
+    db: &str,
+    repo: &str,
+    table: &str,
+) -> Result<(TableManager, tokio::sync::OwnedMutexGuard<()>), BatchError> {
+    let handle = shamir
+        .get_table(db, repo, table)
+        .await
+        .map_err(|e| err_code("internal_error", e.to_string()))?;
+    let uwl_guard = handle.unique_write_lock().lock_owned().await;
+    Ok((handle, uwl_guard))
 }
 
 /// Validate that all unique-constrained fields in the rule set have a
@@ -417,6 +492,23 @@ impl ShamirAdminExecutor {
         // the silent runtime skip into an explicit error).
         validate_no_self_referential_cascade(table, &op.schema)?;
 
+        // F-37 (#845) — acquire the schema-activation write barrier across the
+        // ENTIRE stamp_keyset_safe (count() == 0 proof) → persist catalogue →
+        // activate validator sequence. Without this a concurrent INSERT/UPDATE
+        // could land between the count proof and the schema's activation,
+        // writing a row under whatever schema was active a moment ago —
+        // `keyset_safe = true` would then be stamped for a table whose full
+        // row history was never actually proven homogeneous. The barrier
+        // mirrors the unique-index DDL's pattern (`create_index_v2`): hold the
+        // shared `unique_write_lock` and raise `schema_activation_barrier` so
+        // every writer consulting `needs_write_barrier()` serializes on this
+        // lock. All three locals are RAII — on EVERY exit path (success or any
+        // `?` error below) the barrier flag clears first, then the lock
+        // releases (reverse declaration drop order), matching `create_index_v2`.
+        let (_barrier_handle, _uwl_guard) =
+            begin_schema_activation_barrier(&self.shamir, db, repo, table).await?;
+        let _barrier = SchemaActivationBarrierGuard::raise(&_barrier_handle);
+
         // F-17 (#810) — stamp the server-computed `keyset_safe` proof onto
         // each rule. Read the PREVIOUS rules from the catalogue so that
         // unchanged rules (same path + same type) preserve their prior
@@ -612,6 +704,16 @@ impl ShamirAdminExecutor {
 
         // Reject self-referential ON DELETE CASCADE at DDL time.
         validate_no_self_referential_cascade(table, std::slice::from_ref(new_rule))?;
+
+        // F-37 (#845) — acquire the schema-activation write barrier across the
+        // stamp_keyset_safe → persist → activate sequence, exactly as in
+        // `handle_set_table_schema`. AddSchemaRule shares the same
+        // count-based `keyset_safe` proof (below) and therefore the same
+        // writer race. RAII: the flag clears and the lock releases on every
+        // exit path (success or `?` error), reverse declaration drop order.
+        let (_barrier_handle, _uwl_guard) =
+            begin_schema_activation_barrier(&self.shamir, db, repo, table).await?;
+        let _barrier = SchemaActivationBarrierGuard::raise(&_barrier_handle);
 
         // F-17 (#810) — stamp the server-computed `keyset_safe` proof. Only
         // the upserted rule (new path or type-changed) gets a fresh
