@@ -262,6 +262,416 @@ async fn hybrid_repo_persists_engine_and_path_in_system_store() {
     );
 }
 
+/// F-33 Step 5 (#839) — a schema validator that survived a hybrid-repo
+/// restart must genuinely still be RUNNING post-restart, not merely present
+/// as inert metadata: a write that violates it must be rejected, and a write
+/// that satisfies it must succeed.
+#[tokio::test]
+async fn hybrid_repo_validator_genuinely_enforces_post_restart() {
+    let dir = tempfile::tempdir().unwrap();
+    let sys_path = dir.path().join("meta.redb");
+
+    // === Session 1: CREATE REPO ... ENGINE 'hybrid' + a required-field schema ===
+    {
+        let shamir = ShamirDb::init(SystemStoreConfig::Fjall(sys_path.clone()))
+            .await
+            .unwrap();
+        shamir.create_db("appdb").await;
+
+        let mut b = Batch::new();
+        b.id(1);
+        b.create_repo(
+            "cr",
+            ddl::create_repo("hyrepo")
+                .engine("hybrid")
+                .tables(["items"]),
+        );
+        shamir
+            .execute("appdb", &b.to_request_via_msgpack())
+            .await
+            .unwrap();
+
+        let mut b = Batch::new();
+        b.id(2);
+        b.set_table_schema(
+            "sch",
+            ddl::set_table_schema("items")
+                .repo("hyrepo")
+                .rules([ddl::field(["name"]).string().required().build()]),
+        );
+        shamir
+            .execute("appdb", &b.to_request_via_msgpack())
+            .await
+            .unwrap();
+    }
+
+    // === Session 2: reopen on the SAME meta path ===
+    let shamir = reinit_with_retry(sys_path).await;
+
+    // A write that VIOLATES the schema (missing the required "name" field)
+    // must be rejected with a validation error, not merely have the rule
+    // still listed in DescribeTable.
+    let mut b = Batch::new();
+    b.id(3);
+    b.insert(
+        "bad",
+        write::Insert::with_repo("hyrepo", "items").row(doc! {
+            "other" => "value",
+        }),
+    );
+    let bad_result = shamir.execute("appdb", &b.to_request_via_msgpack()).await;
+    assert!(
+        bad_result.is_err(),
+        "insert missing the required field must be rejected post-restart"
+    );
+    let err = bad_result.unwrap_err().to_string();
+    assert!(
+        err.contains("missing_required"),
+        "error should mention missing_required, got: {err}"
+    );
+
+    // A write that SATISFIES the schema must succeed, proving the validator
+    // is actively running (not just inert metadata).
+    let mut b = Batch::new();
+    b.id(4);
+    b.insert(
+        "good",
+        write::Insert::with_repo("hyrepo", "items").row(doc! {
+            "name" => "widget",
+        }),
+    );
+    let resp = shamir
+        .execute("appdb", &b.to_request_via_msgpack())
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.results["good"].records.len(),
+        1,
+        "insert satisfying the schema must succeed post-restart"
+    );
+}
+
+/// F-33 Step 5 (#839) — a surviving index must be genuinely USABLE for a
+/// brand-new post-restart write, which is also the strongest possible
+/// functional proof of interner coherence: if the post-restart interner
+/// resolved "name" to a different id than the one baked into the surviving
+/// index definition, this query would silently return zero results instead
+/// of erroring.
+#[tokio::test]
+async fn hybrid_repo_index_genuinely_usable_post_restart() {
+    let dir = tempfile::tempdir().unwrap();
+    let sys_path = dir.path().join("meta.redb");
+
+    // === Session 1: CREATE REPO ... ENGINE 'hybrid', index on "name", insert
+    // a row, confirm the index finds it pre-restart ===
+    {
+        let shamir = ShamirDb::init(SystemStoreConfig::Fjall(sys_path.clone()))
+            .await
+            .unwrap();
+        shamir.create_db("appdb").await;
+
+        let mut b = Batch::new();
+        b.id(1);
+        b.create_repo(
+            "cr",
+            ddl::create_repo("hyrepo")
+                .engine("hybrid")
+                .tables(["items"]),
+        );
+        shamir
+            .execute("appdb", &b.to_request_via_msgpack())
+            .await
+            .unwrap();
+
+        let mut b = Batch::new();
+        b.id(2);
+        b.create_index(
+            "idx",
+            ddl::create_index("name_idx", "items")
+                .repo("hyrepo")
+                .field("name"),
+        );
+        shamir
+            .execute("appdb", &b.to_request_via_msgpack())
+            .await
+            .unwrap();
+
+        let mut b = Batch::new();
+        b.id(3);
+        b.insert(
+            "ins",
+            write::Insert::with_repo("hyrepo", "items").row(doc! {
+                "name" => "old-widget",
+            }),
+        );
+        shamir
+            .execute("appdb", &b.to_request_via_msgpack())
+            .await
+            .unwrap();
+
+        // Pre-restart baseline: the index finds the row.
+        let mut b = Batch::new();
+        b.id(4);
+        b.query(
+            "r",
+            Query::with_repo("hyrepo", "items").where_eq("name", "old-widget"),
+        );
+        let resp = shamir
+            .execute("appdb", &b.to_request_via_msgpack())
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.results["r"].records.len(),
+            1,
+            "pre-restart baseline: index must find the row it was built on"
+        );
+    }
+
+    // === Session 2: reopen on the SAME meta path ===
+    let shamir = reinit_with_retry(sys_path).await;
+
+    // Insert a DIFFERENT row with a NEW value on the same indexed field.
+    let mut b = Batch::new();
+    b.id(5);
+    b.insert(
+        "ins2",
+        write::Insert::with_repo("hyrepo", "items").row(doc! {
+            "name" => "new-widget",
+        }),
+    );
+    let resp = shamir
+        .execute("appdb", &b.to_request_via_msgpack())
+        .await
+        .unwrap();
+    assert_eq!(resp.results["ins2"].records.len(), 1);
+
+    // The query MUST find the new row via the surviving index. A silent
+    // interner-id mismatch between the post-restart repo and the surviving
+    // index definition would make this return 0 hits instead of erroring.
+    let mut b = Batch::new();
+    b.id(6);
+    b.query(
+        "r_new",
+        Query::with_repo("hyrepo", "items").where_eq("name", "new-widget"),
+    );
+    let resp = shamir
+        .execute("appdb", &b.to_request_via_msgpack())
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.results["r_new"].records.len(),
+        1,
+        "surviving index must be usable for a brand-new post-restart write \
+         (interner must resolve 'name' to the same id the index was built on)"
+    );
+
+    // No stale postings, DDL-level: querying for the OLD pre-restart value
+    // via the SAME index must return 0 hits (the row itself is gone —
+    // table data is ephemeral by design).
+    let mut b = Batch::new();
+    b.id(7);
+    b.query(
+        "r_old",
+        Query::with_repo("hyrepo", "items").where_eq("name", "old-widget"),
+    );
+    let resp = shamir
+        .execute("appdb", &b.to_request_via_msgpack())
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.results["r_old"].records.len(),
+        0,
+        "querying the pre-restart value via the surviving index must find \
+         nothing post-restart (no stale postings, data is ephemeral)"
+    );
+}
+
+/// F-33 Step 5 (#839) — two full restart cycles in a row: the surviving
+/// index must stay usable and coherent on the SECOND reattach too, not just
+/// the first. A "warm-then-cold-again" open sequence is a plausible spot for
+/// drift (e.g. accidentally re-persisting/duplicating index state, or losing
+/// it) that a single-restart test would not catch.
+#[tokio::test]
+async fn hybrid_repo_index_stays_usable_across_two_restarts() {
+    let dir = tempfile::tempdir().unwrap();
+    let sys_path = dir.path().join("meta.redb");
+
+    // === Session 1: CREATE REPO ... ENGINE 'hybrid', index on "name" ===
+    {
+        let shamir = ShamirDb::init(SystemStoreConfig::Fjall(sys_path.clone()))
+            .await
+            .unwrap();
+        shamir.create_db("appdb").await;
+
+        let mut b = Batch::new();
+        b.id(1);
+        b.create_repo(
+            "cr",
+            ddl::create_repo("hyrepo")
+                .engine("hybrid")
+                .tables(["items"]),
+        );
+        shamir
+            .execute("appdb", &b.to_request_via_msgpack())
+            .await
+            .unwrap();
+
+        let mut b = Batch::new();
+        b.id(2);
+        b.create_index(
+            "idx",
+            ddl::create_index("name_idx", "items")
+                .repo("hyrepo")
+                .field("name"),
+        );
+        shamir
+            .execute("appdb", &b.to_request_via_msgpack())
+            .await
+            .unwrap();
+
+        let mut b = Batch::new();
+        b.id(3);
+        b.insert(
+            "ins",
+            write::Insert::with_repo("hyrepo", "items").row(doc! {
+                "name" => "gen1",
+            }),
+        );
+        shamir
+            .execute("appdb", &b.to_request_via_msgpack())
+            .await
+            .unwrap();
+    }
+
+    // === Session 2: reopen after FIRST restart, write a new generation-2
+    // row, confirm both the new write and the surviving config are usable ===
+    {
+        let shamir = reinit_with_retry(sys_path.clone()).await;
+
+        let mut b = Batch::new();
+        b.id(4);
+        b.insert(
+            "ins2",
+            write::Insert::with_repo("hyrepo", "items").row(doc! {
+                "name" => "gen2",
+            }),
+        );
+        let resp = shamir
+            .execute("appdb", &b.to_request_via_msgpack())
+            .await
+            .unwrap();
+        assert_eq!(resp.results["ins2"].records.len(), 1);
+
+        let mut b = Batch::new();
+        b.id(5);
+        b.query(
+            "r_gen2",
+            Query::with_repo("hyrepo", "items").where_eq("name", "gen2"),
+        );
+        let resp = shamir
+            .execute("appdb", &b.to_request_via_msgpack())
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.results["r_gen2"].records.len(),
+            1,
+            "index must be usable for a new write after the FIRST restart"
+        );
+
+        let mut b = Batch::new();
+        b.id(6);
+        b.query(
+            "r_gen1",
+            Query::with_repo("hyrepo", "items").where_eq("name", "gen1"),
+        );
+        let resp = shamir
+            .execute("appdb", &b.to_request_via_msgpack())
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.results["r_gen1"].records.len(),
+            0,
+            "generation-1 row must be gone after the FIRST restart (ephemeral data)"
+        );
+    }
+
+    // === Session 3: reopen after the SECOND restart in a row ===
+    let shamir = reinit_with_retry(sys_path).await;
+
+    // DescribeTable: the index definition must still be there — no drift on
+    // the second reattach (e.g. duplication, or silent loss).
+    let mut b = Batch::new();
+    b.id(7);
+    b.describe_table("desc", ddl::describe_table("items").repo("hyrepo"));
+    let resp = shamir
+        .execute("appdb", &b.to_request_via_msgpack())
+        .await
+        .unwrap();
+    let d = resp.results["desc"].records[0].as_value().as_ref().clone();
+    let indexes = d
+        .get("indexes")
+        .and_then(|v| v.as_array())
+        .expect("indexes section missing");
+    assert_eq!(
+        indexes
+            .iter()
+            .filter(|i| i.get("name").and_then(|v| v.as_str()) == Some("name_idx"))
+            .count(),
+        1,
+        "name_idx must survive the SECOND restart exactly once (no duplication/loss)"
+    );
+
+    // A brand-new generation-3 write must be found via the same index —
+    // confirming interner coherence holds on the SECOND reattach too.
+    let mut b = Batch::new();
+    b.id(8);
+    b.insert(
+        "ins3",
+        write::Insert::with_repo("hyrepo", "items").row(doc! {
+            "name" => "gen3",
+        }),
+    );
+    let resp = shamir
+        .execute("appdb", &b.to_request_via_msgpack())
+        .await
+        .unwrap();
+    assert_eq!(resp.results["ins3"].records.len(), 1);
+
+    let mut b = Batch::new();
+    b.id(9);
+    b.query(
+        "r_gen3",
+        Query::with_repo("hyrepo", "items").where_eq("name", "gen3"),
+    );
+    let resp = shamir
+        .execute("appdb", &b.to_request_via_msgpack())
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.results["r_gen3"].records.len(),
+        1,
+        "index must remain usable for a new write after the SECOND restart"
+    );
+
+    // And BOTH prior generations' data must remain gone (ephemeral, no
+    // resurrection/duplication across the second reattach either).
+    let mut b = Batch::new();
+    b.id(10);
+    b.query(
+        "r_all_old",
+        Query::with_repo("hyrepo", "items").where_eq("name", "gen2"),
+    );
+    let resp = shamir
+        .execute("appdb", &b.to_request_via_msgpack())
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.results["r_all_old"].records.len(),
+        0,
+        "generation-2 row must still be gone after the SECOND restart"
+    );
+}
+
 /// The unsupported-engine error message must mention `hybrid` alongside
 /// `in_memory`/`fjall` now that it's a real supported choice.
 #[tokio::test]

@@ -443,7 +443,22 @@ impl TableManager {
         let records = self.collect_all_current_records().await?;
         self.index_manager
             .create_index_from_records(index_def, records)
-            .await
+            .await?;
+        // F-33 Step 5 (#839) fix: `build_index_definition` interns the index
+        // NAME and every field-path segment (`intern_string`/`intern_path`),
+        // but those `touch_ind` calls only mutate the in-process `Interner` —
+        // they are never durably chunked without an explicit `persist()`.
+        // Every OTHER index-creating path already does this immediately
+        // after registering (`create_sorted_index_with_include`,
+        // `table_manager_sorted_index.rs`); this one was the omission.
+        // Harmless/no-op on a plain durable repo (the interner is persisted
+        // again on the next write anyway), but on a hybrid repo (F-33) the
+        // interner mirror is the ONLY durable copy of the id<->name mapping
+        // — without this call, a restart's fresh interner silently
+        // reassigns the un-persisted id to whatever string is next
+        // interned, corrupting `IndexDefinition::name_interned` (and thus
+        // `DescribeTable`'s reported index name) without ever erroring.
+        self.interner.persist().await
     }
 
     /// Create a unique index on specified paths.
@@ -490,7 +505,12 @@ impl TableManager {
         let records = self.collect_all_current_records().await?;
         self.index_manager
             .create_unique_index_from_records(index_def, records)
-            .await
+            .await?;
+        // F-33 Step 5 (#839) fix — see `create_index`'s matching comment:
+        // durably persist the index-name/field-path ids the interner just
+        // touched, mirroring `create_sorted_index_with_include`'s existing
+        // persist-after-register call.
+        self.interner.persist().await
     }
 
     /// Drop a regular index by name.
