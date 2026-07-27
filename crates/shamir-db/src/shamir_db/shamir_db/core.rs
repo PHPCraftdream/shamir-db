@@ -701,6 +701,8 @@ impl ShamirDb {
             "in_memory" => Some(BoxRepoFactory::in_memory()),
             #[cfg(feature = "fjall")]
             "fjall" => path.map(BoxRepoFactory::fjall),
+            #[cfg(feature = "fjall")]
+            "hybrid" => path.map(BoxRepoFactory::hybrid),
             _ => None,
         }
     }
@@ -710,6 +712,8 @@ impl ShamirDb {
             BoxRepoFactory::InMemory(_) => "in_memory",
             #[cfg(feature = "fjall")]
             BoxRepoFactory::Fjall(_) => "fjall",
+            #[cfg(feature = "fjall")]
+            BoxRepoFactory::Hybrid(_) => "hybrid",
             // The buffer layer doesn't have an identity of its own
             // — recurse to the underlying backend so reflection
             // sees the real engine.
@@ -724,6 +728,8 @@ impl ShamirDb {
             BoxRepoFactory::InMemory(_) => None,
             #[cfg(feature = "fjall")]
             BoxRepoFactory::Fjall(f) => Some(f.path.to_string_lossy().to_string()),
+            #[cfg(feature = "fjall")]
+            BoxRepoFactory::Hybrid(f) => Some(f.info_path.to_string_lossy().to_string()),
             BoxRepoFactory::MemBuffer(f) => Self::extract_path(&f.inner),
             BoxRepoFactory::Cached(f) => Self::extract_path(&f.inner),
         }

@@ -220,9 +220,41 @@ impl ShamirAdminExecutor {
                     None => BoxRepoFactory::in_memory(),
                 }
             }
+            #[cfg(feature = "fjall")]
+            Some("hybrid") => {
+                // Unlike the `fjall`/`None` arm above, `hybrid` does NOT
+                // fall back to `in_memory()` when there's no `data_root`.
+                // An explicit `ENGINE 'hybrid'` request is an explicit
+                // durability promise for the table config mirror
+                // (`__info__`/`__interner__`) — silently downgrading to
+                // fully-ephemeral would violate exactly that promise, so
+                // this must be a loud, clear error instead.
+                match self.shamir.data_root() {
+                    Some(root) => {
+                        let db_dir = root.join(&self.db_name);
+                        tokio::fs::create_dir_all(&db_dir).await.map_err(|e| {
+                            err(format!(
+                                "failed to create repo directory '{}': {}",
+                                db_dir.display(),
+                                e
+                            ))
+                        })?;
+                        let path = db_dir.join(&op.create_repo);
+                        BoxRepoFactory::hybrid(path)
+                    }
+                    None => {
+                        return Err(err(
+                            "engine 'hybrid' requires a data_root (this ShamirDb home has none): \
+                             hybrid mirrors table config to a durable fjall directory, so there \
+                             is nowhere to put it without a data_root"
+                                .to_string(),
+                        ));
+                    }
+                }
+            }
             Some(other) => {
                 return Err(err(format!(
-                    "Unsupported engine '{}'. Supported: in_memory, fjall.",
+                    "Unsupported engine '{}'. Supported: in_memory, fjall, hybrid.",
                     other
                 )));
             }
