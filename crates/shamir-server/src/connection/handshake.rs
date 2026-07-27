@@ -395,47 +395,88 @@ async fn run_handshake<F: Framer>(
         }
     };
 
-    // F-25 (#818, P0): fail-closed bootstrap TTL check. The rotation block
-    // below is best-effort/non-fatal by design (F-3) so an outstanding
-    // bootstrap token whose TTL has already expired must be rejected HERE,
-    // before any session is granted -- otherwise a login against an expired
-    // (but not-yet-rotated) bootstrap credential would still succeed if the
-    // rotation attempt also fails (e.g. the same storage outage that left
-    // the boot-time TTL sweep's own rotation incomplete). Reject with the
-    // SAME failure shape as a wrong-proof rejection (`HandshakeError::BadProof`,
-    // same `register_failure`/`audit_emit` pattern as the `ProofOutcome::Rejected`
-    // arm above) so this is indistinguishable from a bad password to an
-    // outside observer -- no oracle telling an attacker "the password was
-    // right, only the timing was wrong."
+    // F-25 (#818, P0) + F-38 (#846, P0): fail-closed bootstrap TTL check.
+    // The rotation block below is best-effort/non-fatal by design (F-3) so
+    // an outstanding bootstrap token whose TTL has already expired must be
+    // rejected HERE, before any session is granted -- otherwise a login
+    // against an expired (but not-yet-rotated) bootstrap credential would
+    // still succeed if the rotation attempt also fails (e.g. the same
+    // storage outage that left the boot-time TTL sweep's own rotation
+    // incomplete).
     //
-    // `bootstrap_token_active()`/`bootstrap_token_expired()` both fail OPEN
-    // (return `false`) if `ctx.meta`'s underlying blob read errors -- see
-    // `server_meta.rs`. That is pre-existing behavior this check does not
-    // change or worsen: the surrounding `if` already relies on
-    // `bootstrap_token_active()` failing open the same way to decide whether
-    // a bootstrap token is outstanding at all, so this expiry check does not
-    // introduce any NEW fail-open beyond what already exists here.
+    // F-38: this read is now fail-CLOSED on a metadata read/decode error.
+    // The three granular `bootstrap_*` getters each independently call
+    // `read_blob(KEY_BOOTSTRAP)` and swallow any error via `.ok()` (failing
+    // OPEN), so the old 3-getter `if` could silently skip this gate when
+    // the underlying blob read transiently errored -- granting a session
+    // for what may be an EXPIRED, readable-under-normal-conditions bootstrap
+    // credential purely because the read happened to fail at that instant.
+    // `read_bootstrap_token_state` reads the row ONCE and propagates the
+    // error; we treat BOTH the "outstanding-and-expired-for-this-user" `Ok`
+    // arm AND any `Err` arm as a reject, using the SAME client-facing
+    // failure shape as a wrong-proof rejection (`HandshakeError::BadProof`,
+    // same `register_failure`/`audit_emit` pattern as the
+    // `ProofOutcome::Rejected` arm above) so this is indistinguishable from
+    // a bad password to an outside observer -- no oracle telling an
+    // attacker "the password was right, only a storage error happened."
     //
-    // Must run BEFORE `reset_on_success` -- a login that's about to be
-    // rejected must not reset the pair's lockout counter.
-    if ctx.meta.bootstrap_token_active()
-        && ctx.meta.bootstrap_username().as_deref() == Some(username.as_str())
-        && ctx.meta.bootstrap_token_expired(now_ns)
-    {
-        let backoff_ms = match ctx.lockout.register_failure(pair, now_ns) {
-            FailureOutcome::Backoff { delay_ms } => delay_ms,
-            FailureOutcome::LockedOut => BACKOFF_CAP_MS,
-        };
-        tracing::info!(user_hash = %hex::encode(uhash), "auth_failed: bootstrap token expired");
-        audit_emit(
-            ctx,
-            "auth_failed",
-            username.as_str(),
-            subnet,
-            None,
-            "bootstrap_token_expired",
-        );
-        return Err(HandshakeError::BadProof { backoff_ms });
+    // The two reject arms are byte-for-byte identical in client-observable
+    // shape: ONE `read_blob`, ONE `register_failure`, ONE `audit_emit`, ONE
+    // `HandshakeError::BadProof { backoff_ms }` return. The distinct
+    // `audit_emit` reason string and `warn!` log for the metadata-error arm
+    // are operator-side only (HMAC audit chain + server log) and are never
+    // sent to the client. Must run BEFORE `reset_on_success` -- a login
+    // that's about to be rejected must not reset the pair's lockout counter.
+    match ctx.meta.read_bootstrap_token_state(now_ns) {
+        Ok(state)
+            if state.active
+                && state.username.as_deref() == Some(username.as_str())
+                && state.expired =>
+        {
+            let backoff_ms = match ctx.lockout.register_failure(pair, now_ns) {
+                FailureOutcome::Backoff { delay_ms } => delay_ms,
+                FailureOutcome::LockedOut => BACKOFF_CAP_MS,
+            };
+            tracing::info!(user_hash = %hex::encode(uhash), "auth_failed: bootstrap token expired");
+            audit_emit(
+                ctx,
+                "auth_failed",
+                username.as_str(),
+                subnet,
+                None,
+                "bootstrap_token_expired",
+            );
+            return Err(HandshakeError::BadProof { backoff_ms });
+        }
+        Ok(_) => { /* not an outstanding-expired-bootstrap-for-this-user case — proceed */ }
+        Err(e) => {
+            // F-38 FAIL-CLOSED: a metadata read error after a valid
+            // password proof must reject the login, never grant it. Use the
+            // SAME client-facing failure shape as the expired-token arm
+            // above (identical `register_failure` → backoff mapping +
+            // `HandshakeError::BadProof`) so the two rejects are
+            // indistinguishable to an outside observer. The password proof
+            // already verified, so the only acceptable client signal is
+            // "auth failed" -- never "auth failed because of storage".
+            tracing::warn!(
+                ?e,
+                user_hash = %hex::encode(uhash),
+                "auth_failed: bootstrap metadata read error -- failing closed"
+            );
+            let backoff_ms = match ctx.lockout.register_failure(pair, now_ns) {
+                FailureOutcome::Backoff { delay_ms } => delay_ms,
+                FailureOutcome::LockedOut => BACKOFF_CAP_MS,
+            };
+            audit_emit(
+                ctx,
+                "auth_failed",
+                username.as_str(),
+                subnet,
+                None,
+                "bootstrap_meta_read_error",
+            );
+            return Err(HandshakeError::BadProof { backoff_ms });
+        }
     }
 
     // Reset lockout on success per spec §5.2.5 NORMATIVE.

@@ -206,24 +206,51 @@ fn backoff_progression_is_identical_for_any_pair() {
 }
 
 // ---------------------------------------------------------------------
-// F-25 (#818, P0): bootstrap-TTL fail-closed gate inserted into
-// `run_handshake` between `ProofOutcome::Accepted` and the (best-effort,
-// non-fatal) rotation-on-success block.
+// F-25 (#818, P0) + F-38 (#846, P0): bootstrap-TTL fail-closed gate
+// inserted into `run_handshake` between `ProofOutcome::Accepted` and the
+// (best-effort, non-fatal) rotation-on-success block.
 //
 // Same rationale as the NEW-2 backoff tests above: driving the full async
-// `run_handshake` requires a complete `ConnectionContext`, so this mirrors
-// the EXACT gate condition against a real `ServerMetaStore` (not a mock),
-// and proves it reuses the identical `register_failure` mechanism as the
-// `ProofOutcome::Rejected` arm — i.e. the new reject path is NOT a new,
-// distinguishable failure shape.
+// `run_handshake` requires a complete `ConnectionContext`, so this calls
+// the REAL production read (`ServerMetaStore::read_bootstrap_token_state`,
+// the single-fallible-read method F-38 introduced) against a real
+// `ServerMetaStore` (not a mock), and mirrors the EXACT gate decision
+// (`match` arms) so the test fails if the two drift apart.
 // ---------------------------------------------------------------------
 
-/// Mirror of the new gate in `run_handshake`, kept in lockstep with the
-/// production condition so this test fails if the two drift apart.
-fn bootstrap_token_expired_for_login(meta: &ServerMetaStore, username: &str, now_ns: u64) -> bool {
-    meta.bootstrap_token_active()
-        && meta.bootstrap_username().as_deref() == Some(username)
-        && meta.bootstrap_token_expired(now_ns)
+/// The F-25/F-38 gate's three possible outcomes. In production `run_handshake`
+/// maps BOTH reject variants to the SAME client-facing failure
+/// (`HandshakeError::BadProof`, identical `register_failure` → backoff), so
+/// they are indistinguishable to an outside observer; they are kept as two
+/// variants here only so the tests can prove which arm fired.
+#[derive(Debug, PartialEq, Eq)]
+enum BootstrapGateOutcome {
+    /// Outstanding bootstrap token for this username has expired → reject.
+    RejectExpired,
+    /// Bootstrap metadata read/decode error → reject (F-38 fail-closed).
+    RejectMetaReadError,
+    /// No gating reason → proceed to grant the session.
+    Proceed,
+}
+
+/// Mirror of the F-25/F-38 gate in `run_handshake`, kept in lockstep with
+/// the production `match ctx.meta.read_bootstrap_token_state(now_ns)` so
+/// this test fails if the two drift apart. Calls the REAL production read
+/// method so the read path itself is exercised, not re-implemented.
+fn evaluate_bootstrap_gate(
+    meta: &ServerMetaStore,
+    username: &str,
+    now_ns: u64,
+) -> BootstrapGateOutcome {
+    match meta.read_bootstrap_token_state(now_ns) {
+        Ok(state)
+            if state.active && state.username.as_deref() == Some(username) && state.expired =>
+        {
+            BootstrapGateOutcome::RejectExpired
+        }
+        Ok(_) => BootstrapGateOutcome::Proceed,
+        Err(_) => BootstrapGateOutcome::RejectMetaReadError,
+    }
 }
 
 fn tmp_meta_store() -> (TempDir, ServerMetaStore) {
@@ -233,10 +260,11 @@ fn tmp_meta_store() -> (TempDir, ServerMetaStore) {
     (dir, store)
 }
 
-/// Core F-25 guarantee: once the outstanding bootstrap token's TTL has
-/// passed, the gate fires for the matching username — this is what makes
-/// `run_handshake` reject the login instead of falling through to the
-/// (best-effort, non-fatal) rotation attempt.
+/// Core F-25 guarantee (regression): once the outstanding bootstrap token's
+/// TTL has passed, the gate fires for the matching username — this is what
+/// makes `run_handshake` reject the login instead of falling through to the
+/// (best-effort, non-fatal) rotation attempt. Re-confirmed under the F-38
+/// code path (the gate now reads via `read_bootstrap_token_state`).
 #[test]
 fn gate_fires_when_outstanding_token_for_username_has_expired() {
     let (_dir, store) = tmp_meta_store();
@@ -250,21 +278,22 @@ fn gate_fires_when_outstanding_token_for_username_has_expired() {
         )
         .expect("set_bootstrap_token");
 
-    assert!(
-        bootstrap_token_expired_for_login(&store, "admin", expires_at_ns),
+    assert_eq!(
+        evaluate_bootstrap_gate(&store, "admin", expires_at_ns),
+        BootstrapGateOutcome::RejectExpired,
         "gate must fire at exactly the expiry boundary (<=), matching \
          `bootstrap_token_expired`'s own semantics"
     );
-    assert!(bootstrap_token_expired_for_login(
-        &store,
-        "admin",
-        expires_at_ns + 1
-    ));
+    assert_eq!(
+        evaluate_bootstrap_gate(&store, "admin", expires_at_ns + 1),
+        BootstrapGateOutcome::RejectExpired,
+    );
 }
 
 /// F-3 regression: a NON-expired outstanding token must NOT trip the new
 /// gate — the existing best-effort rotation-on-success login path (F-3)
-/// must keep working unchanged for the common case.
+/// must keep working unchanged for the common case. Confirms a readable,
+/// active, NOT-expired token still proceeds to grant a session normally.
 #[test]
 fn gate_does_not_fire_for_non_expired_token() {
     let (_dir, store) = tmp_meta_store();
@@ -278,8 +307,9 @@ fn gate_does_not_fire_for_non_expired_token() {
         )
         .expect("set_bootstrap_token");
 
-    assert!(
-        !bootstrap_token_expired_for_login(&store, "admin", expires_at_ns - 1),
+    assert_eq!(
+        evaluate_bootstrap_gate(&store, "admin", expires_at_ns - 1),
+        BootstrapGateOutcome::Proceed,
         "F-3 regression: a not-yet-expired token must not be gated"
     );
 }
@@ -299,25 +329,100 @@ fn gate_does_not_fire_for_a_different_username() {
         )
         .expect("set_bootstrap_token");
 
-    assert!(!bootstrap_token_expired_for_login(
-        &store,
-        "someone_else",
-        u64::MAX
-    ));
+    assert_eq!(
+        evaluate_bootstrap_gate(&store, "someone_else", u64::MAX),
+        BootstrapGateOutcome::Proceed,
+    );
 }
 
 /// No outstanding token at all → gate never fires, regardless of `now_ns`
-/// (mirrors `bootstrap_token_expired`'s own "fails open" semantics when no
-/// token is outstanding — this is pre-existing behavior the F-25 gate does
-/// not change, per the brief's "metadata unavailability" note).
+/// (a genuinely-absent row reads as `Ok(snapshot-all-false)`, not an error,
+/// so the gate proceeds — matching `bootstrap_token_expired`'s pre-F-38
+/// "fails open when no token is outstanding" semantics for the absent case).
 #[test]
 fn gate_does_not_fire_when_no_token_is_outstanding() {
     let (_dir, store) = tmp_meta_store();
-    assert!(!bootstrap_token_expired_for_login(
-        &store,
-        "admin",
-        u64::MAX
-    ));
+    assert_eq!(
+        evaluate_bootstrap_gate(&store, "admin", u64::MAX),
+        BootstrapGateOutcome::Proceed,
+    );
+}
+
+/// F-38 (#846, P0) CORE — fault injection: a genuine metadata read failure
+/// at the exact moment `read_bootstrap_token_state` is called during a login
+/// with a VALID password proof must FAIL CLOSED — the gate must REJECT,
+/// never proceed to grant a session for what may be an expired bootstrap
+/// credential.
+///
+/// Injection mechanism: after provisioning a real bootstrap token via the
+/// normal `set_bootstrap_token` path, directly overwrite the raw bytes under
+/// `KEY_BOOTSTRAP` in the underlying fjall keyspace with garbage (bypassing
+/// the serde `put` encode path) so the next `read_blob::<PersistedBootstrap>`
+/// hits a REAL `rmp_serde::from_slice` decode error — a genuine,
+/// reproducible read failure, not a mock. (See
+/// `ServerMetaStore::corrupt_bootstrap_blob_for_test`.)
+#[test]
+fn gate_fails_closed_on_bootstrap_metadata_read_error() {
+    let (_dir, store) = tmp_meta_store();
+    // Provision a real, genuinely-expired bootstrap token for "admin" first
+    // so the pre-corruption state is unambiguously the
+    // "outstanding + expired + matching-username" case (which would reject
+    // via the Ok arm anyway). The corruption then forces the gate to take
+    // the Err arm instead — proving it rejects even when the readable
+    // semantics cannot be evaluated at all.
+    let expires_at_ns = 1_000_000_000_000u64;
+    store
+        .set_bootstrap_token(
+            "admin",
+            [0xAAu8; 32],
+            expires_at_ns,
+            PathBuf::from("/run/shamir/bootstrap_token.txt"),
+        )
+        .expect("set_bootstrap_token");
+    // Sanity: pre-corruption, the gate rejects via the expired Ok arm.
+    assert_eq!(
+        evaluate_bootstrap_gate(&store, "admin", expires_at_ns),
+        BootstrapGateOutcome::RejectExpired,
+        "sanity: pre-corruption, the expired token must reject"
+    );
+
+    // Inject the read failure: overwrite KEY_BOOTSTRAP with garbage bytes.
+    store.corrupt_bootstrap_blob_for_test();
+
+    // The production read method must surface a REAL decode error (not a
+    // swallowed Ok of an all-false snapshot) — this is the load-bearing
+    // difference F-38 introduces vs the old fail-open granular getters.
+    let read_result = store.read_bootstrap_token_state(expires_at_ns);
+    assert!(
+        matches!(read_result, Err(crate::server_meta::MetaError::Encoding(_))),
+        "corrupted KEY_BOOTSTRAP blob must surface as a real \
+         MetaError::Encoding (rmp decode) error, got {read_result:?}"
+    );
+
+    // F-38 fail-closed: the gate routes the read error to a REJECT (the
+    // metadata-error arm), NEVER to Proceed — so a transient metadata read
+    // failure at the security gate can never grant a session.
+    assert_eq!(
+        evaluate_bootstrap_gate(&store, "admin", expires_at_ns),
+        BootstrapGateOutcome::RejectMetaReadError,
+        "F-38: a bootstrap metadata read error must fail CLOSED — reject, \
+         not grant a session"
+    );
+
+    // Defense-in-depth: the corruption must NOT have changed the OTHER two
+    // (intentionally lenient) call sites' fail-OPEN behaviour — the granular
+    // getters still swallow the decode error and return false/None. This
+    // pins the scope of F-38 to the single security gate.
+    assert!(
+        !store.bootstrap_token_active(),
+        "the lenient granular getters must keep their fail-OPEN behaviour \
+         (return false on read error); only the security gate is fail-closed"
+    );
+    assert_eq!(store.bootstrap_username(), None);
+    assert!(
+        !store.bootstrap_token_expired(expires_at_ns),
+        "bootstrap_token_expired must keep its fail-OPEN behaviour on read error"
+    );
 }
 
 /// Oracle-avoidance: the new reject path must reuse the EXACT SAME

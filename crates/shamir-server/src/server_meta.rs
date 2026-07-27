@@ -188,6 +188,42 @@ pub enum MetaError {
     NotInitialised(&'static str),
 }
 
+/// Read-only snapshot of the three fields the fail-closed bootstrap-TTL
+/// security gate (`connection::handshake::run_handshake`, F-25/F-38) needs
+/// to decide whether to reject a login for an outstanding, expired
+/// bootstrap credential.
+///
+/// Unlike the three granular `bootstrap_*` getters — each of which
+/// independently calls `read_blob(KEY_BOOTSTRAP)` and swallows any error
+/// via `.ok()` (failing OPEN) — this snapshot is derived from a SINGLE
+/// [`ServerMetaStore::read_blob`] so the caller can — and must — propagate
+/// a genuine metadata read/decode failure as `Err` and fail CLOSED
+/// (F-38, #846, P0).
+///
+/// Field derivation mirrors the granular getters exactly (kept in lockstep
+/// so the security gate's `Ok` arm matches the pre-F-38 behaviour for the
+/// readable cases):
+/// - `active`: `bootstrap_token_hash.is_some()` (== `bootstrap_token_active`).
+/// - `username`: `bootstrap_username` verbatim.
+/// - `expired`: hash present AND `bootstrap_token_expires_at_ns <= now_ns`
+///   (== `bootstrap_token_expired`).
+///
+/// This is LOCAL to `server_meta.rs`'s live-server bootstrap bookkeeping.
+/// It is deliberately NOT the `shamir_connect::server::bootstrap::BootstrapState`
+/// imported above — that is a heavier, `Mutex`-based type for the wire
+/// challenge-response bootstrap flow whose own module doc states it is
+/// "NOT wired into any live dispatch path" (dead code).
+#[derive(Debug, Clone)]
+pub struct BootstrapTokenSnapshot {
+    /// A bootstrap-token hash is currently present (a token is outstanding).
+    pub active: bool,
+    /// Username the outstanding token was issued for, if any.
+    pub username: Option<String>,
+    /// The outstanding token's TTL has already passed
+    /// (`bootstrap_token_expires_at_ns <= now_ns`).
+    pub expired: bool,
+}
+
 // ---------------------------------------------------------------------------
 // ServerMetaStore
 // ---------------------------------------------------------------------------
@@ -453,6 +489,48 @@ impl ServerMetaStore {
             .unwrap_or(0)
     }
 
+    /// Read the bootstrap-token bookkeeping row ONCE and derive the
+    /// `{active, username, expired}` snapshot the fail-closed TTL gate
+    /// (`connection::handshake`) needs, **propagating any read/decode
+    /// error instead of swallowing it via `.ok()`** (F-38, #846, P0).
+    ///
+    /// Returns `Ok(snapshot)` with `active = false` / `username = None` /
+    /// `expired = false` when the row is genuinely absent — the same shape
+    /// the granular `bootstrap_*` getters return for a missing row, so the
+    /// gate's `Ok(_)` "proceed" arm is unchanged for the readable cases.
+    /// Returns `Err(_)` ONLY on a real read/decode failure (fjall I/O or
+    /// `rmp_serde` decode error on a corrupted blob), which the security
+    /// gate must treat as fail-CLOSED (reject the login).
+    ///
+    /// Keep the derivation below in lockstep with `bootstrap_token_active`/
+    /// `bootstrap_username`/`bootstrap_token_expired` — the granular
+    /// getters remain for the two intentionally-lenient call sites
+    /// (rotate-on-success, boot-time TTL sweep) and existing tests.
+    pub fn read_bootstrap_token_state(
+        &self,
+        now_ns: u64,
+    ) -> Result<BootstrapTokenSnapshot, MetaError> {
+        let p: PersistedBootstrap = self
+            .read_blob(KEY_BOOTSTRAP)?
+            .unwrap_or(PersistedBootstrap {
+                bootstrap_token_hash: None,
+                bootstrap_token_expires_at_ns: None,
+                superuser_ever_existed: false,
+                bootstrap_username: None,
+                bootstrap_token_path: None,
+            });
+        let active = p.bootstrap_token_hash.is_some();
+        let username = p.bootstrap_username;
+        let expired = p.bootstrap_token_hash.is_some()
+            && p.bootstrap_token_expires_at_ns
+                .is_some_and(|exp| exp <= now_ns);
+        Ok(BootstrapTokenSnapshot {
+            active,
+            username,
+            expired,
+        })
+    }
+
     /// True iff the bootstrap-token row currently has a token hash present.
     pub fn bootstrap_token_active(&self) -> bool {
         self.read_blob::<PersistedBootstrap>(KEY_BOOTSTRAP)
@@ -686,6 +764,24 @@ impl ServerMetaStore {
         let _guard = self.write_lock.lock();
         self.put(KEY_RATELIMIT_SNAPSHOT, snapshot)?;
         self.persist()
+    }
+
+    /// TEST-ONLY: overwrite the raw bytes stored under `KEY_BOOTSTRAP` with
+    /// garbage, bypassing the serde encode path (`put`) entirely, so the
+    /// next `read_blob::<PersistedBootstrap>` (and therefore
+    /// [`read_bootstrap_token_state`]) hits a REAL `rmp_serde::from_slice`
+    /// decode error — a genuine, reproducible metadata read failure, not a
+    /// mock. Used by the F-38 fault-injection test in
+    /// `src/tests/connection_tests.rs` to prove the fail-closed TTL gate
+    /// rejects a login when the underlying blob read errors.
+    #[cfg(test)]
+    pub(crate) fn corrupt_bootstrap_blob_for_test(&self) {
+        self.meta
+            .insert(
+                KEY_BOOTSTRAP.as_bytes(),
+                b"\x00\x01\x02 not-a-valid-msgpack-struct-blob \xff\xfe".as_slice(),
+            )
+            .expect("corrupt_bootstrap_blob_for_test: keyspace insert must succeed");
     }
 }
 
