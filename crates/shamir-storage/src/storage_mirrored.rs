@@ -14,11 +14,21 @@
 //! already in the mirror — everything durable was, by construction,
 //! something the classifier accepted when it was written, so it
 //! unconditionally belongs back in the primary on reopen.
+//!
+//! ## `transact` atomicity (F-39)
+//!
+//! [`MirroredStore`] overrides [`Store::transact`] to give the
+//! DURABLE-classified subset of a batch real cross-op atomicity on the
+//! mirror — the ephemeral half remains per-op (matching
+//! [`InMemoryStore`]'s inherited trait default, which has no multi-key
+//! atomicity primitive). See the override's own doc comment for the
+//! precise failure/compensation story and the residual concurrent-reader
+//! window.
 
 use crate::error::DbResult;
 use crate::storage_in_memory::InMemoryStore;
 use crate::storage_membuffer::MemBufferConfig;
-use crate::types::{RecordKey, RecordStream, Store};
+use crate::types::{KvOp, RecordKey, RecordStream, Store};
 use async_trait::async_trait;
 use bytes::Bytes;
 use futures::StreamExt;
@@ -324,16 +334,144 @@ impl Store for MirroredStore {
             .iter_range_stream_reverse(start_inclusive, end_inclusive, batch_size)
     }
 
-    // `insert_many` / `set_many` / `remove_many` / `transact`: NOT
-    // overridden. The trait's default implementations loop calling
-    // `self.insert` / `self.set` / `self.remove` per item (`transact`
-    // loops over `KvOp::Set`/`KvOp::Remove`, each dispatched to
-    // `self.set` / `self.remove`) — since THOSE overrides already do
-    // the classify-and-conditionally-mirror work internally, the
-    // default loops produce correct behavior for free (each element
+    // `insert_many` / `set_many` / `remove_many`: NOT overridden. The
+    // trait's default implementations loop calling `self.insert` /
+    // `self.set` / `self.remove` per item — since THOSE overrides
+    // already do the classify-and-conditionally-mirror work internally,
+    // the default loops produce correct behavior for free (each element
     // gets the same primary-then-conditional-mirror treatment as a
     // standalone call). `InMemoryStore` itself has no native
     // transactional batch API to delegate to for a genuine efficiency
     // win, so there is no motivation to hand-roll a custom override
     // here.
+    //
+    // `transact` IS overridden — see below.
+
+    /// Partitioned atomic-ish batch — gives the DURABLE-classified subset
+    /// real cross-op atomicity on the mirror while leaving the ephemeral
+    /// subset per-op (matching the inherited trait default's semantics).
+    ///
+    /// # Why an override is needed
+    ///
+    /// The trait's default `transact` loops over `self.set` / `self.remove`
+    /// per op — each of which individually mirrors durable keys correctly.
+    /// But that loop is **per-op atomic only, NOT cross-op atomic on the
+    /// mirror**: a mid-batch failure (e.g. the Nth durable op's mirror
+    /// write errors) leaves the first N−1 ops durably committed and the
+    /// rest absent. On a hybrid repo, callers like index-rename code call
+    /// `transact` specifically for all-or-nothing semantics (write the new
+    /// posting, delete the old one, in one batch); the non-atomic default
+    /// silently drops that guarantee on the durable side.
+    ///
+    /// This override splits the batch by [`Self::classify`]: the durable
+    /// subset is committed to the mirror as ONE atomic unit via the
+    /// mirror backend's own [`Store::transact`] (e.g. `FjallStore`'s
+    /// `OwnedWriteBatch` — all-or-nothing), while the ephemeral subset
+    /// is applied to primary per-op (no atomicity — `InMemoryStore`
+    /// has no multi-key primitive to delegate to, and adding one is out
+    /// of scope; see the concurrent-reader residual below).
+    ///
+    /// # Ordering — ephemeral-first, then durable
+    ///
+    /// 1. **Ephemeral ops → `primary`** (per-op loop). If this fails
+    ///    partway, no durable write is attempted (fail fast). `primary`
+    ///    may be left partially mutated — the same pre-existing, tolerable
+    ///    characteristic a plain `InMemoryStore` already has (nothing
+    ///    durable was touched, so nothing inconsistent survives a
+    ///    restart; the live process's in-memory state is transiently
+    ///    inconsistent until the caller's own retry/compensation, exactly
+    ///    as today for a non-mirrored in-memory store).
+    ///
+    /// 2. **Durable ops → `primary`** (per-op loop, for immediate read
+    ///    visibility — reads go to `primary` ONLY). `InMemoryStore::set`
+    ///    / `remove` do not fail in practice, so this phase completing
+    ///    fully before the mirror write is the expected path.
+    ///
+    /// 3. **Durable ops → `mirror`** atomically via `self.mirror.transact`.
+    ///    If this fails: `primary` is now **ahead** of `mirror` (fully
+    ///    applied vs. not applied at all — the mirror backend's real
+    ///    atomicity means the durable side is either fully applied or
+    ///    not at all, never partial). The caller sees the durable error
+    ///    (propagated), so it correctly learns durability was NOT
+    ///    achieved. On the NEXT restart, hydration only replays what's
+    ///    actually in `mirror` (unchanged — the pre-transact durable
+    ///    state), so the ephemeral-side AND durable-side changes from
+    ///    this failed transact are simply lost on restart, exactly
+    ///    matching hybrid mode's own "data/config not durably-written
+    ///    doesn't survive restart" design ethos. **No compensation /
+    ///    rollback of `primary` is needed** — the live process keeps
+    ///    functioning correctly with its current, transiently-ahead
+    ///    in-memory state until the next restart, at which point the
+    ///    divergence is silently reconciled back to the last
+    ///    durably-committed state.
+    ///
+    /// # Concurrent-reader residual (investigated, documented — not fixed)
+    ///
+    /// While the ephemeral loop (phase 1) is applying its ops one at a
+    /// time, a CONCURRENT reader (`get` / `iter_stream` / etc., which
+    /// read `primary` directly with no lock) can observe a
+    /// partially-applied ephemeral batch. This is a pre-existing
+    /// characteristic inherited from `InMemoryStore` having no
+    /// cross-key atomicity primitive, NOT something this fix introduces
+    /// or worsens for the ephemeral side (it only fixes the DURABLE
+    /// side's atomicity, which is the part that matters for
+    /// post-restart correctness).
+    ///
+    /// `scc::TreeIndex` (v3.8.4, the lock-free B+ tree backing
+    /// `InMemoryStore`) was checked for any batched / atomic multi-key
+    /// primitive: its public API exposes only single-key mutations
+    /// (`insert_sync`, `remove_sync`, `upsert_sync`, `remove_if_sync`)
+    /// and `remove_range_sync` (contiguous-range removal — cannot set
+    /// values, so it cannot express a mixed set+remove batch). There is
+    /// no `insert_batch`, `transact`, or multi-key CAS. Closing this
+    /// window would require either a global write lock around the
+    /// ephemeral loop (defeating the lock-free design) or a
+    /// snapshot/isolation layer in `InMemoryStore` — both out of scope
+    /// for this task (too large a blast radius for the foundational,
+    /// widely-used in-memory primitive).
+    async fn transact(&self, ops: Vec<KvOp>) -> DbResult<()> {
+        if ops.is_empty() {
+            return Ok(());
+        }
+
+        // Partition by classifier: ephemeral ops (classify = false) go to
+        // the first vec, durable ops (classify = true) to the second.
+        let (ephemeral_ops, durable_ops): (Vec<KvOp>, Vec<KvOp>) =
+            ops.into_iter().partition(|op| match op {
+                KvOp::Set(k, _) | KvOp::Remove(k) => !(self.classify)(k),
+            });
+
+        // Phase 1 — ephemeral subset → primary (per-op, no cross-op
+        // atomicity; see concurrent-reader residual in the doc comment).
+        for op in ephemeral_ops {
+            match op {
+                KvOp::Set(k, v) => {
+                    let _ = self.primary.set(k, v).await?;
+                }
+                KvOp::Remove(k) => {
+                    let _ = self.primary.remove(k).await?;
+                }
+            }
+        }
+
+        // Phase 2 — durable subset → primary (per-op, for immediate read
+        // visibility — reads go to primary ONLY). Borrowing here so the
+        // owned `durable_ops` can be moved into the mirror write below.
+        for op in &durable_ops {
+            match op {
+                KvOp::Set(k, v) => {
+                    let _ = self.primary.set(k.clone(), v.clone()).await?;
+                }
+                KvOp::Remove(k) => {
+                    let _ = self.primary.remove(k.clone()).await?;
+                }
+            }
+        }
+
+        // Phase 3 — durable subset → mirror atomically (all-or-nothing
+        // via the mirror backend's own transact, e.g. FjallStore's
+        // OwnedWriteBatch). An empty durable subset is a no-op (the
+        // mirror backend's own early-return handles it).
+        self.mirror.transact(durable_ops).await
+    }
 }

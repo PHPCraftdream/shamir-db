@@ -1,12 +1,15 @@
 #![allow(deprecated)]
 
+use crate::error::{DbError, DbResult};
 use crate::storage_in_memory::InMemoryStore;
 use crate::storage_mirrored::{is_durable_table_config, MirroredStore};
 use crate::tests::types_tests::collect_stream;
-use crate::types::{RecordKey, Store};
+use crate::types::{KvOp, RecordKey, RecordStream, Store};
+use async_trait::async_trait;
 use bytes::Bytes;
 use shamir_types::types::record_id::RecordId;
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 
 /// A representative classified key — a `MetaKey::LegacyIndexes`-shaped tag
 /// (`"indexes"`), matching the exact `RecordId::system` encoding.
@@ -299,4 +302,419 @@ async fn classifier_exhaustiveness_guard_against_every_meta_key() {
     // bytes) but fails the `[0,0,0,0]` prefix check.
     let row_key = RecordKey::from_slice(RecordId::new().as_bytes());
     assert!(!is_durable_table_config(&row_key));
+}
+
+// ============================================================================
+// F-39: MirroredStore::transact atomicity tests
+// ============================================================================
+
+/// Test-only mirror wrapper whose `transact` can be configured to fail
+/// atomically — when `fail_transact` is set, it returns `Err` WITHOUT
+/// applying ANY ops to the inner store, simulating what a genuinely
+/// atomic backend (like `FjallStore`'s `OwnedWriteBatch`) does on a
+/// batch-commit failure. All other `Store` methods delegate to `inner`
+/// unchanged.
+///
+/// Proves that `MirroredStore::transact` delegates the ENTIRE durable
+/// subset to ONE `mirror.transact` call (not per-op): when the mirror's
+/// transact fails, NO durable op is partially committed.
+struct FailingTransactMirror {
+    inner: Arc<dyn Store>,
+    /// When `true`, `transact` returns `Err` without delegating to inner.
+    fail_transact: AtomicBool,
+}
+
+#[async_trait]
+impl Store for FailingTransactMirror {
+    async fn insert(&self, value: Bytes) -> DbResult<RecordKey> {
+        self.inner.insert(value).await
+    }
+    async fn set(&self, key: RecordKey, value: Bytes) -> DbResult<bool> {
+        self.inner.set(key, value).await
+    }
+    async fn get(&self, key: RecordKey) -> DbResult<Bytes> {
+        self.inner.get(key).await
+    }
+    async fn remove(&self, key: RecordKey) -> DbResult<bool> {
+        self.inner.remove(key).await
+    }
+    async fn transact(&self, ops: Vec<KvOp>) -> DbResult<()> {
+        if self.fail_transact.load(Ordering::Acquire) {
+            return Err(DbError::Internal(
+                "injected transact failure (FailingTransactMirror)".into(),
+            ));
+        }
+        self.inner.transact(ops).await
+    }
+    fn iter_stream(&self, batch_size: usize) -> RecordStream {
+        self.inner.iter_stream(batch_size)
+    }
+    fn scan_prefix_stream(&self, prefix: Bytes, batch_size: usize) -> RecordStream {
+        self.inner.scan_prefix_stream(prefix, batch_size)
+    }
+}
+
+/// Test-only mirror wrapper that, during `transact`, reads `primary`
+/// through a late-bound handle to the wrapping `MirroredStore` and records
+/// the observed value for a configured key. This deterministically
+/// demonstrates what a concurrent reader sees while
+/// `MirroredStore::transact` is in its durable phase (after ephemeral ops
+/// were applied to `primary`, before the mirror write completes).
+struct ObservingMirror {
+    inner: Arc<dyn Store>,
+    /// Late-bound handle to the `MirroredStore` wrapping this mirror.
+    store_slot: Mutex<Option<Arc<dyn Store>>>,
+    /// Key to read from `primary` (via the wrapping `MirroredStore`) during
+    /// `transact`.
+    observe_key: RecordKey,
+    /// Value observed during `transact` (`None` if not yet observed or the
+    /// key was absent in `primary` at that point).
+    observed: Mutex<Option<Bytes>>,
+}
+
+#[async_trait]
+impl Store for ObservingMirror {
+    async fn insert(&self, value: Bytes) -> DbResult<RecordKey> {
+        self.inner.insert(value).await
+    }
+    async fn set(&self, key: RecordKey, value: Bytes) -> DbResult<bool> {
+        self.inner.set(key, value).await
+    }
+    async fn get(&self, key: RecordKey) -> DbResult<Bytes> {
+        self.inner.get(key).await
+    }
+    async fn remove(&self, key: RecordKey) -> DbResult<bool> {
+        self.inner.remove(key).await
+    }
+    async fn transact(&self, ops: Vec<KvOp>) -> DbResult<()> {
+        // Read `primary` through the wrapping `MirroredStore` to observe
+        // what a concurrent reader sees at this exact point — after the
+        // ephemeral loop completed, before the durable mirror write lands.
+        // Clone the Arc out of the Mutex BEFORE awaiting so the guard is
+        // not held across `.await` (Send requirement).
+        let store_opt = self.store_slot.lock().unwrap().clone();
+        if let Some(store) = store_opt {
+            if let Ok(val) = store.get(self.observe_key.clone()).await {
+                *self.observed.lock().unwrap() = Some(val);
+            }
+        }
+        self.inner.transact(ops).await
+    }
+    fn iter_stream(&self, batch_size: usize) -> RecordStream {
+        self.inner.iter_stream(batch_size)
+    }
+    fn scan_prefix_stream(&self, prefix: Bytes, batch_size: usize) -> RecordStream {
+        self.inner.scan_prefix_stream(prefix, batch_size)
+    }
+}
+
+/// A second classified key — `MetaKey::Tables`-shaped tag (`"_m.tbl"`),
+/// distinct from [`classified_key`]'s `"indexes"` tag so two durable ops
+/// in one batch touch two different keys.
+fn classified_key_2() -> RecordKey {
+    RecordKey::from_slice(RecordId::system("_m.tbl").as_bytes())
+}
+
+/// **Test 1 — durable-subset atomicity, happy path.**
+///
+/// A `transact` with 2+ classified (durable) ops applied together; confirm
+/// both land in `mirror` (the durable backend) and in `primary` (reads go
+/// to primary only).
+#[tokio::test]
+async fn transact_durable_subset_lands_atomically_in_mirror() {
+    let mirror: Arc<dyn Store> = Arc::new(InMemoryStore::new());
+    let store = MirroredStore::new(Arc::clone(&mirror), is_durable_table_config)
+        .await
+        .unwrap();
+
+    let k1 = classified_key();
+    let k2 = classified_key_2();
+    assert!(is_durable_table_config(&k1));
+    assert!(is_durable_table_config(&k2));
+
+    store
+        .transact(vec![
+            KvOp::Set(k1.clone(), Bytes::from_static(b"v1")),
+            KvOp::Set(k2.clone(), Bytes::from_static(b"v2")),
+        ])
+        .await
+        .unwrap();
+
+    // Both durable ops landed in mirror.
+    assert_eq!(
+        mirror.get(k1.clone()).await.unwrap(),
+        Bytes::from_static(b"v1")
+    );
+    assert_eq!(
+        mirror.get(k2.clone()).await.unwrap(),
+        Bytes::from_static(b"v2")
+    );
+
+    // Both also visible through the facade (primary got them in Phase 2).
+    assert_eq!(store.get(k1).await.unwrap(), Bytes::from_static(b"v1"));
+    assert_eq!(store.get(k2).await.unwrap(), Bytes::from_static(b"v2"));
+}
+
+/// **Test 2 — durable-subset atomicity, injected failure.**
+///
+/// A `FailingTransactMirror` wraps the mirror so its `transact` returns
+/// `Err` without applying ANY ops (simulating an atomic backend's batch-
+/// commit failure). Confirm: NO partial durable state exists in the mirror
+/// after the failure (the actual atomicity proof — not just "an error was
+/// returned"), while `primary` correctly holds the ops (Phase 2 ran before
+/// the Phase 3 mirror write was attempted and failed).
+#[tokio::test]
+async fn transact_durable_subset_failure_leaves_no_partial_durable_state() {
+    let mirror_inner: Arc<dyn Store> = Arc::new(InMemoryStore::new());
+
+    // Seed the mirror with a pre-existing durable key so we can verify
+    // it survives unchanged (proving the failure didn't corrupt prior
+    // state) alongside confirming the NEW ops didn't land.
+    let pre_existing = classified_key_2();
+    mirror_inner
+        .set(pre_existing.clone(), Bytes::from_static(b"pre-existing"))
+        .await
+        .unwrap();
+
+    let failing_mirror = Arc::new(FailingTransactMirror {
+        inner: mirror_inner.clone(),
+        fail_transact: AtomicBool::new(true),
+    });
+    let mirror_dyn: Arc<dyn Store> = failing_mirror.clone();
+
+    let store = MirroredStore::new(mirror_dyn, is_durable_table_config)
+        .await
+        .unwrap();
+
+    let k1 = classified_key();
+    let k2 = RecordKey::from_slice(RecordId::system("_m.wal").as_bytes());
+    assert!(is_durable_table_config(&k2));
+
+    let result = store
+        .transact(vec![
+            KvOp::Set(k1.clone(), Bytes::from_static(b"v1")),
+            KvOp::Set(k2.clone(), Bytes::from_static(b"v2")),
+        ])
+        .await;
+
+    // The durable write failed (propagated to caller).
+    assert!(result.is_err(), "durable transact failure should propagate");
+
+    // NO partial durable state: neither of the two new durable ops landed
+    // in the mirror. This is the all-or-nothing atomicity proof.
+    assert!(
+        mirror_inner.get(k1.clone()).await.is_err(),
+        "k1 must NOT be in mirror after atomic failure"
+    );
+    assert!(
+        mirror_inner.get(k2.clone()).await.is_err(),
+        "k2 must NOT be in mirror after atomic failure"
+    );
+
+    // Pre-existing durable state is unchanged.
+    assert_eq!(
+        mirror_inner.get(pre_existing.clone()).await.unwrap(),
+        Bytes::from_static(b"pre-existing"),
+        "prior durable state must survive the failed transact unchanged"
+    );
+
+    // Primary DOES hold the ops (Phase 2 wrote them before Phase 3 failed) —
+    // this is the documented "primary ahead of mirror" failure mode.
+    assert_eq!(store.get(k1).await.unwrap(), Bytes::from_static(b"v1"));
+    assert_eq!(store.get(k2).await.unwrap(), Bytes::from_static(b"v2"));
+}
+
+/// **Test 3 — mixed ephemeral + durable batch routing.**
+///
+/// A single `transact` call with BOTH ephemeral and durable ops. Confirm
+/// ephemeral ops land in `primary` ONLY (not `mirror`), and durable ops
+/// land in BOTH `primary` and `mirror`.
+#[tokio::test]
+async fn transact_mixed_batch_routes_ephemeral_to_primary_and_durable_to_both() {
+    let mirror: Arc<dyn Store> = Arc::new(InMemoryStore::new());
+    let store = MirroredStore::new(Arc::clone(&mirror), is_durable_table_config)
+        .await
+        .unwrap();
+
+    let ephemeral = unclassified_key();
+    let durable = classified_key();
+    assert!(!is_durable_table_config(&ephemeral));
+    assert!(is_durable_table_config(&durable));
+
+    store
+        .transact(vec![
+            KvOp::Set(ephemeral.clone(), Bytes::from_static(b"eph")),
+            KvOp::Set(durable.clone(), Bytes::from_static(b"dur")),
+        ])
+        .await
+        .unwrap();
+
+    // Ephemeral: in primary (visible via facade), NOT in mirror.
+    assert_eq!(
+        store.get(ephemeral.clone()).await.unwrap(),
+        Bytes::from_static(b"eph")
+    );
+    assert!(
+        mirror.get(ephemeral).await.is_err(),
+        "ephemeral op must NOT reach mirror"
+    );
+
+    // Durable: in BOTH primary (facade) and mirror.
+    assert_eq!(
+        store.get(durable.clone()).await.unwrap(),
+        Bytes::from_static(b"dur")
+    );
+    assert_eq!(
+        mirror.get(durable).await.unwrap(),
+        Bytes::from_static(b"dur"),
+        "durable op must reach mirror"
+    );
+}
+
+/// **Test 4 — ephemeral-succeeds-then-durable-fails ordering proof.**
+///
+/// Force the durable half to fail (same `FailingTransactMirror` technique
+/// as test 2) while the ephemeral half would otherwise succeed. Confirm:
+/// - `primary` DOES reflect the ephemeral ops (already applied in Phase 1).
+/// - `primary` ALSO reflects the durable ops (applied in Phase 2, before
+///   the Phase 3 mirror write failed) — the documented "primary ahead of
+///   mirror" state.
+/// - `mirror` does NOT reflect the durable ops (correctly rolled back to
+///   nothing by the mirror backend's own atomic failure).
+///
+/// This is the precise failure-ordering story from the brief's section 2.
+#[tokio::test]
+async fn transact_ephemeral_succeeds_then_durable_fails_leaves_primary_ahead() {
+    let mirror_inner: Arc<dyn Store> = Arc::new(InMemoryStore::new());
+    let failing_mirror = Arc::new(FailingTransactMirror {
+        inner: mirror_inner.clone(),
+        fail_transact: AtomicBool::new(true),
+    });
+    let mirror_dyn: Arc<dyn Store> = failing_mirror.clone();
+
+    let store = MirroredStore::new(mirror_dyn, is_durable_table_config)
+        .await
+        .unwrap();
+
+    let ephemeral = unclassified_key();
+    let durable = classified_key();
+
+    let result = store
+        .transact(vec![
+            KvOp::Set(ephemeral.clone(), Bytes::from_static(b"eph")),
+            KvOp::Set(durable.clone(), Bytes::from_static(b"dur")),
+        ])
+        .await;
+    assert!(result.is_err(), "durable failure should propagate");
+
+    // Primary reflects BOTH the ephemeral and durable ops — fully applied
+    // (Phase 1 + Phase 2 ran before Phase 3 failed). Primary is "ahead".
+    assert_eq!(
+        store.get(ephemeral.clone()).await.unwrap(),
+        Bytes::from_static(b"eph"),
+        "primary must reflect ephemeral ops (Phase 1)"
+    );
+    assert_eq!(
+        store.get(durable.clone()).await.unwrap(),
+        Bytes::from_static(b"dur"),
+        "primary must reflect durable ops (Phase 2, before Phase 3 failed)"
+    );
+
+    // Mirror does NOT reflect the durable ops — the mirror's transact
+    // failed atomically (nothing applied).
+    assert!(
+        mirror_inner.get(durable.clone()).await.is_err(),
+        "mirror must NOT reflect durable ops after atomic failure"
+    );
+
+    // And of course ephemeral never touches mirror at all.
+    assert!(
+        mirror_inner.get(ephemeral).await.is_err(),
+        "ephemeral ops never reach mirror"
+    );
+
+    // Self-heal proof: a FRESH MirroredStore over the same mirror hydrates
+    // from mirror only (unchanged by the failed transact) — neither the
+    // ephemeral NOR the durable ops from the failed transact survive.
+    let reopened = MirroredStore::new(mirror_inner, is_durable_table_config)
+        .await
+        .unwrap();
+    assert!(
+        reopened.get(durable).await.is_err(),
+        "reopened store must not see failed-transact durable ops"
+    );
+}
+
+/// **Test 5 — concurrent-reader visibility during transact (honest test).**
+///
+/// An `ObservingMirror` reads `primary` (via the wrapping `MirroredStore`'s
+/// `get`) at the exact moment the durable phase begins — proving a
+/// concurrent reader during `MirroredStore::transact` CAN observe ephemeral
+/// state already applied to `primary` before the full batch completes.
+///
+/// This is the honest test of the concurrent-reader residual documented in
+/// `MirroredStore::transact`'s doc comment. It demonstrates the window that
+/// IS deterministically testable: a reader observing `primary` during the
+/// durable phase sees all ephemeral ops.
+///
+/// It does NOT assert the finer-grained case — a reader seeing PARTIAL
+/// ephemeral state (some but not all ephemeral ops) mid-ephemeral-loop.
+/// That interleaving is the same inherited `InMemoryStore` characteristic
+/// (lock-free `TreeIndex`, no multi-key atomicity), but it is not
+/// deterministically testable here: `InMemoryStore::set` completes
+/// synchronously with no yield point between ephemeral ops for a concurrent
+/// reader to interleave at. Asserting it would claim a guarantee stronger
+/// than what is implemented — exactly what the brief says NOT to do.
+#[tokio::test]
+async fn transact_concurrent_reader_can_observe_ephemeral_state_mid_batch() {
+    let mirror_inner: Arc<dyn Store> = Arc::new(InMemoryStore::new());
+
+    let ephemeral_key = unclassified_key();
+    let ephemeral_val = Bytes::from_static(b"visible-mid-transact");
+
+    let observing = Arc::new(ObservingMirror {
+        inner: mirror_inner.clone(),
+        store_slot: Mutex::new(None),
+        observe_key: ephemeral_key.clone(),
+        observed: Mutex::new(None),
+    });
+    let mirror_dyn: Arc<dyn Store> = observing.clone();
+
+    let store = Arc::new(
+        MirroredStore::new(mirror_dyn, is_durable_table_config)
+            .await
+            .unwrap(),
+    );
+
+    // Late-bind: give the observing mirror a handle to the wrapping
+    // MirroredStore so it can read `primary` during its own `transact`.
+    let store_dyn: Arc<dyn Store> = store.clone();
+    *observing.store_slot.lock().unwrap() = Some(store_dyn);
+
+    let durable_key = classified_key();
+
+    store
+        .transact(vec![
+            KvOp::Set(ephemeral_key.clone(), ephemeral_val.clone()),
+            KvOp::Set(durable_key.clone(), Bytes::from_static(b"dur")),
+        ])
+        .await
+        .unwrap();
+
+    // The observing mirror read `primary` during the durable phase and
+    // saw the ephemeral value — proving a concurrent reader CAN observe
+    // ephemeral state mid-transact (before the batch completes).
+    let observed = observing.observed.lock().unwrap().clone();
+    assert_eq!(
+        observed,
+        Some(ephemeral_val),
+        "a reader during the durable phase must see the ephemeral op already \
+         applied to primary — this is the concurrent-reader window"
+    );
+
+    // The durable op also landed correctly (transact completed).
+    assert_eq!(
+        mirror_inner.get(durable_key).await.unwrap(),
+        Bytes::from_static(b"dur")
+    );
 }
