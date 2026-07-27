@@ -2,6 +2,8 @@
 mod box_repo_tests;
 #[cfg(all(test, feature = "fjall"))]
 mod hybrid_repo_tests;
+#[cfg(all(test, feature = "fjall"))]
+mod hybrid_table_open_tests;
 #[cfg(test)]
 mod per_table_mvcc_token_names_deadlock_tests;
 #[cfg(test)]
