@@ -12,10 +12,16 @@ use shamir_storage::storage_cached::{CachedStore, WriteMode};
 use shamir_storage::storage_fjall::FjallRepo;
 use shamir_storage::storage_in_memory::InMemoryRepo;
 use shamir_storage::storage_membuffer::{MemBufferConfig, MemBufferStore};
+#[cfg(feature = "fjall")]
+use shamir_storage::storage_mirrored::{is_durable_table_config, MirroredStore};
 
 use shamir_storage::types::{Repo, Store};
+#[cfg(feature = "fjall")]
+use shamir_types::types::common::THasher;
 use std::path::PathBuf;
 use std::sync::Arc;
+#[cfg(feature = "fjall")]
+use tokio::sync::OnceCell;
 use tokio::task;
 
 #[derive(Clone)]
@@ -32,6 +38,13 @@ pub enum BoxRepo {
     ///   read should be free of disk latency. Stacks on top of
     ///   MemBuffer or any other backend.
     Cached(Arc<CachedRepoComposite>),
+    /// F-33 (#836): in-memory-primary repo whose `__info__`/`__interner__`
+    /// stores are additionally mirrored to a durable `fjall` backing repo.
+    /// Everything else (`__data__`, `__history__`, `__tx__`,
+    /// `__changelog__`) is plain ephemeral in-memory. See
+    /// [`HybridRepoComposite`] for the per-store routing table.
+    #[cfg(feature = "fjall")]
+    Hybrid(Arc<HybridRepoComposite>),
 }
 
 pub struct MemBufferRepoComposite {
@@ -42,6 +55,162 @@ pub struct MemBufferRepoComposite {
 pub struct CachedRepoComposite {
     pub inner: BoxRepo,
     pub mode: WriteMode,
+}
+
+/// F-33 Step 2 (#836): composes an ephemeral in-memory repo (table DATA)
+/// with a durable fjall repo (table CONFIGURATION mirror). `store_get`
+/// routes by STORE NAME — see [`HybridRepoComposite::build_store`] for the
+/// full per-name routing table and rationale.
+///
+/// **Critical coupling**: `__interner__` is mirrored with an ALLOW-ALL
+/// classifier (every key durable), not `is_durable_table_config`. Index
+/// definitions living in `__info__` reference INTERNED `u64` field ids —
+/// if `__interner__` did not persist in lockstep with `__info__`, a
+/// reopened hybrid table's fresh interner would reassign those ids to
+/// whatever field is touched first, silently corrupting every existing
+/// index (an index on `email` silently becomes an index on some other
+/// field). `is_durable_table_config` is scoped to the system-record shape
+/// used by `__info__` and would incorrectly reject the interner's own key
+/// shapes, so it cannot be reused here.
+#[cfg(feature = "fjall")]
+pub struct HybridRepoComposite {
+    mem: Arc<InMemoryRepo>,
+    disk: Arc<FjallRepo>,
+    /// Per-store-name memoization, mirroring [`InMemoryRepo`]'s own
+    /// `stores: DashMap` memoization so a [`MirroredStore`]'s (streamed,
+    /// full-mirror) hydration happens exactly ONCE per store name rather
+    /// than on every `store_get` call.
+    stores: scc::HashMap<String, Arc<OnceCell<Arc<dyn Store>>>, THasher>,
+}
+
+#[cfg(feature = "fjall")]
+impl HybridRepoComposite {
+    fn new(mem: Arc<InMemoryRepo>, disk: Arc<FjallRepo>) -> Self {
+        Self {
+            mem,
+            disk,
+            stores: scc::HashMap::with_hasher(THasher::default()),
+        }
+    }
+
+    /// Route `name` to its intended tier and build the resulting `Store`,
+    /// memoized per name (see [`HybridRepoComposite::stores`]).
+    ///
+    /// Mirrors the async-safe memoization shape established at
+    /// `RepoInstance::get_table`
+    /// (`crates/shamir-engine/src/repo/repo_instance.rs` ~line 306-326):
+    /// clone the `Arc<OnceCell>` out of the map and DROP the shard guard
+    /// BEFORE the init `.await`. `scc::HashMap`'s per-shard access is
+    /// backed by a synchronous lock; holding that guard across a
+    /// long-running init `.await` (`MirroredStore::new` streams the
+    /// ENTIRE mirror on hydration) risks the same guard-across-await
+    /// worker-thread starvation under runtime oversubscription. The
+    /// `OnceCell` itself provides the single-init serialization — the
+    /// shard lock only needs to protect the map insert, not the init.
+    async fn store_get_routed(&self, name: &str) -> DbResult<Arc<dyn Store>> {
+        // `entry_sync` (not `entry_async`): the shard lock is synchronous,
+        // so the guard must be dropped BEFORE the init `.await` below —
+        // see this method's doc comment.
+        let cell = {
+            let entry = self
+                .stores
+                .entry_sync(name.to_string())
+                .or_insert_with(|| Arc::new(OnceCell::new()));
+            Arc::clone(entry.get())
+        };
+
+        cell.get_or_try_init(|| async move { self.build_store(name).await })
+            .await
+            .cloned()
+    }
+
+    /// Construct the actual `Store` for `name` per the routing table.
+    ///
+    /// | Name pattern       | Backing | Why                                |
+    /// |---------------------|---------|-------------------------------------|
+    /// | `__history__<table>`| mem     | Actual row data (MVCC routes all data through the version log). |
+    /// | `__data__<table>`   | mem     | Dead keyspace for MVCC tables — routed to mem for consistency. |
+    /// | `__info__<table>`   | disk, mirrored via `is_durable_table_config` | Mixed keyspace: config + data-derived state. |
+    /// | `__interner__`      | disk, mirrored via allow-ALL | Critical coupling — see struct doc. |
+    /// | `__tx__`            | mem     | MVCC/WAL recovery markers derived from the (ephemeral) tx history. |
+    /// | `__changelog__`     | mem     | Changefeed journal describes ephemeral row data. |
+    /// | anything else       | mem + warn + debug_assert | Fail-safe: never persist unknown state by accident. |
+    async fn build_store(&self, name: &str) -> DbResult<Arc<dyn Store>> {
+        if name == "__interner__" {
+            // Critical coupling — see `HybridRepoComposite`'s doc comment.
+            // Allow-ALL classifier: every key in this store is durable
+            // config that must persist alongside `__info__`'s index
+            // definitions, which reference this interner's ids.
+            let disk_store = self.disk.store_get(name).await?;
+            let mirrored = MirroredStore::new(disk_store, |_| true).await?;
+            return Ok(Arc::new(mirrored));
+        }
+
+        if name.starts_with("__info__") {
+            let disk_store = self.disk.store_get(name).await?;
+            let mirrored = MirroredStore::new(disk_store, is_durable_table_config).await?;
+            return Ok(Arc::new(mirrored));
+        }
+
+        if name.starts_with("__history__")
+            || name.starts_with("__data__")
+            || name == "__tx__"
+            || name == "__changelog__"
+        {
+            return self.mem.store_get(name).await;
+        }
+
+        // Fail-safe: an unrecognized store name defaults to ephemeral
+        // in-memory rather than guessing whether it needs to persist. The
+        // 6 names above are the only ones any production caller requests
+        // (confirmed by an exhaustive grep of `store_get(` call sites); a
+        // debug build turns a 7th name into a loud CI failure instead of a
+        // silent, unreviewed persistence decision. Release builds just log
+        // and continue ephemeral — the safe direction per this design's
+        // allowlist philosophy.
+        log::warn!("hybrid repo: unrecognized store name {name:?}, defaulting to ephemeral");
+        debug_assert!(
+            false,
+            "hybrid repo: unrecognized store name {name:?} — add it to the routing table in HybridRepoComposite::build_store"
+        );
+        self.mem.store_get(name).await
+    }
+
+    async fn store_delete_routed(&self, name: &str) -> DbResult<bool> {
+        // Evict the memoized `Store` FIRST — `__info__`/`__interner__`
+        // names are memoized as a `MirroredStore` whose in-memory PRIMARY
+        // is never registered in `self.mem` at all (it lives only inside
+        // the `MirroredStore`, reachable only through this memoization
+        // cache). Leaving the stale entry in place would let a subsequent
+        // `store_get` on the SAME name keep returning the old, still-
+        // populated `MirroredStore` instead of re-routing through
+        // `build_store` (which would re-hydrate from — now empty — disk).
+        let cache_removed = self.stores.remove_sync(name).is_some();
+
+        // `mem.store_delete` is a no-op / not-found for `__info__`/
+        // `__interner__` names (never registered there) and a real
+        // removal for the other 4 names — safe to call unconditionally
+        // for every name rather than branching twice.
+        let mem_removed = self.mem.store_delete(name).await?;
+        // `disk.store_delete` deletes the durable mirror. For
+        // `__info__`/`__interner__` names the durable copy must be
+        // deleted too — deleting `mem`/the cache alone would leave a
+        // stale disk copy that resurrects the config on the next
+        // hydration. For every OTHER name this is a cheap not-found
+        // no-op (nothing was ever written there).
+        let disk_removed = self.disk.store_delete(name).await?;
+        Ok(cache_removed || mem_removed || disk_removed)
+    }
+
+    async fn stores_list_routed(&self) -> DbResult<Vec<String>> {
+        let mut names: Vec<String> = self.mem.stores_list().await?;
+        for disk_name in self.disk.stores_list().await? {
+            if !names.contains(&disk_name) {
+                names.push(disk_name);
+            }
+        }
+        Ok(names)
+    }
 }
 
 #[async_trait::async_trait]
@@ -66,6 +235,8 @@ impl Repo for BoxRepo {
                 };
                 Ok(Arc::new(cached))
             }
+            #[cfg(feature = "fjall")]
+            BoxRepo::Hybrid(c) => c.store_get_routed(name.as_ref()).await,
         }
     }
 
@@ -76,6 +247,8 @@ impl Repo for BoxRepo {
             BoxRepo::Fjall(repo) => repo.store_delete(name).await,
             BoxRepo::MemBuffer(c) => c.inner.store_delete(name).await,
             BoxRepo::Cached(c) => c.inner.store_delete(name).await,
+            #[cfg(feature = "fjall")]
+            BoxRepo::Hybrid(c) => c.store_delete_routed(name.as_ref()).await,
         }
     }
 
@@ -86,6 +259,8 @@ impl Repo for BoxRepo {
             BoxRepo::Fjall(repo) => repo.stores_list().await,
             BoxRepo::MemBuffer(c) => c.inner.stores_list().await,
             BoxRepo::Cached(c) => c.inner.stores_list().await,
+            #[cfg(feature = "fjall")]
+            BoxRepo::Hybrid(c) => c.stores_list_routed().await,
         }
     }
 }
@@ -146,6 +321,34 @@ impl RepoFactory for FjallRepoFactory {
     }
 }
 
+/// F-33 Step 2 (#836): builds a [`HybridRepoComposite`] — an in-memory
+/// repo for ephemeral table data plus a DIRECT (not `MemBuffer`-wrapped)
+/// fjall repo for the durable config mirror. Unlike
+/// [`BoxRepoFactory::fjall`]'s default-wrapped convenience constructor,
+/// the disk side here is deliberately unwrapped: config writes are rare
+/// DDL events that should land durably right away, not sit in a buffered
+/// flush window.
+#[cfg(feature = "fjall")]
+pub struct HybridRepoFactory {
+    pub info_path: PathBuf,
+}
+
+#[cfg(feature = "fjall")]
+#[async_trait::async_trait]
+impl RepoFactory for HybridRepoFactory {
+    async fn create(&self) -> DbResult<BoxRepo> {
+        let mem = Arc::new(InMemoryRepo::new());
+        let path = self.info_path.clone();
+        let disk = task::spawn_blocking(move || FjallRepo::new(path))
+            .await
+            .map_err(|e| shamir_storage::error::DbError::Internal(e.to_string()))??;
+        Ok(BoxRepo::Hybrid(Arc::new(HybridRepoComposite::new(
+            mem,
+            Arc::new(disk),
+        ))))
+    }
+}
+
 // ============================================================================
 // BoxRepoFactory - enum for type-erased factory
 // ============================================================================
@@ -160,6 +363,10 @@ pub enum BoxRepoFactory {
     /// Full-mirror cache wrapper factory. Stacks on top of any
     /// other factory.
     Cached(Box<CachedRepoFactory>),
+    /// F-33 (#836): hybrid backend — ephemeral in-memory data, durable
+    /// fjall config mirror. See [`HybridRepoComposite`].
+    #[cfg(feature = "fjall")]
+    Hybrid(HybridRepoFactory),
 }
 
 pub struct MemBufferRepoFactory {
@@ -236,6 +443,16 @@ impl BoxRepoFactory {
         BoxRepoFactory::Fjall(FjallRepoFactory { path: path.into() })
     }
 
+    /// Hybrid backend: ephemeral in-memory table data, durable fjall
+    /// mirror (at `info_path`) for `__info__`/`__interner__`. NOT
+    /// `MemBuffer`-wrapped — see [`HybridRepoFactory`]'s doc comment.
+    #[cfg(feature = "fjall")]
+    pub fn hybrid(info_path: impl Into<PathBuf>) -> Self {
+        BoxRepoFactory::Hybrid(HybridRepoFactory {
+            info_path: info_path.into(),
+        })
+    }
+
     /// Wrap a factory in a custom-config MemBuffer layer. Use this
     /// when the conservative default config doesn't fit your
     /// workload (very hot dataset, very strict latency window, etc).
@@ -269,6 +486,16 @@ impl BoxRepoFactory {
             BoxRepoFactory::Fjall(f) => Some(f.path.clone()),
             BoxRepoFactory::MemBuffer(f) => f.inner.backing_dir(),
             BoxRepoFactory::Cached(f) => f.inner.backing_dir(),
+            // A hybrid repo's actual DATA (`__history__`/`__data__`) is
+            // ephemeral in-memory, same disposition as `InMemory`. A
+            // file-backed WAL would durably record inflight write markers
+            // that, on the next open, replay into a freshly-EMPTY
+            // `__history__` — resurrecting a torn fragment of a dataset
+            // that's supposed to be gone. `None` selects the in-memory
+            // KV-marker WAL instead, consistent with the ephemeral-data
+            // half of this design.
+            #[cfg(feature = "fjall")]
+            BoxRepoFactory::Hybrid(_) => None,
         }
     }
 }
@@ -294,6 +521,8 @@ impl RepoFactory for BoxRepoFactory {
                     mode: f.mode,
                 })))
             }
+            #[cfg(feature = "fjall")]
+            BoxRepoFactory::Hybrid(f) => f.create().await,
         }
     }
 }
@@ -308,6 +537,8 @@ impl Clone for BoxRepoFactory {
                 BoxRepoFactory::membuffer(f.inner.clone(), f.config.clone())
             }
             BoxRepoFactory::Cached(f) => BoxRepoFactory::cached(f.inner.clone(), f.mode),
+            #[cfg(feature = "fjall")]
+            BoxRepoFactory::Hybrid(f) => BoxRepoFactory::hybrid(f.info_path.clone()),
         }
     }
 }
