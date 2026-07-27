@@ -28,7 +28,7 @@
 | **0** | [`00-quickstart.md`](./00-quickstart.md) | Один бинарник, аккаунт, таблица в `default`, put/get. Работает как KV. | Сразу. |
 | **1** | `01-queries.md` | Фильтры (`where`), батчи с зависимостями, вторичные индексы, диапазоны/сортировка/`LIMIT`. | KV мало — нужны выборки. |
 | **2** | `02-durability.md` | `durability: buffered`/`synced`, транзакционные батчи + `isolation` (snapshot/serializable), graceful shutdown. | Данные терять нельзя. |
-| **3** | `03-storage.md` | Репозитории (durable-by-default), `in_memory`-scratch, бэкап, интроспекция `access-tree`. | Несколько хранилищ / много данных. |
+| **3** | `03-storage.md` | Репозитории (durable-by-default), `in_memory`-scratch, `hybrid`-config-only, бэкап, интроспекция `access-tree`. | Несколько хранилищ / много данных. |
 | **4** | `04-access.md` | Shomer: юзеры, группы, POSIX-режимы (`chmod`/`chown`/`chgrp`), права на ресурсы, бизнес-доступ через процедуры. | >1 типа пользователей. |
 | **5** | `05-functions.md` | Хранимые WASM-функции (`#[shamir::function]`), `ctx` (db/call/http), setuid-процедуры. | Логика переезжает в БД. |
 | **6** | `06-search.md` | Full-text search (токенизация, стемминг), векторы/embeddings (HNSW). | Нужен поиск / AI-фичи. |

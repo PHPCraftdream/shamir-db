@@ -750,3 +750,28 @@ artifact).
     crash survival. See `crates/shamir-server/src/restore.rs`'s
     `fsync_dir` and `crates/shamir-server/src/backup.rs`'s `backup`,
     `copy_dir_recursive`, and `write_manifest`.
+
+## 10. Repo engines
+
+- **`hybrid` repo engine — residual scope (F-33, #840).** `CREATE REPO
+  ... ENGINE 'hybrid'` is a working feature: table configuration
+  (index/sorted-index/functional-index definitions, schema validators,
+  buffer config, the field-name interner) durably mirrors to disk while
+  table data stays fully ephemeral in-memory (wiped on every restart).
+  Two residuals to be aware of:
+  - **Not yet a supported `dst_engine` for `MigrateRepo`/
+    `StartMigration`.** The `dst_engine` resolution accepts only
+    `"in_memory"`; a request for `dst_engine: "hybrid"` is rejected with
+    *"Migration dst_engine 'hybrid' not yet supported. Supported:
+    in_memory"* (same catch-all that rejects every other non-`in_memory`
+    engine). See `crates/shamir-db/src/shamir_db/execute/admin_migration.rs:112-120`.
+  - **Requires the `fjall` cargo feature (same as the durable default).**
+    The `Some("hybrid")` arm in `create_repo` and the `"hybrid"` arm in
+    `factory_from_meta` are both gated by `#[cfg(feature = "fjall")]`.
+    A build with `default-features = false` and `fjall` excluded cannot
+    create a hybrid repo: `ENGINE 'hybrid'` falls into the
+    unsupported-engine error path in that configuration, same as `fjall`
+    itself would. See `crates/shamir-db/src/shamir_db/execute/admin_db_repo.rs:223-254`
+    (create-time arm, including the `data_root`-required guard) and
+    `crates/shamir-db/src/shamir_db/shamir_db/core.rs:700-707`
+    (restart-reattach arm).
