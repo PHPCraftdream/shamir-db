@@ -298,20 +298,21 @@ jobs:
   # (consistent with the rest of this workflow — no other job here or in
   # ci.yml reaches for `jq`/`cargo metadata` for JSON parsing).
   #
-  # DELIBERATE CHOICE on the CHANGELOG requirement: the brief allows either a
-  # strict "a `## [<version>]` heading must already exist" check or a looser
-  # "at minimum `[Unreleased]` or some version heading exists" check. This
-  # job takes the LOOSER form: CHANGELOG.md today has ONLY `[Unreleased]`
-  # (no per-version heading yet, confirmed against the current tree), and
-  # `github-release`'s own "Extract release notes" step already has an
-  # intentional fallback for exactly this case (falls back to a generic
-  # "Pre-release build of ${GITHUB_REF_NAME}" note). Requiring a heading here
-  # would be STRICTER than that existing, intentional fallback allows, and
-  # would make this job permanently red until a human adds the heading in
-  # the same commit being tagged. So: this check only fails if CHANGELOG.md
-  # has NEITHER an `[Unreleased]` section NOR any `## [x.y.z...]` version
-  # heading at all — i.e. it catches a truly empty/gutted changelog, not the
-  # documented "first release has no per-version section yet" state.
+  # CHANGELOG requirement (F-31/#824): the CHANGELOG check below requires the
+  # EXACT `## [${TAG_VERSION}]` heading for the tag being pushed. Previously
+  # (CR-B9) this job took a looser form — pass if CHANGELOG.md had EITHER an
+  # `[Unreleased]` section OR any `## [x.y.z...]` version heading at all —
+  # because at that time CHANGELOG.md had only `[Unreleased]` and no
+  # per-version heading existed yet, so a strict check would have been
+  # permanently red. That condition no longer holds: F-14 (#804) landed a
+  # real `## [0.1.0-alpha.1] - 2026-07-26` section. The loose form became a
+  # liability once a real heading existed — a future tag (e.g.
+  # `v0.1.0-alpha.2`) would have satisfied the old check purely because the
+  # STALE `[0.1.0-alpha.1]` heading was still present, even with no section
+  # ever added for the new tag, silently shipping the wrong release notes
+  # (`github-release`'s "Extract release notes" step would then also find no
+  # match for the new version and fall through to its generic "Pre-release
+  # build" note). See #824.
   # No `needs:` — GitHub Actions has no "explicit empty deps" syntax (an
   # empty `needs: []` array is rejected by workflow syntax validation); a
   # job with no `needs:` key already runs immediately as soon as the
@@ -350,19 +351,31 @@ jobs:
 
           echo "OK: all crates declare ${CRATE_VERSION}, matching tag ${GITHUB_REF_NAME}"
       - name: Check CHANGELOG.md has appropriate content
-        # Looser form per the deliberate choice documented above: pass if
-        # CHANGELOG.md contains EITHER an `[Unreleased]` section OR a
-        # `## [x.y.z...]` version heading (matching this tag or any other) —
-        # only fail on a changelog with neither, which would indicate the
-        # file was gutted/corrupted rather than simply not-yet-cut.
+        # Strict form (F-31/#824): require the EXACT `## [${TAG_VERSION}]`
+        # heading for the tag being pushed, not merely SOME version heading
+        # or an `[Unreleased]` section. `TAG_VERSION` is recomputed here (not
+        # inherited from the first step above) because each `run:` block is a
+        # separate shell invocation — GitHub Actions does not persist plain
+        # shell variables across steps unless exported via `$GITHUB_ENV`.
+        # `grep -E` (not `-F`) is used because the `^` anchor needs regex
+        # semantics — `grep -F` treats the whole pattern as a literal string,
+        # so a leading `^` would match a literal caret character rather than
+        # anchoring to line-start. The version string's `.` characters are
+        # escaped (`\.`) so they match literal dots, not the regex
+        # metacharacter "any character" — real version strings (e.g.
+        # `0.1.0-alpha.1`) wouldn't collide with anything unintended even
+        # unescaped, but escaping costs nothing and is the honest fix.
         shell: bash
         run: |
           set -euo pipefail
 
-          if grep -qE '^## \[Unreleased\]' CHANGELOG.md || grep -qE '^## \[[0-9]+\.[0-9]+\.[0-9]+' CHANGELOG.md; then
-            echo "OK: CHANGELOG.md has an [Unreleased] section and/or a version heading"
+          TAG_VERSION="${GITHUB_REF_NAME#v}"
+          TAG_VERSION_RE="$(printf '%s' "${TAG_VERSION}" | sed -E 's/\./\\\\./g')"
+
+          if grep -qE "^## \[${TAG_VERSION_RE}\]" CHANGELOG.md; then
+            echo "OK: CHANGELOG.md has a heading for ${TAG_VERSION}"
           else
-            echo "::error::CHANGELOG.md has neither an [Unreleased] section nor any '## [x.y.z...]' version heading"
+            echo "::error::CHANGELOG.md has no '## [${TAG_VERSION}]' heading — add release notes for this tag before pushing it"
             exit 1
           fi
 
