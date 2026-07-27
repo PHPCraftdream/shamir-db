@@ -18,6 +18,7 @@ pub mod key_bytes;
 pub mod storage_cached;
 pub mod storage_in_memory;
 pub mod storage_membuffer;
+pub mod storage_mirrored;
 pub mod types;
 
 #[cfg(feature = "fjall")]

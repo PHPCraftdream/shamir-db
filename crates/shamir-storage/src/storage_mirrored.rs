@@ -1,0 +1,339 @@
+//! `MirroredStore` — an in-memory-primary `Store` that conditionally
+//! mirrors a durable-config subset of its writes to a backing `Store`.
+//!
+//! Step 1 of the F-33 hybrid-repo campaign (task #835 / #826): table
+//! DATA stays fully ephemeral (in-memory) while table CONFIGURATION
+//! (index definitions, validator bindings, buffer config, the interner)
+//! survives a process restart. `MirroredStore` composes an
+//! [`InMemoryStore`] (the primary — every read goes here, nothing else
+//! is ever consulted on the read path) with an `Arc<dyn Store>` mirror
+//! (the durable backend), writing to the mirror ONLY for keys an
+//! allowlist classifier ([`is_durable_table_config`]) accepts.
+//!
+//! On construction, the primary is hydrated by streaming every entry
+//! already in the mirror — everything durable was, by construction,
+//! something the classifier accepted when it was written, so it
+//! unconditionally belongs back in the primary on reopen.
+
+use crate::error::DbResult;
+use crate::storage_in_memory::InMemoryStore;
+use crate::storage_membuffer::MemBufferConfig;
+use crate::types::{RecordKey, RecordStream, Store};
+use async_trait::async_trait;
+use bytes::Bytes;
+use futures::StreamExt;
+use std::sync::Arc;
+
+/// System-record prefix — the first 4 bytes of every `RecordId::system`
+/// key (see `shamir_types::types::record_id::RecordId::system` /
+/// `SYSTEM_RECORD_PREFIX`). Kept as a local literal since the constant
+/// itself is private to `shamir-types`; `RecordId::is_system` performs
+/// the equivalent check for the `RecordId` type directly.
+const SYSTEM_RECORD_PREFIX: [u8; 4] = [0, 0, 0, 0];
+
+/// Total byte length of every `RecordId::system(..)`-derived key
+/// (`4`-byte zero prefix + up to 12 name bytes, zero-padded).
+const SYSTEM_KEY_LEN: usize = 16;
+
+/// Allowlist of system-record tags (the trimmed `key[4..16]`, NUL bytes
+/// stripped) that are durable TABLE CONFIGURATION and therefore belong
+/// in the mirror. Cross-checked against every
+/// `shamir_engine::meta::namespace::MetaKey` variant (see module docs
+/// below for the per-variant rationale) — this is deliberately an
+/// ALLOWLIST: an unrecognized tag defaults to ephemeral (ok bug: a
+/// future config key stops surviving restart) rather than a denylist
+/// (dangerous bug: a future derived-state key would silently
+/// resurrect stale data on reopen).
+///
+/// **12-byte truncation gotcha.** `RecordId::system(name)` silently
+/// truncates `name` to its first 12 bytes (see that constructor's
+/// doc). Three `MetaKey::tag()` strings exceed 12 bytes, so the
+/// ACTUAL bytes landing in a key are the truncated form, not the tag
+/// literal in `namespace.rs`:
+/// - `MetaKey::LegacyIndexesUnique` tag `"indexes_unique"` (14 bytes)
+///   → truncated to `"indexes_uniq"`.
+/// - `MetaKey::SortedIndexes` tag `"sorted_indexes"` (14 bytes) →
+///   truncated to `"sorted_index"`.
+/// - `MetaKey::BufferConfig` tag `"buffer_config"` (13 bytes) →
+///   truncated to `"buffer_confi"`.
+///
+/// The entries below use the TRUNCATED (actual on-the-wire) forms —
+/// matching against the untruncated tag string would silently never
+/// fire, since no key `RecordId::system` produces ever contains those
+/// extra bytes. Verified by this module's exhaustiveness test, which
+/// builds keys via `RecordId::system(tag)` (the real constructor,
+/// truncation included) rather than comparing strings directly.
+const ALLOWLIST: &[&str] = &[
+    // MetaKey::LegacyIndexes / LegacyIndexesUnique / SortedIndexes /
+    // Validators / Internals / BufferConfig / Tables / Wal / Migrations
+    // / Indexes — static, hand-authored or admin-driven table
+    // configuration. None of these are derived from row data, so they
+    // are safe (and desirable) to survive a restart of a hybrid table.
+    "indexes",
+    "indexes_uniq", // MetaKey::LegacyIndexesUnique, truncated from "indexes_unique"
+    "sorted_index", // MetaKey::SortedIndexes, truncated from "sorted_indexes"
+    "_m.idx",
+    "_m.val",
+    "buffer_confi", // MetaKey::BufferConfig, truncated from "buffer_config"
+    "internals",
+    "_m.tbl",
+    "_m.wal",
+    "_m.mig",
+    // `_m.idx.lfv` — legacy posting-format version stamp
+    // (`shamir_index::persistence::save_legacy_index_version` /
+    // `legacy_indexes_need_rebuild`, `crates/shamir-index/src/persistence.rs`
+    // ~line 44/94-123). NOT a `MetaKey` variant — it's an ad-hoc
+    // `RecordId::system("_m.idx.lfv")` key constructed directly in
+    // `shamir-index`, so the `MetaKey`-exhaustiveness cross-check alone
+    // does not surface it; found by a separate workspace-wide grep for
+    // every `RecordId::system(...)` call site outside `namespace.rs`/tests.
+    // Static config (marks "the on-disk posting format is up to date"),
+    // not derived from row data — if this stamp were missing after a
+    // hybrid reopen, `legacy_indexes_need_rebuild` would return `true` on
+    // every reopen and trigger a wasted (harmless, since it runs over the
+    // correctly-empty ephemeral history, but pointless) `repair()` pass.
+    "_m.idx.lfv",
+];
+
+/// Tag prefix for interner delta chunks (see
+/// `shamir_engine::table::interner_manager::CHUNK_TAG_PREFIX`). Every
+/// tag of the shape `"i.d" + 9-digit zero-padded index` is a durable
+/// interner chunk record and belongs in the mirror.
+const INTERNER_CHUNK_PREFIX: &str = "i.d";
+
+/// Returns `true` iff `key` is a durable-table-config system record —
+/// i.e. it should ALSO be written to [`MirroredStore`]'s durable
+/// mirror, on top of always landing in the ephemeral in-memory
+/// primary.
+///
+/// **Allowlist semantics — read this before adding a new
+/// `MetaKey`.** A key defaults to EPHEMERAL unless its tag is
+/// explicitly recognized below. This bias is deliberate: forgetting to
+/// ADD a future config tag here just means "a setting doesn't survive
+/// restart" (a bug report); forgetting to EXCLUDE a derived-state tag
+/// would mean "stale state silently corrupts a reopened hybrid table"
+/// (much worse — the store would lie about what happened since the
+/// last restart).
+///
+/// **Explicitly excluded system tags** (all cross-checked against
+/// `shamir_engine::meta::namespace::MetaKey` — see that enum for the
+/// canonical tag strings):
+///
+/// - `MetaKey::Count` (tag `"count"`) — the record counter's
+///   persisted value, DERIVED FROM DATA. Row data is fully ephemeral
+///   in a hybrid table, so persisting the last-seen count would make a
+///   reopened table's row count lie about how many rows actually exist
+///   post-restart.
+/// - `MetaKey::LastCommittedVersion` (tag `"_t.lcv"`) and
+///   `MetaKey::NextTxId` (tag `"_t.nti"`) — MVCC/WAL recovery markers.
+///   Both exist purely to let recovery seed its counters against
+///   already-committed transactional history (see
+///   `shamir_engine::meta::recovery_marker`'s module doc). That history
+///   lives in the ephemeral primary's row data; persisting these
+///   markers without the data they describe would let a reopened
+///   hybrid table seed a `RepoTxGate` counter from a version space that
+///   no longer has any corresponding committed rows — the same
+///   "derived-from-data, not configuration" hazard as `Count`, just
+///   for the transaction log instead of the row counter.
+/// - `MetaKey::ReplicationBookmark` (tag `"_t.rbm"`) — the highest
+///   leader `commit_version` a follower has durably applied (see
+///   `shamir_engine::meta::repl_bookmark`'s module doc). It gates
+///   idempotent re-delivery against locally-applied DATA. If a hybrid
+///   table's data does not survive restart, a persisted bookmark would
+///   make the follower silently skip re-applying leader events whose
+///   effects were actually lost — an even sharper case of "stale
+///   derived state corrupts a reopened table" than `Count`.
+///
+/// These three (`LastCommittedVersion`, `NextTxId`,
+/// `ReplicationBookmark`) are NOT listed in the original design sketch
+/// for this classifier — found by cross-checking every `MetaKey`
+/// variant in `namespace.rs` per this task's brief. They are grouped
+/// with `Count` as data-derived, not configuration.
+///
+/// Non-system keys (postings, sorted-index entries, vector snapshot /
+/// delta chunks) never reach the tag comparison at all: they fail the
+/// `len() == 16` / `[0,0,0,0]` prefix check first (posting keys are
+/// `4+1+value_len+16` bytes with a `u32` index-id prefix that is only
+/// all-zero for `index_id == 0`, and even then byte 4 is a `type_tag`
+/// discriminant rather than the start of an ASCII ALLOWLIST tag; sorted
+/// index / vector snapshot keys are ASCII strings like
+/// `"<keyspace>.g0.data.000000"`, never 16 bytes).
+pub fn is_durable_table_config(key: &RecordKey) -> bool {
+    let bytes = key.as_slice();
+    if bytes.len() != SYSTEM_KEY_LEN {
+        return false;
+    }
+    if bytes[0..4] != SYSTEM_RECORD_PREFIX {
+        return false;
+    }
+
+    let tag_bytes = &bytes[4..16];
+    // Trim trailing NUL padding — `RecordId::system` zero-pads the
+    // 12-byte name field, so a short tag like "internals" is stored
+    // as "internals\0\0\0".
+    let trimmed_len = tag_bytes
+        .iter()
+        .rposition(|&b| b != 0)
+        .map(|last_nonzero| last_nonzero + 1)
+        .unwrap_or(0);
+    let tag_bytes = &tag_bytes[..trimmed_len];
+
+    let Ok(tag) = std::str::from_utf8(tag_bytes) else {
+        return false;
+    };
+
+    ALLOWLIST.contains(&tag) || tag.starts_with(INTERNER_CHUNK_PREFIX)
+}
+
+/// In-memory-primary, conditionally-durable-mirror `Store`.
+///
+/// - **Reads** (`get`, `get_many`, `iter_stream`, `scan_prefix_stream`,
+///   `iter_range_stream`, `iter_range_stream_reverse`) go to `primary`
+///   ONLY — `mirror` is never consulted after construction, keeping
+///   this store zero-cost on the read path.
+/// - **Writes** (`insert`, `set`, `remove`) always land in `primary`
+///   unconditionally (matching `InMemoryStore`'s exact semantics), and
+///   additionally reach `mirror` iff `classify(&key)` returns `true`.
+/// - **`flush`** flushes `mirror` only (`primary` is pure in-memory).
+/// - **`apply_buffer_config`** forwards to `mirror` only.
+/// - **`raw_backend`** returns `None` — see its trait-doc contract:
+///   this store is not a pure cache-wrapper around a single backend,
+///   and unwrapping to `mirror` would let a caller (e.g.
+///   `fully_unwrap_store`) bypass the classifier and write everything
+///   unconditionally to disk.
+pub struct MirroredStore {
+    primary: InMemoryStore,
+    mirror: Arc<dyn Store>,
+    classify: fn(&RecordKey) -> bool,
+}
+
+impl MirroredStore {
+    /// Construct a `MirroredStore` over `mirror`, hydrating `primary`
+    /// with every entry currently in `mirror` (bypassing `classify` —
+    /// everything already durable was classified `true` when it was
+    /// written, so it unconditionally belongs in the primary too).
+    ///
+    /// Config state is small (a handful of keys plus interner chunks),
+    /// so a full streamed hydration at construction time is cheap;
+    /// this is intentionally not lazy.
+    pub async fn new(mirror: Arc<dyn Store>, classify: fn(&RecordKey) -> bool) -> DbResult<Self> {
+        let primary = InMemoryStore::new();
+
+        let mut stream = mirror.iter_stream(shamir_tunables::store_defaults::FULL_SCAN_BATCH);
+        while let Some(batch) = stream.next().await {
+            let batch = batch?;
+            for (key, value) in batch {
+                // `set_no_flag` — hydration doesn't need the
+                // created/updated flag, and every key is fresh in a
+                // brand-new `InMemoryStore`.
+                primary.set_no_flag(key, value).await?;
+            }
+        }
+
+        Ok(Self {
+            primary,
+            mirror,
+            classify,
+        })
+    }
+}
+
+#[async_trait]
+impl Store for MirroredStore {
+    async fn insert(&self, value: Bytes) -> DbResult<RecordKey> {
+        // `InMemoryStore::insert` mints its key from a fresh
+        // `RecordId::new()` (timestamp-prefixed, never all-zero — see
+        // `RecordId::from_ts`), so the resulting key can NEVER match
+        // the system-record shape (`[0,0,0,0]` prefix) `classify`
+        // requires. `insert` therefore never needs to write to
+        // `mirror` at all; every durable-config key in this store's
+        // domain is always written via `set`, never `insert`.
+        self.primary.insert(value).await
+    }
+
+    async fn set(&self, key: RecordKey, value: Bytes) -> DbResult<bool> {
+        let created = self.primary.set(key.clone(), value.clone()).await?;
+        if (self.classify)(&key) {
+            self.mirror.set(key, value).await?;
+        }
+        Ok(created)
+    }
+
+    async fn get(&self, key: RecordKey) -> DbResult<Bytes> {
+        self.primary.get(key).await
+    }
+
+    async fn get_many(&self, keys: Vec<RecordKey>) -> DbResult<Vec<Option<Bytes>>> {
+        self.primary.get_many(keys).await
+    }
+
+    async fn remove(&self, key: RecordKey) -> DbResult<bool> {
+        let existed = self.primary.remove(key.clone()).await?;
+        if (self.classify)(&key) {
+            self.mirror.remove(key).await?;
+        }
+        Ok(existed)
+    }
+
+    async fn flush(&self) -> DbResult<()> {
+        // `primary` is pure in-memory — nothing to flush there.
+        self.mirror.flush().await
+    }
+
+    async fn apply_buffer_config(&self, config: &MemBufferConfig) -> DbResult<()> {
+        // `primary`, being pure in-memory, has no buffer tuning of its
+        // own to apply.
+        self.mirror.apply_buffer_config(config).await
+    }
+
+    async fn raw_backend(&self) -> Option<Arc<dyn Store>> {
+        // NOT a pure cache-wrapper around a single backend: returning
+        // `Some(mirror)` here would let a caller like
+        // `types::fully_unwrap_store` bypass this store's classifier
+        // entirely and write everything unconditionally to durable
+        // storage. `primary` is this store's actual write path, so the
+        // default `None` (already-raw) is the correct answer.
+        None
+    }
+
+    fn iter_stream(&self, batch_size: usize) -> RecordStream {
+        self.primary.iter_stream(batch_size)
+    }
+
+    fn scan_prefix_stream(&self, prefix: Bytes, batch_size: usize) -> RecordStream {
+        self.primary.scan_prefix_stream(prefix, batch_size)
+    }
+
+    fn iter_range_stream(
+        &self,
+        start_inclusive: Option<Bytes>,
+        end_inclusive: Option<Bytes>,
+        batch_size: usize,
+    ) -> RecordStream {
+        self.primary
+            .iter_range_stream(start_inclusive, end_inclusive, batch_size)
+    }
+
+    fn iter_range_stream_reverse(
+        &self,
+        start_inclusive: Option<Bytes>,
+        end_inclusive: Option<Bytes>,
+        batch_size: usize,
+    ) -> RecordStream {
+        self.primary
+            .iter_range_stream_reverse(start_inclusive, end_inclusive, batch_size)
+    }
+
+    // `insert_many` / `set_many` / `remove_many` / `transact`: NOT
+    // overridden. The trait's default implementations loop calling
+    // `self.insert` / `self.set` / `self.remove` per item (`transact`
+    // loops over `KvOp::Set`/`KvOp::Remove`, each dispatched to
+    // `self.set` / `self.remove`) — since THOSE overrides already do
+    // the classify-and-conditionally-mirror work internally, the
+    // default loops produce correct behavior for free (each element
+    // gets the same primary-then-conditional-mirror treatment as a
+    // standalone call). `InMemoryStore` itself has no native
+    // transactional batch API to delegate to for a genuine efficiency
+    // win, so there is no motivation to hand-roll a custom override
+    // here.
+}
