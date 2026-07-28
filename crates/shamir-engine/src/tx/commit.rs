@@ -38,6 +38,104 @@ fn effective_max_tx_lifetime() -> std::time::Duration {
     DEFAULT_MAX_TX_LIFETIME
 }
 
+/// Test-only pause/resume handshake installed via
+/// [`TEST_POST_VALIDATE_PRE_PUBLISH_HOOK`]. `reached` lets the harness thread
+/// detect (via polling, no sleeps) that the commit under test has actually
+/// parked at the seam before the harness fires the concurrent writer;
+/// `resume` is the release signal the harness fires once the concurrent
+/// writer has fully committed.
+///
+/// `armed` closes a real hang this seam originally had: EVERY transaction
+/// that reaches `commit_tx_lockfree`'s hook call site parks here, not just
+/// the "parent" tx a test intends to pause — including the concurrent
+/// writer the harness itself drives to commit AFTER releasing the parent
+/// (once the writer acquires `commit_lock` in turn, it reaches this SAME
+/// program point). A `Notify::notify_one()` wakes at most one parked waiter,
+/// so a harness that calls it exactly once (to release the parent) leaves
+/// the writer's later arrival parked forever with no second wakeup ever
+/// coming — a genuine deadlock, not a slow test. `armed` makes the pause
+/// one-shot: the first caller to reach the seam consumes it (CAS
+/// true→false) and actually parks; every subsequent caller (the writer,
+/// or any other concurrent committer) sees `armed == false` and passes
+/// through immediately, unpaused. A test that wants exactly ONE tx to pause
+/// here gets that for free without having to know in advance how many
+/// OTHER committers will transit the same seam before the test finishes.
+#[cfg(test)]
+#[derive(Debug)]
+pub(crate) struct PostValidatePrePublishHook {
+    pub(crate) reached: std::sync::atomic::AtomicUsize,
+    pub(crate) resume: tokio::sync::Notify,
+    pub(crate) armed: std::sync::atomic::AtomicBool,
+}
+
+/// Test-only pause seam: fires in `commit_tx_lockfree` immediately AFTER
+/// `pre_commit_locked_validate` returns success (Phase 2-bis's
+/// `predicate_conflicts_batch` — the RI barrier's own commit-time re-check —
+/// has already run and passed) and BEFORE Phase 4 (`wal.begin_grouped`, the
+/// actual commit/publish point).
+///
+/// F-46 (#857): the existing race-test seam
+/// (`fk_ri_barrier_tests.rs`'s `RaceInjectingResolver`, injecting at a
+/// `resolve_repo()` call ordinal) fires the concurrent writer BEFORE the
+/// parent even reaches `commit_interactive_tx` — it proves a
+/// writer-already-fully-committed-before-parent-validates race, not a
+/// writer-committing-DURING-the-parent's-own-commit-lock-window race. This
+/// hook fires deterministically inside that window instead, so a test can
+/// drive a concurrent FK-child writer to completion strictly between the
+/// parent's barrier check and the parent's own publish — the exact gap the
+/// 2026-07-28 readonly review's P0-1 finding describes.
+///
+/// Shape mirrors `TEST_MAX_TX_LIFETIME_OVERRIDE` above (a `#[cfg(test)]`
+/// `OnceLock`, zero cost when unset) combined with
+/// `fk_reverse_cache_race_tests.rs`'s counter-poll + `Notify` pause/resume
+/// handshake: a test installs an `Arc<PostValidatePrePublishHook>` here, then
+/// the seam bumps `reached` and parks on `resume.notified()` at exactly this
+/// program point. The harness thread busy-polls `reached` (no sleeps) until
+/// it sees the bump, fires the concurrent writer to full commit, THEN calls
+/// `resume.notify_one()`, guaranteeing (by construction of the wait) that the
+/// writer's publish strictly happens-before this tx resumes toward its own
+/// publish — the precise interleaving the review's counter-example requires.
+///
+/// `nextest` runs each test in its own process (see
+/// `TEST_MAX_TX_LIFETIME_OVERRIDE`'s doc), so this global cannot leak across
+/// test files. Uninstalled (`None`, the default for every other test in the
+/// suite) this is a single `OnceLock::get()` read with no lock, no
+/// allocation, no await point taken.
+#[cfg(test)]
+pub(crate) static TEST_POST_VALIDATE_PRE_PUBLISH_HOOK: std::sync::OnceLock<
+    std::sync::Arc<PostValidatePrePublishHook>,
+> = std::sync::OnceLock::new();
+
+/// Parks on [`TEST_POST_VALIDATE_PRE_PUBLISH_HOOK`] if a test installed one;
+/// a true no-op otherwise. See that static's doc for the exact program point
+/// and rationale.
+async fn fire_post_validate_pre_publish_test_hook() {
+    #[cfg(test)]
+    if let Some(hook) = TEST_POST_VALIDATE_PRE_PUBLISH_HOOK.get() {
+        hook.reached
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        // One-shot: only the FIRST tx to reach this seam actually parks (see
+        // `PostValidatePrePublishHook::armed`'s doc for why this is load-
+        // bearing, not cosmetic). `compare_exchange` CAS true→false so
+        // exactly one racer wins even if two committers reached this line
+        // concurrently; every later arrival (including the harness's own
+        // concurrent writer, once IT reaches this same program point after
+        // acquiring `commit_lock` in turn) sees `false` and returns at once.
+        let should_pause = hook
+            .armed
+            .compare_exchange(
+                true,
+                false,
+                std::sync::atomic::Ordering::AcqRel,
+                std::sync::atomic::Ordering::Acquire,
+            )
+            .is_ok();
+        if should_pause {
+            hook.resume.notified().await;
+        }
+    }
+}
+
 /// Test-only crash-injection seam for the real crash-recovery harness
 /// (`crates/shamir-engine/tests/crash_recovery.rs`, Vector II.1).
 ///
@@ -745,9 +843,39 @@ async fn commit_tx_lockfree(
     // stable commit window (mirrors the Serializable branch's rationale
     // above). A Snapshot tx with no barrier tokens is completely unaffected
     // (the `is_empty` check short-circuits before any lock work).
+    //
+    // F-46 (#857, P0 — 2026-07-28 readonly review's P0-1): ALSO take the
+    // lock when `footprint_tokens` is non-empty. Without this, the RI
+    // barrier above is one-sided: the PARENT-side RI-barrier check takes
+    // `commit_lock` and re-validates against the commit window, but a
+    // concurrent Snapshot WRITER into the same FK-child table only ever
+    // gets `footprint_tokens` populated (via `require_footprint_for`,
+    // called unconditionally by `require_footprint_if_fk_child` at every
+    // insert/update/set into an FK-child table) — never
+    // `ri_barrier_tokens` (that field is written only by the reverse-FK
+    // *scan* sites in `fk_restrict.rs`/`fk_actions.rs`/`fk_on_update.rs`,
+    // which the plain writer never runs). Before this widening, such a
+    // writer could publish (WAL write + `record_commit_writes` +
+    // materialize) WHILE the parent held `commit_lock` and had already
+    // passed its own Phase 2-bis `predicate_conflicts_batch` check —
+    // slipping in behind the barrier's back and defeating its
+    // mutual-exclusion intent (proven by
+    // `fk_ri_barrier_tests.rs`'s
+    // `concurrent_child_publish_during_parent_commit_window_is_serialized_on_delete_{restrict,cascade,set_null}`
+    // / `..._on_update`, using the `TEST_POST_VALIDATE_PRE_PUBLISH_HOOK`
+    // seam above to park a commit-under-test strictly inside this exact
+    // window). Widening this condition makes every FK-child writer
+    // participate in the SAME validate→publish serialization the RI
+    // barrier already relies on, closing the gap symmetrically: whichever
+    // side reaches `commit_lock` first now genuinely excludes the other
+    // for the whole window, not just for the barrier's own read. A
+    // Snapshot tx that never touches an FK-child table has empty
+    // `footprint_tokens` and pays only the pre-existing single `is_empty`
+    // check — zero additional cost on that path.
     let _serializable_guard = if tx.isolation == IsolationLevel::Serializable
         || !tx.cas_set.is_empty()
         || !tx.ri_barrier_tokens_is_empty()
+        || !tx.footprint_tokens.is_empty()
     {
         Some(gate.commit_lock().await)
     } else {
@@ -782,6 +910,13 @@ async fn commit_tx_lockfree(
     // already cleared each `reserved_by`). On the WAL-begin abort below they drop
     // → release every claimed cell (I-PreWAL: a loser never strands a claim).
     let mut cell_guards = validated.cell_guards;
+
+    // F-46 (#857) test-only seam: fires strictly after Phase 2-bis's
+    // `predicate_conflicts_batch` (the RI barrier's commit-time re-check) has
+    // already passed, and strictly before Phase 4's WAL begin / publish. See
+    // `fire_post_validate_pre_publish_test_hook`'s doc. No-op unless a test
+    // installed `TEST_POST_VALIDATE_PRE_PUBLISH_HOOK`.
+    fire_post_validate_pre_publish_test_hook().await;
 
     // Phase 4: WAL begin — THE COMMIT POINT.
     // Concurrent-safe: each tx writes a unique WAL key (txn_id).

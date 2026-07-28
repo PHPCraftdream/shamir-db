@@ -184,10 +184,18 @@ artifact).
       validation direction (a Snapshot parent-side mutation now re-checks
       what a Snapshot child-side writer publishes), and is load-bearing
       for the same commit-lock serialization as Serializable
-      (`commit.rs`'s lock acquisition also widens on non-empty
-      `ri_barrier_tokens`). Proven via deterministic end-to-end
-      explicit-tx race + quiescent tests for all four actions (RESTRICT /
-      CASCADE / SET NULL / ON UPDATE) in
+      (`commit.rs`'s lock acquisition widens on non-empty
+      `ri_barrier_tokens` **and** — closed by F-46, #857, commit-lock
+      widening also keys off non-empty `footprint_tokens` — so a plain
+      Snapshot writer publishing INTO the child table during the parent's
+      own commit-lock window is now excluded too, not just the parent-side
+      barrier check; before F-46 such a writer could slip its publish in
+      between the parent's Phase 2-bis check and its own publish, defeating
+      the barrier's mutual-exclusion intent from the writer's side). Proven
+      via deterministic end-to-end explicit-tx race + quiescent tests for
+      all four actions (RESTRICT / CASCADE / SET NULL / ON UPDATE), plus
+      F-46's `concurrent_child_publish_during_parent_commit_window_is_serialized_on_delete_{restrict,cascade,set_null}`
+      / `..._on_update` tests proving the mutual-serialization direction, in
       `crates/shamir-engine/src/query/batch/tests/fk_ri_barrier_tests.rs`.
       The two memos that scoped and proved the mechanism are
       `docs/dev-artifacts/research/f40-explicit-snapshot-ri-gap-memo.md`
