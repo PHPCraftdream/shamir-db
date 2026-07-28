@@ -475,7 +475,7 @@ impl Store for MirroredStore {
     /// has no multi-key primitive to delegate to, and adding one is out
     /// of scope; see the concurrent-reader residual below).
     ///
-    /// # Ordering — ephemeral-first, then durable
+    /// # Ordering — ephemeral-first, then durable-mirror, then durable-primary
     ///
     /// 1. **Ephemeral ops → `primary`** (per-op loop). If this fails
     ///    partway, no durable write is attempted (fail fast). `primary`
@@ -486,28 +486,46 @@ impl Store for MirroredStore {
     ///    inconsistent until the caller's own retry/compensation, exactly
     ///    as today for a non-mirrored in-memory store).
     ///
-    /// 2. **Durable ops → `primary`** (per-op loop, for immediate read
-    ///    visibility — reads go to `primary` ONLY). `InMemoryStore::set`
-    ///    / `remove` do not fail in practice, so this phase completing
-    ///    fully before the mirror write is the expected path.
+    /// 2. **Durable ops → `mirror`** atomically via `self.mirror.transact`
+    ///    (all-or-nothing via the mirror backend's own transact, e.g.
+    ///    `FjallStore`'s `OwnedWriteBatch`). **F-49: this runs BEFORE
+    ///    `primary` is touched for the durable subset** — the same
+    ///    mirror-commit-before-primary-publish discipline F-41 already
+    ///    established for single-key `set`/`remove` (see [`Self::set`]'s
+    ///    doc). If this fails, `primary` is NEVER mutated for the durable
+    ///    subset: the caller's `Err` is an honest "nothing happened" for
+    ///    the durable ops, not "primary already mutated but you got
+    ///    `Err`" (the pre-F-49 bug — exactly the class F-41 closed for
+    ///    `set`/`remove`, reopened here for the transact batch, and
+    ///    especially dangerous for index-rename/metadata transactions,
+    ///    the exact use case `transact`'s cross-op atomicity was added
+    ///    for). `KvOp` derives `Clone` (types.rs), so the durable ops are
+    ///    cloned for the mirror commit and the owned vec is retained for
+    ///    the subsequent primary application (phase 3).
     ///
-    /// 3. **Durable ops → `mirror`** atomically via `self.mirror.transact`.
-    ///    If this fails: `primary` is now **ahead** of `mirror` (fully
-    ///    applied vs. not applied at all — the mirror backend's real
-    ///    atomicity means the durable side is either fully applied or
-    ///    not at all, never partial). The caller sees the durable error
-    ///    (propagated), so it correctly learns durability was NOT
-    ///    achieved. On the NEXT restart, hydration only replays what's
-    ///    actually in `mirror` (unchanged — the pre-transact durable
-    ///    state), so the ephemeral-side AND durable-side changes from
-    ///    this failed transact are simply lost on restart, exactly
-    ///    matching hybrid mode's own "data/config not durably-written
-    ///    doesn't survive restart" design ethos. **No compensation /
-    ///    rollback of `primary` is needed** — the live process keeps
-    ///    functioning correctly with its current, transiently-ahead
-    ///    in-memory state until the next restart, at which point the
-    ///    divergence is silently reconciled back to the last
-    ///    durably-committed state.
+    /// 3. **Durable ops → `primary`** (per-op loop, for immediate read
+    ///    visibility — reads go to `primary` ONLY). This runs ONLY after
+    ///    the mirror commit succeeded, so a mirror failure can never
+    ///    leave `primary` ahead of `mirror`.
+    ///
+    /// # Residual — reverse-direction divergence (investigated, documented)
+    ///
+    /// Mirror-first has the symmetric residual: a mirror SUCCESS followed
+    /// by a `primary` FAILURE would leave `mirror` ahead of `primary`
+    /// (the durable side holds a value the live process can't yet see,
+    /// which a subsequent restart's hydration would surface). **This
+    /// window does not exist in practice** for the SAME reason
+    /// [`Self::set`]'s doc comment already established (see its
+    /// "# Residual — reverse-direction divergence" section):
+    /// `InMemoryStore::set` is structurally infallible at the `DbResult`
+    /// level (`Ok(match self.data.insert_sync { ... })` — no `?`
+    /// propagation, no `Err` return path; a genuine allocation failure
+    /// inside `scc` would `panic!`/abort, not yield `Err`), and
+    /// `InMemoryStore::remove` is likewise `Ok(self.data.remove_sync(..))`
+    /// (`remove_sync` returns a `bool`, never an error). So once a mirror
+    /// write succeeds, the following primary writes cannot fail, and the
+    /// reverse divergence is unreachable — this cites the existing
+    /// `set`/`remove` investigation rather than re-deriving it.
     ///
     /// # Concurrent-reader residual (investigated, documented — not fixed)
     ///
@@ -558,24 +576,32 @@ impl Store for MirroredStore {
             }
         }
 
-        // Phase 2 — durable subset → primary (per-op, for immediate read
-        // visibility — reads go to primary ONLY). Borrowing here so the
-        // owned `durable_ops` can be moved into the mirror write below.
-        for op in &durable_ops {
+        // Phase 2 — durable subset → mirror FIRST (atomically, via the
+        // mirror backend's own transact — e.g. FjallStore's
+        // `OwnedWriteBatch`, all-or-nothing). F-49: mirroring the
+        // mirror-commit-before-primary-publish discipline F-41 already
+        // gives `set`/`remove`. If this fails, primary is NEVER touched
+        // for the durable subset — the caller's `Err` is an honest
+        // "nothing happened", not "primary already mutated". `KvOp`
+        // derives `Clone`; clone the durable ops for the mirror commit
+        // and retain the owned vec for phase 3.
+        self.mirror.transact(durable_ops.clone()).await?;
+
+        // Phase 3 — durable subset → primary (per-op, for immediate read
+        // visibility — reads go to primary ONLY). Runs ONLY after the
+        // mirror commit succeeded. An empty durable subset (clone was
+        // empty) is a no-op loop.
+        for op in durable_ops {
             match op {
                 KvOp::Set(k, v) => {
-                    let _ = self.primary.set(k.clone(), v.clone()).await?;
+                    let _ = self.primary.set(k, v).await?;
                 }
                 KvOp::Remove(k) => {
-                    let _ = self.primary.remove(k.clone()).await?;
+                    let _ = self.primary.remove(k).await?;
                 }
             }
         }
 
-        // Phase 3 — durable subset → mirror atomically (all-or-nothing
-        // via the mirror backend's own transact, e.g. FjallStore's
-        // OwnedWriteBatch). An empty durable subset is a no-op (the
-        // mirror backend's own early-return handles it).
-        self.mirror.transact(durable_ops).await
+        Ok(())
     }
 }

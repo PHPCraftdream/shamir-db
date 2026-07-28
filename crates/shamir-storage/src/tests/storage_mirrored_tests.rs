@@ -461,8 +461,9 @@ async fn transact_durable_subset_lands_atomically_in_mirror() {
 /// `Err` without applying ANY ops (simulating an atomic backend's batch-
 /// commit failure). Confirm: NO partial durable state exists in the mirror
 /// after the failure (the actual atomicity proof — not just "an error was
-/// returned"), while `primary` correctly holds the ops (Phase 2 ran before
-/// the Phase 3 mirror write was attempted and failed).
+/// returned"), AND (F-49) `primary` does NOT hold the durable ops either —
+/// the mirror-first reorder means the mirror failure aborts before primary
+/// is ever touched for the durable subset.
 #[tokio::test]
 async fn transact_durable_subset_failure_leaves_no_partial_durable_state() {
     let mirror_inner: Arc<dyn Store> = Arc::new(InMemoryStore::new());
@@ -518,10 +519,16 @@ async fn transact_durable_subset_failure_leaves_no_partial_durable_state() {
         "prior durable state must survive the failed transact unchanged"
     );
 
-    // Primary DOES hold the ops (Phase 2 wrote them before Phase 3 failed) —
-    // this is the documented "primary ahead of mirror" failure mode.
-    assert_eq!(store.get(k1).await.unwrap(), Bytes::from_static(b"v1"));
-    assert_eq!(store.get(k2).await.unwrap(), Bytes::from_static(b"v2"));
+    // Primary does NOT hold the durable ops (F-49 mirror-first: the mirror
+    // transact failed in Phase 2 BEFORE primary was touched in Phase 3).
+    assert!(
+        store.get(k1).await.is_err(),
+        "primary must NOT hold durable op k1 after mirror failure (F-49 mirror-first)"
+    );
+    assert!(
+        store.get(k2).await.is_err(),
+        "primary must NOT hold durable op k2 after mirror failure (F-49 mirror-first)"
+    );
 }
 
 /// **Test 3 — mixed ephemeral + durable batch routing.**
@@ -571,20 +578,22 @@ async fn transact_mixed_batch_routes_ephemeral_to_primary_and_durable_to_both() 
     );
 }
 
-/// **Test 4 — ephemeral-succeeds-then-durable-fails ordering proof.**
+/// **Test 4 — ephemeral-applied-then-durable-aborted ordering proof
+/// (F-49 mirror-first).**
 ///
 /// Force the durable half to fail (same `FailingTransactMirror` technique
 /// as test 2) while the ephemeral half would otherwise succeed. Confirm:
-/// - `primary` DOES reflect the ephemeral ops (already applied in Phase 1).
-/// - `primary` ALSO reflects the durable ops (applied in Phase 2, before
-///   the Phase 3 mirror write failed) — the documented "primary ahead of
-///   mirror" state.
+/// - `primary` DOES reflect the ephemeral ops (applied in Phase 1, which
+///   runs first and is unchanged by F-49).
+/// - `primary` does NOT reflect the durable ops (F-49 mirror-first: the
+///   mirror transact failed in Phase 2, aborting before primary was
+///   touched in Phase 3). Before F-49, primary was mutated for the
+///   durable subset before the mirror write was even attempted — the bug
+///   this test now guards against regressing.
 /// - `mirror` does NOT reflect the durable ops (correctly rolled back to
 ///   nothing by the mirror backend's own atomic failure).
-///
-/// This is the precise failure-ordering story from the brief's section 2.
 #[tokio::test]
-async fn transact_ephemeral_succeeds_then_durable_fails_leaves_primary_ahead() {
+async fn transact_ephemeral_applied_but_durable_aborted_on_mirror_failure() {
     let mirror_inner: Arc<dyn Store> = Arc::new(InMemoryStore::new());
     let failing_mirror = Arc::new(FailingTransactMirror {
         inner: mirror_inner.clone(),
@@ -607,17 +616,18 @@ async fn transact_ephemeral_succeeds_then_durable_fails_leaves_primary_ahead() {
         .await;
     assert!(result.is_err(), "durable failure should propagate");
 
-    // Primary reflects BOTH the ephemeral and durable ops — fully applied
-    // (Phase 1 + Phase 2 ran before Phase 3 failed). Primary is "ahead".
+    // Primary reflects the ephemeral ops (Phase 1 runs first, unchanged
+    // by F-49) but NOT the durable ops (F-49 mirror-first: the mirror
+    // transact failed in Phase 2, aborting before primary was touched).
     assert_eq!(
         store.get(ephemeral.clone()).await.unwrap(),
         Bytes::from_static(b"eph"),
-        "primary must reflect ephemeral ops (Phase 1)"
+        "primary must reflect ephemeral ops (Phase 1, unchanged)"
     );
-    assert_eq!(
-        store.get(durable.clone()).await.unwrap(),
-        Bytes::from_static(b"dur"),
-        "primary must reflect durable ops (Phase 2, before Phase 3 failed)"
+    assert!(
+        store.get(durable.clone()).await.is_err(),
+        "primary must NOT reflect durable ops after mirror failure \
+         (F-49 mirror-first: primary untouched on durable mirror failure)"
     );
 
     // Mirror does NOT reflect the durable ops — the mirror's transact
@@ -1054,5 +1064,125 @@ async fn f41_hydration_re_filters_against_current_classifier_and_skips_drifted_k
         skip_msgs[0].contains("skipping"),
         "diagnostic must name the skip action: {:?}",
         skip_msgs[0]
+    );
+}
+
+// ============================================================================
+// F-49: MirroredStore::transact mirror-first ordering for the durable subset
+// ============================================================================
+
+/// **F-49 — `transact` mirror-first ordering: a failed durable mirror
+/// write must leave NO durable-subset effects visible in `primary` via
+/// the live read path (`get` / `iter_stream`), matching the same
+/// error-atomicity guarantee F-41 already gives single-key `set` /
+/// `remove`.**
+///
+/// Before F-49, `transact` applied durable ops to `primary` (old Phase 2)
+/// BEFORE committing them to `mirror` atomically (old Phase 3). If the
+/// mirror write failed, the caller saw `Err` — but `primary` was already
+/// mutated, so the live process served state that was never durably
+/// committed (exactly the bug class F-41 closed for `set`/`remove`,
+/// reopened here for the transact batch).
+///
+/// This test is RED on the pre-F-49 code (the live-read assertions fail
+/// because primary was mutated before the mirror failure) and GREEN after
+/// the mirror-first reorder. It verifies BOTH immediate live reads (the
+/// review's explicit ask — not just reopen behavior, which F-39's test 4
+/// already covers) AND the reopen path.
+#[tokio::test]
+async fn f49_transact_mirror_failure_leaves_no_durable_effects_in_primary_live_read() {
+    let mirror_inner: Arc<dyn Store> = Arc::new(InMemoryStore::new());
+
+    // Seed a pre-existing durable key into the mirror so we can prove a
+    // failed transact's durable Remove op does NOT remove it from primary
+    // either (the mirror failure aborts before primary is touched —
+    // symmetric to the Set case).
+    let pre_existing = classified_key_2();
+    mirror_inner
+        .set(pre_existing.clone(), Bytes::from_static(b"pre-existing"))
+        .await
+        .unwrap();
+
+    let failing_mirror = Arc::new(FailingTransactMirror {
+        inner: mirror_inner.clone(),
+        fail_transact: AtomicBool::new(true),
+    });
+    let mirror_dyn: Arc<dyn Store> = failing_mirror.clone();
+
+    let store = MirroredStore::new(mirror_dyn, is_durable_table_config)
+        .await
+        .unwrap();
+
+    // Confirm the pre-existing key hydrated into primary.
+    assert_eq!(
+        store.get(pre_existing.clone()).await.unwrap(),
+        Bytes::from_static(b"pre-existing")
+    );
+
+    let durable_set_key = classified_key();
+    assert!(is_durable_table_config(&durable_set_key));
+    assert!(is_durable_table_config(&pre_existing));
+
+    // The transact's durable subset: a Set of a new key AND a Remove of
+    // the pre-existing key. Both are classified durable, so both land in
+    // the durable subset that goes through mirror.transact.
+    let result = store
+        .transact(vec![
+            KvOp::Set(durable_set_key.clone(), Bytes::from_static(b"new-durable")),
+            KvOp::Remove(pre_existing.clone()),
+        ])
+        .await;
+    assert!(result.is_err(), "mirror transact failure must propagate");
+
+    // === IMMEDIATE LIVE READ via MirroredStore's own `get` ===
+    // The durable Set op must NOT be visible in primary — the mirror
+    // failed, so primary was never touched for the durable subset.
+    assert!(
+        store.get(durable_set_key.clone()).await.is_err(),
+        "durable Set op must NOT be visible in primary after mirror \
+         failure (mirror-first: primary untouched on durable mirror failure)"
+    );
+    // The durable Remove op must NOT have removed the pre-existing key
+    // from primary — same reason.
+    assert_eq!(
+        store.get(pre_existing.clone()).await.unwrap(),
+        Bytes::from_static(b"pre-existing"),
+        "durable Remove op must NOT have taken effect in primary after \
+         mirror failure"
+    );
+
+    // === IMMEDIATE LIVE READ via MirroredStore's own `iter_stream` ===
+    // Collect all keys visible through the facade. The durable Set op's
+    // key must not appear; the pre-existing key must still be there.
+    let all_entries = collect_stream(store.iter_stream(16)).await.unwrap();
+    let has_set_key = all_entries.iter().any(|(k, _)| *k == durable_set_key);
+    let has_pre_existing = all_entries.iter().any(|(k, _)| *k == pre_existing);
+    assert!(
+        !has_set_key,
+        "iter_stream must NOT surface the durable Set op's key after \
+         mirror failure"
+    );
+    assert!(
+        has_pre_existing,
+        "iter_stream must STILL surface the pre-existing key (durable \
+         Remove was aborted)"
+    );
+
+    // === REOPEN behavior ===
+    // A FRESH MirroredStore over the same mirror hydrates from mirror
+    // only — the failed transact changed nothing durably, so neither the
+    // Set nor the Remove survives.
+    let reopened = MirroredStore::new(mirror_inner, is_durable_table_config)
+        .await
+        .unwrap();
+    assert!(
+        reopened.get(durable_set_key).await.is_err(),
+        "reopened store must not see the failed durable Set op"
+    );
+    assert_eq!(
+        reopened.get(pre_existing).await.unwrap(),
+        Bytes::from_static(b"pre-existing"),
+        "reopened store must still see the pre-existing key (durable \
+         Remove was aborted at the mirror)"
     );
 }
