@@ -23,6 +23,7 @@ use bytes::Bytes;
 use futures::StreamExt;
 use smallvec::SmallVec;
 use std::collections::BTreeSet;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 // Re-export so existing callers that import `SortedIndexDefinition` from this
 // module continue to compile unchanged after the type moved to its own file.
@@ -90,17 +91,35 @@ pub struct SortedIndexManager {
     /// shares its `Arc<IndexInfo>` and how `TableManager` shares
     /// `bindings_len`/`validator_bindings` through `Arc`.
     indexes: Arc<shamir_numa::NodeReplicated<Vec<SortedIndexDefinition>>>,
+    /// F-50 Step 2 (#870, Part D): monotonic generation counter bumped on
+    /// every `register` / `drop_index` (the two operations that change the
+    /// queryable def set). Mirrors `IndexRegistry::generation` for the
+    /// legacy sorted-index path: a tx captures this at stage time
+    /// (`note_sorted_stage_gen`) and, at commit Phase 2.7, re-derives
+    /// sorted posting ops for tables whose generation advanced. The zero-
+    /// overhead gate value: a single Acquire load short-circuits when no
+    /// sorted DDL happened between stage and commit.
+    ///
+    /// `Arc`-shared across clones for the SAME reason `indexes` is: a
+    /// `register` / `drop_index` on one clone must be visible to every
+    /// other clone's `generation()` read, or a commit-pipeline clone
+    /// (snapshotted from the OnceCell primary) would see a stale
+    /// generation and skip re-derivation. Mirrors how `indexes` itself is
+    /// shared.
+    generation: Arc<AtomicU64>,
 }
 
 impl Clone for SortedIndexManager {
     fn clone(&self) -> Self {
-        // Share the SAME NodeReplicated across clones so a register/drop on
-        // any clone is visible to every other clone (see the field doc for
-        // the read-after-write desync this prevents). A snapshot-copy here
-        // would silently drop DDL-registered indexes from later read clones.
+        // Share the SAME NodeReplicated + generation across clones so a
+        // register/drop on any clone is visible to every other clone (see the
+        // field docs for the read-after-write desync this prevents). A
+        // snapshot-copy here would silently drop DDL-registered indexes from
+        // later read clones.
         Self {
             info_store: Arc::clone(&self.info_store),
             indexes: Arc::clone(&self.indexes),
+            generation: Arc::clone(&self.generation),
         }
     }
 }
@@ -114,9 +133,19 @@ impl SortedIndexManager {
                 shamir_numa::detect(),
                 Vec::new(),
             )),
+            generation: Arc::new(AtomicU64::new(0)),
         };
         m.load().await?;
         Ok(m)
+    }
+
+    /// F-50 Step 2 (#870): current sorted-index generation. Bumped (monotonic)
+    /// whenever the set of queryable defs changes (`register` / `drop_index`).
+    /// The zero-overhead gate value for commit-time ops-plan re-derivation: a
+    /// tx captures this at stage time and, at commit, skips re-derivation
+    /// entirely unless it has advanced.
+    pub fn generation(&self) -> u64 {
+        self.generation.load(Ordering::Acquire)
     }
 
     /// True if at least one sorted index exists.
@@ -183,6 +212,10 @@ impl SortedIndexManager {
             }
             new_vec
         });
+        // F-50 Step 2 (#870): the queryable def set changed — advance the
+        // generation so the commit pipeline's re-derivation gate fires for
+        // any tx that staged before this register.
+        self.generation.fetch_add(1, Ordering::AcqRel);
         self.persist_defs().await
     }
 
@@ -203,6 +236,10 @@ impl SortedIndexManager {
         if !existed {
             return Ok(false);
         }
+        // F-50 Step 2 (#870): the queryable def set changed — advance the
+        // generation so the commit pipeline's re-derivation gate fires for
+        // any tx that staged before this drop.
+        self.generation.fetch_add(1, Ordering::AcqRel);
         // Sweep entries.
         let prefix = self.entry_prefix(name_interned);
         let stream = self.info_store.scan_prefix_stream(prefix, MAINT_SCAN_BATCH);

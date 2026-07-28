@@ -407,6 +407,10 @@ impl TableManager {
         // above) so the commit-time re-derivation gate can detect a backend
         // registered between this stage and commit. See TxContext::note_index2_stage_gen.
         tx.note_index2_stage_gen(self.table_token(), self.index2_registry().generation());
+        // F-50 Step 2 (#870, Part D): capture the sorted-index generation
+        // too, so the commit gate can detect a new sorted def registered
+        // between this stage and commit.
+        tx.note_sorted_stage_gen(self.table_token(), self.sorted_indexes.generation());
 
         Ok(rid)
     }
@@ -585,6 +589,9 @@ impl TableManager {
         // F-50 (#869, spike): capture the index2 generation after the stage
         // snapshot (taken at step 4 above) to gate commit-time re-derivation.
         tx.note_index2_stage_gen(token, self.index2_registry().generation());
+        // F-50 Step 2 (#870, Part D): capture the sorted-index generation
+        // alongside, gating sorted-index re-derivation at commit.
+        tx.note_sorted_stage_gen(token, self.sorted_indexes.generation());
 
         Ok(ids)
     }
@@ -743,6 +750,9 @@ impl TableManager {
         // F-50 (#869, spike): capture the index2 generation after the stage
         // snapshot (taken at step 4 above) to gate commit-time re-derivation.
         tx.note_index2_stage_gen(token, self.index2_registry().generation());
+        // F-50 Step 2 (#870, Part D): capture the sorted-index generation
+        // alongside, gating sorted-index re-derivation at commit.
+        tx.note_sorted_stage_gen(token, self.sorted_indexes.generation());
 
         Ok(ids)
     }
@@ -843,6 +853,15 @@ impl TableManager {
             tx,
         )
         .await?;
+
+        // F-50 Step 2 (#870): capture the index2 generation AFTER the stage-time
+        // `all_backends()` snapshot (taken inside plan_update_ops / plan_insert_ops
+        // above), mirroring `insert_tx`. The commit-time re-derivation gate
+        // (pre_commit Phase 2.7) uses this to detect a backend registered between
+        // this stage and commit and re-derive its posting ops.
+        tx.note_index2_stage_gen(self.table_token(), self.index2_registry().generation());
+        // F-50 Step 2 (#870, Part D): capture the sorted-index generation too.
+        tx.note_sorted_stage_gen(self.table_token(), self.sorted_indexes.generation());
 
         Ok(old.is_some())
     }
@@ -956,6 +975,15 @@ impl TableManager {
         )
         .await?;
 
+        // F-50 Step 2 (#870): capture the index2 generation AFTER the stage-time
+        // `all_backends()` snapshot (taken inside plan_update_ops_ref /
+        // plan_update_ops in EITHER branch of the match above), mirroring
+        // `insert_tx`. Covers both the RecordView lens branch and the non-map
+        // fallback — only one runs, and this single capture sits after both.
+        tx.note_index2_stage_gen(self.table_token(), self.index2_registry().generation());
+        // F-50 Step 2 (#870, Part D): capture the sorted-index generation too.
+        tx.note_sorted_stage_gen(self.table_token(), self.sorted_indexes.generation());
+
         Ok(())
     }
 
@@ -1040,6 +1068,15 @@ impl TableManager {
             tx,
         )
         .await?;
+
+        // F-50 Step 2 (#870): capture the index2 generation AFTER the stage-time
+        // `all_backends()` snapshot (taken inside plan_delete_ops in EITHER branch
+        // of the match above), mirroring `insert_tx`. Covers both the RecordView
+        // lens branch and the non-map fallback — only one runs, and this single
+        // capture sits after both.
+        tx.note_index2_stage_gen(self.table_token(), self.index2_registry().generation());
+        // F-50 Step 2 (#870, Part D): capture the sorted-index generation too.
+        tx.note_sorted_stage_gen(self.table_token(), self.sorted_indexes.generation());
 
         Ok(true)
     }

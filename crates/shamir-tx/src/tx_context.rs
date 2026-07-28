@@ -125,6 +125,20 @@ pub struct TxContext {
     /// index2-bearing table write — the single zero-overhead gate.
     pub index2_stage_gens: TFxMap<u64, u64>,
 
+    /// F-50 Step 2 (#870, Part D): per-table `SortedIndexManager` generation
+    /// captured at STAGE time (after the stage-time `iter_indexes()` snapshot),
+    /// to gate commit-time sorted-index ops-plan re-derivation. Mirrors
+    /// [`index2_stage_gens`](Self::index2_stage_gens) for the legacy sorted
+    /// index path: a tx that staged before a new sorted index was registered
+    /// would otherwise commit with zero sorted ops for the new index. At
+    /// commit, if a table's current sorted generation exceeds the captured
+    /// value, the commit pipeline re-derives sorted posting ops against all
+    /// current defs (idempotent — `SetPosting` overwrites, `RemovePosting` is
+    /// a no-op on absent keys). Plain (non-`Mutex`) map: every capture / read
+    /// site holds the tx by `&mut`. Empty for txs that never stage a write —
+    /// the single zero-overhead gate.
+    pub sorted_stage_gens: TFxMap<u64, u64>,
+
     /// Per-table HNSW staged vectors. Key = table token (interned table
     /// name). Each entry is a `(RecordId, embedding)` pair routed here by
     /// the executor instead of into the live HNSW graph. Promoted into the
@@ -336,6 +350,7 @@ impl TxContext {
             write_set: TFxMap::default(),
             index_write_set: Vec::new(),
             index2_stage_gens: TFxMap::default(),
+            sorted_stage_gens: TFxMap::default(),
             staged_vectors: TFxMap::default(),
             staged_vector_deletes: TFxMap::default(),
             interner_overlay: scc::HashMap::with_hasher(THasher::default()),
@@ -530,6 +545,18 @@ impl TxContext {
     /// gate must compare against.
     pub fn note_index2_stage_gen(&mut self, table_token: u64, gen: u64) {
         self.index2_stage_gens.entry(table_token).or_insert(gen);
+    }
+
+    /// F-50 Step 2 (#870, Part D): capture `table_token`'s
+    /// `SortedIndexManager` generation at stage time. Mirrors
+    /// [`note_index2_stage_gen`](Self::note_index2_stage_gen) for the legacy
+    /// sorted-index path. The caller MUST invoke this AFTER its stage-time
+    /// `iter_indexes()` snapshot (so every def in that snapshot has
+    /// registration-generation ≤ `gen`, guaranteeing the commit-time
+    /// re-derivation never double-applies). `or_insert` makes a re-capture in
+    /// the same tx a no-op: the EARLIEST generation is the most stale.
+    pub fn note_sorted_stage_gen(&mut self, table_token: u64, gen: u64) {
+        self.sorted_stage_gens.entry(table_token).or_insert(gen);
     }
 
     /// Record a read for SSI validation (only if Serializable).

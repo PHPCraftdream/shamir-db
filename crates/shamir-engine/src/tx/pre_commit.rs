@@ -10,6 +10,7 @@ use shamir_types::types::record_id::RecordId;
 use shamir_types::types::value::InnerValue;
 use shamir_wal::WalEntryV2;
 
+use crate::index2::kind::IndexKind;
 use crate::repo::RepoInstance;
 use crate::tx::commit::{maybe_crash, TxError};
 
@@ -590,100 +591,240 @@ pub(super) async fn pre_commit_prelock(
 /// generation check (only paid when an index2 backend was actually registered
 /// between stage and commit — the rare DDL-concurrent case).
 ///
-/// Scope note (spike): the stage-time generation is currently captured only
-/// on the INSERT staging paths (`insert_tx` / `insert_tx_many` /
-/// `insert_tx_many_bytes`). UPDATE / DELETE / SET paths do not yet capture
-/// it, so a tx touching those paths alone is not re-derived (the status quo —
-/// no regression). Mirroring the one-line `note_index2_stage_gen` capture
-/// onto those paths is mechanical Step 2 work. Vector backends need an
-/// additional `staged_vectors` re-derivation (their `plan_insert_tx` is a
-/// no-op; HNSW embeddings are buffered separately) — also Step 2.
+/// Scope note (Step 2, #870): the stage-time generation is now captured on
+/// ALL mutation staging paths — INSERT (`insert_tx` / `insert_tx_many` /
+/// `insert_tx_many_bytes`), UPDATE (`update_tx` / `update_tx_bytes`),
+/// DELETE (`delete_tx`), and SET (`set_tx` — an alias of `update_tx`).
+/// The sorted-index generation is captured alongside (`note_sorted_stage_gen`)
+/// for every stage site, gating the legacy sorted-index re-derivation below.
+/// Vector backends' `staged_vectors` are re-derived in the per-record loop
+/// (their `plan_insert_tx` is a no-op; HNSW embeddings are buffered
+/// separately) — Step 2 Part B.
 async fn rederive_index2_ops_post_stage(tx: &mut TxContext, repo: &RepoInstance) {
+    // =========================================================================
+    // Index2 re-derivation (F-50 #869 Step 1) + vector staging (Step 2 Part B)
+    // =========================================================================
+    //
     // Empty for the overwhelming majority of txs (populated only by an
     // index2-bearing-table staging path) — the single zero-overhead gate.
-    if tx.index2_stage_gens.is_empty() {
-        return;
-    }
-    // Clone the captured (table_token, stage_gen) pairs out so the per-table
-    // async work below does not hold a borrow of `tx` (we must mutably
-    // reborrow `tx.index_write_set` to append re-derived ops).
-    let stage_gens: Vec<(u64, u64)> = tx.index2_stage_gens.iter().map(|(t, g)| (*t, *g)).collect();
-    let tx_id = Some(tx.tx_id);
+    if !tx.index2_stage_gens.is_empty() {
+        // Clone the captured (table_token, stage_gen) pairs out so the per-table
+        // async work below does not hold a borrow of `tx` (we must mutably
+        // reborrow `tx.index_write_set` to append re-derived ops).
+        let stage_gens: Vec<(u64, u64)> =
+            tx.index2_stage_gens.iter().map(|(t, g)| (*t, *g)).collect();
+        let tx_id = Some(tx.tx_id);
 
-    for (table_token, stage_gen) in stage_gens {
-        // Resolve WITHOUT forcing lazy instantiation — a dormant table has no
-        // index2 backends (mirrors Phase 2.5's `table_by_token_if_live`).
-        let Some(tbl) = repo.table_by_token_if_live(table_token).await else {
-            continue;
-        };
-        // Generation gate: skip the per-record re-derivation entirely when no
-        // index2 backend was registered since stage. One atomic Acquire load.
-        let new_backends = {
-            let reg = tbl.index2_registry();
-            if reg.generation() == stage_gen {
+        for (table_token, stage_gen) in stage_gens {
+            // Resolve WITHOUT forcing lazy instantiation — a dormant table has no
+            // index2 backends (mirrors Phase 2.5's `table_by_token_if_live`).
+            let Some(tbl) = repo.table_by_token_if_live(table_token).await else {
+                continue;
+            };
+            // Generation gate: skip the per-record re-derivation entirely when no
+            // index2 backend was registered since stage. One atomic Acquire load.
+            let new_backends = {
+                let reg = tbl.index2_registry();
+                if reg.generation() == stage_gen {
+                    continue;
+                }
+                reg.backends_newer_than(stage_gen).await
+            };
+            if new_backends.is_empty() {
                 continue;
             }
-            reg.backends_newer_than(stage_gen).await
-        };
-        if new_backends.is_empty() {
-            continue;
-        }
-        // Collect the staged ops for this table into an owned Vec so no borrow
-        // of `tx.write_set` is held across the per-record async planning below.
-        let staged_ops: Vec<KvOp> = match tx.write_set.get(&table_token) {
-            Some(staging) => staging.snapshot_ops(),
-            None => continue,
-        };
-        let data_store = tbl.data_store().clone();
+            // Collect the staged ops for this table into an owned Vec so no borrow
+            // of `tx.write_set` is held across the per-record async planning below.
+            let staged_ops: Vec<KvOp> = match tx.write_set.get(&table_token) {
+                Some(staging) => staging.snapshot_ops(),
+                None => continue,
+            };
+            let data_store = tbl.data_store().clone();
 
-        let mut appended: Vec<(u64, IndexWriteOp)> = Vec::new();
-        for kvop in staged_ops {
-            match kvop {
-                KvOp::Set(k, v) => {
-                    let Some(rid) = RecordId::try_from_bytes(&k) else {
-                        continue;
-                    };
-                    let Ok(new_rec) = InnerValue::from_bytes(&v) else {
-                        continue;
-                    };
-                    // Phase 5a has not run: the store still holds the PRE-tx
-                    // value, so this one read distinguishes insert vs. update.
-                    match data_store.get(k.clone()).await {
-                        Ok(old_bytes) => {
+            let mut appended: Vec<(u64, IndexWriteOp)> = Vec::new();
+            for kvop in staged_ops {
+                match kvop {
+                    KvOp::Set(k, v) => {
+                        let Some(rid) = RecordId::try_from_bytes(&k) else {
+                            continue;
+                        };
+                        let Ok(new_rec) = InnerValue::from_bytes(&v) else {
+                            continue;
+                        };
+                        // Phase 5a has not run: the store still holds the PRE-tx
+                        // value, so this one read distinguishes insert vs. update.
+                        match data_store.get(k.clone()).await {
+                            Ok(old_bytes) => {
+                                if let Ok(old_rec) = InnerValue::from_bytes(&old_bytes) {
+                                    for backend in &new_backends {
+                                        if let Ok(ops) = backend
+                                            .plan_update_tx(rid, &old_rec, &new_rec, tx_id)
+                                            .await
+                                        {
+                                            appended.extend(
+                                                ops.into_iter().map(|op| (table_token, op)),
+                                            );
+                                        }
+                                        // F-50 Step 2 (#870, Part B): re-derive
+                                        // staged vectors for a new vector backend.
+                                        // VectorBackend::plan_update_tx is a no-op
+                                        // for a tx (HNSW embeddings route through
+                                        // tx.staged_vectors instead), so the posting
+                                        // loop above contributes nothing for it.
+                                        // Mirror stage_vector_deletes_on_update +
+                                        // stage_vectors from table_manager_tx_ops:
+                                        // if old carried a vector and new does not,
+                                        // stage a delete; otherwise stage the new.
+                                        if is_vector_backend(backend) {
+                                            if backend.staged_vector(rid, &old_rec).await.is_some()
+                                                && backend
+                                                    .staged_vector(rid, &new_rec)
+                                                    .await
+                                                    .is_none()
+                                            {
+                                                tx.stage_vector_delete(table_token, rid);
+                                            }
+                                            if let Some(vec) =
+                                                backend.staged_vector(rid, &new_rec).await
+                                            {
+                                                tx.stage_vector(table_token, rid, vec);
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            Err(DbError::NotFound(_)) => {
+                                for backend in &new_backends {
+                                    if let Ok(ops) =
+                                        backend.plan_insert_tx(rid, &new_rec, tx_id).await
+                                    {
+                                        appended
+                                            .extend(ops.into_iter().map(|op| (table_token, op)));
+                                    }
+                                    // F-50 Step 2 (#870, Part B): re-derive staged
+                                    // vector for a new vector backend (insert case).
+                                    // Mirror stage_vectors from table_manager_tx_ops.
+                                    if is_vector_backend(backend) {
+                                        if let Some(vec) =
+                                            backend.staged_vector(rid, &new_rec).await
+                                        {
+                                            tx.stage_vector(table_token, rid, vec);
+                                        }
+                                    }
+                                }
+                            }
+                            // A non-NotFound storage error: best-effort skip.
+                            Err(_) => {}
+                        }
+                    }
+                    KvOp::Remove(k) => {
+                        let Some(rid) = RecordId::try_from_bytes(&k) else {
+                            continue;
+                        };
+                        // Nothing committed to delete from the index on a NotFound read
+                        // (the row was never materialized) — best-effort skip otherwise.
+                        if let Ok(old_bytes) = data_store.get(k.clone()).await {
                             if let Ok(old_rec) = InnerValue::from_bytes(&old_bytes) {
                                 for backend in &new_backends {
                                     if let Ok(ops) =
-                                        backend.plan_update_tx(rid, &old_rec, &new_rec, tx_id).await
+                                        backend.plan_delete_tx(rid, &old_rec, tx_id).await
+                                    {
+                                        appended
+                                            .extend(ops.into_iter().map(|op| (table_token, op)));
+                                    }
+                                    // F-50 Step 2 (#870, Part B): re-derive staged
+                                    // vector delete for a new vector backend.
+                                    // Mirror stage_vector_delete.
+                                    if is_vector_backend(backend)
+                                        && backend.staged_vector(rid, &old_rec).await.is_some()
+                                    {
+                                        tx.stage_vector_delete(table_token, rid);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            if !appended.is_empty() {
+                tx.index_write_set.extend(appended);
+            }
+        }
+    }
+
+    // =========================================================================
+    // F-50 Step 2 (#870, Part D): sorted-index re-derivation
+    // =========================================================================
+    //
+    // Same root-cause class as index2 Part B (stale stage-time plan): a tx that
+    // staged before a new sorted index was registered (via
+    // `create_sorted_index`) carries zero sorted ops in tx.index_write_set for
+    // the new index — a guaranteed miss mirroring #538 Part B. This block
+    // re-derives sorted posting ops for tables whose sorted generation advanced.
+    //
+    // Re-planning against ALL current defs is safe because posting ops are
+    // idempotent (`SetPosting` overwrites with the same key+value; `RemovePosting`
+    // is a no-op on an already-absent key). The generation gate avoids this work
+    // on the common path (no DDL → generation unchanged → per-record loop never
+    // runs). Only paid in the rare DDL-concurrent case.
+    if !tx.sorted_stage_gens.is_empty() {
+        let sorted_gens: Vec<(u64, u64)> =
+            tx.sorted_stage_gens.iter().map(|(t, g)| (*t, *g)).collect();
+        for (table_token, stage_gen) in sorted_gens {
+            let Some(tbl) = repo.table_by_token_if_live(table_token).await else {
+                continue;
+            };
+            let sorted_mgr = tbl.sorted_indexes();
+            // Generation gate: skip when no sorted def was registered/dropped
+            // since stage. One atomic Acquire load.
+            if sorted_mgr.generation() == stage_gen {
+                continue;
+            }
+            let staged_ops: Vec<KvOp> = match tx.write_set.get(&table_token) {
+                Some(staging) => staging.snapshot_ops(),
+                None => continue,
+            };
+            let data_store = tbl.data_store().clone();
+
+            let mut appended: Vec<(u64, IndexWriteOp)> = Vec::new();
+            for kvop in staged_ops {
+                match kvop {
+                    KvOp::Set(k, v) => {
+                        let Some(rid) = RecordId::try_from_bytes(&k) else {
+                            continue;
+                        };
+                        let Ok(new_rec) = InnerValue::from_bytes(&v) else {
+                            continue;
+                        };
+                        // Phase 5a has not run: the store still holds the PRE-tx
+                        // value, so this one read distinguishes insert vs. update.
+                        match data_store.get(k.clone()).await {
+                            Ok(old_bytes) => {
+                                if let Ok(old_rec) = InnerValue::from_bytes(&old_bytes) {
+                                    if let Ok(ops) =
+                                        sorted_mgr.plan_record_updated(&rid, &old_rec, &new_rec, 0)
                                     {
                                         appended
                                             .extend(ops.into_iter().map(|op| (table_token, op)));
                                     }
                                 }
                             }
-                        }
-                        Err(DbError::NotFound(_)) => {
-                            for backend in &new_backends {
-                                if let Ok(ops) = backend.plan_insert_tx(rid, &new_rec, tx_id).await
-                                {
+                            Err(DbError::NotFound(_)) => {
+                                if let Ok(ops) = sorted_mgr.plan_record_created(&rid, &new_rec, 0) {
                                     appended.extend(ops.into_iter().map(|op| (table_token, op)));
                                 }
                             }
+                            // A non-NotFound storage error: best-effort skip.
+                            Err(_) => {}
                         }
-                        // A non-NotFound storage error: best-effort skip.
-                        Err(_) => {}
                     }
-                }
-                KvOp::Remove(k) => {
-                    let Some(rid) = RecordId::try_from_bytes(&k) else {
-                        continue;
-                    };
-                    // Nothing committed to delete from the index on a NotFound read
-                    // (the row was never materialized) — best-effort skip otherwise.
-                    if let Ok(old_bytes) = data_store.get(k.clone()).await {
-                        if let Ok(old_rec) = InnerValue::from_bytes(&old_bytes) {
-                            for backend in &new_backends {
-                                if let Ok(ops) = backend.plan_delete_tx(rid, &old_rec, tx_id).await
-                                {
+                    KvOp::Remove(k) => {
+                        let Some(rid) = RecordId::try_from_bytes(&k) else {
+                            continue;
+                        };
+                        if let Ok(old_bytes) = data_store.get(k.clone()).await {
+                            if let Ok(old_rec) = InnerValue::from_bytes(&old_bytes) {
+                                if let Ok(ops) = sorted_mgr.plan_record_deleted(&rid, &old_rec) {
                                     appended.extend(ops.into_iter().map(|op| (table_token, op)));
                                 }
                             }
@@ -691,11 +832,19 @@ async fn rederive_index2_ops_post_stage(tx: &mut TxContext, repo: &RepoInstance)
                     }
                 }
             }
-        }
-        if !appended.is_empty() {
-            tx.index_write_set.extend(appended);
+            if !appended.is_empty() {
+                tx.index_write_set.extend(appended);
+            }
         }
     }
+}
+
+/// F-50 Step 2 (#870): true when `backend`'s descriptor kind is Vector. Used
+/// to gate the vector-staging branches in [`rederive_index2_ops_post_stage`]
+/// (VectorBackend::plan_*_tx are no-ops for a tx; embeddings route through
+/// `tx.staged_vectors` / `tx.staged_vector_deletes` instead).
+fn is_vector_backend(backend: &Arc<dyn shamir_index::backend::IndexBackend>) -> bool {
+    matches!(backend.descriptor().kind, IndexKind::Vector(_))
 }
 
 /// Outcome of [`pre_commit_locked_validate`]: the assigned commit version,

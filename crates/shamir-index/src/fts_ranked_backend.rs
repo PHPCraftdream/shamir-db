@@ -48,6 +48,16 @@ impl FtsRankedBackend {
         }
     }
 
+    /// F-50 Step 2 (#870, Part C): current document count tracked by the
+    /// in-memory BM25 stats. Exposed so engine-side tests can assert
+    /// `BumpFtsStats` was applied exactly once (not double-counted) for a
+    /// quiescent tx that planned the FTS insert at stage time.
+    pub fn doc_count(&self) -> u64 {
+        self.stats
+            .doc_count
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
     /// Resolve `self.field_path` to its interned-key form (see
     /// `FtsBackend::ipath`).
     fn ipath(&self) -> SmallVec<[InternerKey; 4]> {
