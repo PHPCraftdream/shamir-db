@@ -1,9 +1,12 @@
 use std::sync::Arc;
 
 use shamir_storage::error::DbError;
-use shamir_storage::types::RecordKey;
-use shamir_tx::{CellReservationGuard, IsolationLevel, RepoTxGate, RepoWalManager, TxContext};
+use shamir_storage::types::{KvOp, RecordKey};
+use shamir_tx::{
+    CellReservationGuard, IndexWriteOp, IsolationLevel, RepoTxGate, RepoWalManager, TxContext,
+};
 use shamir_types::core::interner::InternerKey;
+use shamir_types::types::record_id::RecordId;
 use shamir_types::types::value::InnerValue;
 use shamir_wal::WalEntryV2;
 
@@ -514,6 +517,41 @@ pub(super) async fn pre_commit_prelock(
         }
     }
 
+    // F-50 (#869, spike) — Phase 2.7: re-derive index2 posting ops for any
+    // backend registered AFTER this tx's stage-time `all_backends()` snapshot.
+    //
+    // This closes #538 Part B's "guaranteed miss": a tx that staged before a
+    // new index2 backend existed (via `create_index_v2`) and commits after it
+    // was registered would otherwise carry zero ops for it in
+    // `tx.index_write_set` (planned stale, at stage time), so Phase 5c would
+    // have nothing to write — the row is permanently absent from the new
+    // index. Part A's commit-time lock serialization (Phase 2.5 above) only
+    // fixed the commit's TIMING; it cannot retroactively add ops to an
+    // already-built plan.
+    //
+    // Placement is load-bearing for crash safety:
+    //   - AFTER Phase 2.5's per-table `unique_write_lock` acquisition, so any
+    //     in-flight `create_index_v2` (which holds that lock across its full
+    //     backfill→register sequence) has finished registering by the time we
+    //     re-derive — the live `backends_newer_than(stage_gen)` snapshot we
+    //     take here includes it.
+    //   - BEFORE Phase 4's WAL `begin_grouped` (which runs later, inside
+    //     `pre_commit_locked_validate`): `wal_ops_from_tx` serializes
+    //     `tx.index_write_set` directly into the WAL entry, so the re-derived
+    //     ops MUST be appended before that serialization or recovery would
+    //     replay the STALE stage-time plan (silently re-opening the exact miss
+    //     this step closes). Re-deriving AFTER the WAL write is forbidden.
+    //   - OUTSIDE `commit_lock` (this whole fn runs pre-lock): the work is
+    //     per-table, async, and has no commit-window dependency, so holding
+    //     the global commit_lock for it would be needless contention.
+    //
+    // The generation gate makes this zero-cost on the common path: a tx that
+    // captured `index2_stage_gens` (populated only by index2-bearing-table
+    // staging) and sees an unchanged generation skips the per-record
+    // re-derivation entirely. See `rederive_index2_ops_post_stage` for the
+    // old-value resolution (insert-vs-update-vs-delete) mechanism.
+    rederive_index2_ops_post_stage(tx, repo).await;
+
     // F-48b test seam: parks strictly AFTER Phase 2.5's flag-check loop
     // (every table's `needs_write_barrier()` has been read and the writer
     // has committed to the fast or slow path per table) and BEFORE the
@@ -526,6 +564,138 @@ pub(super) async fn pre_commit_prelock(
         uwl_guards,
         drain_guards,
     })
+}
+
+/// F-50 (#869, spike) — Phase 2.7 worker: re-derive index2 posting ops for
+/// backends registered AFTER each touched table's stage-time snapshot.
+///
+/// Invoked from [`pre_commit_prelock`] AFTER Phase 2.5's barrier locks are
+/// acquired and BEFORE Phase 4's WAL begin. See that call site's comment for
+/// the crash-safety ordering constraints.
+///
+/// cancel-safe: YES — appends to `tx.index_write_set` only (in-memory, tx-
+/// scoped; dropped by RAII on abort). The `data_store.get` reads are
+/// read-only. No durable mutation happens here, so cancellation before Phase
+/// 4 is a clean abort (the re-derived ops never reached the WAL).
+///
+/// Old-value resolution (insert vs. update vs. delete): `tx.write_set` only
+/// carries the NET staged op (`Set`/`Remove`) — it does not retain whether a
+/// `Set` is a fresh insert or an overwrite, nor the pre-tx value an update /
+/// delete needs to plan the REMOVE half of its posting diff. Phase 5a
+/// materialize has NOT run yet at this point (we are still in prelock), so
+/// the data store still holds the PRE-tx committed value. A single
+/// `data_store.get(key)` per staged record settles it: `NotFound` ⇒ insert
+/// (plan_insert), `Some(old)` ⇒ update (plan_update) or delete (plan_delete).
+/// The cost is bounded by the number of staged records AND gated behind the
+/// generation check (only paid when an index2 backend was actually registered
+/// between stage and commit — the rare DDL-concurrent case).
+///
+/// Scope note (spike): the stage-time generation is currently captured only
+/// on the INSERT staging paths (`insert_tx` / `insert_tx_many` /
+/// `insert_tx_many_bytes`). UPDATE / DELETE / SET paths do not yet capture
+/// it, so a tx touching those paths alone is not re-derived (the status quo —
+/// no regression). Mirroring the one-line `note_index2_stage_gen` capture
+/// onto those paths is mechanical Step 2 work. Vector backends need an
+/// additional `staged_vectors` re-derivation (their `plan_insert_tx` is a
+/// no-op; HNSW embeddings are buffered separately) — also Step 2.
+async fn rederive_index2_ops_post_stage(tx: &mut TxContext, repo: &RepoInstance) {
+    // Empty for the overwhelming majority of txs (populated only by an
+    // index2-bearing-table staging path) — the single zero-overhead gate.
+    if tx.index2_stage_gens.is_empty() {
+        return;
+    }
+    // Clone the captured (table_token, stage_gen) pairs out so the per-table
+    // async work below does not hold a borrow of `tx` (we must mutably
+    // reborrow `tx.index_write_set` to append re-derived ops).
+    let stage_gens: Vec<(u64, u64)> = tx.index2_stage_gens.iter().map(|(t, g)| (*t, *g)).collect();
+    let tx_id = Some(tx.tx_id);
+
+    for (table_token, stage_gen) in stage_gens {
+        // Resolve WITHOUT forcing lazy instantiation — a dormant table has no
+        // index2 backends (mirrors Phase 2.5's `table_by_token_if_live`).
+        let Some(tbl) = repo.table_by_token_if_live(table_token).await else {
+            continue;
+        };
+        // Generation gate: skip the per-record re-derivation entirely when no
+        // index2 backend was registered since stage. One atomic Acquire load.
+        let new_backends = {
+            let reg = tbl.index2_registry();
+            if reg.generation() == stage_gen {
+                continue;
+            }
+            reg.backends_newer_than(stage_gen).await
+        };
+        if new_backends.is_empty() {
+            continue;
+        }
+        // Collect the staged ops for this table into an owned Vec so no borrow
+        // of `tx.write_set` is held across the per-record async planning below.
+        let staged_ops: Vec<KvOp> = match tx.write_set.get(&table_token) {
+            Some(staging) => staging.snapshot_ops(),
+            None => continue,
+        };
+        let data_store = tbl.data_store().clone();
+
+        let mut appended: Vec<(u64, IndexWriteOp)> = Vec::new();
+        for kvop in staged_ops {
+            match kvop {
+                KvOp::Set(k, v) => {
+                    let Some(rid) = RecordId::try_from_bytes(&k) else {
+                        continue;
+                    };
+                    let Ok(new_rec) = InnerValue::from_bytes(&v) else {
+                        continue;
+                    };
+                    // Phase 5a has not run: the store still holds the PRE-tx
+                    // value, so this one read distinguishes insert vs. update.
+                    match data_store.get(k.clone()).await {
+                        Ok(old_bytes) => {
+                            if let Ok(old_rec) = InnerValue::from_bytes(&old_bytes) {
+                                for backend in &new_backends {
+                                    if let Ok(ops) =
+                                        backend.plan_update_tx(rid, &old_rec, &new_rec, tx_id).await
+                                    {
+                                        appended
+                                            .extend(ops.into_iter().map(|op| (table_token, op)));
+                                    }
+                                }
+                            }
+                        }
+                        Err(DbError::NotFound(_)) => {
+                            for backend in &new_backends {
+                                if let Ok(ops) = backend.plan_insert_tx(rid, &new_rec, tx_id).await
+                                {
+                                    appended.extend(ops.into_iter().map(|op| (table_token, op)));
+                                }
+                            }
+                        }
+                        // A non-NotFound storage error: best-effort skip.
+                        Err(_) => {}
+                    }
+                }
+                KvOp::Remove(k) => {
+                    let Some(rid) = RecordId::try_from_bytes(&k) else {
+                        continue;
+                    };
+                    // Nothing committed to delete from the index on a NotFound read
+                    // (the row was never materialized) — best-effort skip otherwise.
+                    if let Ok(old_bytes) = data_store.get(k.clone()).await {
+                        if let Ok(old_rec) = InnerValue::from_bytes(&old_bytes) {
+                            for backend in &new_backends {
+                                if let Ok(ops) = backend.plan_delete_tx(rid, &old_rec, tx_id).await
+                                {
+                                    appended.extend(ops.into_iter().map(|op| (table_token, op)));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        if !appended.is_empty() {
+            tx.index_write_set.extend(appended);
+        }
+    }
 }
 
 /// Outcome of [`pre_commit_locked_validate`]: the assigned commit version,

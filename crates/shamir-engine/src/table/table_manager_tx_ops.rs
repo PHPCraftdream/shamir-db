@@ -402,6 +402,12 @@ impl TableManager {
         )
         .await?;
 
+        // F-50 (#869, spike): capture this table's index2 generation AFTER the
+        // stage-time `all_backends()` snapshot (taken inside plan_insert_ops
+        // above) so the commit-time re-derivation gate can detect a backend
+        // registered between this stage and commit. See TxContext::note_index2_stage_gen.
+        tx.note_index2_stage_gen(self.table_token(), self.index2_registry().generation());
+
         Ok(rid)
     }
 
@@ -576,6 +582,10 @@ impl TableManager {
             .extend(index_ops.into_iter().map(|op| (token, op)));
         tx.bump_counter(token, values.len() as i64);
 
+        // F-50 (#869, spike): capture the index2 generation after the stage
+        // snapshot (taken at step 4 above) to gate commit-time re-derivation.
+        tx.note_index2_stage_gen(token, self.index2_registry().generation());
+
         Ok(ids)
     }
 
@@ -729,6 +739,10 @@ impl TableManager {
         tx.index_write_set
             .extend(index_ops.into_iter().map(|op| (token, op)));
         tx.bump_counter(token, staged.len() as i64);
+
+        // F-50 (#869, spike): capture the index2 generation after the stage
+        // snapshot (taken at step 4 above) to gate commit-time re-derivation.
+        tx.note_index2_stage_gen(token, self.index2_registry().generation());
 
         Ok(ids)
     }

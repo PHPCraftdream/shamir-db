@@ -110,6 +110,21 @@ pub struct TxContext {
     /// during commit (via `apply_index_ops`).
     pub index_write_set: Vec<(u64, IndexWriteOp)>,
 
+    /// F-50 (#869, spike): per-table index2 registry generation captured at
+    /// STAGE time (after the stage-time `all_backends()` snapshot), to gate
+    /// commit-time ops-plan re-derivation. A tx that staged before a new
+    /// index2 backend was registered would otherwise commit with zero ops
+    /// for it (the "guaranteed miss" — `backfill_index2_backend`'s doc §Part
+    /// B). At commit, if a table's current generation exceeds the captured
+    /// value, the commit pipeline re-derives posting ops for just the
+    /// newly-registered backends. Plain (non-`Mutex`) map: every capture /
+    /// read site holds the tx by `&mut` (the staging methods and the commit
+    /// pipeline's `pre_commit_prelock`), so no interior mutability is needed
+    /// (unlike `ri_barrier_tokens`, which is recorded through a shared
+    /// `&TxContext` by the FK scan path). Empty for txs that never stage an
+    /// index2-bearing table write — the single zero-overhead gate.
+    pub index2_stage_gens: TFxMap<u64, u64>,
+
     /// Per-table HNSW staged vectors. Key = table token (interned table
     /// name). Each entry is a `(RecordId, embedding)` pair routed here by
     /// the executor instead of into the live HNSW graph. Promoted into the
@@ -320,6 +335,7 @@ impl TxContext {
             isolation,
             write_set: TFxMap::default(),
             index_write_set: Vec::new(),
+            index2_stage_gens: TFxMap::default(),
             staged_vectors: TFxMap::default(),
             staged_vector_deletes: TFxMap::default(),
             interner_overlay: scc::HashMap::with_hasher(THasher::default()),
@@ -501,6 +517,19 @@ impl TxContext {
     /// Record a counter change for a table (e.g. +N for insert_many).
     pub fn bump_counter(&mut self, table_id: u64, delta: i64) {
         *self.counter_deltas.entry(table_id).or_insert(0) += delta;
+    }
+
+    /// F-50 (#869, spike): capture `table_token`'s index2 registry generation
+    /// at stage time. The caller MUST invoke this AFTER its stage-time
+    /// `all_backends()` snapshot (so every backend in that snapshot has
+    /// insertion-generation ≤ `gen`, guaranteeing the commit-time
+    /// `backends_newer_than(gen)` diff excludes already-planned backends and
+    /// never double-applies their ops). `or_insert` makes a re-capture in the
+    /// same tx (a second staged mutation to the same table) a no-op: the
+    /// EARLIEST generation is the most stale, so it is the one the commit-time
+    /// gate must compare against.
+    pub fn note_index2_stage_gen(&mut self, table_token: u64, gen: u64) {
+        self.index2_stage_gens.entry(table_token).or_insert(gen);
     }
 
     /// Record a read for SSI validation (only if Serializable).

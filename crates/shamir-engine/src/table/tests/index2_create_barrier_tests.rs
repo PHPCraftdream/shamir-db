@@ -377,17 +377,23 @@ async fn without_reserve_persist_crashed_id_would_be_reused() {
 // index) — so a tx's COMMIT now serializes against an in-flight
 // `create_index_v2` on an index2-only table, mirroring the non-tx fix.
 //
-// Part B (still open, honestly documented): the index2 ops-PLAN
-// (`tx.index_write_set`) is captured at STAGE time against an
+// Part B (CLOSED for the functional-insert case by F-50 #869 spike — see
+// `f50_index_lifecycle_spike_tests.rs` and the decision memo at
+// `docs/dev-artifacts/research/f50-index-lifecycle-spike.md`): the index2
+// ops-PLAN (`tx.index_write_set`) is captured at STAGE time against an
 // `all_backends()` snapshot, which can be taken before the barrier ever goes
 // up. If staging completes before the new backend is registered, the plan
 // simply has no ops for it — Part A's commit-time serialization cannot
 // retroactively add ops to an already-built plan. So a tx that stages AND
-// commits entirely inside the backfill→register window still loses the row
-// from the NEW index, even with Part A applied: Phase 5a writes the row's
-// data as usual (that part was never at risk), but Phase 5c has nothing to
-// apply for the new backend. This is proven by
-// `stage_and_commit_inside_window_still_misses_new_index_part_b_open` below.
+// commits entirely inside the backfill→register window previously lost the
+// row from the NEW index: Phase 5a wrote the row's data as usual (that part
+// was never at risk), but Phase 5c had nothing to apply for the new backend.
+//
+// F-50 closes this for the prototyped case (functional index, single-row
+// insert) via `pre_commit_prelock` Phase 2.7: re-derive index2 ops against
+// the LIVE backend registry (gated by `IndexRegistry`'s generation counter,
+// captured at stage time) and append them to `tx.index_write_set` BEFORE the
+// WAL entry is built. The test below now asserts the CLOSED behavior.
 
 /// tx-path sibling of #534's `insert_during_index2_create_is_not_lost`,
 /// scoped to prove Part A alone: a tx that STAGES before the barrier goes up
@@ -487,24 +493,30 @@ async fn tx_commit_blocks_on_index2_create_barrier_part_a() {
     let _ = tbl.get(bob).await.expect("row must be physically present");
 }
 
-/// Honest Part-B residual proof (explicitly requested by the #538 brief): a
-/// tx whose STAGE **and** COMMIT both land inside the backfill→register
-/// window still loses the row from the newly-created index, even with Part A
-/// applied. Part A only serializes the commit's TIMING against the barrier —
-/// it cannot retroactively add ops to `tx.index_write_set`, which was already
-/// built (empty for the new backend) back at stage time, before the barrier
-/// was ever consulted. This test is expected to FAIL the "row is indexed"
-/// assertion both before AND after Part A — it exists to prove Part B is a
-/// real, still-open gap rather than something silently fixed by Part A.
+/// F-50 (#869 spike) — Part-B residual CLOSED for the functional-insert case.
 ///
-/// NOTE: This test is intentionally written to assert the CURRENT (still-gap)
-/// behavior — it passes by confirming the row is (still) missing from the new
-/// index, so the suite documents the open residual rather than silently
-/// bit-rotting into a false "everything is fixed" green run. If a future task
-/// closes Part B, this assertion must be inverted (and the test re-homed to
-/// the closed-gap section) as part of that fix.
+/// Previously (pre-F-50) this test honestly reproduced the open residual: a
+/// tx whose STAGE **and** COMMIT both land inside the backfill→register
+/// window lost the row from the newly-created index, because Part A only
+/// serializes the commit's TIMING against the barrier — it cannot
+/// retroactively add ops to `tx.index_write_set`, which was built (empty for
+/// the new backend) at stage time. That test asserted the MISS and passed,
+/// documenting the gap.
+///
+/// F-50 closes it: `pre_commit_prelock` Phase 2.7 re-derives index2 ops for
+/// backends registered after this tx's stage-time generation (captured via
+/// `note_index2_stage_gen`) and appends them to `tx.index_write_set` BEFORE
+/// the WAL entry is serialized. The re-derivation runs AFTER Phase 2.5's
+/// barrier lock is acquired (so the parked create has finished registering by
+/// then), so the live `backends_newer_than(stage_gen)` snapshot it takes
+/// includes the new functional backend → Carol's posting is planned and
+/// written at Phase 5c → the row IS now queryable via the new index.
+///
+/// Scope: this closes the functional/INSERT case. Vector (HNSW via
+/// `tx.staged_vectors`), fts, and the sorted-index residual are Step 2 — see
+/// the F-50 memo's implementation plan.
 #[tokio::test]
-async fn stage_and_commit_inside_window_still_misses_new_index_part_b_open() {
+async fn stage_and_commit_inside_window_now_indexes_new_index_part_b_closed() {
     let repo = make_repo();
     repo.add_table(TableConfig::new("people"));
     let tbl = repo.get_table("people").await.unwrap();
@@ -563,19 +575,16 @@ async fn stage_and_commit_inside_window_still_misses_new_index_part_b_open() {
         .await
         .expect("row must be physically present");
 
-    // But it is NOT queryable via the new functional index — Part B's
-    // guaranteed-miss residual, honestly reproduced: this tx's
-    // `insert_tx_many_bytes` staged its `index_write_set` against the
-    // `all_backends()` snapshot taken BEFORE the barrier was ever up (there
-    // was no functional backend, live or mid-backfill, at that instant), so
-    // no op for the new backend was ever planned — Part A's commit-time lock
-    // has nothing left to protect by the time it is acquired.
+    // F-50: the row IS now queryable via the new functional index — Part B's
+    // guaranteed-miss residual is CLOSED for this case. The commit's Phase 2.7
+    // re-derived Carol's posting against the live backend (registered after
+    // this tx's stage-time generation) and appended it before WAL
+    // serialization, so Phase 5c wrote it.
     let owners = functional_lookup(&tbl, key_id(&tbl, "lower_name").await, "carol").await;
     assert!(
-        !owners.contains(carol.as_bytes()),
-        "#538 Part B residual: this row is EXPECTED to still be missing from \
-         the new index even with Part A applied — if this assertion starts \
-         failing (row found), Part B has been closed by some other change \
-         and this test must be updated/re-homed to reflect the fix"
+        owners.contains(carol.as_bytes()),
+        "F-50: the row staged+committed inside the backfill→register window \
+         MUST now be indexed — Part B is closed for the functional-insert case \
+         (if this fails, the Phase 2.7 re-derivation regressed)"
     );
 }

@@ -375,24 +375,26 @@ impl TableManager {
     ///    a tx's COMMIT now serializes against this backfill exactly like
     ///    the non-tx writers do, via the same lock held for this whole
     ///    backfill → register sequence.
-    /// 2. **Part B — still OPEN, not attempted here.** Closing Part A only
-    ///    fixes the commit's TIMING; it does not fix WHAT gets committed.
-    ///    The index2 ops-PLAN (`tx.index_write_set`) is built at STAGE time
-    ///    (inside `insert_tx_many_bytes` etc.) against an `all_backends()`
-    ///    snapshot taken well before Phase 2.5 ever runs — in the worst case,
-    ///    before this `create_index_v2` even started. If a tx stages before
-    ///    this backend exists (in any form) and then commits after this
-    ///    backfill has already completed and registered it, that tx's row
-    ///    IS correctly serialized into the store by Part A's lock — but its
-    ///    ops-plan was built with zero ops for this backend, so Phase 5c has
-    ///    nothing to write for it. This is a GUARANTEED miss (not a rare
-    ///    race), independent of Part A: no amount of commit-time locking can
-    ///    retroactively add ops to an already-built plan. Closing it
-    ///    properly needs the ops-plan to be re-derived against the LIVE
-    ///    backend set at commit time (or an equivalent mechanism) — a change
-    ///    to the commit pipeline's phase structure (WAL entry construction /
-    ///    interner delta sequencing depend on the current staged-plan shape)
-    ///    that #538 deliberately did not risk; tracked as its own follow-up.
+    /// 2. **Part B — CLOSED for the functional/INSERT case by F-50 (#869
+    ///    spike); full closure (vector/fts/update/delete/sorted-index) is
+    ///    Step 2.** Closing Part A only fixed the commit's TIMING; it does
+    ///    not fix WHAT gets committed. The index2 ops-PLAN
+    ///    (`tx.index_write_set`) is built at STAGE time (inside
+    ///    `insert_tx_many_bytes` etc.) against an `all_backends()` snapshot
+    ///    taken well before Phase 2.5 ever runs — in the worst case, before
+    ///    this `create_index_v2` even started. If a tx stages before this
+    ///    backend exists (in any form) and then commits after this backfill
+    ///    has already completed and registered it, that tx's row IS correctly
+    ///    serialized into the store by Part A's lock — but its ops-plan was
+    ///    built with zero ops for this backend, so Phase 5c has nothing to
+    ///    write for it. This was a GUARANTEED miss (not a rare race),
+    ///    independent of Part A. F-50 closes it by re-deriving the ops-plan
+    ///    against the LIVE backend set at commit time (in `pre_commit_prelock`
+    ///    Phase 2.7, gated by `IndexRegistry`'s generation counter, BEFORE the
+    ///    WAL entry is built so recovery replays the fresh plan) — see the
+    ///    decision memo `docs/dev-artifacts/research/f50-index-lifecycle-spike.md`
+    ///    for the full design + the Step 2 scope (the remaining backend kinds
+    ///    and the sorted-index residual).
     /// 3. **Check-then-act, not a drain (pre-existing #534 residual,
     ///    unaffected by #538).** A writer/committer that observes
     ///    `needs_write_barrier() == false` (before `create_index_v2` has set
@@ -404,14 +406,16 @@ impl TableManager {
     ///
     /// Net effect: #534 was strictly better than the pre-#534 state, and
     /// fully correct for the non-tx/replication-apply write path. #538 Part A
-    /// closes the commit-time serialization gap on the tx-commit path, but
-    /// Part B's stage-time ops-plan staleness means a tx whose STAGE and
-    /// COMMIT both land inside the backfill→register window can still miss
-    /// the new index — see
-    /// `crate::table::tests::index2_create_barrier_tests::stage_and_commit_inside_window_still_misses_new_index_part_b_open`
-    /// for the regression test that honestly reproduces (rather than papers
-    /// over) this residual. Do not read this comment as "the tx-commit-path
-    /// lost-write race is fully closed" without that qualification.
+    /// closes the commit-time serialization gap on the tx-commit path. F-50
+    /// (#869 spike) closes Part B's stage-time ops-plan staleness for the
+    /// functional/INSERT case by re-deriving ops in `pre_commit_prelock`
+    /// Phase 2.7 — see
+    /// `crate::table::tests::index2_create_barrier_tests::stage_and_commit_inside_window_now_indexes_new_index_part_b_closed`
+    /// for the regression test confirming the row is now indexed. The full
+    /// closure (vector/fts/update/delete + sorted-index + crash/restart
+    /// continuation) is Step 2 / Step 3 per the F-50 memo — do not read this
+    /// comment as "the tx-commit-path lost-write race is fully closed for all
+    /// backend kinds" without that qualification.
     async fn backfill_index2_backend(
         &self,
         backend: &dyn crate::index2::backend::IndexBackend,
