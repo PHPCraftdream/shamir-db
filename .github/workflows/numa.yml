@@ -10,6 +10,11 @@ env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
 
+# Least-privilege default. Both jobs (tier1-mock / tier3-qemu) only read the
+# repo and run tests — no push/comment/registry write.
+permissions:
+  contents: read
+
 jobs:
   # Tier 1 — DI-mock unit tests. Platform-independent (no real NUMA syscalls),
   # so they pass on every runner. This is the gating signal for the
@@ -23,14 +28,14 @@ jobs:
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
     steps:
-      - uses: actions/checkout@v6.0.3
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6.0.3
       - uses: dtolnay/rust-toolchain@1.93.0
       # Pinned to nextest@0.9.137 — same baseline as ci.yml's test/integration
       # jobs (see ci.yml's nextest pin comment for the guard-coupling rationale).
-      - uses: taiki-e/install-action@v2
+      - uses: taiki-e/install-action@18b1216eba7f8039b0f8d131d5473787f0edce68  # v2.85.3
         with:
           tool: nextest@0.9.137
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32  # v2
       - run: ./scripts/test.sh -p shamir-numa
 
   # Tier 3 — QEMU NUMA emulation (smoke level, opt-in). Boots a 2-node QEMU
@@ -44,7 +49,7 @@ jobs:
     runs-on: ubuntu-latest
     if: contains(github.event.head_commit.message, '[numa-qemu]')
     steps:
-      - uses: actions/checkout@v6.0.3
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6.0.3
       - name: Install QEMU + numactl
         run: sudo apt-get update && sudo apt-get install -y qemu-system-x86 qemu-utils numactl
       - name: Boot 2-node QEMU and run Linux integration tests

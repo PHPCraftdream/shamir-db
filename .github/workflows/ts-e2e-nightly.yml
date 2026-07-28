@@ -50,15 +50,20 @@ env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
 
+# Least-privilege default. Both jobs (ts-e2e / node-e2e) only read the repo and
+# build + run e2e suites — no push/comment/registry write.
+permissions:
+  contents: read
+
 jobs:
   # ── TS client e2e (pure TypeScript, no native binding) ────────────────────
   ts-e2e:
     name: ts client e2e (shamir-client-ts)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6.0.3
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6.0.3
       - uses: dtolnay/rust-toolchain@1.93.0
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32  # v2
       # Produce the release binary `e2e-harness.ts`'s `serverBinPath()` falls
       # back to at `<repo>/target/release/shamir-server`. No workflow in this
       # repo sets `CARGO_TARGET_DIR` (grep-confirmed), so the default
@@ -68,7 +73,7 @@ jobs:
       # drift); a no-op when Cargo.lock is current.
       - name: Build shamir-server (release)
         run: cargo build --release --locked -p shamir-server
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020  # v4.4.0
         with:
           node-version: '22'
           cache: npm
@@ -118,10 +123,10 @@ jobs:
     name: node napi e2e (tests/e2e)
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v6.0.3
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6.0.3
       - uses: dtolnay/rust-toolchain@1.93.0
-      - uses: Swatinem/rust-cache@v2
-      - uses: actions/setup-node@v4
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32  # v2
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020  # v4.4.0
         with:
           node-version: '22'
           cache: npm

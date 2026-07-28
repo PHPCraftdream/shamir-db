@@ -75,7 +75,7 @@ jobs:
     name: cargo fmt
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6.0.3
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6.0.3
       - uses: dtolnay/rust-toolchain@1.93.0
         with:
           components: rustfmt
@@ -92,11 +92,11 @@ jobs:
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
     steps:
-      - uses: actions/checkout@v6.0.3
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6.0.3
       - uses: dtolnay/rust-toolchain@1.93.0
         with:
           components: clippy
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32  # v2
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
 
   test:
@@ -107,17 +107,17 @@ jobs:
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
     steps:
-      - uses: actions/checkout@v6.0.3
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6.0.3
       - uses: dtolnay/rust-toolchain@1.93.0
       # Pinned to the nextest version that matches the perimeter-guard
       # baseline in .config/nextest.toml — see ci.yml's `test` job for the
       # full rationale. `./scripts/test.sh` (not raw `cargo test`) is the
       # sanctioned runner: the cargo-runner guard in .cargo/config.toml
       # fail-closes on anything that does not set the $NEXTEST marker.
-      - uses: taiki-e/install-action@v2
+      - uses: taiki-e/install-action@18b1216eba7f8039b0f8d131d5473787f0edce68  # v2.85.3
         with:
           tool: nextest@0.9.137
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32  # v2
       - run: ./scripts/test.sh --locked
         shell: bash
 
@@ -177,7 +177,7 @@ jobs:
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
     steps:
-      - uses: actions/checkout@v6.0.3
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6.0.3
       - uses: dtolnay/rust-toolchain@1.93.0
       # Pinned to the cargo-nextest version documented as the perimeter-guard
       # baseline in .config/nextest.toml (0.9.137, commit 75ddba7e9). The
@@ -186,10 +186,10 @@ jobs:
       # renaming/removing it and fail-closing ALL test runs. The shorthand
       # `taiki-e/install-action@nextest` form cannot pin a version — the
       # full-form `@v2` + `with: { tool: "nextest@X.Y.Z" }` is required.
-      - uses: taiki-e/install-action@v2
+      - uses: taiki-e/install-action@18b1216eba7f8039b0f8d131d5473787f0edce68  # v2.85.3
         with:
           tool: nextest@0.9.137
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32  # v2
       # bash on every runner (Git Bash on Windows). `-E 'kind(test)'` selects
       # ONLY integration test binaries (crates/*/tests/*.rs) — the nextest
       # filterset equivalent of cargo's `--test '*'` target selector; it
@@ -223,8 +223,8 @@ jobs:
     name: ts unit (shamir-client-ts)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6.0.3
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6.0.3
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020  # v4.4.0
         with:
           # Node 22 = active LTS. `shamir-client-ts/package.json` declares
           # no `engines` floor; `shamir-client-node`'s is `>=18`, so 22
@@ -255,9 +255,9 @@ jobs:
     needs: [fmt, clippy, test]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6.0.3
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6.0.3
       - uses: dtolnay/rust-toolchain@1.93.0
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32  # v2
       # Produce the release binary `e2e-harness.ts`'s `serverBinPath()` falls
       # back to at `<repo>/target/release/shamir-server`. No workflow in this
       # repo sets `CARGO_TARGET_DIR` (grep-confirmed), so the default
@@ -267,7 +267,7 @@ jobs:
       # drift); a no-op when Cargo.lock is current.
       - name: Build shamir-server (release)
         run: cargo build --release --locked -p shamir-server
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020  # v4.4.0
         with:
           node-version: '22'
           cache: npm
@@ -322,7 +322,7 @@ jobs:
     name: tag <-> crate version consistency
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6.0.3
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6.0.3
       - name: Check every crate version matches the pushed tag
         shell: bash
         run: |
@@ -350,6 +350,23 @@ jobs:
           fi
 
           echo "OK: all crates declare ${CRATE_VERSION}, matching tag ${GITHUB_REF_NAME}"
+
+          # ── Scope note (F-52) ──────────────────────────────────────────
+          # This check intentionally does NOT cover shamir-client-node's
+          # package.json "version" field. That crate is excluded from the Cargo
+          # workspace (root Cargo.toml `exclude` — napi-rs cdylib, MSVC-only,
+          # built separately per CLAUDE.md), uses a different manifest format
+          # (Node package.json, not Cargo.toml — never matched by the
+          # `crates/*/Cargo.toml` grep above), and is versioned/released on its
+          # own cadence. Its "version": "0.1.0" therefore legitimately differs
+          # from the workspace's 0.1.0-alpha.1 and is OUT OF SCOPE here by
+          # design — do NOT "fix" it by bumping the package.json version. There
+          # is currently NO separate npm-publish workflow for it either: only
+          # ts-e2e-nightly.yml's node-e2e job touches it (builds + tests the
+          # .node binding locally; no npm publish step exists yet). Bringing the
+          # node package into this consistency contract, or adding a real
+          # publish pipeline, is a separate, larger task — see the matching note
+          # in CHANGELOG.md's "Versioning scheme" section.
       - name: Check CHANGELOG.md has appropriate content
         # Strict form (F-31/#824): require the EXACT `## [${TAG_VERSION}]`
         # heading for the tag being pushed, not merely SOME version heading
@@ -418,17 +435,18 @@ jobs:
           - os: windows-latest
             target: x86_64-pc-windows-msvc
     steps:
-      - uses: actions/checkout@v6.0.3
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6.0.3
       - uses: dtolnay/rust-toolchain@1.93.0
         with:
           targets: ${{ matrix.target }}
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32  # v2
       - name: Build release binary
         run: cargo build --release --locked -p shamir-server --target ${{ matrix.target }}
       - name: Stage binary
         # Copy the built binary into a clean staging dir so the archive
-        # contains only `shamir-server` (not the whole target/ tree). Git
-        # Bash on Windows provides `cp`; RUNNER_OS distinguishes the .exe.
+        # contains only the staged binary + the release docs staged below (not
+        # the whole target/ tree). Git Bash on Windows provides `cp`;
+        # RUNNER_OS distinguishes the .exe.
         shell: bash
         run: |
           set -euo pipefail
@@ -438,24 +456,46 @@ jobs:
           else
             cp "target/${{ matrix.target }}/release/shamir-server" stage/shamir-server
           fi
+      - name: Stage release docs
+        # Make the archive self-contained for an operator unpacking it on a host
+        # without the repo: the binary + the two license texts, a deploy/operator
+        # quickstart, a safe starting config, and short checksum-verification
+        # instructions. Flat layout — every file lands at the archive root next
+        # to the binary (the packaging steps below archive the whole stage/ dir).
+        # deploy/README.md (the self-contained systemd/Docker/config runbook) is
+        # staged as README.md: a better fit for a release archive than the
+        # dev-oriented root README.md (workspace layout, contributing, cargo
+        # commands). THIRD_PARTY_LICENSES is intentionally NOT staged here: no
+        # license-text generation tool (cargo-about or similar) exists in this
+        # workspace's CI today — adding one is a separate follow-up task.
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp LICENSE-MIT stage/LICENSE-MIT
+          cp LICENSE-APACHE stage/LICENSE-APACHE
+          cp deploy/README.md stage/README.md
+          cp deploy/server.example.ktav stage/server.example.ktav
+          cp deploy/VERIFY.md stage/VERIFY.md
       - name: Package (tar.gz) + checksum
         if: runner.os != 'Windows'
         shell: bash
         run: |
           set -euo pipefail
           ARCHIVE="shamir-server-${{ github.ref_name }}-${{ matrix.target }}.tar.gz"
-          tar -C stage -czf "${ARCHIVE}" shamir-server
+          # Archive the whole flat stage/ dir (binary + LICENSE/README/config/VERIFY docs).
+          tar -C stage -czf "${ARCHIVE}" .
           sha256sum "${ARCHIVE}" > "${ARCHIVE}.sha256"
       - name: Package (zip)
         # Windows: Compress-Archive (PowerShell) — Git Bash's `zip` is not
         # guaranteed on windows-latest, and bsdtar-vs-GNU-tar ambiguity makes
         # `tar -a -cf x.zip` unreliable across shells. Compress-Archive is the
-        # deterministic native option.
+        # deterministic native option. `stage/*` glob = the whole flat stage
+        # dir (binary + LICENSE/README/config/VERIFY docs).
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
           $archive = "shamir-server-${{ github.ref_name }}-${{ matrix.target }}.zip"
-          Compress-Archive -Path stage/shamir-server.exe -DestinationPath $archive
+          Compress-Archive -Path stage/* -DestinationPath $archive
       - name: Checksum (zip)
         # sha256sum ships with Git for Windows (Git Bash), so the checksum
         # step is uniform across all three OSes.
@@ -466,7 +506,7 @@ jobs:
           ARCHIVE="shamir-server-${{ github.ref_name }}-${{ matrix.target }}.zip"
           sha256sum "${ARCHIVE}" > "${ARCHIVE}.sha256"
       - name: Upload archive artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
         with:
           name: binary-${{ matrix.target }}
           path: |
@@ -499,7 +539,7 @@ jobs:
     needs: [fmt, clippy, test, integration, ts-unit, ts-e2e, version-consistency]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6.0.3
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6.0.3
       - name: Build image
         run: docker build -f deploy/Dockerfile -t shamir-db:${{ github.ref_name }} .
       - name: Generate minimal smoke-test config
@@ -603,7 +643,7 @@ jobs:
     needs: [fmt, clippy, test, integration, ts-unit, ts-e2e, version-consistency]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6.0.3
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6.0.3
       - uses: dtolnay/rust-toolchain@1.93.0
       - name: Install cargo-cyclonedx
         # Pinned to 0.5.9 to match .github/workflows/supply-chain.yml's `sbom`
@@ -624,7 +664,7 @@ jobs:
           find crates -name '*.cdx.json' -exec cp {} sbom/ \;
           ls -1 sbom/
       - name: Upload SBOM artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
         with:
           name: sbom-cyclonedx
           path: sbom/*.cdx.json
@@ -651,12 +691,12 @@ jobs:
       id-token: write   # required for keyless cosign (GitHub OIDC)
     steps:
       - name: Download archive artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4.3.0
         with:
           pattern: binary-*
           merge-multiple: true
       - name: Install cosign
-        uses: sigstore/cosign-installer@v3
+        uses: sigstore/cosign-installer@398d4b0eeef1380460a10c8013a76f728fb906ac  # v3.9.1
       - name: Sign archives (keyless)
         shell: bash
         run: |
@@ -677,7 +717,7 @@ jobs:
             exit 1
           fi
       - name: Upload signature artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
         with:
           name: signatures
           path: |
@@ -721,9 +761,9 @@ jobs:
     permissions:
       contents: write   # required to create a release on the pushed tag
     steps:
-      - uses: actions/checkout@v6.0.3
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6.0.3
       - name: Download all artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4.3.0
         with:
           path: artifacts
           merge-multiple: true
@@ -753,7 +793,7 @@ jobs:
           echo "--- release notes ---"
           cat release-notes.md
       - name: Create GitHub Release (prerelease)
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65  # v2.6.2
         with:
           tag_name: ${{ github.ref_name }}
           name: ${{ github.ref_name }}
