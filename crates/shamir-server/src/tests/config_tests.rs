@@ -145,6 +145,47 @@ fn medium_profile_parses_and_validates() {
     );
 }
 
+#[test]
+fn large_profile_parses_and_validates() {
+    let cfg = Config::from_file(&deploy_path("server.large.example.ktav"))
+        .expect("server.large.example.ktav must parse");
+    cfg.validate()
+        .expect("server.large.example.ktav must pass Config::validate");
+
+    // Argon2 auth-RAM ceiling = argon2_concurrent_max × memory_kb (KiB).
+    // The large profile mirrors the base example's Argon2 sizing unchanged
+    // (only its security.connection/query_limits carry the high-capacity
+    // numbers) — pinned here so a future drift is caught.
+    let ceiling = cfg.argon2_concurrent_max as u64 * cfg.kdf_defaults.memory_kb as u64;
+    assert_eq!(
+        ceiling,
+        64_u64 * 131_072,
+        "large profile Argon2 ceiling must be 64 × 131072 KiB (got {ceiling})"
+    );
+
+    // F-44 (#852): the large profile carries the OLD base-example numbers
+    // (10 000 connections, 1 GiB result, 4 GiB in-flight) moved here from
+    // `server.example.ktav` so they are an explicit opt-in, not the
+    // accidental first file a new operator copies.
+    assert_eq!(
+        cfg.security.connection.max_active_connections, 10_000,
+        "large profile max_active_connections"
+    );
+    assert_eq!(
+        cfg.security.query_limits.max_result_size_bytes,
+        1024 * 1024 * 1024,
+        "large profile max_result_size_bytes"
+    );
+
+    // F-11: every shipped profile must set a finite inflight-response budget
+    // (4× max_result_size_bytes); never `None` again.
+    assert_eq!(
+        cfg.security.query_limits.max_inflight_response_bytes,
+        Some(4 * 1024 * 1024 * 1024),
+        "large profile max_inflight_response_bytes"
+    );
+}
+
 // =============== RI-15 / F-29: max_inflight_response_bytes validation ======
 
 /// F-29 (#822): the code-level default is now a FINITE value
@@ -426,6 +467,7 @@ fn shipped_profiles_leave_experimental_migration_api_disabled() {
         "server.example.ktav",
         "server.small.example.ktav",
         "server.medium.example.ktav",
+        "server.large.example.ktav",
     ] {
         let cfg = Config::from_file(&deploy_path(name)).expect("{name} must parse");
         assert!(

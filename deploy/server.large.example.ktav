@@ -1,5 +1,20 @@
-# Example ShamirDB server config. Copy to /etc/shamir/server.ktav and
-# adjust paths/ports for your deployment.
+# Large-footprint / high-capacity ShamirDB server config — the EXPLICITLY
+# OPT-IN profile for deployments that genuinely need far more concurrent
+# connections and larger response budgets than the safe-by-default base
+# `server.example.ktav` (which mirrors the library's own code-level
+# defaults). Copy to /etc/shamir/server.ktav and adjust paths/ports for
+# your deployment ONLY after confirming your host has the RAM, CPU, and
+# network headroom to sustain these limits.
+#
+# These numbers (10 000 connections, 1 GiB per result, 4 GiB in-flight)
+# were previously the base example's defaults and were moved here (F-44)
+# so they are no longer the accidental first thing a new operator copies.
+#
+# Sizing formula for this profile's Argon2 auth-RAM ceiling:
+#   argon2_concurrent_max × kdf_defaults.memory_kb (KiB)  ≤  ~25% of your
+#   container/host RAM (KiB).
+# Example: a 4 GiB container → ~1 GiB budget → memory_kb=131072 (128 MiB)
+# allows argon2_concurrent_max up to ~8.
 #
 # Schema is documented in `crates/shamir-server/src/config.rs`.
 
@@ -69,22 +84,22 @@ security: {
         # ~50 ms; 5000 ms is comfortably above network jitter.
         auth_init_timeout_ms: 5000
         # Hard cap on simultaneously-active connections. 0 disables.
-        max_active_connections: 1000
+        max_active_connections: 10000
         # Per-source-IP cap on simultaneously-active connections.
         max_active_connections_per_ip: 100
     }
     query_limits: {
         # Hard caps on `BatchRequest.limits` — operator's max wins
         # over client payload.
-        # 64 MiB.
-        max_result_size_bytes: 67108864
+        # 1 GiB.
+        max_result_size_bytes: 1073741824
         max_execution_time_secs: 60
         max_queries_per_batch: 100
         # RI-15 global upfront-reserve budget on total in-flight response
-        # bytes. Sized at 4× max_result_size_bytes (256 MiB / 64 MiB = 4
+        # bytes. Sized at 4× max_result_size_bytes (4 GiB / 1 GiB = 4
         # concurrent batches; CR-B2 reserves upfront, so concurrency ≈
         # inflight / max_result — see docs/guide-docs/guide/07-operations.md).
-        max_inflight_response_bytes: 268435456
+        max_inflight_response_bytes: 4294967296
     }
 }
 
