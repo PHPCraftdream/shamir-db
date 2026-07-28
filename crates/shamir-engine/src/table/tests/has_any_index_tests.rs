@@ -80,6 +80,7 @@ async fn has_any_index_true_after_index2_backend() {
         },
         created_at_nanos: 0,
         options: Vec::new(),
+        state: crate::index2::state::IndexState::default(),
     };
     let backend = crate::index2::build_index2_backend(desc, &info);
     tbl.index2_registry().insert(backend).await.unwrap();

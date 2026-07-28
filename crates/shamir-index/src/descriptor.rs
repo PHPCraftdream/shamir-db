@@ -1,6 +1,7 @@
 //! Persisted description of a single index instance.
 
 use crate::kind::IndexKind;
+use crate::state::IndexState;
 use serde::{Deserialize, Serialize};
 use smallvec::SmallVec;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -26,6 +27,14 @@ pub struct IndexDescriptor {
     /// as msgpack or whatever the backend wants; empty by default.
     #[serde(default)]
     pub options: Vec<u8>,
+    /// Persisted build lifecycle state (F-50 Step 3a). `Ready` for a
+    /// freshly-constructed descriptor; `Building` is set by Step 3b's
+    /// `create_index_v2` between the backfill start and the final
+    /// `save_index2_metadata`. See `state::IndexState` for why
+    /// `#[serde(default)]` alone does NOT provide bincode forward-compat
+    /// (the load path in `persistence::load_index2_metadata` does).
+    #[serde(default)]
+    pub state: IndexState,
 }
 
 impl IndexDescriptor {
@@ -48,6 +57,7 @@ impl IndexDescriptor {
             kind,
             created_at_nanos,
             options: Vec::new(),
+            state: IndexState::default(),
         }
     }
 }

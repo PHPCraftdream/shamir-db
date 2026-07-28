@@ -6,6 +6,7 @@ pub mod expr_tests;
 pub mod fts_backend_tests;
 pub mod fts_ranked_backend_tests;
 pub mod functional_backend_tests;
+pub mod index_state_compat_tests;
 pub mod kind_tests;
 pub mod persistence_tests;
 pub mod posting_layout_tests;

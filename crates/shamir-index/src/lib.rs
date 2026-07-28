@@ -32,6 +32,7 @@ pub mod persistence;
 
 pub mod posting_layout;
 pub mod registry;
+pub mod state;
 pub mod tokenizer;
 pub mod vector;
 pub mod write_ops;
@@ -51,6 +52,7 @@ pub use persistence::{
 };
 pub use posting_layout::{build_posting_key, type_tag, PostingKeyRef};
 pub use registry::IndexRegistry;
+pub use state::IndexState;
 pub use write_ops::{apply_index_ops, IndexWriteOp};
 
 #[cfg(test)]

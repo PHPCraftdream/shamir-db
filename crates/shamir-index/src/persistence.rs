@@ -20,7 +20,7 @@
 //!       InnerValue decode).
 
 use crate::descriptor::IndexDescriptor;
-use crate::MetaEnvelope;
+use crate::{MetaEnvelope, MetaError};
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 use shamir_storage::types::Store;
@@ -74,14 +74,113 @@ pub async fn load_index2_metadata(
     info_store: &Arc<dyn Store>,
 ) -> Result<Option<PersistedIndexes>, shamir_storage::error::DbError> {
     let key = meta_key_indexes();
-    match info_store.get(key.to_bytes().into()).await {
-        Ok(bytes) => {
-            let p: PersistedIndexes = MetaEnvelope::open(&bytes)
-                .map_err(|e| shamir_storage::error::DbError::Internal(e.to_string()))?;
-            Ok(Some(p))
+    let bytes = match info_store.get(key.to_bytes().into()).await {
+        Ok(bytes) => bytes,
+        Err(shamir_storage::error::DbError::NotFound(_)) => return Ok(None),
+        Err(e) => return Err(e),
+    };
+    Ok(Some(decode_persisted_indexes(&bytes)?))
+}
+
+/// Decode the `__meta__/indexes` blob into the current [`PersistedIndexes`],
+/// with a forward-compat fallback for blobs written BEFORE the `state`
+/// field existed (F-50 Step 3a).
+///
+/// bincode 1.3.3 does NOT honour `#[serde(default)]` for a NEW trailing
+/// field — a pre-`state` blob fails to decode as the current shape with
+/// `io error: unexpected end of file` (proven by the F-50 Step 3a
+/// round-trip test, `tests/index_state_compat_tests.rs`). So the current
+/// shape is tried first; on a decode failure the pre-`state` shadow shape
+/// is tried and each descriptor is lifted to `state = Ready` (every
+/// pre-`state` persisted index was fully built — a `Building` index could
+/// never have been persisted before the `state` field existed). Any other
+/// failure (bad magic, unsupported envelope version, or a blob that
+/// decodes as NEITHER shape — genuine corruption) is surfaced as an error.
+pub(crate) fn decode_persisted_indexes(
+    bytes: &[u8],
+) -> Result<PersistedIndexes, shamir_storage::error::DbError> {
+    match MetaEnvelope::<PersistedIndexes>::open(bytes) {
+        Ok(p) => Ok(p),
+        Err(MetaError::Decode(new_err)) => {
+            // Possible pre-`state` blob — try the legacy shadow shape.
+            match MetaEnvelope::<forward_compat::PersistedIndexesNoState>::open(bytes) {
+                Ok(legacy) => {
+                    log::warn!(
+                        "index2 metadata: decoded with pre-`state` legacy fallback \
+                         ({} descriptor(s) lifted to state=Ready). \
+                         New-shape decode error: {}",
+                        legacy.descriptors.len(),
+                        new_err
+                    );
+                    Ok(PersistedIndexes::from(legacy))
+                }
+                Err(legacy_err) => {
+                    // Decodes as neither shape — genuine corruption.
+                    Err(shamir_storage::error::DbError::Internal(format!(
+                        "index2 metadata decode failed (new shape: {new_err}; \
+                         legacy shape: {legacy_err})"
+                    )))
+                }
+            }
         }
-        Err(shamir_storage::error::DbError::NotFound(_)) => Ok(None),
-        Err(e) => Err(e),
+        Err(e) => Err(shamir_storage::error::DbError::Internal(e.to_string())),
+    }
+}
+
+/// Pre-`state` on-disk shadow shapes used ONLY by the forward-compat
+/// fallback in [`load_index2_metadata`]. These mirror the exact field
+/// order/types of `IndexDescriptor`/`PersistedIndexes` as they existed
+/// BEFORE the `state: IndexState` field was added (F-50 Step 3a), so
+/// genuinely old on-disk bytes can be decoded and lifted to the current
+/// shape. Write-side always emits the current shape; these are read-only.
+mod forward_compat {
+    use crate::kind::IndexKind;
+    use serde::{Deserialize, Serialize};
+    use smallvec::SmallVec;
+
+    /// Pre-`state` `IndexDescriptor` shadow.
+    #[derive(Debug, Serialize, Deserialize)]
+    pub(in crate::persistence) struct IndexDescriptorNoState {
+        pub id: u32,
+        pub name: String,
+        pub name_interned: u64,
+        pub paths: SmallVec<[Vec<u64>; 2]>,
+        pub kind: IndexKind,
+        pub created_at_nanos: u64,
+        #[serde(default)]
+        pub options: Vec<u8>,
+    }
+
+    /// Pre-`state` `PersistedIndexes` shadow.
+    #[derive(Debug, Serialize, Deserialize)]
+    pub(in crate::persistence) struct PersistedIndexesNoState {
+        pub next_id: u32,
+        pub descriptors: Vec<IndexDescriptorNoState>,
+    }
+}
+
+impl From<forward_compat::PersistedIndexesNoState> for PersistedIndexes {
+    fn from(legacy: forward_compat::PersistedIndexesNoState) -> Self {
+        PersistedIndexes {
+            next_id: legacy.next_id,
+            descriptors: legacy
+                .descriptors
+                .into_iter()
+                .map(|d| IndexDescriptor {
+                    id: d.id,
+                    name: d.name,
+                    name_interned: d.name_interned,
+                    paths: d.paths,
+                    kind: d.kind,
+                    created_at_nanos: d.created_at_nanos,
+                    options: d.options,
+                    // Every pre-`state` persisted index was fully built;
+                    // a `Building` index could not have been persisted
+                    // before this field existed.
+                    state: crate::state::IndexState::default(),
+                })
+                .collect(),
+        }
     }
 }
 
