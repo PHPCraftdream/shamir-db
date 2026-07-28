@@ -136,13 +136,48 @@ artifact).
       `commit_implicit_batch_tx`; and D1 above (Step 2), listed here
       again for completeness since it was discovered, not pre-supposed,
       during this campaign.
+    - **Two more bugs in this same cache mechanism — found and closed by
+      the 2026-07-27 readonly review, not during the F-28 campaign.** The
+      cache that gates the Serializable upgrade above (S3-C) had two
+      latent bugs neither this entry nor F-28 knew about: (1) F-35 (#843,
+      commit `44c4317e`) — each cached `ReverseFkEntry` populated its
+      single role-flag field from `fk.on_delete` only, so an
+      `on_delete = NoAction, on_update = Restrict/Cascade/SetNull` FK never
+      flagged its parent for the Serializable upgrade on the implicit
+      UPDATE path, silently reopening the cross-transaction race for
+      `on_update` specifically; `ReverseFkEntry` now tracks `on_delete` and
+      `on_update` independently, and the isolation-upgrade hook is split
+      per operation kind (see
+      `crates/shamir-engine/src/repo/fk_reverse_cache.rs`). (2) F-36 (#844,
+      commit `d3d06c82`) — `get_or_build_by_parent` unconditionally
+      published a scan's result even if a concurrent `invalidate` (from
+      FK-schema DDL) raced it, so a scan started before a DDL could finish
+      after it and publish a stale snapshot (this cache directly gates
+      isolation upgrades, so a stale snapshot could silently reopen the
+      dangling-reference race); the cache is now generation-safe
+      (single-flight `build_lock` + compare-and-publish), with a narrow,
+      documented residual window (the post-scan generation compare and the
+      publish are two separate atomics, not one CAS).
     - **Residual scope.** This closes the race for the IMPLICIT
-      (autocommit) delete/update path only. An EXPLICIT transaction that
-      the caller opens as `Snapshot` for its own reasons does not get an
-      automatic Serializable upgrade — a caller wanting the same
-      protection for an explicit transaction opens it `Serializable`
-      itself; the same footprint/predicate machinery already protects
-      that case once wired that way.
+      (autocommit) delete/update path only, and (F-40, #848, commit
+      `5679edfa`) the two hooks that gate it
+      (`require_footprint_if_fk_child` /
+      `implicit_tx_isolation_for_fk_parent` in
+      `crates/shamir-engine/src/query/batch/query_runner.rs`) now fail
+      CLOSED on a discovery error — a `resolve_repo` or cache-build
+      failure widens the footprint / upgrades to Serializable instead of
+      silently falling back to the permissive behavior the pre-F-40 code
+      used. The SEPARATE explicit-Snapshot gap remains OPEN (not closed):
+      an EXPLICIT transaction that the caller opens as `Snapshot` for its
+      own reasons does not get an automatic Serializable upgrade — a
+      caller wanting the same protection for an explicit transaction
+      opens it `Serializable` itself; the same footprint/predicate
+      machinery already protects that case once wired that way. This
+      explicit-Snapshot gap is now scoped (no longer unbounded) via a
+      decision memo (`docs/dev-artifacts/research/f40-explicit-snapshot-ri-gap-memo.md`)
+      and follow-up task (F-40b, #854): the memo rejects a mid-flight
+      isolation upgrade as unsound and scopes an isolation-independent
+      "RI barrier" commit-time re-check as the tractable direction.
     - See the "TOCTOU caveat" / "Cross-transaction race — CLOSED" doc
       comments in `crates/shamir-engine/src/query/batch/fk_restrict.rs`
       for the full mechanism writeup this summary is drawn from.
