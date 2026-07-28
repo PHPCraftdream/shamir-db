@@ -625,8 +625,27 @@ pub(super) async fn pre_commit_locked(
     // Inverted single-pass scan — see the matching block in
     // `pre_commit_locked_validate` for the full rationale. Both call
     // sites share `RepoTxGate::predicate_conflicts_batch`.
-    if tx.isolation == IsolationLevel::Serializable && !tx.predicate_set.is_empty() {
-        let deps = tx.predicate_set.snapshot_deps();
+    //
+    // F-40b (RI barrier): widened to ALSO fire when `ri_barrier_tokens` is
+    // non-empty (recorded by FK reverse-check scans regardless of
+    // isolation), so an EXPLICIT `Snapshot`-isolation parent delete/update
+    // routed through this AsyncIndex-visibility path — which never
+    // populates `predicate_set` — still gets a commit-time re-check. This
+    // path already always runs under `commit_lock` (taken unconditionally
+    // by its caller), so no additional lock-widening is needed here
+    // (unlike the lock-free path's commit-lock acquisition). The barrier
+    // tokens are appended as `TableScan { table_token }` deps, reusing
+    // the SAME `predicate_conflicts_batch` machinery verbatim — identical
+    // to the `pre_commit_locked_validate` widening above.
+    let has_serializable_preds =
+        tx.isolation == IsolationLevel::Serializable && !tx.predicate_set.is_empty();
+    if has_serializable_preds || !tx.ri_barrier_tokens_is_empty() {
+        let mut deps = if has_serializable_preds {
+            tx.predicate_set.snapshot_deps()
+        } else {
+            Vec::new()
+        };
+        tx.append_ri_barrier_deps(&mut deps);
         if let Some(idx) = gate.predicate_conflicts_batch(&deps, tx.snapshot_version) {
             let dep = format!("{:?}", deps[idx]);
             repo.tx_metrics().on_tx_aborted_phantom();

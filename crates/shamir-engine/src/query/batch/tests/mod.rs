@@ -9,7 +9,7 @@ mod fk_race_closure_tests;
 mod fk_restrict_tests;
 mod fk_reverse_cache_race_tests;
 mod fk_reverse_cache_tests;
-mod fk_ri_barrier_spike_tests;
+mod fk_ri_barrier_tests;
 mod for_each_tests;
 mod planner_tests;
 mod query_value_serializer_tests;

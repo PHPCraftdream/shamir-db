@@ -394,6 +394,13 @@ async fn plan_cascade_recursive(
         let mut cascade_ids: Vec<RecordId> = Vec::new();
         let mut setnull_ids: Vec<(RecordId, String)> = Vec::new();
 
+        // F-40b (RI barrier): record this child-table scan at entry,
+        // regardless of isolation, so an EXPLICIT `Snapshot`-isolation
+        // parent delete (which never populates `predicate_set`) still gets a
+        // commit-time re-check via `pre_commit.rs` Phase 2-bis against
+        // concurrent committers that touched this child table. Mirrors
+        // `fk_restrict.rs::child_has_reference`'s recording exactly.
+        tx.record_ri_barrier(child_table.table_token());
         let stream = child_table.list_stream_tx(Some(tx), batch_size);
         futures::pin_mut!(stream);
         while let Some(batch_result) = stream.next().await {
@@ -685,6 +692,11 @@ async fn plan_cascade_for_ids(
         let mut gc_cascade_ids: Vec<RecordId> = Vec::new();
         let mut gc_setnull_ids: Vec<(RecordId, String)> = Vec::new();
 
+        // F-40b (RI barrier): record this grandchild-table scan at entry,
+        // regardless of isolation — same recording as the direct-child scan
+        // in `plan_cascade_recursive` above, closing the cross-transaction
+        // race for the explicit-Snapshot path at this recursion level too.
+        tx.record_ri_barrier(child_table.table_token());
         let stream = child_table.list_stream_tx(Some(tx), batch_size);
         futures::pin_mut!(stream);
         while let Some(batch_result) = stream.next().await {

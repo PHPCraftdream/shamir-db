@@ -159,7 +159,7 @@ artifact).
       documented residual window (the post-scan generation compare and the
       publish are two separate atomics, not one CAS).
     - **Residual scope.** This closes the race for the IMPLICIT
-      (autocommit) delete/update path only, and (F-40, #848, commit
+      (autocommit) delete/update path, and (F-40, #848, commit
       `5679edfa`) the two hooks that gate it
       (`require_footprint_if_fk_child` /
       `implicit_tx_isolation_for_fk_parent` in
@@ -167,17 +167,38 @@ artifact).
       CLOSED on a discovery error — a `resolve_repo` or cache-build
       failure widens the footprint / upgrades to Serializable instead of
       silently falling back to the permissive behavior the pre-F-40 code
-      used. The SEPARATE explicit-Snapshot gap remains OPEN (not closed):
-      an EXPLICIT transaction that the caller opens as `Snapshot` for its
-      own reasons does not get an automatic Serializable upgrade — a
-      caller wanting the same protection for an explicit transaction
-      opens it `Serializable` itself; the same footprint/predicate
-      machinery already protects that case once wired that way. This
-      explicit-Snapshot gap is now scoped (no longer unbounded) via a
-      decision memo (`docs/dev-artifacts/research/f40-explicit-snapshot-ri-gap-memo.md`)
-      and follow-up task (F-40b, #854): the memo rejects a mid-flight
-      isolation upgrade as unsound and scopes an isolation-independent
-      "RI barrier" commit-time re-check as the tractable direction.
+      used. The SEPARATE explicit-Snapshot gap is now CLOSED too (F-40b,
+      #855/#856): an EXPLICIT transaction the caller opens as `Snapshot`
+      is now protected by an isolation-independent "RI barrier" — every FK
+      reverse-check scan (`fk_restrict.rs::child_has_reference`,
+      `fk_actions.rs`'s cascade probes, `fk_on_update.rs`'s on-update
+      probes) records its child `table_token` into
+      `TxContext.ri_barrier_tokens` regardless of isolation, and every
+      commit-pipeline Phase 2-bis guard (`pre_commit_locked_validate`,
+      `pre_commit_locked`, and `group_commit.rs`'s inter-batch phantom
+      check) re-checks those tokens via the existing
+      `predicate_conflicts_batch` / `record_conflicts` machinery, so a
+      concurrent committer that touched the child table in the commit
+      window aborts the parent with `PhantomConflict`/`tx_conflict`. The
+      barrier mirrors the S3-C `footprint_tokens` pattern applied to the
+      validation direction (a Snapshot parent-side mutation now re-checks
+      what a Snapshot child-side writer publishes), and is load-bearing
+      for the same commit-lock serialization as Serializable
+      (`commit.rs`'s lock acquisition also widens on non-empty
+      `ri_barrier_tokens`). Proven via deterministic end-to-end
+      explicit-tx race + quiescent tests for all four actions (RESTRICT /
+      CASCADE / SET NULL / ON UPDATE) in
+      `crates/shamir-engine/src/query/batch/tests/fk_ri_barrier_tests.rs`.
+      The two memos that scoped and proved the mechanism are
+      `docs/dev-artifacts/research/f40-explicit-snapshot-ri-gap-memo.md`
+      (rejects a mid-flight isolation upgrade as unsound, scopes the RI
+      barrier) and `docs/dev-artifacts/research/f40b-ri-barrier-spike.md`
+      (settles the flat `TFxSet<u64>` token shape and `"tx_conflict"`
+      error-code reuse). A client wanting transparent race resolution for
+      an explicit-tx `tx_conflict` retries on that code (the engine's
+      explicit-tx API is intentionally retry-free — the client owns the
+      lifecycle); the wire code is already the standard `"tx_conflict"`
+      every SSI-class conflict uses.
     - See the "TOCTOU caveat" / "Cross-transaction race — CLOSED" doc
       comments in `crates/shamir-engine/src/query/batch/fk_restrict.rs`
       for the full mechanism writeup this summary is drawn from.

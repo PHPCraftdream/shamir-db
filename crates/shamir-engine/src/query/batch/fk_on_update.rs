@@ -408,6 +408,12 @@ pub(crate) async fn plan_fk_on_update(
         // cheap insurance.
 
         let batch_size = 1000;
+        // F-40b (RI barrier): record this child-table scan at entry,
+        // regardless of isolation — same recording as
+        // `fk_restrict.rs::child_has_reference`, closing the
+        // cross-transaction race for the explicit-Snapshot parent UPDATE
+        // path (CASCADE / SET NULL fan-out).
+        tx.record_ri_barrier(child_table.table_token());
         let stream = child_table.list_stream_tx(Some(tx), batch_size);
         futures::pin_mut!(stream);
         while let Some(batch_result) = stream.next().await {
@@ -807,6 +813,16 @@ async fn child_has_reference(
     value: &QueryValue,
     tx: &shamir_tx::TxContext,
 ) -> shamir_storage::error::DbResult<bool> {
+    // F-40b (RI barrier): record this child-table scan REGARDLESS of
+    // isolation — mirrors `fk_restrict.rs::child_has_reference`'s recording
+    // at function entry, before the index fast-path, so an EXPLICIT
+    // `Snapshot`-isolation parent UPDATE (which never populates
+    // `predicate_set`) still gets a commit-time re-check (`pre_commit.rs`
+    // Phase 2-bis) against concurrent committers that touched this child
+    // table. Fires even when a supporting index short-circuits the scan
+    // below.
+    tx.record_ri_barrier(table.table_token());
+
     let interner = table.interner().get().await?;
 
     // F-28 Step 2: resolve the field id through the tx-layered interner

@@ -181,21 +181,52 @@ pub(super) async fn run_leader(
                 // in this batch. The committed log is already checked inside
                 // pre_commit_locked_validate; this closes the gap for
                 // intra-batch phantoms.
-                let phantom_conflict = if entry.tx.isolation == IsolationLevel::Serializable
-                    && !entry.tx.predicate_set.is_empty()
+                //
+                // F-40b (RI barrier): widened to ALSO fire when
+                // `ri_barrier_tokens` is non-empty (recorded by FK
+                // reverse-check scans regardless of isolation), so an
+                // EXPLICIT `Snapshot`-isolation parent delete/update routed
+                // through a grouped commit still gets the intra-batch
+                // re-check against earlier batch survivors' footprints. The
+                // barrier tokens are materialized as
+                // `TableScan { table_token }` deps via
+                // `append_ri_barrier_deps` and checked against each
+                // `batch_footprints` entry via `record_conflicts`, exactly
+                // as `predicate_set` entries already are.
+                let has_serializable_preds = entry.tx.isolation == IsolationLevel::Serializable
+                    && !entry.tx.predicate_set.is_empty();
+                let phantom_conflict = if (has_serializable_preds
+                    || !entry.tx.ri_barrier_tokens_is_empty())
                     && !batch_footprints.is_empty()
                 {
+                    let mut barrier_deps: Vec<shamir_tx::PredicateDep> = Vec::new();
+                    entry.tx.append_ri_barrier_deps(&mut barrier_deps);
                     let mut conflict_dep: Option<String> = None;
-                    entry.tx.predicate_set.with_iter(|dep| {
-                        if conflict_dep.is_none() {
+                    if has_serializable_preds {
+                        entry.tx.predicate_set.with_iter(|dep| {
+                            if conflict_dep.is_none() {
+                                for fp in &batch_footprints {
+                                    if shamir_tx::record_conflicts(fp, dep) {
+                                        conflict_dep = Some(format!("{:?}", dep));
+                                        break;
+                                    }
+                                }
+                            }
+                        });
+                    }
+                    if conflict_dep.is_none() {
+                        for dep in &barrier_deps {
                             for fp in &batch_footprints {
                                 if shamir_tx::record_conflicts(fp, dep) {
                                     conflict_dep = Some(format!("{:?}", dep));
                                     break;
                                 }
                             }
+                            if conflict_dep.is_some() {
+                                break;
+                            }
                         }
-                    });
+                    }
                     conflict_dep
                 } else {
                     None
