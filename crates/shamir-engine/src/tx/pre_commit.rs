@@ -457,8 +457,22 @@ pub(super) async fn pre_commit_locked_validate(
     // P). The conflict set is identical to the per-dep loop — a conflict
     // exists iff some dep conflicts with some record, which is
     // order-independent.
-    if tx.isolation == IsolationLevel::Serializable && !tx.predicate_set.is_empty() {
-        let deps = tx.predicate_set.snapshot_deps();
+    //
+    // F-40b (RI barrier): widened to ALSO fire when `ri_barrier_tokens` is
+    // non-empty (recorded by FK reverse-check scans regardless of
+    // isolation), so an EXPLICIT `Snapshot`-isolation parent delete/update
+    // — which never populates `predicate_set` — still gets a commit-time
+    // re-check. The barrier tokens are appended as `TableScan { table_token }`
+    // deps, reusing the SAME `predicate_conflicts_batch` machinery verbatim.
+    let has_serializable_preds =
+        tx.isolation == IsolationLevel::Serializable && !tx.predicate_set.is_empty();
+    if has_serializable_preds || !tx.ri_barrier_tokens_is_empty() {
+        let mut deps = if has_serializable_preds {
+            tx.predicate_set.snapshot_deps()
+        } else {
+            Vec::new()
+        };
+        tx.append_ri_barrier_deps(&mut deps);
         if let Some(idx) = gate.predicate_conflicts_batch(&deps, tx.snapshot_version) {
             let dep = format!("{:?}", deps[idx]);
             repo.tx_metrics().on_tx_aborted_phantom();

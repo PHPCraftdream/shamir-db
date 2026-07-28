@@ -9,7 +9,7 @@ use shamir_collections::{TFxMap, TFxSet, THasher};
 use shamir_types::access::Actor;
 use shamir_types::types::record_id::RecordId;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use crate::staging_store::StagingStore;
 use crate::types::{IsolationLevel, TxId};
@@ -225,6 +225,30 @@ pub struct TxContext {
     /// `build_footprint_from_tx` zero-overhead off this path.
     pub footprint_tokens: TFxSet<u64>,
 
+    /// F-40b (RI barrier): child-table tokens recorded by an FK reverse-check
+    /// scan (`fk_restrict.rs::child_has_reference`, and — in Step 2 — the
+    /// cascade/on-update probes), **regardless of isolation level**. At
+    /// commit time, `pre_commit.rs` Phase 2-bis runs a targeted
+    /// `predicate_conflicts_batch` over these tokens (as
+    /// `PredicateDep::TableScan { table_token }`) so an EXPLICIT
+    /// `Snapshot`-isolation parent delete/update — which never records a
+    /// Serializable `predicate_set` entry — still aborts when a concurrent
+    /// committer touched one of these child tables in the commit window.
+    ///
+    /// This is the S3-C `footprint_tokens` pattern applied to the VALIDATION
+    /// direction: `footprint_tokens` widened what a Snapshot WRITER publishes;
+    /// `ri_barrier_tokens` widens what a Snapshot parent-side MUTATION checks.
+    ///
+    /// Interior-mutable (`Mutex<TFxSet<u64>>`, not a bare `TFxSet<u64>` like
+    /// `footprint_tokens`) because the recording site
+    /// (`child_has_reference`) holds the tx by shared reference (`&TxContext`)
+    /// — same access pattern and same low-frequency / never-held-across-
+    /// `.await` / never-contended rationale as `predicate_set`'s own
+    /// `Mutex<Vec<_>>` (`predicate_set.rs:10-14`). Empty for the overwhelming
+    /// majority of txs; `ri_barrier_tokens_is_empty()` is the single
+    /// zero-overhead gate on the commit path.
+    pub ri_barrier_tokens: Mutex<TFxSet<u64>>,
+
     /// Commit visibility / ack policy. Default `Synchronous` (no behaviour
     /// change). When set to `AsyncIndex`, the engine's `commit_tx` returns
     /// to the caller right after WAL durability + data apply + publish; the
@@ -310,6 +334,7 @@ impl TxContext {
             unique_guards: Vec::new(),
             predicate_set: crate::predicate_set::PredicateSet::new(),
             footprint_tokens: TFxSet::default(),
+            ri_barrier_tokens: Mutex::new(TFxSet::default()),
             visibility: CommitVisibility::default(),
             async_prefix_failed: false,
             actor: Actor::System,
@@ -559,6 +584,42 @@ impl TxContext {
     pub fn require_footprint_for(&mut self, table_token: u64) -> &mut Self {
         self.footprint_tokens.insert(table_token);
         self
+    }
+
+    /// F-40b (RI barrier): record that this tx performed an FK reverse-check
+    /// scan of `table_token` (a child table), **regardless of isolation
+    /// level**. Called from `fk_restrict.rs::child_has_reference` (and, in
+    /// Step 2, the cascade / on-update probes). At commit time, Phase 2-bis
+    /// re-checks every recorded token against the commit-write log so a
+    /// concurrent committer that touched the child table aborts this tx —
+    /// closing the cross-transaction FK TOCTOU race for EXPLICIT
+    /// `Snapshot`-isolation parent mutations (which never record a
+    /// Serializable `predicate_set` entry).
+    ///
+    /// Takes `&self` via interior mutability so the FK scan path (which holds
+    /// the tx by shared reference) can record without a signature break.
+    /// Idempotent — a `TFxSet` insert of an already-present token is a no-op.
+    pub fn record_ri_barrier(&self, table_token: u64) {
+        self.ri_barrier_tokens.lock().unwrap().insert(table_token);
+    }
+
+    /// F-40b: true when no RI barrier tokens have been recorded. The
+    /// zero-overhead gate on the commit path (Phase 2-bis and the
+    /// commit-lock acquisition both check this before doing any work).
+    pub fn ri_barrier_tokens_is_empty(&self) -> bool {
+        self.ri_barrier_tokens.lock().unwrap().is_empty()
+    }
+
+    /// F-40b: append one `PredicateDep::TableScan { table_token }` per
+    /// recorded barrier token into `deps`, under a single lock. Used by
+    /// Phase 2-bis to build the unified predicate-deps slice passed to
+    /// `predicate_conflicts_batch`. The caller has already verified
+    /// non-emptiness via [`ri_barrier_tokens_is_empty`](Self::ri_barrier_tokens_is_empty).
+    pub fn append_ri_barrier_deps(&self, deps: &mut Vec<crate::predicate_set::PredicateDep>) {
+        let guard = self.ri_barrier_tokens.lock().unwrap();
+        for &token in guard.iter() {
+            deps.push(crate::predicate_set::PredicateDep::TableScan { table_token: token });
+        }
     }
 
     /// Validate the read-set against current committed versions.

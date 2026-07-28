@@ -295,6 +295,20 @@ async fn child_has_reference(
     value: &QueryValue,
     tx: &shamir_tx::TxContext,
 ) -> shamir_storage::error::DbResult<bool> {
+    // F-40b (RI barrier): record this child-table scan REGARDLESS of
+    // isolation, so an EXPLICIT `Snapshot`-isolation parent delete — which
+    // never records a Serializable `predicate_set` entry — still gets a
+    // commit-time re-check (`pre_commit.rs` Phase 2-bis) against concurrent
+    // committers that touched this child table. This closes the
+    // cross-transaction FK TOCTOU race for the explicit-Snapshot path.
+    //
+    // Recorded at function ENTRY (before the index fast-path below) so it
+    // fires even when a supporting index short-circuits the scan and
+    // `list_stream_tx` (which records the Serializable `TableScan` predicate)
+    // is never reached — a case the existing Serializable path itself misses
+    // for a well-formed FK whose referenced field has a supporting index.
+    tx.record_ri_barrier(table.table_token());
+
     let interner = table.interner().get().await?;
 
     // F-28 Step 2: resolve the field id through the tx-layered interner

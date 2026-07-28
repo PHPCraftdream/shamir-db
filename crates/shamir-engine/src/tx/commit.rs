@@ -738,12 +738,21 @@ async fn commit_tx_lockfree(
     // control flow reaches this function, so no caller arrives here already
     // holding the mutex. `tokio::sync::Mutex` is non-reentrant, so this
     // invariant is load-bearing.
-    let _serializable_guard =
-        if tx.isolation == IsolationLevel::Serializable || !tx.cas_set.is_empty() {
-            Some(gate.commit_lock().await)
-        } else {
-            None
-        };
+    // F-40b (RI barrier): ALSO take the lock when `ri_barrier_tokens` is
+    // non-empty — a Snapshot tx that recorded an FK-child scan needs the
+    // SAME validate→publish window serialization Serializable already
+    // relies on, so the barrier's `predicate_conflicts_batch` scan sees a
+    // stable commit window (mirrors the Serializable branch's rationale
+    // above). A Snapshot tx with no barrier tokens is completely unaffected
+    // (the `is_empty` check short-circuits before any lock work).
+    let _serializable_guard = if tx.isolation == IsolationLevel::Serializable
+        || !tx.cas_set.is_empty()
+        || !tx.ri_barrier_tokens_is_empty()
+    {
+        Some(gate.commit_lock().await)
+    } else {
+        None
+    };
 
     // Phase 3 + 2 + 2-bis + WAL entry build (no lock needed).
     let validated = match pre_commit_locked_validate(&mut tx, repo, gate, uwl_guards).await {
