@@ -84,6 +84,46 @@ fn create_repo_full() {
     );
 }
 
+/// F-43 (#851) — `RepoEngine` typed variants must produce the same wire
+/// `engine` string as the equivalent raw `&str`, and both call styles must
+/// compile against the existing `.engine(impl Into<String>)` signature. The
+/// variant set here mirrors the real server engine-match arms in
+/// `handle_create_repo` (`in_memory`, `fjall`, `hybrid`).
+#[test]
+fn create_repo_typed_repo_engine_matches_raw_string() {
+    // Each typed variant must serialize to the SAME wire value as its raw
+    // string counterpart.
+    for (typed, raw) in [
+        (ddl::RepoEngine::InMemory, "in_memory"),
+        (ddl::RepoEngine::Fjall, "fjall"),
+        (ddl::RepoEngine::Hybrid, "hybrid"),
+    ] {
+        let typed_op = ddl::create_repo("r").engine(typed.clone()).build();
+        let raw_op = ddl::create_repo("r").engine(raw).build();
+        assert_eq!(
+            typed_op, raw_op,
+            "RepoEngine::{typed:?} should serialize identically to the raw string {raw:?}"
+        );
+        let j = roundtrip(&typed_op);
+        assert_eq!(j["engine"], raw, "wire engine mismatch for {typed:?}");
+    }
+
+    // The Other(...) escape hatch forwards its string verbatim.
+    let other_op = ddl::create_repo("r")
+        .engine(ddl::RepoEngine::Other("future_engine".to_string()))
+        .build();
+    let raw_future = ddl::create_repo("r").engine("future_engine").build();
+    assert_eq!(other_op, raw_future);
+    assert_eq!(roundtrip(&other_op)["engine"], "future_engine");
+
+    // And the default (no engine set) is still absent on the wire.
+    let none_op = ddl::create_repo("r").build();
+    assert!(
+        roundtrip(&none_op).get("engine").is_none(),
+        "engine must be absent when not set"
+    );
+}
+
 #[test]
 fn drop_repo_wire() {
     let op = ddl::drop_repo("temp").build();

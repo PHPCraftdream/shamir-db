@@ -149,6 +149,24 @@ impl ShamirAdminExecutor {
         let err_access =
             |e: shamir_types::access::AccessError| err_code("access_denied", e.to_string());
 
+        // F-43 (#851): the wire DTO exposes `path`, but the server ALWAYS
+        // computes the on-disk repo directory itself (`data_root/<db>/<repo>`,
+        // see the engine arms below). Silently discarding a client-supplied
+        // path is an API-honesty bug — a caller that sets `.path(...)` believes
+        // it chose the storage location while the server would use a different
+        // one and return success with no warning. Reject it loudly instead.
+        // (Path validation/allowlisting is a separate, larger feature with its
+        // own security review; this P1 task's scope is just to stop ignoring
+        // the field. `op.path == None`, the common case, is unaffected.)
+        if op.path.is_some() {
+            return Err(err_code(
+                "unsupported_field",
+                "CreateRepo.path is not supported: the server always resolves the storage \
+                 location internally (data_root/<db>/<repo>)"
+                    .to_string(),
+            ));
+        }
+
         validate_name_component(&self.db_name, "db_name")?;
         validate_name_component(&op.create_repo, "repo_name")?;
 

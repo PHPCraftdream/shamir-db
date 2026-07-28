@@ -695,3 +695,72 @@ async fn unsupported_engine_error_mentions_hybrid() {
         "unsupported-engine error should still mention in_memory/fjall, got: {err}"
     );
 }
+
+/// F-43 (#851) — `CreateRepo.path` must not be silently ignored. The server
+/// ALWAYS resolves the on-disk repo directory itself (`data_root/<db>/<repo>`),
+/// so a client that explicitly sets `.path(...)` must get a clear typed error
+/// rather than success-with-a-different-path. The repo must NOT be created.
+#[tokio::test]
+async fn create_repo_with_explicit_path_is_rejected_not_silently_ignored() {
+    let shamir = ShamirDb::init_memory().await.unwrap();
+    shamir.create_db("appdb").await;
+
+    let mut b = Batch::new();
+    b.id(1);
+    b.create_repo(
+        "cr",
+        ddl::create_repo("pathrepo").path("/somewhere/the/client/picked"),
+    );
+    let result = shamir.execute("appdb", &b.to_request_via_msgpack()).await;
+
+    let err = result.expect_err(
+        "CREATE REPO with an explicit .path(...) must be rejected, not silently applied",
+    );
+    assert_eq!(
+        err.code(),
+        Some("unsupported_field"),
+        "error should carry the 'unsupported_field' code, got: {err}"
+    );
+    let msg = err.to_string();
+    assert!(
+        msg.contains("path") && msg.contains("data_root"),
+        "error should mention 'path' and the server-resolved 'data_root' location, got: {msg}"
+    );
+
+    // And the repo must NOT have been created at all.
+    assert!(
+        !shamir
+            .get_db("appdb")
+            .expect("db exists")
+            .has_repo("pathrepo"),
+        "repo must not exist after a rejected path-supplied create"
+    );
+}
+
+/// F-43 (#851) — regression: the common case (no `.path(...)`) is completely
+/// unaffected — `CREATE REPO` still succeeds exactly as before.
+#[tokio::test]
+async fn create_repo_without_path_still_succeeds() {
+    let shamir = ShamirDb::init_memory().await.unwrap();
+    shamir.create_db("appdb").await;
+
+    let mut b = Batch::new();
+    b.id(1);
+    b.create_repo("cr", ddl::create_repo("goodrepo").engine("in_memory"));
+    let resp = shamir
+        .execute("appdb", &b.to_request_via_msgpack())
+        .await
+        .expect("CREATE REPO without .path(...) must still succeed");
+
+    assert_eq!(
+        resp.results["cr"].records[0].get_value_str("created_repo"),
+        Some("goodrepo")
+    );
+    assert!(
+        shamir
+            .get_db("appdb")
+            .expect("db exists")
+            .has_repo("goodrepo"),
+        "repo must exist after a successful no-path create"
+    );
+}
