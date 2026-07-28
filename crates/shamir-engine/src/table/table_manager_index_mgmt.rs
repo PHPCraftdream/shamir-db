@@ -437,28 +437,32 @@ impl TableManager {
     /// Create a regular index on specified paths.
     pub async fn create_index(&self, name: &str, paths: &[&str]) -> DbResult<()> {
         let index_def = self.build_index_definition(name, paths).await?;
+        // F-42 (#850): persist the interner's newly-touched ids BEFORE the
+        // index goes live — a persist failure must abort BEFORE publish, not
+        // after. `build_index_definition` already interned the index NAME and
+        // every field-path segment in-memory (`intern_string`/`intern_path` →
+        // `touch_ind`); the ONLY thing deferred to this point is the DURABLE
+        // flush of those already-assigned ids, so moving it ahead of
+        // `collect_all_current_records`/`create_index_from_records` is a pure
+        // ordering change with no functional side effect. Confirmed by reading
+        // the actual signatures: `create_index_from_records(index_def, records)`
+        // consumes the already-built `IndexDefinition` (whose `name_interned`
+        // u64 was set in-memory by `build_index_definition`) and a records Vec
+        // collected independently from `list_stream` — neither depends on the
+        // interner having been durably persisted. Pre-F-42 a persist failure
+        // here returned `Err` but left the just-registered index LIVE in
+        // `index_manager` — a live index whose interner ids may not survive a
+        // restart, the exact F-33 corruption class reopened at the failure
+        // path. Reordering means a persist failure aborts before any publish,
+        // so no rollback is needed.
+        self.interner.persist().await?;
         // Always use the seam: collect_all_current_records routes
         // attached→log / unattached→data_store, so it is correct for
         // both cases.
         let records = self.collect_all_current_records().await?;
         self.index_manager
             .create_index_from_records(index_def, records)
-            .await?;
-        // F-33 Step 5 (#839) fix: `build_index_definition` interns the index
-        // NAME and every field-path segment (`intern_string`/`intern_path`),
-        // but those `touch_ind` calls only mutate the in-process `Interner` —
-        // they are never durably chunked without an explicit `persist()`.
-        // Every OTHER index-creating path already does this immediately
-        // after registering (`create_sorted_index_with_include`,
-        // `table_manager_sorted_index.rs`); this one was the omission.
-        // Harmless/no-op on a plain durable repo (the interner is persisted
-        // again on the next write anyway), but on a hybrid repo (F-33) the
-        // interner mirror is the ONLY durable copy of the id<->name mapping
-        // — without this call, a restart's fresh interner silently
-        // reassigns the un-persisted id to whatever string is next
-        // interned, corrupting `IndexDefinition::name_interned` (and thus
-        // `DescribeTable`'s reported index name) without ever erroring.
-        self.interner.persist().await
+            .await
     }
 
     /// Create a unique index on specified paths.
@@ -498,6 +502,15 @@ impl TableManager {
         paths: &[&str],
     ) -> DbResult<()> {
         let index_def = self.build_index_definition(name, paths).await?;
+        // F-42 (#850) — see `create_index`'s matching comment: durably
+        // persist the index-name/field-path ids BEFORE registering the
+        // unique index. A persist failure aborts before publish, so no
+        // rollback is needed (nothing was published yet). Signature check:
+        // `create_unique_index_from_records(index_def, records)` consumes
+        // the already-built `IndexDefinition` and a records Vec collected
+        // independently from `list_stream` — neither depends on the
+        // interner having been durably persisted.
+        self.interner.persist().await?;
         // Always use the seam: collect_all_current_records routes
         // attached→log / unattached→data_store, so it is correct for
         // both cases. Collected UNDER the lock (held by caller) so no
@@ -505,12 +518,7 @@ impl TableManager {
         let records = self.collect_all_current_records().await?;
         self.index_manager
             .create_unique_index_from_records(index_def, records)
-            .await?;
-        // F-33 Step 5 (#839) fix — see `create_index`'s matching comment:
-        // durably persist the index-name/field-path ids the interner just
-        // touched, mirroring `create_sorted_index_with_include`'s existing
-        // persist-after-register call.
-        self.interner.persist().await
+            .await
     }
 
     /// Drop a regular index by name.

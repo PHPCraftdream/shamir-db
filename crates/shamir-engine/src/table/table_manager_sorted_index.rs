@@ -46,12 +46,48 @@ impl TableManager {
                 path_ids.push(id);
             }
         }
-        let def = SortedIndexDefinition::with_included(name_interned, path_ids, included_fields);
-        self.sorted_indexes.register(def).await?;
-        // Intern the included_fields paths so the covering projection is
-        // active immediately (before backfill).
-        self.sorted_indexes.intern_included_paths(interner);
+        // F-42 (#850): the covering-index `included_fields` segments must
+        // be interned in-memory BEFORE the durable persist call lands, so
+        // their ids are saved in the same chunk as the name + field-path
+        // ids. Pre-F-42, `intern_included_paths` ran AFTER register — its
+        // `touch_ind` side-effects landed AFTER the persist, so a persist
+        // failure (or a crash between persist and `intern_included_paths`)
+        // could leave the registered index's covering projection pointing
+        // at un-persisted ids. Building `included_fields_interned` inline
+        // here and constructing the def with `with_included_interned`
+        // pre-populates the transient cache the covering projection reads,
+        // so `intern_included_paths` is no longer needed at create time
+        // (its other call site in `TableManager::create` still rebuilds
+        // the cache for defs loaded from disk after restart).
+        let mut included_fields_interned: Vec<Vec<u64>> = Vec::with_capacity(included_fields.len());
+        for path_segs in &included_fields {
+            let mut seg_ids: Vec<u64> = Vec::with_capacity(path_segs.len());
+            for seg in path_segs {
+                let id = interner
+                    .touch_ind(seg.as_str())
+                    .map_err(|e| shamir_storage::error::DbError::Codec(e.to_string()))?
+                    .key()
+                    .id();
+                seg_ids.push(id);
+            }
+            included_fields_interned.push(seg_ids);
+        }
+        // F-42 (#850) — same fix class as `create_index`/
+        // `create_unique_index_locked`: persist the interner's newly-touched
+        // ids BEFORE `register` publishes the index. A persist failure
+        // aborts before publish, so no rollback is needed (nothing was
+        // registered yet). The subsequent `register` + backfill only need
+        // the fully-built `def` (whose ids are already in-memory) and the
+        // record stream — neither depends on the interner having been
+        // durably persisted.
         self.interner.persist().await?;
+        let def = SortedIndexDefinition::with_included_interned(
+            name_interned,
+            path_ids,
+            included_fields,
+            included_fields_interned,
+        );
+        self.sorted_indexes.register(def).await?;
 
         // Backfill: stream existing records and add each to the new
         // sorted index. Avoids materialising the whole table.
