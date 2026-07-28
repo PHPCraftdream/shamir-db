@@ -114,6 +114,16 @@ async fn lock_schema_rmw(
 // writer consulting `needs_write_barrier()` serializes on that same lock.
 // `lock_schema_rmw` (DDL-vs-DDL) stays as-is — these are two independent
 // serialization axes.
+//
+// F-48 (#859): the flag + lock alone are a check-then-act, not a drain — a
+// writer that read `needs_write_barrier() == false` a moment BEFORE the flag
+// went up proceeds lock-free through its whole validate→write→index sequence
+// with no further check. `SchemaActivationBarrierGuard::raise` therefore also
+// calls `TableManager::drain_writers()` after raising the flag (while still
+// holding `unique_write_lock`), genuinely waiting for any such in-flight
+// fast-path writer to exit before the count-proof proceeds. See
+// `shamir-engine::table::writer_drain_barrier` for the reusable drain
+// primitive (F-50 will wire the SAME call into `create_index_v2`).
 
 /// RAII guard that raises a table's `schema_activation_barrier` flag while
 /// held and clears it on drop — including every `?` early-return path inside
@@ -128,13 +138,30 @@ async fn lock_schema_rmw(
 /// declaration order: the barrier guard, declared AFTER the lock guard, drops
 /// FIRST), matching `create_index_v2`'s own clear-flag-then-release-lock
 /// sequence.
+///
+/// F-48 (#859): [`raise`](Self::raise) is `async` because it ALSO calls
+/// `TableManager::drain_writers()` after the flag store — the genuine drain
+/// that catches any fast-path writer that read `false` before the flag went
+/// up. The flag + lock alone were a check-then-act, not a drain; the drain
+/// closes that gap. Callers MUST `.await` the result.
 struct SchemaActivationBarrierGuard<'a> {
     table: &'a TableManager,
 }
 
 impl<'a> SchemaActivationBarrierGuard<'a> {
-    fn raise(table: &'a TableManager) -> Self {
+    /// Raise the flag (`Release`) and drain every in-flight fast-path writer
+    /// that read `needs_write_barrier() == false` before the flag went up.
+    /// The caller MUST already hold `unique_write_lock` (acquired by
+    /// [`begin_schema_activation_barrier`]). See the type-level doc for the
+    /// F-48 drain rationale.
+    async fn raise(table: &'a TableManager) -> Self {
         table.set_schema_activation_barrier(true);
+        // F-48 (#859): the genuine drain. After the flag's `Release` store and
+        // while the caller holds `unique_write_lock`, wait for any fast-path
+        // writer that already read `false` to finish its validate→write→index
+        // sequence. This closes the check-then-act gap the flag + lock alone
+        // leave open. Cheap (one `Acquire` load) when no writer is in flight.
+        table.drain_writers().await;
         Self { table }
     }
 }
@@ -505,9 +532,12 @@ impl ShamirAdminExecutor {
         // lock. All three locals are RAII — on EVERY exit path (success or any
         // `?` error below) the barrier flag clears first, then the lock
         // releases (reverse declaration drop order), matching `create_index_v2`.
+        //
+        // F-48 (#859): `raise` is `async` — it also drains in-flight
+        // fast-path writers (see `SchemaActivationBarrierGuard::raise`).
         let (_barrier_handle, _uwl_guard) =
             begin_schema_activation_barrier(&self.shamir, db, repo, table).await?;
-        let _barrier = SchemaActivationBarrierGuard::raise(&_barrier_handle);
+        let _barrier = SchemaActivationBarrierGuard::raise(&_barrier_handle).await;
 
         // F-17 (#810) — stamp the server-computed `keyset_safe` proof onto
         // each rule. Read the PREVIOUS rules from the catalogue so that
@@ -711,9 +741,12 @@ impl ShamirAdminExecutor {
         // count-based `keyset_safe` proof (below) and therefore the same
         // writer race. RAII: the flag clears and the lock releases on every
         // exit path (success or `?` error), reverse declaration drop order.
+        //
+        // F-48 (#859): `raise` is `async` — it also drains in-flight
+        // fast-path writers (see `SchemaActivationBarrierGuard::raise`).
         let (_barrier_handle, _uwl_guard) =
             begin_schema_activation_barrier(&self.shamir, db, repo, table).await?;
-        let _barrier = SchemaActivationBarrierGuard::raise(&_barrier_handle);
+        let _barrier = SchemaActivationBarrierGuard::raise(&_barrier_handle).await;
 
         // F-17 (#810) — stamp the server-computed `keyset_safe` proof. Only
         // the upserted rule (new path or type-changed) gets a fresh

@@ -28,6 +28,7 @@ mod table_manager_validators;
 mod tx_scan_overlay;
 mod write_exec;
 pub(crate) mod write_helpers;
+pub mod writer_drain_barrier;
 
 #[cfg(test)]
 pub mod tests;

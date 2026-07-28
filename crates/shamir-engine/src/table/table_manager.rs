@@ -78,6 +78,18 @@ pub struct TableManager {
     /// Set/cleared `Release` (under `unique_write_lock`) by the shamir-db DDL
     /// handler via [`set_schema_activation_barrier`](Self::set_schema_activation_barrier).
     pub(super) schema_activation_barrier: Arc<std::sync::atomic::AtomicBool>,
+    /// F-48 (#859, P0) — reusable writer-drain barrier. Fast-path writers
+    /// (those that read `needs_write_barrier() == false`) bump this counter
+    /// before their flag check and drop it after their full
+    /// validate→write→index sequence. A drainer (schema DDL today; index2
+    /// create in F-50) calls [`drain_writers`](Self::drain_writers) after
+    /// raising its intent flag + acquiring `unique_write_lock` to wait for
+    /// any in-flight fast-path writer that read `false` before the flag went
+    /// up — the check-then-act gap `unique_write_lock` + the flag alone
+    /// cannot close. Shared across clones via `Arc` (same rationale as the
+    /// sibling barrier flags). See [`writer_drain_barrier`] for the full
+    /// memory-model + reusability rationale.
+    pub(super) writer_drain: super::writer_drain_barrier::WriterDrainBarrier,
     pub(super) index2_registry: Arc<crate::index2::IndexRegistry>,
     pub(super) mvcc_store: Option<Arc<shamir_tx::MvccStore>>,
     /// Per-table validator bindings (S2). Lock-free reads via
@@ -174,6 +186,8 @@ impl Clone for TableManager {
             // F-37 — shared across clones so a schema-activation DDL in flight
             // on any clone forces writers on every clone onto the barrier.
             schema_activation_barrier: Arc::clone(&self.schema_activation_barrier),
+            // F-48 — shared across clones (Arc<AtomicUsize> inside).
+            writer_drain: self.writer_drain.clone(),
             index2_registry: Arc::clone(&self.index2_registry),
             mvcc_store: self.mvcc_store.clone(),
             validator_bindings: Arc::clone(&self.validator_bindings),
@@ -242,6 +256,7 @@ impl TableManager {
             unique_write_lock: Arc::new(tokio::sync::Mutex::new(())),
             index2_create_barrier: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             schema_activation_barrier: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            writer_drain: super::writer_drain_barrier::WriterDrainBarrier::new(),
             index2_registry: Arc::new(crate::index2::IndexRegistry::new()),
             mvcc_store: None,
             validator_bindings,
@@ -393,6 +408,7 @@ impl TableManager {
             unique_write_lock: Arc::new(tokio::sync::Mutex::new(())),
             index2_create_barrier: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             schema_activation_barrier: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            writer_drain: super::writer_drain_barrier::WriterDrainBarrier::new(),
             index2_registry: Arc::new(crate::index2::IndexRegistry::new()),
             mvcc_store: None,
             validator_bindings: Arc::new(arc_swap::ArcSwap::from_pointee(Vec::new())),
@@ -571,6 +587,25 @@ impl TableManager {
     pub fn set_schema_activation_barrier(&self, on: bool) {
         self.schema_activation_barrier
             .store(on, std::sync::atomic::Ordering::Release);
+    }
+
+    /// F-48 (#859, P0) — drain every in-flight fast-path writer before the
+    /// caller proceeds past a snapshot/proof point (the `keyset_safe`
+    /// count-proof for schema activation; the backfill snapshot for index2
+    /// create in F-50).
+    ///
+    /// The caller MUST have already (1) raised its intent flag
+    /// (`schema_activation_barrier` / `index2_create_barrier`) so NEW writers
+    /// take the slow (locked) path, and (2) hold `unique_write_lock` so
+    /// slow-path writers are blocked. Then this catches any writer that read
+    /// `false` before the flag went up and is still in its
+    /// validate→write→index sequence. Returns immediately (one `Acquire`
+    /// load) when no fast-path writer is active.
+    ///
+    /// See [`writer_drain_barrier`](crate::table::writer_drain_barrier) for
+    /// the full memory-model rationale and how F-50 reuses this same call.
+    pub async fn drain_writers(&self) {
+        self.writer_drain.drain().await;
     }
 
     /// Borrow the table's sorted-index manager — used by the planner

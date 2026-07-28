@@ -187,6 +187,130 @@ async fn without_barrier_flag_writer_takes_lock_free_path() {
 }
 
 // ============================================================================
+// F-48 (#859, P0) — the check-then-act DRAIN proof.
+//
+// The two tests above prove the barrier FLAG engages (a writer blocks once
+// the flag is already up). This test proves the DRAIN: a writer that read
+// `needs_write_barrier() == false` a moment BEFORE the DDL raised the flag,
+// and is still in its validate→write→index sequence, is genuinely waited for
+// — the DDL's count-proof does NOT proceed until that writer has completed.
+//
+// Without the drain (check-then-act): the writer reads false and proceeds
+// lock-free; the DDL raises the flag + takes the lock + reads count()==0
+// (the writer hasn't written yet); the writer then completes its write; the
+// DDL has stamped keyset_safe=true over a table whose row history was never
+// proven homogeneous. This test deterministically reproduces that exact
+// interleaving via a test-only pause seam (mirrors F-46/F-47) and proves the
+// F-48 drain closes it: post-fix the DDL's drain blocks until the writer
+// finishes, so the count-proof sees the in-flight writer's row.
+// ============================================================================
+
+#[tokio::test]
+async fn f48_drain_catches_writer_that_read_false_before_flag_went_up() {
+    let repo = make_repo();
+    repo.add_table(TableConfig::new("people"));
+    let tbl = repo.get_table("people").await.unwrap();
+    let name_field = key_id(&tbl, "name").await;
+
+    // Precondition: no barrier active → lock-free fast path.
+    assert!(
+        !tbl.needs_write_barrier(),
+        "precondition: barrier down → lock-free path"
+    );
+
+    // Install the F-48 test seam (mirrors F-46's
+    // `TEST_POST_VALIDATE_PRE_PUBLISH_HOOK` / F-47's
+    // `TEST_POST_GENCHECK_PRE_PUBLISH_HOOK`): one-shot `armed` CAS so only the
+    // FIRST writer to reach the seam parks; `reached` for busy-poll detection
+    // (no sleeps); `resume` for the release signal. nextest isolates this
+    // global per test process.
+    use crate::table::table_manager_crud::{
+        PostBarrierPreWriteHook, TEST_POST_BARRIER_PRE_WRITE_HOOK,
+    };
+    let hook = Arc::new(PostBarrierPreWriteHook {
+        reached: std::sync::atomic::AtomicUsize::new(0),
+        resume: Notify::new(),
+        armed: std::sync::atomic::AtomicBool::new(true),
+    });
+    TEST_POST_BARRIER_PRE_WRITE_HOOK
+        .set(Arc::clone(&hook))
+        .expect("hook installed once per test process");
+
+    // 1. Spawn the writer. It reads needs_write_barrier() == false, enters
+    //    the drain set (post-fix), and parks at the seam — BEFORE its write.
+    let tbl_w = tbl.clone();
+    let writer =
+        tokio::spawn(async move { tbl_w.insert(&record_with_str(name_field, "Bob")).await });
+
+    // Rendezvous: wait until the writer has actually parked at the seam
+    // (busy-poll `reached`, no sleeps — same handshake as F-46/F-47).
+    while hook.reached.load(std::sync::atomic::Ordering::SeqCst) == 0 {
+        tokio::task::yield_now().await;
+    }
+    // The writer has read false and is parked. It has NOT written.
+    assert_eq!(
+        tbl.count().await.unwrap(),
+        0,
+        "writer parked before its write — table must be empty"
+    );
+
+    // 2. The DDL raises the barrier + takes the lock + drains (post-fix) +
+    //    reads its count-proof. We run the DDL's critical section as a task
+    //    and receive the count result via a oneshot channel.
+    //
+    //    - UNFIXED code: `drain_writers()` exists but no CRUD site calls
+    //      `enter_writer()`, so the active counter is always 0 → drain returns
+    //      immediately → count reads 0 while the writer is still parked.
+    //    - FIXED code: the writer called `enter_writer()` before parking, so
+    //      the drain blocks here until we release the writer (step 3).
+    let tbl_d = tbl.clone();
+    let (proof_tx, proof_rx) = tokio::sync::oneshot::channel::<usize>();
+    let ddl = tokio::spawn(async move {
+        let _uwl = tbl_d.unique_write_lock().lock_owned().await;
+        let _barrier = SchemaBarrierFlag::raise(&tbl_d);
+        // F-48 drain: wait for in-flight fast-path writers.
+        tbl_d.drain_writers().await;
+        let count_at_proof = tbl_d.count().await.unwrap();
+        let _ = proof_tx.send(count_at_proof);
+    });
+
+    // Give the DDL enough time to acquire the lock, raise the flag, and
+    // (post-fix) enter the drain loop. On the unfixed code the DDL completes
+    // its count-proof in well under this window.
+    tokio::time::sleep(Duration::from_millis(80)).await;
+
+    // 3. Release the parked writer. It completes its data-store write +
+    //    record-counter bump + index updates, then exits the drain set
+    //    (post-fix: the `WriterDrainGuard` drops).
+    hook.resume.notify_one();
+    let bob = writer
+        .await
+        .unwrap()
+        .expect("insert must succeed once released");
+    assert!(tbl.get(bob).await.is_ok(), "row must be present");
+
+    // 4. The DDL finishes (on the fixed code, the drain returned after the
+    //    writer exited the drain set; on the unfixed code, it finished long
+    //    ago with count==0).
+    ddl.await.unwrap();
+    let count_at_proof = proof_rx.await.unwrap();
+
+    // 5. THE PROOF.
+    //    - UNFIXED (check-then-act): count_at_proof == 0 — the DDL proved the
+    //      table empty while a lock-free writer was still in flight, then the
+    //      writer landed → keyset_safe proof violated. FAIL here.
+    //    - FIXED (drain): count_at_proof == 1 — the drain waited for the
+    //      in-flight writer; the count-proof saw its row. PASS.
+    assert_eq!(
+        count_at_proof, 1,
+        "F-48 drain: the DDL's count-proof must observe the in-flight writer's \
+         row. Got {count_at_proof} = the check-then-act race (DDL proved \
+         count()==0 while a lock-free writer was parked mid-flight, then the \
+         writer landed — keyset_safe proof violated)."
+    );
+}
+
+// ============================================================================
 // RAII helper mirroring admin_schema's `SchemaActivationBarrierGuard`: raise the
 // flag on construction, clear on drop. Local to this test module so the test
 // drives the EXACT same set/clear discipline the production DDL uses.

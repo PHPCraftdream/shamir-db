@@ -8,6 +8,74 @@ use shamir_types::types::value::InnerValue;
 use super::table_manager::TableManager;
 use crate::index::index_definition::IndexDefinition;
 
+// ── F-48 (#859) test-only pause seam ────────────────────────────────────────
+//
+// Mirrors F-46's `TEST_POST_VALIDATE_PRE_PUBLISH_HOOK` (commit.rs, #857) and
+// F-47's `TEST_POST_GENCHECK_PRE_PUBLISH_HOOK` (fk_reverse_cache.rs, #858): a
+// `#[cfg(test)]` `OnceLock<Arc<Hook>>` global, zero cost when unset. The seam
+// fires in each non-tx writer method strictly AFTER `needs_write_barrier()`
+// is read (so the test knows which path the writer took) and BEFORE the
+// data-store write. A test installs the hook, spawns a writer, busy-polls
+// `reached`, then drives the DDL's barrier + drain + count-proof while the
+// writer is parked, then `resume`s it — deterministically reproducing the
+// check-then-act interleaving the review's P0-3 finding describes.
+
+/// Test-only pause/resume handshake installed via
+/// [`TEST_POST_BARRIER_PRE_WRITE_HOOK`]. `reached` lets the harness detect
+/// (via polling, no sleeps) that the writer under test has actually parked at
+/// the seam; `resume` is the release signal; `armed` makes the pause one-shot
+/// (CAS true→false) so only the FIRST writer to reach the seam parks — every
+/// later arrival passes through immediately. Shape mirrors
+/// `commit.rs::PostValidatePrePublishHook` (F-46) exactly.
+#[cfg(test)]
+#[derive(Debug)]
+pub(crate) struct PostBarrierPreWriteHook {
+    pub(crate) reached: std::sync::atomic::AtomicUsize,
+    pub(crate) resume: tokio::sync::Notify,
+    pub(crate) armed: std::sync::atomic::AtomicBool,
+}
+
+/// Test-only pause seam. Fires in the non-tx writer methods immediately AFTER
+/// `needs_write_barrier()` returns (so the writer has committed to the fast
+/// or slow path) and BEFORE the data-store write. See
+/// [`PostBarrierPreWriteHook`]'s doc for the exact rationale.
+///
+/// `nextest` runs each test in its own process, so this global cannot leak
+/// across test files. Uninstalled (`None`, the default for every other test)
+/// this is a single `OnceLock::get()` read with no lock, no allocation, no
+/// await point taken.
+#[cfg(test)]
+pub(crate) static TEST_POST_BARRIER_PRE_WRITE_HOOK: std::sync::OnceLock<
+    std::sync::Arc<PostBarrierPreWriteHook>,
+> = std::sync::OnceLock::new();
+
+/// Parks on [`TEST_POST_BARRIER_PRE_WRITE_HOOK`] if a test installed one;
+/// a true no-op otherwise.
+async fn fire_post_barrier_pre_write_test_hook() {
+    #[cfg(test)]
+    if let Some(hook) = TEST_POST_BARRIER_PRE_WRITE_HOOK.get() {
+        hook.reached
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        // One-shot: only the FIRST writer to reach this seam actually parks
+        // (CAS true→false). Every later arrival passes straight through — see
+        // `PostBarrierPreWriteHook::armed`'s doc for why this is
+        // load-bearing (the concurrent DDL-side writer or any other
+        // in-flight op must not deadlock here).
+        let should_pause = hook
+            .armed
+            .compare_exchange(
+                true,
+                false,
+                std::sync::atomic::Ordering::AcqRel,
+                std::sync::atomic::Ordering::Acquire,
+            )
+            .is_ok();
+        if should_pause {
+            hook.resume.notified().await;
+        }
+    }
+}
+
 impl TableManager {
     // ---- index2 event hooks (used by crud + replication) ----
 
@@ -86,11 +154,25 @@ impl TableManager {
         // #534 finding 1: `needs_write_barrier()` is also `true` while an
         // index2 `create_index_v2` is in flight, so this insert can't slip
         // into the backfill→register window and get lost by the new index.
-        let _guard = if self.needs_write_barrier() {
+        //
+        // F-48 (#859): bump the drain counter BEFORE reading the barrier flag
+        // so the flag's coherence chain carries happens-before to the DDL's
+        // drain load. If the flag is up (slow path), exit the drain set and
+        // take `unique_write_lock` instead — the lock serializes us, not the
+        // counter. See `writer_drain_barrier` for the full memory-model.
+        let drain_guard = self.writer_drain.enter_writer();
+        let needs_barrier = self.needs_write_barrier();
+        let _guard = if needs_barrier {
+            drop(drain_guard);
             Some(self.unique_write_lock.lock().await)
         } else {
             None
+            // drain_guard stays alive for the whole fast-path sequence.
         };
+
+        // F-48 test seam: parks strictly AFTER the flag read, BEFORE the
+        // write. No-op in every non-test build.
+        fire_post_barrier_pre_write_test_hook().await;
 
         // 1. Validate unique indexes BEFORE write
         self.index_manager.validate_unique_for_create(value).await?;
@@ -176,11 +258,21 @@ impl TableManager {
         // batch's unique validation + posting writes when a unique index
         // exists, matching the single-row path's atomicity). Without an index2
         // create in flight and without a unique index, this stays lock-free.
-        let _guard = if self.needs_write_barrier() {
+        //
+        // F-48 (#859): bump the drain counter BEFORE reading the barrier flag.
+        // See `writer_drain_barrier` for the memory-model rationale.
+        let drain_guard = self.writer_drain.enter_writer();
+        let needs_barrier = self.needs_write_barrier();
+        let _guard = if needs_barrier {
+            drop(drain_guard);
             Some(self.unique_write_lock.lock().await)
         } else {
             None
         };
+
+        // F-48 test seam: parks strictly AFTER the flag read, BEFORE the
+        // write. No-op in every non-test build.
+        fire_post_barrier_pre_write_test_hook().await;
 
         // 1. Validate unique indexes for every value first. Two
         //    layers of check: persisted state (via
@@ -319,11 +411,20 @@ impl TableManager {
         // sequence while an index2 create_index_v2 backfill is in flight, so the
         // new index's backfill and this delete's posting removal can't interleave
         // (the backfill could otherwise re-add a posting for a just-deleted row).
-        let _guard = if self.needs_write_barrier() {
+        //
+        // F-48 (#859): bump the drain counter BEFORE reading the barrier flag.
+        // See `writer_drain_barrier` for the memory-model rationale.
+        let drain_guard = self.writer_drain.enter_writer();
+        let needs_barrier = self.needs_write_barrier();
+        let _guard = if needs_barrier {
+            drop(drain_guard);
             Some(self.unique_write_lock.lock().await)
         } else {
             None
         };
+        // F-48 test seam: parks strictly AFTER the flag read, BEFORE the
+        // write. No-op in every non-test build.
+        fire_post_barrier_pre_write_test_hook().await;
         // Get old value before deletion for index cleanup
         let old_value = self.get(id).await.ok();
         // Route through MvccStore when attached so the old bytes are
@@ -386,11 +487,21 @@ impl TableManager {
     ) -> DbResult<(bool, u64)> {
         // #534 finding 1: also lock while an index2 create_index_v2 backfill
         // is in flight, so a concurrent update isn't lost by the new index.
-        let _guard = if self.needs_write_barrier() {
+        //
+        // F-48 (#859): bump the drain counter BEFORE reading the barrier flag.
+        // See `writer_drain_barrier` for the memory-model rationale.
+        let drain_guard = self.writer_drain.enter_writer();
+        let needs_barrier = self.needs_write_barrier();
+        let _guard = if needs_barrier {
+            drop(drain_guard);
             Some(self.unique_write_lock.lock().await)
         } else {
             None
         };
+
+        // F-48 test seam: parks strictly AFTER the flag read, BEFORE the
+        // write. No-op in every non-test build.
+        fire_post_barrier_pre_write_test_hook().await;
 
         // Get old value before update for index maintenance
         let old_value = self.get(id).await.ok();
