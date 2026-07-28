@@ -13,24 +13,28 @@
 //!
 //! ## Design
 //!
-//! - **Storage**: `ArcSwap<Option<CacheState>>` (RCU) — this is a
-//!   read-heavy, rarely-invalidated snapshot, matching the workspace's
-//!   `ArcSwap` convention for exactly this access pattern (see
-//!   `TableManager::validator_bindings`).
-//! - **Population**: cache-aside / lazy. A cache miss (the state is `None`,
-//!   i.e. never built or just invalidated) triggers an O(tables) scan via
-//!   the caller-supplied discovery closure, and the result is stored for
-//!   every subsequent hit until the next invalidation. F-36 made this
-//!   genuinely "exactly one scan per miss" under concurrency: a
-//!   single-flight `build_lock` serializes concurrent misses (so the second
-//!   one's post-lock re-check finds the first's result already warm), and a
-//!   generation counter (bumped in `invalidate`) gates the publish — a scan
-//!   that raced a concurrent DDL invalidation is dropped and rebuilt rather
-//!   than publishing a stale snapshot. See
-//!   [`FkReverseCache::get_or_build_by_parent`] for the (documented) residual
-//!   window.
-//! - **Invalidation**: whole-repo clear (`store(None)`), not a surgical
-//!   single-entry update. DDL (schema mutation, table create/drop) is rare;
+//! - **Storage**: `ArcSwap<VersionedState>` (RCU) — this is a read-heavy,
+//!   rarely-invalidated snapshot, matching the workspace's `ArcSwap`
+//!   convention for exactly this access pattern (see
+//!   `TableManager::validator_bindings`). F-47 (#858) merged the generation
+//!   counter and the cached indices into ONE `VersionedState` behind this
+//!   single `ArcSwap`, so a generation-check-then-publish is a single atomic
+//!   pointer-identity CAS, not two independent operations on two separate
+//!   atomics.
+//! - **Population**: cache-aside / lazy. A cache miss (the state's `cache` is
+//!   `None`, i.e. never built or just invalidated) triggers an O(tables)
+//!   scan via the caller-supplied discovery closure, and the result is
+//!   stored for every subsequent hit until the next invalidation. F-36 made
+//!   this genuinely "exactly one scan per miss" under concurrency via a
+//!   single-flight `build_lock` (serializing concurrent misses so the
+//!   second's post-lock re-check finds the first's result already warm) and
+//!   a generation-gated publish; F-47 closed the residual publish-race that
+//!   gate left open by replacing the two-atomic generation-then-store with
+//!   one atomic `ArcSwap::compare_and_swap` — see
+//!   [`FkReverseCache::get_or_build_by_parent`].
+//! - **Invalidation**: whole-repo clear (a single `ArcSwap::rcu` publishing a
+//!   bumped generation with a cleared cache), not a surgical single-entry
+//!   update. DDL (schema mutation, table create/drop) is rare;
 //!   deletes/cascades are comparatively frequent, so paying one full rebuild
 //!   per DDL mutation (instead of one per delete) is the right tradeoff.
 //! - **Two lookups, one build**: [`ReverseFkEntry`] rows are collected ONCE
@@ -41,7 +45,7 @@
 //!   which F-28 Step 5's Serializable-upgrade decision will need for its
 //!   `require_footprint_for` wiring). No second independent scan.
 
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 
 use arc_swap::ArcSwap;
 use shamir_query_types::admin::FkAction;
@@ -49,6 +53,68 @@ use tokio::sync::Mutex;
 
 use crate::query::batch::TableResolver;
 use crate::query::TableRef;
+
+/// Test-only pause/resume handshake, installed via
+/// [`TEST_POST_GENCHECK_PRE_PUBLISH_HOOK`]. Shape mirrors
+/// `commit.rs`'s `PostValidatePrePublishHook` (F-46, #857): `reached` lets
+/// the harness thread detect (via polling, no sleeps) that a build has
+/// actually parked at the seam; `resume` is the release signal the harness
+/// fires once a concurrent `invalidate()` has completed; `armed` makes the
+/// pause one-shot (CAS true→false) so only the FIRST caller to reach the
+/// seam actually parks — every later arrival (e.g. a retry after a CAS
+/// loss) passes straight through.
+#[cfg(test)]
+#[derive(Debug)]
+pub(crate) struct PostGenCheckPrePublishHook {
+    pub(crate) reached: std::sync::atomic::AtomicUsize,
+    pub(crate) resume: tokio::sync::Notify,
+    pub(crate) armed: std::sync::atomic::AtomicBool,
+}
+
+/// Test-only pause seam: fires in [`FkReverseCache::get_or_build_by_parent`]
+/// immediately AFTER the O(tables) scan (`build().await`) returns and BEFORE
+/// [`FkReverseCache::try_publish`]'s CAS attempt.
+///
+/// F-47 (#858): this is the exact program point the F-36 residual-window doc
+/// named — a concurrent `invalidate()` that completes strictly inside this
+/// window used to still be over-published by an unconditional `store`. This
+/// hook lets a test drive a concurrent `invalidate()` to completion at
+/// EXACTLY this point (deterministically, no sleeps) to prove: (a) on the
+/// pre-fix code, the stale scan result got published anyway; (b) on the
+/// fixed code, the pointer-identity CAS observes the concurrent publish and
+/// refuses to overwrite it.
+///
+/// `nextest` runs each test in its own process, so this global cannot leak
+/// across test files. Uninstalled (the default for every test that doesn't
+/// use it) this is a single `OnceLock::get()` read with no lock, no
+/// allocation, no await point taken.
+#[cfg(test)]
+pub(crate) static TEST_POST_GENCHECK_PRE_PUBLISH_HOOK: std::sync::OnceLock<
+    std::sync::Arc<PostGenCheckPrePublishHook>,
+> = std::sync::OnceLock::new();
+
+/// Parks on [`TEST_POST_GENCHECK_PRE_PUBLISH_HOOK`] if a test installed one;
+/// a true no-op otherwise. See that static's doc for the exact program point
+/// and rationale.
+async fn fire_post_gencheck_pre_publish_test_hook() {
+    #[cfg(test)]
+    if let Some(hook) = TEST_POST_GENCHECK_PRE_PUBLISH_HOOK.get() {
+        hook.reached
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let should_pause = hook
+            .armed
+            .compare_exchange(
+                true,
+                false,
+                std::sync::atomic::Ordering::AcqRel,
+                std::sync::atomic::Ordering::Acquire,
+            )
+            .is_ok();
+        if should_pause {
+            hook.resume.notified().await;
+        }
+    }
+}
 
 /// A single reverse-FK reference: a child table + child field that
 /// references some parent table with the given `on_delete`/`on_update`
@@ -97,12 +163,30 @@ type ParentIndex = shamir_collections::TFxMap<String, Vec<ReverseFkEntry>>;
 /// The O(1) "is table X an FK child" role flag F-28 Step 5 needs.
 type ChildIndex = shamir_collections::TFxMap<String, shamir_collections::TFxSet<String>>;
 
-/// One repo's cached reverse-FK state. Absent (`state` holds `None`) means
+/// One repo's cached reverse-FK state. Absent (`cache` holds `None`) means
 /// "not built (yet), or invalidated — the next lookup must rebuild via the
 /// O(tables) scan".
 struct CacheState {
     by_parent: ParentIndex,
     by_child: ChildIndex,
+}
+
+/// F-47 (#858): `generation` and `cache` merged into ONE value behind ONE
+/// `ArcSwap`, so a generation-check-then-publish is a single atomic
+/// compare-and-swap on `Arc` pointer identity rather than two independent
+/// operations on two separate atomics racing each other. See
+/// [`FkReverseCache`] and [`FkReverseCache::get_or_build_by_parent`] for the
+/// F-36 race this closes.
+struct VersionedState {
+    /// Monotonically increasing generation, bumped every time
+    /// [`invalidate`](FkReverseCache::invalidate) publishes a new (cleared)
+    /// state. Kept (rather than relying purely on pointer identity) so
+    /// `get_or_build_by_parent`'s doc/log-friendly reasoning about "did a
+    /// concurrent invalidate happen" stays readable; the actual correctness
+    /// guarantee comes from `ArcSwap::compare_and_swap`'s pointer-identity
+    /// check, not from comparing this number.
+    generation: u64,
+    cache: Option<CacheState>,
 }
 
 /// Per-repo cache of the reverse-FK map, lazily populated (cache-aside) and
@@ -114,15 +198,12 @@ struct CacheState {
 /// repo, cloned (Arc-shared) across every handle to that repo — same
 /// pattern as `per_table_mvcc` / `token_names`.
 pub struct FkReverseCache {
-    state: ArcSwap<Option<CacheState>>,
-    /// Monotonically increasing generation counter, bumped in
-    /// [`invalidate`](Self::invalidate) alongside the `state` clear. The
-    /// build path in [`get_or_build_by_parent`](Self::get_or_build_by_parent)
-    /// captures this BEFORE its O(tables) scan and refuses to publish the
-    /// scan's result if a concurrent `invalidate` bumped it in the meantime
-    /// — closing the F-36 cache-aside invalidate-vs-build race where a scan
-    /// that started before a DDL could publish a stale snapshot AFTER it.
-    generation: AtomicU64,
+    /// F-47 (#858): generation + cache merged into ONE `ArcSwap<VersionedState>`
+    /// (see that type's doc) so [`invalidate`](Self::invalidate) and the
+    /// build path's publish in
+    /// [`get_or_build_by_parent`](Self::get_or_build_by_parent) are each a
+    /// SINGLE atomic operation instead of two racing ones.
+    state: ArcSwap<VersionedState>,
     /// Single-flight guard serializing the build/populate path of
     /// [`get_or_build_by_parent`](Self::get_or_build_by_parent). Sanctioned
     /// async-mutex exception (see `CLAUDE.md`): this is a low-frequency
@@ -143,8 +224,10 @@ impl Default for FkReverseCache {
 impl FkReverseCache {
     pub fn new() -> Self {
         Self {
-            state: ArcSwap::from_pointee(None),
-            generation: AtomicU64::new(0),
+            state: ArcSwap::from_pointee(VersionedState {
+                generation: 0,
+                cache: None,
+            }),
             build_lock: Mutex::new(()),
         }
     }
@@ -159,16 +242,21 @@ impl FkReverseCache {
     /// The next call to [`get_or_build_by_parent`](Self::get_or_build_by_parent)
     /// after this pays one more O(tables) scan and repopulates both indices.
     pub fn invalidate(&self) {
-        // Bump the generation FIRST, then clear the snapshot. A concurrent
-        // build (holding `build_lock`, mid-scan) captured the generation
-        // before its scan began and re-reads it after; this bump makes that
-        // re-read observe the change so the build refuses to publish its
-        // (now-stale, pre-DDL) result and rebuilds against the current
-        // (post-DDL) state instead. See `get_or_build_by_parent` for the
-        // residual window this leaves (a single atomic CAS across BOTH
-        // `generation` and `state` isn't expressible here).
-        self.generation.fetch_add(1, Ordering::AcqRel);
-        self.state.store(std::sync::Arc::new(None));
+        // F-47 (#858): a single `ArcSwap::rcu` publishes the bumped
+        // generation AND the cleared cache as ONE new `Arc<VersionedState>`
+        // in one atomic operation — no separate "bump generation, then
+        // clear state" two-step, so there is no window between them for a
+        // concurrent builder to straddle. `rcu`'s retry loop (re-running the
+        // closure against whatever is CURRENTLY stored if another writer won
+        // first) also makes back-to-back concurrent `invalidate` calls
+        // themselves race-free: each sees the other's generation bump rather
+        // than clobbering it.
+        self.state.rcu(|old| {
+            Arc::new(VersionedState {
+                generation: old.generation + 1,
+                cache: None,
+            })
+        });
     }
 
     /// Cache-aside lookup: return the cached reverse-FK entries for
@@ -183,36 +271,40 @@ impl FkReverseCache {
     /// a DIFFERENT parent table in the same repo also hits the cache instead
     /// of triggering its own rebuild.
     ///
-    /// # F-36 — generation-safe, single-flight rebuild
+    /// # F-36 — single-flight rebuild; F-47 (#858) — atomic versioned publish
     ///
     /// Fast path: a cheap `ArcSwap::load` outside any lock serves every
     /// warm-cache reader. On a miss, [`build_lock`](Self::new) serializes
     /// the build path so two concurrent misses don't each run their own
     /// independent O(tables) scan (the second's post-acquire re-check finds
-    /// the first's already-warm result). Inside the lock, the generation
-    /// captured BEFORE the scan is re-checked AFTER it, and the result is
-    /// published ONLY if no concurrent [`invalidate`](Self::invalidate)
-    /// bumped the generation during the scan; on a mismatch the scan ran
-    /// against stale (pre-DDL) schema, so it's dropped and rebuilt against
-    /// the current generation — still under the same lock, never returning a
-    /// stale-or-empty answer for this call.
+    /// the first's already-warm result).
     ///
-    /// `build` is `Fn` (not `FnOnce`) precisely so that rare
-    /// generation-mismatch retry can call it again.
+    /// Inside the lock, the publish is a SINGLE atomic operation: the exact
+    /// `Arc<VersionedState>` in effect is captured BEFORE the scan, and after
+    /// the scan the result is published via `ArcSwap::compare_and_swap`
+    /// against that SAME captured `Arc` (pointer identity, not a number
+    /// comparison). The CAS can only succeed if nothing — no concurrent
+    /// [`invalidate`](Self::invalidate), no other builder — replaced the
+    /// state since it was captured. F-36's original version of this method
+    /// captured a plain `u64` generation and, after the scan, compared it
+    /// against a FRESH `generation.load()` before a SEPARATE `state.store`
+    /// — two independent operations on two independent atomics, leaving a
+    /// window where a concurrent `invalidate`'s bump-then-clear could land
+    /// between the compare and the store and get overwritten by a stale
+    /// publish. F-47 closes that window by merging the generation and the
+    /// cached indices into ONE `VersionedState` behind ONE `ArcSwap`, making
+    /// the compare-then-publish a single atomic CAS instead of two racing
+    /// operations.
     ///
-    /// ## Residual window (documented, not closed)
+    /// A CAS loss means some other writer (an `invalidate`, or in principle
+    /// another concurrent builder) already published a newer state; the scan
+    /// result is dropped and the whole build retries against that new state,
+    /// still holding `build_lock` — this never returns a stale-or-empty
+    /// answer, only once a genuinely uncontested publish (or an existing warm
+    /// hit) has happened.
     ///
-    /// The post-scan generation compare and `populate`'s `ArcSwap::store`
-    /// are two separate operations on two separate atomics, so a single
-    /// atomic CAS across both isn't expressible. A concurrent `invalidate`
-    /// whose `fetch_add` lands AFTER the post-scan generation load but whose
-    /// `state.store(None)` lands BEFORE `populate`'s `store(Some)` can still
-    /// be over-published by our subsequent `store`. This window contains no
-    /// `.await` and no allocations beyond `populate`'s own index build, so
-    /// it is far narrower than the pre-F-36 unconditional publish; it is
-    /// bounded by the NEXT `invalidate` (the very next DDL clears it), and
-    /// the single-flight `build_lock` guarantees the NEXT miss re-checks the
-    /// generation under the lock and rebuilds fresh.
+    /// `build` is `Fn` (not `FnOnce`) precisely so that a rare CAS-loss retry
+    /// can call it again.
     pub async fn get_or_build_by_parent<F, Fut, E>(
         &self,
         parent_table: &str,
@@ -242,26 +334,24 @@ impl FkReverseCache {
             return Ok(hit);
         }
 
-        // Build loop: capture the generation, run the scan, and publish ONLY
-        // if no `invalidate` bumped the generation during the scan. On a
-        // mismatch, drop the stale result and rebuild against the current
-        // generation, still holding `build_lock`. We never return a
-        // stale-or-empty answer here — only return once a
-        // generation-matched populate has actually happened.
+        // Build loop: capture the CURRENT Arc<VersionedState> (not just its
+        // generation number), run the scan, and publish via a single
+        // pointer-identity CAS against that exact captured Arc. On a CAS
+        // loss, drop the stale result and rebuild against the current
+        // state, still holding `build_lock`.
         loop {
-            let gen_at_start = self.generation.load(Ordering::Acquire);
+            let captured = self.state.load_full();
 
             let all_entries = build().await?;
 
-            // Re-read the generation as close to the publish as possible. If
-            // it's unchanged, no `invalidate` raced the scan — publish. If it
-            // moved, a concurrent DDL invalidated mid-scan; loop and rebuild
-            // against the new generation (see the doc's residual-window
-            // note for the compare-vs-store ordering this can't fully close).
-            if self.generation.load(Ordering::Acquire) == gen_at_start {
-                self.populate(all_entries);
+            fire_post_gencheck_pre_publish_test_hook().await;
+
+            if self.try_publish(&captured, all_entries) {
                 return Ok(self.lookup_by_parent(parent_table).unwrap_or_default());
             }
+            // CAS lost: some other writer (an `invalidate`, or in principle
+            // another builder) already published a newer state since we
+            // captured `captured`. Loop and rebuild against the new state.
         }
     }
 
@@ -276,7 +366,7 @@ impl FkReverseCache {
     /// `implicit_tx_isolation_for_fk_parent`, which does exactly that).
     pub fn is_fk_parent_with_delete_action(&self, table: &str) -> bool {
         let guard = self.state.load();
-        match guard.as_ref() {
+        match guard.cache.as_ref() {
             Some(cache) => cache
                 .by_parent
                 .get(table)
@@ -298,7 +388,7 @@ impl FkReverseCache {
     /// which warms the cache before peeking.
     pub fn is_fk_parent_with_update_action(&self, table: &str) -> bool {
         let guard = self.state.load();
-        match guard.as_ref() {
+        match guard.cache.as_ref() {
             Some(cache) => cache
                 .by_parent
                 .get(table)
@@ -317,7 +407,7 @@ impl FkReverseCache {
     /// the cache before peeking.
     pub fn is_fk_child(&self, table: &str) -> bool {
         let guard = self.state.load();
-        match guard.as_ref() {
+        match guard.cache.as_ref() {
             Some(cache) => cache
                 .by_child
                 .get(table)
@@ -328,7 +418,7 @@ impl FkReverseCache {
 
     fn lookup_by_parent(&self, parent_table: &str) -> Option<Vec<ReverseFkEntry>> {
         let guard = self.state.load();
-        guard.as_ref().as_ref().map(|cache| {
+        guard.cache.as_ref().map(|cache| {
             cache
                 .by_parent
                 .get(parent_table)
@@ -338,9 +428,22 @@ impl FkReverseCache {
     }
 
     /// Build both indices from a flat, parent-tagged list of ALL reverse-FK
-    /// entries in the repo and publish them atomically via one
-    /// `ArcSwap::store`.
-    fn populate(&self, all_entries: Vec<TaggedReverseFkEntry>) {
+    /// entries in the repo and attempt to publish them via a SINGLE
+    /// pointer-identity `ArcSwap::compare_and_swap` against `captured` — the
+    /// exact `Arc<VersionedState>` the caller observed before running the
+    /// scan `all_entries` came from.
+    ///
+    /// Returns `true` if the CAS won (our result is now published — no
+    /// concurrent `invalidate`/builder replaced `captured` since it was
+    /// read), `false` if it lost (some other writer already published a
+    /// newer state; the caller must drop this result and retry against the
+    /// new one). This is the F-47 (#858) fix: generation-check-then-publish
+    /// collapsed into one atomic CAS instead of a separate load + store.
+    fn try_publish(
+        &self,
+        captured: &Arc<VersionedState>,
+        all_entries: Vec<TaggedReverseFkEntry>,
+    ) -> bool {
         let mut by_parent: ParentIndex = shamir_collections::TFxMap::default();
         let mut by_child: ChildIndex = shamir_collections::TFxMap::default();
 
@@ -355,10 +458,17 @@ impl FkReverseCache {
                 .push(tagged.entry);
         }
 
-        self.state.store(std::sync::Arc::new(Some(CacheState {
-            by_parent,
-            by_child,
-        })));
+        let new_state = Arc::new(VersionedState {
+            generation: captured.generation + 1,
+            cache: Some(CacheState {
+                by_parent,
+                by_child,
+            }),
+        });
+
+        let previous =
+            arc_swap::Guard::into_inner(self.state.compare_and_swap(captured, new_state));
+        Arc::ptr_eq(&previous, captured)
     }
 }
 

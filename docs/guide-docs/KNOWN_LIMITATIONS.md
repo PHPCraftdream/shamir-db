@@ -155,9 +155,12 @@ artifact).
       after it and publish a stale snapshot (this cache directly gates
       isolation upgrades, so a stale snapshot could silently reopen the
       dangling-reference race); the cache is now generation-safe
-      (single-flight `build_lock` + compare-and-publish), with a narrow,
-      documented residual window (the post-scan generation compare and the
-      publish are two separate atomics, not one CAS).
+      (single-flight `build_lock` + compare-and-publish). F-47 (#858) closed
+      the narrow residual window this originally left open (the post-scan
+      generation compare and the publish were two separate atomics, not one
+      CAS) by merging the generation and the cached indices into a single
+      `ArcSwap<VersionedState>`, so the publish is now one atomic
+      pointer-identity `compare_and_swap`.
     - **Residual scope.** This closes the race for the IMPLICIT
       (autocommit) delete/update path, and (F-40, #848, commit
       `5679edfa`) the two hooks that gate it

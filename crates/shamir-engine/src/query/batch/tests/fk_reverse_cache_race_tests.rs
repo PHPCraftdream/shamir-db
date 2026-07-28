@@ -36,6 +36,24 @@
 //!    that the generation logic doesn't leave the cache stuck cold or stale:
 //!    `invalidate()` followed by a single `get_or_build_by_parent` returns the
 //!    fresh post-invalidate data, not the pre-invalidate snapshot.
+//! 4. **`concurrent_invalidate_strictly_between_gencheck_and_publish_never_over_publishes`**
+//!    (F-47, #858) — the F-36 RESIDUAL window itself, restated by the
+//!    2026-07-28 readonly review's §3 P0-2: test 1 above pauses the build
+//!    mid-SCAN (before the generation is even re-checked), which the OLD
+//!    generation-then-store code already handled correctly. This test uses
+//!    `fk_reverse_cache.rs`'s `TEST_POST_GENCHECK_PRE_PUBLISH_HOOK` to pause
+//!    AFTER the scan/gen-check has already passed and BEFORE the publish
+//!    itself — the exact gap the module's own doc named "documented, not
+//!    closed" — and fires a concurrent `invalidate()` to completion strictly
+//!    inside that gap. On the pre-F-47 code (`generation.load() ==
+//!    gen_at_start` then a separate unconditional `populate`/`store`), the
+//!    concurrent `invalidate()` change is invisible to the publish and the
+//!    stale scan result overwrites the fresh post-invalidate `None` — the
+//!    call returns STALE data and the cache is stuck serving it. On the
+//!    fixed (F-47) code, the publish is a single pointer-identity CAS against
+//!    the captured `Arc`; since `invalidate()` already replaced that `Arc`
+//!    by the time the CAS runs, the CAS loses, the stale result is dropped,
+//!    and the build retries against the fresh state.
 
 use std::convert::Infallible;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -44,6 +62,9 @@ use std::sync::Arc;
 use shamir_query_types::admin::FkAction;
 use tokio::sync::Notify;
 
+use crate::repo::fk_reverse_cache::{
+    PostGenCheckPrePublishHook, TEST_POST_GENCHECK_PRE_PUBLISH_HOOK,
+};
 use crate::repo::{FkReverseCache, ReverseFkEntry, TaggedReverseFkEntry};
 
 /// Build a `ReverseFkEntry` whose `child_table` is `child` (everything else
@@ -326,4 +347,147 @@ async fn invalidate_then_single_get_returns_fresh_data() {
          post-invalidate data, not the stale pre-invalidate snapshot"
     );
     assert_ne!(second, first);
+}
+
+// ============================================================================
+// 4. F-47 (#858) — the F-36 RESIDUAL window itself: a concurrent invalidate()
+//    that completes STRICTLY BETWEEN the post-scan generation re-check and the
+//    publish must never be over-published. This is the one interleaving test 1
+//    (above) does NOT cover: that test's `resume` gate pauses the build INSIDE
+//    the scan, before `get_or_build_by_parent` has even reached its
+//    generation-compare — a window the OLD (F-36) code already closed
+//    correctly. This test instead pauses AFTER the scan returns and AFTER the
+//    (pre-F-47) generation compare would have already passed, using
+//    `fk_reverse_cache.rs`'s `TEST_POST_GENCHECK_PRE_PUBLISH_HOOK` — the exact
+//    program point named in the module's own "Residual window" doc.
+//
+// Determinism: the build closure returns immediately (no pause of its own).
+// The seam INSIDE `get_or_build_by_parent` (fired right after `build().await`
+// returns, right before the publish attempt) is what parks — installed via
+// the hook below. The harness busy-polls `reached` (no sleeps) until the
+// build has arrived at that seam, fires a concurrent `invalidate()` (which
+// itself completes synchronously — `ArcSwap::rcu` returns once its own CAS
+// has won), THEN releases the parked build. `invalidate()` strictly
+// happens-before the release, and the release strictly happens-before the
+// paused build resumes toward its publish attempt — so the interleaving is
+// exactly "scan done, gen-check-equivalent already passed, THEN a concurrent
+// invalidate completes, THEN the publish attempt runs" — the precise gap the
+// module's own doc names.
+// ============================================================================
+
+#[tokio::test]
+async fn concurrent_invalidate_strictly_between_gencheck_and_publish_never_over_publishes() {
+    let cache = Arc::new(FkReverseCache::new());
+    let build_calls = Arc::new(AtomicUsize::new(0));
+
+    // Install the pause seam BEFORE the first get_or_build_by_parent call.
+    // Every arrival at the seam bumps `reached` and (one-shot, via `armed`)
+    // the FIRST arrival parks; the retry's second arrival (after a CAS loss)
+    // passes straight through.
+    let hook = Arc::new(PostGenCheckPrePublishHook {
+        reached: AtomicUsize::new(0),
+        resume: Notify::new(),
+        armed: std::sync::atomic::AtomicBool::new(true),
+    });
+    TEST_POST_GENCHECK_PRE_PUBLISH_HOOK
+        .set(Arc::clone(&hook))
+        .expect("hook must not already be installed in this test process");
+
+    // Build closure: invocation 1 returns "old schema" (pre-invalidate) data;
+    // invocation 2+ returns "new schema" (post-invalidate) data — mirrors
+    // test 1's `versioned_entry`/counter pattern so a retry's publish is
+    // distinguishable from the rejected first attempt's. Neither invocation
+    // pauses on its own — the pause under test lives INSIDE
+    // get_or_build_by_parent (the hook above), strictly AFTER this closure
+    // returns and BEFORE the publish attempt.
+    let build = {
+        let build_calls = Arc::clone(&build_calls);
+        move || {
+            let build_calls = Arc::clone(&build_calls);
+            async move {
+                let n = build_calls.fetch_add(1, Ordering::SeqCst);
+                if n == 0 {
+                    Ok::<_, Infallible>(vec![tagged(old_entry())])
+                } else {
+                    Ok::<_, Infallible>(vec![tagged(new_entry())])
+                }
+            }
+        }
+    };
+
+    let cache_for_task = Arc::clone(&cache);
+    let handle = tokio::spawn(async move {
+        cache_for_task
+            .get_or_build_by_parent("parent", build)
+            .await
+            .unwrap()
+    });
+
+    // Wait until the build has reached the post-scan/pre-publish seam and
+    // actually parked there (invocation 1, "old schema", has already
+    // returned).
+    while hook.reached.load(Ordering::SeqCst) < 1 {
+        tokio::task::yield_now().await;
+    }
+
+    // Fire a concurrent invalidate() strictly WHILE the build is parked at
+    // the post-scan/pre-publish seam — i.e. AFTER any pre-F-47
+    // generation-compare would already have passed, but BEFORE the publish
+    // itself. `invalidate()` runs to full completion (its own `rcu` resolves
+    // synchronously) before we release the paused build below.
+    cache.invalidate();
+
+    // Release the paused build. It will now attempt to publish its STALE
+    // (invocation-1, pre-invalidate) scan result.
+    hook.resume.notify_one();
+
+    let published = handle.await.unwrap();
+
+    // The stale (invocation-1) publish attempt must have been rejected
+    // (F-47: pointer-identity CAS against its captured pre-scan Arc, which
+    // invalidate() already replaced) and the build must have retried
+    // (invocation 2, "new schema") and published THAT instead. On the
+    // pre-F-47 code (two-atomic generation-then-store, no CAS), the
+    // generation compare had ALREADY passed before this seam even fires, so
+    // the stale invocation-1 result gets published unconditionally here —
+    // this assertion is what catches that.
+    assert_eq!(
+        published,
+        vec![new_entry()],
+        "a build whose publish raced a concurrent invalidate() completing \
+         strictly between its post-scan check and its own publish must NEVER \
+         over-publish the stale pre-invalidate snapshot — must drop it and \
+         retry against the fresh post-invalidate state instead"
+    );
+    assert_eq!(
+        build_calls.load(Ordering::SeqCst),
+        2,
+        "stale build rejected by the CAS + exactly one fresh retry"
+    );
+
+    // The NEXT call must serve the fresh snapshot from the WARM cache (no
+    // further rebuild) — confirms the cache isn't stuck cold or re-scanning.
+    let calls_before_next = build_calls.load(Ordering::SeqCst);
+    let next = cache
+        .get_or_build_by_parent("parent", {
+            let build_calls = Arc::clone(&build_calls);
+            move || {
+                let build_calls = Arc::clone(&build_calls);
+                async move {
+                    build_calls.fetch_add(1, Ordering::SeqCst);
+                    Ok::<_, Infallible>(vec![tagged(old_entry())])
+                }
+            }
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        next, published,
+        "the next call must serve the same fresh post-invalidate snapshot"
+    );
+    assert_eq!(
+        build_calls.load(Ordering::SeqCst),
+        calls_before_next,
+        "the next call must hit the warm cache (no rebuild)"
+    );
 }
