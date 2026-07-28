@@ -174,7 +174,16 @@ pub(super) async fn run_leader(
             idx
         };
 
-        match pre_commit_locked_validate(&mut entry.tx, repo, gate, entry.uwl_guards).await {
+        // F-48b (#867): `run_leader` passes an empty `drain_guards` vec here
+        // because it is dead code (no production call site — see the brief's
+        // §6 and F-54). The live tx-commit paths (`commit_tx_inner_legacy_async`
+        // / `commit_tx_lockfree`) thread the real drain guards from
+        // `pre_commit_prelock`; this inert path never receives any. The
+        // returned `ValidatedPreCommit.drain_guards` is consequently always
+        // empty and drops unused below — no behavior change.
+        match pre_commit_locked_validate(&mut entry.tx, repo, gate, entry.uwl_guards, Vec::new())
+            .await
+        {
             Ok(Some(vpc)) => {
                 // P3a: inter-batch phantom check — scan this survivor's
                 // predicates against footprints of earlier accepted survivors
@@ -520,8 +529,17 @@ pub(super) async fn run_leader(
 
     // P2b: materialize each survivor OUTSIDE commit_lock, gated by uwl_guards.
     for mut work in post_works {
-        let post_publish =
-            materialize(&mut work.tx, repo, work.version_guard, work.uwl_guards).await;
+        // F-48b (#867): empty drain_guards — `run_leader` is dead code and
+        // never receives real drain guards (see the note at the
+        // `pre_commit_locked_validate` call above).
+        let post_publish = materialize(
+            &mut work.tx,
+            repo,
+            work.version_guard,
+            work.uwl_guards,
+            Vec::new(),
+        )
+        .await;
         // SSI fix S2 — Phase 5a inside `materialize` finalized this survivor's
         // claimed cells; disarm so the guards' `Drop` is a no-op.
         for g in &mut work.cell_guards {
@@ -582,7 +600,10 @@ async fn run_single_tx(
 ) -> Result<TxOutcome, TxError> {
     use crate::tx::pre_commit::pre_commit_locked;
 
-    let pre = match pre_commit_locked(&mut tx, repo, gate, wal, uwl_guards).await {
+    // F-48b (#867): `run_single_tx` passes an empty `drain_guards` vec — it
+    // is only called from `run_leader` (dead code, no production call site).
+    // See the matching note at the `pre_commit_locked_validate` call above.
+    let pre = match pre_commit_locked(&mut tx, repo, gate, wal, uwl_guards, Vec::new()).await {
         Ok(Some(pc)) => pc,
         Ok(None) => {
             repo.tx_metrics().on_tx_committed();
@@ -619,7 +640,10 @@ async fn run_single_tx(
     // P2b: materialize runs OUTSIDE commit_lock, gated by per-table
     // uwl_guards. Disjoint-table commits proceed in parallel.
     let changefeed_event = shamir_tx::project_event(&tx, repo.name(), commit_version);
-    let post_publish = materialize(&mut tx, repo, pre.version_guard, pre.uwl_guards).await;
+    // F-48b (#867): empty drain_guards — `run_single_tx` is only called from
+    // `run_leader` (dead code). See the matching note above.
+    let post_publish =
+        materialize(&mut tx, repo, pre.version_guard, pre.uwl_guards, Vec::new()).await;
     // SSI fix S2 — Phase 5a inside `materialize` finalized every claimed cell;
     // disarm so the guards' `Drop` is a no-op.
     for g in &mut cell_guards {

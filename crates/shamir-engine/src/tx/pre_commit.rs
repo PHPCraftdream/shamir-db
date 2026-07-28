@@ -12,6 +12,81 @@ use crate::tx::commit::{maybe_crash, TxError};
 
 use super::commit::wal_ops_from_tx;
 
+// ── F-48b (#867) test-only pause seam ──────────────────────────────────────
+//
+// Mirrors F-46's `TEST_POST_VALIDATE_PRE_PUBLISH_HOOK` (commit.rs, #857),
+// F-47's `TEST_POST_GENCHECK_PRE_PUBLISH_HOOK` (fk_reverse_cache.rs, #858),
+// and F-48's `TEST_POST_BARRIER_PRE_WRITE_HOOK` (table_manager_crud.rs, #859):
+// a `#[cfg(test)]` `OnceLock<Arc<Hook>>` global, zero cost when unset. The
+// seam fires in `pre_commit_prelock` strictly AFTER Phase 2.5's
+// `needs_write_barrier()` check has run for every table in `tx.write_set`
+// (so the test knows which path each table took) and BEFORE Phase 5c's
+// materialize write. A test installs the hook, spawns a tx commit,
+// busy-polls `reached`, then drives a schema-activation DDL's
+// raise+drain+count-proof while the tx is parked, then `resume`s it —
+// deterministically reproducing the check-then-act interleaving the
+// 2026-07-28 review's P0-3 finding describes for the tx-commit path.
+
+/// Test-only pause/resume handshake installed via
+/// [`TEST_POST_PRELOCK_PRE_MATERIALIZE_HOOK`]. `reached` lets the harness
+/// detect (via polling, no sleeps) that the tx commit under test has
+/// actually parked at the seam; `resume` is the release signal; `armed`
+/// makes the pause one-shot (CAS true→false) so only the FIRST committer
+/// to reach the seam parks — every later arrival (including the harness's
+/// own concurrent DDL-side writer, if it also commits) passes straight
+/// through. Shape mirrors `commit.rs::PostValidatePrePublishHook` (F-46)
+/// and `table_manager_crud.rs::PostBarrierPreWriteHook` (F-48) exactly.
+#[cfg(test)]
+#[derive(Debug)]
+pub(crate) struct PostPrelockPreMaterializeHook {
+    pub(crate) reached: std::sync::atomic::AtomicUsize,
+    pub(crate) resume: tokio::sync::Notify,
+    pub(crate) armed: std::sync::atomic::AtomicBool,
+}
+
+/// Test-only pause seam. Fires in `pre_commit_prelock` immediately AFTER
+/// Phase 2.5's `needs_write_barrier()` check loop (so the writer has
+/// committed to the fast or slow path per table) and BEFORE the function
+/// returns into the commit pipeline's later phases (Phase 5c materialize
+/// being the actual data write). See
+/// [`PostPrelockPreMaterializeHook`]'s doc for the exact rationale.
+///
+/// `nextest` runs each test in its own process, so this global cannot leak
+/// across test files. Uninstalled (`None`, the default for every other
+/// test) this is a single `OnceLock::get()` read with no lock, no
+/// allocation, no await point taken.
+#[cfg(test)]
+pub(crate) static TEST_POST_PRELOCK_PRE_MATERIALIZE_HOOK: std::sync::OnceLock<
+    std::sync::Arc<PostPrelockPreMaterializeHook>,
+> = std::sync::OnceLock::new();
+
+/// Parks on [`TEST_POST_PRELOCK_PRE_MATERIALIZE_HOOK`] if a test installed
+/// one; a true no-op otherwise.
+async fn fire_post_prelock_pre_materialize_test_hook() {
+    #[cfg(test)]
+    if let Some(hook) = TEST_POST_PRELOCK_PRE_MATERIALIZE_HOOK.get() {
+        hook.reached
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        // One-shot: only the FIRST committer to reach this seam actually
+        // parks (CAS true→false). Every later arrival passes straight
+        // through — see `PostPrelockPreMaterializeHook::armed`'s doc for
+        // why this is load-bearing (a concurrent committer / the harness's
+        // own DDL-side writer must not deadlock here).
+        let should_pause = hook
+            .armed
+            .compare_exchange(
+                true,
+                false,
+                std::sync::atomic::Ordering::AcqRel,
+                std::sync::atomic::Ordering::Acquire,
+            )
+            .is_ok();
+        if should_pause {
+            hook.resume.notified().await;
+        }
+    }
+}
+
 /// Stage I: the constant first `u64` of every `WalEntryV2.interner_delta`
 /// triple. Pre-Stage-I this slot carried the per-table `table_token` so
 /// recovery could route each delta to the right per-table interner. The
@@ -126,6 +201,11 @@ async fn claim_write_set(
 pub(super) struct PreCommit {
     pub(super) commit_version: u64,
     pub(super) uwl_guards: Vec<tokio::sync::OwnedMutexGuard<()>>,
+    /// F-48b (#867): kept-alive writer-drain guards (one per fast-path table
+    /// in `tx.write_set` whose `needs_write_barrier()` read `false` in Phase
+    /// 2.5). Threaded alongside `uwl_guards` through Phase 5c, dropped inside
+    /// [`materialize`] after the data/index writes have landed.
+    pub(super) drain_guards: Vec<crate::table::writer_drain_barrier::WriterDrainGuard>,
     /// RAII owner of the version's terminal-mark obligation (P0a). Survives
     /// to the caller's success path (consumed via `materialize` →
     /// `guard.commit()` → Materialized). WAL begin already succeeded by the
@@ -148,8 +228,18 @@ pub(super) struct PreCommit {
 /// Outcome of [`pre_commit_prelock`]: per-table uwl_guards acquired in
 /// sorted token order OUTSIDE the commit_lock. These are passed into
 /// [`pre_commit_locked`] and then through to [`materialize`].
+///
+/// F-48b (#867): `drain_guards` carries one [`WriterDrainGuard`] per table in
+/// `tx.write_set` whose Phase 2.5 `needs_write_barrier()` read `false` (the
+/// fast path). These stay alive through Phase 5c materialize — the exact
+/// window a schema-activation / index2-create DDL raising the barrier AFTER
+/// the flag read must drain before stamping its proof. Tables that read
+/// `true` (slow path) contribute to `uwl_guards` instead and are NOT in the
+/// drain set (the lock serializes them — staying in the drain set while
+/// blocking on the lock would deadlock).
 pub(super) struct PreLockResult {
     pub(super) uwl_guards: Vec<tokio::sync::OwnedMutexGuard<()>>,
+    pub(super) drain_guards: Vec<crate::table::writer_drain_barrier::WriterDrainGuard>,
 }
 
 /// Pre-lock phase of the commit pipeline: runs OUTSIDE `commit_lock`,
@@ -334,11 +424,45 @@ pub(super) async fn pre_commit_prelock(
     // `Arc<Mutex<()>>`). Tables needing neither a unique guard nor the
     // index2-create barrier are untouched — the lock-free fast path is
     // preserved for them.
+    //
+    // F-48b (#867): the lock-free fast path has the SAME check-then-act race
+    // F-48 closed for the non-tx writer methods — `needs_write_barrier()` is
+    // read ONCE, and if `false` the tx proceeds through Phase 5c materialize
+    // with no further check, so a DDL raising the barrier AFTER this read (and
+    // calling `drain_writers()`) sees zero in-flight writers, incorrectly.
+    // Fixed by entering the writer-drain set (`enter_writer_drain`) BEFORE
+    // reading the flag, for every table in `tx.write_set` — the flag's
+    // coherence chain carries the happens-before edge to the DDL's drain load
+    // (see `writer_drain_barrier`'s memory-model doc). If the flag is `true`
+    // (slow path: this table gets a uwl_guard), drop the drain guard BEFORE
+    // the lock acquisition — the lock alone provides exclusion, and staying
+    // in the drain set while blocking on the lock (held by a DDL that is
+    // itself calling `drain_writers()`) would deadlock. If `false`, keep the
+    // drain guard alive until Phase 5c materialize lands — the kept-alive
+    // guards flow through `PreLockResult` → `PreCommit`/`ValidatedPreCommit`
+    // → `materialize`/`materialize_async_tail`, dropped alongside
+    // `uwl_guards` after the data/index writes have completed.
     let mut unique_tokens: Vec<u64> = tx.unique_guards.iter().map(|g| g.table_token).collect();
+    let mut drain_guards: Vec<crate::table::writer_drain_barrier::WriterDrainGuard> = Vec::new();
     for table_id in tx.write_set.keys() {
         if let Some(tbl) = repo.table_by_token_if_live(*table_id).await {
+            // F-48b: bump the drain counter BEFORE reading the flag so the
+            // flag's coherence chain carries happens-before to the DDL's
+            // drain load. Mirrors `table_manager_crud.rs`'s writer methods.
+            let drain_guard = tbl.enter_writer_drain();
             if tbl.needs_write_barrier() {
+                // Slow path: this table will get a `unique_write_lock` guard
+                // (added to `unique_tokens` below). Drop the drain guard
+                // BEFORE the lock acquisition — see the comment block above
+                // for the deadlock rationale. The lock serializes this table;
+                // the drain counter must not.
+                drop(drain_guard);
                 unique_tokens.push(*table_id);
+            } else {
+                // Fast path: keep the drain guard alive until Phase 5c
+                // materialize. A DDL that raises the barrier AFTER this read
+                // and calls `drain_writers()` genuinely waits for this tx.
+                drain_guards.push(drain_guard);
             }
         }
     }
@@ -390,7 +514,18 @@ pub(super) async fn pre_commit_prelock(
         }
     }
 
-    Ok(PreLockResult { uwl_guards })
+    // F-48b test seam: parks strictly AFTER Phase 2.5's flag-check loop
+    // (every table's `needs_write_barrier()` has been read and the writer
+    // has committed to the fast or slow path per table) and BEFORE the
+    // function returns into the commit pipeline's later phases — in
+    // particular before Phase 5c's materialize write (the actual data
+    // store mutation). No-op in every non-test build.
+    fire_post_prelock_pre_materialize_test_hook().await;
+
+    Ok(PreLockResult {
+        uwl_guards,
+        drain_guards,
+    })
 }
 
 /// Outcome of [`pre_commit_locked_validate`]: the assigned commit version,
@@ -398,6 +533,12 @@ pub(super) async fn pre_commit_prelock(
 pub(super) struct ValidatedPreCommit {
     pub(super) commit_version: u64,
     pub(super) uwl_guards: Vec<tokio::sync::OwnedMutexGuard<()>>,
+    /// F-48b (#867): kept-alive writer-drain guards (one per fast-path table
+    /// in `tx.write_set` whose `needs_write_barrier()` read `false` in Phase
+    /// 2.5). Threaded alongside `uwl_guards` through Phase 5c, dropped inside
+    /// [`materialize`](super::materialize::materialize) after the data/index
+    /// writes have landed.
+    pub(super) drain_guards: Vec<crate::table::writer_drain_barrier::WriterDrainGuard>,
     /// RAII owner of the version's terminal-mark obligation. The caller
     /// (`commit_tx_lockfree`) either calls `materialize` (which consumes it
     /// via `guard.commit()` → Materialized) on the success path, or drops it
@@ -433,6 +574,7 @@ pub(super) async fn pre_commit_locked_validate(
     repo: &RepoInstance,
     gate: &RepoTxGate,
     uwl_guards: Vec<tokio::sync::OwnedMutexGuard<()>>,
+    drain_guards: Vec<crate::table::writer_drain_barrier::WriterDrainGuard>,
 ) -> Result<Option<ValidatedPreCommit>, TxError> {
     // Phase 2 (SSI only): read-set validation.
     if tx.isolation == IsolationLevel::Serializable {
@@ -573,6 +715,7 @@ pub(super) async fn pre_commit_locked_validate(
     Ok(Some(ValidatedPreCommit {
         commit_version,
         uwl_guards,
+        drain_guards,
         version_guard,
         cell_guards,
         wal_entry_arc,
@@ -598,6 +741,7 @@ pub(super) async fn pre_commit_locked(
     gate: &RepoTxGate,
     wal: &RepoWalManager,
     uwl_guards: Vec<tokio::sync::OwnedMutexGuard<()>>,
+    drain_guards: Vec<crate::table::writer_drain_barrier::WriterDrainGuard>,
 ) -> Result<Option<PreCommit>, TxError> {
     // Phase 2 (SSI only): read-set validation.
     //
@@ -794,6 +938,7 @@ pub(super) async fn pre_commit_locked(
     Ok(Some(PreCommit {
         commit_version,
         uwl_guards,
+        drain_guards,
         version_guard,
         cell_guards,
         wal_entry_arc: entry_arc,

@@ -243,6 +243,7 @@ pub(crate) async fn materialize_async_tail(
     repo: &RepoInstance,
     commit_version: u64,
     uwl_guards: Vec<tokio::sync::OwnedMutexGuard<()>>,
+    drain_guards: Vec<crate::table::writer_drain_barrier::WriterDrainGuard>,
 ) -> MaterializationState {
     let tx_id = tx.tx_id.0;
     let mut ok = !tx.async_prefix_failed;
@@ -273,7 +274,13 @@ pub(crate) async fn materialize_async_tail(
     // guard window has closed (postings either published or deferred to
     // recovery; recovery is idempotent). Released even on a deferred 5c —
     // a stuck guard would only block non-tx writers.
+    //
+    // F-48b (#867): drop the kept-alive writer-drain guards at the SAME
+    // point — Phase 5c has landed (or deferred to recovery), so the tx's
+    // writes are observable. See `materialize`'s matching drop for the
+    // memory-model rationale.
     drop(uwl_guards);
+    drop(drain_guards);
 
     // Phase 6.5: persist recovery markers.
     if let Ok(gate) = repo.tx_gate().await {

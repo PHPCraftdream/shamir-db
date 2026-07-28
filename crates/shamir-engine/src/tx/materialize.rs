@@ -61,6 +61,7 @@ pub(super) async fn materialize(
     repo: &RepoInstance,
     version_guard: shamir_tx::VersionGuard,
     uwl_guards: Vec<tokio::sync::OwnedMutexGuard<()>>,
+    drain_guards: Vec<crate::table::writer_drain_barrier::WriterDrainGuard>,
 ) -> PostPublishState {
     let tx_id = tx.tx_id.0;
     let commit_version = version_guard.version();
@@ -192,7 +193,16 @@ pub(super) async fn materialize(
     // here would only add contention. Released even on a deferred Phase 5c:
     // recovery re-applies the postings, and a stuck guard would only block
     // non-tx writers.
+    //
+    // F-48b (#867): drop the kept-alive writer-drain guards at the SAME
+    // point — the tx's actual data/index writes have now landed, so a
+    // schema-activation / index2-create DDL waiting in `drain_writers()`
+    // observes the completed writes via the Release fetch_sub → Acquire
+    // load pairing (see `writer_drain_barrier`'s memory-model doc). The
+    // guards' Release-drop happens-after the Phase 5a/5c data-store writes
+    // above, so the drainer's count-proof / backfill snapshot sees them.
     drop(uwl_guards);
+    drop(drain_guards);
 
     // Phase 5d (HNSW promote) is NO LONGER here. It moved OUT of the
     // commit critical section: `commit_tx_inner` drops `commit_lock` after

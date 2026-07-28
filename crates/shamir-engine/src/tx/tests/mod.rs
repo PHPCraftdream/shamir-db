@@ -29,4 +29,5 @@ pub mod ssi_stress_tests;
 pub mod ssi_unique_serialization_tests;
 #[cfg(debug_assertions)]
 pub mod truncation_tests;
+pub mod tx_commit_writer_drain_tests;
 pub mod tx_vector_delete_tests;

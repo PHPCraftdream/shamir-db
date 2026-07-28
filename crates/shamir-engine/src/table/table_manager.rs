@@ -608,6 +608,29 @@ impl TableManager {
         self.writer_drain.drain().await;
     }
 
+    /// F-48b (#867) — the writer-side twin of [`drain_writers`]: bump the
+    /// drain-set counter and return an RAII guard that decrements on drop.
+    ///
+    /// Called by the tx-commit pipeline's Phase 2.5 prelock
+    /// (`tx::pre_commit::pre_commit_prelock`) for EVERY table in `tx.write_set`
+    /// BEFORE reading [`needs_write_barrier`](Self::needs_write_barrier) — the
+    /// ordering is load-bearing (see [`writer_drain_barrier`] for the
+    /// happens-before chain). If the flag is `true` (slow path), the caller
+    /// drops the returned guard BEFORE taking [`unique_write_lock`] (the lock
+    /// serializes the slow path; staying in the drain set while blocking on
+    /// the lock would deadlock against a DDL holding the lock and waiting on
+    /// [`drain_writers`]). If the flag is `false`, the caller keeps the guard
+    /// alive until its Phase 5c materialize write has landed — so a DDL that
+    /// raises the barrier AFTER the flag read genuinely waits for this tx.
+    ///
+    /// Visibility mirrors [`needs_write_barrier`] (`pub(crate)`): the only
+    /// caller is the engine's own tx-commit prelock. The non-tx writer methods
+    /// in `table_manager_crud.rs` access `self.writer_drain` directly (same
+    /// module); this accessor exists for the cross-module prelock call site.
+    pub(crate) fn enter_writer_drain(&self) -> super::writer_drain_barrier::WriterDrainGuard {
+        self.writer_drain.enter_writer()
+    }
+
     /// Borrow the table's sorted-index manager — used by the planner
     /// for range / order / min queries, and by DDL when a
     /// `create_index { sorted: true }` op lands.

@@ -597,7 +597,10 @@ async fn commit_tx_inner(mut tx: TxContext, repo: &RepoInstance) -> Result<TxOut
     // converge). Phase 2.5/2.6 serialize on per-table uwl_guards in
     // sorted token order — no global serialization needed. Two committers
     // touching disjoint unique tables proceed fully in parallel here.
-    let PreLockResult { uwl_guards } = match pre_commit_prelock(&mut tx, repo).await {
+    let PreLockResult {
+        uwl_guards,
+        drain_guards,
+    } = match pre_commit_prelock(&mut tx, repo).await {
         Ok(r) => r,
         Err(e) => {
             release_pessimistic_locks(&tx, repo).await;
@@ -609,8 +612,15 @@ async fn commit_tx_inner(mut tx: TxContext, repo: &RepoInstance) -> Result<TxOut
     // as a background task, which is incompatible with the leader processing
     // another tx's materialization. They always wait for the lock.
     if tx.visibility == shamir_tx::CommitVisibility::AsyncIndex {
-        return commit_tx_inner_legacy_async(tx, uwl_guards, repo, gate.as_ref(), wal.as_ref())
-            .await;
+        return commit_tx_inner_legacy_async(
+            tx,
+            uwl_guards,
+            drain_guards,
+            repo,
+            gate.as_ref(),
+            wal.as_ref(),
+        )
+        .await;
     }
 
     // === P2c: LOCKFREE COMMIT PATH ===
@@ -628,7 +638,15 @@ async fn commit_tx_inner(mut tx: TxContext, repo: &RepoInstance) -> Result<TxOut
     //
     // Group-commit WAL batching is sacrificed for parallelism; the
     // WAL backend's internal batching (if any) still amortizes fsync.
-    commit_tx_lockfree(tx, uwl_guards, repo, gate.as_ref(), wal.as_ref()).await
+    commit_tx_lockfree(
+        tx,
+        uwl_guards,
+        drain_guards,
+        repo,
+        gate.as_ref(),
+        wal.as_ref(),
+    )
+    .await
 }
 
 /// AsyncIndex commit path: uses the traditional sequential commit_lock.
@@ -637,6 +655,7 @@ async fn commit_tx_inner(mut tx: TxContext, repo: &RepoInstance) -> Result<TxOut
 async fn commit_tx_inner_legacy_async(
     mut tx: TxContext,
     uwl_guards: Vec<tokio::sync::OwnedMutexGuard<()>>,
+    drain_guards: Vec<crate::table::writer_drain_barrier::WriterDrainGuard>,
     repo: &RepoInstance,
     gate: &shamir_tx::RepoTxGate,
     wal: &shamir_tx::RepoWalManager,
@@ -646,10 +665,11 @@ async fn commit_tx_inner_legacy_async(
     let PreCommit {
         commit_version,
         uwl_guards,
+        drain_guards,
         version_guard,
         cell_guards,
         wal_entry_arc,
-    } = match pre_commit_locked(&mut tx, repo, gate, wal, uwl_guards).await {
+    } = match pre_commit_locked(&mut tx, repo, gate, wal, uwl_guards, drain_guards).await {
         Ok(Some(pc)) => pc,
         Ok(None) => {
             repo.tx_metrics().on_tx_committed();
@@ -749,7 +769,14 @@ async fn commit_tx_inner_legacy_async(
     let repo_clone = repo.clone();
     let metrics = repo.tx_metrics().clone();
     let join = tokio::spawn(async move {
-        let state = materialize_async_tail(&mut tx, &repo_clone, commit_version, uwl_guards).await;
+        let state = materialize_async_tail(
+            &mut tx,
+            &repo_clone,
+            commit_version,
+            uwl_guards,
+            drain_guards,
+        )
+        .await;
         if state == MaterializationState::Deferred {
             metrics.on_tx_materialization_deferred();
         }
@@ -797,6 +824,7 @@ async fn commit_tx_inner_legacy_async(
 async fn commit_tx_lockfree(
     mut tx: TxContext,
     uwl_guards: Vec<tokio::sync::OwnedMutexGuard<()>>,
+    drain_guards: Vec<crate::table::writer_drain_barrier::WriterDrainGuard>,
     repo: &RepoInstance,
     gate: &shamir_tx::RepoTxGate,
     wal: &shamir_tx::RepoWalManager,
@@ -883,25 +911,26 @@ async fn commit_tx_lockfree(
     };
 
     // Phase 3 + 2 + 2-bis + WAL entry build (no lock needed).
-    let validated = match pre_commit_locked_validate(&mut tx, repo, gate, uwl_guards).await {
-        Ok(Some(v)) => v,
-        Ok(None) => {
-            // C6 empty-tx fast-path.
-            repo.tx_metrics().on_tx_committed();
-            release_pessimistic_locks(&tx, repo).await;
-            return Ok(TxOutcome {
-                tx_id: tx.tx_id.0,
-                snapshot_version: tx.snapshot_version,
-                commit_version: tx.snapshot_version,
-                materialization: MaterializationState::Complete,
-                background: None,
-            });
-        }
-        Err(e) => {
-            release_pessimistic_locks(&tx, repo).await;
-            return Err(e);
-        }
-    };
+    let validated =
+        match pre_commit_locked_validate(&mut tx, repo, gate, uwl_guards, drain_guards).await {
+            Ok(Some(v)) => v,
+            Ok(None) => {
+                // C6 empty-tx fast-path.
+                repo.tx_metrics().on_tx_committed();
+                release_pessimistic_locks(&tx, repo).await;
+                return Ok(TxOutcome {
+                    tx_id: tx.tx_id.0,
+                    snapshot_version: tx.snapshot_version,
+                    commit_version: tx.snapshot_version,
+                    materialization: MaterializationState::Complete,
+                    background: None,
+                });
+            }
+            Err(e) => {
+                release_pessimistic_locks(&tx, repo).await;
+                return Err(e);
+            }
+        };
 
     let commit_version = validated.commit_version;
     let version_guard = validated.version_guard;
@@ -951,7 +980,14 @@ async fn commit_tx_lockfree(
     let tx_id_u64 = tx.tx_id.0;
     let changefeed_event = shamir_tx::project_event(&tx, repo.name(), commit_version);
 
-    let post_publish = materialize(&mut tx, repo, version_guard, validated.uwl_guards).await;
+    let post_publish = materialize(
+        &mut tx,
+        repo,
+        version_guard,
+        validated.uwl_guards,
+        validated.drain_guards,
+    )
+    .await;
     // SSI fix S2 — publish (Phase 5a `apply_committed_visible`) ran inside
     // `materialize` and `finalize_reservation`'d every claimed cell (version
     // published, `reserved_by` cleared). Disarm the guards so their `Drop` does
