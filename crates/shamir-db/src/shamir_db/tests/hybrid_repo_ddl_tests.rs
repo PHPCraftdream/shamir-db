@@ -16,6 +16,8 @@ use shamir_query_builder::ddl;
 use shamir_query_builder::doc;
 use shamir_query_builder::write;
 use shamir_query_builder::Query;
+use shamir_query_types::admin::CreateRepoOp;
+use shamir_query_types::batch::BatchOp;
 
 use crate::shamir_db::SystemStoreConfig;
 use crate::ShamirDb;
@@ -696,10 +698,14 @@ async fn unsupported_engine_error_mentions_hybrid() {
     );
 }
 
-/// F-43 (#851) — `CreateRepo.path` must not be silently ignored. The server
-/// ALWAYS resolves the on-disk repo directory itself (`data_root/<db>/<repo>`),
-/// so a client that explicitly sets `.path(...)` must get a clear typed error
-/// rather than success-with-a-different-path. The repo must NOT be created.
+/// F-43 (#851) / F-51 (#862) — `CreateRepoOp.path` must not be silently
+/// ignored. The server ALWAYS resolves the on-disk repo directory itself
+/// (`data_root/<db>/<repo>`), so a wire payload carrying an explicit `path`
+/// must get a clear typed error rather than success-with-a-different-path.
+/// The repo must NOT be created. (The Rust builder no longer exposes a
+/// `.path(...)` setter — F-51 removed it because the server rejects it — so
+/// this test crafts the raw wire DTO directly to exercise the server's
+/// rejection arm.)
 #[tokio::test]
 async fn create_repo_with_explicit_path_is_rejected_not_silently_ignored() {
     let shamir = ShamirDb::init_memory().await.unwrap();
@@ -707,10 +713,16 @@ async fn create_repo_with_explicit_path_is_rejected_not_silently_ignored() {
 
     let mut b = Batch::new();
     b.id(1);
-    b.create_repo(
-        "cr",
-        ddl::create_repo("pathrepo").path("/somewhere/the/client/picked"),
-    );
+    // The builder has no `.path(...)` setter (F-51); build the wire op
+    // directly to prove the SERVER still rejects a supplied path.
+    let op = BatchOp::CreateRepo(CreateRepoOp {
+        create_repo: "pathrepo".to_string(),
+        engine: None,
+        path: Some("/somewhere/the/client/picked".to_string()),
+        tables: Vec::new(),
+        if_not_exists: false,
+    });
+    b.create_repo("cr", op);
     let result = shamir.execute("appdb", &b.to_request_via_msgpack()).await;
 
     let err = result.expect_err(

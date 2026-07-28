@@ -1,10 +1,10 @@
 # Large-footprint / high-capacity ShamirDB server config — the EXPLICITLY
 # OPT-IN profile for deployments that genuinely need far more concurrent
 # connections and larger response budgets than the safe-by-default base
-# `server.example.ktav` (which mirrors the library's own code-level
-# defaults). Copy to /etc/shamir/server.ktav and adjust paths/ports for
-# your deployment ONLY after confirming your host has the RAM, CPU, and
-# network headroom to sustain these limits.
+# `server.example.ktav`. Sized for hosts with ≥32 GiB RAM. Copy to
+# /etc/shamir/server.ktav and adjust paths/ports for your deployment ONLY
+# after confirming your host has the RAM, CPU, and network headroom to
+# sustain these limits.
 #
 # These numbers (10 000 connections, 1 GiB per result, 4 GiB in-flight)
 # were previously the base example's defaults and were moved here (F-44)
@@ -13,8 +13,10 @@
 # Sizing formula for this profile's Argon2 auth-RAM ceiling:
 #   argon2_concurrent_max × kdf_defaults.memory_kb (KiB)  ≤  ~25% of your
 #   container/host RAM (KiB).
-# Example: a 4 GiB container → ~1 GiB budget → memory_kb=131072 (128 MiB)
-# allows argon2_concurrent_max up to ~8.
+# This profile ships argon2_concurrent_max=64 × memory_kb=131072 (128 MiB)
+# = 8 GiB worst-case auth-RAM, i.e. ~25% of a 32 GiB host — the minimum
+# this profile is sized for. On a smaller host, pick a smaller profile or
+# derive your own argon2_concurrent_max from the formula above.
 #
 # Schema is documented in `crates/shamir-server/src/config.rs`.
 
@@ -39,7 +41,7 @@ kdf_defaults: {
 
 # Server-wide cap on concurrent Argon2id verifies. Each verify holds
 # `memory_kb` of RAM for a few hundred ms, so this directly bounds peak
-# auth-RAM. 64 × 128 MB = 8 GB worst case → size accordingly.
+# auth-RAM. 64 × 128 MiB = 8 GiB worst case (~25% of a 32 GiB host).
 argon2_concurrent_max: 64
 
 # Network endpoints. Multiple listeners can run concurrently — each

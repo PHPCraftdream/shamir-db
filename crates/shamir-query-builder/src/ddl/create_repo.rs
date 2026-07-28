@@ -51,17 +51,22 @@ pub fn create_repo(name: impl Into<String>) -> CreateRepo {
     CreateRepo {
         name: name.into(),
         engine: None,
-        path: None,
         tables: Vec::new(),
         if_not_exists: false,
     }
 }
 
 /// Builder for [`CreateRepoOp`].
+///
+/// There is intentionally NO `path` setter: the server always resolves the
+/// on-disk repo directory itself (`data_root/<db>/<repo>`) and rejects any
+/// client-supplied `CreateRepoOp.path` with an `unsupported_field` error
+/// (F-43/#851, see `handle_create_repo` in `shamir-db`'s `admin_db_repo.rs`).
+/// The wire DTO retains the `path` field so the server can read and reject
+/// it; this builder always emits `path: None`.
 pub struct CreateRepo {
     name: String,
     engine: Option<String>,
-    path: Option<String>,
     tables: Vec<String>,
     if_not_exists: bool,
 }
@@ -75,12 +80,6 @@ impl CreateRepo {
     /// kind.
     pub fn engine(mut self, engine: impl Into<String>) -> Self {
         self.engine = Some(engine.into());
-        self
-    }
-
-    /// Set the data path.
-    pub fn path(mut self, path: impl Into<String>) -> Self {
-        self.path = Some(path.into());
         self
     }
 
@@ -101,7 +100,9 @@ impl CreateRepo {
         BatchOp::CreateRepo(CreateRepoOp {
             create_repo: self.name,
             engine: self.engine,
-            path: self.path,
+            // Always `None`: see the struct doc — the server resolves the
+            // repo directory itself and rejects any client-supplied path.
+            path: None,
             tables: self.tables,
             if_not_exists: self.if_not_exists,
         })

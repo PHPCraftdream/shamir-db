@@ -9,20 +9,23 @@ on a production host.
 |------|------------|
 | `shamir-db.service` | systemd unit. Drop into `/etc/systemd/system/` and `systemctl enable --now shamir-db` |
 | `Dockerfile` | Multi-stage Docker image (Rust 1.93 bookworm builder → debian:bookworm-slim runtime, ~80 MB) |
-| `server.example.ktav` | Annotated reference config (all fields shown) — copy to `/etc/shamir/server.ktav` and adjust |
+| `server.example.ktav` | Base reference config (all fields shown), sized for a 2–4 GiB container (≈3 GiB budget): Argon2 128 MiB × 6, 1000 conns, 64 MiB result cap |
 | `server.small.example.ktav` | Resource profile for a 1–2 GiB container (≈1.5 GiB budget): Argon2 64 MiB × 6, 500 conns, 32 MiB result cap |
 | `server.medium.example.ktav` | Resource profile for a 4–8 GiB container (≈6 GiB budget): Argon2 128 MiB × 12, 2000 conns, 64 MiB result cap |
+| `server.large.example.ktav` | Resource profile for a ≥32 GiB host: Argon2 128 MiB × 64, 10 000 conns, 1 GiB result cap (opt-in) |
 
 ## Resource profiles
 
-Pick a profile by your container/host RAM budget and start from it instead of
-the all-fields reference (`server.example.ktav`):
+Pick a profile by your container/host RAM budget (`server.example.ktav`
+is the every-field-shown base, conservatively sized for a typical 2–4 GiB
+host — use it directly or trim it when you want to see every knob):
 
 | Profile | Target RAM | When to pick |
 |---------|-----------|--------------|
 | `server.small.example.ktav` | 1–2 GiB (sized for ~1.5 GiB) | Single-tenant / dev / small VPS. Argon2 auth-RAM ceiling ≈ 384 MiB. |
 | `server.medium.example.ktav` | 4–8 GiB (sized for ~6 GiB) | Small-to-medium production. Argon2 auth-RAM ceiling ≈ 1.5 GiB. |
-| `server.example.ktav` | n/a (reference) | Every-field-shown template — copy & trim when neither small nor medium fits. |
+| `server.example.ktav` | 2–4 GiB (sized for ~3 GiB) | General-purpose safe default AND every-field-shown reference — copy & trim. Argon2 auth-RAM ceiling ≈ 768 MiB. |
+| `server.large.example.ktav` | ≥32 GiB | High-capacity opt-in: 10 000 conns, 1 GiB results. Argon2 auth-RAM ceiling ≈ 8 GiB. |
 
 **Argon2 sizing formula** (also embedded as a comment at the top of each
 profile):
@@ -33,8 +36,8 @@ container/host RAM (KiB).
 ```
 
 Example: a 4 GiB container → ~1 GiB budget → `memory_kb = 131072` (128 MiB)
-allows `argon2_concurrent_max` up to ~8. The two profiles above pin
-`argon2_concurrent_max` to ~25% of their respective budgets; if your budget
+allows `argon2_concurrent_max` up to ~8. Each profile above pins
+`argon2_concurrent_max` to ~25% of its stated budget; if your budget
 differs, derive your own pair from the formula and update both fields together.
 
 ## Quick start (systemd)
