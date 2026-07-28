@@ -99,6 +99,52 @@ impl TableManager {
         let mut matched: Vec<(RecordId, Bytes)> = Vec::new();
         let mut records_scanned: u64 = 0;
 
+        // F-53a (#874): mirror read_collecting's inline top-K bounded heap.
+        // When the query has ORDER BY + finite LIMIT (no distinct/group_by/
+        // agg), project + push each WHERE-passing AS-OF row straight into a
+        // `k = skip + take` heap DURING the scan, never accumulating the full
+        // `matched` Vec. The pre-F-53a path always materialised every matched
+        // `(RecordId, Bytes)` THEN sorted+paged post-hoc — full O(N) memory
+        // even with a LIMIT. `read_as_of` carries the full `ReadQuery`, so the
+        // order/limit spec IS in scope at the scan loop (unlike the brief's
+        // hypothetical "needs separate follow-up" case) — this is the same
+        // class of fix as read_collecting's.
+        //
+        // `with_version` is not supported on the temporal path (it always
+        // returns `versions: None`), so the heap never needs to carry ids
+        // here. `count_total` composes via the independent running counter.
+        let has_group_by = query.group_by.is_some();
+        let has_agg = exec::has_aggregates(&query.select);
+        let (skip_resolved, take_resolved) = query.pagination.resolve();
+        let use_topk = query.order_by.is_some()
+            && take_resolved.is_some()
+            && !query.select.distinct
+            && !has_group_by
+            && !has_agg;
+        let mut topk_heap: Option<exec::TopKHeap<'_>> = if use_topk {
+            Some(exec::TopKHeap::new(
+                query.order_by.as_ref().unwrap(),
+                skip_resolved as usize,
+                take_resolved.unwrap() as usize,
+                false,
+            ))
+        } else {
+            None
+        };
+        let topk_proj = if use_topk {
+            Some(exec::SelectProjection::new(
+                &query.select,
+                interner,
+                ctx.scalars.clone(),
+            )?)
+        } else {
+            None
+        };
+        let mut topk_total: u64 = 0;
+        // Declared up here (not after the loop, as pre-F-53a) so the inline
+        // top-K projection can report corrupt rows during the scan.
+        let mut corrupt: Vec<crate::query::read::CorruptRecordRef> = Vec::new();
+
         while let Some(batch_result) = stream.next().await {
             let batch = batch_result?;
             records_scanned += batch.len() as u64;
@@ -136,16 +182,70 @@ impl TableManager {
                     None => true,
                 };
                 if passes {
-                    matched.push((id, bytes));
+                    if let Some(heap) = topk_heap.as_mut() {
+                        // F-53a (#874): inline bounded heap — project the AS-OF
+                        // bytes straight into the heap. The projection mirrors
+                        // `apply_select_value_bytes` exactly (RecordView →
+                        // InnerValue fallback → corrupt + Null placeholder), so
+                        // ORDER BY nulls-ordering still applies to undecodable
+                        // rows byte-for-byte. `topk_total` is the independent
+                        // `count_total` counter.
+                        topk_total += 1;
+                        let qv = match shamir_types::record_view::RecordView::new(&bytes) {
+                            Ok(view) => topk_proj.as_ref().unwrap().project_value(&view, interner),
+                            Err(_) => match InnerValue::from_bytes(bytes.as_ref()) {
+                                Ok(iv) => topk_proj.as_ref().unwrap().project_value(&iv, interner),
+                                Err(_) => {
+                                    corrupt.push(crate::query::read::CorruptRecordRef {
+                                        table: self.name().to_string(),
+                                        id,
+                                    });
+                                    QueryValue::Null
+                                }
+                            },
+                        };
+                        heap.push(qv, None);
+                    } else {
+                        matched.push((id, bytes));
+                    }
                 }
             }
         }
 
+        // F-53a (#874): inline bounded-heap short-circuit. When the query has
+        // ORDER BY + finite LIMIT (no distinct/group_by/agg), the heap already
+        // applied ORDER BY + skip/take during the scan — drain, sort, and
+        // return. No full `matched` Vec was accumulated for this path, so the
+        // `try_project_page_only_bytes` / `apply_select_value_bytes` /
+        // `apply_order_by_qv` / `apply_pagination` tail below is skipped
+        // entirely.
+        if let Some(heap) = topk_heap {
+            let (qvs, _ids) = heap.into_sorted();
+            let pagination =
+                exec::topk_pagination(&query.pagination, query.count_total, topk_total);
+            let records_returned = qvs.len() as u64;
+            let records: Vec<QueryRecord> = qvs.into_iter().map(QueryRecord::Direct).collect();
+            return Ok(QueryResult {
+                records,
+                stats: Some(QueryStats {
+                    index_used: Some("temporal_asof".to_string()),
+                    records_scanned,
+                    records_returned,
+                    execution_time_us: start.elapsed().as_micros() as u64,
+                }),
+                pagination,
+                value: None,
+                explain: None,
+                skipped: false,
+                versions: None,
+                corrupt_records: corrupt,
+            });
+        }
+
         // Pipeline tail — same helpers as the collecting / index-scan paths.
         // S4: matched is now Bytes-typed; all three branches consume Bytes.
-        let has_group_by = query.group_by.is_some();
-        let has_agg = exec::has_aggregates(&query.select);
-        let mut corrupt: Vec<crate::query::read::CorruptRecordRef> = Vec::new();
+        // (has_group_by / has_agg / corrupt were declared above, before the
+        // scan loop, so the inline top-K path could use them.)
 
         if let Some((paged, pagination)) = try_project_page_only_bytes(
             query,

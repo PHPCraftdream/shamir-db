@@ -99,10 +99,11 @@ fn apply_permutation<T>(v: &mut Vec<T>, idx: &[usize]) {
 /// Bounded top-K ORDER BY: returns the first `skip + take` records in order,
 /// using O(skip + take) memory via a `BinaryHeap` capped at `skip + take`.
 ///
-/// The heap uses *reversed* comparison so the root is the WORST element in the
-/// current top-K set. When a new row compares better than the root, we pop the
-/// root and push the new row. After all rows are consumed, the heap is drained
-/// and sorted to produce the final ordered slice.
+/// Thin wrapper over [`TopKHeap`] — kept as a standalone entry point so the
+/// post-materialization shape (consume a ready `Vec<QueryValue>`) stays
+/// available for tests and any caller that already has the full projection in
+/// hand. The inline scan-loop paths (`read_collecting`, `read_as_of`) call
+/// [`TopKHeap`] directly so they never build that intermediate `Vec` (F-53a).
 ///
 /// Insertion order (`idx`) is used as a tiebreaker for equal sort keys to
 /// match the stable-sort semantics of `apply_order_by_qv`.
@@ -117,90 +118,197 @@ pub fn apply_order_by_topk(
     if order_by.items.is_empty() || records.is_empty() || take == 0 {
         return Vec::new();
     }
-
-    let k = skip.saturating_add(take);
-
-    // HeapItem carries pre-resolved sort keys, insertion index (for stable
-    // tie-breaking), and the value. Comparison is in ORDER BY direction;
-    // equal keys break by ascending insertion index (preserving insertion
-    // order, matching `sort_by` stability).
-    struct HeapItem {
-        keys: QvPreResolvedKeys,
-        idx: usize,
-        value: QueryValue,
-        items_ptr: *const [OrderByItem],
+    let mut heap = TopKHeap::new(order_by, skip, take, false);
+    for value in records {
+        heap.push(value, None);
     }
+    heap.into_sorted().0
+}
 
-    // SAFETY: QueryValue is Send, QvSortKey is Send, and items_ptr is only
-    // dereferenced within this function's scope where order_by is alive.
-    unsafe impl Send for HeapItem {}
+// ============================================================================
+// TopKHeap — the shared, reusable bounded top-K max-heap (F-53a, #874)
+// ============================================================================
 
-    impl HeapItem {
-        #[inline]
-        fn cmp_order(&self, other: &Self) -> std::cmp::Ordering {
-            let items = unsafe { &*self.items_ptr };
-            let ord = compare_qv_preresolved(&self.keys, &other.keys, items);
-            ord.then_with(|| self.idx.cmp(&other.idx))
+/// One entry in the bounded top-K heap. Carries pre-resolved sort keys, the
+/// insertion index (for stable tie-breaking, mirroring `sort_by` stability),
+/// the projected value, and — opt-in via [`TopKHeap::new`]`(..., with_ids =
+/// true)` — the source `RecordId` the `with_version` read path threads through
+/// the sort so the per-record `versions` array can be rebuilt from the
+/// surviving heap rows alone.
+///
+/// Borrows `&'ob [OrderByItem]` instead of the raw `*const [OrderByItem]` the
+/// pre-F-53a inlined version used: the borrow gives `HeapItem: Send` for free
+/// (no `unsafe impl Send`) so a `TopKHeap` can be held across `.await` points
+/// in the async scan loop. `OrderByItem: Sync` ⇒ `&[OrderByItem]: Send`.
+struct HeapItem<'ob> {
+    keys: QvPreResolvedKeys,
+    idx: usize,
+    value: QueryValue,
+    id: Option<RecordId>,
+    items: &'ob [OrderByItem],
+}
+
+impl<'ob> HeapItem<'ob> {
+    /// ORDER BY-direction comparison with ascending insertion-index tie-break.
+    /// This is the single source of truth for top-K ordering: both the old
+    /// full-sort path (`apply_order_by_qv`'s `compare_qv_preresolved`) and the
+    /// heap path route through it, so the two are byte-identical by
+    /// construction.
+    #[inline]
+    fn cmp_order(&self, other: &Self) -> std::cmp::Ordering {
+        let ord = compare_qv_preresolved(&self.keys, &other.keys, self.items);
+        ord.then_with(|| self.idx.cmp(&other.idx))
+    }
+}
+
+impl<'ob> PartialEq for HeapItem<'ob> {
+    fn eq(&self, other: &Self) -> bool {
+        self.cmp(other) == std::cmp::Ordering::Equal
+    }
+}
+impl<'ob> Eq for HeapItem<'ob> {}
+impl<'ob> PartialOrd for HeapItem<'ob> {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+impl<'ob> Ord for HeapItem<'ob> {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        // BinaryHeap is a max-heap; root = worst candidate (sorts last).
+        self.cmp_order(other)
+    }
+}
+
+/// Bounded top-K max-heap over `QueryValue` rows, keyed by an ORDER BY spec.
+///
+/// (F-53a, #874) Encapsulates the comparator, sort-key extraction, and
+/// heap-eviction logic so the SAME comparison semantics serve both the
+/// post-materialization [`apply_order_by_topk`] and the inline scan loops in
+/// `read_collecting` / `read_as_of` — which feed rows directly into the heap
+/// DURING the scan, avoiding the O(N) `rec_acc` / `matched` accumulation the
+/// old shape paid BEFORE the heap trim ever ran (the pre-F-53a code comment
+/// claiming "O(K) memory" described only the heap's own internals, not the
+/// full projected `Vec` feeding it).
+///
+/// The heap is a max-heap ordered by the ORDER BY comparator: the root is the
+/// WORST candidate in the current top-K window. While the heap holds fewer
+/// than `k = skip + take` rows every incoming row is admitted; once full, a
+/// row that sorts strictly before the root evicts it, all others are dropped.
+/// After all rows are pushed, [`into_sorted`](Self::into_sorted) drains the
+/// heap, sorts by ORDER BY direction + insertion index (stable tie-break), and
+/// applies the `skip`/`take` window — byte-identical to `apply_order_by_qv` +
+/// truncation.
+///
+/// `with_ids = true` makes each item carry its `RecordId` (mirroring the
+/// `id_acc` pairing the plain-ORDER BY + `with_version` read path needs); the
+/// ids come out of `into_sorted` aligned with the surviving values, so the
+/// per-record `versions` array can be rebuilt from the heap's final survivors
+/// alone — never the full scan's ids.
+pub struct TopKHeap<'ob> {
+    heap: BinaryHeap<HeapItem<'ob>>,
+    items: &'ob [OrderByItem],
+    k: usize,
+    skip: usize,
+    take: usize,
+    /// Monotonic insertion counter shared by every push — increments on EVERY
+    /// call regardless of whether the row entered the heap, so the tie-break
+    /// index reflects the order rows were SEEN (matching `enumerate()` on the
+    /// old full-`Vec` input), not the order they were admitted.
+    next_idx: usize,
+    with_ids: bool,
+}
+
+impl<'ob> TopKHeap<'ob> {
+    /// Build a bounded heap capped at `k = skip.saturating_add(take)`.
+    ///
+    /// `with_ids` selects whether each pushed row carries its `RecordId` (the
+    /// `with_version` read path sets this so the per-record versions array can
+    /// be rebuilt from the surviving heap rows alone).
+    pub fn new(order_by: &'ob OrderBy, skip: usize, take: usize, with_ids: bool) -> Self {
+        let k = skip.saturating_add(take);
+        Self {
+            heap: BinaryHeap::with_capacity(k + 1),
+            items: &order_by.items[..],
+            k,
+            skip,
+            take,
+            next_idx: 0,
+            with_ids,
         }
     }
 
-    impl PartialEq for HeapItem {
-        fn eq(&self, other: &Self) -> bool {
-            self.cmp(other) == std::cmp::Ordering::Equal
-        }
-    }
-    impl Eq for HeapItem {}
-    impl PartialOrd for HeapItem {
-        fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-            Some(self.cmp(other))
-        }
-    }
-    impl Ord for HeapItem {
-        fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-            // BinaryHeap is a max-heap; root = worst candidate (sorts last).
-            self.cmp_order(other)
-        }
-    }
-
-    let items_ptr: *const [OrderByItem] = &order_by.items[..];
-    let mut heap: BinaryHeap<HeapItem> = BinaryHeap::with_capacity(k + 1);
-
-    for (idx, value) in records.into_iter().enumerate() {
-        let keys = resolve_qv_order_keys(&value, &order_by.items);
-
-        if heap.len() < k {
-            heap.push(HeapItem {
+    /// Push one row into the heap. The heap self-bounds to `k` rows: while it
+    /// has fewer than `k` items the row is always admitted; once full, a row
+    /// that sorts strictly before the current root (worst) evicts it, all
+    /// others are dropped. `id` is stored iff `with_ids` was set at
+    /// construction; callers that did not enable it pass `None`.
+    #[inline]
+    pub fn push(&mut self, value: QueryValue, id: Option<RecordId>) {
+        let keys = resolve_qv_order_keys(&value, self.items);
+        let idx = self.next_idx;
+        self.next_idx += 1;
+        let stored_id = if self.with_ids { id } else { None };
+        if self.heap.len() < self.k {
+            self.heap.push(HeapItem {
                 keys,
                 idx,
                 value,
-                items_ptr,
+                id: stored_id,
+                items: self.items,
             });
-        } else if let Some(worst) = heap.peek() {
+        } else if let Some(worst) = self.heap.peek() {
             // If new element sorts BEFORE the worst in the heap, swap.
             let new_item = HeapItem {
                 keys,
                 idx,
                 value,
-                items_ptr,
+                id: stored_id,
+                items: self.items,
             };
             if new_item.cmp_order(worst) == std::cmp::Ordering::Less {
-                heap.pop();
-                heap.push(new_item);
+                self.heap.pop();
+                self.heap.push(new_item);
             }
         }
     }
 
-    // Drain and sort the top-K by ORDER BY direction + insertion order.
-    let mut top_k: Vec<HeapItem> = heap.into_vec();
-    top_k.sort_by(|a, b| a.cmp_order(b));
+    /// Drain the heap, sort by ORDER BY direction + insertion index, apply the
+    /// `skip`/`take` window, and return `(values, ids)`. The `ids` vec is
+    /// populated only when `with_ids` was set at construction; in that case it
+    /// is exactly `values.len()` entries long and index-aligned with it.
+    pub fn into_sorted(self) -> (Vec<QueryValue>, Vec<RecordId>) {
+        // Drain and sort the top-K by ORDER BY direction + insertion order.
+        let mut top_k: Vec<HeapItem<'ob>> = self.heap.into_vec();
+        top_k.sort_by(|a, b| a.cmp_order(b));
 
-    // Apply skip, then take.
-    top_k
-        .into_iter()
-        .skip(skip)
-        .take(take)
-        .map(|e| e.value)
-        .collect()
+        let n = top_k.len().saturating_sub(self.skip).min(self.take);
+        let mut values = Vec::with_capacity(n);
+        let mut ids = if self.with_ids {
+            Vec::with_capacity(n)
+        } else {
+            Vec::new()
+        };
+        for item in top_k.into_iter().skip(self.skip).take(self.take) {
+            values.push(item.value);
+            if self.with_ids {
+                // Alignment invariant: with_ids ⇒ every push carried Some(id).
+                ids.push(item.id.expect("with_ids heap item must carry a RecordId"));
+            }
+        }
+        (values, ids)
+    }
+
+    /// Number of rows currently held (always ≤ `k`).
+    #[allow(dead_code)]
+    pub fn len(&self) -> usize {
+        self.heap.len()
+    }
+
+    /// Whether the heap currently holds no rows.
+    #[allow(dead_code)]
+    pub fn is_empty(&self) -> bool {
+        self.heap.is_empty()
+    }
 }
 
 /// Owned sort key for QueryValue fields. Unlike the legacy `SortKey<'a>` this

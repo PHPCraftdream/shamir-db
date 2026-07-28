@@ -11,7 +11,7 @@ pub use crate::query::read::aggregate::{
 };
 use crate::query::read::hashable_query_value::HashableQueryValue;
 pub use crate::query::read::order::{
-    apply_order_by_qv, apply_order_by_qv_with_ids, apply_order_by_topk,
+    apply_order_by_qv, apply_order_by_qv_with_ids, apply_order_by_topk, TopKHeap,
 };
 pub use crate::query::read::select_projection::SelectProjection;
 pub use crate::query::read::{Pagination, PaginationInfo, Select, SelectItem};
@@ -122,6 +122,44 @@ pub fn fast_path_pagination(pagination: &Pagination) -> Option<PaginationInfo> {
         None
     } else {
         Some(PaginationInfo::compute(pagination, None))
+    }
+}
+
+/// Pagination metadata for the inline top-K heap path (F-53a, #874).
+///
+/// The heap itself only ever holds `k = skip + take` rows, so it cannot
+/// supply a true total — but the scan loop that feeds it DOES see every
+/// WHERE-passing row, and counts them in an independent running counter.
+/// `total_count` is that counter; `count_total` selects whether to thread it
+/// into the returned metadata.
+///
+/// This mirrors [`apply_pagination`]'s metadata logic byte-for-byte (the
+/// `pagination.is_none() && count_total` special shape, plus
+/// [`PaginationInfo::compute`] with the optional total) — only the SLICING is
+/// absent, because the heap already applied the `skip`/`take` window. Keeping
+/// the metadata shape identical means a top-K-served `ORDER BY + LIMIT` query
+/// returns the same `PaginationInfo` whether or not the bounded heap was used.
+pub fn topk_pagination(
+    pagination: &Pagination,
+    count_total: bool,
+    total_count: u64,
+) -> Option<PaginationInfo> {
+    if pagination.is_none() && !count_total {
+        return None;
+    }
+    let total = if count_total { Some(total_count) } else { None };
+    if pagination.is_none() && count_total {
+        // Mirrors apply_pagination's "count_total without pagination" shape.
+        Some(PaginationInfo {
+            total_count: total,
+            total_pages: None,
+            current_page: None,
+            page_size: None,
+            has_next: false,
+            has_prev: false,
+        })
+    } else {
+        Some(PaginationInfo::compute(pagination, total))
     }
 }
 

@@ -97,7 +97,7 @@ dhat = "0.3"
 bench-scale-tool = { workspace = true, features = ["async"] }
 tempfile = "3.10.1"
 serial_test = "3.3.1"
-shamir-bench-utils = { path = "../shamir-bench-utils" }
+shamir-bench-utils = { path = "../shamir-bench-utils", features = ["peak_mem"] }
 # RSS sampling for the `vector_report` example (V0.4). Reads the OS
 # resident-set size (procfs on Linux, mach_task_basic_info on macOS,
 # GetProcessMemoryInfo on Windows) — order-of-magnitude only, never a
@@ -166,6 +166,10 @@ harness = false
 
 [[bench]]
 name = "order_by_pipeline"
+harness = false
+
+[[bench]]
+name = "streaming_topk"
 harness = false
 
 [[bench]]

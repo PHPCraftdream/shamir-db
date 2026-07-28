@@ -936,6 +936,28 @@ impl TableManager {
 
         let mut records_scanned: u64 = 0;
 
+        // F-53a (#874): decide the inline top-K bounded-heap path UP FRONT,
+        // before the scan. When the query has ORDER BY + a finite LIMIT and no
+        // DISTINCT / GROUP BY / aggregate, we feed each WHERE-passing row
+        // directly into a `k = skip + take` bounded max-heap DURING the scan —
+        // never accumulating the full O(N) `rec_acc` the pre-F-53a shape
+        // materialised before `apply_order_by_topk` ever trimmed it. The old
+        // code comment claiming "O(K) memory" was true only for the heap's
+        // own internals; the `rec_acc` Vec feeding it was still O(N).
+        //
+        // `count_total` and `with_version` NO LONGER force the fallback (the
+        // pre-F-53a gate excluded both): `count_total` is satisfied by an
+        // independent running counter over WHERE-passing rows, and
+        // `with_version` is satisfied by carrying each heap item's `RecordId`.
+        // DISTINCT / GROUP BY / aggregates still force the fallback (they need
+        // the full projected/byte materialisation).
+        let (skip_resolved, take_resolved) = query.pagination.resolve();
+        let use_topk = query.order_by.is_some()
+            && take_resolved.is_some()
+            && !query.select.distinct
+            && !has_group_by
+            && !has_agg;
+
         // Two accumulation modes: raw Bytes (for aggregates) or projected
         // QueryRecord (for plain SELECT). S4: the aggregate arm now carries
         // Bytes + per-row RecordView instead of a full InnerValue tree.
@@ -961,6 +983,26 @@ impl TableManager {
         } else {
             None
         };
+
+        // F-53a (#874): the inline bounded heap. Only constructed when
+        // `use_topk`; the scan loop pushes into it instead of `rec_acc`.
+        // `with_ids` mirrors `tracking_versions` so the post-heap version
+        // rebuild (`collect_versions`) still gets the surviving page's ids.
+        let mut topk_heap: Option<exec::TopKHeap<'_>> = if use_topk {
+            Some(exec::TopKHeap::new(
+                query.order_by.as_ref().unwrap(),
+                skip_resolved as usize,
+                take_resolved.unwrap() as usize,
+                tracking_versions,
+            ))
+        } else {
+            None
+        };
+        // Independent running counter for `count_total` — decoupled from any
+        // Vec's `.len()`: increments once per WHERE-passing row regardless of
+        // whether it survives the heap's eviction. Lets the bounded heap serve
+        // `count_total` queries without falling back to the O(N) full sort.
+        let mut topk_total: u64 = 0;
 
         // F-10 (#800): rows that fail to decode are still skipped from the
         // result set (unchanged behaviour) but reported here instead of
@@ -989,7 +1031,16 @@ impl TableManager {
                             None => true,
                         };
                         if passes {
-                            if needs_raw {
+                            if let Some(heap) = topk_heap.as_mut() {
+                                // F-53a (#874): inline bounded heap — project
+                                // and push straight in, never accumulating the
+                                // full rec_acc. `topk_total` is the running
+                                // `count_total` counter (independent of the
+                                // heap's K-row window).
+                                topk_total += 1;
+                                let qv = proj.as_ref().unwrap().project_value(&view, interner);
+                                heap.push(qv, tracking_versions.then_some(id));
+                            } else if needs_raw {
                                 // S4: push raw bytes; the aggregate pipeline
                                 // builds a RecordView per row. No InnerValue
                                 // decode here.
@@ -1010,7 +1061,13 @@ impl TableManager {
                             None => true,
                         };
                         if passes {
-                            if needs_raw {
+                            if let Some(heap) = topk_heap.as_mut() {
+                                // F-53a (#874): inline bounded heap (Owned arm
+                                // — already-decoded InnerValue, e.g. from MVCC).
+                                topk_total += 1;
+                                let qv = proj.as_ref().unwrap().project_value(&record, interner);
+                                heap.push(qv, tracking_versions.then_some(id));
+                            } else if needs_raw {
                                 // S4: the Owned arm carries an already-decoded
                                 // InnerValue (e.g. from MVCC). Re-encode to
                                 // bytes once so the aggregate lens can consume
@@ -1041,72 +1098,55 @@ impl TableManager {
             }
         }
 
-        let mut qv_result: Vec<shamir_types::types::value::QueryValue> = if has_group_by {
-            exec::validate_aggregate_select(&query.select)?;
-            let group_by = query.group_by.as_ref().unwrap();
-            exec::apply_group_by(&raw_acc, group_by, &query.select, interner, ctx)
-        } else if has_agg {
-            exec::validate_aggregate_select(&query.select)?;
-            exec::apply_aggregate_all(&raw_acc, &query.select, interner, ctx.scalars.clone())
-        } else {
-            rec_acc
-                .into_iter()
-                .map(|r| match r {
-                    crate::query::read::QueryRecord::Direct(qv) => qv,
-                    other => other.as_value().into_owned(),
-                })
-                .collect()
-        };
-
-        // Post-process directly on QueryValue — no legacy round-trip.
-        // Both aggregate and non-aggregate paths now produce QueryValue
-        // and go through the QV post-processors.
-        if query.select.distinct {
-            qv_result = exec::apply_distinct_qv(qv_result);
-        }
-        // Top-K path: when ORDER BY + finite LIMIT and no distinct/group_by,
-        // use a bounded heap (O(K) memory) instead of full sort (O(N) memory).
-        let (skip_resolved, take_resolved) = query.pagination.resolve();
-        let use_topk = query.order_by.is_some()
-            && take_resolved.is_some()
-            && !query.select.distinct
-            && !has_group_by
-            && !has_agg
-            && !query.count_total
-            && !query.with_version;
-
         let mut paged_ids: Vec<RecordId> = Vec::new();
-        let (paged, pagination) = if use_topk {
-            let order_by = query.order_by.as_ref().unwrap();
-            let skip = skip_resolved as usize;
-            let take = take_resolved.unwrap() as usize;
-            let topk_result = exec::apply_order_by_topk(qv_result, order_by, skip, take);
-            // count_total=true is excluded from the top-K gate above, so a
-            // query that asks for a true total (ORDER BY + LIMIT + count_total)
-            // falls through to the `else` branch below, which uses the full
-            // sort (`apply_order_by_qv`) + `apply_pagination` — that path
-            // honors count_total by computing Some(records.len() as u64)
-            // before slicing. The top-K heap cannot supply a total (it only
-            // sees K rows), so routing count_total away from it is the only
-            // way to satisfy the flag; the O(N)-memory full sort is the
-            // intended, correct tradeoff.
+        let (paged, pagination) = if let Some(heap) = topk_heap {
+            // F-53a (#874): the inline bounded heap already applied the
+            // ORDER BY + skip/take window DURING the scan — drain, sort, and
+            // slice here. No full `rec_acc` / `qv_result` was built for this
+            // path, so `apply_order_by_topk` / `apply_order_by_qv` are never
+            // reached. `topk_total` (the independent running counter) feeds
+            // `count_total` metadata without falling back to the O(N) sort.
             //
-            // #128 regression fix: the top-K LIMIT fast path emits the same
-            // pagination metadata as every other LIMIT path, via the shared
-            // `fast_path_pagination` helper (count_total == false → total
-            // None). Returning a bare `None` here once silently dropped
-            // pagination for every `ORDER BY` + `LIMIT` query.
-            //
-            // F-7 (#797): `with_version` is likewise excluded from the top-K
-            // gate for the same reason — the heap-based `apply_order_by_topk`
-            // carries only `BinaryHeap<QueryValue>` entries and cannot thread a
-            // companion `RecordId` vector through the reorder. Forcing the
-            // full-sort fallback lets the plain-ORDER-BY + with_version path
-            // carry each row's id (via `apply_order_by_qv_with_ids`) and
-            // rebuild the per-record versions array. Threading ids through the
-            // heap is a separate, larger change explicitly out of scope here.
-            (topk_result, exec::fast_path_pagination(&query.pagination))
+            // `with_version` composes: when `tracking_versions`, each heap item
+            // carried its `RecordId`, and `into_sorted` returns the surviving
+            // page's ids already aligned with the values — drop them into
+            // `paged_ids` so the existing `collect_versions` call below
+            // rebuilds the per-record versions array unchanged.
+            let (qvs, ids) = heap.into_sorted();
+            if tracking_versions {
+                paged_ids = ids;
+            }
+            (
+                qvs,
+                exec::topk_pagination(&query.pagination, query.count_total, topk_total),
+            )
         } else {
+            // Fallback path (no ORDER BY + finite LIMIT, OR DISTINCT / GROUP BY
+            // / aggregate present): unchanged — build qv_result from the full
+            // accumulation, then sort + paginate.
+            let mut qv_result: Vec<shamir_types::types::value::QueryValue> = if has_group_by {
+                exec::validate_aggregate_select(&query.select)?;
+                let group_by = query.group_by.as_ref().unwrap();
+                exec::apply_group_by(&raw_acc, group_by, &query.select, interner, ctx)
+            } else if has_agg {
+                exec::validate_aggregate_select(&query.select)?;
+                exec::apply_aggregate_all(&raw_acc, &query.select, interner, ctx.scalars.clone())
+            } else {
+                rec_acc
+                    .into_iter()
+                    .map(|r| match r {
+                        crate::query::read::QueryRecord::Direct(qv) => qv,
+                        other => other.as_value().into_owned(),
+                    })
+                    .collect()
+            };
+
+            // Post-process directly on QueryValue — no legacy round-trip.
+            // Both aggregate and non-aggregate paths now produce QueryValue
+            // and go through the QV post-processors.
+            if query.select.distinct {
+                qv_result = exec::apply_distinct_qv(qv_result);
+            }
             if let Some(ref order_by) = query.order_by {
                 if tracking_versions {
                     // F-7 (#797): plain ORDER BY + with_version — sort the
