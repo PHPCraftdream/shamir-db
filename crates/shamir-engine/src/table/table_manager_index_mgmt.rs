@@ -543,6 +543,86 @@ impl TableManager {
         self.index_manager.drop_unique_index(name_id).await
     }
 
+    /// Drop an index2 backend (`fts` / `functional` / `vector`) by name.
+    ///
+    /// This is the standalone `DROP INDEX` counterpart to
+    /// [`create_index_v2`](Self::create_index_v2). Unlike the
+    /// `DROP TABLE ... CASCADE` path (which can skip persistence + posting
+    /// cleanup because the whole table dies with the index), a standalone
+    /// drop must do both so the surviving table never observes a stale
+    /// descriptor or orphan postings.
+    ///
+    /// Sequence (best-effort, non-atomic — crash-safety is F-50 Step 3b
+    /// / #873, deliberately out of scope here, matching `create_index_v2`'s
+    /// own multi-step sequence):
+    ///   1. resolve the backend by interned name (`Ok(false)` if absent);
+    ///   2. `backend.drop_all()` to sweep its posting entries;
+    ///   3. `registry.remove_by_id(id)` to retire it from the live set
+    ///      (also advances the F-50 generation counter);
+    ///   4. `save_index2_metadata` to persist the reduced registry — it
+    ///      re-derives `PersistedIndexes` from the LIVE registry's
+    ///      `all_descriptors()`, so calling it AFTER `remove_by_id`
+    ///      naturally persists the removal.
+    ///
+    /// # Returns
+    /// `true` if a backend existed and was removed, `false` if no index2
+    /// backend is registered under `name`.
+    pub async fn drop_index2(&self, name: &str) -> DbResult<bool> {
+        let interner = self.interner.get().await?;
+        // `get_ind` is a pure lookup (does NOT mint a new id), so dropping a
+        // name that was never interned cannot pollute the interner.
+        let Some(name_key) = interner.get_ind(name) else {
+            return Ok(false);
+        };
+        let Some(backend) = self.index2_registry.get_by_name(name_key.id()).await else {
+            return Ok(false);
+        };
+        // Clean up the backend's posting entries BEFORE retiring it from the
+        // registry, so a concurrent reader can never observe a registered
+        // backend with no postings (best-effort, non-atomic).
+        backend
+            .drop_all()
+            .await
+            .map_err(|e| shamir_storage::error::DbError::Internal(e.to_string()))?;
+        self.index2_registry
+            .remove_by_id(backend.descriptor().id)
+            .await;
+        crate::index2::persistence::save_index2_metadata(&self.index2_registry, &self.info_store)
+            .await?;
+        Ok(true)
+    }
+
+    /// Check if a sorted index exists by name.
+    ///
+    /// Mirrors [`index_exists`](Self::index_exists) /
+    /// [`unique_index_exists`](Self::unique_index_exists): a pure lookup that
+    /// does NOT mint a new interned id when the name is absent.
+    pub async fn sorted_index_exists(&self, name: &str) -> bool {
+        if let Ok(interner) = self.interner.get().await {
+            if let Some(key) = interner.get_ind(name) {
+                return self
+                    .sorted_indexes
+                    .find_by_name_interned(key.id())
+                    .is_some();
+            }
+        }
+        false
+    }
+
+    /// Check if an index2 backend (`fts` / `functional` / `vector`) exists
+    /// by name.
+    ///
+    /// Mirrors [`index_exists`](Self::index_exists): a pure lookup that does
+    /// NOT mint a new interned id when the name is absent.
+    pub async fn index2_exists(&self, name: &str) -> bool {
+        if let Ok(interner) = self.interner.get().await {
+            if let Some(key) = interner.get_ind(name) {
+                return self.index2_registry.get_by_name(key.id()).await.is_some();
+            }
+        }
+        false
+    }
+
     /// Look up records by index value.
     pub async fn lookup_by_index(
         &self,

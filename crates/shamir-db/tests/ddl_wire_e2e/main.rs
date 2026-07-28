@@ -7,6 +7,7 @@
 mod helpers;
 
 mod drop_function_guard;
+mod drop_index_index2_support;
 mod error_codes;
 mod folders_introspection;
 mod idempotency_cascade;

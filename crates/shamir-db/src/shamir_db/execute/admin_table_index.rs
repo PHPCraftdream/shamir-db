@@ -437,6 +437,13 @@ impl ShamirAdminExecutor {
             |e: shamir_types::access::AccessError| err_code("access_denied", e.to_string());
 
         // if_exists early-exit: missing db, table, or index → no-op.
+        //
+        // Existence is checked across ALL FOUR index mechanisms (legacy
+        // regular, legacy unique, sorted, index2) — `DROP INDEX <name>` has
+        // no `index_type` hint on the wire (see `DropIndexOp`), so the name
+        // alone must be resolved. Before this, an index2 / sorted index of
+        // the same name would be reported as "does not exist" and silently
+        // no-op'd even though it does.
         if op.if_exists {
             let db_opt = self.shamir.get_db(&self.db_name);
             let table_opt = match &db_opt {
@@ -445,11 +452,14 @@ impl ShamirAdminExecutor {
             };
             let index_exists = match &table_opt {
                 Some(table) => {
-                    if op.unique {
+                    let legacy = if op.unique {
                         table.unique_index_exists(&op.drop_index).await
                     } else {
                         table.index_exists(&op.drop_index).await
-                    }
+                    };
+                    legacy
+                        || table.sorted_index_exists(&op.drop_index).await
+                        || table.index2_exists(&op.drop_index).await
                 }
                 None => false,
             };
@@ -478,6 +488,12 @@ impl ShamirAdminExecutor {
             .await
             .map_err(|e| err(e.to_string()))?;
 
+        // Resolution order: legacy first (preserves the existing behavior
+        // and error messages for the common btree case unchanged), then the
+        // legacy-miss falls through to sorted, then to index2. `DropIndexOp`
+        // carries no `index_type`, so the name is resolved by trying each
+        // mechanism in turn and returning the first hit. Short-circuit `||`
+        // skips the remaining lookups once one matches.
         let removed = if op.unique {
             table
                 .drop_unique_index(&op.drop_index)
@@ -489,6 +505,15 @@ impl ShamirAdminExecutor {
                 .await
                 .map_err(|e| err(e.to_string()))?
         };
+        let removed = removed
+            || table
+                .drop_sorted_index(&op.drop_index)
+                .await
+                .map_err(|e| err(e.to_string()))?
+            || table
+                .drop_index2(&op.drop_index)
+                .await
+                .map_err(|e| err(e.to_string()))?;
 
         Ok(admin_result(mpack!({
             "dropped_index": @(QueryValue::Str(op.drop_index.clone())),
