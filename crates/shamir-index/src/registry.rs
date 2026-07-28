@@ -17,17 +17,27 @@
 //! the tx already planned against at stage time.
 
 use crate::backend::{IndexBackend, IndexError};
+use crate::state::IndexState;
 use shamir_collections::THasher;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
 
 pub struct IndexRegistry {
-    /// `(backend, inserted_at_generation)`. The generation tag is set by
-    /// [`insert`](Self::insert) to the value it bumps `generation` to, so
-    /// [`backends_newer_than`](Self::backends_newer_than) can filter without
-    /// a second map lookup (and without the two-maps-out-of-sync hazard a
-    /// parallel side-map would introduce).
-    by_id: scc::HashMap<u32, (Arc<dyn IndexBackend>, u64), THasher>,
+    /// `(backend, inserted_at_generation, lifecycle_state)`. The generation
+    /// tag is set by [`insert`](Self::insert) to the value it bumps
+    /// `generation` to, so [`backends_newer_than`](Self::backends_newer_than)
+    /// can filter without a second map lookup (and without the
+    /// two-maps-out-of-sync hazard a parallel side-map would introduce). The
+    /// `IndexState` slot (F-50 Step 3b) is the AUTHORITATIVE lifecycle state
+    /// for a live backend: `IndexDescriptor.state` is a pure serialization
+    /// carrier, and [`all_descriptors`](Self::all_descriptors) overwrites the
+    /// cloned descriptor's `state` from this tuple entry so persistence always
+    /// emits the registry's current truth. [`set_state`](Self::set_state)
+    /// flips `Building → Ready` after a successful backfill without
+    /// per-backend interior mutability (the Step 3a memo explicitly rejected
+    /// that as more invasive — this is the F-50 Step 1 generation-tag pattern
+    /// extended by one field).
+    by_id: scc::HashMap<u32, (Arc<dyn IndexBackend>, u64, IndexState), THasher>,
     by_name: scc::HashMap<u64, u32, THasher>,
     next_id: AtomicU32,
     /// F-50: bumped on every successful `insert` / `remove_by_id`. Read with
@@ -71,8 +81,16 @@ impl IndexRegistry {
         // value; +1 is the generation this insert will be visible at.
         let inserted_gen = self.generation.fetch_add(1, Ordering::AcqRel) + 1;
 
+        // F-50 Step 3b: capture the descriptor's persisted `state` into the
+        // authoritative tuple slot. For `create_index_v2` this is `Building`
+        // at insert time (flipped to `Ready` via `set_state` once the backfill
+        // completes); for the table-open path a `Ready` descriptor carries
+        // `Ready`, a `Building` descriptor carries `Building` (the open-path
+        // self-heal flips it to `Ready` after re-backfill). The tuple — NOT
+        // `IndexDescriptor.state` — is the live source of truth.
+        let state = d.state;
         self.by_id
-            .insert_async(id, (backend.clone(), inserted_gen))
+            .insert_async(id, (backend.clone(), inserted_gen, state))
             .await
             .map_err(|_| IndexError::Backend(format!("index id {id} already registered")))?;
         self.by_name
@@ -82,6 +100,33 @@ impl IndexRegistry {
                 IndexError::Backend(format!("index name {name_interned} already registered"))
             })?;
         Ok(())
+    }
+
+    /// F-50 Step 3b: set the authoritative lifecycle `state` for the backend
+    /// registered under `id`. Used by `create_index_v2` (and the table-open
+    /// self-heal) to flip `Building → Ready` once a backfill has completed —
+    /// the backend's own `IndexDescriptor.state` is immutable and stays as
+    /// the serialization carrier; this tuple slot is what
+    /// [`all_descriptors`](Self::all_descriptors) reads when persisting.
+    ///
+    /// Returns `true` if the backend was found and updated, `false` if no
+    /// backend is registered under `id` (no-op). Idempotent: setting `Ready`
+    /// on an already-`Ready` backend is a cheap no-op write.
+    pub async fn set_state(&self, id: u32, state: IndexState) -> bool {
+        self.by_id
+            .update_async(&id, |_, v| {
+                v.2 = state;
+            })
+            .await
+            .is_some()
+    }
+
+    /// F-50 Step 3b: the authoritative lifecycle `state` for the backend
+    /// registered under `id`, or `None` if no backend is registered. Reads
+    /// the tuple slot (not the descriptor clone) — this is the value the
+    /// planner Ready-gate and the doctor consult.
+    pub async fn state_of(&self, id: u32) -> Option<IndexState> {
+        self.by_id.read_async(&id, |_, v| v.2).await
     }
 
     /// F-50: every backend whose insertion generation is strictly greater
@@ -95,7 +140,7 @@ impl IndexRegistry {
     pub async fn backends_newer_than(&self, threshold_gen: u64) -> Vec<Arc<dyn IndexBackend>> {
         let mut out = Vec::new();
         self.by_id
-            .iter_async(|_, (backend, gen)| {
+            .iter_async(|_, (backend, gen, _state)| {
                 if *gen > threshold_gen {
                     out.push(backend.clone());
                 }
@@ -159,13 +204,22 @@ impl IndexRegistry {
         out
     }
 
-    /// Collect all descriptors (for persistence).
+    /// Collect all descriptors (for persistence). F-50 Step 3b: the cloned
+    /// descriptor's `state` field is OVERWRITTEN from the authoritative tuple
+    /// slot — `IndexDescriptor.state` as read from disk (or set at backend
+    /// construction) is a pure serialization carrier; the registry tuple is
+    /// the single source of truth for a LIVE backend's current state. This
+    /// keeps `create_index_v2`'s `Building`-at-construction →
+    /// `set_state(Ready)` flip correctly reflected in the persisted blob
+    /// without any per-backend interior mutability.
     #[allow(clippy::disallowed_methods)] // O(N) ack: Vec-capacity sizing at snapshot, off hot path
     pub async fn all_descriptors(&self) -> Vec<crate::descriptor::IndexDescriptor> {
         let mut out = Vec::with_capacity(self.by_id.len());
         self.by_id
             .iter_async(|_, v| {
-                out.push(v.0.descriptor().clone());
+                let mut desc = v.0.descriptor().clone();
+                desc.state = v.2;
+                out.push(desc);
                 true
             })
             .await;
@@ -203,7 +257,17 @@ impl IndexRegistry {
     }
 
     /// Find a backend whose first field path matches and whose kind
-    /// matches the given tag ("fts", "functional", "vector").
+    /// matches the given tag ("fts", "functional", "vector", "btree").
+    ///
+    /// F-50 Step 3b Ready-gate: a backend in `Building` state is INVISIBLE
+    /// to this lookup — the planner and every read path that dispatches via
+    /// `find_by_field_and_kind` fall through to a full scan as if the
+    /// half-built index did not exist. This is the correctness anchor for
+    /// restart-from-scratch: a `Building` backend's partial postings are
+    /// safely droppable because no reader can have depended on them. DDL
+    /// paths that need to reach a `Building` backend (e.g. `drop_index2`)
+    /// resolve by name via [`get_by_name`](Self::get_by_name), which is
+    /// intentionally NOT state-filtered.
     pub async fn find_by_field_and_kind(
         &self,
         field_path: &[u64],
@@ -211,7 +275,12 @@ impl IndexRegistry {
     ) -> Option<Arc<dyn IndexBackend>> {
         let mut found = None;
         self.by_id
-            .iter_async(|_, (backend, _gen)| {
+            .iter_async(|_, (backend, _gen, state)| {
+                // Planner Ready-gate: skip a Building backend so reads never
+                // observe partial postings.
+                if *state != IndexState::Ready {
+                    return true;
+                }
                 let desc = backend.descriptor();
                 let kind_matches = matches!(
                     (&desc.kind, kind_tag),

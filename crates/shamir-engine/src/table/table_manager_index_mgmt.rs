@@ -99,25 +99,6 @@ impl TableManager {
 
         let id = self.index2_registry.allocate_id();
 
-        // #534 finding 2 (crash-orphan-id-reuse). `allocate_id()` is a plain
-        // in-memory `AtomicU32::fetch_add` with NO durability — the id only
-        // becomes durable when the FINAL `save_index2_metadata` (after backfill
-        // + register) succeeds. A crash between here and that final save would
-        // leave postings written under an id that was never persisted; on
-        // restart `next_id` resets to the last persisted watermark and the SAME
-        // id could be reallocated to a DIFFERENT index definition that then
-        // inherits the crashed attempt's orphan postings. Durably advance the
-        // persisted `next_id` watermark NOW, before backfill: at this point
-        // `all_descriptors()` still returns the PRE-existing set (the new
-        // backend is not yet inserted), so this does NOT expose the
-        // not-yet-backfilled index to any reader of `descriptors` — it only
-        // reserves the id so a crash can never reallocate it. The orphan
-        // postings under the dead id become inert, permanently-unreachable
-        // garbage (no future index can collide with an id nothing will ever
-        // allocate again).
-        crate::index2::persistence::save_index2_metadata(&self.index2_registry, &self.info_store)
-            .await?;
-
         let name_key = match interner
             .touch_ind(&op.create_index)
             .map_err(|e| shamir_storage::error::DbError::Internal(e.to_string()))?
@@ -142,13 +123,18 @@ impl TableManager {
                     tokenizer: tok,
                     language: op.fts_language.clone(),
                 };
-                let desc = IndexDescriptor::new(
+                // F-50 Step 3b: construct with state=Building so the first
+                // `save_index2_metadata_with_pending` (after this match)
+                // persists a durable crash-restart marker BEFORE the backfill
+                // runs. Flipped to Ready via `set_state` after the backfill.
+                let mut desc = IndexDescriptor::new(
                     id,
                     &op.create_index,
                     name_key,
                     interned_paths.clone(),
                     kind.clone(),
                 );
+                desc.state = crate::index2::state::IndexState::Building;
                 let backend: Arc<dyn IndexBackend> =
                     Arc::new(crate::index2::fts_ranked_backend::FtsRankedBackend::new(
                         desc,
@@ -188,13 +174,17 @@ impl TableManager {
                     }
                 };
                 let kind = IndexKind::Functional(Box::new(FunctionalConfig { expr: expr.clone() }));
-                let desc = IndexDescriptor::new(
+                // F-50 Step 3b: state=Building (see the fts arm's matching
+                // comment) — persisted by the first save before backfill,
+                // flipped to Ready after.
+                let mut desc = IndexDescriptor::new(
                     id,
                     &op.create_index,
                     name_key,
                     interned_paths.clone(),
                     kind.clone(),
                 );
+                desc.state = crate::index2::state::IndexState::Building;
                 let backend: Arc<dyn IndexBackend> =
                     if matches!(expr, crate::index2::expr::IndexExpr::Scalar { .. }) {
                         Arc::new(
@@ -263,13 +253,17 @@ impl TableManager {
                     },
                     quantization,
                 }));
-                let desc = IndexDescriptor::new(
+                // F-50 Step 3b: state=Building (see the fts arm's matching
+                // comment) — persisted by the first save before backfill,
+                // flipped to Ready after.
+                let mut desc = IndexDescriptor::new(
                     id,
                     &op.create_index,
                     name_key,
                     interned_paths.clone(),
                     kind.clone(),
                 );
+                desc.state = crate::index2::state::IndexState::Building;
                 let adapter = Arc::new(
                     crate::index2::vector::hnsw_adapter::HnswAdapter::new_with_quantization(
                         dim,
@@ -295,6 +289,31 @@ impl TableManager {
                 )))
             }
         };
+
+        // #534 finding 2 (crash-orphan-id-reuse) + F-50 Step 3b
+        // (crash-restart marker). `allocate_id()` is a plain in-memory
+        // `AtomicU32::fetch_add` with NO durability, and the backend's
+        // descriptor is not yet in the live registry (the backfill runs
+        // before register — see `backfill_index2_backend`'s doc comment).
+        // This persist runs BEFORE the backfill to:
+        //  (a) durably advance the `next_id` watermark past the reserved id
+        //      so a crash can never reallocate it to a different index
+        //      definition (#534 finding 2); AND
+        //  (b) make the in-flight `Building` descriptor visible on disk so a
+        //      restart between this point and the final `Ready` persist can
+        //      DETECT the interrupted build and self-heal (F-50 Step 3b's
+        //      table-open restart-from-scratch — the `Building` state is the
+        //      durable marker that distinguishes "interrupted build" from
+        //      "never attempted").
+        // The `pending` arg passes the descriptor WITHOUT inserting the
+        // backend into the live registry — preserving the backfill-before-
+        // register invariant the live `index2_on_insert` hook relies on.
+        crate::index2::persistence::save_index2_metadata_with_pending(
+            &self.index2_registry,
+            &self.info_store,
+            Some(backend.descriptor().clone()),
+        )
+        .await?;
 
         // Backfill the new backend from records that already exist in the
         // table BEFORE it was registered. Without this, a functional / fts /
@@ -324,6 +343,19 @@ impl TableManager {
             .await
             .map_err(|e| shamir_storage::error::DbError::Internal(e.to_string()))?;
 
+        // F-50 Step 3b: the backfill completed and the backend is now
+        // registered, so flip its authoritative lifecycle state from
+        // `Building` (set at descriptor construction above and captured into
+        // the registry tuple by `insert`) to `Ready`. The FINAL
+        // `save_index2_metadata` below reads `all_descriptors()`, which
+        // merges the tuple's state into the cloned descriptor — so the
+        // persisted blob now carries `Ready`, atomically replacing the
+        // `Building` marker from the first save. A crash before this point
+        // leaves `Building` on disk → the table-open self-heal re-backfills.
+        self.index2_registry
+            .set_state(id, crate::index2::state::IndexState::Ready)
+            .await;
+
         crate::index2::persistence::save_index2_metadata(&self.index2_registry, &self.info_store)
             .await?;
 
@@ -338,6 +370,10 @@ impl TableManager {
     /// `create_index_from_records` backfill. It is scoped to ONE backend (the
     /// one just created) so a CREATE INDEX on a table that already carries
     /// other index2 backends does not needlessly re-touch them.
+    ///
+    /// Called from BOTH `create_index_v2` (the normal CREATE INDEX path) AND
+    /// the F-50 Step 3b table-open self-healing restart-from-scratch
+    /// (`TableManager::create`'s `Building`-descriptor recovery loop).
     ///
     /// Runs BEFORE the backend is registered, which avoids a double-write
     /// (the live `index2_on_insert` hook can't yet route to an unregistered
@@ -416,7 +452,7 @@ impl TableManager {
     /// continuation) is Step 2 / Step 3 per the F-50 memo — do not read this
     /// comment as "the tx-commit-path lost-write race is fully closed for all
     /// backend kinds" without that qualification.
-    async fn backfill_index2_backend(
+    pub(super) async fn backfill_index2_backend(
         &self,
         backend: &dyn crate::index2::backend::IndexBackend,
     ) -> DbResult<()> {

@@ -321,6 +321,31 @@ artifact).
   different `dim` would cause a `DimMismatch` on promote. See
   `docs/guide-docs/guide/06-search.md:151-160`.
 - **No partial indexes, no TTL indexes, no geo indexes.**
+- **A crash during an index2 (`fts`/`functional`/`vector`) build always
+  re-does the O(N) backfill on the next table open, even if the crash
+  happened at 99% completion — CLOSED crash-restart gap (F-50 Step 3b,
+  #873), residual cost documented.** A `CREATE INDEX` on an index2 backend
+  is a multi-step sequence (reserve id → persist `Building` marker →
+  backfill → register → persist `Ready`). If the process crashes between
+  the `Building` and `Ready` persists, the on-disk metadata records a
+  half-built index. On reopen, the table-open self-healing path detects the
+  `Building` marker, drops the partial backend's postings
+  (`IndexBackend::drop_all`), re-runs the full backfill from scratch, flips
+  the state to `Ready`, and re-persists — automatically, no operator action
+  needed (the doctor's `verify()` additionally surfaces any `Building`
+  backend that survived open, e.g. from a backfill that failed under the
+  non-fatal `restore_on_open` error policy, and `repair()` can re-trigger
+  the same restart-from-scratch for a live table). The **residual cost** is
+  that a crash at 99% completion discards the 99% and redoes the entire
+  O(N) scan: resume-from-checkpoint was explicitly rejected as
+  over-engineering for a rare, operator-driven DDL event (the backfill is
+  checkpoint-less and the per-backend ops are not guaranteed idempotent, so
+  resume would need a persisted cursor + per-backend idempotency guarantees
+  in addition to a range-resume stream variant). See the decision memo at
+  `docs/dev-artifacts/research/f50-step3-crash-restart-spike.md` §2 for the
+  full restart-vs-resume reasoning, and `IndexState` /
+  `IndexDescriptor.state` / `IndexRegistry::set_state` in
+  `crates/shamir-index/src/` for the lifecycle-state implementation.
 
 ## 4. Subscriptions
 

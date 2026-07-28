@@ -20,6 +20,7 @@ pub mod has_any_index_tests;
 pub mod history_read_tests;
 pub mod index2_create_barrier_tests;
 pub mod index2_empty_result_tests;
+pub mod index2_lifecycle_state_tests;
 pub mod index2_migration_tests;
 pub mod index2_persistence_tests;
 pub mod index_create_persist_atomicity_tests;

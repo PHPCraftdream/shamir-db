@@ -25,6 +25,7 @@ use shamir_types::types::value::InnerValue;
 
 use crate::index::index_definition::IndexDefinition;
 use crate::index::sorted_index_manager::{SortedIndexDefinition, SortedIndexManager};
+use crate::index2::state::IndexState;
 use crate::table::record_cow::RecordCow;
 
 use super::table_manager::TableManager;
@@ -38,6 +39,16 @@ pub struct VerifyReport {
     pub regular_indexes: Vec<IndexHealth>,
     pub unique_indexes: Vec<IndexHealth>,
     pub sorted_indexes: Vec<IndexHealth>,
+    /// F-50 Step 3b — per-backend lifecycle health for index2 (`fts` /
+    /// `functional` / `vector`). A `Building` entry is reported as
+    /// `healthy == false` with a diagnostic `message`, and folds into
+    /// [`is_healthy`](Self::is_healthy)'s AND-chain so a stuck-Building
+    /// index surfaces in the overall report. (The self-healing open path
+    /// normally clears these before any operator audit runs; this section
+    /// is the belt-and-suspenders visibility layer for a Building index
+    /// that survived open — e.g. a backfill that failed under the
+    /// non-fatal `restore_on_open` error policy.)
+    pub index2_backends: Vec<Index2Health>,
     pub elapsed_ms: u64,
 }
 
@@ -50,6 +61,7 @@ impl VerifyReport {
         self.regular_indexes.iter().all(|i| i.is_healthy())
             && self.unique_indexes.iter().all(|i| i.is_healthy())
             && self.sorted_indexes.iter().all(|i| i.is_healthy())
+            && self.index2_backends.iter().all(|i| i.is_healthy())
     }
 }
 
@@ -63,6 +75,29 @@ pub struct IndexHealth {
 impl IndexHealth {
     pub fn is_healthy(&self) -> bool {
         self.expected_entries == self.actual_entries
+    }
+}
+
+/// F-50 Step 3b — lifecycle health of a single index2 backend
+/// (`fts` / `functional` / `vector`).
+///
+/// `healthy` is `false` iff `state == Building` (the build was interrupted
+/// by a crash and the self-healing open path either has not run yet or its
+/// backfill failed under the non-fatal error policy). The `message` field
+/// carries the operator-facing diagnostic for unhealthy entries; it is
+/// `None` for a `Ready` backend.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Index2Health {
+    pub id: u32,
+    pub name: String,
+    pub state: IndexState,
+    pub healthy: bool,
+    pub message: Option<String>,
+}
+
+impl Index2Health {
+    pub fn is_healthy(&self) -> bool {
+        self.healthy
     }
 }
 
@@ -177,6 +212,33 @@ impl TableManager {
             });
         }
 
+        // F-50 Step 3b — index2 backend lifecycle health. `all_descriptors()`
+        // merges the authoritative tuple state into each cloned descriptor,
+        // so `desc.state` here is the LIVE registry's truth (not the stale
+        // serialization carrier on the backend's own `IndexDescriptor`).
+        // A `Building` backend is reported unhealthy with the operator-facing
+        // message from the Step 3a memo §4 design.
+        let mut index2_backends = Vec::new();
+        for desc in self.index2_registry().all_descriptors().await {
+            let healthy = desc.state == IndexState::Ready;
+            let message = if healthy {
+                None
+            } else {
+                Some(format!(
+                    "index2 backend '{}' (id={}) is in Building state — build was \
+                     interrupted; reopen the table or run repair",
+                    desc.name, desc.id
+                ))
+            };
+            index2_backends.push(Index2Health {
+                id: desc.id,
+                name: desc.name.clone(),
+                state: desc.state,
+                healthy,
+                message,
+            });
+        }
+
         Ok(VerifyReport {
             records_in_data,
             counter_value,
@@ -184,6 +246,7 @@ impl TableManager {
             regular_indexes,
             unique_indexes,
             sorted_indexes,
+            index2_backends,
             elapsed_ms: start.elapsed().as_millis() as u64,
         })
     }
@@ -286,6 +349,53 @@ impl TableManager {
             counter_after += batch?.len() as u64;
         }
         self.counter().set_to(counter_after).await?;
+
+        // F-50 Step 3b — optionally heal any index2 backend stuck in
+        // `Building` state. The self-healing open path is the PRIMARY
+        // recovery (it runs automatically on every table open); this
+        // `repair()` branch is the manual belt-and-suspenders trigger for an
+        // operator who notices a stuck Building index on a LIVE table (one
+        // whose backfill failed under `restore_on_open`'s non-fatal error
+        // policy) and wants to force a re-build without a full table reopen.
+        // It reuses the same restart-from-scratch logic as the open path:
+        // drop the partial postings, re-run the full backfill, flip Ready,
+        // and re-persist.
+        let mut index2_healed: u64 = 0;
+        let index2_descs = self.index2_registry().all_descriptors().await;
+        for desc in &index2_descs {
+            if desc.state != IndexState::Building {
+                continue;
+            }
+            if let Some(backend) = self.index2_registry().get_by_id(desc.id).await {
+                log::warn!(
+                    "repair: re-triggering restart-from-scratch for Building index2 \
+                     backend '{}' (id={})",
+                    desc.name,
+                    desc.id
+                );
+                if let Err(e) = backend.drop_all().await {
+                    log::warn!(
+                        "repair: drop_all for Building index2 '{}' (id={}) failed: {} \
+                         — continuing with backfill",
+                        desc.name,
+                        desc.id,
+                        e
+                    );
+                }
+                self.backfill_index2_backend(backend.as_ref()).await?;
+                self.index2_registry()
+                    .set_state(desc.id, IndexState::Ready)
+                    .await;
+                index2_healed += 1;
+            }
+        }
+        if index2_healed > 0 {
+            let _ = crate::index2::persistence::save_index2_metadata(
+                &self.index2_registry,
+                &self.info_store,
+            )
+            .await;
+        }
 
         Ok(RepairReport {
             records_scanned: counter_after,

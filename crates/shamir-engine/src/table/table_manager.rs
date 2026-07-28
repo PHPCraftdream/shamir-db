@@ -293,6 +293,18 @@ impl TableManager {
         }
 
         // Restore index2 backends from persisted metadata.
+        //
+        // F-50 Step 3b — self-healing restart-from-scratch: a descriptor
+        // loaded with `state == Building` marks an index whose backfill was
+        // interrupted by a crash between `create_index_v2`'s first
+        // (`Building`) and final (`Ready`) persist. The half-built backend's
+        // partial postings are safely droppable (the planner Ready-gate kept
+        // every reader off them), so we drop them, re-run the backfill from
+        // scratch, flip the state to `Ready`, and re-persist — making the
+        // recovery fully automatic, no operator action needed. See the
+        // decision memo (`docs/dev-artifacts/research/f50-step3-crash-restart-spike.md`
+        // §2) for why restart-from-scratch was chosen over resume.
+        let mut recovered_building_ids: Vec<u32> = Vec::new();
         if let Some(persisted) =
             crate::index2::persistence::load_index2_metadata(&mgr.info_store).await?
         {
@@ -301,12 +313,68 @@ impl TableManager {
                 if matches!(desc.kind, crate::index2::kind::IndexKind::Btree { .. }) {
                     continue;
                 }
+                let was_building = desc.state == crate::index2::state::IndexState::Building;
                 let backend = crate::index2::build_index2_backend_with_resolver(
                     desc,
                     &info_store,
                     Some(mgr.scalar_resolver.load_full().as_ref().clone()),
                 );
+                // F-50 Step 3b self-heal: for a Building descriptor, drop any
+                // partial postings the crashed attempt wrote under the
+                // reserved id, then re-run the full backfill. The backend is
+                // freshly constructed (empty adapter / no in-memory state),
+                // so `drop_all` cleans only the crashed attempt's persisted
+                // postings; the backfill that follows rebuilds a complete,
+                // consistent index.
+                if was_building {
+                    log::warn!(
+                        "index2 backend '{}' (id={}) was persisted in Building state — \
+                         build was interrupted by a crash; restarting the build from scratch \
+                         (drop_all + full backfill)",
+                        backend.descriptor().name,
+                        backend.descriptor().id
+                    );
+                    if let Err(e) = backend.drop_all().await {
+                        // `drop_all` failure is not fatal: the backfill below
+                        // will re-write postings idempotently for most
+                        // backends (functional/vector). Log and continue —
+                        // matching `restore_on_open`'s own error policy.
+                        log::warn!(
+                            "index2 drop_all during restart-from-scratch for '{}' (id={}) \
+                             failed: {} — continuing with backfill (partial postings may persist)",
+                            backend.descriptor().name,
+                            backend.descriptor().id,
+                            e
+                        );
+                    }
+                    // Re-run the backfill (the same `backfill_index2_backend`
+                    // `create_index_v2` uses). Errors propagate: a backfill
+                    // failure on reopen is a genuine data-integrity problem,
+                    // not a transient issue.
+                    mgr.backfill_index2_backend(backend.as_ref()).await?;
+                }
+                let recovered_id = backend.descriptor().id;
                 let _ = mgr.index2_registry.insert(backend).await;
+                // Flip Building → Ready now that the backfill has completed
+                // (for Ready descriptors this is a no-op — their tuple slot
+                // already carries Ready from `insert`).
+                if was_building {
+                    mgr.index2_registry
+                        .set_state(recovered_id, crate::index2::state::IndexState::Ready)
+                        .await;
+                    recovered_building_ids.push(recovered_id);
+                }
+            }
+            // Re-persist so the on-disk state matches the now-Ready in-memory
+            // state. Without this, a second crash before the next
+            // `save_index2_metadata` would leave `Building` on disk and force
+            // a redundant re-backfill on the NEXT reopen (correct but wasteful).
+            if !recovered_building_ids.is_empty() {
+                let _ = crate::index2::persistence::save_index2_metadata(
+                    &mgr.index2_registry,
+                    &mgr.info_store,
+                )
+                .await;
             }
         }
 
@@ -319,9 +387,19 @@ impl TableManager {
         // FIRST (V2.2 / #401) and only fall back to a full scan when the
         // snapshot is absent/corrupt — so a warm restart is O(load), not
         // O(N-scan).
+        //
+        // F-50 Step 3b: a backend that was JUST recovered from `Building`
+        // (in the loop above) is skipped here — its backfill already
+        // populated it (postings AND in-memory stats), so a second
+        // `restore_on_open` rebuild would double-count FTS `BumpFtsStats`
+        // and needlessly re-scan. The `recovered_building_ids` set carries
+        // the recovered ids forward.
         {
             let backends = mgr.index2_registry.all_backends().await;
             for b in &backends {
+                if recovered_building_ids.contains(&b.descriptor().id) {
+                    continue;
+                }
                 let info = Arc::clone(&mgr.info_store);
                 let data = Arc::clone(mgr.table.data_store());
                 if let Err(e) = b.restore_on_open(info, data).await {

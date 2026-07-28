@@ -54,9 +54,43 @@ pub async fn save_index2_metadata(
     registry: &crate::IndexRegistry,
     info_store: &Arc<dyn Store>,
 ) -> Result<(), shamir_storage::error::DbError> {
+    save_index2_metadata_with_pending(registry, info_store, None).await
+}
+
+/// Persist the index2 registry metadata, optionally including a `pending`
+/// in-flight descriptor that is NOT yet in the live registry (F-50 Step 3b).
+///
+/// `create_index_v2` builds a backend's descriptor with `state = Building`
+/// and needs that Building descriptor durably on disk BEFORE the backfill
+/// runs (so a crash between the backfill and the final `Ready` persist is
+/// detectable on restart). But the backend must NOT be inserted into the
+/// live registry until after the backfill completes (the live
+/// `index2_on_insert` hook can't route to an unregistered backend — see
+/// `backfill_index2_backend`'s doc comment). This variant lets the caller
+/// pass the in-flight Building descriptor as `pending` so the persisted set
+/// is `all_descriptors() ∪ {pending}` without publishing the backend.
+///
+/// If `pending`'s id collides with an already-registered backend (defensive —
+/// shouldn't happen in the normal create flow), the pending entry is dropped
+/// in favor of the live registry's entry.
+pub async fn save_index2_metadata_with_pending(
+    registry: &crate::IndexRegistry,
+    info_store: &Arc<dyn Store>,
+    pending: Option<IndexDescriptor>,
+) -> Result<(), shamir_storage::error::DbError> {
+    let mut descriptors = registry.all_descriptors().await;
+    if let Some(d) = pending {
+        // Defensive de-dup: never write two descriptors with the same id
+        // (the normal create flow is pre-register so this branch is a no-op,
+        // but a caller that races a concurrent insert + pending with the
+        // same id must not produce a malformed blob).
+        if !descriptors.iter().any(|x| x.id == d.id) {
+            descriptors.push(d);
+        }
+    }
     let p = PersistedIndexes {
         next_id: registry.peek_next_id(),
-        descriptors: registry.all_descriptors().await,
+        descriptors,
     };
     let envelope = MetaEnvelope::new(p);
     let bytes = envelope
