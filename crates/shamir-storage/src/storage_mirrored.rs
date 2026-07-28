@@ -11,9 +11,11 @@
 //! allowlist classifier ([`is_durable_table_config`]) accepts.
 //!
 //! On construction, the primary is hydrated by streaming every entry
-//! already in the mirror — everything durable was, by construction,
-//! something the classifier accepted when it was written, so it
-//! unconditionally belongs back in the primary on reopen.
+//! already in the mirror and RE-RUNNING the classifier against each key
+//! (F-41) — see [`MirroredStore::new`] for why the classifier is
+//! re-applied at hydration (rather than trusting "was classified true
+//! when written" as an eternal invariant) and what happens to entries
+//! that no longer match the current classifier.
 //!
 //! ## `transact` atomicity (F-39)
 //!
@@ -219,9 +221,43 @@ pub struct MirroredStore {
 
 impl MirroredStore {
     /// Construct a `MirroredStore` over `mirror`, hydrating `primary`
-    /// with every entry currently in `mirror` (bypassing `classify` —
-    /// everything already durable was classified `true` when it was
-    /// written, so it unconditionally belongs in the primary too).
+    /// with every entry currently in `mirror` that STILL passes the
+    /// current classifier.
+    ///
+    /// **F-41 — classifier re-filter at hydration.** Each streamed
+    /// entry's key is re-run through `classify(&key)` rather than
+    /// trusting "everything in the mirror was classified `true` when it
+    /// was written" as an eternal invariant. A key can be present in
+    /// `mirror` yet fail the CURRENT classifier via either:
+    /// - a classifier change across a version upgrade (a tag durable
+    ///   under an OLD allowlist — e.g. a once-accepted
+    ///   `Count` / `ReplicationBookmark`-style derived-state tag — may
+    ///   no longer be durable under the new one), or
+    /// - on-disk corruption / manual tampering that planted an
+    ///   arbitrary key in the backing store.
+    ///
+    /// For a key that does NOT pass the current classifier, hydration
+    /// SKIPS it (does NOT load it into `primary`) and emits a
+    /// `log::warn!` naming the key and the reason — surfacing the drift
+    /// for operator visibility. **Skipping is the safer choice for THIS
+    /// classifier:** every tag it deliberately excludes (`Count`,
+    /// `LastCommittedVersion`, `NextTxId`, `ReplicationBookmark`) is
+    /// DERIVED FROM DATA, excluded precisely because surfacing it after
+    /// a restart makes a reopened hybrid table LIE about its state (a
+    /// stale row count; stale MVCC counters; a replication bookmark
+    /// that skips re-applying leader events whose effects were lost).
+    /// Loading such a key from the mirror back into `primary` would
+    /// re-activate exactly that hazard — and since the key would keep
+    /// failing `classify` on every subsequent reopen, the stale value
+    /// would be re-loaded on every restart until manually purged.
+    /// Skipping leaves the stale entry inert in the mirror (it is NOT
+    /// deleted, just not surfaced to the live process) while the
+    /// `warn!` surfaces the drift. For the orthogonal case — a
+    /// LEGITIMATE config key accidentally dropped from the allowlist by
+    /// a future classifier regression — skipping reproduces the
+    /// already-documented "a setting doesn't survive restart" failure
+    /// mode (see [`is_durable_table_config`]'s doc), and the `warn!`
+    /// makes that regression immediately visible rather than silent.
     ///
     /// Config state is small (a handful of keys plus interner chunks),
     /// so a full streamed hydration at construction time is cheap;
@@ -233,6 +269,19 @@ impl MirroredStore {
         while let Some(batch) = stream.next().await {
             let batch = batch?;
             for (key, value) in batch {
+                // F-41: re-run the classifier against each streamed
+                // entry — see this constructor's doc for why "was
+                // classified true when written" is not a safe eternal
+                // invariant, and why a mismatching key is SKIPPED.
+                if !(classify)(&key) {
+                    log::warn!(
+                        "MirroredStore hydration: skipping mirror entry that \
+                         no longer matches the durable-config classifier \
+                         (classifier drift or mirror tampering) — key = {:?}",
+                        key
+                    );
+                    continue;
+                }
                 // `set_no_flag` — hydration doesn't need the
                 // created/updated flag, and every key is fresh in a
                 // brand-new `InMemoryStore`.
@@ -261,12 +310,57 @@ impl Store for MirroredStore {
         self.primary.insert(value).await
     }
 
+    /// **F-41 write-ordering — mirror-commit-before-primary-publish
+    /// for durable keys.**
+    ///
+    /// For a CLASSIFIED (durable) key the mirror write happens FIRST;
+    /// only if it succeeds is `primary` mutated. This closes the
+    /// pre-F-41 error-atomicity hole, where a mirror-write failure left
+    /// `primary` already mutated (so the live process behaved as if the
+    /// write had succeeded) even though the caller received `Err` and a
+    /// restart reverted the write (the mirror never got it) — three
+    /// divergent observable states across one operation's lifetime. Now
+    /// a mirror failure means "nothing happened", honestly: `primary`
+    /// is never touched.
+    ///
+    /// For an UNCLASSIFIED (ephemeral) key there is no mirror
+    /// involvement, so the write goes straight to `primary`, unchanged
+    /// from before.
+    ///
+    /// # Residual — reverse-direction divergence (investigated, documented)
+    ///
+    /// Mirror-first has the symmetric residual: a mirror SUCCESS
+    /// followed by a `primary` FAILURE would leave `mirror` ahead of
+    /// `primary` (the durable side holds a value the live process can't
+    /// yet see, which a subsequent restart's hydration would surface).
+    /// **This window does not exist in practice.** `InMemoryStore::set`
+    /// is structurally infallible at the `DbResult` level — its body is
+    /// `Ok(match self.data.insert_sync { ... })` with no `?`
+    /// propagation and no `Err` return path: the `insert_sync` "error"
+    /// is merely the duplicate-key signal it handles internally via
+    /// `remove_sync` + re-`insert_sync` (a genuine allocation failure
+    /// inside `scc` would `panic!`/abort the process, not yield `Err`).
+    /// `InMemoryStore::remove` is likewise
+    /// `Ok(self.data.remove_sync(..))` — `remove_sync` returns a
+    /// `bool`, never an error. So once a mirror write succeeds, the
+    /// following primary write cannot fail, and the reverse divergence
+    /// is unreachable. (This confirms F-39's own investigation of the
+    /// same two methods, made concrete here by reading the actual
+    /// `InMemoryStore` impls rather than reasoning about them
+    /// abstractly.)
     async fn set(&self, key: RecordKey, value: Bytes) -> DbResult<bool> {
-        let created = self.primary.set(key.clone(), value.clone()).await?;
         if (self.classify)(&key) {
-            self.mirror.set(key, value).await?;
+            // Durable key: mirror commit FIRST. If this errors, primary
+            // is NEVER touched — the caller's `Err` is now an honest
+            // "nothing happened", not "half happened".
+            self.mirror.set(key.clone(), value.clone()).await?;
         }
-        Ok(created)
+        // Return value is `primary`'s "was this a fresh insert vs
+        // overwrite" flag, preserving `InMemoryStore::set`'s exact
+        // semantics (the mirror's own created-flag is deliberately
+        // discarded — it is not meaningful to the caller, and mixing
+        // it with primary's would be).
+        self.primary.set(key, value).await
     }
 
     async fn get(&self, key: RecordKey) -> DbResult<Bytes> {
@@ -277,12 +371,22 @@ impl Store for MirroredStore {
         self.primary.get_many(keys).await
     }
 
+    /// **F-41 write-ordering — same mirror-first discipline as
+    /// [`Self::set`], applied to removal.** For a CLASSIFIED key the
+    /// mirror removal happens FIRST; only if it succeeds is the key
+    /// removed from `primary`. For an UNCLASSIFIED key, `primary` is
+    /// mutated directly with no mirror involvement. The same residual
+    /// analysis as `set` applies (the reverse divergence is unreachable
+    /// because `InMemoryStore::remove` is infallible).
     async fn remove(&self, key: RecordKey) -> DbResult<bool> {
-        let existed = self.primary.remove(key.clone()).await?;
         if (self.classify)(&key) {
-            self.mirror.remove(key).await?;
+            // Durable key: mirror removal FIRST — see `set` for the
+            // full rationale.
+            self.mirror.remove(key.clone()).await?;
         }
-        Ok(existed)
+        // Return value is `primary`'s "did the key exist" flag,
+        // preserving `InMemoryStore::remove`'s exact semantics.
+        self.primary.remove(key).await
     }
 
     async fn flush(&self) -> DbResult<()> {
