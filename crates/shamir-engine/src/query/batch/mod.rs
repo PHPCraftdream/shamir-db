@@ -168,5 +168,16 @@ pub use shamir_query_types::batch::{
 #[cfg(test)]
 pub(crate) use query_runner::execute_batch_with_permissions;
 
+// F-40: expose the two FK fail-closed hooks (and the op-kind enum
+// `implicit_tx_isolation_for_fk_parent` takes) so the fail-closed test
+// suite (`tests/fk_fail_closed_tests.rs`) can drive them directly with an
+// injectable-failure resolver, instead of having to reproduce the whole
+// `execute_batch` call sequence just to reach the error branches. Mirrors
+// the `execute_batch_with_permissions` re-export pattern above.
+#[cfg(test)]
+pub(crate) use query_runner::{
+    implicit_tx_isolation_for_fk_parent, require_footprint_if_fk_child, FkParentOpKind,
+};
+
 #[cfg(test)]
 mod tests;

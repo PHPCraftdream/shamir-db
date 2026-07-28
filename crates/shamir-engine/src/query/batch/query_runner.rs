@@ -271,10 +271,23 @@ fn write_value_error_to_batch_error(alias: &str, err: WriteValueError) -> BatchE
 /// any Snapshot-isolation writer touching an FK-child table needs its
 /// footprint published, regardless of which path staged it.
 ///
-/// Best-effort: a `resolve_repo` failure here is not a reason to fail the
-/// write itself (the table was already successfully resolved moments ago by
-/// the SAME call site — this is defense-in-depth for the SSI race window,
-/// not a correctness precondition for the write). Logged and skipped.
+/// **F-40: fail-CLOSED on discovery failure.** This hook is a correctness
+/// precondition for the FK-race-closure guarantee (without a footprint
+/// token, a concurrent Serializable FK-parent-delete's Phase 2-bis check has
+/// nothing to conflict against — exactly the silent-corruption outcome S3-C
+/// exists to prevent). So when FK-role discovery ITSELF fails — a
+/// `resolve_repo` error, or a `get_or_build_by_parent` cache-build error —
+/// the hook does NOT fall back to the permissive "assume not an FK child"
+/// behavior; it widens the footprint UNCONDITIONALLY by calling
+/// [`TxContext::require_footprint_for`] anyway. This is safe because a
+/// `resolve_repo` failure here almost certainly means the SAME resolve will
+/// also fail moments later for the actual write this hook precedes (the
+/// table was just resolved by the caller; a transient failure tends to
+/// recur on the very next FK-discovery call the write path needs), so the
+/// operation is very likely to fail downstream regardless — the extra
+/// footprint token is a no-practical-cost safety margin, not a source of
+/// new spurious aborts on otherwise-healthy repos. A cache-build failure is
+/// rarer still and would likewise recur on the next real FK-discovery call.
 ///
 /// `FkReverseCache::is_fk_child` is a pure peek that returns `false` on a
 /// cold/never-built cache WITHOUT triggering a rebuild (see its doc
@@ -286,7 +299,7 @@ fn write_value_error_to_batch_error(alias: &str, err: WriteValueError) -> BatchE
 /// `build_reverse_fk_entries` pair before peeking — a cache miss pays the
 /// same one-time O(tables) scan `fk_restrict.rs`/`fk_actions.rs` already
 /// pay on their own first miss; a warm cache is an O(1) hit.
-async fn require_footprint_if_fk_child(
+pub(crate) async fn require_footprint_if_fk_child(
     resolver: &dyn TableResolver,
     table_ref: &TableRef,
     table_token: u64,
@@ -295,10 +308,19 @@ async fn require_footprint_if_fk_child(
     let repo = match resolver.resolve_repo(&table_ref.repo).await {
         Ok(repo) => repo,
         Err(e) => {
+            // F-40: fail CLOSED — discovery failed, so we cannot prove the
+            // table is NOT an FK child. Widen the footprint unconditionally
+            // rather than silently skipping the requirement (the old
+            // permissive behavior). See this function's doc comment for why
+            // this is safe and the right direction for a correctness-gating
+            // hook.
             log::warn!(
-                "F-28 S3-C: require_footprint_if_fk_child: resolve_repo({}) failed: {e}",
+                "F-40 fail-closed: require_footprint_if_fk_child: resolve_repo({}) failed ({e}) \
+                 — widening footprint for table_token={table_token} anyway (cannot prove \
+                 non-FK-child on discovery failure)",
                 table_ref.repo
             );
+            tx.require_footprint_for(table_token);
             return;
         }
     };
@@ -322,10 +344,17 @@ async fn require_footprint_if_fk_child(
         })
         .await
     {
+        // F-40: fail CLOSED — same rationale as the resolve_repo error path
+        // above. A cache-build failure means we cannot prove the table is
+        // NOT an FK child, so widen the footprint unconditionally rather
+        // than silently skipping the requirement.
         log::warn!(
-            "F-28 S3-C: require_footprint_if_fk_child: reverse-FK scan failed for repo '{}': {e}",
+            "F-40 fail-closed: require_footprint_if_fk_child: reverse-FK scan failed for repo \
+             '{}' ({e}) — widening footprint for table_token={table_token} anyway (cannot prove \
+             non-FK-child on cache-build failure)",
             table_ref.repo
         );
+        tx.require_footprint_for(table_token);
         return;
     }
     if cache.is_fk_child(&table_ref.table) {
@@ -349,29 +378,53 @@ async fn require_footprint_if_fk_child(
 /// child-table scans (`fk_restrict.rs`/`fk_actions.rs`/`fk_on_update.rs`)
 /// record a real `TableScan` SSI predicate, closing the cross-transaction
 /// TOCTOU race between "scan found no conflicting child row" and this tx's
-/// eventual commit. Falls back to `Snapshot` (byte-identical prior behavior)
-/// on any resolve failure or when the table has no FK-relevant role for the
-/// given operation kind — this is a pure opportunistic upgrade, never a
-/// hard requirement for the write.
+/// eventual commit.
+///
+/// **F-40: fail-CLOSED on discovery failure.** When FK-role discovery ITSELF
+/// fails — a `resolve_repo` error, or a `get_or_build_by_parent` cache-build
+/// error — the hook returns `Serializable` (the MORE protective isolation),
+/// not `Snapshot`. The old permissive fallback (return `Snapshot`, byte-
+/// identical to a non-FK-parent table) was the wrong direction for a
+/// correctness-gating mechanism: a discovery failure means we cannot prove
+/// the table is NOT an FK parent with a non-`NoAction` action, so assume it
+/// is and apply the stronger protection. This is safe for the same reason
+/// `require_footprint_if_fk_child`'s fail-closed branch is safe (see that
+/// function's doc): a `resolve_repo` failure here almost certainly recurs
+/// for the actual delete/update this hook precedes, so the operation very
+/// likely fails downstream regardless — the Serializable upgrade is a
+/// no-practical-cost safety margin, not a source of new spurious aborts on
+/// otherwise-healthy repos.
 ///
 /// F-35: `op` was added because the cache used to carry only a single
 /// `action` field (always `on_delete`), so the UPDATE arm — which needs the
 /// `on_update` flag — silently never upgraded for an `on_delete = NoAction,
 /// on_update = Restrict/Cascade/SetNull` FK. The two arms now ask the
 /// cache the question matching their operation kind.
-enum FkParentOpKind {
+pub(crate) enum FkParentOpKind {
     Delete,
     Update,
 }
 
-async fn implicit_tx_isolation_for_fk_parent(
+pub(crate) async fn implicit_tx_isolation_for_fk_parent(
     resolver: &dyn TableResolver,
     table_ref: &TableRef,
     op: FkParentOpKind,
 ) -> shamir_tx::IsolationLevel {
     let repo = match resolver.resolve_repo(&table_ref.repo).await {
         Ok(repo) => repo,
-        Err(_) => return shamir_tx::IsolationLevel::Snapshot,
+        Err(_e) => {
+            // F-40: fail CLOSED — discovery failed, so we cannot prove the
+            // table is NOT an FK parent with a non-`NoAction` action. Return
+            // the MORE protective isolation rather than the old permissive
+            // `Snapshot` fallback. See this function's doc comment.
+            log::warn!(
+                "F-40 fail-closed: implicit_tx_isolation_for_fk_parent: resolve_repo({}) failed \
+                 ({_e}) — returning Serializable anyway (cannot prove non-FK-parent on discovery \
+                 failure)",
+                table_ref.repo
+            );
+            return shamir_tx::IsolationLevel::Serializable;
+        }
     };
     let cache = repo.fk_reverse_cache();
     let repo_name = table_ref.repo.clone();
@@ -389,7 +442,17 @@ async fn implicit_tx_isolation_for_fk_parent(
         .await
         .is_err()
     {
-        return shamir_tx::IsolationLevel::Snapshot;
+        // F-40: fail CLOSED — same rationale as the resolve_repo error path
+        // above. A cache-build failure means we cannot prove the table is
+        // NOT an FK parent, so return the MORE protective isolation rather
+        // than the old permissive `Snapshot` fallback.
+        log::warn!(
+            "F-40 fail-closed: implicit_tx_isolation_for_fk_parent: reverse-FK scan failed for \
+             repo '{}' — returning Serializable anyway (cannot prove non-FK-parent on \
+             cache-build failure)",
+            table_ref.repo
+        );
+        return shamir_tx::IsolationLevel::Serializable;
     }
     let is_fk_parent = match op {
         FkParentOpKind::Delete => cache.is_fk_parent_with_delete_action(&table_ref.table),
