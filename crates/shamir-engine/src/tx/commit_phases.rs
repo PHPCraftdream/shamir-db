@@ -554,16 +554,28 @@ pub(crate) async fn apply_data_batch(
 
 /// Apply one table's staged index ops (Phase 5c).
 ///
-/// F-53b Step 2 (#878): after the postings land, advance the table's
-/// sorted-index mutation high-water (`last_mutation_version`) to
-/// `commit_version`. This is the LOAD-BEARING wire point for the tx path:
-/// the AsOf cursor seek gate compares this against a cursor's pinned
-/// version. Bumping here (at APPLY time, with the commit version) — NOT at
-/// stage time — ensures an uncommitted (possibly-aborting) tx can never
-/// disable the fast path for unrelated cursors. A missed bump (e.g. a tx
-/// whose Phase 5c is deferred to recovery) only costs a fallback to the
-/// already-correct full scan; the `concurrent_modified` defence-in-depth
-/// classifier in the seek arm catches any post-pin mutation the gate missed.
+/// F-53b Step 2 (#878) / F-67 (#893): after the postings land, advance the
+/// PER-INDEX mutation high-water (`last_mutation_version(name_interned)`)
+/// to `commit_version`, for exactly the sorted index(es) `ops` actually
+/// touched (`SortedIndexManager::bump_touched_indexes` decodes
+/// `name_interned` from each op's physical key). This is the LOAD-BEARING
+/// wire point for the tx path: the AsOf cursor seek gate compares this
+/// against a cursor's pinned version, for the SAME index the cursor's seek
+/// is planned against. Bumping here (at APPLY time, with the commit
+/// version) — NOT at stage time — ensures an uncommitted (possibly-aborting)
+/// tx can never disable the fast path for unrelated cursors. A missed bump
+/// (e.g. a tx whose Phase 5c is deferred to recovery) only costs a fallback
+/// to the already-correct full scan; the `concurrent_modified`
+/// defence-in-depth classifier in the seek arm catches any post-pin
+/// mutation the gate missed.
+///
+/// `ops` is the flat per-table `Vec<IndexWriteOp>` assembled by
+/// `materialize.rs`/this module's caller from `tx.index_write_set` — a
+/// `Vec<(table_token, IndexWriteOp)>` grouped only by table, never by
+/// index, and shared across every index family (hash/sorted/FTS/functional).
+/// `bump_touched_indexes` skips any op whose key does not decode as a
+/// sorted-index physical key (`SORTED_TAG`-prefixed) — those belong to a
+/// different index family and are harmless to skip here.
 pub(crate) async fn apply_index_batch(
     repo: &RepoInstance,
     token: u64,
@@ -592,14 +604,17 @@ pub(crate) async fn apply_index_batch(
         // returning a stale cached result.
         tbl.index_manager_ref()
             .invalidate_posting_cache_for_ops(ops);
-        // F-53b Step 2 (#878): advance the per-table sorted-index mutation
-        // high-water so the AsOf cursor seek gate sees this commit. See the
-        // method doc for the stage-vs-apply ordering invariant. Bumped
-        // unconditionally (even when `ops` has no sorted-index entries) — a
-        // false-negative gate only costs a fallback to the already-correct
-        // full scan, never a correctness bug.
+        // F-67 (#893): advance the mutation high-water for exactly the
+        // sorted index(es) `ops` touched, so the AsOf cursor seek gate for
+        // THAT index sees this commit. See the function doc for the
+        // stage-vs-apply ordering invariant and the per-index scoping
+        // rationale. An `ops` batch with no sorted-index entries (or ops
+        // touching only OTHER index families) bumps nothing here — a
+        // false-negative (a real sorted-index touch this decode missed)
+        // only costs a fallback to the already-correct full scan, never a
+        // correctness bug.
         tbl.sorted_indexes()
-            .note_mutation_at_version(commit_version);
+            .bump_touched_indexes(ops, commit_version);
     }
     Ok(())
 }

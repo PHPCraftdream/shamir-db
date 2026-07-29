@@ -383,8 +383,9 @@ async fn asof_seek_gate_fallback_on_concurrent_insert() {
         let _ = insert_score(&tbl, &mvcc, s, &format!("r{s}")).await;
     }
     let pinned = pinned_at(&gate);
+    let idx_name = tbl.sorted_indexes().iter_indexes()[0].name_interned;
     assert!(
-        tbl.sorted_indexes().last_mutation_version() <= pinned,
+        tbl.sorted_indexes().last_mutation_version(idx_name) <= pinned,
         "pre-condition: gate must pass before the concurrent write"
     );
 
@@ -392,7 +393,7 @@ async fn asof_seek_gate_fallback_on_concurrent_insert() {
     let (_ins_id, ins_v) = insert_score(&tbl, &mvcc, 125, "late125").await;
     assert!(ins_v > pinned);
     assert!(
-        tbl.sorted_indexes().last_mutation_version() > pinned,
+        tbl.sorted_indexes().last_mutation_version(idx_name) > pinned,
         "post-insert: gate must have advanced past the pin"
     );
 
@@ -431,6 +432,7 @@ async fn asof_seek_gate_fallback_on_concurrent_update() {
         ids.push(insert_score(&tbl, &mvcc, s, &format!("r{s}")).await.0);
     }
     let pinned = pinned_at(&gate);
+    let idx_name = tbl.sorted_indexes().iter_indexes()[0].name_interned;
     let score_id = {
         let interner = tbl.interner().get().await.unwrap();
         interner.touch_ind("score").unwrap().key().id()
@@ -454,7 +456,7 @@ async fn asof_seek_gate_fallback_on_concurrent_update() {
     );
     tbl.set(row30, &InnerValue::Map(m)).await.unwrap();
     assert!(
-        tbl.sorted_indexes().last_mutation_version() > pinned,
+        tbl.sorted_indexes().last_mutation_version(idx_name) > pinned,
         "post-update: gate must have advanced past the pin"
     );
 
@@ -485,6 +487,7 @@ async fn asof_seek_gate_fallback_on_concurrent_delete() {
         ids.push(insert_score(&tbl, &mvcc, s, &format!("r{s}")).await.0);
     }
     let pinned = pinned_at(&gate);
+    let idx_name = tbl.sorted_indexes().iter_indexes()[0].name_interned;
     let score_id = {
         let interner = tbl.interner().get().await.unwrap();
         interner.touch_ind("score").unwrap().key().id()
@@ -494,7 +497,7 @@ async fn asof_seek_gate_fallback_on_concurrent_delete() {
     let row30 = find_row_with_score(&mvcc, &ids, 30, pinned, score_id).await;
     tbl.delete(row30).await.unwrap();
     assert!(
-        tbl.sorted_indexes().last_mutation_version() > pinned,
+        tbl.sorted_indexes().last_mutation_version(idx_name) > pinned,
         "post-delete: gate must have advanced past the pin"
     );
 
@@ -584,6 +587,7 @@ async fn f58_post_check_catches_mid_scan_delete() {
         ids.push(insert_score(&tbl, &mvcc, s, &format!("r{s}")).await.0);
     }
     let pinned = pinned_at(&gate);
+    let idx_name = tbl.sorted_indexes().iter_indexes()[0].name_interned;
     let score_id = {
         let interner = tbl.interner().get().await.unwrap();
         interner.touch_ind("score").unwrap().key().id()
@@ -591,7 +595,7 @@ async fn f58_post_check_catches_mid_scan_delete() {
 
     // Pre-condition: the entry gate passes at pin time.
     assert!(
-        tbl.sorted_indexes().last_mutation_version() <= pinned,
+        tbl.sorted_indexes().last_mutation_version(idx_name) <= pinned,
         "pre-condition: gate must pass before the concurrent write"
     );
 
@@ -634,7 +638,7 @@ async fn f58_post_check_catches_mid_scan_delete() {
     let row30 = find_row_with_score(&mvcc, &ids, 30, pinned, score_id).await;
     tbl.delete(row30).await.unwrap();
     assert!(
-        tbl.sorted_indexes().last_mutation_version() > pinned,
+        tbl.sorted_indexes().last_mutation_version(idx_name) > pinned,
         "post-delete: high-water must have advanced past the pin"
     );
 
@@ -659,4 +663,227 @@ async fn f58_post_check_catches_mid_scan_delete() {
          at its pinned position (score 30), not the current-state seek result \
          which would miss it"
     );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// F-67 (#893) — per-index mutation epoch: scope-narrowing proof.
+//
+// An independent readonly review (snapshot `e145b1d3`, section P1-4) flagged
+// that `SortedIndexManager::last_mutation_version()` (pre-F-67) was a SINGLE
+// manager-wide `AtomicU64` high-water, even though the AsOf cursor seek
+// (`read_as_of_keyset_seek`) always plans against ONE specific sorted index.
+// Consequence: mutating any UNRELATED sorted index on the same table bumped
+// the shared high-water and disabled the seek fast path for every cursor on
+// that table, not just cursors reading the index that actually changed.
+//
+// This harness has TWO sorted indexes on the SAME table: `score_idx` (on
+// `score`) and `rank_idx` (on `rank`). The test below proves:
+// 1. mutating `rank_idx` (via an UPDATE that changes ONLY `rank`, leaving
+//    `score` untouched) does NOT disable the AsOf seek fast path for a
+//    cursor planned against `score_idx`;
+// 2. a subsequent mutation to `score_idx` itself still correctly disables
+//    the seek fast path for a `score_idx`-planned cursor, and the full-scan
+//    fallback still produces the correct (pinned-snapshot) page.
+//
+// RED (pre-F-67, manager-wide counter): step 1 would FAIL — the `rank_idx`
+// UPDATE bumps the single shared `last_mutation_version`, so the `score_idx`
+// cursor's gate (`last_mutation_version() <= pinned`) trips even though
+// `score_idx` itself never changed, and `assert_seek_path` below would see
+// the full-scan label instead.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Two-index harness: `score_idx` on `score`, `rank_idx` on `rank`, both
+/// non-covering. Rows carry `{score, rank, label}`.
+async fn make_mvcc_two_index_table() -> (TableManager, Arc<MvccStore>, Arc<RepoTxGate>) {
+    let data: Arc<dyn Store> = Arc::new(InMemoryStore::new());
+    let info: Arc<dyn Store> = Arc::new(InMemoryStore::new());
+    let history: Arc<dyn Store> = Arc::new(InMemoryStore::new());
+
+    let base = TableManager::create("t".into(), Arc::clone(&data), Arc::clone(&info))
+        .await
+        .unwrap();
+
+    let gate = Arc::new(RepoTxGate::fresh());
+    let mvcc = Arc::new(MvccStore::new(history, Arc::clone(&gate)));
+    mvcc.set_retention(Retention::keep_history()).unwrap();
+
+    let tbl = base.with_mvcc_store(Arc::clone(&mvcc));
+    tbl.create_sorted_index("score_idx", &["score"])
+        .await
+        .unwrap();
+    tbl.create_sorted_index("rank_idx", &["rank"])
+        .await
+        .unwrap();
+    (tbl, mvcc, gate)
+}
+
+/// Insert `{score, rank, label}` and return the assigned RecordId.
+async fn insert_score_rank(tbl: &TableManager, score: i64, rank: i64, label: &str) -> RecordId {
+    let interner = tbl.interner().get().await.unwrap();
+    let score_key = interner.touch_ind("score").unwrap().into_key();
+    let rank_key = interner.touch_ind("rank").unwrap().into_key();
+    let label_key = interner.touch_ind("label").unwrap().into_key();
+    tbl.interner().persist().await.unwrap();
+
+    let mut m = new_map();
+    m.insert(score_key, InnerValue::Int(score));
+    m.insert(rank_key, InnerValue::Int(rank));
+    m.insert(label_key, InnerValue::Str(label.to_owned()));
+    let rec = InnerValue::Map(m);
+
+    tbl.insert(&rec).await.unwrap()
+}
+
+/// Mutating an UNRELATED sorted index (`rank_idx`) does NOT disable the
+/// AsOf seek fast path for a cursor planned against `score_idx`; mutating
+/// `score_idx` itself still correctly disables it, and the full-scan
+/// fallback still returns the correct pinned-snapshot page.
+#[tokio::test]
+async fn f67_cross_index_mutation_does_not_disable_unrelated_cursor() {
+    let (tbl, mvcc, gate) = make_mvcc_two_index_table().await;
+
+    // 10 rows read by the `score_idx` cursor below: score = rank =
+    // 0,10,...,90. PLUS one extra "sentinel" row (score = 10_000, rank = 0)
+    // that the `score_idx` page query never reaches (its score is far
+    // outside the `i64::MIN..` page the test reads) — mutating ONLY the
+    // sentinel's `rank` lets us bump `rank_idx`'s epoch without also
+    // bumping the SENTINEL RECORD'S OWN MVCC version inside a row the
+    // `score_idx` seek's per-candidate classifier (`version_of`) would
+    // observe. If the mutated row were IN the read page, the classifier's
+    // whole-record `concurrent_modified` check (a pre-existing, orthogonal
+    // mechanism — see `read_asof_seek.rs`'s classifier) would trip on ANY
+    // field changing, masking the per-index-epoch property this test
+    // actually targets.
+    let mut ids = Vec::new();
+    for i in 0..10i64 {
+        let s = i * 10;
+        ids.push(insert_score_rank(&tbl, s, s, &format!("r{s}")).await);
+    }
+    let sentinel_id = insert_score_rank(&tbl, 10_000, 0, "sentinel").await;
+    let pinned = pinned_at(&gate);
+
+    let interner = tbl.interner().get().await.unwrap();
+    let score_idx_name = interner.touch_ind("score_idx").unwrap().key().id();
+    let rank_idx_name = interner.touch_ind("rank_idx").unwrap().key().id();
+    let score_field_id = interner.touch_ind("score").unwrap().key().id();
+    let rank_field_id = interner.touch_ind("rank").unwrap().key().id();
+    let label_field_id = interner.touch_ind("label").unwrap().key().id();
+    assert_ne!(
+        score_idx_name, rank_idx_name,
+        "sanity: the two indexes must have distinct interned names"
+    );
+
+    // Pre-condition: both indexes' gates pass at pin time.
+    assert!(tbl.sorted_indexes().last_mutation_version(score_idx_name) <= pinned);
+    assert!(tbl.sorted_indexes().last_mutation_version(rank_idx_name) <= pinned);
+
+    let refs = new_map();
+    let ctx = FilterContext::new(interner, &refs);
+
+    // ── Step 1: mutate `rank_idx` ONLY — update the SENTINEL row's `rank`
+    //    field (0 -> 999), leaving `score` untouched. This produces a
+    //    RemovePosting+SetPosting pair for `rank_idx` and NOTHING for
+    //    `score_idx` (score unchanged -> plan_record_updated's key_changed
+    //    == false and there is no covering projection to rewrite). The
+    //    sentinel's score (10_000) is outside the `score_idx` page below, so
+    //    its bumped MVCC version is never observed by that page's classifier.
+    let mut m = new_map();
+    m.insert(
+        shamir_types::core::interner::InternerKey::new(score_field_id),
+        InnerValue::Int(10_000), // score unchanged
+    );
+    m.insert(
+        shamir_types::core::interner::InternerKey::new(rank_field_id),
+        InnerValue::Int(999),
+    );
+    m.insert(
+        shamir_types::core::interner::InternerKey::new(label_field_id),
+        InnerValue::Str("rank-only-update".to_owned()),
+    );
+    tbl.set(sentinel_id, &InnerValue::Map(m)).await.unwrap();
+    assert!(
+        mvcc.version_of(&sentinel_id.to_bytes()) > pinned,
+        "sanity: the sentinel row's own MVCC version did advance past the pin \
+         (proving this is a REAL concurrent write, not a no-op)"
+    );
+
+    // `rank_idx`'s epoch MUST have advanced past the pin...
+    assert!(
+        tbl.sorted_indexes().last_mutation_version(rank_idx_name) > pinned,
+        "rank_idx epoch must advance after a rank-only update"
+    );
+    // ...but `score_idx`'s epoch MUST NOT — this is the scope-narrowing
+    // property F-67 exists for. Under the pre-F-67 manager-wide counter this
+    // assertion would FAIL (both indexes shared one counter).
+    assert!(
+        tbl.sorted_indexes().last_mutation_version(score_idx_name) <= pinned,
+        "score_idx epoch must NOT advance from a mutation to the UNRELATED rank_idx index"
+    );
+
+    // A cursor planned against `score_idx` (ORDER BY score, page limited to
+    // the original 10 rows — well short of the sentinel's score 10_000)
+    // must still take the seek fast path — the gate for `score_idx` never
+    // tripped, and the sentinel is never a candidate this page's classifier
+    // observes.
+    let q_score = seek_query_asc_two_idx(i64::MIN, 10, pinned);
+    let result_score = tbl.read(&q_score, &ctx).await.unwrap();
+    assert_seek_path(&result_score);
+    assert_eq!(
+        baseline_scores(&result_score),
+        (0..10).map(|i| i * 10).collect::<Vec<_>>(),
+        "score_idx seek must return all 10 pinned scores unaffected by the rank_idx mutation"
+    );
+
+    // ── Step 2: mutate `score_idx` itself — update row 1's `score` field
+    //    (10 -> 888). NOW the seek arm for `score_idx` must decline.
+    let mut m2 = new_map();
+    m2.insert(
+        shamir_types::core::interner::InternerKey::new(score_field_id),
+        InnerValue::Int(888),
+    );
+    m2.insert(
+        shamir_types::core::interner::InternerKey::new(rank_field_id),
+        InnerValue::Int(10), // rank unchanged
+    );
+    m2.insert(
+        shamir_types::core::interner::InternerKey::new(label_field_id),
+        InnerValue::Str("score-update".to_owned()),
+    );
+    tbl.set(ids[1], &InnerValue::Map(m2)).await.unwrap();
+
+    assert!(
+        tbl.sorted_indexes().last_mutation_version(score_idx_name) > pinned,
+        "score_idx epoch must advance after a score-changing update to score_idx itself"
+    );
+
+    // The seek arm for `score_idx` must now DECLINE, falling back to the
+    // full scan — which still returns the CORRECT pinned-snapshot page
+    // (row 1 at its OLD score, 10, not the post-pin 888).
+    let result_score_after = tbl.read(&q_score, &ctx).await.unwrap();
+    assert_fullscan_path(&result_score_after);
+    assert_eq!(
+        baseline_scores(&result_score_after),
+        (0..10).map(|i| i * 10).collect::<Vec<_>>(),
+        "full-scan fallback must return every row at its PINNED score, \
+         including row 1 at its old score (10), not the post-pin 888"
+    );
+}
+
+/// Build a seek AsOf query (ASC) against `score` for the two-index harness —
+/// mirrors `seek_query_asc` but is kept separate since it's only used by the
+/// F-67 cross-index test (the two-index harness is otherwise independent of
+/// the single-index harness's helpers).
+fn seek_query_asc_two_idx(seek: i64, limit: u64, pinned: u64) -> ReadQuery {
+    let mut q = ReadQuery::new("t")
+        .select(Select::fields(["score"]))
+        .order_by(OrderBy::asc("score"))
+        .pagination(Pagination::after_with_id(
+            vec![QueryValue::Int(seek)],
+            Some(limit),
+            None,
+        ));
+    q.temporal = Temporal::AsOf {
+        at: At::Version(pinned),
+    };
+    q
 }

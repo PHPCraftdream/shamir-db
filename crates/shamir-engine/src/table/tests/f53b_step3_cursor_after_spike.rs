@@ -407,8 +407,9 @@ async fn negative_gate_failure_mid_lifetime_must_not_page_one_forever() {
         ids.push(insert_score(&tbl, &mvcc, s, &format!("r{s}")).await.0);
     }
     let pinned = pinned_at(&gate);
+    let idx_name = tbl.sorted_indexes().iter_indexes()[0].name_interned;
     assert!(
-        tbl.sorted_indexes().last_mutation_version() <= pinned,
+        tbl.sorted_indexes().last_mutation_version(idx_name) <= pinned,
         "pre-condition: gate must pass before the concurrent write"
     );
 
@@ -457,7 +458,7 @@ async fn negative_gate_failure_mid_lifetime_must_not_page_one_forever() {
     );
     tbl.set(row200, &InnerValue::Map(m)).await.unwrap();
     assert!(
-        tbl.sorted_indexes().last_mutation_version() > pinned,
+        tbl.sorted_indexes().last_mutation_version(idx_name) > pinned,
         "post-update: the gate must have advanced past the pin"
     );
 

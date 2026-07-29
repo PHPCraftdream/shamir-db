@@ -38,6 +38,7 @@ use shamir_types::core::interner::{Interner, InternerKey};
 use shamir_types::core::sort_codec;
 use shamir_types::record_view::RecordRef;
 use shamir_types::record_view::ScalarRef;
+use shamir_types::types::common::THasher;
 use shamir_types::types::record_id::RecordId;
 use shamir_types::types::value::{InnerValue, QueryValue};
 
@@ -108,23 +109,38 @@ pub struct SortedIndexManager {
     /// shared.
     generation: Arc<AtomicU64>,
 
-    /// F-53b Step 2 (#878): monotonic "last mutation version" high-water —
-    /// the MVCC commit version of the most recent write that applied a
-    /// posting (create / update / delete) to ANY index this manager owns.
+    /// F-67 (#893): PER-INDEX "last mutation version" high-water — the MVCC
+    /// commit version of the most recent write that applied a posting
+    /// (create / update / delete) to THIS SPECIFIC index (keyed by
+    /// `name_interned`), not to the manager as a whole.
+    ///
+    /// Was a single manager-wide `AtomicU64` (F-53b Step 2, #878) until an
+    /// independent readonly review (snapshot `e145b1d3`, section P1-4)
+    /// flagged that the AsOf cursor index-seek fast path
+    /// (`read_as_of_keyset_seek`) always plans against ONE specific sorted
+    /// index, so a manager-wide high-water disabled the fast path for every
+    /// cursor on the table whenever ANY sorted index mutated — not just the
+    /// one the cursor actually reads. This is a scope-narrowing refactor
+    /// only: the safety argument is unchanged, just re-derived per-index
+    /// (see [`Self::last_mutation_version`] / [`Self::note_mutation_at_version`]
+    /// docs below).
     ///
     /// The gate for the AsOf-aware cursor index-seek fast path
-    /// (`read_as_of_keyset_seek`): a cursor pinned at `pinned_version` may
-    /// ONLY use the seek when `last_mutation_version() <= pinned`, because
-    /// only then does the current-state index provably mirror the pinned
-    /// snapshot's postings. When any concurrent write has advanced this past
-    /// the pin, a current-state index CANNOT correctly place a row whose
-    /// pinned-version posting was MOVED (UPDATE to the indexed field) or
-    /// REMOVED (DELETE) after the pin — proven by F-53b Step 1's two
-    /// negative tests. The seek declines and the existing full-rescan
-    /// `read_as_of` path handles the page instead (correct, just O(N) not
-    /// O(page_size)). A false-negative gate (bumping when only an unrelated
-    /// index changed) costs ONE fallback to the already-correct scan, never
-    /// a correctness bug.
+    /// (`read_as_of_keyset_seek`): a cursor pinned at `pinned_version`,
+    /// planned against index `name_interned`, may ONLY use the seek when
+    /// `last_mutation_version(name_interned) <= pinned`, because only then
+    /// does the current-state index provably mirror the pinned snapshot's
+    /// postings for THAT index. When a concurrent write to THAT SAME index
+    /// has advanced this past the pin, a current-state index CANNOT
+    /// correctly place a row whose pinned-version posting was MOVED (UPDATE
+    /// to the indexed field) or REMOVED (DELETE) after the pin — proven by
+    /// F-53b Step 1's two negative tests. The seek declines and the existing
+    /// full-rescan `read_as_of` path handles the page instead (correct, just
+    /// O(N) not O(page_size)). A false-negative gate (bumping when the SAME
+    /// index changed but not in a way that affects this cursor's page)
+    /// costs ONE fallback to the already-correct scan, never a correctness
+    /// bug. Mutating an UNRELATED index no longer bumps this cursor's gate
+    /// at all — that's the whole point of keying by `name_interned`.
     ///
     /// **Bumped at APPLY time, NOT stage time.** Sorted-index ops are staged
     /// into `tx.index_write_set` at STAGE time and applied at commit Phase
@@ -134,10 +150,16 @@ pub struct SortedIndexManager {
     /// `on_record_*` (that path's own apply point). Both wire points pass
     /// the write's MVCC commit version, never a stage-time placeholder.
     ///
-    /// `Arc`-shared across clones for the same reason `generation` is: a
-    /// write applied through one clone's commit pipeline must advance the
-    /// high-water for every other clone's `read_as_of` gate read.
-    last_mutation_version: Arc<AtomicU64>,
+    /// An index that has never been mutated has no entry in the map and
+    /// reads as epoch `0` — the same default-empty semantics the old
+    /// manager-wide counter had at construction.
+    ///
+    /// `scc::HashMap` (lock-free, sharded) per this repo's NORMATIVE
+    /// concurrency invariants (CLAUDE.md pillar 5, "shared registry"
+    /// row) — `Arc`-shared across clones for the same reason `generation`
+    /// is: a write applied through one clone's commit pipeline must advance
+    /// the high-water for every other clone's `read_as_of` gate read.
+    last_mutation_version: Arc<scc::HashMap<u64, AtomicU64, THasher>>,
 }
 
 impl Clone for SortedIndexManager {
@@ -166,7 +188,7 @@ impl SortedIndexManager {
                 Vec::new(),
             )),
             generation: Arc::new(AtomicU64::new(0)),
-            last_mutation_version: Arc::new(AtomicU64::new(0)),
+            last_mutation_version: Arc::new(scc::HashMap::with_hasher(THasher::default())),
         };
         m.load().await?;
         Ok(m)
@@ -181,35 +203,60 @@ impl SortedIndexManager {
         self.generation.load(Ordering::Acquire)
     }
 
-    /// F-53b Step 2 (#878): the per-index mutation high-water — the MVCC
-    /// commit version of the most recent write that applied a posting to any
-    /// index this manager owns. The AsOf cursor seek gate compares this
-    /// against the cursor's `pinned_version`: when `<= pinned`, the
-    /// current-state index provably mirrors the pinned snapshot and the seek
-    /// fast path is safe; when `> pinned`, a concurrent write may have
-    /// moved/removed a pinned posting and the seek MUST decline (falling
-    /// back to the full scan).
+    /// F-67 (#893): the mutation high-water for ONE specific index (keyed by
+    /// `name_interned`) — the MVCC commit version of the most recent write
+    /// that applied a posting to THAT index. An index with no recorded
+    /// mutation (never written, or this manager was just constructed) reads
+    /// as `0`, matching the old manager-wide counter's default.
     ///
-    /// Acquire-load pairs with the `fetch_max(AcqRel)` in
-    /// [`note_mutation_at_version`].
-    pub fn last_mutation_version(&self) -> u64 {
-        self.last_mutation_version.load(Ordering::Acquire)
+    /// The AsOf cursor seek gate compares this against the cursor's
+    /// `pinned_version` FOR THE INDEX THE SEEK IS PLANNED AGAINST: when
+    /// `<= pinned`, the current-state index provably mirrors the pinned
+    /// snapshot and the seek fast path is safe; when `> pinned`, a
+    /// concurrent write to THIS index may have moved/removed a pinned
+    /// posting and the seek MUST decline (falling back to the full scan).
+    /// Mutating a DIFFERENT index no longer affects this read at all — the
+    /// scope-narrowing this task exists for.
+    ///
+    /// Acquire-load pairs with the `fetch_max`-equivalent upsert (AcqRel) in
+    /// [`note_mutation_at_version`]. The same monotonic-counter proof F-58
+    /// established for the manager-wide counter applies unchanged per-index:
+    /// any mutation the scan could have observed for THIS index necessarily
+    /// bumped THIS index's counter before the observation, and this
+    /// Acquire load is guaranteed to see it (or a later value).
+    pub fn last_mutation_version(&self, name_interned: u64) -> u64 {
+        match self.last_mutation_version.get_sync(&name_interned) {
+            Some(entry) => entry.get().load(Ordering::Acquire),
+            None => 0,
+        }
     }
 
-    /// F-53b Step 2 (#878): advance the mutation high-water to `version` if
-    /// it is newer than the current value. Called at APPLY time only —
-    /// inside `on_record_*` (the non-tx direct apply path) and at commit
-    /// Phase 5c (`apply_index_batch`), always with the write's MVCC commit
-    /// version. Never called at stage time: bumping before commit would let
-    /// an uncommitted (possibly-aborting) tx disable the fast path for
+    /// F-67 (#893): advance the mutation high-water for ONE specific index
+    /// (`name_interned`) to `version` if it is newer than that index's
+    /// current value. Called at APPLY time only — inside `on_record_*` (the
+    /// non-tx direct apply path, bumping only the indexes whose planner
+    /// actually produced an op for this call) and at commit Phase 5c
+    /// (`apply_index_batch`, bumping only the indexes with at least one op
+    /// in the commit batch), always with the write's MVCC commit version.
+    /// Never called at stage time: bumping before commit would let an
+    /// uncommitted (possibly-aborting) tx disable the fast path for
     /// unrelated cursors.
     ///
-    /// `fetch_max` (not `store`) makes the bump monotonic and race-free
-    /// under concurrent committers without needing a CAS loop: the maximum
-    /// of all concurrent commit versions is always the correct high-water.
-    pub fn note_mutation_at_version(&self, version: u64) {
-        self.last_mutation_version
-            .fetch_max(version, Ordering::AcqRel);
+    /// Lazily creates the per-index entry on first mutation (initialized to
+    /// `version`); an existing entry is advanced via a `fetch_max`-style
+    /// AcqRel RMW, so the bump is monotonic and race-free under concurrent
+    /// committers targeting the SAME index without needing a CAS loop: the
+    /// maximum of all concurrent commit versions is always the correct
+    /// high-water for that index.
+    pub fn note_mutation_at_version(&self, name_interned: u64, version: u64) {
+        match self.last_mutation_version.entry_sync(name_interned) {
+            scc::hash_map::Entry::Occupied(entry) => {
+                entry.get().fetch_max(version, Ordering::AcqRel);
+            }
+            scc::hash_map::Entry::Vacant(entry) => {
+                entry.insert_entry(AtomicU64::new(version));
+            }
+        }
     }
 
     /// True if at least one sorted index exists.
@@ -402,6 +449,15 @@ impl SortedIndexManager {
     // ============================================================================
 
     /// Plan index entries for a newly created record.
+    ///
+    /// F-67 (#893): a PURE planner — no side effects, including no epoch
+    /// bump. This is called at BOTH stage time (tx path, `version == 0`
+    /// placeholder — see `table_manager_tx_ops.rs`) and apply time (non-tx
+    /// direct path, via [`on_record_created`]'s real `version`), so bumping
+    /// here would incorrectly fire at stage time for an uncommitted
+    /// (possibly-aborting) tx. The per-index bump lives in
+    /// [`on_record_created`], the actual apply-time entry point, derived
+    /// from the ops this planner returns.
     pub fn plan_record_created(
         &self,
         record_id: &RecordId,
@@ -432,6 +488,10 @@ impl SortedIndexManager {
     /// pass, snapshotting `iter_indexes()` ONCE (the per-row
     /// `plan_record_created` re-snapshots every call). Used by the
     /// tx batch insert path.
+    ///
+    /// F-67 (#893): a PURE planner — no epoch bump (see
+    /// [`plan_record_created`]'s doc for why: this is also called at stage
+    /// time with a `version == 0` placeholder).
     pub fn plan_records_created_batch<'a, R, I>(
         &self,
         items: I,
@@ -463,6 +523,11 @@ impl SortedIndexManager {
     }
 
     /// Plan index entry changes when a record is updated.
+    ///
+    /// F-67 (#893): a PURE planner — no epoch bump (see
+    /// [`plan_record_created`]'s doc for why: this is also called at stage
+    /// time with a `version == 0` placeholder, e.g.
+    /// `table_manager_tx_ops.rs`'s tx-stage path).
     pub fn plan_record_updated(
         &self,
         record_id: &RecordId,
@@ -521,6 +586,10 @@ impl SortedIndexManager {
     }
 
     /// Plan index entry removals for a deleted record.
+    ///
+    /// F-67 (#893): a PURE planner — no epoch bump (see
+    /// [`plan_record_created`]'s doc for why: this is also called at stage
+    /// time, e.g. `table_manager_tx_ops.rs::plan_legacy_delete_ops`).
     pub fn plan_record_deleted(
         &self,
         record_id: &RecordId,
@@ -564,6 +633,52 @@ impl SortedIndexManager {
         Ok(())
     }
 
+    /// F-67 (#893): bump the per-index mutation high-water to `version` for
+    /// every DISTINCT sorted-index `name_interned` touched by `ops`.
+    ///
+    /// Called at APPLY time only:
+    /// - Internally, right after a planner's pure `Vec<IndexWriteOp>` is
+    ///   produced by one of the `on_record_*` wrappers below (the non-tx
+    ///   direct path's own apply point) — never inside the planners
+    ///   themselves, which are also invoked at STAGE time (tx path,
+    ///   `version == 0` placeholder) where bumping would incorrectly disable
+    ///   the fast path for an uncommitted, possibly-aborting tx.
+    /// - Externally, by `commit_phases.rs::apply_index_batch` (the tx-commit
+    ///   path's Phase 5c apply point) against the flat `ops: &[IndexWriteOp]`
+    ///   batch for one table, AFTER the postings have landed — `tx.
+    ///   index_write_set` is `Vec<(table_token, IndexWriteOp)>`, grouped only
+    ///   by table (never by index), so this is the only per-index-precise
+    ///   entry point available at that call site.
+    ///
+    /// `ops` may legitimately contain entries this manager did NOT produce
+    /// (other index families — hash/FTS/functional — share the same flat
+    /// `IndexWriteOp` enum and the same commit-time batch; `IndexWriteOp`
+    /// carries no index-id field of its own). Each key is decoded via
+    /// [`decode_sorted_index_name`] (the `[SORTED_TAG | name_interned |
+    /// ...]` layout [`Self::build_entry_key`] writes); a `None` (foreign key
+    /// from a different index family, or a malformed key) is skipped rather
+    /// than treated as an error — false negatives here only cost a fallback
+    /// to the already-correct full scan, never a correctness bug.
+    /// De-duplicates via a small on-stack scan (`SmallVec`) since a table
+    /// typically has ≤ ~10 sorted indexes (see the manager's cardinality
+    /// doc) — cheaper than allocating a `HashSet` for single-digit N.
+    pub fn bump_touched_indexes(&self, ops: &[IndexWriteOp], version: u64) {
+        let mut touched: SmallVec<[u64; 8]> = SmallVec::new();
+        for op in ops {
+            let key = match op {
+                IndexWriteOp::SetPosting { key, .. } => key,
+                IndexWriteOp::RemovePosting { key } => key,
+                IndexWriteOp::BumpFtsStats { .. } => continue,
+            };
+            if let Some(name_interned) = decode_sorted_index_name(key.as_ref()) {
+                if !touched.contains(&name_interned) {
+                    touched.push(name_interned);
+                    self.note_mutation_at_version(name_interned, version);
+                }
+            }
+        }
+    }
+
     // ============================================================================
     // on_record_* wrappers — plan + apply
     // ============================================================================
@@ -576,10 +691,10 @@ impl SortedIndexManager {
         record: &(impl RecordRef + ?Sized),
         version: u64,
     ) -> DbResult<()> {
-        // F-53b Step 2 (#878): bump at APPLY time (this method is the non-tx
-        // direct path's apply point). `version` is the write's MVCC version.
-        self.note_mutation_at_version(version);
         let ops = self.plan_record_created(record_id, record, version)?;
+        // F-67 (#893): bump at APPLY time (this method is the non-tx direct
+        // path's apply point), only for the index(es) `ops` actually touched.
+        self.bump_touched_indexes(&ops, version);
         self.apply_ops(&ops).await
     }
 
@@ -591,9 +706,9 @@ impl SortedIndexManager {
         new: &(impl RecordRef + ?Sized),
         version: u64,
     ) -> DbResult<()> {
-        // F-53b Step 2 (#878): bump at APPLY time (see on_record_created).
-        self.note_mutation_at_version(version);
         let ops = self.plan_record_updated(record_id, old, new, version)?;
+        // F-67 (#893): bump at APPLY time (see on_record_created).
+        self.bump_touched_indexes(&ops, version);
         self.apply_ops(&ops).await
     }
 
@@ -607,8 +722,6 @@ impl SortedIndexManager {
         R: RecordRef + ?Sized + 'a,
         I: IntoIterator<Item = (&'a RecordId, &'a R)> + Clone,
     {
-        // F-53b Step 2 (#878): bump at APPLY time (see on_record_created).
-        self.note_mutation_at_version(version);
         if self.indexes.load_local().is_empty() {
             return Ok(());
         }
@@ -617,6 +730,7 @@ impl SortedIndexManager {
         // built as `Bytes` and converted byte-identically at each push.
         let mut writes: Vec<(RecordKey, Bytes)> = Vec::new();
         for def in &defs {
+            let mut touched = false;
             for (rid, value) in items.clone() {
                 if let Some(encoded) = extract_and_encode(value, &def.field_path)? {
                     let key = self.build_entry_key(def.name_interned, &encoded, rid);
@@ -626,7 +740,14 @@ impl SortedIndexManager {
                         Bytes::new()
                     };
                     writes.push((key.into(), pv));
+                    touched = true;
                 }
+            }
+            // F-67 (#893): bump at APPLY time (this method is the non-tx
+            // direct batch path's apply point) — only for a `def` at least
+            // one item in the batch actually produced a posting for.
+            if touched {
+                self.note_mutation_at_version(def.name_interned, version);
             }
         }
         if writes.is_empty() {
@@ -638,21 +759,25 @@ impl SortedIndexManager {
 
     /// Drop entries for a deleted record.
     ///
-    /// F-53b Step 2 (#878): `version` is the DELETE's MVCC commit version,
-    /// used to bump the mutation high-water at APPLY time. A DELETE after a
-    /// cursor's pin REMOVES the posting — the index never yields the record
-    /// id again, so the seek would silently miss a row the pinned snapshot
-    /// must show. The gate (bumped here) is what makes the AsOf seek decline
-    /// in that case and fall back to the full scan.
+    /// `version` is the DELETE's MVCC commit version, used to bump the
+    /// per-index mutation high-water at APPLY time (F-67, #893: only for the
+    /// index(es) that actually carried a posting for this record — see
+    /// [`Self::bump_touched_indexes`]). A DELETE after a cursor's pin
+    /// REMOVES the posting for that index — the index never yields the
+    /// record id again, so a seek planned against THAT SAME index would
+    /// silently miss a row the pinned snapshot must show. The gate (bumped
+    /// here) is what makes the AsOf seek decline in that case and fall back
+    /// to the full scan; mutating an UNRELATED index no longer bumps this
+    /// counter at all.
     pub async fn on_record_deleted(
         &self,
         record_id: &RecordId,
         record: &(impl RecordRef + ?Sized),
         version: u64,
     ) -> DbResult<()> {
-        // F-53b Step 2 (#878): bump at APPLY time (see on_record_created).
-        self.note_mutation_at_version(version);
         let ops = self.plan_record_deleted(record_id, record)?;
+        // F-67 (#893): bump at APPLY time (see on_record_created).
+        self.bump_touched_indexes(&ops, version);
         self.apply_ops(&ops).await
     }
 
@@ -1493,4 +1618,31 @@ fn decode_record_id_suffix(key_bytes: &[u8]) -> Option<RecordId> {
     let mut arr = [0u8; 16];
     arr.copy_from_slice(tail);
     Some(RecordId(arr))
+}
+
+/// F-67 (#893): decode the `name_interned` (u64, big-endian) out of a
+/// physical sorted-index key `[SORTED_TAG (1) | name_interned (8 BE) |
+/// encoded_value | record_id (16)]` — the exact layout [`SortedIndexManager
+/// ::build_entry_key`]/[`SortedIndexManager::entry_prefix`] write.
+///
+/// Used by [`SortedIndexManager::bump_touched_indexes`] to recover per-index
+/// identity from the `IndexWriteOp::{SetPosting, RemovePosting}` keys the
+/// manager's own planners produced — `IndexWriteOp` itself carries no
+/// separate index-id field (it's a pure-data enum shared across every index
+/// family: hash, sorted, FTS, functional), so the physical key is the only
+/// place the identity survives once ops are collected into a flat
+/// `Vec<IndexWriteOp>` (see `commit_phases.rs::apply_index_batch`, which
+/// resolves this the same way for the tx-commit path).
+///
+/// Returns `None` for a key that is too short or is not `SORTED_TAG`-prefixed
+/// (a foreign key from a different index family sharing the same
+/// `info_store` — should never reach this manager's own planner-produced
+/// ops, but decoding defensively rather than panicking).
+fn decode_sorted_index_name(key_bytes: &[u8]) -> Option<u64> {
+    if key_bytes.len() < 1 + 8 || key_bytes[0] != SORTED_TAG {
+        return None;
+    }
+    let mut arr = [0u8; 8];
+    arr.copy_from_slice(&key_bytes[1..9]);
+    Some(u64::from_be_bytes(arr))
 }

@@ -10,8 +10,9 @@
 //! `O(page_size)` per page instead of the `O(N)` the full-rescan
 //! `read_as_of` baseline pays.
 //!
-//! The §5.1 gate (`SortedIndexManager::last_mutation_version() <= pinned`) is
-//! checked by the caller (`read_as_of`) BEFORE dispatching here. It guarantees
+//! The §5.1 gate (`SortedIndexManager::last_mutation_version(index_name) <=
+//! pinned`) is checked by the caller (`read_as_of`) BEFORE dispatching here,
+//! for the SPECIFIC `index_name` the seek is planned against. It guarantees
 //! that, AT ENTRY, the current-state index provably mirrors the pinned
 //! snapshot's postings, so the §1.3 cases (UPDATE to the indexed field,
 //! DELETE after pin) — which a current-state index CANNOT serve — could not
@@ -27,34 +28,49 @@
 //! below is a multi-iteration, multi-`.await` loop — a mutation landing
 //! DURING that window is a genuine TOCTOU race the entry check alone cannot
 //! catch. The fix is a symmetric POST-scan re-check of the same predicate
-//! (`last_mutation_version() > pinned_version` ⇒ fall back), added after the
-//! loop and the `concurrent_modified` check, before this arm commits to
-//! returning its result. This works because `last_mutation_version` is a
-//! monotonic, `Acquire`/`AcqRel`-ordered high-water mark
-//! (`shamir-index/src/legacy/sorted_index_manager.rs`) — any mutation whose
-//! effect the walk could have observed necessarily bumps this same counter,
-//! and the post-check's `Acquire` load is guaranteed to see it (or later).
+//! (`last_mutation_version(index_name) > pinned_version` ⇒ fall back), added
+//! after the loop and the `concurrent_modified` check, before this arm
+//! commits to returning its result. This works because
+//! `last_mutation_version(index_name)` is a monotonic, `Acquire`/`AcqRel`
+//! -ordered per-index high-water mark
+//! (`shamir-index/src/legacy/sorted_index_manager.rs`) — any mutation to
+//! `index_name` whose effect the walk could have observed necessarily bumps
+//! THIS index's counter, and the post-check's `Acquire` load is guaranteed to
+//! see it (or later).
+//!
+//! F-67 (#893) re-derives this proof per-index (the mechanism was previously
+//! a single manager-wide counter — see that task's brief for the scope
+//! narrowing rationale): the argument transfers directly, because it never
+//! actually depended on the counter being shared across indexes, only on
+//! "any mutation THIS candidate's posting could have been affected by bumps
+//! THIS counter before the walk could observe the effect" — which holds
+//! per-index exactly as it held manager-wide. A mutation to a DIFFERENT
+//! sorted index on the same table does NOT bump `index_name`'s counter and
+//! correctly does not trip either the entry gate or this post-check.
 //!
 //! ## Bump-vs-apply ordering (both verified, both safe for the post-check)
 //!
 //! - **Non-tx direct path** (`on_record_created`/`on_record_updated`/
 //!   `on_records_created_batch`/`on_record_deleted`,
-//!   `sorted_index_manager.rs:573-657`): bumps the high-water FIRST, applies
-//!   the posting mutation SECOND. This is actually the SAFER order for the
-//!   post-check: if the scan ever observes the mutation's effect, the bump
-//!   necessarily already happened — zero residual window. The only cost is a
-//!   possible false-positive fallback (bump fired, apply hadn't landed yet),
-//!   which is always safe (the full-scan fallback is correct by
-//!   construction).
+//!   `sorted_index_manager.rs`): bumps the per-index high-water (via
+//!   `bump_touched_indexes`, computed from the planner's `Vec<IndexWriteOp>`)
+//!   FIRST, applies the posting mutation SECOND. This is actually the SAFER
+//!   order for the post-check: if the scan ever observes the mutation's
+//!   effect, the bump necessarily already happened — zero residual window.
+//!   The only cost is a possible false-positive fallback (bump fired, apply
+//!   hadn't landed yet), which is always safe (the full-scan fallback is
+//!   correct by construction).
 //! - **Tx-commit path** (`commit_phases.rs` Phase 5c): applies the posting
-//!   mutation FIRST, bumps the high-water SECOND — the ordering this module
-//!   originally assumed. This leaves a narrow, synchronous (no `.await`
-//!   between the two calls) window where the post-check could in principle
-//!   run between the apply and the bump and miss it. This residual is
-//!   accepted as out-of-scope for F-58: it is orders of magnitude narrower
-//!   than the unbounded-scan-duration TOCTOU this task closes, and closing it
-//!   fully would mean reordering the tx-commit pipeline's Phase 5c itself —
-//!   separate, riskier work, not this read-path fix.
+//!   mutation FIRST, bumps the per-index high-water SECOND (via
+//!   `bump_touched_indexes` decoding `name_interned` from each op's key) —
+//!   the ordering this module originally assumed. This leaves a narrow,
+//!   synchronous (no `.await` between the two calls) window where the
+//!   post-check could in principle run between the apply and the bump and
+//!   miss it. This residual is accepted as out-of-scope for F-58/F-67: it is
+//!   orders of magnitude narrower than the unbounded-scan-duration TOCTOU
+//!   F-58 closes, and closing it fully would mean reordering the tx-commit
+//!   pipeline's Phase 5c itself — separate, riskier work, not this read-path
+//!   fix.
 
 use std::time::Instant;
 
@@ -256,18 +272,25 @@ impl TableManager {
             return Ok(None);
         }
 
-        // F-58 (#884): post-scan re-check of the entry gate's predicate. The
-        // entry gate (checked once in `read_as_of` before dispatching here)
-        // can be invalidated by a concurrent UPDATE/DELETE landing DURING the
-        // loop above — a posting the walk has not yet reached (or already
-        // passed) can vanish entirely, and the `concurrent_modified` classifier
-        // above can only flag candidates it actually observes. This symmetric
-        // re-check closes that TOCTOU window: any mutation that could have
-        // raced the walk bumps this same counter, and the post-check's Acquire
-        // load observes it (see the module doc for the bump-vs-apply ordering
-        // analysis). If this fires, the caller falls through to the full scan
-        // — correct by construction.
-        if self.sorted_indexes().last_mutation_version() > pinned_version {
+        // F-58 (#884) / F-67 (#893): post-scan re-check of the entry gate's
+        // predicate, now keyed to THIS index (`index_name`) only. The entry
+        // gate (checked once in `read_as_of` before dispatching here) can be
+        // invalidated by a concurrent UPDATE/DELETE to THIS SAME index
+        // landing DURING the loop above — a posting the walk has not yet
+        // reached (or already passed) can vanish entirely, and the
+        // `concurrent_modified` classifier above can only flag candidates it
+        // actually observes. This symmetric re-check closes that TOCTOU
+        // window: any mutation to `index_name` that could have raced the
+        // walk bumps THIS index's counter, and the post-check's Acquire load
+        // observes it (see the module doc for the bump-vs-apply ordering
+        // analysis — the same proof, re-derived per-index: it does not rely
+        // on the counter being manager-wide, only on it being monotonic and
+        // bumped for every mutation THIS index's postings undergo). If this
+        // fires, the caller falls through to the full scan — correct by
+        // construction. A concurrent mutation to a DIFFERENT index does not
+        // bump `index_name`'s counter and correctly does not trip this
+        // re-check.
+        if self.sorted_indexes().last_mutation_version(index_name) > pinned_version {
             return Ok(None);
         }
 
