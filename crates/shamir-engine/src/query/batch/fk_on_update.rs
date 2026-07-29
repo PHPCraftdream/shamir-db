@@ -105,7 +105,7 @@ use crate::table::record_cow::RecordCow;
 use crate::table::TableManager;
 
 /// A single reverse-FK reference whose `on_update != NoAction`.
-struct OnUpdateRef {
+pub(crate) struct OnUpdateRef {
     /// Child table name (same repo as the parent).
     child_table: String,
     /// Child field path holding the FK value (first segment for the probe).
@@ -722,7 +722,7 @@ async fn field_is_nullable(table: &TableManager, field: &str) -> bool {
 
 /// Discover all child tables in the repo that have a FK pointing at
 /// `parent_table` with `on_update != NoAction`.
-async fn discover_on_update_refs(
+pub(crate) async fn discover_on_update_refs(
     resolver: &dyn TableResolver,
     parent_table_ref: &TableRef,
 ) -> Result<Vec<OnUpdateRef>, BatchError> {
@@ -740,10 +740,20 @@ async fn discover_on_update_refs(
 
     for name in &table_names {
         let child_ref = TableRef::with_repo(&parent_table_ref.repo, name);
-        let child_table = match resolver.resolve(&child_ref).await {
-            Ok(t) => t,
-            Err(_) => continue,
-        };
+        // F-55 (#881): a resolve failure on any single child table aborts
+        // the WHOLE repo-wide scan instead of silently treating that table
+        // as "declares no foreign keys". Mirrors the `resolve_repo` error
+        // mapping a few lines above; uses `map_err` (not bare `?`) because
+        // this function returns `BatchError`, not `DbResult`.
+        let child_table =
+            resolver
+                .resolve(&child_ref)
+                .await
+                .map_err(|e| BatchError::QueryError {
+                    alias: String::new(),
+                    message: format!("fk_on_update: resolve({name}): {e}"),
+                    code: Some("fk_on_update".to_string()),
+                })?;
 
         for (field_path, fk) in child_table.collect_fk_refs() {
             if fk.ref_table != parent_table_ref.table {

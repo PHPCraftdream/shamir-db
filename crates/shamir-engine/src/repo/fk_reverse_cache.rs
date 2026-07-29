@@ -493,10 +493,13 @@ pub async fn build_reverse_fk_entries(
 
     for name in &table_names {
         let child_ref = TableRef::with_repo(repo_name, name);
-        let child_table = match resolver.resolve(&child_ref).await {
-            Ok(t) => t,
-            Err(_) => continue,
-        };
+        // F-55 (#881): a resolve failure on any single child table aborts
+        // the WHOLE repo-wide scan instead of silently treating that table
+        // as "declares no foreign keys". Swallowing the error here would
+        // publish an incomplete FK graph via the caller's CAS, allowing a
+        // subsequent parent UPDATE/DELETE to violate referential integrity
+        // by never discovering the missed child as a dependent.
+        let child_table = resolver.resolve(&child_ref).await?;
 
         for (field_path, fk) in child_table.collect_fk_refs() {
             entries.push(TaggedReverseFkEntry {
