@@ -117,6 +117,10 @@ name = "keyset_seek"
 harness = false
 
 [[bench]]
+name = "cursor_pages_depth"
+harness = false
+
+[[bench]]
 name = "interner_concurrent"
 harness = false
 

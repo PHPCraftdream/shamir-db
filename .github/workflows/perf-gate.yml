@@ -1,0 +1,59 @@
+name: perf-gate
+
+# F-53d (#877) — release-blocking performance gate.
+#
+# WHY SELF-HOSTED, NOT ubuntu-latest: absolute ns/op timing gates need a
+# STABLE machine. GitHub-hosted runners are shared-tenancy and too noisy for
+# that — this repo's own docs/dev-artifacts/checkpoints/2026-07-22-1747.md
+# records 9 separate CI timing-margin flakes on hosted runners. A dedicated
+# self-hosted box gives comparable absolute numbers run to run. This is a
+# deliberate, already-made decision (see the brief this workflow was built
+# from, docs/dev-artifacts/prompts/post-alpha/110-f53d-ci-perf-gates-self-hosted.md)
+# — do not "fix" the flakiness below by switching `runs-on` back to a
+# GitHub-hosted label.
+#
+# WHY THIS JOB WILL SIMPLY QUEUE FOREVER RIGHT NOW: `runs-on: [self-hosted,
+# shamir-bench]` targets a runner label that has NO machine registered
+# against it yet — registering one is a manual, out-of-band operator step
+# (see docs/guide-docs/CI_PERF_GATE_RUNBOOK.md). Until that happens, a PR
+# touching `master` will show this job stuck in "Queued" indefinitely. That
+# is EXPECTED, not a misconfiguration — do not delete this workflow or
+# change its `runs-on` to make the queue go away; register the runner
+# instead, per the runbook.
+#
+# WHY GATED ON PRs TO master ONLY (not every push, not feature branches):
+# absolute-timing bench runs are too slow/expensive to run on every push to
+# every branch; release-blocking gates belong on the path that actually
+# ships (`pull_request` into `master`, matching `ci.yml`'s own gating).
+
+on:
+  pull_request:
+    branches: [master]
+  workflow_dispatch: {}
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+# Least-privilege default, same as ci.yml / stress-nightly.yml: this job
+# only reads the repo and runs benches — no push/comment/registry write.
+permissions:
+  contents: read
+
+jobs:
+  perf-gate:
+    name: performance gate (self-hosted)
+    # See the header comment above: this label has no runner registered
+    # against it yet in this environment. That is expected until the
+    # runbook's manual registration step is completed by a human operator.
+    runs-on: [self-hosted, shamir-bench]
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6.0.3
+      - uses: dtolnay/rust-toolchain@1.93.0
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32  # v2
+
+      # bash on every runner (Git Bash on Windows) — `./scripts/bench_gate.sh`
+      # is a bash script, same convention as `./scripts/test.sh` in ci.yml.
+      - name: run performance gate
+        run: ./scripts/bench_gate.sh
+        shell: bash
