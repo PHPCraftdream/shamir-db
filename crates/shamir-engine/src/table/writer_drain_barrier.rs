@@ -67,7 +67,7 @@ use std::sync::Arc;
 /// The four cross-atomic operations are ALL `Ordering::SeqCst`:
 ///   - writer  `active.fetch_add` (`enter_writer`)
 ///   - writer  `flag.load` (`needs_write_barrier`)
-///   - drainer `flag.store(true)` (`set_schema_activation_barrier` / `Index2CreateBarrierGuard`)
+///   - drainer `flag.store(true)` (`set_schema_activation_barrier` / `IndexCreateBarrierGuard`)
 ///   - drainer `active.load` (`drain`)
 ///
 /// This dependency spans TWO independent atomics (`active` and `flag`), so

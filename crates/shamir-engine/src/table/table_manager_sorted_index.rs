@@ -2,6 +2,7 @@ use futures::StreamExt;
 use shamir_storage::error::DbResult;
 
 use super::table_manager::TableManager;
+use super::table_manager_index_mgmt::IndexCreateBarrierGuard;
 
 impl TableManager {
     /// Register a new sorted (B-tree-by-value) index over a single
@@ -14,6 +15,22 @@ impl TableManager {
     /// the doctor's `repair()` rebuilds the index from scratch as a
     /// recovery path. Do NOT call under `tokio::select!` /
     /// `tokio::time::timeout`.
+    ///
+    /// # Concurrency (F-57, #883)
+    ///
+    /// Unlike the other three index families, sorted indexes MUST register
+    /// BEFORE backfill: the backfill calls `on_record_created` through the
+    /// `SortedIndexManager`, which needs the registered definition to know
+    /// where to write. This makes the concurrent-writer exposure MORE acute
+    /// (a writer can interleave with the backfill on a registered index), not
+    /// less. F-57 closes the concurrent-writer race with the SAME barrier +
+    /// lock + drain pattern as the other three families: `unique_write_lock`
+    /// is held across the entire register→backfill sequence,
+    /// `sorted_index_create_barrier` is raised so `needs_write_barrier()`
+    /// returns `true`, and `drain_writers()` waits for any in-flight fast-path
+    /// writer that read `false` before the flag went up. The cancellation
+    /// residual (partial index on `select!`/`timeout`) remains — the doctor's
+    /// `repair()` is the documented recovery path.
     pub async fn create_sorted_index(&self, index_name: &str, field_path: &[&str]) -> DbResult<()> {
         self.create_sorted_index_with_include(index_name, field_path, Vec::new())
             .await
@@ -72,6 +89,17 @@ impl TableManager {
             }
             included_fields_interned.push(seg_ids);
         }
+        // F-57 (#883): hold `unique_write_lock` across the ENTIRE register →
+        // backfill sequence and raise `sorted_index_create_barrier` so ALL
+        // writer paths serialize against this create. The register-before-
+        // backfill shape means a concurrent writer could otherwise interleave
+        // with the backfill on a registered-but-incomplete index. The
+        // `drain_writers()` call closes the check-then-act gap for a writer
+        // that read `false` before the flag went up — same SeqCst protocol as
+        // F-56's `create_index_v2`.
+        let _uwl_guard = self.unique_write_lock.lock().await;
+        let _barrier = IndexCreateBarrierGuard::set(&self.sorted_index_create_barrier);
+        self.drain_writers().await;
         // F-42 (#850) — same fix class as `create_index`/
         // `create_unique_index_locked`: persist the interner's newly-touched
         // ids BEFORE `register` publishes the index. A persist failure
@@ -94,6 +122,9 @@ impl TableManager {
         // P4 (pre-refactor boundary): read CURRENT state through the seam
         // (`self.list_stream` → MvccStore::current_stream when attached), not
         // `self.table.list_stream` directly, so collapse-main swaps one place.
+        // F-57: the barrier + lock above ensure no concurrent writer can
+        // interleave with this backfill — the snapshot is a true point-in-time
+        // view with no in-flight writers.
         let stream = self.list_stream(1000);
         futures::pin_mut!(stream);
         while let Some(batch) = stream.next().await {

@@ -80,6 +80,39 @@ pub struct TableManager {
     /// (F-56). Set/cleared `SeqCst` (under `unique_write_lock`) by the shamir-db
     /// DDL handler via [`set_schema_activation_barrier`](Self::set_schema_activation_barrier).
     pub(super) schema_activation_barrier: Arc<std::sync::atomic::AtomicBool>,
+    /// F-57 (#883, P0) — sibling of `index2_create_barrier`, raised for the
+    /// duration of a regular (non-unique) hash-index `create_index`
+    /// snapshot→backfill→register sequence. While it is `true`, EVERY writer
+    /// path also acquires `unique_write_lock`, closing the lost-write race
+    /// where a row written between the backfill snapshot and registration is
+    /// seen by NEITHER the backfill NOR the live `index_manager` write hook
+    /// (`needs_write_barrier()` previously never considered regular indexes at
+    /// all). Shared across clones via `Arc`; loaded `SeqCst` via
+    /// [`needs_write_barrier`](Self::needs_write_barrier); set/cleared `SeqCst`
+    /// (under `unique_write_lock`) by [`IndexCreateBarrierGuard`].
+    pub(super) regular_index_create_barrier: Arc<std::sync::atomic::AtomicBool>,
+    /// F-57 (#883, P0) — sibling raised for the duration of a unique-index
+    /// `create_unique_index` snapshot→backfill→register sequence. The existing
+    /// `unique_write_lock` already serializes writers when
+    /// [`has_unique_indexes`](IndexManager::has_unique_indexes) is `true`, but
+    /// for the FIRST unique index on a table that predicate is `false` until
+    /// the index is registered — so every concurrent fast-path writer bypassed
+    /// the lock entirely. This flag forces `needs_write_barrier()` to `true`
+    /// during the create so even the first unique index is protected. Shared
+    /// across clones via `Arc`; loaded `SeqCst` via
+    /// [`needs_write_barrier`](Self::needs_write_barrier); set/cleared `SeqCst`
+    /// (under `unique_write_lock`) by [`IndexCreateBarrierGuard`].
+    pub(super) unique_index_create_barrier: Arc<std::sync::atomic::AtomicBool>,
+    /// F-57 (#883, P0) — sibling raised for the duration of a sorted-index
+    /// `create_sorted_index_with_include` register→backfill sequence. Sorted
+    /// indexes register BEFORE backfill (load-bearing: the backfill calls
+    /// `on_record_created` through the manager, which needs the registered
+    /// definition). Without this flag, a concurrent writer could interleave
+    /// with the backfill and the row could be missed or double-posted. Shared
+    /// across clones via `Arc`; loaded `SeqCst` via
+    /// [`needs_write_barrier`](Self::needs_write_barrier); set/cleared `SeqCst`
+    /// (under `unique_write_lock`) by [`IndexCreateBarrierGuard`].
+    pub(super) sorted_index_create_barrier: Arc<std::sync::atomic::AtomicBool>,
     /// F-48 (#859, P0) — reusable writer-drain barrier. Fast-path writers
     /// (those that read `needs_write_barrier() == false`) bump this counter
     /// before their flag check and drop it after their full
@@ -188,6 +221,10 @@ impl Clone for TableManager {
             // F-37 — shared across clones so a schema-activation DDL in flight
             // on any clone forces writers on every clone onto the barrier.
             schema_activation_barrier: Arc::clone(&self.schema_activation_barrier),
+            // F-57 — shared across clones (same rationale as the siblings above).
+            regular_index_create_barrier: Arc::clone(&self.regular_index_create_barrier),
+            unique_index_create_barrier: Arc::clone(&self.unique_index_create_barrier),
+            sorted_index_create_barrier: Arc::clone(&self.sorted_index_create_barrier),
             // F-48 — shared across clones (Arc<AtomicUsize> inside).
             writer_drain: self.writer_drain.clone(),
             index2_registry: Arc::clone(&self.index2_registry),
@@ -258,6 +295,9 @@ impl TableManager {
             unique_write_lock: Arc::new(tokio::sync::Mutex::new(())),
             index2_create_barrier: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             schema_activation_barrier: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            regular_index_create_barrier: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            unique_index_create_barrier: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            sorted_index_create_barrier: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             writer_drain: super::writer_drain_barrier::WriterDrainBarrier::new(),
             index2_registry: Arc::new(crate::index2::IndexRegistry::new()),
             mvcc_store: None,
@@ -488,6 +528,9 @@ impl TableManager {
             unique_write_lock: Arc::new(tokio::sync::Mutex::new(())),
             index2_create_barrier: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             schema_activation_barrier: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            regular_index_create_barrier: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            unique_index_create_barrier: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            sorted_index_create_barrier: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             writer_drain: super::writer_drain_barrier::WriterDrainBarrier::new(),
             index2_registry: Arc::new(crate::index2::IndexRegistry::new()),
             mvcc_store: None,
@@ -746,7 +789,11 @@ impl TableManager {
     ///   OR
     /// - a schema-activation DDL (`set_table_schema` / `add_schema_rule`) is
     ///   currently in its `keyset_safe` count-proof → persist → activate
-    ///   window (F-37, #845).
+    ///   window (F-37, #845), OR
+    /// - a regular hash-index `create_index` (F-57, #883), unique-index
+    ///   `create_unique_index` (F-57), or sorted-index
+    ///   `create_sorted_index_with_include` (F-57) snapshot→backfill→register
+    ///   sequence is currently in flight.
     ///
     /// Each barrier flag is loaded `SeqCst` (F-56, #882). The flag load is the
     /// writer half of a cross-atomic dependency with the `active` drain counter:
@@ -777,6 +824,15 @@ impl TableManager {
                 .load(std::sync::atomic::Ordering::SeqCst)
             || self
                 .schema_activation_barrier
+                .load(std::sync::atomic::Ordering::SeqCst)
+            || self
+                .regular_index_create_barrier
+                .load(std::sync::atomic::Ordering::SeqCst)
+            || self
+                .unique_index_create_barrier
+                .load(std::sync::atomic::Ordering::SeqCst)
+            || self
+                .sorted_index_create_barrier
                 .load(std::sync::atomic::Ordering::SeqCst)
     }
 

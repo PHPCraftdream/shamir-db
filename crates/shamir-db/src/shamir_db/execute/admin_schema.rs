@@ -127,7 +127,7 @@ async fn lock_schema_rmw(
 
 /// RAII guard that raises a table's `schema_activation_barrier` flag while
 /// held and clears it on drop — including every `?` early-return path inside
-/// a schema-activation DDL. Mirrors the engine's `Index2CreateBarrierGuard`
+/// a schema-activation DDL. Mirrors the engine's `IndexCreateBarrierGuard`
 /// (`table_manager_index_mgmt.rs`): the flag is `SeqCst`-stored here (F-56),
 /// matching the writer's `SeqCst` load in `needs_write_barrier` and the
 /// `SeqCst` `active`-counter ops — the cross-atomic drain dependency needs a
@@ -135,7 +135,7 @@ async fn lock_schema_rmw(
 ///
 /// **Must be created while the caller already holds `unique_write_lock`**
 /// (see [`begin_schema_activation_barrier`]) — exactly as the engine's
-/// `Index2CreateBarrierGuard` is raised under `_uwl_guard`. The clear-on-drop
+/// `IndexCreateBarrierGuard` is raised under `_uwl_guard`. The clear-on-drop
 /// then runs while the lock is still held (Rust drops locals in reverse
 /// declaration order: the barrier guard, declared AFTER the lock guard, drops
 /// FIRST), matching `create_index_v2`'s own clear-flag-then-release-lock
@@ -181,7 +181,7 @@ impl Drop for SchemaActivationBarrierGuard<'_> {
 /// returned handle so all three locals (`_barrier`, `_uwl_guard`, `_handle`)
 /// share one scope and drop in the right order (barrier clears first, then
 /// the lock releases) — the exact shape of `create_index_v2`'s
-/// `_uwl_guard` + `Index2CreateBarrierGuard` pair.
+/// `_uwl_guard` + `IndexCreateBarrierGuard` pair.
 ///
 /// Call this immediately BEFORE the `stamp_keyset_safe` count-proof read so
 /// the subsequent count→persist→activate sequence is a genuine snapshot no
