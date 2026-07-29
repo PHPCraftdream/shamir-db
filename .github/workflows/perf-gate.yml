@@ -15,20 +15,36 @@ name: perf-gate
 # WHY THIS JOB WILL SIMPLY QUEUE FOREVER RIGHT NOW: `runs-on: [self-hosted,
 # shamir-bench]` targets a runner label that has NO machine registered
 # against it yet — registering one is a manual, out-of-band operator step
-# (see docs/guide-docs/CI_PERF_GATE_RUNBOOK.md). Until that happens, a PR
-# touching `master` will show this job stuck in "Queued" indefinitely. That
-# is EXPECTED, not a misconfiguration — do not delete this workflow or
-# change its `runs-on` to make the queue go away; register the runner
-# instead, per the runbook.
+# (see docs/guide-docs/CI_PERF_GATE_RUNBOOK.md). Until that happens, a
+# manually-triggered run (see the workflow_dispatch note below) will show
+# this job stuck in "Queued" indefinitely. That is EXPECTED, not a
+# misconfiguration — do not delete this workflow or change its `runs-on`
+# to make the queue go away; register the runner instead, per the
+# runbook.
 #
-# WHY GATED ON PRs TO master ONLY (not every push, not feature branches):
-# absolute-timing bench runs are too slow/expensive to run on every push to
-# every branch; release-blocking gates belong on the path that actually
-# ships (`pull_request` into `master`, matching `ci.yml`'s own gating).
+# WHY MANUAL (workflow_dispatch) ONLY, NOT `pull_request` (F-61, #887):
+# this repository is PUBLIC (verified via `gh repo view` — not a future
+# concern, the current state). A `pull_request`-triggered workflow checks
+# out and executes the PR's OWN code — `cargo bench` compiles and runs
+# whatever `build.rs`/proc-macros/benches the PR supplies — and this job
+# runs on a PERSISTENT self-hosted machine, not a disposable per-job VM.
+# Any fork could open a PR against `master` and get arbitrary code
+# execution on that machine the moment a runner is registered against the
+# `shamir-bench` label. `workflow_dispatch` requires a maintainer (someone
+# with at least write access) to manually trigger a run — that is the
+# safety boundary for now. This is an intentional trade-off: the gate no
+# longer runs unattended on every PR, in exchange for not handing code
+# execution on a persistent machine to anonymous fork PRs. Do NOT add
+# `pull_request` back, and do NOT reach for `pull_request_target` as an
+# alternative — that trigger runs with the base repo's privileged token
+# while still able to check out untrusted PR code if misused, a
+# well-known WORSE version of this same vulnerability class. A stronger
+# mechanism (maintainer-approval-gated trusted workflow benchmarking an
+# immutable PR SHA, or a genuinely ephemeral no-secrets runner) may be
+# worth building later if unattended PR coverage becomes valuable again —
+# not implemented here.
 
 on:
-  pull_request:
-    branches: [master]
   workflow_dispatch: {}
 
 env:

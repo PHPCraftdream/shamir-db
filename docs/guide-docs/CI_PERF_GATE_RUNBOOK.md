@@ -99,10 +99,15 @@ performance change lands and the old baseline should no longer be treated
 as the target (this is a manual, deliberate act — the gate never
 auto-updates its own baseline).
 
-### 5. Confirm the workflow job goes green on the next PR
+### 5. Confirm the workflow job goes green on a manual run
 
-Open (or push to) a PR against `master`. `.github/workflows/perf-gate.yml`'s
-`perf-gate` job should now pick up on your registered runner, run
+F-61 (#887) restricted `.github/workflows/perf-gate.yml` to
+`workflow_dispatch` only — it does NOT run automatically on PRs (this repo
+is public; see the workflow's own header comment for why an unattended
+`pull_request` trigger on a persistent self-hosted runner is unsafe here).
+Trigger it manually instead: GitHub's Actions tab → "perf-gate" → "Run
+workflow" (or `gh workflow run perf-gate.yml` from a checkout with a
+registered runner). It should pick up on your registered runner, run
 `./scripts/bench_gate.sh` (gate mode — no flags), and report pass/fail based
 on the 25% regression threshold (see `scripts/bench_gate.sh`'s header
 comment for why 25% and how to override it via
