@@ -8,6 +8,22 @@ machine registered against it. Every PR into `master` will show that job
 stuck in "Queued" until you complete the steps below. That is expected,
 not a bug.
 
+> **F-62 (#888) — the release pipeline now depends on this gate too.**
+> `.github/workflows/release.yml`'s tag-triggered pipeline now includes its
+> own inline `perf-gate` job (same `./scripts/bench_gate.sh` recipe, same
+> `[self-hosted, shamir-bench]` runner), duplicated inline rather than
+> depended on via cross-workflow `needs:` (which GitHub Actions does not
+> support — see the `sbom` job there for the same duplicate-the-recipe
+> pattern). Every downstream release job (`build`, `docker`, `sbom`, `sign`,
+> `github-release`) `needs:` it. **Consequence: a `v*` tag push will queue
+> the ENTIRE release pipeline on this same unregistered-runner condition**
+> — until you complete the steps below (register the runner + capture the
+> baseline), no tag can ship. That is the intended release-blocking
+> semantics, not a bug: do not weaken the dependency to let a release
+> through. This is exactly what the roadmap's §7 "Definition of done for
+> first tag" line ("perf-gate прошёл на том же frozen SHA") asks for,
+> turned from a manual checklist item into a structurally enforced gate.
+
 ## Why self-hosted, not a GitHub-hosted runner
 
 Absolute `ns/op` timing gates need a stable, dedicated machine.

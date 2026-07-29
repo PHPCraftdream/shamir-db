@@ -6,9 +6,10 @@ name: release
 # exact tag:
 #
 #   1. a GATE (fmt + clippy + test + integration + ts-unit + ts-e2e +
-#      version-consistency; CR-B9 widened this beyond the original
-#      fmt+clippy+test) that every downstream job depends on, so a red gate
-#      blocks the whole release;
+#      version-consistency, plus a release-only `perf-gate` job on the
+#      self-hosted `shamir-bench` runner; CR-B9 widened this beyond the
+#      original fmt+clippy+test and F-62 added the perf gate) that every
+#      downstream job depends on, so a red gate blocks the whole release;
 #   2. multi-OS release binaries (Linux x86_64, macOS aarch64, Windows
 #      x86_64) packaged as versioned archives + per-archive sha256 checksums;
 #   3. a Docker image build + real smoke test (boot the container, poll
@@ -42,6 +43,21 @@ name: release
 # gaps. `node-e2e` (the napi native-binding suite from ts-e2e-nightly.yml) is
 # still intentionally NOT wired in here — it needs the MSVC-only
 # `shamir-client-node` binding excluded from this workspace.
+#
+# F-62 (#888): the gate was widened again to include a release-only
+# `perf-gate` job — the same self-hosted `./scripts/bench_gate.sh` recipe as
+# .github/workflows/perf-gate.yml, duplicated inline here (NOT depended on via
+# cross-workflow `needs:`, which GitHub Actions does not support — see the
+# `sbom` job's notes for the same duplicate-the-recipe-inline pattern) so a
+# `v*` tag push actually depends on the performance gate passing for that
+# exact commit. Because that job targets `runs-on: [self-hosted, shamir-bench]`
+# — a runner label with NO machine registered yet — a real tag push will queue
+# the ENTIRE release pipeline indefinitely until a human operator registers
+# the runner and captures the baseline (see
+# docs/guide-docs/CI_PERF_GATE_RUNBOOK.md). That release-blocking-until-
+# registered state is the INTENDED outcome, not a bug: do not weaken the
+# dependency (e.g. `continue-on-error: true`) to let a release slip past an
+# unrun perf gate — register the runner and capture the baseline instead.
 
 on:
   push:
@@ -397,6 +413,65 @@ jobs:
           fi
 
   # --------------------------------------------------------------------------
+  # PERFORMANCE GATE (F-62, #888) — mirrors .github/workflows/perf-gate.yml's
+  # `perf-gate` job recipe inline, the same way the `sbom` job below duplicates
+  # supply-chain.yml's sbom recipe. Cross-workflow `needs:` is not supported by
+  # GitHub Actions (see the CR-B9 / sbom notes), so to make a `v*` tag push
+  # actually depend on the performance gate, the gate's recipe is duplicated
+  # here verbatim:
+  #   - same `runs-on: [self-hosted, shamir-bench]` (the only label whose
+  #     machine can give stable absolute ns/op numbers — see perf-gate.yml's
+  #     own header comment and docs/guide-docs/CI_PERF_GATE_RUNBOOK.md for the
+  #     full why),
+  #   - the same checkout / rust-toolchain / rust-cache steps, and
+  #   - the same gate-mode invocation `./scripts/bench_gate.sh` (no flags —
+  #     compares the fresh run against the committed `bench-baseline.json`).
+  #
+  # No `needs:` deliberately — this is a peer gate job, on equal footing with
+  # fmt/clippy/test/integration/ts-unit/version-consistency: it runs as soon as
+  # the workflow starts (in parallel with the other gates), and every
+  # downstream job below `needs:` it, so a red perf gate blocks the whole
+  # release exactly like a red fmt/clippy/test does.
+  #
+  # FAIL-LOUD ON NO BASELINE: F-60's (#886) hardened parser means gate mode
+  # FAILS LOUDLY when `bench-baseline.json` is absent — `./scripts/bench_gate.sh`
+  # prints "no baseline found at <repo>/bench-baseline.json — run with
+  # --capture-baseline first" and exits non-zero, rather than silently
+  # passing. So even once a runner exists, this job will never go green by
+  # accident: it fails on the missing baseline until one is captured
+  # (runbook Step 4).
+  #
+  # QUEUE-FOREVER CONSEQUENCE (INTENTIONAL, not a bug): `runs-on:
+  # [self-hosted, shamir-bench]` targets a runner label that has NO machine
+  # registered against it yet — registering one is a manual, out-of-band
+  # operator step (see docs/guide-docs/CI_PERF_GATE_RUNBOOK.md). Until that
+  # happens, this job — and therefore the ENTIRE tag-release pipeline, since
+  # every downstream job `needs:` it — will sit stuck in "Queued" on a real
+  # `v*` tag push. That is the CORRECT, INTENDED outcome of wiring the perf
+  # gate into the release DAG: release-blocking means release-blocking. Do
+  # NOT weaken it (e.g. `continue-on-error: true`, or making the dependency
+  # optional) to make the release go green before a runner + baseline exist —
+  # that would defeat the whole point of this gate. Register the runner and
+  # capture the baseline instead (see the runbook). This mirrors
+  # perf-gate.yml's own now-documented "queues forever until registered"
+  # behaviour, and matches the roadmap's §7 "Definition of done for first
+  # tag" line "perf-gate прошёл на том же frozen SHA" — this task turns that
+  # checklist line into a structurally ENFORCED gate rather than just a
+  # manual checkbox.
+  perf-gate:
+    name: performance gate (self-hosted)
+    runs-on: [self-hosted, shamir-bench]
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6.0.3
+      - uses: dtolnay/rust-toolchain@1.93.0
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32  # v2
+      # bash on every runner (Git Bash on Windows) — `./scripts/bench_gate.sh`
+      # is a bash script, same convention as `./scripts/test.sh` in ci.yml.
+      - name: run performance gate
+        run: ./scripts/bench_gate.sh
+        shell: bash
+
+  # --------------------------------------------------------------------------
   # 2. MULTI-OS RELEASE BINARY BUILD + PACKAGE + CHECKSUM
   # --------------------------------------------------------------------------
   #
@@ -422,7 +497,7 @@ jobs:
 
   build:
     name: build (${{ matrix.target }})
-    needs: [fmt, clippy, test, integration, ts-unit, ts-e2e, version-consistency]
+    needs: [fmt, clippy, test, integration, ts-unit, ts-e2e, version-consistency, perf-gate]
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -536,7 +611,7 @@ jobs:
 
   docker:
     name: docker build + smoke test
-    needs: [fmt, clippy, test, integration, ts-unit, ts-e2e, version-consistency]
+    needs: [fmt, clippy, test, integration, ts-unit, ts-e2e, version-consistency, perf-gate]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6.0.3
@@ -640,7 +715,7 @@ jobs:
 
   sbom:
     name: cargo cyclonedx (SBOM)
-    needs: [fmt, clippy, test, integration, ts-unit, ts-e2e, version-consistency]
+    needs: [fmt, clippy, test, integration, ts-unit, ts-e2e, version-consistency, perf-gate]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6.0.3
@@ -685,7 +760,7 @@ jobs:
 
   sign:
     name: cosign sign (keyless)
-    needs: [fmt, clippy, test, integration, ts-unit, ts-e2e, version-consistency, build]
+    needs: [fmt, clippy, test, integration, ts-unit, ts-e2e, version-consistency, perf-gate, build]
     runs-on: ubuntu-latest
     permissions:
       id-token: write   # required for keyless cosign (GitHub OIDC)
@@ -752,6 +827,7 @@ jobs:
         ts-unit,
         ts-e2e,
         version-consistency,
+        perf-gate,
         build,
         docker,
         sbom,
