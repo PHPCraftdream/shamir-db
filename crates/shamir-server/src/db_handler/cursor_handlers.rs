@@ -96,6 +96,7 @@
 
 use shamir_connect::server::session::Session;
 use shamir_db::engine::query::filter::eval_context::FilterContext;
+use shamir_db::engine::query::filter::resolve::intern_field_path;
 use shamir_db::engine::repo::RepoInstance;
 use shamir_db::engine::table::TableManager;
 use shamir_db::engine::validator::schema::TypeTag;
@@ -106,7 +107,9 @@ use shamir_db::query::read::{
 };
 use shamir_query_types::filter::query_value_to_filter_value;
 use shamir_query_types::wire::CursorId;
+use shamir_types::core::interner::Interner;
 use shamir_types::types::common::{new_map, TMap};
+use shamir_types::types::record_id::RecordId;
 use shamir_types::types::value::QueryValue;
 
 use crate::byte_budget::{stash_guard, stash_serialized_response, ByteBudgetGuard};
@@ -415,6 +418,63 @@ fn pagination_mode_for_query(query: &ReadQuery) -> PaginationMode {
     }
 }
 
+/// F-53b Step 4 (#880): `create_cursor`-time eligibility probe for
+/// `PaginationMode::IndexSeek` — an EXACT port of the F-53b Step 3 spike's
+/// `probe_index_seek_eligible` (`crates/shamir-engine/src/table/tests/
+/// f53b_step3_cursor_after_spike.rs`, lines 171-190), unchanged apart from
+/// the module path its imports now resolve through. Returns the interned
+/// sorted-index name when:
+///
+/// - `query.r#where.is_none()` — mirrors `TableManager::try_plan_keyset_seek`
+///   (`read_planner.rs:472-525`)'s hard requirement, shared by BOTH the
+///   `Temporal::Latest` fast path and the AsOf arm this mode reaches. A
+///   cursor whose ORIGINAL query already carries a caller `WHERE` can NEVER
+///   reach the seek arm, no matter what pagination shape `fetch_next` sends
+///   — see the module doc comment / the settled design memo §1.1 for why
+///   extending the seek machinery to accept a residual `WHERE` is out of
+///   scope.
+/// - `query.order_by` is `Some` with exactly one single-segment field,
+/// - a sorted index covers that field.
+///
+/// Deliberately does NOT check `query.pagination` — at `create_cursor` time
+/// there is no `Pagination::After` bookmark yet to inspect; that's exactly
+/// why this can't just delegate to `try_plan_keyset_seek` itself even
+/// setting `where` aside.
+///
+/// Built ENTIRELY from methods already `pub` today: `TableManager::
+/// sorted_indexes()`, `SortedIndexManager::find_by_field`, and
+/// `shamir_engine::query::filter::resolve::intern_field_path` — no new `pub`
+/// method needs to be added anywhere (see the design memo §1.2 for the full
+/// grep proof of reachability from this crate).
+///
+/// Wired as the FIRST branch in `create_cursor`'s mode-decision chain: when
+/// `Some`, `IndexSeek` is pinned and the existing `pagination_mode_for_query`
+/// -> schema-typed-gate -> null-probe chain is skipped entirely — the seek
+/// arm's own per-candidate MVCC classifier (`read_as_of_keyset_seek`)
+/// already handles the data-shape edge cases those two `Keyset`-specific
+/// safety probes exist for, so running them here would be unnecessary work,
+/// not a correctness gap (design memo §2.1).
+fn probe_index_seek_eligible(
+    table: &TableManager,
+    query: &ReadQuery,
+    interner: &Interner,
+) -> Option<u64> {
+    if query.r#where.is_some() {
+        return None;
+    }
+    let order_by = query.order_by.as_ref()?;
+    if order_by.items.len() != 1 {
+        return None;
+    }
+    let item = &order_by.items[0];
+    if item.field.len() != 1 {
+        return None;
+    }
+    let field_path = intern_field_path(&item.field, interner)?;
+    let def = table.sorted_indexes().find_by_field(&field_path)?;
+    Some(def.name_interned)
+}
+
 /// F-1 (#792, release blocker): is `query`'s sole ORDER BY column provably
 /// homogeneous (no second `QueryValue` type possible, and never `NaN`) by a
 /// bound schema, so the keyset boundary-filter scheme is safe to attempt?
@@ -599,12 +659,34 @@ async fn order_by_column_contains_null(
 /// Precondition: only meaningful when `pagination_mode_for_query(query) ==
 /// PaginationMode::Keyset` (single-column simple ORDER BY) — callers only
 /// invoke this in that case.
+///
+/// F-53b Step 4 (#880): uses `QueryRecord::get_value_owned` (variant-
+/// agnostic), not `get_value` (which only handles `Direct`, returning `None`
+/// for `Inserted`) — `PaginationMode::IndexSeek`'s successful-seek-arm rows
+/// come back as `QueryRecord::Inserted` (see `read_as_of_keyset_seek`), so
+/// this widening is required for `IndexSeek` to extract its `seek_key`
+/// bookmark at all. Strictly additive for `Keyset` mode, whose rows are
+/// always `Direct` (the generic AsOf full-scan projection) — `get_value_
+/// owned`'s `Direct` arm behaves identically to the old `get_value` call.
 fn order_by_field_value(query: &ReadQuery, record: &QueryRecord) -> Option<QueryValue> {
     let order_by = query.order_by.as_ref()?;
     if order_by.items.len() != 1 || order_by.items[0].field.len() != 1 {
         return None;
     }
-    record.get_value(&order_by.items[0].field[0]).cloned()
+    record.get_value_owned(&order_by.items[0].field[0])
+}
+
+/// F-53b Step 4 (#880): extract the real `RecordId` a
+/// `PaginationMode::IndexSeek` row carries. Only `QueryRecord::Inserted`
+/// (the wire shape `read_as_of_keyset_seek`/`read_keyset_seek` both use to
+/// surface `_id`) carries one — `QueryRecord::Direct` (the generic AsOf
+/// full-scan/offset projection) never does, matching the module doc
+/// comment's CR-A4 note on why `Keyset` mode needs `tie_skip` instead.
+fn row_record_id(record: &QueryRecord) -> Option<RecordId> {
+    match record {
+        QueryRecord::Inserted(rec) => rec.id,
+        _ => None,
+    }
 }
 
 /// W-2/W-3 (#789, Wave D review): is `candidate` safe to hand to
@@ -1205,37 +1287,55 @@ impl ShamirDbHandler {
         // WHOLE cursor falls back to `PaginationMode::Offset` from
         // creation, closing the null/missing case unconditionally.
         //
-        // F-1 (#792, release blocker): BEFORE that probe, gate keyset
-        // eligibility on the ORDER BY column's SCHEMA-enforced type. F-17
-        // (#810) adds a `keyset_safe` proof requirement: the schema must
-        // have been bound while the table was empty (verified via a
-        // persisted `table.count() == 0`-at-bind-time check), so a schema
-        // declared onto an already-populated table's column falls back to
-        // `Offset`. When the gate DOES pass, the null probe below still
-        // runs — this gate proves "no second non-null type is possible",
-        // not "never null".
-        let mut mode = pagination_mode_for_query(&query);
-        if mode == PaginationMode::Keyset {
-            // `pagination_mode_for_query` only returns `Keyset` when
-            // `query.order_by` is `Some` with exactly one single-segment
-            // field — both already validated, so this is infallible here.
-            let order_by_field = &query
-                .order_by
-                .as_ref()
-                .expect("pagination_mode_for_query returned Keyset without an order_by")
-                .items[0]
-                .field;
-            if !order_by_column_is_schema_typed_scalar(&table, order_by_field) {
-                mode = PaginationMode::Offset;
+        // F-53b Step 4 (#880): try `IndexSeek` eligibility FIRST, ahead of
+        // the existing `Keyset`/`Offset` decision chain — see the design
+        // memo §2.1 and `probe_index_seek_eligible`'s doc comment. When
+        // eligible, the existing `order_by_column_is_schema_typed_scalar` +
+        // `order_by_column_contains_null` probes are skipped entirely (the
+        // seek arm's own per-candidate MVCC classifier already handles the
+        // data-shape edge cases those two `Keyset`-specific safety probes
+        // exist for). Only when `probe_index_seek_eligible` returns `None`
+        // does the existing chain run, completely unchanged.
+        let interner = match table.interner().get().await {
+            Ok(i) => i,
+            Err(e) => return error_response(&wrap_engine_err(e)),
+        };
+        let mode = if probe_index_seek_eligible(&table, &query, interner).is_some() {
+            PaginationMode::IndexSeek
+        } else {
+            // F-1 (#792, release blocker): BEFORE that probe, gate keyset
+            // eligibility on the ORDER BY column's SCHEMA-enforced type.
+            // F-17 (#810) adds a `keyset_safe` proof requirement: the schema
+            // must have been bound while the table was empty (verified via a
+            // persisted `table.count() == 0`-at-bind-time check), so a
+            // schema declared onto an already-populated table's column falls
+            // back to `Offset`. When the gate DOES pass, the null probe
+            // below still runs — this gate proves "no second non-null type
+            // is possible", not "never null".
+            let mut mode = pagination_mode_for_query(&query);
+            if mode == PaginationMode::Keyset {
+                // `pagination_mode_for_query` only returns `Keyset` when
+                // `query.order_by` is `Some` with exactly one single-segment
+                // field — both already validated, so this is infallible here.
+                let order_by_field = &query
+                    .order_by
+                    .as_ref()
+                    .expect("pagination_mode_for_query returned Keyset without an order_by")
+                    .items[0]
+                    .field;
+                if !order_by_column_is_schema_typed_scalar(&table, order_by_field) {
+                    mode = PaginationMode::Offset;
+                }
             }
-        }
-        if mode == PaginationMode::Keyset {
-            match order_by_column_contains_null(&table, &ctx, &query, pinned_version).await {
-                Ok(true) => mode = PaginationMode::Offset,
-                Ok(false) => {}
-                Err(e) => return error_response(&e),
+            if mode == PaginationMode::Keyset {
+                match order_by_column_contains_null(&table, &ctx, &query, pinned_version).await {
+                    Ok(true) => mode = PaginationMode::Offset,
+                    Ok(false) => {}
+                    Err(e) => return error_response(&e),
+                }
             }
-        }
+            mode
+        };
 
         // CR-B4: fetch one extra "peek" row beyond the client-visible
         // `page_size` so the true end-of-data can be told apart from "the
@@ -1250,10 +1350,44 @@ impl ShamirDbHandler {
         // internal fetch limit; `Pagination::LimitOffset::limit` is already
         // `Option<u64>`, so this cannot overflow.
         let internal_limit = (page_size as u64).saturating_add(1);
+
+        // F-53b Step 4 (#880): `IndexSeek` mode's first page is ATTEMPTED via
+        // `Pagination::after_with_id(vec![], ..)` — an empty seek tuple,
+        // since there is no prior bookmark yet at `create_cursor` time.
+        // `TableManager::try_plan_keyset_seek` (`read_planner.rs:493-497`)
+        // hard-requires `key.len() == 1`, so this key ALWAYS declines the
+        // seek arm on page 1 specifically — there is no type-agnostic
+        // sentinel value provably "before/after every real value" for an
+        // arbitrary sorted-index column in BOTH ASC and DESC direction (see
+        // the design memo: `QueryValue::Null` is a universal ASC-minimum
+        // sentinel via `sort_codec`'s tag ordering, but no universal
+        // DESC-maximum exists — `Bytes` is the highest tag, but no `Bytes`
+        // VALUE sorts after every other `Bytes` value). Building one would
+        // need a new engine-side primitive, explicitly out of scope here
+        // (cursor-wiring only, consuming the existing engine API).
+        //
+        // This first page therefore ALWAYS falls through to `read_as_of`'s
+        // full-scan tail (verified below via `stats.index_used`) and is
+        // rebuilt via `PaginationMode::Offset`'s `Pagination::LimitOffset`
+        // path instead — the SAME fallback mechanism `fetch_next` uses (step
+        // 6), just applied at creation time. Critically, this does NOT
+        // downgrade `mode` itself: `IndexSeek` stays pinned for the cursor's
+        // ongoing lifetime, because `fetch_next`'s FIRST real call seeds
+        // `Pagination::After` from THIS page's LAST ROW — a real,
+        // correctly-typed value (not a synthetic sentinel) — which DOES
+        // reach the seek arm from page 2 onward. Only a genuine MID-LIFETIME
+        // gate decline (a `fetch_next` that previously succeeded, then
+        // stops — see that function's `IndexSeek` dispatch arm) commits the
+        // permanent `IndexSeek -> Offset` transition; a page-1 decline here
+        // is expected/structural, not a failure signal.
         let mut first_query = query.clone();
-        first_query.pagination = Pagination::LimitOffset {
-            limit: Some(internal_limit),
-            offset: 0,
+        first_query.pagination = if mode == PaginationMode::IndexSeek {
+            Pagination::after_with_id(vec![], Some(internal_limit), None)
+        } else {
+            Pagination::LimitOffset {
+                limit: Some(internal_limit),
+                offset: 0,
+            }
         };
         first_query.temporal = Temporal::AsOf {
             at: At::Version(pinned_version),
@@ -1266,6 +1400,27 @@ impl ShamirDbHandler {
             Ok(p) => p,
             Err(e) => return error_response(&wrap_engine_err(e)),
         };
+
+        if mode == PaginationMode::IndexSeek {
+            let took_seek_arm = page
+                .stats
+                .as_ref()
+                .and_then(|s| s.index_used.as_deref())
+                .is_some_and(|l| l.ends_with("_asof_keyset"));
+            if !took_seek_arm {
+                first_query.pagination = Pagination::LimitOffset {
+                    limit: Some(internal_limit),
+                    offset: 0,
+                };
+                page = match table
+                    .read_with_encoding(&first_query, &ctx, Default::default())
+                    .await
+                {
+                    Ok(p) => p,
+                    Err(e) => return error_response(&wrap_engine_err(e)),
+                };
+            }
+        }
 
         // CR-B4: the peek row (if present) proves there's at least one more
         // record beyond `page_size` — trim it off BEFORE the page goes out
@@ -1311,6 +1466,30 @@ impl ShamirDbHandler {
             }
         } else {
             (None, 0)
+        };
+
+        // F-53b Step 4 (#880): `IndexSeek` mode's bookmark half — the last
+        // row's ORDER BY value (reusing `seek_key`, same as `Keyset`) plus
+        // its REAL `RecordId` (`after_id`, new). Simpler than `Keyset`'s
+        // `tie_skip` counting scheme: no tie-counting needed, since
+        // `read_as_of_keyset_seek` always attaches a real id to every row
+        // (unlike `Keyset` mode's generic AsOf full-scan projection, which
+        // never does — see `tie_skip`'s doc comment).
+        let after_id = if has_more && mode == PaginationMode::IndexSeek {
+            page.records.last().and_then(row_record_id)
+        } else {
+            None
+        };
+        let seek_key = if mode == PaginationMode::IndexSeek {
+            if has_more {
+                page.records
+                    .last()
+                    .and_then(|r| order_by_field_value(&query, r))
+            } else {
+                None
+            }
+        } else {
+            seek_key
         };
         let offset = page.records.len() as u64;
 
@@ -1387,6 +1566,7 @@ impl ShamirDbHandler {
             state.tie_skip = tie_skip;
             state.offset = offset;
             state.exhausted = !has_more;
+            state.after_id = after_id;
         }
 
         match self.cursor_registry.register(
@@ -1651,8 +1831,126 @@ impl ShamirDbHandler {
         // falls back to its post-hoc-only acquire in that case.
         let budget_guard = reserve_page_budget_upfront(self).await;
 
-        let (page, new_seek_key, new_tie_skip, has_more, new_offset, force_offset_mode);
+        let (
+            page,
+            new_seek_key,
+            new_tie_skip,
+            has_more,
+            new_offset,
+            force_offset_mode,
+            new_after_id,
+        );
         match (state.mode, state.seek_key.clone()) {
+            (PaginationMode::IndexSeek, seek_key_opt) => {
+                // F-53b Step 4 (#880): reach `TableManager::read_as_of`'s
+                // AsOf-aware sorted-index seek arm (`read_as_of_keyset_seek`,
+                // F-53b Step 2/#878) directly via `Pagination::after_with_id`
+                // — no boundary filter, no `where` at all (the eligibility
+                // probe already proved the caller's original query has none;
+                // see `probe_index_seek_eligible`'s doc comment).
+                //
+                // CR-B4-style peek: request ONE more row than
+                // `effective_page_size` so the true end-of-data can be told
+                // apart from an exact multiple of `effective_page_size` —
+                // `read_as_of_keyset_seek`/`read_keyset_seek` both fetch
+                // EXACTLY `limit` rows (bounded only by data availability),
+                // they do not bake in a peek row themselves, so this call
+                // site must apply the same +1 convention every other page
+                // helper in this file (`fetch_keyset_page`,
+                // `fetch_offset_page`) already uses.
+                let internal_limit = (effective_page_size as u64).saturating_add(1);
+                let mut q = base_query.clone();
+                q.pagination = Pagination::after_with_id(
+                    seek_key_opt.map(|v| vec![v]).unwrap_or_default(),
+                    Some(internal_limit),
+                    state.after_id,
+                );
+                q.temporal = Temporal::AsOf {
+                    at: At::Version(cursor.pinned_version()),
+                };
+                let result = match table.read_with_encoding(&q, &ctx, Default::default()).await {
+                    Ok(r) => r,
+                    Err(e) => {
+                        drop(state);
+                        return error_response(&wrap_engine_err(e));
+                    }
+                };
+
+                let took_seek_arm = result
+                    .stats
+                    .as_ref()
+                    .and_then(|s| s.index_used.as_deref())
+                    .is_some_and(|l| l.ends_with("_asof_keyset"));
+
+                if took_seek_arm {
+                    // Normal path: peek-row trim, advance the bookmark from
+                    // the (now client-visible-sized) tail, and keep
+                    // `state.offset` moving in parallel — the CR-D1
+                    // precondition the fallback arm below depends on (every
+                    // `FetchNext`, on ANY mode, keeps `offset` reflecting the
+                    // true cumulative row count so far).
+                    let mut result = result;
+                    let returned_more = result.records.len() as u64 > effective_page_size as u64;
+                    if returned_more {
+                        result.records.truncate(effective_page_size as usize);
+                        if let Some(stats) = result.stats.as_mut() {
+                            stats.records_returned = result.records.len() as u64;
+                        }
+                    }
+                    new_offset = state.offset + result.records.len() as u64;
+                    new_after_id = if returned_more {
+                        result.records.last().and_then(row_record_id)
+                    } else {
+                        None
+                    };
+                    new_seek_key = if returned_more {
+                        result
+                            .records
+                            .last()
+                            .and_then(|r| order_by_field_value(&base_query, r))
+                    } else {
+                        None
+                    };
+                    page = result;
+                    has_more = returned_more;
+                    new_tie_skip = 0;
+                    force_offset_mode = false;
+                } else {
+                    // MANDATORY one-time fallback (design memo §1.4 / §2.3):
+                    // mirrors CR-D1's `StuckAtCeiling -> Offset` handling
+                    // exactly — re-run THIS SAME call via
+                    // `fetch_offset_page(state.offset, ..)` so the caller
+                    // still gets a CORRECT page back (not a silent repeat of
+                    // an earlier page — see the design memo §1.4 for the
+                    // concretely-proven hazard a naive always-`After` scheme
+                    // would hit here), and defer the `state.mode` commit to
+                    // `Offset` until AFTER this page clears the budget gate
+                    // below (same ordering CR-D1 already documents).
+                    let offset_outcome = match fetch_offset_page(
+                        &table,
+                        &ctx,
+                        &base_query,
+                        state.offset,
+                        effective_page_size,
+                        cursor.pinned_version(),
+                    )
+                    .await
+                    {
+                        Ok(o) => o,
+                        Err(e) => {
+                            drop(state);
+                            return error_response(&e);
+                        }
+                    };
+                    new_offset = offset_outcome.new_offset;
+                    page = offset_outcome.result;
+                    has_more = offset_outcome.has_more;
+                    new_seek_key = None;
+                    new_tie_skip = 0;
+                    new_after_id = None;
+                    force_offset_mode = true;
+                }
+            }
             (PaginationMode::Keyset, Some(seek_key)) => {
                 let outcome = match fetch_keyset_page(
                     &table,
@@ -1680,6 +1978,7 @@ impl ShamirDbHandler {
                         new_tie_skip = outcome.next_tie_skip;
                         has_more = outcome.has_more;
                         force_offset_mode = false;
+                        new_after_id = None;
                     }
                     KeysetOutcome::StuckAtCeiling => {
                         // CR-D1: permanently switch coordinate systems and
@@ -1709,6 +2008,7 @@ impl ShamirDbHandler {
                         new_seek_key = None;
                         new_tie_skip = 0;
                         force_offset_mode = true;
+                        new_after_id = None;
                     }
                 }
             }
@@ -1735,6 +2035,7 @@ impl ShamirDbHandler {
                 new_seek_key = None;
                 new_tie_skip = 0;
                 force_offset_mode = false;
+                new_after_id = None;
             }
         }
 
@@ -1782,9 +2083,13 @@ impl ShamirDbHandler {
         state.tie_skip = new_tie_skip;
         state.offset = new_offset;
         state.exhausted = !has_more;
+        state.after_id = new_after_id;
         // CR-D1 (#782): commit the permanent keyset->offset mode switch
         // only now that the page has cleared the budget gate — see the
         // dispatch match above for the exactly-once correctness argument.
+        // F-53b Step 4 (#880): the SAME flag/ordering also carries the
+        // IndexSeek -> Offset fallback (see the new dispatch arm above) —
+        // no second flag, no different commit-ordering rule.
         if force_offset_mode {
             state.mode = PaginationMode::Offset;
         }

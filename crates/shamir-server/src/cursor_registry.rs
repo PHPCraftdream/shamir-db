@@ -37,6 +37,7 @@ use std::time::{Duration, Instant};
 use dashmap::DashMap;
 use shamir_query_types::read::ReadQuery;
 use shamir_tx::SnapshotGuard;
+use shamir_types::types::record_id::RecordId;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
@@ -113,6 +114,9 @@ pub enum CursorRegistryError {
 /// differs qualitatively from the hazard the paragraph above rules out: a
 /// single, detected-failure-condition transition, never an
 /// opportunistic/repeated per-page re-derivation.
+/// F-53b Step 4 (#880): which pagination coordinate system a cursor's
+/// bookmark resumes from — see [`PaginationMode`]'s existing variants above
+/// for the CR-A4/CR-D1 discipline this extends.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PaginationMode {
     /// Boundary-filter seek on the single ORDER BY column (`seek_key` +
@@ -122,6 +126,29 @@ pub enum PaginationMode {
     /// not a simple single-column one) — no field to build a boundary
     /// filter on.
     Offset,
+    /// F-53b Step 4 (#880): sorted-index keyset seek via `Pagination::After`,
+    /// reaching `TableManager::read_as_of`'s AsOf-aware seek arm
+    /// (`read_as_of_keyset_seek`, F-53b Step 2/#878) directly instead of the
+    /// `Keyset` mode's boundary-filter + full-rescan scheme. Decided ONCE at
+    /// `create_cursor` time (same CR-A4 discipline) by
+    /// `db_handler::cursor_handlers::probe_index_seek_eligible`:
+    /// `query.where.is_none()` AND a single simple-field ORDER BY AND a
+    /// sorted index covers it — a narrower, real slice of cursor shapes than
+    /// `Keyset` (see `try_plan_keyset_seek`'s shared `where.is_some()` guard,
+    /// `read_planner.rs:472-525`, which permanently excludes any caller
+    /// `WHERE` from this path).
+    ///
+    /// Falls back PERMANENTLY to `Offset` (mirrors CR-D1's `StuckAtCeiling ->
+    /// Offset` transition exactly, same `force_offset_mode` flag/commit-
+    /// ordering) the first time a `FetchNext`'s `stats.index_used` does not
+    /// end in `"_asof_keyset"` — the load-bearing safety net proven by the
+    /// F-53b Step 3 spike (`docs/dev-artifacts/research/
+    /// f53b-step3-cursor-pagination-after-spike.md`, §1.4): a bare
+    /// mode-agnostic "always send `Pagination::After`" scheme would silently
+    /// re-return the SAME page once the gate declines mid-lifetime (no
+    /// boundary filter to fall back on, unlike `Keyset` mode), so this
+    /// fallback is mandatory, not optional polish.
+    IndexSeek,
 }
 
 /// Mutable per-cursor pagination state, guarded by the cursor's
@@ -179,6 +206,18 @@ pub struct CursorState {
     /// set, a further `FetchNext` returns `CursorNotFound`/closes the
     /// cursor rather than re-running an exhausted scan.
     pub exhausted: bool,
+    /// F-53b Step 4 (#880): the last row's `RecordId`, for `IndexSeek`
+    /// mode's `Pagination::after_with_id` tie-breaker. `None` before the
+    /// first `FetchNext` (nothing to seek past yet) and whenever `mode !=
+    /// IndexSeek`. Reuses the EXISTING `seek_key: Option<QueryValue>` field
+    /// above for the ORDER BY value half of the bookmark (no new field
+    /// needed there) — only the id half is new, because `IndexSeek` is the
+    /// ONLY mode whose read path (`read_as_of_keyset_seek`) attaches a real
+    /// `RecordId` to every row; `Keyset` mode's generic AsOf full-scan
+    /// projection never does (see `tie_skip`'s doc comment above), which is
+    /// exactly why `Keyset` needs a counting substitute instead of a plain
+    /// id.
+    pub after_id: Option<RecordId>,
 }
 
 /// A live server-side result cursor parked between `FetchNext` round-trips.
@@ -241,6 +280,7 @@ impl Cursor {
                 tie_skip: 0,
                 offset: 0,
                 exhausted: false,
+                after_id: None,
             }),
             _snapshot: snapshot,
             pinned_version,
