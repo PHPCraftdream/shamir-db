@@ -121,6 +121,21 @@ the baseline are all correctly wired together.
   a cell faster, or an accepted trade-off that makes it slower) so the gate
   compares against current reality instead of flagging every future PR as
   "regressed" relative to stale numbers.
+- **Introducing a new workload cell** (F-60, #886): the gate is now
+  fail-closed. When you add a new entry to the `WORKLOADS` list in
+  `scripts/bench_gate.sh`, the next gate run will FAIL because the new cell
+  has no baseline entry yet — the gate does NOT silently skip cells it
+  doesn't recognize. Capture a fresh baseline first
+  (`./scripts/bench_gate.sh --capture-baseline`), or pass
+  `--allow-new-cells` for a transitional run where the new workload is
+  deliberately introduced before its baseline is committed:
+  ```
+  ./scripts/bench_gate.sh --allow-new-cells
+  ```
+  The same fail-closed principle applies to parser output: if a bench
+  binary's stdout format drifts so the parser matches zero lines for a
+  cell, or a cell appears more than once, the gate fails hard rather than
+  silently dropping that cell from the comparison.
 - **Threshold tuning**: the shipped 25% threshold is a conservative first
   cut (see `scripts/bench_gate.sh`'s header). Once the self-hosted machine
   has run the gate enough times to characterize its own run-to-run noise
