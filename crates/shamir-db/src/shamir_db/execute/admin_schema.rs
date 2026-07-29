@@ -128,8 +128,10 @@ async fn lock_schema_rmw(
 /// RAII guard that raises a table's `schema_activation_barrier` flag while
 /// held and clears it on drop — including every `?` early-return path inside
 /// a schema-activation DDL. Mirrors the engine's `Index2CreateBarrierGuard`
-/// (`table_manager_index_mgmt.rs`): the flag is `Release`-stored here, pairing
-/// with the writer's `Acquire` load in `needs_write_barrier`.
+/// (`table_manager_index_mgmt.rs`): the flag is `SeqCst`-stored here (F-56),
+/// matching the writer's `SeqCst` load in `needs_write_barrier` and the
+/// `SeqCst` `active`-counter ops — the cross-atomic drain dependency needs a
+/// single SeqCst total order (see `writer_drain_barrier`).
 ///
 /// **Must be created while the caller already holds `unique_write_lock`**
 /// (see [`begin_schema_activation_barrier`]) — exactly as the engine's

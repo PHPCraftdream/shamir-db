@@ -59,7 +59,9 @@ pub struct TableManager {
     /// unique index exists (`has_unique_indexes()`), and an index2-only
     /// table has none. Shared across clones via `Arc` so a create on any
     /// clone is observed by writers on every clone (same rationale as
-    /// `bindings_len`). Loaded `Acquire` on the writer fast-path skip.
+    /// `bindings_len`). Loaded `SeqCst` on the writer fast-path skip (F-56: the
+    /// cross-atomic dependency on the `active` drain counter requires a single
+    /// SeqCst total order — see [`writer_drain_barrier`]).
     pub(super) index2_create_barrier: Arc<std::sync::atomic::AtomicBool>,
     /// F-37 (#845) — sibling of `index2_create_barrier`, raised for the
     /// duration of a schema-activation DDL sequence (`set_table_schema` /
@@ -73,10 +75,10 @@ pub struct TableManager {
     /// `table_manager_crud.rs`). Sibling, NOT overload: `index2_create_barrier`
     /// and this flag represent different in-flight conditions and are
     /// independently settable/clearable. Shared across clones via `Arc`
-    /// (same rationale as `index2_create_barrier`); loaded `Acquire` on the
-    /// writer fast-path skip via [`needs_write_barrier`](Self::needs_write_barrier).
-    /// Set/cleared `Release` (under `unique_write_lock`) by the shamir-db DDL
-    /// handler via [`set_schema_activation_barrier`](Self::set_schema_activation_barrier).
+    /// (same rationale as `index2_create_barrier`); loaded `SeqCst` on the
+    /// writer fast-path skip via [`needs_write_barrier`](Self::needs_write_barrier)
+    /// (F-56). Set/cleared `SeqCst` (under `unique_write_lock`) by the shamir-db
+    /// DDL handler via [`set_schema_activation_barrier`](Self::set_schema_activation_barrier).
     pub(super) schema_activation_barrier: Arc<std::sync::atomic::AtomicBool>,
     /// F-48 (#859, P0) — reusable writer-drain barrier. Fast-path writers
     /// (those that read `needs_write_barrier() == false`) bump this counter
@@ -652,10 +654,14 @@ impl TableManager {
     /// longer land between the `count() == 0` read and the schema's persist +
     /// activate).
     ///
-    /// `Release`-ordered to pair with the writer's `Acquire` load in
-    /// `needs_write_barrier`. **Callers MUST set/clear this while holding
-    /// `unique_write_lock`** (mirrors `index2_create_barrier`'s discipline in
-    /// `create_index_v2`): raise the flag under the lock so the
+    /// `SeqCst`-ordered (F-56): the store must participate in the SAME single
+    /// SeqCst total order as the writer's `SeqCst` flag load in
+    /// [`needs_write_barrier`](Self::needs_write_barrier) and the writer's
+    /// `SeqCst` `active`-counter `fetch_add` — the cross-atomic dependency the
+    /// drain proof relies on cannot be carried by `Release`/`Acquire` alone
+    /// (see [`writer_drain_barrier`]). **Callers MUST set/clear this while
+    /// holding `unique_write_lock`** (mirrors `index2_create_barrier`'s
+    /// discipline in `create_index_v2`): raise the flag under the lock so the
     /// `count() == 0` proof that follows is a genuine snapshot no concurrent
     /// writer can invalidate, and clear it (still under the lock) once
     /// persist + activate have committed — the lock is then released, letting
@@ -664,7 +670,7 @@ impl TableManager {
     /// see `admin_schema.rs::SchemaActivationBarrierGuard`.
     pub fn set_schema_activation_barrier(&self, on: bool) {
         self.schema_activation_barrier
-            .store(on, std::sync::atomic::Ordering::Release);
+            .store(on, std::sync::atomic::Ordering::SeqCst);
     }
 
     /// F-48 (#859, P0) — drain every in-flight fast-path writer before the
@@ -742,9 +748,14 @@ impl TableManager {
     ///   currently in its `keyset_safe` count-proof → persist → activate
     ///   window (F-37, #845).
     ///
-    /// Each barrier flag is loaded `Acquire` to pair with the `Release` store
-    /// the corresponding create/DDL path makes under the lock. Tables with
-    /// none of these conditions keep the lock-free fast path.
+    /// Each barrier flag is loaded `SeqCst` (F-56, #882). The flag load is the
+    /// writer half of a cross-atomic dependency with the `active` drain counter:
+    /// a writer that reads `false` must have its prior `active.fetch_add` (also
+    /// `SeqCst`) be observable by the drainer's `active.load` (also `SeqCst`).
+    /// Only a single `SeqCst` total order across both atomics can carry that
+    /// edge — `Release`/`Acquire` alone cannot (see [`writer_drain_barrier`]'s
+    /// memory-model proof). Tables with none of these conditions keep the
+    /// lock-free fast path.
     ///
     /// Consulted by the non-tx writer methods in `table_manager_crud.rs`
     /// (`insert`/`insert_many_returning_version`/`delete_returning_version`/
@@ -763,10 +774,10 @@ impl TableManager {
         self.index_manager.has_unique_indexes()
             || self
                 .index2_create_barrier
-                .load(std::sync::atomic::Ordering::Acquire)
+                .load(std::sync::atomic::Ordering::SeqCst)
             || self
                 .schema_activation_barrier
-                .load(std::sync::atomic::Ordering::Acquire)
+                .load(std::sync::atomic::Ordering::SeqCst)
     }
 
     pub fn name(&self) -> &str {

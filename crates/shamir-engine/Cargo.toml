@@ -89,6 +89,13 @@ fjall  = ["shamir-storage/fjall"]
 # `shamir-db`'s `[dev-dependencies]` (audit #540 regression test); never
 # enabled by default, so nothing ships in a production build.
 test-util = []
+# F-56 (#882): enables the loom model-checker module in
+# `writer_drain_barrier.rs`. The `build.rs` emits `cfg(loom)` ONLY for this
+# crate when this feature is on (NOT via a global rustflag), so the heavy
+# dependency tree stays out of its own loom code paths. Run with:
+#   cargo test -p shamir-engine --features loom --lib \
+#       table::writer_drain_barrier::loom_model
+loom = []
 
 [target.'cfg(unix)'.dev-dependencies]
 dhat = "0.3"
@@ -106,6 +113,13 @@ memory-stats = "1.2"
 # Tests build queries via the typed query builder instead of raw wire values.
 # query-builder depends only on query-types/types — no cycle on engine.
 shamir-query-builder = { path = "../shamir-query-builder" }
+# F-56 (#882): concurrency model checker for the `WriterDrainBarrier` primitive.
+# Used ONLY under `RUSTFLAGS="--cfg loom"` (the `#[cfg(loom)]` module in
+# `writer_drain_barrier.rs` is compiled away from every normal build, so the
+# loom tests never run under `./scripts/test.sh`). It IS compiled once for the
+# package's test target (cached thereafter) — see the module doc for the exact
+# opt-in command and its (honestly-scoped) coverage.
+loom = "0.7"
 # (No dev-dep cycle on shamir-db. The two tests that needed the
 # `ShamirDb` facade — `admin_tests.rs`, `auth_tests.rs` — moved to
 # `crates/shamir-db/tests/` as integration tests instead. Keeping the

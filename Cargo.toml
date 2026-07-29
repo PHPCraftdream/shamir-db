@@ -33,6 +33,13 @@ absolute_paths = "warn"
 disallowed_methods = "warn"
 disallowed_types = "deny"
 
+[workspace.lints.rust]
+# F-56 (#882): the loom model-checker module in `shamir-engine` compiles only
+# under `RUSTFLAGS="--cfg loom"`. Register the cfg so `unexpected_cfgs` is
+# satisfied (clippy `--all-targets -D warnings` runs without that flag) without
+# needing a build script.
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(loom)'] }
+
 [profile.dev]
 opt-level = 0
 codegen-units = 14

@@ -81,6 +81,21 @@ impl TableManager {
         // failed create never leaves writers stuck on the barrier forever.
         let _barrier = Index2CreateBarrierGuard::set(&self.index2_create_barrier);
 
+        // F-56 (#882, P0): the genuine drain. The flag + lock above are a
+        // check-then-act, not a drain — a fast-path writer that read
+        // `needs_write_barrier() == false` a moment BEFORE the flag went up is
+        // already in the drain set (`enter_writer()` ran first) and still
+        // mid-flight through its validate→write→index sequence. Wait for every
+        // such in-flight writer to exit BEFORE the backfill takes its snapshot,
+        // so the snapshot cannot race a writer that is about to land. Mirrors
+        // F-48's identical call from `SchemaActivationBarrierGuard::raise`. The
+        // four cross-atomic ops involved (writer `fetch_add`, writer `flag.load`,
+        // this `flag.store`, drainer `active.load`) are ALL `SeqCst` — see
+        // `writer_drain_barrier` for the worked memory-model proof of why
+        // Release/Acquire alone do NOT close this cross-atomic dependency.
+        // Cheap (one `SeqCst` load) when no fast-path writer is in flight.
+        self.drain_writers().await;
+
         let interner = self.interner.get().await?;
         let mut interned_paths: SmallVec<[Vec<u64>; 2]> = SmallVec::new();
         for field_path in &op.fields {
@@ -1028,23 +1043,27 @@ async fn rekey_sorted_prefix(info_store: &dyn Store, old_id: u64, new_id: u64) -
 /// finding 1). Clearing on drop guarantees a failed create can never leave
 /// writers permanently forced onto the barrier.
 ///
-/// The flag is set/cleared while the caller holds `unique_write_lock`, so the
-/// `Release` store here pairs with the writer's `Acquire` load in
-/// `needs_write_barrier`.
+/// The flag is set/cleared while the caller holds `unique_write_lock`, and is
+/// `SeqCst`-ordered (F-56): the store must participate in the SAME single
+/// SeqCst total order as the writer's `SeqCst` flag load in
+/// [`needs_write_barrier`](TableManager::needs_write_barrier) and the writer's
+/// `SeqCst` `active`-counter `fetch_add` — the cross-atomic dependency the
+/// drain proof relies on cannot be carried by `Release`/`Acquire` alone (see
+/// `writer_drain_barrier`).
 struct Index2CreateBarrierGuard<'a> {
     flag: &'a AtomicBool,
 }
 
 impl<'a> Index2CreateBarrierGuard<'a> {
     fn set(flag: &'a AtomicBool) -> Self {
-        flag.store(true, Ordering::Release);
+        flag.store(true, Ordering::SeqCst);
         Self { flag }
     }
 }
 
 impl Drop for Index2CreateBarrierGuard<'_> {
     fn drop(&mut self) {
-        self.flag.store(false, Ordering::Release);
+        self.flag.store(false, Ordering::SeqCst);
     }
 }
 

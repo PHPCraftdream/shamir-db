@@ -588,3 +588,151 @@ async fn stage_and_commit_inside_window_now_indexes_new_index_part_b_closed() {
          (if this fails, the Phase 2.7 re-derivation regressed)"
     );
 }
+
+// ============================================================================
+// F-56 (#882, P0) — `create_index_v2` DRAIN proof.
+//
+// The `index2_create_barrier` + `unique_write_lock` (above) close the lost-write
+// race for a writer that observes the barrier ALREADY up. But they leave open a
+// check-then-act gap: a fast-path writer that read `needs_write_barrier() ==
+// false` a moment BEFORE `create_index_v2` raised the barrier is in its drain
+// set and still mid-flight (its data-store write has NOT landed) when the create
+// raises the barrier. The flag + lock alone never wait for such a writer — it
+// proceeds lock-free through its whole validate→write→index sequence with no
+// further check, and the create's backfill snapshot can race its landing.
+//
+// F-56 closes it by wiring `drain_writers()` into `create_index_v2` (after the
+// barrier is raised, before the backfill snapshot) — the same call F-48 already
+// makes from `SchemaActivationBarrierGuard::raise`. This test proves that wiring
+// engages: the create BLOCKS on the drain while the in-flight fast-path writer
+// is parked in the drain set.
+//
+// Determinism (mirrors `f48_drain_catches_writer_that_read_false_before_flag_went_up`
+// in schema_activation_barrier_tests.rs): the F-48 test seam
+// (`PostBarrierPreWriteHook`) parks the writer strictly AFTER its flag read and
+// BEFORE its data-store write, with the writer already in the drain set
+// (`enter_writer()` ran first). The create is then spawned and (post-fix) parks
+// in `drain_writers()` until the writer is released.
+//
+// - UNFIXED (no `drain_writers()` in `create_index_v2`): the create runs to
+//   completion (backfill + register + persist) WHILE the writer is still parked
+//   pre-write → `is_finished()` is true → the assertion below FAILS.
+// - FIXED: the create blocks in `drain_writers()` until the writer completes its
+//   write and exits the drain set → `is_finished()` is false → PASSES.
+//
+// NOTE: this exercises the *wiring* of the drain (an interleaving the tokio
+// scheduler can observe). The separate F-56 memory-ordering fix (Relaxed/Acquire
+// → SeqCst on the four cross-atomic ops) closes a *weak-memory* reordering that
+// no single-threaded tokio interleaving can reproduce — that is proven by the
+// SeqCst argument in `writer_drain_barrier.rs` and guarded by the loom model in
+// the same file.
+// ============================================================================
+
+#[tokio::test]
+async fn f56_create_index_v2_drains_inflight_fast_path_writer() {
+    use crate::table::table_manager_crud::{
+        PostBarrierPreWriteHook, TEST_POST_BARRIER_PRE_WRITE_HOOK,
+    };
+    use tokio::sync::Notify;
+
+    let repo = make_repo();
+    repo.add_table(TableConfig::new("people"));
+    let tbl = repo.get_table("people").await.unwrap();
+    let name_field = key_id(&tbl, "name").await;
+
+    // One pre-existing row so the backfill has something to stream.
+    let _alice = tbl
+        .insert(&record_with_str(name_field, "Alice"))
+        .await
+        .unwrap();
+
+    // Precondition: barrier down → lock-free fast path for an index2-only table.
+    assert!(
+        !tbl.needs_write_barrier(),
+        "precondition: no barrier active → lock-free fast path"
+    );
+
+    // Install the F-48 test seam: park the FIRST writer strictly after its flag
+    // read, before its write. The writer has already entered the drain set.
+    let hook = Arc::new(PostBarrierPreWriteHook {
+        reached: std::sync::atomic::AtomicUsize::new(0),
+        resume: Notify::new(),
+        armed: std::sync::atomic::AtomicBool::new(true),
+    });
+    TEST_POST_BARRIER_PRE_WRITE_HOOK
+        .set(Arc::clone(&hook))
+        .expect("hook installed once per test process");
+
+    // 1. Spawn the writer. It enters the drain set, reads
+    //    needs_write_barrier() == false, and parks at the seam — BEFORE its write.
+    let tbl_w = tbl.clone();
+    let writer =
+        tokio::spawn(async move { tbl_w.insert(&record_with_str(name_field, "Bob")).await });
+
+    // Rendezvous: the writer has parked (busy-poll `reached`, no sleeps).
+    while hook.reached.load(std::sync::atomic::Ordering::SeqCst) == 0 {
+        tokio::task::yield_now().await;
+    }
+    assert_eq!(
+        tbl.count().await.unwrap(),
+        1,
+        "writer parked before its write — only the pre-existing row is present"
+    );
+
+    // 2. Spawn the create. It acquires unique_write_lock (uncontended: the
+    //    fast-path writer holds NO lock), raises index2_create_barrier, and
+    //    (post-fix) drains.
+    let tbl_c = tbl.clone();
+    let create = tokio::spawn(async move {
+        tbl_c
+            .create_index_v2(&functional_lower_op("lower_name", "people", "name"))
+            .await
+    });
+
+    // Give the create enough time to acquire the lock, raise the barrier, and
+    // (post-fix) enter drain_writers(). On the unfixed code the create runs to
+    // completion in well under this window.
+    tokio::time::sleep(Duration::from_millis(80)).await;
+
+    // 3. THE PROOF. The create must still be parked in drain_writers() because
+    //    the writer is still in the drain set (active == 1).
+    //    - UNFIXED: create already finished (no drain) → assertion FAILS.
+    //    - FIXED: create blocked at drain_writers() → assertion PASSES.
+    assert!(
+        !create.is_finished(),
+        "F-56: create_index_v2 must drain the in-flight fast-path writer (parked \
+         in the drain set) before proceeding to its backfill snapshot. If this \
+         fails, create_index_v2 finished without waiting — drain_writers() is \
+         missing from the create path (the check-then-act gap is still open)."
+    );
+
+    // 4. Release the parked writer. It completes its write + index updates and
+    //    exits the drain set (the WriterDrainGuard drops).
+    hook.resume.notify_one();
+    let bob = writer
+        .await
+        .unwrap()
+        .expect("writer must complete once released");
+
+    // 5. The create's drain returns (writer exited the drain set), the backfill
+    //    now sees BOTH rows (Alice pre-existing + Bob just written), and the
+    //    backend is registered.
+    create
+        .await
+        .unwrap()
+        .expect("create must complete once the writer finishes");
+
+    // Sanity: both rows are indexed by the backfill (the drain ensured the
+    // backfill snapshot was taken AFTER the in-flight writer landed).
+    let bob_owners = functional_lookup(&tbl, key_id(&tbl, "lower_name").await, "bob").await;
+    assert!(
+        bob_owners.contains(bob.as_bytes()),
+        "the in-flight writer's row must be backfilled into the new index"
+    );
+    let alice_owners = functional_lookup(&tbl, key_id(&tbl, "lower_name").await, "alice").await;
+    assert_eq!(
+        alice_owners.len(),
+        1,
+        "the pre-existing row must be backfilled into the new index"
+    );
+}

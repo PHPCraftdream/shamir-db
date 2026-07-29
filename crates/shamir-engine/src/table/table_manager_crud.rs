@@ -155,11 +155,13 @@ impl TableManager {
         // index2 `create_index_v2` is in flight, so this insert can't slip
         // into the backfill→register window and get lost by the new index.
         //
-        // F-48 (#859): bump the drain counter BEFORE reading the barrier flag
-        // so the flag's coherence chain carries happens-before to the DDL's
-        // drain load. If the flag is up (slow path), exit the drain set and
-        // take `unique_write_lock` instead — the lock serializes us, not the
-        // counter. See `writer_drain_barrier` for the full memory-model.
+        // F-48/F-56: bump the drain counter (SeqCst) BEFORE reading the barrier
+        // flag (SeqCst) so the cross-atomic happens-before edge to the DDL's
+        // SeqCst drain load is carried by the single SeqCst total order (NOT a
+        // flag coherence chain — Release/Acquire cannot span two independent
+        // atomics; see `writer_drain_barrier`'s proof). If the flag is up
+        // (slow path), exit the drain set and take `unique_write_lock` instead
+        // — the lock serializes us, not the counter.
         let drain_guard = self.writer_drain.enter_writer();
         let needs_barrier = self.needs_write_barrier();
         let _guard = if needs_barrier {

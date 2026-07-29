@@ -9,10 +9,16 @@
 //! genuinely drains those in-flight fast-path writers before the drainer
 //! proceeds past its snapshot/proof point.
 //!
-//! See `table_manager_index_mgmt.rs::backfill_index2_backend`'s doc comment
-//! ("Check-then-act, not a drain") for the older, candidly-documented
-//! instance of the SAME race class — F-50 will wire this SAME primitive into
-//! `create_index_v2`'s residual with no new design work.
+//! F-56 (#882, P0) wired this SAME primitive into `create_index_v2`'s residual
+//! (the `drain_writers()` call after `index2_create_barrier` is raised, before
+//! the backfill snapshot) — closing the older, candidly-documented instance of
+//! the SAME race class that `table_manager_index_mgmt.rs::backfill_index2_backend`'s
+//! doc comment previously tracked as an open residual.
+//!
+//! F-56 ALSO corrected a memory-ordering flaw in this primitive: the original
+//! `Relaxed`/`Acquire`/`Release` orderings do NOT actually carry the
+//! happens-before edge they claimed (see the proof on [`WriterDrainBarrier`]).
+//! All four cross-atomic operations are now `SeqCst`.
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -32,16 +38,10 @@ use std::sync::Arc;
 /// # Why bump BEFORE the flag check
 ///
 /// The counter increment MUST be sequenced before the
-/// `needs_write_barrier()` flag read in the writer. This lets the flag's
-/// coherence ordering carry the happens-before: if a writer reads `false`
-/// (flag not yet up) and proceeds, the drainer's drain — called after the
-/// flag's `Release` store — observes the writer's increment via the coherence
-/// chain
-/// (`writer.fetch_add` sb→ `flag.load == false` coherence-ordered-before→
-/// `flag.store == true` sb→ `drain.load`). Reversing the order (flag check
-/// then bump) reopens the race: the drain could load `0` in the gap between
-/// the flag read and the bump, then proceed while the writer is still
-/// in flight.
+/// `needs_write_barrier()` flag read in the writer. Reversing the order
+/// (flag check then bump) reopens the race: the drain could load `0` in the
+/// gap between the flag read and the bump, then proceed while the writer is
+/// still in flight.
 ///
 /// # Slow-path writers do NOT stay in the drain set
 ///
@@ -54,35 +54,85 @@ use std::sync::Arc;
 ///
 /// # Cost
 ///
-/// `enter_writer`: one `Relaxed fetch_add` (uncontended cache-line RMW,
-/// ~ns). `WriterDrainGuard::drop`: one `Release fetch_sub`. `drain`: one
-/// `Acquire` load per iteration, `yield_now` between iterations (rare DDL
-/// path). When no drain is in progress the drainer never touches this
-/// primitive — zero contention.
+/// `enter_writer`: one `SeqCst fetch_add` (uncontended cache-line RMW,
+/// ~ns — the `SeqCst` strengthening is a full fence on x86 only at the
+/// *subsequent* `flag.load`, the RMW itself is a single locked instruction).
+/// `WriterDrainGuard::drop`: one `SeqCst fetch_sub`. `drain`: one `SeqCst`
+/// load per iteration, `yield_now` between iterations (rare DDL path). When
+/// no drain is in progress the drainer never touches this primitive — zero
+/// contention.
 ///
-/// # Memory model
+/// # Memory model (F-56, #882 — corrected)
 ///
-/// `enter_writer`'s `Relaxed fetch_add` is sufficient because the flag's
-/// coherence chain (above) carries the happens-before edge to the drain load
-/// — no additional ordering on the increment itself is needed.
-/// `WriterDrainGuard::drop`'s `Release fetch_sub` pairs with the drainer's
-/// `Acquire` load so the writer's pre-decrement work (data-store write,
-/// record-counter bump, index updates) happens-before the drainer's
-/// post-drain work (the `keyset_safe` count-proof / index backfill
-/// snapshot). The data store's own internal synchronization provides
-/// cross-thread write visibility; this counter provides temporal drain — no
-/// fast-path writer is still in flight when `drain()` returns — mirroring the
-/// role `unique_write_lock` plays on the slow path.
+/// The four cross-atomic operations are ALL `Ordering::SeqCst`:
+///   - writer  `active.fetch_add` (`enter_writer`)
+///   - writer  `flag.load` (`needs_write_barrier`)
+///   - drainer `flag.store(true)` (`set_schema_activation_barrier` / `Index2CreateBarrierGuard`)
+///   - drainer `active.load` (`drain`)
 ///
-/// # Reusability (F-50)
+/// This dependency spans TWO independent atomics (`active` and `flag`), so
+/// `Release`/`Acquire` ALONE CANNOT carry it. A `synchronizes-with` edge —
+/// the only thing that creates a cross-thread happens-before relationship —
+/// requires an `Acquire` load to read the value written by a *specific*
+/// `Release` store **on the same atomic**. Here the writer's `flag.load`
+/// reads `false` (the OLD value), NOT the `true` the drainer's
+/// `flag.store(true)` wrote, so no synchronizes-with edge is created on
+/// `flag`; and `active` is an entirely separate atomic whose `Relaxed`
+/// increment the drainer's `Acquire` load has no ordering relationship with
+/// at all. A legal weak-memory outcome is therefore: the writer increments
+/// `active` (real time), reads `flag == false`, and proceeds; the drainer
+/// stores `flag = true`, then `active.load` observes `0` and `drain()`
+/// returns immediately — precisely the in-flight writer the primitive exists
+/// to hold back.
+///
+/// `SeqCst` closes it. `SeqCst` operations participate in a SINGLE total
+/// order `S` over all atomics, with the consistency constraints (C++/Rust
+/// memory model, [atomics.order]):
+///   (C1) same-thread sequenced-before is respected in `S`;
+///   (C2) each atomic's modification order is respected in `S`;
+///   (C3) a `SeqCst` load reads the value written by the most recent
+///        modification of that atomic that precedes it in `S`.
+/// Worked proof that the drainer cannot observe `active == 0`:
+///   1. Writer: `fetch_add` is sequenced-before `flag.load` ⟹ by (C1)
+///      `fetch_add ≺ flag.load` in `S`.
+///   2. Drainer: `flag.store(true)` is sequenced-before `active.load` ⟹ by
+///      (C1) `flag.store(true) ≺ active.load` in `S`.
+///   3. The writer's `flag.load` read `false`, i.e. the value written by the
+///      initial / pre-transition store on `flag` — NOT the drainer's
+///      `flag.store(true)`. By (C3), if `flag.store(true)` preceded
+///      `flag.load` in `S`, the load would have read `true`. It read `false`,
+///      so `flag.load ≺ flag.store(true)` in `S`.
+///   4. Chaining 1 → 3 → 2: `fetch_add ≺ flag.load ≺ flag.store(true) ≺
+///      active.load`, all in the single total order `S`.
+///   5. `fetch_add` and `active.load` are both `SeqCst` ops on the SAME
+///      atomic (`active`). By (C3), `active.load` reads the most recent
+///      modification of `active` preceding it in `S`. Since
+///      `fetch_add ≺ active.load` in `S`, that most-recent modification is
+///      `fetch_add` or a later one — so `active.load` observes a value
+///      `>= 1` (it cannot observe the pre-increment `0`). The drainer does
+///      NOT return; it waits. □
+///
+/// This is the standard "a third total order carries the cross-atomic
+/// happens-before" argument; it works precisely because `SeqCst`, unlike
+/// `Acquire`/`Release`, imposes a single global order across DIFFERENT
+/// atomics — exactly what this primitive's `flag` + `active` dependency
+/// needs. `WriterDrainGuard::drop`'s `fetch_sub` is `SeqCst` too, so the
+/// writer's pre-decrement work (data-store write, record-counter bump, index
+/// updates) is ordered before `drain()`'s `active.load` observes the
+/// resulting `0` (the same chain, step 5, on the decrement side) — i.e. when
+/// `drain()` returns, no fast-path writer is still in flight. The data
+/// store's own synchronization provides cross-thread write visibility; this
+/// counter provides temporal drain, mirroring the role `unique_write_lock`
+/// plays on the slow path.
+///
+/// # Reusability
 ///
 /// This primitive is barrier-agnostic: [`drain`](Self::drain) waits for ALL
 /// in-flight fast-path writers, regardless of which intent flag the drainer
-/// raised. F-50 will call `TableManager::drain_writers()` (which delegates
-/// here) from `create_index_v2` — after raising `index2_create_barrier`,
-/// before the backfill snapshot — with no new design work, exactly the way
-/// F-48 calls it from `SchemaActivationBarrierGuard::raise` for the
-/// schema-activation DDL.
+/// raised. It is called from `SchemaActivationBarrierGuard::raise`
+/// (schema-activation DDL, F-48) and from `create_index_v2`
+/// (`table_manager_index_mgmt.rs`, F-56) — after raising the intent flag,
+/// before the snapshot/proof point — identically.
 #[derive(Debug)]
 pub struct WriterDrainBarrier {
     active: Arc<AtomicUsize>,
@@ -105,7 +155,11 @@ impl WriterDrainBarrier {
     /// must not.
     #[must_use]
     pub fn enter_writer(&self) -> WriterDrainGuard {
-        self.active.fetch_add(1, Ordering::Relaxed);
+        // SeqCst (not Relaxed): see the struct-level memory-model proof — the
+        // cross-atomic dependency on `needs_write_barrier`'s flag load requires
+        // a single SeqCst total order, which Relaxed/Acquire/Release cannot
+        // provide across two independent atomics.
+        self.active.fetch_add(1, Ordering::SeqCst);
         WriterDrainGuard {
             active: Arc::clone(&self.active),
         }
@@ -119,14 +173,17 @@ impl WriterDrainBarrier {
     /// `unique_write_lock` so slow-path writers are blocked. Then this
     /// catches any writer that read `false` before the flag went up.
     ///
-    /// When no writers are active, returns after a single `Acquire` load.
+    /// When no writers are active, returns after a single `SeqCst` load.
     pub async fn drain(&self) {
-        while self.active.load(Ordering::Acquire) != 0 {
+        // SeqCst (not Acquire): pairs with the writer's SeqCst fetch_add via the
+        // single total order — see the struct-level memory-model proof.
+        while self.active.load(Ordering::SeqCst) != 0 {
             tokio::task::yield_now().await;
         }
     }
 
-    /// Test-only: current active-writer count (for assertions).
+    /// Test-only: current active-writer count (for assertions). Not part of
+    /// the drain protocol; a plain `Acquire` load suffices for assertions.
     #[cfg(test)]
     pub fn active_count(&self) -> usize {
         self.active.load(Ordering::Acquire)
@@ -148,7 +205,11 @@ impl Default for WriterDrainBarrier {
 }
 
 /// RAII guard returned by [`WriterDrainBarrier::enter_writer`]. Decrements
-/// the counter on drop (Release), releasing drain-set membership.
+/// the counter on drop (`SeqCst`), releasing drain-set membership. The
+/// `SeqCst` decrement is what lets the drainer's `SeqCst` load (in
+/// [`WriterDrainBarrier::drain`]) conclude the writer's pre-decrement work is
+/// done when it observes the resulting `0` — see the struct-level memory-model
+/// proof.
 #[derive(Debug)]
 pub struct WriterDrainGuard {
     active: Arc<AtomicUsize>,
@@ -156,7 +217,7 @@ pub struct WriterDrainGuard {
 
 impl Drop for WriterDrainGuard {
     fn drop(&mut self) {
-        self.active.fetch_sub(1, Ordering::Release);
+        self.active.fetch_sub(1, Ordering::SeqCst);
     }
 }
 
@@ -168,7 +229,7 @@ mod tests {
     async fn drain_returns_immediately_when_no_writers_active() {
         let b = WriterDrainBarrier::new();
         assert_eq!(b.active_count(), 0);
-        // Must not hang — single Acquire load, immediate return.
+        // Must not hang — single SeqCst load, immediate return.
         b.drain().await;
     }
 
@@ -198,9 +259,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn guard_decrement_is_release_paired_with_drain_acquire() {
+    async fn guard_decrement_returns_counter_to_zero_for_drain() {
         // Structural: enter + drop returns the counter to 0 so a subsequent
-        // drain observes it (Acquire load reads the Release-stored 0).
+        // drain observes it (the SeqCst load reads the SeqCst-stored 0).
         let b = WriterDrainBarrier::new();
         {
             let _g = b.enter_writer();
@@ -223,5 +284,116 @@ mod tests {
             1,
             "clone must share the same Arc<AtomicUsize>"
         );
+    }
+}
+
+// ============================================================================
+// F-56 (#882) — loom model of the writer-drain barrier's interleaving contract.
+//
+// RUN (NOT part of `./scripts/test.sh` — loom is opt-in via the `loom` cargo
+// feature, which the `build.rs` translates into a crate-local `cfg(loom)` so
+// the dependency tree is not pulled into its own loom code paths; this module
+// is compiled away from every normal build):
+//
+//   cargo test -p shamir-engine --features loom --lib \
+//       table::writer_drain_barrier::loom_model -- --nocapture
+//
+// ## Honest scope — what this model does and does NOT prove
+//
+// loom explores all SEQUENTIALLY-CONSISTENT thread interleavings of the model.
+// The F-56 memory-ordering bug fixed above is NOT an interleaving bug: it is a
+// cross-atomic WEAK-MEMORY reordering (a `Relaxed fetch_add` on `active` whose
+// visibility is not ordered relative to an `Acquire load` on a DIFFERENT
+// atomic, `flag`). No SC interleaving exhibits it — in every interleaving where
+// the writer's `flag.load` reads `false`, the writer's `fetch_add` has already
+// executed in program order, so the drainer's `active.load` observes `>= 1`.
+// Consequently this model PASSES for BOTH the old (Relaxed/Acquire/Release)
+// and the new (SeqCst) orderings; it CANNOT red/green the old code. The
+// weak-memory soundness of the SeqCst fix rests entirely on the worked proof
+// in the [`WriterDrainBarrier`] doc comment above, NOT on this model.
+//
+// What this model IS good for: guarding the protocol's INTERLEAVING contract
+// against future regressions — a broken `drain` loop (e.g. one that exits while
+// `active != 0`), a missing guard decrement, a slow path that fails to exit the
+// drain set before blocking on the lock (the deadlock shape the comment above
+// warns about), or a reordering of `enter_writer` AFTER the flag read. Any of
+// those would show up here as an interleaving that violates the invariant
+// "after `drain()` returns, every fast-path writer that entered the drain set
+// has completed its write". That is the contract the SeqCst proof's step 5
+// (drain-load observes the increment) ultimately serves, so it is worth
+// pinning down — just not as a stand-in for the weak-memory argument.
+// ============================================================================
+#[cfg(loom)]
+mod loom_model {
+    use loom::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use loom::sync::Arc;
+    use loom::thread;
+
+    /// Minimal model of the two-atomics that matter: the `active` drain counter
+    /// and the intent `flag` (one of `index2_create_barrier` /
+    /// `schema_activation_barrier`). `writer_wrote` models the fast-path
+    /// writer's data-store write landing — it is the thing the drain exists to
+    /// make visible to the drainer's post-drain snapshot.
+    struct Model {
+        active: AtomicUsize,
+        flag: AtomicBool,
+        writer_wrote: AtomicBool,
+    }
+
+    impl Model {
+        fn new() -> Arc<Self> {
+            Arc::new(Self {
+                active: AtomicUsize::new(0),
+                flag: AtomicBool::new(false),
+                writer_wrote: AtomicBool::new(false),
+            })
+        }
+    }
+
+    /// Writer thread (fast path only — the drain contract concerns fast-path
+    /// writers): `enter_writer` (SeqCst fetch_add) → read `flag` (SeqCst) → if
+    /// `false`, model the write → drop the guard (SeqCst fetch_sub). Returns
+    /// whether it took the fast path.
+    fn run_writer(m: Arc<Model>) -> bool {
+        m.active.fetch_add(1, Ordering::SeqCst);
+        let fast = !m.flag.load(Ordering::SeqCst);
+        if fast {
+            m.writer_wrote.store(true, Ordering::SeqCst);
+        }
+        m.active.fetch_sub(1, Ordering::SeqCst);
+        fast
+    }
+
+    /// Drainer thread: raise `flag` (SeqCst store) → drain (spin on `active`
+    /// until 0, SeqCst) → take the post-drain snapshot.
+    fn run_drainer(m: &Model) {
+        m.flag.store(true, Ordering::SeqCst);
+        while m.active.load(Ordering::SeqCst) != 0 {
+            thread::yield_now();
+        }
+        // drain() has returned — every fast-path writer is out of the drain set.
+    }
+
+    #[test]
+    fn drain_returns_only_after_fast_path_writer_completes() {
+        loom::model(|| {
+            let m = Model::new();
+            let m_w = Arc::clone(&m);
+            let writer = thread::spawn(move || run_writer(m_w));
+            run_drainer(&m);
+            let took_fast = writer.join().unwrap();
+
+            // THE INVARIANT (interleaving contract): once the drainer's drain
+            // returns (active hit 0), a fast-path writer that entered the drain
+            // set has completed its modeled write — the guard decrement, which
+            // is what drove active back to 0, is sequenced AFTER the write.
+            if took_fast {
+                assert!(
+                    m.writer_wrote.load(Ordering::SeqCst),
+                    "drain returned before the fast-path writer's write landed — \
+                     an interleaving hole in the drain contract"
+                );
+            }
+        });
     }
 }

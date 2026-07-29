@@ -435,9 +435,12 @@ pub(super) async fn pre_commit_prelock(
     // with no further check, so a DDL raising the barrier AFTER this read (and
     // calling `drain_writers()`) sees zero in-flight writers, incorrectly.
     // Fixed by entering the writer-drain set (`enter_writer_drain`) BEFORE
-    // reading the flag, for every table in `tx.write_set` — the flag's
-    // coherence chain carries the happens-before edge to the DDL's drain load
-    // (see `writer_drain_barrier`'s memory-model doc). If the flag is `true`
+    // reading the flag, for every table in `tx.write_set` — the cross-atomic
+    // happens-before edge to the DDL's drain load is carried by the single
+    // SeqCst total order over the `active` counter + `flag` (F-56; see
+    // `writer_drain_barrier`'s memory-model doc — NOT a flag coherence chain,
+    // which Release/Acquire cannot span across two independent atomics). If
+    // the flag is `true`
     // (slow path: this table gets a uwl_guard), drop the drain guard BEFORE
     // the lock acquisition — the lock alone provides exclusion, and staying
     // in the drain set while blocking on the lock (held by a DDL that is
@@ -450,9 +453,9 @@ pub(super) async fn pre_commit_prelock(
     let mut drain_guards: Vec<crate::table::writer_drain_barrier::WriterDrainGuard> = Vec::new();
     for table_id in tx.write_set.keys() {
         if let Some(tbl) = repo.table_by_token_if_live(*table_id).await {
-            // F-48b: bump the drain counter BEFORE reading the flag so the
-            // flag's coherence chain carries happens-before to the DDL's
-            // drain load. Mirrors `table_manager_crud.rs`'s writer methods.
+            // F-48b/F-56: bump the drain counter BEFORE reading the flag so the
+            // cross-atomic SeqCst happens-before edge reaches the DDL's drain
+            // load. Mirrors `table_manager_crud.rs`'s writer methods.
             let drain_guard = tbl.enter_writer_drain();
             if tbl.needs_write_barrier() {
                 // Slow path: this table will get a `unique_write_lock` guard
