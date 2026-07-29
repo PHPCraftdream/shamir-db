@@ -215,8 +215,8 @@ fn batch_conflicts_matches_per_dep_loop() {
 }
 
 // ── P3a: inter-batch phantom — record_conflicts against a batch-local
-//        footprint (the building blocks the group-commit leader composes
-//        inline in run_leader). The committed-log path is already covered by
+//        footprint (the building blocks the commit pipeline's Phase 2-bis
+//        guards use). The committed-log path is already covered by
 //        commit_log_window_scan_*; this verifies the SAME footprint shape
 //        (build_footprint_from_tx) and the SAME conflict predicate
 //        (record_conflicts) detect an intra-batch phantom without going

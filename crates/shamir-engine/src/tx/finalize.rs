@@ -1,16 +1,20 @@
 //! Shared finalization tail for the synchronous commit paths.
 //!
 //! PR3 (Fowler preparatory refactoring — "make the change easy, then make
-//! the easy change"): the three commit paths (`commit_tx_lockfree`,
-//! `run_single_tx`, and the `run_leader` batch loop) all share the exact
-//! same post-`materialize` tail:
+//! the easy change"): the synchronous commit path's post-`materialize` tail
+//! was extracted here as its single canonical implementation:
 //!
 //! `post_publish_cleanup` → deferred-metric → `drainer().wake()` →
 //! `emit_changefeed_event` → `promote_vectors`
 //!
-//! R1 (`apply_replicated`) will invoke this same tail with the version
-//! from a replicated commit event, instead of re-implementing it a fourth
-//! time.
+//! The sole in-tree caller today is `commit_tx_lockfree` (`commit.rs`).
+//! (F-54, #865 removed the dead `tx/group_commit.rs` batch path —
+//! `run_single_tx` / `run_leader` — that previously shared this tail; it
+//! had zero production call sites.) `apply_replicated` (R1) does NOT call
+//! this either: a replicated raw-apply has neither a `TxContext` (for
+//! `promote_vectors`) nor a `PostPublishState` (from `materialize`), so it
+//! reimplements the equivalent steps inline — see `apply_replicated.rs`'s
+//! "finalize-tail reuse" docs.
 //!
 //! ## Why `commit_tx_inner_legacy_async` is NOT a caller
 //!

@@ -11,7 +11,6 @@ pub mod drainer_tests;
 pub mod durable_watermark_tests;
 pub mod early_assign_tests;
 pub mod gc_tests;
-pub mod group_commit_tests;
 pub mod index_rollback_tests;
 pub mod interner_checkpoint_tests;
 pub mod legacy_index_tx_tests;

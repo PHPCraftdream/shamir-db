@@ -541,7 +541,7 @@ async fn concurrent_cas_exactly_one_wins_under_snapshot() {
     // "version_conflict" wire code, not "tx_conflict" — verify the losing
     // `CommitError::CasConflict` converts to `DbError::VersionConflict`
     // (whose `.code()` is `"version_conflict"`), mirroring the exact
-    // mapping used by `batch_execute.rs` / `db_tx.rs` / `group_commit.rs`.
+    // mapping used by `batch_execute.rs` / `db_tx.rs`.
     let loser = if a_conflict { res_a } else { res_b };
     match loser {
         Err(CommitError::CasConflict { .. }) => {}

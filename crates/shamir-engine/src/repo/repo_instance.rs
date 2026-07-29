@@ -1086,7 +1086,7 @@ impl RepoInstance {
                     // (plain non-transactional) Snapshot path must surface
                     // the SAME "version_conflict" code as the immediate
                     // staging-time check — mirrors the identical mapping in
-                    // `batch_execute.rs` / `db_tx.rs` / `group_commit.rs`.
+                    // `batch_execute.rs` / `db_tx.rs`.
                     crate::tx::CommitError::CasConflict { .. } => {
                         (commit_err.to_string(), Some("version_conflict".to_string()))
                     }

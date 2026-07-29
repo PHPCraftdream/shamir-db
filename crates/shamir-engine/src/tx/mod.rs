@@ -7,8 +7,6 @@ pub mod commit_phases;
 #[allow(dead_code)]
 pub mod drainer;
 pub(super) mod finalize;
-#[allow(dead_code, unused_imports)]
-pub(crate) mod group_commit;
 pub(super) mod materialize;
 pub(super) mod pre_commit;
 pub mod predicate_range;

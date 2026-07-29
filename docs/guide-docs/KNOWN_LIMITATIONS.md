@@ -177,12 +177,14 @@ artifact).
       `fk_actions.rs`'s cascade probes, `fk_on_update.rs`'s on-update
       probes) records its child `table_token` into
       `TxContext.ri_barrier_tokens` regardless of isolation, and every
-      commit-pipeline Phase 2-bis guard (`pre_commit_locked_validate`,
-      `pre_commit_locked`, and `group_commit.rs`'s inter-batch phantom
-      check) re-checks those tokens via the existing
-      `predicate_conflicts_batch` / `record_conflicts` machinery, so a
+      live commit-pipeline Phase 2-bis guard
+      (`pre_commit_locked_validate`, `pre_commit_locked`) re-checks those
+      tokens via the existing `predicate_conflicts_batch` /
+      `record_conflicts` machinery, so a
       concurrent committer that touched the child table in the commit
-      window aborts the parent with `PhantomConflict`/`tx_conflict`. The
+      window aborts the parent with `PhantomConflict`/`tx_conflict`. (A
+      third such guard existed in the dead `group_commit.rs` inter-batch
+      phantom check; that unreachable code was removed in F-54, #865.) The
       barrier mirrors the S3-C `footprint_tokens` pattern applied to the
       validation direction (a Snapshot parent-side mutation now re-checks
       what a Snapshot child-side writer publishes), and is load-bearing

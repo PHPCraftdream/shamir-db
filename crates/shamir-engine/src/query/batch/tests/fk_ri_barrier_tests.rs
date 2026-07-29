@@ -17,9 +17,8 @@
 //! `fk_actions.rs`'s cascade probes, `fk_on_update.rs`'s on-update probes)
 //! records the child `table_token` into `TxContext.ri_barrier_tokens`
 //! REGARDLESS of isolation (not gated on `Serializable` like the existing
-//! `predicate_set` recording). At commit, every Phase 2-bis guard
-//! (`pre_commit_locked_validate`, `pre_commit_locked`, and
-//! `group_commit.rs`'s inter-batch phantom check) runs
+//! `predicate_set` recording). At commit, every live Phase 2-bis guard
+//! (`pre_commit_locked_validate`, `pre_commit_locked`) runs
 //! `predicate_conflicts_batch` / `record_conflicts` over those tokens, so a
 //! concurrent committer that touched the child table in the commit window
 //! aborts the parent — closing the cross-transaction FK TOCTOU race that
