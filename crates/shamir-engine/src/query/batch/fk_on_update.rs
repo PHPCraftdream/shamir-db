@@ -407,62 +407,98 @@ pub(crate) async fn plan_fk_on_update(
         // when `resolved_probes` is empty, so running the scan anyway is
         // cheap insurance.
 
-        let batch_size = 1000;
-        // F-40b (RI barrier): record this child-table scan at entry,
+        // F-40b (RI barrier): record this child-table scan at ENTRY,
         // regardless of isolation — same recording as
         // `fk_restrict.rs::child_has_reference`, closing the
         // cross-transaction race for the explicit-Snapshot parent UPDATE
         // path (CASCADE / SET NULL fan-out).
+        //
+        // Recorded BEFORE the index fast-path branch below so it fires
+        // regardless of which sub-path executes — the F-40b mutual-
+        // serialization guarantee holds whether the index fast-path
+        // short-circuits the scan or the `list_stream_tx` fallback runs.
         tx.record_ri_barrier(child_table.table_token());
-        let stream = child_table.list_stream_tx(Some(tx), batch_size);
-        futures::pin_mut!(stream);
-        while let Some(batch_result) = stream.next().await {
-            let batch = batch_result.map_err(|e| BatchError::QueryError {
-                alias: alias.to_string(),
-                message: format!("fk_on_update: child scan failed: {e}"),
-                code: Some("fk_on_update".to_string()),
-            })?;
-            for (id, cow) in batch {
-                let bytes: Bytes = cow_to_bytes(cow).map_err(|e| BatchError::QueryError {
+
+        // F-53c: index fast-path (mirrors `child_has_reference`'s index
+        // lookup for RESTRICT, and `fk_actions::index_candidate_ids` for the
+        // delete path). When every probe's FK field resolves to a BASE
+        // interner id with a single-field index AND the current tx has no
+        // staged writes against this child table, fetch candidate RecordIds
+        // directly via `lookup_by_index` instead of streaming + matching
+        // every row. The "no staged writes" gate is the correctness
+        // boundary: the index reflects committed state only, so staged
+        // inserts/updates/deletes (invisible to the index) must be handled
+        // by the tx-aware scan fallback below.
+        let index_probes: Vec<(&str, &QueryValue)> = resolved_probes
+            .iter()
+            .map(|(old, _, _, field, _)| (*field, *old))
+            .collect();
+        let no_staged_child_writes = tx
+            .write_set
+            .get(&child_table.table_token())
+            .is_none_or(|s| s.is_empty());
+        let fast_path = if no_staged_child_writes {
+            index_candidate_ids(&child_table, interner, &index_probes)
+                .await
+                .map_err(|e| BatchError::QueryError {
                     alias: alias.to_string(),
-                    message: format!("fk_on_update: child scan serialize: {e}"),
+                    message: format!("fk_on_update: child index lookup failed: {e}"),
+                    code: Some("fk_on_update".to_string()),
+                })?
+        } else {
+            None
+        };
+
+        if let Some(candidate_ids) = fast_path {
+            // Index-verified candidate set (committed-only; no staged writes
+            // to reconcile). Re-read each candidate and run the SAME
+            // per-field probe-matching inner loop as the scan fallback
+            // (`classify_row_update`) so the fan-out is identical to the scan
+            // path — guaranteeing the same rows are affected whether or not
+            // an index exists.
+            for id in candidate_ids {
+                let bytes = match child_table.read_one_tx_bytes(id, Some(tx)).await {
+                    Ok(Some(b)) => b,
+                    _ => continue,
+                };
+                classify_row_update(
+                    id,
+                    bytes.as_ref(),
+                    &resolved_probes,
+                    &child_table,
+                    &mut mutations,
+                );
+            }
+        } else {
+            // Fallback: full scan with field match. Tx-aware via
+            // `list_stream_tx` (overlays this tx's own staged writes so a
+            // staged insert/update/delete on the child table is correctly
+            // reflected). `list_stream_tx` also records the Serializable
+            // `TableScan` predicate at construction time — the RI-barrier
+            // token recorded at ENTRY above is the path-agnostic safety net
+            // (exactly as in `child_has_reference`).
+            let batch_size = 1000;
+            let stream = child_table.list_stream_tx(Some(tx), batch_size);
+            futures::pin_mut!(stream);
+            while let Some(batch_result) = stream.next().await {
+                let batch = batch_result.map_err(|e| BatchError::QueryError {
+                    alias: alias.to_string(),
+                    message: format!("fk_on_update: child scan failed: {e}"),
                     code: Some("fk_on_update".to_string()),
                 })?;
-
-                // For this row, apply EVERY matching probe.  Unlike the
-                // delete path (where Cascade dominates SetNull because a
-                // deleted row can't be nulled), the UPDATE path is
-                // PER-FIELD: a single row may carry two distinct FK fields
-                // that both reference the old value (e.g. `sender_id` +
-                // `receiver_id` → `users.id`), and each must be re-keyed or
-                // nulled according to its own FK's action.  A field is a
-                // single FK with a single action, and a row's field value
-                // can equal at most one `old` value, so at most one probe
-                // per field matches a given row — there is no per-field
-                // Cascade/SetNull conflict to resolve.
-                for (old, new, action, field, field_id) in &resolved_probes {
-                    let key = shamir_types::core::interner::InternerKey::new(*field_id);
-                    if !record_field_matches_by_id(bytes.as_ref(), &key, old) {
-                        continue;
-                    }
-                    match action {
-                        FkAction::Cascade => {
-                            mutations.push(PendingMutation::UpdateField {
-                                table: child_table.clone(),
-                                id,
-                                field: field.to_string(),
-                                new_value: (*new).clone(),
-                            });
-                        }
-                        FkAction::SetNull => {
-                            mutations.push(PendingMutation::SetNull {
-                                table: child_table.clone(),
-                                id,
-                                field: field.to_string(),
-                            });
-                        }
-                        _ => {}
-                    }
+                for (id, cow) in batch {
+                    let bytes: Bytes = cow_to_bytes(cow).map_err(|e| BatchError::QueryError {
+                        alias: alias.to_string(),
+                        message: format!("fk_on_update: child scan serialize: {e}"),
+                        code: Some("fk_on_update".to_string()),
+                    })?;
+                    classify_row_update(
+                        id,
+                        bytes.as_ref(),
+                        &resolved_probes,
+                        &child_table,
+                        &mut mutations,
+                    );
                 }
             }
         }
@@ -970,6 +1006,87 @@ fn record_field_matches_by_id(
         }
     }
     false
+}
+
+/// F-53c: per-row fan-out resolution shared by the index fast-path and the
+/// `list_stream_tx` scan fallback in `plan_fk_on_update`. Mutates `mutations`
+/// exactly as the original inline loop did: the UPDATE path is PER-FIELD (a
+/// single row may carry two distinct FK fields that both reference the old
+/// value, and each must be re-keyed or nulled according to its own FK's
+/// action). Extracting this into a shared helper guarantees the two paths
+/// produce byte-for-byte identical results whether or not a supporting
+/// index exists on the FK column.
+fn classify_row_update(
+    id: RecordId,
+    bytes: &[u8],
+    resolved_probes: &[(&QueryValue, &QueryValue, FkAction, &str, u64)],
+    child_table: &TableManager,
+    mutations: &mut Vec<PendingMutation>,
+) {
+    // For this row, apply EVERY matching probe.  A field is a single FK with
+    // a single action, and a row's field value can equal at most one `old`
+    // value, so at most one probe per field matches a given row — there is
+    // no per-field Cascade/SetNull conflict to resolve.
+    for (old, new, action, field, field_id) in resolved_probes {
+        let key = shamir_types::core::interner::InternerKey::new(*field_id);
+        if !record_field_matches_by_id(bytes, &key, old) {
+            continue;
+        }
+        match action {
+            FkAction::Cascade => {
+                mutations.push(PendingMutation::UpdateField {
+                    table: child_table.clone(),
+                    id,
+                    field: field.to_string(),
+                    new_value: (*new).clone(),
+                });
+            }
+            FkAction::SetNull => {
+                mutations.push(PendingMutation::SetNull {
+                    table: child_table.clone(),
+                    id,
+                    field: field.to_string(),
+                });
+            }
+            _ => {}
+        }
+    }
+}
+
+/// F-53c: index fast-path candidate gathering, mirroring
+/// `fk_restrict::child_has_reference`'s index lookup exactly (and the
+/// identical helper in `fk_actions.rs`). See `fk_actions::index_candidate_ids`
+/// for the full contract. The caller MUST have already recorded the RI-barrier
+/// token at entry (before this call), preserving the F-40b mutual-serialization
+/// ordering exactly as `child_has_reference` does.
+async fn index_candidate_ids(
+    table: &TableManager,
+    interner: &shamir_types::core::interner::Interner,
+    probes: &[(&str, &QueryValue)],
+) -> shamir_storage::error::DbResult<Option<Vec<RecordId>>> {
+    use std::collections::BTreeSet;
+    let mut all: BTreeSet<RecordId> = BTreeSet::new();
+    for (field, value) in probes {
+        let inner = match qv_scalar_to_inner(value) {
+            Some(InnerValue::Null) | None => return Ok(None),
+            Some(iv) => iv,
+        };
+        let base_field_id = match interner.get_ind(field) {
+            Some(id) => id,
+            None => return Ok(None),
+        };
+        let field_path = [base_field_id.id()];
+        let idx_name = match table.find_single_field_index(&field_path) {
+            Some(n) => n,
+            None => return Ok(None),
+        };
+        let ids = table
+            .index_manager_ref()
+            .lookup_by_index(idx_name, std::slice::from_ref(&inner))
+            .await?;
+        all.extend(ids.iter().copied());
+    }
+    Ok(Some(all.into_iter().collect()))
 }
 
 fn scalar_ref_to_qv(sr: ScalarRef<'_>) -> QueryValue {

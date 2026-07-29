@@ -1346,3 +1346,325 @@ async fn read_all_field(
         .map(|r| r.get_value_owned(field).unwrap_or(QueryValue::Null))
         .collect()
 }
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// F-53c — index fast-path vs scan-fallback equivalence for CASCADE / SET NULL.
+//
+// `fk_actions.rs::index_candidate_ids` (the F-53c index fast-path) and the
+// `list_stream_tx` scan fallback MUST produce byte-for-byte identical results:
+// the same rows deleted (CASCADE) or nulled (SET NULL), the same survivors,
+// whether or not a supporting single-field index exists on the child FK
+// column. These tests pin that equivalence by running the SAME scenario twice
+// — once with NO index (scan path) and once WITH a supporting index (fast
+// path) — and asserting identical final state. A third test pins the
+// "no staged writes" correctness gate: with an index present AND a staged
+// child insert in the SAME tx, the fast-path must NOT engage (the index is
+// committed-only and would miss the staged row); the tx-aware scan fallback
+// runs instead and correctly cascades the staged child too.
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Build the shared CASCADE scenario: parent rows {1,2,3}; child rows where
+/// four reference parent id=1 (the cascade target) and one each reference
+/// id=2 / id=3 (must survive). When `with_index` is true a single-field
+/// index is created on `child.parent_id` so the F-53c fast-path engages (the
+/// fresh autocommit tx has no staged child writes).
+async fn build_cascade_index_scenario(with_index: bool) -> FkTestResolver {
+    let repo_config = RepoConfig {
+        name: "default".to_string(),
+        factory: BoxRepoFactory::in_memory(),
+        tables: vec![TableConfig::new("parent"), TableConfig::new("child")],
+    };
+    let db = DbInstance::with_repos(vec![repo_config]).await.unwrap();
+    let registry = Arc::new(ValidatorRegistry::new());
+
+    bind_fk_validator(
+        &db,
+        &registry,
+        "child",
+        "child_fk_cascade_idx",
+        "parent_id",
+        "parent",
+        "id",
+        FkAction::Cascade,
+        true,
+    );
+
+    let resolver = FkTestResolver {
+        db,
+        repo: "default".to_string(),
+        registry,
+    };
+
+    for pid in [1_i64, 2, 3] {
+        insert_helper(
+            &resolver,
+            "parent",
+            doc().set("id", pid).set("name", format!("p{pid}")),
+        )
+        .await;
+    }
+    let mut cid = 100_i64;
+    for _ in 0..4 {
+        insert_helper(
+            &resolver,
+            "child",
+            doc().set("cid", cid).set("parent_id", 1_i64),
+        )
+        .await;
+        cid += 1;
+    }
+    insert_helper(
+        &resolver,
+        "child",
+        doc().set("cid", cid).set("parent_id", 2_i64),
+    )
+    .await;
+    cid += 1;
+    insert_helper(
+        &resolver,
+        "child",
+        doc().set("cid", cid).set("parent_id", 3_i64),
+    )
+    .await;
+
+    if with_index {
+        let child_table = resolver.db.get_table("default", "child").await.unwrap();
+        child_table
+            .create_index("idx_child_parent_id", &["parent_id"])
+            .await
+            .expect("index creation");
+    }
+
+    resolver
+}
+
+/// Assert the post-cascade invariant for `build_cascade_index_scenario`:
+/// parent 1 + its 4 children gone; parents 2,3 survive with one child each.
+async fn assert_cascade_scenario_result(resolver: &FkTestResolver) {
+    assert_eq!(count_rows(resolver, "parent").await, 2);
+    assert_eq!(count_rows(resolver, "child").await, 2);
+    let mut surviving: Vec<i64> = read_all_field(resolver, "child", "parent_id")
+        .await
+        .into_iter()
+        .filter_map(|v| match v {
+            QueryValue::Int(i) => Some(i),
+            _ => None,
+        })
+        .collect();
+    surviving.sort_unstable();
+    assert_eq!(
+        surviving,
+        [2, 3],
+        "only the children referencing parents 2 and 3 should survive"
+    );
+}
+
+#[tokio::test]
+async fn cascade_no_index_scan_path_deletes_referencing_children() {
+    // Scan-fallback path (no supporting index).
+    let resolver = build_cascade_index_scenario(false).await;
+    assert_eq!(count_rows(&resolver, "child").await, 6);
+
+    let mut b = Batch::new();
+    b.id(10);
+    b.delete(
+        "del",
+        write::delete("parent").where_(filter::eq("id", 1_i64)),
+    );
+    execute_batch(&b.build(), &resolver, None, None, Actor::System, "test")
+        .await
+        .unwrap();
+
+    assert_cascade_scenario_result(&resolver).await;
+}
+
+#[tokio::test]
+async fn cascade_with_index_fast_path_deletes_same_children() {
+    // F-53c index fast-path (supporting index, fresh autocommit tx → no
+    // staged child writes → fast-path engages). Must produce the IDENTICAL
+    // result to the no-index scan path above.
+    let resolver = build_cascade_index_scenario(true).await;
+    assert_eq!(count_rows(&resolver, "child").await, 6);
+
+    let mut b = Batch::new();
+    b.id(10);
+    b.delete(
+        "del",
+        write::delete("parent").where_(filter::eq("id", 1_i64)),
+    );
+    execute_batch(&b.build(), &resolver, None, None, Actor::System, "test")
+        .await
+        .unwrap();
+
+    assert_cascade_scenario_result(&resolver).await;
+}
+
+#[tokio::test]
+async fn cascade_with_index_fast_path_falls_back_to_scan_for_staged_child_writes() {
+    // With a supporting index BUT a staged child insert in the SAME tx, the
+    // F-53c "no staged writes" gate MUST route to the tx-aware scan fallback
+    // — otherwise the staged (unindexed) child would be orphaned by the
+    // cascade (the index reflects committed state only). This is the CASCADE
+    // analog of
+    // `transactional_insert_child_with_index_then_delete_parent_restrict_sees_staged_insert`.
+    let repo_config = RepoConfig {
+        name: "default".to_string(),
+        factory: BoxRepoFactory::in_memory(),
+        tables: vec![TableConfig::new("parent"), TableConfig::new("child")],
+    };
+    let db = DbInstance::with_repos(vec![repo_config]).await.unwrap();
+    let registry = Arc::new(ValidatorRegistry::new());
+
+    bind_fk_validator(
+        &db,
+        &registry,
+        "child",
+        "child_fk_cascade_staged",
+        "parent_id",
+        "parent",
+        "id",
+        FkAction::Cascade,
+        true,
+    );
+
+    let resolver = FkTestResolver {
+        db,
+        repo: "default".to_string(),
+        registry,
+    };
+
+    insert_helper(&resolver, "parent", doc().set("id", 1_i64).set("name", "P")).await;
+    // One COMMITTED child referencing parent 1.
+    insert_helper(
+        &resolver,
+        "child",
+        doc().set("cid", 10_i64).set("parent_id", 1_i64),
+    )
+    .await;
+
+    // Supporting index → the fast-path WOULD engage, except the same-tx
+    // staged insert below forces the scan fallback.
+    let child_table = resolver.db.get_table("default", "child").await.unwrap();
+    child_table
+        .create_index("idx_child_parent_id", &["parent_id"])
+        .await
+        .unwrap();
+
+    // ONE transactional batch: insert a SECOND child referencing parent 1
+    // (staged, never in the index until commit), THEN delete parent 1. The
+    // cascade must see BOTH children (the committed one + the staged one via
+    // the scan overlay) and cascade-delete both.
+    let mut b = Batch::new();
+    b.id(20);
+    b.transactional();
+    b.insert(
+        "ins_child2",
+        write::insert("child").row(doc().set("cid", 11_i64).set("parent_id", 1_i64)),
+    );
+    b.delete(
+        "del_parent",
+        write::delete("parent").where_(filter::eq("id", 1_i64)),
+    );
+    let req = b.build();
+    let resp = execute_batch(&req, &resolver, None, None, Actor::System, "test")
+        .await
+        .unwrap();
+
+    let info = resp
+        .transaction
+        .as_ref()
+        .expect("transaction info present for a transactional batch");
+    assert!(
+        info.is_committed(),
+        "cascade tx should commit (Cascade, not Restrict); got: {info:?}"
+    );
+
+    assert_eq!(count_rows(&resolver, "parent").await, 0);
+    assert_eq!(
+        count_rows(&resolver, "child").await,
+        0,
+        "the staged (unindexed) child insert must be cascaded too — the \
+         F-53c 'no staged writes' gate must route to the tx-aware scan \
+         fallback rather than trusting the committed-only index"
+    );
+}
+
+#[tokio::test]
+async fn set_null_with_index_fast_path_nulls_same_children() {
+    // SET NULL via the F-53c index fast-path must match the existing
+    // scan-path test `set_null_nulls_child_field_when_parent_deleted`
+    // (which runs with no index). Two children reference parent 1; after
+    // the delete both must survive with parent_id == Null.
+    let repo_config = RepoConfig {
+        name: "default".to_string(),
+        factory: BoxRepoFactory::in_memory(),
+        tables: vec![TableConfig::new("parent"), TableConfig::new("child")],
+    };
+    let db = DbInstance::with_repos(vec![repo_config]).await.unwrap();
+    let registry = Arc::new(ValidatorRegistry::new());
+
+    bind_fk_validator(
+        &db,
+        &registry,
+        "child",
+        "child_fk_setnull_idx",
+        "parent_id",
+        "parent",
+        "id",
+        FkAction::SetNull,
+        true,
+    );
+
+    let resolver = FkTestResolver {
+        db,
+        repo: "default".to_string(),
+        registry,
+    };
+
+    insert_helper(&resolver, "parent", doc().set("id", 1_i64).set("name", "P")).await;
+    insert_helper(
+        &resolver,
+        "child",
+        doc()
+            .set("cid", 10_i64)
+            .set("parent_id", 1_i64)
+            .set("label", "c1"),
+    )
+    .await;
+    insert_helper(
+        &resolver,
+        "child",
+        doc()
+            .set("cid", 11_i64)
+            .set("parent_id", 1_i64)
+            .set("label", "c2"),
+    )
+    .await;
+
+    // Supporting index on the FK column → F-53c fast-path engages.
+    let child_table = resolver.db.get_table("default", "child").await.unwrap();
+    child_table
+        .create_index("idx_child_parent_id", &["parent_id"])
+        .await
+        .unwrap();
+
+    let mut b = Batch::new();
+    b.id(30);
+    b.delete(
+        "del_parent",
+        write::delete("parent").where_(filter::eq("id", 1_i64)),
+    );
+    execute_batch(&b.build(), &resolver, None, None, Actor::System, "test")
+        .await
+        .unwrap();
+
+    // Parent gone; both children survive with parent_id == Null (same as the
+    // scan-path SET NULL test).
+    assert_eq!(count_rows(&resolver, "parent").await, 0);
+    assert_eq!(count_rows(&resolver, "child").await, 2);
+    let nulled = read_all_field(&resolver, "child", "parent_id").await;
+    assert!(
+        nulled.iter().all(|v| *v == QueryValue::Null),
+        "both children's parent_id must be Null after SET NULL, got: {nulled:?}"
+    );
+}

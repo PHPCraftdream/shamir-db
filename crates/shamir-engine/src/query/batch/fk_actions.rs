@@ -390,63 +390,105 @@ async fn plan_cascade_recursive(
         // scan costs a harmless full pass with no matches — cheap insurance
         // that keeps the SSI predicate recorded either way.
 
-        let batch_size = 1000;
         let mut cascade_ids: Vec<RecordId> = Vec::new();
         let mut setnull_ids: Vec<(RecordId, String)> = Vec::new();
 
-        // F-40b (RI barrier): record this child-table scan at entry,
+        // F-40b (RI barrier): record this child-table scan at ENTRY,
         // regardless of isolation, so an EXPLICIT `Snapshot`-isolation
         // parent delete (which never populates `predicate_set`) still gets a
         // commit-time re-check via `pre_commit.rs` Phase 2-bis against
         // concurrent committers that touched this child table. Mirrors
         // `fk_restrict.rs::child_has_reference`'s recording exactly.
+        //
+        // Recorded BEFORE the index fast-path branch below so it fires
+        // regardless of which sub-path executes — the F-40b mutual-
+        // serialization guarantee holds whether the index fast-path
+        // short-circuits the scan or the `list_stream_tx` fallback runs.
         tx.record_ri_barrier(child_table.table_token());
-        let stream = child_table.list_stream_tx(Some(tx), batch_size);
-        futures::pin_mut!(stream);
-        while let Some(batch_result) = stream.next().await {
-            let batch = batch_result.map_err(|e| BatchError::QueryError {
-                alias: alias.to_string(),
-                message: format!("fk_actions: child scan failed: {e}"),
-                code: Some("fk_actions".to_string()),
-            })?;
-            for (id, cow) in batch {
-                let bytes: Bytes = cow_to_bytes(cow).map_err(|e| BatchError::QueryError {
+
+        // F-53c: index fast-path (mirrors `child_has_reference`'s index
+        // lookup for RESTRICT). When every probe's FK field resolves to a
+        // BASE interner id with a single-field index AND the current tx has
+        // no staged writes against this child table, fetch candidate
+        // RecordIds directly via `lookup_by_index` instead of streaming +
+        // matching every row. The "no staged writes" gate is the
+        // correctness boundary for CASCADE/SET NULL: the index reflects
+        // committed state only, so staged inserts/updates/deletes
+        // (invisible to the index) must be handled by the tx-aware scan
+        // fallback below. RESTRICT can consult the staged overlay piecemeal
+        // (it only needs a bool); CASCADE/SET NULL need the full ID set, so
+        // the clean correctness line is "use the index only when there is
+        // nothing staged to reconcile".
+        let index_probes: Vec<(&str, &QueryValue)> = resolved_probes
+            .iter()
+            .map(|(_, value, _, field)| (*field, *value))
+            .collect();
+        let no_staged_child_writes = tx
+            .write_set
+            .get(&child_table.table_token())
+            .is_none_or(|s| s.is_empty());
+        let fast_path = if no_staged_child_writes {
+            index_candidate_ids(&child_table, interner, &index_probes)
+                .await
+                .map_err(|e| BatchError::QueryError {
                     alias: alias.to_string(),
-                    message: format!("fk_actions: child scan serialize: {e}"),
+                    message: format!("fk_actions: child index lookup failed: {e}"),
+                    code: Some("fk_actions".to_string()),
+                })?
+        } else {
+            None
+        };
+
+        if let Some(candidate_ids) = fast_path {
+            // Index-verified candidate set (committed-only; no staged writes
+            // to reconcile). Re-read each candidate and run the SAME
+            // probe-matching inner loop as the scan fallback (`classify_row`)
+            // so action resolution (Cascade dominates SetNull) is identical
+            // to the scan path — guaranteeing the same rows are affected
+            // whether or not an index exists.
+            for id in candidate_ids {
+                let bytes = match child_table.read_one_tx_bytes(id, Some(tx)).await {
+                    Ok(Some(b)) => b,
+                    _ => continue,
+                };
+                classify_row(
+                    id,
+                    bytes.as_ref(),
+                    &resolved_probes,
+                    &mut cascade_ids,
+                    &mut setnull_ids,
+                );
+            }
+        } else {
+            // Fallback: full scan with field match. Tx-aware via
+            // `list_stream_tx` (overlays this tx's own staged writes so a
+            // staged insert/update/delete on the child table is correctly
+            // reflected). `list_stream_tx` also records the Serializable
+            // `TableScan` predicate at construction time — the RI-barrier
+            // token recorded at ENTRY above is the path-agnostic safety net
+            // (exactly as in `child_has_reference`).
+            let batch_size = 1000;
+            let stream = child_table.list_stream_tx(Some(tx), batch_size);
+            futures::pin_mut!(stream);
+            while let Some(batch_result) = stream.next().await {
+                let batch = batch_result.map_err(|e| BatchError::QueryError {
+                    alias: alias.to_string(),
+                    message: format!("fk_actions: child scan failed: {e}"),
                     code: Some("fk_actions".to_string()),
                 })?;
-
-                // Check each probe against this row.  Cascade dominates SetNull
-                // (a deleted row can't be nulled).
-                let mut row_action: Option<FkAction> = None;
-                let mut row_setnull_field: Option<String> = None;
-                for (field_id, value, action, field_name) in &resolved_probes {
-                    let key = shamir_types::core::interner::InternerKey::new(*field_id);
-                    if record_field_matches_by_id(bytes.as_ref(), &key, value) {
-                        match action {
-                            FkAction::Cascade => {
-                                row_action = Some(FkAction::Cascade);
-                                break;
-                            }
-                            FkAction::SetNull => {
-                                if row_action.is_none() {
-                                    row_action = Some(FkAction::SetNull);
-                                    row_setnull_field = Some((*field_name).to_string());
-                                }
-                            }
-                            _ => {}
-                        }
-                    }
-                }
-
-                match row_action {
-                    Some(FkAction::Cascade) => cascade_ids.push(id),
-                    Some(FkAction::SetNull) => {
-                        if let Some(f) = row_setnull_field {
-                            setnull_ids.push((id, f));
-                        }
-                    }
-                    _ => {}
+                for (id, cow) in batch {
+                    let bytes: Bytes = cow_to_bytes(cow).map_err(|e| BatchError::QueryError {
+                        alias: alias.to_string(),
+                        message: format!("fk_actions: child scan serialize: {e}"),
+                        code: Some("fk_actions".to_string()),
+                    })?;
+                    classify_row(
+                        id,
+                        bytes.as_ref(),
+                        &resolved_probes,
+                        &mut cascade_ids,
+                        &mut setnull_ids,
+                    );
                 }
             }
         }
@@ -688,57 +730,79 @@ async fn plan_cascade_for_ids(
         // interned; the per-row match loop below is a harmless no-op when
         // `resolved_probes` is empty.
 
-        let batch_size = 1000;
         let mut gc_cascade_ids: Vec<RecordId> = Vec::new();
         let mut gc_setnull_ids: Vec<(RecordId, String)> = Vec::new();
 
-        // F-40b (RI barrier): record this grandchild-table scan at entry,
+        // F-40b (RI barrier): record this grandchild-table scan at ENTRY,
         // regardless of isolation — same recording as the direct-child scan
         // in `plan_cascade_recursive` above, closing the cross-transaction
         // race for the explicit-Snapshot path at this recursion level too.
+        // Recorded BEFORE the index fast-path branch below so it fires
+        // regardless of which sub-path executes (mirrors
+        // `child_has_reference`'s entry-time ordering exactly).
         tx.record_ri_barrier(child_table.table_token());
-        let stream = child_table.list_stream_tx(Some(tx), batch_size);
-        futures::pin_mut!(stream);
-        while let Some(batch_result) = stream.next().await {
-            let batch = batch_result.map_err(|e| BatchError::QueryError {
-                alias: alias.to_string(),
-                message: format!("fk_actions: grandchild scan failed: {e}"),
-                code: Some("fk_actions".to_string()),
-            })?;
-            for (id, cow) in batch {
-                let bytes: Bytes = cow_to_bytes(cow).map_err(|e| BatchError::QueryError {
+
+        // F-53c: index fast-path — same shape as the direct-child scan in
+        // `plan_cascade_recursive` above (see that site's comment for the
+        // rationale). See `index_candidate_ids`'s doc for the ordering
+        // contract (RI barrier must already be recorded).
+        let index_probes: Vec<(&str, &QueryValue)> = resolved_probes
+            .iter()
+            .map(|(_, value, _, field)| (*field, *value))
+            .collect();
+        let no_staged_child_writes = tx
+            .write_set
+            .get(&child_table.table_token())
+            .is_none_or(|s| s.is_empty());
+        let fast_path = if no_staged_child_writes {
+            index_candidate_ids(&child_table, gc_interner, &index_probes)
+                .await
+                .map_err(|e| BatchError::QueryError {
                     alias: alias.to_string(),
-                    message: format!("fk_actions: grandchild scan serialize: {e}"),
+                    message: format!("fk_actions: grandchild index lookup failed: {e}"),
+                    code: Some("fk_actions".to_string()),
+                })?
+        } else {
+            None
+        };
+
+        if let Some(candidate_ids) = fast_path {
+            for id in candidate_ids {
+                let bytes = match child_table.read_one_tx_bytes(id, Some(tx)).await {
+                    Ok(Some(b)) => b,
+                    _ => continue,
+                };
+                classify_row(
+                    id,
+                    bytes.as_ref(),
+                    &resolved_probes,
+                    &mut gc_cascade_ids,
+                    &mut gc_setnull_ids,
+                );
+            }
+        } else {
+            let batch_size = 1000;
+            let stream = child_table.list_stream_tx(Some(tx), batch_size);
+            futures::pin_mut!(stream);
+            while let Some(batch_result) = stream.next().await {
+                let batch = batch_result.map_err(|e| BatchError::QueryError {
+                    alias: alias.to_string(),
+                    message: format!("fk_actions: grandchild scan failed: {e}"),
                     code: Some("fk_actions".to_string()),
                 })?;
-                let mut row_action: Option<FkAction> = None;
-                let mut row_setnull_field: Option<String> = None;
-                for (field_id, value, action, field_name) in &resolved_probes {
-                    let key = shamir_types::core::interner::InternerKey::new(*field_id);
-                    if record_field_matches_by_id(bytes.as_ref(), &key, value) {
-                        match action {
-                            FkAction::Cascade => {
-                                row_action = Some(FkAction::Cascade);
-                                break;
-                            }
-                            FkAction::SetNull => {
-                                if row_action.is_none() {
-                                    row_action = Some(FkAction::SetNull);
-                                    row_setnull_field = Some((*field_name).to_string());
-                                }
-                            }
-                            _ => {}
-                        }
-                    }
-                }
-                match row_action {
-                    Some(FkAction::Cascade) => gc_cascade_ids.push(id),
-                    Some(FkAction::SetNull) => {
-                        if let Some(f) = row_setnull_field {
-                            gc_setnull_ids.push((id, f));
-                        }
-                    }
-                    _ => {}
+                for (id, cow) in batch {
+                    let bytes: Bytes = cow_to_bytes(cow).map_err(|e| BatchError::QueryError {
+                        alias: alias.to_string(),
+                        message: format!("fk_actions: grandchild scan serialize: {e}"),
+                        code: Some("fk_actions".to_string()),
+                    })?;
+                    classify_row(
+                        id,
+                        bytes.as_ref(),
+                        &resolved_probes,
+                        &mut gc_cascade_ids,
+                        &mut gc_setnull_ids,
+                    );
                 }
             }
         }
@@ -1115,6 +1179,121 @@ fn record_field_matches_by_id(
         }
     }
     false
+}
+
+/// F-53c: per-row action resolution shared by the index fast-path and the
+/// `list_stream_tx` scan fallback in `plan_cascade_recursive` and
+/// `plan_cascade_for_ids`. Mutates `cascade_ids` / `setnull_ids` exactly as
+/// the original inline loop did: Cascade dominates SetNull (a deleted row
+/// can't be nulled). Extracting this into a shared helper guarantees the
+/// two paths produce byte-for-byte identical results whether or not a
+/// supporting index exists on the FK column.
+fn classify_row(
+    id: RecordId,
+    bytes: &[u8],
+    resolved_probes: &[(u64, &QueryValue, FkAction, &str)],
+    cascade_ids: &mut Vec<RecordId>,
+    setnull_ids: &mut Vec<(RecordId, String)>,
+) {
+    // Check each probe against this row.  Cascade dominates SetNull
+    // (a deleted row can't be nulled).
+    let mut row_action: Option<FkAction> = None;
+    let mut row_setnull_field: Option<String> = None;
+    for (field_id, value, action, field_name) in resolved_probes {
+        let key = shamir_types::core::interner::InternerKey::new(*field_id);
+        if record_field_matches_by_id(bytes, &key, value) {
+            match action {
+                FkAction::Cascade => {
+                    row_action = Some(FkAction::Cascade);
+                    break;
+                }
+                FkAction::SetNull => {
+                    if row_action.is_none() {
+                        row_action = Some(FkAction::SetNull);
+                        row_setnull_field = Some((*field_name).to_string());
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    match row_action {
+        Some(FkAction::Cascade) => cascade_ids.push(id),
+        Some(FkAction::SetNull) => {
+            if let Some(f) = row_setnull_field {
+                setnull_ids.push((id, f));
+            }
+        }
+        _ => {}
+    }
+}
+
+/// F-53c: index fast-path candidate gathering, mirroring
+/// `fk_restrict::child_has_reference`'s index lookup exactly.
+///
+/// For each `(field, value)` probe, resolves `field` to its BASE interner id,
+/// checks for a single-field index on it (via `find_single_field_index`, the
+/// SAME check `child_has_reference` uses for RESTRICT), and looks up the
+/// committed RecordIds whose indexed value equals `value`. Returns the UNION
+/// of all probes' candidate IDs (deduped) when EVERY probe is index-covered,
+/// or `None` as soon as any probe's field lacks a usable single-field index
+/// (or any value is `Null` / a non-indexable scalar) — signaling the caller
+/// to fall back to the tx-aware `list_stream_tx` scan. `Null` is deliberately
+/// treated as non-indexable so the fast-path and scan-fallback produce
+/// identical results even for a (theoretically) nullable referenced field.
+///
+/// The returned IDs reflect COMMITTED state only — the index is maintained
+/// at commit, never mid-tx. The caller MUST additionally gate on "no staged
+/// writes to this child table" before treating the set as complete; staged
+/// inserts/updates/deletes are invisible to the index and are correctly
+/// handled only by the scan fallback. The caller MUST have already recorded
+/// the RI-barrier token at entry (before this call), preserving the F-40b
+/// mutual-serialization ordering exactly as `child_has_reference` does.
+async fn index_candidate_ids(
+    table: &TableManager,
+    interner: &shamir_types::core::interner::Interner,
+    probes: &[(&str, &QueryValue)],
+) -> shamir_storage::error::DbResult<Option<Vec<RecordId>>> {
+    use std::collections::BTreeSet;
+    let mut all: BTreeSet<RecordId> = BTreeSet::new();
+    for (field, value) in probes {
+        let inner = match qv_scalar_to_inner(value) {
+            Some(InnerValue::Null) | None => return Ok(None),
+            Some(iv) => iv,
+        };
+        let base_field_id = match interner.get_ind(field) {
+            Some(id) => id,
+            None => return Ok(None),
+        };
+        let field_path = [base_field_id.id()];
+        let idx_name = match table.find_single_field_index(&field_path) {
+            Some(n) => n,
+            None => return Ok(None),
+        };
+        let ids = table
+            .index_manager_ref()
+            .lookup_by_index(idx_name, std::slice::from_ref(&inner))
+            .await?;
+        all.extend(ids.iter().copied());
+    }
+    Ok(Some(all.into_iter().collect()))
+}
+
+/// F-53c: index fast-path helper — converts a probe's `QueryValue` to its
+/// indexable `InnerValue` form. Mirrors the identical helper in
+/// `fk_restrict.rs` / `fk_on_update.rs`.
+fn qv_scalar_to_inner(qv: &QueryValue) -> Option<InnerValue> {
+    match qv {
+        QueryValue::Null => Some(InnerValue::Null),
+        QueryValue::Bool(b) => Some(InnerValue::Bool(*b)),
+        QueryValue::Int(i) => Some(InnerValue::Int(*i)),
+        QueryValue::F64(f) => Some(InnerValue::F64(*f)),
+        QueryValue::Str(s) => Some(InnerValue::Str(s.clone())),
+        QueryValue::Bin(b) => Some(InnerValue::Bin(b.clone())),
+        QueryValue::Dec(d) => Some(InnerValue::Dec(*d)),
+        QueryValue::Big(b) => Some(InnerValue::Big(b.clone())),
+        _ => None,
+    }
 }
 
 /// F-28 Step 2: resolve `field` to its interner id, checking `base` first

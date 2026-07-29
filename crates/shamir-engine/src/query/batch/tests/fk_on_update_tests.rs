@@ -1883,3 +1883,193 @@ async fn delete_then_update_same_row_in_one_tx_row_stays_deleted() {
         "DELETE then UPDATE same row in one tx: row must stay deleted"
     );
 }
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// F-53c — index fast-path vs scan-fallback equivalence for ON UPDATE
+// CASCADE / SET NULL.
+//
+// `fk_on_update.rs::index_candidate_ids` (the F-53c index fast-path) and the
+// `list_stream_tx` scan fallback MUST produce byte-for-byte identical results.
+// These tests run the SAME scenario WITH a supporting index on the child FK
+// column (so the F-53c fast-path engages — the fresh autocommit tx has no
+// staged child writes) and assert the fan-out matches the no-index scan path
+// exercised by the existing tests above (`on_update_cascade_rekeys_multiple_*`
+// / `on_update_set_null_nulls_child_fk`).
+// ═══════════════════════════════════════════════════════════════════════════════
+
+#[tokio::test]
+async fn on_update_cascade_with_index_fast_path_rekeys_same_children() {
+    let repo_config = RepoConfig {
+        name: "default".to_string(),
+        factory: BoxRepoFactory::in_memory(),
+        tables: vec![TableConfig::new("parent"), TableConfig::new("child")],
+    };
+    let db = DbInstance::with_repos(vec![repo_config]).await.unwrap();
+    let registry = Arc::new(ValidatorRegistry::new());
+
+    bind_fk_validator(
+        &db,
+        &registry,
+        "child",
+        9330,
+        "child_fk_cascade_upd_idx",
+        "parent_id",
+        "parent",
+        "id",
+        FkAction::Cascade,
+        true,
+    );
+
+    let resolver = FkTestResolver {
+        db,
+        repo: "default".to_string(),
+        registry,
+    };
+
+    // Two parents (id=5, id=6), three children (two referencing 5, one 6) —
+    // same shape as `on_update_cascade_rekeys_multiple_children_and_rows`.
+    insert_row(
+        &resolver,
+        "ip1",
+        "parent",
+        doc().set("id", 5).set("name", "P5"),
+    )
+    .await;
+    insert_row(
+        &resolver,
+        "ip2",
+        "parent",
+        doc().set("id", 6).set("name", "P6"),
+    )
+    .await;
+    insert_row(
+        &resolver,
+        "ic1",
+        "child",
+        doc().set("cid", 1).set("parent_id", 5).set("label", "a"),
+    )
+    .await;
+    insert_row(
+        &resolver,
+        "ic2",
+        "child",
+        doc().set("cid", 2).set("parent_id", 5).set("label", "b"),
+    )
+    .await;
+    insert_row(
+        &resolver,
+        "ic3",
+        "child",
+        doc().set("cid", 3).set("parent_id", 6).set("label", "c"),
+    )
+    .await;
+
+    // Supporting index on the FK column → F-53c fast-path engages.
+    let child_table = resolver.db.get_table("default", "child").await.unwrap();
+    child_table
+        .create_index("idx_child_parent_id", &["parent_id"])
+        .await
+        .unwrap();
+
+    // Re-key BOTH parents (5,6 → 99) via a where that matches both.
+    let mut b = Batch::new();
+    b.id(1);
+    b.update(
+        "upd_parents",
+        write::update("parent")
+            .where_(filter::in_("id", [5, 6]))
+            .set(doc().set("id", 99)),
+    );
+    let req = b.build();
+    execute_batch(&req, &resolver, None, None, Actor::System, "test")
+        .await
+        .unwrap();
+
+    // IDENTICAL to the no-index scan path: every child re-keyed to 99.
+    let parent_ids = read_field_all(&resolver, "child", "parent_id").await;
+    assert_eq!(parent_ids.len(), 3);
+    assert!(
+        parent_ids.iter().all(|v| *v == QueryValue::Int(99)),
+        "expected all children re-keyed to 99 via the index fast-path, got: {parent_ids:?}"
+    );
+}
+
+#[tokio::test]
+async fn on_update_set_null_with_index_fast_path_nulls_same_children() {
+    let repo_config = RepoConfig {
+        name: "default".to_string(),
+        factory: BoxRepoFactory::in_memory(),
+        tables: vec![TableConfig::new("parent"), TableConfig::new("child")],
+    };
+    let db = DbInstance::with_repos(vec![repo_config]).await.unwrap();
+    let registry = Arc::new(ValidatorRegistry::new());
+
+    bind_fk_validator(
+        &db,
+        &registry,
+        "child",
+        9331,
+        "child_fk_setnull_upd_idx",
+        "parent_id",
+        "parent",
+        "id",
+        FkAction::SetNull,
+        true,
+    );
+
+    let resolver = FkTestResolver {
+        db,
+        repo: "default".to_string(),
+        registry,
+    };
+
+    insert_row(
+        &resolver,
+        "ip",
+        "parent",
+        doc().set("id", 5).set("name", "P5"),
+    )
+    .await;
+    insert_row(
+        &resolver,
+        "ic1",
+        "child",
+        doc().set("cid", 1).set("parent_id", 5).set("label", "a"),
+    )
+    .await;
+    insert_row(
+        &resolver,
+        "ic2",
+        "child",
+        doc().set("cid", 2).set("parent_id", 5).set("label", "b"),
+    )
+    .await;
+
+    // Supporting index on the FK column → F-53c fast-path engages.
+    let child_table = resolver.db.get_table("default", "child").await.unwrap();
+    child_table
+        .create_index("idx_child_parent_id", &["parent_id"])
+        .await
+        .unwrap();
+
+    // Re-key parent 5 → 7: both children's parent_id must be SET to Null.
+    let mut b = Batch::new();
+    b.id(1);
+    b.update(
+        "upd_parent",
+        write::update("parent")
+            .where_(filter::eq("id", 5))
+            .set(doc().set("id", 7)),
+    );
+    let req = b.build();
+    execute_batch(&req, &resolver, None, None, Actor::System, "test")
+        .await
+        .unwrap();
+
+    let parent_ids = read_field_all(&resolver, "child", "parent_id").await;
+    assert_eq!(parent_ids.len(), 2);
+    assert!(
+        parent_ids.iter().all(|v| *v == QueryValue::Null),
+        "expected both children nulled via the index fast-path, got: {parent_ids:?}"
+    );
+}

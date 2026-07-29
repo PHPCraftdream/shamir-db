@@ -235,6 +235,10 @@ harness = false
 name = "for_each_eval"
 harness = false
 
+[[bench]]
+name = "fk_cascade_index"
+harness = false
+
 [lib]
 # Doctests are banned project-wide (slow: recompile-per-example). Examples
 # live as illustration; behavioural coverage is in unit/integration tests.
