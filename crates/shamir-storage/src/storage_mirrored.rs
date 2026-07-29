@@ -475,33 +475,39 @@ impl Store for MirroredStore {
     /// has no multi-key primitive to delegate to, and adding one is out
     /// of scope; see the concurrent-reader residual below).
     ///
-    /// # Ordering — ephemeral-first, then durable-mirror, then durable-primary
+    /// # Ordering — durable-mirror FIRST, then BOTH subsets → primary
     ///
-    /// 1. **Ephemeral ops → `primary`** (per-op loop). If this fails
-    ///    partway, no durable write is attempted (fail fast). `primary`
-    ///    may be left partially mutated — the same pre-existing, tolerable
-    ///    characteristic a plain `InMemoryStore` already has (nothing
-    ///    durable was touched, so nothing inconsistent survives a
-    ///    restart; the live process's in-memory state is transiently
-    ///    inconsistent until the caller's own retry/compensation, exactly
-    ///    as today for a non-mirrored in-memory store).
+    /// **F-59: the mirror commit runs before `primary` is touched for
+    /// EITHER subset** — this is what makes the whole mixed batch
+    /// genuinely all-or-nothing from the caller's point of view: `Err`
+    /// means `primary` was not mutated at all (neither ephemeral nor
+    /// durable), `Ok` means both subsets landed.
     ///
-    /// 2. **Durable ops → `mirror`** atomically via `self.mirror.transact`
+    /// 1. **Durable ops → `mirror`** atomically via `self.mirror.transact`
     ///    (all-or-nothing via the mirror backend's own transact, e.g.
-    ///    `FjallStore`'s `OwnedWriteBatch`). **F-49: this runs BEFORE
-    ///    `primary` is touched for the durable subset** — the same
-    ///    mirror-commit-before-primary-publish discipline F-41 already
-    ///    established for single-key `set`/`remove` (see [`Self::set`]'s
-    ///    doc). If this fails, `primary` is NEVER mutated for the durable
-    ///    subset: the caller's `Err` is an honest "nothing happened" for
-    ///    the durable ops, not "primary already mutated but you got
-    ///    `Err`" (the pre-F-49 bug — exactly the class F-41 closed for
-    ///    `set`/`remove`, reopened here for the transact batch, and
-    ///    especially dangerous for index-rename/metadata transactions,
-    ///    the exact use case `transact`'s cross-op atomicity was added
-    ///    for). `KvOp` derives `Clone` (types.rs), so the durable ops are
-    ///    cloned for the mirror commit and the owned vec is retained for
-    ///    the subsequent primary application (phase 3).
+    ///    `FjallStore`'s `OwnedWriteBatch`). This is the ONLY fallible step
+    ///    — the same mirror-commit-before-primary-publish discipline F-41
+    ///    already established for single-key `set`/`remove` (see
+    ///    [`Self::set`]'s doc). If this fails, `primary` is NEVER mutated
+    ///    for EITHER subset: the caller's `Err` is an honest "nothing
+    ///    happened" for the whole batch, not "part of the batch already
+    ///    mutated primary but you got `Err`" (the pre-F-59 bug — the
+    ///    ephemeral subset used to apply to `primary` unconditionally
+    ///    BEFORE this fallible step, so a mirror failure left ephemeral
+    ///    mutations observable to concurrent readers despite the caller
+    ///    seeing `Err`; especially dangerous for index-rename/metadata
+    ///    transactions, the exact use case `transact`'s cross-op atomicity
+    ///    was added for). `KvOp` derives `Clone` (types.rs), so the
+    ///    durable ops are cloned for the mirror commit and the owned vec
+    ///    is retained for the subsequent primary application (step 3).
+    ///
+    /// 2. **Ephemeral ops → `primary`** (per-op loop, moved here from
+    ///    before the mirror commit). This runs ONLY after the mirror
+    ///    commit succeeded. Applying it to the concrete `InMemoryStore`
+    ///    is structurally infallible at the `DbResult` level (see the
+    ///    "Residual — reverse-direction divergence" section below), so
+    ///    once step 1 succeeds this step cannot itself introduce a new
+    ///    partial-failure window.
     ///
     /// 3. **Durable ops → `primary`** (per-op loop, for immediate read
     ///    visibility — reads go to `primary` ONLY). This runs ONLY after
@@ -529,7 +535,7 @@ impl Store for MirroredStore {
     ///
     /// # Concurrent-reader residual (investigated, documented — not fixed)
     ///
-    /// While the ephemeral loop (phase 1) is applying its ops one at a
+    /// While the ephemeral loop (step 2) is applying its ops one at a
     /// time, a CONCURRENT reader (`get` / `iter_stream` / etc., which
     /// read `primary` directly with no lock) can observe a
     /// partially-applied ephemeral batch. This is a pre-existing
@@ -563,8 +569,23 @@ impl Store for MirroredStore {
                 KvOp::Set(k, _) | KvOp::Remove(k) => !(self.classify)(k),
             });
 
-        // Phase 1 — ephemeral subset → primary (per-op, no cross-op
+        // Step 1 — durable subset → mirror FIRST (atomically, via the
+        // mirror backend's own transact — e.g. FjallStore's
+        // `OwnedWriteBatch`, all-or-nothing). F-59: this is the ONLY
+        // fallible step in the whole function, and it runs BEFORE
+        // `primary` is touched for EITHER subset — the same
+        // mirror-commit-before-primary-publish discipline F-41 already
+        // gives `set`/`remove`. If this fails, primary is NEVER touched
+        // for either subset — the caller's `Err` is an honest "nothing
+        // happened" for the whole batch, not "part of the batch already
+        // mutated primary". `KvOp` derives `Clone`; clone the durable ops
+        // for the mirror commit and retain the owned vec for step 3.
+        self.mirror.transact(durable_ops.clone()).await?;
+
+        // Step 2 — ephemeral subset → primary (per-op, no cross-op
         // atomicity; see concurrent-reader residual in the doc comment).
+        // Runs ONLY after the mirror commit succeeded (moved here from
+        // before it — F-59).
         for op in ephemeral_ops {
             match op {
                 KvOp::Set(k, v) => {
@@ -576,18 +597,7 @@ impl Store for MirroredStore {
             }
         }
 
-        // Phase 2 — durable subset → mirror FIRST (atomically, via the
-        // mirror backend's own transact — e.g. FjallStore's
-        // `OwnedWriteBatch`, all-or-nothing). F-49: mirroring the
-        // mirror-commit-before-primary-publish discipline F-41 already
-        // gives `set`/`remove`. If this fails, primary is NEVER touched
-        // for the durable subset — the caller's `Err` is an honest
-        // "nothing happened", not "primary already mutated". `KvOp`
-        // derives `Clone`; clone the durable ops for the mirror commit
-        // and retain the owned vec for phase 3.
-        self.mirror.transact(durable_ops.clone()).await?;
-
-        // Phase 3 — durable subset → primary (per-op, for immediate read
+        // Step 3 — durable subset → primary (per-op, for immediate read
         // visibility — reads go to primary ONLY). Runs ONLY after the
         // mirror commit succeeded. An empty durable subset (clone was
         // empty) is a no-op loop.

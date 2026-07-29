@@ -358,8 +358,11 @@ impl Store for FailingTransactMirror {
 /// through a late-bound handle to the wrapping `MirroredStore` and records
 /// the observed value for a configured key. This deterministically
 /// demonstrates what a concurrent reader sees while
-/// `MirroredStore::transact` is in its durable phase (after ephemeral ops
-/// were applied to `primary`, before the mirror write completes).
+/// `MirroredStore::transact` is in its durable (mirror-commit) phase.
+/// Under F-59 the ephemeral loop runs AFTER the mirror commit, so at this
+/// observation point ephemeral ops are NOT yet applied to `primary` — the
+/// reader sees no ephemeral state during the durable phase (the inverse of
+/// the pre-F-59 window, where ephemeral was applied first).
 struct ObservingMirror {
     inner: Arc<dyn Store>,
     /// Late-bound handle to the `MirroredStore` wrapping this mirror.
@@ -388,10 +391,12 @@ impl Store for ObservingMirror {
     }
     async fn transact(&self, ops: Vec<KvOp>) -> DbResult<()> {
         // Read `primary` through the wrapping `MirroredStore` to observe
-        // what a concurrent reader sees at this exact point — after the
-        // ephemeral loop completed, before the durable mirror write lands.
-        // Clone the Arc out of the Mutex BEFORE awaiting so the guard is
-        // not held across `.await` (Send requirement).
+        // what a concurrent reader sees at this exact point — during the
+        // durable mirror-commit phase. F-59 moved the ephemeral loop to
+        // AFTER this point, so a reader here sees NO ephemeral state yet
+        // (pre-F-59, ephemeral was applied before this and was visible
+        // here). Clone the Arc out of the Mutex BEFORE awaiting so the
+        // guard is not held across `.await` (Send requirement).
         let store_opt = self.store_slot.lock().unwrap().clone();
         if let Some(store) = store_opt {
             if let Ok(val) = store.get(self.observe_key.clone()).await {
@@ -519,15 +524,16 @@ async fn transact_durable_subset_failure_leaves_no_partial_durable_state() {
         "prior durable state must survive the failed transact unchanged"
     );
 
-    // Primary does NOT hold the durable ops (F-49 mirror-first: the mirror
-    // transact failed in Phase 2 BEFORE primary was touched in Phase 3).
+    // Primary does NOT hold the durable ops (F-49/F-59: the mirror
+    // transact — the only fallible step — runs FIRST, so its failure
+    // aborts before `primary` is touched for the durable subset).
     assert!(
         store.get(k1).await.is_err(),
-        "primary must NOT hold durable op k1 after mirror failure (F-49 mirror-first)"
+        "primary must NOT hold durable op k1 after mirror failure (mirror-first)"
     );
     assert!(
         store.get(k2).await.is_err(),
-        "primary must NOT hold durable op k2 after mirror failure (F-49 mirror-first)"
+        "primary must NOT hold durable op k2 after mirror failure (mirror-first)"
     );
 }
 
@@ -578,22 +584,28 @@ async fn transact_mixed_batch_routes_ephemeral_to_primary_and_durable_to_both() 
     );
 }
 
-/// **Test 4 — ephemeral-applied-then-durable-aborted ordering proof
-/// (F-49 mirror-first).**
+/// **Test 4 — whole-batch error atomicity (F-59 mirror-first-for-both).**
 ///
 /// Force the durable half to fail (same `FailingTransactMirror` technique
-/// as test 2) while the ephemeral half would otherwise succeed. Confirm:
-/// - `primary` DOES reflect the ephemeral ops (applied in Phase 1, which
-///   runs first and is unchanged by F-49).
-/// - `primary` does NOT reflect the durable ops (F-49 mirror-first: the
-///   mirror transact failed in Phase 2, aborting before primary was
-///   touched in Phase 3). Before F-49, primary was mutated for the
-///   durable subset before the mirror write was even attempted — the bug
-///   this test now guards against regressing.
+/// as test 2) while the ephemeral half would otherwise succeed. Confirm
+/// F-59's all-or-nothing guarantee for the WHOLE mixed batch:
+/// - `primary` does NOT reflect the ephemeral ops (F-59: the ephemeral
+///   loop now runs AFTER the mirror commit, so a mirror failure aborts
+///   before `primary` is touched for EITHER subset). Pre-F-59, the
+///   ephemeral loop ran BEFORE the mirror commit and landed in `primary`
+///   unconditionally — the caller then saw `Err` despite part of the
+///   batch being externally visible, the bug this test now guards
+///   against regressing.
+/// - `primary` does NOT reflect the durable ops (same reason — the only
+///   fallible step is the mirror commit, which runs first).
 /// - `mirror` does NOT reflect the durable ops (correctly rolled back to
 ///   nothing by the mirror backend's own atomic failure).
+///
+/// This test is RED on the pre-F-59 ordering (the ephemeral assertion
+/// fails because the ephemeral loop ran first and mutated `primary`
+/// before the mirror failure) and GREEN after the F-59 reorder.
 #[tokio::test]
-async fn transact_ephemeral_applied_but_durable_aborted_on_mirror_failure() {
+async fn transact_neither_subset_applied_on_mirror_failure() {
     let mirror_inner: Arc<dyn Store> = Arc::new(InMemoryStore::new());
     let failing_mirror = Arc::new(FailingTransactMirror {
         inner: mirror_inner.clone(),
@@ -616,18 +628,21 @@ async fn transact_ephemeral_applied_but_durable_aborted_on_mirror_failure() {
         .await;
     assert!(result.is_err(), "durable failure should propagate");
 
-    // Primary reflects the ephemeral ops (Phase 1 runs first, unchanged
-    // by F-49) but NOT the durable ops (F-49 mirror-first: the mirror
-    // transact failed in Phase 2, aborting before primary was touched).
-    assert_eq!(
-        store.get(ephemeral.clone()).await.unwrap(),
-        Bytes::from_static(b"eph"),
-        "primary must reflect ephemeral ops (Phase 1, unchanged)"
+    // F-59: primary reflects NEITHER subset — the mirror commit (the only
+    // fallible step) runs FIRST, so its failure aborts before `primary` is
+    // touched for ephemeral OR durable. The ephemeral assertion is the one
+    // that flips from the pre-F-59 behavior (it used to land in primary
+    // before the mirror commit was even attempted).
+    assert!(
+        store.get(ephemeral.clone()).await.is_err(),
+        "primary must NOT reflect ephemeral ops after mirror failure \
+         (F-59: ephemeral loop runs AFTER the mirror commit, so a mirror \
+         failure aborts before primary is touched for either subset)"
     );
     assert!(
         store.get(durable.clone()).await.is_err(),
         "primary must NOT reflect durable ops after mirror failure \
-         (F-49 mirror-first: primary untouched on durable mirror failure)"
+         (F-59: mirror commit runs first — primary untouched on failure)"
     );
 
     // Mirror does NOT reflect the durable ops — the mirror's transact
@@ -655,28 +670,34 @@ async fn transact_ephemeral_applied_but_durable_aborted_on_mirror_failure() {
     );
 }
 
-/// **Test 5 — concurrent-reader visibility during transact (honest test).**
+/// **Test 5 — concurrent-reader visibility during transact (honest test,
+/// updated for F-59).**
 ///
 /// An `ObservingMirror` reads `primary` (via the wrapping `MirroredStore`'s
-/// `get`) at the exact moment the durable phase begins — proving a
-/// concurrent reader during `MirroredStore::transact` CAN observe ephemeral
-/// state already applied to `primary` before the full batch completes.
+/// `get`) at the exact moment the durable mirror-commit phase runs. This
+/// test documents the visibility boundary at that point.
 ///
-/// This is the honest test of the concurrent-reader residual documented in
-/// `MirroredStore::transact`'s doc comment. It demonstrates the window that
-/// IS deterministically testable: a reader observing `primary` during the
-/// durable phase sees all ephemeral ops.
+/// **F-59 changed this boundary.** Pre-F-59 the ephemeral loop ran BEFORE
+/// the mirror commit, so a reader observing during the durable phase saw
+/// ephemeral state already applied to `primary` — a concurrency window the
+/// old version of this test asserted as `Some(ephemeral_val)`. F-59 moves
+/// the ephemeral loop to AFTER the mirror commit (the same reorder that
+/// closes the F-59 error-atomicity bug), so a reader observing during the
+/// durable mirror-commit phase now sees NO ephemeral state yet (`None`).
+/// This is a genuine narrowing of the observable window, and the flipped
+/// assertion is a regression guard proving the F-59 reorder is in effect.
 ///
-/// It does NOT assert the finer-grained case — a reader seeing PARTIAL
-/// ephemeral state (some but not all ephemeral ops) mid-ephemeral-loop.
-/// That interleaving is the same inherited `InMemoryStore` characteristic
-/// (lock-free `TreeIndex`, no multi-key atomicity), but it is not
-/// deterministically testable here: `InMemoryStore::set` completes
+/// This test does NOT assert the finer-grained "concurrent-reader
+/// residual" still documented in `MirroredStore::transact`'s doc comment —
+/// a reader seeing PARTIAL ephemeral state (some but not all ephemeral ops)
+/// mid-ephemeral-loop. That residual is UNCHANGED by F-59 (the ephemeral
+/// loop still applies ops one at a time with no cross-op atomicity) but is
+/// not deterministically testable here: `InMemoryStore::set` completes
 /// synchronously with no yield point between ephemeral ops for a concurrent
 /// reader to interleave at. Asserting it would claim a guarantee stronger
 /// than what is implemented — exactly what the brief says NOT to do.
 #[tokio::test]
-async fn transact_concurrent_reader_can_observe_ephemeral_state_mid_batch() {
+async fn transact_concurrent_reader_during_mirror_commit_sees_no_ephemeral_state() {
     let mirror_inner: Arc<dyn Store> = Arc::new(InMemoryStore::new());
 
     let ephemeral_key = unclassified_key();
@@ -711,15 +732,19 @@ async fn transact_concurrent_reader_can_observe_ephemeral_state_mid_batch() {
         .await
         .unwrap();
 
-    // The observing mirror read `primary` during the durable phase and
-    // saw the ephemeral value — proving a concurrent reader CAN observe
-    // ephemeral state mid-transact (before the batch completes).
+    // The observing mirror read `primary` during the durable mirror-commit
+    // phase. F-59: the ephemeral loop runs AFTER the mirror commit, so at
+    // this observation point ephemeral state is NOT yet in `primary` — the
+    // reader sees `None`. (Pre-F-59 this was `Some(ephemeral_val)` because
+    // ephemeral was applied before the mirror commit; the flip is the F-59
+    // regression guard.)
     let observed = observing.observed.lock().unwrap().clone();
-    assert_eq!(
-        observed,
-        Some(ephemeral_val),
-        "a reader during the durable phase must see the ephemeral op already \
-         applied to primary — this is the concurrent-reader window"
+    assert!(
+        observed.is_none(),
+        "a reader during the durable mirror-commit phase must NOT see \
+         ephemeral state yet — F-59 applies the ephemeral loop AFTER the \
+         mirror commit (pre-F-59 this window showed the ephemeral value); \
+         observed = {observed:?}"
     );
 
     // The durable op also landed correctly (transact completed).
