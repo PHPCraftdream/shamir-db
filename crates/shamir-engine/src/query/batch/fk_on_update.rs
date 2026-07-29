@@ -459,7 +459,16 @@ pub(crate) async fn plan_fk_on_update(
             for id in candidate_ids {
                 let bytes = match child_table.read_one_tx_bytes(id, Some(tx)).await {
                     Ok(Some(b)) => b,
-                    _ => continue,
+                    Ok(None) => continue,
+                    Err(e) => {
+                        return Err(BatchError::QueryError {
+                            alias: alias.to_string(),
+                            message: format!(
+                                "fk_on_update: child index fast-path re-read failed: {e}"
+                            ),
+                            code: Some("fk_on_update".to_string()),
+                        })
+                    }
                 };
                 classify_row_update(
                     id,

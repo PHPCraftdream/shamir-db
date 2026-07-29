@@ -449,7 +449,16 @@ async fn plan_cascade_recursive(
             for id in candidate_ids {
                 let bytes = match child_table.read_one_tx_bytes(id, Some(tx)).await {
                     Ok(Some(b)) => b,
-                    _ => continue,
+                    Ok(None) => continue,
+                    Err(e) => {
+                        return Err(BatchError::QueryError {
+                            alias: alias.to_string(),
+                            message: format!(
+                                "fk_actions: child index fast-path re-read failed: {e}"
+                            ),
+                            code: Some("fk_actions".to_string()),
+                        })
+                    }
                 };
                 classify_row(
                     id,
@@ -634,7 +643,16 @@ async fn plan_cascade_for_ids(
     for id in parent_ids {
         let bytes = match parent_table.read_one_tx_bytes(*id, Some(tx)).await {
             Ok(Some(b)) => b,
-            _ => continue,
+            Ok(None) => continue,
+            Err(e) => {
+                return Err(BatchError::QueryError {
+                    alias: alias.to_string(),
+                    message: format!(
+                        "fk_actions: grandchild ref_field collection re-read failed: {e}"
+                    ),
+                    code: Some("fk_actions".to_string()),
+                })
+            }
         };
         for &field in &parent_ref_fields {
             if let Some(&field_id) = field_ids.get(field) {
@@ -770,7 +788,16 @@ async fn plan_cascade_for_ids(
             for id in candidate_ids {
                 let bytes = match child_table.read_one_tx_bytes(id, Some(tx)).await {
                     Ok(Some(b)) => b,
-                    _ => continue,
+                    Ok(None) => continue,
+                    Err(e) => {
+                        return Err(BatchError::QueryError {
+                            alias: alias.to_string(),
+                            message: format!(
+                                "fk_actions: grandchild index fast-path re-read failed: {e}"
+                            ),
+                            code: Some("fk_actions".to_string()),
+                        })
+                    }
                 };
                 classify_row(
                     id,

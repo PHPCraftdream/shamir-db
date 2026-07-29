@@ -42,3 +42,9 @@ pub use table_manager::{table_token_for, TableManager};
 
 #[cfg(test)]
 pub use table::Table;
+
+// F-65 (#891): re-export the `read_one_tx_bytes` failure-injection seam so the
+// FK indexed-action fast-path tests under `crate::query::batch::tests` can arm a
+// one-shot injected read error. Test-only.
+#[cfg(test)]
+pub(crate) use table_manager_streaming::{ReadOneTxBytesFailHook, TEST_READ_ONE_TX_BYTES_FAILURE};

@@ -5,6 +5,7 @@ mod executor_tests;
 mod fk_actions_tests;
 mod fk_discovery_fail_closed_tests;
 mod fk_fail_closed_tests;
+mod fk_indexed_action_read_error_tests;
 mod fk_on_update_tests;
 mod fk_race_closure_tests;
 mod fk_restrict_tests;

@@ -3,6 +3,8 @@ use std::sync::Arc;
 use bytes::Bytes;
 use futures::StreamExt;
 use shamir_query_types::batch::ResultEncoding;
+#[cfg(test)]
+use shamir_storage::error::DbError;
 use shamir_storage::error::DbResult;
 use shamir_storage::types::RecordKey;
 use shamir_types::record_view::RecordView;
@@ -18,6 +20,62 @@ use super::tx_scan_overlay::{
 use crate::query::filter::eval::compile_filter;
 use crate::query::filter::eval_context::FilterContext;
 use crate::query::filter::Filter;
+
+// ── F-65 (#891) test-only failure-injection seam ────────────────────────────
+//
+// Mirrors the `TEST_*_HOOK` family (`table_manager_crud.rs::TEST_POST_BARRIER_PRE_WRITE_HOOK`,
+// `commit.rs::TEST_POST_VALIDATE_PRE_PUBLISH_HOOK`, etc.): a `#[cfg(test)]`
+// `OnceLock<Arc<Hook>>` global, zero cost when unset. Where those seams are
+// pause/resume handshakes for ordering tests, this one is a one-shot FAILURE
+// injector: it lets a test make the NEXT `read_one_tx_bytes` call for a given
+// `(table_token, RecordId)` return a genuine `Err(DbError::Storage)` instead of
+// reading the bytes — so an FK indexed-action fast-path candidate RE-READ hits a
+// real read error deterministically (no sleeps, no timing races).
+//
+// The injector is one-shot per arm: once an armed `(table_token, id)` fires it
+// is consumed, so a retry of the SAME id reads normally — keeping the injection
+// scoped to exactly one call and avoiding an accidental infinite-failure loop.
+// `read_one_tx_bytes` does NOT decode (it returns raw bytes), so corrupting
+// storage bytes cannot reach its `Err` branch — that is why a dedicated seam is
+// the cleanest deterministic way to exercise the `Err` path here.
+//
+// `std::sync::Mutex` is used (not a lock-free map) because this is a test-only,
+// cold, zero-contention path behind a `OnceLock::get()` that is `None` for every
+// non-test build — the lock-free-first rule applies to hot paths, not to this.
+
+#[cfg(test)]
+pub(crate) static TEST_READ_ONE_TX_BYTES_FAILURE: std::sync::OnceLock<
+    std::sync::Arc<ReadOneTxBytesFailHook>,
+> = std::sync::OnceLock::new();
+
+/// Test-only one-shot failure injector for [`TableManager::read_one_tx_bytes`].
+/// See [`TEST_READ_ONE_TX_BYTES_FAILURE`]'s doc for the rationale.
+#[cfg(test)]
+#[derive(Debug, Default)]
+pub(crate) struct ReadOneTxBytesFailHook {
+    inner: std::sync::Mutex<Vec<(u64, RecordId)>>,
+}
+
+#[cfg(test)]
+impl ReadOneTxBytesFailHook {
+    /// Arm a one-shot injected `Err` for the next `read_one_tx_bytes(table_token, id)`.
+    pub(crate) fn arm(&self, table_token: u64, id: RecordId) {
+        self.inner.lock().unwrap().push((table_token, id));
+    }
+
+    /// Returns `Some(Err)` if `(table_token, id)` is armed, consuming the arm
+    /// (one-shot); `None` otherwise.
+    fn take_injected(&self, table_token: u64, id: RecordId) -> Option<DbError> {
+        let mut guard = self.inner.lock().unwrap();
+        let pos = guard
+            .iter()
+            .position(|(tt, rid)| *tt == table_token && *rid == id)?;
+        guard.swap_remove(pos);
+        Some(DbError::Storage(format!(
+            "F-65 injected read_one_tx_bytes failure (table_token={table_token}, id={id:?})"
+        )))
+    }
+}
 
 impl TableManager {
     /// Stream records in batches, returning InnerValues
@@ -578,6 +636,16 @@ impl TableManager {
         id: RecordId,
         tx: Option<&shamir_tx::TxContext>,
     ) -> DbResult<Option<Bytes>> {
+        // F-65 (#891) test-only fault injection: if a test armed a failure for
+        // this exact `(table_token, id)`, return the injected `Err` instead of
+        // reading. One-shot (consumed on first match). See
+        // [`TEST_READ_ONE_TX_BYTES_FAILURE`]'s doc.
+        #[cfg(test)]
+        if let Some(hook) = TEST_READ_ONE_TX_BYTES_FAILURE.get() {
+            if let Some(err) = hook.take_injected(self.table_token(), id) {
+                return Err(err);
+            }
+        }
         if let Some(tx) = tx {
             let key = id.to_bytes();
             // Level-3: acquire a Shared lock on the key before reading.
