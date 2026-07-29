@@ -163,7 +163,7 @@ pub(super) async fn materialize(
             .into_iter()
             .map(|(token, ops)| async move {
                 let res = retry_materialize(MATERIALIZE_ATTEMPTS, || {
-                    apply_index_batch(repo, token, &ops, tx_id)
+                    apply_index_batch(repo, token, &ops, tx_id, commit_version)
                 })
                 .await;
                 (token, res)

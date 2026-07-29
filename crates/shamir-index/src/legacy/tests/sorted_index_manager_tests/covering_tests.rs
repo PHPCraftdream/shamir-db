@@ -230,7 +230,7 @@ async fn covering_delete_removes_projection() {
     let rid = RecordId::new();
     let rec = record_score_email(7, "gone@example.com");
     mgr.on_record_created(&rid, &rec, 1).await.unwrap();
-    mgr.on_record_deleted(&rid, &rec).await.unwrap();
+    mgr.on_record_deleted(&rid, &rec, 2).await.unwrap();
 
     let entries = all_sorted_entries(&info_store, COVERING_INDEX_NAME).await;
     assert!(entries.is_empty(), "posting must be removed on delete");

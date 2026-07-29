@@ -71,6 +71,53 @@ impl TableManager {
             },
         };
 
+        // F-53b Step 2 (#878): AsOf-aware sorted-index keyset seek fast path.
+        //
+        // When the query is single-column indexed ORDER BY + keyset
+        // pagination (`Pagination::After`) AND the per-index mutation
+        // high-water gate confirms no concurrent write could have
+        // moved/removed a pinned posting (`last_mutation_version() <=
+        // version`), dispatch to the seek arm BEFORE the inline-top-K and
+        // full-scan tails. The seek walks the sorted index in ORDER BY
+        // direction (`lookup_range_first_k_page`) and classifies each
+        // candidate against the pinned snapshot via `version_of` + `get_at`
+        // — `O(page_size)` per page instead of `O(N)`. A miss signal
+        // (`Ok(None)` — `concurrent_modified > 0`, defence-in-depth) falls
+        // through to the existing paths below.
+        //
+        // The gate is the load-bearing safety piece (see the spike memo §1.3
+        // + §5.1): a current-state index CANNOT correctly serve an AsOf ORDER
+        // BY query when a concurrent UPDATE to the indexed field MOVES a
+        // posting or a concurrent DELETE REMOVES one. The gate makes those
+        // cases impossible on this path; the classifier's
+        // `concurrent_modified` counter is the belt-and-suspenders fallback.
+        if let Some((idx_name, encoded_key, after_id, limit, direction)) =
+            self.try_plan_keyset_seek(query, interner)
+        {
+            if self.sorted_indexes().last_mutation_version() <= version {
+                if let Some(result) = self
+                    .read_as_of_keyset_seek(
+                        query,
+                        ctx,
+                        interner,
+                        idx_name,
+                        &encoded_key,
+                        after_id.as_ref(),
+                        limit,
+                        direction,
+                        version,
+                        start,
+                    )
+                    .await?
+                {
+                    return Ok(result);
+                }
+                // `Ok(None)` — defence-in-depth fallback (concurrent_modified
+                // > 0 under a gate that should have declined). Fall through to
+                // the existing full-scan path below for this page.
+            }
+        }
+
         // ── 2. Compile the WHERE filter (will be applied to AS-OF values). ──
         let filter_cb: Option<FilterNode> =
             query.r#where.as_ref().map(|f| compile_filter(f, interner));

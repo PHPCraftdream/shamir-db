@@ -107,6 +107,37 @@ pub struct SortedIndexManager {
     /// generation and skip re-derivation. Mirrors how `indexes` itself is
     /// shared.
     generation: Arc<AtomicU64>,
+
+    /// F-53b Step 2 (#878): monotonic "last mutation version" high-water —
+    /// the MVCC commit version of the most recent write that applied a
+    /// posting (create / update / delete) to ANY index this manager owns.
+    ///
+    /// The gate for the AsOf-aware cursor index-seek fast path
+    /// (`read_as_of_keyset_seek`): a cursor pinned at `pinned_version` may
+    /// ONLY use the seek when `last_mutation_version() <= pinned`, because
+    /// only then does the current-state index provably mirror the pinned
+    /// snapshot's postings. When any concurrent write has advanced this past
+    /// the pin, a current-state index CANNOT correctly place a row whose
+    /// pinned-version posting was MOVED (UPDATE to the indexed field) or
+    /// REMOVED (DELETE) after the pin — proven by F-53b Step 1's two
+    /// negative tests. The seek declines and the existing full-rescan
+    /// `read_as_of` path handles the page instead (correct, just O(N) not
+    /// O(page_size)). A false-negative gate (bumping when only an unrelated
+    /// index changed) costs ONE fallback to the already-correct scan, never
+    /// a correctness bug.
+    ///
+    /// **Bumped at APPLY time, NOT stage time.** Sorted-index ops are staged
+    /// into `tx.index_write_set` at STAGE time and applied at commit Phase
+    /// 5c (`apply_index_batch`); bumping at stage time would let an
+    /// uncommitted (possibly-aborting) tx disable the fast path for
+    /// unrelated cursors. The non-tx direct CRUD path bumps inside
+    /// `on_record_*` (that path's own apply point). Both wire points pass
+    /// the write's MVCC commit version, never a stage-time placeholder.
+    ///
+    /// `Arc`-shared across clones for the same reason `generation` is: a
+    /// write applied through one clone's commit pipeline must advance the
+    /// high-water for every other clone's `read_as_of` gate read.
+    last_mutation_version: Arc<AtomicU64>,
 }
 
 impl Clone for SortedIndexManager {
@@ -120,6 +151,7 @@ impl Clone for SortedIndexManager {
             info_store: Arc::clone(&self.info_store),
             indexes: Arc::clone(&self.indexes),
             generation: Arc::clone(&self.generation),
+            last_mutation_version: Arc::clone(&self.last_mutation_version),
         }
     }
 }
@@ -134,6 +166,7 @@ impl SortedIndexManager {
                 Vec::new(),
             )),
             generation: Arc::new(AtomicU64::new(0)),
+            last_mutation_version: Arc::new(AtomicU64::new(0)),
         };
         m.load().await?;
         Ok(m)
@@ -146,6 +179,37 @@ impl SortedIndexManager {
     /// entirely unless it has advanced.
     pub fn generation(&self) -> u64 {
         self.generation.load(Ordering::Acquire)
+    }
+
+    /// F-53b Step 2 (#878): the per-index mutation high-water — the MVCC
+    /// commit version of the most recent write that applied a posting to any
+    /// index this manager owns. The AsOf cursor seek gate compares this
+    /// against the cursor's `pinned_version`: when `<= pinned`, the
+    /// current-state index provably mirrors the pinned snapshot and the seek
+    /// fast path is safe; when `> pinned`, a concurrent write may have
+    /// moved/removed a pinned posting and the seek MUST decline (falling
+    /// back to the full scan).
+    ///
+    /// Acquire-load pairs with the `fetch_max(AcqRel)` in
+    /// [`note_mutation_at_version`].
+    pub fn last_mutation_version(&self) -> u64 {
+        self.last_mutation_version.load(Ordering::Acquire)
+    }
+
+    /// F-53b Step 2 (#878): advance the mutation high-water to `version` if
+    /// it is newer than the current value. Called at APPLY time only —
+    /// inside `on_record_*` (the non-tx direct apply path) and at commit
+    /// Phase 5c (`apply_index_batch`), always with the write's MVCC commit
+    /// version. Never called at stage time: bumping before commit would let
+    /// an uncommitted (possibly-aborting) tx disable the fast path for
+    /// unrelated cursors.
+    ///
+    /// `fetch_max` (not `store`) makes the bump monotonic and race-free
+    /// under concurrent committers without needing a CAS loop: the maximum
+    /// of all concurrent commit versions is always the correct high-water.
+    pub fn note_mutation_at_version(&self, version: u64) {
+        self.last_mutation_version
+            .fetch_max(version, Ordering::AcqRel);
     }
 
     /// True if at least one sorted index exists.
@@ -512,6 +576,9 @@ impl SortedIndexManager {
         record: &(impl RecordRef + ?Sized),
         version: u64,
     ) -> DbResult<()> {
+        // F-53b Step 2 (#878): bump at APPLY time (this method is the non-tx
+        // direct path's apply point). `version` is the write's MVCC version.
+        self.note_mutation_at_version(version);
         let ops = self.plan_record_created(record_id, record, version)?;
         self.apply_ops(&ops).await
     }
@@ -524,6 +591,8 @@ impl SortedIndexManager {
         new: &(impl RecordRef + ?Sized),
         version: u64,
     ) -> DbResult<()> {
+        // F-53b Step 2 (#878): bump at APPLY time (see on_record_created).
+        self.note_mutation_at_version(version);
         let ops = self.plan_record_updated(record_id, old, new, version)?;
         self.apply_ops(&ops).await
     }
@@ -538,6 +607,8 @@ impl SortedIndexManager {
         R: RecordRef + ?Sized + 'a,
         I: IntoIterator<Item = (&'a RecordId, &'a R)> + Clone,
     {
+        // F-53b Step 2 (#878): bump at APPLY time (see on_record_created).
+        self.note_mutation_at_version(version);
         if self.indexes.load_local().is_empty() {
             return Ok(());
         }
@@ -566,11 +637,21 @@ impl SortedIndexManager {
     }
 
     /// Drop entries for a deleted record.
+    ///
+    /// F-53b Step 2 (#878): `version` is the DELETE's MVCC commit version,
+    /// used to bump the mutation high-water at APPLY time. A DELETE after a
+    /// cursor's pin REMOVES the posting — the index never yields the record
+    /// id again, so the seek would silently miss a row the pinned snapshot
+    /// must show. The gate (bumped here) is what makes the AsOf seek decline
+    /// in that case and fall back to the full scan.
     pub async fn on_record_deleted(
         &self,
         record_id: &RecordId,
         record: &(impl RecordRef + ?Sized),
+        version: u64,
     ) -> DbResult<()> {
+        // F-53b Step 2 (#878): bump at APPLY time (see on_record_created).
+        self.note_mutation_at_version(version);
         let ops = self.plan_record_deleted(record_id, record)?;
         self.apply_ops(&ops).await
     }

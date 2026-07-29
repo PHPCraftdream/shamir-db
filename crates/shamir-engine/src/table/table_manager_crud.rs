@@ -451,7 +451,9 @@ impl TableManager {
                 self.index_manager
                     .on_record_deleted_unique(&id, old)
                     .await?;
-                self.sorted_indexes.on_record_deleted(&id, old).await?;
+                self.sorted_indexes
+                    .on_record_deleted(&id, old, version)
+                    .await?;
                 self.index2_on_delete(&id, old).await?;
             }
             // SSI footprint: delete touches the table (coarse TableScan

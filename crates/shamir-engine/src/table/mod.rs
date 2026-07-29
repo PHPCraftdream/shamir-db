@@ -5,6 +5,7 @@ mod filtered_vector;
 pub mod index2_backfill_hook;
 pub mod interner_manager;
 pub mod persistable;
+mod read_asof_seek;
 mod read_exec;
 mod read_index_scan;
 mod read_planner;

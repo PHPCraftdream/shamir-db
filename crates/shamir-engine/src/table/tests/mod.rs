@@ -13,6 +13,7 @@ pub mod explain_tests;
 pub mod f50_index_lifecycle_spike_tests;
 pub mod f50_step2_index_lifecycle_tests;
 pub mod f53a_streaming_topk_tests;
+pub mod f53b_asof_seek_tests;
 pub mod f53b_cursor_seek_spike_tests;
 pub mod filter_stream_tests;
 pub mod filtered_ann_tests;

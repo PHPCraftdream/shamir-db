@@ -462,7 +462,7 @@ async fn on_record_deleted_removes_entry() {
     let id = RecordId::new();
     let rec = record_with_int(201, 42);
     mgr.on_record_created(&id, &rec, 1).await.unwrap();
-    mgr.on_record_deleted(&id, &rec).await.unwrap();
+    mgr.on_record_deleted(&id, &rec, 2).await.unwrap();
     let r = mgr
         .lookup_range(101, Some(&enc_i64(42)), Some(&enc_i64(42)))
         .await

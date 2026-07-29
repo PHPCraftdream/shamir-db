@@ -402,7 +402,23 @@ artifact).
   wire at once — but the SERVER still executes a full pinned-version scan
   per page internally (no true server-side streaming cursor at the engine
   level), so server-side peak memory during a single page's execution is
-  not reduced by cursors; only wire/client-side memory is.
+  not reduced by cursors; only wire/client-side memory is. **F-53b (#878)
+  narrows this for the common case**: when a cursor's ORDER BY is a
+  single-column indexed field AND no concurrent write has touched that
+  index since the cursor's pin, the server now uses an AsOf-aware
+  sorted-index keyset seek (`read_as_of_keyset_seek`) that scans only
+  `O(page_size)` postings per page instead of `O(N)` — the per-page
+  scan-cost drops by a factor of `N / page_size` for the dominant
+  stable-result-set cursor workload. The full pinned-version scan per page
+  still applies to: (a) non-keyset-eligible cursors (multi-column,
+  unindexed, or computed-expression ORDER BY); (b) cursors where a
+  concurrent write to the indexed field advanced the per-index mutation
+  high-water gate past the pin (a one-way ratchet that conservatively
+  disables the seek for the cursor's remaining lifetime — the correct
+  tradeoff, since a current-state index cannot place a row whose pinned
+  posting was moved/removed); and (c) the cursor's own boundary-filter +
+  OFFSET pagination shape, which has not yet been converted to emit
+  `Pagination::After` (a follow-up task).
 - **Result-size and connection caps (current defaults).** A batch
   response is clamped to `max_result_size_bytes` (default **64 MiB**),
   and the server enforces a global `max_active_connections` cap (default

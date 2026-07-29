@@ -257,7 +257,7 @@ pub(crate) async fn materialize_async_tail(
         }
         for (token, ops) in by_token {
             if let Err(e) = retry_materialize(MATERIALIZE_ATTEMPTS, || {
-                apply_index_batch(repo, token, &ops, tx_id)
+                apply_index_batch(repo, token, &ops, tx_id, commit_version)
             })
             .await
             {
@@ -553,11 +553,23 @@ pub(crate) async fn apply_data_batch(
 }
 
 /// Apply one table's staged index ops (Phase 5c).
+///
+/// F-53b Step 2 (#878): after the postings land, advance the table's
+/// sorted-index mutation high-water (`last_mutation_version`) to
+/// `commit_version`. This is the LOAD-BEARING wire point for the tx path:
+/// the AsOf cursor seek gate compares this against a cursor's pinned
+/// version. Bumping here (at APPLY time, with the commit version) — NOT at
+/// stage time — ensures an uncommitted (possibly-aborting) tx can never
+/// disable the fast path for unrelated cursors. A missed bump (e.g. a tx
+/// whose Phase 5c is deferred to recovery) only costs a fallback to the
+/// already-correct full scan; the `concurrent_modified` defence-in-depth
+/// classifier in the seek arm catches any post-pin mutation the gate missed.
 pub(crate) async fn apply_index_batch(
     repo: &RepoInstance,
     token: u64,
     ops: &[IndexWriteOp],
     _tx_id: u64,
+    commit_version: u64,
 ) -> Result<(), DbError> {
     // Test-only failure injection: simulate a persistent Phase 5c storage
     // error for a specific tx so a post-commit-point failure can be
@@ -580,6 +592,14 @@ pub(crate) async fn apply_index_batch(
         // returning a stale cached result.
         tbl.index_manager_ref()
             .invalidate_posting_cache_for_ops(ops);
+        // F-53b Step 2 (#878): advance the per-table sorted-index mutation
+        // high-water so the AsOf cursor seek gate sees this commit. See the
+        // method doc for the stage-vs-apply ordering invariant. Bumped
+        // unconditionally (even when `ops` has no sorted-index entries) — a
+        // false-negative gate only costs a fallback to the already-correct
+        // full scan, never a correctness bug.
+        tbl.sorted_indexes()
+            .note_mutation_at_version(commit_version);
     }
     Ok(())
 }
