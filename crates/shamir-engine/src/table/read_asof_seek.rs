@@ -11,15 +11,50 @@
 //! `read_as_of` baseline pays.
 //!
 //! The §5.1 gate (`SortedIndexManager::last_mutation_version() <= pinned`) is
-//! the load-bearing safety check, performed by the caller (`read_as_of`)
-//! BEFORE dispatching here. It guarantees the current-state index provably
-//! mirrors the pinned snapshot's postings, so the §1.3 cases (UPDATE to the
-//! indexed field, DELETE after pin) — which a current-state index CANNOT
-//! serve — are impossible on this path. The `concurrent_modified` counter is
-//! kept as defence-in-depth: if the gate somehow misses (e.g. a Phase 5c
-//! deferred to recovery that did not bump the high-water), this arm returns
-//! `Ok(None)` so the caller falls back to the full scan for that page rather
-//! than returning a wrong result.
+//! checked by the caller (`read_as_of`) BEFORE dispatching here. It guarantees
+//! that, AT ENTRY, the current-state index provably mirrors the pinned
+//! snapshot's postings, so the §1.3 cases (UPDATE to the indexed field,
+//! DELETE after pin) — which a current-state index CANNOT serve — could not
+//! already have happened. The `concurrent_modified` counter classifies any
+//! candidate the walk actually OBSERVES with a bumped version — but it cannot
+//! catch a posting that a concurrent mutation REMOVES from the observed range
+//! entirely (DELETE) or MOVES out of it (an UPDATE to the indexed field): such
+//! a posting is simply absent from the walk, never reaches the classifier,
+//! and the page would silently omit a row that existed in the pinned
+//! snapshot.
+//!
+//! F-58 (#884) closes this: the entry gate is only checked ONCE, but the walk
+//! below is a multi-iteration, multi-`.await` loop — a mutation landing
+//! DURING that window is a genuine TOCTOU race the entry check alone cannot
+//! catch. The fix is a symmetric POST-scan re-check of the same predicate
+//! (`last_mutation_version() > pinned_version` ⇒ fall back), added after the
+//! loop and the `concurrent_modified` check, before this arm commits to
+//! returning its result. This works because `last_mutation_version` is a
+//! monotonic, `Acquire`/`AcqRel`-ordered high-water mark
+//! (`shamir-index/src/legacy/sorted_index_manager.rs`) — any mutation whose
+//! effect the walk could have observed necessarily bumps this same counter,
+//! and the post-check's `Acquire` load is guaranteed to see it (or later).
+//!
+//! ## Bump-vs-apply ordering (both verified, both safe for the post-check)
+//!
+//! - **Non-tx direct path** (`on_record_created`/`on_record_updated`/
+//!   `on_records_created_batch`/`on_record_deleted`,
+//!   `sorted_index_manager.rs:573-657`): bumps the high-water FIRST, applies
+//!   the posting mutation SECOND. This is actually the SAFER order for the
+//!   post-check: if the scan ever observes the mutation's effect, the bump
+//!   necessarily already happened — zero residual window. The only cost is a
+//!   possible false-positive fallback (bump fired, apply hadn't landed yet),
+//!   which is always safe (the full-scan fallback is correct by
+//!   construction).
+//! - **Tx-commit path** (`commit_phases.rs` Phase 5c): applies the posting
+//!   mutation FIRST, bumps the high-water SECOND — the ordering this module
+//!   originally assumed. This leaves a narrow, synchronous (no `.await`
+//!   between the two calls) window where the post-check could in principle
+//!   run between the apply and the bump and miss it. This residual is
+//!   accepted as out-of-scope for F-58: it is orders of magnitude narrower
+//!   than the unbounded-scan-duration TOCTOU this task closes, and closing it
+//!   fully would mean reordering the tx-commit pipeline's Phase 5c itself —
+//!   separate, riskier work, not this read-path fix.
 
 use std::time::Instant;
 
@@ -34,6 +69,53 @@ use shamir_storage::error::DbResult;
 
 use super::read_exec::apply_select_value_bytes;
 use super::table_manager::TableManager;
+
+// ─────────────────────────────────────────────────────────────────────────────
+// F-58 (#884): test-only pause seam — parks `read_as_of_keyset_seek` AFTER
+// the entry gate has passed (the caller checks `last_mutation_version() <=
+// pinned` before dispatching here) but BEFORE the loop's first iteration.
+//
+// Mirrors the `PostBarrierPreWriteHook` / `TEST_POST_BARRIER_PRE_WRITE_HOOK`
+// convention (table_manager_crud.rs, F-48 #859). One-shot: only the FIRST
+// seek to reach this seam actually parks (CAS true→false); every later seek
+// passes straight through. `nextest` runs each test in its own process, so
+// the global cannot leak across test files.
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+#[derive(Debug)]
+pub(crate) struct SeekLoopPreIterHook {
+    pub(crate) reached: std::sync::atomic::AtomicUsize,
+    pub(crate) resume: tokio::sync::Notify,
+    pub(crate) armed: std::sync::atomic::AtomicBool,
+}
+
+#[cfg(test)]
+pub(crate) static TEST_SEEK_LOOP_PRE_ITER_HOOK: std::sync::OnceLock<
+    std::sync::Arc<SeekLoopPreIterHook>,
+> = std::sync::OnceLock::new();
+
+/// Parks on [`TEST_SEEK_LOOP_PRE_ITER_HOOK`] if a test installed one;
+/// a true no-op otherwise.
+async fn fire_seek_loop_pre_iter_test_hook() {
+    #[cfg(test)]
+    if let Some(hook) = TEST_SEEK_LOOP_PRE_ITER_HOOK.get() {
+        hook.reached
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let should_pause = hook
+            .armed
+            .compare_exchange(
+                true,
+                false,
+                std::sync::atomic::Ordering::AcqRel,
+                std::sync::atomic::Ordering::Acquire,
+            )
+            .is_ok();
+        if should_pause {
+            hook.resume.notified().await;
+        }
+    }
+}
 
 impl TableManager {
     /// F-53b Step 2 (#878): AsOf-aware sorted-index keyset seek.
@@ -87,6 +169,12 @@ impl TableManager {
         })?;
 
         let forward = matches!(direction, OrderDirection::Asc);
+
+        // F-58 (#884): test seam — park AFTER the entry gate passed (the
+        // caller already checked `last_mutation_version() <= pinned`) but
+        // BEFORE the loop starts reading postings. This is the TOCTOU window
+        // the post-scan re-check below closes.
+        fire_seek_loop_pre_iter_test_hook().await;
 
         // Ordered walk + stale-posting-resume loop — mirrors
         // `read_keyset_seek`'s loop, generalised to also resume past
@@ -165,6 +253,21 @@ impl TableManager {
         // before dispatching here), fall back to the full scan for this page
         // rather than returning a wrong result.
         if concurrent_modified > 0 {
+            return Ok(None);
+        }
+
+        // F-58 (#884): post-scan re-check of the entry gate's predicate. The
+        // entry gate (checked once in `read_as_of` before dispatching here)
+        // can be invalidated by a concurrent UPDATE/DELETE landing DURING the
+        // loop above — a posting the walk has not yet reached (or already
+        // passed) can vanish entirely, and the `concurrent_modified` classifier
+        // above can only flag candidates it actually observes. This symmetric
+        // re-check closes that TOCTOU window: any mutation that could have
+        // raced the walk bumps this same counter, and the post-check's Acquire
+        // load observes it (see the module doc for the bump-vs-apply ordering
+        // analysis). If this fires, the caller falls through to the full scan
+        // — correct by construction.
+        if self.sorted_indexes().last_mutation_version() > pinned_version {
             return Ok(None);
         }
 

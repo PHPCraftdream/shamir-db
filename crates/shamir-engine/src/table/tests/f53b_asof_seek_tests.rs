@@ -544,3 +544,119 @@ fn score_from_bytes(bytes: &bytes::Bytes, score_id: u64) -> Option<i64> {
         _ => None,
     }
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// F-58 (#884) — mid-scan TOCTOU: DELETE during the parked seek walk.
+//
+// Unlike the gate-fallback tests above (which mutate BEFORE the entry gate
+// check and correctly prove the gate declines up front), this test parks the
+// seek walk AFTER the entry gate has passed but BEFORE the loop's first
+// iteration, then performs a concurrent DELETE. PRE-FIX: the seek silently
+// returns a page missing the deleted row (whose posting vanished from the
+// index) — the `concurrent_modified` classifier cannot detect a posting that
+// vanished entirely. POST-FIX: the F-58 post-scan re-check detects the
+// advanced high-water and returns `Ok(None)`, so `read_as_of` falls back to
+// the full scan for this page, which correctly includes the deleted-after-pin
+// row at its pinned value.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// F-58 (#884): a concurrent DELETE landing DURING the seek walk (after the
+/// entry gate passed) removes a posting the walk has not yet reached. The
+/// per-candidate classifier cannot detect a posting that vanished entirely.
+/// The F-58 post-scan re-check catches the advanced high-water and falls back
+/// to the full scan, which returns the deleted-after-pin row at its pinned
+/// position.
+///
+/// RED (pre-fix): the seek path walks the current-state index (now missing
+/// score-30's posting) and returns `[10, 20, 40]` — silently missing the row
+/// that existed in the pinned snapshot. GREEN (post-fix): the post-scan
+/// re-check detects `last_mutation_version > pinned` and returns `Ok(None)`,
+/// so `read_as_of` falls back to the full scan, which returns `[10, 20, 30]`.
+#[tokio::test]
+async fn f58_post_check_catches_mid_scan_delete() {
+    use crate::table::read_asof_seek::{SeekLoopPreIterHook, TEST_SEEK_LOOP_PRE_ITER_HOOK};
+    use std::sync::atomic::{AtomicBool, AtomicUsize};
+
+    let (tbl, mvcc, gate) = make_mvcc_score_table().await;
+    // 5 rows: scores [10, 20, 30, 40, 50].
+    let mut ids = Vec::new();
+    for s in [10, 20, 30, 40, 50] {
+        ids.push(insert_score(&tbl, &mvcc, s, &format!("r{s}")).await.0);
+    }
+    let pinned = pinned_at(&gate);
+    let score_id = {
+        let interner = tbl.interner().get().await.unwrap();
+        interner.touch_ind("score").unwrap().key().id()
+    };
+
+    // Pre-condition: the entry gate passes at pin time.
+    assert!(
+        tbl.sorted_indexes().last_mutation_version() <= pinned,
+        "pre-condition: gate must pass before the concurrent write"
+    );
+
+    // Install the F-58 test seam: park the seek walk AFTER the entry gate
+    // has passed (the caller checks `last_mutation_version() <= pinned`
+    // before dispatching to `read_as_of_keyset_seek`) but BEFORE the loop's
+    // first iteration. This is the exact TOCTOU window.
+    let hook = Arc::new(SeekLoopPreIterHook {
+        reached: AtomicUsize::new(0),
+        resume: tokio::sync::Notify::new(),
+        armed: AtomicBool::new(true),
+    });
+    TEST_SEEK_LOOP_PRE_ITER_HOOK
+        .set(Arc::clone(&hook))
+        .expect("hook installed once per test process");
+
+    // Spawn the seek read: first page, limit=3 → wants [10, 20, 30] in ASC
+    // score order. The read enters `read_as_of_keyset_seek`, passes the
+    // entry gate, and parks at the F-58 seam before the loop.
+    let tbl_r = tbl.clone();
+    let read_handle = tokio::spawn(async move {
+        let q = seek_query_asc(i64::MIN, 3, pinned, None);
+        let interner = tbl_r.interner().get().await.unwrap();
+        let refs = new_map();
+        let ctx = FilterContext::new(interner, &refs);
+        tbl_r.read(&q, &ctx).await.unwrap()
+    });
+
+    // Rendezvous: the read has parked at the F-58 seam. Busy-poll `reached`
+    // with `yield_now` so the runtime can poll the spawned read task until
+    // it reaches the hook and suspends (same convention as F-48/F-57).
+    while hook.reached.load(std::sync::atomic::Ordering::SeqCst) == 0 {
+        tokio::task::yield_now().await;
+    }
+
+    // While the read is parked, DELETE the score-30 row. This removes its
+    // posting from the sorted index AND bumps `last_mutation_version` past
+    // the pin. The in-flight seek walk has NOT yet read any postings, so it
+    // will walk an index that no longer contains score-30.
+    let row30 = find_row_with_score(&mvcc, &ids, 30, pinned, score_id).await;
+    tbl.delete(row30).await.unwrap();
+    assert!(
+        tbl.sorted_indexes().last_mutation_version() > pinned,
+        "post-delete: high-water must have advanced past the pin"
+    );
+
+    // Release the parked read and await its result.
+    hook.resume.notify_one();
+    let result = read_handle.await.unwrap();
+
+    // POST-FIX: the F-58 post-scan re-check detected the advanced high-water
+    // and returned `Ok(None)`, so `read_as_of` fell back to the full scan.
+    // The full scan uses tombstone-inclusive enumeration + `get_at(id,
+    // pinned)`, which correctly includes the deleted-after-pin row at its
+    // pinned value.
+    assert_fullscan_path(&result);
+
+    // The correct pinned result is [10, 20, 30]. PRE-FIX (no post-check) the
+    // seek would walk the current-state index (now [10, 20, 40, 50], missing
+    // score-30's posting) and return [10, 20, 40] — silently missing the row.
+    assert_eq!(
+        baseline_scores(&result),
+        vec![10, 20, 30],
+        "post-fix: full-scan fallback must return the deleted-after-pin row \
+         at its pinned position (score 30), not the current-state seek result \
+         which would miss it"
+    );
+}
