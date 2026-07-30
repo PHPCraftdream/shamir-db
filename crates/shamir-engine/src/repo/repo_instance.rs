@@ -503,6 +503,10 @@ impl RepoInstance {
     /// the catalogue is the source of truth). If the caller also needs
     /// the old stores gone, follow up with `store_delete` per namespace.
     pub async fn rename_table_stores(&self, from: &str, to: &str) -> DbResult<bool> {
+        // F-68 (#895) cluster D / task #124 diagnostic instrumentation:
+        // timestamped entry/exit — NOT a behavior change, logging only.
+        let rts_started = std::time::Instant::now();
+        log::debug!("rename_table_stores: enter from={from} to={to}");
         // Snapshot the old config BEFORE mutating `configs` so a missing
         // table is reported cleanly and a concurrent `remove_table` can
         // only make us return `false` (no half-applied rename).
@@ -523,7 +527,17 @@ impl RepoInstance {
         //    in history), this is a no-op.
         let from_token = table_token_for(from);
         if let Some(mvcc) = self.per_table_mvcc.get_sync(&from_token) {
+            // F-68 (#895) cluster D / task #124: timestamped before/after
+            // around `drain_to_history` — this synchronously walks the
+            // overlay and writes each drained version to `__history__`, the
+            // one potentially I/O-heavy step in this function.
+            let drain_started = std::time::Instant::now();
+            log::debug!("rename_table_stores: calling drain_to_history from={from}");
             mvcc.drain_to_history().await?;
+            log::debug!(
+                "rename_table_stores: drain_to_history returned after {:?}",
+                drain_started.elapsed()
+            );
         }
 
         // 1. Copy physical stores under the new name. `copy_store` is
@@ -557,6 +571,13 @@ impl RepoInstance {
             enable_indexes: old_config.enable_indexes,
         };
         self.add_table(new_config);
+
+        // F-68 (#895) cluster D / task #124: exit timestamp, paired with
+        // the "enter" log above.
+        log::debug!(
+            "rename_table_stores: exit from={from} to={to} elapsed={:?}",
+            rts_started.elapsed()
+        );
 
         Ok(true)
     }

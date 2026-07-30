@@ -175,11 +175,50 @@ impl WriterDrainBarrier {
     ///
     /// When no writers are active, returns after a single `SeqCst` load.
     pub async fn drain(&self) {
+        // F-68 (#895) cluster D / task #124 diagnostic instrumentation.
+        // NOT a behavior change: this is timestamped logging only, no new
+        // await point, no retry/timeout.
+        //
+        // This is the DDL side of the suspected lock-order inversion (task
+        // #897): every caller (`create_index_v2`, `create_index`,
+        // `create_unique_index_locked`, `SchemaActivationBarrierGuard::raise`)
+        // acquires `unique_write_lock` FIRST and calls `drain()` SECOND, while
+        // `pre_commit_prelock` (crates/shamir-engine/src/tx/pre_commit.rs)
+        // enters this SAME drain set first and may later acquire
+        // `unique_write_lock` for a DIFFERENT table while still holding this
+        // table's drain-set membership. If a DDL's `drain()` call never
+        // returns, this loop logs a "still waiting" warning periodically (not
+        // every iteration — that would flood the log) so a stuck CI run shows
+        // the entered-but-never-drained state with a timestamp gap that lines
+        // up with the kill.
+        let drain_started = std::time::Instant::now();
+        let mut last_report = drain_started;
+        log::debug!(
+            "WriterDrainBarrier::drain: enter, active={}",
+            self.active.load(Ordering::SeqCst)
+        );
         // SeqCst (not Acquire): pairs with the writer's SeqCst fetch_add via the
         // single total order — see the struct-level memory-model proof.
         while self.active.load(Ordering::SeqCst) != 0 {
             tokio::task::yield_now().await;
+            // Threshold-gated so the common (fast, uncontended) path never
+            // pays a Instant::now() + log call per yield — only once the
+            // wait has already run past 1s do we start periodically
+            // reporting, and then only once per additional second.
+            if last_report.elapsed() >= std::time::Duration::from_secs(1) {
+                log::warn!(
+                    "WriterDrainBarrier::drain: still waiting after {:?}, active={} \
+                     (possible lock-order-inversion deadlock, see task #897)",
+                    drain_started.elapsed(),
+                    self.active.load(Ordering::SeqCst)
+                );
+                last_report = std::time::Instant::now();
+            }
         }
+        log::debug!(
+            "WriterDrainBarrier::drain: exit after {:?}",
+            drain_started.elapsed()
+        );
     }
 
     /// Test-only: current active-writer count (for assertions). Not part of

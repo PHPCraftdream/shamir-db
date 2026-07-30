@@ -201,6 +201,14 @@ impl ShamirDb {
         to: &str,
         _actor: Actor,
     ) -> DbResult<()> {
+        // F-68 (#895) cluster D / task #124 diagnostic instrumentation:
+        // timestamped entry/exit around the whole rename so a hung CI run
+        // (e.g. `rename_populated_survives_cold_restart`, TIMEOUT 600.016s
+        // on ubuntu-latest) shows whether the stall is inside this call at
+        // all, and if so how far it got before the last log line. NOT a
+        // behavior change — logging only.
+        let rename_started = std::time::Instant::now();
+        log::debug!("rename_table_as: enter db={db_name} repo={repo_name} from={from} to={to}");
         let db = self
             .get_db(db_name)
             .ok_or_else(|| DbError::NotFound(format!("Database '{}' not found", db_name)))?;
@@ -291,7 +299,18 @@ impl ShamirDb {
         let repo = db
             .get_repo(repo_name)
             .ok_or_else(|| DbError::NotFound(format!("Repository '{}' not found", repo_name)))?;
+        // F-68 (#895) cluster D / task #124: timestamped before/after around
+        // `rename_table_stores` — this is the call that force-drains the
+        // source table's MVCC overlay (`drain_to_history`) and copies the
+        // physical stores; if the hang is inside the engine's rename path
+        // rather than in commit-pipeline locking, this pinpoints it.
+        let stores_started = std::time::Instant::now();
+        log::debug!("rename_table_as: calling rename_table_stores from={from} to={to}");
         let existed = repo.rename_table_stores(from, to).await?;
+        log::debug!(
+            "rename_table_as: rename_table_stores returned after {:?}",
+            stores_started.elapsed()
+        );
         debug_assert!(
             existed,
             "rename_table_stores returned false despite has_table guard"
@@ -329,6 +348,14 @@ impl ShamirDb {
                 e
             );
         }
+
+        // F-68 (#895) cluster D / task #124: exit timestamp, paired with the
+        // "enter" log above.
+        log::debug!(
+            "rename_table_as: exit db={db_name} repo={repo_name} from={from} to={to} \
+             elapsed={:?}",
+            rename_started.elapsed()
+        );
 
         Ok(())
     }

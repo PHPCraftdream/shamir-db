@@ -75,7 +75,16 @@ impl TableManager {
         // shamir-db + engine tests) never already hold `unique_write_lock`, so
         // acquiring it here cannot self-deadlock (`tokio::sync::Mutex` is NOT
         // reentrant).
+        // F-68 (#895) cluster D / task #124: timestamped lock-then-drain
+        // instrumentation (see `writer_drain_barrier.rs::drain`'s doc for the
+        // suspected lock-order-inversion — task #897 — this pairs with).
+        let lock_wait_started = std::time::Instant::now();
+        log::debug!("create_index_v2: acquiring unique_write_lock");
         let _uwl_guard = self.unique_write_lock.lock().await;
+        log::debug!(
+            "create_index_v2: acquired unique_write_lock after {:?}",
+            lock_wait_started.elapsed()
+        );
         // RAII: clear the barrier on EVERY exit path (including the `?`
         // early-returns in the backend-build match and the backfill), so a
         // failed create never leaves writers stuck on the barrier forever.
@@ -509,7 +518,15 @@ impl TableManager {
         // F-57 (#883): hold `unique_write_lock` across the snapshot→register
         // sequence and raise the barrier flag so ALL writer paths serialize
         // against this create. Mirrors `create_index_v2`'s now-corrected shape.
+        // F-68 (#895) cluster D / task #124: timestamped lock-then-drain
+        // instrumentation — mirrors `create_index_v2`'s matching log lines.
+        let lock_wait_started = std::time::Instant::now();
+        log::debug!("create_index: acquiring unique_write_lock");
         let _uwl_guard = self.unique_write_lock.lock().await;
+        log::debug!(
+            "create_index: acquired unique_write_lock after {:?}",
+            lock_wait_started.elapsed()
+        );
         let _barrier = IndexCreateBarrierGuard::set(&self.regular_index_create_barrier);
         // Drain any in-flight fast-path writer that read
         // `needs_write_barrier() == false` before the flag went up — same
@@ -565,7 +582,17 @@ impl TableManager {
         // pipeline (Phase 2.5) acquire, so it unifies DDL against all writer
         // classes. Tables without unique indexes acquire it harmlessly
         // (no contention); this is a low-frequency DDL operation.
+        //
+        // F-68 (#895) cluster D / task #124: timestamped lock-then-drain
+        // instrumentation — mirrors `create_index_v2`'s matching log lines
+        // (the actual drain happens inside `create_unique_index_locked`).
+        let lock_wait_started = std::time::Instant::now();
+        log::debug!("create_unique_index: acquiring unique_write_lock");
         let _uwl_guard = self.unique_write_lock.lock().await;
+        log::debug!(
+            "create_unique_index: acquired unique_write_lock after {:?}",
+            lock_wait_started.elapsed()
+        );
         self.create_unique_index_locked(name, paths).await
     }
 
@@ -947,7 +974,18 @@ impl TableManager {
             // SAME lock non-tx writers acquire (table_manager_crud.rs) and
             // the tx commit pipeline acquires (Phase 2.5), so it blocks all
             // writer classes for the rename's duration.
+            //
+            // F-68 (#895) cluster D / task #124: timestamped lock-then-drain
+            // instrumentation — mirrors `create_index_v2`'s matching log
+            // lines (this is `rename_index`'s unique-index path; the actual
+            // drain happens inside `create_unique_index_locked` below).
+            let lock_wait_started = std::time::Instant::now();
+            log::debug!("rename_index: acquiring unique_write_lock (unique case)");
             let _uwl_guard = self.unique_write_lock.lock().await;
+            log::debug!(
+                "rename_index: acquired unique_write_lock after {:?}",
+                lock_wait_started.elapsed()
+            );
 
             self.index_manager.drop_unique_index(old_id).await?;
             // Use the _locked variant: the lock is already held above, and

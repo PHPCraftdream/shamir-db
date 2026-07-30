@@ -76,6 +76,17 @@ captrack = { workspace = true }
 bytes       = "1"
 tempfile    = "3.10.1"
 serial_test = "3.3.1"
+# F-68 (#895) cluster D / task #124: test-only diagnostic-instrumentation
+# visibility. `log = "0.4"` (already a direct dependency above) is the
+# macro facade every `log::debug!`/`log::warn!` call site in shamir-engine
+# and shamir-db uses, but with no logger installed those calls are silent
+# no-ops — nextest does not wire one up by default. `env_logger` is already
+# present in Cargo.lock (transitive dep of another crate) at 0.11.10, so
+# this pulls in no new version; `rename_table_durability.rs` calls
+# `env_logger::try_init()` once so the new instrumentation actually reaches
+# nextest's captured stdout on a hang. Dev-only — no production/library
+# code depends on this.
+env_logger  = "0.11.10"
 futures     = "0.3"            # audit #540 fault-injecting Store test double (iter_stream/scan_prefix_stream Stream impl)
 # Unifies in the `test-util` feature so `RepoInstance::install_table_for_test`
 # (audit #540 fault-injection seam) exists when shamir-db's own tests compile.

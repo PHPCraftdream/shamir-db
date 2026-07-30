@@ -3426,6 +3426,7 @@ dependencies = [
  "bytes",
  "captrack",
  "dashmap",
+ "env_logger",
  "futures",
  "log",
  "mimalloc",

@@ -854,9 +854,23 @@ impl Drainer {
                     break;
                 }
                 if let Some(this) = drainer.upgrade() {
+                    // F-68 (#895) cluster D / task #124 diagnostic
+                    // instrumentation: timestamped "tick started"/"tick
+                    // finished" pair around this background loop's core
+                    // work, per the brief's request to rule out (or
+                    // implicate) a concurrently-running reaper/GC task
+                    // during `rename_populated_survives_cold_restart`'s
+                    // cold-restart cycle. NOT a behavior change — logging
+                    // only, no new await point.
+                    let tick_started = std::time::Instant::now();
+                    log::debug!("drainer background loop: tick started");
                     if let Err(e) = this.drain_all(&repo).await {
                         log::warn!("drainer background loop: drain_all failed: {e}");
                     }
+                    log::debug!(
+                        "drainer background loop: tick finished after {:?}",
+                        tick_started.elapsed()
+                    );
                 } else {
                     break;
                 }

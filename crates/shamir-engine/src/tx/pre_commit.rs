@@ -279,6 +279,16 @@ pub(super) async fn pre_commit_prelock(
     tx: &mut TxContext,
     repo: &RepoInstance,
 ) -> Result<PreLockResult, TxError> {
+    // F-68 (#895) cluster D diagnostic instrumentation, task #124 — entry
+    // timestamp. Task #897 (independent code review) suspects a lock-order
+    // inversion between this fn (drain-guard-then-lock, see the Phase 2.5
+    // loop below) and every DDL path (lock-then-drain, e.g.
+    // `create_index_v2` in `table_manager_index_mgmt.rs`). If a hang
+    // reproduces on CI, this pairs with the "pre_commit_prelock: exit" log
+    // below (or its absence) to show whether the stall is INSIDE this fn.
+    let tx_id_for_log = tx.tx_id.0;
+    let prelock_started = std::time::Instant::now();
+    log::debug!("pre_commit_prelock: enter tx_id={tx_id_for_log}");
     // Phase 1: interner overlay merge → id remap.
     //
     // Stage I: the interner is per-REPO (one id-namespace shared across
@@ -484,7 +494,39 @@ pub(super) async fn pre_commit_prelock(
         Vec::with_capacity(unique_tokens.len());
     for token in &unique_tokens {
         if let Some(tbl) = repo.table_by_token(*token).await? {
-            uwl_guards.push(tbl.unique_write_lock().lock_owned().await);
+            // F-68 (#895) cluster D / task #124 — this is the OTHER half of
+            // the suspected lock-order inversion (task #897): this committer
+            // is still holding this table's `drain_guards` (Phase 2.5's
+            // fast-path guards, kept alive above for whichever OTHER tables
+            // read `needs_write_barrier() == false`) while acquiring THIS
+            // table's `unique_write_lock` here. A DDL path
+            // (`create_index_v2` / `SchemaActivationBarrierGuard::raise`)
+            // takes the OPPOSITE order (lock, then drain) — if both sides
+            // are mid-sequence on overlapping tables, this `.lock_owned()`
+            // and the DDL's `drain_writers().await` can each wait on the
+            // other forever. Timestamped so a stuck run shows exactly which
+            // table_token this committer was blocked on acquiring, and for
+            // how long.
+            let uwl_wait_started = std::time::Instant::now();
+            log::debug!(
+                "pre_commit_prelock: tx_id={tx_id_for_log} acquiring unique_write_lock \
+                 table_token={token}"
+            );
+            let guard = tbl.unique_write_lock().lock_owned().await;
+            let uwl_wait_elapsed = uwl_wait_started.elapsed();
+            if uwl_wait_elapsed >= std::time::Duration::from_secs(1) {
+                log::warn!(
+                    "pre_commit_prelock: tx_id={tx_id_for_log} unique_write_lock \
+                     table_token={token} acquisition took {uwl_wait_elapsed:?} \
+                     (>= 1s threshold) — possible lock-order contention, see task #897"
+                );
+            } else {
+                log::debug!(
+                    "pre_commit_prelock: tx_id={tx_id_for_log} acquired unique_write_lock \
+                     table_token={token} in {uwl_wait_elapsed:?}"
+                );
+            }
+            uwl_guards.push(guard);
         }
     }
 
@@ -563,6 +605,19 @@ pub(super) async fn pre_commit_prelock(
     // particular before Phase 5c's materialize write (the actual data
     // store mutation). No-op in every non-test build.
     fire_post_prelock_pre_materialize_test_hook().await;
+
+    // F-68 (#895) cluster D / task #124 — exit timestamp, paired with the
+    // "enter" log above. If a run hangs, the LAST "enter" without a
+    // matching "exit" for the same tx_id pinpoints that the stall is
+    // somewhere inside this function (most likely the per-table
+    // unique_write_lock loop just above — see task #897).
+    log::debug!(
+        "pre_commit_prelock: exit tx_id={tx_id_for_log} elapsed={:?} \
+         uwl_guards={} drain_guards={}",
+        prelock_started.elapsed(),
+        uwl_guards.len(),
+        drain_guards.len()
+    );
 
     Ok(PreLockResult {
         uwl_guards,

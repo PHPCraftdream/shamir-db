@@ -396,6 +396,20 @@ async fn metrics_exposes_unbounded_sentinel_when_no_byte_budget() {
         spawn_with_byte_budget, ObservabilityError, ObservabilityState,
     };
 
+    // F-68 (#895) cluster D / task #124: install a `tracing` subscriber so
+    // the `tracing::debug!`/`tracing::warn!` diagnostic instrumentation
+    // added to `ObservabilityHandle::shutdown` (crates/shamir-server/src/
+    // observability.rs) actually reaches nextest's captured stdout if this
+    // test hits its 600.059s TIMEOUT (macos-latest) again — without an
+    // installed subscriber, `tracing` events are silently dropped.
+    // `try_init` (not `init`, which panics on a second call) because
+    // `tracing_subscriber::fmt()` installs a GLOBAL default subscriber and
+    // nextest may run other tests in this same binary concurrently.
+    let _ = tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::DEBUG)
+        .with_test_writer()
+        .try_init();
+
     let state = ObservabilityState::new();
     let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
     // Same try-then-fallback recorder-install race as

@@ -99,10 +99,56 @@ pub struct ObservabilityHandle {
 
 impl ObservabilityHandle {
     /// Stop the HTTP listener and the process-metrics poller.
+    ///
+    /// F-68 (#895) cluster D / task #124 diagnostic instrumentation: this
+    /// function is instrumented with timestamped `tracing` events around
+    /// `notify_waiters()` and around EACH of the two `JoinHandle` awaits
+    /// individually (they were previously awaited back-to-back with no
+    /// logging), because `metrics_exposes_unbounded_sentinel_when_no_byte_budget`
+    /// hit a 600.059s TIMEOUT on macos-latest here. Working hypothesis (NOT
+    /// yet confirmed): `listener_task` runs
+    /// `axum::serve(..).with_graceful_shutdown(..)`, and axum/hyper's
+    /// graceful shutdown by default waits for every open connection
+    /// (including idle HTTP/1.1 keep-alive connections from EARLIER
+    /// requests in the same test process, not just in-flight ones) to close
+    /// before the future resolves — so if some connection from an earlier
+    /// request/test in this process is never closed, `listener_task.await`
+    /// could hang here indefinitely. This is logging only — no retry, no
+    /// timeout, no behavior change. If this hangs again, the log will show
+    /// which of the two awaits (`listener_task` vs. `poller_task`) never
+    /// returns, with a timestamp gap lining up with the 600s kill.
     pub async fn shutdown(self) {
+        let shutdown_started = std::time::Instant::now();
+        tracing::debug!("ObservabilityHandle::shutdown: enter, calling notify_waiters()");
         self.shutdown.notify_waiters();
+        tracing::debug!(
+            elapsed = ?shutdown_started.elapsed(),
+            "ObservabilityHandle::shutdown: notify_waiters() returned"
+        );
+
+        let listener_wait_started = std::time::Instant::now();
+        tracing::debug!("ObservabilityHandle::shutdown: awaiting listener_task");
         let _ = self.listener_task.await;
+        tracing::debug!(
+            elapsed = ?listener_wait_started.elapsed(),
+            "ObservabilityHandle::shutdown: listener_task.await returned \
+             (axum::serve's with_graceful_shutdown resolved — see this fn's \
+             doc for the lingering-keep-alive-connection hypothesis if this \
+             took unexpectedly long)"
+        );
+
+        let poller_wait_started = std::time::Instant::now();
+        tracing::debug!("ObservabilityHandle::shutdown: awaiting poller_task");
         let _ = self.poller_task.await;
+        tracing::debug!(
+            elapsed = ?poller_wait_started.elapsed(),
+            "ObservabilityHandle::shutdown: poller_task.await returned"
+        );
+
+        tracing::debug!(
+            total_elapsed = ?shutdown_started.elapsed(),
+            "ObservabilityHandle::shutdown: exit"
+        );
     }
 }
 
@@ -384,6 +430,31 @@ pub async fn spawn_with_byte_budget(
         let serve = axum::serve(listener, app);
         let shutdown_signal = async move {
             shutdown_for_serve.notified().await;
+            // F-68 (#895) cluster D / task #124: this is the point
+            // `with_graceful_shutdown` is signaled to stop accepting NEW
+            // connections. `axum::serve`'s graceful shutdown (built on
+            // hyper-util's `GracefulShutdown`) then waits for every
+            // currently-open connection — including idle HTTP/1.1
+            // keep-alive connections left over from EARLIER requests, not
+            // just genuinely in-flight ones — to close before the
+            // `.with_graceful_shutdown(..).await` below resolves. Checked:
+            // axum 0.7 / `axum::serve` does not expose a public
+            // connection-count or per-connection introspection hook (no
+            // `on_connection` callback, no live counter) that this log
+            // could report — noting that here rather than forcing an
+            // artificial signal. If `listener_task.await` in
+            // `ObservabilityHandle::shutdown` (this crate, same file) hangs,
+            // the coarser before/after timestamps there are the best signal
+            // currently available; narrowing further would need either an
+            // upstream hyper-util API or wrapping every accepted connection
+            // in our own counter (a behavior change, out of scope here).
+            tracing::debug!(
+                "observability listener_task: shutdown signal fired, \
+                 waiting for axum::serve's graceful shutdown to drain \
+                 open connections (connection-count introspection is not \
+                 available from axum/hyper-util's public API — see this \
+                 comment)"
+            );
         };
         if let Err(e) = serve.with_graceful_shutdown(shutdown_signal).await {
             tracing::warn!(error = %e, "observability server exited with error");

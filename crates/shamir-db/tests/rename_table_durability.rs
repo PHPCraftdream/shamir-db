@@ -42,6 +42,20 @@ async fn reinit_with_retry(sys_path: std::path::PathBuf) -> ShamirDb {
 /// drop-and-reopen.
 #[tokio::test]
 async fn rename_populated_survives_cold_restart() {
+    // F-68 (#895) cluster D / task #124: install a logger so the
+    // `log::debug!`/`log::warn!` diagnostic instrumentation added to the
+    // rename/pre_commit lock-and-drain path (see
+    // docs/dev-artifacts/prompts/post-alpha/124-f68-cluster-d-hang-instrumentation.md)
+    // actually reaches nextest's captured stdout if this test hangs again —
+    // without an installed logger, `log`'s macros are silent no-ops.
+    // `default_filter_or("debug")` sets the level CI needs (CI sets no
+    // `RUST_LOG`) while still letting a local `RUST_LOG=...` override win.
+    // `try_init` (not `init`) so a second call in the same process (nextest
+    // can run multiple tests per binary) doesn't panic.
+    let _ = env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("debug"))
+        .is_test(true)
+        .try_init();
+
     let dir = tempfile::tempdir().unwrap();
     let sys_path = dir.path().join("meta.redb");
 
