@@ -507,6 +507,18 @@ pub(crate) fn utc_timestamp() -> String {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0);
+    utc_timestamp_at(secs)
+}
+
+/// F-68 (#895, cluster D): format an arbitrary unix-epoch-seconds value the
+/// same way [`utc_timestamp`] formats "now". Split out so a test can
+/// compute the stamp for a KNOWN instant (e.g. "now" and "now + 1s")
+/// without racing `SystemTime::now()` a second time — see
+/// `tests::restore_tests::preexisting_temp_dir_name_collision_still_reports_already_exists`,
+/// which pre-creates a collision directory at BOTH `now` and `now + 1s` so
+/// the test is deterministic regardless of which UTC second `restore()`'s
+/// own internal `utc_timestamp()` call lands in.
+pub(crate) fn utc_timestamp_at(secs: u64) -> String {
     let (y, mo, d, h, mi, s) = unix_to_ymd_hms(secs);
     format!("{y:04}{mo:02}{d:02}_{h:02}{mi:02}{s:02}")
 }

@@ -240,6 +240,30 @@ fn step5_first_rename_failure_cleans_up_staged_temp_dir() {
 /// underlying detection mechanism changed (a single atomic syscall instead
 /// of a separate `exists()` probe), but the operator-facing behavior must
 /// not.
+///
+/// F-68 (#895, cluster D) root cause: this test used to read
+/// `crate::backup::utc_timestamp()` ONCE, immediately before calling
+/// `restore()`, and pre-create a collision directory at that single name --
+/// but `restore()` computes its OWN, SEPARATE `utc_timestamp()` call
+/// internally, racing the wall clock. If a UTC-second boundary fell between
+/// the two calls, the names diverged, `restore()`'s `fs::create_dir` did
+/// NOT collide with the pre-created directory, and `restore()` succeeded
+/// instead of failing with `AlreadyExists` -- observed for real on
+/// windows-latest CI (run 30447562583): `unwrap_err()` panicked on an `Ok`
+/// value with 2 files restored. This was NOT a rare fluke to paper over
+/// with a retry; it was a structural TOCTOU between two independent
+/// `SystemTime::now()` reads a test author correctly flagged as a risk in
+/// the old comment ("minimize... though not with absolute certainty
+/// eliminate") but did not actually close.
+///
+/// Fix: `restore()`'s internal stamp read happens strictly AFTER this
+/// test's own -- so it can only equal this instant's second or exactly ONE
+/// second later, never earlier. Pre-creating collision directories at BOTH
+/// `now` and `now + 1s` (via [`crate::backup::utc_timestamp_at`], which
+/// formats an arbitrary epoch-seconds value the same way `utc_timestamp()`
+/// formats "now") covers every value `restore()`'s internal call can
+/// possibly produce, closing the race with certainty rather than
+/// probability.
 #[test]
 fn preexisting_temp_dir_name_collision_still_reports_already_exists() {
     let root = TempDir::new().unwrap();
@@ -251,14 +275,19 @@ fn preexisting_temp_dir_name_collision_still_reports_already_exists() {
     // `{parent}/{data_dir_name}.restore_tmp_{stamp}` where `stamp` is a
     // second-granularity UTC `YYYYMMDD_HHMMSS` timestamp taken INSIDE
     // `restore()` itself -- there is no hook to read it back directly, so
-    // pre-create a directory at the name `crate::backup::utc_timestamp()`
-    // produces right here, immediately before calling `restore()`, to
-    // minimize (though not with absolute certainty eliminate) the
-    // vanishingly small second-boundary race between this call and
-    // `restore()`'s own internal timestamp.
-    let stamp = crate::backup::utc_timestamp();
-    let temp_dir = root.path().join(format!("data_dir.restore_tmp_{stamp}"));
-    fs::create_dir_all(&temp_dir).unwrap();
+    // pre-create a collision directory at EVERY name `restore()`'s internal
+    // call could possibly produce: `now` and `now + 1s`. `restore()`'s own
+    // read happens strictly after this one, so it lands in one of exactly
+    // these two seconds -- never earlier, never more than one second later.
+    let now_secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    for secs in [now_secs, now_secs + 1] {
+        let stamp = crate::backup::utc_timestamp_at(secs);
+        let temp_dir = root.path().join(format!("data_dir.restore_tmp_{stamp}"));
+        fs::create_dir_all(&temp_dir).unwrap();
+    }
 
     let err = restore(&snapshot, &data_dir, true).unwrap_err();
 
