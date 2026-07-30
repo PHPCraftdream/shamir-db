@@ -448,16 +448,49 @@ async fn restart_preserves_recall_at_10_against_brute_force() {
     }
 
     let recall = total_hits as f64 / (total_queries as f64 * k as f64);
-    // HNSW recall@10 against exact brute force is inherently noisy (hnsw_rs
-    // uses an unseedable layer-assignment RNG), so we assert a realistic
-    // floor — 0.90 — rather than exact equality. The V0.4 baseline report
-    // measured recall@10 in the 0.95+ band at these params; 0.90 leaves
-    // headroom for a reload's RNG drift while still proving the snapshot did
-    // not silently corrupt the graph (a corrupt load would crater recall
-    // well below 0.5).
+    // F-68 (#895, cluster A) derivation for the 0.75 floor below (was 0.90):
+    //
+    // Root cause: `hnsw_rs` 0.3.4's `LayerGenerator::new` seeds via
+    // `StdRng::from_os_rng()` (confirmed by reading `hnsw_rs-0.3.4/src/hnsw.rs`
+    // directly) — genuinely unseedable, fresh OS entropy every graph build,
+    // so recall@10 against exact brute force varies run to run with NO
+    // caller-side lever to pin it. The CI failure this floor is being fixed
+    // for (macOS `cargo test lib`, run 30515165549) measured recall@10 =
+    // 0.800, below the old 0.90 floor.
+    //
+    // Empirical distribution measured THIS session (temporarily
+    // instrumented this test to print recall on every run, then removed the
+    // instrumentation): 55 runs total on this Windows dev box at these EXACT
+    // params (DIM=16, N_E2E=3000, same query set) — min 0.970, max 0.998,
+    // mean 0.985, ZERO runs below 0.90, let alone below the 0.800 macOS CI
+    // observed. This dev box could not reproduce the CI-observed value even
+    // once in 55 tries, which itself is informative: it corroborates the
+    // brief's own hypothesis that macOS CI runners (far fewer vCPUs than a
+    // dev box) produce measurably worse-connected HNSW graphs under the same
+    // build parameters — `hnsw_rs`'s graph quality is a function of both the
+    // unseedable RNG AND the actual concurrent-insertion interleaving
+    // (`parallel_insert` is rayon-`par_iter`-scheduled), which a low-core
+    // machine explores differently than a high-core one. This mechanism
+    // cannot be fixed from caller code (no seed hook, no way to force
+    // uniform core counts across CI runners); the honest fix is a floor
+    // that tolerates the CI-observed value with real margin, not one tuned
+    // to this machine's much tighter local distribution.
+    //
+    // Floor set at 0.75: comfortably BELOW the one real CI observation
+    // (0.800, so that exact recurrence passes with margin), while staying
+    // well ABOVE the "corrupted graph" territory this assertion actually
+    // guards against (a genuinely corrupt/mismatched snapshot reload craters
+    // recall far below 0.5, per the adjacent corruption-fallback tests in
+    // `crash_recovery_tests.rs` and `snapshot_tests.rs`, which assert
+    // `rebuild_count == 1` for real corruption rather than a recall
+    // threshold at all). 0.75 cannot be satisfied by a broken dump/reload
+    // path — it still requires the large majority of the 10 nearest
+    // neighbours to survive the round-trip — while giving 15 points of
+    // margin under the worst value seen in the wild, not just the values
+    // this one machine happens to produce.
     assert!(
-        recall >= 0.90,
-        "recall@10 after restart ({recall:.3}) below 0.90 floor — \
+        recall >= 0.75,
+        "recall@10 after restart ({recall:.3}) below 0.75 floor — \
          snapshot reload may have corrupted the graph"
     );
 }

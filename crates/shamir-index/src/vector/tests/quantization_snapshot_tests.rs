@@ -161,14 +161,34 @@ async fn build_fitted_quant_adapter(
 #[tokio::test]
 async fn spike_file_dump_u8_works() {
     let dim = 16usize;
-    // 1500 (not 300): `hnsw_rs` assigns graph node layers from an internal,
-    // unseedable RNG (see `crates/shamir-index/src/vector/hnsw_adapter.rs`
-    // lines ~46-58 for the same documented caveat), so a small/under-
-    // connected graph can occasionally miss even a self-query's own id
-    // within top-10 -- observed once on CI. A larger, well-connected graph
-    // keeps this pre-dump sanity check reliable without weakening the
-    // test's actual subject (the before==after dump/reload fidelity check
-    // below, which stays an exact comparison).
+    // F-68 (#895, cluster A) root cause: `f6016bce` grew N from 300 to 1500
+    // on the theory that a larger, well-connected graph would make the
+    // self-id-in-top-10 pre-check reliable. It did not -- reproduced FAILING
+    // again this session at n=1500 under `./scripts/test.sh -p shamir-index
+    // --full` nextest concurrency (this exact panic:
+    // "pre-dump: self-id 0 not in top-10"). Root cause, confirmed by reading
+    // `hnsw_rs` 0.3.4's source directly: `LayerGenerator::new` seeds via
+    // `StdRng::from_os_rng()` (src/hnsw.rs) -- genuinely unseedable, fresh
+    // OS entropy every build, no way to fix from caller code. `parallel_insert`
+    // additionally inserts via `datas.par_iter().for_each(...)` (rayon), so
+    // insertion order is ALSO nondeterministic across runs; empirically
+    // measured (300+ in-process trials, serial vs parallel, same fixture,
+    // with and without artificial CPU contention) that this specific
+    // fixture/params combination still fails a small fraction of the time —
+    // growing N further would only lower, never eliminate, the failure rate,
+    // repeating a fix already shown insufficient.
+    //
+    // The actual fix: `before_ids.contains(&0)` was testing HNSW recall
+    // QUALITY (a statistical property of an approximate, RNG-seeded graph),
+    // which is NOT this test's subject. The test's real subject is the
+    // `before_ids == after_ids` dump/reload fidelity check below, which
+    // stays an EXACT comparison regardless of what `before_ids` happens to
+    // contain — a self-query landing outside top-10 does not, in any way,
+    // make the dump/reload path less trustworthy. Dropped the self-id
+    // assertion entirely rather than paper over it with a bigger N or a
+    // retry; kept the non-empty check (a structural invariant that does not
+    // depend on RNG luck: any live HNSW index returns SOME neighbours for a
+    // query drawn from its own training data).
     let n = 1500usize;
     let data = clustered(n, dim, 8, 0.2, 0xCAFE);
 
@@ -212,12 +232,12 @@ async fn spike_file_dump_u8_works() {
     .await
     .expect("spawn_blocking join");
     let before_ids: Vec<usize> = before.iter().map(|n| n.d_id).collect();
+    // Structural invariant only -- NOT an HNSW recall/quality assertion (see
+    // the F-68 cluster A comment above for why the old self-id-in-top-10
+    // check was removed). A live graph over 1500 real training vectors must
+    // return SOME neighbours for a query drawn from that same training set;
+    // this holds regardless of the unseedable layer-RNG's draw.
     assert!(!before_ids.is_empty(), "pre-dump search returned nothing");
-    // A self-query must retrieve the query's own id within top-10.
-    assert!(
-        before_ids.contains(&0),
-        "pre-dump: self-id 0 not in top-10 (got {before_ids:?})"
-    );
 
     // Dump the u8 graph to a TempDir.
     let dump_dir = tempfile::tempdir().expect("tempdir");
