@@ -8,3 +8,4 @@ pub use shamir_index::legacy::index_record_key;
 pub use shamir_index::legacy::index_status;
 pub use shamir_index::legacy::sorted_index_definition;
 pub use shamir_index::legacy::sorted_index_manager;
+pub use shamir_index::legacy::write_barrier_flags;

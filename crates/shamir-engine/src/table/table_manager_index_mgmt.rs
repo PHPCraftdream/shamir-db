@@ -1,5 +1,4 @@
 use std::collections::BTreeSet;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use bytes::Bytes;
@@ -15,6 +14,7 @@ use shamir_types::types::value::InnerValue;
 use super::table_manager::TableManager;
 use crate::index::index_definition::IndexDefinition;
 use crate::index::index_info_item::IndexInfoItem;
+use crate::index::write_barrier_flags::WriteBarrierFlags;
 
 impl TableManager {
     // ============================================================================
@@ -50,7 +50,7 @@ impl TableManager {
         // `create_unique_index`'s own audit-A9 precedent). Hold the table-wide
         // `unique_write_lock` across the ENTIRE reserve-id → backfill →
         // register → persist sequence for the index2 branch.
-        // `index2_create_barrier` (set below, under this guard) flips
+        // The `INDEX2_CREATE` bit (set below, under this guard) flips
         // `needs_write_barrier()` to `true` on every NON-TX writer path
         // (`insert`/`insert_many_returning_version`/`delete_returning_version`/
         // `set` in `table_manager_crud.rs`) — so even an index2-only table
@@ -88,7 +88,10 @@ impl TableManager {
         // RAII: clear the barrier on EVERY exit path (including the `?`
         // early-returns in the backend-build match and the backfill), so a
         // failed create never leaves writers stuck on the barrier forever.
-        let _barrier = IndexCreateBarrierGuard::set(&self.index2_create_barrier);
+        let _barrier = IndexCreateBarrierGuard::set(
+            &self.write_barrier_flags,
+            crate::index::write_barrier_flags::INDEX2_CREATE,
+        );
 
         // F-56 (#882, P0): the genuine drain. The flag + lock above are a
         // check-then-act, not a drain — a fast-path writer that read
@@ -407,8 +410,8 @@ impl TableManager {
     /// # closed on the tx-commit path (#538 Part A), Part B still OPEN
     ///
     /// The caller (`create_index_v2`) holds `unique_write_lock` AND has set
-    /// `index2_create_barrier` across this backfill → the subsequent
-    /// `index2_registry.insert`. While that barrier is up, every **non-tx**
+    /// the `INDEX2_CREATE` bit across this backfill → the subsequent
+    /// `index2_registry.insert`. While that bit is up, every **non-tx**
     /// writer path (`TableManager::insert`/`insert_many_returning_version`/
     /// `delete_returning_version`/`set`, gated by `needs_write_barrier()`)
     /// also takes `unique_write_lock`, so no row reaching the store through
@@ -503,7 +506,7 @@ impl TableManager {
     /// # Concurrency (F-57, #883)
     ///
     /// Holds `unique_write_lock` across the ENTIRE snapshot→backfill→register
-    /// sequence and raises `regular_index_create_barrier` so
+    /// sequence and raises the `REGULAR_INDEX_CREATE` bit so
     /// [`needs_write_barrier`](Self::needs_write_barrier) returns `true` for
     /// every writer path — closing the lost-write race where a row written
     /// between the backfill snapshot and registration is seen by NEITHER the
@@ -527,7 +530,10 @@ impl TableManager {
             "create_index: acquired unique_write_lock after {:?}",
             lock_wait_started.elapsed()
         );
-        let _barrier = IndexCreateBarrierGuard::set(&self.regular_index_create_barrier);
+        let _barrier = IndexCreateBarrierGuard::set(
+            &self.write_barrier_flags,
+            crate::index::write_barrier_flags::REGULAR_INDEX_CREATE,
+        );
         // Drain any in-flight fast-path writer that read
         // `needs_write_barrier() == false` before the flag went up — same
         // SeqCst cross-atomic protocol as F-56's `create_index_v2`.
@@ -604,12 +610,12 @@ impl TableManager {
     ///
     /// # Concurrency (F-57, #883)
     ///
-    /// Raises `unique_index_create_barrier` (under the caller-held lock) and
+    /// Raises the `UNIQUE_INDEX_CREATE` bit (under the caller-held lock) and
     /// drains in-flight fast-path writers BEFORE the snapshot. This closes the
     /// critical gap for the FIRST unique index on a table: pre-F-57,
     /// `needs_write_barrier()` consulted `has_unique_indexes()` which is
     /// `false` until the index is registered — so every concurrent fast-path
-    /// writer bypassed `unique_write_lock` entirely. The flag + drain make the
+    /// writer bypassed `unique_write_lock` entirely. The bit + drain make the
     /// FIRST unique-index create as safe as the second-and-later.
     pub(super) async fn create_unique_index_locked(
         &self,
@@ -617,13 +623,16 @@ impl TableManager {
         paths: &[&str],
     ) -> DbResult<()> {
         let index_def = self.build_index_definition(name, paths).await?;
-        // F-57 (#883): raise the barrier flag (SeqCst) and drain any in-flight
+        // F-57 (#883): raise the barrier bit (SeqCst) and drain any in-flight
         // fast-path writer BEFORE the snapshot. The caller already holds
         // `unique_write_lock`. For the FIRST unique index on this table,
-        // `has_unique_indexes()` is still `false`, so without this flag every
+        // `has_unique_indexes()` is still `false`, so without this bit every
         // concurrent writer would proceed lock-free — the exact race the
-        // review flagged. The RAII guard clears the flag on every exit path.
-        let _barrier = IndexCreateBarrierGuard::set(&self.unique_index_create_barrier);
+        // review flagged. The RAII guard clears the bit on every exit path.
+        let _barrier = IndexCreateBarrierGuard::set(
+            &self.write_barrier_flags,
+            crate::index::write_barrier_flags::UNIQUE_INDEX_CREATE,
+        );
         self.drain_writers().await;
         // F-42 (#850) — see `create_index`'s matching comment: durably
         // persist the index-name/field-path ids BEFORE registering the
@@ -1114,11 +1123,11 @@ async fn rekey_sorted_prefix(info_store: &dyn Store, old_id: u64, new_id: u64) -
     Ok(())
 }
 
-/// RAII guard that raises an index-create barrier flag (`index2_create_barrier`
-/// / `regular_index_create_barrier` / `unique_index_create_barrier` /
-/// `sorted_index_create_barrier`) for the duration of a CREATE INDEX sequence
-/// and clears it on drop — including the `?` early-return paths inside the
-/// create. While the flag is up, every writer's
+/// RAII guard that raises one bit (`INDEX2_CREATE` / `REGULAR_INDEX_CREATE` /
+/// `UNIQUE_INDEX_CREATE` / `SORTED_INDEX_CREATE`) of the single packed
+/// [`WriteBarrierFlags`] word for the duration of a CREATE INDEX sequence and
+/// clears it on drop — including the `?` early-return paths inside the
+/// create. While the bit is up, every writer's
 /// [`needs_write_barrier`](TableManager::needs_write_barrier) returns `true`,
 /// so writers serialize on `unique_write_lock` against the create. Clearing on
 /// drop guarantees a failed create can never leave writers permanently forced
@@ -1126,30 +1135,34 @@ async fn rekey_sorted_prefix(info_store: &dyn Store, old_id: u64, new_id: u64) -
 ///
 /// F-57 (#883) generalized this guard from the index2-only
 /// `Index2CreateBarrierGuard` so all four index families share one RAII shape.
-/// The guard is parameterized over which `AtomicBool` it wraps — the caller
-/// passes a reference to the appropriate barrier flag.
+/// F-69 (#896, P0) re-parameterized it from "one `&AtomicBool` per flag" to
+/// "one bit of the SAME shared `Arc<AtomicU8>`" — see
+/// `crate::index::write_barrier_flags`'s module doc for why every DDL-intent
+/// bit now lives in one word instead of a standalone atomic per condition.
 ///
-/// The flag is set/cleared while the caller holds `unique_write_lock`, and is
-/// `SeqCst`-ordered (F-56): the store must participate in the SAME single
-/// SeqCst total order as the writer's `SeqCst` flag load in
+/// The bit is set/cleared while the caller holds `unique_write_lock`, and is
+/// `SeqCst`-ordered (F-56, extended by F-69 to the whole word): the
+/// `fetch_or`/`fetch_and` must participate in the SAME single SeqCst total
+/// order as the writer's `SeqCst` load of the whole word in
 /// [`needs_write_barrier`](TableManager::needs_write_barrier) and the writer's
 /// `SeqCst` `active`-counter `fetch_add` — the cross-atomic dependency the
 /// drain proof relies on cannot be carried by `Release`/`Acquire` alone (see
 /// `writer_drain_barrier`).
 pub(super) struct IndexCreateBarrierGuard<'a> {
-    flag: &'a AtomicBool,
+    flags: &'a WriteBarrierFlags,
+    bit: u8,
 }
 
 impl<'a> IndexCreateBarrierGuard<'a> {
-    pub(super) fn set(flag: &'a AtomicBool) -> Self {
-        flag.store(true, Ordering::SeqCst);
-        Self { flag }
+    pub(super) fn set(flags: &'a WriteBarrierFlags, bit: u8) -> Self {
+        flags.set(bit);
+        Self { flags, bit }
     }
 }
 
 impl Drop for IndexCreateBarrierGuard<'_> {
     fn drop(&mut self) {
-        self.flag.store(false, Ordering::SeqCst);
+        self.flags.clear(self.bit);
     }
 }
 

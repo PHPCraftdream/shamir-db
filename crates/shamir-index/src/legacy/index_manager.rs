@@ -18,6 +18,7 @@ use crate::legacy::index_definition::IndexDefinition;
 use crate::legacy::index_info::IndexInfo;
 use crate::legacy::index_keys::{build_index_key, build_index_key_from_record, build_posting_key};
 use crate::legacy::index_record_key::IndexRecordKey;
+use crate::legacy::write_barrier_flags::{WriteBarrierFlags, UNIQUE_INDEX_EXISTS};
 use crate::write_ops::IndexWriteOp;
 use bytes::Bytes;
 use dashmap::DashMap;
@@ -65,8 +66,15 @@ pub struct IndexManager {
     /// Атомарный флаг: есть ли хоть один обычный индекс
     /// Arc позволяет всем клонам видеть одно и то же состояние
     pub(super) has_indexes: Arc<AtomicBool>,
-    /// Атомарный флаг: есть ли хоть один уникальный индекс
-    pub(super) has_indexes_unique: Arc<AtomicBool>,
+    /// F-69 (#896, P0): the [`UNIQUE_INDEX_EXISTS`] bit of the SAME packed
+    /// word `TableManager` (`shamir-engine`) shares as the single atomic
+    /// backing `needs_write_barrier()`. Replaces the former standalone
+    /// `has_indexes_unique: Arc<AtomicBool>` (which was loaded `Relaxed`,
+    /// the exact torn-read bug this task closes — see
+    /// `write_barrier_flags.rs`'s module doc for the full writeup). This
+    /// manager is the exclusive write authority for this bit; `TableManager`
+    /// clones the same `Arc<AtomicU8>` and owns the other five bits.
+    pub(super) write_barrier_flags: WriteBarrierFlags,
 
     /// **Opt G** — in-memory cache for posting lists. Keys are the
     /// raw physical index keys (`build_index_key(...).to_bytes()`);
@@ -97,7 +105,7 @@ impl Clone for IndexManager {
             indexes: Arc::clone(&self.indexes),
             indexes_unique: Arc::clone(&self.indexes_unique),
             has_indexes: Arc::clone(&self.has_indexes),
-            has_indexes_unique: Arc::clone(&self.has_indexes_unique),
+            write_barrier_flags: self.write_barrier_flags.clone(),
             posting_cache: Arc::clone(&self.posting_cache),
         }
     }
@@ -155,7 +163,18 @@ impl IndexManager {
             indexes: Arc::new(indexes),
             indexes_unique: Arc::new(indexes_unique),
             has_indexes: Arc::new(AtomicBool::new(has_indexes_flag)),
-            has_indexes_unique: Arc::new(AtomicBool::new(has_indexes_unique_flag)),
+            // F-69 (#896): standalone construction gets its own fresh packed
+            // word (no `TableManager` exists yet to share it with — callers
+            // that DO need the shared word, i.e. `TableManager::create`,
+            // fold their own bits into THIS SAME instance via
+            // `write_barrier_flags()` right after construction, rather than
+            // this manager adopting an externally-supplied `Arc`. This keeps
+            // every standalone/test/bench caller of `IndexManager::new`
+            // (dozens of call sites across `shamir-index` and
+            // `shamir-engine`) working unchanged.
+            write_barrier_flags: WriteBarrierFlags::with_unique_index_exists(
+                has_indexes_unique_flag,
+            ),
             posting_cache: Arc::new(DashMap::with_capacity_and_hasher(
                 POSTING_CACHE_CAP,
                 THasher::default(),
@@ -172,8 +191,8 @@ impl IndexManager {
     fn sync_flags(&self) {
         self.has_indexes
             .store(self.indexes.is_enabled(), Ordering::Release);
-        self.has_indexes_unique
-            .store(self.indexes_unique.is_enabled(), Ordering::Release);
+        self.write_barrier_flags
+            .set_to(UNIQUE_INDEX_EXISTS, self.indexes_unique.is_enabled());
     }
 
     /// Проверяет, есть ли хоть один обычный индекс.
@@ -186,10 +205,28 @@ impl IndexManager {
 
     /// Проверяет, есть ли хоть один уникальный индекс.
     ///
-    /// Использует атомарное чтение, поэтому очень быстро.
-    /// Не требует захвата блокировки.
+    /// F-69 (#896): reads the shared [`WriteBarrierFlags`] word (`SeqCst`) —
+    /// previously a standalone `Relaxed` `AtomicBool` load, which is the
+    /// exact ordering gap that let a duplicate slip past a unique
+    /// constraint racing a concurrent index-create (see
+    /// `write_barrier_flags.rs`'s module doc). `SeqCst` here costs nothing
+    /// extra in practice (x86 loads are already total-order-respecting;
+    /// the fence cost of `SeqCst` is paid on the RMW/store side, not this
+    /// load) and is required to keep this bit inside the SAME total order
+    /// as `TableManager::needs_write_barrier()`'s single load of this word.
     pub fn has_unique_indexes(&self) -> bool {
-        self.has_indexes_unique.load(Ordering::Relaxed)
+        self.write_barrier_flags.is_set(UNIQUE_INDEX_EXISTS)
+    }
+
+    /// F-69 (#896): expose the shared packed write-barrier word so
+    /// `TableManager` (`shamir-engine`) can fold its own five DDL-intent
+    /// bits into the SAME `Arc<AtomicU8>` this manager uses for
+    /// [`UNIQUE_INDEX_EXISTS`] — the shape that makes
+    /// `needs_write_barrier()` a single atomic load across both crates'
+    /// halves of the predicate. See `write_barrier_flags.rs`'s module doc
+    /// for the full ownership rationale.
+    pub fn write_barrier_flags(&self) -> WriteBarrierFlags {
+        self.write_barrier_flags.clone()
     }
 
     /// Создаёт новый индекс для таблицы.

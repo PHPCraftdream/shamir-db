@@ -7,6 +7,7 @@ use crate::legacy::index_definition::IndexDefinition;
 use crate::legacy::index_keys::{build_index_key, build_index_key_from_record};
 use crate::legacy::index_manager::IndexManager;
 use crate::legacy::index_record_key::IndexRecordKey;
+use crate::legacy::write_barrier_flags::UNIQUE_INDEX_EXISTS;
 use crate::write_ops::IndexWriteOp;
 use bytes::Bytes;
 use shamir_storage::error::DbResult;
@@ -15,7 +16,6 @@ use shamir_tunables::store_defaults::FULL_SCAN_BATCH;
 use shamir_types::record_view::RecordRef;
 use shamir_types::types::record_id::RecordId;
 use shamir_types::types::value::InnerValue;
-use std::sync::atomic::Ordering;
 
 impl IndexManager {
     // ============================================================================
@@ -417,7 +417,10 @@ impl IndexManager {
         }
 
         self.indexes_unique.add_index(index_def);
-        self.has_indexes_unique.store(true, Ordering::Release);
+        // F-69 (#896): SeqCst set on the shared packed word — see
+        // `write_barrier_flags.rs`'s module doc for why this bit's ordering
+        // must match the rest of the write-barrier predicate.
+        self.write_barrier_flags.set(UNIQUE_INDEX_EXISTS);
         self.save_index_info_unique().await?;
 
         log::info!(
@@ -460,8 +463,9 @@ impl IndexManager {
 
         // Удаляем определение индекса из метаданных
         let was_removed = self.indexes_unique.remove_index(name_interned);
-        self.has_indexes_unique
-            .store(self.indexes_unique.is_enabled(), Ordering::Release);
+        // F-69 (#896): SeqCst set/clear on the shared packed word.
+        self.write_barrier_flags
+            .set_to(UNIQUE_INDEX_EXISTS, self.indexes_unique.is_enabled());
 
         if was_removed {
             self.save_index_info_unique().await?;

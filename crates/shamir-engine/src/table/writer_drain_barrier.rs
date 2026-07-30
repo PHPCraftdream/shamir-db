@@ -19,6 +19,33 @@
 //! `Relaxed`/`Acquire`/`Release` orderings do NOT actually carry the
 //! happens-before edge they claimed (see the proof on [`WriterDrainBarrier`]).
 //! All four cross-atomic operations are now `SeqCst`.
+//!
+//! F-69 (#896, P0) — **scope correction, read this before assuming the proof
+//! below covers the whole write-barrier predicate.** F-56's proof was
+//! rigorous but its stated scope was too narrow: it covered exactly ONE
+//! flag+counter pair, `schema_activation_barrier` and this module's `active`
+//! counter. `TableManager::needs_write_barrier()` at the time OR'd together
+//! SIX conditions (five `AtomicBool` flags here plus
+//! `IndexManager::has_unique_indexes()`, a `shamir-index`-owned flag loaded
+//! `Relaxed`, not `SeqCst`), and F-56 never extended its proof to the other
+//! four flags or to the `Relaxed` operand — which is exactly how a real bug
+//! survived: a writer's `enter_writer` (`SeqCst`) could reorder relative to
+//! a `Relaxed` `has_unique_indexes()` read, letting a duplicate slip past a
+//! unique index that had just gone live via `create_unique_index_locked`
+//! concurrently. F-69 closes this by collapsing all six conditions into ONE
+//! packed `Arc<AtomicU8>` word (see
+//! `crate::index::write_barrier_flags::WriteBarrierFlags`) — every setter is
+//! still `SeqCst`, so the worked proof below (steps 1-5) now applies
+//! verbatim to the WHOLE six-condition predicate: `flag.load` in the proof
+//! is `WriteBarrierFlags::any_set()` (one `SeqCst` load of the packed word),
+//! and `flag.store(true)` is any of `WriteBarrierFlags::set`/`set_to` (the
+//! `SeqCst` `fetch_or` any DDL-intent bit, including the
+//! `shamir-index`-owned `UNIQUE_INDEX_EXISTS` bit, now performs). The proof's
+//! reasoning is unchanged — extended in coverage, not contradicted. The
+//! writer-drain counter (`active`, this module) remains a SEPARATE atomic,
+//! not folded into `WriteBarrierFlags` — see that module's doc for why
+//! (folding would turn `enter_writer`'s single locked `fetch_add` into a CAS
+//! loop on the hottest path in this whole barrier).
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -62,12 +89,18 @@ use std::sync::Arc;
 /// no drain is in progress the drainer never touches this primitive — zero
 /// contention.
 ///
-/// # Memory model (F-56, #882 — corrected)
+/// # Memory model (F-56, #882 — corrected; F-69, #896 — scope extended to
+/// # the FULL six-condition predicate, not just `schema_activation_barrier`)
 ///
 /// The four cross-atomic operations are ALL `Ordering::SeqCst`:
 ///   - writer  `active.fetch_add` (`enter_writer`)
-///   - writer  `flag.load` (`needs_write_barrier`)
-///   - drainer `flag.store(true)` (`set_schema_activation_barrier` / `IndexCreateBarrierGuard`)
+///   - writer  `flag.load` (`needs_write_barrier`, now
+///     `WriteBarrierFlags::any_set()` — ONE `SeqCst` load of the packed word
+///     that replaced the six former independent flags)
+///   - drainer `flag.store(true)` (any `WriteBarrierFlags::set`/`set_to` call
+///     — `set_schema_activation_barrier` / `IndexCreateBarrierGuard` /
+///     `IndexManager`'s `UNIQUE_INDEX_EXISTS` setters all route through the
+///     SAME `fetch_or`/`fetch_and` on the SAME `Arc<AtomicU8>`)
 ///   - drainer `active.load` (`drain`)
 ///
 /// This dependency spans TWO independent atomics (`active` and `flag`), so

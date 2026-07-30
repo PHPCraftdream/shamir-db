@@ -17,6 +17,7 @@ pub mod f53b_asof_seek_tests;
 pub mod f53b_cursor_seek_spike_tests;
 pub mod f53b_step3_cursor_after_spike;
 pub mod f57_index_create_barrier_tests;
+pub mod f69_write_barrier_single_atomic_tests;
 pub mod filter_stream_tests;
 pub mod filtered_ann_tests;
 pub mod filtered_vector_tests;

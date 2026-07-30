@@ -25,8 +25,9 @@ impl TableManager {
     /// (a writer can interleave with the backfill on a registered index), not
     /// less. F-57 closes the concurrent-writer race with the SAME barrier +
     /// lock + drain pattern as the other three families: `unique_write_lock`
-    /// is held across the entire register→backfill sequence,
-    /// `sorted_index_create_barrier` is raised so `needs_write_barrier()`
+    /// is held across the entire register→backfill sequence, the
+    /// `SORTED_INDEX_CREATE` bit (F-69, #896: one bit of the single packed
+    /// `write_barrier_flags` word) is raised so `needs_write_barrier()`
     /// returns `true`, and `drain_writers()` waits for any in-flight fast-path
     /// writer that read `false` before the flag went up. The cancellation
     /// residual (partial index on `select!`/`timeout`) remains — the doctor's
@@ -90,7 +91,7 @@ impl TableManager {
             included_fields_interned.push(seg_ids);
         }
         // F-57 (#883): hold `unique_write_lock` across the ENTIRE register →
-        // backfill sequence and raise `sorted_index_create_barrier` so ALL
+        // backfill sequence and raise the `SORTED_INDEX_CREATE` bit so ALL
         // writer paths serialize against this create. The register-before-
         // backfill shape means a concurrent writer could otherwise interleave
         // with the backfill on a registered-but-incomplete index. The
@@ -98,7 +99,10 @@ impl TableManager {
         // that read `false` before the flag went up — same SeqCst protocol as
         // F-56's `create_index_v2`.
         let _uwl_guard = self.unique_write_lock.lock().await;
-        let _barrier = IndexCreateBarrierGuard::set(&self.sorted_index_create_barrier);
+        let _barrier = IndexCreateBarrierGuard::set(
+            &self.write_barrier_flags,
+            crate::index::write_barrier_flags::SORTED_INDEX_CREATE,
+        );
         self.drain_writers().await;
         // F-42 (#850) — same fix class as `create_index`/
         // `create_unique_index_locked`: persist the interner's newly-touched
