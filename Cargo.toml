@@ -63,7 +63,29 @@ codegen-units = 14
 incremental = false
 debug = false
 strip = true
-panic = "abort"
+# F-68 cluster C (#895): `panic = "abort"` (the scaffold default, never
+# revisited) silently defeated EVERY panic-isolation boundary this server's
+# architecture depends on. `shamir-server` is a long-lived multi-connection
+# process where each connection's request loop spawns per-request dispatch
+# tasks into its own `JoinSet` (`connection/request_loop.rs`) specifically so
+# one connection's panic can't take down another's, and the background
+# scheduler (`scheduler.rs::safe_run`) wraps each periodic GC/checkpoint tick
+# in `std::panic::catch_unwind` for the same reason. Both mechanisms rely on
+# stack unwinding to convert a panic into a `JoinError` / `Result::Err` that
+# the surrounding code can react to (log-and-continue, tear down just the one
+# connection). Under `panic = "abort"` there is no unwinding: the process
+# calls `abort()` at the panic site, before `catch_unwind` or `JoinHandle`
+# ever get a chance to run — a panic ANYWHERE (one connection's dispatch
+# task, one background GC tick) kills the ENTIRE process and every other
+# open connection with it, with no server-side log line pinpointing which
+# task panicked (the whole process is gone). This reproduced as
+# `e2e-permissions.test.ts`'s shared `adminClient` (or a concurrently-open
+# sibling connection) seeing a clean-looking `Error: connection closed` at
+# unpredictable, unrelated points in the file — exactly what "some panic
+# aborts the whole process while N clients are mid-request" looks like from
+# a client's point of view. `panic = "unwind"` restores the isolation this
+# code already assumes and is written to rely on.
+panic = "unwind"
 
 # `cargo bench` uses this profile by default. Inherits from release
 # but DROPS `lto = "fat"` — that single flag was 80%+ of the
