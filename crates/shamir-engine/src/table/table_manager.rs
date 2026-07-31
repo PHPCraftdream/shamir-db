@@ -88,21 +88,21 @@ pub struct TableManager {
     ///   where a row written between the backfill snapshot and registration
     ///   is seen by NEITHER the backfill NOR the live `index_manager` write
     ///   hook (`needs_write_barrier()` previously never considered regular
-    ///   indexes at all). Set/cleared by [`IndexCreateBarrierGuard`].
+    ///   indexes at all). Set/cleared by [`WriteBarrierGuard`] (F-70, #897).
     /// - `UNIQUE_INDEX_CREATE` (F-57, #883) — raised for the duration of a
     ///   unique-index `create_unique_index` snapshot→backfill→register
     ///   sequence. The `UNIQUE_INDEX_EXISTS` bit already forces the barrier
     ///   once a unique index is registered, but for the FIRST unique index on
     ///   a table that bit is unset until the index IS registered — so every
     ///   concurrent fast-path writer would otherwise bypass the lock
-    ///   entirely. Set/cleared by [`IndexCreateBarrierGuard`].
+    ///   entirely. Set/cleared by [`WriteBarrierGuard`] (F-70, #897).
     /// - `SORTED_INDEX_CREATE` (F-57, #883) — raised for the duration of a
     ///   sorted-index `create_sorted_index_with_include` register→backfill
     ///   sequence. Sorted indexes register BEFORE backfill (load-bearing: the
     ///   backfill calls `on_record_created` through the manager, which needs
     ///   the registered definition). Without this bit, a concurrent writer
     ///   could interleave with the backfill and the row could be missed or
-    ///   double-posted. Set/cleared by [`IndexCreateBarrierGuard`].
+    ///   double-posted. Set/cleared by [`WriteBarrierGuard`] (F-70, #897).
     ///
     /// Every bit-set/clear is `SeqCst` (F-56's total-order argument, now
     /// covering the FULL six-condition predicate — see
@@ -677,6 +677,51 @@ impl TableManager {
         Arc::clone(&self.unique_write_lock)
     }
 
+    /// F-70 (#897, P0) — THE canonical acquisition path for a DDL-side write
+    /// barrier: raise `bit`, [`drain_writers`](Self::drain_writers), THEN
+    /// acquire [`unique_write_lock`](Self::unique_write_lock) — in that order,
+    /// and no other. See [`writer_drain_barrier`](super::writer_drain_barrier)'s
+    /// module doc ("F-70 — THE canonical lock-order hierarchy") for the full
+    /// derivation of why this order (not lock-then-drain, which F-57, #883,
+    /// wired into every DDL create path and which this task found genuinely
+    /// deadlocks against the tx-commit path's own drain-guard-then-lock
+    /// shape).
+    ///
+    /// Every DDL call site that used to hand-roll
+    /// `unique_write_lock().lock().await` followed by
+    /// `IndexCreateBarrierGuard::set(..)` + `drain_writers().await` now calls
+    /// this instead, so the order cannot silently drift back at a new call
+    /// site (exactly how F-57 introduced the inversion in the first place —
+    /// the hierarchy was never written down anywhere shared, only implied
+    /// per-call-site).
+    ///
+    /// Returns the RAII [`WriteBarrierGuard`] (clears `bit` on drop) and the
+    /// owned `unique_write_lock` guard. Both must be held for the ENTIRE
+    /// snapshot/backfill/register/persist body that follows — drop order
+    /// (guard before lock, achieved by dropping in the order returned/
+    /// declared) mirrors every existing DDL site's discipline.
+    ///
+    /// `pub` (not `pub(crate)`): the schema-activation DDL handler
+    /// (`shamir-db::execute::admin_schema`) is a DIFFERENT crate and must use
+    /// this SAME entry point for `SCHEMA_ACTIVATION` — see
+    /// `write_barrier_flags`'s bit constants, all of which are `pub`.
+    pub async fn begin_write_barrier(
+        &self,
+        bit: u8,
+    ) -> (WriteBarrierGuard, tokio::sync::OwnedMutexGuard<()>) {
+        // Step 1: raise the intent bit FIRST — new writers now take the slow
+        // (locked) path.
+        let guard = WriteBarrierGuard::set(self.write_barrier_flags.clone(), bit);
+        // Step 2: drain every writer that read the flag as `false` BEFORE
+        // step 1 and is still mid-flight. Cheap (one SeqCst load) when none
+        // are active.
+        self.drain_writers().await;
+        // Step 3: ONLY NOW acquire the lock — see the module doc for why
+        // this order (not the reverse) is what closes the F-70 cycle.
+        let lock_guard = self.unique_write_lock.clone().lock_owned().await;
+        (guard, lock_guard)
+    }
+
     /// F-37 (#845) — drive the schema-activation write barrier from outside
     /// the engine crate (the shamir-db schema DDL handler in
     /// `admin_schema.rs`). When `on == true`, every writer consulting
@@ -699,7 +744,10 @@ impl TableManager {
     /// persist + activate have committed — the lock is then released, letting
     /// queued writers proceed ordered AFTER the proof point. An RAII guard
     /// that clears on drop (every exit path) is the sanctioned usage shape —
-    /// see `admin_schema.rs::SchemaActivationBarrierGuard`.
+    /// production callers use [`begin_write_barrier`](Self::begin_write_barrier)
+    /// (F-70, #897), which now also reorders the lock acquisition to AFTER
+    /// the drain (see that method's doc); this raw setter remains for tests
+    /// that exercise the flag transition directly.
     pub fn set_schema_activation_barrier(&self, on: bool) {
         self.write_barrier_flags
             .set_to(crate::index::write_barrier_flags::SCHEMA_ACTIVATION, on);
@@ -887,6 +935,43 @@ impl TableManager {
     pub fn with_changefeed(mut self, gate: Arc<shamir_tx::RepoTxGate>) -> Self {
         self.changefeed = Some(NonTxChangefeed { gate });
         self
+    }
+}
+
+/// F-70 (#897, P0) — RAII guard returned by
+/// [`TableManager::begin_write_barrier`]: raises one bit of the shared
+/// [`WriteBarrierFlags`](crate::index::write_barrier_flags::WriteBarrierFlags)
+/// word on construction, clears it on drop (including every `?` early-return
+/// path in the caller). Owns a CLONE of the `Arc<AtomicU8>`-backed flags
+/// word (cheap — one refcount bump) rather than borrowing it, so it can be
+/// returned by value from `begin_write_barrier` with no lifetime tied to
+/// `&TableManager` — the shape a cross-crate `pub` acquisition helper needs.
+///
+/// Supersedes the old per-module `IndexCreateBarrierGuard`
+/// (`table_manager_index_mgmt.rs`) and `SchemaActivationBarrierGuard`
+/// (`shamir-db::execute::admin_schema`), both of which independently raised
+/// a bit under an ALREADY-HELD `unique_write_lock` (lock-then-drain — the
+/// F-70 inversion). This guard is constructed BEFORE the lock is taken (see
+/// [`begin_write_barrier`](TableManager::begin_write_barrier)); the bit is
+/// still `SeqCst`-ordered (F-56, extended by F-69 to the whole word), which
+/// is what the [`writer_drain_barrier`] proof requires regardless of when
+/// the lock is acquired relative to the drain.
+#[must_use]
+pub struct WriteBarrierGuard {
+    flags: crate::index::write_barrier_flags::WriteBarrierFlags,
+    bit: u8,
+}
+
+impl WriteBarrierGuard {
+    fn set(flags: crate::index::write_barrier_flags::WriteBarrierFlags, bit: u8) -> Self {
+        flags.set(bit);
+        Self { flags, bit }
+    }
+}
+
+impl Drop for WriteBarrierGuard {
+    fn drop(&mut self) {
+        self.flags.clear(self.bit);
     }
 }
 

@@ -14,7 +14,6 @@ use shamir_types::types::value::InnerValue;
 use super::table_manager::TableManager;
 use crate::index::index_definition::IndexDefinition;
 use crate::index::index_info_item::IndexInfoItem;
-use crate::index::write_barrier_flags::WriteBarrierFlags;
 
 impl TableManager {
     // ============================================================================
@@ -75,38 +74,21 @@ impl TableManager {
         // shamir-db + engine tests) never already hold `unique_write_lock`, so
         // acquiring it here cannot self-deadlock (`tokio::sync::Mutex` is NOT
         // reentrant).
-        // F-68 (#895) cluster D / task #124: timestamped lock-then-drain
-        // instrumentation (see `writer_drain_barrier.rs::drain`'s doc for the
-        // suspected lock-order-inversion — task #897 — this pairs with).
-        let lock_wait_started = std::time::Instant::now();
-        log::debug!("create_index_v2: acquiring unique_write_lock");
-        let _uwl_guard = self.unique_write_lock.lock().await;
-        log::debug!(
-            "create_index_v2: acquired unique_write_lock after {:?}",
-            lock_wait_started.elapsed()
-        );
-        // RAII: clear the barrier on EVERY exit path (including the `?`
-        // early-returns in the backend-build match and the backfill), so a
-        // failed create never leaves writers stuck on the barrier forever.
-        let _barrier = IndexCreateBarrierGuard::set(
-            &self.write_barrier_flags,
-            crate::index::write_barrier_flags::INDEX2_CREATE,
-        );
-
-        // F-56 (#882, P0): the genuine drain. The flag + lock above are a
-        // check-then-act, not a drain — a fast-path writer that read
-        // `needs_write_barrier() == false` a moment BEFORE the flag went up is
-        // already in the drain set (`enter_writer()` ran first) and still
-        // mid-flight through its validate→write→index sequence. Wait for every
-        // such in-flight writer to exit BEFORE the backfill takes its snapshot,
-        // so the snapshot cannot race a writer that is about to land. Mirrors
-        // F-48's identical call from `SchemaActivationBarrierGuard::raise`. The
-        // four cross-atomic ops involved (writer `fetch_add`, writer `flag.load`,
-        // this `flag.store`, drainer `active.load`) are ALL `SeqCst` — see
-        // `writer_drain_barrier` for the worked memory-model proof of why
-        // Release/Acquire alone do NOT close this cross-atomic dependency.
-        // Cheap (one `SeqCst` load) when no fast-path writer is in flight.
-        self.drain_writers().await;
+        //
+        // F-70 (#897, P0): acquired via the canonical drain-then-lock path —
+        // raise `INDEX2_CREATE`, drain in-flight fast-path writers, THEN take
+        // `unique_write_lock` — NOT lock-then-drain (F-57, #883's original
+        // order here, which this task found deadlocks against
+        // `pre_commit_prelock`'s drain-guard-then-lock shape). See
+        // `TableManager::begin_write_barrier` and
+        // `writer_drain_barrier`'s "F-70 — THE canonical lock-order
+        // hierarchy" doc section for the full derivation. RAII: `_barrier`
+        // clears the bit on EVERY exit path (including the `?` early-returns
+        // in the backend-build match and the backfill), so a failed create
+        // never leaves writers stuck on the barrier forever.
+        let (_barrier, _uwl_guard) = self
+            .begin_write_barrier(crate::index::write_barrier_flags::INDEX2_CREATE)
+            .await;
 
         let interner = self.interner.get().await?;
         let mut interned_paths: SmallVec<[Vec<u64>; 2]> = SmallVec::new();
@@ -512,32 +494,23 @@ impl TableManager {
     /// between the backfill snapshot and registration is seen by NEITHER the
     /// backfill NOR the live `index_manager` write hook. Pre-F-57 this path had
     /// ZERO protection: `needs_write_barrier()` never considered regular
-    /// indexes at all. The `drain_writers()` call (after the flag is raised,
-    /// before the snapshot) closes the check-then-act gap for a writer that
-    /// read `false` a moment before the flag went up — same pattern as
-    /// `create_index_v2` (F-56).
+    /// indexes at all. The drain (via
+    /// [`begin_write_barrier`](Self::begin_write_barrier), BEFORE the lock —
+    /// F-70, #897) closes the check-then-act gap for a writer that read
+    /// `false` a moment before the flag went up — same pattern as
+    /// `create_index_v2`.
     pub async fn create_index(&self, name: &str, paths: &[&str]) -> DbResult<()> {
         let index_def = self.build_index_definition(name, paths).await?;
-        // F-57 (#883): hold `unique_write_lock` across the snapshot→register
-        // sequence and raise the barrier flag so ALL writer paths serialize
-        // against this create. Mirrors `create_index_v2`'s now-corrected shape.
-        // F-68 (#895) cluster D / task #124: timestamped lock-then-drain
-        // instrumentation — mirrors `create_index_v2`'s matching log lines.
-        let lock_wait_started = std::time::Instant::now();
-        log::debug!("create_index: acquiring unique_write_lock");
-        let _uwl_guard = self.unique_write_lock.lock().await;
-        log::debug!(
-            "create_index: acquired unique_write_lock after {:?}",
-            lock_wait_started.elapsed()
-        );
-        let _barrier = IndexCreateBarrierGuard::set(
-            &self.write_barrier_flags,
-            crate::index::write_barrier_flags::REGULAR_INDEX_CREATE,
-        );
-        // Drain any in-flight fast-path writer that read
-        // `needs_write_barrier() == false` before the flag went up — same
-        // SeqCst cross-atomic protocol as F-56's `create_index_v2`.
-        self.drain_writers().await;
+        // F-70 (#897, P0): canonical drain-then-lock acquisition — raise
+        // `REGULAR_INDEX_CREATE`, drain in-flight fast-path writers, THEN
+        // take `unique_write_lock`. F-57 (#883) originally acquired the lock
+        // FIRST here, which this task found deadlocks against
+        // `pre_commit_prelock`'s drain-guard-then-lock shape on a second
+        // table. See `TableManager::begin_write_barrier` and
+        // `writer_drain_barrier`'s "F-70" doc section.
+        let (_barrier, _uwl_guard) = self
+            .begin_write_barrier(crate::index::write_barrier_flags::REGULAR_INDEX_CREATE)
+            .await;
         // F-42 (#850): persist the interner's newly-touched ids BEFORE the
         // index goes live — a persist failure must abort BEFORE publish, not
         // after. `build_index_definition` already interned the index NAME and
@@ -583,57 +556,48 @@ impl TableManager {
     /// # Errors
     /// Returns `DbError::UniqueIndexCreationFailed` if duplicate values exist.
     pub async fn create_unique_index(&self, name: &str, paths: &[&str]) -> DbResult<()> {
-        // Hold the unique_write_lock across snapshot + backfill + register.
-        // This is the same lock non-tx writers (`insert`) and the tx commit
-        // pipeline (Phase 2.5) acquire, so it unifies DDL against all writer
-        // classes. Tables without unique indexes acquire it harmlessly
-        // (no contention); this is a low-frequency DDL operation.
-        //
-        // F-68 (#895) cluster D / task #124: timestamped lock-then-drain
-        // instrumentation — mirrors `create_index_v2`'s matching log lines
-        // (the actual drain happens inside `create_unique_index_locked`).
-        let lock_wait_started = std::time::Instant::now();
-        log::debug!("create_unique_index: acquiring unique_write_lock");
-        let _uwl_guard = self.unique_write_lock.lock().await;
-        log::debug!(
-            "create_unique_index: acquired unique_write_lock after {:?}",
-            lock_wait_started.elapsed()
-        );
-        self.create_unique_index_locked(name, paths).await
+        // F-70 (#897, P0): canonical drain-then-lock acquisition — raise
+        // `UNIQUE_INDEX_CREATE`, drain in-flight fast-path writers, THEN take
+        // `unique_write_lock`. F-57 (#883) originally took the lock FIRST
+        // (here, in the caller), with the flag+drain inside
+        // `create_unique_index_locked` — this task found that order
+        // deadlocks against `pre_commit_prelock`'s drain-guard-then-lock
+        // shape on a second table. See `TableManager::begin_write_barrier`
+        // and `writer_drain_barrier`'s "F-70" doc section. This is the SAME
+        // lock non-tx writers (`insert`) and the tx commit pipeline
+        // (Phase 2.5) acquire, so it unifies DDL against all writer classes.
+        // Tables without unique indexes pay this harmlessly (no contention);
+        // this is a low-frequency DDL operation.
+        let (_barrier, _uwl_guard) = self
+            .begin_write_barrier(crate::index::write_barrier_flags::UNIQUE_INDEX_CREATE)
+            .await;
+        self.create_unique_index_body(name, paths).await
     }
 
-    /// Inner unique-index create that ASSUMES the caller already holds the
-    /// `unique_write_lock`. Used by [`rename_index`](Self::rename_index) for
-    /// the unique case, which holds the lock across the entire
-    /// drop→backfill→register sequence (avoids re-entrant deadlock on
-    /// `tokio::sync::Mutex`, which is NOT reentrant).
+    /// Inner unique-index create body: snapshot→backfill→register, with NO
+    /// flag/lock acquisition of its own. ASSUMES the caller already holds
+    /// BOTH `unique_write_lock` AND the `UNIQUE_INDEX_CREATE` barrier bit
+    /// (via [`begin_write_barrier`](Self::begin_write_barrier)) for the
+    /// caller's own required span. Used by:
+    ///   - [`create_unique_index`](Self::create_unique_index) (acquires
+    ///     barrier+lock itself, immediately above, then calls this body), and
+    ///   - [`rename_index`](Self::rename_index)'s unique-index branch, which
+    ///     acquires the SAME barrier+lock ONCE and holds it across the entire
+    ///     drop→create span (a DIFFERENT requirement — uniqueness-gap
+    ///     atomicity across drop+create, audit A9 — not drain ordering; see
+    ///     that call site).
     ///
-    /// # Concurrency (F-57, #883)
+    /// # Concurrency (F-57, #883; reordered by F-70, #897)
     ///
-    /// Raises the `UNIQUE_INDEX_CREATE` bit (under the caller-held lock) and
-    /// drains in-flight fast-path writers BEFORE the snapshot. This closes the
-    /// critical gap for the FIRST unique index on a table: pre-F-57,
-    /// `needs_write_barrier()` consulted `has_unique_indexes()` which is
-    /// `false` until the index is registered — so every concurrent fast-path
-    /// writer bypassed `unique_write_lock` entirely. The bit + drain make the
-    /// FIRST unique-index create as safe as the second-and-later.
-    pub(super) async fn create_unique_index_locked(
-        &self,
-        name: &str,
-        paths: &[&str],
-    ) -> DbResult<()> {
+    /// The FIRST unique index on a table is the critical case:
+    /// `has_unique_indexes()` (and therefore `UNIQUE_INDEX_EXISTS`) is
+    /// `false` until this create registers it, so without the caller's
+    /// `UNIQUE_INDEX_CREATE` bit + drain, every concurrent fast-path writer
+    /// would bypass `unique_write_lock` entirely — the exact race the review
+    /// flagged. The bit + drain (done by the caller, BEFORE the lock — F-70)
+    /// make the FIRST unique-index create as safe as the second-and-later.
+    async fn create_unique_index_body(&self, name: &str, paths: &[&str]) -> DbResult<()> {
         let index_def = self.build_index_definition(name, paths).await?;
-        // F-57 (#883): raise the barrier bit (SeqCst) and drain any in-flight
-        // fast-path writer BEFORE the snapshot. The caller already holds
-        // `unique_write_lock`. For the FIRST unique index on this table,
-        // `has_unique_indexes()` is still `false`, so without this bit every
-        // concurrent writer would proceed lock-free — the exact race the
-        // review flagged. The RAII guard clears the bit on every exit path.
-        let _barrier = IndexCreateBarrierGuard::set(
-            &self.write_barrier_flags,
-            crate::index::write_barrier_flags::UNIQUE_INDEX_CREATE,
-        );
-        self.drain_writers().await;
         // F-42 (#850) — see `create_index`'s matching comment: durably
         // persist the index-name/field-path ids BEFORE registering the
         // unique index. A persist failure aborts before publish, so no
@@ -979,29 +943,32 @@ impl TableManager {
             let paths = resolve_index_paths(interner, &old_def.paths);
             let path_refs: Vec<&str> = paths.iter().map(|s| s.as_str()).collect();
 
-            // Hold the unique_write_lock across drop + create. This is the
-            // SAME lock non-tx writers acquire (table_manager_crud.rs) and
-            // the tx commit pipeline acquires (Phase 2.5), so it blocks all
-            // writer classes for the rename's duration.
+            // Hold the barrier bit + unique_write_lock across drop + create.
+            // This is the SAME lock non-tx writers acquire
+            // (table_manager_crud.rs) and the tx commit pipeline acquires
+            // (Phase 2.5), so it blocks all writer classes for the rename's
+            // duration.
             //
-            // F-68 (#895) cluster D / task #124: timestamped lock-then-drain
-            // instrumentation — mirrors `create_index_v2`'s matching log
-            // lines (this is `rename_index`'s unique-index path; the actual
-            // drain happens inside `create_unique_index_locked` below).
-            let lock_wait_started = std::time::Instant::now();
-            log::debug!("rename_index: acquiring unique_write_lock (unique case)");
-            let _uwl_guard = self.unique_write_lock.lock().await;
-            log::debug!(
-                "rename_index: acquired unique_write_lock after {:?}",
-                lock_wait_started.elapsed()
-            );
+            // F-70 (#897, P0): acquired via the canonical drain-then-lock
+            // path (`begin_write_barrier`) — raise `UNIQUE_INDEX_CREATE`,
+            // drain in-flight fast-path writers, THEN take
+            // `unique_write_lock` — instead of lock-then-drain (F-57, #883's
+            // original order, which deadlocks against `pre_commit_prelock`'s
+            // drain-guard-then-lock shape on a second table). Holding the
+            // guards across BOTH `drop_unique_index` AND the create body is a
+            // SEPARATE, still-valid requirement (uniqueness-gap atomicity,
+            // audit A9) — unrelated to drain ordering: the drain always
+            // completes strictly before this span begins, regardless of how
+            // long the span itself then holds the lock for.
+            let (_barrier, _uwl_guard) = self
+                .begin_write_barrier(crate::index::write_barrier_flags::UNIQUE_INDEX_CREATE)
+                .await;
 
             self.index_manager.drop_unique_index(old_id).await?;
-            // Use the _locked variant: the lock is already held above, and
-            // `create_unique_index` would re-acquire it → deadlock
-            // (tokio::sync::Mutex is NOT reentrant).
-            self.create_unique_index_locked(new_name, &path_refs)
-                .await?;
+            // Use the body variant: the barrier + lock are already held
+            // above, and `create_unique_index` would re-acquire the lock →
+            // deadlock (`tokio::sync::Mutex` is NOT reentrant).
+            self.create_unique_index_body(new_name, &path_refs).await?;
         }
 
         // ── Rekey sorted index posting entries ────────────────────────────────
@@ -1121,49 +1088,6 @@ async fn rekey_sorted_prefix(info_store: &dyn Store, old_id: u64, new_id: u64) -
     }
 
     Ok(())
-}
-
-/// RAII guard that raises one bit (`INDEX2_CREATE` / `REGULAR_INDEX_CREATE` /
-/// `UNIQUE_INDEX_CREATE` / `SORTED_INDEX_CREATE`) of the single packed
-/// [`WriteBarrierFlags`] word for the duration of a CREATE INDEX sequence and
-/// clears it on drop — including the `?` early-return paths inside the
-/// create. While the bit is up, every writer's
-/// [`needs_write_barrier`](TableManager::needs_write_barrier) returns `true`,
-/// so writers serialize on `unique_write_lock` against the create. Clearing on
-/// drop guarantees a failed create can never leave writers permanently forced
-/// onto the barrier.
-///
-/// F-57 (#883) generalized this guard from the index2-only
-/// `Index2CreateBarrierGuard` so all four index families share one RAII shape.
-/// F-69 (#896, P0) re-parameterized it from "one `&AtomicBool` per flag" to
-/// "one bit of the SAME shared `Arc<AtomicU8>`" — see
-/// `crate::index::write_barrier_flags`'s module doc for why every DDL-intent
-/// bit now lives in one word instead of a standalone atomic per condition.
-///
-/// The bit is set/cleared while the caller holds `unique_write_lock`, and is
-/// `SeqCst`-ordered (F-56, extended by F-69 to the whole word): the
-/// `fetch_or`/`fetch_and` must participate in the SAME single SeqCst total
-/// order as the writer's `SeqCst` load of the whole word in
-/// [`needs_write_barrier`](TableManager::needs_write_barrier) and the writer's
-/// `SeqCst` `active`-counter `fetch_add` — the cross-atomic dependency the
-/// drain proof relies on cannot be carried by `Release`/`Acquire` alone (see
-/// `writer_drain_barrier`).
-pub(super) struct IndexCreateBarrierGuard<'a> {
-    flags: &'a WriteBarrierFlags,
-    bit: u8,
-}
-
-impl<'a> IndexCreateBarrierGuard<'a> {
-    pub(super) fn set(flags: &'a WriteBarrierFlags, bit: u8) -> Self {
-        flags.set(bit);
-        Self { flags, bit }
-    }
-}
-
-impl Drop for IndexCreateBarrierGuard<'_> {
-    fn drop(&mut self) {
-        self.flags.clear(self.bit);
-    }
 }
 
 /// Resolve interned path ids back to dot-separated string paths.

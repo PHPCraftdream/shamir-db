@@ -280,12 +280,17 @@ pub(super) async fn pre_commit_prelock(
     repo: &RepoInstance,
 ) -> Result<PreLockResult, TxError> {
     // F-68 (#895) cluster D diagnostic instrumentation, task #124 — entry
-    // timestamp. Task #897 (independent code review) suspects a lock-order
-    // inversion between this fn (drain-guard-then-lock, see the Phase 2.5
-    // loop below) and every DDL path (lock-then-drain, e.g.
-    // `create_index_v2` in `table_manager_index_mgmt.rs`). If a hang
-    // reproduces on CI, this pairs with the "pre_commit_prelock: exit" log
-    // below (or its absence) to show whether the stall is INSIDE this fn.
+    // timestamp. F-70 (#897, P0) confirmed and fixed a genuine lock-order
+    // inversion between this fn's shape (drain-guard-then-lock, see the
+    // Phase 2.5 loop below — UNCHANGED by F-70) and every DDL path, which
+    // used to be lock-then-drain (e.g. `create_index_v2` in
+    // `table_manager_index_mgmt.rs`) and is now drain-then-lock via
+    // `TableManager::begin_write_barrier` — see `writer_drain_barrier`'s
+    // "F-70 — THE canonical lock-order hierarchy" doc section for the full
+    // derivation and correctness argument. This logging is kept as a
+    // regression tripwire: if a hang ever reproduces again, this pairs with
+    // the "pre_commit_prelock: exit" log below (or its absence) to show
+    // whether the stall is INSIDE this fn.
     let tx_id_for_log = tx.tx_id.0;
     let prelock_started = std::time::Instant::now();
     log::debug!("pre_commit_prelock: enter tx_id={tx_id_for_log}");
@@ -494,19 +499,22 @@ pub(super) async fn pre_commit_prelock(
         Vec::with_capacity(unique_tokens.len());
     for token in &unique_tokens {
         if let Some(tbl) = repo.table_by_token(*token).await? {
-            // F-68 (#895) cluster D / task #124 — this is the OTHER half of
-            // the suspected lock-order inversion (task #897): this committer
-            // is still holding this table's `drain_guards` (Phase 2.5's
-            // fast-path guards, kept alive above for whichever OTHER tables
-            // read `needs_write_barrier() == false`) while acquiring THIS
-            // table's `unique_write_lock` here. A DDL path
-            // (`create_index_v2` / `SchemaActivationBarrierGuard::raise`)
-            // takes the OPPOSITE order (lock, then drain) — if both sides
-            // are mid-sequence on overlapping tables, this `.lock_owned()`
-            // and the DDL's `drain_writers().await` can each wait on the
-            // other forever. Timestamped so a stuck run shows exactly which
-            // table_token this committer was blocked on acquiring, and for
-            // how long.
+            // F-68 (#895) cluster D / task #124 — this committer is still
+            // holding this table's `drain_guards` (Phase 2.5's fast-path
+            // guards, kept alive above for whichever OTHER tables read
+            // `needs_write_barrier() == false`) while acquiring THIS table's
+            // `unique_write_lock` here. F-70 (#897, P0) confirmed this WAS
+            // the other half of a genuine lock-order inversion: every DDL
+            // path (`create_index_v2` et al.) used to take the OPPOSITE
+            // order (lock, then drain) — if both sides were mid-sequence on
+            // overlapping tables, this `.lock_owned()` and the DDL's
+            // `drain_writers().await` could each wait on the other forever.
+            // Fixed by reordering every DDL path to drain-then-lock
+            // (`TableManager::begin_write_barrier`) — this fn's own order is
+            // UNCHANGED (it was never the bug; see `writer_drain_barrier`'s
+            // "F-70" doc section). Timestamped logging kept as a regression
+            // tripwire: a stuck run would show exactly which table_token
+            // this committer was blocked on acquiring, and for how long.
             let uwl_wait_started = std::time::Instant::now();
             log::debug!(
                 "pre_commit_prelock: tx_id={tx_id_for_log} acquiring unique_write_lock \

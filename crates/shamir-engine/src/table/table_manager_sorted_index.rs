@@ -2,7 +2,6 @@ use futures::StreamExt;
 use shamir_storage::error::DbResult;
 
 use super::table_manager::TableManager;
-use super::table_manager_index_mgmt::IndexCreateBarrierGuard;
 
 impl TableManager {
     /// Register a new sorted (B-tree-by-value) index over a single
@@ -90,22 +89,22 @@ impl TableManager {
             }
             included_fields_interned.push(seg_ids);
         }
-        // F-57 (#883): hold `unique_write_lock` across the ENTIRE register →
-        // backfill sequence and raise the `SORTED_INDEX_CREATE` bit so ALL
-        // writer paths serialize against this create. The register-before-
-        // backfill shape means a concurrent writer could otherwise interleave
-        // with the backfill on a registered-but-incomplete index. The
-        // `drain_writers()` call closes the check-then-act gap for a writer
-        // that read `false` before the flag went up — same SeqCst protocol as
-        // F-56's `create_index_v2`.
-        let _uwl_guard = self.unique_write_lock.lock().await;
-        let _barrier = IndexCreateBarrierGuard::set(
-            &self.write_barrier_flags,
-            crate::index::write_barrier_flags::SORTED_INDEX_CREATE,
-        );
-        self.drain_writers().await;
+        // F-70 (#897, P0): canonical drain-then-lock acquisition — raise
+        // `SORTED_INDEX_CREATE`, drain in-flight fast-path writers, THEN take
+        // `unique_write_lock`. F-57 (#883) originally acquired the lock
+        // FIRST here, which this task found deadlocks against
+        // `pre_commit_prelock`'s drain-guard-then-lock shape on a second
+        // table. The register-before-backfill shape means a concurrent
+        // writer could otherwise interleave with the backfill on a
+        // registered-but-incomplete index — the barrier+drain closes that
+        // regardless of lock-acquisition order (see
+        // `TableManager::begin_write_barrier` and `writer_drain_barrier`'s
+        // "F-70" doc section).
+        let (_barrier, _uwl_guard) = self
+            .begin_write_barrier(crate::index::write_barrier_flags::SORTED_INDEX_CREATE)
+            .await;
         // F-42 (#850) — same fix class as `create_index`/
-        // `create_unique_index_locked`: persist the interner's newly-touched
+        // `create_unique_index`: persist the interner's newly-touched
         // ids BEFORE `register` publishes the index. A persist failure
         // aborts before publish, so no rollback is needed (nothing was
         // registered yet). The subsequent `register` + backfill only need

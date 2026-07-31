@@ -38,7 +38,7 @@ pub use interner_manager::InternerManager;
 pub use persistable::{PersistRegistry, Persistable};
 pub use record_counter::RecordCounter;
 pub use table_config::TableConfig;
-pub use table_manager::{table_token_for, TableManager};
+pub use table_manager::{table_token_for, TableManager, WriteBarrierGuard};
 
 #[cfg(test)]
 pub use table::Table;

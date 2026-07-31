@@ -46,6 +46,104 @@
 //! not folded into `WriteBarrierFlags` — see that module's doc for why
 //! (folding would turn `enter_writer`'s single locked `fetch_add` into a CAS
 //! loop on the hottest path in this whole barrier).
+//!
+//! # F-70 (#897, P0) — THE canonical lock-order hierarchy (read this before
+//! # adding ANY new caller of `drain_writers()` or `unique_write_lock`)
+//!
+//! F-57 (#883) wired `unique_write_lock().lock().await` FOLLOWED BY
+//! `drain_writers().await` into every DDL create path
+//! (`create_index_v2`/`create_index`/`create_unique_index_locked`/sorted-index
+//! create) — lock-then-drain. Independently, F-48b (#867) had already wired
+//! `pre_commit_prelock` (the tx-commit path, `tx/pre_commit.rs`) to enter this
+//! module's drain set for EVERY table in `tx.write_set` and keep the guard
+//! alive (fast path) BEFORE acquiring `unique_write_lock` for any OTHER
+//! barriered table in the SAME transaction (slow path) — drain-guard-then-lock,
+//! the OPPOSITE order, for a DIFFERENT table.
+//!
+//! This is a genuine lock-order inversion, reachable with three parties on two
+//! tables X, Y: a DDL on X holds `unique_write_lock(X)` and blocks in
+//! `drain(X)` waiting for committer A's kept-alive drain guard on X (A itself
+//! blocked acquiring `unique_write_lock(Y)`, held by committer B, which is
+//! itself blocked acquiring `unique_write_lock(X)` — held by the DDL). DDL → A
+//! → B → DDL: a real deadlock, not a race, first reachable once F-57 gave a
+//! second DDL family the lock-then-drain shape (see
+//! `docs/dev-artifacts/prompts/post-alpha/126-f70-lock-order-inversion.md` for
+//! the full derivation and `tx::pre_commit::tests::f70_lock_order_inversion_tests`
+//! for the deterministic reproduction).
+//!
+//! ## The fix: drain-then-lock on the DDL side
+//!
+//! **Every DDL acquisition of a per-table write barrier now follows THIS
+//! order, and no other:**
+//!
+//! 1. Raise the intent bit (`WriteBarrierFlags::set`/`IndexCreateBarrierGuard`
+//!    / `set_schema_activation_barrier(true)`) — makes every NEW writer take
+//!    the slow (locked) path.
+//! 2. [`drain`](WriterDrainBarrier::drain) — wait for every writer that read
+//!    the flag as `false` BEFORE step 1 to finish its in-flight
+//!    validate→write→index sequence and exit the drain set.
+//! 3. **Only THEN** acquire `unique_write_lock`.
+//! 4. Run the snapshot/backfill/register/persist body.
+//! 5. Release the lock, then clear the intent bit (RAII, reverse order).
+//!
+//! [`TableManager::begin_write_barrier`](super::table_manager::TableManager::begin_write_barrier)
+//! is the ONE canonical entry point that performs steps 1-3 in this order —
+//! every DDL call site (in `shamir-engine` AND `shamir-db`) goes through it
+//! instead of hand-rolling the lock+flag+drain sequence, so the order cannot
+//! silently drift back to lock-then-drain at a new call site.
+//!
+//! ## Why drain-then-lock closes the cycle (not just "the other" order)
+//!
+//! The hazard in lock-then-drain is that the DDL is BOTH a lock-holder
+//! (`unique_write_lock(X)`) AND a waiter (on the drain count) at the SAME
+//! time — and the parties it waits on (A, transitively B) may need OTHER
+//! locks the DDL never touches, closing an arbitrarily long cycle back to
+//! `unique_write_lock(X)`.
+//!
+//! Under drain-then-lock, while the DDL is parked in `drain(X)` it holds NO
+//! table lock for this operation at all — it cannot be a link in any
+//! lock-wait cycle during that wait, because nothing it holds can block
+//! anyone else. Once `drain(X)` returns (every fast-path writer that read the
+//! flag as `false` has exited), the DDL competes for `unique_write_lock(X)`
+//! exactly like a brand-new slow-path writer would — an ordinary two-party
+//! wait (DDL vs. whoever currently holds the lock), never a cycle, because
+//! that lock-holder does not (and structurally cannot: see below) wait on
+//! anything the DDL holds.
+//!
+//! This also does not reopen the snapshot-safety property F-56/F-57 built
+//! `drain_writers()` for: a writer that arrives AFTER the flag is raised
+//! reads `needs_write_barrier() == true` and takes the slow path, competing
+//! for the SAME `unique_write_lock` the DDL is about to acquire. Either
+//! outcome is safe — if the writer wins the race, it completes its write and
+//! releases the lock BEFORE the DDL's snapshot begins (so the snapshot sees
+//! it); if the DDL wins, the writer simply waits its turn behind the DDL,
+//! identical to today's serialization. A writer that read the flag as
+//! `false` a moment BEFORE the raise is still caught by `drain()` in step 2,
+//! exactly as before — reordering step 2 relative to step 3 changes nothing
+//! about what `drain()` itself waits for (see "Why bump BEFORE the flag
+//! check" above: the writer's fast/slow fork is decided at ITS OWN flag read,
+//! independent of when the DDL happens to acquire, or not yet acquire, the
+//! lock).
+//!
+//! ## `pre_commit_prelock`'s order is UNCHANGED and is the one this mirrors
+//!
+//! The commit-side order (drain-guard-kept-alive, THEN lock for a different
+//! table) was never the bug — F-48b's shape already amounts to
+//! "drain-membership before any lock acquisition, per table, for the whole
+//! prelock call". The DDL side is what had to change to match it. See
+//! `tx::pre_commit::pre_commit_prelock`'s own doc comment for its half of the
+//! now-consistent hierarchy.
+//!
+//! ## Multi-table / rename callers
+//!
+//! `TableManager::rename_index`'s unique-index branch needs the lock held
+//! across an entire drop→create span (not just create), for a DIFFERENT
+//! reason (uniqueness-gap atomicity, audit A9) — unrelated to drain ordering.
+//! It still goes through `begin_write_barrier` for the initial
+//! raise→drain→lock acquisition and then simply keeps the returned lock guard
+//! alive across both the drop and the create body — see that method's doc.
+//! This does not reintroduce a lock-then-drain window: the drain always
+//! completes strictly BEFORE this caller (or any other) holds the lock.
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -98,9 +196,10 @@ use std::sync::Arc;
 ///     `WriteBarrierFlags::any_set()` — ONE `SeqCst` load of the packed word
 ///     that replaced the six former independent flags)
 ///   - drainer `flag.store(true)` (any `WriteBarrierFlags::set`/`set_to` call
-///     — `set_schema_activation_barrier` / `IndexCreateBarrierGuard` /
-///     `IndexManager`'s `UNIQUE_INDEX_EXISTS` setters all route through the
-///     SAME `fetch_or`/`fetch_and` on the SAME `Arc<AtomicU8>`)
+///     — `set_schema_activation_barrier` / `WriteBarrierGuard` (F-70, #897;
+///     formerly `IndexCreateBarrierGuard`) / `IndexManager`'s
+///     `UNIQUE_INDEX_EXISTS` setters all route through the SAME
+///     `fetch_or`/`fetch_and` on the SAME `Arc<AtomicU8>`)
 ///   - drainer `active.load` (`drain`)
 ///
 /// This dependency spans TWO independent atomics (`active` and `flag`), so
@@ -162,10 +261,12 @@ use std::sync::Arc;
 ///
 /// This primitive is barrier-agnostic: [`drain`](Self::drain) waits for ALL
 /// in-flight fast-path writers, regardless of which intent flag the drainer
-/// raised. It is called from `SchemaActivationBarrierGuard::raise`
-/// (schema-activation DDL, F-48) and from `create_index_v2`
-/// (`table_manager_index_mgmt.rs`, F-56) — after raising the intent flag,
-/// before the snapshot/proof point — identically.
+/// raised. Every DDL call site (schema-activation, F-37/F-48; `create_index_v2`
+/// /`create_index`/`create_unique_index`/sorted-index create, F-56/F-57) now
+/// reaches it through the ONE canonical entry point,
+/// [`TableManager::begin_write_barrier`](super::table_manager::TableManager::begin_write_barrier)
+/// (F-70, #897) — after raising the intent bit, before acquiring
+/// `unique_write_lock` and before the snapshot/proof point — identically.
 #[derive(Debug)]
 pub struct WriterDrainBarrier {
     active: Arc<AtomicUsize>,
@@ -201,10 +302,21 @@ impl WriterDrainBarrier {
     /// Drain: wait until every in-flight fast-path writer has exited the
     /// drain set.
     ///
-    /// The caller MUST have already (1) raised its intent flag (`Release`)
-    /// so NEW writers take the slow (locked) path, and (2) hold
-    /// `unique_write_lock` so slow-path writers are blocked. Then this
-    /// catches any writer that read `false` before the flag went up.
+    /// The caller MUST have already raised its intent flag/bit (`SeqCst`
+    /// store) so NEW writers take the slow (locked) path. Then this catches
+    /// any writer that read `false` before the flag went up.
+    ///
+    /// F-70 (#897, P0): the caller must call this BEFORE acquiring
+    /// `unique_write_lock`, NOT after — see
+    /// [`TableManager::begin_write_barrier`](super::table_manager::TableManager::begin_write_barrier)
+    /// and this module's "F-70 — THE canonical lock-order hierarchy" doc
+    /// section for why (the prior lock-then-drain order, F-57, deadlocked
+    /// against `pre_commit_prelock`'s drain-guard-then-lock shape). Holding
+    /// the lock is not required for `drain()` to be correct: what matters is
+    /// that the flag was raised first (so every NEW writer takes the slow
+    /// path and cannot re-enter the drain set) — the lock only serializes
+    /// those NEW slow-path writers against the caller's own body, a separate
+    /// concern from the drain wait itself.
     ///
     /// When no writers are active, returns after a single `SeqCst` load.
     pub async fn drain(&self) {
@@ -212,18 +324,20 @@ impl WriterDrainBarrier {
         // NOT a behavior change: this is timestamped logging only, no new
         // await point, no retry/timeout.
         //
-        // This is the DDL side of the suspected lock-order inversion (task
-        // #897): every caller (`create_index_v2`, `create_index`,
-        // `create_unique_index_locked`, `SchemaActivationBarrierGuard::raise`)
-        // acquires `unique_write_lock` FIRST and calls `drain()` SECOND, while
-        // `pre_commit_prelock` (crates/shamir-engine/src/tx/pre_commit.rs)
-        // enters this SAME drain set first and may later acquire
-        // `unique_write_lock` for a DIFFERENT table while still holding this
-        // table's drain-set membership. If a DDL's `drain()` call never
-        // returns, this loop logs a "still waiting" warning periodically (not
-        // every iteration — that would flood the log) so a stuck CI run shows
-        // the entered-but-never-drained state with a timestamp gap that lines
-        // up with the kill.
+        // F-70 (#897, P0): this WAS the DDL side of a genuine lock-order
+        // inversion — every DDL caller used to acquire `unique_write_lock`
+        // FIRST and call `drain()` SECOND, while `pre_commit_prelock`
+        // (crates/shamir-engine/src/tx/pre_commit.rs) enters this SAME drain
+        // set first and may later acquire `unique_write_lock` for a
+        // DIFFERENT table while still holding this table's drain-set
+        // membership — DDL → committer A → committer B → DDL, a reachable
+        // 3-party cycle. Fixed by reordering every DDL caller to
+        // drain-then-lock (`TableManager::begin_write_barrier`); this
+        // diagnostic logging is kept as a regression tripwire — if a
+        // `drain()` call ever again blocks past 1s, that is the signature of
+        // this same deadlock class re-opening (e.g. a new call site that
+        // hand-rolls lock-then-drain instead of going through
+        // `begin_write_barrier`).
         let drain_started = std::time::Instant::now();
         let mut last_report = drain_started;
         log::debug!(
