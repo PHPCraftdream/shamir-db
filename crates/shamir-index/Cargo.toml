@@ -60,8 +60,8 @@ serial_test = "3.3.1"
 shamir-storage = { path = "../shamir-storage" }
 rust_decimal = { version = "1.40.0", features = ["serde"] }
 num-bigint = { version = "0.4", features = ["serde"] }
-shamir-bench-utils = { path = "../shamir-bench-utils" }
-bench-scale-tool = { workspace = true }
+shamir-bench-utils = { path = "../shamir-bench-utils", features = ["peak_mem"] }
+bench-scale-tool = { workspace = true, features = ["async"] }
 
 [[bench]]
 name = "sq8_hot_path"

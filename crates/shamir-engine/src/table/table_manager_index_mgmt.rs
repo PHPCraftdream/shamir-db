@@ -524,26 +524,50 @@ impl TableManager {
         // after. `build_index_definition` already interned the index NAME and
         // every field-path segment in-memory (`intern_string`/`intern_path` →
         // `touch_ind`); the ONLY thing deferred to this point is the DURABLE
-        // flush of those already-assigned ids, so moving it ahead of
-        // `collect_all_current_records`/`create_index_from_records` is a pure
-        // ordering change with no functional side effect. Confirmed by reading
-        // the actual signatures: `create_index_from_records(index_def, records)`
-        // consumes the already-built `IndexDefinition` (whose `name_interned`
-        // u64 was set in-memory by `build_index_definition`) and a records Vec
-        // collected independently from `list_stream` — neither depends on the
-        // interner having been durably persisted. Pre-F-42 a persist failure
-        // here returned `Err` but left the just-registered index LIVE in
+        // flush of those already-assigned ids, so moving it ahead of the
+        // streaming backfill below is a pure ordering change with no
+        // functional side effect. Confirmed by reading the actual signatures:
+        // `create_index_from_stream(index_def, stream)` consumes the
+        // already-built `IndexDefinition` (whose `name_interned` u64 was set
+        // in-memory by `build_index_definition`) and a stream built
+        // independently from `list_stream` — neither depends on the interner
+        // having been durably persisted. Pre-F-42 a persist failure here
+        // returned `Err` but left the just-registered index LIVE in
         // `index_manager` — a live index whose interner ids may not survive a
         // restart, the exact F-33 corruption class reopened at the failure
         // path. Reordering means a persist failure aborts before any publish,
         // so no rollback is needed.
         self.interner.persist().await?;
-        // Always use the seam: collect_all_current_records routes
-        // attached→log / unattached→data_store, so it is correct for
-        // both cases.
-        let records = self.collect_all_current_records().await?;
+        // F-78 (#905): stream the backfill instead of materializing the WHOLE
+        // table into a `Vec<(RecordId, InnerValue)>`. `list_stream` already
+        // yields batches in O(batch) memory; we adapt each `RecordCow` to a
+        // decoded `InnerValue` here (the same decode `collect_all_current_records`
+        // did, but per-batch instead of for the whole table) and hand the
+        // stream to `IndexManager::create_index_from_stream`, which batch-
+        // writes postings via `set_many` per batch (one transactional commit
+        // per batch) instead of one giant `set_many` at the end. Peak memory
+        // drops from O(table) to O(batch).
+        //
+        // `collect_all_current_records` is intentionally LEFT in place — it
+        // still has other callers (`doctor::repair()` and two parity tests).
+        //
+        // Write-delta catch-up is already FREE: the barrier+lock above
+        // (`begin_write_barrier(REGULAR_INDEX_CREATE)`) serializes every
+        // concurrent writer for the whole create (in both the old materialize
+        // shape and this streaming shape), and Phase 1's register-at-Building
+        // (inside `create_index_from_stream`) activates the live write-hook so
+        // a row written at the registration boundary gets its posting
+        // maintained by that hook — the SAME mechanism the old path relied on.
+        // Streaming adds no new lost-write window and needs no new mechanism.
+        let stream = self.list_stream(1000).map(|batch| {
+            batch.and_then(|rows| {
+                rows.into_iter()
+                    .map(|(id, cow)| cow.into_inner().map(|v| (id, v)))
+                    .collect()
+            })
+        });
         self.index_manager
-            .create_index_from_records(index_def, records)
+            .create_index_from_stream(index_def, stream)
             .await
     }
 
@@ -619,6 +643,15 @@ impl TableManager {
         // attached→log / unattached→data_store, so it is correct for
         // both cases. Collected UNDER the lock (held by caller) so no
         // writer can interpose.
+        //
+        // F-78 (#905) — DEFERRED for the unique family: unlike the regular
+        // `create_index` path (which now streams via
+        // `create_index_from_stream`), the unique path still materializes the
+        // whole table here because duplicate detection needs global knowledge.
+        // See `create_unique_index_from_records`'s F-78 doc for the full
+        // rationale + the bounded-memory approaches tracked as follow-up. The
+        // regular-hash streaming fix landed fully tested + benchmarked; this
+        // unique-family gap is the documented escape-hatch deferral.
         let records = self.collect_all_current_records().await?;
         self.index_manager
             .create_unique_index_from_records(index_def, records)

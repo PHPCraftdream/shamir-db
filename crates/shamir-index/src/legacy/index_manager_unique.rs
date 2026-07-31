@@ -368,6 +368,27 @@ impl IndexManager {
     /// FINAL-A: create unique index and backfill from pre-decoded records
     /// instead of `data_store.iter_stream`. Used by `TableManager` when an
     /// MvccStore is attached.
+    ///
+    /// # F-78 (#905) — DEFERRED (regular-hash family landed; unique deferred)
+    ///
+    /// Unlike the regular-hash family (whose `create_index_from_records` got a
+    /// streaming counterpart `create_index_from_stream` in F-78), this unique
+    /// path STILL materializes: it builds a `TMap<Bytes, usize>` duplicate-
+    /// count map PLUS an `entries: Vec<(RecordId, Bytes)>` — two O(table)
+    /// structures — before any posting is written, then (if duplicate-free) a
+    /// THIRD O(table) `Vec` for the final `set_many`. That is the O(table)
+    /// peak-memory shape F-78 eliminates for regular indexes, preserved here
+    /// UNCHANGED because the unique family cannot stream naively: duplicate
+    /// detection needs GLOBAL knowledge (you cannot know a key is duplicate-
+    /// free until you have seen every row with that key), and a sound bounded-
+    /// memory rewrite (external/partitioned duplicate detection, or a temporary
+    /// unique backend whose set-primitive rejects duplicates at write time) is
+    /// a substantially harder, separately-scoped task. Per F-78's brief
+    /// escape hatch, the regular-hash streaming fix was landed fully tested +
+    /// benchmarked and this unique-family gap is documented as deferred
+    /// follow-up rather than shipping an unsound or untested duplicate-
+    /// detection rewrite under schedule pressure. The existing duplicate-
+    /// detection + `UniqueIndexCreationFailed` error shape are unchanged.
     pub async fn create_unique_index_from_records(
         &self,
         index_def: IndexDefinition,

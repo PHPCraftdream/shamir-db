@@ -537,6 +537,142 @@ impl IndexManager {
         Ok(())
     }
 
+    /// F-78 (#905): streaming counterpart of [`create_index_from_records`].
+    ///
+    /// Same externally-observable result and the SAME F-72 Phase 1 → Phase 2
+    /// → Phase 3 lifecycle as [`create_index_from_records`]; only Phase 2's
+    /// *body* differs — it consumes a `Stream` of decoded record *batches*
+    /// instead of one pre-materialised `Vec`, so peak memory is O(batch) not
+    /// O(table). Each batch is decoded, indexed, and flushed to `info_store`
+    /// via its own `set_many` (one transactional commit per batch on
+    /// transactional backends), then dropped before the next batch is read.
+    ///
+    /// # Why a separate method (not a signature change on the old one)
+    ///
+    /// [`create_index_from_records`] is preserved byte-for-byte unchanged so
+    /// the F-78 correctness-equivalence test can build the SAME index the OLD
+    /// (materialise-then-one-`set_many`) way and the NEW (stream-and-batch)
+    /// way against identical fixtures and assert the resulting posting SETS
+    /// are identical. The streaming rewrite must change HOW the postings are
+    /// written, never WHAT gets written.
+    ///
+    /// # F-72 state machine — UNCHANGED
+    ///
+    /// Phase 1 (register at `Building`, durable persist) and Phase 3 (flip to
+    /// `Ready`, durable persist) are identical to [`create_index_from_records`]
+    /// — only Phase 2's materialise-then-iterate body is replaced by a
+    /// stream-and-batch body. The `create_index_backfill_hook` pause point
+    /// stays exactly where it was (post-Phase-2, pre-Phase-3), so F-72's
+    /// regression tests are unaffected.
+    ///
+    /// # Concurrency — write-delta catch-up is FREE (reconfirmed)
+    ///
+    /// The caller (`TableManager::create_index`) holds F-70's write barrier
+    /// (`begin_write_barrier(REGULAR_INDEX_CREATE)` → raise bit → drain →
+    /// `unique_write_lock`) across the ENTIRE Phase 1→2→3 sequence, so no
+    /// concurrent writer can land a row *during* this loop — writers observe
+    /// `needs_write_barrier() == true` and queue on `unique_write_lock` until
+    /// the barrier drops. A row written at the registration boundary (after
+    /// the snapshot but before Phase 1's `add_index`) is caught by the LIVE
+    /// write-hook that Phase 1 activates — the SAME register-first ordering
+    /// `create_index_from_records` already relied on, which this method does
+    /// NOT change. So streaming introduces no new lost-write window and needs
+    /// no new catch-up mechanism: the existing register-first + live-hook +
+    /// barrier ordering already covers it. (The barrier holds writers for the
+    /// whole build in BOTH the old and new shapes, so streaming does not by
+    /// itself reduce writer queueing — its benefit is peak *memory*, tracked
+    /// by the F-78 bench. Reducing writer-blocked time would require releasing
+    /// the barrier between batches, which is explicitly out of scope — see the
+    /// brief's "do not disturb F-72 / only Phase 2's body is in scope" rule.)
+    ///
+    /// # Cancel-safety / partial-build residual (unchanged class)
+    ///
+    /// An `Err` from the stream or a `set_many` (`?` below) leaves the
+    /// definition registered but `Building` — it never reaches Phase 3's
+    /// flip, so it stays permanently planner-invisible until an operator
+    /// `repair()` — the SAME accepted residual as
+    /// [`create_index_from_records`] and `create_sorted_index_with_include`.
+    pub async fn create_index_from_stream<S>(
+        &self,
+        index_def: IndexDefinition,
+        stream: S,
+    ) -> DbResult<()>
+    where
+        S: futures::Stream<Item = DbResult<Vec<(RecordId, InnerValue)>>> + Unpin,
+    {
+        use futures::StreamExt;
+
+        let name_interned = index_def.name_interned;
+        // Capture paths before `index_def` is moved into `add_index`.
+        let paths = index_def.paths.clone();
+
+        // ── Phase 1: register the definition FIRST, at Building ────────────
+        // (Identical to `create_index_from_records` — see that method's doc.)
+        self.indexes.add_index(index_def);
+        self.has_indexes.store(true, Ordering::Release);
+        self.save_index_info().await?;
+
+        // ── Phase 2: stream + batch-write postings (F-78 body) ──────────────
+        // O(batch) peak memory: each batch's posting_writes / cache_index_keys
+        // are built, flushed via `set_many`, and dropped before the next batch.
+        // Idempotent against a record also written by the live hook at the
+        // registration boundary — same (posting_key, empty-value) pair.
+        let mut count = 0usize;
+        let mut stream = stream;
+        while let Some(batch_result) = stream.next().await {
+            let batch = batch_result?;
+            let mut posting_writes: Vec<(Bytes, Bytes)> =
+                Vec::with_capacity(batch.len().min(131_072));
+            let mut cache_index_keys: Vec<Bytes> = Vec::with_capacity(posting_writes.capacity());
+            for (record_id, value) in &batch {
+                if let Some(irk) = build_index_key_from_record(false, name_interned, value, &paths)
+                {
+                    let index_key = irk.to_bytes();
+                    let posting_key = build_posting_key(&index_key, record_id);
+                    posting_writes.push((posting_key, Bytes::new()));
+                    cache_index_keys.push(index_key);
+                    count += 1;
+                }
+            }
+            if !posting_writes.is_empty() {
+                // Boundary: posting keys are built as `Bytes`; the store
+                // `set_many` takes `RecordKey` (byte-identical conversion).
+                let posting_writes: Vec<(RecordKey, Bytes)> = posting_writes
+                    .into_iter()
+                    .map(|(k, v)| (k.into(), v))
+                    .collect();
+                self.info_store.set_many(posting_writes).await?;
+            }
+            for ik in cache_index_keys {
+                self.posting_cache.remove(&ik);
+            }
+        }
+
+        // F-72 (#899, P0) test seam — IDENTICAL placement to
+        // `create_index_from_records` (post-Phase-2, pre-Phase-3). NOT
+        // `#[cfg(test)]`-gated — cross-crate test consumer; see the field's
+        // doc. `None` on every real path.
+        if let Some(hook) = self.create_index_backfill_hook.load_full() {
+            hook.wait_at_window().await;
+        }
+
+        // ── Phase 3: flip Building → Ready, persist BEFORE returning ────────
+        // (Identical to `create_index_from_records` — see that method's doc.)
+        if let Some(def) = self.indexes.get_index(name_interned) {
+            let mut ready_def = def;
+            ready_def.state = crate::state::IndexState::Ready;
+            self.indexes.add_index(ready_def);
+        }
+        self.save_index_info().await?;
+
+        log::info!(
+            "Created index '{}' with {} entries (streamed from seam)",
+            name_interned,
+            count
+        );
+        Ok(())
+    }
+
     /// Удаляет индекс по его имени.
     ///
     /// Процесс удаления (F-76 / #903 — definition retired BEFORE the posting

@@ -257,6 +257,10 @@ harness = false
 name = "fk_cascade_index"
 harness = false
 
+[[bench]]
+name = "f78_writer_latency"
+harness = false
+
 [lib]
 # Doctests are banned project-wide (slow: recompile-per-example). Examples
 # live as illustration; behavioural coverage is in unit/integration tests.
