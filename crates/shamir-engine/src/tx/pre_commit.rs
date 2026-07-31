@@ -604,7 +604,7 @@ pub(super) async fn pre_commit_prelock(
     // staging) and sees an unchanged generation skips the per-record
     // re-derivation entirely. See `rederive_index2_ops_post_stage` for the
     // old-value resolution (insert-vs-update-vs-delete) mechanism.
-    rederive_index2_ops_post_stage(tx, repo).await;
+    rederive_index2_ops_post_stage(tx, repo).await?;
 
     // F-48b test seam: parks strictly AFTER Phase 2.5's flag-check loop
     // (every table's `needs_write_barrier()` has been read and the writer
@@ -631,6 +631,79 @@ pub(super) async fn pre_commit_prelock(
         uwl_guards,
         drain_guards,
     })
+}
+
+// ── F-73 (#900) test-only failure-injection seam ────────────────────────────
+//
+// Mirrors `table_manager_streaming.rs::TEST_READ_ONE_TX_BYTES_FAILURE` /
+// `ReadOneTxBytesFailHook` (F-65, #891): a `#[cfg(test)]` `OnceLock<Arc<Hook>>`
+// global, zero cost when unset. Lets a test make the NEXT
+// `read_pre_tx_bytes(table_token, id)` call for a specific `(table_token,
+// RecordId)` return a genuine `Err(DbError::Storage)` instead of reading the
+// pre-tx bytes — so `rederive_index2_ops_post_stage`'s commit-time storage
+// read hits a real, deterministic error (no sleeps, no timing races) proving
+// the F-73 fail-closed fix.
+//
+// One-shot per arm: once an armed `(table_token, id)` fires it is consumed,
+// so a retry of the SAME id reads normally.
+#[cfg(test)]
+pub(crate) static TEST_REDERIVE_PRE_TX_READ_FAILURE: std::sync::OnceLock<
+    std::sync::Arc<RederivePreTxReadFailHook>,
+> = std::sync::OnceLock::new();
+
+/// Test-only one-shot failure injector for [`read_pre_tx_bytes`]. See
+/// [`TEST_REDERIVE_PRE_TX_READ_FAILURE`]'s doc for the rationale.
+#[cfg(test)]
+#[derive(Debug, Default)]
+pub(crate) struct RederivePreTxReadFailHook {
+    inner: std::sync::Mutex<Vec<(u64, RecordId)>>,
+}
+
+#[cfg(test)]
+impl RederivePreTxReadFailHook {
+    /// Arm a one-shot injected `Err` for the next
+    /// `read_pre_tx_bytes(table_token, id)`.
+    pub(crate) fn arm(&self, table_token: u64, id: RecordId) {
+        self.inner.lock().unwrap().push((table_token, id));
+    }
+
+    /// Returns `Some(Err)` if `(table_token, id)` is armed, consuming the arm
+    /// (one-shot); `None` otherwise.
+    fn take_injected(&self, table_token: u64, id: RecordId) -> Option<DbError> {
+        let mut guard = self.inner.lock().unwrap();
+        let pos = guard
+            .iter()
+            .position(|(tt, rid)| *tt == table_token && *rid == id)?;
+        guard.swap_remove(pos);
+        Some(DbError::Storage(format!(
+            "F-73 injected rederive pre-tx read failure (table_token={table_token}, id={id:?})"
+        )))
+    }
+}
+
+/// Read the pre-tx value of a staged record's key from `data_store`, used by
+/// [`rederive_index2_ops_post_stage`] to distinguish insert vs. update/delete.
+/// Returns `Ok(None)` for `DbError::NotFound` (the proven "no pre-tx row"
+/// semantics — see that function's doc), `Ok(Some(bytes))` on a hit, and
+/// propagates every other error (F-73: a transient storage error here must
+/// abort the tx, not silently skip the record).
+async fn read_pre_tx_bytes(
+    data_store: &Arc<dyn shamir_storage::types::Store>,
+    #[cfg_attr(not(test), allow(unused_variables))] table_token: u64,
+    #[cfg_attr(not(test), allow(unused_variables))] rid: RecordId,
+    key: &RecordKey,
+) -> Result<Option<bytes::Bytes>, DbError> {
+    #[cfg(test)]
+    if let Some(hook) = TEST_REDERIVE_PRE_TX_READ_FAILURE.get() {
+        if let Some(err) = hook.take_injected(table_token, rid) {
+            return Err(err);
+        }
+    }
+    match data_store.get(key.clone()).await {
+        Ok(bytes) => Ok(Some(bytes)),
+        Err(DbError::NotFound(_)) => Ok(None),
+        Err(e) => Err(e),
+    }
 }
 
 /// F-50 (#869, spike) — Phase 2.7 worker: re-derive index2 posting ops for
@@ -666,7 +739,32 @@ pub(super) async fn pre_commit_prelock(
 /// Vector backends' `staged_vectors` are re-derived in the per-record loop
 /// (their `plan_insert_tx` is a no-op; HNSW embeddings are buffered
 /// separately) — Step 2 Part B.
-async fn rederive_index2_ops_post_stage(tx: &mut TxContext, repo: &RepoInstance) {
+///
+/// F-73 (#900, P0) — FAIL CLOSED. This function used to return `()` and
+/// silently swallow every error class it could hit: a non-`NotFound`
+/// `data_store.get` error, a `plan_insert_tx`/`plan_update_tx`/
+/// `plan_delete_tx`/`plan_record_*` `Err`, a record that fails
+/// `InnerValue::from_bytes`, or a staged key that fails
+/// `RecordId::try_from_bytes`. Because Phase 5a (the data mutation) runs
+/// UNCONDITIONALLY later in the pipeline, a transient error here used to let
+/// the tx commit successfully while silently skipping the row's posting for
+/// the new index — a permanent, unreported table/index divergence. Now every
+/// one of those classes propagates via `?`/`map_err` and the tx aborts before
+/// Phase 4's WAL begin (see the call site in `pre_commit_prelock`). The ONE
+/// exception, unchanged from before: `Err(DbError::NotFound(_))` on
+/// `data_store.get` stays the sole "treat as insert" case — that is the
+/// PROVEN semantics at this call site (Phase 5a hasn't run yet, so the store
+/// still holds the pre-tx value; `NotFound` genuinely means "no pre-tx row").
+/// A malformed staged key or an undecodable staged/stored record is an
+/// internal invariant violation (the staging path guarantees well-formed
+/// keys/values reach here), surfaced as `DbError::Internal` /
+/// `DbError::Codec` respectively — the same typed-error-over-bare-string
+/// style F-55 (#881, commit `f9eed337`) and F-65 (#891, commit `28d39f31`)
+/// established for this fail-open defect class.
+async fn rederive_index2_ops_post_stage(
+    tx: &mut TxContext,
+    repo: &RepoInstance,
+) -> Result<(), TxError> {
     // =========================================================================
     // Index2 re-derivation (F-50 #869 Step 1) + vector staging (Step 2 Part B)
     // =========================================================================
@@ -711,62 +809,92 @@ async fn rederive_index2_ops_post_stage(tx: &mut TxContext, repo: &RepoInstance)
             for kvop in staged_ops {
                 match kvop {
                     KvOp::Set(k, v) => {
-                        let Some(rid) = RecordId::try_from_bytes(&k) else {
-                            continue;
-                        };
-                        let Ok(new_rec) = InnerValue::from_bytes(&v) else {
-                            continue;
-                        };
+                        // F-73: a staged key that doesn't decode as a RecordId is an
+                        // internal invariant violation (the staging path guarantees
+                        // well-formed keys reach here) — fail the tx, don't skip.
+                        let rid = RecordId::try_from_bytes(&k).ok_or_else(|| {
+                            TxError::Storage(DbError::Internal(format!(
+                                "rederive_index2_ops_post_stage: malformed staged key \
+                                 (table_token={table_token}, {} bytes) — expected a \
+                                 16-byte RecordId",
+                                k.len()
+                            )))
+                        })?;
+                        // F-73: a staged record that fails to decode is corruption,
+                        // not a normal runtime condition — fail the tx.
+                        let new_rec = InnerValue::from_bytes(&v).map_err(|e| {
+                            TxError::Storage(DbError::Codec(format!(
+                                "rederive_index2_ops_post_stage: staged record decode \
+                                 failed (table_token={table_token}, rid={rid:?}): {e}"
+                            )))
+                        })?;
                         // Phase 5a has not run: the store still holds the PRE-tx
                         // value, so this one read distinguishes insert vs. update.
-                        match data_store.get(k.clone()).await {
-                            Ok(old_bytes) => {
-                                if let Ok(old_rec) = InnerValue::from_bytes(&old_bytes) {
-                                    for backend in &new_backends {
-                                        if let Ok(ops) = backend
-                                            .plan_update_tx(rid, &old_rec, &new_rec, tx_id)
-                                            .await
+                        match read_pre_tx_bytes(&data_store, table_token, rid, &k).await {
+                            Ok(Some(old_bytes)) => {
+                                // F-73: the pre-tx value MUST decode — it was written
+                                // by a prior successful commit through this same
+                                // codec. A decode failure here is corruption, not
+                                // "skip this record".
+                                let old_rec = InnerValue::from_bytes(&old_bytes).map_err(|e| {
+                                    TxError::Storage(DbError::Codec(format!(
+                                        "rederive_index2_ops_post_stage: pre-tx record \
+                                         decode failed (table_token={table_token}, \
+                                         rid={rid:?}): {e}"
+                                    )))
+                                })?;
+                                for backend in &new_backends {
+                                    let ops = backend
+                                        .plan_update_tx(rid, &old_rec, &new_rec, tx_id)
+                                        .await
+                                        .map_err(|e| {
+                                            TxError::Storage(DbError::Internal(format!(
+                                                "rederive_index2_ops_post_stage: \
+                                                 plan_update_tx failed \
+                                                 (table_token={table_token}, rid={rid:?}): {e}"
+                                            )))
+                                        })?;
+                                    appended.extend(ops.into_iter().map(|op| (table_token, op)));
+                                    // F-50 Step 2 (#870, Part B): re-derive
+                                    // staged vectors for a new vector backend.
+                                    // VectorBackend::plan_update_tx is a no-op
+                                    // for a tx (HNSW embeddings route through
+                                    // tx.staged_vectors instead), so the posting
+                                    // loop above contributes nothing for it.
+                                    // Mirror stage_vector_deletes_on_update +
+                                    // stage_vectors from table_manager_tx_ops:
+                                    // if old carried a vector and new does not,
+                                    // stage a delete; otherwise stage the new.
+                                    if is_vector_backend(backend) {
+                                        if backend.staged_vector(rid, &old_rec).await.is_some()
+                                            && backend.staged_vector(rid, &new_rec).await.is_none()
                                         {
-                                            appended.extend(
-                                                ops.into_iter().map(|op| (table_token, op)),
-                                            );
+                                            tx.stage_vector_delete(table_token, rid);
                                         }
-                                        // F-50 Step 2 (#870, Part B): re-derive
-                                        // staged vectors for a new vector backend.
-                                        // VectorBackend::plan_update_tx is a no-op
-                                        // for a tx (HNSW embeddings route through
-                                        // tx.staged_vectors instead), so the posting
-                                        // loop above contributes nothing for it.
-                                        // Mirror stage_vector_deletes_on_update +
-                                        // stage_vectors from table_manager_tx_ops:
-                                        // if old carried a vector and new does not,
-                                        // stage a delete; otherwise stage the new.
-                                        if is_vector_backend(backend) {
-                                            if backend.staged_vector(rid, &old_rec).await.is_some()
-                                                && backend
-                                                    .staged_vector(rid, &new_rec)
-                                                    .await
-                                                    .is_none()
-                                            {
-                                                tx.stage_vector_delete(table_token, rid);
-                                            }
-                                            if let Some(vec) =
-                                                backend.staged_vector(rid, &new_rec).await
-                                            {
-                                                tx.stage_vector(table_token, rid, vec);
-                                            }
+                                        if let Some(vec) =
+                                            backend.staged_vector(rid, &new_rec).await
+                                        {
+                                            tx.stage_vector(table_token, rid, vec);
                                         }
                                     }
                                 }
                             }
-                            Err(DbError::NotFound(_)) => {
+                            Ok(None) => {
+                                // NotFound is the ONLY case treated as "this is an
+                                // insert, not an update" — the proven semantics at
+                                // this call site (see the fn's doc comment).
                                 for backend in &new_backends {
-                                    if let Ok(ops) =
-                                        backend.plan_insert_tx(rid, &new_rec, tx_id).await
-                                    {
-                                        appended
-                                            .extend(ops.into_iter().map(|op| (table_token, op)));
-                                    }
+                                    let ops = backend
+                                        .plan_insert_tx(rid, &new_rec, tx_id)
+                                        .await
+                                        .map_err(|e| {
+                                            TxError::Storage(DbError::Internal(format!(
+                                                "rederive_index2_ops_post_stage: \
+                                                 plan_insert_tx failed \
+                                                 (table_token={table_token}, rid={rid:?}): {e}"
+                                            )))
+                                        })?;
+                                    appended.extend(ops.into_iter().map(|op| (table_token, op)));
                                     // F-50 Step 2 (#870, Part B): re-derive staged
                                     // vector for a new vector backend (insert case).
                                     // Mirror stage_vectors from table_manager_tx_ops.
@@ -779,33 +907,54 @@ async fn rederive_index2_ops_post_stage(tx: &mut TxContext, repo: &RepoInstance)
                                     }
                                 }
                             }
-                            // A non-NotFound storage error: best-effort skip.
-                            Err(_) => {}
+                            // F-73: a non-NotFound storage error MUST abort the tx —
+                            // it used to be a silent best-effort skip, which let the
+                            // commit succeed while the row's posting for the new
+                            // index was permanently dropped.
+                            Err(e) => return Err(TxError::Storage(e)),
                         }
                     }
                     KvOp::Remove(k) => {
-                        let Some(rid) = RecordId::try_from_bytes(&k) else {
-                            continue;
-                        };
-                        // Nothing committed to delete from the index on a NotFound read
-                        // (the row was never materialized) — best-effort skip otherwise.
-                        if let Ok(old_bytes) = data_store.get(k.clone()).await {
-                            if let Ok(old_rec) = InnerValue::from_bytes(&old_bytes) {
-                                for backend in &new_backends {
-                                    if let Ok(ops) =
-                                        backend.plan_delete_tx(rid, &old_rec, tx_id).await
-                                    {
-                                        appended
-                                            .extend(ops.into_iter().map(|op| (table_token, op)));
-                                    }
-                                    // F-50 Step 2 (#870, Part B): re-derive staged
-                                    // vector delete for a new vector backend.
-                                    // Mirror stage_vector_delete.
-                                    if is_vector_backend(backend)
-                                        && backend.staged_vector(rid, &old_rec).await.is_some()
-                                    {
-                                        tx.stage_vector_delete(table_token, rid);
-                                    }
+                        let rid = RecordId::try_from_bytes(&k).ok_or_else(|| {
+                            TxError::Storage(DbError::Internal(format!(
+                                "rederive_index2_ops_post_stage: malformed staged key \
+                                 (table_token={table_token}, {} bytes) — expected a \
+                                 16-byte RecordId",
+                                k.len()
+                            )))
+                        })?;
+                        // Nothing committed to delete from the index on a NotFound
+                        // read (the row was never materialized) — a non-NotFound
+                        // error still aborts the tx (F-73).
+                        if let Some(old_bytes) =
+                            read_pre_tx_bytes(&data_store, table_token, rid, &k).await?
+                        {
+                            let old_rec = InnerValue::from_bytes(&old_bytes).map_err(|e| {
+                                TxError::Storage(DbError::Codec(format!(
+                                    "rederive_index2_ops_post_stage: pre-tx record \
+                                     decode failed (table_token={table_token}, \
+                                     rid={rid:?}): {e}"
+                                )))
+                            })?;
+                            for backend in &new_backends {
+                                let ops = backend
+                                    .plan_delete_tx(rid, &old_rec, tx_id)
+                                    .await
+                                    .map_err(|e| {
+                                        TxError::Storage(DbError::Internal(format!(
+                                            "rederive_index2_ops_post_stage: \
+                                                 plan_delete_tx failed \
+                                                 (table_token={table_token}, rid={rid:?}): {e}"
+                                        )))
+                                    })?;
+                                appended.extend(ops.into_iter().map(|op| (table_token, op)));
+                                // F-50 Step 2 (#870, Part B): re-derive staged
+                                // vector delete for a new vector backend.
+                                // Mirror stage_vector_delete.
+                                if is_vector_backend(backend)
+                                    && backend.staged_vector(rid, &old_rec).await.is_some()
+                                {
+                                    tx.stage_vector_delete(table_token, rid);
                                 }
                             }
                         }
@@ -856,44 +1005,68 @@ async fn rederive_index2_ops_post_stage(tx: &mut TxContext, repo: &RepoInstance)
             for kvop in staged_ops {
                 match kvop {
                     KvOp::Set(k, v) => {
-                        let Some(rid) = RecordId::try_from_bytes(&k) else {
-                            continue;
-                        };
-                        let Ok(new_rec) = InnerValue::from_bytes(&v) else {
-                            continue;
-                        };
+                        // F-73: same invariant-violation treatment as the index2
+                        // half above — a malformed staged key or undecodable
+                        // staged record is corruption, not "skip this record".
+                        let rid = RecordId::try_from_bytes(&k).ok_or_else(|| {
+                            TxError::Storage(DbError::Internal(format!(
+                                "rederive sorted-index: malformed staged key \
+                                 (table_token={table_token}, {} bytes) — expected a \
+                                 16-byte RecordId",
+                                k.len()
+                            )))
+                        })?;
+                        let new_rec = InnerValue::from_bytes(&v).map_err(|e| {
+                            TxError::Storage(DbError::Codec(format!(
+                                "rederive sorted-index: staged record decode failed \
+                                 (table_token={table_token}, rid={rid:?}): {e}"
+                            )))
+                        })?;
                         // Phase 5a has not run: the store still holds the PRE-tx
                         // value, so this one read distinguishes insert vs. update.
-                        match data_store.get(k.clone()).await {
-                            Ok(old_bytes) => {
-                                if let Ok(old_rec) = InnerValue::from_bytes(&old_bytes) {
-                                    if let Ok(ops) =
-                                        sorted_mgr.plan_record_updated(&rid, &old_rec, &new_rec, 0)
-                                    {
-                                        appended
-                                            .extend(ops.into_iter().map(|op| (table_token, op)));
-                                    }
-                                }
+                        match read_pre_tx_bytes(&data_store, table_token, rid, &k).await {
+                            Ok(Some(old_bytes)) => {
+                                let old_rec = InnerValue::from_bytes(&old_bytes).map_err(|e| {
+                                    TxError::Storage(DbError::Codec(format!(
+                                        "rederive sorted-index: pre-tx record decode \
+                                         failed (table_token={table_token}, rid={rid:?}): {e}"
+                                    )))
+                                })?;
+                                let ops =
+                                    sorted_mgr.plan_record_updated(&rid, &old_rec, &new_rec, 0)?;
+                                appended.extend(ops.into_iter().map(|op| (table_token, op)));
                             }
-                            Err(DbError::NotFound(_)) => {
-                                if let Ok(ops) = sorted_mgr.plan_record_created(&rid, &new_rec, 0) {
-                                    appended.extend(ops.into_iter().map(|op| (table_token, op)));
-                                }
+                            Ok(None) => {
+                                // NotFound is the ONLY case treated as "this is an
+                                // insert, not an update" (same proven semantics as
+                                // the index2 half above).
+                                let ops = sorted_mgr.plan_record_created(&rid, &new_rec, 0)?;
+                                appended.extend(ops.into_iter().map(|op| (table_token, op)));
                             }
-                            // A non-NotFound storage error: best-effort skip.
-                            Err(_) => {}
+                            // F-73: a non-NotFound storage error MUST abort the tx.
+                            Err(e) => return Err(TxError::Storage(e)),
                         }
                     }
                     KvOp::Remove(k) => {
-                        let Some(rid) = RecordId::try_from_bytes(&k) else {
-                            continue;
-                        };
-                        if let Ok(old_bytes) = data_store.get(k.clone()).await {
-                            if let Ok(old_rec) = InnerValue::from_bytes(&old_bytes) {
-                                if let Ok(ops) = sorted_mgr.plan_record_deleted(&rid, &old_rec) {
-                                    appended.extend(ops.into_iter().map(|op| (table_token, op)));
-                                }
-                            }
+                        let rid = RecordId::try_from_bytes(&k).ok_or_else(|| {
+                            TxError::Storage(DbError::Internal(format!(
+                                "rederive sorted-index: malformed staged key \
+                                 (table_token={table_token}, {} bytes) — expected a \
+                                 16-byte RecordId",
+                                k.len()
+                            )))
+                        })?;
+                        if let Some(old_bytes) =
+                            read_pre_tx_bytes(&data_store, table_token, rid, &k).await?
+                        {
+                            let old_rec = InnerValue::from_bytes(&old_bytes).map_err(|e| {
+                                TxError::Storage(DbError::Codec(format!(
+                                    "rederive sorted-index: pre-tx record decode failed \
+                                     (table_token={table_token}, rid={rid:?}): {e}"
+                                )))
+                            })?;
+                            let ops = sorted_mgr.plan_record_deleted(&rid, &old_rec)?;
+                            appended.extend(ops.into_iter().map(|op| (table_token, op)));
                         }
                     }
                 }
@@ -903,6 +1076,8 @@ async fn rederive_index2_ops_post_stage(tx: &mut TxContext, repo: &RepoInstance)
             }
         }
     }
+
+    Ok(())
 }
 
 /// F-50 Step 2 (#870): true when `backend`'s descriptor kind is Vector. Used
