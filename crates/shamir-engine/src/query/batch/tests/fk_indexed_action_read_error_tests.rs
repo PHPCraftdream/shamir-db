@@ -36,11 +36,34 @@
 //! existing `TEST_*_HOOK` conventions (`TEST_POST_BARRIER_PRE_WRITE_HOOK` et
 //! al.): a one-shot `(table_token, RecordId)`-keyed injector that makes the
 //! NEXT `read_one_tx_bytes` call for an armed key return a genuine
-//! `Err(DbError::Storage(..))` instead of reading. Each scenario enumerates
-//! every `RecordId` currently in the target child table (via `list_stream`)
-//! and arms all of them, so whichever candidate id(s) the index fast-path
-//! selects for re-read are guaranteed to hit the injected failure — no need
-//! to predict which specific id the fast path will pick.
+//! `Err(DbError::Storage(..))` instead of reading.
+//!
+//! **"Arm every row in the target table" is sound ONLY for a single-level
+//! (non-recursive) scenario**, where the whole table's rows are candidates
+//! for exactly ONE re-read site (sites 1 and 4 below: each scenario
+//! enumerates every `RecordId` currently in the target child table via
+//! `list_stream` and arms all of them, so whichever candidate id(s) the
+//! index fast-path selects for re-read are guaranteed to hit the injected
+//! failure — no need to predict which specific id the fast path will pick).
+//!
+//! That strategy is INVALID for a multi-level self-referential recursion
+//! (a table that is its own child at every recursion depth, e.g. a
+//! self-referential CASCADE hierarchy) or, more generally, whenever the
+//! SAME table is touched by more than one re-read site (including the
+//! top-level DELETE/UPDATE's own row read, which is unrelated to any
+//! `fk_actions.rs`/`fk_on_update.rs` site). Arming "every row" there also
+//! arms rows read by sites the test is NOT trying to exercise — including,
+//! in the self-referential case, the very row the top-level batch op
+//! targets — so `result.is_err()` passing proves nothing about which site
+//! actually failed. This is exactly what made a prior version of the
+//! grandchild-recursion test (sites 2/3, see the comment on
+//! `setup_grandchild_cascade_chain` below) an invalid oracle: it never
+//! reached sites 2/3 at all, yet still returned `Err` for an unrelated
+//! reason. The fix is per-id (or per-table, when each table has exactly one
+//! candidate row) arming that leaves the OTHER re-read sites' candidates
+//! unarmed, combined with asserting the returned error message contains the
+//! target site's verbatim, already-site-specific string — proving THIS
+//! site failed, not merely that something did.
 
 use futures::StreamExt;
 use shamir_query_builder::batch::Batch;
@@ -48,6 +71,7 @@ use shamir_query_builder::filter;
 use shamir_query_builder::write;
 use shamir_query_builder::write::doc;
 use shamir_query_types::admin::FkAction;
+use shamir_query_types::batch::{BatchError, BatchResponse};
 use shamir_types::access::Actor;
 use shamir_types::types::record_id::RecordId;
 use std::sync::Arc;
@@ -382,36 +406,104 @@ async fn on_update_index_fast_path_propagates_read_error() {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// Sites 2 + 3 — `fk_actions.rs` grandchild recursion (`plan_cascade_for_ids`):
-// the grandchild-level index fast-path re-read (site 2) AND the
-// ref-field-value collection loop over the already-cascaded parent/child
-// rows (site 3). A 3-level self-referential CASCADE hierarchy
-// (grandparent -> parent -> child, all `employees.manager_id -> employees.id`)
-// drives both in one delete: deleting the grandparent cascades to the parent
-// row (direct-child fast path, site 1's shape), which then recurses into
-// `plan_cascade_for_ids` — site 3 reads the cascaded parent row to collect
-// its `id` value, and site 2 re-reads the grandchild-level index candidates
-// selected from that value.
+// Sites 2 + 3 — `fk_actions.rs` grandchild recursion (`plan_cascade_for_ids`).
+//
+// ## Why the ORIGINAL single self-referential test was an invalid oracle
+//
+// A prior version of this coverage used a single 3-level SELF-referential
+// hierarchy (`employees.manager_id -> employees.id`, CEO <- Mgr <- Worker)
+// and armed every row of the ONE `employees` table. That construction is
+// broken twice over:
+//
+// 1. `discover_action_refs` unconditionally filters out self-referential
+//    CASCADE refs (`fk_actions.rs`, the `is_self_ref` check) — self-ref
+//    CASCADE is rejected at DDL time and treated as a no-op defense-in-depth
+//    here, so `action_refs` for the `employees` table was ALWAYS empty.
+//    `plan_cascade_recursive` returned `Ok(())` immediately: no cascade ever
+//    ran, and sites 1/2/3 were never even entered.
+// 2. Because "arm every row in `employees`" also armed the id of the row
+//    the top-level DELETE itself targets (the CEO), the observed `Err` came
+//    from `TableManager::delete_tx`'s OWN internal `read_one_tx_bytes` read
+//    of the row being deleted — a completely unrelated code path, not any
+//    of `fk_actions.rs`'s three re-read sites. `result.is_err()` was true
+//    for a reason that had nothing to do with what the test's name and
+//    module doc claimed to prove.
+//
+// A genuine multi-level CASCADE recursion (so sites 2/3 are reachable at
+// all) needs a REAL parent -> child -> grandchild chain across three
+// DISTINCT tables (`a -> b -> c`, mirroring `fk_actions_tests::
+// cascade_chain_a_to_b_to_c`) — self-referential CASCADE never recurses.
+//
+// ## Discrimination method: per-table arming + per-site message assertion
+//
+// With `a -> b -> c` (each FK `Cascade`), deleting `a`'s row walks:
+//   - `plan_cascade_recursive` (depth 0, parent table `a`): direct-child
+//     scan/fast-path over `b`. Site 1 re-reads `b`'s row ONLY if there is a
+//     supporting index on `b`'s FK field — no index there means this level
+//     falls back to `list_stream_tx` + `classify_row`, which never calls
+//     `read_one_tx_bytes` at all.
+//   - `plan_cascade_for_ids` (depth 1, cascaded parent table `b`): site 3
+//     re-reads EACH id in `parent_ids` (here, `b`'s single cascaded row) to
+//     collect its `id` ref-field value — BEFORE the by-child-table loop
+//     that contains site 2.
+//   - Still inside `plan_cascade_for_ids`: site 2 re-reads the grandchild
+//     (`c`) index-fast-path candidates selected from that collected value.
+//
+// Both tests below therefore leave NO index on `b`'s FK field (`a_id`) —
+// this forces the direct-child level to use the scan fallback, so site 1
+// NEVER calls `read_one_tx_bytes` and can never consume an arm meant for
+// site 2/3. Site 3 always runs before site 2 for the SAME id (`b`'s row),
+// so arming `b` isolates site 3 (it fails before site 2's loop is ever
+// reached) and arming ONLY `c` (leaving `b` unarmed) isolates site 2 (site
+// 3 reads `b` successfully, then site 2's re-read of `c` fails). Each test
+// additionally asserts the returned error message contains the site's
+// verbatim, already-site-specific string (`fk_actions.rs`'s
+// `"...grandchild index fast-path re-read failed..."` for site 2,
+// `"...grandchild ref_field collection re-read failed..."` for site 3) —
+// combining per-id arming with message assertion for the strongest proof
+// that THIS test failed at THIS site, not merely that something, somewhere,
+// returned `Err`.
 // ═══════════════════════════════════════════════════════════════════════════
 
-#[tokio::test]
-async fn cascade_grandchild_recursion_propagates_read_error() {
+/// Shared 3-table `a -> b -> c` CASCADE chain setup for the site 2 / site 3
+/// grandchild-recursion tests. Returns the resolver with `a(1)`, `b(2, a_id=1)`,
+/// `c(3, b_id=2)` inserted. Deliberately creates NO index on `b`'s FK field
+/// (`a_id`) — see the module-doc block above for why that is load-bearing
+/// (it forces the direct-child level to the scan fallback, so site 1 never
+/// fires and can never consume an arm meant for site 2/3).
+async fn setup_grandchild_cascade_chain() -> FkTestResolver {
     let repo_config = RepoConfig {
         name: "default".to_string(),
         factory: BoxRepoFactory::in_memory(),
-        tables: vec![TableConfig::new("employees")],
+        tables: vec![
+            TableConfig::new("a"),
+            TableConfig::new("b"),
+            TableConfig::new("c"),
+        ],
     };
     let db = DbInstance::with_repos(vec![repo_config]).await.unwrap();
     let registry = Arc::new(ValidatorRegistry::new());
 
-    // employees.manager_id -> employees.id ON DELETE CASCADE (self-ref).
+    // b.a_id -> a.id ON DELETE CASCADE.
     bind_fk_validator(
         &db,
         &registry,
-        "employees",
-        "self_ref_cascade_read_err",
-        "manager_id",
-        "employees",
+        "b",
+        "b_fk_a_cascade_read_err",
+        "a_id",
+        "a",
+        "id",
+        FkAction::Cascade,
+        true,
+    );
+    // c.b_id -> b.id ON DELETE CASCADE.
+    bind_fk_validator(
+        &db,
+        &registry,
+        "c",
+        "c_fk_b_cascade_read_err",
+        "b_id",
+        "b",
         "id",
         FkAction::Cascade,
         true,
@@ -423,59 +515,75 @@ async fn cascade_grandchild_recursion_propagates_read_error() {
         registry,
     };
 
-    // 3-level hierarchy: CEO(1) <- Mgr(2) <- Worker(3).
-    insert_helper(
-        &resolver,
-        "employees",
-        doc()
-            .set("id", 1_i64)
-            .set("name", "CEO")
-            .set("manager_id", shamir_types::types::value::QueryValue::Null),
-    )
-    .await;
-    insert_helper(
-        &resolver,
-        "employees",
-        doc()
-            .set("id", 2_i64)
-            .set("name", "Mgr")
-            .set("manager_id", 1_i64),
-    )
-    .await;
-    insert_helper(
-        &resolver,
-        "employees",
-        doc()
-            .set("id", 3_i64)
-            .set("name", "Worker")
-            .set("manager_id", 2_i64),
-    )
-    .await;
+    insert_helper(&resolver, "a", doc().set("id", 1_i64)).await;
+    insert_helper(&resolver, "b", doc().set("id", 2_i64).set("a_id", 1_i64)).await;
+    insert_helper(&resolver, "c", doc().set("id", 3_i64).set("b_id", 2_i64)).await;
 
-    // Supporting index on the FK column -> F-53c fast-path engages at every
-    // recursion level (direct-child AND grandchild).
-    let employees_table = resolver.db.get_table("default", "employees").await.unwrap();
-    employees_table
-        .create_index("idx_employees_manager_id", &["manager_id"])
+    resolver
+}
+
+/// Delete `a`'s single row, the trigger for the whole cascade chain.
+async fn delete_a(resolver: &FkTestResolver) -> Result<BatchResponse, BatchError> {
+    let mut b = Batch::new();
+    b.id(4);
+    b.delete("del_a", write::delete("a").where_(filter::eq("id", 1_i64)));
+    execute_batch(&b.build(), resolver, None, None, Actor::System, "test").await
+}
+
+#[tokio::test]
+async fn cascade_grandchild_index_fast_path_propagates_read_error() {
+    let resolver = setup_grandchild_cascade_chain().await;
+
+    // Supporting index on c's FK field only -> site 2's fast path engages
+    // for the grandchild level. No index on b's FK field (see module doc) ->
+    // site 1 never runs, so it can't consume an arm meant for site 2/3.
+    let c_table = resolver.db.get_table("default", "c").await.unwrap();
+    c_table
+        .create_index("idx_c_b_id_site2", &["b_id"])
         .await
         .unwrap();
 
-    arm_failure_for_all_rows(&resolver, "employees").await;
+    // Arm ONLY c's row. b's row (read by site 3 first) is left unarmed, so
+    // site 3 succeeds and control reaches site 2's re-read of c, which then
+    // hits the injected failure.
+    arm_failure_for_all_rows(&resolver, "c").await;
 
-    // Delete the CEO -> cascades to Mgr (direct child, site 1 shape) -> must
-    // recurse into `plan_cascade_for_ids` for Worker (site 2 / site 3).
-    let mut b = Batch::new();
-    b.id(4);
-    b.delete(
-        "del_ceo",
-        write::delete("employees").where_(filter::eq("id", 1_i64)),
+    let result = delete_a(&resolver).await;
+
+    let err = result.expect_err(
+        "a genuine read_one_tx_bytes error during the grandchild index \
+         fast-path re-read (site 2) must abort the whole delete (Err), not \
+         silently continue past the poisoned candidate",
     );
-    let result = execute_batch(&b.build(), &resolver, None, None, Actor::System, "test").await;
-
+    let message = err.to_string();
     assert!(
-        result.is_err(),
-        "a genuine read_one_tx_bytes error anywhere in the CASCADE fan-out \
-         (direct-child OR grandchild-recursion re-read) must abort the whole \
-         delete, not silently shrink the cascaded set. Got: {result:?}"
+        message.contains("grandchild index fast-path re-read failed"),
+        "expected the site-2-specific error message, got: {message}"
+    );
+}
+
+#[tokio::test]
+async fn cascade_grandchild_ref_field_collection_propagates_read_error() {
+    let resolver = setup_grandchild_cascade_chain().await;
+
+    // Arm ONLY b's row. Site 3 (`plan_cascade_for_ids`'s ref-field
+    // collection loop) re-reads b's row BEFORE site 2's by-child-table loop
+    // ever runs, so this must fail at site 3 specifically — site 2 (c's
+    // index fast path, even if an index existed) is never reached. No index
+    // on b's FK field (see module doc) -> site 1 never runs either, so it
+    // can't consume this arm before site 3 does.
+    arm_failure_for_all_rows(&resolver, "b").await;
+
+    let result = delete_a(&resolver).await;
+
+    let err = result.expect_err(
+        "a genuine read_one_tx_bytes error during the grandchild ref_field \
+         collection re-read (site 3) must abort the whole delete (Err), not \
+         silently continue past the poisoned row",
+    );
+    let message = err.to_string();
+    assert!(
+        message.contains("grandchild ref_field collection re-read failed"),
+        "expected the site-3-specific error message, got: {message}"
     );
 }
