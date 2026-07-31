@@ -261,6 +261,10 @@ harness = false
 name = "f78_writer_latency"
 harness = false
 
+[[bench]]
+name = "f80_writer_drain_overhead"
+harness = false
+
 [lib]
 # Doctests are banned project-wide (slow: recompile-per-example). Examples
 # live as illustration; behavioural coverage is in unit/integration tests.

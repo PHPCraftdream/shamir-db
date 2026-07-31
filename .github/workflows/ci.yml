@@ -210,3 +210,44 @@ jobs:
       # here to match.
       - run: cargo install --locked --version 0.3.4 cargo-cooldown
       - run: cargo cooldown check
+
+  # F-80 (#907) — loom model-checker gate for the WriterDrainBarrier
+  # interleaving contract (F-56, #882). This is the proof mechanism
+  # referenced in three P0-fix doc comments (F-56/F-69/F-70); before this
+  # job it existed but never ran in CI, so a future edit could silently
+  # break the proven contract with nothing catching it before a human
+  # happened to run the loom command by hand.
+  #
+  # Standalone job (not a step in `test`): needs a different feature flag
+  # (`--features loom`), and model-checking is conceptually distinct from
+  # correctness testing — keeping it separate lets it fail without noise
+  # in the primary test signal, and vice versa.
+  #
+  # ubuntu-only (not matrixed): loom mocks the atomic operations
+  # themselves — the model has no OS-specific behavior to exercise (no
+  # sockets, no fsync, no file locking). CPU-bound model enumeration.
+  #
+  # Hard PR gate (blocks merge): the loom model is the interleaving-contract
+  # proof backing three P0 fixes. It runs in ~0.2s (verified locally), well
+  # within per-PR budget — no flakiness or runtime concern.
+  #
+  # Uses cargo-nextest (not bare `cargo test`): the `.cargo/config.toml`
+  # perimeter guard blocks bare `cargo test` in CI too (it is committed).
+  # Nextest passes the guard via $NEXTEST — same pattern every other test
+  # job in this file uses. The loom model is a regular `#[test]`; nextest
+  # discovers and runs it identically.
+  loom-model:
+    name: loom model (writer_drain_barrier)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6.0.3
+      - uses: dtolnay/rust-toolchain@d0befba8b9ddf874327619e84c39b094edd58b66  # 1.93.0
+      - uses: taiki-e/install-action@18b1216eba7f8039b0f8d131d5473787f0edce68  # v2.85.3
+        with:
+          tool: nextest@0.9.137
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32  # v2
+      # The `loom` feature triggers build.rs to emit `cfg(loom)` for THIS
+      # crate only (not globally), so dependencies aren't dragged into
+      # incompatible loom code paths. The `-E 'test(loom_model)'` filter
+      # runs just the model-checker test (excluded from test.sh by design).
+      - run: cargo nextest run -p shamir-engine --features loom --lib -E 'test(loom_model)' --nocapture
