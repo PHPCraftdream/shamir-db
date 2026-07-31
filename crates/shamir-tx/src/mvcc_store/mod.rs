@@ -216,6 +216,27 @@ impl MvccStore {
         }
     }
 
+    /// F-71 (#898): the repo-wide committed watermark this store's `gate`
+    /// currently exposes — identical to `RepoTxGate::last_committed()`, which
+    /// is not reachable from outside this crate (`gate` is `pub(super)`).
+    ///
+    /// Added for callers (e.g. `shamir-engine`'s sorted-index CREATE INDEX
+    /// backfill, `TableManager::create_sorted_index_with_include` →
+    /// `SortedIndexManager::mark_ready_at`) that need "the table's current
+    /// committed version" but only hold an `Arc<MvccStore>`, not the
+    /// `Arc<RepoTxGate>` directly (that Arc is threaded separately via
+    /// `TableManager`'s optional `changefeed: Option<NonTxChangefeed>`, which
+    /// is `None` for plenty of legitimate MVCC-backed tables — e.g. every
+    /// test harness that skips `with_changefeed`, and any production table
+    /// wired without SSI). Deriving this from the ALREADY-attached
+    /// `MvccStore` instead means the watermark used to floor a freshly
+    /// backfilled index's AsOf epoch is available whenever an `MvccStore` is
+    /// attached at all, not only when the separate (and narrower) changefeed
+    /// wiring happens to also be present.
+    pub fn current_committed_version(&self) -> u64 {
+        self.gate.last_committed()
+    }
+
     /// P1b: borrow the per-table versioned overlay. P1c will use this to
     /// populate the overlay on the ack-path; tests use it to drive the merge
     /// logic with hand-placed entries. The read seams consult it internally.

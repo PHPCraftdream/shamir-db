@@ -154,6 +154,17 @@ pub struct SortedIndexManager {
     /// reads as epoch `0` — the same default-empty semantics the old
     /// manager-wide counter had at construction.
     ///
+    /// F-71 (#898): a fresh in-memory `scc::HashMap` (below) has NO entries
+    /// at construction — including right after [`load`](Self::load) hydrates
+    /// `indexes` from disk on a restart. Left alone this would mean every
+    /// restarted index reads epoch `0` regardless of its real mutation
+    /// history, wrongly opening the AsOf seek gate for any pinned version.
+    /// `load()` closes this by seeding this map from each loaded
+    /// definition's durable `ready_at_version` field (set once at
+    /// backfill-completion time by [`mark_ready_at`](Self::mark_ready_at)) —
+    /// see that method's and `load`'s docs for the full restart / CREATE /
+    /// RENAME epoch-initialization story.
+    ///
     /// `scc::HashMap` (lock-free, sharded) per this repo's NORMATIVE
     /// concurrency invariants (CLAUDE.md pillar 5, "shared registry"
     /// row) — `Arc`-shared across clones for the same reason `generation`
@@ -257,6 +268,64 @@ impl SortedIndexManager {
                 entry.insert_entry(AtomicU64::new(version));
             }
         }
+    }
+
+    /// F-71 (#898): mark index `name_interned` READY as of `table_version` —
+    /// call exactly once, right after a successful CREATE INDEX backfill
+    /// finishes streaming the table into the new index.
+    ///
+    /// Fixes vector 2 of the F-67 regression: the backfill call site
+    /// (`TableManager::create_sorted_index_with_include`) drives
+    /// `on_record_created(&id, &record, 0)` for every existing row — a
+    /// literal version-`0` placeholder, because the backfill isn't a real
+    /// MVCC write and has no commit version of its own. Left alone, that
+    /// leaves the freshly built index's epoch at `0` even though its
+    /// postings mirror everything up to the table's CURRENT version, so an
+    /// `AsOf` query pinned to any version BEFORE the create would wrongly
+    /// see `0 <= pinned` and take the fast path against an index that in
+    /// fact reflects newer state (silently omitting a row deleted between
+    /// the pin and the backfill).
+    ///
+    /// Sets BOTH:
+    /// - the durable `ready_at_version` on the persisted definition (COW via
+    ///   `rcu`, `max` with any existing value so a re-run — e.g. a doctor
+    ///   repair rebuild — never moves the floor backward), persisted
+    ///   immediately so a restart right after backfill restores the exact
+    ///   epoch via [`load`](Self::load) rather than falling back to `0`;
+    /// - the in-memory [`last_mutation_version`](Self::last_mutation_version)
+    ///   high-water for this index, via the same monotonic
+    ///   [`note_mutation_at_version`](Self::note_mutation_at_version) used by
+    ///   every other bump site, so the gate is correct immediately —
+    ///   without waiting for the NEXT write to bump it.
+    ///
+    /// `table_version` MUST be the table's `last_committed_version` (or
+    /// equivalent snapshot-ceiling watermark) sampled AFTER the backfill
+    /// stream has fully drained, never `0` — passing `0` here would just
+    /// reproduce the bug this method exists to close. An index whose
+    /// backfill observed an EMPTY table is still "ready" as of the current
+    /// version, not as of the dawn of time, so callers must call this
+    /// unconditionally (not only when the backfill touched at least one
+    /// row).
+    pub async fn mark_ready_at(&self, name_interned: u64, table_version: u64) -> DbResult<()> {
+        self.note_mutation_at_version(name_interned, table_version);
+        let mut found = false;
+        self.indexes.rcu(|cur| {
+            let mut new_vec: Vec<SortedIndexDefinition> = (*cur).clone();
+            if let Some(def) = new_vec
+                .iter_mut()
+                .find(|d| d.name_interned == name_interned)
+            {
+                def.ready_at_version = def.ready_at_version.max(table_version);
+                found = true;
+            }
+            new_vec
+        });
+        if !found {
+            return Err(shamir_storage::error::DbError::Internal(
+                "sorted index definition disappeared before backfill completed".to_string(),
+            ));
+        }
+        self.persist_defs().await
     }
 
     /// True if at least one sorted index exists.
@@ -380,6 +449,24 @@ impl SortedIndexManager {
     ///
     /// Note: `drop_index` would delete the physical entries we just moved, so
     /// we bypass it and manipulate the `indexes` snapshot directly via `rcu`.
+    ///
+    /// F-71 (#898): fixes vector 3 of the F-67 regression. The definition's
+    /// `ready_at_version` travels for free (the `rcu` below mutates
+    /// `name_interned` IN PLACE on the same struct, so its `ready_at_version`
+    /// field is untouched and is persisted under the new key by the
+    /// `persist_defs` call below). But the in-memory
+    /// [`last_mutation_version`](Self::last_mutation_version) high-water is a
+    /// SEPARATE map keyed by `name_interned` — without an explicit carry, the
+    /// rename would silently leave the OLD key's entry behind (never read
+    /// again under `new_id`) and `new_id` would read as epoch `0`, resetting
+    /// the AsOf gate to wide-open for the renamed index for the remainder of
+    /// this process's lifetime (a restart would then re-seed correctly from
+    /// the persisted `ready_at_version`, but that's not good enough — the
+    /// gate must not go wrong even without a restart in between). We `remove`
+    /// the old entry and re-insert its value under `new_id` (last-write-wins
+    /// `max` against any value already sitting under `new_id`, though that
+    /// should be impossible since the caller already checked no index is
+    /// registered under `new_id`).
     pub async fn rename_definition(&self, old_id: u64, new_id: u64) -> DbResult<()> {
         let mut not_found = false;
         self.indexes.rcu(|cur| {
@@ -399,6 +486,16 @@ impl SortedIndexManager {
             return Err(shamir_storage::error::DbError::Internal(
                 "sorted index definition disappeared mid-rename".to_string(),
             ));
+        }
+        // Carry the in-memory mutation-epoch entry from old_id to new_id —
+        // see the doc above. `remove_sync` returns the removed AtomicU64
+        // (if any); an index that was never mutated has no entry, which is
+        // fine — `new_id` correctly starts at the freshly-carried
+        // `ready_at_version` floor `load()` would seed on the next restart,
+        // and at `0` in-memory until the next mutation or `mark_ready_at`
+        // call, matching a never-mutated index's normal semantics.
+        if let Some((_, old_epoch)) = self.last_mutation_version.remove_sync(&old_id) {
+            self.note_mutation_at_version(new_id, old_epoch.load(Ordering::Acquire));
         }
         self.persist_defs().await
     }
@@ -1406,6 +1503,26 @@ impl SortedIndexManager {
             deduped.insert(d.name_interned, d);
         }
         let new_vec: Vec<SortedIndexDefinition> = deduped.into_values().collect();
+        // F-71 (#898): fixes vector 1 of the F-67 regression — seed the
+        // in-memory AsOf-gate high-water for EVERY loaded index from its
+        // durable `ready_at_version` (set once at backfill-completion time by
+        // `mark_ready_at`), so a restart restores the EXACT epoch instead of
+        // `last_mutation_version` defaulting to `0` for an index this fresh
+        // `SortedIndexManager` has not yet observed a mutation for in THIS
+        // process. Pre-fix, `load()` hydrated only `self.indexes`
+        // (definitions) and never touched this map, so `0` was every
+        // restarted index's epoch regardless of how much mutation history it
+        // actually carried — `0 <= pinned` then held for every AsOf query,
+        // wrongly opening the seek fast path against an index that might not
+        // mirror the pinned snapshot at all. `note_mutation_at_version`'s
+        // `fetch_max` semantics make this call idempotent and order-
+        // independent with any other seed. A definition persisted before
+        // F-71 decodes with `ready_at_version == 0` (`#[serde(default)]`),
+        // which reproduces exactly the OLD (permissive but not regressed
+        // further) default for data written before this fix shipped.
+        for def in &new_vec {
+            self.note_mutation_at_version(def.name_interned, def.ready_at_version);
+        }
         self.indexes.store(new_vec);
         Ok(())
     }

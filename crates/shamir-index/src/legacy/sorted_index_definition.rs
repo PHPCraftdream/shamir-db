@@ -46,6 +46,27 @@ pub struct SortedIndexDefinition {
     /// load from disk. Empty means "no covering projection".
     #[serde(skip)]
     pub included_fields_interned: Vec<Vec<u64>>,
+    /// F-71 (#898): durable floor for the AsOf cursor-seek gate
+    /// (`SortedIndexManager::last_mutation_version`) — the MVCC version up
+    /// to which this index's postings are KNOWN to mirror the table's
+    /// content, set once at the end of a successful backfill (see
+    /// `SortedIndexManager::mark_ready_at`) to the table's
+    /// `last_committed_version` at that moment (**never** `0`, even for an
+    /// index whose backfill observed no rows — an empty table is still
+    /// "ready" as of the current version, not as of the dawn of time).
+    ///
+    /// Persisted (unlike `included_fields_interned`) so a restart restores
+    /// the EXACT epoch instead of falling back to a lower, merely-safe
+    /// floor: `SortedIndexManager::load()` seeds the in-memory
+    /// `last_mutation_version` high-water from this field for every loaded
+    /// definition, closing the F-67 regression where a fresh manager read
+    /// every index's epoch as `0` after ANY restart (see that task's
+    /// brief). `#[serde(default)]` keeps loading pre-F-71 persisted blobs
+    /// backward-compatible: a definition written before this field existed
+    /// decodes with `ready_at_version == 0`, the same (safe, if permissive)
+    /// default the epoch already had before this fix.
+    #[serde(default)]
+    pub ready_at_version: u64,
 }
 
 impl SortedIndexDefinition {
@@ -55,6 +76,7 @@ impl SortedIndexDefinition {
             field_path,
             included_fields: Vec::new(),
             included_fields_interned: Vec::new(),
+            ready_at_version: 0,
         }
     }
 
@@ -71,6 +93,7 @@ impl SortedIndexDefinition {
             field_path,
             included_fields,
             included_fields_interned: Vec::new(),
+            ready_at_version: 0,
         }
     }
 
@@ -87,6 +110,7 @@ impl SortedIndexDefinition {
             field_path,
             included_fields,
             included_fields_interned,
+            ready_at_version: 0,
         }
     }
 
@@ -111,6 +135,10 @@ impl From<SortedIndexDefinitionV1> for SortedIndexDefinition {
             field_path: v1.field_path,
             included_fields: Vec::new(),
             included_fields_interned: Vec::new(),
+            // Pre-F-71 on-disk layout carries no epoch — decodes as the same
+            // safe-if-permissive `0` default `#[serde(default)]` gives the
+            // current V2 format when the field is absent.
+            ready_at_version: 0,
         }
     }
 }

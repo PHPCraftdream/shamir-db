@@ -133,11 +133,60 @@ impl TableManager {
         while let Some(batch) = stream.next().await {
             for (id, cow) in batch? {
                 let record = cow.into_inner()?;
+                // F-71 (#898): the backfill is NOT a real MVCC write — it has
+                // no commit version of its own, so every `on_record_created`
+                // call here still passes the literal `0` placeholder used
+                // since this backfill loop was written. That placeholder is
+                // ONLY safe because `mark_ready_at` below overwrites the
+                // resulting epoch with the table's real watermark before
+                // this method returns; see that call's doc for why leaving
+                // the epoch at `0` (the bug this task fixes) would let an
+                // `AsOf` query pinned to any version BEFORE this create
+                // wrongly take the fast path against an index that in fact
+                // mirrors state as of `table_version`.
                 self.sorted_indexes
                     .on_record_created(&id, &record, 0)
                     .await?;
             }
         }
+        // F-71 (#898): close vector 2 of the F-67 regression — mark the
+        // index READY as of the table's CURRENT committed watermark, sampled
+        // now that the backfill stream (still under the write barrier + lock
+        // acquired above, so no writer could have landed a commit invisible
+        // to the snapshot the backfill just read) has fully drained. Without
+        // this, the index's epoch stays at whatever the `on_record_created(
+        // .., 0)` calls above left it — `0` for a brand-new index — even
+        // though its postings mirror everything up to `table_version`; an
+        // `AsOf` query pinned to any version strictly before this CREATE
+        // would then wrongly see `0 <= pinned` and take the seek fast path
+        // against an index that does not actually reflect the pinned
+        // snapshot (e.g. a row deleted between the pin and this backfill
+        // would be silently omitted rather than correctly included).
+        //
+        // Read the watermark off the attached `MvccStore` directly
+        // (`MvccStore::current_committed_version`), NOT `self.changefeed`.
+        // `changefeed` is a SEPARATE, narrower wire (only present when SSI
+        // footprint recording was explicitly attached via `with_changefeed`)
+        // — plenty of legitimate MVCC-backed tables have `mvcc_store: Some`
+        // but `changefeed: None` (every test harness that skips
+        // `with_changefeed`, e.g. `f53b_asof_seek_tests.rs`'s
+        // `make_mvcc_score_table`, and any production table wired without
+        // SSI). Gating on `changefeed` there would silently floor the epoch
+        // at `0` — reproducing exactly the bug this task fixes — for every
+        // such table. `current_committed_version()` reads `0` only when NO
+        // `MvccStore` is attached at all (system tables / pure in-memory
+        // tests without MVCC) — `mark_ready_at` still floors the epoch there,
+        // matching the pre-existing "epoch 0 for an index this process has
+        // not observed a mutation for" semantics: those tables have no
+        // MvccStore for `read_as_of` to even run against, so the gate is moot
+        // for them.
+        let table_version = self
+            .mvcc_store_ref()
+            .map(|mvcc| mvcc.current_committed_version())
+            .unwrap_or(0);
+        self.sorted_indexes
+            .mark_ready_at(name_interned, table_version)
+            .await?;
         Ok(())
     }
 
