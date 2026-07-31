@@ -186,6 +186,16 @@ pub struct TableManager {
     #[cfg(test)]
     pub(super) create_sorted_index_backfill_hook:
         Arc<arc_swap::ArcSwapOption<super::index2_backfill_hook::BackfillPauseHook>>,
+    /// F-76 (#903) test-only deterministic pause point: parks `drop_index2`
+    /// between the registry retirement and the posting sweep (the exact
+    /// visibility window this task closes). Lets a regression test drive a
+    /// concurrent READ into the window and assert it falls back to a full
+    /// scan instead of observing a registered-but-emptied backend. Reuses
+    /// the same `BackfillPauseHook` primitive. `None` in every non-test
+    /// build and by default in tests — see `f76_drop_visibility_tests.rs`.
+    #[cfg(test)]
+    pub(super) drop_index2_pause_hook:
+        Arc<arc_swap::ArcSwapOption<super::index2_backfill_hook::BackfillPauseHook>>,
 }
 
 /// Bundle wiring the non-tx write path to the SSI commit-write log.
@@ -244,6 +254,8 @@ impl Clone for TableManager {
             create_index2_backfill_hook: Arc::clone(&self.create_index2_backfill_hook),
             #[cfg(test)]
             create_sorted_index_backfill_hook: Arc::clone(&self.create_sorted_index_backfill_hook),
+            #[cfg(test)]
+            drop_index2_pause_hook: Arc::clone(&self.drop_index2_pause_hook),
         }
     }
 }
@@ -315,6 +327,8 @@ impl TableManager {
             create_index2_backfill_hook: Arc::new(arc_swap::ArcSwapOption::empty()),
             #[cfg(test)]
             create_sorted_index_backfill_hook: Arc::new(arc_swap::ArcSwapOption::empty()),
+            #[cfg(test)]
+            drop_index2_pause_hook: Arc::new(arc_swap::ArcSwapOption::empty()),
         };
 
         // Resolve covering-index included_fields string paths to interned ids.
@@ -549,6 +563,8 @@ impl TableManager {
             create_index2_backfill_hook: Arc::new(arc_swap::ArcSwapOption::empty()),
             #[cfg(test)]
             create_sorted_index_backfill_hook: Arc::new(arc_swap::ArcSwapOption::empty()),
+            #[cfg(test)]
+            drop_index2_pause_hook: Arc::new(arc_swap::ArcSwapOption::empty()),
         }
     }
 
@@ -682,6 +698,17 @@ impl TableManager {
         hook: Option<Arc<super::index2_backfill_hook::BackfillPauseHook>>,
     ) {
         self.create_sorted_index_backfill_hook.store(hook);
+    }
+
+    /// F-76 (#903) test-only: install (or clear with `None`) the deterministic
+    /// `drop_index2` pause hook (fires between the registry retirement and the
+    /// posting sweep). See `drop_index2_pause_hook`'s field doc.
+    #[cfg(test)]
+    pub(crate) fn set_drop_index2_pause_hook(
+        &self,
+        hook: Option<Arc<super::index2_backfill_hook::BackfillPauseHook>>,
+    ) {
+        self.drop_index2_pause_hook.store(hook);
     }
 
     /// Clone the handle to this table's unique-write serialisation lock.

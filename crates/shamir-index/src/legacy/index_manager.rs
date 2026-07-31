@@ -109,6 +109,17 @@ pub struct IndexManager {
     /// doc on `backfill_pause_hook` for the cross-crate-visibility reason.
     pub(super) create_index_backfill_hook:
         Arc<arc_swap::ArcSwapOption<crate::legacy::backfill_pause_hook::BackfillPauseHook>>,
+    /// F-76 (#903) test-only deterministic pause point: parks `drop_index`
+    /// (regular) AND `drop_unique_index` (unique) between the definition
+    /// retirement and the posting sweep — the exact visibility window this
+    /// task closes (the mirror image of F-72's CREATE bug). A regression
+    /// test installs this from `shamir-engine`'s test binary, so (like
+    /// `create_index_backfill_hook`) it is NOT `#[cfg(test)]`-gated. Shared
+    /// by both legacy DROP paths — a test exercises only one at a time.
+    /// `None` on every real path; one uncontended `ArcSwapOption::load_full()`
+    /// Acquire load at the call site. See `f76_drop_visibility_tests.rs`.
+    pub(super) drop_index_pause_hook:
+        Arc<arc_swap::ArcSwapOption<crate::legacy::backfill_pause_hook::BackfillPauseHook>>,
 }
 
 impl Clone for IndexManager {
@@ -122,6 +133,7 @@ impl Clone for IndexManager {
             write_barrier_flags: self.write_barrier_flags.clone(),
             posting_cache: Arc::clone(&self.posting_cache),
             create_index_backfill_hook: Arc::clone(&self.create_index_backfill_hook),
+            drop_index_pause_hook: Arc::clone(&self.drop_index_pause_hook),
         }
     }
 }
@@ -197,6 +209,7 @@ impl IndexManager {
                 THasher::default(),
             )),
             create_index_backfill_hook: Arc::new(arc_swap::ArcSwapOption::empty()),
+            drop_index_pause_hook: Arc::new(arc_swap::ArcSwapOption::empty()),
         };
 
         // Синхронизируем флаги с состоянием IndexInfo
@@ -214,6 +227,19 @@ impl IndexManager {
         hook: Option<Arc<crate::legacy::backfill_pause_hook::BackfillPauseHook>>,
     ) {
         self.create_index_backfill_hook.store(hook);
+    }
+
+    /// F-76 (#903) test-only: install (or clear with `None`) the deterministic
+    /// `drop_index` / `drop_unique_index` pause hook (fires between the
+    /// definition retirement and the posting sweep). Not `#[cfg(test)]`-gated
+    /// — cross-crate test consumer, same reason as
+    /// `set_create_index_backfill_hook`. See `drop_index_pause_hook`'s field
+    /// doc.
+    pub fn set_drop_index_pause_hook(
+        &self,
+        hook: Option<Arc<crate::legacy::backfill_pause_hook::BackfillPauseHook>>,
+    ) {
+        self.drop_index_pause_hook.store(hook);
     }
 
     /// Синхронизирует атомарные флаги с реальным состоянием индексов.
@@ -513,11 +539,24 @@ impl IndexManager {
 
     /// Удаляет индекс по его имени.
     ///
-    /// Процесс удаления:
+    /// Процесс удаления (F-76 / #903 — definition retired BEFORE the posting
+    /// sweep, the mirror image of F-72's CREATE gate):
     /// 1. Проверяет существование индекса
-    /// 2. Удаляет все записи индекса из info_store (потоковая обработка)
-    /// 3. Удаляет определение из метаданных
+    /// 2. Удаляет определение из метаданных (planner-invisible с этого
+    ///    момента — RCU-свап публикует Vec без этой дефиниции)
+    /// 3. Удаляет все записи индекса из info_store (теперь orphan,
+    ///    planner-invisible)
     /// 4. Сохраняет обновлённые метаданные
+    ///
+    /// F-76 (#903): the OLD order was sweep → `remove_index`, which left a
+    /// window in which a concurrent reader could still select the index via
+    /// `iter_indexes_ready` (it was still `Ready` in the Vec) while its
+    /// postings were mid-sweep — silently wrong/incomplete results, the
+    /// mirror image of the F-72 CREATE bug. The RCU `remove_index` swap
+    /// publishes a Vec without this definition atomically; every NEW reader
+    /// after this point no longer sees the index and falls back to a full
+    /// scan. A reader that already snapshotted the old Vec keeps working
+    /// against its own consistent view.
     ///
     /// # Возвращает
     ///
@@ -529,11 +568,28 @@ impl IndexManager {
             return Ok(false);
         }
 
-        // Формируем префикс и собираем все ключи постингов за один
-        // prefix-scan, удаляем их одним вызовом `remove_many`. На
-        // транзакционных backends (redb/persy/nebari) это одна
-        // commit'нутая транзакция вместо N×fsync.
         let prefix = IndexRecordKey::new(false, name_interned).to_prefix_bytes();
+
+        // F-76 (#903): retire the definition from the planner-visible Vec
+        // FIRST (see the method doc). The RCU swap publishes a Vec without
+        // this definition atomically.
+        let was_removed = self.indexes.remove_index(name_interned);
+        self.has_indexes
+            .store(self.indexes.is_enabled(), Ordering::Release);
+
+        // F-76 test seam: park here (definition already retired, postings not
+        // yet swept) if a test installed a pause hook. With the fix, a
+        // concurrent read issued while parked here must fall back to a full
+        // scan. NOT `#[cfg(test)]`-gated — see `drop_index_pause_hook`'s
+        // field doc (cross-crate test consumer).
+        if let Some(hook) = self.drop_index_pause_hook.load_full() {
+            hook.wait_at_window().await;
+        }
+
+        // Sweep the (now orphan, planner-invisible) posting entries. Формируем
+        // префикс и собираем все ключи постингов за один prefix-scan, удаляем
+        // их одним вызовом `remove_many`. На транзакционных backends
+        // (redb/persy/nebari) это одна commit'нутая транзакция вместо N×fsync.
         use futures::StreamExt;
         // `RecordKey` (the scan yields store keys, consumed by `remove_many`).
         let mut to_remove: Vec<RecordKey> = Vec::new();
@@ -555,11 +611,6 @@ impl IndexManager {
         // with the index's prefix. Cheap — typical hotsets are
         // small and the cache is bounded.
         self.posting_cache.retain(|k, _| !k.starts_with(&prefix));
-
-        // Удаляем определение индекса из метаданных
-        let was_removed = self.indexes.remove_index(name_interned);
-        self.has_indexes
-            .store(self.indexes.is_enabled(), Ordering::Release);
 
         if was_removed {
             self.save_index_info().await?;

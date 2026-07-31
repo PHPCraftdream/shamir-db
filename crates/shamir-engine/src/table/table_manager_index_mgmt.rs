@@ -656,13 +656,27 @@ impl TableManager {
     /// / #873, deliberately out of scope here, matching `create_index_v2`'s
     /// own multi-step sequence):
     ///   1. resolve the backend by interned name (`Ok(false)` if absent);
-    ///   2. `backend.drop_all()` to sweep its posting entries;
-    ///   3. `registry.remove_by_id(id)` to retire it from the live set
-    ///      (also advances the F-50 generation counter);
+    ///   2. `registry.remove_by_id(id)` to retire it from the planner-visible
+    ///      live set FIRST (F-76 / #903 — mirror image of F-72's `Building`
+    ///      gate for CREATE). Also advances the F-50 generation counter;
+    ///   3. `backend.drop_all()` to sweep its (now orphan, planner-invisible)
+    ///      posting entries — `backend` is held locally so it survives the
+    ///      registry removal;
     ///   4. `save_index2_metadata` to persist the reduced registry — it
     ///      re-derives `PersistedIndexes` from the LIVE registry's
     ///      `all_descriptors()`, so calling it AFTER `remove_by_id`
     ///      naturally persists the removal.
+    ///
+    /// F-76 (#903): the OLD order was `drop_all` → `remove_by_id`, which left
+    /// a window in which a concurrent reader could still resolve the backend
+    /// via `find_by_field_and_kind` (it was still `Ready` in the registry)
+    /// while its postings were mid-sweep — silently wrong/incomplete results,
+    /// the mirror image of the F-72 CREATE bug. Retiring the registry entry
+    /// FIRST closes that window: every NEW reader after the removal resolves
+    /// the backend as absent and falls back to a full scan. A reader that
+    /// already holds an `Arc<dyn IndexBackend>` snapshot keeps working
+    /// against its own consistent view (RCU — the `Arc` keeps the backend and
+    /// its already-read postings alive).
     ///
     /// # Returns
     /// `true` if a backend existed and was removed, `false` if no index2
@@ -677,16 +691,27 @@ impl TableManager {
         let Some(backend) = self.index2_registry.get_by_name(name_key.id()).await else {
             return Ok(false);
         };
-        // Clean up the backend's posting entries BEFORE retiring it from the
-        // registry, so a concurrent reader can never observe a registered
-        // backend with no postings (best-effort, non-atomic).
+        // F-76 (#903): retire the backend from the planner-visible registry
+        // BEFORE sweeping its postings. See the method doc for the full
+        // rationale. `backend` is held locally, so `drop_all` below still
+        // runs after this removal.
+        self.index2_registry
+            .remove_by_id(backend.descriptor().id)
+            .await;
+        // F-76 test seam: park here (backend already retired from the
+        // registry, postings not yet swept) if a test installed a pause hook.
+        // With the fix, a concurrent read issued while parked here must fall
+        // back to a full scan (the backend is gone from the planner). Zero
+        // cost on the real path (`None`), compiled out of non-test builds.
+        #[cfg(test)]
+        if let Some(hook) = self.drop_index2_pause_hook.load_full() {
+            hook.wait_at_window().await;
+        }
+        // Sweep the (now orphan, planner-invisible) posting entries.
         backend
             .drop_all()
             .await
             .map_err(|e| shamir_storage::error::DbError::Internal(e.to_string()))?;
-        self.index2_registry
-            .remove_by_id(backend.descriptor().id)
-            .await;
         crate::index2::persistence::save_index2_metadata(&self.index2_registry, &self.info_store)
             .await?;
         Ok(true)

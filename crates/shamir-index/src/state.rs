@@ -7,6 +7,14 @@
 //! `create_index_v2` backfills-then-registers, so a backend is effectively
 //! ready the moment it appears — see the Step 1 memo §1.2).
 //!
+//! # Unified per-family lifecycle contract (F-72 + F-76)
+//!
+//! The full `Ok`/`Err`/crash contract for every index family × transition
+//! (CREATE / DROP / RENAME) — including the conceptual
+//! `Absent → Building → Ready → Dropping → Absent` state machine and the
+//! explicit deferred follow-up gaps — lives in [`crate::lifecycle`]. Refer
+//! there to answer "what does `Err` mean for family X transition Y".
+//!
 //! # Serialization / forward-compat (PROVEN, not assumed)
 //!
 //! bincode 1.3.3 (this workspace's pinned version) is a positional,

@@ -433,6 +433,13 @@ impl IndexManager {
 
     /// Удаляет уникальный индекс по его имени.
     ///
+    /// F-76 (#903): definition retired BEFORE the posting sweep — same
+    /// mirror-image-of-F-72 fix as `IndexManager::drop_index` (see that
+    /// method's doc for the full rationale). The OLD order (sweep →
+    /// `remove_index`) left a window in which a concurrent reader /
+    /// uniqueness check could still observe the index while its postings
+    /// were mid-sweep.
+    ///
     /// # Возвращает
     ///
     /// `true` — индекс существовал и был удалён
@@ -442,9 +449,26 @@ impl IndexManager {
             return Ok(false);
         }
 
-        // Формируем префикс и удаляем все posting-ключи одним
-        // вызовом `remove_many` — на disk backends это один
-        // транзакционный коммит вместо N×fsync.
+        // F-76 (#903): retire the definition FIRST (RCU swap publishes a Vec
+        // without this definition atomically; the shared write-barrier bit is
+        // cleared so writers stop maintaining it).
+        let was_removed = self.indexes_unique.remove_index(name_interned);
+        // F-69 (#896): SeqCst set/clear on the shared packed word.
+        self.write_barrier_flags
+            .set_to(UNIQUE_INDEX_EXISTS, self.indexes_unique.is_enabled());
+
+        // F-76 test seam (shared with the regular-hash drop hook). Park here
+        // (definition already retired, postings not yet swept) if a test
+        // installed a pause hook. NOT `#[cfg(test)]`-gated — cross-crate test
+        // consumer.
+        if let Some(hook) = self.drop_index_pause_hook.load_full() {
+            hook.wait_at_window().await;
+        }
+
+        // Sweep the (now orphan, planner-invisible) posting entries.
+        // Формируем префикс и удаляем все posting-ключи одним вызовом
+        // `remove_many` — на disk backends это один транзакционный коммит
+        // вместо N×fsync.
         let prefix = IndexRecordKey::new(true, name_interned).to_prefix_bytes();
         use futures::StreamExt;
         // `RecordKey` (scan yields store keys, consumed by `remove_many`).
@@ -460,12 +484,6 @@ impl IndexManager {
             // Ok-value (removed entries) intentionally discarded; ? propagates errors.
             let _ = self.info_store.remove_many(to_remove).await?;
         }
-
-        // Удаляем определение индекса из метаданных
-        let was_removed = self.indexes_unique.remove_index(name_interned);
-        // F-69 (#896): SeqCst set/clear on the shared packed word.
-        self.write_barrier_flags
-            .set_to(UNIQUE_INDEX_EXISTS, self.indexes_unique.is_enabled());
 
         if was_removed {
             self.save_index_info_unique().await?;

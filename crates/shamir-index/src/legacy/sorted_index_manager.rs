@@ -451,6 +451,14 @@ impl SortedIndexManager {
 
     /// Drop a sorted index definition AND every entry written under
     /// it. O(I) where I is the size of the index.
+    ///
+    /// F-76 (#903): this family is ALREADY safe — the RCU `indexes` swap
+    /// (definition retirement) runs BEFORE the posting sweep, so a
+    /// concurrent reader can never observe a registered-but-emptied sorted
+    /// index. No reorder was needed here (unlike the regular / unique /
+    /// index2 families, whose DROP paths swept postings BEFORE retiring the
+    /// definition). See `shamir_index::state`'s lifecycle doc for the
+    /// unified per-family contract.
     pub async fn drop_index(&self, name_interned: u64) -> DbResult<bool> {
         let mut existed = false;
         self.indexes.rcu(|cur| {
