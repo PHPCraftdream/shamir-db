@@ -135,8 +135,36 @@ pub struct RepoTxGate {
     commit_write_log: scc::TreeIndex<u64, Arc<CommitWriteRecord>>,
 
     /// Stage D scaffolding: queue of transactions awaiting group-commit.
-    /// Short-section `std::sync::Mutex` — only push/drain, no `.await`
-    /// held across. The leader pops the entire vec under lock.
+    ///
+    /// **F-79 (#906) — sanctioned `std::sync::Mutex` exception (dead
+    /// scaffolding).** This is the ONLY remaining `std::sync::Mutex` on a
+    /// runtime struct in shamir-tx, and it is sanctioned because the field
+    /// is **dead**: the group-commit leader/follower path that would have
+    /// used it (`tx/group_commit.rs`) was removed in F-54 (#865 — see
+    /// `crates/shamir-engine/src/tx/finalize.rs:11`); `enqueue_pending` /
+    /// `drain_pending` have ZERO callers in the live commit path or any
+    /// test (`rg enqueue_pending|drain_pending` resolves to the two
+    /// definitions below + a doc reference in `pending_commit.rs`), and
+    /// the 2026-07-06 concurrency-engine audit (§1) independently flags
+    /// this as dead. The contention model is therefore not "nil" but
+    /// **nonexistent**: the mutex is never locked on any code path, hot
+    /// or cold, so the CLAUDE.md "banned in hot paths" rule (which
+    /// targets live hot paths) does not reach it. Cross-referenced from
+    /// CLAUDE.md "Concurrency invariants" so the exception is
+    /// discoverable from the normative rule, not just from this field.
+    ///
+    /// A std (non-async) `Mutex` is retained rather than a lock-free
+    /// structure because (1) it carries zero runtime cost while dead
+    /// (never locked), (2) the only two accessors are `push`/`drain-all`
+    /// which a future group-commit revival would need to re-audit for its
+    /// ACTUAL contention model anyway, and (3) `PendingCommit` is not
+    /// `Clone` (it owns a `TxContext` + `oneshot::Sender` +
+    /// `OwnedMutexGuard`s), so a lock-free `scc::TreeIndex`-backed drain
+    /// cannot return an owned `Vec<PendingCommit>` without a per-entry
+    /// remove loop — unjustified complexity for code with no callers.
+    /// If/when group-commit is revived, this field MUST be re-evaluated
+    /// against F-66/F-79's poisoning precedent before it takes a live
+    /// call.
     pending_commits: std::sync::Mutex<Vec<PendingCommit>>,
 
     /// Tracks materialized/aborted state per version and maintains a
@@ -666,13 +694,24 @@ impl RepoTxGate {
     }
 
     // ── Stage D: group-commit queue ───────────────────────────────────
+    // F-79 (#906): the leader/follower group-commit path that drove this
+    // queue was removed in F-54 (#865). Both accessors below are currently
+    // DEAD (zero callers — see the `pending_commits` field doc). They are
+    // retained as Stage D scaffolding; see the field's doc comment for the
+    // sanctioned `std::sync::Mutex` exception and the revival re-audit note.
 
     /// Enqueue a `PendingCommit` for the next group-commit batch.
+    ///
+    /// F-79 (#906): DEAD — zero live callers (the F-54/#865 group-commit
+    /// removal orphaned this accessor). See `pending_commits` field doc.
     pub fn enqueue_pending(&self, p: PendingCommit) {
         self.pending_commits.lock().unwrap().push(p);
     }
 
     /// Drain all pending commits, returning them to the leader.
+    ///
+    /// F-79 (#906): DEAD — zero live callers (the F-54/#865 group-commit
+    /// removal orphaned this accessor). See `pending_commits` field doc.
     pub fn drain_pending(&self) -> Vec<PendingCommit> {
         let mut guard = self.pending_commits.lock().unwrap();
         std::mem::take(&mut *guard)
@@ -770,8 +809,9 @@ impl RepoTxGate {
     /// this method (no predicate validation), so the no-lock property
     /// for Snapshot is moot here.
     ///
-    /// `deps` is already snapshot-collected by the caller (under the
-    /// PredicateSet Mutex), so this method holds no `Mutex` guard.
+    /// `deps` is already snapshot-collected by the caller (cloned out of
+    /// the lock-free `PredicateSet` via `snapshot_deps`), so this method
+    /// holds no `PredicateSet` reader guard.
     pub fn predicate_conflicts_batch(
         &self,
         deps: &[crate::predicate_set::PredicateDep],

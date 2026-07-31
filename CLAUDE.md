@@ -374,6 +374,22 @@ shape of the access pattern, in this order of preference:
 (bootstrap, one-shot init, test fixtures). Every hot-path use must be
 justified inline with a comment that names the contention model.
 
+**Sanctioned runtime exception (F-79 / #906):** the sole remaining
+`std::sync::Mutex` on a runtime struct is
+`RepoTxGate::pending_commits: std::sync::Mutex<Vec<PendingCommit>>` in
+`crates/shamir-tx/src/repo_tx_gate.rs`. It is sanctioned because the field
+is **dead scaffolding** — the group-commit leader/follower path
+(`tx/group_commit.rs`) that drove it was removed in F-54 (#865), and
+`enqueue_pending` / `drain_pending` have zero live callers. The contention
+model is nonexistent (never locked on any path), so the "banned in hot
+paths" rule (which targets *live* hot paths) does not reach it. If/when
+group-commit is revived, this field MUST be re-evaluated against the
+F-66/F-79 poisoning precedent (`ri_barrier_tokens` / `PredicateSet` were
+both migrated to lock-free `scc::*` for that reason) before it takes a
+live call. The sibling per-tx sites (`TxContext::ri_barrier_tokens`,
+`TxContext::predicate_set`) are already lock-free `scc::*` — they are NOT
+exceptions.
+
 ---
 
 ## 🛡️ Protocol of development (TDD)

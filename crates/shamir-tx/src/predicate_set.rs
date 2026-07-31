@@ -7,15 +7,28 @@
 //! write-keys (see Phase C doc section 5). Populated ONLY under
 //! `IsolationLevel::Serializable`; Snapshot pays nothing.
 //!
-//! Concurrency note (CLAUDE.md "Concurrency invariants" + Phase C
-//! doc section 3.1): a plain `std::sync::Mutex<Vec<_>>` is acceptable here,
-//! and ONLY here, because the guard is never held across `.await` and
-//! the container is never read on a hot non-tx path. The executor
-//! runs a tx's queries serially, so contention is nil.
+//! Concurrency note (CLAUDE.md "Concurrency invariants", pillar 5): the
+//! dep log is a lock-free `scc::TreeIndex<u64, PredicateDep>` keyed by a
+//! monotonic per-instance `AtomicU64` sequence — NOT a
+//! `std::sync::Mutex<Vec<_>>`. F-66 (#892) replaced the sibling
+//! `TxContext::ri_barrier_tokens`'s `std::sync::Mutex<TFxSet<u64>>` with a
+//! lock-free `scc::HashSet` for the same reason that applies verbatim here:
+//! a `std::sync::Mutex` poisoned by a panic under the guard permanently
+//! breaks every later access on the same `TxContext` (every
+//! `.lock().unwrap()` panics). The executor runs a tx's queries serially,
+//! so contention IS nil in practice — but "nil contention" was the OLD
+//! justification for keeping a `Mutex`, and F-79 (#906) retired it: the
+//! poisoning exposure is unacceptable even when contention is nil, and the
+//! Serializable read path that populates this set is a hot path. The dep
+//! log is therefore lock-free CAS-based (`scc::TreeIndex::insert_sync`),
+//! identical in spirit to F-66's `ri_barrier_tokens` migration. Cardinality
+//! (`len`/`is_empty`) is served by an `AtomicUsize` mirror —
+//! `scc::TreeIndex::len()` is O(N) and banned by `clippy.toml`
+//! `disallowed-methods` (CLAUDE.md pillar 3).
 
 use bytes::Bytes;
 use std::ops::Bound;
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 /// One captured predicate dependency of a Serializable tx.
 ///
@@ -44,65 +57,96 @@ pub enum PredicateDep {
 /// Per-tx predicate read-set — append-only, interior-mutable.
 ///
 /// Lives next to [`TxContext::read_set`](crate::TxContext::read_set).
-/// `Mutex<Vec<_>>` (not `scc::HashMap`) because (a) it is
-/// append-only during execution and scan-only at commit, (b)
-/// entries are not keyed, (c) the executor runs a tx's queries
-/// serially so contention is nil — the lock is always taken
-/// uncontended. A plain `std::sync::Mutex` is acceptable ONLY here
-/// because it is never held across `.await` and never on a hot
-/// non-tx path.
+///
+/// Backing store is a lock-free `scc::TreeIndex<u64, PredicateDep>` keyed by
+/// a monotonic per-instance `AtomicU64` sequence, plus an `AtomicUsize`
+/// length mirror. This replaces the historical `std::sync::Mutex<Vec<_>>`
+/// (F-79 / #906), following F-66's (#892) `ri_barrier_tokens` precedent:
+/// (a) append-only during execution and scan-only at commit — a sequence-
+///     keyed `TreeIndex` is a lock-free append-only log with ordered
+///     iteration, preserving the exact `Vec`-order semantics;
+/// (b) entries are not keyed, so a synthetic monotonic key is used purely
+///     to give the lock-free tree a unique slot per append;
+/// (c) the executor runs a tx's queries serially so contention is nil —
+///     but a `std::sync::Mutex` poisoned by ANY panic under the guard would
+///     permanently break the `TxContext` (every later `.lock().unwrap()`
+///     panics), which is unacceptable on the Serializable read path.
+///     `scc::TreeIndex` is CAS-based and has no poisoning.
+///
+/// `len`/`is_empty` read the `AtomicUsize` mirror (O(1)) rather than the
+/// O(N) `scc::TreeIndex::len()` (banned by `clippy.toml`). The mirror is
+/// updated with a `Relaxed` fetch_add at every `push`; the structure is
+/// single-task-per-instance (serial executor), so no cross-thread ordering
+/// is required for correctness — the `TreeIndex`'s own CAS provides the
+/// happens-before edge for the data.
 pub struct PredicateSet {
-    inner: Mutex<Vec<PredicateDep>>,
+    log: scc::TreeIndex<u64, PredicateDep>,
+    next_seq: AtomicU64,
+    len_mirror: AtomicUsize,
 }
 
 impl PredicateSet {
-    /// Empty set. Zero-alloc: `Vec::new()` does not heap-allocate
-    /// until the first push, so the always-present field stays
-    /// zero-cost on Snapshot.
+    /// Empty set. Zero-alloc: `scc::TreeIndex::new()` and the two atomics
+    /// do not heap-allocate until the first push, so the always-present
+    /// field stays zero-cost on Snapshot.
     pub fn new() -> Self {
         Self {
-            inner: Mutex::new(Vec::new()),
+            log: scc::TreeIndex::new(),
+            next_seq: AtomicU64::new(0),
+            len_mirror: AtomicUsize::new(0),
         }
     }
 
     /// Append one dependency. Takes `&self` via interior mutability
     /// — load-bearing because the engine's tx-aware read paths hold
     /// the tx by shared ref (`Option<&TxContext>`).
+    ///
+    /// Lock-free CAS (`scc::TreeIndex::insert_sync`); no poisoning. The
+    /// synthetic key is a monotonic `AtomicU64` fetch_add, guaranteeing a
+    /// unique slot per append and preserving insertion-iteration order.
     pub fn push(&self, dep: PredicateDep) {
-        self.inner.lock().unwrap().push(dep);
+        let seq = self.next_seq.fetch_add(1, Ordering::Relaxed);
+        // Monotonic seq ⇒ no duplicate keys ⇒ insert_sync always Ok; the
+        // returned Err variant is statically unreachable.
+        let _ = self.log.insert_sync(seq, dep);
+        self.len_mirror.fetch_add(1, Ordering::Relaxed);
     }
 
-    /// Number of recorded deps.
+    /// Number of recorded deps. O(1) via the `AtomicUsize` mirror.
     pub fn len(&self) -> usize {
-        self.inner.lock().unwrap().len()
+        self.len_mirror.load(Ordering::Relaxed)
     }
 
-    /// True if no deps recorded.
+    /// True if no deps recorded. O(1) via the `AtomicUsize` mirror.
     pub fn is_empty(&self) -> bool {
-        self.inner.lock().unwrap().is_empty()
+        self.len_mirror.load(Ordering::Relaxed) == 0
     }
 
-    /// Iterate over recorded deps under the lock, applying `f` to
-    /// each. Used by commit-time predicate validation — keeps the
-    /// lock guard from leaking across `.await` by confining its
-    /// scope to a synchronous closure.
+    /// Iterate over recorded deps in insertion order, applying `f` to
+    /// each. Used by commit-time predicate validation. The lock-free
+    /// `scc::TreeIndex` reader runs under an EBR `Guard` confined to this
+    /// synchronous call — no guard or lock is held across `.await`.
     pub fn with_iter<F: FnMut(&PredicateDep)>(&self, mut f: F) {
-        let g = self.inner.lock().unwrap();
-        for dep in g.iter() {
+        let guard = scc::Guard::new();
+        for (_seq, dep) in self.log.iter(&guard) {
             f(dep);
         }
     }
 
-    /// Snapshot all recorded deps into a `Vec` under the lock.
+    /// Snapshot all recorded deps into a `Vec` in insertion order.
     ///
     /// Used by the inverted batch predicate-validation path
     /// (`RepoTxGate::predicate_conflicts_batch`): the deps are cloned
-    /// out once under the `Mutex`, then the lock is released before the
-    /// commit-window scan — so no lock is held across the EBR-guarded
+    /// out once under the EBR guard, then the guard is released before the
+    /// commit-window scan — so no guard is held across the EBR-guarded
     /// tree range walk. The clone is O(P) in dep count and only fires
     /// on the Serializable + non-empty-predicate path.
     pub fn snapshot_deps(&self) -> Vec<PredicateDep> {
-        self.inner.lock().unwrap().clone()
+        let guard = scc::Guard::new();
+        self.log
+            .iter(&guard)
+            .map(|(_seq, dep)| dep.clone())
+            .collect()
     }
 }
 
@@ -203,15 +247,10 @@ pub fn key_in_interval(
 
 impl std::fmt::Debug for PredicateSet {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self.inner.try_lock() {
-            Ok(g) => f
-                .debug_struct("PredicateSet")
-                .field("len", &g.len())
-                .finish(),
-            Err(_) => f
-                .debug_struct("PredicateSet")
-                .field("len", &"<locked>")
-                .finish(),
-        }
+        // Lock-free: cardinality is an O(1) atomic load, so there is no
+        // contended-guard `try_lock` fallback to worry about.
+        f.debug_struct("PredicateSet")
+            .field("len", &self.len_mirror.load(Ordering::Relaxed))
+            .finish()
     }
 }
