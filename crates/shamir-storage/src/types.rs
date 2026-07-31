@@ -186,11 +186,21 @@ pub trait Store: Send + Sync {
     /// into one apply (data + index postings + counter updates). Empty
     /// `ops` is a no-op.
     ///
-    /// **Atomicity contract.** When a backend overrides this with a
-    /// transactional impl, partial state is never observable. The
-    /// default loop impl below is per-op atomic only — callers that
-    /// need true cross-op atomicity must verify their backend overrides
-    /// `transact`.
+    /// **Atomicity contract — opt-in, queryable via
+    /// [`Self::supports_atomic_transact`].** Whole-batch VISIBILITY
+    /// atomicity (a concurrent reader observes EITHER the full
+    /// pre-batch state OR the full post-batch state, never a
+    /// partially-applied batch) is NOT implied merely by overriding
+    /// this method. Backends that deliver it (e.g. `FjallStore` via a
+    /// native write batch) override [`Self::supports_atomic_transact`]
+    /// to return `true`. Both the default per-op loop below AND
+    /// overrides that apply some subset per-key to a lock-free primary
+    /// with no multi-key publish primitive (notably `MirroredStore`,
+    /// whose ephemeral subset is per-op) report `false`. Callers that
+    /// need true cross-op visibility atomicity MUST check
+    /// [`Self::supports_atomic_transact`] and not assume every
+    /// override delivers it — when the flag is `false`, partial state
+    /// MAY be observable to a concurrent reader mid-batch.
     async fn transact(&self, ops: Vec<KvOp>) -> DbResult<()> {
         for op in ops {
             match op {
@@ -203,6 +213,32 @@ pub trait Store: Send + Sync {
             }
         }
         Ok(())
+    }
+
+    /// Whether this backend's [`Self::transact`] delivers whole-batch
+    /// VISIBILITY atomicity — i.e. a concurrent reader observes EITHER
+    /// the full pre-batch state OR the full post-batch state, never a
+    /// partially-applied batch.
+    ///
+    /// Default `false`: most backends either inherit the default
+    /// per-op `transact` loop (no cross-op atomicity) or — like
+    /// `MirroredStore` — override `transact` but still apply at least
+    /// one subset per-key to a lock-free primary with no multi-key
+    /// publish primitive. Genuinely atomic backends (`FjallStore` via
+    /// a native write batch) override to `true`. Wrapper backends
+    /// (`CachedStore`, `MemBufferStore`) delegate to their inner
+    /// backend's answer.
+    ///
+    /// **Callers that rely on whole-batch visibility atomicity MUST
+    /// check this flag** rather than assume every `transact` override
+    /// delivers it — see [`Self::transact`]'s atomicity contract. F-77
+    /// (#904): the prior contract text ("when a backend overrides
+    /// `transact`, partial state is never observable") was an
+    /// overpromise that `MirroredStore` silently violated for its
+    /// ephemeral subset; this flag makes the capability
+    /// machine-checkable.
+    fn supports_atomic_transact(&self) -> bool {
+        false
     }
 
     /// Returns an async stream that yields batches of records.

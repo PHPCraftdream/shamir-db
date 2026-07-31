@@ -587,6 +587,13 @@ impl Store for CachedStore {
         Ok(())
     }
 
+    /// Delegates to `inner` — the cache layer adds no atomicity of its
+    /// own (it populates from `inner.transact`'s committed result).
+    /// F-77 (#904).
+    fn supports_atomic_transact(&self) -> bool {
+        self.inner.supports_atomic_transact()
+    }
+
     /// Pass-through for buffer config: a CachedStore doesn't have
     /// its own buffer knobs but the underlying store likely does
     /// (especially when stacked Cached → MemBuffer → raw).

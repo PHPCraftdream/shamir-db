@@ -1085,6 +1085,14 @@ impl Store for MemBufferStore {
         Ok(())
     }
 
+    /// Delegates to `inner` — the buffer layer drains its dirty overlay
+    /// into `inner` and then delegates the batch to `inner.transact`,
+    /// so the atomicity is whatever the inner backend provides. F-77
+    /// (#904).
+    fn supports_atomic_transact(&self) -> bool {
+        self.inner.supports_atomic_transact()
+    }
+
     async fn insert_many(&self, values: Vec<Bytes>) -> DbResult<Vec<RecordKey>> {
         let mut keys = Vec::with_capacity(values.len());
         let cache = self.state.cache.load();

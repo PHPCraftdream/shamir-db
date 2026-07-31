@@ -1211,3 +1211,154 @@ async fn f49_transact_mirror_failure_leaves_no_durable_effects_in_primary_live_r
          Remove was aborted at the mirror)"
     );
 }
+
+// ============================================================================
+// F-77 (#904): supports_atomic_transact honesty tests
+// ============================================================================
+
+/// **F-77 — the `supports_atomic_transact` capability flag is HONEST
+/// for every backend in the read/write stack.**
+///
+/// `MirroredStore` overrides `transact` (so by the OLD trait contract
+/// it implicitly advertised whole-batch visibility atomicity) but its
+/// ephemeral subset is applied per-key to a lock-free `InMemoryStore`
+/// primary — a concurrent reader can observe a partially-applied batch.
+/// F-77 replaces the overpromising prose contract with a
+/// machine-checkable flag. This test pins the flag's value for every
+/// backend so a future change that silently flips it (or forgets to
+/// delegate it through a wrapper) is caught here, not by a reader
+/// observing torn state in production.
+#[tokio::test]
+async fn f77_supports_atomic_transact_is_honest_for_every_backend() {
+    // --- MirroredStore: FALSE -----------------------------------------
+    // The primary is a non-atomic InMemoryStore regardless of what the
+    // mirror backend is, so the flag must be false even when the mirror
+    // itself is genuinely atomic (here a second MirroredStore whose
+    // mirror is an InMemoryStore — the production hybrid repo uses a
+    // fjall mirror, but the flag is about the PRIMARY's publish
+    // atomicity, not the mirror's).
+    let mirror: Arc<dyn Store> = Arc::new(InMemoryStore::new());
+    let mirrored = MirroredStore::new(mirror, is_durable_table_config)
+        .await
+        .unwrap();
+    assert!(
+        !mirrored.supports_atomic_transact(),
+        "MirroredStore must report false: its ephemeral subset is applied \
+         per-key to a lock-free InMemoryStore primary with no multi-key \
+         publish primitive, so a concurrent reader can observe a \
+         partially-applied batch"
+    );
+    // Same answer through the `Arc<dyn Store>` erase boundary (the only
+    // shape a caller actually holds in production).
+    let mirrored_dyn: Arc<dyn Store> = Arc::new(mirrored);
+    assert!(
+        !mirrored_dyn.supports_atomic_transact(),
+        "the flag must survive type erasure to Arc<dyn Store>"
+    );
+
+    // --- InMemoryStore: FALSE (inherits the trait default) ------------
+    // No transact override, no multi-key primitive.
+    let in_mem: Arc<dyn Store> = Arc::new(InMemoryStore::new());
+    assert!(
+        !in_mem.supports_atomic_transact(),
+        "InMemoryStore must report false (default): it inherits the \
+         per-op transact loop with no cross-op atomicity"
+    );
+
+    // --- A genuinely-atomic mock backend: TRUE surfaces correctly -----
+    // A mock that claims real atomicity (mimicking FjallStore's
+    // OwnedWriteBatch) overrides the flag to true. This proves the flag
+    // is not hard-wired false — a backend that DOES deliver whole-batch
+    // visibility atomicity is accurately advertised as such, so callers
+    // checking the flag get a trustworthy signal in both directions.
+    let atomic_mock: Arc<dyn Store> = Arc::new(AtomicTransactMock {
+        inner: Arc::new(InMemoryStore::new()),
+    });
+    assert!(
+        atomic_mock.supports_atomic_transact(),
+        "a backend that genuinely delivers whole-batch visibility \
+         atomicity must be able to report true (proves the flag is not \
+        hard-wired false and the honesty signal works both ways)"
+    );
+
+    // --- CachedStore delegation: surfaces inner's flag ---------------
+    // The cache layer delegates to inner. Wrapping a non-atomic
+    // InMemoryStore must surface false; wrapping the genuinely-atomic
+    // mock must surface true. Proves the delegation chain does not
+    // silently invent or drop the capability signal.
+    use crate::storage_cached::CachedStore;
+    let cached_over_mem: Arc<dyn Store> = Arc::new(
+        CachedStore::new_sync(Arc::new(InMemoryStore::new()))
+            .await
+            .unwrap(),
+    );
+    assert!(
+        !cached_over_mem.supports_atomic_transact(),
+        "CachedStore(InMemoryStore) must report false via delegation"
+    );
+    let cached_over_atomic: Arc<dyn Store> =
+        Arc::new(CachedStore::new_sync(atomic_mock.clone()).await.unwrap());
+    assert!(
+        cached_over_atomic.supports_atomic_transact(),
+        "CachedStore(atomic) must report true via delegation — the flag \
+         must propagate truthfully through wrapper layers"
+    );
+
+    // --- The mirror-inside-MirroredStore's flag is IRRELEVANT --------
+    // MirroredStore reports based on its OWN primary (InMemoryStore),
+    // NOT on the mirror backend. Even a genuinely-atomic mirror does
+    // not make MirroredStore atomic, because the ephemeral subset is
+    // still published per-key to the non-atomic primary. This pins the
+    // documented design decision so a future "delegate to mirror's
+    // flag" regression is caught.
+    let atomic_mirror: Arc<dyn Store> = Arc::new(AtomicTransactMock {
+        inner: Arc::new(InMemoryStore::new()),
+    });
+    let mirrored_over_atomic = MirroredStore::new(atomic_mirror, is_durable_table_config)
+        .await
+        .unwrap();
+    assert!(
+        !mirrored_over_atomic.supports_atomic_transact(),
+        "MirroredStore must report false even when its mirror IS \
+         genuinely atomic — the flag reflects the PRIMARY's publish \
+         atomicity, and the ephemeral subset is still per-op on the \
+         InMemoryStore primary"
+    );
+}
+
+/// Test-only `Store` that stands in for a genuinely-atomic backend
+/// (like `FjallStore`'s `OwnedWriteBatch`): it overrides
+/// `supports_atomic_transact` to `true` and delegates everything else
+/// to an inner `InMemoryStore`. Used only by the F-77 honesty test to
+/// prove the flag can surface `true` and is not hard-wired `false`.
+struct AtomicTransactMock {
+    inner: Arc<dyn Store>,
+}
+
+#[async_trait]
+impl Store for AtomicTransactMock {
+    async fn insert(&self, value: Bytes) -> DbResult<RecordKey> {
+        self.inner.insert(value).await
+    }
+    async fn set(&self, key: RecordKey, value: Bytes) -> DbResult<bool> {
+        self.inner.set(key, value).await
+    }
+    async fn get(&self, key: RecordKey) -> DbResult<Bytes> {
+        self.inner.get(key).await
+    }
+    async fn remove(&self, key: RecordKey) -> DbResult<bool> {
+        self.inner.remove(key).await
+    }
+    async fn transact(&self, ops: Vec<KvOp>) -> DbResult<()> {
+        self.inner.transact(ops).await
+    }
+    fn supports_atomic_transact(&self) -> bool {
+        true
+    }
+    fn iter_stream(&self, batch_size: usize) -> RecordStream {
+        self.inner.iter_stream(batch_size)
+    }
+    fn scan_prefix_stream(&self, prefix: Bytes, batch_size: usize) -> RecordStream {
+        self.inner.scan_prefix_stream(prefix, batch_size)
+    }
+}

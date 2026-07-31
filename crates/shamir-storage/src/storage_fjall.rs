@@ -500,6 +500,13 @@ impl Store for FjallStore {
         .await
     }
 
+    /// `true` — fjall's native `OwnedWriteBatch` commits the whole
+    /// `transact` batch atomically (all-or-nothing, and a concurrent
+    /// reader never observes a partially-applied batch). F-77 (#904).
+    fn supports_atomic_transact(&self) -> bool {
+        true
+    }
+
     /// Force the WAL to fsync-on-disk. fjall buffers individual
     /// writes in the journal; `persist(SyncAll)` fsyncs the journal
     /// + writes any pending metadata. Reachable through

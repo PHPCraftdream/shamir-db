@@ -545,6 +545,14 @@ impl Store for MirroredStore {
     /// side's atomicity, which is the part that matters for
     /// post-restart correctness).
     ///
+    /// **F-77 (#904): this residual means `MirroredStore` reports
+    /// [`Store::supports_atomic_transact`] == `false`** — whole-batch
+    /// visibility atomicity is NOT delivered even though this method
+    /// overrides `transact`. The trait's atomicity contract is now
+    /// opt-in and queryable via that flag; callers that need real
+    /// visibility atomicity MUST check it rather than assume every
+    /// override delivers it.
+    ///
     /// `scc::TreeIndex` (v3.8.4, the lock-free B+ tree backing
     /// `InMemoryStore`) was checked for any batched / atomic multi-key
     /// primitive: its public API exposes only single-key mutations
@@ -613,5 +621,24 @@ impl Store for MirroredStore {
         }
 
         Ok(())
+    }
+
+    /// **F-77 (#904): `false` — `MirroredStore::transact` does NOT
+    /// deliver whole-batch VISIBILITY atomicity.** See the
+    /// "# Concurrent-reader residual" section of [`Self::transact`]'s
+    /// doc: the ephemeral subset is applied per-key to a lock-free
+    /// `InMemoryStore` primary (`scc::TreeIndex`, no multi-key publish
+    /// primitive), so a concurrent reader on another runtime worker
+    /// thread can observe a partially-applied batch. The DURABLE
+    /// subset IS atomic on the mirror (via F-59's
+    /// mirror-commit-first ordering) and all-or-nothing for ERROR
+    /// atomicity across the whole batch — but visibility atomicity for
+    /// the live read path is per-op, hence `false`.
+    ///
+    /// Callers that need whole-batch visibility atomicity MUST check
+    /// this flag (via the [`Store::supports_atomic_transact`] default
+    /// contract) and not assume the `transact` override delivers it.
+    fn supports_atomic_transact(&self) -> bool {
+        false
     }
 }
