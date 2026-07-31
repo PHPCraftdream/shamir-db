@@ -500,7 +500,15 @@ impl TableManager {
     /// `false` a moment before the flag went up — same pattern as
     /// `create_index_v2`.
     pub async fn create_index(&self, name: &str, paths: &[&str]) -> DbResult<()> {
-        let index_def = self.build_index_definition(name, paths).await?;
+        let mut index_def = self.build_index_definition(name, paths).await?;
+        // F-72 (#899, P0): register at `Building` — `IndexManager::
+        // create_index_from_records` persists this marker BEFORE the
+        // backfill runs and flips it to `Ready` (with its own durable
+        // persist) only once the backfill fully completes. See that
+        // method's doc for the full publish/backfill/flip sequence this
+        // closes (a concurrent planner read must never observe a
+        // half-populated index).
+        index_def.state = crate::index2::state::IndexState::Building;
         // F-70 (#897, P0): canonical drain-then-lock acquisition — raise
         // `REGULAR_INDEX_CREATE`, drain in-flight fast-path writers, THEN
         // take `unique_write_lock`. F-57 (#883) originally acquired the lock

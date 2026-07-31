@@ -1,11 +1,60 @@
 //! Index configuration and sync status
+//!
+//! # bincode forward-compat for `IndexDefinition::state` (F-72, #899)
+//!
+//! bincode 1.3.3 (this workspace's pinned version) is a positional,
+//! non-self-describing format: `#[serde(default)]` on a NEW trailing field
+//! does NOT rescue a read of OLD on-disk bytes — the read fails with
+//! `io error: unexpected end of file`, proven for this exact struct shape by
+//! `crates/shamir-index/src/tests/index_state_compat_tests.rs` and documented
+//! in full in `state.rs`'s module doc. `IndexDefinition` gained a trailing
+//! `state: IndexState` field for F-72, so a `BTreeMap<u64, IndexDefinition>`
+//! written before that field existed can no longer be decoded as the current
+//! shape.
+//!
+//! [`IndexInfo::decode_bytes`] closes this the same way
+//! `persistence::load_index2_metadata` does for index2 metadata: try the
+//! current (with-`state`) shape first, and on a decode failure fall back to a
+//! pre-`state` shadow shape (`IndexDefinitionNoState`), lifting every legacy
+//! definition to `state = Ready` (every pre-`state` persisted index was, by
+//! definition, fully built — a `Building` index could never have been
+//! persisted before the field existed). The derived `Deserialize` impl below
+//! is kept for round-tripping CURRENT-shape data (e.g. serde-generic
+//! contexts, tests) but is NOT forward-compat by itself — every load-from-disk
+//! call site MUST go through `decode_bytes`, not raw `bincode::deserialize`.
 
 use super::index_definition::IndexDefinition;
+use crate::legacy::index_info_item::IndexInfoItem;
 use crate::legacy::index_status::IndexStatus;
+use crate::state::IndexState;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::Arc;
+
+/// Pre-`state` on-disk shadow shape of `IndexDefinition`, used ONLY by the
+/// forward-compat fallback in [`Deserialize for IndexInfo`](struct.IndexInfo.html).
+/// Mirrors the exact field order/types `IndexDefinition` had before the
+/// `state` field was added, so genuinely old on-disk bytes can be decoded and
+/// lifted to the current shape. Write-side always emits the current shape;
+/// this is read-only.
+#[derive(Debug, Deserialize)]
+struct IndexDefinitionNoState {
+    pub name_interned: u64,
+    pub paths: Vec<IndexInfoItem>,
+}
+
+impl From<IndexDefinitionNoState> for IndexDefinition {
+    fn from(legacy: IndexDefinitionNoState) -> Self {
+        IndexDefinition {
+            name_interned: legacy.name_interned,
+            paths: legacy.paths,
+            // Every pre-`state` persisted index was fully built; a `Building`
+            // index could not have been persisted before this field existed.
+            state: IndexState::default(),
+        }
+    }
+}
 
 /// Wrapper around Arc<AtomicU8> that implements Default for deserialization.
 /// The default value is IndexStatus::Actual.
@@ -113,6 +162,56 @@ impl IndexInfo {
         Self {
             indexes: shamir_numa::NodeReplicated::new(shamir_numa::detect(), vec),
             status: StatusAtom(Arc::new(AtomicU8::new(IndexStatus::Actual.as_u8()))),
+        }
+    }
+
+    /// Decode a persisted `IndexInfo` blob from raw bincode bytes, with a
+    /// forward-compat fallback for blobs written BEFORE `IndexDefinition`
+    /// gained its `state` field (F-72, #899).
+    ///
+    /// Tries the current (with-`state`) shape first via the derived
+    /// `Deserialize` impl; on a decode failure falls back to decoding a
+    /// `BTreeMap<u64, IndexDefinitionNoState>` (the exact pre-`state` on-disk
+    /// shape) and lifts every legacy definition to `state = Ready` — see this
+    /// module's doc for why `#[serde(default)]` alone does NOT provide this
+    /// rescue for bincode's positional format. Mirrors
+    /// `persistence::decode_persisted_indexes`'s pattern for index2 metadata.
+    ///
+    /// Any OTHER decode failure (the bytes match neither shape — genuine
+    /// corruption) is surfaced as an error rather than silently discarding
+    /// the caller's existing index definitions.
+    pub fn decode_bytes(bytes: &[u8]) -> Result<Self, bincode::Error> {
+        match bincode::deserialize::<IndexInfo>(bytes) {
+            Ok(info) => Ok(info),
+            Err(new_err) => {
+                match bincode::deserialize::<BTreeMap<u64, IndexDefinitionNoState>>(bytes) {
+                    Ok(legacy_map) => {
+                        log::warn!(
+                            "IndexInfo: decoded with pre-`state` legacy fallback \
+                         ({} definition(s) lifted to state=Ready). New-shape decode error: {}",
+                            legacy_map.len(),
+                            new_err
+                        );
+                        let vec: Vec<IndexDefinition> = legacy_map
+                            .into_values()
+                            .map(IndexDefinition::from)
+                            .collect();
+                        Ok(Self {
+                            indexes: shamir_numa::NodeReplicated::new(shamir_numa::detect(), vec),
+                            status: StatusAtom(Arc::new(AtomicU8::new(
+                                IndexStatus::Actual.as_u8(),
+                            ))),
+                        })
+                    }
+                    Err(_legacy_err) => {
+                        // Decodes as neither shape — genuine corruption. Surface
+                        // the ORIGINAL (current-shape) error, matching the
+                        // `unwrap_or_else(|_| IndexInfo::new())` call sites'
+                        // existing error-shape expectations.
+                        Err(new_err)
+                    }
+                }
+            }
         }
     }
 

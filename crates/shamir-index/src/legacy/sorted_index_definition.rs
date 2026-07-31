@@ -16,6 +16,7 @@
 //! `name_interned`, all entries share that prefix, so a prefix scan
 //! returns every record matching this index in **value order**.
 
+use crate::state::IndexState;
 use serde::{Deserialize, Serialize};
 
 /// Distinguishes sorted-index physical keys from any other key kind
@@ -67,6 +68,26 @@ pub struct SortedIndexDefinition {
     /// default the epoch already had before this fix.
     #[serde(default)]
     pub ready_at_version: u64,
+    /// F-72 (#899, P0): planner-visibility lifecycle state, reusing
+    /// `shamir_index::state::IndexState` directly (the same type index2's
+    /// registry uses — no parallel enum). A freshly-registered definition
+    /// starts `Building` (set explicitly by
+    /// `TableManager::create_sorted_index_with_include`, mirroring
+    /// `IndexDefinition::state`) and is flipped to `Ready` once its backfill
+    /// fully completes. `Ready` is the `#[default]`/`#[serde(default)]`
+    /// value, so every freshly-constructed definition — and, via
+    /// `SortedIndexManager::load`'s decode fallback below, every PRE-`state`
+    /// on-disk definition — is `Ready` unless a CREATE explicitly marks it
+    /// `Building`.
+    ///
+    /// bincode forward-compat NOTE: `#[serde(default)]` on this NEW trailing
+    /// field does NOT by itself rescue a read of pre-`state` on-disk bytes
+    /// (see `shamir_index::state`'s module doc for the proven bincode
+    /// landmine) — `SortedIndexManager::load`'s three-tier decode (current →
+    /// `SortedIndexDefinitionNoState` → `SortedIndexDefinitionV1`) provides
+    /// the real fallback, mirroring `persistence::load_index2_metadata`.
+    #[serde(default)]
+    pub state: IndexState,
 }
 
 impl SortedIndexDefinition {
@@ -77,6 +98,7 @@ impl SortedIndexDefinition {
             included_fields: Vec::new(),
             included_fields_interned: Vec::new(),
             ready_at_version: 0,
+            state: IndexState::default(),
         }
     }
 
@@ -94,6 +116,7 @@ impl SortedIndexDefinition {
             included_fields,
             included_fields_interned: Vec::new(),
             ready_at_version: 0,
+            state: IndexState::default(),
         }
     }
 
@@ -111,6 +134,7 @@ impl SortedIndexDefinition {
             included_fields,
             included_fields_interned,
             ready_at_version: 0,
+            state: IndexState::default(),
         }
     }
 
@@ -139,6 +163,39 @@ impl From<SortedIndexDefinitionV1> for SortedIndexDefinition {
             // safe-if-permissive `0` default `#[serde(default)]` gives the
             // current V2 format when the field is absent.
             ready_at_version: 0,
+            // Pre-F-72 on-disk layout predates the lifecycle state entirely —
+            // every such persisted index was, by definition, fully built.
+            state: IndexState::default(),
+        }
+    }
+}
+
+/// Pre-`state` on-disk shadow shape of `SortedIndexDefinition` (F-72, #899):
+/// the layout as it existed with `included_fields` + `ready_at_version` but
+/// BEFORE `state` was added. Used only by `SortedIndexManager::load`'s
+/// forward-compat fallback — mirrors `IndexDefinitionNoState`
+/// (`index_info.rs`) and `persistence::load_index2_metadata`'s pattern.
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct SortedIndexDefinitionNoState {
+    pub(crate) name_interned: u64,
+    pub(crate) field_path: Vec<u64>,
+    #[serde(default)]
+    pub(crate) included_fields: Vec<Vec<String>>,
+    #[serde(default)]
+    pub(crate) ready_at_version: u64,
+}
+
+impl From<SortedIndexDefinitionNoState> for SortedIndexDefinition {
+    fn from(legacy: SortedIndexDefinitionNoState) -> Self {
+        Self {
+            name_interned: legacy.name_interned,
+            field_path: legacy.field_path,
+            included_fields: legacy.included_fields,
+            included_fields_interned: Vec::new(),
+            ready_at_version: legacy.ready_at_version,
+            // Every pre-`state` persisted index was fully built; a `Building`
+            // index could not have been persisted before this field existed.
+            state: IndexState::default(),
         }
     }
 }

@@ -151,8 +151,15 @@ impl TableManager {
     }
 
     /// Find a single-field index whose path matches `field_path`.
+    ///
+    /// F-72 (#899, P0): uses `iter_indexes_ready` (state-filtered), NOT the
+    /// raw `iter_indexes` — a `Building` definition (CREATE INDEX backfill
+    /// still in flight) must be invisible to this planner lookup, or a
+    /// concurrent Eq/In query could be routed to a half-populated index and
+    /// silently miss rows. See `IndexManager::create_index_from_records`'s
+    /// doc for the full register/backfill/flip sequence this gates.
     pub fn find_single_field_index(&self, field_path: &[u64]) -> Option<u64> {
-        for def in self.index_manager_ref().iter_indexes() {
+        for def in self.index_manager_ref().iter_indexes_ready() {
             if def.paths.len() == 1 && def.paths[0].path == field_path {
                 return Some(def.name_interned);
             }
@@ -219,8 +226,11 @@ impl TableManager {
 
         let idx_mgr = self.index_manager_ref();
 
+        // F-72 (#899, P0): both loops below use `iter_indexes_ready` (state-
+        // filtered) — see `find_single_field_index`'s doc for why a
+        // `Building` definition must stay invisible to this planner path.
         // Try composite indexes first (Eq-only, each path covered by exactly one Eq)
-        for def in idx_mgr.iter_indexes() {
+        for def in idx_mgr.iter_indexes_ready() {
             if def.paths.len() > 1 {
                 let mut lookup_values = Vec::with_capacity(def.paths.len());
                 let mut consumed = Vec::new();
@@ -247,7 +257,7 @@ impl TableManager {
         }
 
         // Try single-field indexes (Eq or In)
-        for def in idx_mgr.iter_indexes() {
+        for def in idx_mgr.iter_indexes_ready() {
             if def.paths.len() == 1 {
                 if let Some(item) = items.iter().find(|it| it.field_path == def.paths[0].path) {
                     let consumed = vec![item.filter_idx];
@@ -298,23 +308,28 @@ impl TableManager {
             return None;
         }
 
+        // F-72 (#899, P0): every arm below uses `find_by_field_ready`
+        // (state-filtered), NOT `find_by_field` — see
+        // `SortedIndexManager::find_by_field_ready`'s doc for why a
+        // `Building` sorted index (CREATE INDEX backfill still in flight)
+        // must be invisible to every planner lookup.
         match filter {
             Filter::Between { field, from, to } => {
                 let field_path = intern_field_path(field, interner)?;
-                let def = mgr.find_by_field(&field_path)?;
+                let def = mgr.find_by_field_ready(&field_path)?;
                 let lo = encode_filter_value_for_sort(from)?;
                 let hi = encode_filter_value_for_sort(to)?;
                 Some((def.name_interned, Some(lo), Some(hi), None))
             }
             Filter::Gte { field, value } => {
                 let field_path = intern_field_path(field, interner)?;
-                let def = mgr.find_by_field(&field_path)?;
+                let def = mgr.find_by_field_ready(&field_path)?;
                 let lo = encode_filter_value_for_sort(value)?;
                 Some((def.name_interned, Some(lo), None, None))
             }
             Filter::Lte { field, value } => {
                 let field_path = intern_field_path(field, interner)?;
-                let def = mgr.find_by_field(&field_path)?;
+                let def = mgr.find_by_field_ready(&field_path)?;
                 let hi = encode_filter_value_for_sort(value)?;
                 Some((def.name_interned, None, Some(hi), None))
             }
@@ -327,7 +342,7 @@ impl TableManager {
             // records to filter.
             Filter::Gt { field, value } => {
                 let field_path = intern_field_path(field, interner)?;
-                let def = mgr.find_by_field(&field_path)?;
+                let def = mgr.find_by_field_ready(&field_path)?;
                 let lo = encode_filter_value_for_sort(value)?;
                 let residual = Filter::Ne {
                     field: field.clone(),
@@ -337,7 +352,7 @@ impl TableManager {
             }
             Filter::Lt { field, value } => {
                 let field_path = intern_field_path(field, interner)?;
-                let def = mgr.find_by_field(&field_path)?;
+                let def = mgr.find_by_field_ready(&field_path)?;
                 let hi = encode_filter_value_for_sort(value)?;
                 let residual = Filter::Ne {
                     field: field.clone(),
@@ -455,7 +470,11 @@ impl TableManager {
             return None;
         }
         let field_path = intern_field_path(&item.field, interner)?;
-        let def = mgr.find_by_field(&field_path)?;
+        // F-72 (#899, P0): state-filtered (`find_by_field_ready`, not
+        // `find_by_field`) — a `Building` sorted index must be invisible to
+        // this fast-path eligibility check, same as every other planner
+        // lookup in this file.
+        let def = mgr.find_by_field_ready(&field_path)?;
 
         Some((def.name_interned, take, skip, item.direction))
     }
@@ -506,7 +525,11 @@ impl TableManager {
             return None;
         }
         let field_path = intern_field_path(&item.field, interner)?;
-        let def = mgr.find_by_field(&field_path)?;
+        // F-72 (#899, P0): state-filtered (`find_by_field_ready`, not
+        // `find_by_field`) — a `Building` sorted index must be invisible to
+        // this fast-path eligibility check, same as every other planner
+        // lookup in this file.
+        let def = mgr.find_by_field_ready(&field_path)?;
 
         // Encode the single seek value.
         let encoded_key = encode_query_value_for_sort(&key[0])?;

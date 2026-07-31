@@ -1,3 +1,4 @@
+pub mod f72_legacy_state_compat_tests;
 pub mod index_definition_tests;
 pub mod index_info_item_tests;
 pub mod index_info_tests;

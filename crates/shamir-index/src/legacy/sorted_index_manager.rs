@@ -28,7 +28,9 @@ use std::sync::Arc;
 // Re-export so existing callers that import `SortedIndexDefinition` from this
 // module continue to compile unchanged after the type moved to its own file.
 pub use crate::legacy::sorted_index_definition::SortedIndexDefinition;
-use crate::legacy::sorted_index_definition::{SortedIndexDefinitionV1, SORTED_TAG};
+use crate::legacy::sorted_index_definition::{
+    SortedIndexDefinitionNoState, SortedIndexDefinitionV1, SORTED_TAG,
+};
 use crate::write_ops::IndexWriteOp;
 use shamir_storage::error::DbResult;
 use shamir_storage::types::RecordKey;
@@ -306,6 +308,18 @@ impl SortedIndexManager {
     /// version, not as of the dawn of time, so callers must call this
     /// unconditionally (not only when the backfill touched at least one
     /// row).
+    ///
+    /// F-72 (#899, P0): ALSO flips the definition's lifecycle `state` from
+    /// `Building` to `Ready` in the SAME copy-on-write `rcu` pass as the
+    /// `ready_at_version` bump — one atomic publication, mirroring index2's
+    /// `IndexRegistry::set_state`. This is the ONLY point a concurrent
+    /// planner read (`find_by_field_ready`) may start observing the index:
+    /// before this call the definition is registered (closing the
+    /// lost-write race against concurrent writers, unchanged from F-57) but
+    /// planner-invisible; after it, both the postings AND the planner
+    /// visibility are complete. Idempotent: called on an already-`Ready`
+    /// definition (e.g. `doctor::repair`'s rebuild path never calls this
+    /// directly, but a future retry safely could) is a no-op state-wise.
     pub async fn mark_ready_at(&self, name_interned: u64, table_version: u64) -> DbResult<()> {
         self.note_mutation_at_version(name_interned, table_version);
         let mut found = false;
@@ -316,6 +330,7 @@ impl SortedIndexManager {
                 .find(|d| d.name_interned == name_interned)
             {
                 def.ready_at_version = def.ready_at_version.max(table_version);
+                def.state = crate::state::IndexState::Ready;
                 found = true;
             }
             new_vec
@@ -353,6 +368,15 @@ impl SortedIndexManager {
     }
 
     /// Look up a definition whose `field_path` matches.
+    ///
+    /// F-72 (#899, P0): NOT state-filtered — returns a `Building` definition
+    /// just as readily as a `Ready` one. This is the DDL/introspection-shaped
+    /// lookup (mirrors index2's `get_by_name`, intentionally unfiltered so
+    /// paths like `rename_index`/`drop_sorted_index` can still resolve an
+    /// in-flight CREATE). PLANNER call sites (anything that decides whether a
+    /// query can use this index for a scan) MUST use
+    /// [`find_by_field_ready`](Self::find_by_field_ready) instead — see that
+    /// method's doc for the correctness reason.
     pub fn find_by_field(&self, field_path: &[u64]) -> Option<SortedIndexDefinition> {
         self.indexes
             .load_local()
@@ -361,9 +385,35 @@ impl SortedIndexManager {
             .cloned()
     }
 
+    /// Planner Ready-gate sibling of [`find_by_field`](Self::find_by_field):
+    /// returns `None` for a definition whose `state` is `Building`, exactly
+    /// as if the index did not exist yet.
+    ///
+    /// F-72 (#899, P0): closes the planner-invisibility gap — CREATE INDEX
+    /// registers the definition BEFORE the backfill loop populates its
+    /// postings (closing a DIFFERENT, pre-existing lost-write race against
+    /// concurrent writers; see `create_sorted_index_with_include`'s doc), so
+    /// a concurrent range/`Between`/`Gte`/`Lte`/keyset-seek/ORDER-BY-LIMIT-K
+    /// query planned against the raw (unfiltered) `find_by_field` could be
+    /// routed to a half-populated index and silently return fewer rows than
+    /// actually exist. Every PLANNER call site
+    /// (`TableManager::try_plan_sorted_index_scan`,
+    /// `try_plan_order_limit_fast_path`, `try_plan_keyset_seek`) uses this
+    /// method instead, so a `Building` index is invisible to query planning
+    /// and those queries safely fall back to a full scan until the backfill
+    /// flips the definition to `Ready` (mirrors index2's
+    /// `IndexRegistry::find_by_field_and_kind` Ready-gate).
+    pub fn find_by_field_ready(&self, field_path: &[u64]) -> Option<SortedIndexDefinition> {
+        self.find_by_field(field_path)
+            .filter(|d| d.state == crate::state::IndexState::Ready)
+    }
+
     /// Look up a definition by its interned name id.
     /// Used by the index-only read path (slice A3) to check
     /// whether the scanned index is a covering index.
+    ///
+    /// NOT state-filtered — see [`find_by_field`](Self::find_by_field)'s doc;
+    /// this is a name-keyed lookup used by rename/introspection, not planning.
     pub fn find_by_name_interned(&self, name_interned: u64) -> Option<SortedIndexDefinition> {
         self.indexes
             .load_local()
@@ -1478,20 +1528,46 @@ impl SortedIndexManager {
         if bytes.is_empty() {
             return Ok(());
         }
-        // Try the current format first; on failure fall back to the legacy
-        // V1 format (no `included_fields`) for backward-compat with existing
-        // persisted data written before the covering-index DDL slice.
+        // F-72 (#899): three-tier decode, try current shape first, falling
+        // back to progressively older shapes — mirrors
+        // `persistence::load_index2_metadata`'s pattern (see
+        // `sorted_index_definition.rs`'s `state` field doc for why
+        // `#[serde(default)]` alone does NOT rescue a pre-`state` blob under
+        // this workspace's pinned bincode). Tier 2 (`SortedIndexDefinitionNoState`)
+        // handles a blob written after covering indexes but before F-72's
+        // `state` field; tier 3 (`SortedIndexDefinitionV1`) handles the
+        // original pre-covering-index shape. A legacy tier's definitions are
+        // lifted to `state = Ready` — every pre-`state` persisted index was,
+        // by definition, fully built.
         let defs: Vec<SortedIndexDefinition> =
             match bincode::deserialize::<Vec<SortedIndexDefinition>>(bytes.as_ref()) {
                 Ok(d) => d,
-                Err(_) => {
-                    let v1s: Vec<SortedIndexDefinitionV1> = bincode::deserialize(bytes.as_ref())
-                        .map_err(|e| {
-                            shamir_storage::error::DbError::Codec(format!(
-                                "sorted-index defs decode: {e}"
-                            ))
-                        })?;
-                    v1s.into_iter().map(SortedIndexDefinition::from).collect()
+                Err(new_err) => {
+                    match bincode::deserialize::<Vec<SortedIndexDefinitionNoState>>(bytes.as_ref())
+                    {
+                        Ok(no_state) => {
+                            log::warn!(
+                                "sorted-index defs: decoded with pre-`state` legacy fallback \
+                                 ({} definition(s) lifted to state=Ready). New-shape decode \
+                                 error: {}",
+                                no_state.len(),
+                                new_err
+                            );
+                            no_state
+                                .into_iter()
+                                .map(SortedIndexDefinition::from)
+                                .collect()
+                        }
+                        Err(_) => {
+                            let v1s: Vec<SortedIndexDefinitionV1> =
+                                bincode::deserialize(bytes.as_ref()).map_err(|e| {
+                                    shamir_storage::error::DbError::Codec(format!(
+                                        "sorted-index defs decode: {e}"
+                                    ))
+                                })?;
+                            v1s.into_iter().map(SortedIndexDefinition::from).collect()
+                        }
+                    }
                 }
             };
         // Last-write-wins dedup by name_interned (matches the previous

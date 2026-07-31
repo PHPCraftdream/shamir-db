@@ -95,6 +95,20 @@ pub struct IndexManager {
     /// fully lock-free against unrelated index keys. Cache hits on
     /// the same shard still take the per-shard read lock.
     pub(super) posting_cache: Arc<DashMap<Bytes, Arc<[RecordId]>, THasher>>,
+
+    /// F-72 (#899, P0) test-only deterministic pause point: parks
+    /// `create_index_from_records`'s Phase 2 backfill loop (definition
+    /// already registered at `state = Building`, hence planner-invisible)
+    /// so a regression test can drive a concurrent read into the exact
+    /// window this task closes. `None` on every real path — a cheap
+    /// `ArcSwapOption::load_full()` (uncontended `Acquire` load) at the one
+    /// call site, no lock, no allocation. NOT `#[cfg(test)]`-gated: the
+    /// consuming test (`shamir-engine`'s `f72_planner_invisibility_tests.rs`)
+    /// installs this hook from a DIFFERENT crate's test binary, where THIS
+    /// crate's own `cfg(test)` is inactive — see `legacy/mod.rs`'s module
+    /// doc on `backfill_pause_hook` for the cross-crate-visibility reason.
+    pub(super) create_index_backfill_hook:
+        Arc<arc_swap::ArcSwapOption<crate::legacy::backfill_pause_hook::BackfillPauseHook>>,
 }
 
 impl Clone for IndexManager {
@@ -107,6 +121,7 @@ impl Clone for IndexManager {
             has_indexes: Arc::clone(&self.has_indexes),
             write_barrier_flags: self.write_barrier_flags.clone(),
             posting_cache: Arc::clone(&self.posting_cache),
+            create_index_backfill_hook: Arc::clone(&self.create_index_backfill_hook),
         }
     }
 }
@@ -137,8 +152,12 @@ impl IndexManager {
         // Загружаем обычные индексы или создаём пустую структуру
         let indexes = match info_store.get(indexes_key.clone().into()).await {
             Ok(bytes) => {
-                // Десериализуем метаданные; при ошибке начинаем с пустого набора
-                bincode::deserialize::<IndexInfo>(&bytes).unwrap_or_else(|_| IndexInfo::new())
+                // F-72 (#899): `decode_bytes` tries the current shape first,
+                // falling back to the pre-`state` legacy shape (lifted to
+                // Ready) before giving up — see `index_info.rs`'s module doc.
+                // At error we begin with an empty set (matches this call
+                // site's pre-existing best-effort recovery policy).
+                IndexInfo::decode_bytes(&bytes).unwrap_or_else(|_| IndexInfo::new())
             }
             Err(shamir_storage::error::DbError::NotFound(_)) => IndexInfo::new(),
             Err(e) => return Err(e),
@@ -146,9 +165,7 @@ impl IndexManager {
 
         // Загружаем уникальные индексы или создаём пустую структуру
         let indexes_unique = match info_store.get(indexes_unique_key.clone().into()).await {
-            Ok(bytes) => {
-                bincode::deserialize::<IndexInfo>(&bytes).unwrap_or_else(|_| IndexInfo::new())
-            }
+            Ok(bytes) => IndexInfo::decode_bytes(&bytes).unwrap_or_else(|_| IndexInfo::new()),
             Err(shamir_storage::error::DbError::NotFound(_)) => IndexInfo::new(),
             Err(e) => return Err(e),
         };
@@ -179,12 +196,24 @@ impl IndexManager {
                 POSTING_CACHE_CAP,
                 THasher::default(),
             )),
+            create_index_backfill_hook: Arc::new(arc_swap::ArcSwapOption::empty()),
         };
 
         // Синхронизируем флаги с состоянием IndexInfo
         manager.sync_flags();
 
         Ok(manager)
+    }
+
+    /// F-72 (#899, P0) test-only: install (or clear with `None`) the
+    /// deterministic `create_index_from_records` backfill pause hook. Not
+    /// `#[cfg(test)]`-gated — see the field's doc for why (cross-crate test
+    /// consumer).
+    pub fn set_create_index_backfill_hook(
+        &self,
+        hook: Option<Arc<crate::legacy::backfill_pause_hook::BackfillPauseHook>>,
+    ) {
+        self.create_index_backfill_hook.store(hook);
     }
 
     /// Синхронизирует атомарные флаги с реальным состоянием индексов.
@@ -342,6 +371,50 @@ impl IndexManager {
     /// is a pure function of `(is_unique, name_interned, h1, h2, record_id)`
     /// with an EMPTY value (`Bytes::new()`) — so writing it twice is an
     /// idempotent no-op, not a corruption.
+    ///
+    /// # Planner invisibility + persist ordering (F-72, #899, P0)
+    ///
+    /// `index_def` is registered at `state = Building` (set by the caller,
+    /// `TableManager::create_index` — see that call site) — register-first
+    /// is UNCHANGED (it is what closes the lost-write race above); what
+    /// changes is that a `Building` definition is invisible to every
+    /// PLANNER lookup (`TableManager::find_single_field_index`,
+    /// `try_plan_and_index_scan` — both now consult
+    /// `IndexManager::iter_indexes_ready`, not the raw `iter_indexes`), so a
+    /// concurrent Eq/In/And query cannot be routed to this half-populated
+    /// index while Phase 2 below is still streaming postings.
+    ///
+    /// The FIRST `save_index_info` (right after `add_index`) durably
+    /// publishes the `Building` marker BEFORE the backfill starts — so a
+    /// crash mid-backfill leaves a durable, planner-invisible `Building`
+    /// definition on disk, not a `Ready` one with missing postings. Once the
+    /// backfill (Phase 2) completes, the definition is flipped to `Ready`
+    /// in-memory and a SECOND `save_index_info` durably persists that flip —
+    /// this fixes the pre-F-72 publish-then-persist inversion (the state
+    /// flip to `Ready`, i.e. "queryable", now happens no earlier than the
+    /// persist that makes it durable, never after — a persist failure at
+    /// the SECOND save cannot leave a `Ready`, queryable, durably-unsaved-as-
+    /// Ready index behind: `?` propagates the error and the in-memory
+    /// `indexes` map still holds the flipped-to-Ready struct, but the
+    /// CALLER receives `Err`, so the DDL statement is reported as failed —
+    /// see `create_index`'s caller contract). On a genuine backfill error
+    /// (Phase 2's `?` — none of today's in-loop steps are fallible in this
+    /// specific method, but `plan`/`apply` sibling call sites are — or a
+    /// future fallible step), the definition simply never reaches the
+    /// second `save_index_info`/flip and stays durably `Building`.
+    ///
+    /// Unlike index2, the legacy `IndexManager` family has NO automatic
+    /// restart-from-scratch self-heal for a `Building` definition at
+    /// table-open time (grep-verified: `IndexManager::new` only loads
+    /// definitions via `IndexInfo::decode_bytes`, it does not re-run any
+    /// backfill). A `Building` definition left behind by a crash/error
+    /// therefore stays durably `Building` — permanently planner-invisible,
+    /// never silently resurrected as `Ready` — until an operator runs
+    /// `TableManager::repair()` (`doctor.rs`), which rebuilds every
+    /// definition unconditionally regardless of state. This is an accepted,
+    /// explicitly-documented gap: automatic legacy-family self-healing is
+    /// out of scope for this task (mirrors the equivalent note on
+    /// `create_sorted_index_with_include`).
     pub async fn create_index_from_records(
         &self,
         index_def: IndexDefinition,
@@ -351,13 +424,14 @@ impl IndexManager {
         // Capture paths before `index_def` is moved into `add_index`.
         let paths = index_def.paths.clone();
 
-        // ── Phase 1: register the definition FIRST ──────────────────────────
+        // ── Phase 1: register the definition FIRST, at Building ────────────
         // Once registered, the live write-hook starts maintaining postings
-        // for every concurrent/new write against this index immediately.
-        // `save_index_info` persists the registry so a crash between
-        // registration and backfill leaves a correctly-registered (but
-        // possibly under-populated) index that the S9b rebuild-on-open /
-        // doctor `repair()` pass will top up on next open.
+        // for every concurrent/new write against this index immediately —
+        // but the definition stays planner-invisible until Phase 3 flips it
+        // to Ready. `save_index_info` durably persists the `Building` marker
+        // so a crash between registration and backfill leaves a correctly-
+        // registered (but possibly under-populated), still-planner-invisible
+        // index that the doctor `repair()` pass can top up on request.
         self.indexes.add_index(index_def);
         self.has_indexes.store(true, Ordering::Release);
         self.save_index_info().await?;
@@ -389,6 +463,45 @@ impl IndexManager {
         for ik in cache_index_keys {
             self.posting_cache.remove(&ik);
         }
+
+        // F-72 (#899, P0) test seam: park here (postings written, definition
+        // still `Building` and hence planner-invisible until Phase 3 below)
+        // if a test installed a pause hook. `None` on every real path — one
+        // uncontended `ArcSwapOption::load_full()` Acquire load, no lock, no
+        // allocation. NOT `#[cfg(test)]`-gated — see the field's doc for why
+        // (a cross-crate test consumer needs this reachable in a normal,
+        // non-test compile of this crate). Lets a regression test drive a
+        // concurrent READ into the exact window this task closes.
+        if let Some(hook) = self.create_index_backfill_hook.load_full() {
+            hook.wait_at_window().await;
+        }
+
+        // ── Phase 3: flip Building → Ready, persist BEFORE returning ────────
+        // F-72 (#899, P0): the state flip and its durable persist are the
+        // ONLY point a concurrent planner read may start observing this
+        // index. Fixes the publish-then-persist inversion: the in-memory
+        // flip happens here, immediately followed by the persist that makes
+        // it durable — never the other way around (persist-after-serving is
+        // what the OLD single-save-before-backfill shape effectively did
+        // for `Ready`-by-default definitions). A failure on THIS save
+        // surfaces as `Err` to the DDL caller (the statement is reported
+        // failed) while the definition remains `Ready` in THIS process's
+        // memory but durably `Building` on disk — an intentional choice
+        // (see the method doc): we do not roll back the in-memory flip,
+        // because the postings themselves are already fully written and
+        // correct; a restart would simply re-observe `Building` from disk
+        // and require an operator `repair()` to reconcile, at worst costing
+        // a redundant full rebuild, never a correctness gap (the disk state
+        // never claims Ready without the postings backing it, and the
+        // planner in THIS still-live process is the only place `Ready` is
+        // visible without yet being durable — acceptable because the
+        // postings backing that Ready view already exist).
+        if let Some(def) = self.indexes.get_index(name_interned) {
+            let mut ready_def = def;
+            ready_def.state = crate::state::IndexState::Ready;
+            self.indexes.add_index(ready_def);
+        }
+        self.save_index_info().await?;
 
         log::info!(
             "Created index '{}' with {} entries (from seam)",
@@ -860,8 +973,33 @@ impl IndexManager {
     }
 
     /// Iterate over all regular index definitions.
+    ///
+    /// F-72 (#899, P0): NOT state-filtered — yields a `Building` definition
+    /// just as readily as a `Ready` one. This is the DDL/introspection-shaped
+    /// accessor (doctor `verify`/`repair`, admin DESCRIBE/LIST, DROP TABLE
+    /// CASCADE, tests) that legitimately needs to see an in-flight CREATE.
+    /// PLANNER call sites (anything that decides whether a query can be
+    /// routed through this index) MUST use
+    /// [`iter_indexes_ready`](Self::iter_indexes_ready) instead.
     pub fn iter_indexes(&self) -> impl Iterator<Item = IndexDefinition> + '_ {
         self.indexes.iter()
+    }
+
+    /// Planner Ready-gate sibling of [`iter_indexes`](Self::iter_indexes):
+    /// yields only `Ready` definitions, skipping any `Building` one exactly
+    /// as if it did not exist yet.
+    ///
+    /// F-72 (#899, P0): closes the planner-invisibility gap for the regular
+    /// (non-unique) hash-index family — `TableManager::find_single_field_index`
+    /// and `try_plan_and_index_scan` (`read_planner.rs`) use this instead of
+    /// the raw `iter_indexes`, so a concurrent Eq/In/And query cannot be
+    /// planned against an index whose backfill has not yet completed (see
+    /// `create_index_from_records`'s doc for the full publish/backfill/flip
+    /// sequence this gates).
+    pub fn iter_indexes_ready(&self) -> impl Iterator<Item = IndexDefinition> + '_ {
+        self.indexes
+            .iter()
+            .filter(|d| d.state == crate::state::IndexState::Ready)
     }
 
     /// Проверяет существование индекса по его имени.

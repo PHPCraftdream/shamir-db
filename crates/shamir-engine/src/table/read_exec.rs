@@ -371,7 +371,11 @@ impl TableManager {
             } = &query.select.items[0]
             {
                 if let Some(field_path) = intern_field_path(path, interner) {
-                    if let Some(def) = self.sorted_indexes().find_by_field(&field_path) {
+                    // F-72 (#899, P0): state-filtered — a `Building` sorted
+                    // index (CREATE INDEX backfill in flight) must fall
+                    // through to the full scan below, not answer MIN from a
+                    // half-populated index.
+                    if let Some(def) = self.sorted_indexes().find_by_field_ready(&field_path) {
                         if let Some(id) =
                             self.sorted_indexes().lookup_min(def.name_interned).await?
                         {
@@ -675,7 +679,8 @@ impl TableManager {
             } = &query.select.items[0]
             {
                 if let Some(field_path) = intern_field_path(path, interner) {
-                    if let Some(def) = self.sorted_indexes().find_by_field(&field_path) {
+                    // F-72 (#899, P0): state-filtered — see the MIN arm above.
+                    if let Some(def) = self.sorted_indexes().find_by_field_ready(&field_path) {
                         if let Some(id) =
                             self.sorted_indexes().lookup_max(def.name_interned).await?
                         {
@@ -2329,7 +2334,7 @@ impl TableManager {
             } = &query.select.items[0]
             {
                 if let Some(fp) = intern_field_path(path, interner) {
-                    if let Some(def) = self.sorted_indexes().find_by_field(&fp) {
+                    if let Some(def) = self.sorted_indexes().find_by_field_ready(&fp) {
                         return ExplainPlan {
                             plan_type: PlanType::MinMaxIndex,
                             index_used: Some(format!("sorted_idx_{}_min", def.name_interned)),
@@ -2400,7 +2405,7 @@ impl TableManager {
             } = &query.select.items[0]
             {
                 if let Some(fp) = intern_field_path(path, interner) {
-                    if let Some(def) = self.sorted_indexes().find_by_field(&fp) {
+                    if let Some(def) = self.sorted_indexes().find_by_field_ready(&fp) {
                         return ExplainPlan {
                             plan_type: PlanType::MinMaxIndex,
                             index_used: Some(format!("sorted_idx_{}_max", def.name_interned)),

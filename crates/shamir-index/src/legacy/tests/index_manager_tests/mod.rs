@@ -4,6 +4,7 @@ pub mod btree_tests;
 pub mod byte_identity_tests;
 pub mod composite_tests;
 pub mod concurrency_tests;
+pub mod f72_publish_then_persist_tests;
 pub mod helpers;
 pub mod type_tests;
 pub mod unique_tests;

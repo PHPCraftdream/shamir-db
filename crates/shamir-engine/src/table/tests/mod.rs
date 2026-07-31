@@ -20,6 +20,7 @@ pub mod f57_index_create_barrier_tests;
 pub mod f69_write_barrier_single_atomic_tests;
 pub mod f70_lock_order_inversion_tests;
 pub mod f71_asof_epoch_init_tests;
+pub mod f72_planner_invisibility_tests;
 pub mod filter_stream_tests;
 pub mod filtered_ann_tests;
 pub mod filtered_vector_tests;

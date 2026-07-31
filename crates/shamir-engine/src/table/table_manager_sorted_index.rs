@@ -112,12 +112,21 @@ impl TableManager {
         // record stream — neither depends on the interner having been
         // durably persisted.
         self.interner.persist().await?;
-        let def = SortedIndexDefinition::with_included_interned(
+        // F-72 (#899, P0): construct with `state = Building` — see
+        // `SortedIndexDefinition::state`'s doc. `register` persists this
+        // BEFORE the backfill loop runs (unchanged register-first ordering —
+        // that's what closes the lost-write race against concurrent writers,
+        // see the doc above), but a `Building` definition is invisible to
+        // every PLANNER lookup (`find_by_field_ready`), so a concurrent
+        // range/seek/order-by query cannot be routed to this half-populated
+        // index while the backfill below is still streaming.
+        let mut def = SortedIndexDefinition::with_included_interned(
             name_interned,
             path_ids,
             included_fields,
             included_fields_interned,
         );
+        def.state = crate::index2::state::IndexState::Building;
         self.sorted_indexes.register(def).await?;
 
         // Backfill: stream existing records and add each to the new
@@ -128,6 +137,26 @@ impl TableManager {
         // F-57: the barrier + lock above ensure no concurrent writer can
         // interleave with this backfill — the snapshot is a true point-in-time
         // view with no in-flight writers.
+        //
+        // F-72 (#899, P0): backfill error/cancellation handling. If the loop
+        // below returns `Err` (a `?` on a stream/decode/apply failure), the
+        // definition stays registered but `Building` — it is NEVER flipped to
+        // `Ready`, so it remains permanently planner-invisible (the state
+        // flip only happens after this loop completes AND `mark_ready_at`
+        // runs, below). Unlike index2, the legacy sorted-index family has NO
+        // automatic restart-from-scratch self-heal at table-open time (grep-
+        // verified: `TableManager::create`'s open path re-hydrates
+        // `SortedIndexManager` via `load()`, which restores whatever `state`
+        // was last persisted, but runs no backfill-repair loop for a
+        // `Building` entry the way the index2 branch does). A crash or error
+        // here therefore leaves a `Building`, planner-invisible, partially-
+        // populated definition that self-heals ONLY via an explicit operator
+        // `doctor::repair()` call (which rebuilds every definition
+        // unconditionally, regardless of state) — it does NOT silently
+        // resurrect as queryable on its own. This is an accepted, explicitly
+        // documented gap (mirrors the pre-existing `create_sorted_index`
+        // doc's "cancel-safe: NO" note) — automatic legacy-family
+        // self-healing is out of scope for this task.
         let stream = self.list_stream(1000);
         futures::pin_mut!(stream);
         while let Some(batch) = stream.next().await {
@@ -147,6 +176,18 @@ impl TableManager {
                 self.sorted_indexes
                     .on_record_created(&id, &record, 0)
                     .await?;
+            }
+            // F-72 (#899, P0) test seam: park here (mid-backfill, definition
+            // still `Building` and hence planner-invisible) if a test
+            // installed a pause hook. Zero cost in the real path (`None`),
+            // compiled out of non-test builds. Lets a regression test drive
+            // a concurrent READ into the exact window this task closes and
+            // assert it falls back to a full scan instead of observing a
+            // half-populated index. See `create_index2_backfill_hook`'s
+            // sibling doc for the analogous index2 seam.
+            #[cfg(test)]
+            if let Some(hook) = self.create_sorted_index_backfill_hook.load_full() {
+                hook.wait_at_window().await;
             }
         }
         // F-71 (#898): close vector 2 of the F-67 regression — mark the

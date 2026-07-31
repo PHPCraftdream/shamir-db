@@ -175,6 +175,17 @@ pub struct TableManager {
     #[cfg(test)]
     pub(super) create_index2_backfill_hook:
         Arc<arc_swap::ArcSwapOption<super::index2_backfill_hook::BackfillPauseHook>>,
+    /// F-72 (#899, P0) test-only deterministic pause point: parks
+    /// `create_sorted_index_with_include`'s backfill loop mid-stream (after
+    /// registering the definition at `Building`, before it flips to
+    /// `Ready`). Lets a regression test drive a concurrent READ into the
+    /// exact planner-invisibility window this task closes — see
+    /// `f72_planner_invisibility_tests.rs`. Reuses the same
+    /// `BackfillPauseHook` primitive as `create_index2_backfill_hook`.
+    /// `None` in every non-test build and by default in tests.
+    #[cfg(test)]
+    pub(super) create_sorted_index_backfill_hook:
+        Arc<arc_swap::ArcSwapOption<super::index2_backfill_hook::BackfillPauseHook>>,
 }
 
 /// Bundle wiring the non-tx write path to the SSI commit-write log.
@@ -231,6 +242,8 @@ impl Clone for TableManager {
             scalar_resolver: Arc::clone(&self.scalar_resolver),
             #[cfg(test)]
             create_index2_backfill_hook: Arc::clone(&self.create_index2_backfill_hook),
+            #[cfg(test)]
+            create_sorted_index_backfill_hook: Arc::clone(&self.create_sorted_index_backfill_hook),
         }
     }
 }
@@ -300,6 +313,8 @@ impl TableManager {
             ))),
             #[cfg(test)]
             create_index2_backfill_hook: Arc::new(arc_swap::ArcSwapOption::empty()),
+            #[cfg(test)]
+            create_sorted_index_backfill_hook: Arc::new(arc_swap::ArcSwapOption::empty()),
         };
 
         // Resolve covering-index included_fields string paths to interned ids.
@@ -532,6 +547,8 @@ impl TableManager {
             ))),
             #[cfg(test)]
             create_index2_backfill_hook: Arc::new(arc_swap::ArcSwapOption::empty()),
+            #[cfg(test)]
+            create_sorted_index_backfill_hook: Arc::new(arc_swap::ArcSwapOption::empty()),
         }
     }
 
@@ -654,6 +671,17 @@ impl TableManager {
         hook: Option<Arc<super::index2_backfill_hook::BackfillPauseHook>>,
     ) {
         self.create_index2_backfill_hook.store(hook);
+    }
+
+    /// F-72 (#899, P0) test-only: install (or clear with `None`) the
+    /// deterministic `create_sorted_index_with_include` backfill pause hook.
+    /// See `create_sorted_index_backfill_hook`'s field doc.
+    #[cfg(test)]
+    pub(crate) fn set_create_sorted_index_backfill_hook(
+        &self,
+        hook: Option<Arc<super::index2_backfill_hook::BackfillPauseHook>>,
+    ) {
+        self.create_sorted_index_backfill_hook.store(hook);
     }
 
     /// Clone the handle to this table's unique-write serialisation lock.
