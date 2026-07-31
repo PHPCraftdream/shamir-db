@@ -48,29 +48,40 @@
 //! sorted index on the same table does NOT bump `index_name`'s counter and
 //! correctly does not trip either the entry gate or this post-check.
 //!
-//! ## Bump-vs-apply ordering (both verified, both safe for the post-check)
+//! ## Bump-vs-apply ordering (both paths now bump-before-apply — closed by F-74)
 //!
 //! - **Non-tx direct path** (`on_record_created`/`on_record_updated`/
 //!   `on_records_created_batch`/`on_record_deleted`,
 //!   `sorted_index_manager.rs`): bumps the per-index high-water (via
 //!   `bump_touched_indexes`, computed from the planner's `Vec<IndexWriteOp>`)
-//!   FIRST, applies the posting mutation SECOND. This is actually the SAFER
-//!   order for the post-check: if the scan ever observes the mutation's
-//!   effect, the bump necessarily already happened — zero residual window.
-//!   The only cost is a possible false-positive fallback (bump fired, apply
-//!   hadn't landed yet), which is always safe (the full-scan fallback is
-//!   correct by construction).
-//! - **Tx-commit path** (`commit_phases.rs` Phase 5c): applies the posting
-//!   mutation FIRST, bumps the per-index high-water SECOND (via
-//!   `bump_touched_indexes` decoding `name_interned` from each op's key) —
-//!   the ordering this module originally assumed. This leaves a narrow,
-//!   synchronous (no `.await` between the two calls) window where the
-//!   post-check could in principle run between the apply and the bump and
-//!   miss it. This residual is accepted as out-of-scope for F-58/F-67: it is
-//!   orders of magnitude narrower than the unbounded-scan-duration TOCTOU
-//!   F-58 closes, and closing it fully would mean reordering the tx-commit
-//!   pipeline's Phase 5c itself — separate, riskier work, not this read-path
-//!   fix.
+//!   FIRST, applies the posting mutation SECOND. This is the SAFER order for
+//!   the post-check: if the scan ever observes the mutation's effect, the
+//!   bump necessarily already happened — zero residual window. The only
+//!   cost is a possible false-positive fallback (bump fired, apply hadn't
+//!   landed yet), which is always safe (the full-scan fallback is correct
+//!   by construction).
+//! - **Tx-commit path** (`commit_phases.rs::apply_index_batch`, Phase 5c):
+//!   PRE-F-74, this path applied the posting mutation FIRST and bumped the
+//!   per-index high-water SECOND — the ordering this module originally
+//!   assumed, and the opposite of the non-tx path above. That left a narrow
+//!   window, unprotected by any `.await`-based happens-before edge on the
+//!   SAME tokio task, where a genuinely concurrent reader on ANOTHER OS
+//!   thread (tokio is a multi-threaded work-stealing runtime by default in
+//!   this workspace — the absence of an interleaved `.await` on the
+//!   committing task says nothing about a *different* task/thread) could run
+//!   its own entry-gate → scan → post-check sequence entirely inside that
+//!   window: it could observe postings this commit had already mutated while
+//!   the epoch still read as unbumped, pass both checks, and return a
+//!   silently short/wrong AsOf page. **F-74 (#901) closes this**:
+//!   `apply_index_batch` now bumps `bump_touched_indexes` BEFORE
+//!   `apply_index_ops_at_commit`, mirroring the non-tx path's order exactly.
+//!   The tx-commit path is no longer the odd one out, and the residual this
+//!   section used to accept as out-of-scope for F-58/F-67 no longer exists:
+//!   there is no ordering under which either path can reach a state where
+//!   postings have changed but the counter has not. The remaining (safe)
+//!   possibility on both paths is the SAME one described above for the
+//!   non-tx path — bump lands, apply has not yet landed — which only costs a
+//!   spurious full-scan fallback, never a wrong answer.
 
 use std::time::Instant;
 

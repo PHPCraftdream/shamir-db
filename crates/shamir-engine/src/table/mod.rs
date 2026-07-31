@@ -48,3 +48,10 @@ pub use table::Table;
 // one-shot injected read error. Test-only.
 #[cfg(test)]
 pub(crate) use table_manager_streaming::{ReadOneTxBytesFailHook, TEST_READ_ONE_TX_BYTES_FAILURE};
+
+// F-74 (#901): re-export the F-58 seek-loop pause seam so the tx-commit
+// bump/apply-ordering tests under `crate::tx::tests` can install it and
+// rendezvous a concurrent AsOf read against a racing commit's Phase 5c
+// seam. Test-only.
+#[cfg(test)]
+pub(crate) use read_asof_seek::{SeekLoopPreIterHook, TEST_SEEK_LOOP_PRE_ITER_HOOK};

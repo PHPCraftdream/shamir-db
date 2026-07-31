@@ -72,6 +72,65 @@ pub(crate) static FAIL_VECTOR_PROMOTE_TX_ID: std::sync::atomic::AtomicU64 =
 pub(crate) static FAIL_VECTOR_DELTA_TX_ID: std::sync::atomic::AtomicU64 =
     std::sync::atomic::AtomicU64::new(0);
 
+/// F-74 (#901) test-only ordering toggle for [`apply_index_batch`]. When
+/// `true`, Phase 5c temporarily reverts to the OLD, buggy apply-then-bump
+/// order (postings land, THEN the per-index epoch is bumped) instead of the
+/// fixed bump-then-apply order, so a test can reconstruct the exact TOCTOU
+/// window this task closes and prove it RED, then flip this back to `false`
+/// (the default) and prove the identical scenario GREEN. `nextest` runs each
+/// test in its own process, so this global cannot leak across test files.
+#[cfg(test)]
+pub(crate) static TEST_LEGACY_APPLY_THEN_BUMP_ORDER: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// F-74 (#901) test-only pause/resume handshake for
+/// [`apply_index_batch`]'s bump-vs-apply seam. Shape mirrors
+/// `read_asof_seek.rs`'s `SeekLoopPreIterHook` / `TEST_SEEK_LOOP_PRE_ITER_HOOK`
+/// (F-58) and `commit.rs`'s `PostValidatePrePublishHook` /
+/// `TEST_POST_VALIDATE_PRE_PUBLISH_HOOK`: `reached` lets the driving test
+/// detect (via a `yield_now` poll loop, no sleeps) that the committing tx has
+/// actually parked at the seam; `resume` is the release signal; `armed`
+/// makes the pause one-shot (CAS true→false) so only the FIRST committer to
+/// reach the seam in a given test actually parks.
+#[cfg(test)]
+#[derive(Debug)]
+pub(crate) struct IndexBatchBumpApplyHook {
+    pub(crate) reached: std::sync::atomic::AtomicUsize,
+    pub(crate) resume: tokio::sync::Notify,
+    pub(crate) armed: std::sync::atomic::AtomicBool,
+}
+
+#[cfg(test)]
+pub(crate) static TEST_INDEX_BATCH_BUMP_APPLY_HOOK: std::sync::OnceLock<
+    std::sync::Arc<IndexBatchBumpApplyHook>,
+> = std::sync::OnceLock::new();
+
+/// Parks on [`TEST_INDEX_BATCH_BUMP_APPLY_HOOK`] if a test installed one; a
+/// true no-op otherwise. Fires strictly between the bump and apply calls in
+/// [`apply_index_batch`], regardless of which of the two orderings
+/// (`TEST_LEGACY_APPLY_THEN_BUMP_ORDER`) is active — i.e. always at the exact
+/// program point between "epoch bump" and "posting apply", whichever one ran
+/// first.
+async fn fire_index_batch_bump_apply_test_hook() {
+    #[cfg(test)]
+    if let Some(hook) = TEST_INDEX_BATCH_BUMP_APPLY_HOOK.get() {
+        hook.reached
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let should_pause = hook
+            .armed
+            .compare_exchange(
+                true,
+                false,
+                std::sync::atomic::Ordering::AcqRel,
+                std::sync::atomic::Ordering::Acquire,
+            )
+            .is_ok();
+        if should_pause {
+            hook.resume.notified().await;
+        }
+    }
+}
+
 /// Async-mode helper: run Phase 5a (data) inline on the client path.
 ///
 /// Mirrors the per-table loop in [`crate::tx::commit::materialize`] (drain → bounded retry →
@@ -554,20 +613,36 @@ pub(crate) async fn apply_data_batch(
 
 /// Apply one table's staged index ops (Phase 5c).
 ///
-/// F-53b Step 2 (#878) / F-67 (#893): after the postings land, advance the
-/// PER-INDEX mutation high-water (`last_mutation_version(name_interned)`)
-/// to `commit_version`, for exactly the sorted index(es) `ops` actually
-/// touched (`SortedIndexManager::bump_touched_indexes` decodes
-/// `name_interned` from each op's physical key). This is the LOAD-BEARING
-/// wire point for the tx path: the AsOf cursor seek gate compares this
-/// against a cursor's pinned version, for the SAME index the cursor's seek
-/// is planned against. Bumping here (at APPLY time, with the commit
-/// version) — NOT at stage time — ensures an uncommitted (possibly-aborting)
-/// tx can never disable the fast path for unrelated cursors. A missed bump
-/// (e.g. a tx whose Phase 5c is deferred to recovery) only costs a fallback
-/// to the already-correct full scan; the `concurrent_modified`
-/// defence-in-depth classifier in the seek arm catches any post-pin
-/// mutation the gate missed.
+/// F-53b Step 2 (#878) / F-67 (#893) / F-74 (#901): advance the PER-INDEX
+/// mutation high-water (`last_mutation_version(name_interned)`) to
+/// `commit_version`, for exactly the sorted index(es) `ops` actually touched
+/// (`SortedIndexManager::bump_touched_indexes` decodes `name_interned` from
+/// each op's physical key) — BEFORE the postings themselves are applied to
+/// `info_store`. This is the LOAD-BEARING wire point for the tx path: the
+/// AsOf cursor seek gate compares this against a cursor's pinned version, for
+/// the SAME index the cursor's seek is planned against.
+///
+/// F-74 (#901): bump-BEFORE-apply mirrors the non-tx direct path
+/// (`SortedIndexManager::on_record_created`/`on_record_updated`/
+/// `on_record_deleted`, `sorted_index_manager.rs`) and closes a real TOCTOU
+/// window the previous apply-then-bump order left open: a concurrent AsOf
+/// read's entry gate + post-scan re-check (`read_asof_seek.rs`) both compare
+/// `last_mutation_version(index_name) <= pinned` directly against this
+/// counter, with NO `.await` between a scan and its own post-check on that
+/// same tokio task — but tokio is a multi-threaded work-stealing runtime by
+/// default here, so a genuinely concurrent reader on ANOTHER OS thread can
+/// run its own gate-check → scan → post-check sequence anywhere inside the
+/// window between these two calls. Under apply-then-bump, that reader could
+/// observe postings already mutated by this commit while the counter still
+/// read as unbumped, pass both its entry gate and its post-check, and return
+/// a silently short/wrong AsOf page. Under bump-then-apply that window
+/// cannot produce a wrong answer: if the bump is visible to a concurrent
+/// reader at all, so is the fact that this index changed, and its gate (entry
+/// or post-scan) declines the fast path in favour of the always-correct full
+/// scan. The only possible failure mode left is the SAFE one: the bump lands
+/// first and the apply has not yet landed, in which case a concurrent reader
+/// unnecessarily falls back to a full scan for a mutation that has not
+/// actually taken effect yet — conservative, never wrong.
 ///
 /// `ops` is the flat per-table `Vec<IndexWriteOp>` assembled by
 /// `materialize.rs`/this module's caller from `tx.index_write_set` — a
@@ -575,7 +650,12 @@ pub(crate) async fn apply_data_batch(
 /// index, and shared across every index family (hash/sorted/FTS/functional).
 /// `bump_touched_indexes` skips any op whose key does not decode as a
 /// sorted-index physical key (`SORTED_TAG`-prefixed) — those belong to a
-/// different index family and are harmless to skip here.
+/// different index family and are harmless to skip here. Note this function
+/// computes the touched-index set from `ops` BEFORE `ops` is applied — `ops`
+/// is a plain `&[IndexWriteOp]` parameter, fully available at function entry,
+/// so this reorder needs no re-fetch or re-derivation of `ops` itself, only
+/// moving the existing `bump_touched_indexes` call ahead of the existing
+/// `apply_index_ops_at_commit` call.
 pub(crate) async fn apply_index_batch(
     repo: &RepoInstance,
     token: u64,
@@ -595,26 +675,65 @@ pub(crate) async fn apply_index_batch(
 
     if let Some(tbl) = repo.table_by_token(token).await? {
         let backends = tbl.index2_registry().all_backends().await;
-        crate::index2::write_ops::apply_index_ops_at_commit(ops, tbl.info_store(), &backends)
-            .await
-            .map_err(|e| DbError::Internal(format!("index apply at commit: {e}")))?;
-        // Invalidate the legacy IndexManager's posting cache for every
-        // SetPosting / RemovePosting that was just durably applied, so the
-        // next lookup_by_index re-fetches from the store instead of
-        // returning a stale cached result.
-        tbl.index_manager_ref()
-            .invalidate_posting_cache_for_ops(ops);
-        // F-67 (#893): advance the mutation high-water for exactly the
-        // sorted index(es) `ops` touched, so the AsOf cursor seek gate for
-        // THAT index sees this commit. See the function doc for the
-        // stage-vs-apply ordering invariant and the per-index scoping
-        // rationale. An `ops` batch with no sorted-index entries (or ops
-        // touching only OTHER index families) bumps nothing here — a
-        // false-negative (a real sorted-index touch this decode missed)
-        // only costs a fallback to the already-correct full scan, never a
-        // correctness bug.
-        tbl.sorted_indexes()
-            .bump_touched_indexes(ops, commit_version);
+
+        // F-74 (#901) test-only ordering toggle: normally always `false`
+        // (the fixed bump-then-apply order below). A test can set
+        // `TEST_LEGACY_APPLY_THEN_BUMP_ORDER` to temporarily resurrect the
+        // OLD, buggy apply-then-bump order so the TOCTOU window it left open
+        // can be proven RED (and, once cleared, proven GREEN again) against
+        // the exact same pause seam (`fire_index_batch_bump_apply_test_hook`)
+        // placed strictly between the two calls in both orderings.
+        #[cfg(test)]
+        let legacy_apply_then_bump =
+            TEST_LEGACY_APPLY_THEN_BUMP_ORDER.load(std::sync::atomic::Ordering::SeqCst);
+        #[cfg(not(test))]
+        let legacy_apply_then_bump = false;
+
+        if legacy_apply_then_bump {
+            // OLD (buggy) order, test-only: apply the postings FIRST...
+            crate::index2::write_ops::apply_index_ops_at_commit(ops, tbl.info_store(), &backends)
+                .await
+                .map_err(|e| DbError::Internal(format!("index apply at commit: {e}")))?;
+            tbl.index_manager_ref()
+                .invalidate_posting_cache_for_ops(ops);
+            // ...pause strictly between apply and bump — the exact TOCTOU
+            // window F-74 closes: postings already mutated, epoch not yet
+            // raised.
+            fire_index_batch_bump_apply_test_hook().await;
+            // ...bump SECOND.
+            tbl.sorted_indexes()
+                .bump_touched_indexes(ops, commit_version);
+        } else {
+            // F-74 (#901) FIX: bump the per-index mutation high-water for
+            // exactly the sorted index(es) `ops` touched BEFORE the postings
+            // land, mirroring the non-tx direct path's order. See the
+            // function doc for the full TOCTOU-closing rationale. An `ops`
+            // batch with no sorted-index entries (or ops touching only OTHER
+            // index families) bumps nothing here — a decode miss on a key
+            // that actually IS a sorted-index posting is a real correctness
+            // risk (it leaves that index's gate open on postings that are
+            // about to change), not a harmless degrade-to-full-scan; see
+            // `bump_touched_indexes`'s own doc.
+            tbl.sorted_indexes()
+                .bump_touched_indexes(ops, commit_version);
+
+            // F-74 (#901) test-only pause seam: park strictly between the
+            // bump above and the posting apply below — proves that with the
+            // FIXED order, a concurrent AsOf read cannot observe an
+            // unbumped-but-applied state (there IS no such state: the bump
+            // already happened before any posting can change).
+            fire_index_batch_bump_apply_test_hook().await;
+
+            crate::index2::write_ops::apply_index_ops_at_commit(ops, tbl.info_store(), &backends)
+                .await
+                .map_err(|e| DbError::Internal(format!("index apply at commit: {e}")))?;
+            // Invalidate the legacy IndexManager's posting cache for every
+            // SetPosting / RemovePosting that was just durably applied, so
+            // the next lookup_by_index re-fetches from the store instead of
+            // returning a stale cached result.
+            tbl.index_manager_ref()
+                .invalidate_posting_cache_for_ops(ops);
+        }
     }
     Ok(())
 }

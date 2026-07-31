@@ -11,6 +11,7 @@ pub mod drainer_tests;
 pub mod durable_watermark_tests;
 pub mod early_assign_tests;
 pub mod f73_rederive_fail_closed_tests;
+pub mod f74_bump_apply_ordering_tests;
 pub mod gc_tests;
 pub mod index_rollback_tests;
 pub mod interner_checkpoint_tests;

@@ -792,7 +792,8 @@ impl SortedIndexManager {
     ///   the fast path for an uncommitted, possibly-aborting tx.
     /// - Externally, by `commit_phases.rs::apply_index_batch` (the tx-commit
     ///   path's Phase 5c apply point) against the flat `ops: &[IndexWriteOp]`
-    ///   batch for one table, AFTER the postings have landed — `tx.
+    ///   batch for one table. F-74 (#901): called BEFORE the postings land
+    ///   (mirroring the non-tx path above), not after — `tx.
     ///   index_write_set` is `Vec<(table_token, IndexWriteOp)>`, grouped only
     ///   by table (never by index), so this is the only per-index-precise
     ///   entry point available at that call site.
@@ -804,8 +805,20 @@ impl SortedIndexManager {
     /// [`decode_sorted_index_name`] (the `[SORTED_TAG | name_interned |
     /// ...]` layout [`Self::build_entry_key`] writes); a `None` (foreign key
     /// from a different index family, or a malformed key) is skipped rather
-    /// than treated as an error — false negatives here only cost a fallback
-    /// to the already-correct full scan, never a correctness bug.
+    /// than treated as an error. F-74 (#901): a decode miss on a key that
+    /// genuinely WAS a sorted-index posting is NOT harmless — the gate this
+    /// counter drives is `epoch <= pinned ⟹ take the fast path`, so a missed
+    /// bump leaves the epoch LOW and the gate OPEN, i.e. it KEEPS the fast
+    /// path enabled for an index whose postings just changed, which is the
+    /// unsafe direction (a false-negative here risks a wrong AsOf page, not
+    /// a spurious full-scan fallback). Before F-67 (#893) the bump was
+    /// UNCONDITIONAL, so the only possible error was OVER-bumping (safe:
+    /// closes the gate, forces a fallback); F-67 made the bump conditional on
+    /// `decode_sorted_index_name` returning `Some`, introducing the
+    /// possibility of UNDER-bumping this doc previously mis-described as
+    /// harmless. `decode_sorted_index_name`'s own decode correctness is out
+    /// of scope here — this note only corrects the description of what a
+    /// miss actually costs.
     /// De-duplicates via a small on-stack scan (`SmallVec`) since a table
     /// typically has ≤ ~10 sorted indexes (see the manager's cardinality
     /// doc) — cheaper than allocating a `HashSet` for single-digit N.
