@@ -106,6 +106,114 @@ fn regular_index_corrupt_blob_errors() {
 }
 
 // ============================================================================
+// F-83 (#911) — call-site corruption propagation for `IndexManager::new`.
+//
+// `decode_bytes` itself (tested directly by
+// `regular_index_corrupt_blob_errors` above) is correct: it already returns
+// `Err` for genuine corruption. But its only two production call sites
+// (`index_manager.rs`, the `Ok(bytes)` arms of the `system:indexes` and
+// `system:indexes_unique` reads) previously swallowed that error via
+// `unwrap_or_else(|_| IndexInfo::new())`, silently discarding the caller's
+// existing index definitions. The tests below prove `IndexManager::new`
+// now propagates a genuine decode failure as a hard error, and — as a
+// control — that the legitimate "no info yet" (`NotFound`) path still opens
+// a brand-new table cleanly with an empty index set. Mirrors
+// `sorted_index_corrupt_blob_errors` below for the regular/unique families'
+// LOAD path.
+// ============================================================================
+
+/// A genuinely-corrupt `system:indexes` blob (bytes present but decode as
+/// neither the current nor the pre-`state` legacy shape) must surface an
+/// error from `IndexManager::new` — NOT silently decode as an empty index
+/// set (F-83, #911). The `NotFound` path (no blob) is covered separately by
+/// `index_manager_missing_blobs_open_clean`.
+#[tokio::test]
+async fn index_manager_corrupt_indexes_blob_errors() {
+    use crate::legacy::index_manager::IndexManager;
+
+    let data_store: Arc<dyn Store> = Arc::new(InMemoryStore::new());
+    let info_store: Arc<dyn Store> = Arc::new(InMemoryStore::new());
+
+    // Seed a corrupt blob under the `system:indexes` key (bytes exist, but
+    // match neither `IndexInfo`'s current shape nor `IndexDefinitionNoState`).
+    let sys_id = RecordId::system("indexes");
+    info_store
+        .set(
+            sys_id.to_bytes().into(),
+            bytes::Bytes::from_static(b"NOT_A_VALID_BINCODE_PAYLOAD_AT_ALL_______________"),
+        )
+        .await
+        .unwrap();
+
+    let result = IndexManager::new(Arc::clone(&data_store), Arc::clone(&info_store)).await;
+    assert!(
+        result.is_err(),
+        "a corrupt system:indexes blob must surface an error from \
+         IndexManager::new, not silently decode as an empty index set"
+    );
+}
+
+/// A genuinely-corrupt `system:indexes_unique` blob must surface an error
+/// from `IndexManager::new` — NOT silently decode as an empty index set
+/// (F-83, #911). This is the worse of the two families: an empty
+/// `indexes_unique` zeroes the `UNIQUE_INDEX_EXISTS` write-barrier bit, so
+/// every subsequent writer skips unique validation and accepts duplicates
+/// into a column the schema still treats as unique; the NEXT persist then
+/// writes the empty set back to disk, permanently losing the constraint.
+#[tokio::test]
+async fn index_manager_corrupt_indexes_unique_blob_errors() {
+    use crate::legacy::index_manager::IndexManager;
+
+    let data_store: Arc<dyn Store> = Arc::new(InMemoryStore::new());
+    let info_store: Arc<dyn Store> = Arc::new(InMemoryStore::new());
+
+    let sys_id = RecordId::system("indexes_unique");
+    info_store
+        .set(
+            sys_id.to_bytes().into(),
+            bytes::Bytes::from_static(b"NOT_A_VALID_BINCODE_PAYLOAD_AT_ALL_______________"),
+        )
+        .await
+        .unwrap();
+
+    let result = IndexManager::new(Arc::clone(&data_store), Arc::clone(&info_store)).await;
+    assert!(
+        result.is_err(),
+        "a corrupt system:indexes_unique blob must surface an error from \
+         IndexManager::new, not silently decode as an empty index set"
+    );
+}
+
+/// Control: a brand-new table (no `system:indexes` AND no
+/// `system:indexes_unique` blob ever written — the `NotFound` arm) must
+/// still open cleanly with an empty index set. This proves the F-83 fix is
+/// scoped to GENUINE corruption only, not to the legitimate "no info yet"
+/// case, which remains a silent `IndexInfo::new()` exactly as before.
+#[tokio::test]
+async fn index_manager_missing_blobs_open_clean() {
+    use crate::legacy::index_manager::IndexManager;
+
+    let data_store: Arc<dyn Store> = Arc::new(InMemoryStore::new());
+    let info_store: Arc<dyn Store> = Arc::new(InMemoryStore::new());
+
+    let mgr = IndexManager::new(Arc::clone(&data_store), Arc::clone(&info_store))
+        .await
+        .expect(
+            "a brand-new table (no index metadata blob) must open cleanly \
+             with an empty index set — the NotFound path is unchanged by F-83",
+        );
+    assert!(
+        !mgr.has_indexes(),
+        "a brand-new table must report zero regular indexes"
+    );
+    assert!(
+        !mgr.has_unique_indexes(),
+        "a brand-new table must report zero unique indexes (the \
+         UNIQUE_INDEX_EXISTS write-barrier bit must stay clear)"
+    );
+}
+
+// ============================================================================
 // Sorted family — `SortedIndexManager` / `SortedIndexDefinition`
 // ============================================================================
 

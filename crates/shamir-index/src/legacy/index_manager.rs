@@ -167,9 +167,24 @@ impl IndexManager {
                 // F-72 (#899): `decode_bytes` tries the current shape first,
                 // falling back to the pre-`state` legacy shape (lifted to
                 // Ready) before giving up — see `index_info.rs`'s module doc.
-                // At error we begin with an empty set (matches this call
-                // site's pre-existing best-effort recovery policy).
-                IndexInfo::decode_bytes(&bytes).unwrap_or_else(|_| IndexInfo::new())
+                //
+                // F-83 (#911): a decode failure here is NECESSARILY genuine
+                // corruption — `decode_bytes` already handles both the current
+                // shape AND the legacy pre-`state` shape internally and
+                // returns `Ok` for each. Surfacing the error as a hard failure
+                // (rather than the prior `unwrap_or_else(|_| IndexInfo::new())`,
+                // which silently discarded the caller's existing index
+                // definitions) is the documented promise in `decode_bytes`'s
+                // own doc comment. The `NotFound` arm below is the ONLY
+                // legitimate "no info yet" case (a brand-new table whose blob
+                // was never written). Mirrors `sorted_index_manager::load`'s
+                // corruption→`DbError::Codec` propagation.
+                IndexInfo::decode_bytes(&bytes).map_err(|e| {
+                    shamir_storage::error::DbError::Codec(format!(
+                        "system:indexes decode failed (genuine corruption — \
+                         neither current nor pre-`state` legacy shape): {e}"
+                    ))
+                })?
             }
             Err(shamir_storage::error::DbError::NotFound(_)) => IndexInfo::new(),
             Err(e) => return Err(e),
@@ -177,7 +192,23 @@ impl IndexManager {
 
         // Загружаем уникальные индексы или создаём пустую структуру
         let indexes_unique = match info_store.get(indexes_unique_key.clone().into()).await {
-            Ok(bytes) => IndexInfo::decode_bytes(&bytes).unwrap_or_else(|_| IndexInfo::new()),
+            Ok(bytes) => {
+                // F-83 (#911): same corruption policy as the `indexes` arm
+                // above. For the UNIQUE family a silent `IndexInfo::new()`
+                // substitution is worse than data loss — it zeroes
+                // `has_indexes_unique_flag`, which flips
+                // `WriteBarrierFlags::with_unique_index_exists(false)`, so
+                // every writer skips unique validation and accepts
+                // duplicates into a column the schema still treats as
+                // unique; the NEXT persist then writes the empty set back to
+                // disk, making the loss permanent. Propagate the error.
+                IndexInfo::decode_bytes(&bytes).map_err(|e| {
+                    shamir_storage::error::DbError::Codec(format!(
+                        "system:indexes_unique decode failed (genuine corruption — \
+                         neither current nor pre-`state` legacy shape): {e}"
+                    ))
+                })?
+            }
             Err(shamir_storage::error::DbError::NotFound(_)) => IndexInfo::new(),
             Err(e) => return Err(e),
         };
