@@ -791,18 +791,22 @@ impl TableManager {
     /// [`needs_write_barrier`](Self::needs_write_barrier) and the writer's
     /// `SeqCst` `active`-counter `fetch_add` — the cross-atomic dependency the
     /// drain proof relies on cannot be carried by `Release`/`Acquire` alone
-    /// (see [`writer_drain_barrier`]). **Callers MUST set/clear this while
-    /// holding `unique_write_lock`** (mirrors `INDEX2_CREATE`'s discipline in
-    /// `create_index_v2`): raise the flag under the lock so the
-    /// `count() == 0` proof that follows is a genuine snapshot no concurrent
-    /// writer can invalidate, and clear it (still under the lock) once
-    /// persist + activate have committed — the lock is then released, letting
-    /// queued writers proceed ordered AFTER the proof point. An RAII guard
-    /// that clears on drop (every exit path) is the sanctioned usage shape —
-    /// production callers use [`begin_write_barrier`](Self::begin_write_barrier)
-    /// (F-70, #897), which now also reorders the lock acquisition to AFTER
-    /// the drain (see that method's doc); this raw setter remains for tests
-    /// that exercise the flag transition directly.
+    /// (see [`writer_drain_barrier`]).
+    ///
+    /// **This is a raw, test-facing flag setter, NOT the production entry
+    /// point.** It does NOT need to be (and in production is NOT) called
+    /// under `unique_write_lock`: F-70 (#897) established the canonical
+    /// drain-then-lock order — raise the intent bit FIRST, then drain, then
+    /// acquire the lock (see [`begin_write_barrier`](Self::begin_write_barrier)
+    /// for the sequence and [`writer_drain_barrier`](crate::table::writer_drain_barrier)'s
+    /// "F-70 — THE canonical lock-order hierarchy" module doc for why the
+    /// prior lock-then-set discipline is a deadlock). Production DDL callers
+    /// MUST go through [`begin_write_barrier`](Self::begin_write_barrier),
+    /// which performs the raise→drain→lock sequence in this exact order and
+    /// returns an RAII [`WriteBarrierGuard`] that clears the bit on drop
+    /// (every exit path). This raw setter remains only for tests that
+    /// exercise the flag transition directly without the full barrier
+    /// sequence.
     pub fn set_schema_activation_barrier(&self, on: bool) {
         self.write_barrier_flags
             .set_to(crate::index::write_barrier_flags::SCHEMA_ACTIVATION, on);
@@ -813,17 +817,33 @@ impl TableManager {
     /// count-proof for schema activation; the backfill snapshot for index2
     /// create in F-50).
     ///
-    /// The caller MUST have already (1) raised its intent bit
+    /// The caller MUST have already raised its intent bit
     /// (`SCHEMA_ACTIVATION` / `INDEX2_CREATE` / ... — see
     /// `write_barrier_flags` field doc) so NEW writers take the slow
-    /// (locked) path, and (2) hold `unique_write_lock` so
-    /// slow-path writers are blocked. Then this catches any writer that read
-    /// `false` before the flag went up and is still in its
-    /// validate→write→index sequence. Returns immediately (one `Acquire`
-    /// load) when no fast-path writer is active.
+    /// (locked) path. Then this catches any writer that read `false` before
+    /// the flag went up and is still in its validate→write→index sequence.
+    /// Returns immediately (one `SeqCst` load) when no fast-path writer is
+    /// active.
     ///
-    /// See [`writer_drain_barrier`](crate::table::writer_drain_barrier) for
-    /// the full memory-model rationale and how F-50 reuses this same call.
+    /// **F-70 (#897) order — call this BEFORE acquiring `unique_write_lock`,
+    /// NOT after.** This is the canonical drain-then-lock order; the prior
+    /// lock-then-drain order (F-57) deadlocks against the tx-commit path's
+    /// drain-guard-then-lock shape — see
+    /// [`writer_drain_barrier`](crate::table::writer_drain_barrier)'s "F-70 —
+    /// THE canonical lock-order hierarchy" module doc for the full 3-party
+    /// derivation. Holding the lock is NOT required for `drain_writers()` to
+    /// be correct: what matters is that the intent bit was raised first (so
+    /// every NEW writer takes the slow path and cannot re-enter the drain
+    /// set) — the lock only serializes those NEW slow-path writers against
+    /// the caller's own body, a separate concern from the drain wait itself.
+    ///
+    /// Production code MUST go through [`begin_write_barrier`](Self::begin_write_barrier)
+    /// (which performs the raise→drain→lock sequence in this exact order)
+    /// instead of calling this method directly — `drain_writers()` is a raw
+    /// primitive that `begin_write_barrier` (and the legacy direct callers
+    /// that pre-date it) delegate to, not the sanctioned entry point. See
+    /// [`writer_drain_barrier`](crate::table::writer_drain_barrier) for the
+    /// full memory-model rationale and how F-50 reuses this same call.
     pub async fn drain_writers(&self) {
         self.writer_drain.drain().await;
     }
