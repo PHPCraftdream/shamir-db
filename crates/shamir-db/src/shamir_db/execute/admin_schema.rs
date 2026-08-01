@@ -498,8 +498,14 @@ impl ShamirAdminExecutor {
         // `keyset_safe = true` would then be stamped for a table whose full
         // row history was never actually proven homogeneous. Both RAII
         // guards are held for the whole sequence — on EVERY exit path
-        // (success or any `?` error below) the barrier bit clears first,
-        // then the lock releases (reverse declaration drop order).
+        // (success or any `?` error below) the lock releases first, then
+        // the barrier bit clears (F-87, #915: a `let (a, b, c) = ...` tuple
+        // drops its bindings in REVERSE declaration order, so `_uwl_guard`
+        // — declared last — drops FIRST; the prior comment here claimed
+        // the opposite order). Benign either way: a writer arriving in the
+        // gap between lock-release and bit-clear still reads the bit as
+        // set and takes the slow (locked) path, simply finding the lock
+        // already free.
         //
         // F-70 (#897, P0): `begin_schema_activation_barrier` acquires via the
         // canonical drain-then-lock path (raise → drain → lock) — see that

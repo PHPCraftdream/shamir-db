@@ -164,6 +164,17 @@ impl CreateIndex {
     ///
     /// `build()` is unchanged and remains the lenient path for existing call
     /// sites; new code that wants the parity checks should prefer `try_build()`.
+    ///
+    /// **Scope limitation (F-87, #915):** these three checks cover only the
+    /// legacy btree-family combinations `admin_table_index.rs` checks BEFORE
+    /// dispatching a non-`"btree"` `index_type` to `create_index_v2`. A
+    /// non-btree `index_type` (`"vector"`/`"fts"`/`"functional"`) has
+    /// ADDITIONAL server-side validation this method does NOT replicate —
+    /// e.g. the one-vector-index-per-table constraint, functional-op
+    /// trustedness, FTS tokenizer DSL well-formedness. A caller can still get
+    /// a local `Ok` from `try_build()` for one of those families followed by
+    /// a server-side rejection on submit; that residual round-trip cost is a
+    /// known, accepted scope gap, not an oversight.
     pub fn try_build(self) -> Result<BatchOp, CreateIndexBuildError> {
         if self.sorted && self.unique {
             return Err(CreateIndexBuildError::UniqueAndSorted);
