@@ -197,10 +197,16 @@ pub trait Store: Send + Sync {
     /// overrides that apply some subset per-key to a lock-free primary
     /// with no multi-key publish primitive (notably `MirroredStore`,
     /// whose ephemeral subset is per-op) report `false`. Callers that
-    /// need true cross-op visibility atomicity MUST check
-    /// [`Self::supports_atomic_transact`] and not assume every
-    /// override delivers it — when the flag is `false`, partial state
-    /// MAY be observable to a concurrent reader mid-batch.
+    /// need true cross-op visibility atomicity SHOULD check
+    /// [`Self::supports_atomic_transact`] before assuming it; when the
+    /// flag is `false`, partial state MAY be observable to a concurrent
+    /// reader mid-batch. Today's production `transact` callers
+    /// (`rekey_sorted_prefix`, `apply_index_ops`,
+    /// `apply_index_ops_at_commit`, legacy `apply_ops`) all tolerate
+    /// the non-atomic case via a self-healing settle/re-scan
+    /// mechanism, so none currently gate on the flag — it exists as
+    /// honest, queryable capability metadata, not a mandatory
+    /// pre-check (F-85, #913).
     async fn transact(&self, ops: Vec<KvOp>) -> DbResult<()> {
         for op in ops {
             match op {
@@ -229,14 +235,19 @@ pub trait Store: Send + Sync {
     /// (`CachedStore`, `MemBufferStore`) delegate to their inner
     /// backend's answer.
     ///
-    /// **Callers that rely on whole-batch visibility atomicity MUST
-    /// check this flag** rather than assume every `transact` override
-    /// delivers it — see [`Self::transact`]'s atomicity contract. F-77
-    /// (#904): the prior contract text ("when a backend overrides
-    /// `transact`, partial state is never observable") was an
-    /// overpromise that `MirroredStore` silently violated for its
-    /// ephemeral subset; this flag makes the capability
-    /// machine-checkable.
+    /// **Callers whose correctness DEPENDS on whole-batch visibility
+    /// atomicity should check this flag** before assuming every
+    /// `transact` override delivers it — see [`Self::transact`]'s
+    /// atomicity contract. F-77 (#904): the prior contract text ("when
+    /// a backend overrides `transact`, partial state is never
+    /// observable") was an overpromise that `MirroredStore` silently
+    /// violated for its ephemeral subset; this flag makes the
+    /// capability machine-checkable. F-85 (#913): an audit found ZERO
+    /// production callers read this flag — today's `transact` callers
+    /// all tolerate the non-atomic case via self-healing
+    /// settle/re-scan, so the flag serves as honest, queryable
+    /// capability metadata rather than a gate any production path
+    /// enforces.
     fn supports_atomic_transact(&self) -> bool {
         false
     }

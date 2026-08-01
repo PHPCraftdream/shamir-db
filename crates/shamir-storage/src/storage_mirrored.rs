@@ -548,10 +548,17 @@ impl Store for MirroredStore {
     /// **F-77 (#904): this residual means `MirroredStore` reports
     /// [`Store::supports_atomic_transact`] == `false`** — whole-batch
     /// visibility atomicity is NOT delivered even though this method
-    /// overrides `transact`. The trait's atomicity contract is now
-    /// opt-in and queryable via that flag; callers that need real
-    /// visibility atomicity MUST check it rather than assume every
-    /// override delivers it.
+    /// overrides `transact`. The trait's atomicity contract documents
+    /// this as an opt-in, queryable capability; callers whose
+    /// correctness DEPENDS on it should check the flag before assuming
+    /// it. F-85 (#913): no production caller currently gates on the
+    /// flag — every `transact` caller reachable through `MirroredStore`
+    /// (`rekey_sorted_prefix`, `apply_index_ops`,
+    /// `apply_index_ops_at_commit`, legacy `apply_ops`) writes
+    /// ephemeral posting keys and tolerates the transient
+    /// partial-visibility window via a self-healing settle/re-scan
+    /// mechanism, so the gap is a known, accepted residual rather
+    /// than a live hazard.
     ///
     /// `scc::TreeIndex` (v3.8.4, the lock-free B+ tree backing
     /// `InMemoryStore`) was checked for any batched / atomic multi-key
@@ -635,9 +642,14 @@ impl Store for MirroredStore {
     /// atomicity across the whole batch — but visibility atomicity for
     /// the live read path is per-op, hence `false`.
     ///
-    /// Callers that need whole-batch visibility atomicity MUST check
-    /// this flag (via the [`Store::supports_atomic_transact`] default
-    /// contract) and not assume the `transact` override delivers it.
+    /// Callers whose correctness DEPENDS on whole-batch visibility
+    /// atomicity should check this flag (via the
+    /// [`Store::supports_atomic_transact`] default contract) and not
+    /// assume the `transact` override delivers it. See F-85 (#913):
+    /// no production caller currently reads this flag — all
+    /// `transact` callers through `MirroredStore` tolerate the
+    /// non-atomic case via self-healing settle/re-scan, so it serves
+    /// as honest capability metadata, not a mandatory gate.
     fn supports_atomic_transact(&self) -> bool {
         false
     }
