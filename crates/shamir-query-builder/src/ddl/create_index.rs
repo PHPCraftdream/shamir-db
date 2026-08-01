@@ -4,6 +4,8 @@ use shamir_types::types::value::QueryValue;
 
 use crate::batch::IntoBatchOp;
 
+use super::create_index_build_error::CreateIndexBuildError;
+
 /// Create an index on a table. Returns a builder for the many optional
 /// knobs (unique, sorted, FTS, vector, functional).
 pub fn create_index(name: impl Into<String>, table: impl Into<String>) -> CreateIndex {
@@ -144,6 +146,37 @@ impl CreateIndex {
     pub fn if_not_exists(mut self) -> Self {
         self.if_not_exists = true;
         self
+    }
+
+    /// Consume the builder, run the client-side validation pass, and produce
+    /// the wire-ready [`BatchOp`].
+    ///
+    /// This is the **fallible / validating** sibling of [`CreateIndex::build`].
+    /// It constructs the identical [`BatchOp`] as `build()`, but first rejects
+    /// the invalid-combination classes the server enforces at DDL-execution time
+    /// (`shamir-db::execute::admin_table_index`) and the TS builder
+    /// (`shamir-client-ts`) rejects synchronously:
+    /// - [`CreateIndexBuildError::UniqueAndSorted`] — `.unique()` + `.sorted()`.
+    /// - [`CreateIndexBuildError::IncludeWithoutSorted`] — `.include(...)`
+    ///   without `.sorted()`.
+    /// - [`CreateIndexBuildError::SortedMultiField`] — `.sorted()` with a field
+    ///   count ≠ 1.
+    ///
+    /// `build()` is unchanged and remains the lenient path for existing call
+    /// sites; new code that wants the parity checks should prefer `try_build()`.
+    pub fn try_build(self) -> Result<BatchOp, CreateIndexBuildError> {
+        if self.sorted && self.unique {
+            return Err(CreateIndexBuildError::UniqueAndSorted);
+        }
+        if !self.include.is_empty() && !self.sorted {
+            return Err(CreateIndexBuildError::IncludeWithoutSorted);
+        }
+        if self.sorted && self.fields.len() != 1 {
+            return Err(CreateIndexBuildError::SortedMultiField {
+                field_count: self.fields.len(),
+            });
+        }
+        Ok(self.build())
     }
 
     /// Finalize into a [`BatchOp`].
