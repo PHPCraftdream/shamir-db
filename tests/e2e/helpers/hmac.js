@@ -1,11 +1,27 @@
 /**
- * HMAC-confirmation helpers for destructive DDL ops.
+ * HMAC-confirmation helpers for destructive DDL/admin ops.
  *
- * The server gates every drop_* op behind an HMAC tag whose
- * canonical input is null-byte-separated identifier bytes; the
- * key is derived from `session_id` via a domain-separated
- * SHA-256. Both sides MUST agree byte-for-byte — these helpers
- * mirror `crates/shamir-query-types/src/hmac.rs`.
+ * The server gates every drop_* / migration op behind an HMAC tag whose
+ * canonical input is null-byte-separated identifier bytes; the key is
+ * derived from `session_id` via a domain-separated SHA-256. Both sides
+ * MUST agree byte-for-byte — these helpers mirror
+ * `crates/shamir-query-types/src/hmac.rs`.
+ *
+ * The op construction itself is delegated to the platform-agnostic
+ * query builders in `@shamir/client` (`ddl.*` / `admin.*`), which carry
+ * their OWN copy of the canonical-byte layout (mirroring the same Rust
+ * `hmac.rs`). Routing through them removes the duplication risk of two
+ * hand-rolled canonical encoders drifting out of sync. A `signerFor`
+ * adapter wraps this file's `sign()` so the builders call back into the
+ * EXACT same key-derivation + HMAC-SHA256 pipeline — the tag bytes a
+ * builder produces are identical to what the old inline construction did
+ * (verified by an equivalence probe).
+ *
+ * `tests/e2e` is CommonJS while `@shamir/client` ships ESM, but Node
+ * 22.12+ can `require()` an ESM module that has no top-level await, so
+ * the builders load synchronously and every `*_op` helper stays a plain
+ * (non-async) function returning the wire object directly — call sites
+ * like `queries: { d: drop_table_op(...) }` are unchanged.
  *
  * Usage:
  *
@@ -16,12 +32,16 @@
  *   });
  *
  * Each `*_op` helper returns the FULL op object including the
- * pre-computed `hmac` field, ready to drop into a batch.
+ * pre-computed `hmac` field, ready to drop into a batch. The public
+ * names and call signatures are stable.
  */
 
 'use strict';
 
 const crypto = require('crypto');
+const { ddl, admin } = require('@shamir/client');
+
+// ── Signing primitives (single source of truth for the HMAC tag) ────
 
 function deriveKey(sessionId) {
   // sessionId arrives from the napi binding as a Buffer of length 32.
@@ -50,68 +70,61 @@ function sign(client, canonical) {
   return crypto.createHmac('sha256', key).update(canonical).digest('hex');
 }
 
-/** Build a `drop_db` op with HMAC attached.
- *
- *  `opts.cascade` (default `false`) — when `true`, sets `cascade: true` on
- *  the wire op so the server recursively removes the db's repos+tables
- *  before dropping it (see `admin_db_repo.rs::handle_drop_db`). The
- *  canonical HMAC input for `drop_db` is `b"drop_db\0<db>"` — `cascade`
- *  is NOT part of the signed bytes (see `hmac.rs::canonical_drop_db`),
- *  so the same tag is valid for both the cascading and non-cascading
- *  forms. */
-function drop_db_op(client, dbName, opts = {}) {
-  const cascade = !!opts.cascade;
-  const canonical = joinNullBytes(['drop_db', dbName]);
-  const op = { drop_db: dbName, hmac: sign(client, canonical) };
-  if (cascade) op.cascade = true;
-  return op;
+/**
+ * Adapter that satisfies the `HmacSigner` interface the @shamir/client
+ * builders expect (`{ hmacTagHex(canonical: Uint8Array): string }`) by
+ * routing the canonical bytes through this file's `sign()`. The signing
+ * logic is NOT reimplemented — the builder owns canonical construction,
+ * this helper owns key derivation + the HMAC primitive.
+ */
+function signerFor(client) {
+  return { hmacTagHex: (canonical) => sign(client, Buffer.from(canonical)) };
 }
 
-/** Build a `drop_repo` op with HMAC attached.
- *  `dbInUse` is the db the batch will be `execute()`d against. */
+// ── HMAC-gated ops (delegated to @shamir/client builders) ───────────
+
+/**
+ * Build a `drop_db` op with HMAC attached. Delegates to
+ * `ddl.dropDb`; `opts.cascade` toggles recursive removal (the `cascade`
+ * flag is NOT part of the signed canonical bytes, so the same tag is
+ * valid for both forms — see `admin_db_repo.rs::handle_drop_db`).
+ */
+function drop_db_op(client, dbName, opts = {}) {
+  return ddl.dropDb(signerFor(client), dbName, opts);
+}
+
+/** Build a `drop_repo` op with HMAC attached. `dbInUse` is the db the
+ *  batch will be `execute()`d against. */
 function drop_repo_op(client, dbInUse, repo) {
-  const canonical = joinNullBytes(['drop_repo', dbInUse, repo]);
-  return { drop_repo: repo, hmac: sign(client, canonical) };
+  return ddl.dropRepo(signerFor(client), dbInUse, repo);
 }
 
 /** Build a `drop_table` op with HMAC attached. */
 function drop_table_op(client, dbInUse, repo, table) {
-  const canonical = joinNullBytes(['drop_table', dbInUse, repo, table]);
-  return {
-    drop_table: table,
-    repo,
-    hmac: sign(client, canonical),
-  };
+  return ddl.dropTable(signerFor(client), dbInUse, repo, table);
 }
 
 /** Build a `drop_index` op with HMAC attached. */
 function drop_index_op(client, dbInUse, repo, table, indexName, opts = {}) {
-  const unique = !!opts.unique;
-  const canonical = joinNullBytes([
-    'drop_index',
-    dbInUse,
-    repo,
-    table,
-    indexName,
-    unique ? '1' : '0',
-  ]);
-  const op = {
-    drop_index: indexName,
-    table,
-    repo,
-    hmac: sign(client, canonical),
-  };
-  if (unique) op.unique = true;
-  return op;
+  return ddl.dropIndex(signerFor(client), dbInUse, repo, table, indexName, opts);
 }
 
 /** Build a `drop_user` op with HMAC attached. */
 function drop_user_op(client, username) {
-  const canonical = joinNullBytes(['drop_user', username]);
-  return { drop_user: username, hmac: sign(client, canonical) };
+  return admin.dropUser(signerFor(client), username);
 }
 
-/** Build a `drop_role` op with HMAC attached. */
+/**
+ * Build a `drop_role` op with HMAC attached.
+ *
+ * NOTE: there is NO matching builder in @shamir/client — roles became
+ * plain string labels attached to directory users (task #549), so the
+ * only role-mutating builders are `grantRole` / `revokeRole`; a
+ * `drop_role` wire op no longer exists on the server side
+ * (`shamir-query-types` has no `canonical_drop_role`). This helper is
+ * retained for signature stability but is legacy/unused, so its
+ * canonical bytes are still constructed inline here.
+ */
 function drop_role_op(client, role) {
   const canonical = joinNullBytes(['drop_role', role]);
   return { drop_role: role, hmac: sign(client, canonical) };
@@ -119,41 +132,24 @@ function drop_role_op(client, role) {
 
 /** Build a `start_migration` op with HMAC attached. */
 function start_migration_op(client, dbInUse, srcRepo, table, dstRepo, dstEngine, opts = {}) {
-  const canonical = joinNullBytes([
-    'start_migration',
-    dbInUse,
-    srcRepo,
-    table,
-    dstRepo,
-    dstEngine,
-  ]);
-  const op = {
-    start_migration: table,
-    repo: srcRepo,
-    dst_repo: dstRepo,
-    dst_engine: dstEngine,
-    hmac: sign(client, canonical),
-  };
-  if (opts.dst_path) op.dst_path = opts.dst_path;
-  return op;
+  return ddl.startMigration(signerFor(client), dbInUse, srcRepo, table, dstRepo, dstEngine, opts);
 }
 
 /** Build a `commit_migration` op with HMAC attached. */
 function commit_migration_op(client, dbInUse, migrationId) {
-  const canonical = joinNullBytes(['commit_migration', dbInUse, migrationId]);
-  return { commit_migration: migrationId, hmac: sign(client, canonical) };
+  return ddl.commitMigration(signerFor(client), dbInUse, migrationId);
 }
 
 /** Build a `rollback_migration` op with HMAC attached. */
 function rollback_migration_op(client, dbInUse, migrationId) {
-  const canonical = joinNullBytes(['rollback_migration', dbInUse, migrationId]);
-  return { rollback_migration: migrationId, hmac: sign(client, canonical) };
+  return ddl.rollbackMigration(signerFor(client), dbInUse, migrationId);
 }
 
 module.exports = {
   deriveKey,
   joinNullBytes,
   sign,
+  signerFor,
   drop_db_op,
   drop_repo_op,
   drop_table_op,
