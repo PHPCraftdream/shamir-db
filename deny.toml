@@ -57,6 +57,24 @@ ignore = [
     # project — deliberately deferred, not silently ignored. Revisit when
     # that migration is scheduled.
     { id = "RUSTSEC-2025-0141", reason = "bincode is unmaintained (maintainer safety incident); no safe upgrade exists (3.0.0 is a deliberate tombstone); migration off bincode is a separate, deferred project touching on-disk WAL/snapshot/interner formats" },
+    # wasmtime 45.x (the version this workspace pins, `shamir-wasm-host/
+    # Cargo.toml`) has no patched release — RUSTSEC-2026-0222's fixed ranges
+    # are >=24.0.12,<25.0.0 / >=36.0.13,<37.0.0 / >=46.0.2,<47.0.0 / >=47.0.3,
+    # none of which overlap 45.x. Confirmed by attempting the 46.0.2 bump
+    # directly: `cargo update -p wasmtime --precise 46.0.2` resolves, but
+    # `wasmtime@46.0.2` (and every `cranelift-*`/`pulley-*` crate it pulls)
+    # declares `rust-version = "1.94.0"`, one minor above this workspace's
+    # pinned toolchain (`rust-toolchain.toml`, 1.93.0) — `cargo check`
+    # confirms a hard MSRV failure, not just a lockfile-resolution nuisance.
+    # Fixing this advisory therefore requires bumping the pinned Rust
+    # toolchain first (its own separate, invasive change — every crate's
+    # clippy lints need re-verification against the new rustc, plus every
+    # `dtolnay/rust-toolchain@1.93.0` ref across `.github/workflows/*.yml`
+    # needs updating in lockstep, per this file's own documented bump
+    # procedure). Deferred as a dedicated toolchain-bump task, not silently
+    # ignored — revisit and remove this entry once the toolchain moves to
+    # >=1.94.0 and wasmtime can follow to >=46.0.2.
+    { id = "RUSTSEC-2026-0222", reason = "wasmtime's only patched versions (>=46.0.2) require Rust 1.94.0; this workspace is pinned to 1.93.0 (rust-toolchain.toml) — fixing this advisory requires a separate toolchain-bump task first, deferred rather than silently unfixed" },
 ]
 
 [licenses]
