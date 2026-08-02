@@ -20,6 +20,7 @@
 'use strict';
 
 const hmac = require('../helpers/hmac');
+const { ddl } = require('@shamir/client');
 
 module.exports = async function ({ client, fixtures, test, assert, assertEq }) {
   test('list databases includes default', async () => {
@@ -36,7 +37,7 @@ module.exports = async function ({ client, fixtures, test, assert, assertEq }) {
     const dbName = fixtures.uniqueDbName('ddl_drop');
     await client.execute('default', {
       id: 'mk',
-      queries: { m: { create_db: dbName } },
+      queries: { m: ddl.createDb(dbName) },
     });
 
     let resp = await client.execute('default', {
@@ -68,13 +69,13 @@ module.exports = async function ({ client, fixtures, test, assert, assertEq }) {
 
     await client.execute(dbName, {
       id: 'r2',
-      queries: { r: { create_repo: 'cold' } },
+      queries: { r: ddl.createRepo('cold') },
     });
     await client.execute(dbName, {
       id: 'tt',
       queries: {
-        t1: { create_table: 'users', repo: 'main' },
-        t2: { create_table: 'logs', repo: 'cold' },
+        t1: ddl.createTable('users', { repo: 'main' }),
+        t2: ddl.createTable('logs', { repo: 'cold' }),
       },
     });
 
@@ -113,11 +114,7 @@ module.exports = async function ({ client, fixtures, test, assert, assertEq }) {
     await client.execute(dbName, {
       id: 'mk-idx',
       queries: {
-        i: {
-          create_index: 'by_email', // index name
-          table: 't',
-          fields: [['email']],
-        },
+        i: ddl.createIndex('by_email', 't', [['email']]),
       },
     });
 
