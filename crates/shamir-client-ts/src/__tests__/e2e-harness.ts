@@ -234,6 +234,17 @@ security: {
         auth_init_timeout_ms: 10000
         max_active_connections: 100
     }
+    # Default 10/sec (2.5/sec during the 60s post-boot warmup window,
+    # shamir-connect::server::rate_limit) is tuned for production abuse
+    # resistance, not a test harness that opens many new connections in a
+    # tight burst from one subnet (127.0.0.0/24) against a server that is
+    # ALWAYS inside its own warmup window (freshly spawned per test file).
+    # Matches the same workaround already used by the Rust e2e/integration
+    # suites (permission_e2e.rs, slow_loris.rs, slow_loris_pre_tls.rs,
+    # max_connections.rs) -- without this, e2e-permissions.test.ts's
+    # multi-connection setup steps intermittently hit rate_limited-at-accept
+    # and see the socket closed pre-handshake ("connection closed").
+    auth_init_rate_per_second: 1000
     query_limits: {
         max_result_size_bytes:    10485760
         max_execution_time_secs:  30
