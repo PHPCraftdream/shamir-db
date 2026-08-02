@@ -40,6 +40,8 @@
 
 'use strict';
 
+const { ddl } = require('@shamir/client');
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Vector data helpers
 // ─────────────────────────────────────────────────────────────────────────────
@@ -116,15 +118,12 @@ module.exports = async function ({ client, fixtures, test, assert, assertEq, ass
     const resp = await client.execute(db, {
       id: 'mk-sq8',
       queries: {
-        i: {
-          create_index: 'vec_sq8',
-          table: 'docs',
-          fields: [['embedding']],
+        i: ddl.createIndex('vec_sq8', 'docs', [['embedding']], {
           index_type: 'vector',
           vector_dim: 8,
           vector_metric: 'cosine',
           vector_quantization: 'sq8',
-        },
+        }),
       },
     });
     // A successful create_index returns a record; no error thrown.
@@ -137,14 +136,11 @@ module.exports = async function ({ client, fixtures, test, assert, assertEq, ass
     const resp = await client.execute(db, {
       id: 'mk-plain',
       queries: {
-        i: {
-          create_index: 'vec_plain',
-          table: 'docs',
-          fields: [['embedding']],
+        i: ddl.createIndex('vec_plain', 'docs', [['embedding']], {
           index_type: 'vector',
           vector_dim: 4,
           vector_metric: 'cosine',
-        },
+        }),
       },
     });
     assert(resp.results.i, 'plain vector index created');
@@ -155,14 +151,11 @@ module.exports = async function ({ client, fixtures, test, assert, assertEq, ass
     const resp = await client.execute(db, {
       id: 'mk-dot',
       queries: {
-        i: {
-          create_index: 'vec_dot',
-          table: 'docs',
-          fields: [['embedding']],
+        i: ddl.createIndex('vec_dot', 'docs', [['embedding']], {
           index_type: 'vector',
           vector_dim: 4,
           vector_metric: 'dot',
-        },
+        }),
       },
     });
     assert(resp.results.i, 'dot-metric vector index created');
@@ -178,14 +171,11 @@ module.exports = async function ({ client, fixtures, test, assert, assertEq, ass
     await client.execute(db, {
       id: 'mk',
       queries: {
-        i: {
-          create_index: 'v',
-          table: 'docs',
-          fields: [['embedding']],
+        i: ddl.createIndex('v', 'docs', [['embedding']], {
           index_type: 'vector',
           vector_dim: dim,
           vector_metric: 'cosine',
-        },
+        }),
       },
     });
 
@@ -224,14 +214,11 @@ module.exports = async function ({ client, fixtures, test, assert, assertEq, ass
     await client.execute(db, {
       id: 'mk',
       queries: {
-        i: {
-          create_index: 'v',
-          table: 'docs',
-          fields: [['embedding']],
+        i: ddl.createIndex('v', 'docs', [['embedding']], {
           index_type: 'vector',
           vector_dim: dim,
           vector_metric: 'l2',
-        },
+        }),
       },
     });
 
@@ -276,14 +263,11 @@ module.exports = async function ({ client, fixtures, test, assert, assertEq, ass
     await client.execute(db, {
       id: 'mk',
       queries: {
-        i: {
-          create_index: 'v',
-          table: 'docs',
-          fields: [['embedding']],
+        i: ddl.createIndex('v', 'docs', [['embedding']], {
           index_type: 'vector',
           vector_dim: dim,
           vector_metric: 'cosine',
-        },
+        }),
       },
     });
     await insertClusteredBatched(client, db, 'docs', 40, dim, 10);
@@ -350,14 +334,11 @@ module.exports = async function ({ client, fixtures, test, assert, assertEq, ass
     await client.execute(db, {
       id: 'mk',
       queries: {
-        i: {
-          create_index: 'v',
-          table: 'docs',
-          fields: [['embedding']],
+        i: ddl.createIndex('v', 'docs', [['embedding']], {
           index_type: 'vector',
           vector_dim: dim,
           vector_metric: 'cosine',
-        },
+        }),
       },
     });
     await client.execute(db, {
@@ -394,14 +375,11 @@ module.exports = async function ({ client, fixtures, test, assert, assertEq, ass
     await client.execute(db, {
       id: 'mk',
       queries: {
-        i: {
-          create_index: 'v',
-          table: 'docs',
-          fields: [['embedding']],
+        i: ddl.createIndex('v', 'docs', [['embedding']], {
           index_type: 'vector',
           vector_dim: dim,
           vector_metric: 'cosine',
-        },
+        }),
       },
     });
     await client.execute(db, {
@@ -442,14 +420,11 @@ module.exports = async function ({ client, fixtures, test, assert, assertEq, ass
     await client.execute(db, {
       id: 'mk-vec',
       queries: {
-        i: {
-          create_index: 'v',
-          table: 'docs',
-          fields: [['embedding']],
+        i: ddl.createIndex('v', 'docs', [['embedding']], {
           index_type: 'vector',
           vector_dim: dim,
           vector_metric: 'cosine',
-        },
+        }),
       },
     });
 
@@ -510,14 +485,11 @@ module.exports = async function ({ client, fixtures, test, assert, assertEq, ass
     await client.execute(db, {
       id: 'mk',
       queries: {
-        i: {
-          create_index: 'v',
-          table: 'docs',
-          fields: [['embedding']],
+        i: ddl.createIndex('v', 'docs', [['embedding']], {
           index_type: 'vector',
           vector_dim: dim,
           vector_metric: 'cosine',
-        },
+        }),
       },
     });
     await client.execute(db, {
@@ -558,14 +530,11 @@ module.exports = async function ({ client, fixtures, test, assert, assertEq, ass
     await client.execute(db, {
       id: 'mk',
       queries: {
-        i: {
-          create_index: 'v',
-          table: 'docs',
-          fields: [['embedding']],
+        i: ddl.createIndex('v', 'docs', [['embedding']], {
           index_type: 'vector',
           vector_dim: dim,
           vector_metric: 'cosine',
-        },
+        }),
       },
     });
 
@@ -614,14 +583,11 @@ module.exports = async function ({ client, fixtures, test, assert, assertEq, ass
     await client.execute(db, {
       id: 'mk',
       queries: {
-        i: {
-          create_index: 'v',
-          table: 'docs',
-          fields: [['embedding']],
+        i: ddl.createIndex('v', 'docs', [['embedding']], {
           index_type: 'vector',
           vector_dim: dim,
           vector_metric: 'cosine',
-        },
+        }),
       },
     });
 
@@ -683,15 +649,12 @@ module.exports = async function ({ client, fixtures, test, assert, assertEq, ass
     await client.execute(db, {
       id: 'mk-sq8',
       queries: {
-        i: {
-          create_index: 'v',
-          table: 'docs',
-          fields: [['embedding']],
+        i: ddl.createIndex('v', 'docs', [['embedding']], {
           index_type: 'vector',
           vector_dim: dim,
           vector_metric: 'cosine',
           vector_quantization: 'sq8',
-        },
+        }),
       },
     });
 
@@ -738,15 +701,12 @@ module.exports = async function ({ client, fixtures, test, assert, assertEq, ass
     await client.execute(db, {
       id: 'mk',
       queries: {
-        i: {
-          create_index: 'v',
-          table: 'docs',
-          fields: [['embedding']],
+        i: ddl.createIndex('v', 'docs', [['embedding']], {
           index_type: 'vector',
           vector_dim: dim,
           vector_metric: 'cosine',
           vector_quantization: 'sq8',
-        },
+        }),
       },
     });
 

@@ -15,6 +15,8 @@
 
 'use strict';
 
+const { ddl } = require('@shamir/client');
+
 module.exports = async function ({ client, fixtures, test, assert, assertEq }) {
   // ─────────────────────────────────────────────────────────────────────
   // FTS
@@ -26,13 +28,10 @@ module.exports = async function ({ client, fixtures, test, assert, assertEq }) {
     await client.execute(db, {
       id: 'mk',
       queries: {
-        i: {
-          create_index: 'body_fts',
-          table: 'posts',
-          fields: [['body']],
+        i: ddl.createIndex('body_fts', 'posts', [['body']], {
           index_type: 'fts',
           fts_tokenizer: 'whitespace',
-        },
+        }),
       },
     });
 
@@ -66,12 +65,7 @@ module.exports = async function ({ client, fixtures, test, assert, assertEq }) {
     await client.execute(db, {
       id: 'mk',
       queries: {
-        i: {
-          create_index: 'body_fts',
-          table: 'posts',
-          fields: [['body']],
-          index_type: 'fts',
-        },
+        i: ddl.createIndex('body_fts', 'posts', [['body']], { index_type: 'fts' }),
       },
     });
     await client.execute(db, {
@@ -100,7 +94,7 @@ module.exports = async function ({ client, fixtures, test, assert, assertEq }) {
     await client.execute(db, {
       id: 'mk',
       queries: {
-        i: { create_index: 'b', table: 'posts', fields: [['body']], index_type: 'fts' },
+        i: ddl.createIndex('b', 'posts', [['body']], { index_type: 'fts' }),
       },
     });
     await client.execute(db, {
@@ -150,13 +144,10 @@ module.exports = async function ({ client, fixtures, test, assert, assertEq }) {
     await client.execute(db, {
       id: 'mk',
       queries: {
-        i: {
-          create_index: 'email_lower',
-          table: 'users',
-          fields: [['email']],
+        i: ddl.createIndex('email_lower', 'users', [['email']], {
           index_type: 'functional',
           functional_op: 'lower',
-        },
+        }),
       },
     });
 
@@ -194,13 +185,10 @@ module.exports = async function ({ client, fixtures, test, assert, assertEq }) {
     await client.execute(db, {
       id: 'mk',
       queries: {
-        i: {
-          create_index: 'code_upper',
-          table: 't',
-          fields: [['code']],
+        i: ddl.createIndex('code_upper', 't', [['code']], {
           index_type: 'functional',
           functional_op: 'upper',
-        },
+        }),
       },
     });
     await client.execute(db, {
@@ -238,14 +226,11 @@ module.exports = async function ({ client, fixtures, test, assert, assertEq }) {
     await client.execute(db, {
       id: 'mk',
       queries: {
-        i: {
-          create_index: 'vec_idx',
-          table: 'docs',
-          fields: [['embedding']],
+        i: ddl.createIndex('vec_idx', 'docs', [['embedding']], {
           index_type: 'vector',
           vector_dim: 3,
           vector_metric: 'cosine',
-        },
+        }),
       },
     });
 
@@ -288,14 +273,11 @@ module.exports = async function ({ client, fixtures, test, assert, assertEq }) {
     await client.execute(db, {
       id: 'mk',
       queries: {
-        i: {
-          create_index: 'v',
-          table: 'docs',
-          fields: [['e']],
+        i: ddl.createIndex('v', 'docs', [['e']], {
           index_type: 'vector',
           vector_dim: 2,
           vector_metric: 'l2',
-        },
+        }),
       },
     });
     await client.execute(db, {
