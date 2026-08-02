@@ -70,8 +70,8 @@ ignore = [
     # toolchain first (its own separate, invasive change — every crate's
     # clippy lints need re-verification against the new rustc, plus every
     # `dtolnay/rust-toolchain@1.93.0` ref across `.github/workflows/*.yml`
-    # needs updating in lockstep, per this file's own documented bump
-    # procedure). Deferred as a dedicated toolchain-bump task, not silently
+    # needs updating in lockstep, per rust-toolchain.toml's own documented
+    # bump procedure). Deferred as a dedicated toolchain-bump task, not silently
     # ignored — revisit and remove this entry once the toolchain moves to
     # >=1.94.0 and wasmtime can follow to >=46.0.2.
     { id = "RUSTSEC-2026-0222", reason = "wasmtime's only patched versions (>=46.0.2) require Rust 1.94.0; this workspace is pinned to 1.93.0 (rust-toolchain.toml) — fixing this advisory requires a separate toolchain-bump task first, deferred rather than silently unfixed" },
