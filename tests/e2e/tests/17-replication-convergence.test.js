@@ -50,6 +50,8 @@
 'use strict';
 
 const { ShamirClient } = require('shamir-client');
+const { ddl, admin } = require('@shamir/client');
+const hmac = require('../helpers/hmac');
 const { startServerWithReplication } = require('../helpers/server');
 
 // SubscriptionSupervisor reconcile-tick (server_launcher.rs
@@ -125,31 +127,33 @@ module.exports = async function ({ client: leaderClient, server: leaderServer, t
   test('setup: leader creates app/main/items, opens access, publishes, writes rows', async () => {
     await leaderClient.execute('default', {
       id: 'conv-setup-db',
-      queries: { mk: { create_db: db } },
+      queries: { mk: ddl.createDb(db) },
     });
     await leaderClient.execute(db, {
       id: 'conv-setup-schema',
       queries: {
-        r: { create_repo: repo },
-        t: { create_table: table, repo },
+        r: ddl.createRepo(repo),
+        t: ddl.createTable(table, { repo }),
       },
     });
 
     // OPEN db + repo + table (0o777) — same pattern as 16-replication.test.js
     // Scenario 1 — so the non-superuser `replicator`-role session can read
-    // via the normal Shomer DAC path.
+    // via the normal Shomer DAC path. `chmod` is HMAC-gated, so the tag is
+    // built by `admin.chmod` via the shared `signerFor` adapter.
     const MODE_777 = 0o777;
+    const leaderSigner = hmac.signerFor(leaderClient);
     await leaderClient.execute(db, {
       id: 'conv-chmod-db',
-      queries: { c: { chmod: { database: db }, mode: MODE_777 } },
+      queries: { c: admin.chmod(leaderSigner, admin.refDatabase(db), MODE_777) },
     });
     await leaderClient.execute(db, {
       id: 'conv-chmod-repo',
-      queries: { c: { chmod: { store: [db, repo] }, mode: MODE_777 } },
+      queries: { c: admin.chmod(leaderSigner, admin.refStore(db, repo), MODE_777) },
     });
     await leaderClient.execute(db, {
       id: 'conv-chmod-table',
-      queries: { c: { chmod: { table: [db, repo, table] }, mode: MODE_777 } },
+      queries: { c: admin.chmod(leaderSigner, admin.refTable(db, repo, table), MODE_777) },
     });
 
     await leaderClient.createScramUser(replUser, replPw, ['replicator']);
@@ -190,13 +194,13 @@ module.exports = async function ({ client: leaderClient, server: leaderServer, t
     // writes into an EXISTING table, it does not create schema on the fly.
     await followerClient.execute('default', {
       id: 'conv-follower-db',
-      queries: { mk: { create_db: db } },
+      queries: { mk: ddl.createDb(db) },
     });
     await followerClient.execute(db, {
       id: 'conv-follower-schema',
       queries: {
-        r: { create_repo: repo },
-        t: { create_table: table, repo },
+        r: ddl.createRepo(repo),
+        t: ddl.createTable(table, { repo }),
       },
     });
 

@@ -35,6 +35,8 @@
 
 const { encode, decode } = require('@msgpack/msgpack');
 const { ShamirClient } = require('shamir-client');
+const { ddl, admin } = require('@shamir/client');
+const hmac = require('../helpers/hmac');
 
 /** Encode a ReplRequest object → msgpack Buffer for the napi boundary. */
 function replBuf(req) {
@@ -65,13 +67,13 @@ module.exports = async function ({ client, server, fixtures, test, assert, asser
     // create_db must run against `default` (target doesn't exist yet).
     await client.execute('default', {
       id: 'repl-setup-db',
-      queries: { mk: { create_db: db } },
+      queries: { mk: ddl.createDb(db) },
     });
     await client.execute(db, {
       id: 'repl-setup-schema',
       queries: {
-        r: { create_repo: repo },
-        t: { create_table: table, repo },
+        r: ddl.createRepo(repo),
+        t: ddl.createTable(table, { repo }),
       },
     });
 
@@ -92,23 +94,27 @@ module.exports = async function ({ client, server, fixtures, test, assert, asser
     }
 
     // OPEN db + repo + table (0o777) so the non-superuser replicator
-    // session can read via the normal Shomer DAC path.
-    // chmod wire shape (access_ddl_tests.rs):
-    //   db:    { chmod: { database: "app" }, mode: 511 }
-    //   repo:  { chmod: { store: ["app","main"] }, mode: 511 }
-    //   table: { chmod: { table: ["app","main","items"] }, mode: 511 }
+    // session can read via the normal Shomer DAC path. `chmod` is an
+    // HMAC-gated destructive op — the tag is built by `admin.chmod`
+    // (canonical input = resource+mode) via the shared `signerFor`
+    // adapter. ResourceRef constructors mirror the wire shapes in
+    // access_ddl_tests.rs:
+    //   db:    { database: "app" }
+    //   repo:  { store: ["app","main"] }
+    //   table: { table: ["app","main","items"] }
     const MODE_777 = 0o777; // 511 decimal
+    const signer = hmac.signerFor(client);
     await client.execute(db, {
       id: 'repl-chmod-db',
-      queries: { c: { chmod: { database: db }, mode: MODE_777 } },
+      queries: { c: admin.chmod(signer, admin.refDatabase(db), MODE_777) },
     });
     await client.execute(db, {
       id: 'repl-chmod-repo',
-      queries: { c: { chmod: { store: [db, repo] }, mode: MODE_777 } },
+      queries: { c: admin.chmod(signer, admin.refStore(db, repo), MODE_777) },
     });
     await client.execute(db, {
       id: 'repl-chmod-table',
-      queries: { c: { chmod: { table: [db, repo, table] }, mode: MODE_777 } },
+      queries: { c: admin.chmod(signer, admin.refTable(db, repo, table), MODE_777) },
     });
 
     // Create the replicator-role user + a plain user (no roles) for the
