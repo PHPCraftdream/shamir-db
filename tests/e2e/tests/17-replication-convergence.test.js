@@ -156,7 +156,8 @@ module.exports = async function ({ client: leaderClient, server: leaderServer, t
       queries: { c: admin.chmod(leaderSigner, admin.refTable(db, repo, table), MODE_777) },
     });
 
-    await leaderClient.createScramUser(replUser, replPw, ['replicator']);
+    await leaderClient.createScramUser(replUser, replPw, []);
+    await leaderClient.setReplicator(replUser, true);
 
     // Declare the leader's publication — the set of scopes downstream
     // subscribers may pull (repl_ops.rs::CreatePublicationOp).

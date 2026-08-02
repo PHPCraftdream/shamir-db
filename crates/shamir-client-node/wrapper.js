@@ -129,6 +129,24 @@ class ShamirClient extends native.ShamirClient {
     }
     return resp;
   }
+
+  /**
+   * Grant or revoke replication API access on an existing SCRAM user via the
+   * dedicated SetReplicator wire op (the "replicator" pseudo-role is reserved
+   * and cannot be passed in createScramUser's roles array). Requires the
+   * current session to belong to a superuser. Throws ShamirDbError on
+   * domain-level DB errors (e.g. "permission_denied", "hmac_required",
+   * "not_found").
+   */
+  async setReplicator(user, on) {
+    const resp = await super.setReplicator(user, on);
+    try {
+      decodeOrThrow(resp);
+    } catch (e) {
+      if (e instanceof ShamirDbError) throw e;
+    }
+    // Void op — no payload to return.
+  }
 }
 
 module.exports = {

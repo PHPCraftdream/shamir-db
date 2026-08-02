@@ -118,8 +118,11 @@ module.exports = async function ({ client, server, fixtures, test, assert, asser
     });
 
     // Create the replicator-role user + a plain user (no roles) for the
-    // deny-by-default scenario.
-    await client.createScramUser(replUser, replPw, ['replicator']);
+    // deny-by-default scenario. The `replicator` pseudo-role is reserved and
+    // cannot be attached via `createScramUser`'s generic roles array — it
+    // requires the dedicated `SetReplicator` wire op.
+    await client.createScramUser(replUser, replPw, []);
+    await client.setReplicator(replUser, true);
     await client.createScramUser(plainUser, plainPw, []);
   });
 

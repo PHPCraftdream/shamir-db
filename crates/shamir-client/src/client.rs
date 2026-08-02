@@ -848,6 +848,35 @@ impl Client {
         }
     }
 
+    /// Grant or revoke the `replicator` role on an existing SCRAM user
+    /// (task #921). The `replicator` pseudo-role is reserved — it cannot be
+    /// attached through [`create_scram_user`]'s generic `roles` array; the
+    /// server explicitly rejects it there and requires this dedicated
+    /// [`DbRequest::SetReplicator`] wire op instead (mirrors
+    /// `SetSuperuser`'s shape and unconditional-HMAC gate exactly).
+    ///
+    /// Requires the current session to belong to a superuser (server enforces,
+    /// checked before the HMAC gate). The confirmation tag is computed from
+    /// `self.session_id` — callers don't need to know about the HMAC plumbing.
+    pub async fn set_replicator(&self, user: &str, on: bool) -> Result<(), ClientError> {
+        let tag = {
+            let key = shamir_connect::common::crypto::derive_session_hmac_key(&self.session_id);
+            let canonical = shamir_query_types::hmac::canonical_set_replicator(user, on);
+            shamir_query_types::hmac::compute_tag_hex(&key, &canonical)
+        };
+        let req = DbRequest::SetReplicator {
+            user: user.to_string(),
+            on,
+            hmac: Some(tag),
+        };
+        match self.roundtrip(&req).await? {
+            DbResponse::ReplicatorSet { .. } => Ok(()),
+            other => Err(ClientError::Protocol(format!(
+                "expected ReplicatorSet, got {other:?}"
+            ))),
+        }
+    }
+
     /// Replication pull-API (REPLICATION §5.1/§5.2/§5.4). Sends a
     /// [`DbRequest::Repl`] carrying a [`ReplRequest`] (`Hello` or `Pull`) and
     /// returns the matched [`ReplResponse`].

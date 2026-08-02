@@ -271,6 +271,40 @@ impl ShamirClient {
         }
     }
 
+    /// Grant or revoke the `replicator` role on an existing SCRAM user via
+    /// the dedicated `SetReplicator` wire op (the `replicator` pseudo-role is
+    /// reserved — it cannot be attached through `create_scram_user`'s generic
+    /// `roles` array). Requires the current session to belong to a superuser.
+    ///
+    /// Domain-level DB errors (e.g. `permission_denied`, `hmac_required`,
+    /// `not_found`) surface through the same `DbResponse::Error`-marker
+    /// convention as `create_scram_user` / `repl` — the JS wrapper decodes the
+    /// returned `Buffer` and throws a typed `ShamirDbError`.
+    #[napi]
+    pub async fn set_replicator(&self, user: String, on: bool) -> Result<Buffer> {
+        let guard = self.inner.lock().await;
+        let client = guard
+            .as_ref()
+            .ok_or_else(|| Error::from_reason("client closed"))?;
+        match client.set_replicator(&user, on).await {
+            Ok(()) => {
+                // Success: encode the echoed `ReplicatorSet { user, on }` so
+                // the JS wrapper can `decodeOrThrow` for the error marker,
+                // matching `create_scram_user`'s `Result<Buffer>` convention.
+                // The server echoes exactly these values on a confirmed
+                // grant/revoke — the core client already verified the
+                // `ReplicatorSet` variant before returning.
+                let resp = DbResponse::ReplicatorSet { user, on };
+                let bytes = rmp_serde::to_vec_named(&resp).map_err(|e| {
+                    Error::from_reason(format!("encode set_replicator response: {e}"))
+                })?;
+                Ok(Buffer::from(bytes))
+            }
+            Err(core::ClientError::Db { code, message }) => encode_db_error(code, message),
+            Err(e) => Err(infra_error(e)),
+        }
+    }
+
     /// Close the TLS write half cleanly. Idempotent — second call is
     /// a no-op.
     #[napi]
