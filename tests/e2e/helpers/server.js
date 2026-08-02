@@ -89,6 +89,12 @@ security: {
         max_execution_time_secs:  10
         max_queries_per_batch:    32
     }
+    # 13-migration.test.js exercises the real in_memory migration lifecycle
+    # (not just the HMAC gate), which the server refuses by default
+    # (experimental_feature_disabled -- StartMigration is not yet
+    # crash-safe/online-safe). Opt in for this internal test server only,
+    # same pattern e2e-harness.ts uses for its own migration test run.
+    enable_experimental_migration_api: true
 }
 
 audit: {
