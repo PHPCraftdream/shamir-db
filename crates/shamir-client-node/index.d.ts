@@ -44,6 +44,18 @@ export declare class ShamirClient {
    */
   createScramUser(name: string, password: string, roles: Array<string>): Promise<Buffer>
   /**
+   * Grant or revoke the `replicator` role on an existing SCRAM user via
+   * the dedicated `SetReplicator` wire op (the `replicator` pseudo-role is
+   * reserved — it cannot be attached through `create_scram_user`'s generic
+   * `roles` array). Requires the current session to belong to a superuser.
+   *
+   * Domain-level DB errors (e.g. `permission_denied`, `hmac_required`,
+   * `not_found`) surface through the same `DbResponse::Error`-marker
+   * convention as `create_scram_user` / `repl` — the JS wrapper decodes the
+   * returned `Buffer` and throws a typed `ShamirDbError`.
+   */
+  setReplicator(user: string, on: boolean): Promise<Buffer>
+  /**
    * Close the TLS write half cleanly. Idempotent — second call is
    * a no-op.
    */
