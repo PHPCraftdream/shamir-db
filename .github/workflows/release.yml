@@ -91,7 +91,7 @@ jobs:
     name: cargo fmt
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6.0.3
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
       - uses: dtolnay/rust-toolchain@d0befba8b9ddf874327619e84c39b094edd58b66  # 1.93.0
         with:
           components: rustfmt
@@ -108,7 +108,7 @@ jobs:
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6.0.3
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
       - uses: dtolnay/rust-toolchain@d0befba8b9ddf874327619e84c39b094edd58b66  # 1.93.0
         with:
           components: clippy
@@ -123,7 +123,7 @@ jobs:
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6.0.3
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
       - uses: dtolnay/rust-toolchain@d0befba8b9ddf874327619e84c39b094edd58b66  # 1.93.0
       # Pinned to the nextest version that matches the perimeter-guard
       # baseline in .config/nextest.toml — see ci.yml's `test` job for the
@@ -193,7 +193,7 @@ jobs:
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6.0.3
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
       - uses: dtolnay/rust-toolchain@d0befba8b9ddf874327619e84c39b094edd58b66  # 1.93.0
       # Pinned to the cargo-nextest version documented as the perimeter-guard
       # baseline in .config/nextest.toml (0.9.137, commit 75ddba7e9). The
@@ -239,7 +239,7 @@ jobs:
     name: ts unit (shamir-client-ts)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6.0.3
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
       - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444  # v5.0.0
         with:
           # Node 22 = active LTS. `shamir-client-ts/package.json` declares
@@ -271,7 +271,7 @@ jobs:
     needs: [fmt, clippy, test]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6.0.3
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
       - uses: dtolnay/rust-toolchain@d0befba8b9ddf874327619e84c39b094edd58b66  # 1.93.0
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32  # v2
       # Produce the release binary `e2e-harness.ts`'s `serverBinPath()` falls
@@ -338,7 +338,7 @@ jobs:
     name: tag <-> crate version consistency
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6.0.3
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
       - name: Check every crate version matches the pushed tag
         shell: bash
         run: |
@@ -462,7 +462,7 @@ jobs:
     name: performance gate (self-hosted)
     runs-on: [self-hosted, shamir-bench]
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6.0.3
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
       - uses: dtolnay/rust-toolchain@d0befba8b9ddf874327619e84c39b094edd58b66  # 1.93.0
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32  # v2
       # bash on every runner (Git Bash on Windows) — `./scripts/bench_gate.sh`
@@ -510,7 +510,7 @@ jobs:
           - os: windows-latest
             target: x86_64-pc-windows-msvc
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6.0.3
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
       - uses: dtolnay/rust-toolchain@d0befba8b9ddf874327619e84c39b094edd58b66  # 1.93.0
         with:
           targets: ${{ matrix.target }}
@@ -614,7 +614,7 @@ jobs:
     needs: [fmt, clippy, test, integration, ts-unit, ts-e2e, version-consistency, perf-gate]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6.0.3
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
       - name: Build image
         run: docker build -f deploy/Dockerfile -t shamir-db:${{ github.ref_name }} .
       - name: Generate minimal smoke-test config
@@ -718,7 +718,7 @@ jobs:
     needs: [fmt, clippy, test, integration, ts-unit, ts-e2e, version-consistency, perf-gate]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6.0.3
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
       - uses: dtolnay/rust-toolchain@d0befba8b9ddf874327619e84c39b094edd58b66  # 1.93.0
       - name: Install cargo-cyclonedx
         # Pinned to 0.5.9 to match .github/workflows/supply-chain.yml's `sbom`
@@ -837,7 +837,7 @@ jobs:
     permissions:
       contents: write   # required to create a release on the pushed tag
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6.0.3
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
       - name: Download all artifacts
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4.3.0
         with:
