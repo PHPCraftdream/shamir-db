@@ -146,6 +146,17 @@ jobs:
       - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444  # v5.0.0
         with:
           node-version: '22'
+      # tests/e2e depends on `@shamir/client` (file:../../crates/shamir-client-ts,
+      # task #919) for its query-builder helpers. That package ships its
+      # compiled `dist/` as a build artifact (gitignored, `tsc -p
+      # tsconfig.build.json`) -- a fresh CI checkout has no dist/ until this
+      # step produces one, otherwise `tests/e2e`'s `npm install` resolves the
+      # file: link but `require('@shamir/client')` then fails with
+      # MODULE_NOT_FOUND against the (nonexistent) dist/index.js.
+      - name: Build @shamir/client (shamir-client-ts)
+        run: npm ci && npm run build
+        working-directory: crates/shamir-client-ts
+        shell: bash
       # `npm run build` = build:server (`cargo build --release -p
       # shamir-server`, producing target/release/shamir-server.exe) +
       # build:binding (`cd shamir-client-node && npm install && napi build
