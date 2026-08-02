@@ -26,7 +26,14 @@
  *     specific table/store/database), not at the catalog level.
  */
 
-import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import {
+  describe,
+  it,
+  expect,
+  beforeAll,
+  beforeEach,
+  afterAll,
+} from 'vitest';
 
 import type { ShamirClient, BatchResponse } from '../index.js';
 import {
@@ -87,6 +94,24 @@ describe.skipIf(!SERVER_AVAILABLE)(
         server = null;
       }
     }, 15_000);
+
+    // Diagnostic (task CI-1/#916): dump the full server stdout+stderr on ANY
+    // test failure in this suite, not just the initial connection attempt.
+    // "connection closed" cascades were invisible because server.logs() was
+    // only printed in the beforeAll catch block. onTestFailed runs only when
+    // the enclosing test actually fails, so this adds zero noise on green runs.
+    beforeEach((ctx) => {
+      ctx.onTestFailed(() => {
+        if (server) {
+          console.log(
+            '[e2e-permissions] test FAILED — server stdout/stderr:\n' +
+              '<<<SERVER-LOGS-START>>>\n' +
+              server.logs() +
+              '\n<<<SERVER-LOGS-END>>>',
+          );
+        }
+      });
+    });
 
     // ── helper: create a SCRAM user and connect ──────────────────────────
 
