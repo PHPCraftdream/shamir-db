@@ -50,7 +50,7 @@
 'use strict';
 
 const { ShamirClient } = require('shamir-client');
-const { ddl, admin } = require('@shamir/client');
+const { ddl, admin, write, Query, replication } = require('@shamir/client');
 const hmac = require('../helpers/hmac');
 const { startServerWithReplication } = require('../helpers/server');
 
@@ -85,7 +85,7 @@ module.exports = async function ({ client: leaderClient, server: leaderServer, t
   async function countItems(client, targetDb) {
     const resp = await client.execute(targetDb, {
       id: 'count-items',
-      queries: { q: { from: table } },
+      queries: { q: Query.from(table).build() },
     });
     const records = resp.results && resp.results.q && resp.results.q.records;
     return Array.isArray(records) ? records.length : 0;
@@ -95,16 +95,17 @@ module.exports = async function ({ client: leaderClient, server: leaderServer, t
   async function writeRows(base, n) {
     for (let i = base; i < base + n; i += 1) {
       const sku = `CONV-${i}`;
+      // `transactional` is a BatchRequest-level flag (see batch_request.rs),
+      // not a per-op field — the prior hand-rolled `{ transactional: true,
+      // set, key, value }` shape carried it on the op object, where `SetOp`
+      // (no `deny_unknown_fields`) silently dropped it on deserialize.
+      // `write.upsert` reproduces the exact same effective wire shape
+      // (`{ set, key, value }`) — same fix as 16-replication.test.js.
       // eslint-disable-next-line no-await-in-loop
       await leaderClient.execute(db, {
         id: `conv-write-${i}`,
         queries: {
-          w: {
-            transactional: true,
-            set: table,
-            key: { sku },
-            value: { sku, qty: i },
-          },
+          w: write.upsert(table, { sku }, { sku, qty: i }),
         },
       });
     }
@@ -164,10 +165,7 @@ module.exports = async function ({ client: leaderClient, server: leaderServer, t
     await leaderClient.execute(db, {
       id: 'conv-create-publication',
       queries: {
-        p: {
-          create_publication: publicationName,
-          scopes: [{ db, repo }],
-        },
+        p: replication.publication(publicationName, [replication.replScope(db, { repo })]),
       },
     });
 
@@ -213,22 +211,14 @@ module.exports = async function ({ client: leaderClient, server: leaderServer, t
     await followerClient.execute(db, {
       id: 'conv-follower-subscribe',
       queries: {
-        cp: {
-          create_replication_profile: profileName,
-          streams: [
-            {
-              scope: { db, repo },
-              direction: 'pull',
-              mode: 'read_only',
-            },
-          ],
-        },
-        cs: {
-          create_subscription: subscriptionName,
+        cp: replication.replicationProfile(profileName, [
+          replication.replStream(replication.replScope(db, { repo }), 'pull', 'read_only'),
+        ]),
+        cs: replication.subscription(subscriptionName, {
           upstream,
           publication: publicationName,
           profile: profileName,
-        },
+        }),
       },
     });
 
