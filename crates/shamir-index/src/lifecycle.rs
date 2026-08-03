@@ -230,10 +230,13 @@
 //! re-scan loop that catches a concurrent write landing under the old id
 //! during the brief window.
 //!
-//! ## index2 — `rename_entry` (by_name mapping change only)
+//! ## index2 — `rename_entry` (by_name mapping + authoritative name-slot update)
 //! Physical postings are keyed by the compact `u32` id (NOT `name_interned`),
-//! so NO data movement happens. Only the `by_name` lookup table changes plus
-//! the persisted metadata. The backend stays `Ready` and queryable throughout.
+//! so NO data movement happens. `rename_entry` updates BOTH the `by_name`
+//! reverse index AND the authoritative `name`/`name_interned` slots in the
+//! `by_id` entry, so `all_descriptors()` (the persistence path) emits the new
+//! name and the rename survives a restart (P0-5a / #961). The backend stays
+//! `Ready` and queryable throughout.
 //!
 //! ---
 //!

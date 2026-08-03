@@ -980,8 +980,9 @@ impl TableManager {
     ///     value bytes, not a hash of (name, value), so the rewrite is exact.
     ///   - **index2** (FTS / functional / vector): posting entries are keyed
     ///     by the compact `u32` `index_id`, not by name_interned, so no
-    ///     physical move is needed — only the `by_name` lookup table in the
-    ///     registry is updated, and the persisted metadata is re-saved.
+    ///     physical move is needed — only the `by_name` lookup table AND the
+    ///     authoritative name slots in the registry's `by_id` entry are updated
+    ///     (P0-5a / #961), then the persisted metadata is re-saved.
     ///
     /// Returns `Err` when the source does not exist or the destination name is
     /// already occupied by any index on this table.
@@ -1123,8 +1124,15 @@ impl TableManager {
         // name_interned — no data movement needed. Only the by_name lookup
         // table in the registry changes, plus the persisted metadata.
         if is_index2 {
-            // rename_entry moves the by_name mapping from old_id → new_id.
-            let ok = self.index2_registry.rename_entry(old_id, new_id).await;
+            // rename_entry moves the by_name mapping old_id → new_id AND
+            // updates the authoritative name slots in the by_id entry so the
+            // rename survives `save_index2_metadata` (P0-5a / #961: without
+            // the by_id update, the persisted descriptor carried the stale
+            // original name and the rename was silently reverted on reopen).
+            let ok = self
+                .index2_registry
+                .rename_entry(old_id, new_name.to_string(), new_id)
+                .await;
             if !ok {
                 return Err(shamir_storage::error::DbError::Internal(
                     "index2 rename_entry failed (concurrent conflict?)".to_string(),
