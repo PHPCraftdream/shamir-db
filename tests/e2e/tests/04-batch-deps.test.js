@@ -13,6 +13,8 @@
 
 'use strict';
 
+const { Query, filter } = require('@shamir/client');
+
 module.exports = async function ({ client, fixtures, test, assert, assertEq }) {
   let db;
 
@@ -34,18 +36,10 @@ module.exports = async function ({ client, fixtures, test, assert, assertEq }) {
     const resp = await client.execute(db, {
       id: 'parent-child',
       queries: {
-        user: {
-          from: 'users',
-          where: { op: 'eq', field: ['name'], value: 'Alice' },
-        },
-        orders: {
-          from: 'orders',
-          where: {
-            op: 'eq',
-            field: ['user_id'],
-            value: { $query: '@user', path: '[0].id' },
-          },
-        },
+        user: Query.from('users').where(filter.eq('name', 'Alice')).build(),
+        orders: Query.from('orders')
+          .where(filter.eq('user_id', filter.queryRef('@user', '[0].id')))
+          .build(),
       },
     });
     const orders = resp.results.orders.records;
@@ -57,15 +51,10 @@ module.exports = async function ({ client, fixtures, test, assert, assertEq }) {
     const resp = await client.execute(db, {
       id: 'plan-shape',
       queries: {
-        user: { from: 'users', where: { op: 'eq', field: ['id'], value: 'u1' } },
-        orders: {
-          from: 'orders',
-          where: {
-            op: 'eq',
-            field: ['user_id'],
-            value: { $query: '@user', path: '[0].id' },
-          },
-        },
+        user: Query.from('users').where(filter.eq('id', 'u1')).build(),
+        orders: Query.from('orders')
+          .where(filter.eq('user_id', filter.queryRef('@user', '[0].id')))
+          .build(),
       },
     });
     const plan = resp.execution_plan;
@@ -78,15 +67,10 @@ module.exports = async function ({ client, fixtures, test, assert, assertEq }) {
     const resp = await client.execute(db, {
       id: 'array-ref',
       queries: {
-        all_users: { from: 'users' },
-        their_orders: {
-          from: 'orders',
-          where: {
-            op: 'in',
-            field: ['user_id'],
-            values: [{ $query: '@all_users', path: '[].id' }],
-          },
-        },
+        all_users: Query.from('users').build(),
+        their_orders: Query.from('orders')
+          .where(filter.in_('user_id', [filter.queryRef('@all_users', '[].id')]))
+          .build(),
       },
     });
     assertEq(resp.results.their_orders.records.length, 4);
@@ -96,24 +80,14 @@ module.exports = async function ({ client, fixtures, test, assert, assertEq }) {
     const resp = await client.execute(db, {
       id: 'chain',
       queries: {
-        a: { from: 'users', where: { op: 'eq', field: ['id'], value: 'u1' } },
-        b: {
-          from: 'orders',
-          where: {
-            op: 'eq',
-            field: ['user_id'],
-            value: { $query: '@a', path: '[0].id' },
-          },
-          order_by: { items: [{ field: ['total'], direction: 'desc' }] },
-        },
-        c: {
-          from: 'orders',
-          where: {
-            op: 'eq',
-            field: ['id'],
-            value: { $query: '@b', path: '[0].id' },
-          },
-        },
+        a: Query.from('users').where(filter.eq('id', 'u1')).build(),
+        b: Query.from('orders')
+          .where(filter.eq('user_id', filter.queryRef('@a', '[0].id')))
+          .orderByDesc('total')
+          .build(),
+        c: Query.from('orders')
+          .where(filter.eq('id', filter.queryRef('@b', '[0].id')))
+          .build(),
       },
     });
     assertEq(resp.results.c.records.length, 1);
@@ -129,15 +103,10 @@ module.exports = async function ({ client, fixtures, test, assert, assertEq }) {
     const resp = await client.execute(db, {
       id: 'bare',
       queries: {
-        u: { from: 'users', where: { op: 'eq', field: ['id'], value: 'u2' } },
-        o: {
-          from: 'orders',
-          where: {
-            op: 'eq',
-            field: ['user_id'],
-            value: { $query: 'u', path: '[0].id' },
-          },
-        },
+        u: Query.from('users').where(filter.eq('id', 'u2')).build(),
+        o: Query.from('orders')
+          .where(filter.eq('user_id', filter.queryRef('u', '[0].id')))
+          .build(),
       },
     });
     assertEq(resp.results.o.records.length, 1);
