@@ -1,0 +1,67 @@
+# Brief — P0-3: DROP INDEX has no safe reader/writer/durability protocol
+
+Task: #959 in the session TaskList. Source: `docs/dev-artifacts/research/2026-08-03-new-wave-readonly-review.md` §P0-3, verified against the actual source before filing this task. Tasks #960 (P0-4), #957 (P0-1), #958 (P0-2) are already fixed and committed separately. #958 added a `generation: Arc<AtomicU64>` counter to `IndexManager` (bumped on create/drop of regular+unique defs) and a `rederive_legacy_ops_post_stage` commit-time reconciliation function in `crates/shamir-engine/src/tx/pre_commit.rs` that ALREADY retracts stale posting ops for legacy indexes dropped between tx-stage and tx-commit (sub-bug 2c of that task) — do not duplicate that; this task is about the DROP operation's OWN safety, independent of any in-flight tx.
+
+**This is again a large, high-risk task with three distinct sub-bugs (3a/3b/3c below). Read the whole brief before writing code. If full scope does not fit your session, prioritize in this order and report exactly what you didn't reach:**
+1. **3c (durable correctness — HIGHEST PRIORITY)**: a crash between sweep and metadata-persist resurrects a fully-broken "Ready but no postings" index after restart. This is the worst bug — silent wrong query results with no crash/error visible to the operator.
+2. **3b (name-reuse ghost postings)**: mitigate via the same tombstone this task adds for 3c.
+3. **3a (in-flight reader consistency)**: hardest to fully close; a partial, well-documented improvement is acceptable — do NOT invent a half-finished epoch system if you can't finish it; leaving it as a documented known-gap with a test proving the CURRENT (unfixed) behavior is safer than a broken partial fix.
+
+## Confirmed current DROP behavior (read directly from source)
+
+Both `crates/shamir-index/src/legacy/index_manager.rs::drop_index` (~line 771) and `crates/shamir-index/src/legacy/index_manager_unique.rs::drop_unique_index` (~line 491) follow the SAME sequence:
+
+1. Retire the definition from the planner-visible Vec (RCU swap — `self.indexes.remove_index(name_interned)` / `self.indexes_unique.remove_index(...)`), bump the P0-2 generation counter, update `has_indexes`/write-barrier flags.
+2. (Test-only pause hook — `drop_index_pause_hook` — used by existing F-76 tests to force an interleaving window here; NOT `#[cfg(test)]`-gated, it's a cross-crate test seam, leave it as-is.)
+3. **Sweep**: `scan_prefix_stream` over the index's key prefix, collect every posting key, `remove_many` them from `info_store` in one call. Also purge matching entries from `posting_cache`.
+4. **Persist**: `save_index_info()` / `save_index_info_unique()` writes the now-reduced `IndexInfo` (with the def removed) back to `info_store` under `system:indexes`/`system:indexes_unique`.
+
+**Sub-bug 3c is exactly the gap between steps 3 and 4**: if the process crashes (or `save_index_info`'s write fails) after step 3 completes but before step 4's write lands durably, the ON-DISK metadata STILL lists the index as present (in its prior `Ready` state — nothing marked it as dropping). After restart, `IndexManager::new` (line ~172) loads that stale `Ready` definition from `system:indexes`/`system:indexes_unique` and the planner will happily route queries to an index whose postings are ALL gone — silently wrong (empty or missing) results, no error, no crash signal.
+
+`index2` (fts/functional/vector) backends and the sorted-index manager have an ANALOGOUS drop sequence — check `crates/shamir-engine/src/table/table_manager_index_mgmt.rs` (~line 679-750, line numbers may have shifted slightly after #958's edits, search for the DROP INDEX dispatch) and the index2 registry's `remove_by_id`/`drop_all` (`crates/shamir-index/src/registry.rs`) plus `crates/shamir-index/src/legacy/sorted_index_manager.rs`'s drop path — confirm whether they share this exact ordering bug before assuming; fix all three families uniformly if they do.
+
+## Sub-bug 3a: `Arc`/RCU gives a definition snapshot, NOT a postings-keyspace snapshot
+
+A reader that resolved a backend/definition via `find_by_field_and_kind`/`get_by_name`/etc. BEFORE `drop_index` runs holds an `Arc<dyn IndexBackend>` (or, for legacy, has already decided to route a lookup through `lookup_by_index`/`check_unique_constraint`). The RCU-published Vec swap makes the definition invisible to NEW callers immediately, but the POSTINGS live in the SAME shared mutable `info_store` that step 3 above sweeps — a reader already mid-lookup can observe a PARTIALLY-swept keyspace (some posting keys removed, others not yet, mid-`remove_many` or mid-scan).
+
+This is the hardest sub-bug to close completely (it requires either (a) a reader-side epoch/generation check on every posting read — expensive on the hot path, or (b) a grace period before physical sweep that waits for all readers who resolved the backend before retire to finish — needs a per-backend reader-count mechanism this codebase does not have today). Do not attempt a half-finished version of either. Instead:
+
+- Document the CURRENT behavior precisely (a code comment near `drop_index`/`drop_unique_index`, in the same rigorous style as `writer_drain_barrier.rs`/`write_barrier_flags.rs`'s existing docs) stating the exact race window and its severity (a concurrent lookup CAN return a partial/incomplete result set during the sweep, though never wrong data — only missing rows — since `remove_many` only removes, never corrupts, existing postings).
+- If time allows, a SIMPLE, provably-correct mitigation: hold the SAME `TableManager::begin_write_barrier` guard (from #957, already merged) for the full duration of DROP (raise the appropriate bit for the index family, drain writers, hold `unique_write_lock`) — this already exists for CREATE; check whether DROP currently does this or not (grep every call site of `drop_index`/`drop_unique_index` in `shamir-engine`/`shamir-db` to see whether the caller wraps it in `begin_write_barrier`). If DROP does NOT currently take the write barrier, wrapping it in one closes most of the practical risk (serializes DROP against concurrent writers) even though it does not fully solve the "reader resolved backend before retire" case for READS specifically (the barrier only serializes writers, not readers). Note precisely what this does and does not close in your report.
+
+## Sub-bug 3b: old writer/tx can resurrect ghost postings via namespace reuse
+
+Legacy physical postings are keyed by `name_interned` (see `IndexRecordKey`/`build_index_key`). A non-tx writer that resolved the OLD definition before retire, or a tx that staged physical ops before DROP (now handled by #958's 2c retraction for the TX case specifically — but a NON-TX writer racing the exact retire→sweep window is NOT covered by #958, which only touches the tx commit path), can still physically write a posting keyed by that `name_interned` AFTER the sweep. If a SUBSEQUENT `CREATE INDEX` reuses the SAME name (hence the same `name_interned`), it inherits the orphan postings as ghost data — for unique indexes this manifests as false duplicate-constraint conflicts or silently corrupted uniqueness; for regular/sorted, wrong candidates returned or a permanent storage leak.
+
+### Required fix for 3c (do this first) + mitigating 3b
+
+Introduce a minimal persisted tombstone state for legacy DROP (and the index2/sorted equivalents if they share the bug — confirm first):
+
+1. Before step 3 (sweep) in `drop_index`/`drop_unique_index`, persist a durable tombstone marker recording "index `name_interned` is being dropped" — the simplest viable shape given this codebase's existing `IndexInfo`/`IndexDefinition` persistence pattern (`bincode` blob under a `system:*` key) is to add a `dropping: Vec<u64>` (or a small dedicated struct) to the persisted `IndexInfo` shape, OR a separate `system:indexes_dropping`/`system:indexes_unique_dropping` key — pick whichever requires the LEAST change to the existing (de)serialization code (`IndexInfo::decode_bytes` already has a documented fallback-shape mechanism per F-72/F-83's comments — study it before deciding whether to extend that shape or add a sibling key). This tombstone write must be a SEPARATE, DURABLE, must-succeed-before-sweep write (if it fails, ABORT the drop — do not proceed to sweep without a durable tombstone).
+2. Sweep as today.
+3. On successful sweep, clear the tombstone AND persist the reduced `IndexInfo` — ideally in the SAME write if your chosen shape allows it (e.g. the reduced `IndexInfo` blob itself no longer lists the def AND no longer lists it in `dropping`, written as one `self.info_store.set(...)` call), so there is no window between "tombstone cleared" and "definition removed" — collapse those into the single existing `save_index_info()`/`save_index_info_unique()` write if possible.
+4. **Open-time recovery** (`IndexManager::new`, ~line 172): after loading `indexes`/`indexes_unique`, check the tombstone. If a `name_interned` is marked `dropping` but the definition still exists in the loaded `IndexInfo` (the crash-between-sweep-and-persist case), the open path must NOT expose it as `Ready` — treat it as still-dropping, RESUME the sweep (re-run the same prefix scan + `remove_many` — idempotent, since removing already-removed keys is a no-op) synchronously during `new()` (or asynchronously with the index planner-invisible in the meantime — pick whichever is simpler to implement correctly; a synchronous resume-then-clear inside `new()` is almost certainly the simpler, safer choice for this task's scope), then clear the tombstone and persist the fully-reduced definitions.
+5. This tombstone ALSO addresses 3b's namespace-reuse risk for the common case: a `CREATE INDEX` reusing a `name_interned` that is CURRENTLY in the `dropping` set should be rejected (or made to wait) until the tombstone clears — check whether `create_index`/`create_unique_index` currently has any such guard; if not, add one (a `dropping` name is "not gone yet", so treat it the same as "name already registered" for the purposes of a fresh `create_index` reusing that exact name, until the tombstone clears).
+
+## Required tests
+
+Follow this crate's `tests/` layout convention (see existing `f70_lock_order_inversion_tests.rs`/`f95_ddl_admission_tests.rs`/`p02_legacy_rederive_tests.rs` for the wiring-in pattern via `tests/mod.rs`).
+
+- **3c crash-resurrection regression**: simulate a crash between sweep and persist (a deterministic test hook, similar in spirit to `drop_index_pause_hook` — check whether you can reuse that hook or need a new one specifically for "stop after sweep, before persist"). Verify: reconstructing a FRESH `IndexManager::new()` against the SAME `info_store` (simulating restart) does NOT expose the dropped index as `Ready`, and that a lookup through it returns nothing (either because the def is fully gone, or because the resumed sweep correctly finished during `new()`).
+- **3c idempotent resume**: call the open-time recovery path TWICE against the same tombstoned state (simulating two restart attempts) — the second must be a clean no-op, not an error or double-sweep failure.
+- **3b name-reuse rejection**: DROP an index, before its tombstone clears (use the same pause-hook seam), attempt `create_index`/`create_unique_index` with the SAME name — assert it is rejected or blocked until the tombstone clears, not silently accepted with ghost postings.
+- **3a documentation test** (only if you implement the `begin_write_barrier`-wrapping mitigation): a test proving DROP now serializes against concurrent writers the same way CREATE does (mirror the shape of #957's `f95_*_serializes_and_writer_sees_barrier` tests, parametrized for DROP instead of CREATE, if you have time; otherwise document why not).
+
+## Scope discipline
+
+- Do NOT touch RENAME INDEX (index2's rename in #961, sorted's in #962 — separate tasks) or perf-gate config (#963). Do NOT re-touch #958's `rederive_legacy_ops_post_stage` (tx-side reconciliation) — this task is about the DROP operation's own durability, a different code path.
+- Run ONLY the centralized test entry point: `./scripts/test.sh -p shamir-index` (and `-p shamir-engine` if you touch anything there for the write-barrier wrapping). Raw `cargo test` is blocked.
+- `cargo fmt` and `cargo clippy --workspace --all-targets -- -D warnings` must be clean before you declare done.
+
+## ⛔ Git discipline (MANDATORY)
+
+NEVER run `git reset` / `checkout` / `clean` / `stash` / `restore` / `rm`, or any git command that mutates the working tree or index. Do NOT run `git commit` or `git add` — the orchestrator verifies your diff and test run, then commits. Only edit files and run read-only/build/test commands. Delete stray log files you create yourself (plain `rm <file>.log` is fine) rather than leaving them; mention it if you do leave any.
+
+## What to report back
+
+Structure your report by sub-bug (3a/3b/3c): what you fixed and the exact persisted-state shape you chose (and why, especially how it interacts with `IndexInfo::decode_bytes`'s existing fallback-shape mechanism), what each test proves, and the exact `cargo fmt`/`cargo clippy`/`./scripts/test.sh` commands with real pass/fail counts and exit codes. If you stopped short of full scope (likely for 3a), say exactly what remains undone and why, and whether the codebase is at least NO WORSE than before (never leave a half-finished state machine that's riskier than the original bug).
