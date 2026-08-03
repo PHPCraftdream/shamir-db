@@ -52,8 +52,8 @@ use metrics_exporter_prometheus::{PrometheusBuilder, PrometheusHandle};
 use metrics_process::Collector;
 use serde::Serialize;
 use tokio::net::TcpListener;
-use tokio::sync::Notify;
 use tokio::task::JoinHandle;
+use tokio_util::sync::CancellationToken;
 
 use crate::byte_budget::ByteBudget;
 
@@ -92,7 +92,7 @@ impl ObservabilityState {
 pub struct ObservabilityHandle {
     pub bound_addr: SocketAddr,
     pub state: Arc<ObservabilityState>,
-    shutdown: Arc<Notify>,
+    shutdown: CancellationToken,
     listener_task: JoinHandle<()>,
     poller_task: JoinHandle<()>,
 }
@@ -100,30 +100,41 @@ pub struct ObservabilityHandle {
 impl ObservabilityHandle {
     /// Stop the HTTP listener and the process-metrics poller.
     ///
-    /// F-68 (#895) cluster D / task #124 diagnostic instrumentation: this
-    /// function is instrumented with timestamped `tracing` events around
-    /// `notify_waiters()` and around EACH of the two `JoinHandle` awaits
-    /// individually (they were previously awaited back-to-back with no
-    /// logging), because `metrics_exposes_unbounded_sentinel_when_no_byte_budget`
-    /// hit a 600.059s TIMEOUT on macos-latest here. Working hypothesis (NOT
-    /// yet confirmed): `listener_task` runs
-    /// `axum::serve(..).with_graceful_shutdown(..)`, and axum/hyper's
-    /// graceful shutdown by default waits for every open connection
-    /// (including idle HTTP/1.1 keep-alive connections from EARLIER
-    /// requests in the same test process, not just in-flight ones) to close
-    /// before the future resolves — so if some connection from an earlier
-    /// request/test in this process is never closed, `listener_task.await`
-    /// could hang here indefinitely. This is logging only — no retry, no
-    /// timeout, no behavior change. If this hangs again, the log will show
-    /// which of the two awaits (`listener_task` vs. `poller_task`) never
-    /// returns, with a timestamp gap lining up with the 600s kill.
+    /// F-68 (#895) cluster D / task #124 added timestamped `tracing` events
+    /// around each of the two `JoinHandle` awaits individually, suspecting
+    /// `axum::serve`'s graceful shutdown waiting on a lingering keep-alive
+    /// connection (`listener_task`). Task #922 / F-68b used that
+    /// instrumentation on a real ubuntu-latest CI hang
+    /// (`metrics_exposes_unbounded_sentinel_when_no_byte_budget` /
+    /// `metrics_exposes_finite_byte_budget_gauges`, run `30757334929`) and it
+    /// disproved that hypothesis: the log showed `listener_task.await`
+    /// returning in ~100µs, then hanging forever on `poller_task.await` with
+    /// no further output. Root cause: `poller_task` (below, in
+    /// `spawn_with_byte_budget`) used to wait on `shutdown_for_poller
+    /// .notified()` inside a `tokio::select!` — `Notify::notify_waiters()`
+    /// only wakes tasks that are actively polling `.notified()` AT THE
+    /// MOMENT it is called; it stores no permit. Between loop iterations
+    /// (each `select!` re-evaluation creates a *new* `Notified` future) there
+    /// is a window with no live waiter, and a `notify_waiters()` landing in
+    /// that window is silently dropped — the poller then blocks on its next
+    /// `interval.tick()` forever since nothing calls `notify_waiters()`
+    /// again. This is the exact same lossy-`Notify` class already documented
+    /// and fixed once in this crate for the root shutdown signal (see
+    /// `ServerHandle::shutdown_token`'s doc comment in
+    /// `server/server_handle.rs`) — this call site was missed during that
+    /// remediation. Fixed here by switching to `tokio_util::sync::
+    /// CancellationToken`, whose `cancel()` is a persistent flag: any
+    /// `.cancelled()` future (existing or newly created) resolves
+    /// immediately once cancelled, closing the race by construction. The
+    /// `tracing` instrumentation is kept (still useful if some other stall
+    /// appears here later).
     pub async fn shutdown(self) {
         let shutdown_started = std::time::Instant::now();
-        tracing::debug!("ObservabilityHandle::shutdown: enter, calling notify_waiters()");
-        self.shutdown.notify_waiters();
+        tracing::debug!("ObservabilityHandle::shutdown: enter, calling cancel()");
+        self.shutdown.cancel();
         tracing::debug!(
             elapsed = ?shutdown_started.elapsed(),
-            "ObservabilityHandle::shutdown: notify_waiters() returned"
+            "ObservabilityHandle::shutdown: cancel() returned"
         );
 
         let listener_wait_started = std::time::Instant::now();
@@ -132,9 +143,7 @@ impl ObservabilityHandle {
         tracing::debug!(
             elapsed = ?listener_wait_started.elapsed(),
             "ObservabilityHandle::shutdown: listener_task.await returned \
-             (axum::serve's with_graceful_shutdown resolved — see this fn's \
-             doc for the lingering-keep-alive-connection hypothesis if this \
-             took unexpectedly long)"
+             (axum::serve's with_graceful_shutdown resolved)"
         );
 
         let poller_wait_started = std::time::Instant::now();
@@ -371,7 +380,12 @@ pub async fn spawn_with_byte_budget(
     // (~30-50 µs of work). The first collect() is invoked synchronously
     // so /metrics returns useful data immediately.
     collector.collect();
-    let shutdown = Arc::new(Notify::new());
+    // F-68b (#922): `CancellationToken`, not `Notify::notify_waiters()` — see
+    // `ObservabilityHandle::shutdown`'s doc comment (this file) for the
+    // lossy-`Notify` missed-wakeup bug this replaced (confirmed root cause of
+    // a real 600s ubuntu-latest CI hang) and the precedent in
+    // `server/server_handle.rs`'s `shutdown_token` doc comment.
+    let shutdown = CancellationToken::new();
     let shutdown_for_poller = shutdown.clone();
     let tx_metrics_clone = tx_metrics;
     let byte_budget_clone = byte_budget;
@@ -382,7 +396,7 @@ pub async fn spawn_with_byte_budget(
         loop {
             tokio::select! {
                 biased;
-                _ = shutdown_for_poller.notified() => break,
+                _ = shutdown_for_poller.cancelled() => break,
                 _ = interval.tick() => {
                     collector.collect();
                     if let Some(ref tx_m) = tx_metrics_clone {
@@ -429,31 +443,22 @@ pub async fn spawn_with_byte_budget(
     let listener_task = tokio::spawn(async move {
         let serve = axum::serve(listener, app);
         let shutdown_signal = async move {
-            shutdown_for_serve.notified().await;
-            // F-68 (#895) cluster D / task #124: this is the point
-            // `with_graceful_shutdown` is signaled to stop accepting NEW
-            // connections. `axum::serve`'s graceful shutdown (built on
-            // hyper-util's `GracefulShutdown`) then waits for every
-            // currently-open connection — including idle HTTP/1.1
-            // keep-alive connections left over from EARLIER requests, not
-            // just genuinely in-flight ones — to close before the
-            // `.with_graceful_shutdown(..).await` below resolves. Checked:
-            // axum 0.7 / `axum::serve` does not expose a public
-            // connection-count or per-connection introspection hook (no
-            // `on_connection` callback, no live counter) that this log
-            // could report — noting that here rather than forcing an
-            // artificial signal. If `listener_task.await` in
-            // `ObservabilityHandle::shutdown` (this crate, same file) hangs,
-            // the coarser before/after timestamps there are the best signal
-            // currently available; narrowing further would need either an
-            // upstream hyper-util API or wrapping every accepted connection
-            // in our own counter (a behavior change, out of scope here).
+            shutdown_for_serve.cancelled().await;
+            // F-68 (#895) cluster D / task #124 suspected this
+            // `with_graceful_shutdown` signal point as the hang source
+            // (axum/hyper's graceful shutdown waiting on a lingering
+            // keep-alive connection). Task #922 / F-68b confirmed via a real
+            // CI hang's `tracing` log that this resolves in ~100µs — the
+            // actual hang was in the poller task's now-fixed lossy `Notify`
+            // wait (see `ObservabilityHandle::shutdown`'s doc comment).
+            // `CancellationToken::cancelled()` closes the same class of race
+            // here too (previously `Notify::notified()`), even though this
+            // specific await was not observed to hang in the confirmed
+            // repro.
             tracing::debug!(
                 "observability listener_task: shutdown signal fired, \
                  waiting for axum::serve's graceful shutdown to drain \
-                 open connections (connection-count introspection is not \
-                 available from axum/hyper-util's public API — see this \
-                 comment)"
+                 open connections"
             );
         };
         if let Err(e) = serve.with_graceful_shutdown(shutdown_signal).await {
