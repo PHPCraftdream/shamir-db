@@ -1,12 +1,8 @@
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
-use bytes::Bytes;
 use futures::StreamExt;
 use shamir_storage::error::DbResult;
-use shamir_storage::types::KvOp;
-use shamir_storage::types::Store;
-use shamir_tunables::store_defaults::FULL_SCAN_BATCH;
 use shamir_types::core::interner::TouchInd;
 use shamir_types::types::record_id::RecordId;
 use shamir_types::types::value::InnerValue;
@@ -1105,18 +1101,21 @@ impl TableManager {
         }
 
         // ── Rekey sorted index posting entries ────────────────────────────────
-        // Concurrency (audit A9): rename the definition FIRST (atomic RCU
-        // swap), so the live write-hook starts writing under new_id
-        // immediately. THEN rekey old-id postings to new_id. A concurrent
-        // write that lands under old_id during the brief rename→rekey
-        // window is caught by `rekey_sorted_prefix`'s settle re-scan loop.
+        // P0-5b (#962): the full sorted-rename orchestration (durable "Renaming"
+        // tombstone → definition swap → settle-loop rekey → tombstone clear)
+        // now lives in `SortedIndexManager::rename_index_sorted`, mirroring how
+        // `drop_sorted_index` delegates to `drop_index`. The durable tombstone
+        // makes an interrupted rekey resumable on restart via
+        // `recover_in_progress_renames` (previously a rekey `Err` after the
+        // definition swap orphaned postings permanently). Concurrency (audit
+        // A9): the definition is renamed FIRST (atomic RCU swap), so the live
+        // write-hook starts writing under new_id immediately; the rekey's
+        // settle re-scan then catches any old-id entry a concurrent writer
+        // landed in the brief rename→rekey window.
         if is_sorted {
-            // Swap the in-memory definition old_id → new_id FIRST.
             self.sorted_indexes
-                .rename_definition(old_id, new_id)
+                .rename_index_sorted(old_id, new_id)
                 .await?;
-            // Then sweep remaining old-id postings to new_id (with settle).
-            rekey_sorted_prefix(&*self.info_store, old_id, new_id).await?;
         }
 
         // ── Rekey index2 (FTS / functional / vector) ──────────────────────────
@@ -1147,87 +1146,6 @@ impl TableManager {
 
         Ok(())
     }
-}
-
-// ============================================================================
-// Prefix-scan rekey helpers (module-private)
-// ============================================================================
-
-/// Rekey all posting entries of a sorted index.
-///
-/// Sorted-index physical key layout:
-///   `[SORTED_TAG: 1][name_interned BE: 8][encoded_value: var][record_id: 16]`
-///
-/// For each key found under the old prefix, bytes [1..9] are replaced
-/// with `new_id.to_be_bytes()` (note: **big-endian**, unlike hash indexes).
-///
-/// # Concurrency (audit A9)
-///
-/// `rename_index` calls [`SortedIndexManager::rename_definition`] BEFORE
-/// this function, so the live write-hook starts writing under `new_id`
-/// immediately. This function then sweeps the remaining `old_id`-prefixed
-/// postings to `new_id`. A concurrent write that landed under `old_id`
-/// during the brief rename-definition→rekey window is caught by the
-/// **settle re-scan**: after the initial pass completes, we re-scan the
-/// old-id prefix once more to copy any entries that arrived mid-sweep.
-/// The settle loop is bounded — it terminates as soon as a re-scan finds
-/// no new old-id entries (typically the first re-scan, since the
-/// rename-definition RCU swap is atomic and writers switch to new_id
-/// immediately after).
-async fn rekey_sorted_prefix(info_store: &dyn Store, old_id: u64, new_id: u64) -> DbResult<()> {
-    // SORTED_TAG = 0x80 — the tag byte that distinguishes sorted-index physical
-    // keys from hash-index keys and system RecordId keys in the same info_store.
-    // Mirrors `shamir_index::base_index::sorted_index_definition::SORTED_TAG` (pub(crate)
-    // there, so we inline the constant here with a comment instead of importing).
-    const SORTED_TAG: u8 = 0x80;
-
-    let mut old_prefix_buf = Vec::with_capacity(9);
-    old_prefix_buf.push(SORTED_TAG);
-    old_prefix_buf.extend_from_slice(&old_id.to_be_bytes());
-    let old_prefix = Bytes::from(old_prefix_buf);
-
-    let new_id_bytes = new_id.to_be_bytes();
-
-    // Loop until a full scan of the old-id prefix finds no entries to move.
-    // The first pass moves the bulk; subsequent "settle" passes catch any
-    // entries a concurrent writer inserted under old_id mid-sweep (writers
-    // switch to new_id after the rename-definition RCU swap, so at most a
-    // tiny number of in-flight writers can still be writing old_id — bounded).
-    loop {
-        let stream = info_store.scan_prefix_stream(old_prefix.clone(), FULL_SCAN_BATCH);
-        futures::pin_mut!(stream);
-
-        // Task #616: one mixed-op batch per pass instead of a separate
-        // `set_many` followed by `remove_many` — the previous two-call
-        // shape was NOT atomic (a crash/failure between the two calls
-        // could leave entries visible under BOTH old_id and new_id, or
-        // drop the new_id write while the old_id entry was already gone).
-        // `Store::transact` commits the whole batch as one atomic unit.
-        let mut ops: Vec<KvOp> = Vec::new();
-        let mut moved_any = false;
-
-        while let Some(batch) = stream.next().await {
-            for (key, value) in batch? {
-                if key.len() < 9 {
-                    continue; // malformed; skip
-                }
-                let mut new_key = key.to_vec();
-                new_key[1..9].copy_from_slice(&new_id_bytes);
-                ops.push(KvOp::Set(Bytes::from(new_key).into(), value));
-                ops.push(KvOp::Remove(key));
-                moved_any = true;
-            }
-        }
-
-        if !moved_any {
-            // No old-id entries found this pass — settle complete.
-            break;
-        }
-
-        info_store.transact(ops).await?;
-    }
-
-    Ok(())
 }
 
 /// Resolve interned path ids back to dot-separated string paths.

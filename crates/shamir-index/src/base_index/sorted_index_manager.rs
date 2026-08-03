@@ -22,7 +22,7 @@
 use bytes::Bytes;
 use futures::StreamExt;
 use smallvec::SmallVec;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 // Re-export so existing callers that import `SortedIndexDefinition` from this
@@ -33,9 +33,8 @@ use crate::base_index::sorted_index_definition::{
 };
 use crate::write_ops::IndexWriteOp;
 use shamir_storage::error::DbResult;
-use shamir_storage::types::RecordKey;
-use shamir_storage::types::Store;
-use shamir_tunables::store_defaults::MAINT_SCAN_BATCH;
+use shamir_storage::types::{KvOp, RecordKey, Store};
+use shamir_tunables::store_defaults::{FULL_SCAN_BATCH, MAINT_SCAN_BATCH};
 use shamir_types::core::interner::{Interner, InternerKey};
 use shamir_types::core::sort_codec;
 use shamir_types::record_view::RecordRef;
@@ -193,6 +192,37 @@ pub struct SortedIndexManager {
     /// NEVER held across an `.await` point.
     dropping_sorted: Arc<Mutex<BTreeSet<u64>>>,
 
+    /// P0-5b (#962): in-memory mirror of the persisted "Renaming" tombstone set
+    /// for in-progress RENAME INDEX operations on the SORTED family. Each entry
+    /// maps `old_id → new_id`. When `rename_index_sorted` starts, it adds the
+    /// `(old_id, new_id)` pair here AND persists it durably (see
+    /// `add_to_renaming_sorted`) BEFORE `rename_definition` runs; when the
+    /// rename completes (definition swapped + postings rekeyed), it removes the
+    /// entry (see `clear_from_renaming_sorted`). On restart, `new` loads the
+    /// persisted tombstone and `recover_in_progress_renames` resumes the
+    /// (idempotent) rekey settle loop for each pair, then clears the tombstone.
+    ///
+    /// This closes the REAL remaining gap from the P0-5 review: `rename_index`
+    /// previously swapped the definition to `new_id` FIRST and then ran
+    /// `rekey_sorted_prefix`; if the rekey returned `Err` (a real backend
+    /// failure, not just non-atomic partial visibility — the per-batch
+    /// atomicity is already handled by the settle loop + `Store::transact`,
+    /// F-85/#913), the error propagated to the client while the catalog
+    /// already believed the rename succeeded. A client RETRY of the same
+    /// command then failed immediately (the source name no longer resolved),
+    /// leaving orphan postings permanently stranded under the old
+    /// `SORTED_TAG || old_id` prefix (never queried under either name, silent
+    /// storage leak, and ghost-posting collision if `old_id` is ever reused).
+    /// The durable tombstone makes the interrupted rekey RESUMABLE on restart
+    /// instead of orphaned. Mirrors #972's `dropping_sorted` for rename.
+    ///
+    /// `std::sync::Mutex` is the sanctioned low-frequency fallback here
+    /// (CLAUDE.md: "only low-frequency/setup fallbacks, justified inline").
+    /// RENAME INDEX is a DDL operation — contention is nil in normal
+    /// operation and the set is empty 99.999 % of the time. The lock is
+    /// NEVER held across an `.await` point.
+    renaming_sorted: Arc<Mutex<BTreeMap<u64, u64>>>,
+
     /// P0-3b (#972): test-only deterministic pause point that fires AFTER the
     /// definition is retired but BEFORE the posting sweep (the pre-sweep
     /// window). A regression test installs this hook, parks `drop_index`
@@ -214,6 +244,20 @@ pub struct SortedIndexManager {
     /// `drop_index_post_sweep_hook`.
     drop_index_post_sweep_hook:
         Arc<arc_swap::ArcSwapOption<crate::base_index::backfill_pause_hook::BackfillPauseHook>>,
+
+    /// P0-5b (#962): test-only deterministic pause point that fires AFTER
+    /// `rename_definition` has swapped-and-persisted the definition
+    /// `old_id → new_id` but BEFORE `rekey_postings` runs — the EXACT crash
+    /// window the P0-5b bug describes (definition already under `new_id`,
+    /// postings still stranded under `old_id`). A regression test installs
+    /// this hook, parks `rename_index_sorted` mid-rename, drops the manager
+    /// (simulating a crash), then constructs a fresh
+    /// `SortedIndexManager::new` against the SAME `info_store` and asserts
+    /// the recovery path finishes the rekey. NOT `#[cfg(test)]`-gated —
+    /// cross-crate test consumer. `None` on every real path. Mirrors #972's
+    /// `drop_index_post_sweep_hook`.
+    rename_rekey_pause_hook:
+        Arc<arc_swap::ArcSwapOption<crate::base_index::backfill_pause_hook::BackfillPauseHook>>,
 }
 
 impl Clone for SortedIndexManager {
@@ -231,6 +275,8 @@ impl Clone for SortedIndexManager {
             dropping_sorted: Arc::clone(&self.dropping_sorted),
             drop_index_pause_hook: Arc::clone(&self.drop_index_pause_hook),
             drop_index_post_sweep_hook: Arc::clone(&self.drop_index_post_sweep_hook),
+            renaming_sorted: Arc::clone(&self.renaming_sorted),
+            rename_rekey_pause_hook: Arc::clone(&self.rename_rekey_pause_hook),
         }
     }
 }
@@ -249,6 +295,8 @@ impl SortedIndexManager {
             dropping_sorted: Arc::new(Mutex::new(BTreeSet::new())),
             drop_index_pause_hook: Arc::new(arc_swap::ArcSwapOption::empty()),
             drop_index_post_sweep_hook: Arc::new(arc_swap::ArcSwapOption::empty()),
+            renaming_sorted: Arc::new(Mutex::new(BTreeMap::new())),
+            rename_rekey_pause_hook: Arc::new(arc_swap::ArcSwapOption::empty()),
         };
         m.load().await?;
         // P0-3b (#972): resume any in-progress DROP INDEX operations that were
@@ -260,6 +308,16 @@ impl SortedIndexManager {
         // `recover_in_progress_drops`'s doc for the full crash-state matrix.
         // Mirrors #959's base_index-family open-time recovery.
         m.recover_in_progress_drops().await?;
+        // P0-5b (#962): resume any in-progress RENAME INDEX operations that
+        // were interrupted by a crash between the tombstone write and the
+        // rekey's completion. The tombstone is persisted under a separate
+        // `system:sidx_ren` key recording `(old_id, new_id)` pairs; if
+        // present, the recovery path re-runs the (idempotent) rekey settle
+        // loop for each pair, ensuring no postings are left orphaned under
+        // the old prefix, then clears the tombstone. See
+        // `recover_in_progress_renames`'s doc for the full crash-state
+        // matrix. Mirrors #972's drop-recovery sibling.
+        m.recover_in_progress_renames().await?;
         Ok(m)
     }
 
@@ -284,6 +342,19 @@ impl SortedIndexManager {
         hook: Option<Arc<crate::base_index::backfill_pause_hook::BackfillPauseHook>>,
     ) {
         self.drop_index_post_sweep_hook.store(hook);
+    }
+
+    /// P0-5b (#962) test-only: install (or clear with `None`) the deterministic
+    /// pause hook that fires AFTER `rename_definition` swaps-and-persists the
+    /// definition `old_id → new_id` but BEFORE `rekey_postings` runs — the
+    /// exact crash window this fix targets (definition already under `new_id`,
+    /// postings still under `old_id`). Not `#[cfg(test)]`-gated — cross-crate
+    /// test consumer, same reason as #972's hooks.
+    pub fn set_rename_rekey_pause_hook(
+        &self,
+        hook: Option<Arc<crate::base_index::backfill_pause_hook::BackfillPauseHook>>,
+    ) {
+        self.rename_rekey_pause_hook.store(hook);
     }
 
     /// F-50 Step 2 (#870): current sorted-index generation. Bumped (monotonic)
@@ -892,9 +963,9 @@ impl SortedIndexManager {
     /// and persist the updated metadata.
     ///
     /// This is the metadata half of RENAME INDEX for sorted indexes — the
-    /// physical posting entries are re-keyed separately by the engine
-    /// (`rekey_sorted_prefix`). Here we only swap the in-memory entry and
-    /// re-save the definitions blob.
+    /// physical posting entries are re-keyed by [`rekey_postings`](Self::rekey_postings)
+    /// (driven by [`rename_index_sorted`](Self::rename_index_sorted)). Here we
+    /// only swap the in-memory entry and re-save the definitions blob.
     ///
     /// Note: `drop_index` would delete the physical entries we just moved, so
     /// we bypass it and manipulate the `indexes` snapshot directly via `rcu`.
@@ -947,6 +1018,319 @@ impl SortedIndexManager {
             self.note_mutation_at_version(new_id, old_epoch.load(Ordering::Acquire));
         }
         self.persist_defs().await
+    }
+
+    // ========================================================================
+    // P0-5b (#962) — RENAME INDEX durable tombstone + crash recovery (sorted)
+    // ========================================================================
+    //
+    // Mirrors #972's DROP-INDEX durable-tombstone pattern, adapted for rename.
+    //
+    // The REAL gap this closes (re-read against CURRENT source): the per-batch
+    // atomicity of the physical rekey is ALREADY handled — `rekey_postings`
+    // (below) is a settle re-scan loop that applies each batch as one
+    // `Store::transact` call, the accepted non-atomic-backend tolerance pattern
+    // (F-85/#913; a partial-batch visibility is fine because the NEXT loop
+    // iteration picks up whatever wasn't yet moved). What was NOT handled is
+    // RESUMABILITY: the engine's `rename_index` previously swapped the
+    // definition `old_id → new_id` FIRST (`rename_definition`) and THEN ran the
+    // rekey. If the rekey returned `Err` (a genuine backend failure), the error
+    // propagated to the client while the catalog already believed the rename
+    // had succeeded — a client RETRY of the same command then failed
+    // immediately (the source name no longer resolved), leaving postings
+    // permanently orphaned under the `SORTED_TAG || old_id` prefix (silent
+    // storage leak + ghost-posting collision if `old_id` is ever reused). The
+    // durable "Renaming" tombstone (written BEFORE `rename_definition`, cleared
+    // AFTER the rekey completes) makes the interrupted rekey RESUMABLE on
+    // restart: `recover_in_progress_renames` re-runs the (idempotent) settle
+    // loop for each recorded `(old_id, new_id)` pair.
+    //
+    // Tombstone shape: `Vec<(u64, u64)>` (the `old_id → new_id` pairs),
+    // serialized via bincode under `system:sidx_ren`. A separate key was chosen
+    // (mirroring #972's `system:sidx_drop`) to avoid touching `persist_defs`/
+    // `load`'s three-tier bincode forward-compat fallback chain. An absent key
+    // or empty vec means "no in-progress renames".
+    //
+    // **CRITICAL** (the hard-won #959 collision lesson): `RecordId::system(name)`
+    // truncates `name` to 12 bytes (see `shamir_types::types::record_id::system`).
+    // `"sidx_ren"` (8 bytes) was verified collision-free against every other
+    // sorted system key: it differs from `"sorted_indexes"` (truncates to
+    // `"sorted_index"`) at byte index 1 (`i` vs `o`), and from `"sidx_drop"` at
+    // byte index 5 (`r` vs `d`) — NO collision.
+
+    /// P0-5b (#962): persist the current in-memory `renaming_sorted` map to
+    /// `info_store` under `system:sidx_ren`. Serializes the map as a
+    /// `Vec<(u64, u64)>` (deterministic order via `BTreeMap`). An empty map
+    /// writes an empty `Vec` (NOT a key deletion) so the load path handles
+    /// both `NotFound` and empty-vec uniformly. Mirrors #972's
+    /// `save_dropping_sorted`.
+    pub(super) async fn save_renaming_sorted(&self) -> DbResult<()> {
+        let snapshot: Vec<(u64, u64)> = {
+            let map = self.renaming_sorted.lock().unwrap();
+            map.iter().map(|(&o, &n)| (o, n)).collect()
+        };
+        let key = RecordId::system("sidx_ren").to_bytes();
+        let bytes = bincode::serialize(&snapshot)
+            .map_err(|e| shamir_storage::error::DbError::Codec(e.to_string()))?;
+        self.info_store.set(key.into(), Bytes::from(bytes)).await?;
+        Ok(())
+    }
+
+    /// P0-5b (#962): load a persisted renaming map from `info_store`. Returns
+    /// an empty `Vec` if the key is absent (`NotFound`) or contains an empty
+    /// vec — both mean "no in-progress renames". Mirrors #972's
+    /// `load_dropping_sorted`.
+    pub(super) async fn load_renaming_sorted(&self) -> DbResult<Vec<(u64, u64)>> {
+        let key = RecordId::system("sidx_ren").to_bytes();
+        match self.info_store.get(key.into()).await {
+            Ok(bytes) => {
+                if bytes.is_empty() {
+                    return Ok(Vec::new());
+                }
+                bincode::deserialize::<Vec<(u64, u64)>>(&bytes).map_err(|e| {
+                    shamir_storage::error::DbError::Codec(format!(
+                        "system:sidx_ren decode failed: {e}"
+                    ))
+                })
+            }
+            Err(shamir_storage::error::DbError::NotFound(_)) => Ok(Vec::new()),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// P0-5b (#962): record `(old_id → new_id)` in the in-memory renaming map,
+    /// then persist the updated map durably. MUST be called BEFORE
+    /// `rename_definition` so a crash at any subsequent point is recoverable.
+    ///
+    /// In-memory update happens FIRST (so a concurrent observer immediately
+    /// sees the pair as in-flight), then the persist follows. If the persist
+    /// fails, the in-memory update is rolled back and the caller receives
+    /// `Err` — the rename MUST NOT proceed without a durable tombstone.
+    /// Mirrors #972's `add_to_dropping_sorted`.
+    pub(super) async fn add_to_renaming_sorted(&self, old_id: u64, new_id: u64) -> DbResult<()> {
+        {
+            let mut map = self.renaming_sorted.lock().unwrap();
+            map.insert(old_id, new_id);
+        }
+        let result = self.save_renaming_sorted().await;
+        if result.is_err() {
+            // Roll back the in-memory map so the state stays consistent.
+            let mut map = self.renaming_sorted.lock().unwrap();
+            map.remove(&old_id);
+        }
+        result
+    }
+
+    /// P0-5b (#962): clear `old_id` from the persisted tombstone, then from
+    /// the in-memory map. Persist-first ordering ensures the on-disk state is
+    /// always at least as advanced as the in-memory state: a crash between
+    /// persist and in-memory update leaves a stale in-memory entry that dies
+    /// with the process, while the on-disk tombstone is already correct.
+    ///
+    /// MUST be called AFTER the rekey completes (the moved postings must be
+    /// durable under `new_id` first). If the process crashes between the rekey
+    /// and this clear, recovery sees the tombstone and re-runs the (idempotent,
+    /// no-op-if-finished) rekey, then clears the tombstone. Mirrors #972's
+    /// `clear_from_dropping_sorted`.
+    pub(super) async fn clear_from_renaming_sorted(&self, old_id: u64) -> DbResult<()> {
+        // Compute the snapshot without the entry (do NOT modify in-memory yet).
+        let snapshot: Vec<(u64, u64)> = {
+            let map = self.renaming_sorted.lock().unwrap();
+            map.iter()
+                .filter(|(&o, _)| o != old_id)
+                .map(|(&o, &n)| (o, n))
+                .collect()
+        };
+        // Persist first.
+        let key = RecordId::system("sidx_ren").to_bytes();
+        let bytes = bincode::serialize(&snapshot)
+            .map_err(|e| shamir_storage::error::DbError::Codec(e.to_string()))?;
+        self.info_store.set(key.into(), Bytes::from(bytes)).await?;
+        // Only now update in-memory.
+        {
+            let mut map = self.renaming_sorted.lock().unwrap();
+            map.remove(&old_id);
+        }
+        Ok(())
+    }
+
+    /// P0-5b (#962): rekey all posting entries of a sorted index from
+    /// `old_id` to `new_id`. MOVED here from the engine crate's free function
+    /// `rekey_sorted_prefix` so the open-time recovery path can re-run it
+    /// idempotently (it now lives next to its `sweep_sorted_postings` sibling).
+    ///
+    /// Sorted-index physical key layout:
+    ///   `[SORTED_TAG: 1][name_interned BE: 8][encoded_value: var][record_id: 16]`
+    /// For each key found under the old prefix, bytes [1..9] are replaced with
+    /// `new_id.to_be_bytes()` (big-endian).
+    ///
+    /// # Concurrency / atomicity
+    ///
+    /// Settle re-scan loop: after each pass applies one `Store::transact` batch
+    /// (one mixed-op atomic unit — a crash/failure between a `set_many` +
+    /// `remove_many` pair was the pre-#616 bug), we re-scan the old-id prefix
+    /// and loop until a pass finds nothing to move. This is the accepted,
+    /// F-85/#913-documented way production callers tolerate
+    /// `supports_atomic_transact() == false`: a non-atomic backend's
+    /// partial-batch visibility is fine because the NEXT iteration picks up
+    /// whatever wasn't yet moved. A concurrent writer that lands an entry
+    /// under `old_id` mid-sweep (only possible in the brief window before the
+    /// `rename_definition` RCU swap publishes `new_id` to the write-hook) is
+    /// caught by the next settle pass. Idempotent: calling it again after the
+    /// rekey finished just finds nothing to move and returns `Ok(())`.
+    pub(super) async fn rekey_postings(&self, old_id: u64, new_id: u64) -> DbResult<()> {
+        let old_prefix = self.entry_prefix(old_id);
+        let new_id_bytes = new_id.to_be_bytes();
+
+        // Loop until a full scan of the old-id prefix finds no entries to move.
+        loop {
+            let stream = self
+                .info_store
+                .scan_prefix_stream(old_prefix.clone(), FULL_SCAN_BATCH);
+            futures::pin_mut!(stream);
+
+            // One mixed-op batch per pass — `Store::transact` commits the whole
+            // batch as one atomic unit (the pre-#616 two-call `set_many` +
+            // `remove_many` shape was NOT atomic).
+            let mut ops: Vec<KvOp> = Vec::new();
+            let mut moved_any = false;
+
+            while let Some(batch) = stream.next().await {
+                for (key, value) in batch? {
+                    if key.len() < 9 {
+                        continue; // malformed; skip
+                    }
+                    let mut new_key = key.to_vec();
+                    new_key[1..9].copy_from_slice(&new_id_bytes);
+                    ops.push(KvOp::Set(Bytes::from(new_key).into(), value));
+                    ops.push(KvOp::Remove(key));
+                    moved_any = true;
+                }
+            }
+
+            if !moved_any {
+                // No old-id entries found this pass — settle complete.
+                break;
+            }
+
+            self.info_store.transact(ops).await?;
+        }
+
+        Ok(())
+    }
+
+    /// P0-5b (#962): open-time recovery for RENAME INDEX operations
+    /// interrupted by a crash. Called from `SortedIndexManager::new` AFTER
+    /// definitions are loaded and AFTER `recover_in_progress_drops` runs (a
+    /// drop and a rename for the same name cannot both be in flight — the
+    /// engine's write barrier serializes DDL).
+    ///
+    /// # Crash-state matrix
+    ///
+    /// | crash point                                  | def under? | tombstone? | recovery action                         |
+    /// |----------------------------------------------|------------|------------|-----------------------------------------|
+    /// | after tombstone, before rename_definition    | old_id     | yes        | rename def, rekey (moves postings)      |
+    /// | after rename_definition, before/during rekey | new_id     | yes        | rekey (finishes moving remainder)       |
+    /// | after rekey, before tombstone clear          | new_id     | yes        | rekey (no-op), clear tombstone          |
+    ///
+    /// In every case recovery leaves the manager consistent: the definition is
+    /// under `new_id`, ALL postings are under `new_id`, and the tombstone is
+    /// cleared. The rekey is idempotent, so calling recovery twice (two
+    /// restart attempts) is a clean no-op on the second call.
+    pub(super) async fn recover_in_progress_renames(&self) -> DbResult<()> {
+        let renaming = self.load_renaming_sorted().await?;
+        if renaming.is_empty() {
+            return Ok(());
+        }
+
+        log::info!(
+            "P0-5b (#962): recovering {} in-progress sorted RENAME(s)",
+            renaming.len()
+        );
+
+        for &(old_id, new_id) in &renaming {
+            // If the definition is still under old_id, the crash happened
+            // before rename_definition's persist finalized — finish the def
+            // rename now. If it is already under new_id (or absent under
+            // old_id), `find_by_name_interned(old_id).is_none()` short-
+            // circuits and we skip straight to the (idempotent) rekey.
+            if self.find_by_name_interned(old_id).is_some() {
+                // rename_definition carries the in-memory mutation epoch and
+                // persists; if the def raced away between the check and the
+                // call (only under a violated write-barrier contract), treat
+                // its Err as non-fatal and let the rekey run regardless.
+                let _ = self.rename_definition(old_id, new_id).await;
+            }
+            // Always run the rekey (idempotent). Covers both the "rekey never
+            // ran" and "rekey ran partially" cases.
+            self.rekey_postings(old_id, new_id).await?;
+        }
+
+        // Clear the tombstone (write empty Vec; the load path treats empty-vec
+        // and NotFound identically — cheaper than a remove).
+        let empty = bincode::serialize(&Vec::<(u64, u64)>::new())
+            .map_err(|e| shamir_storage::error::DbError::Codec(e.to_string()))?;
+        let key = RecordId::system("sidx_ren").to_bytes();
+        self.info_store.set(key.into(), Bytes::from(empty)).await?;
+
+        log::info!(
+            "P0-5b (#962): recovery complete — {} sorted RENAME(s) finalized",
+            renaming.len()
+        );
+
+        Ok(())
+    }
+
+    /// P0-5b (#962): the FULL sorted-RENAME orchestration — definition swap +
+    /// physical posting rekey, wrapped in a durable "Renaming" tombstone so an
+    /// interrupted rekey is resumable on restart. The engine's `rename_index`
+    /// delegates its sorted branch to this method (mirroring how
+    /// `drop_sorted_index` delegates to `drop_index`).
+    ///
+    /// Sequence:
+    /// 1. Write a durable "Renaming" tombstone `(old_id → new_id)` — MUST
+    ///    succeed before anything mutates, so a crash at any later point is
+    ///    recoverable by `recover_in_progress_renames`.
+    /// 2. `rename_definition(old_id, new_id)` — swap the in-memory definition
+    ///    (RCU) + carry the mutations epoch + persist.
+    /// 3. `rekey_postings(old_id, new_id)` — settle-loop move of the physical
+    ///    postings to the new prefix.
+    /// 4. Clear the tombstone (persist-first).
+    ///
+    /// # Error / resume semantics
+    ///
+    /// If step 2 or 3 returns `Err`, the tombstone is LEFT IN PLACE and the
+    /// error propagates to the caller. The catalog may already believe the
+    /// rename succeeded (step 2 swapped + persisted), so a client RETRY of the
+    /// same command is expected to fail — but a restart runs
+    /// `recover_in_progress_renames`, which finishes the rekey (the whole
+    /// point of the tombstone). This matches #972's model: a crashed DDL op is
+    /// finished by restart-recovery, not by re-issuing the command.
+    pub async fn rename_index_sorted(&self, old_id: u64, new_id: u64) -> DbResult<()> {
+        // 1. Durable tombstone BEFORE the definition swap.
+        self.add_to_renaming_sorted(old_id, new_id).await?;
+
+        // 2. Swap + persist the definition (carries the mutations epoch too).
+        // If this fails AFTER the tombstone was written, the tombstone is left
+        // in place — recovery will reconcile on restart (it checks which id the
+        // definition is actually under before deciding to rename vs. just rekey).
+        self.rename_definition(old_id, new_id).await?;
+
+        // P0-5b (#962) test seam — park here (definition already swapped +
+        // persisted under new_id, postings NOT yet rekeyed) if a test
+        // installed the pause hook. This is the EXACT crash window the bug
+        // describes. NOT `#[cfg(test)]`-gated — cross-crate test consumer.
+        if let Some(hook) = self.rename_rekey_pause_hook.load_full() {
+            hook.wait_at_window().await;
+        }
+
+        // 3. Rekey the physical postings (settle loop).
+        self.rekey_postings(old_id, new_id).await?;
+
+        // 4. Clear the tombstone now that the rekey is durable.
+        self.clear_from_renaming_sorted(old_id).await?;
+
+        Ok(())
     }
 
     // ============================================================================

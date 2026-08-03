@@ -553,7 +553,7 @@ impl Store for MirroredStore {
     /// correctness DEPENDS on it should check the flag before assuming
     /// it. F-85 (#913): no production caller currently gates on the
     /// flag — every `transact` caller reachable through `MirroredStore`
-    /// (`rekey_sorted_prefix`, `apply_index_ops`,
+    /// (`SortedIndexManager::rekey_postings`, `apply_index_ops`,
     /// `apply_index_ops_at_commit`, base_index `apply_ops`) writes
     /// ephemeral posting keys and tolerates the transient
     /// partial-visibility window via a self-healing settle/re-scan

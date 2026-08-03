@@ -224,11 +224,17 @@
 //! lock are held across the ENTIRE drop→create to prevent any writer from
 //! inserting a duplicate in the gap. F-70 (#897) fixed the drain/lock order.
 //!
-//! ## sorted — `rename_definition` (rcu swap FIRST, rekey SECOND)
-//! The in-memory definition is re-keyed atomically (RCU); then
-//! `rekey_sorted_prefix` moves old-id postings to new-id with a settle
-//! re-scan loop that catches a concurrent write landing under the old id
-//! during the brief window.
+//! ## sorted — `rename_index_sorted` (tombstone → rcu swap → rekey → clear)
+//! The engine's `rename_index` delegates its sorted branch to
+//! `SortedIndexManager::rename_index_sorted`, which writes a durable
+//! "Renaming" tombstone (`system:sidx_ren`, recording `old_id → new_id`)
+//! BEFORE swapping the definition, then atomically re-points the in-memory
+//! definition (RCU) + persists, then `rekey_postings` moves old-id postings
+//! to new-id with a settle re-scan loop (catching a concurrent write landing
+//! under the old id during the brief window), then clears the tombstone. The
+//! tombstone makes an interrupted rekey RESUMABLE on restart: `new` calls
+//! `recover_in_progress_renames`, which re-runs the idempotent settle loop for
+//! each recorded pair and clears the tombstone (P0-5b / #962).
 //!
 //! ## index2 — `rename_entry` (by_name mapping + authoritative name-slot update)
 //! Physical postings are keyed by the compact `u32` id (NOT `name_interned`),
