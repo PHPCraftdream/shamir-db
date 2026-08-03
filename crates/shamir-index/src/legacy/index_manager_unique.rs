@@ -170,14 +170,36 @@ impl IndexManager {
     async fn check_unique_key(&self, index_key: &Bytes) -> DbResult<Option<RecordId>> {
         match self.info_store.get(index_key.clone().into()).await {
             Ok(bytes) => {
-                if bytes.len() == 16 {
-                    let arr: [u8; 16] = bytes.as_ref().try_into().unwrap();
-                    Ok(Some(RecordId(arr)))
-                } else {
-                    // Коррупция данных — считаем что занято
-                    log::warn!("Invalid unique index value length: {}", bytes.len());
-                    Ok(None)
-                }
+                // P0-4 (#960): a unique-index posting MUST store exactly a
+                // 16-byte `RecordId`. Any other length is NECESSARILY genuine
+                // corruption of the posting value. Fail CLOSED by surfacing a
+                // typed `Codec` error, mirroring the F-83 (#911) corruption
+                // policy for `system:indexes` / `system:indexes_unique` blobs
+                // in `IndexManager::new`.
+                //
+                // The prior code logged a warning and returned `Ok(None)` —
+                // the SAME value as the genuine not-found arm below, which
+                // callers (`validate_unique_for_create/update`,
+                // `lookup_by_unique_index`) treat as "key is free". A
+                // corrupted unique posting was therefore silently treated as
+                // an EMPTY, insertable key, the opposite of this codebase's
+                // fail-closed policy: a subsequent write could pass
+                // unique-constraint validation and commit a duplicate on top
+                // of corrupted storage.
+                //
+                // The `NotFound` arm below remains the ONLY legitimate "key is
+                // free" path (a key that was never written). The `try_into`
+                // maps any length other than 16 (including 0, 15, 17, ...) to
+                // the typed error, so there is no infallible `unwrap()` left
+                // that would silently break if this path is ever reworked.
+                let arr: [u8; 16] = bytes.as_ref().try_into().map_err(|_| {
+                    shamir_storage::error::DbError::Codec(format!(
+                        "unique index posting corrupt: expected 16-byte RecordId, \
+                         got {} bytes (genuine corruption — fail-closed)",
+                        bytes.len()
+                    ))
+                })?;
+                Ok(Some(RecordId(arr)))
             }
             Err(shamir_storage::error::DbError::NotFound(_)) => Ok(None),
             Err(e) => Err(e),

@@ -1,7 +1,9 @@
 use super::helpers::{create_manager, create_test_value};
 use crate::legacy::index_definition::IndexDefinition;
 use crate::legacy::index_info_item::IndexInfoItem;
+use crate::legacy::index_keys::build_index_key;
 use crate::legacy::index_manager::IndexManager;
+use bytes::Bytes;
 use shamir_storage::storage_in_memory::InMemoryStore;
 use shamir_storage::types::Store;
 use shamir_types::types::record_id::RecordId;
@@ -890,4 +892,260 @@ async fn unique_index_collision_in_plan_phase() {
         }
         other => panic!("expected DuplicateKey, got {:?}", other),
     }
+}
+
+// ============================================================================
+// P0-4 (#960) — corrupt unique posting must fail CLOSED (Err), not Ok(None)
+// ============================================================================
+//
+// A unique-index posting value MUST be exactly a 16-byte RecordId. Any other
+// length is genuine corruption. The fix changes `check_unique_key`'s prior
+// behavior (which logged a warning and returned `Ok(None)` — the SAME signal
+// callers use for "key is free") to surface a typed `DbError::Codec`, so a
+// write that would have relied on this check aborts instead of silently
+// committing a duplicate on top of corrupted storage. These tests prove:
+//   * every malformed length (0/15/17/64) surfaces an error via the lookup
+//     path (`lookup_by_unique_index` → `check_unique_constraint` →
+//     `check_unique_key`);
+//   * the genuine not-found path (key never written) is UNCHANGED and still
+//     returns `Ok(None)`;
+//   * a well-formed 16-byte posting still decodes to `Ok(Some(RecordId))`;
+//   * `validate_unique_for_create` / `validate_unique_for_update` against a
+//     corrupted posting ABORT (Err), not silently succeed.
+
+/// Write `corrupt_value` into the info_store at the exact 25-byte unique-index
+/// key that `check_unique_key` reads for `(name_interned, lookup_values)`.
+/// Simulates a torn/corrupt posting left behind by a crash or a buggy writer.
+async fn seed_corrupt_unique_posting(
+    info_store: &Arc<dyn Store>,
+    name_interned: u64,
+    lookup_values: &[InnerValue],
+    corrupt_value: Bytes,
+) {
+    let index_key = build_index_key(true, name_interned, lookup_values).to_bytes();
+    info_store
+        .set(index_key.into(), corrupt_value)
+        .await
+        .unwrap();
+}
+
+/// Shared harness: build a manager with one unique index on field 1 and return
+/// its info_store handle (for seeding corruption) plus the manager.
+async fn manager_with_unique_index() -> (Arc<dyn Store>, IndexManager) {
+    let (_, info_store, manager) = create_manager();
+    let index_def = IndexDefinition::new(1001, vec![IndexInfoItem::new(vec![1])]);
+    manager.create_unique_index(index_def).await.unwrap();
+    (info_store, manager)
+}
+
+#[tokio::test]
+async fn corrupt_unique_posting_length_0_errors() {
+    let (info_store, manager) = manager_with_unique_index().await;
+    seed_corrupt_unique_posting(
+        &info_store,
+        1001,
+        &[InnerValue::Str("Alice".to_string())],
+        Bytes::new(),
+    )
+    .await;
+
+    let result = manager
+        .lookup_by_unique_index(1001, &[InnerValue::Str("Alice".to_string())])
+        .await;
+    assert!(result.is_err(), "0-byte posting must error, not Ok(None)");
+    assert!(
+        matches!(
+            result.as_ref().unwrap_err(),
+            shamir_storage::error::DbError::Codec(_)
+        ),
+        "expected Codec corruption error, got {:?}",
+        result
+    );
+}
+
+#[tokio::test]
+async fn corrupt_unique_posting_length_15_errors() {
+    let (info_store, manager) = manager_with_unique_index().await;
+    seed_corrupt_unique_posting(
+        &info_store,
+        1001,
+        &[InnerValue::Str("Alice".to_string())],
+        Bytes::from_static(&[0xAB; 15]),
+    )
+    .await;
+
+    let result = manager
+        .lookup_by_unique_index(1001, &[InnerValue::Str("Alice".to_string())])
+        .await;
+    assert!(result.is_err(), "15-byte posting must error, not Ok(None)");
+    assert!(
+        matches!(
+            result.as_ref().unwrap_err(),
+            shamir_storage::error::DbError::Codec(_)
+        ),
+        "expected Codec corruption error, got {:?}",
+        result
+    );
+}
+
+#[tokio::test]
+async fn corrupt_unique_posting_length_17_errors() {
+    let (info_store, manager) = manager_with_unique_index().await;
+    seed_corrupt_unique_posting(
+        &info_store,
+        1001,
+        &[InnerValue::Str("Alice".to_string())],
+        Bytes::from_static(&[0xCD; 17]),
+    )
+    .await;
+
+    let result = manager
+        .lookup_by_unique_index(1001, &[InnerValue::Str("Alice".to_string())])
+        .await;
+    assert!(result.is_err(), "17-byte posting must error, not Ok(None)");
+    assert!(
+        matches!(
+            result.as_ref().unwrap_err(),
+            shamir_storage::error::DbError::Codec(_)
+        ),
+        "expected Codec corruption error, got {:?}",
+        result
+    );
+}
+
+#[tokio::test]
+async fn corrupt_unique_posting_length_64_errors() {
+    let (info_store, manager) = manager_with_unique_index().await;
+    seed_corrupt_unique_posting(
+        &info_store,
+        1001,
+        &[InnerValue::Str("Alice".to_string())],
+        Bytes::from_static(&[0xEF; 64]),
+    )
+    .await;
+
+    let result = manager
+        .lookup_by_unique_index(1001, &[InnerValue::Str("Alice".to_string())])
+        .await;
+    assert!(result.is_err(), "64-byte posting must error, not Ok(None)");
+    assert!(
+        matches!(
+            result.as_ref().unwrap_err(),
+            shamir_storage::error::DbError::Codec(_)
+        ),
+        "expected Codec corruption error, got {:?}",
+        result
+    );
+}
+
+#[tokio::test]
+async fn genuine_not_found_unique_posting_returns_ok_none() {
+    // Regression guard: the genuine "key is free" path (key NEVER written)
+    // must remain Ok(None) — the corruption fix must NOT bleed into the
+    // legitimate NotFound arm.
+    let (_, manager) = manager_with_unique_index().await;
+
+    let result = manager
+        .lookup_by_unique_index(1001, &[InnerValue::Str("NeverWritten".to_string())])
+        .await;
+    assert!(
+        result.is_ok(),
+        "genuine NotFound must remain Ok, got {:?}",
+        result
+    );
+    assert!(
+        result.unwrap().is_none(),
+        "a never-written key must resolve to None (free)"
+    );
+}
+
+#[tokio::test]
+async fn valid_16_byte_unique_posting_returns_ok_some() {
+    // Positive control: a well-formed 16-byte RecordId posting decodes
+    // correctly — the corruption fix did not break the happy path.
+    let (info_store, manager) = manager_with_unique_index().await;
+    let rid = RecordId::new();
+    seed_corrupt_unique_posting(
+        &info_store,
+        1001,
+        &[InnerValue::Str("Alice".to_string())],
+        Bytes::copy_from_slice(rid.as_bytes()),
+    )
+    .await;
+
+    let result = manager
+        .lookup_by_unique_index(1001, &[InnerValue::Str("Alice".to_string())])
+        .await
+        .unwrap();
+    assert_eq!(
+        result,
+        Some(rid),
+        "16-byte posting must decode to its RecordId"
+    );
+}
+
+#[tokio::test]
+async fn corrupt_unique_posting_aborts_validate_create() {
+    // A create against a corrupted unique posting must ABORT (Err), not
+    // silently pass validation and commit a duplicate on top of corruption.
+    let (info_store, manager) = manager_with_unique_index().await;
+    seed_corrupt_unique_posting(
+        &info_store,
+        1001,
+        &[InnerValue::Str("Alice".to_string())],
+        Bytes::from_static(&[0x99; 12]),
+    )
+    .await;
+
+    let value = create_test_value(&[(1, InnerValue::Str("Alice".to_string()))]);
+    let result = manager.validate_unique_for_create(&value).await;
+    assert!(
+        result.is_err(),
+        "create validation against a corrupt posting must abort, got {:?}",
+        result
+    );
+    assert!(
+        matches!(
+            result.unwrap_err(),
+            shamir_storage::error::DbError::Codec(_)
+        ),
+        "expected Codec corruption error to propagate to the create path"
+    );
+}
+
+#[tokio::test]
+async fn corrupt_unique_posting_aborts_validate_update() {
+    // An update whose NEW value collides with a corrupted posting must ABORT
+    // (Err). The update path (`validate_unique_for_update`) reads the same
+    // posting via `check_unique_key`, so corruption must propagate there too.
+    let (info_store, manager) = manager_with_unique_index().await;
+    seed_corrupt_unique_posting(
+        &info_store,
+        1001,
+        &[InnerValue::Str("Alice".to_string())],
+        Bytes::from_static(&[0x77; 20]),
+    )
+    .await;
+
+    let record_id = RecordId::new();
+    // The updating record currently holds a DIFFERENT value ("Bob"), and wants
+    // to move to the corrupted value ("Alice"). The check_unique_key read of
+    // "Alice" must surface the corruption error.
+    let old_value = create_test_value(&[(1, InnerValue::Str("Bob".to_string()))]);
+    let new_value = create_test_value(&[(1, InnerValue::Str("Alice".to_string()))]);
+    let result = manager
+        .validate_unique_for_update(&record_id, &old_value, &new_value)
+        .await;
+    assert!(
+        result.is_err(),
+        "update validation against a corrupt posting must abort, got {:?}",
+        result
+    );
+    assert!(
+        matches!(
+            result.unwrap_err(),
+            shamir_storage::error::DbError::Codec(_)
+        ),
+        "expected Codec corruption error to propagate to the update path"
+    );
 }
