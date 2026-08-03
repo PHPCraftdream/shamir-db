@@ -15,7 +15,7 @@
 
 'use strict';
 
-const { ddl } = require('@shamir/client');
+const { ddl, Query, write, filter } = require('@shamir/client');
 
 module.exports = async function ({ client, fixtures, test, assert, assertEq }) {
   // ─────────────────────────────────────────────────────────────────────
@@ -38,19 +38,16 @@ module.exports = async function ({ client, fixtures, test, assert, assertEq }) {
     await client.execute(db, {
       id: 'ins',
       queries: {
-        w1: { insert_into: 'posts', values: [{ body: 'hello rust world' }] },
-        w2: { insert_into: 'posts', values: [{ body: 'rust is great' }] },
-        w3: { insert_into: 'posts', values: [{ body: 'hello python' }] },
+        w1: write.insert('posts', { body: 'hello rust world' }),
+        w2: write.insert('posts', { body: 'rust is great' }),
+        w3: write.insert('posts', { body: 'hello python' }),
       },
     });
 
     const resp = await client.execute(db, {
       id: 'q',
       queries: {
-        r: {
-          from: 'posts',
-          where: { op: 'fts', field: ['body'], query: 'hello world', mode: 'and' },
-        },
+        r: Query.from('posts').where(filter.fts('body', 'hello world', 'and')).build(),
       },
     });
     const recs = resp.results.r.records;
@@ -71,19 +68,16 @@ module.exports = async function ({ client, fixtures, test, assert, assertEq }) {
     await client.execute(db, {
       id: 'ins',
       queries: {
-        w1: { insert_into: 'posts', values: [{ body: 'apple orange' }] },
-        w2: { insert_into: 'posts', values: [{ body: 'banana pear' }] },
-        w3: { insert_into: 'posts', values: [{ body: 'cherry grape' }] },
+        w1: write.insert('posts', { body: 'apple orange' }),
+        w2: write.insert('posts', { body: 'banana pear' }),
+        w3: write.insert('posts', { body: 'cherry grape' }),
       },
     });
 
     const resp = await client.execute(db, {
       id: 'q',
       queries: {
-        r: {
-          from: 'posts',
-          where: { op: 'fts', field: ['body'], query: 'apple banana', mode: 'or' },
-        },
+        r: Query.from('posts').where(filter.fts('body', 'apple banana', 'or')).build(),
       },
     });
     assertEq(resp.results.r.records.length, 2);
@@ -99,15 +93,12 @@ module.exports = async function ({ client, fixtures, test, assert, assertEq }) {
     });
     await client.execute(db, {
       id: 'ins',
-      queries: { w: { insert_into: 'posts', values: [{ body: 'HELLO World' }] } },
+      queries: { w: write.insert('posts', { body: 'HELLO World' }) },
     });
     const resp = await client.execute(db, {
       id: 'q',
       queries: {
-        r: {
-          from: 'posts',
-          where: { op: 'fts', field: ['body'], query: 'hello WORLD', mode: 'and' },
-        },
+        r: Query.from('posts').where(filter.fts('body', 'hello WORLD', 'and')).build(),
       },
     });
     assertEq(resp.results.r.records.length, 1);
@@ -118,17 +109,14 @@ module.exports = async function ({ client, fixtures, test, assert, assertEq }) {
     await client.execute(db, {
       id: 'ins',
       queries: {
-        w1: { insert_into: 'posts', values: [{ body: 'hello world' }] },
-        w2: { insert_into: 'posts', values: [{ body: 'no match' }] },
+        w1: write.insert('posts', { body: 'hello world' }),
+        w2: write.insert('posts', { body: 'no match' }),
       },
     });
     const resp = await client.execute(db, {
       id: 'q',
       queries: {
-        r: {
-          from: 'posts',
-          where: { op: 'fts', field: ['body'], query: 'hello', mode: 'and' },
-        },
+        r: Query.from('posts').where(filter.fts('body', 'hello', 'and')).build(),
       },
     });
     assertEq(resp.results.r.records.length, 1);
@@ -154,24 +142,17 @@ module.exports = async function ({ client, fixtures, test, assert, assertEq }) {
     await client.execute(db, {
       id: 'ins',
       queries: {
-        w1: { insert_into: 'users', values: [{ email: 'Alice@FOO.com', name: 'alice' }] },
-        w2: { insert_into: 'users', values: [{ email: 'BOB@bar.org', name: 'bob' }] },
+        w1: write.insert('users', { email: 'Alice@FOO.com', name: 'alice' }),
+        w2: write.insert('users', { email: 'BOB@bar.org', name: 'bob' }),
       },
     });
 
     const resp = await client.execute(db, {
       id: 'q',
       queries: {
-        r: {
-          from: 'users',
-          where: {
-            op: 'computed',
-            expr_op: 'lower',
-            field: ['email'],
-            cmp: 'eq',
-            value: 'alice@foo.com',
-          },
-        },
+        r: Query.from('users')
+          .where(filter.computed('lower', 'email', 'eq', 'alice@foo.com'))
+          .build(),
       },
     });
     const recs = resp.results.r.records;
@@ -194,22 +175,15 @@ module.exports = async function ({ client, fixtures, test, assert, assertEq }) {
     await client.execute(db, {
       id: 'ins',
       queries: {
-        w: { insert_into: 't', values: [{ code: 'abc123', tag: 'first' }] },
+        w: write.insert('t', { code: 'abc123', tag: 'first' }),
       },
     });
     const resp = await client.execute(db, {
       id: 'q',
       queries: {
-        r: {
-          from: 't',
-          where: {
-            op: 'computed',
-            expr_op: 'upper',
-            field: ['code'],
-            cmp: 'eq',
-            value: 'ABC123',
-          },
-        },
+        r: Query.from('t')
+          .where(filter.computed('upper', 'code', 'eq', 'ABC123'))
+          .build(),
       },
     });
     assertEq(resp.results.r.records.length, 1);
@@ -237,25 +211,19 @@ module.exports = async function ({ client, fixtures, test, assert, assertEq }) {
     await client.execute(db, {
       id: 'ins',
       queries: {
-        w1: { insert_into: 'docs', values: [{ embedding: [1.0, 0.0, 0.0], label: 'x' }] },
-        w2: { insert_into: 'docs', values: [{ embedding: [0.0, 1.0, 0.0], label: 'y' }] },
-        w3: { insert_into: 'docs', values: [{ embedding: [0.95, 0.1, 0.0], label: 'x_near' }] },
-        w4: { insert_into: 'docs', values: [{ embedding: [0.0, 0.0, 1.0], label: 'z' }] },
+        w1: write.insert('docs', { embedding: [1.0, 0.0, 0.0], label: 'x' }),
+        w2: write.insert('docs', { embedding: [0.0, 1.0, 0.0], label: 'y' }),
+        w3: write.insert('docs', { embedding: [0.95, 0.1, 0.0], label: 'x_near' }),
+        w4: write.insert('docs', { embedding: [0.0, 0.0, 1.0], label: 'z' }),
       },
     });
 
     const resp = await client.execute(db, {
       id: 'q',
       queries: {
-        r: {
-          from: 'docs',
-          where: {
-            op: 'vector_similarity',
-            field: ['embedding'],
-            query: [1.0, 0.0, 0.0],
-            k: 2,
-          },
-        },
+        r: Query.from('docs')
+          .where(filter.vectorSimilarity('embedding', [1.0, 0.0, 0.0], 2))
+          .build(),
       },
     });
     const recs = resp.results.r.records;
@@ -283,23 +251,15 @@ module.exports = async function ({ client, fixtures, test, assert, assertEq }) {
     await client.execute(db, {
       id: 'ins',
       queries: {
-        w1: { insert_into: 'docs', values: [{ e: [0.0, 0.0], tag: 'origin' }] },
-        w2: { insert_into: 'docs', values: [{ e: [3.0, 4.0], tag: 'far' }] },
-        w3: { insert_into: 'docs', values: [{ e: [0.5, 0.5], tag: 'close' }] },
+        w1: write.insert('docs', { e: [0.0, 0.0], tag: 'origin' }),
+        w2: write.insert('docs', { e: [3.0, 4.0], tag: 'far' }),
+        w3: write.insert('docs', { e: [0.5, 0.5], tag: 'close' }),
       },
     });
     const resp = await client.execute(db, {
       id: 'q',
       queries: {
-        r: {
-          from: 'docs',
-          where: {
-            op: 'vector_similarity',
-            field: ['e'],
-            query: [0.0, 0.0],
-            k: 2,
-          },
-        },
+        r: Query.from('docs').where(filter.vectorSimilarity('e', [0.0, 0.0], 2)).build(),
       },
     });
     const labels = resp.results.r.records.map((r) => r.tag);
