@@ -6,6 +6,8 @@
 
 'use strict';
 
+const { Query, write } = require('@shamir/client');
+
 module.exports = async function ({ client, fixtures, test, assert, assertEq }) {
   let db;
 
@@ -32,9 +34,9 @@ module.exports = async function ({ client, fixtures, test, assert, assertEq }) {
     const resp = await client.execute(db, {
       id: 'multi-read',
       queries: {
-        u: { from: 'users' },
-        o: { from: 'orders' },
-        p: { from: 'products' },
+        u: Query.from('users').build(),
+        o: Query.from('orders').build(),
+        p: Query.from('products').build(),
       },
     });
     assertEq(Object.keys(resp.results).length, 3);
@@ -47,9 +49,9 @@ module.exports = async function ({ client, fixtures, test, assert, assertEq }) {
     const resp = await client.execute(db, {
       id: 'stages',
       queries: {
-        u: { from: 'users' },
-        o: { from: 'orders' },
-        p: { from: 'products' },
+        u: Query.from('users').build(),
+        o: Query.from('orders').build(),
+        p: Query.from('products').build(),
       },
     });
     const plan = resp.execution_plan;
@@ -64,11 +66,8 @@ module.exports = async function ({ client, fixtures, test, assert, assertEq }) {
     const resp = await client.execute(db, {
       id: 'mixed',
       queries: {
-        ins: {
-          insert_into: 'products',
-          values: [{ id: 'p5', name: 'Nut', price: 0.3 }],
-        },
-        rd: { from: 'users' },
+        ins: write.insert('products', { id: 'p5', name: 'Nut', price: 0.3 }),
+        rd: Query.from('users').build(),
       },
     });
     assert(resp.results.ins, 'ins result present');
@@ -80,8 +79,8 @@ module.exports = async function ({ client, fixtures, test, assert, assertEq }) {
     const resp = await client.execute(db, {
       id: 'no-return',
       queries: {
-        s: { set: 'users', key: { id: 'u3' }, value: { id: 'u3', name: 'Carol' } },
-        keep: { from: 'users' },
+        s: write.upsert('users', { id: 'u3' }, { id: 'u3', name: 'Carol' }),
+        keep: Query.from('users').build(),
       },
       return_all: false,
     });
