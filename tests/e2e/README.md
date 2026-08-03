@@ -20,19 +20,25 @@ npm install
 npm run build       # builds shamir-server release + .node binding
 ```
 
-`npm install` also builds `@shamir/client`'s `dist/` (a gitignored
-artifact, `tsc -p tsconfig.build.json`) via that package's own `prepare`
-script, which npm runs automatically for a linked `file:` dependency —
-so a fresh clone doesn't hit `Cannot find module '.../shamir-client-ts/dist/index.js'`.
-
 `npm run build` runs:
 
-1. `cargo build --release -p shamir-server` — produces `target/release/shamir-server[.exe]`
-2. `napi build --platform --release` — produces `crates/shamir-client-node/shamir-client.<triple>.node`
+1. `cd crates/shamir-client-ts && npm install && npm run build` —
+   produces `crates/shamir-client-ts/dist/` (a gitignored artifact,
+   `tsc -p tsconfig.build.json`). `@shamir/client`'s own `devDependencies`
+   (including `typescript`) are never installed by `tests/e2e`'s own
+   `npm install` — npm does not install a `file:`-linked package's
+   `devDependencies` — so this step's own `npm install` (inside
+   `crates/shamir-client-ts`) is what makes `tsc` resolvable. Without it,
+   a fresh clone hits `Cannot find module '.../shamir-client-ts/dist/index.js'`.
+2. `cargo build --release -p shamir-server` — produces `target/release/shamir-server[.exe]`
+3. `napi build --platform --release` — produces `crates/shamir-client-node/shamir-client.<triple>.node`
 
-Both native bindings (`shamir-client`, `@shamir/client`) are published
-locally via `file:` references in `package.json`, so `npm install`
-symlinks them directly.
+`shamir-client` (the napi binding) and `@shamir/client` (a pure-TypeScript
+package, no native code) are both published locally via `file:`
+references in `package.json`, so `tests/e2e`'s own `npm install` symlinks
+both directly — but only `shamir-client`'s native binary and
+`@shamir/client`'s `dist/` need a build step first; the `file:` symlink
+alone isn't enough for either.
 
 ## Run
 
