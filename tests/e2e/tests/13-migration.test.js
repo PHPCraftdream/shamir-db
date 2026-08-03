@@ -8,6 +8,7 @@
 'use strict';
 
 const hmac = require('../helpers/hmac');
+const { Query, write, ddl } = require('@shamir/client');
 
 module.exports = async function ({ client, fixtures, test, assert, assertEq, assertThrows }) {
 
@@ -17,6 +18,9 @@ module.exports = async function ({ client, fixtures, test, assert, assertEq, ass
 
   test('start_migration without hmac → hmac_required', async () => {
     const db = await fixtures.setupDb(client, 'mig_no_hmac', ['users']);
+    // Deliberately malformed (no `hmac` field) to test server-side rejection —
+    // a builder only ever emits valid, correctly-signed ops, so this negative
+    // case must stay hand-rolled (mirrors 12-hmac-gate.test.js's precedent).
     await assertThrows(
       () =>
         client.execute(db, {
@@ -37,6 +41,9 @@ module.exports = async function ({ client, fixtures, test, assert, assertEq, ass
 
   test('start_migration with wrong hmac → hmac_mismatch', async () => {
     const db = await fixtures.setupDb(client, 'mig_bad_hmac', ['users']);
+    // Deliberately malformed (garbage `hmac` field) to test server-side
+    // rejection — a builder only ever emits a correctly-signed tag, so this
+    // negative case must stay hand-rolled (mirrors 12-hmac-gate.test.js).
     await assertThrows(
       () =>
         client.execute(db, {
@@ -78,9 +85,9 @@ module.exports = async function ({ client, fixtures, test, assert, assertEq, ass
     await client.execute(db, {
       id: 0,
       queries: {
-        s1: { set: 'items', key: { id: 1 }, value: { id: 1, name: 'apple' } },
-        s2: { set: 'items', key: { id: 2 }, value: { id: 2, name: 'banana' } },
-        s3: { set: 'items', key: { id: 3 }, value: { id: 3, name: 'cherry' } },
+        s1: write.upsert('items', { id: 1 }, { id: 1, name: 'apple' }),
+        s2: write.upsert('items', { id: 2 }, { id: 2, name: 'banana' }),
+        s3: write.upsert('items', { id: 3 }, { id: 3, name: 'cherry' }),
       },
     });
 
@@ -97,7 +104,7 @@ module.exports = async function ({ client, fixtures, test, assert, assertEq, ass
     // Check status
     const statusResp = await client.execute(db, {
       id: 2,
-      queries: { s: { migration_status: migId } },
+      queries: { s: ddl.migrationStatus(migId) },
     });
     assertEq(statusResp.results.s.records[0].phase, 'cutover_ready');
     assertEq(statusResp.results.s.records[0].records_copied, 3);
@@ -115,7 +122,7 @@ module.exports = async function ({ client, fixtures, test, assert, assertEq, ass
     // Read from destination repo
     const readResp = await client.execute(db, {
       id: 4,
-      queries: { r: { from: ['archive', 'items'] } },
+      queries: { r: Query.withRepo('archive', 'items').build() },
     });
     assertEq(readResp.results.r.records.length, 3);
   });
@@ -129,7 +136,7 @@ module.exports = async function ({ client, fixtures, test, assert, assertEq, ass
 
     await client.execute(db, {
       id: 0,
-      queries: { s: { set: 'items', key: { id: 1 }, value: { id: 1 } } },
+      queries: { s: write.upsert('items', { id: 1 }, { id: 1 }) },
     });
 
     const startOp = hmac.start_migration_op(client, db, 'main', 'items', 'rb_dst', 'in_memory');
@@ -149,7 +156,7 @@ module.exports = async function ({ client, fixtures, test, assert, assertEq, ass
 
     // Status should fail — migration removed
     await assertThrows(
-      () => client.execute(db, { id: 3, queries: { s: { migration_status: migId } } }),
+      () => client.execute(db, { id: 3, queries: { s: ddl.migrationStatus(migId) } }),
       (e) => /not found/.test(e.message || ''),
       'status of rolled-back migration should fail'
     );
@@ -176,7 +183,7 @@ module.exports = async function ({ client, fixtures, test, assert, assertEq, ass
   test('migration_status of unknown ID → error', async () => {
     const db = await fixtures.setupDb(client, 'mig_404', []);
     await assertThrows(
-      () => client.execute(db, { id: 1, queries: { s: { migration_status: 'nonexistent' } } }),
+      () => client.execute(db, { id: 1, queries: { s: ddl.migrationStatus('nonexistent') } }),
       (e) => /not found/.test(e.message || ''),
       'status of nonexistent migration should fail'
     );
