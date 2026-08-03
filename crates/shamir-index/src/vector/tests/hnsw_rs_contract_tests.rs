@@ -299,10 +299,18 @@ fn parallel_insert_surfaces_all_ids_and_matches_bruteforce_top1() {
     // observed 80% is a huge absolute margin; 20 correlated queries against
     // ONE graph build is a single heavy-tailed trial, where a build one
     // notch worse than the CI-observed 16/20 fails again at 15/20 too).
-    // 200 queries against the same graph build cuts the statistic's
-    // variance ~sqrt(10)x for negligible added runtime (querying is O(log n)
-    // per call, not O(n)) and gives the 75% floor real headroom rather than
-    // one query's worth.
+    // 200 queries against the same graph build cuts the *within-build*
+    // sampling noise of the recall proportion ~10x in variance (~sqrt(10)x
+    // in standard deviation) for negligible added runtime (0.55-0.80s
+    // locally across repeated runs -- the O(n) brute-force scan per query
+    // dominates cost, not the O(log n) ANN search, but 200x400 comparisons
+    // is still cheap). This does NOT address the underlying build-to-build
+    // topology variance from the unseedable RNG + rayon ordering -- a
+    // genuinely poor graph build can still fail this assertion regardless
+    // of query count. What it buys is real headroom for the realistic
+    // "mostly-good build, occasional bad query" flake regime instead of
+    // one query's worth of margin against a repeat of the exact
+    // CI-observed build quality.
     //
     // Root cause (confirmed by reading hnsw_rs 0.3.4's source directly,
     // `hnsw_rs-0.3.4/src/hnsw.rs`): `LayerGenerator::new` seeds via
