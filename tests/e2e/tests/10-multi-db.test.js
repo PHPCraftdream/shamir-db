@@ -4,6 +4,7 @@
 
 'use strict';
 
+const { Query } = require('@shamir/client');
 const hmac = require('../helpers/hmac');
 
 module.exports = async function ({ client, fixtures, test, assertEq, assert }) {
@@ -32,7 +33,7 @@ module.exports = async function ({ client, fixtures, test, assertEq, assert }) {
   test('A sees only A records', async () => {
     const resp = await client.execute(dbA, {
       id: 'a-read',
-      queries: { all: { from: 't' } },
+      queries: { all: Query.from('t').build() },
     });
     const recs = resp.results.all.records;
     assertEq(recs.length, 2);
@@ -42,7 +43,7 @@ module.exports = async function ({ client, fixtures, test, assertEq, assert }) {
   test('B sees only B records', async () => {
     const resp = await client.execute(dbB, {
       id: 'b-read',
-      queries: { all: { from: 't' } },
+      queries: { all: Query.from('t').build() },
     });
     const recs = resp.results.all.records;
     assertEq(recs.length, 1);
@@ -61,7 +62,7 @@ module.exports = async function ({ client, fixtures, test, assertEq, assert }) {
     });
     const resp = await client.execute(dbB, {
       id: 'b-still',
-      queries: { all: { from: 't' } },
+      queries: { all: Query.from('t').build() },
     });
     assertEq(resp.results.all.records.length, 1);
   });
