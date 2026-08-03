@@ -911,6 +911,53 @@ describe.skipIf(!SERVER_AVAILABLE)(
         expect((e as Error).message).toMatch(/access_denied/);
       }
     });
+
+    // ════════════════════════════════════════════════════════════════════
+    //  A12/A13 — setReplicator round-trip against a real server (#931)
+    // ════════════════════════════════════════════════════════════════════
+    //
+    // Unlike setSuperuser (exercised inline in A8), setReplicator previously
+    // had ONLY unit coverage (byte-exact HMAC canonical-input verification
+    // in core/__tests__/hmac.test.ts, wire-shape checks in
+    // core/builders/__tests__/admin.test.ts) -- nothing proved the HMAC tag
+    // this client computes is actually ACCEPTED by a real server, or that
+    // the `replicator_set` response round-trips correctly over the real
+    // TLS+WS wire from this client's own transport (the napi client's
+    // equivalent coverage in tests/e2e/tests/16-replication.test.js is a
+    // DIFFERENT client implementation).
+    //
+    // Verifying that a granted `replicator` role actually takes effect
+    // (ReplHello/ReplPull, as 16-replication.test.js does) is NOT reachable
+    // from this client: shamir-client-ts has no `.repl()` binary-protocol
+    // method -- only the napi `shamir-client` binding exposes that. This
+    // client's own `replication.ts` builders are a different concept
+    // (publication/subscription BatchOps), not the ReplHello/ReplPull
+    // pull-API. So these tests cover what IS reachable from this client:
+    // the HMAC-gated wire round-trip and the permission gate.
+
+    it('A12: setReplicator round-trip -- grant, revoke, echoed correctly', async () => {
+      const replCandidate = `perm_repl_${process.pid}`;
+      const replCandidatePw = 'replicator candidate password for test';
+      await adminClient!.createScramUser(replCandidate, replCandidatePw, []);
+
+      const granted = await adminClient!.setReplicator(replCandidate, true);
+      expect(granted.user).toBe(replCandidate);
+      expect(granted.on).toBe(true);
+
+      const revoked = await adminClient!.setReplicator(replCandidate, false);
+      expect(revoked.user).toBe(replCandidate);
+      expect(revoked.on).toBe(false);
+    });
+
+    it('A13: setReplicator denied for a non-superuser session', async () => {
+      try {
+        await userAClient!.setReplicator(USER_A, true);
+        expect.unreachable('non-superuser must be denied set_replicator');
+      } catch (e: unknown) {
+        const msg = (e as Error).message;
+        expect(msg).toMatch(/permission_denied/);
+      }
+    });
   },
 );
 
