@@ -36,7 +36,7 @@ import {
 } from './protocol.js';
 import { CURRENT_QUERY_LANG_VERSION } from './scram.js';
 import { signCanonical, canonicalCreateScramUser } from './hmac.js';
-import { setSuperuser } from './builders/admin.js';
+import { setSuperuser, setReplicator } from './builders/admin.js';
 import { listUsers } from './builders/ddl.js';
 import { Db } from './db.js';
 import { SubscriptionRouter } from './subscription-router.js';
@@ -70,6 +70,14 @@ export interface ScramUserCreated {
 
 /** Result of {@link ShamirClient.setSuperuser} (`DbResponse::SuperuserSet`). */
 export interface SuperuserSet {
+  /** Echoed target username. */
+  user: string;
+  /** Echoed requested state (`true` = granted, `false` = revoked). */
+  on: boolean;
+}
+
+/** Result of {@link ShamirClient.setReplicator} (`DbResponse::ReplicatorSet`). */
+export interface ReplicatorSet {
   /** Echoed target username. */
   user: string;
   /** Echoed requested state (`true` = granted, `false` = revoked). */
@@ -972,6 +980,26 @@ export class ShamirClient {
     }
     throw new Error(
       `unexpected DbResponse kind for set_superuser: ${r.kind}`,
+    );
+  }
+
+  /**
+   * Grant or revoke replicator status on an existing SCRAM-directory user
+   * (top-level `DbRequest::SetReplicator`, NOT a `BatchOp`, task #621).
+   * Requires an already-superuser session AND an HMAC confirmation tag —
+   * the tag is unconditional (every call signs it via this session's HMAC
+   * key). Mirrors `setSuperuser`'s top-level shape and gate exactly; the
+   * signed wire op is built by the `setReplicator` admin builder.
+   */
+  async setReplicator(user: string, on: boolean): Promise<ReplicatorSet> {
+    const r = await this.sendDbRequest(
+      setReplicator(this, user, on),
+    );
+    if (r.kind === 'replicator_set') {
+      return { user: r.user as string, on: r.on as boolean };
+    }
+    throw new Error(
+      `unexpected DbResponse kind for set_replicator: ${r.kind}`,
     );
   }
 

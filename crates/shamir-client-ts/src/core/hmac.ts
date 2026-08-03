@@ -143,6 +143,18 @@ export function canonicalSetSuperuser(user: string, on: boolean): Uint8Array {
   return joinNull(['set_superuser', user, on ? 'true' : 'false']);
 }
 
+/**
+ * `b"set_replicator\0<user>\0<on>"`. `<on>` is the literal `"true"` or
+ * `"false"` string (not `"1"`/`"0"`) — byte-for-byte mirror of the Rust
+ * `canonical_set_replicator` (itself a literal mirror of
+ * `canonical_set_superuser` with a different op tag). HMAC on
+ * `set_replicator` is UNCONDITIONAL: every SetReplicator op requires the
+ * tag, regardless of whether it's a grant or a revoke.
+ */
+export function canonicalSetReplicator(user: string, on: boolean): Uint8Array {
+  return joinNull(['set_replicator', user, on ? 'true' : 'false']);
+}
+
 export function canonicalStartMigration(
   dbInUse: string,
   srcRepo: string,

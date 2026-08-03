@@ -10,7 +10,7 @@
 
 import { describe, it, expect } from 'vitest';
 import { admin } from '../admin.js';
-import type { Action, SetSuperuserOp } from '../../types/admin.js';
+import type { Action, SetSuperuserOp, SetReplicatorOp } from '../../types/admin.js';
 import {
   canonicalDropUser,
   canonicalChmod,
@@ -20,6 +20,7 @@ import {
   canonicalGrantRole,
   canonicalRevokeRole,
   canonicalSetSuperuser,
+  canonicalSetReplicator,
   canonicalCreateGroup,
   canonicalDropGroup,
   canonicalRenameGroup,
@@ -479,6 +480,48 @@ describe('setSuperuser (HMAC)', () => {
   it('on=true and on=false produce distinct canonical bytes (and tags)', () => {
     const grantTag = admin.setSuperuser(fakeSigner, 'frank', true).hmac;
     const revokeTag = admin.setSuperuser(fakeSigner, 'frank', false).hmac;
+    expect(grantTag).not.toBe(revokeTag);
+  });
+});
+
+// ── setReplicator (top-level DbRequest, HMAC-gated) ─────────────────
+
+describe('setReplicator (HMAC)', () => {
+  it('emits {op:"set_replicator", user, on, hmac} — grant (on=true)', () => {
+    const canonical = canonicalSetReplicator('carol', true);
+    const op = admin.setReplicator(fakeSigner, 'carol', true);
+    const expected: SetReplicatorOp = {
+      op: 'set_replicator',
+      user: 'carol',
+      on: true,
+      hmac: fakeSigner.hmacTagHex(canonical),
+    };
+    expect(op).toEqual(expected);
+  });
+
+  it('emits {op:"set_replicator", user, on, hmac} — revoke (on=false)', () => {
+    const canonical = canonicalSetReplicator('dave', false);
+    const op = admin.setReplicator(fakeSigner, 'dave', false);
+    expect(op).toEqual({
+      op: 'set_replicator',
+      user: 'dave',
+      on: false,
+      hmac: fakeSigner.hmacTagHex(canonical),
+    });
+  });
+
+  it('hmac is unconditional — always present', () => {
+    expect(admin.setReplicator(fakeSigner, 'eve', true).hmac).toBe(
+      fakeSigner.hmacTagHex(canonicalSetReplicator('eve', true)),
+    );
+    expect(admin.setReplicator(fakeSigner, 'eve', false).hmac).toBe(
+      fakeSigner.hmacTagHex(canonicalSetReplicator('eve', false)),
+    );
+  });
+
+  it('on=true and on=false produce distinct canonical bytes (and tags)', () => {
+    const grantTag = admin.setReplicator(fakeSigner, 'frank', true).hmac;
+    const revokeTag = admin.setReplicator(fakeSigner, 'frank', false).hmac;
     expect(grantTag).not.toBe(revokeTag);
   });
 });

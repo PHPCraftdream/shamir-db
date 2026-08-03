@@ -19,6 +19,7 @@ import {
   canonicalDropIndex,
   canonicalDropUser,
   canonicalSetSuperuser,
+  canonicalSetReplicator,
   canonicalStartMigration,
   canonicalCommitMigration,
   canonicalRollbackMigration,
@@ -71,6 +72,16 @@ describe('canonical inputs are null-separated (hmac.rs vectors)', () => {
   it('set_superuser — on=false renders literal "false"', () => {
     expect(arr(canonicalSetSuperuser('dave', false))).toEqual(
       b('set_superuser\0dave\0false'),
+    );
+  });
+  it('set_replicator — on=true renders literal "true"', () => {
+    expect(arr(canonicalSetReplicator('carol', true))).toEqual(
+      b('set_replicator\0carol\0true'),
+    );
+  });
+  it('set_replicator — on=false renders literal "false"', () => {
+    expect(arr(canonicalSetReplicator('dave', false))).toEqual(
+      b('set_replicator\0dave\0false'),
     );
   });
   it('migration canonicals', () => {

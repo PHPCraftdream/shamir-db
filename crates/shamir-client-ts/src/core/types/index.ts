@@ -120,6 +120,7 @@ export type {
   GrantRoleOp,
   RevokeRoleOp,
   SetSuperuserOp,
+  SetReplicatorOp,
   AdminOp,
 } from './admin.js';
 

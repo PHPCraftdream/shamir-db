@@ -262,6 +262,23 @@ export interface SetSuperuserOp {
   hmac: string;
 }
 
+/**
+ * Grant or revoke replicator status on an existing SCRAM-directory account
+ * (top-level `DbRequest::SetReplicator`, task #621). Mirrors
+ * `SetSuperuserOp`'s shape and gate exactly: requires an already-superuser
+ * session AND an HMAC confirmation tag, unconditional (no "last remaining"
+ * guard).
+ *
+ * `hmac` is `Option<String>` on the Rust side; the client builder always
+ * supplies the signed tag, so it is typed `string` here.
+ */
+export interface SetReplicatorOp {
+  op: 'set_replicator';
+  user: string;
+  on: boolean;
+  hmac: string;
+}
+
 // ── Union ───────────────────────────────────────────────────────────
 
 /** Union of all ACL + RBAC admin operations. */

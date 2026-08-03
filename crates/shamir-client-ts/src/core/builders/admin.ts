@@ -36,6 +36,7 @@ import type {
   GrantRoleOp,
   RevokeRoleOp,
   SetSuperuserOp,
+  SetReplicatorOp,
 } from '../types/admin.js';
 
 import type { Filter } from '../types/filter.js';
@@ -50,6 +51,7 @@ import {
   canonicalGrantRole,
   canonicalRevokeRole,
   canonicalSetSuperuser,
+  canonicalSetReplicator,
   canonicalCreateGroup,
   canonicalDropGroup,
   canonicalRenameGroup,
@@ -304,6 +306,26 @@ export function setSuperuser(
 }
 
 /**
+ * Grant or revoke replicator status on an existing SCRAM-directory account
+ * (top-level `DbRequest::SetReplicator`, task #621, NOT a `BatchOp`).
+ * Requires an already-superuser session. The HMAC tag is UNCONDITIONAL —
+ * every call signs it. canonical = `canonicalSetReplicator(user, on)`.
+ *
+ * Mirrors `setSuperuser`'s builder shape exactly (signer + canonical +
+ * `.hmac` field), emitting the top-level wire shape
+ * `{ op: "set_replicator", ... }`. `ShamirClient.setReplicator` sends it
+ * via `sendDbRequest`.
+ */
+export function setReplicator(
+  signer: HmacSigner,
+  user: string,
+  on: boolean,
+): SetReplicatorOp {
+  const canonical = canonicalSetReplicator(user, on);
+  return { op: 'set_replicator', user, on, hmac: signer.hmacTagHex(canonical) };
+}
+
+/**
  * Grant a role to a user (HMAC-gated) — the single most dangerous op in
  * the system (e.g. granting `superuser` to an attacker-controlled account).
  * canonical = `canonicalGrantRole(role, user)`.
@@ -350,6 +372,7 @@ export const admin = {
   createUser,
   dropUser,
   setSuperuser,
+  setReplicator,
   grantRole,
   revokeRole,
 };
