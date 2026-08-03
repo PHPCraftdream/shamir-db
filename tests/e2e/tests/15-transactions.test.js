@@ -7,6 +7,8 @@
 
 'use strict';
 
+const { Query, write } = require('@shamir/client');
+
 module.exports = async function ({ client, fixtures, test, assert, assertEq }) {
   let db;
 
@@ -26,10 +28,7 @@ module.exports = async function ({ client, fixtures, test, assert, assertEq }) {
       id: 'tx-si-1-ins',
       transactional: true,
       queries: {
-        ins: {
-          insert_into: 'items',
-          values: [{ name: 'widget', qty: 10 }],
-        },
+        ins: write.insert('items', { name: 'widget', qty: 10 }),
       },
     });
     assert(ins.transaction, 'transaction info present');
@@ -43,7 +42,7 @@ module.exports = async function ({ client, fixtures, test, assert, assertEq }) {
     const readResp = await client.execute(db, {
       id: 'tx-si-1-read',
       queries: {
-        read: { from: 'items' },
+        read: Query.from('items').build(),
       },
     });
     const recs = readResp.results.read.records;
@@ -59,16 +58,13 @@ module.exports = async function ({ client, fixtures, test, assert, assertEq }) {
       id: 'tx-raw-ins',
       transactional: true,
       queries: {
-        ins: {
-          insert_into: 'items',
-          values: [{ name: 'gadget', qty: 99 }],
-        },
+        ins: write.insert('items', { name: 'gadget', qty: 99 }),
       },
     });
     const resp2 = await client.execute(db, {
       id: 'tx-raw-read',
       queries: {
-        all: { from: 'items' },
+        all: Query.from('items').build(),
       },
     });
     const names = resp2.results.all.records.map(r => r.name);
@@ -81,14 +77,8 @@ module.exports = async function ({ client, fixtures, test, assert, assertEq }) {
       id: 'tx-cross-table',
       transactional: true,
       queries: {
-        ins_items: {
-          insert_into: 'items',
-          values: [{ name: 'cross-item' }],
-        },
-        ins_logs: {
-          insert_into: 'logs',
-          values: [{ event: 'item_created' }],
-        },
+        ins_items: write.insert('items', { name: 'cross-item' }),
+        ins_logs: write.insert('logs', { event: 'item_created' }),
       },
     });
     assertEq(resp.transaction.status, 'committed');
@@ -103,10 +93,7 @@ module.exports = async function ({ client, fixtures, test, assert, assertEq }) {
       transactional: true,
       isolation: 'serializable',
       queries: {
-        ins: {
-          insert_into: 'items',
-          values: [{ name: 'ssi-item' }],
-        },
+        ins: write.insert('items', { name: 'ssi-item' }),
       },
     });
     assertEq(resp.transaction.status, 'committed');
@@ -117,10 +104,7 @@ module.exports = async function ({ client, fixtures, test, assert, assertEq }) {
     const resp = await client.execute(db, {
       id: 'non-tx',
       queries: {
-        ins: {
-          insert_into: 'items',
-          values: [{ name: 'plain-item' }],
-        },
+        ins: write.insert('items', { name: 'plain-item' }),
       },
     });
     // No transaction block.
