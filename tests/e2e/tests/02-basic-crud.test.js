@@ -5,6 +5,8 @@
 
 'use strict';
 
+const { Query, write, filter } = require('@shamir/client');
+
 module.exports = async function ({ client, fixtures, test, assert, assertEq }) {
   let db;
 
@@ -17,10 +19,7 @@ module.exports = async function ({ client, fixtures, test, assert, assertEq }) {
     const resp = await client.execute(db, {
       id: 'ins-one',
       queries: {
-        ins: {
-          insert_into: 'items',
-          values: [{ id: 'A1', name: 'widget', qty: 10 }],
-        },
+        ins: write.insert('items', { id: 'A1', name: 'widget', qty: 10 }),
       },
     });
     const inserted = resp.results.ins.records;
@@ -30,7 +29,7 @@ module.exports = async function ({ client, fixtures, test, assert, assertEq }) {
   test('read all returns the inserted record', async () => {
     const resp = await client.execute(db, {
       id: 'read-all',
-      queries: { all: { from: 'items' } },
+      queries: { all: Query.from('items').build() },
     });
     const recs = resp.results.all.records;
     assertEq(recs.length, 1);
@@ -42,12 +41,12 @@ module.exports = async function ({ client, fixtures, test, assert, assertEq }) {
     await client.execute(db, {
       id: 'set-new',
       queries: {
-        s: { set: 'items', key: { id: 'B2' }, value: { id: 'B2', name: 'gear', qty: 3 } },
+        s: write.upsert('items', { id: 'B2' }, { id: 'B2', name: 'gear', qty: 3 }),
       },
     });
     const resp = await client.execute(db, {
       id: 'count-after-set',
-      queries: { all: { from: 'items' } },
+      queries: { all: Query.from('items').build() },
     });
     assertEq(resp.results.all.records.length, 2);
   });
@@ -56,13 +55,13 @@ module.exports = async function ({ client, fixtures, test, assert, assertEq }) {
     await client.execute(db, {
       id: 'set-existing',
       queries: {
-        s: { set: 'items', key: { id: 'A1' }, value: { id: 'A1', name: 'widget-v2', qty: 99 } },
+        s: write.upsert('items', { id: 'A1' }, { id: 'A1', name: 'widget-v2', qty: 99 }),
       },
     });
     const resp = await client.execute(db, {
       id: 'read-A1',
       queries: {
-        a: { from: 'items', where: { op: 'eq', field: ['id'], value: 'A1' } },
+        a: Query.from('items').where(filter.eq('id', 'A1')).build(),
       },
     });
     assertEq(resp.results.a.records.length, 1);
@@ -74,17 +73,13 @@ module.exports = async function ({ client, fixtures, test, assert, assertEq }) {
     await client.execute(db, {
       id: 'upd',
       queries: {
-        u: {
-          update: 'items',
-          where: { op: 'eq', field: ['id'], value: 'B2' },
-          set: { qty: 7 },
-        },
+        u: write.update('items').where(filter.eq('id', 'B2')).set({ qty: 7 }).build(),
       },
     });
     const resp = await client.execute(db, {
       id: 'read-B2',
       queries: {
-        b: { from: 'items', where: { op: 'eq', field: ['id'], value: 'B2' } },
+        b: Query.from('items').where(filter.eq('id', 'B2')).build(),
       },
     });
     assertEq(resp.results.b.records[0].qty, 7);
@@ -94,15 +89,12 @@ module.exports = async function ({ client, fixtures, test, assert, assertEq }) {
     await client.execute(db, {
       id: 'del',
       queries: {
-        d: {
-          delete_from: 'items',
-          where: { op: 'eq', field: ['id'], value: 'A1' },
-        },
+        d: write.del('items', filter.eq('id', 'A1')),
       },
     });
     const resp = await client.execute(db, {
       id: 'read-after-del',
-      queries: { all: { from: 'items' } },
+      queries: { all: Query.from('items').build() },
     });
     assertEq(resp.results.all.records.length, 1);
     assertEq(resp.results.all.records[0].id, 'B2');
@@ -112,15 +104,12 @@ module.exports = async function ({ client, fixtures, test, assert, assertEq }) {
     await client.execute(db, {
       id: 'del-all',
       queries: {
-        d: {
-          delete_from: 'items',
-          where: { op: 'eq', field: ['id'], value: 'B2' },
-        },
+        d: write.del('items', filter.eq('id', 'B2')),
       },
     });
     const resp = await client.execute(db, {
       id: 'read-empty',
-      queries: { all: { from: 'items' } },
+      queries: { all: Query.from('items').build() },
     });
     assertEq(resp.results.all.records.length, 0);
   });
