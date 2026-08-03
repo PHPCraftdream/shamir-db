@@ -35,7 +35,7 @@
 
 const { encode, decode } = require('@msgpack/msgpack');
 const { ShamirClient } = require('shamir-client');
-const { ddl, admin } = require('@shamir/client');
+const { ddl, admin, write } = require('@shamir/client');
 const hmac = require('../helpers/hmac');
 
 /** Encode a ReplRequest object → msgpack Buffer for the napi boundary. */
@@ -78,17 +78,18 @@ module.exports = async function ({ client, server, fixtures, test, assert, asser
     });
 
     // Write 3 transactional upserts — each commit emits a changelog event.
+    // NOTE: `transactional` is a BatchRequest-level flag (see
+    // `batch_request.rs`), not a per-op field — the prior hand-rolled
+    // `{ transactional: true, set, key, value }` shape carried it on the
+    // op object, where `SetOp` (no `deny_unknown_fields`) silently
+    // dropped it on deserialize. `write.upsert` reproduces the exact
+    // same effective wire shape (`{ set, key, value }`).
     for (let i = 0; i < 3; i += 1) {
       const sku = `X${i}`;
       await client.execute(db, {
         id: `repl-write-${i}`,
         queries: {
-          w: {
-            transactional: true,
-            set: table,
-            key: { sku },
-            value: { sku, qty: i },
-          },
+          w: write.upsert(table, { sku }, { sku, qty: i }),
         },
       });
     }
