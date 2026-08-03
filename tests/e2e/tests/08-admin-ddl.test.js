@@ -26,7 +26,7 @@ module.exports = async function ({ client, fixtures, test, assert, assertEq }) {
   test('list databases includes default', async () => {
     const resp = await client.execute('default', {
       id: 'lsdb',
-      queries: { l: { list: 'databases' } },
+      queries: { l: ddl.listDatabases() },
     });
     const names = resp.results.l.records[0].databases;
     assert(Array.isArray(names), `expected an array, got ${JSON.stringify(names)}`);
@@ -42,7 +42,7 @@ module.exports = async function ({ client, fixtures, test, assert, assertEq }) {
 
     let resp = await client.execute('default', {
       id: 'lsdb2',
-      queries: { l: { list: 'databases' } },
+      queries: { l: ddl.listDatabases() },
     });
     assert(
       resp.results.l.records[0].databases.includes(dbName),
@@ -56,7 +56,7 @@ module.exports = async function ({ client, fixtures, test, assert, assertEq }) {
 
     resp = await client.execute('default', {
       id: 'lsdb3',
-      queries: { l: { list: 'databases' } },
+      queries: { l: ddl.listDatabases() },
     });
     assert(
       !resp.results.l.records[0].databases.includes(dbName),
@@ -81,7 +81,7 @@ module.exports = async function ({ client, fixtures, test, assert, assertEq }) {
 
     const reposResp = await client.execute(dbName, {
       id: 'lsr',
-      queries: { l: { list: 'repos' } },
+      queries: { l: ddl.listRepos() },
     });
     const repoNames = reposResp.results.l.records[0].repos.sort();
     assertEq(repoNames.length, 2);
@@ -91,7 +91,7 @@ module.exports = async function ({ client, fixtures, test, assert, assertEq }) {
     // list:tables is repo-scoped — separate query per repo.
     const mainTables = await client.execute(dbName, {
       id: 'lst-main',
-      queries: { l: { list: 'tables', repo: 'main' } },
+      queries: { l: ddl.listTables({ repo: 'main' }) },
     });
     assert(
       mainTables.results.l.records[0].tables.includes('users'),
@@ -100,7 +100,7 @@ module.exports = async function ({ client, fixtures, test, assert, assertEq }) {
 
     const coldTables = await client.execute(dbName, {
       id: 'lst-cold',
-      queries: { l: { list: 'tables', repo: 'cold' } },
+      queries: { l: ddl.listTables({ repo: 'cold' }) },
     });
     assert(
       coldTables.results.l.records[0].tables.includes('logs'),
@@ -120,7 +120,7 @@ module.exports = async function ({ client, fixtures, test, assert, assertEq }) {
 
     const lsResp = await client.execute(dbName, {
       id: 'ls-idx',
-      queries: { l: { list: 'indexes', repo: 'main', table: 't' } },
+      queries: { l: ddl.listIndexes('t', { repo: 'main' }) },
     });
     // list:indexes returns rich entries (name + unique flag), unlike
     // databases/repos/tables which return plain string arrays.
@@ -137,7 +137,7 @@ module.exports = async function ({ client, fixtures, test, assert, assertEq }) {
 
     const ls2 = await client.execute(dbName, {
       id: 'ls-idx2',
-      queries: { l: { list: 'indexes', repo: 'main', table: 't' } },
+      queries: { l: ddl.listIndexes('t', { repo: 'main' }) },
     });
     const afterNames = ls2.results.l.records[0].indexes.map((i) => i.name);
     assert(
