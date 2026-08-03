@@ -13,7 +13,7 @@
 'use strict';
 
 const hmac = require('../helpers/hmac');
-const { ddl } = require('@shamir/client');
+const { ddl, Query } = require('@shamir/client');
 
 module.exports = async function ({ client, fixtures, test, assert, assertEq, assertThrows }) {
   // The napi binding throws on `DbResponse::Error` — assertThrows
@@ -167,7 +167,7 @@ module.exports = async function ({ client, fixtures, test, assert, assertEq, ass
         client.execute(dbName, {
           id: 1,
           queries: {
-            r: { from: 't' },
+            r: Query.from('t').build(),
             d: { drop_table: 't', repo: 'main' },
           },
         }),
@@ -180,7 +180,7 @@ module.exports = async function ({ client, fixtures, test, assert, assertEq, ass
     const dbName = await fixtures.setupDb(client, 'hmac_read', ['t']);
     const resp = await client.execute(dbName, {
       id: 1,
-      queries: { r: { from: 't' } },
+      queries: { r: Query.from('t').build() },
     });
     assertEq(resp.results.r.records.length, 0);
   });
