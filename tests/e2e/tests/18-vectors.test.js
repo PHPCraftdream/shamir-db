@@ -40,7 +40,7 @@
 
 'use strict';
 
-const { ddl } = require('@shamir/client');
+const { ddl, Query, write, filter } = require('@shamir/client');
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Vector data helpers
@@ -100,7 +100,7 @@ async function insertClusteredBatched(client, db, table, count, dim, batchSize) 
     await client.execute(db, {
       id: `ins-batch-${inserted}`,
       queries: {
-        ins: { insert_into: table, values },
+        ins: write.insert(table, values),
       },
     });
   }
@@ -187,15 +187,7 @@ module.exports = async function ({ client, fixtures, test, assert, assertEq, ass
     const resp = await client.execute(db, {
       id: 'q',
       queries: {
-        r: {
-          from: 'docs',
-          where: {
-            op: 'vector_similarity',
-            field: ['embedding'],
-            query: axisVector(dim, 0),
-            k: 5,
-          },
-        },
+        r: Query.from('docs').where(filter.vectorSimilarity('embedding', axisVector(dim, 0), 5)).build(),
       },
     });
     const recs = resp.results.r.records;
@@ -226,25 +218,17 @@ module.exports = async function ({ client, fixtures, test, assert, assertEq, ass
     await client.execute(db, {
       id: 'ins',
       queries: {
-        a: { insert_into: 'docs', values: [{ id: 'origin', embedding: [0, 0, 0, 0], cluster: 0 }] },
-        b: { insert_into: 'docs', values: [{ id: 'near', embedding: [0.1, 0.1, 0.1, 0.1], cluster: 0 }] },
-        c: { insert_into: 'docs', values: [{ id: 'mid', embedding: [1, 1, 1, 1], cluster: 1 }] },
-        d: { insert_into: 'docs', values: [{ id: 'far', embedding: [5, 5, 5, 5], cluster: 2 }] },
+        a: write.insert('docs', { id: 'origin', embedding: [0, 0, 0, 0], cluster: 0 }),
+        b: write.insert('docs', { id: 'near', embedding: [0.1, 0.1, 0.1, 0.1], cluster: 0 }),
+        c: write.insert('docs', { id: 'mid', embedding: [1, 1, 1, 1], cluster: 1 }),
+        d: write.insert('docs', { id: 'far', embedding: [5, 5, 5, 5], cluster: 2 }),
       },
     });
 
     const resp = await client.execute(db, {
       id: 'q',
       queries: {
-        r: {
-          from: 'docs',
-          where: {
-            op: 'vector_similarity',
-            field: ['embedding'],
-            query: [0, 0, 0, 0],
-            k: 2,
-          },
-        },
+        r: Query.from('docs').where(filter.vectorSimilarity('embedding', [0, 0, 0, 0], 2)).build(),
       },
     });
     const ids = resp.results.r.records.map((r) => r.id);
@@ -279,16 +263,9 @@ module.exports = async function ({ client, fixtures, test, assert, assertEq, ass
     const small = await client.execute(db, {
       id: 'q-small',
       queries: {
-        r: {
-          from: 'docs',
-          where: {
-            op: 'vector_similarity',
-            field: ['embedding'],
-            query: target,
-            k: 3,
-            ef_search: 16,
-          },
-        },
+        r: Query.from('docs')
+          .where(filter.vectorSimilarity('embedding', target, 3, { efSearch: 16 }))
+          .build(),
       },
     });
     const smallIds = small.results.r.records.map((r) => r.id);
@@ -298,16 +275,9 @@ module.exports = async function ({ client, fixtures, test, assert, assertEq, ass
     const large = await client.execute(db, {
       id: 'q-large',
       queries: {
-        r: {
-          from: 'docs',
-          where: {
-            op: 'vector_similarity',
-            field: ['embedding'],
-            query: target,
-            k: 3,
-            ef_search: 256,
-          },
-        },
+        r: Query.from('docs')
+          .where(filter.vectorSimilarity('embedding', target, 3, { efSearch: 256 }))
+          .build(),
       },
     });
     const largeIds = large.results.r.records.map((r) => r.id);
@@ -344,12 +314,18 @@ module.exports = async function ({ client, fixtures, test, assert, assertEq, ass
     await client.execute(db, {
       id: 'ins',
       queries: {
-        a: { insert_into: 'docs', values: [{ id: 'a', embedding: [1, 0, 0, 0], cluster: 0 }] },
-        b: { insert_into: 'docs', values: [{ id: 'b', embedding: [0, 1, 0, 0], cluster: 1 }] },
+        a: write.insert('docs', { id: 'a', embedding: [1, 0, 0, 0], cluster: 0 }),
+        b: write.insert('docs', { id: 'b', embedding: [0, 1, 0, 0], cluster: 1 }),
       },
     });
 
     // ef_search far above MAX_EF_SEARCH (10_000) must clamp, not error.
+    // Note: filter.vectorSimilarity's client-side guard rejects ef_search
+    // above MAX_EF_SEARCH (10_000) so the caller learns immediately instead
+    // of getting silently degraded (clamped) recall -- see filter.ts's
+    // vectorSimilarity doc comment. This test exercises the SERVER's clamp
+    // behavior specifically (a raw wire value the client would otherwise
+    // reject), so the object literal is intentionally left hand-rolled here.
     const resp = await client.execute(db, {
       id: 'q',
       queries: {
@@ -385,8 +361,8 @@ module.exports = async function ({ client, fixtures, test, assert, assertEq, ass
     await client.execute(db, {
       id: 'ins',
       queries: {
-        a: { insert_into: 'docs', values: [{ id: 'a', embedding: [1, 0, 0, 0], cluster: 0 }] },
-        b: { insert_into: 'docs', values: [{ id: 'b', embedding: [0.9, 0.1, 0, 0], cluster: 0 }] },
+        a: write.insert('docs', { id: 'a', embedding: [1, 0, 0, 0], cluster: 0 }),
+        b: write.insert('docs', { id: 'b', embedding: [0.9, 0.1, 0, 0], cluster: 0 }),
       },
     });
 
@@ -395,16 +371,9 @@ module.exports = async function ({ client, fixtures, test, assert, assertEq, ass
     const resp = await client.execute(db, {
       id: 'q',
       queries: {
-        r: {
-          from: 'docs',
-          where: {
-            op: 'vector_similarity',
-            field: ['embedding'],
-            query: [1, 0, 0, 0],
-            k: 2,
-            oversample: 3.0,
-          },
-        },
+        r: Query.from('docs')
+          .where(filter.vectorSimilarity('embedding', [1, 0, 0, 0], 2, { oversample: 3.0 }))
+          .build(),
       },
     });
     assertEq(resp.results.r.records.length, 2);
@@ -439,7 +408,7 @@ module.exports = async function ({ client, fixtures, test, assert, assertEq, ass
     }
     await client.execute(db, {
       id: 'ins',
-      queries: { ins: { insert_into: 'docs', values } },
+      queries: { ins: write.insert('docs', values) },
     });
 
     // Query axis 0 BUT restrict to group "g1" — the nearest in g1 must be
@@ -448,21 +417,14 @@ module.exports = async function ({ client, fixtures, test, assert, assertEq, ass
     const resp = await client.execute(db, {
       id: 'q-filtered',
       queries: {
-        r: {
-          from: 'docs',
-          where: {
-            op: 'and',
-            filters: [
-              {
-                op: 'vector_similarity',
-                field: ['embedding'],
-                query: axisVector(dim, 1),
-                k: 3,
-              },
-              { op: 'eq', field: ['group'], value: 'g1' },
-            ],
-          },
-        },
+        r: Query.from('docs')
+          .where(
+            filter.and([
+              filter.vectorSimilarity('embedding', axisVector(dim, 1), 3),
+              filter.eq('group', 'g1'),
+            ]),
+          )
+          .build(),
       },
     });
     const recs = resp.results.r.records;
@@ -495,8 +457,8 @@ module.exports = async function ({ client, fixtures, test, assert, assertEq, ass
     await client.execute(db, {
       id: 'ins',
       queries: {
-        a: { insert_into: 'docs', values: [{ id: 'a', embedding: [1, 0, 0, 0], group: 'x' }] },
-        b: { insert_into: 'docs', values: [{ id: 'b', embedding: [0, 1, 0, 0], group: 'x' }] },
+        a: write.insert('docs', { id: 'a', embedding: [1, 0, 0, 0], group: 'x' }),
+        b: write.insert('docs', { id: 'b', embedding: [0, 1, 0, 0], group: 'x' }),
       },
     });
 
@@ -505,16 +467,14 @@ module.exports = async function ({ client, fixtures, test, assert, assertEq, ass
     const resp = await client.execute(db, {
       id: 'q-empty',
       queries: {
-        r: {
-          from: 'docs',
-          where: {
-            op: 'and',
-            filters: [
-              { op: 'vector_similarity', field: ['embedding'], query: [1, 0, 0, 0], k: 5 },
-              { op: 'eq', field: ['group'], value: 'nonexistent' },
-            ],
-          },
-        },
+        r: Query.from('docs')
+          .where(
+            filter.and([
+              filter.vectorSimilarity('embedding', [1, 0, 0, 0], 5),
+              filter.eq('group', 'nonexistent'),
+            ]),
+          )
+          .build(),
       },
     });
     assertEq(resp.results.r.records.length, 0);
@@ -543,21 +503,18 @@ module.exports = async function ({ client, fixtures, test, assert, assertEq, ass
     const vecB = axisVector(dim, 1);
     await client.execute(db, {
       id: 'ins-a',
-      queries: { ins: { insert_into: 'docs', values: [{ id: 'a', embedding: vecA }] } },
+      queries: { ins: write.insert('docs', { id: 'a', embedding: vecA }) },
     });
     await client.execute(db, {
       id: 'ins-b',
-      queries: { ins: { insert_into: 'docs', values: [{ id: 'b', embedding: vecB }] } },
+      queries: { ins: write.insert('docs', { id: 'b', embedding: vecB }) },
     });
 
     // Querying vecA must rank 'a' as top-1.
     const qA = await client.execute(db, {
       id: 'q-a',
       queries: {
-        r: {
-          from: 'docs',
-          where: { op: 'vector_similarity', field: ['embedding'], query: vecA, k: 1 },
-        },
+        r: Query.from('docs').where(filter.vectorSimilarity('embedding', vecA, 1)).build(),
       },
     });
     assertEq(qA.results.r.records.length, 1);
@@ -567,10 +524,7 @@ module.exports = async function ({ client, fixtures, test, assert, assertEq, ass
     const qB = await client.execute(db, {
       id: 'q-b',
       queries: {
-        r: {
-          from: 'docs',
-          where: { op: 'vector_similarity', field: ['embedding'], query: vecB, k: 1 },
-        },
+        r: Query.from('docs').where(filter.vectorSimilarity('embedding', vecB, 1)).build(),
       },
     });
     assertEq(qB.results.r.records.length, 1);
@@ -598,9 +552,9 @@ module.exports = async function ({ client, fixtures, test, assert, assertEq, ass
     await client.execute(db, {
       id: 'ins',
       queries: {
-        a: { insert_into: 'docs', values: [{ id: 'a', embedding: vecA }] },
-        b: { insert_into: 'docs', values: [{ id: 'b', embedding: vecB }] },
-        c: { insert_into: 'docs', values: [{ id: 'c', embedding: vecC }] },
+        a: write.insert('docs', { id: 'a', embedding: vecA }),
+        b: write.insert('docs', { id: 'b', embedding: vecB }),
+        c: write.insert('docs', { id: 'c', embedding: vecC }),
       },
     });
 
@@ -608,10 +562,7 @@ module.exports = async function ({ client, fixtures, test, assert, assertEq, ass
     const before = await client.execute(db, {
       id: 'q-before',
       queries: {
-        r: {
-          from: 'docs',
-          where: { op: 'vector_similarity', field: ['embedding'], query: vecA, k: 1 },
-        },
+        r: Query.from('docs').where(filter.vectorSimilarity('embedding', vecA, 1)).build(),
       },
     });
     assertEq(before.results.r.records[0].id, 'a');
@@ -619,17 +570,14 @@ module.exports = async function ({ client, fixtures, test, assert, assertEq, ass
     // Delete 'a'.
     await client.execute(db, {
       id: 'del-a',
-      queries: { d: { delete_from: 'docs', where: { op: 'eq', field: ['id'], value: 'a' } } },
+      queries: { d: write.del('docs', filter.eq('id', 'a')) },
     });
 
     // Post-delete: top-1 for vecA must NOT be 'a'.
     const after = await client.execute(db, {
       id: 'q-after',
       queries: {
-        r: {
-          from: 'docs',
-          where: { op: 'vector_similarity', field: ['embedding'], query: vecA, k: 1 },
-        },
+        r: Query.from('docs').where(filter.vectorSimilarity('embedding', vecA, 1)).build(),
       },
     });
     assertEq(after.results.r.records.length, 1);
@@ -674,16 +622,9 @@ module.exports = async function ({ client, fixtures, test, assert, assertEq, ass
     const resp = await client.execute(db, {
       id: 'q-probe',
       queries: {
-        r: {
-          from: 'docs',
-          where: {
-            op: 'vector_similarity',
-            field: ['embedding'],
-            query: probeVec,
-            k: 3,
-            ef_search: 128,
-          },
-        },
+        r: Query.from('docs')
+          .where(filter.vectorSimilarity('embedding', probeVec, 3, { efSearch: 128 }))
+          .build(),
       },
     });
     const recs = resp.results.r.records;
@@ -717,22 +658,14 @@ module.exports = async function ({ client, fixtures, test, assert, assertEq, ass
     const resp = await client.execute(db, {
       id: 'q',
       queries: {
-        r: {
-          from: 'docs',
-          where: {
-            op: 'and',
-            filters: [
-              {
-                op: 'vector_similarity',
-                field: ['embedding'],
-                query: axisVector(dim, 0),
-                k: 3,
-                ef_search: 128,
-              },
-              { op: 'eq', field: ['cluster'], value: 0 },
-            ],
-          },
-        },
+        r: Query.from('docs')
+          .where(
+            filter.and([
+              filter.vectorSimilarity('embedding', axisVector(dim, 0), 3, { efSearch: 128 }),
+              filter.eq('cluster', 0),
+            ]),
+          )
+          .build(),
       },
     });
     const recs = resp.results.r.records;
