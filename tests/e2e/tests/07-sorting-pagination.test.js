@@ -4,6 +4,8 @@
 
 'use strict';
 
+const { Query, filter } = require('@shamir/client');
+
 module.exports = async function ({ client, fixtures, test, assert, assertEq }) {
   let db;
   const N = 20;
@@ -25,10 +27,7 @@ module.exports = async function ({ client, fixtures, test, assert, assertEq }) {
     const resp = await client.execute(db, {
       id: 'asc',
       queries: {
-        r: {
-          from: 'items',
-          order_by: { items: [{ field: ['score'], direction: 'asc' }] },
-        },
+        r: Query.from('items').orderByAsc('score').build(),
       },
     });
     const recs = resp.results.r.records;
@@ -45,10 +44,7 @@ module.exports = async function ({ client, fixtures, test, assert, assertEq }) {
     const resp = await client.execute(db, {
       id: 'desc',
       queries: {
-        r: {
-          from: 'items',
-          order_by: { items: [{ field: ['score'], direction: 'desc' }] },
-        },
+        r: Query.from('items').orderByDesc('score').build(),
       },
     });
     const recs = resp.results.r.records;
@@ -61,15 +57,7 @@ module.exports = async function ({ client, fixtures, test, assert, assertEq }) {
     const resp = await client.execute(db, {
       id: 'multi',
       queries: {
-        r: {
-          from: 'items',
-          order_by: {
-            items: [
-              { field: ['bucket'], direction: 'asc' },
-              { field: ['score'], direction: 'desc' },
-            ],
-          },
-        },
+        r: Query.from('items').orderByAsc('bucket').orderByDesc('score').build(),
       },
     });
     const recs = resp.results.r.records;
@@ -88,11 +76,7 @@ module.exports = async function ({ client, fixtures, test, assert, assertEq }) {
     const resp = await client.execute(db, {
       id: 'p1',
       queries: {
-        r: {
-          from: 'items',
-          order_by: { items: [{ field: ['id'], direction: 'asc' }] },
-          pagination: { mode: 'LimitOffset', limit: 5, offset: 0 },
-        },
+        r: Query.from('items').orderByAsc('id').limit(5).offset(0).build(),
       },
     });
     const recs = resp.results.r.records;
@@ -105,11 +89,7 @@ module.exports = async function ({ client, fixtures, test, assert, assertEq }) {
     const resp = await client.execute(db, {
       id: 'p2',
       queries: {
-        r: {
-          from: 'items',
-          order_by: { items: [{ field: ['id'], direction: 'asc' }] },
-          pagination: { mode: 'LimitOffset', limit: 5, offset: 5 },
-        },
+        r: Query.from('items').orderByAsc('id').limit(5).offset(5).build(),
       },
     });
     const recs = resp.results.r.records;
@@ -122,11 +102,7 @@ module.exports = async function ({ client, fixtures, test, assert, assertEq }) {
     const resp = await client.execute(db, {
       id: 'p-end',
       queries: {
-        r: {
-          from: 'items',
-          order_by: { items: [{ field: ['id'], direction: 'asc' }] },
-          pagination: { mode: 'LimitOffset', limit: 5, offset: 18 },
-        },
+        r: Query.from('items').orderByAsc('id').limit(5).offset(18).build(),
       },
     });
     assertEq(resp.results.r.records.length, 2); // r18, r19
@@ -136,12 +112,12 @@ module.exports = async function ({ client, fixtures, test, assert, assertEq }) {
     const resp = await client.execute(db, {
       id: 'ct',
       queries: {
-        r: {
-          from: 'items',
-          where: { op: 'gte', field: ['score'], value: 50 },
-          pagination: { mode: 'LimitOffset', limit: 3, offset: 0 },
-          count_total: true,
-        },
+        r: Query.from('items')
+          .where(filter.gte('score', 50))
+          .limit(3)
+          .offset(0)
+          .countTotal()
+          .build(),
       },
     });
     const recs = resp.results.r.records;
