@@ -108,6 +108,36 @@ pub struct TableManager {
     /// covering the FULL six-condition predicate — see
     /// [`writer_drain_barrier`]'s module doc, updated by this task).
     pub(super) write_barrier_flags: crate::index::write_barrier_flags::WriteBarrierFlags,
+    /// F-95 (#957, P0) — per-table DDL admission mutex. Serializes
+    /// concurrent DDL operations that would share the same write-barrier
+    /// bit (e.g. two `CREATE INDEX` both raising `REGULAR_INDEX_CREATE`).
+    /// Acquired FIRST inside
+    /// [`begin_write_barrier`](Self::begin_write_barrier) (before the
+    /// raise→drain→lock sequence) and held for the caller's ENTIRE
+    /// critical section (the guard is embedded in the returned
+    /// [`WriteBarrierGuard`]).
+    ///
+    /// Without this, two concurrent DDLs sharing a bit race: DDL-A drops
+    /// its `WriteBarrierGuard` (unconditionally clearing the bit via
+    /// `fetch_and`) while DDL-B has already drained and is parked on
+    /// `unique_write_lock`. When B acquires the lock the bit is 0 and B
+    /// never re-raises it, so a brand-new writer fast-paths past B's
+    /// still-in-progress backfill — the exact hazard the barrier exists
+    /// to prevent.
+    ///
+    /// The admission mutex ensures DDL-B does its OWN raise→drain→lock
+    /// from scratch, AFTER DDL-A's entire critical section (including
+    /// guard drop) has completed. Regular writers
+    /// ([`needs_write_barrier`](Self::needs_write_barrier)) do NOT take
+    /// this mutex — only `begin_write_barrier` callers do — so the F-70
+    /// (#897) lock-order invariant (writers never block behind a
+    /// DDL-held lock in a way that could deadlock) is preserved.
+    ///
+    /// Lock-order hierarchy (extending F-70's canonical order):
+    /// `ddl_admission` → (raise bit) → `drain_writers` →
+    /// `unique_write_lock`. No writer or committer ever acquires
+    /// `ddl_admission`, so no cycle involving it can form.
+    pub(super) ddl_admission: Arc<tokio::sync::Mutex<()>>,
     /// F-48 (#859, P0) — reusable writer-drain barrier. Fast-path writers
     /// (those that read `needs_write_barrier() == false`) bump this counter
     /// before their flag check and drop it after their full
@@ -236,6 +266,11 @@ impl Clone for TableManager {
             // onto the barrier, same rationale the five separate flags this
             // replaces each carried individually.
             write_barrier_flags: self.write_barrier_flags.clone(),
+            // F-95 (#957) — shared across clones (Arc<tokio::sync::Mutex>
+            // inside) so a DDL admission in flight on any clone blocks every
+            // clone's begin_write_barrier, same rationale as the other
+            // shared-Arc fields.
+            ddl_admission: Arc::clone(&self.ddl_admission),
             // F-48 — shared across clones (Arc<AtomicUsize> inside).
             writer_drain: self.writer_drain.clone(),
             index2_registry: Arc::clone(&self.index2_registry),
@@ -313,6 +348,8 @@ impl TableManager {
             verify_running: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             unique_write_lock: Arc::new(tokio::sync::Mutex::new(())),
             write_barrier_flags,
+            // F-95 (#957) — fresh per-table admission mutex.
+            ddl_admission: Arc::new(tokio::sync::Mutex::new(())),
             writer_drain: super::writer_drain_barrier::WriterDrainBarrier::new(),
             index2_registry: Arc::new(crate::index2::IndexRegistry::new()),
             mvcc_store: None,
@@ -549,6 +586,7 @@ impl TableManager {
             verify_running: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             unique_write_lock: Arc::new(tokio::sync::Mutex::new(())),
             write_barrier_flags,
+            ddl_admission: Arc::new(tokio::sync::Mutex::new(())),
             writer_drain: super::writer_drain_barrier::WriterDrainBarrier::new(),
             index2_registry: Arc::new(crate::index2::IndexRegistry::new()),
             mvcc_store: None,
@@ -764,9 +802,22 @@ impl TableManager {
         &self,
         bit: u8,
     ) -> (WriteBarrierGuard, tokio::sync::OwnedMutexGuard<()>) {
+        // Step 0 (F-95, #957): acquire the per-table DDL admission mutex
+        // FIRST. This serializes concurrent DDL operations that would
+        // share the same bit: without it, DDL-B can drain and park on
+        // `unique_write_lock` BEFORE DDL-A drops its WriteBarrierGuard
+        // (which unconditionally clears the bit). When B later acquires
+        // the lock, the bit is 0 and B never re-raises it — a new writer
+        // then fast-paths past B's in-progress backfill. The admission
+        // guard is embedded inside the returned `WriteBarrierGuard` so it
+        // is held for the caller's ENTIRE critical section (not just this
+        // call), and dropped AFTER the bit is cleared (field-drop order:
+        // the manual `Drop::drop` clears the bit first, then the
+        // `admission` field is dropped, releasing the mutex).
+        let admission = self.ddl_admission.clone().lock_owned().await;
         // Step 1: raise the intent bit FIRST — new writers now take the slow
         // (locked) path.
-        let guard = WriteBarrierGuard::set(self.write_barrier_flags.clone(), bit);
+        let guard = WriteBarrierGuard::set(self.write_barrier_flags.clone(), bit, admission);
         // Step 2: drain every writer that read the flag as `false` BEFORE
         // step 1 and is still mid-flight. Cheap (one SeqCst load) when none
         // are active.
@@ -1022,6 +1073,19 @@ impl TableManager {
 /// returned by value from `begin_write_barrier` with no lifetime tied to
 /// `&TableManager` — the shape a cross-crate `pub` acquisition helper needs.
 ///
+/// F-95 (#957, P0): this guard ALSO embeds the per-table DDL admission
+/// mutex guard (`ddl_admission`), acquired BEFORE the bit is raised inside
+/// [`begin_write_barrier`](TableManager::begin_write_barrier). Embedding it
+/// here — rather than returning it as a third tuple element — means every
+/// existing call site's destructuring (`let (_barrier, _lock) = …`) is
+/// unchanged, and the admission guard's lifetime is automatically tied to
+/// this guard's. Drop order is correct: the manual `Drop::drop` clears the
+/// bit first, then Rust drops the struct's fields in declaration order
+/// (`flags` → `bit` → `admission`), so the admission mutex is released
+/// ONLY after the bit has been cleared — the next DDL waiting on admission
+/// wakes to a clean state (bit 0) and does its own raise→drain→lock from
+/// scratch.
+///
 /// Supersedes the old per-module `IndexCreateBarrierGuard`
 /// (`table_manager_index_mgmt.rs`) and `SchemaActivationBarrierGuard`
 /// (`shamir-db::execute::admin_schema`), both of which independently raised
@@ -1035,12 +1099,30 @@ impl TableManager {
 pub struct WriteBarrierGuard {
     flags: crate::index::write_barrier_flags::WriteBarrierFlags,
     bit: u8,
+    /// F-95 (#957): the DDL admission mutex guard, held for the caller's
+    /// entire critical section. Declared LAST so it drops AFTER the
+    /// manual `Drop::drop` has already cleared `bit`.
+    // The field is never *read* — it is held purely for its `Drop`
+    // side-effect (releasing `ddl_admission` after the bit is cleared).
+    // Without it the admission mutex would be released at the end of
+    // `begin_write_barrier` rather than the end of the caller's critical
+    // section, reopening the exact multi-owner race this guard closes.
+    #[allow(dead_code)]
+    admission: tokio::sync::OwnedMutexGuard<()>,
 }
 
 impl WriteBarrierGuard {
-    fn set(flags: crate::index::write_barrier_flags::WriteBarrierFlags, bit: u8) -> Self {
+    fn set(
+        flags: crate::index::write_barrier_flags::WriteBarrierFlags,
+        bit: u8,
+        admission: tokio::sync::OwnedMutexGuard<()>,
+    ) -> Self {
         flags.set(bit);
-        Self { flags, bit }
+        Self {
+            flags,
+            bit,
+            admission,
+        }
     }
 }
 
