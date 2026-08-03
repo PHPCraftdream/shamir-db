@@ -14,6 +14,8 @@
 
 'use strict';
 
+const { Query, select } = require('@shamir/client');
+
 module.exports = async function ({ client, fixtures, test, assert, assertEq }) {
   let db;
 
@@ -32,15 +34,7 @@ module.exports = async function ({ client, fixtures, test, assert, assertEq }) {
     const resp = await client.execute(db, {
       id: 'proj',
       queries: {
-        r: {
-          from: 'orders',
-          select: {
-            items: [
-              { type: 'field', path: ['user'] },
-              { type: 'field', path: ['amount'] },
-            ],
-          },
-        },
+        r: Query.from('orders').select(['user', 'amount']).build(),
       },
     });
     const recs = resp.results.r.records;
@@ -57,10 +51,7 @@ module.exports = async function ({ client, fixtures, test, assert, assertEq }) {
     const resp = await client.execute(db, {
       id: 'cnt',
       queries: {
-        c: {
-          from: 'orders',
-          select: { items: [{ type: 'count_all', alias: 'n' }] },
-        },
+        c: Query.from('orders').select([select.countAll('n')]).build(),
       },
     });
     const r = resp.results.c.records;
@@ -72,17 +63,14 @@ module.exports = async function ({ client, fixtures, test, assert, assertEq }) {
     const resp = await client.execute(db, {
       id: 'sums',
       queries: {
-        s: {
-          from: 'orders',
-          select: {
-            items: [
-              { type: 'aggregate', func: 'sum', field: ['amount'], alias: 'total' },
-              { type: 'aggregate', func: 'avg', field: ['amount'], alias: 'mean' },
-              { type: 'aggregate', func: 'min', field: ['amount'], alias: 'lo' },
-              { type: 'aggregate', func: 'max', field: ['amount'], alias: 'hi' },
-            ],
-          },
-        },
+        s: Query.from('orders')
+          .select([
+            select.sum('amount', { alias: 'total' }),
+            select.avg('amount', { alias: 'mean' }),
+            select.min('amount', { alias: 'lo' }),
+            select.max('amount', { alias: 'hi' }),
+          ])
+          .build(),
       },
     });
     const r = resp.results.s.records[0];
@@ -96,18 +84,15 @@ module.exports = async function ({ client, fixtures, test, assert, assertEq }) {
     const resp = await client.execute(db, {
       id: 'gb',
       queries: {
-        g: {
-          from: 'orders',
-          group_by: { fields: [['user']] },
-          select: {
-            items: [
-              { type: 'field', path: ['user'] },
-              { type: 'count_all', alias: 'n_orders' },
-              { type: 'aggregate', func: 'sum', field: ['amount'], alias: 'total' },
-            ],
-          },
-          order_by: { items: [{ field: ['user'], direction: 'asc' }] },
-        },
+        g: Query.from('orders')
+          .groupBy('user')
+          .select([
+            select.field('user'),
+            select.countAll('n_orders'),
+            select.sum('amount', { alias: 'total' }),
+          ])
+          .orderByAsc('user')
+          .build(),
       },
     });
     const recs = resp.results.g.records;
@@ -125,16 +110,10 @@ module.exports = async function ({ client, fixtures, test, assert, assertEq }) {
     const resp = await client.execute(db, {
       id: 'gbr',
       queries: {
-        g: {
-          from: 'orders',
-          group_by: { fields: [['region']] },
-          select: {
-            items: [
-              { type: 'field', path: ['region'] },
-              { type: 'aggregate', func: 'sum', field: ['amount'], alias: 't' },
-            ],
-          },
-        },
+        g: Query.from('orders')
+          .groupBy('region')
+          .select([select.field('region'), select.sum('amount', { alias: 't' })])
+          .build(),
       },
     });
     const byRegion = {};
