@@ -10,8 +10,8 @@ const ALL: &[MetaKey] = &[
     MetaKey::Count,
     MetaKey::BufferConfig,
     MetaKey::SortedIndexes,
-    MetaKey::LegacyIndexes,
-    MetaKey::LegacyIndexesUnique,
+    MetaKey::BaseIndexIndexes,
+    MetaKey::BaseIndexIndexesUnique,
     MetaKey::LastCommittedVersion,
     MetaKey::NextTxId,
     MetaKey::Validators,
@@ -60,11 +60,11 @@ fn tags_match_legacy_literal_encoding() {
         RecordId::system("sorted_indexes")
     );
     assert_eq!(
-        MetaKey::LegacyIndexes.as_record_id(),
+        MetaKey::BaseIndexIndexes.as_record_id(),
         RecordId::system("indexes")
     );
     assert_eq!(
-        MetaKey::LegacyIndexesUnique.as_record_id(),
+        MetaKey::BaseIndexIndexesUnique.as_record_id(),
         RecordId::system("indexes_unique")
     );
 }

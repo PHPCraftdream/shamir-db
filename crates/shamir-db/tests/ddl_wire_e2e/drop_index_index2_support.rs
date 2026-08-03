@@ -7,7 +7,7 @@
 //! resolution-order wiring and the `if_exists` early-exit live in the
 //! handler and are the actual subject of the change.
 
-use shamir_db::engine::index2::legacy::sorted_index_manager::SortedIndexManager;
+use shamir_db::engine::index2::base_index::sorted_index_manager::SortedIndexManager;
 use shamir_db::engine::index2::persistence::load_index2_metadata;
 use shamir_db::engine::index2::posting_layout::type_tag;
 use shamir_query_builder::batch::Batch;

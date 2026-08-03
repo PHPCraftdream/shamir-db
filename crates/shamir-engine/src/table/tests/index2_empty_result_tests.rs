@@ -1,6 +1,6 @@
 //! CRIT-7 regression: an empty index2 result (FTS / functional / vector) is
 //! the authoritative "zero rows match" answer and must short-circuit the
-//! query — it must NOT fall through to the legacy btree / full-scan paths.
+//! query — it must NOT fall through to the base_index btree / full-scan paths.
 //!
 //! The dangerous case is `Filter::VectorSimilarity`: it compiles to
 //! `FilterNode::True` (`query/filter/compile.rs`), so a fall-through to the

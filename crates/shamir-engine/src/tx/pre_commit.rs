@@ -408,8 +408,8 @@ pub(super) async fn pre_commit_prelock(
     // winner's posting and correctly detects the conflict.
     //
     // #538 Part A: the token set was originally built ONLY from
-    // `tx.unique_guards` (tables with a legacy UNIQUE index) — an
-    // index2-only table (fts/functional/vector, no legacy unique index)
+    // `tx.unique_guards` (tables with a base_index UNIQUE index) — an
+    // index2-only table (fts/functional/vector, no base_index unique index)
     // contributed nothing, so this tx's Phase 5a/5c could freely interleave
     // with a concurrent `create_index_v2`'s backfill on that table (the same
     // lost-write window #534 closed for the non-tx path, left open here).
@@ -435,7 +435,7 @@ pub(super) async fn pre_commit_prelock(
     // fallback to MVCC-routed, a behavior change this check must not cause.
     // It is also correct: `needs_write_barrier()` can only be `true` on an
     // instance that was actually created (no code path can flip
-    // `index2_create_barrier` or register a legacy unique index without
+    // `index2_create_barrier` or register a base_index unique index without
     // first holding a live `TableManager`), so a dormant table is
     // equivalent to "no barrier" for this purpose.
     //
@@ -607,15 +607,15 @@ pub(super) async fn pre_commit_prelock(
     // old-value resolution (insert-vs-update-vs-delete) mechanism.
     rederive_index2_ops_post_stage(tx, repo).await?;
 
-    // P0-2 (#958): legacy (regular + unique) re-derivation — mirrors the
+    // P0-2 (#958): base_index (regular + unique) re-derivation — mirrors the
     // index2/sorted gate above for the `IndexManager` family. A tx that
-    // staged before a legacy index was created would otherwise commit with
+    // staged before a base_index index was created would otherwise commit with
     // zero ops for it (permanently missing posting for regular; for unique,
     // additionally unconstrained duplicate). For unique defs specifically,
     // the rederive records fresh `UniqueGuard`s so Phase 2.6's commit-time
     // re-validation covers the new constraint. Also handles 2c: retracts
-    // staged ops for legacy indexes dropped between stage and commit.
-    rederive_legacy_ops_post_stage(tx, repo).await?;
+    // staged ops for base_index indexes dropped between stage and commit.
+    rederive_base_index_ops_post_stage(tx, repo).await?;
 
     // F-48b test seam: parks strictly AFTER Phase 2.5's flag-check loop
     // (every table's `needs_write_barrier()` has been read and the writer
@@ -746,7 +746,7 @@ async fn read_pre_tx_bytes(
 /// `insert_tx_many_bytes`), UPDATE (`update_tx` / `update_tx_bytes`),
 /// DELETE (`delete_tx`), and SET (`set_tx` — an alias of `update_tx`).
 /// The sorted-index generation is captured alongside (`note_sorted_stage_gen`)
-/// for every stage site, gating the legacy sorted-index re-derivation below.
+/// for every stage site, gating the base_index sorted-index re-derivation below.
 /// Vector backends' `staged_vectors` are re-derived in the per-record loop
 /// (their `plan_insert_tx` is a no-op; HNSW embeddings are buffered
 /// separately) — Step 2 Part B.
@@ -1099,15 +1099,15 @@ fn is_vector_backend(backend: &Arc<dyn shamir_index::backend::IndexBackend>) -> 
     matches!(backend.descriptor().kind, IndexKind::Vector(_))
 }
 
-/// P0-2 (#958): legacy `IndexManager` (regular + unique) ops-plan
+/// P0-2 (#958): base_index `IndexManager` (regular + unique) ops-plan
 /// re-derivation after stage. Mirrors [`rederive_index2_ops_post_stage`]'s
-/// shape for the legacy index family: a tx that staged before a legacy
+/// shape for the base_index index family: a tx that staged before a base_index
 /// index (regular OR unique) was created carries zero ops for the new
 /// index in `tx.index_write_set` — a permanently missing posting (regular)
 /// or an unconstrained duplicate (unique, because no `UniqueGuard` was
 /// recorded for a def that didn't exist at stage time).
 ///
-/// At commit, if a table's legacy generation exceeds the captured value,
+/// At commit, if a table's base_index generation exceeds the captured value,
 /// this function re-plans regular + unique posting ops against ALL current
 /// defs (idempotent — `SetPosting` overwrites, `RemovePosting` is a no-op
 /// on absent keys — so re-planning defs that already had ops at stage time
@@ -1115,33 +1115,37 @@ fn is_vector_backend(backend: &Arc<dyn shamir_index::backend::IndexBackend>) -> 
 /// def so Phase 2.6's authoritative re-validation under `commit_lock`
 /// covers the new constraint.
 ///
-/// Sub-bug 2c: ALSO retracts staged ops for legacy indexes that were
-/// DROP'd between stage and commit. An op whose key starts with a legacy
+/// Sub-bug 2c: ALSO retracts staged ops for base_index indexes that were
+/// DROP'd between stage and commit. An op whose key starts with a base_index
 /// `(is_unique, name_interned)` prefix that's no longer in the current
 /// def set is removed from `tx.index_write_set` before commit — preventing
-/// orphan postings for gone indexes. Non-legacy ops (index2/sorted, which
+/// orphan postings for gone indexes. Non-base_index ops (index2/sorted, which
 /// have different key formats/lengths) are left untouched.
 ///
 /// The generation gate makes this zero-cost on the common path: a tx that
-/// captured `legacy_stage_gens` (populated only by a legacy-index-bearing-
+/// captured `base_index_stage_gens` (populated only by a base_index-index-bearing-
 /// table staging) and sees an unchanged generation skips the per-record
 /// re-derivation entirely.
-async fn rederive_legacy_ops_post_stage(
+async fn rederive_base_index_ops_post_stage(
     tx: &mut TxContext,
     repo: &RepoInstance,
 ) -> Result<(), TxError> {
-    if tx.legacy_stage_gens.is_empty() {
+    if tx.base_index_stage_gens.is_empty() {
         return Ok(());
     }
 
-    let stage_gens: Vec<(u64, u64)> = tx.legacy_stage_gens.iter().map(|(t, g)| (*t, *g)).collect();
+    let stage_gens: Vec<(u64, u64)> = tx
+        .base_index_stage_gens
+        .iter()
+        .map(|(t, g)| (*t, *g))
+        .collect();
 
     for (table_token, stage_gen) in stage_gens {
         let Some(tbl) = repo.table_by_token_if_live(table_token).await else {
             continue;
         };
         let mgr = tbl.index_manager_ref();
-        // Generation gate: skip when no legacy def was registered/dropped
+        // Generation gate: skip when no base_index def was registered/dropped
         // since stage. One atomic Acquire load.
         if mgr.generation() == stage_gen {
             continue;
@@ -1163,7 +1167,7 @@ async fn rederive_legacy_ops_post_stage(
                 KvOp::Set(k, v) => {
                     let rid = RecordId::try_from_bytes(&k).ok_or_else(|| {
                         TxError::Storage(DbError::Internal(format!(
-                            "rederive_legacy: malformed staged key \
+                            "rederive_base_index: malformed staged key \
                              (table_token={table_token}, {} bytes) — expected a \
                              16-byte RecordId",
                             k.len()
@@ -1171,7 +1175,7 @@ async fn rederive_legacy_ops_post_stage(
                     })?;
                     let new_rec = InnerValue::from_bytes(&v).map_err(|e| {
                         TxError::Storage(DbError::Codec(format!(
-                            "rederive_legacy: staged record decode failed \
+                            "rederive_base_index: staged record decode failed \
                              (table_token={table_token}, rid={rid:?}): {e}"
                         )))
                     })?;
@@ -1180,7 +1184,7 @@ async fn rederive_legacy_ops_post_stage(
                             // Update case: old record exists in the store.
                             let old_rec = InnerValue::from_bytes(&old_bytes).map_err(|e| {
                                 TxError::Storage(DbError::Codec(format!(
-                                    "rederive_legacy: pre-tx record decode failed \
+                                    "rederive_base_index: pre-tx record decode failed \
                                      (table_token={table_token}, rid={rid:?}): {e}"
                                 )))
                             })?;
@@ -1191,7 +1195,7 @@ async fn rederive_legacy_ops_post_stage(
                                 .await
                                 .map_err(|e| {
                                     TxError::Storage(DbError::Internal(format!(
-                                        "rederive_legacy: plan_record_updated failed: {e}"
+                                        "rederive_base_index: plan_record_updated failed: {e}"
                                     )))
                                 })?;
                             appended.extend(ops.into_iter().map(|op| (table_token, op)));
@@ -1200,7 +1204,7 @@ async fn rederive_legacy_ops_post_stage(
                                 .await
                                 .map_err(|e| {
                                     TxError::Storage(DbError::Internal(format!(
-                                        "rederive_legacy: plan_record_updated_unique failed: {e}"
+                                        "rederive_base_index: plan_record_updated_unique failed: {e}"
                                     )))
                                 })?;
                             appended.extend(unique_ops.into_iter().map(|op| (table_token, op)));
@@ -1220,7 +1224,7 @@ async fn rederive_legacy_ops_post_stage(
                             let ops =
                                 mgr.plan_record_created(&rid, &new_rec).await.map_err(|e| {
                                     TxError::Storage(DbError::Internal(format!(
-                                        "rederive_legacy: plan_record_created failed: {e}"
+                                        "rederive_base_index: plan_record_created failed: {e}"
                                     )))
                                 })?;
                             appended.extend(ops.into_iter().map(|op| (table_token, op)));
@@ -1229,7 +1233,7 @@ async fn rederive_legacy_ops_post_stage(
                                 .await
                                 .map_err(|e| {
                                 TxError::Storage(DbError::Internal(format!(
-                                    "rederive_legacy: plan_record_created_unique failed: {e}"
+                                    "rederive_base_index: plan_record_created_unique failed: {e}"
                                 )))
                             })?;
                             appended.extend(unique_ops.into_iter().map(|op| (table_token, op)));
@@ -1247,7 +1251,7 @@ async fn rederive_legacy_ops_post_stage(
                 KvOp::Remove(k) => {
                     let rid = RecordId::try_from_bytes(&k).ok_or_else(|| {
                         TxError::Storage(DbError::Internal(format!(
-                            "rederive_legacy: malformed staged key \
+                            "rederive_base_index: malformed staged key \
                              (table_token={table_token}, {} bytes) — expected a \
                              16-byte RecordId",
                             k.len()
@@ -1258,13 +1262,13 @@ async fn rederive_legacy_ops_post_stage(
                     {
                         let old_rec = InnerValue::from_bytes(&old_bytes).map_err(|e| {
                             TxError::Storage(DbError::Codec(format!(
-                                "rederive_legacy: pre-tx record decode failed \
+                                "rederive_base_index: pre-tx record decode failed \
                                  (table_token={table_token}, rid={rid:?}): {e}"
                             )))
                         })?;
                         let ops = mgr.plan_record_deleted(&rid, &old_rec).await.map_err(|e| {
                             TxError::Storage(DbError::Internal(format!(
-                                "rederive_legacy: plan_record_deleted failed: {e}"
+                                "rederive_base_index: plan_record_deleted failed: {e}"
                             )))
                         })?;
                         appended.extend(ops.into_iter().map(|op| (table_token, op)));
@@ -1273,7 +1277,7 @@ async fn rederive_legacy_ops_post_stage(
                             .await
                             .map_err(|e| {
                                 TxError::Storage(DbError::Internal(format!(
-                                    "rederive_legacy: plan_record_deleted_unique failed: {e}"
+                                    "rederive_base_index: plan_record_deleted_unique failed: {e}"
                                 )))
                             })?;
                         appended.extend(unique_ops.into_iter().map(|op| (table_token, op)));
@@ -1289,18 +1293,18 @@ async fn rederive_legacy_ops_post_stage(
             tx.index_write_set.extend(appended);
         }
 
-        // ── Sub-bug 2c: retract staged ops for DROP'd legacy indexes ──────
+        // ── Sub-bug 2c: retract staged ops for DROP'd base_index indexes ──────
         //
         // An index that existed at stage time (contributing ops to
         // `index_write_set`) but was DROP'd before commit leaves orphan ops
         // that would resurrect a posting for a gone index. We retain only
-        // ops whose target legacy index is still live, plus all non-legacy
+        // ops whose target base_index index is still live, plus all non-base_index
         // ops (index2/sorted — different key formats) unchanged.
         //
-        // Legacy regular posting keys are exactly 41 bytes (25-byte
-        // IndexRecordKey + 16-byte RecordId); legacy unique keys are exactly
+        // base_index regular posting keys are exactly 41 bytes (25-byte
+        // IndexRecordKey + 16-byte RecordId); base_index unique keys are exactly
         // 25 bytes. Both start with a 9-byte prefix: `[is_unique:u8,
-        // name_interned:u64_le]`. Non-legacy ops have different key lengths
+        // name_interned:u64_le]`. Non-base_index ops have different key lengths
         // and are left untouched.
         let mut live_prefixes: shamir_collections::TFxSet<(u8, u64)> =
             shamir_collections::TFxSet::default();
@@ -1319,7 +1323,7 @@ async fn rederive_legacy_ops_post_stage(
                 IndexWriteOp::RemovePosting { key } => key.as_ref(),
                 IndexWriteOp::BumpFtsStats { .. } => return true, // Not a posting op.
             };
-            // Only legacy regular (41 bytes) and unique (25 bytes) keys are
+            // Only base_index regular (41 bytes) and unique (25 bytes) keys are
             // candidates for retraction. Anything else is index2/sorted —
             // leave untouched.
             if key.len() != 41 && key.len() != 25 {
@@ -1327,7 +1331,7 @@ async fn rederive_legacy_ops_post_stage(
             }
             let is_unique_byte = key[0];
             if is_unique_byte > 1 {
-                return true; // Not a legacy key.
+                return true; // Not a base_index key.
             }
             let name_interned = u64::from_le_bytes(key[1..9].try_into().unwrap_or([0u8; 8]));
             live_prefixes.contains(&(is_unique_byte, name_interned))

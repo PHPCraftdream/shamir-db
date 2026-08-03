@@ -11,7 +11,7 @@ use shamir_types::types::record_id::RecordId;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
-/// A representative classified key — a `MetaKey::LegacyIndexes`-shaped tag
+/// A representative classified key — a `MetaKey::BaseIndexIndexes`-shaped tag
 /// (`"indexes"`), matching the exact `RecordId::system` encoding.
 fn classified_key() -> RecordKey {
     RecordKey::from_slice(RecordId::system("indexes").as_bytes())
@@ -215,8 +215,8 @@ async fn batch_apis_split_classified_and_unclassified_correctly() {
 /// test was written (14 variants): `Indexes` ("_m.idx"), `Tables`
 /// ("_m.tbl"), `Wal` ("_m.wal"), `Migrations` ("_m.mig"), `Internals`
 /// ("internals"), `Count` ("count"), `BufferConfig` ("buffer_config"),
-/// `SortedIndexes` ("sorted_indexes"), `LegacyIndexes` ("indexes"),
-/// `LegacyIndexesUnique` ("indexes_unique"), `LastCommittedVersion`
+/// `SortedIndexes` ("sorted_indexes"), `BaseIndexIndexes` ("indexes"),
+/// `BaseIndexIndexesUnique` ("indexes_unique"), `LastCommittedVersion`
 /// ("_t.lcv"), `NextTxId` ("_t.nti"), `Validators` ("_m.val"),
 /// `ReplicationBookmark` ("_t.rbm").
 const ALL_META_KEY_TAGS: &[(&str, bool)] = &[
@@ -228,8 +228,8 @@ const ALL_META_KEY_TAGS: &[(&str, bool)] = &[
     ("count", false),         // MetaKey::Count — derived from row data
     ("buffer_config", true),  // MetaKey::BufferConfig
     ("sorted_indexes", true), // MetaKey::SortedIndexes
-    ("indexes", true),        // MetaKey::LegacyIndexes
-    ("indexes_unique", true), // MetaKey::LegacyIndexesUnique
+    ("indexes", true),        // MetaKey::BaseIndexIndexes
+    ("indexes_unique", true), // MetaKey::BaseIndexIndexesUnique
     // Derived recovery/replication bookkeeping tied to the committed
     // transaction history — same "derived from data, not
     // configuration" hazard as `Count`. See `is_durable_table_config`'s

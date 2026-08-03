@@ -630,7 +630,7 @@ async fn c1_partial_index_coverage_enforces_unindexed_predicate() {
     repo.add_table(TableConfig::new("vecs"));
     let tbl = repo.get_table("vecs").await.unwrap();
     tbl.create_index_v2(&vector_index_op(4)).await.unwrap();
-    // Legacy btree index on "tag" only — "price" is NOT indexed.
+    // base_index btree index on "tag" only — "price" is NOT indexed.
     tbl.create_index("tag_idx", &["tag"]).await.unwrap();
 
     let emb_id = field_id(&tbl, "embedding").await;
@@ -709,7 +709,7 @@ async fn c1_partial_index_coverage_enforces_unindexed_predicate() {
 // path (no secondary index on the residual field, so the planner cannot
 // populate `candidate_rids` and falls through to the V3.1 oversample-retry
 // loop). The three tests below force the PRE-FILTER and CO-FILTER paths by
-// adding a legacy btree index on the residual field (`tag`), then assert the
+// adding a base_index btree index on the residual field (`tag`), then assert the
 // in-tx staged vectors are visible AND the residual still filters them.
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -747,7 +747,7 @@ async fn commit_cluster(tbl: &TableManager, emb_id: u64, tag_id: u64, tag: &str,
     tbl.insert_many(&values).await.unwrap();
 }
 
-/// **PRE-FILTER path** (candidate set ≤ `PRE_FILTER_MAX_CANDIDATES`): a legacy
+/// **PRE-FILTER path** (candidate set ≤ `PRE_FILTER_MAX_CANDIDATES`): a base_index
 /// btree index on `tag` resolves `eq(tag,"red")` to a small committed RID set
 /// (under 4096), so the planner selects `search_prefilter`. A staged "red"
 /// record must appear, and a staged "blue" record must be filtered out —
@@ -759,7 +759,7 @@ async fn vr5_prefilter_sees_staged_and_filters_residual() {
     repo.add_table(TableConfig::new("vecs"));
     let tbl = repo.get_table("vecs").await.unwrap();
     tbl.create_index_v2(&vector_index_op(2)).await.unwrap();
-    // Legacy btree on `tag` so `try_plan_index_scan` resolves `eq(tag, ...)`.
+    // base_index btree on `tag` so `try_plan_index_scan` resolves `eq(tag, ...)`.
     tbl.create_index("tag_idx", &["tag"]).await.unwrap();
 
     let emb_id = field_id(&tbl, "embedding").await;

@@ -50,7 +50,7 @@
 //!   scratch. A `Failed` variant is not needed because `Building` already
 //!   encodes "interrupted, needs reconciliation" and the reconciliation path
 //!   is fully automatic (index2) or operator-invoked `doctor::repair()`
-//!   (legacy). See the per-family crash rows below.
+//!   (base_index). See the per-family crash rows below.
 //!
 //! Adding the variants later is a backward-compatible enum change (bincode
 //! tags variants by ordinal; see [`crate::state`]'s forward-compat note), so
@@ -89,11 +89,11 @@
 //! - **Retryable after `Err`:** yes (idempotent backfill; same name reuses the
 //!   same interned id and posting keys are deterministic).
 //! - **Crash/cancel:** an abandoned `Building` definition is invisible to the
-//!   planner (F-72 gate). On restart, legacy load lifts on-disk defs to
-//!   `Ready` by default — a KNOWN LIMITATION (F-72 brief): a legacy
+//!   planner (F-72 gate). On restart, base_index load lifts on-disk defs to
+//!   `Ready` by default — a KNOWN LIMITATION (F-72 brief): a base_index
 //!   `Building` def whose backfill was interrupted may load as `Ready` with
 //!   partial postings. Operator `doctor::repair()` reconciles. (index2 has
-//!   automatic self-heal; legacy does not — documented gap.)
+//!   automatic self-heal; base_index does not — documented gap.)
 //!
 //! ## unique (hash) — `create_unique_index` → `create_unique_index_from_records`
 //! - **Planner-visible exactly when:** `indexes_unique` membership is
@@ -108,7 +108,7 @@
 //!   a correctness violation of the uniqueness guarantee, not a harmless
 //!   double-write — RENAME closes this by holding `unique_write_lock` across
 //!   the whole drop→create (see RENAME).
-//! - **Crash/cancel:** same legacy limitation as regular (no automatic
+//! - **Crash/cancel:** same base_index limitation as regular (no automatic
 //!   self-heal); `doctor::repair()`.
 //!
 //! ## sorted — `create_sorted_index_with_include`
@@ -119,7 +119,7 @@
 //! - **`Ok`:** queryable + durable (`persist_defs` ran). The existing code is
 //!   explicitly commented `cancel-safe: NO` for the streamed backfill.
 //! - **`Err`:** a backfill error leaves a `Building` definition; retryable.
-//! - **Crash/cancel:** `Building` on disk; legacy limitation (no auto
+//! - **Crash/cancel:** `Building` on disk; base_index limitation (no auto
 //!   self-heal); `doctor::repair()`.
 //!
 //! ## index2 (fts/functional/vector) — `create_index_v2`
@@ -161,7 +161,7 @@
 //!   can error. If the sweep errors, the definition is ALREADY gone from
 //!   memory (planner-invisible) but orphan postings may remain on disk; the
 //!   durable blob may still list the def. A restart re-loads the def
-//!   `Ready` with partial postings (legacy limitation); `doctor::repair()`
+//!   `Ready` with partial postings (base_index limitation); `doctor::repair()`
 //!   re-syncs. Retryable.
 //! - **In-flight reader:** keeps working against its pre-swap `Vec` snapshot
 //!   (RCU); its postings are untouched by the sweep until it drops the
@@ -250,10 +250,10 @@
 //!   authored for every family's CREATE/DROP/RENAME. The DROP visibility
 //!   tests (the P0 correctness bug) ARE landed; the broader
 //!   crash/cancellation matrix is the follow-up.
-//! - **Legacy CREATE auto-self-heal parity with index2.** Legacy (regular /
+//! - **base_index CREATE auto-self-heal parity with index2.** base_index (regular /
 //!   unique / sorted) CREATE leaves an abandoned `Building` def that does NOT
 //!   automatically self-heal on restart the way index2 does — it relies on
-//!   `doctor::repair()`. Closing this (restart-from-scratch for legacy) is a
+//!   `doctor::repair()`. Closing this (restart-from-scratch for base_index) is a
 //!   separate, larger task.
 //! - **A `Dropping` / `Failed` enum variant** if operator-introspection ever
 //!   needs to surface mid-teardown / failed-build status (not required for

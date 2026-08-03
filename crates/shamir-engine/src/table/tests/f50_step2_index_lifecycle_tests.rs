@@ -335,7 +335,7 @@ async fn fts_quiescent_tx_exactly_one_bumpftsstats_no_double_count() {
 ///
 /// Pre-fix (no generation counter on `SortedIndexManager` + no commit-time
 /// sorted re-derivation): the tx's `index_write_set` permanently carries zero
-/// sorted ops for the new index (the stage-time `plan_legacy_insert_ops`'s
+/// sorted ops for the new index (the stage-time `plan_base_index_insert_ops`'s
 /// `sorted_indexes.plan_record_created` ran against an empty def snapshot).
 /// Phase 5c has no sorted posting to write → the row is permanently absent
 /// from the new sorted index — the SAME guaranteed-miss class as index2
@@ -362,7 +362,7 @@ async fn sorted_staging_before_register_present_after_fix() {
 
     // === Step 1: STAGE the tx's insert BEFORE the sorted index exists. ===
     // At this instant there are no sorted defs, so the stage-time
-    // `plan_legacy_insert_ops`'s `sorted_indexes.plan_record_created` returns
+    // `plan_base_index_insert_ops`'s `sorted_indexes.plan_record_created` returns
     // zero ops. The sorted generation is captured here.
     let (mut tx, _guard) = repo.begin_tx(IsolationLevel::Snapshot).await.unwrap();
     let op = write::insert("nums")

@@ -10,7 +10,7 @@ use shamir_storage::types::{RecordKey, Repo};
 use shamir_types::types::record_id::RecordId;
 
 /// A representative durable-config key, shaped exactly like
-/// `is_durable_table_config` expects (`MetaKey::LegacyIndexes`'s tag).
+/// `is_durable_table_config` expects (`MetaKey::BaseIndexIndexes`'s tag).
 fn classified_key() -> RecordKey {
     RecordKey::from_slice(RecordId::system("indexes").as_bytes())
 }

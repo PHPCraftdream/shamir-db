@@ -1372,7 +1372,7 @@ impl RepoInstance {
     /// nothing in `pre_commit_prelock` should trigger merely by CHECKING a
     /// barrier flag. Correctness is preserved: `needs_write_barrier()` can
     /// only ever be `true` on an instance that was actually created — no
-    /// code path can flip `index2_create_barrier` or register a legacy
+    /// code path can flip `index2_create_barrier` or register a base_index
     /// unique index without first holding a live `TableManager` (`get_table`
     /// must have run at least once for a `create_index_v2` /
     /// `create_unique_index` to even be callable) — so a dormant `OnceCell`

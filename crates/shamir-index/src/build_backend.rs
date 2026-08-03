@@ -64,7 +64,7 @@ pub fn build_index2_backend_with_resolver(
             Arc::new(crate::vector::VectorBackend::new(desc, first_path, adapter))
         }
         crate::kind::IndexKind::Btree { .. } => {
-            unreachable!("Btree indexes are handled by the legacy index manager")
+            unreachable!("Btree indexes are handled by the base_index index manager")
         }
     }
 }

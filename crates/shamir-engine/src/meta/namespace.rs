@@ -25,12 +25,12 @@ pub enum MetaKey {
     BufferConfig,
     /// SortedIndexManager registry. Inline as system("sorted_indexes").
     SortedIndexes,
-    /// Legacy IndexManager regular-index registry.
+    /// base_index IndexManager regular-index registry.
     /// Inline as system("indexes").
-    LegacyIndexes,
-    /// Legacy IndexManager unique-index registry.
+    BaseIndexIndexes,
+    /// base_index IndexManager unique-index registry.
     /// Inline as system("indexes_unique").
-    LegacyIndexesUnique,
+    BaseIndexIndexesUnique,
 
     /// Last committed MVCC version (`u64 BE` body).
     ///
@@ -75,8 +75,8 @@ impl MetaKey {
             MetaKey::Count => "count",
             MetaKey::BufferConfig => "buffer_config",
             MetaKey::SortedIndexes => "sorted_indexes",
-            MetaKey::LegacyIndexes => "indexes",
-            MetaKey::LegacyIndexesUnique => "indexes_unique",
+            MetaKey::BaseIndexIndexes => "indexes",
+            MetaKey::BaseIndexIndexesUnique => "indexes_unique",
             MetaKey::LastCommittedVersion => "_t.lcv",
             MetaKey::NextTxId => "_t.nti",
             MetaKey::Validators => "_m.val",

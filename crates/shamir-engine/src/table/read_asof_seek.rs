@@ -33,7 +33,7 @@
 //! commits to returning its result. This works because
 //! `last_mutation_version(index_name)` is a monotonic, `Acquire`/`AcqRel`
 //! -ordered per-index high-water mark
-//! (`shamir-index/src/legacy/sorted_index_manager.rs`) — any mutation to
+//! (`shamir-index/src/base_index/sorted_index_manager.rs`) — any mutation to
 //! `index_name` whose effect the walk could have observed necessarily bumps
 //! THIS index's counter, and the post-check's `Acquire` load is guaranteed to
 //! see it (or later).

@@ -345,7 +345,7 @@ async fn index2_decode_error_aborts_commit_no_partial_state() {
 // Sorted-index family — storage-read error
 // ═══════════════════════════════════════════════════════════════════════════
 
-/// Same fault class as the index2 storage-read test, but for the legacy
+/// Same fault class as the index2 storage-read test, but for the base_index
 /// sorted-index re-derivation half of `rederive_index2_ops_post_stage`
 /// (gated by `tx.sorted_stage_gens`).
 #[tokio::test]

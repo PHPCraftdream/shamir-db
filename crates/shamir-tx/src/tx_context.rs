@@ -128,7 +128,7 @@ pub struct TxContext {
     /// F-50 Step 2 (#870, Part D): per-table `SortedIndexManager` generation
     /// captured at STAGE time (after the stage-time `iter_indexes()` snapshot),
     /// to gate commit-time sorted-index ops-plan re-derivation. Mirrors
-    /// [`index2_stage_gens`](Self::index2_stage_gens) for the legacy sorted
+    /// [`index2_stage_gens`](Self::index2_stage_gens) for the base_index sorted
     /// index path: a tx that staged before a new sorted index was registered
     /// would otherwise commit with zero sorted ops for the new index. At
     /// commit, if a table's current sorted generation exceeds the captured
@@ -139,22 +139,22 @@ pub struct TxContext {
     /// the single zero-overhead gate.
     pub sorted_stage_gens: TFxMap<u64, u64>,
 
-    /// P0-2 (#958): per-table legacy `IndexManager` (regular + unique)
-    /// generation captured at STAGE time, to gate commit-time legacy
+    /// P0-2 (#958): per-table base_index `IndexManager` (regular + unique)
+    /// generation captured at STAGE time, to gate commit-time base_index
     /// ops-plan re-derivation. Mirrors
     /// [`index2_stage_gens`](Self::index2_stage_gens) and
-    /// [`sorted_stage_gens`](Self::sorted_stage_gens) for the legacy
+    /// [`sorted_stage_gens`](Self::sorted_stage_gens) for the base_index
     /// index path: a tx that staged before a new regular or unique index
     /// was created would otherwise commit with zero ops for the new
     /// index — a permanently missing posting (regular) or an
     /// unconstrained duplicate (unique). At commit, if a table's current
-    /// legacy generation exceeds the captured value, the commit pipeline
-    /// re-derives legacy posting ops against all current defs and, for
+    /// base_index generation exceeds the captured value, the commit pipeline
+    /// re-derives base_index posting ops against all current defs and, for
     /// unique defs, records fresh `UniqueGuard`s so the existing Phase 2.6
     /// re-validation covers them. Plain (non-`Mutex`) map: every capture /
     /// read site holds the tx by `&mut`. Empty for txs that never stage a
     /// write — the single zero-overhead gate.
-    pub legacy_stage_gens: TFxMap<u64, u64>,
+    pub base_index_stage_gens: TFxMap<u64, u64>,
 
     /// Per-table HNSW staged vectors. Key = table token (interned table
     /// name). Each entry is a `(RecordId, embedding)` pair routed here by
@@ -377,7 +377,7 @@ impl TxContext {
             index_write_set: Vec::new(),
             index2_stage_gens: TFxMap::default(),
             sorted_stage_gens: TFxMap::default(),
-            legacy_stage_gens: TFxMap::default(),
+            base_index_stage_gens: TFxMap::default(),
             staged_vectors: TFxMap::default(),
             staged_vector_deletes: TFxMap::default(),
             interner_overlay: scc::HashMap::with_hasher(THasher::default()),
@@ -576,7 +576,7 @@ impl TxContext {
 
     /// F-50 Step 2 (#870, Part D): capture `table_token`'s
     /// `SortedIndexManager` generation at stage time. Mirrors
-    /// [`note_index2_stage_gen`](Self::note_index2_stage_gen) for the legacy
+    /// [`note_index2_stage_gen`](Self::note_index2_stage_gen) for the base_index
     /// sorted-index path. The caller MUST invoke this AFTER its stage-time
     /// `iter_indexes()` snapshot (so every def in that snapshot has
     /// registration-generation ≤ `gen`, guaranteeing the commit-time
@@ -586,14 +586,14 @@ impl TxContext {
         self.sorted_stage_gens.entry(table_token).or_insert(gen);
     }
 
-    /// P0-2 (#958): capture `table_token`'s legacy `IndexManager` generation
+    /// P0-2 (#958): capture `table_token`'s base_index `IndexManager` generation
     /// at stage time. Mirrors
     /// [`note_index2_stage_gen`](Self::note_index2_stage_gen) /
-    /// [`note_sorted_stage_gen`](Self::note_sorted_stage_gen) for the legacy
+    /// [`note_sorted_stage_gen`](Self::note_sorted_stage_gen) for the base_index
     /// (regular + unique) index path. `or_insert` makes a re-capture in the
     /// same tx a no-op: the EARLIEST generation is the most stale.
-    pub fn note_legacy_stage_gen(&mut self, table_token: u64, gen: u64) {
-        self.legacy_stage_gens.entry(table_token).or_insert(gen);
+    pub fn note_base_index_stage_gen(&mut self, table_token: u64, gen: u64) {
+        self.base_index_stage_gens.entry(table_token).or_insert(gen);
     }
 
     /// Record a read for SSI validation (only if Serializable).

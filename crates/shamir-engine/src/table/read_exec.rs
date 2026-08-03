@@ -468,7 +468,7 @@ impl TableManager {
         // CRIT-7: an `IndexResult::Set`/`Ranked` from index2 is the
         // AUTHORITATIVE, complete answer for this filter — including when
         // it is EMPTY. An empty set means "zero rows match", full stop.
-        // We must NOT fall through to the legacy btree / full-scan paths
+        // We must NOT fall through to the base_index btree / full-scan paths
         // when `rids_vec` is empty:
         //   - FTS / functional: the full scan would re-derive the same
         //     empty answer at O(N) needless cost (tokenising every row
@@ -594,7 +594,7 @@ impl TableManager {
             }
         }
 
-        // Try index scan first (legacy btree)
+        // Try index scan first (base_index btree)
         if let Some(ref filter) = query.r#where {
             if let Some((idx_name, lookup_sets, residual)) =
                 self.try_plan_index_scan(filter, interner)
@@ -1724,7 +1724,7 @@ impl TableManager {
                 match idx2_result {
                     Some(IndexResult::Set(set)) => Some(set.into_iter().collect()),
                     _ => {
-                        // Try legacy btree index scan. Only use when the index
+                        // Try base_index btree index scan. Only use when the index
                         // FULLY covers the residual (no leftover predicate).
                         if let Some((idx_name, lookup_sets, leftover)) =
                             self.try_plan_index_scan(residual, interner)

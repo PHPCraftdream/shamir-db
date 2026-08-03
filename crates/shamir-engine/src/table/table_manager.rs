@@ -68,7 +68,7 @@ pub struct TableManager {
     ///   NEITHER the backfill snapshot (cursor already past it) NOR the live
     ///   `index2_on_insert` hook (backend not yet registered) — the
     ///   lost-write race (#534, finding 1) that `unique_write_lock` alone
-    ///   does not close because writers only took that lock when a legacy
+    ///   does not close because writers only took that lock when a base_index
     ///   unique index existed, and an index2-only table has none.
     /// - `SCHEMA_ACTIVATION` (F-37, #845) — raised for the duration of a
     ///   schema-activation DDL sequence (`set_table_schema` /
@@ -930,10 +930,10 @@ impl TableManager {
     }
 
     /// O(1) composite check: does this table have ANY index across all
-    /// three subsystems (index2 registry, legacy hash/unique, sorted)?
+    /// three subsystems (index2 registry, base_index hash/unique, sorted)?
     ///
     /// Used as a fast-path guard on the insert hot path to skip the
-    /// `all_backends().await` scan + 3 legacy planner calls when the
+    /// `all_backends().await` scan + 3 base_index planner calls when the
     /// table has zero indexes. Each sub-check is O(1): `is_empty()`
     /// on `scc::HashMap`, an `AtomicBool` load, a packed-word bit test
     /// (F-69, #896), `DashMap::is_empty`.
@@ -948,7 +948,7 @@ impl TableManager {
     /// its validate→write→index sequence?
     ///
     /// `true` when ANY of:
-    /// - the table has a legacy unique index (the original reason the barrier
+    /// - the table has a base_index unique index (the original reason the barrier
     ///   exists — atomic unique-check + posting-write),
     /// - an index2 `create_index_v2` is currently in flight (#534 finding 1),
     ///   OR
@@ -983,8 +983,8 @@ impl TableManager {
     /// `set`), AND (task #538, Part A) by the tx-commit pipeline's Phase 2.5
     /// prelock (`tx::pre_commit::pre_commit_prelock`), which now acquires
     /// `unique_write_lock` for every table this tx wrote to that returns
-    /// `true` here — not just tables with legacy unique guards. This closes
-    /// the commit-time serialization gap for an index2-only table (no legacy
+    /// `true` here — not just tables with base_index unique guards. This closes
+    /// the commit-time serialization gap for an index2-only table (no base_index
     /// unique index) under an in-flight `create_index_v2`. It does NOT close
     /// #538's Part B (stage-time index2 ops-plan staleness against a
     /// create that starts/finishes entirely between this tx's stage and

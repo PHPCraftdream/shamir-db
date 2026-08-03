@@ -31,17 +31,17 @@ async fn has_any_index_false_for_fresh_table() {
 }
 
 #[tokio::test]
-async fn has_any_index_true_after_legacy_index() {
+async fn has_any_index_true_after_base_index() {
     let tbl = make_table().await;
     assert!(!tbl.has_any_index());
 
-    // Add a legacy (non-unique) hash index.
+    // Add a base_index (non-unique) hash index.
     let def = IndexDefinition::new(42, vec![IndexInfoItem::new(vec![1])]);
     tbl.index_manager_ref().create_index(def).await.unwrap();
 
     assert!(
         tbl.has_any_index(),
-        "after adding a legacy index, has_any_index must be true"
+        "after adding a base_index index, has_any_index must be true"
     );
 }
 
@@ -135,7 +135,7 @@ async fn insert_tx_unindexed_produces_no_index_ops() {
 async fn insert_tx_many_indexed_produces_index_ops() {
     let tbl = make_table().await;
 
-    // Add a legacy hash index on field path [1].
+    // Add a base_index hash index on field path [1].
     let def = IndexDefinition::new(42, vec![IndexInfoItem::new(vec![1])]);
     tbl.index_manager_ref().create_index(def).await.unwrap();
     assert!(tbl.has_any_index());

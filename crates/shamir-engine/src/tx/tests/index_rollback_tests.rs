@@ -18,20 +18,20 @@
 //!   committed graph. Non-tx queries (`adapter.search(_, _, None)`)
 //!   still see only the committed graph and therefore do not surface
 //!   the staged vector. Verified end-to-end below.
-//! * Legacy `IndexManager` / `SortedIndexManager` — NOW routed through
-//!   `insert_tx` / `update_tx` / `delete_tx`. The legacy/sorted planners
+//! * base_index `IndexManager` / `SortedIndexManager` — NOW routed through
+//!   `insert_tx` / `update_tx` / `delete_tx`. The base_index/sorted planners
 //!   emit `IndexWriteOp`s into `tx.index_write_set` carrying the exact
 //!   physical key scheme the readers expect; a committed tx applies them
 //!   (Phase 5c-d), a dropped tx discards them. Asserted in
-//!   `legacy_index_routed_through_insert_tx_on_commit` here and in
-//!   `legacy_index_tx_tests`.
+//!   `base_index_routed_through_insert_tx_on_commit` here and in
+//!   `base_index_tx_tests`.
 //! * Commit-time apply for `tx.index_write_set` ops
 //!   (`commit.rs::commit_tx_inner` Phase 5c-d) — DONE. On the happy
 //!   path a committed tx applies its staged postings to `info_store`
 //!   (and broadcasts BumpFtsStats to the live backends) via
 //!   `apply_index_ops_at_commit`, so the record is findable through
 //!   the index immediately after commit — asserted by
-//!   `legacy_index_routed_through_insert_tx_on_commit` here. The same
+//!   `base_index_routed_through_insert_tx_on_commit` here. The same
 //!   ops are also emitted into the WAL entry by `wal_ops_from_tx`, so
 //!   crash recovery re-applies them idempotently if the process dies
 //!   between the WAL begin and commit markers.
@@ -175,24 +175,24 @@ async fn dropped_tx_vector_index_leaves_no_postings() {
     }
 }
 
-/// HIGH-6 (closed): legacy `IndexManager` (`tbl.create_index` →
+/// HIGH-6 (closed): base_index `IndexManager` (`tbl.create_index` →
 /// `tbl.lookup_by_index`) IS now wired into `insert_tx`. The posting
 /// writes are staged into `tx.index_write_set` by `insert_tx` (via the
-/// legacy planners) and applied to `info_store` by the commit pipeline
+/// base_index planners) and applied to `info_store` by the commit pipeline
 /// (Phase 5c-d). A committed `insert_tx` therefore makes the record
-/// findable through the legacy secondary index — the gap this test
+/// findable through the base_index secondary index — the gap this test
 /// originally documented is closed.
 ///
-/// (Rollback safety — a dropped `insert_tx` leaving the legacy index
+/// (Rollback safety — a dropped `insert_tx` leaving the base_index index
 /// empty — is asserted separately in
-/// `legacy_index_tx_tests::dropped_tx_no_secondary_postings`.)
+/// `base_index_tx_tests::dropped_tx_no_secondary_postings`.)
 #[tokio::test]
-async fn legacy_index_routed_through_insert_tx_on_commit() {
+async fn base_index_routed_through_insert_tx_on_commit() {
     let repo = make_repo();
     repo.add_table(TableConfig::new("t"));
     let tbl = repo.get_table("t").await.unwrap();
 
-    // Legacy btree-style index on field "name".
+    // base_index btree-style index on field "name".
     repo.create_index("t", "by_name", &["name"]).await.unwrap();
 
     let name_key_id = {
@@ -216,15 +216,15 @@ async fn legacy_index_routed_through_insert_tx_on_commit() {
         .unwrap();
     let _ = repo.commit_tx(tx).await.unwrap();
 
-    // Legacy lookup. Post-HIGH-6: the staged posting is applied at
-    // commit, so the record is findable via the legacy index.
+    // base_index lookup. Post-HIGH-6: the staged posting is applied at
+    // commit, so the record is findable via the base_index index.
     let hits = tbl
         .lookup_by_index("by_name", &[InnerValue::Str("alice".into())])
         .await
         .unwrap();
     assert!(
         hits.contains(&rid),
-        "HIGH-6 (closed): committed insert_tx must populate the legacy \
+        "HIGH-6 (closed): committed insert_tx must populate the base_index \
          IndexManager posting; got {:?}, rid {:?}",
         hits,
         rid

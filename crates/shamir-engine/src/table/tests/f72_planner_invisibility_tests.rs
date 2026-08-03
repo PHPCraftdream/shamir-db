@@ -1,4 +1,4 @@
-//! F-72 (#899, P0) — legacy regular-hash / sorted CREATE INDEX must be
+//! F-72 (#899, P0) — base_index regular-hash / sorted CREATE INDEX must be
 //! planner-invisible until backfill completes.
 //!
 //! F-57 (#883) and F-70 (#897) serialise CREATE INDEX against WRITERS
@@ -111,7 +111,7 @@ async fn read_between_score(
 /// flips to `Ready`), the SAME query must then use the index.
 #[tokio::test]
 async fn f72_regular_index_planner_invisible_during_backfill() {
-    use shamir_index::legacy::backfill_pause_hook::BackfillPauseHook;
+    use shamir_index::base_index::backfill_pause_hook::BackfillPauseHook;
 
     let repo = make_repo();
     repo.add_table(TableConfig::new("people"));

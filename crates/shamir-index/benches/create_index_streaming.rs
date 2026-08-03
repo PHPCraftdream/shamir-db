@@ -1,6 +1,6 @@
-//! F-78 (#905) bench — stream legacy regular-index build vs. materialize.
+//! F-78 (#905) bench — stream base_index regular-index build vs. materialize.
 //!
-//! Before F-78, `CREATE INDEX` on a legacy regular-hash index materialized the
+//! Before F-78, `CREATE INDEX` on a base_index regular-hash index materialized the
 //! ENTIRE table into a `Vec<(RecordId, InnerValue)>` (the
 //! `collect_all_current_records` + `create_index_from_records` path) and then
 //! built a SECOND full-table `Vec` of postings before one `set_many` — O(table)
@@ -64,9 +64,9 @@ use std::sync::Arc;
 
 use bench_scale_tool::Harness;
 use futures::StreamExt;
-use shamir_index::legacy::index_definition::IndexDefinition;
-use shamir_index::legacy::index_info_item::IndexInfoItem;
-use shamir_index::legacy::index_manager::IndexManager;
+use shamir_index::base_index::index_definition::IndexDefinition;
+use shamir_index::base_index::index_info_item::IndexInfoItem;
+use shamir_index::base_index::index_manager::IndexManager;
 use shamir_storage::storage_in_memory::InMemoryStore;
 use shamir_storage::types::Store;
 use shamir_types::core::interner::InternerKey;

@@ -98,7 +98,7 @@ fn functional_lower_op(name: &str, table: &str, field: &str) -> CreateIndexOp {
 /// still returns the correct set via full scan (the index no longer exists).
 #[tokio::test]
 async fn f76_regular_hash_drop_invisible_during_sweep() {
-    use shamir_index::legacy::backfill_pause_hook::BackfillPauseHook;
+    use shamir_index::base_index::backfill_pause_hook::BackfillPauseHook;
 
     let repo = make_repo();
     repo.add_table(TableConfig::new("people"));
@@ -303,7 +303,7 @@ async fn f76_index2_drop_invisible_during_sweep() {
 /// planner-routed read.)
 #[tokio::test]
 async fn f76_unique_hash_drop_retires_definition_before_sweep() {
-    use shamir_index::legacy::backfill_pause_hook::BackfillPauseHook;
+    use shamir_index::base_index::backfill_pause_hook::BackfillPauseHook;
 
     let repo = make_repo();
     repo.add_table(TableConfig::new("people"));

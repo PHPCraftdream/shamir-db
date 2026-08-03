@@ -9,7 +9,7 @@
 //! `index2_on_insert` hook (backend not yet routable) — permanently missing
 //! from the new index. The fix holds `unique_write_lock` across
 //! backfill→register AND flips `index2_create_barrier` so EVERY writer path
-//! (even on an index2-only table with no legacy unique index) serializes
+//! (even on an index2-only table with no base_index unique index) serializes
 //! against the create for its duration.
 //!
 //! The regression test drives a concurrent writer INTO that exact window via
@@ -373,7 +373,7 @@ async fn without_reserve_persist_crashed_id_would_be_reused() {
 //
 // Part A (closed here): `pre_commit.rs`'s Phase 2.5 prelock now acquires
 // `unique_write_lock` for every table this tx wrote to that has
-// `needs_write_barrier() == true` (not just tables with a legacy unique
+// `needs_write_barrier() == true` (not just tables with a base_index unique
 // index) — so a tx's COMMIT now serializes against an in-flight
 // `create_index_v2` on an index2-only table, mirroring the non-tx fix.
 //

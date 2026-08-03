@@ -22,7 +22,7 @@ impl TableManager {
 
     /// Create a regular or specialized (fts/vector/functional) index.
     ///
-    /// Routes `btree` + `unique` variants through the legacy `IndexManager`
+    /// Routes `btree` + `unique` variants through the base_index `IndexManager`
     /// path (`create_index` / `create_unique_index`). All other index types
     /// go through the `index2` backend pipeline.
     pub async fn create_index_v2(
@@ -53,7 +53,7 @@ impl TableManager {
         // `needs_write_barrier()` to `true` on every NON-TX writer path
         // (`insert`/`insert_many_returning_version`/`delete_returning_version`/
         // `set` in `table_manager_crud.rs`) — so even an index2-only table
-        // (no legacy unique index, normally lock-free) now serializes THOSE
+        // (no base_index unique index, normally lock-free) now serializes THOSE
         // writers against this create.
         //
         // PARTIAL FIX, honestly scoped (see `backfill_index2_backend`'s doc
@@ -328,7 +328,7 @@ impl TableManager {
         // table BEFORE it was registered. Without this, a functional / fts /
         // vector index created on a non-empty table silently omits every
         // pre-existing row: only rows written AFTER the index exists get a
-        // posting via the `index2_on_insert` write-hook. (The legacy btree
+        // posting via the `index2_on_insert` write-hook. (The base_index btree
         // path backfills via `create_index` → `create_index_from_records`;
         // the index2 pipeline had no equivalent, so `create_index_v2` was the
         // divergence — a query using the index would then miss every row that
@@ -375,7 +375,7 @@ impl TableManager {
     /// already exist in this table, by streaming the current record set and
     /// running `plan_insert` + `apply_index_ops` for each row.
     ///
-    /// This is the index2 analogue of the legacy btree
+    /// This is the index2 analogue of the base_index btree
     /// `create_index_from_records` backfill. It is scoped to ONE backend (the
     /// one just created) so a CREATE INDEX on a table that already carries
     /// other index2 backends does not needlessly re-touch them.
@@ -411,7 +411,7 @@ impl TableManager {
     ///    pipeline's Phase 2.5 prelock / Phase 5a-5c for MATERIALIZE). The
     ///    commit-time prelock (`pre_commit.rs`'s `pre_commit_prelock`, Phase
     ///    2.5) originally took `unique_write_lock` only for tables in
-    ///    `tx.unique_guards` (tables with a legacy UNIQUE index) — an
+    ///    `tx.unique_guards` (tables with a base_index UNIQUE index) — an
     ///    index2-only table under an in-flight `create_index_v2` contributed
     ///    nothing, so that tx's commit could freely interleave with this
     ///    backfill. #538 Part A extends Phase 2.5 to ALSO acquire
@@ -725,7 +725,7 @@ impl TableManager {
     /// # CRASH-SAFETY GAP (pre-existing, deliberately deferred — reviewed under #972)
     ///
     /// The order retire → sweep → persist is the SAME shape as the
-    /// crash-resurrection bug fixed for the legacy regular/unique family
+    /// crash-resurrection bug fixed for the base_index regular/unique family
     /// (#959) and the sorted family (#972): a crash between step 3 (`drop_all`)
     /// and step 4 (`save_index2_metadata`) leaves the on-disk
     /// `PersistedIndexes` still listing the index as `Ready` while its
@@ -737,7 +737,7 @@ impl TableManager {
     ///
     /// When this is picked up, copy the durable-tombstone pattern from the
     /// sibling families. The closest analog is the SORTED family
-    /// (`SortedIndexManager` in `shamir-index/src/legacy/sorted_index_manager.rs`,
+    /// (`SortedIndexManager` in `shamir-index/src/base_index/sorted_index_manager.rs`,
     /// #972), which uses a separate `system:sidx_drop` key holding a
     /// bincode `Vec<u64>` written BEFORE the sweep and cleared AFTER the
     /// persist, with an open-time `recover_in_progress_drops` resuming any
@@ -1169,7 +1169,7 @@ impl TableManager {
 async fn rekey_sorted_prefix(info_store: &dyn Store, old_id: u64, new_id: u64) -> DbResult<()> {
     // SORTED_TAG = 0x80 — the tag byte that distinguishes sorted-index physical
     // keys from hash-index keys and system RecordId keys in the same info_store.
-    // Mirrors `shamir_index::legacy::sorted_index_definition::SORTED_TAG` (pub(crate)
+    // Mirrors `shamir_index::base_index::sorted_index_definition::SORTED_TAG` (pub(crate)
     // there, so we inline the constant here with a comment instead of importing).
     const SORTED_TAG: u8 = 0x80;
 

@@ -490,7 +490,7 @@ async fn w2d_dec_big_invariant_index_key_parity() {
 
     // extract_index_leaves drives materialize_at under the hood — this is
     // what insert_tx_many_bytes uses. Both must agree on the leaf value.
-    let def = shamir_index::legacy::index_info_item::IndexInfoItem::new(vec![price_id]);
+    let def = shamir_index::base_index::index_info_item::IndexInfoItem::new(vec![price_id]);
 
     let tree_leaves =
         crate::index::index_keys::extract_index_leaves(&inner, std::slice::from_ref(&def));

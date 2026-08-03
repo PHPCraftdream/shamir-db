@@ -190,7 +190,7 @@ impl ShamirAdminExecutor {
         if op.cascade {
             if let Some(db) = self.shamir.get_db(&self.db_name) {
                 if let Ok(table) = db.get_table(&op.repo, &op.drop_table).await {
-                    // Legacy regular indexes.
+                    // base_index regular indexes.
                     let regular_ids: Vec<u64> = table
                         .index_manager_ref()
                         .iter_indexes()
@@ -199,7 +199,7 @@ impl ShamirAdminExecutor {
                     for id in regular_ids {
                         let _ = table.index_manager_ref().drop_index(id).await;
                     }
-                    // Legacy unique indexes.
+                    // base_index unique indexes.
                     let unique_ids: Vec<u64> = table
                         .index_manager_ref()
                         .iter_unique_indexes()
@@ -438,8 +438,8 @@ impl ShamirAdminExecutor {
 
         // if_exists early-exit: missing db, table, or index → no-op.
         //
-        // Existence is checked across ALL FOUR index mechanisms (legacy
-        // regular, legacy unique, sorted, index2) — `DROP INDEX <name>` has
+        // Existence is checked across ALL FOUR index mechanisms (base_index
+        // regular, base_index unique, sorted, index2) — `DROP INDEX <name>` has
         // no `index_type` hint on the wire (see `DropIndexOp`), so the name
         // alone must be resolved. Before this, an index2 / sorted index of
         // the same name would be reported as "does not exist" and silently
@@ -452,12 +452,12 @@ impl ShamirAdminExecutor {
             };
             let index_exists = match &table_opt {
                 Some(table) => {
-                    let legacy = if op.unique {
+                    let base_index = if op.unique {
                         table.unique_index_exists(&op.drop_index).await
                     } else {
                         table.index_exists(&op.drop_index).await
                     };
-                    legacy
+                    base_index
                         || table.sorted_index_exists(&op.drop_index).await
                         || table.index2_exists(&op.drop_index).await
                 }
@@ -488,9 +488,9 @@ impl ShamirAdminExecutor {
             .await
             .map_err(|e| err(e.to_string()))?;
 
-        // Resolution order: legacy first (preserves the existing behavior
+        // Resolution order: base_index first (preserves the existing behavior
         // and error messages for the common btree case unchanged), then the
-        // legacy-miss falls through to sorted, then to index2. `DropIndexOp`
+        // base_index-miss falls through to sorted, then to index2. `DropIndexOp`
         // carries no `index_type`, so the name is resolved by trying each
         // mechanism in turn and returning the first hit. Short-circuit `||`
         // skips the remaining lookups once one matches.

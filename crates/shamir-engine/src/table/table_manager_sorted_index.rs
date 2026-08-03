@@ -143,7 +143,7 @@ impl TableManager {
         // definition stays registered but `Building` — it is NEVER flipped to
         // `Ready`, so it remains permanently planner-invisible (the state
         // flip only happens after this loop completes AND `mark_ready_at`
-        // runs, below). Unlike index2, the legacy sorted-index family has NO
+        // runs, below). Unlike index2, the base_index sorted-index family has NO
         // automatic restart-from-scratch self-heal at table-open time (grep-
         // verified: `TableManager::create`'s open path re-hydrates
         // `SortedIndexManager` via `load()`, which restores whatever `state`
@@ -155,7 +155,7 @@ impl TableManager {
         // unconditionally, regardless of state) — it does NOT silently
         // resurrect as queryable on its own. This is an accepted, explicitly
         // documented gap (mirrors the pre-existing `create_sorted_index`
-        // doc's "cancel-safe: NO" note) — automatic legacy-family
+        // doc's "cancel-safe: NO" note) — automatic base_index-family
         // self-healing is out of scope for this task.
         let stream = self.list_stream(1000);
         futures::pin_mut!(stream);

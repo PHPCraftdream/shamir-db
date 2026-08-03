@@ -2,7 +2,7 @@
 //!
 //! Two guarantees:
 //!
-//! 1. **Index-op identity**: `plan_delete_ops` and `plan_legacy_delete_ops`
+//! 1. **Index-op identity**: `plan_delete_ops` and `plan_base_index_delete_ops`
 //!    called with a `RecordView` built from the storage bytes emit the
 //!    byte-identical `IndexWriteOp` set as those same planners called with
 //!    `InnerValue::from_bytes(same_bytes)`. This proves the lens delete path
@@ -125,20 +125,26 @@ async fn plan_delete_ops_view_eq_tree_no_backends() {
 }
 
 // ============================================================================
-// 2. plan_legacy_delete_ops identity — RecordView vs InnerValue
+// 2. plan_base_index_delete_ops identity — RecordView vs InnerValue
 // ============================================================================
 
-/// No legacy indexes → both paths return empty.
+/// No base_index indexes → both paths return empty.
 #[tokio::test]
-async fn plan_legacy_delete_ops_view_eq_tree_no_index() {
+async fn plan_base_index_delete_ops_view_eq_tree_no_index() {
     let tbl = make_table().await;
     let (rid, raw_bytes) = seed_indexed_record(&tbl).await;
 
     let old_tree = InnerValue::from_bytes(&raw_bytes).unwrap();
     let old_view = RecordView::new(&raw_bytes).unwrap();
 
-    let mut ops_tree = tbl.plan_legacy_delete_ops(rid, &old_tree).await.unwrap();
-    let mut ops_view = tbl.plan_legacy_delete_ops(rid, &old_view).await.unwrap();
+    let mut ops_tree = tbl
+        .plan_base_index_delete_ops(rid, &old_tree)
+        .await
+        .unwrap();
+    let mut ops_view = tbl
+        .plan_base_index_delete_ops(rid, &old_view)
+        .await
+        .unwrap();
 
     sort_ops(&mut ops_tree);
     sort_ops(&mut ops_view);
@@ -146,13 +152,13 @@ async fn plan_legacy_delete_ops_view_eq_tree_no_index() {
     assert_eq!(
         ops_as_sortkeys(&ops_tree),
         ops_as_sortkeys(&ops_view),
-        "plan_legacy_delete_ops (no index): RecordView and InnerValue paths must agree"
+        "plan_base_index_delete_ops (no index): RecordView and InnerValue paths must agree"
     );
 }
 
 /// Regular index on `city` → both paths emit a RemovePosting for the city entry.
 #[tokio::test]
-async fn plan_legacy_delete_ops_view_eq_tree_regular_index() {
+async fn plan_base_index_delete_ops_view_eq_tree_regular_index() {
     let tbl = make_table().await;
     tbl.create_index("city_idx", &["city"]).await.unwrap();
 
@@ -161,8 +167,14 @@ async fn plan_legacy_delete_ops_view_eq_tree_regular_index() {
     let old_tree = InnerValue::from_bytes(&raw_bytes).unwrap();
     let old_view = RecordView::new(&raw_bytes).unwrap();
 
-    let mut ops_tree = tbl.plan_legacy_delete_ops(rid, &old_tree).await.unwrap();
-    let mut ops_view = tbl.plan_legacy_delete_ops(rid, &old_view).await.unwrap();
+    let mut ops_tree = tbl
+        .plan_base_index_delete_ops(rid, &old_tree)
+        .await
+        .unwrap();
+    let mut ops_view = tbl
+        .plan_base_index_delete_ops(rid, &old_view)
+        .await
+        .unwrap();
 
     sort_ops(&mut ops_tree);
     sort_ops(&mut ops_view);
@@ -170,7 +182,7 @@ async fn plan_legacy_delete_ops_view_eq_tree_regular_index() {
     assert_eq!(
         ops_as_sortkeys(&ops_tree),
         ops_as_sortkeys(&ops_view),
-        "plan_legacy_delete_ops (regular index): RecordView and InnerValue paths must produce identical RemovePosting ops"
+        "plan_base_index_delete_ops (regular index): RecordView and InnerValue paths must produce identical RemovePosting ops"
     );
 
     // Sanity: at least one RemovePosting was emitted (non-vacuous).
@@ -183,7 +195,7 @@ async fn plan_legacy_delete_ops_view_eq_tree_regular_index() {
 /// Regular index on `city` + unique index on `email` → ops must agree.
 /// Expects at least two ops (one per index).
 #[tokio::test]
-async fn plan_legacy_delete_ops_view_eq_tree_unique_and_regular() {
+async fn plan_base_index_delete_ops_view_eq_tree_unique_and_regular() {
     let tbl = make_table().await;
     tbl.create_index("city_idx", &["city"]).await.unwrap();
     tbl.create_unique_index("email_unique", &["email"])
@@ -195,8 +207,14 @@ async fn plan_legacy_delete_ops_view_eq_tree_unique_and_regular() {
     let old_tree = InnerValue::from_bytes(&raw_bytes).unwrap();
     let old_view = RecordView::new(&raw_bytes).unwrap();
 
-    let mut ops_tree = tbl.plan_legacy_delete_ops(rid, &old_tree).await.unwrap();
-    let mut ops_view = tbl.plan_legacy_delete_ops(rid, &old_view).await.unwrap();
+    let mut ops_tree = tbl
+        .plan_base_index_delete_ops(rid, &old_tree)
+        .await
+        .unwrap();
+    let mut ops_view = tbl
+        .plan_base_index_delete_ops(rid, &old_view)
+        .await
+        .unwrap();
 
     sort_ops(&mut ops_tree);
     sort_ops(&mut ops_view);
@@ -204,7 +222,7 @@ async fn plan_legacy_delete_ops_view_eq_tree_unique_and_regular() {
     assert_eq!(
         ops_as_sortkeys(&ops_tree),
         ops_as_sortkeys(&ops_view),
-        "plan_legacy_delete_ops (unique+regular): RecordView and InnerValue must produce identical ops"
+        "plan_base_index_delete_ops (unique+regular): RecordView and InnerValue must produce identical ops"
     );
     assert!(
         ops_view.len() >= 2,
@@ -215,7 +233,7 @@ async fn plan_legacy_delete_ops_view_eq_tree_unique_and_regular() {
 
 /// Nested-path index on `addr.city` → ops must agree.
 #[tokio::test]
-async fn plan_legacy_delete_ops_view_eq_tree_nested_path() {
+async fn plan_base_index_delete_ops_view_eq_tree_nested_path() {
     let tbl = make_table().await;
     tbl.create_index("addr_city_idx", &["addr.city"])
         .await
@@ -226,8 +244,14 @@ async fn plan_legacy_delete_ops_view_eq_tree_nested_path() {
     let old_tree = InnerValue::from_bytes(&raw_bytes).unwrap();
     let old_view = RecordView::new(&raw_bytes).unwrap();
 
-    let mut ops_tree = tbl.plan_legacy_delete_ops(rid, &old_tree).await.unwrap();
-    let mut ops_view = tbl.plan_legacy_delete_ops(rid, &old_view).await.unwrap();
+    let mut ops_tree = tbl
+        .plan_base_index_delete_ops(rid, &old_tree)
+        .await
+        .unwrap();
+    let mut ops_view = tbl
+        .plan_base_index_delete_ops(rid, &old_view)
+        .await
+        .unwrap();
 
     sort_ops(&mut ops_tree);
     sort_ops(&mut ops_view);
@@ -235,7 +259,7 @@ async fn plan_legacy_delete_ops_view_eq_tree_nested_path() {
     assert_eq!(
         ops_as_sortkeys(&ops_tree),
         ops_as_sortkeys(&ops_view),
-        "plan_legacy_delete_ops (nested addr.city): RecordView and InnerValue must produce identical RemovePosting ops"
+        "plan_base_index_delete_ops (nested addr.city): RecordView and InnerValue must produce identical RemovePosting ops"
     );
     assert!(
         !ops_view.is_empty(),
@@ -327,7 +351,7 @@ async fn execute_delete_tx_removes_regular_and_unique_index_entries() {
 /// regular index. Commit the staged ops manually, then confirm the index is
 /// cleared.
 #[tokio::test]
-async fn delete_tx_stages_remove_posting_for_legacy_index() {
+async fn delete_tx_stages_remove_posting_for_base_index() {
     let tbl = make_table().await;
     tbl.create_index("city_idx", &["city"]).await.unwrap();
 

@@ -264,11 +264,11 @@ async fn set_index_ops_view_eq_tree_regular_index() {
     let rid = RecordId::new();
 
     let mut ops_tree = tbl
-        .plan_legacy_update_ops(rid, &old_tree, &new_tree)
+        .plan_base_index_update_ops(rid, &old_tree, &new_tree)
         .await
         .unwrap();
     let mut ops_view = tbl
-        .plan_legacy_update_ops_ref(rid, &old_view, &new_view)
+        .plan_base_index_update_ops_ref(rid, &old_view, &new_view)
         .await
         .unwrap();
 
@@ -277,7 +277,7 @@ async fn set_index_ops_view_eq_tree_regular_index() {
     assert_eq!(
         ops_as_sortkeys(&ops_tree),
         ops_as_sortkeys(&ops_view),
-        "SET plan_legacy_update_ops (regular index): RecordView and InnerValue must agree"
+        "SET plan_base_index_update_ops (regular index): RecordView and InnerValue must agree"
     );
     assert!(
         !ops_tree.is_empty(),
@@ -369,7 +369,7 @@ async fn set_change_detection_new_key() {
 // ============================================================================
 
 /// SET that UPDATES an existing record's indexed field → the index reflects
-/// the new value (proves `update_tx_bytes` drove the legacy posting planners
+/// the new value (proves `update_tx_bytes` drove the base_index posting planners
 /// through the lens and the postings landed at commit).
 #[tokio::test]
 async fn set_update_indexed_field_reflected_in_index() {

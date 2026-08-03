@@ -218,14 +218,14 @@ impl TableManager {
         Ok(all_ops)
     }
 
-    /// HIGH-6: collect legacy `IndexManager` (regular + unique) and
+    /// HIGH-6: collect base_index `IndexManager` (regular + unique) and
     /// `SortedIndexManager` posting ops for a tx insert. These ops use
     /// the *exact* physical key layout the non-tx readers expect
     /// (`lookup_by_index` / `check_unique_constraint` / `lookup_range`),
     /// so applying them at commit time produces postings indistinguishable
     /// from the non-tx `on_record_created` path. The unique ops do NOT
     /// validate — validation runs separately at stage time in `insert_tx`.
-    pub(super) async fn plan_legacy_insert_ops(
+    pub(super) async fn plan_base_index_insert_ops(
         &self,
         rid: RecordId,
         rec: &InnerValue,
@@ -240,8 +240,8 @@ impl TableManager {
         Ok(ops)
     }
 
-    /// HIGH-6: legacy + sorted posting ops for a tx update.
-    pub(super) async fn plan_legacy_update_ops(
+    /// HIGH-6: base_index + sorted posting ops for a tx update.
+    pub(super) async fn plan_base_index_update_ops(
         &self,
         rid: RecordId,
         old: &InnerValue,
@@ -260,11 +260,11 @@ impl TableManager {
         Ok(ops)
     }
 
-    /// RecordRef-generic variant of [`plan_legacy_update_ops`].
+    /// RecordRef-generic variant of [`plan_base_index_update_ops`].
     ///
     /// Accepts any `RecordRef` (`InnerValue` or `RecordView`) so the update
     /// path can feed zero-copy lenses instead of decoded trees.
-    pub(super) async fn plan_legacy_update_ops_ref<R>(
+    pub(super) async fn plan_base_index_update_ops_ref<R>(
         &self,
         rid: RecordId,
         old: &R,
@@ -286,11 +286,11 @@ impl TableManager {
         Ok(ops)
     }
 
-    /// HIGH-6: legacy + sorted posting ops for a tx delete.
+    /// HIGH-6: base_index + sorted posting ops for a tx delete.
     ///
     /// Accepts any `RecordRef` (`InnerValue` or `RecordView`) so the delete
     /// path can feed a zero-copy lens instead of a decoded tree.
-    pub(super) async fn plan_legacy_delete_ops<R>(
+    pub(super) async fn plan_base_index_delete_ops<R>(
         &self,
         rid: RecordId,
         old: &R,
@@ -314,9 +314,9 @@ impl TableManager {
     /// - `tx == Some` → stages data + index ops + counter delta in
     ///   TxContext. No physical writes. commit_tx Phase 5 applies.
     ///
-    /// HIGH-6: legacy `IndexManager` (regular + unique) and
+    /// HIGH-6: base_index `IndexManager` (regular + unique) and
     /// `SortedIndexManager` posting writes ARE now staged into
-    /// `tx.index_write_set` via [`plan_legacy_insert_ops`]. The planners
+    /// `tx.index_write_set` via [`plan_base_index_insert_ops`]. The planners
     /// emit `IndexWriteOp`s carrying the exact physical key layout the
     /// non-tx readers expect, so the commit pipeline applies them
     /// atomically and a dropped tx leaves no ghost postings. Unique-index
@@ -396,13 +396,13 @@ impl TableManager {
         let token = self.table_token();
         let index2_gen = self.index2_registry().generation();
         let sorted_gen = self.sorted_indexes.generation();
-        let legacy_gen = self.index_manager.generation();
+        let base_index_gen = self.index_manager.generation();
 
         let mut index_ops = Vec::new();
         if self.has_any_index() {
             let tx_id = Some(tx.tx_id);
             index_ops = self.plan_insert_ops(rid, value, tx_id).await?;
-            index_ops.extend(self.plan_legacy_insert_ops(rid, value).await?);
+            index_ops.extend(self.plan_base_index_insert_ops(rid, value).await?);
 
             // HIGH-6: stage HNSW vectors tx-locally (not into the live graph).
             self.stage_vectors(rid, value, tx).await;
@@ -419,12 +419,12 @@ impl TableManager {
         .await?;
 
         // F-50 (#869) + F-50 Step 2 (#870) + P0-2 (#958): capture this table's
-        // index2 / sorted / legacy generation (values read ABOVE, before the
+        // index2 / sorted / base_index generation (values read ABOVE, before the
         // stage-time snapshots) so the commit-time re-derivation gate can
         // detect a backend/def registered between this stage and commit.
         tx.note_index2_stage_gen(token, index2_gen);
         tx.note_sorted_stage_gen(token, sorted_gen);
-        tx.note_legacy_stage_gen(token, legacy_gen);
+        tx.note_base_index_stage_gen(token, base_index_gen);
 
         Ok(rid)
     }
@@ -433,7 +433,7 @@ impl TableManager {
     /// staging path. Stages N records' data + index ops + counter
     /// delta into `tx` in one pass, lifting the per-row overhead
     /// (`validate_unique_for_create`, `unique_keys_for`,
-    /// `all_backends().await` snapshots, `plan_legacy_insert_ops`)
+    /// `all_backends().await` snapshots, `plan_base_index_insert_ops`)
     /// out of the row loop.
     ///
     /// Semantics MUST match calling [`insert_tx`] N times:
@@ -443,7 +443,7 @@ impl TableManager {
     ///     to settle ownership);
     ///   * HNSW vectors are staged tx-locally via [`stage_vector`];
     ///   * stateless index2 backends emit ops via `plan_insert_tx`;
-    ///   * legacy / unique / sorted indexes emit ops via the existing
+    ///   * base_index / unique / sorted indexes emit ops via the existing
     ///     batch planners (`plan_records_created_batch`,
     ///     `plan_records_created_unique_batch`, sorted-by-def loop);
     ///   * counter delta = +N is bumped once;
@@ -537,7 +537,7 @@ impl TableManager {
         let token = self.table_token();
         let index2_gen = self.index2_registry().generation();
         let sorted_gen = self.sorted_indexes.generation();
-        let legacy_gen = self.index_manager.generation();
+        let base_index_gen = self.index_manager.generation();
         let mut index_ops: Vec<shamir_tx::IndexWriteOp> = Vec::new();
         if self.has_any_index() {
             // 4. Take the index2 backend snapshot ONCE, then drive both
@@ -561,22 +561,22 @@ impl TableManager {
                 }
             }
 
-            // 5. Legacy + sorted batch planners — one call each, planning
+            // 5. base_index + sorted batch planners — one call each, planning
             //    over the whole (id, value) iterator. Same physical key
             //    layout the non-tx readers expect (see
-            //    `plan_legacy_insert_ops` for the contract).
+            //    `plan_base_index_insert_ops` for the contract).
             let pairs = || ids.iter().zip(values.iter());
-            let mut legacy_ops = self
+            let mut base_index_ops = self
                 .index_manager
                 .plan_records_created_batch(pairs())
                 .await?;
-            legacy_ops.extend(
+            base_index_ops.extend(
                 self.index_manager
                     .plan_records_created_unique_batch(pairs())
                     .await?,
             );
-            legacy_ops.extend(self.sorted_indexes.plan_records_created_batch(pairs(), 0)?);
-            index_ops.extend(legacy_ops);
+            base_index_ops.extend(self.sorted_indexes.plan_records_created_batch(pairs(), 0)?);
+            index_ops.extend(base_index_ops);
         }
 
         // 6. Single ensure_table_staging, then set_many: one synchronous
@@ -608,11 +608,11 @@ impl TableManager {
         tx.bump_counter(token, values.len() as i64);
 
         // F-50 (#869) + F-50 Step 2 (#870) + P0-2 (#958): capture the index2 /
-        // sorted / legacy generation (values read ABOVE, before the stage-time
+        // sorted / base_index generation (values read ABOVE, before the stage-time
         // snapshots) to gate commit-time re-derivation.
         tx.note_index2_stage_gen(token, index2_gen);
         tx.note_sorted_stage_gen(token, sorted_gen);
-        tx.note_legacy_stage_gen(token, legacy_gen);
+        tx.note_base_index_stage_gen(token, base_index_gen);
 
         Ok(ids)
     }
@@ -720,7 +720,7 @@ impl TableManager {
         let token = self.table_token();
         let index2_gen = self.index2_registry().generation();
         let sorted_gen = self.sorted_indexes.generation();
-        let legacy_gen = self.index_manager.generation();
+        let base_index_gen = self.index_manager.generation();
         let mut index_ops: Vec<shamir_tx::IndexWriteOp> = Vec::new();
         if self.has_any_index() {
             // 4. Take the index2 backend snapshot ONCE, then drive both
@@ -742,21 +742,21 @@ impl TableManager {
                 }
             }
 
-            // 5. Legacy + sorted batch planners — one call each, planning
+            // 5. base_index + sorted batch planners — one call each, planning
             //    over the whole (id, view) iterator. `RecordView: RecordRef`,
             //    so the generic `R: RecordRef` bound is satisfied.
             let pairs = || ids.iter().zip(views.iter());
-            let mut legacy_ops = self
+            let mut base_index_ops = self
                 .index_manager
                 .plan_records_created_batch(pairs())
                 .await?;
-            legacy_ops.extend(
+            base_index_ops.extend(
                 self.index_manager
                     .plan_records_created_unique_batch(pairs())
                     .await?,
             );
-            legacy_ops.extend(self.sorted_indexes.plan_records_created_batch(pairs(), 0)?);
-            index_ops.extend(legacy_ops);
+            base_index_ops.extend(self.sorted_indexes.plan_records_created_batch(pairs(), 0)?);
+            index_ops.extend(base_index_ops);
         }
 
         // 6. Single ensure_table_staging, then set_many with the staged
@@ -775,11 +775,11 @@ impl TableManager {
         tx.bump_counter(token, staged.len() as i64);
 
         // F-50 (#869) + F-50 Step 2 (#870) + P0-2 (#958): capture the index2 /
-        // sorted / legacy generation (values read ABOVE, before the stage-time
+        // sorted / base_index generation (values read ABOVE, before the stage-time
         // snapshots) to gate commit-time re-derivation.
         tx.note_index2_stage_gen(token, index2_gen);
         tx.note_sorted_stage_gen(token, sorted_gen);
-        tx.note_legacy_stage_gen(token, legacy_gen);
+        tx.note_base_index_stage_gen(token, base_index_gen);
 
         Ok(ids)
     }
@@ -849,7 +849,7 @@ impl TableManager {
         let token = self.table_token();
         let index2_gen = self.index2_registry().generation();
         let sorted_gen = self.sorted_indexes.generation();
-        let legacy_gen = self.index_manager.generation();
+        let base_index_gen = self.index_manager.generation();
 
         let tx_id = Some(tx.tx_id);
         let (mut index_ops, counter_delta) = match &old {
@@ -861,9 +861,9 @@ impl TableManager {
         };
         match &old {
             Some(old_val) => {
-                index_ops.extend(self.plan_legacy_update_ops(id, old_val, value).await?)
+                index_ops.extend(self.plan_base_index_update_ops(id, old_val, value).await?)
             }
-            None => index_ops.extend(self.plan_legacy_insert_ops(id, value).await?),
+            None => index_ops.extend(self.plan_base_index_insert_ops(id, value).await?),
         }
 
         // HIGH-6: stage the new vector tx-locally (apply_committed_vectors
@@ -889,11 +889,11 @@ impl TableManager {
         .await?;
 
         // F-50 (#869) + F-50 Step 2 (#870) + P0-2 (#958): capture the index2 /
-        // sorted / legacy generation (values read ABOVE, before the stage-time
+        // sorted / base_index generation (values read ABOVE, before the stage-time
         // snapshots).
         tx.note_index2_stage_gen(token, index2_gen);
         tx.note_sorted_stage_gen(token, sorted_gen);
-        tx.note_legacy_stage_gen(token, legacy_gen);
+        tx.note_base_index_stage_gen(token, base_index_gen);
 
         Ok(old.is_some())
     }
@@ -924,7 +924,7 @@ impl TableManager {
         let token = self.table_token();
         let index2_gen = self.index2_registry().generation();
         let sorted_gen = self.sorted_indexes.generation();
-        let legacy_gen = self.index_manager.generation();
+        let base_index_gen = self.index_manager.generation();
 
         // Build RecordView lenses for old and new. For non-map records
         // (bare scalars from legacy tests), fall back to a full InnerValue
@@ -951,9 +951,9 @@ impl TableManager {
                     let mut ops = self
                         .plan_update_ops_ref(id, &old_view, &new_view, tx_id)
                         .await?;
-                    // Legacy + sorted posting ops.
+                    // base_index + sorted posting ops.
                     ops.extend(
-                        self.plan_legacy_update_ops_ref(id, &old_view, &new_view)
+                        self.plan_base_index_update_ops_ref(id, &old_view, &new_view)
                             .await?,
                     );
 
@@ -995,7 +995,7 @@ impl TableManager {
                         .plan_update_ops(id, &old_tree, &new_tree, tx_id)
                         .await?;
                     ops.extend(
-                        self.plan_legacy_update_ops(id, &old_tree, &new_tree)
+                        self.plan_base_index_update_ops(id, &old_tree, &new_tree)
                             .await?,
                     );
                     self.stage_vectors(id, &new_tree, tx).await;
@@ -1015,11 +1015,11 @@ impl TableManager {
         .await?;
 
         // F-50 (#869) + F-50 Step 2 (#870) + P0-2 (#958): capture the index2 /
-        // sorted / legacy generation (values read ABOVE, before the stage-time
+        // sorted / base_index generation (values read ABOVE, before the stage-time
         // snapshots).
         tx.note_index2_stage_gen(token, index2_gen);
         tx.note_sorted_stage_gen(token, sorted_gen);
-        tx.note_legacy_stage_gen(token, legacy_gen);
+        tx.note_base_index_stage_gen(token, base_index_gen);
 
         Ok(())
     }
@@ -1072,7 +1072,7 @@ impl TableManager {
         let token = self.table_token();
         let index2_gen = self.index2_registry().generation();
         let sorted_gen = self.sorted_indexes.generation();
-        let legacy_gen = self.index_manager.generation();
+        let base_index_gen = self.index_manager.generation();
         //
         // gap#1 / HIGH-6: in BOTH branches we also stage any vector
         // delete the record carries into `tx.staged_vector_deletes` — the
@@ -1084,7 +1084,7 @@ impl TableManager {
         let index_ops = match RecordView::new(&old_bytes) {
             Ok(old_view) => {
                 let mut ops = self.plan_delete_ops(id, &old_view, tx_id).await?;
-                ops.extend(self.plan_legacy_delete_ops(id, &old_view).await?);
+                ops.extend(self.plan_base_index_delete_ops(id, &old_view).await?);
                 self.stage_vector_delete(id, &old_view, tx).await;
                 ops
             }
@@ -1097,7 +1097,7 @@ impl TableManager {
                     ))
                 })?;
                 let mut ops = self.plan_delete_ops(id, &old_inner, tx_id).await?;
-                ops.extend(self.plan_legacy_delete_ops(id, &old_inner).await?);
+                ops.extend(self.plan_base_index_delete_ops(id, &old_inner).await?);
                 self.stage_vector_delete(id, &old_inner, tx).await;
                 ops
             }
@@ -1114,11 +1114,11 @@ impl TableManager {
         .await?;
 
         // F-50 (#869) + F-50 Step 2 (#870) + P0-2 (#958): capture the index2 /
-        // sorted / legacy generation (values read ABOVE, before the stage-time
+        // sorted / base_index generation (values read ABOVE, before the stage-time
         // snapshots).
         tx.note_index2_stage_gen(token, index2_gen);
         tx.note_sorted_stage_gen(token, sorted_gen);
-        tx.note_legacy_stage_gen(token, legacy_gen);
+        tx.note_base_index_stage_gen(token, base_index_gen);
 
         Ok(true)
     }

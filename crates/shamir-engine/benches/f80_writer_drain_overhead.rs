@@ -60,7 +60,7 @@ use std::sync::Arc;
 
 use bench_scale_tool::Harness;
 use shamir_engine::table::writer_drain_barrier::WriterDrainBarrier;
-use shamir_index::legacy::write_barrier_flags::WriteBarrierFlags;
+use shamir_index::base_index::write_barrier_flags::WriteBarrierFlags;
 
 fn main() {
     let mut h = Harness::new("f80_writer_drain_overhead", env!("CARGO_MANIFEST_DIR"));

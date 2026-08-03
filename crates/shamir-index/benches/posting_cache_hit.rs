@@ -37,9 +37,9 @@ use std::hint::black_box;
 use std::sync::Arc;
 
 use bench_scale_tool::Harness;
-use shamir_index::legacy::index_definition::IndexDefinition;
-use shamir_index::legacy::index_info_item::IndexInfoItem;
-use shamir_index::legacy::index_manager::IndexManager;
+use shamir_index::base_index::index_definition::IndexDefinition;
+use shamir_index::base_index::index_info_item::IndexInfoItem;
+use shamir_index::base_index::index_manager::IndexManager;
 use shamir_storage::storage_in_memory::InMemoryStore;
 use shamir_storage::types::Store;
 use shamir_types::core::interner::InternerKey;

@@ -62,7 +62,7 @@ const SYSTEM_KEY_LEN: usize = 16;
 /// doc). Three `MetaKey::tag()` strings exceed 12 bytes, so the
 /// ACTUAL bytes landing in a key are the truncated form, not the tag
 /// literal in `namespace.rs`:
-/// - `MetaKey::LegacyIndexesUnique` tag `"indexes_unique"` (14 bytes)
+/// - `MetaKey::BaseIndexIndexesUnique` tag `"indexes_unique"` (14 bytes)
 ///   → truncated to `"indexes_uniq"`.
 /// - `MetaKey::SortedIndexes` tag `"sorted_indexes"` (14 bytes) →
 ///   truncated to `"sorted_index"`.
@@ -76,13 +76,13 @@ const SYSTEM_KEY_LEN: usize = 16;
 /// builds keys via `RecordId::system(tag)` (the real constructor,
 /// truncation included) rather than comparing strings directly.
 const ALLOWLIST: &[&str] = &[
-    // MetaKey::LegacyIndexes / LegacyIndexesUnique / SortedIndexes /
+    // MetaKey::BaseIndexIndexes / BaseIndexIndexesUnique / SortedIndexes /
     // Validators / Internals / BufferConfig / Tables / Wal / Migrations
     // / Indexes — static, hand-authored or admin-driven table
     // configuration. None of these are derived from row data, so they
     // are safe (and desirable) to survive a restart of a hybrid table.
     "indexes",
-    "indexes_uniq", // MetaKey::LegacyIndexesUnique, truncated from "indexes_unique"
+    "indexes_uniq", // MetaKey::BaseIndexIndexesUnique, truncated from "indexes_unique"
     "sorted_index", // MetaKey::SortedIndexes, truncated from "sorted_indexes"
     "_m.idx",
     "_m.val",
@@ -554,7 +554,7 @@ impl Store for MirroredStore {
     /// it. F-85 (#913): no production caller currently gates on the
     /// flag — every `transact` caller reachable through `MirroredStore`
     /// (`rekey_sorted_prefix`, `apply_index_ops`,
-    /// `apply_index_ops_at_commit`, legacy `apply_ops`) writes
+    /// `apply_index_ops_at_commit`, base_index `apply_ops`) writes
     /// ephemeral posting keys and tolerates the transient
     /// partial-visibility window via a self-healing settle/re-scan
     /// mechanism, so the gap is a known, accepted residual rather

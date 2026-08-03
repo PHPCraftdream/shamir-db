@@ -202,7 +202,7 @@ pub trait Store: Send + Sync {
     /// flag is `false`, partial state MAY be observable to a concurrent
     /// reader mid-batch. Today's production `transact` callers
     /// (`rekey_sorted_prefix`, `apply_index_ops`,
-    /// `apply_index_ops_at_commit`, legacy `apply_ops`) all tolerate
+    /// `apply_index_ops_at_commit`, base_index `apply_ops`) all tolerate
     /// the non-atomic case via a self-healing settle/re-scan
     /// mechanism, so none currently gate on the flag — it exists as
     /// honest, queryable capability metadata, not a mandatory

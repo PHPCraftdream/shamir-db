@@ -166,7 +166,7 @@ impl CreateIndex {
     /// sites; new code that wants the parity checks should prefer `try_build()`.
     ///
     /// **Scope limitation (F-87, #915):** these three checks cover only the
-    /// legacy btree-family combinations `admin_table_index.rs` checks BEFORE
+    /// base_index btree-family combinations `admin_table_index.rs` checks BEFORE
     /// dispatching a non-`"btree"` `index_type` to `create_index_v2`. A
     /// non-btree `index_type` (`"vector"`/`"fts"`/`"functional"`) has
     /// ADDITIONAL server-side validation this method does NOT replicate —

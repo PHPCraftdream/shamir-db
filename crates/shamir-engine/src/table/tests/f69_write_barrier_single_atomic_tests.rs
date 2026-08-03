@@ -38,7 +38,7 @@
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
-use shamir_index::legacy::write_barrier_flags::{
+use shamir_index::base_index::write_barrier_flags::{
     WriteBarrierFlags, INDEX2_CREATE, REGULAR_INDEX_CREATE, SCHEMA_ACTIVATION, SORTED_INDEX_CREATE,
     UNIQUE_INDEX_CREATE, UNIQUE_INDEX_EXISTS,
 };

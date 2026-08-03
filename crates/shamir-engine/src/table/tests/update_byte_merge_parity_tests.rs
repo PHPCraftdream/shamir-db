@@ -268,7 +268,7 @@ async fn update_index_ops_view_eq_tree_no_backends() {
 }
 
 #[tokio::test]
-async fn update_legacy_ops_view_eq_tree_regular_index() {
+async fn update_base_index_ops_view_eq_tree_regular_index() {
     let tbl = make_table().await;
     tbl.create_index("city_idx", &["city"]).await.unwrap();
 
@@ -290,11 +290,11 @@ async fn update_legacy_ops_view_eq_tree_regular_index() {
     let rid = RecordId::new();
 
     let mut ops_tree = tbl
-        .plan_legacy_update_ops(rid, &old_tree, &new_tree)
+        .plan_base_index_update_ops(rid, &old_tree, &new_tree)
         .await
         .unwrap();
     let mut ops_view = tbl
-        .plan_legacy_update_ops_ref(rid, &old_view, &new_view)
+        .plan_base_index_update_ops_ref(rid, &old_view, &new_view)
         .await
         .unwrap();
 
@@ -303,7 +303,7 @@ async fn update_legacy_ops_view_eq_tree_regular_index() {
     assert_eq!(
         ops_as_sortkeys(&ops_tree),
         ops_as_sortkeys(&ops_view),
-        "plan_legacy_update_ops (regular index): RecordView and InnerValue must agree"
+        "plan_base_index_update_ops (regular index): RecordView and InnerValue must agree"
     );
     // Should have ops (RemovePosting for old + SetPosting for new).
     assert!(

@@ -175,7 +175,7 @@ fn audit_insert_body(bind_row: &str) -> BatchRequest {
 ///      `FilterValue::Array` — so a small-valued `over` literal like
 ///      `[1, 1, 2]` fails to resolve as a list at all, over the real wire.
 ///   2. Even with values large enough to avoid (1), unique-index validation
-///      (`crates/shamir-index/src/legacy/index_manager_unique.rs`'s
+///      (`crates/shamir-index/src/base_index/index_manager_unique.rs`'s
 ///      `validate_unique_for_create` plus the commit-time re-check in
 ///      `crates/shamir-engine/src/tx/pre_commit.rs`'s `pre_commit_prelock`)
 ///      only ever checks against DURABLE committed state — two inserts

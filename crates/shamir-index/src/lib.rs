@@ -18,6 +18,7 @@
 
 pub mod actor;
 pub mod backend;
+pub mod base_index;
 pub mod bm25;
 pub mod build_backend;
 pub mod descriptor;
@@ -26,7 +27,6 @@ pub mod fts_backend;
 pub mod fts_ranked_backend;
 pub mod functional_backend;
 pub mod kind;
-pub mod legacy;
 pub mod lifecycle;
 pub mod meta_envelope;
 pub mod persistence;
