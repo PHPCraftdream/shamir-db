@@ -113,16 +113,25 @@ impl ObservabilityHandle {
     /// `spawn_with_byte_budget`) used to wait on `shutdown_for_poller
     /// .notified()` inside a `tokio::select!` — `Notify::notify_waiters()`
     /// only wakes tasks that are actively polling `.notified()` AT THE
-    /// MOMENT it is called; it stores no permit. Between loop iterations
-    /// (each `select!` re-evaluation creates a *new* `Notified` future) there
-    /// is a window with no live waiter, and a `notify_waiters()` landing in
-    /// that window is silently dropped — the poller then blocks on its next
-    /// `interval.tick()` forever since nothing calls `notify_waiters()`
-    /// again. This is the exact same lossy-`Notify` class already documented
-    /// and fixed once in this crate for the root shutdown signal (see
-    /// `ServerHandle::shutdown_token`'s doc comment in
-    /// `server/server_handle.rs`) — this call site was missed during that
-    /// remediation. Fixed here by switching to `tokio_util::sync::
+    /// MOMENT it is called; it stores no permit. Same class of race
+    /// `Scheduler`'s own doc comment (`scheduler.rs`, near its
+    /// `shutdown_tx` field) already names precisely: if `notify_waiters()`
+    /// fires before the spawned task has been polled for the first time
+    /// (not yet inside its `select!` at all) — plausible here since
+    /// `tokio::spawn` only schedules the task, it doesn't run it
+    /// synchronously — the notify is silently dropped and the task waits
+    /// out its next `interval.tick()` (5s here) instead. The same is also
+    /// true of the narrower "between loop iterations" window (each
+    /// `select!` re-evaluation creates a *new* `Notified` future with its
+    /// own dead zone) — either window reproduces the observed hang;
+    /// `CancellationToken`'s fix below closes both by construction, so
+    /// distinguishing which one fired in the specific CI repro isn't load
+    /// bearing for the fix. This is the exact same lossy-`Notify` class
+    /// already documented and fixed once in this crate for the root
+    /// shutdown signal (see `ServerHandle::shutdown_token`'s doc comment in
+    /// `server/server_handle.rs`, and `Scheduler`'s broadcast-based fix) —
+    /// this call site was missed during that remediation. Fixed here by
+    /// switching to `tokio_util::sync::
     /// CancellationToken`, whose `cancel()` is a persistent flag: any
     /// `.cancelled()` future (existing or newly created) resolves
     /// immediately once cancelled, closing the race by construction. The
