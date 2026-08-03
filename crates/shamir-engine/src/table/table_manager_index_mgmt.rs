@@ -709,9 +709,7 @@ impl TableManager {
     /// drop must do both so the surviving table never observes a stale
     /// descriptor or orphan postings.
     ///
-    /// Sequence (best-effort, non-atomic — crash-safety is F-50 Step 3b
-    /// / #873, deliberately out of scope here, matching `create_index_v2`'s
-    /// own multi-step sequence):
+    /// Sequence (best-effort, non-atomic — crash-safety GAP below):
     ///   1. resolve the backend by interned name (`Ok(false)` if absent);
     ///   2. `registry.remove_by_id(id)` to retire it from the planner-visible
     ///      live set FIRST (F-76 / #903 — mirror image of F-72's `Building`
@@ -723,6 +721,50 @@ impl TableManager {
     ///      re-derives `PersistedIndexes` from the LIVE registry's
     ///      `all_descriptors()`, so calling it AFTER `remove_by_id`
     ///      naturally persists the removal.
+    ///
+    /// # CRASH-SAFETY GAP (pre-existing, deliberately deferred — reviewed under #972)
+    ///
+    /// The order retire → sweep → persist is the SAME shape as the
+    /// crash-resurrection bug fixed for the legacy regular/unique family
+    /// (#959) and the sorted family (#972): a crash between step 3 (`drop_all`)
+    /// and step 4 (`save_index2_metadata`) leaves the on-disk
+    /// `PersistedIndexes` still listing the index as `Ready` while its
+    /// postings are gone — on restart the planner would route queries to an
+    /// index with zero postings, silently returning wrong (empty/missing)
+    /// results. This was known and intentionally deferred BEFORE #972 (the
+    /// original note pointed at F-50 Step 3b / #873), and #972 re-reviewed it
+    /// and left it deferred for a focused task — NOT a time-out.
+    ///
+    /// When this is picked up, copy the durable-tombstone pattern from the
+    /// sibling families. The closest analog is the SORTED family
+    /// (`SortedIndexManager` in `shamir-index/src/legacy/sorted_index_manager.rs`,
+    /// #972), which uses a separate `system:sidx_drop` key holding a
+    /// bincode `Vec<u64>` written BEFORE the sweep and cleared AFTER the
+    /// persist, with an open-time `recover_in_progress_drops` resuming any
+    /// interrupted drop. For index2 the tombstone would hold `Vec<u32>`
+    /// (descriptor ids, not `name_interned`) under a fresh `system:` key, and
+    /// the recovery hook belongs in `TableManager::create`'s index2-open loop
+    /// (where `load_index2_metadata` runs), right after the
+    /// Building-state self-heal block. ALSO add the matching namespace-reuse
+    /// guard (reject `create_index_v2` for an id in the tombstone set),
+    /// mirroring `SortedIndexManager::register`'s guard.
+    ///
+    /// **Two design options for the fix** (decide when scoped):
+    /// - **(a) Tombstone** (what #959/#972 use): a separate `system:` key,
+    ///   consistent with the other three families, minimal persistence-shape
+    ///   change. CRITICAL (the #959 lesson): `RecordId::system(name)`
+    ///   truncates `name` to 12 bytes — verify the chosen key's first 12
+    ///   bytes don't collide with `"_m.idx"` (→`"_m.idx"`) or
+    ///   `"_m.idx.lfv"` (→`"_m.idx.lfv"`). `"_m.idx.drop"` (11 bytes) is safe.
+    /// - **(b) State-based** (what the original deferral note gestured at,
+    ///   matching `create_index_v2`'s `Building`/`Ready` self-heal): add a
+    ///   `Dropping` state (or a `pending_drop` marker) to the descriptor and
+    ///   let the existing open-time self-heal loop reconcile it. More invasive
+    ///   (new enum variant, persistence forward-compat, planner state-gate).
+    ///
+    /// Option (a) is the lower-risk, pattern-consistent choice for a release;
+    /// (b) is more uniform with index2's own CREATE crash-safety but is
+    /// substantially more design surface.
     ///
     /// F-76 (#903): the OLD order was `drop_all` → `remove_by_id`, which left
     /// a window in which a concurrent reader could still resolve the backend

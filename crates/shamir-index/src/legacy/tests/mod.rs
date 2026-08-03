@@ -6,5 +6,6 @@ pub mod index_manager_tests;
 pub mod index_record_key_tests;
 pub mod index_status_tests;
 pub mod p03_drop_durability_tests;
+pub mod p03b_sorted_drop_durability_tests;
 pub mod sorted_index_manager_tests;
 pub mod write_barrier_flags_tests;
