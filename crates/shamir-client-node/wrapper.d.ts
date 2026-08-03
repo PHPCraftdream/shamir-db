@@ -58,5 +58,11 @@ export declare class ShamirClient {
   execute(db: string, batch: object): Promise<object>;
   repl(req: Buffer): Promise<Buffer>;
   createScramUser(name: string, password: string, roles: string[]): Promise<Buffer>;
+  /**
+   * Grant or revoke the `replicator` role on an existing SCRAM user via the
+   * dedicated SetReplicator wire op. Throws ShamirDbError on domain-level DB
+   * errors (e.g. "permission_denied", "hmac_required", "not_found").
+   */
+  setReplicator(user: string, on: boolean): Promise<void>;
   close(): Promise<void>;
 }
