@@ -7,10 +7,14 @@ flow.
 
 ## Requirements
 
-Node **>=22.12** (declared in `package.json`'s `engines`). This suite's
-query-builder helpers `require()` `@shamir/client` (`crates/shamir-client-ts`),
-an ESM-only package — Node 22.12+ can `require()` an ESM module with no
-top-level await; older Node raises `ERR_REQUIRE_ESM`.
+Node **>=22.12**, enforced (`.npmrc`'s `engine-strict=true` in this
+directory turns the `package.json` `engines` constraint into a hard
+`npm install` failure — `EBADENGINE` — instead of a soft warning). This
+suite's query-builder helpers `require()` `@shamir/client`
+(`crates/shamir-client-ts`), an ESM-only package — Node 22.12+ can
+`require()` an ESM module with no top-level await; older Node raises
+`ERR_REQUIRE_ESM` at test-run time, which the enforced install-time
+check now catches earlier and with a clearer message.
 
 ## One-time setup
 
