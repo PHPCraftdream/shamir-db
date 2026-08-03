@@ -29,8 +29,9 @@ use shamir_types::record_view::RecordRef;
 use shamir_types::types::common::THasher;
 use shamir_types::types::record_id::RecordId;
 use shamir_types::types::value::InnerValue;
+use std::collections::BTreeSet;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 /// Maximum number of posting-list entries cached in memory per
 /// `IndexManager`. Hit on a cached entry is a single `HashMap::get`
@@ -135,6 +136,39 @@ pub struct IndexManager {
     /// ops for the new defs and, for unique defs, records fresh
     /// `UniqueGuard`s so the existing Phase 2.6 re-validation covers them.
     pub(super) generation: Arc<AtomicU64>,
+
+    /// P0-3 (#959): in-memory mirror of the persisted tombstone set for
+    /// in-progress legacy DROP INDEX operations (regular family). When
+    /// `drop_index` starts, it adds `name_interned` here AND persists it
+    /// durably (see `add_to_dropping`) BEFORE sweeping postings; when the
+    /// drop completes (sweep + persist reduced IndexInfo), it removes the
+    /// entry (see `clear_from_dropping`). On restart, `IndexManager::new`
+    /// loads the persisted tombstone, runs the recovery sweep, and clears
+    /// both the persisted and in-memory sets. Also consulted by
+    /// `create_index[_from_records][_from_stream]` to reject a CREATE that
+    /// would reuse a name whose DROP is still in flight (sub-bug 3b).
+    ///
+    /// `std::sync::Mutex` is the sanctioned low-frequency fallback here
+    /// (CLAUDE.md: "only low-frequency/setup fallbacks, justified inline").
+    /// DROP INDEX is a DDL operation — contention is nil in normal
+    /// operation and the set is empty 99.999 % of the time. A `DashSet`
+    /// would be unjustified overkill for a guard that fires once per DDL.
+    /// The lock is NEVER held across an `.await` point.
+    pub(super) dropping_regular: Arc<Mutex<BTreeSet<u64>>>,
+    /// P0-3 (#959): same as `dropping_regular`, for the unique family.
+    pub(super) dropping_unique: Arc<Mutex<BTreeSet<u64>>>,
+
+    /// P0-3 (#959): test-only deterministic pause point that fires AFTER
+    /// the posting sweep but BEFORE the reduced `IndexInfo` is persisted —
+    /// the exact crash window sub-bug 3c tests. A regression test installs
+    /// this hook, parks `drop_index` / `drop_unique_index` mid-drop, drops
+    /// the manager (simulating a crash), then constructs a fresh
+    /// `IndexManager::new` against the SAME `info_store` and asserts the
+    /// recovery path finishes the drop instead of resurrecting a broken
+    /// `Ready` index. NOT `#[cfg(test)]`-gated — cross-crate test consumer,
+    /// same reason as `drop_index_pause_hook`. `None` on every real path.
+    pub(super) drop_index_post_sweep_hook:
+        Arc<arc_swap::ArcSwapOption<crate::legacy::backfill_pause_hook::BackfillPauseHook>>,
 }
 
 impl Clone for IndexManager {
@@ -150,6 +184,9 @@ impl Clone for IndexManager {
             create_index_backfill_hook: Arc::clone(&self.create_index_backfill_hook),
             drop_index_pause_hook: Arc::clone(&self.drop_index_pause_hook),
             generation: Arc::clone(&self.generation),
+            dropping_regular: Arc::clone(&self.dropping_regular),
+            dropping_unique: Arc::clone(&self.dropping_unique),
+            drop_index_post_sweep_hook: Arc::clone(&self.drop_index_post_sweep_hook),
         }
     }
 }
@@ -258,7 +295,20 @@ impl IndexManager {
             create_index_backfill_hook: Arc::new(arc_swap::ArcSwapOption::empty()),
             drop_index_pause_hook: Arc::new(arc_swap::ArcSwapOption::empty()),
             generation: Arc::new(AtomicU64::new(0)),
+            dropping_regular: Arc::new(Mutex::new(BTreeSet::new())),
+            dropping_unique: Arc::new(Mutex::new(BTreeSet::new())),
+            drop_index_post_sweep_hook: Arc::new(arc_swap::ArcSwapOption::empty()),
         };
+
+        // P0-3 (#959): resume any in-progress DROP INDEX operations that were
+        // interrupted by a crash between the tombstone write and the final
+        // IndexInfo persist. The tombstone is persisted under a separate
+        // `system:idx_drop` / `system:uidx_drop` key;
+        // if present, the recovery path re-runs the (idempotent) sweep and
+        // removes the stale definition so the planner never resurrects a
+        // fully-broken "Ready but no postings" index. See
+        // `recover_in_progress_drops`'s doc for the full crash-state matrix.
+        manager.recover_in_progress_drops().await?;
 
         // Синхронизируем флаги с состоянием IndexInfo
         manager.sync_flags();
@@ -290,12 +340,306 @@ impl IndexManager {
         self.drop_index_pause_hook.store(hook);
     }
 
+    /// P0-3 (#959) test-only: install (or clear with `None`) the deterministic
+    /// post-sweep pause hook (fires after the posting sweep, before the
+    /// reduced `IndexInfo` is persisted — the exact crash window sub-bug 3c
+    /// tests). Not `#[cfg(test)]`-gated — cross-crate test consumer, same
+    /// reason as `set_drop_index_pause_hook`.
+    pub fn set_drop_index_post_sweep_hook(
+        &self,
+        hook: Option<Arc<crate::legacy::backfill_pause_hook::BackfillPauseHook>>,
+    ) {
+        self.drop_index_post_sweep_hook.store(hook);
+    }
+
     /// Синхронизирует атомарные флаги с реальным состоянием индексов.
     fn sync_flags(&self) {
         self.has_indexes
             .store(self.indexes.is_enabled(), Ordering::Release);
         self.write_barrier_flags
             .set_to(UNIQUE_INDEX_EXISTS, self.indexes_unique.is_enabled());
+    }
+
+    // ========================================================================
+    // P0-3 (#959) — DROP INDEX durable tombstone + crash recovery
+    // ========================================================================
+    //
+    // Sub-bug 3c: a crash between the posting sweep (step 3 of `drop_index`)
+    // and the IndexInfo persist (step 4) resurrects a fully-broken "Ready
+    // but no postings" index after restart. The fix: persist a tombstone
+    // BEFORE the sweep, and clear it AFTER the persist. On restart,
+    // `recover_in_progress_drops` resumes any tombstoned-but-incomplete drop.
+    //
+    // Sub-bug 3b: a name in the tombstone set is rejected by CREATE INDEX
+    // until the tombstone clears, preventing ghost postings from namespace
+    // reuse.
+    //
+    // Tombstone shape: `Vec<u64>` serialized via bincode under
+    // `system:idx_drop` (regular) / `system:uidx_drop`
+    // (unique). A separate key was chosen over extending `IndexInfo`'s
+    // serialized shape to avoid touching `IndexInfo::decode_bytes`'s delicate
+    // bincode forward-compat fallback chain (current-shape → pre-`state`
+    // legacy shape). An absent key or empty vec means "no in-progress drops".
+    //
+    // **CRITICAL**: the key names `"idx_drop"` and `"uidx_drop"` are short by
+    // design — `RecordId::system(name)` truncates `name` to 12 bytes, so the
+    // original candidates `"indexes_dropping"` / `"indexes_unique_dropping"`
+    // collided with `"indexes_unique"` (both truncate to `"indexes_uniq"`).
+
+    /// P0-3 (#959): persist the current in-memory `dropping_regular` set to
+    /// `info_store` under `system:idx_drop`. Serializes the set as a
+    /// `Vec<u64>` (deterministic order via `BTreeSet`). An empty set writes
+    /// an empty `Vec<u64>` (NOT a key deletion) so the load path handles
+    /// both `NotFound` and empty-vec uniformly.
+    pub(super) async fn save_dropping_regular(&self) -> DbResult<()> {
+        let snapshot: Vec<u64> = {
+            let set = self.dropping_regular.lock().unwrap();
+            set.iter().copied().collect()
+        };
+        let key = RecordId::system("idx_drop").to_bytes();
+        let bytes = bincode::serialize(&snapshot)
+            .map_err(|e| shamir_storage::error::DbError::Codec(e.to_string()))?;
+        self.info_store.set(key.into(), Bytes::from(bytes)).await?;
+        Ok(())
+    }
+
+    /// P0-3 (#959): persist the current in-memory `dropping_unique` set.
+    /// Mirror of `save_dropping_regular` for the unique family.
+    pub(super) async fn save_dropping_unique(&self) -> DbResult<()> {
+        let snapshot: Vec<u64> = {
+            let set = self.dropping_unique.lock().unwrap();
+            set.iter().copied().collect()
+        };
+        let key = RecordId::system("uidx_drop").to_bytes();
+        let bytes = bincode::serialize(&snapshot)
+            .map_err(|e| shamir_storage::error::DbError::Codec(e.to_string()))?;
+        self.info_store.set(key.into(), Bytes::from(bytes)).await?;
+        Ok(())
+    }
+
+    /// P0-3 (#959): load a persisted dropping set from `info_store`. Returns
+    /// an empty `Vec` if the key is absent (`NotFound`) or contains an empty
+    /// vec — both mean "no in-progress drops".
+    pub(super) async fn load_dropping_set(&self, is_unique: bool) -> DbResult<Vec<u64>> {
+        let key_str = if is_unique { "uidx_drop" } else { "idx_drop" };
+        let key = RecordId::system(key_str).to_bytes();
+        match self.info_store.get(key.into()).await {
+            Ok(bytes) => {
+                if bytes.is_empty() {
+                    return Ok(Vec::new());
+                }
+                bincode::deserialize::<Vec<u64>>(&bytes).map_err(|e| {
+                    shamir_storage::error::DbError::Codec(format!(
+                        "system:{key_str} decode failed: {e}"
+                    ))
+                })
+            }
+            Err(shamir_storage::error::DbError::NotFound(_)) => Ok(Vec::new()),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// P0-3 (#959): add `name_interned` to the in-memory dropping set, then
+    /// persist the updated set durably. MUST be called BEFORE the sweep in
+    /// `drop_index` / `drop_unique_index` so a crash at any subsequent point
+    /// is recoverable.
+    ///
+    /// In-memory update happens FIRST (so a concurrent CREATE INDEX
+    /// immediately sees the name as guarded), then the persist follows. If
+    /// the persist fails, the in-memory update is rolled back and the caller
+    /// receives `Err` — the drop MUST NOT proceed without a durable
+    /// tombstone. A crash between the in-memory update and the persist is
+    /// safe: nothing has been swept or persisted yet, so the on-disk state
+    /// is unchanged (old IndexInfo, postings intact).
+    pub(super) async fn add_to_dropping(
+        &self,
+        is_unique: bool,
+        name_interned: u64,
+    ) -> DbResult<()> {
+        let dropping = if is_unique {
+            &self.dropping_unique
+        } else {
+            &self.dropping_regular
+        };
+        {
+            let mut set = dropping.lock().unwrap();
+            set.insert(name_interned);
+        }
+        let result = if is_unique {
+            self.save_dropping_unique().await
+        } else {
+            self.save_dropping_regular().await
+        };
+        if result.is_err() {
+            // Roll back the in-memory set so the guard stays consistent.
+            let mut set = dropping.lock().unwrap();
+            set.remove(&name_interned);
+        }
+        result
+    }
+
+    /// P0-3 (#959): clear `name_interned` from the persisted tombstone, then
+    /// from the in-memory set. Persist-first ordering ensures the on-disk
+    /// state is always at least as advanced as the in-memory state: a crash
+    /// between persist and in-memory update leaves a stale in-memory entry
+    /// that dies with the process, while the on-disk tombstone is already
+    /// correct.
+    ///
+    /// MUST be called AFTER `save_index_info` / `save_index_info_unique`
+    /// (the reduced IndexInfo must be durable first). If the process crashes
+    /// between the IndexInfo persist and this clear, recovery sees the
+    /// tombstone but the def is already gone from IndexInfo — it just clears
+    /// the tombstone (a no-op sweep).
+    pub(super) async fn clear_from_dropping(
+        &self,
+        is_unique: bool,
+        name_interned: u64,
+    ) -> DbResult<()> {
+        let dropping = if is_unique {
+            &self.dropping_unique
+        } else {
+            &self.dropping_regular
+        };
+        // Compute the snapshot without the entry (do NOT modify in-memory yet).
+        let snapshot: Vec<u64> = {
+            let set = dropping.lock().unwrap();
+            set.iter()
+                .filter(|&&k| k != name_interned)
+                .copied()
+                .collect()
+        };
+        // Persist first.
+        let key_str = if is_unique { "uidx_drop" } else { "idx_drop" };
+        let key = RecordId::system(key_str).to_bytes();
+        let bytes = bincode::serialize(&snapshot)
+            .map_err(|e| shamir_storage::error::DbError::Codec(e.to_string()))?;
+        self.info_store.set(key.into(), Bytes::from(bytes)).await?;
+        // Only now update in-memory.
+        {
+            let mut set = dropping.lock().unwrap();
+            set.remove(&name_interned);
+        }
+        Ok(())
+    }
+
+    /// P0-3 (#959): sweep all posting entries for the given index prefix.
+    /// Extracted from `drop_index` / `drop_unique_index` so the recovery
+    /// path can re-run it idempotently. Removing already-removed keys is a
+    /// no-op on every `Store` backend.
+    pub(super) async fn sweep_index_postings(
+        &self,
+        is_unique: bool,
+        name_interned: u64,
+    ) -> DbResult<()> {
+        let prefix = IndexRecordKey::new(is_unique, name_interned).to_prefix_bytes();
+        use futures::StreamExt;
+        let mut to_remove: Vec<RecordKey> = Vec::new();
+        let mut stream = self
+            .info_store
+            .scan_prefix_stream(prefix.clone(), FULL_SCAN_BATCH);
+        while let Some(batch_result) = stream.next().await {
+            for (key, _) in batch_result? {
+                to_remove.push(key);
+            }
+        }
+        if !to_remove.is_empty() {
+            let _ = self.info_store.remove_many(to_remove).await?;
+        }
+        self.posting_cache.retain(|k, _| !k.starts_with(&prefix));
+        Ok(())
+    }
+
+    /// P0-3 (#959): open-time recovery for DROP INDEX operations interrupted
+    /// by a crash. Called from `IndexManager::new` AFTER definitions are
+    /// loaded but BEFORE the manager is returned to the caller.
+    ///
+    /// # Crash-state matrix
+    ///
+    /// | crash point                    | IndexInfo has def? | tombstone? | recovery action            |
+    /// |--------------------------------|--------------------|------------|----------------------------|
+    /// | after tombstone-write, pre-sweep | yes (Ready)        | yes        | remove def, sweep, persist |
+    /// | after sweep, pre-persist        | yes (Ready)        | yes        | remove def, sweep (no-op), persist |
+    /// | after persist, pre-clear        | no                 | yes        | sweep (no-op), clear tombstone |
+    ///
+    /// In every case the recovery leaves the manager in a consistent state:
+    /// the def is gone from IndexInfo, its postings are swept, and the
+    /// tombstone is cleared. The sweep is idempotent (removing already-removed
+    /// keys is a no-op), so calling recovery twice (two restart attempts) is
+    /// a clean no-op on the second call.
+    pub(super) async fn recover_in_progress_drops(&self) -> DbResult<()> {
+        let dropping_regular = self.load_dropping_set(false).await?;
+        let dropping_unique = self.load_dropping_set(true).await?;
+
+        if dropping_regular.is_empty() && dropping_unique.is_empty() {
+            return Ok(());
+        }
+
+        log::info!(
+            "P0-3 (#959): recovering {} regular + {} unique in-progress DROP(s)",
+            dropping_regular.len(),
+            dropping_unique.len()
+        );
+
+        // ── Regular family ───────────────────────────────────────────────
+        let mut regular_changed = false;
+        for &name_interned in &dropping_regular {
+            if self.indexes.contains(name_interned) {
+                // Crash between tombstone-write and IndexInfo-persist:
+                // def is still in IndexInfo at Ready. Resume the drop.
+                self.indexes.remove_index(name_interned);
+                self.bump_generation();
+                regular_changed = true;
+            }
+            // Always run the sweep (idempotent). Covers both the
+            // "sweep never ran" and "sweep ran but persist failed" cases.
+            self.sweep_index_postings(false, name_interned).await?;
+        }
+        if regular_changed {
+            self.has_indexes
+                .store(self.indexes.is_enabled(), Ordering::Release);
+            self.save_index_info().await?;
+        }
+
+        // ── Unique family ────────────────────────────────────────────────
+        let mut unique_changed = false;
+        for &name_interned in &dropping_unique {
+            if self.indexes_unique.contains(name_interned) {
+                self.indexes_unique.remove_index(name_interned);
+                self.bump_generation();
+                unique_changed = true;
+            }
+            self.sweep_index_postings(true, name_interned).await?;
+        }
+        if unique_changed {
+            self.write_barrier_flags
+                .set_to(UNIQUE_INDEX_EXISTS, self.indexes_unique.is_enabled());
+            self.save_index_info_unique().await?;
+        }
+
+        // ── Clear both tombstones ────────────────────────────────────────
+        // Write empty Vec<u64> for both keys (cheaper than a remove, and
+        // the load path treats empty-vec and NotFound identically).
+        let empty = bincode::serialize(&Vec::<u64>::new())
+            .map_err(|e| shamir_storage::error::DbError::Codec(e.to_string()))?;
+        let key_regular = RecordId::system("idx_drop").to_bytes();
+        self.info_store
+            .set(key_regular.into(), Bytes::from(empty.clone()))
+            .await?;
+        let key_unique = RecordId::system("uidx_drop").to_bytes();
+        self.info_store
+            .set(key_unique.into(), Bytes::from(empty))
+            .await?;
+
+        // Sync in-memory flags one more time after recovery.
+        self.sync_flags();
+
+        log::info!(
+            "P0-3 (#959): recovery complete — {} regular + {} unique DROP(s) finalized",
+            dropping_regular.len(),
+            dropping_unique.len()
+        );
+
+        Ok(())
     }
 
     /// Проверяет, есть ли хоть один обычный индекс.
@@ -374,6 +718,23 @@ impl IndexManager {
         use futures::StreamExt;
 
         let name_interned = index_def.name_interned;
+
+        // P0-3 (#959) sub-bug 3b: reject CREATE INDEX for a name whose DROP
+        // is still in flight — a tombstoned name has had (or is having) its
+        // postings swept; a fresh create would inherit orphan ghost postings
+        // keyed by the same `name_interned`.
+        if self
+            .dropping_regular
+            .lock()
+            .unwrap()
+            .contains(&name_interned)
+        {
+            return Err(shamir_storage::error::DbError::Internal(format!(
+                "Cannot create regular index '{name_interned}': \
+                 a DROP INDEX for this name is still in progress"
+            )));
+        }
+
         // Capture paths before `index_def` is moved into `add_index`.
         let paths = index_def.paths.clone();
 
@@ -515,6 +876,21 @@ impl IndexManager {
         records: Vec<(RecordId, InnerValue)>,
     ) -> DbResult<()> {
         let name_interned = index_def.name_interned;
+
+        // P0-3 (#959) sub-bug 3b: reject CREATE for a name whose DROP is
+        // still in flight (see `create_index`'s matching guard).
+        if self
+            .dropping_regular
+            .lock()
+            .unwrap()
+            .contains(&name_interned)
+        {
+            return Err(shamir_storage::error::DbError::Internal(format!(
+                "Cannot create regular index '{name_interned}': \
+                 a DROP INDEX for this name is still in progress"
+            )));
+        }
+
         // Capture paths before `index_def` is moved into `add_index`.
         let paths = index_def.paths.clone();
 
@@ -672,6 +1048,21 @@ impl IndexManager {
         use futures::StreamExt;
 
         let name_interned = index_def.name_interned;
+
+        // P0-3 (#959) sub-bug 3b: reject CREATE for a name whose DROP is
+        // still in flight (see `create_index`'s matching guard).
+        if self
+            .dropping_regular
+            .lock()
+            .unwrap()
+            .contains(&name_interned)
+        {
+            return Err(shamir_storage::error::DbError::Internal(format!(
+                "Cannot create regular index '{name_interned}': \
+                 a DROP INDEX for this name is still in progress"
+            )));
+        }
+
         // Capture paths before `index_def` is moved into `add_index`.
         let paths = index_def.paths.clone();
 
@@ -746,13 +1137,17 @@ impl IndexManager {
     /// Удаляет индекс по его имени.
     ///
     /// Процесс удаления (F-76 / #903 — definition retired BEFORE the posting
-    /// sweep, the mirror image of F-72's CREATE gate):
+    /// sweep, the mirror image of F-72's CREATE gate; P0-3 / #959 — durable
+    /// tombstone closes the crash-resurrection gap):
     /// 1. Проверяет существование индекса
-    /// 2. Удаляет определение из метаданных (planner-invisible с этого
-    ///    момента — RCU-свап публикует Vec без этой дефиниции)
-    /// 3. Удаляет все записи индекса из info_store (теперь orphan,
-    ///    planner-invisible)
-    /// 4. Сохраняет обновлённые метаданные
+    /// 2. **P0-3**: persist a durable tombstone (`system:idx_drop`)
+    ///    recording that `name_interned` is being dropped — MUST succeed
+    ///    before the sweep, so a crash at any later point is recoverable
+    /// 3. Retires the definition from the in-memory Vec (planner-invisible
+    ///    via RCU swap)
+    /// 4. Sweeps all posting entries from `info_store`
+    /// 5. Persists the reduced `IndexInfo` (def removed)
+    /// 6. **P0-3**: clears the tombstone
     ///
     /// F-76 (#903): the OLD order was sweep → `remove_index`, which left a
     /// window in which a concurrent reader could still select the index via
@@ -764,6 +1159,33 @@ impl IndexManager {
     /// scan. A reader that already snapshotted the old Vec keeps working
     /// against its own consistent view.
     ///
+    /// P0-3 (#959) sub-bug 3c — crash-resurrection: the OLD code had a gap
+    /// between the sweep (step 4) and the IndexInfo persist (step 5). If the
+    /// process crashed in that gap, the on-disk `IndexInfo` still listed the
+    /// index as `Ready`, but all its postings were gone — `IndexManager::new`
+    /// would load the stale `Ready` definition and the planner would route
+    /// queries to an index with zero postings, silently returning wrong
+    /// (empty / missing) results with no error or crash signal. The durable
+    /// tombstone (step 2) closes this: on restart, `recover_in_progress_drops`
+    /// sees the tombstone, resumes the sweep (idempotent), removes the stale
+    /// definition, persists, and clears the tombstone.
+    ///
+    /// P0-3 (#959) sub-bug 3a — in-flight reader consistency (KNOWN GAP):
+    /// A reader that resolved the definition BEFORE `drop_index` retired it
+    /// holds an `Arc`-snapshot of the Vec and will continue to route a
+    /// lookup through `info_store`'s shared keyspace DURING the sweep. Such
+    /// a reader CAN observe a PARTIALLY-swept keyspace — some posting keys
+    /// already removed, others not yet — returning an incomplete (but never
+    /// wrong/corrupted) result set. `remove_many` only removes; it never
+    /// corrupts existing postings. Fully closing this race requires either
+    /// (a) a per-backend reader-count epoch mechanism (this codebase does
+    /// not have one) or (b) a grace period before the physical sweep — both
+    /// are substantial, separately-scoped work. The engine-side mitigation
+    /// (`TableManager::drop_index` wrapping the call in
+    /// `begin_write_barrier(REGULAR_INDEX_CREATE)`) serializes DROP against
+    /// concurrent WRITERS but does NOT serialize against concurrent READERS.
+    /// See the module doc on `dropping_regular` for the full write-up.
+    ///
     /// # Возвращает
     ///
     /// `true` — индекс существовал и был удалён
@@ -774,7 +1196,15 @@ impl IndexManager {
             return Ok(false);
         }
 
-        let prefix = IndexRecordKey::new(false, name_interned).to_prefix_bytes();
+        // P0-3 (#959): write a durable tombstone BEFORE retiring the
+        // definition or sweeping postings. If the process crashes after
+        // the sweep but before the reduced IndexInfo is persisted, the
+        // on-disk metadata still lists the index as `Ready` — but the
+        // tombstone tells `recover_in_progress_drops` to finish the drop
+        // rather than resurrecting a broken "Ready but no postings" index.
+        // MUST succeed before proceeding; `add_to_dropping` rolls back the
+        // in-memory set on persist failure.
+        self.add_to_dropping(false, name_interned).await?;
 
         // F-76 (#903): retire the definition from the planner-visible Vec
         // FIRST (see the method doc). The RCU swap publishes a Vec without
@@ -793,35 +1223,36 @@ impl IndexManager {
             hook.wait_at_window().await;
         }
 
-        // Sweep the (now orphan, planner-invisible) posting entries. Формируем
-        // префикс и собираем все ключи постингов за один prefix-scan, удаляем
-        // их одним вызовом `remove_many`. На транзакционных backends
-        // (redb/persy/nebari) это одна commit'нутая транзакция вместо N×fsync.
-        use futures::StreamExt;
-        // `RecordKey` (the scan yields store keys, consumed by `remove_many`).
-        let mut to_remove: Vec<RecordKey> = Vec::new();
-        // tunables: prefix scan currently uses FULL_SCAN_BATCH(1000); profile is arguably MAINT(256) — revisit under /opti.
-        let mut stream = self
-            .info_store
-            .scan_prefix_stream(prefix.clone(), FULL_SCAN_BATCH);
-        while let Some(batch_result) = stream.next().await {
-            for (key, _) in batch_result? {
-                to_remove.push(key);
-            }
-        }
-        if !to_remove.is_empty() {
-            // Ok-value (removed entries) intentionally discarded; ? propagates errors.
-            let _ = self.info_store.remove_many(to_remove).await?;
+        // Sweep the (now orphan, planner-invisible) posting entries.
+        // P0-3 (#959): extracted to `sweep_index_postings` so the recovery
+        // path can re-run it idempotently.
+        self.sweep_index_postings(false, name_interned).await?;
+
+        // P0-3 (#959) test seam — park here (sweep complete, reduced
+        // IndexInfo NOT yet persisted) if a test installed the post-sweep
+        // hook. This is the exact crash window sub-bug 3c exercises: a
+        // "crash" here (dropping the manager) leaves the tombstone on disk
+        // but the old IndexInfo, and the recovery path in `new()` must
+        // finish the drop. NOT `#[cfg(test)]`-gated — cross-crate test
+        // consumer, same reason as `drop_index_pause_hook`.
+        if let Some(hook) = self.drop_index_post_sweep_hook.load_full() {
+            hook.wait_at_window().await;
         }
 
-        // Posting cache: blow away every entry whose key starts
-        // with the index's prefix. Cheap — typical hotsets are
-        // small and the cache is bounded.
-        self.posting_cache.retain(|k, _| !k.starts_with(&prefix));
-
+        // Persist the reduced IndexInfo (definition removed).
         if was_removed {
             self.save_index_info().await?;
         }
+
+        // P0-3 (#959): clear the tombstone AFTER the reduced IndexInfo is
+        // durably persisted. `clear_from_dropping` persists first, then
+        // updates in-memory — if the process crashes between persist and
+        // in-memory update, the on-disk tombstone is already cleared and
+        // the stale in-memory entry dies with the process. If the process
+        // crashes BEFORE this call (between IndexInfo persist and tombstone
+        // clear), recovery sees the tombstone but the def is already gone
+        // from IndexInfo — it just clears the tombstone (a no-op sweep).
+        self.clear_from_dropping(false, name_interned).await?;
 
         Ok(was_removed)
     }

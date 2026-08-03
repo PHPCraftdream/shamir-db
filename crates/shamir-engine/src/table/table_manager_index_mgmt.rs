@@ -660,19 +660,43 @@ impl TableManager {
 
     /// Drop a regular index by name.
     ///
+    /// P0-3 (#957/#959): wrapped in `begin_write_barrier(REGULAR_INDEX_CREATE)`
+    /// — same drain-then-lock pattern as `create_index`. This serializes DROP
+    /// against concurrent WRITERS (an in-flight fast-path writer that read
+    /// `needs_write_barrier() == false` before the bit went up is drained
+    /// before the sweep begins). It does NOT fully close the in-flight
+    /// READER race (sub-bug 3a — a reader holding an `Arc` snapshot of the
+    /// old definition can still observe a partially-swept keyspace); that
+    /// residual is documented on `IndexManager::drop_index`'s method doc.
+    ///
     /// # Returns
     /// `true` if index existed and was removed, `false` if not found.
     pub async fn drop_index(&self, name: &str) -> DbResult<bool> {
         let name_id = self.intern_string(name).await?;
+        // P0-3 (#959): drain-then-lock — raise the REGULAR_INDEX_CREATE bit,
+        // drain in-flight fast-path writers, then take `unique_write_lock`.
+        // See `create_index`'s matching acquisition for the F-70 ordering
+        // rationale.
+        let (_barrier, _uwl_guard) = self
+            .begin_write_barrier(crate::index::write_barrier_flags::REGULAR_INDEX_CREATE)
+            .await;
         self.index_manager.drop_index(name_id).await
     }
 
     /// Drop a unique index by name.
     ///
+    /// P0-3 (#957/#959): wrapped in `begin_write_barrier(UNIQUE_INDEX_CREATE)`
+    /// — same drain-then-lock pattern as `create_unique_index`. See
+    /// `drop_index`'s doc for what this does and does not close.
+    ///
     /// # Returns
     /// `true` if index existed and was removed, `false` if not found.
     pub async fn drop_unique_index(&self, name: &str) -> DbResult<bool> {
         let name_id = self.intern_string(name).await?;
+        // P0-3 (#959): drain-then-lock — see `drop_index`'s doc.
+        let (_barrier, _uwl_guard) = self
+            .begin_write_barrier(crate::index::write_barrier_flags::UNIQUE_INDEX_CREATE)
+            .await;
         self.index_manager.drop_unique_index(name_id).await
     }
 

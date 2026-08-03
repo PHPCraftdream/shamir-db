@@ -6,7 +6,6 @@
 use crate::legacy::index_definition::IndexDefinition;
 use crate::legacy::index_keys::{build_index_key, build_index_key_from_record};
 use crate::legacy::index_manager::IndexManager;
-use crate::legacy::index_record_key::IndexRecordKey;
 use crate::legacy::write_barrier_flags::UNIQUE_INDEX_EXISTS;
 use crate::write_ops::IndexWriteOp;
 use bytes::Bytes;
@@ -419,6 +418,21 @@ impl IndexManager {
         use shamir_types::types::common::{new_map, TMap};
 
         let name_interned = index_def.name_interned;
+
+        // P0-3 (#959) sub-bug 3b: reject CREATE for a name whose DROP is
+        // still in flight — mirrors `create_index`'s regular-family guard.
+        if self
+            .dropping_unique
+            .lock()
+            .unwrap()
+            .contains(&name_interned)
+        {
+            return Err(shamir_storage::error::DbError::Internal(format!(
+                "Cannot create unique index '{name_interned}': \
+                 a DROP INDEX for this name is still in progress"
+            )));
+        }
+
         // Collect (record_id, index_key_bytes) for duplicate detection and bulk write.
         let mut key_counts: TMap<Bytes, usize> = new_map();
         let mut entries: Vec<(RecordId, Bytes)> = Vec::with_capacity(16);
@@ -477,12 +491,13 @@ impl IndexManager {
 
     /// Удаляет уникальный индекс по его имени.
     ///
-    /// F-76 (#903): definition retired BEFORE the posting sweep — same
-    /// mirror-image-of-F-72 fix as `IndexManager::drop_index` (see that
-    /// method's doc for the full rationale). The OLD order (sweep →
-    /// `remove_index`) left a window in which a concurrent reader /
-    /// uniqueness check could still observe the index while its postings
-    /// were mid-sweep.
+    /// F-76 (#903) + P0-3 (#959): definition retired BEFORE the posting
+    /// sweep (F-76, same mirror-image-of-F-72 fix as `drop_index`), with a
+    /// durable tombstone (P0-3) closing the crash-resurrection gap (3c) and
+    /// the name-reuse ghost-postings gap (3b). See `IndexManager::drop_index`'s
+    /// doc for the full sub-bug 3a/3b/3c write-up — this method mirrors it
+    /// exactly for the unique family (tombstone key:
+    /// `system:indexes_unique_dropping`).
     ///
     /// # Возвращает
     ///
@@ -492,6 +507,10 @@ impl IndexManager {
         if !self.indexes_unique.contains(name_interned) {
             return Ok(false);
         }
+
+        // P0-3 (#959): write a durable tombstone BEFORE retiring/sweeping.
+        // See `drop_index`'s doc for the crash-state matrix.
+        self.add_to_dropping(true, name_interned).await?;
 
         // F-76 (#903): retire the definition FIRST (RCU swap publishes a Vec
         // without this definition atomically; the shared write-barrier bit is
@@ -511,28 +530,25 @@ impl IndexManager {
         }
 
         // Sweep the (now orphan, planner-invisible) posting entries.
-        // Формируем префикс и удаляем все posting-ключи одним вызовом
-        // `remove_many` — на disk backends это один транзакционный коммит
-        // вместо N×fsync.
-        let prefix = IndexRecordKey::new(true, name_interned).to_prefix_bytes();
-        use futures::StreamExt;
-        // `RecordKey` (scan yields store keys, consumed by `remove_many`).
-        let mut to_remove: Vec<RecordKey> = Vec::new();
-        // tunables: prefix scan currently uses FULL_SCAN_BATCH(1000); profile is arguably MAINT(256) — revisit under /opti.
-        let mut stream = self.info_store.scan_prefix_stream(prefix, FULL_SCAN_BATCH);
-        while let Some(batch_result) = stream.next().await {
-            for (key, _) in batch_result? {
-                to_remove.push(key);
-            }
-        }
-        if !to_remove.is_empty() {
-            // Ok-value (removed entries) intentionally discarded; ? propagates errors.
-            let _ = self.info_store.remove_many(to_remove).await?;
+        // P0-3 (#959): extracted to `sweep_index_postings` for reuse by
+        // the recovery path.
+        self.sweep_index_postings(true, name_interned).await?;
+
+        // P0-3 (#959) test seam — post-sweep, pre-persist crash window.
+        // See `drop_index`'s matching hook for the full rationale.
+        if let Some(hook) = self.drop_index_post_sweep_hook.load_full() {
+            hook.wait_at_window().await;
         }
 
+        // Persist the reduced IndexInfo (definition removed).
         if was_removed {
             self.save_index_info_unique().await?;
         }
+
+        // P0-3 (#959): clear the tombstone AFTER the reduced IndexInfo is
+        // durably persisted. See `drop_index`'s matching call for the
+        // ordering rationale.
+        self.clear_from_dropping(true, name_interned).await?;
 
         Ok(was_removed)
     }
