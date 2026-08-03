@@ -18,6 +18,8 @@
 
 'use strict';
 
+const { Query, filter } = require('@shamir/client');
+
 // Mirror of the TS SDK's RETRYABLE_ERROR_CODES (core/errors.ts) so this
 // binding-level e2e can classify a code without importing the TS module.
 const RETRYABLE = new Set([
@@ -38,7 +40,7 @@ module.exports = async function ({ client, test, assertThrows, assert }) {
     const err = await assertThrows(() =>
       client.execute('nonexistent_db_xyz', {
         id: 'q',
-        queries: { x: { from: 'whatever' } },
+        queries: { x: Query.from('whatever').build() },
       })
     );
     const code = codeOf(err);
@@ -57,15 +59,14 @@ module.exports = async function ({ client, test, assertThrows, assert }) {
       client.execute('default', {
         id: 'bad-ref',
         queries: {
-          a: { from: '__databases', where: { op: 'eq', field: ['name'], value: 'default' } },
-          b: {
-            from: '__databases',
-            where: {
-              op: 'eq',
-              field: ['name'],
-              value: { $query: 'nonexistent_alias', path: '[0].name' },
-            },
-          },
+          a: Query.from('__databases')
+            .where(filter.eq('name', 'default'))
+            .build(),
+          b: Query.from('__databases')
+            .where(
+              filter.eq('name', filter.queryRef('nonexistent_alias', '[0].name'))
+            )
+            .build(),
         },
       })
     );
@@ -86,7 +87,7 @@ module.exports = async function ({ client, test, assertThrows, assert }) {
     const err = await assertThrows(() =>
       client.execute('definitely_no_such_db_42', {
         id: 'q',
-        queries: { x: { from: 'whatever' } },
+        queries: { x: Query.from('whatever').build() },
       })
     );
     assert(
