@@ -822,6 +822,38 @@ powers; ordinary role strings are attached via `updateUser` (§12.5) or the
 RBAC `grant_role`/`revoke_role` batch ops ("role" is a plain string label,
 task #549 — there is no "role object" to create/drop/rename/list).
 
+### 12.5.2. `setReplicator` (admin)
+
+```
+Request:  { "setReplicator": {
+              "user": String,
+              "on": bool,
+              "hmac": Option<String>           // hex HMAC-SHA256 tag — UNCONDITIONAL
+           }}
+Response: { "replicator_set": { "user": String, "on": bool } }
+```
+
+Grant (`on=true`) or revoke (`on=false`) the replication-API capability flag
+on an existing SCRAM-directory account (task #621). Mirrors `setSuperuser`
+(§12.5.1) exactly — same authorization gate order (caller must already be
+superuser, checked before the HMAC gate), same unconditional HMAC tag (the
+canonical form is `b"set_replicator\0<user>\0<on>"` with `<on>` as the
+literal `"true"`/`"false"`), same top-level `DbRequest` shape (not a
+`BatchOp`), same `tickets_invalid_before_ns` bump on success so an
+outstanding ticket can never serve the stale privilege state.
+
+**Unlike `superuser`, there is no last-remaining guard:** the server does
+not track "how many replicators are left" — zero replicators is a normal
+resting state (unlike zero superusers, which would lock the system out of
+admin), so revoking the last one is never rejected.
+
+**Note (task #621):** the literal `"replicator"` string is RESERVED at the
+same directory write boundary as `"superuser"` — supplying it via
+`createUser`'s `roles` field surfaces a `query`-class error. Use this
+dedicated op (`setReplicator`), not `createUser`'s `roles` array and not the
+RBAC `grant_role`/`revoke_role` batch ops, to grant or revoke replication
+access.
+
 ### 12.6. Информационные команды
 
 `whoami`, `listSessions`, `serverInfo` — schemas и поведение в IMPLEMENTATION_GUIDE.md §13. Не security-критичны, не требуют superuser (кроме `listSessions` всех юзеров).
