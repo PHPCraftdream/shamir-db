@@ -24,6 +24,8 @@
 
 'use strict';
 
+const { ddl } = require('@shamir/client');
+
 module.exports = async function ({ client, fixtures, test, assert, assertEq }) {
   function fullCfg(overrides = {}) {
     return Object.assign(
@@ -42,7 +44,7 @@ module.exports = async function ({ client, fixtures, test, assert, assertEq }) {
     const dbName = await fixtures.setupDb(client, 'bcfg_unset', ['t']);
     const resp = await client.execute(dbName, {
       id: 'get-unset',
-      queries: { g: { get_buffer_config: 't', repo: 'main' } },
+      queries: { g: ddl.getBufferConfig('t', { repo: 'main' }) },
     });
     const row = resp.results.g.records[0];
     assertEq(row.table, 't');
@@ -59,7 +61,7 @@ module.exports = async function ({ client, fixtures, test, assert, assertEq }) {
     const setResp = await client.execute(dbName, {
       id: 'set',
       queries: {
-        s: { set_buffer_config: 't', repo: 'main', config: fullCfg() },
+        s: ddl.setBufferConfig('t', fullCfg(), { repo: 'main' }),
       },
     });
     const setRow = setResp.results.s.records[0];
@@ -70,7 +72,7 @@ module.exports = async function ({ client, fixtures, test, assert, assertEq }) {
 
     const getResp = await client.execute(dbName, {
       id: 'get',
-      queries: { g: { get_buffer_config: 't', repo: 'main' } },
+      queries: { g: ddl.getBufferConfig('t', { repo: 'main' }) },
     });
     const cfg = getResp.results.g.records[0].config;
     assert(cfg !== null, 'config must be present after set');
@@ -88,7 +90,7 @@ module.exports = async function ({ client, fixtures, test, assert, assertEq }) {
     await client.execute(dbName, {
       id: 'seed',
       queries: {
-        s: { set_buffer_config: 't', repo: 'main', config: fullCfg() },
+        s: ddl.setBufferConfig('t', fullCfg(), { repo: 'main' }),
       },
     });
 
@@ -96,11 +98,11 @@ module.exports = async function ({ client, fixtures, test, assert, assertEq }) {
     const alterResp = await client.execute(dbName, {
       id: 'alter',
       queries: {
-        a: {
-          alter_buffer_config: 't',
-          repo: 'main',
-          patch: { flush_interval_ms: 1000, max_entries: 9999 },
-        },
+        a: ddl.alterBufferConfig(
+          't',
+          { flush_interval_ms: 1000, max_entries: 9999 },
+          { repo: 'main' }
+        ),
       },
     });
     const altered = alterResp.results.a.records[0].config;
@@ -114,7 +116,7 @@ module.exports = async function ({ client, fixtures, test, assert, assertEq }) {
 
     const getResp = await client.execute(dbName, {
       id: 'after',
-      queries: { g: { get_buffer_config: 't', repo: 'main' } },
+      queries: { g: ddl.getBufferConfig('t', { repo: 'main' }) },
     });
     const cfg = getResp.results.g.records[0].config;
     assertEq(cfg.flush_interval_ms, 1000);
@@ -129,18 +131,14 @@ module.exports = async function ({ client, fixtures, test, assert, assertEq }) {
     await client.execute(dbName, {
       id: 'seed',
       queries: {
-        s: { set_buffer_config: 't', repo: 'main', config: fullCfg() },
+        s: ddl.setBufferConfig('t', fullCfg(), { repo: 'main' }),
       },
     });
 
     const alterResp = await client.execute(dbName, {
       id: 'alter',
       queries: {
-        a: {
-          alter_buffer_config: 't',
-          repo: 'main',
-          patch: { ttl_ms: null },
-        },
+        a: ddl.alterBufferConfig('t', { ttl_ms: null }, { repo: 'main' }),
       },
     });
     const cfg = alterResp.results.a.records[0].config;
@@ -159,11 +157,7 @@ module.exports = async function ({ client, fixtures, test, assert, assertEq }) {
     const alterResp = await client.execute(dbName, {
       id: 'alter',
       queries: {
-        a: {
-          alter_buffer_config: 't',
-          repo: 'main',
-          patch: { max_entries: 42 },
-        },
+        a: ddl.alterBufferConfig('t', { max_entries: 42 }, { repo: 'main' }),
       },
     });
     const cfg = alterResp.results.a.records[0].config;
@@ -179,7 +173,7 @@ module.exports = async function ({ client, fixtures, test, assert, assertEq }) {
     await client.execute(dbName, {
       id: 'set',
       queries: {
-        s: { set_buffer_config: 't', repo: 'main', config: fullCfg() },
+        s: ddl.setBufferConfig('t', fullCfg(), { repo: 'main' }),
       },
     });
 
@@ -187,7 +181,7 @@ module.exports = async function ({ client, fixtures, test, assert, assertEq }) {
     // value because it was written into info_store.
     const resp = await client.execute(dbName, {
       id: 'get-later',
-      queries: { g: { get_buffer_config: 't', repo: 'main' } },
+      queries: { g: ddl.getBufferConfig('t', { repo: 'main' }) },
     });
     const cfg = resp.results.g.records[0].config;
     assertEq(cfg.max_bytes, 1048576);
@@ -200,21 +194,19 @@ module.exports = async function ({ client, fixtures, test, assert, assertEq }) {
     await client.execute(dbName, {
       id: 'set-a',
       queries: {
-        s: {
-          set_buffer_config: 'a',
+        s: ddl.setBufferConfig('a', fullCfg({ max_entries: 111 }), {
           repo: 'main',
-          config: fullCfg({ max_entries: 111 }),
-        },
+        }),
       },
     });
 
     const aResp = await client.execute(dbName, {
       id: 'get-a',
-      queries: { g: { get_buffer_config: 'a', repo: 'main' } },
+      queries: { g: ddl.getBufferConfig('a', { repo: 'main' }) },
     });
     const bResp = await client.execute(dbName, {
       id: 'get-b',
-      queries: { g: { get_buffer_config: 'b', repo: 'main' } },
+      queries: { g: ddl.getBufferConfig('b', { repo: 'main' }) },
     });
 
     assertEq(aResp.results.g.records[0].config.max_entries, 111);
@@ -227,11 +219,11 @@ module.exports = async function ({ client, fixtures, test, assert, assertEq }) {
   test('repo defaults to main when omitted', async () => {
     const dbName = await fixtures.setupDb(client, 'bcfg_dfltrepo', ['t']);
 
-    // No `repo` key — should target `main` per default_repo().
+    // No `repo` opt — should target `main` per default_repo().
     const setResp = await client.execute(dbName, {
       id: 'set',
       queries: {
-        s: { set_buffer_config: 't', config: fullCfg({ max_bytes: 222 }) },
+        s: ddl.setBufferConfig('t', fullCfg({ max_bytes: 222 })),
       },
     });
     assertEq(setResp.results.s.records[0].config.max_bytes, 222);
@@ -239,7 +231,7 @@ module.exports = async function ({ client, fixtures, test, assert, assertEq }) {
 
     const getResp = await client.execute(dbName, {
       id: 'get',
-      queries: { g: { get_buffer_config: 't' } },
+      queries: { g: ddl.getBufferConfig('t') },
     });
     assertEq(getResp.results.g.records[0].config.max_bytes, 222);
     assertEq(getResp.results.g.records[0].repo, 'main');
