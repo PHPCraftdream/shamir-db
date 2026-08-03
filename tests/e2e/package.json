@@ -3,6 +3,9 @@
   "private": true,
   "version": "0.1.0",
   "description": "End-to-end test harness for ShamirDB — uses the shamir-client native binding to drive a real server subprocess through the full TLS+SCRAM+Batch flow.",
+  "engines": {
+    "node": ">=22.12"
+  },
   "scripts": {
     "build:server": "cd ../.. && cargo build --release -p shamir-server",
     "build:binding": "cd ../../crates/shamir-client-node && npm install && npx napi build --platform --release",

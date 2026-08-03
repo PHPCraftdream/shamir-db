@@ -5,6 +5,13 @@ crate at `crates/shamir-client-node/`). Drives a real `shamir-server`
 subprocess through the full TLS 1.3 + SCRAM-Argon2id + Batch wire
 flow.
 
+## Requirements
+
+Node **>=22.12** (declared in `package.json`'s `engines`). This suite's
+query-builder helpers `require()` `@shamir/client` (`crates/shamir-client-ts`),
+an ESM-only package — Node 22.12+ can `require()` an ESM module with no
+top-level await; older Node raises `ERR_REQUIRE_ESM`.
+
 ## One-time setup
 
 ```bash
@@ -13,13 +20,19 @@ npm install
 npm run build       # builds shamir-server release + .node binding
 ```
 
+`npm install` also builds `@shamir/client`'s `dist/` (a gitignored
+artifact, `tsc -p tsconfig.build.json`) via that package's own `prepare`
+script, which npm runs automatically for a linked `file:` dependency —
+so a fresh clone doesn't hit `Cannot find module '.../shamir-client-ts/dist/index.js'`.
+
 `npm run build` runs:
 
 1. `cargo build --release -p shamir-server` — produces `target/release/shamir-server[.exe]`
 2. `napi build --platform --release` — produces `crates/shamir-client-node/shamir-client.<triple>.node`
 
-The binding is published locally via `file:` reference in
-`package.json`, so `npm install` symlinks it directly.
+Both native bindings (`shamir-client`, `@shamir/client`) are published
+locally via `file:` references in `package.json`, so `npm install`
+symlinks them directly.
 
 ## Run
 
