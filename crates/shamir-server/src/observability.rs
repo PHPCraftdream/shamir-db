@@ -87,8 +87,12 @@ impl ObservabilityState {
     }
 }
 
-/// Handle to a running observability server. Drop or call `shutdown`
-/// to stop it.
+/// Handle to a running observability server. `shutdown` MUST be called
+/// explicitly to stop it — dropping this handle does NOT cancel
+/// `listener_task`/`poller_task` (a bare `CancellationToken` has no
+/// Drop-triggered cancel; that's `tokio_util::sync::DropGuard`'s job,
+/// which this type doesn't use) nor abort the `JoinHandle`s, so an
+/// un-shut-down drop leaks both background tasks running detached.
 pub struct ObservabilityHandle {
     pub bound_addr: SocketAddr,
     pub state: Arc<ObservabilityState>,
