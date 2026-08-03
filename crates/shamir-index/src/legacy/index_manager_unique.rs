@@ -460,9 +460,10 @@ impl IndexManager {
         }
 
         self.indexes_unique.add_index(index_def);
-        // F-69 (#896): SeqCst set on the shared packed word — see
-        // `write_barrier_flags.rs`'s module doc for why this bit's ordering
-        // must match the rest of the write-barrier predicate.
+        self.bump_generation(); // P0-2 (#958): gen gate for commit-time rederive
+                                // F-69 (#896): SeqCst set on the shared packed word — see
+                                // `write_barrier_flags.rs`'s module doc for why this bit's ordering
+                                // must match the rest of the write-barrier predicate.
         self.write_barrier_flags.set(UNIQUE_INDEX_EXISTS);
         self.save_index_info_unique().await?;
 
@@ -496,7 +497,8 @@ impl IndexManager {
         // without this definition atomically; the shared write-barrier bit is
         // cleared so writers stop maintaining it).
         let was_removed = self.indexes_unique.remove_index(name_interned);
-        // F-69 (#896): SeqCst set/clear on the shared packed word.
+        self.bump_generation(); // P0-2 (#958): gen gate for commit-time rederive
+                                // F-69 (#896): SeqCst set/clear on the shared packed word.
         self.write_barrier_flags
             .set_to(UNIQUE_INDEX_EXISTS, self.indexes_unique.is_enabled());
 

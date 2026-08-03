@@ -29,7 +29,7 @@ use shamir_types::record_view::RecordRef;
 use shamir_types::types::common::THasher;
 use shamir_types::types::record_id::RecordId;
 use shamir_types::types::value::InnerValue;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 
 /// Maximum number of posting-list entries cached in memory per
@@ -120,6 +120,21 @@ pub struct IndexManager {
     /// Acquire load at the call site. See `f76_drop_visibility_tests.rs`.
     pub(super) drop_index_pause_hook:
         Arc<arc_swap::ArcSwapOption<crate::legacy::backfill_pause_hook::BackfillPauseHook>>,
+
+    /// P0-2 (#958): monotonic generation counter bumped whenever the set of
+    /// legacy index definitions (regular OR unique) changes — i.e. on every
+    /// `create_index` / `create_index_from_records` / `create_index_from_stream`
+    /// / `create_unique_index[_from_records]` / `drop_index` /
+    /// `drop_unique_index`. Read with [`generation`](Self::generation) to gate
+    /// commit-time ops-plan re-derivation, exactly like `IndexRegistry`'s
+    /// generation does for index2 backends and `SortedIndexManager`'s does for
+    /// sorted indexes. A tx that staged BEFORE a legacy index was created
+    /// would otherwise commit with zero ops for the new index — a
+    /// permanently missing posting (for regular) or a permanently
+    /// unconstrained duplicate (for unique). The commit-time gate re-plans
+    /// ops for the new defs and, for unique defs, records fresh
+    /// `UniqueGuard`s so the existing Phase 2.6 re-validation covers them.
+    pub(super) generation: Arc<AtomicU64>,
 }
 
 impl Clone for IndexManager {
@@ -134,6 +149,7 @@ impl Clone for IndexManager {
             posting_cache: Arc::clone(&self.posting_cache),
             create_index_backfill_hook: Arc::clone(&self.create_index_backfill_hook),
             drop_index_pause_hook: Arc::clone(&self.drop_index_pause_hook),
+            generation: Arc::clone(&self.generation),
         }
     }
 }
@@ -241,6 +257,7 @@ impl IndexManager {
             )),
             create_index_backfill_hook: Arc::new(arc_swap::ArcSwapOption::empty()),
             drop_index_pause_hook: Arc::new(arc_swap::ArcSwapOption::empty()),
+            generation: Arc::new(AtomicU64::new(0)),
         };
 
         // Синхронизируем флаги с состоянием IndexInfo
@@ -304,6 +321,25 @@ impl IndexManager {
         self.write_barrier_flags.is_set(UNIQUE_INDEX_EXISTS)
     }
 
+    /// P0-2 (#958): current legacy `IndexManager` generation (regular +
+    /// unique combined). Bumped (monotonic) whenever the set of definitions
+    /// changes. The zero-overhead gate value for commit-time legacy
+    /// ops-plan re-derivation: a tx captures this at stage time and, at
+    /// commit, skips re-derivation entirely unless it has advanced.
+    pub fn generation(&self) -> u64 {
+        self.generation.load(Ordering::Acquire)
+    }
+
+    /// P0-2 (#958): advance the generation counter after a definition
+    /// change (create or drop of a regular or unique index). Called by
+    /// every create / drop path in this manager and in
+    /// `index_manager_unique.rs` (same `impl IndexManager` block).
+    /// Mirrors `SortedIndexManager`'s `generation.fetch_add` and
+    /// `IndexRegistry`'s equivalent.
+    pub(super) fn bump_generation(&self) {
+        self.generation.fetch_add(1, Ordering::AcqRel);
+    }
+
     /// F-69 (#896): expose the shared packed write-barrier word so
     /// `TableManager` (`shamir-engine`) can fold its own five DDL-intent
     /// bits into the SAME `Arc<AtomicU8>` this manager uses for
@@ -344,6 +380,7 @@ impl IndexManager {
         // ── Phase 1: register the definition FIRST ──────────────────────────
         // (Same concurrency rationale as `create_index_from_records`.)
         self.indexes.add_index(index_def);
+        self.bump_generation(); // P0-2 (#958): gen gate for commit-time rederive
         self.has_indexes.store(true, Ordering::Release);
         self.save_index_info().await?;
 
@@ -490,6 +527,7 @@ impl IndexManager {
         // registered (but possibly under-populated), still-planner-invisible
         // index that the doctor `repair()` pass can top up on request.
         self.indexes.add_index(index_def);
+        self.bump_generation(); // P0-2 (#958): gen gate for commit-time rederive
         self.has_indexes.store(true, Ordering::Release);
         self.save_index_info().await?;
 
@@ -640,6 +678,7 @@ impl IndexManager {
         // ── Phase 1: register the definition FIRST, at Building ────────────
         // (Identical to `create_index_from_records` — see that method's doc.)
         self.indexes.add_index(index_def);
+        self.bump_generation(); // P0-2 (#958): gen gate for commit-time rederive
         self.has_indexes.store(true, Ordering::Release);
         self.save_index_info().await?;
 
@@ -741,6 +780,7 @@ impl IndexManager {
         // FIRST (see the method doc). The RCU swap publishes a Vec without
         // this definition atomically.
         let was_removed = self.indexes.remove_index(name_interned);
+        self.bump_generation(); // P0-2 (#958): gen gate for commit-time rederive
         self.has_indexes
             .store(self.indexes.is_enabled(), Ordering::Release);
 

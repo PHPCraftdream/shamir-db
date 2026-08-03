@@ -73,13 +73,36 @@ impl IndexRegistry {
         let id = d.id;
         let name_interned = d.name_interned;
 
-        // F-50: reserve this insert's generation tag BEFORE publishing. A
-        // spurious bump on the (rare) failure path below is harmless — it is
-        // monotonic, so a commit observing the bump and calling
-        // `backends_newer_than` simply finds the never-inserted backend absent
-        // from `by_id` and contributes no ops. `fetch_add` returns the OLD
-        // value; +1 is the generation this insert will be visible at.
-        let inserted_gen = self.generation.fetch_add(1, Ordering::AcqRel) + 1;
+        // P0-2 (#958, sub-bug 2b) TOCTOU fix: publish to `by_id` / `by_name`
+        // FIRST, then advance `generation` LAST via `fetch_max(Release)`.
+        //
+        // The OLD order (`fetch_add(generation)` BEFORE `insert_async`)
+        // created a TOCTOU window: a reader that loaded `generation()`
+        // AFTER the bump but iterated `by_id` BEFORE the `insert_async`
+        // completed saw an advanced generation with a missing backend —
+        // at commit, `current_gen == staged_gen` and re-derivation was
+        // skipped entirely, permanently missing the backend's posting.
+        //
+        // The new order, combined with the stage-time reader reading
+        // `generation()` FIRST (Acquire) THEN calling `all_backends()`,
+        // establishes the invariant: any backend whose `insert()` advanced
+        // `generation` to a value ≤ the reader's observed generation is
+        // GUARANTEED already visible in `by_id` (by Release-Acquire: the
+        // writer's `insert_async` happens-before its `fetch_max(Release)`,
+        // which synchronizes-with the reader's `load(Acquire)`).
+        //
+        // The per-backend tag (`my_gen`) is computed as `current_gen + 1`.
+        // Two concurrent inserts that read the same `current_gen` compute
+        // the same `my_gen` — both publish with that tag and both
+        // `fetch_max(my_gen)` (idempotent). `backends_newer_than(threshold)`
+        // uses strict-greater-than, so both are returned for any
+        // `threshold < my_gen`. A tag slightly below the final generation
+        // value (due to a concurrent insert's `fetch_max` landing between
+        // our load and our `fetch_max`) is harmless: it just means the
+        // backend is included in a slightly wider `backends_newer_than`
+        // filter — the resulting ops are idempotent (`SetPosting`
+        // overwrites, `RemovePosting` is a no-op on absent keys).
+        let my_gen = self.generation.load(Ordering::Acquire) + 1;
 
         // F-50 Step 3b: capture the descriptor's persisted `state` into the
         // authoritative tuple slot. For `create_index_v2` this is `Building`
@@ -90,7 +113,7 @@ impl IndexRegistry {
         // `IndexDescriptor.state` — is the live source of truth.
         let state = d.state;
         self.by_id
-            .insert_async(id, (backend.clone(), inserted_gen, state))
+            .insert_async(id, (backend.clone(), my_gen, state))
             .await
             .map_err(|_| IndexError::Backend(format!("index id {id} already registered")))?;
         self.by_name
@@ -99,6 +122,8 @@ impl IndexRegistry {
             .map_err(|_| {
                 IndexError::Backend(format!("index name {name_interned} already registered"))
             })?;
+        // P0-2 (2b): advance generation AFTER successful publish.
+        self.generation.fetch_max(my_gen, Ordering::Release);
         Ok(())
     }
 

@@ -382,6 +382,22 @@ impl TableManager {
 
         // L9 fast-path: skip index planning entirely when the table has
         // no indexes. The `has_any_index()` check is O(1).
+        //
+        // P0-2 (#958) / TOCTOU fix (2b): capture ALL three generation counters
+        // BEFORE any `all_backends()` / `iter()` snapshot. Reading generation
+        // FIRST (Acquire) then snapshotting guarantees (via Release-Acquire
+        // on each manager's generation atomic, combined with each writer's
+        // publish-before-bump ordering) that any backend/def published before
+        // the gen load is visible in the snapshot, and any published after the
+        // gen load but before the snapshot is double-planned (idempotent,
+        // harmless). The OLD order (snapshot → gen capture) had a TOCTOU
+        // window where gen was bumped but the backend wasn't yet visible in
+        // `by_id`, causing the commit-time gate to skip re-derivation entirely.
+        let token = self.table_token();
+        let index2_gen = self.index2_registry().generation();
+        let sorted_gen = self.sorted_indexes.generation();
+        let legacy_gen = self.index_manager.generation();
+
         let mut index_ops = Vec::new();
         if self.has_any_index() {
             let tx_id = Some(tx.tx_id);
@@ -402,15 +418,13 @@ impl TableManager {
         )
         .await?;
 
-        // F-50 (#869, spike): capture this table's index2 generation AFTER the
-        // stage-time `all_backends()` snapshot (taken inside plan_insert_ops
-        // above) so the commit-time re-derivation gate can detect a backend
-        // registered between this stage and commit. See TxContext::note_index2_stage_gen.
-        tx.note_index2_stage_gen(self.table_token(), self.index2_registry().generation());
-        // F-50 Step 2 (#870, Part D): capture the sorted-index generation
-        // too, so the commit gate can detect a new sorted def registered
-        // between this stage and commit.
-        tx.note_sorted_stage_gen(self.table_token(), self.sorted_indexes.generation());
+        // F-50 (#869) + F-50 Step 2 (#870) + P0-2 (#958): capture this table's
+        // index2 / sorted / legacy generation (values read ABOVE, before the
+        // stage-time snapshots) so the commit-time re-derivation gate can
+        // detect a backend/def registered between this stage and commit.
+        tx.note_index2_stage_gen(token, index2_gen);
+        tx.note_sorted_stage_gen(token, sorted_gen);
+        tx.note_legacy_stage_gen(token, legacy_gen);
 
         Ok(rid)
     }
@@ -516,7 +530,14 @@ impl TableManager {
         // 4–5. Index planning — skipped entirely when the table has no
         //    indexes (L9 fast-path). The `has_any_index()` check is O(1)
         //    (atomic loads + `is_empty` on lock-free maps).
+        //
+        //    P0-2 (#958) / TOCTOU fix (2b): capture generations BEFORE the
+        //    `all_backends()` snapshot below (see `insert_tx`'s comment for
+        //    the full Release-Acquire ordering proof).
         let token = self.table_token();
+        let index2_gen = self.index2_registry().generation();
+        let sorted_gen = self.sorted_indexes.generation();
+        let legacy_gen = self.index_manager.generation();
         let mut index_ops: Vec<shamir_tx::IndexWriteOp> = Vec::new();
         if self.has_any_index() {
             // 4. Take the index2 backend snapshot ONCE, then drive both
@@ -586,12 +607,12 @@ impl TableManager {
             .extend(index_ops.into_iter().map(|op| (token, op)));
         tx.bump_counter(token, values.len() as i64);
 
-        // F-50 (#869, spike): capture the index2 generation after the stage
-        // snapshot (taken at step 4 above) to gate commit-time re-derivation.
-        tx.note_index2_stage_gen(token, self.index2_registry().generation());
-        // F-50 Step 2 (#870, Part D): capture the sorted-index generation
-        // alongside, gating sorted-index re-derivation at commit.
-        tx.note_sorted_stage_gen(token, self.sorted_indexes.generation());
+        // F-50 (#869) + F-50 Step 2 (#870) + P0-2 (#958): capture the index2 /
+        // sorted / legacy generation (values read ABOVE, before the stage-time
+        // snapshots) to gate commit-time re-derivation.
+        tx.note_index2_stage_gen(token, index2_gen);
+        tx.note_sorted_stage_gen(token, sorted_gen);
+        tx.note_legacy_stage_gen(token, legacy_gen);
 
         Ok(ids)
     }
@@ -693,7 +714,13 @@ impl TableManager {
         // 4–5. Index planning — skipped entirely when the table has no
         //    indexes (L9 fast-path). The `has_any_index()` check is O(1)
         //    (atomic loads + `is_empty` on lock-free maps).
+        //
+        //    P0-2 (#958) / TOCTOU fix (2b): capture generations BEFORE the
+        //    `all_backends()` snapshot below.
         let token = self.table_token();
+        let index2_gen = self.index2_registry().generation();
+        let sorted_gen = self.sorted_indexes.generation();
+        let legacy_gen = self.index_manager.generation();
         let mut index_ops: Vec<shamir_tx::IndexWriteOp> = Vec::new();
         if self.has_any_index() {
             // 4. Take the index2 backend snapshot ONCE, then drive both
@@ -747,12 +774,12 @@ impl TableManager {
             .extend(index_ops.into_iter().map(|op| (token, op)));
         tx.bump_counter(token, staged.len() as i64);
 
-        // F-50 (#869, spike): capture the index2 generation after the stage
-        // snapshot (taken at step 4 above) to gate commit-time re-derivation.
-        tx.note_index2_stage_gen(token, self.index2_registry().generation());
-        // F-50 Step 2 (#870, Part D): capture the sorted-index generation
-        // alongside, gating sorted-index re-derivation at commit.
-        tx.note_sorted_stage_gen(token, self.sorted_indexes.generation());
+        // F-50 (#869) + F-50 Step 2 (#870) + P0-2 (#958): capture the index2 /
+        // sorted / legacy generation (values read ABOVE, before the stage-time
+        // snapshots) to gate commit-time re-derivation.
+        tx.note_index2_stage_gen(token, index2_gen);
+        tx.note_sorted_stage_gen(token, sorted_gen);
+        tx.note_legacy_stage_gen(token, legacy_gen);
 
         Ok(ids)
     }
@@ -817,6 +844,13 @@ impl TableManager {
             shamir_storage::error::DbError::Codec(format!("Failed to serialize InnerValue: {}", e))
         })?;
 
+        // P0-2 (#958) / TOCTOU fix (2b): capture generations BEFORE any
+        // `all_backends()` / `iter()` snapshot (see `insert_tx`'s comment).
+        let token = self.table_token();
+        let index2_gen = self.index2_registry().generation();
+        let sorted_gen = self.sorted_indexes.generation();
+        let legacy_gen = self.index_manager.generation();
+
         let tx_id = Some(tx.tx_id);
         let (mut index_ops, counter_delta) = match &old {
             Some(old_val) => (
@@ -854,14 +888,12 @@ impl TableManager {
         )
         .await?;
 
-        // F-50 Step 2 (#870): capture the index2 generation AFTER the stage-time
-        // `all_backends()` snapshot (taken inside plan_update_ops / plan_insert_ops
-        // above), mirroring `insert_tx`. The commit-time re-derivation gate
-        // (pre_commit Phase 2.7) uses this to detect a backend registered between
-        // this stage and commit and re-derive its posting ops.
-        tx.note_index2_stage_gen(self.table_token(), self.index2_registry().generation());
-        // F-50 Step 2 (#870, Part D): capture the sorted-index generation too.
-        tx.note_sorted_stage_gen(self.table_token(), self.sorted_indexes.generation());
+        // F-50 (#869) + F-50 Step 2 (#870) + P0-2 (#958): capture the index2 /
+        // sorted / legacy generation (values read ABOVE, before the stage-time
+        // snapshots).
+        tx.note_index2_stage_gen(token, index2_gen);
+        tx.note_sorted_stage_gen(token, sorted_gen);
+        tx.note_legacy_stage_gen(token, legacy_gen);
 
         Ok(old.is_some())
     }
@@ -886,6 +918,13 @@ impl TableManager {
         // Level-3: acquire an Exclusive lock on the key before staging.
         self.acquire_pessimistic_write_lock(RecordKey::from_slice(id.as_bytes()), tx)
             .await?;
+
+        // P0-2 (#958) / TOCTOU fix (2b): capture generations BEFORE any
+        // `all_backends()` / `iter()` snapshot (see `insert_tx`'s comment).
+        let token = self.table_token();
+        let index2_gen = self.index2_registry().generation();
+        let sorted_gen = self.sorted_indexes.generation();
+        let legacy_gen = self.index_manager.generation();
 
         // Build RecordView lenses for old and new. For non-map records
         // (bare scalars from legacy tests), fall back to a full InnerValue
@@ -975,14 +1014,12 @@ impl TableManager {
         )
         .await?;
 
-        // F-50 Step 2 (#870): capture the index2 generation AFTER the stage-time
-        // `all_backends()` snapshot (taken inside plan_update_ops_ref /
-        // plan_update_ops in EITHER branch of the match above), mirroring
-        // `insert_tx`. Covers both the RecordView lens branch and the non-map
-        // fallback — only one runs, and this single capture sits after both.
-        tx.note_index2_stage_gen(self.table_token(), self.index2_registry().generation());
-        // F-50 Step 2 (#870, Part D): capture the sorted-index generation too.
-        tx.note_sorted_stage_gen(self.table_token(), self.sorted_indexes.generation());
+        // F-50 (#869) + F-50 Step 2 (#870) + P0-2 (#958): capture the index2 /
+        // sorted / legacy generation (values read ABOVE, before the stage-time
+        // snapshots).
+        tx.note_index2_stage_gen(token, index2_gen);
+        tx.note_sorted_stage_gen(token, sorted_gen);
+        tx.note_legacy_stage_gen(token, legacy_gen);
 
         Ok(())
     }
@@ -1030,6 +1067,13 @@ impl TableManager {
         // decode so the planners still see the value and produce correct
         // (typically empty) index ops.
         //
+        // P0-2 (#958) / TOCTOU fix (2b): capture generations BEFORE any
+        // `all_backends()` / `iter()` snapshot (see `insert_tx`'s comment).
+        let token = self.table_token();
+        let index2_gen = self.index2_registry().generation();
+        let sorted_gen = self.sorted_indexes.generation();
+        let legacy_gen = self.index_manager.generation();
+        //
         // gap#1 / HIGH-6: in BOTH branches we also stage any vector
         // delete the record carries into `tx.staged_vector_deletes` — the
         // delete mirror of the insert path's `stage_vectors`. This is the
@@ -1069,14 +1113,12 @@ impl TableManager {
         )
         .await?;
 
-        // F-50 Step 2 (#870): capture the index2 generation AFTER the stage-time
-        // `all_backends()` snapshot (taken inside plan_delete_ops in EITHER branch
-        // of the match above), mirroring `insert_tx`. Covers both the RecordView
-        // lens branch and the non-map fallback — only one runs, and this single
-        // capture sits after both.
-        tx.note_index2_stage_gen(self.table_token(), self.index2_registry().generation());
-        // F-50 Step 2 (#870, Part D): capture the sorted-index generation too.
-        tx.note_sorted_stage_gen(self.table_token(), self.sorted_indexes.generation());
+        // F-50 (#869) + F-50 Step 2 (#870) + P0-2 (#958): capture the index2 /
+        // sorted / legacy generation (values read ABOVE, before the stage-time
+        // snapshots).
+        tx.note_index2_stage_gen(token, index2_gen);
+        tx.note_sorted_stage_gen(token, sorted_gen);
+        tx.note_legacy_stage_gen(token, legacy_gen);
 
         Ok(true)
     }
