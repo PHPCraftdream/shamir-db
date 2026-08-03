@@ -17,18 +17,19 @@ top-level await; older Node raises `ERR_REQUIRE_ESM`.
 ```bash
 cd tests/e2e
 npm install
-npm run build       # builds shamir-server release + .node binding
+npm run build       # builds @shamir/client's dist/ + shamir-server release + .node binding
 ```
 
 `npm run build` runs:
 
-1. `cd crates/shamir-client-ts && npm install && npm run build` —
+1. `cd crates/shamir-client-ts && npm ci && npm run build` —
    produces `crates/shamir-client-ts/dist/` (a gitignored artifact,
    `tsc -p tsconfig.build.json`). `@shamir/client`'s own `devDependencies`
    (including `typescript`) are never installed by `tests/e2e`'s own
    `npm install` — npm does not install a `file:`-linked package's
-   `devDependencies` — so this step's own `npm install` (inside
-   `crates/shamir-client-ts`) is what makes `tsc` resolvable. Without it,
+   `devDependencies` — so this step's own `npm ci` (inside
+   `crates/shamir-client-ts`, against that package's own committed
+   `package-lock.json`) is what makes `tsc` resolvable. Without it,
    a fresh clone hits `Cannot find module '.../shamir-client-ts/dist/index.js'`.
 2. `cargo build --release -p shamir-server` — produces `target/release/shamir-server[.exe]`
 3. `napi build --platform --release` — produces `crates/shamir-client-node/shamir-client.<triple>.node`

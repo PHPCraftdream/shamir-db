@@ -146,24 +146,19 @@ jobs:
       - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444  # v5.0.0
         with:
           node-version: '22'
-      # tests/e2e depends on `@shamir/client` (file:../../crates/shamir-client-ts,
-      # task #919) for its query-builder helpers. That package ships its
-      # compiled `dist/` as a build artifact (gitignored, `tsc -p
-      # tsconfig.build.json`) -- a fresh CI checkout has no dist/ until this
-      # step produces one, otherwise `tests/e2e`'s `npm install` resolves the
-      # file: link but `require('@shamir/client')` then fails with
-      # MODULE_NOT_FOUND against the (nonexistent) dist/index.js.
-      - name: Build @shamir/client (shamir-client-ts)
-        run: npm ci && npm run build
-        working-directory: crates/shamir-client-ts
-        shell: bash
-      # `npm run build` = build:server (`cargo build --release -p
-      # shamir-server`, producing target/release/shamir-server.exe) +
-      # build:binding (`cd shamir-client-node && npm install && napi build
-      # --platform --release`, producing the .node binding), per
-      # tests/e2e/package.json. `npm test` then runs `node e2e.test.js`,
-      # which spawns the server and drives the native binding through the
-      # full TLS+SCRAM+Batch flow. A non-zero exit fails the job.
+      # `npm run build` = build:client-ts (`cd ../../crates/shamir-client-ts
+      # && npm ci && npm run build`, producing that package's gitignored
+      # `dist/` -- tests/e2e depends on `@shamir/client` (file:../../
+      # crates/shamir-client-ts, task #919) for its query-builder helpers;
+      # a fresh checkout has no dist/ until this runs, otherwise
+      # `require('@shamir/client')` fails with MODULE_NOT_FOUND) +
+      # build:server (`cargo build --release -p shamir-server`, producing
+      # target/release/shamir-server.exe) + build:binding (`cd
+      # shamir-client-node && npm install && napi build --platform
+      # --release`, producing the .node binding), per tests/e2e/package.json.
+      # `npm test` then runs `node e2e.test.js`, which spawns the server and
+      # drives the native binding through the full TLS+SCRAM+Batch flow. A
+      # non-zero exit fails the job.
       - name: Build server + napi binding, run node e2e
         run: npm install && npm run build && npm test
         working-directory: tests/e2e
