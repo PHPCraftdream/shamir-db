@@ -34,7 +34,14 @@ import {
   RESUME_OK_RESUMPTION_EXPIRES_AT_NS,
   RESUME_OK_SERVER_QUERY_VERSION,
 } from './protocol.js';
-import { CURRENT_QUERY_LANG_VERSION } from './scram.js';
+import {
+  CURRENT_QUERY_LANG_VERSION,
+  buildAuthMessageCp,
+  computeClientProof,
+  TRANSPORT_KIND_WS,
+  BINDING_MODE_TLS_NO_EXPORT,
+} from './scram.js';
+import type { KdfParams } from './scram.js';
 import { signCanonical, canonicalCreateScramUser } from './hmac.js';
 import { setSuperuser, setReplicator } from './builders/admin.js';
 import { listUsers } from './builders/ddl.js';
@@ -118,6 +125,12 @@ export class ShamirClient {
    * {@link ShamirTimeoutError}.
    */
   private readonly _requestTimeoutMs: number;
+  /**
+   * NFC-normalized username from the original SCRAM handshake, needed by
+   * `changePassword` to build `auth_message_cp`. `undefined` on resumed
+   * sessions (which lack the username).
+   */
+  private readonly _normalizedUser: string | undefined;
   private nextRequestId = 1;
 
   /**
@@ -144,6 +157,7 @@ export class ShamirClient {
     resumptionExpiresAtNs?: bigint,
     serverQueryVersion?: number,
     requestTimeoutMs?: number,
+    normalizedUser?: string,
   ) {
     this.platform = platform;
     this.framer = framer;
@@ -154,6 +168,7 @@ export class ShamirClient {
     this._resumptionExpiresAtNs = resumptionExpiresAtNs;
     this._serverQueryVersion = serverQueryVersion ?? 0;
     this._requestTimeoutMs = requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
+    this._normalizedUser = normalizedUser;
 
     // Start the persistent read loop immediately. The loop is the sole consumer
     // of framer.recv(); it routes each incoming frame to the matching pending
@@ -204,6 +219,7 @@ export class ShamirClient {
         resumptionExpiresAtNs,
         serverQueryVersion,
         opts.requestTimeoutMs,
+        opts.username.normalize('NFC'),
       );
     } catch (e) {
       await framer.close();
@@ -1001,6 +1017,100 @@ export class ShamirClient {
     throw new Error(
       `unexpected DbResponse kind for set_replicator: ${r.kind}`,
     );
+  }
+
+  /**
+   * Change the password for the currently-authenticated user (spec §12.5).
+   * Two-step flow over the active session: challenge (server issues fresh
+   * nonce + echoes current salt/KDF), then verify (client submits SCRAM
+   * proof-of-old-password + pre-derived new credentials). On success every
+   * other live session for this user is killed server-side.
+   *
+   * NOT available on resumed sessions — the client needs the normalized
+   * username from the original SCRAM handshake to build `auth_message_cp`.
+   */
+  async changePassword(
+    oldPassword: string,
+    newPassword: string,
+  ): Promise<void> {
+    if (this._normalizedUser === undefined) {
+      throw new Error(
+        'changePassword requires a full connect() session (not resume)',
+      );
+    }
+
+    // ── Step 1: challenge ──────────────────────────────────────────────
+    const clientNonceCp = this.platform.randomBytes(32);
+    const ch = await this.sendDbRequest({
+      op: 'change_password_challenge',
+      client_nonce_cp: clientNonceCp,
+    });
+    if (ch.kind !== 'change_password_challenge') {
+      throw new Error(
+        `unexpected DbResponse kind for change_password_challenge: ${ch.kind}`,
+      );
+    }
+
+    const serverNonceCp = ch.server_nonce_cp as Uint8Array;
+    const salt = ch.salt as Uint8Array;
+    const kdf: KdfParams = {
+      memoryKb: ch.kdf_memory_kb as number,
+      time: ch.kdf_time as number,
+      parallelism: ch.kdf_parallelism as number,
+      argon2Version: ch.kdf_argon2_version as number,
+    };
+
+    // ── Step 2: build auth_message_cp + derive proofs ──────────────────
+    // Channel binding is always 32 zero bytes on the WS/no-exporter path —
+    // the server snapshotted the same value at session creation, so they
+    // MUST match bit-for-bit or the server's recomputation fails.
+    const authMessageCp = buildAuthMessageCp({
+      username: this._normalizedUser,
+      sessionId: this._sessionId,
+      clientNonceCp,
+      serverNonceCp,
+      salt,
+      kdf,
+      transportKind: TRANSPORT_KIND_WS,
+      bindingMode: BINDING_MODE_TLS_NO_EXPORT,
+      channelBindingAtAuth: new Uint8Array(32),
+    });
+
+    // Old-password proof: full SCRAM derivation against current salt/KDF.
+    const oldProof = await computeClientProof(
+      this.platform,
+      oldPassword,
+      salt,
+      kdf,
+      authMessageCp,
+    );
+
+    // New credential material: fresh salt, same KDF params (server ignores
+    // the client's KDF choice for new material per ChangePwApply). We only
+    // need .storedKey and .serverKey — the dummy authMessage is required
+    // by computeClientProof but its proof output is discarded.
+    const newSalt = this.platform.randomBytes(16);
+    const newCreds = await computeClientProof(
+      this.platform,
+      newPassword,
+      newSalt,
+      kdf,
+      new Uint8Array(1),
+    );
+
+    // ── Step 3: verify ─────────────────────────────────────────────────
+    const r = await this.sendDbRequest({
+      op: 'change_password_verify',
+      client_proof_old: oldProof.clientProof,
+      new_salt: newSalt,
+      new_stored_key: newCreds.storedKey,
+      new_server_key: newCreds.serverKey,
+    });
+    if (r.kind !== 'change_password_ok') {
+      throw new Error(
+        `unexpected DbResponse kind for change_password_verify: ${r.kind}`,
+      );
+    }
   }
 
   /**

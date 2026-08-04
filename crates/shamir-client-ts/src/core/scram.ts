@@ -14,6 +14,9 @@ import type { Platform } from './platform.js';
 /** 14-byte ASCII header — must equal `AUTH_V1` in domain_tags.rs. */
 const AUTH_V1 = new TextEncoder().encode('SHAMIR-AUTH-v1');
 
+/** 15-byte ASCII header — must equal `CHGPW_V1` in domain_tags.rs. */
+const CHGPW_V1 = new TextEncoder().encode('SHAMIR-CHGPW-v1');
+
 /** Argon2 version 1.3 (0x13 == 19). */
 export const ARGON2_VERSION_13 = 0x13;
 /** Transport tag for the WebSocket path (TransportKind::Ws). */
@@ -141,6 +144,94 @@ export function buildAuthMessage(
     Uint8Array.of((challenge.bindingMode ?? BINDING_MODE_TLS_NO_EXPORT) & 0xff),
     exporter,
     Uint8Array.of((challenge.supportedVersion ?? SUPPORTED_VERSION) & 0xff),
+  ]);
+}
+
+/**
+ * Inputs needed to build the changePassword `auth_message_cp` (spec §12.5).
+ * Mirrors `ChangePwAuthMessageInputs` in changepw.rs.
+ */
+export interface CpAuthMessageInputs {
+  /** Already-normalized (NFC) username. */
+  username: string;
+  /** Active 32-byte session id. */
+  sessionId: Uint8Array;
+  /** Client-supplied per-request 32-byte CSPRNG nonce. */
+  clientNonceCp: Uint8Array;
+  /** Server-issued per-request 32-byte CSPRNG nonce. */
+  serverNonceCp: Uint8Array;
+  /** User's current 16-byte Argon2id salt. */
+  salt: Uint8Array;
+  /** User's current KDF parameters. */
+  kdf: KdfParams;
+  /** Transport tag snapshotted at session creation. */
+  transportKind: number;
+  /** Binding mode snapshotted at session creation. */
+  bindingMode: number;
+  /** 32-byte `channel_binding_at_auth` from the active session (zeros for WS path). */
+  channelBindingAtAuth: Uint8Array;
+}
+
+/**
+ * Build the canonical `auth_message_cp` byte string for the changePassword
+ * flow (spec §12.5). Mirrors changepw.rs::build_auth_message_cp — different
+ * domain tag and inputs from login's `buildAuthMessage` (notably includes
+ * the live `session_id` and omits `supported_version`).
+ *
+ * Layout (mirrors changepw.rs::build_auth_message_cp):
+ *   "SHAMIR-CHGPW-v1"                        (15 bytes)
+ *   u16_be(byte_len(username_nfc)) || username_nfc
+ *   session_id(32) || client_nonce_cp(32) || server_nonce_cp(32) || salt(16)
+ *   u32_be(memory_kb) || u32_be(time) || u32_be(parallelism)
+ *   u8(argon2_version) || u8(transport_kind) || u8(binding_mode)
+ *   channel_binding_at_auth(32)
+ *
+ * No platform dependency — pure byte arithmetic.
+ */
+export function buildAuthMessageCp(inputs: CpAuthMessageInputs): Uint8Array {
+  const userBytes = new TextEncoder().encode(inputs.username);
+  if (userBytes.length > 255) {
+    throw new Error('username > 255 bytes after UTF-8 encoding');
+  }
+  if (inputs.sessionId.length !== 32) {
+    throw new Error(
+      `session_id must be 32 bytes, got ${inputs.sessionId.length}`,
+    );
+  }
+  if (inputs.clientNonceCp.length !== 32) {
+    throw new Error(
+      `client_nonce_cp must be 32 bytes, got ${inputs.clientNonceCp.length}`,
+    );
+  }
+  if (inputs.serverNonceCp.length !== 32) {
+    throw new Error(
+      `server_nonce_cp must be 32 bytes, got ${inputs.serverNonceCp.length}`,
+    );
+  }
+  if (inputs.salt.length !== 16) {
+    throw new Error(`salt must be 16 bytes, got ${inputs.salt.length}`);
+  }
+  if (inputs.channelBindingAtAuth.length !== 32) {
+    throw new Error(
+      `channel_binding_at_auth must be 32 bytes, got ${inputs.channelBindingAtAuth.length}`,
+    );
+  }
+
+  return concat([
+    CHGPW_V1,
+    u16be(userBytes.length),
+    userBytes,
+    inputs.sessionId,
+    inputs.clientNonceCp,
+    inputs.serverNonceCp,
+    inputs.salt,
+    u32be(inputs.kdf.memoryKb),
+    u32be(inputs.kdf.time),
+    u32be(inputs.kdf.parallelism),
+    Uint8Array.of(inputs.kdf.argon2Version & 0xff),
+    Uint8Array.of(inputs.transportKind & 0xff),
+    Uint8Array.of(inputs.bindingMode & 0xff),
+    inputs.channelBindingAtAuth,
   ]);
 }
 
