@@ -35,7 +35,7 @@
 
 const { encode, decode } = require('@msgpack/msgpack');
 const { ShamirClient } = require('shamir-client');
-const { ddl, admin, write } = require('@shamir/client');
+const { ddl, admin, write, replication } = require('@shamir/client');
 const hmac = require('../helpers/hmac');
 
 /** Encode a ReplRequest object → msgpack Buffer for the napi boundary. */
@@ -48,7 +48,7 @@ function replDecode(buf) {
   return decode(new Uint8Array(buf));
 }
 
-module.exports = async function ({ client, server, fixtures, test, assert, assertEq }) {
+module.exports = async function ({ client, server, fixtures, test, assert, assertEq, assertThrows }) {
   // ---------------------------------------------------------------------
   // Shared setup (runs once for this file; the runner calls tests in the
   // order they are registered, so a leading `test('setup', ...)` is the
@@ -242,5 +242,345 @@ module.exports = async function ({ client, server, fixtures, test, assert, asser
     } finally {
       await plain.close();
     }
+  });
+
+  // ---------------------------------------------------------------------
+  // Scenario 5: full lifecycle over the `AdminOp`-level publication /
+  // subscription / replication-profile catalogue — `list_publications`,
+  // `drop_publication`, `drop_replication_profile`, `list_subscriptions`,
+  // `alter_subscription` (pause/resume/set_profile), `replication_status`,
+  // and `drop_subscription`. These 7 wire ops have unit + msgpack-parity
+  // coverage (`repl_ops_tests.rs` / `repl_parity.test.ts`) but — before this
+  // scenario — zero live-server execution: `create_publication` /
+  // `create_replication_profile` / `create_subscription` are already proven
+  // live by 17-replication-convergence.test.js, but nothing exercises the
+  // matching drop/list/alter/status half.
+  //
+  // Unlike ReplHello/ReplPull above (the privileged `client.repl(Buffer)`
+  // napi method), these are ordinary `BatchOp`s sent through
+  // `client.execute()` — built exclusively via the `replication` builder
+  // namespace (`crates/shamir-client-ts/src/core/builders/replication.ts`),
+  // never hand-assembled wire objects (repo-wide rule, CLAUDE.md).
+  //
+  // Response shapes are per `crates/shamir-db/src/shamir_db/execute/
+  // admin_replication.rs`:
+  //   create_publication          → { created_publication: name }
+  //   list_publications           → { publications: [{ name, scopes }, ...] }
+  //   drop_publication            → { dropped_publication: name, existed: bool }
+  //   create_replication_profile  → { created_replication_profile: name }
+  //   drop_replication_profile    → { dropped_replication_profile: name, existed: bool }
+  //   create_subscription         → { created_subscription: name }
+  //   list_subscriptions          → { subscriptions: [{ name, upstream, publication, profile, state }, ...] }
+  //   alter_subscription          → { altered_subscription: name } (or a
+  //                                  `not_found`-coded BatchError if the
+  //                                  subscription doesn't exist)
+  //   replication_status          → { subscriptions: [{ name, state }, ...] }
+  //   drop_subscription           → { dropped_subscription: name, existed: bool }
+  // ---------------------------------------------------------------------
+  test('lifecycle: create_publication -> list_publications -> drop_publication', async () => {
+    const pubName = 'pub_lifecycle';
+
+    const createResp = await client.execute(db, {
+      id: 'lifecycle-create-publication',
+      queries: {
+        p: replication.publication(pubName, [replication.replScope(db, { repo })]),
+      },
+    });
+    assertEq(
+      createResp.results.p.records[0].created_publication,
+      pubName,
+      `create_publication response: ${JSON.stringify(createResp.results.p)}`
+    );
+
+    const listResp1 = await client.execute(db, {
+      id: 'lifecycle-list-publications-1',
+      queries: { l: replication.listPublications() },
+    });
+    const pubs1 = listResp1.results.l.records[0].publications;
+    assert(Array.isArray(pubs1), `publications should be an array: ${JSON.stringify(pubs1)}`);
+    assert(
+      pubs1.some((p) => p.name === pubName),
+      `${pubName} missing from list_publications: ${JSON.stringify(pubs1)}`
+    );
+
+    const dropResp = await client.execute(db, {
+      id: 'lifecycle-drop-publication',
+      queries: { d: replication.dropPublication(pubName) },
+    });
+    assertEq(
+      dropResp.results.d.records[0].dropped_publication,
+      pubName,
+      `drop_publication response: ${JSON.stringify(dropResp.results.d)}`
+    );
+    assertEq(
+      dropResp.results.d.records[0].existed,
+      true,
+      `drop_publication should report existed=true: ${JSON.stringify(dropResp.results.d)}`
+    );
+
+    const listResp2 = await client.execute(db, {
+      id: 'lifecycle-list-publications-2',
+      queries: { l: replication.listPublications() },
+    });
+    const pubs2 = listResp2.results.l.records[0].publications;
+    assert(
+      !pubs2.some((p) => p.name === pubName),
+      `${pubName} still listed after drop_publication: ${JSON.stringify(pubs2)}`
+    );
+
+    // Dropping again is a no-op (not an error) — `existed` flips to false.
+    const dropAgainResp = await client.execute(db, {
+      id: 'lifecycle-drop-publication-again',
+      queries: { d: replication.dropPublication(pubName) },
+    });
+    assertEq(
+      dropAgainResp.results.d.records[0].existed,
+      false,
+      `re-dropping an absent publication should report existed=false: ${JSON.stringify(dropAgainResp.results.d)}`
+    );
+  });
+
+  test('lifecycle: create_replication_profile -> drop_replication_profile (existed flag both ways)', async () => {
+    const profileName = 'profile_lifecycle';
+
+    const createResp = await client.execute(db, {
+      id: 'lifecycle-create-profile',
+      queries: {
+        cp: replication.replicationProfile(profileName, [
+          replication.replStream(replication.replScope(db, { repo }), 'pull', 'read_only'),
+        ]),
+      },
+    });
+    assertEq(
+      createResp.results.cp.records[0].created_replication_profile,
+      profileName,
+      `create_replication_profile response: ${JSON.stringify(createResp.results.cp)}`
+    );
+
+    const dropResp = await client.execute(db, {
+      id: 'lifecycle-drop-profile',
+      queries: { dp: replication.dropReplicationProfile(profileName) },
+    });
+    assertEq(
+      dropResp.results.dp.records[0].dropped_replication_profile,
+      profileName,
+      `drop_replication_profile response: ${JSON.stringify(dropResp.results.dp)}`
+    );
+    assertEq(
+      dropResp.results.dp.records[0].existed,
+      true,
+      `drop_replication_profile should report existed=true: ${JSON.stringify(dropResp.results.dp)}`
+    );
+
+    // Wire contract (admin_replication.rs::handle_drop_replication_profile):
+    // dropping an absent profile is NOT an error — it is a no-op that
+    // reports `existed: false`.
+    const dropAgainResp = await client.execute(db, {
+      id: 'lifecycle-drop-profile-again',
+      queries: { dp: replication.dropReplicationProfile(profileName) },
+    });
+    assertEq(
+      dropAgainResp.results.dp.records[0].dropped_replication_profile,
+      profileName,
+      `re-drop should still echo the name: ${JSON.stringify(dropAgainResp.results.dp)}`
+    );
+    assertEq(
+      dropAgainResp.results.dp.records[0].existed,
+      false,
+      `re-dropping an absent profile should report existed=false: ${JSON.stringify(dropAgainResp.results.dp)}`
+    );
+  });
+
+  test('lifecycle: create_subscription -> list_subscriptions -> alter_subscription (pause/resume/set_profile) -> replication_status -> drop_subscription', async () => {
+    const profileA = 'sub_lifecycle_profile_a';
+    const profileB = 'sub_lifecycle_profile_b';
+    const subName = 'sub_lifecycle';
+    const upstream = `tcp://${server.host}:${server.port}`;
+
+    // Two profiles so `set_profile` has somewhere to rebind to.
+    await client.execute(db, {
+      id: 'lifecycle-sub-setup-profiles',
+      queries: {
+        pa: replication.replicationProfile(profileA, [
+          replication.replStream(replication.replScope(db, { repo }), 'pull', 'read_only'),
+        ]),
+        pb: replication.replicationProfile(profileB, [
+          replication.replStream(replication.replScope(db, { repo }), 'pull', 'read_only'),
+        ]),
+      },
+    });
+
+    const createResp = await client.execute(db, {
+      id: 'lifecycle-create-subscription',
+      queries: {
+        cs: replication.subscription(subName, {
+          upstream,
+          publication: 'pub_conv', // arbitrary — 386-a create_subscription does not validate existence
+          profile: profileA,
+        }),
+      },
+    });
+    assertEq(
+      createResp.results.cs.records[0].created_subscription,
+      subName,
+      `create_subscription response: ${JSON.stringify(createResp.results.cs)}`
+    );
+
+    // list_subscriptions: the new subscription appears, freshly active,
+    // bound to profileA.
+    const listResp1 = await client.execute(db, {
+      id: 'lifecycle-list-subscriptions-1',
+      queries: { l: replication.listSubscriptions() },
+    });
+    const subs1 = listResp1.results.l.records[0].subscriptions;
+    assert(Array.isArray(subs1), `subscriptions should be an array: ${JSON.stringify(subs1)}`);
+    const sub1 = subs1.find((s) => s.name === subName);
+    assert(sub1, `${subName} missing from list_subscriptions: ${JSON.stringify(subs1)}`);
+    assertEq(sub1.state, 'active', `fresh subscription should be active: ${JSON.stringify(sub1)}`);
+    assertEq(sub1.profile, profileA, `fresh subscription profile: ${JSON.stringify(sub1)}`);
+
+    // alter_subscription: pause.
+    const pauseResp = await client.execute(db, {
+      id: 'lifecycle-alter-pause',
+      queries: { a: replication.alterSubscription(subName, 'pause') },
+    });
+    assertEq(
+      pauseResp.results.a.records[0].altered_subscription,
+      subName,
+      `alter_subscription (pause) response: ${JSON.stringify(pauseResp.results.a)}`
+    );
+    const statusAfterPause = await client.execute(db, {
+      id: 'lifecycle-status-after-pause',
+      queries: { s: replication.replicationStatus() },
+    });
+    const pausedEntry = statusAfterPause.results.s.records[0].subscriptions.find(
+      (s) => s.name === subName
+    );
+    assert(pausedEntry, `${subName} missing from replication_status after pause`);
+    assertEq(
+      pausedEntry.state,
+      'paused',
+      `replication_status should reflect paused: ${JSON.stringify(pausedEntry)}`
+    );
+
+    // alter_subscription: resume.
+    const resumeResp = await client.execute(db, {
+      id: 'lifecycle-alter-resume',
+      queries: { a: replication.alterSubscription(subName, 'resume') },
+    });
+    assertEq(
+      resumeResp.results.a.records[0].altered_subscription,
+      subName,
+      `alter_subscription (resume) response: ${JSON.stringify(resumeResp.results.a)}`
+    );
+    const listAfterResume = await client.execute(db, {
+      id: 'lifecycle-list-after-resume',
+      queries: { l: replication.listSubscriptions() },
+    });
+    const resumedEntry = listAfterResume.results.l.records[0].subscriptions.find(
+      (s) => s.name === subName
+    );
+    assert(resumedEntry, `${subName} missing from list_subscriptions after resume`);
+    assertEq(
+      resumedEntry.state,
+      'active',
+      `list_subscriptions should reflect active after resume: ${JSON.stringify(resumedEntry)}`
+    );
+
+    // alter_subscription: set_profile → rebind to profileB.
+    const setProfileResp = await client.execute(db, {
+      id: 'lifecycle-alter-set-profile',
+      queries: { a: replication.alterSubscription(subName, { set_profile: profileB }) },
+    });
+    assertEq(
+      setProfileResp.results.a.records[0].altered_subscription,
+      subName,
+      `alter_subscription (set_profile) response: ${JSON.stringify(setProfileResp.results.a)}`
+    );
+    const listAfterSetProfile = await client.execute(db, {
+      id: 'lifecycle-list-after-set-profile',
+      queries: { l: replication.listSubscriptions() },
+    });
+    const rebound = listAfterSetProfile.results.l.records[0].subscriptions.find(
+      (s) => s.name === subName
+    );
+    assert(rebound, `${subName} missing from list_subscriptions after set_profile`);
+    assertEq(
+      rebound.profile,
+      profileB,
+      `list_subscriptions should reflect the rebound profile: ${JSON.stringify(rebound)}`
+    );
+
+    // replication_status mid-lifecycle: shape/fields sanity (name + state
+    // present on every entry, including our still-active subscription).
+    const statusResp = await client.execute(db, {
+      id: 'lifecycle-status-mid',
+      queries: { s: replication.replicationStatus() },
+    });
+    const statusEntries = statusResp.results.s.records[0].subscriptions;
+    assert(Array.isArray(statusEntries), `replication_status.subscriptions should be an array: ${JSON.stringify(statusEntries)}`);
+    const statusEntry = statusEntries.find((s) => s.name === subName);
+    assert(statusEntry, `${subName} missing from replication_status: ${JSON.stringify(statusEntries)}`);
+    assertEq(
+      Object.prototype.hasOwnProperty.call(statusEntry, 'name'),
+      true,
+      `replication_status entry should have a name field: ${JSON.stringify(statusEntry)}`
+    );
+    assertEq(
+      statusEntry.state,
+      'active',
+      `replication_status should reflect active mid-lifecycle: ${JSON.stringify(statusEntry)}`
+    );
+
+    // alter_subscription against a name that never existed → not_found
+    // (admin_replication.rs::handle_alter_subscription returns a
+    // `BatchError::QueryError { code: Some("not_found"), .. }` when the
+    // lookup finds no matching row).
+    await assertThrows(
+      () =>
+        client.execute(db, {
+          id: 'lifecycle-alter-missing',
+          queries: { a: replication.alterSubscription('sub_never_existed', 'pause') },
+        }),
+      (err) => /not_found|not found/i.test(err.message),
+      'alter_subscription on a non-existent subscription should raise a not_found error'
+    );
+
+    // drop_subscription: removed from a subsequent list_subscriptions.
+    const dropResp = await client.execute(db, {
+      id: 'lifecycle-drop-subscription',
+      queries: { d: replication.dropSubscription(subName) },
+    });
+    assertEq(
+      dropResp.results.d.records[0].dropped_subscription,
+      subName,
+      `drop_subscription response: ${JSON.stringify(dropResp.results.d)}`
+    );
+    assertEq(
+      dropResp.results.d.records[0].existed,
+      true,
+      `drop_subscription should report existed=true: ${JSON.stringify(dropResp.results.d)}`
+    );
+
+    const listResp2 = await client.execute(db, {
+      id: 'lifecycle-list-subscriptions-2',
+      queries: { l: replication.listSubscriptions() },
+    });
+    const subs2 = listResp2.results.l.records[0].subscriptions;
+    assert(
+      !subs2.some((s) => s.name === subName),
+      `${subName} still listed after drop_subscription: ${JSON.stringify(subs2)}`
+    );
+
+    // Cleanup the two profiles created for this scenario (best-effort, not
+    // asserted — keeps the catalogue tidy for any later file that lists
+    // profiles, though nothing currently does).
+    await client.execute(db, {
+      id: 'lifecycle-sub-cleanup-profiles',
+      queries: {
+        dpa: replication.dropReplicationProfile(profileA),
+        dpb: replication.dropReplicationProfile(profileB),
+      },
+    });
   });
 };
