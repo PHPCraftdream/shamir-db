@@ -176,37 +176,70 @@ pub trait Store: Send + Sync {
         Ok(out)
     }
 
-    /// Atomic mixed-op batch — either ALL ops succeed and are visible
-    /// to subsequent reads, or NONE are. The default impl applies ops
-    /// sequentially and is **NOT atomic** — disk backends with a
-    /// native write-transaction API (redb, sled, fjall, persy, nebari,
-    /// canopy) override this to give the real atomicity guarantee.
+    /// Apply a mixed-op batch (`Set` / `Remove`) sequentially. The
+    /// DEFAULT implementation below applies each op one at a time and
+    /// provides **NO cross-op atomicity** — a crash mid-batch, or a
+    /// concurrent read landing between two ops, can observe a
+    /// partially-applied state. Empty `ops` is a no-op.
     ///
-    /// Used by the transactional engine layer to bundle a tx commit
-    /// into one apply (data + index postings + counter updates). Empty
-    /// `ops` is a no-op.
+    /// Backends with a native write-transaction API (redb, sled, fjall,
+    /// persy, nebari, canopy) OVERRIDE this to collapse N per-key writes
+    /// into one write-tx (one fsync) and — where the underlying engine
+    /// publishes the whole batch atomically — to deliver genuine
+    /// whole-batch atomicity. Whether a given override actually does so
+    /// is **opt-in, queryable via [`Self::supports_atomic_transact`]**
+    /// (see that method's contract). `FjallStore` reports `true`; both
+    /// the default per-op loop below AND overrides that apply at least
+    /// one subset per-key to a lock-free primary with no multi-key
+    /// publish primitive (notably `MirroredStore`, whose ephemeral
+    /// subset is per-op) report `false`. Callers whose correctness
+    /// genuinely DEPENDS on whole-batch visibility atomicity SHOULD
+    /// check the flag before assuming it; when it is `false`, partial
+    /// state MAY be observable to a concurrent reader mid-batch.
     ///
-    /// **Atomicity contract — opt-in, queryable via
-    /// [`Self::supports_atomic_transact`].** Whole-batch VISIBILITY
-    /// atomicity (a concurrent reader observes EITHER the full
-    /// pre-batch state OR the full post-batch state, never a
-    /// partially-applied batch) is NOT implied merely by overriding
-    /// this method. Backends that deliver it (e.g. `FjallStore` via a
-    /// native write batch) override [`Self::supports_atomic_transact`]
-    /// to return `true`. Both the default per-op loop below AND
-    /// overrides that apply some subset per-key to a lock-free primary
-    /// with no multi-key publish primitive (notably `MirroredStore`,
-    /// whose ephemeral subset is per-op) report `false`. Callers that
-    /// need true cross-op visibility atomicity SHOULD check
-    /// [`Self::supports_atomic_transact`] before assuming it; when the
-    /// flag is `false`, partial state MAY be observable to a concurrent
-    /// reader mid-batch. Today's production `transact` callers
-    /// (`SortedIndexManager::rekey_postings`, `apply_index_ops`,
-    /// `apply_index_ops_at_commit`, base_index `apply_ops`) all tolerate
-    /// the non-atomic case via a self-healing settle/re-scan
-    /// mechanism, so none currently gate on the flag — it exists as
-    /// honest, queryable capability metadata, not a mandatory
-    /// pre-check (F-85, #913).
+    /// Used by the transactional engine layer to bundle a tx commit into
+    /// one apply (data + index postings + version-log + counter updates).
+    ///
+    /// # Production callers and their non-atomic tolerance
+    ///
+    /// F-85 (#913): NO production caller gates on the flag today — every
+    /// one tolerates the `false` case by construction, so the flag serves
+    /// as honest, queryable capability metadata rather than a gate any
+    /// production path enforces. Current callers, grouped by HOW they
+    /// tolerate a non-atomic batch:
+    ///
+    /// - **Self-healing settle / re-scan** (idempotent re-run converges):
+    ///   `SortedIndexManager::rekey_postings` (#962) re-scans the old-id
+    ///   prefix and re-applies until a pass finds nothing to move;
+    ///   `base_index::IndexManager::apply_ops`, and
+    ///   `write_ops::apply_index_ops` / `apply_index_ops_at_commit`,
+    ///   write last-write-wins postings that are rebuildable from the
+    ///   primary record set and idempotent under WAL replay.
+    /// - **MVCC version-log** (watermark-gated visibility + WAL replay):
+    ///   `MvccStore::set_versioned` / batched-set / `delete_versioned`
+    ///   (`shamir-tx::mvcc_store`) and `write_committed_to_history` /
+    ///   `write_committed_batch_to_history` (`mvcc_history`) land the
+    ///   `(data + ts)` entries in one `transact`, but the reader-visible
+    ///   floor is advanced (`guard.commit()` / `publish_committed_max`)
+    ///   ONLY after the call returns `Ok`, so a concurrent reader never
+    ///   observes a partial batch; crash-safety is the WAL's job (these
+    ///   paths are documented `cancel-safe: NO`, recovered by replay).
+    /// - **Non-MVCC / unattached tables** (WAL replay + redelivery):
+    ///   `commit_phases` and `apply_replicated` write directly to `base`
+    ///   only on the `None` branch (tables without a version-log);
+    ///   recovery replays / re-delivers.
+    /// - **Vector snapshot publish / generation flip** (pre-written
+    ///   chunks + CRC'd manifest): `shamir-index::vector::snapshot`
+    ///   writes new chunks BEFORE the single publish/flip `transact`, and
+    ///   the manifest is a CRC'd `MetaEnvelope`, so `restore_on_open`
+    ///   ignores a partially-published manifest and a non-atomic flip at
+    ///   worst leaves stale old-gen chunks (ignored — the manifest points
+    ///   unambiguously at the new gen).
+    ///
+    /// F-77 (#904): the prior contract text ("when a backend overrides
+    /// `transact`, partial state is never observable") was an overpromise
+    /// that `MirroredStore` silently violated for its ephemeral subset;
+    /// the flag makes the capability machine-checkable.
     async fn transact(&self, ops: Vec<KvOp>) -> DbResult<()> {
         for op in ops {
             match op {
@@ -243,11 +276,12 @@ pub trait Store: Send + Sync {
     /// observable") was an overpromise that `MirroredStore` silently
     /// violated for its ephemeral subset; this flag makes the
     /// capability machine-checkable. F-85 (#913): an audit found ZERO
-    /// production callers read this flag — today's `transact` callers
-    /// all tolerate the non-atomic case via self-healing
-    /// settle/re-scan, so the flag serves as honest, queryable
-    /// capability metadata rather than a gate any production path
-    /// enforces.
+    /// production callers read this flag — every current `transact`
+    /// caller tolerates the non-atomic case by construction (settle /
+    /// re-scan, watermark-gated visibility + WAL replay, redelivery, or
+    /// pre-written-chunk snapshot publish — see [`Self::transact`]'s
+    /// caller list), so the flag serves as honest, queryable capability
+    /// metadata rather than a gate any production path enforces.
     fn supports_atomic_transact(&self) -> bool {
         false
     }
