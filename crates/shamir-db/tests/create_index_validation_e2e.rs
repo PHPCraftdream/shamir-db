@@ -232,6 +232,39 @@ async fn server_rejects_include_on_non_btree() {
     );
 }
 
+/// `.include(...)` without `.sorted()` MUST be rejected by the server.
+///
+/// This restores server-side e2e coverage of `admin_table_index.rs`'s
+/// `!op.include.is_empty() && !op.sorted` check (line ~472: "include is only
+/// valid for sorted indexes") that was lost when #990 added a client-side
+/// `include`-without-`sorted` guard to the TS builder's `createIndex()` — the
+/// JS e2e test that used to exercise this server path now hits the TS builder
+/// first (synchronously, before any wire round-trip). This test constructs the
+/// op through `exec_create`, which routes via `IntoBatchOp` →
+/// `CreateIndex::build()` — the LENIENT, non-validating path (NOT
+/// `try_build()`, which would reject it client-side) — so the invalid op
+/// actually reaches the server and proves the server's OWN check still fires.
+#[tokio::test]
+async fn server_rejects_include_without_sorted() {
+    let shamir = setup().await;
+    let result = exec_create(
+        &shamir,
+        ddl::create_index("inc_unsorted", "docs")
+            .field("score")
+            .include([vec!["label".to_string()]]),
+    )
+    .await;
+    assert!(
+        result.is_err(),
+        "include without sorted must be rejected by the server, got Ok"
+    );
+    let msg = result.unwrap_err();
+    assert!(
+        msg.contains("include") && msg.contains("sorted"),
+        "error should mention 'include' and 'sorted': {msg}"
+    );
+}
+
 // ============================================================================
 // Valid cases still succeed (regression guard).
 // ============================================================================

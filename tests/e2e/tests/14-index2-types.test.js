@@ -474,9 +474,16 @@ module.exports = async function ({ client, fixtures, test, assert, assertEq, ass
   test('covering: include on non-sorted index is rejected', async () => {
     const db = await fixtures.setupDb(client, 'cover_neg', ['t']);
 
-    // `include` without `sorted: true` must be rejected by the server
-    // (admin_table_index.rs ~line 389:
-    //  "include is only valid for sorted indexes").
+    // #990 added a client-side `include`-without-`sorted` guard to the TS
+    // builder's `createIndex()`, so `ddl.createIndex(...)` now throws
+    // SYNCHRONOUSLY before any wire round-trip (assertThrows catches sync
+    // throws too). The regex is loosened (`include.*only valid…`) to tolerate
+    // the backtick in the client-side message ("`include` is only valid for
+    // sorted indexes"). The server's own identical check
+    // (admin_table_index.rs ~line 472: "include is only valid for sorted
+    // indexes") is now covered separately by the Rust e2e test
+    // `server_rejects_include_without_sorted` in
+    // create_index_validation_e2e.rs.
     const err = await assertThrows(() =>
       client.execute(db, {
         id: 'mk-bad',
@@ -488,7 +495,7 @@ module.exports = async function ({ client, fixtures, test, assert, assertEq, ass
       }),
     );
     assert(
-      /include is only valid for sorted indexes/i.test(err.message),
+      /include.*only valid for sorted indexes/i.test(err.message),
       `expected include-rejection error, got: ${err.message}`,
     );
   });
