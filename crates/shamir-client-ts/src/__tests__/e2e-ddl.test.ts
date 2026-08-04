@@ -603,6 +603,292 @@ describe.skipIf(!SERVER_AVAILABLE)(
         .execute(client!, 'default'));
       expect(resp.results.l.records).toBeDefined();
     });
+
+    // ── 12. Validator rename (H.1 — rename_validator live execution) ────
+    //
+    // Bindings store validator_id, not name — so a rename keeps every
+    // binding functional.  listValidators_() (global) shows the NEW name;
+    // listValidators(table) still shows the binding count unchanged.
+
+    it('validator: rename keeps binding functional under new name', async () => {
+      const db = await setupDb(client!, 'ddl_valren', ['orders']);
+
+      // create validator from minimal WASM
+      br(await Batch.create('mk-val')
+        .add('v', ddl.createValidator('v_old', {
+          wasm: EMPTY_WASM_B64,
+        }))
+        .execute(client!, db));
+
+      // bind to table
+      br(await Batch.create('bind-val')
+        .add('b', ddl.bindValidator('v_old', 'orders', ['insert', 'update'], 1000, {
+          db,
+          repo: 'main',
+        }))
+        .execute(client!, db));
+
+      // verify binding exists
+      const lsBound = br(await Batch.create('ls-val-bound')
+        .add('l', ddl.listValidators('orders', { db, repo: 'main' }))
+        .execute(client!, db));
+      const boundRow = lsBound.results.l.records[0] as Record<string, unknown>;
+      const boundValidators = boundRow.validators as Array<Record<string, unknown>>;
+      expect(boundValidators.length).toBeGreaterThan(0);
+
+      // rename
+      br(await Batch.create('ren-val')
+        .add('r', ddl.renameValidator('v_old', 'v_new'))
+        .execute(client!, db));
+
+      // global list shows new name, not old
+      const lsGlobal = br(await Batch.create('ls-val-renamed')
+        .add('l', ddl.listValidators_())
+        .execute(client!, db));
+      const globalList = JSON.stringify(lsGlobal.results.l.records);
+      expect(globalList).toContain('v_new');
+      expect(globalList).not.toContain('v_old');
+
+      // binding still exists after rename (bindings store validator_id)
+      const lsAfter = br(await Batch.create('ls-val-after')
+        .add('l', ddl.listValidators('orders', { db, repo: 'main' }))
+        .execute(client!, db));
+      const afterRow = lsAfter.results.l.records[0] as Record<string, unknown>;
+      const afterValidators = afterRow.validators as Array<Record<string, unknown>>;
+      expect(afterValidators.length).toBeGreaterThan(0);
+
+      // cleanup — must unbind before drop (server rejects dropping a bound validator)
+      br(await Batch.create('unbind-val')
+        .add('u', ddl.unbindValidator('v_new', {
+          db,
+          repo: 'main',
+          table: 'orders',
+        }))
+        .execute(client!, db));
+      br(await Batch.create('drop-val')
+        .add('d', ddl.dropValidator('v_new'))
+        .execute(client!, db));
+    });
+
+    // ── 13. Function folder rename (H.2 — rename_function_folder) ──────
+    //
+    // rename_function_folder re-keys the folder record at `from` AND every
+    // descendant folder whose path is prefixed by `from + "/"`.  Functions
+    // live in a flat namespace (server doc: "Does NOT touch stored
+    // functions") so we test the folder-record re-keying, which is the
+    // actual documented contract.
+
+    it('function-folder: renameFunctionFolder re-keys folder + descendant folders', async () => {
+      const db = await setupDb(client!, 'ddl_fnfolder', ['t']);
+
+      // create nested folder hierarchy
+      br(await Batch.create('mk-folders')
+        .add('f1', ddl.createFunctionFolder(['scripts']))
+        .add('f2', ddl.createFunctionFolder(['scripts', 'daily']))
+        .execute(client!, db));
+
+      // verify folders exist
+      const ls1 = br(await Batch.create('ls-folders-1')
+        .add('l', ddl.listFunctionFolders())
+        .execute(client!, db));
+      const folders1 = ls1.results.l.records[0] as Record<string, unknown>;
+      const folderPaths1 = folders1.function_folders as string[];
+      expect(folderPaths1).toContain('scripts');
+      expect(folderPaths1).toContain('scripts/daily');
+
+      // rename the PARENT folder
+      br(await Batch.create('ren-folder')
+        .add('r', ddl.renameFunctionFolder(['scripts'], ['lib']))
+        .execute(client!, db));
+
+      // new paths exist; old paths gone (folder + descendant re-keyed)
+      const ls2 = br(await Batch.create('ls-folders-2')
+        .add('l', ddl.listFunctionFolders())
+        .execute(client!, db));
+      const folders2 = ls2.results.l.records[0] as Record<string, unknown>;
+      const folderPaths2 = folders2.function_folders as string[];
+      expect(folderPaths2).toContain('lib');
+      expect(folderPaths2).toContain('lib/daily');
+      expect(folderPaths2).not.toContain('scripts');
+      expect(folderPaths2).not.toContain('scripts/daily');
+    });
+
+    // ── 14. Incremental schema mutation (H.3 — add/remove/get) ─────────
+    //
+    // Today only set_table_schema (whole-replace) is exercised.  This test
+    // covers add_schema_rule (upsert-by-path) + remove_schema_rule +
+    // get_table_schema on a table that starts with NO schema.
+
+    it('schema: incremental addSchemaRule (upsert-by-path) + removeSchemaRule + getTableSchema', async () => {
+      const db = await setupDb(client!, 'ddl_schincr', ['users']);
+
+      // Start with NO schema — getTableSchema should return 0 rules
+      const get0 = br(await Batch.create('get-schema-0')
+        .add('g', ddl.getTableSchema('users'))
+        .execute(client!, db));
+      const schema0 = get0.results.g.records[0] as Record<string, unknown>;
+      const rules0 = (schema0.schema as unknown[]) ?? [];
+      expect(rules0.length).toBe(0);
+
+      // add first rule
+      br(await Batch.create('add-rule-1')
+        .add('a', ddl.addSchemaRule('users',
+          ddl.field(['name']).string().required().build(),
+        ))
+        .execute(client!, db));
+
+      // getTableSchema — should show name
+      const get1 = br(await Batch.create('get-schema-1')
+        .add('g', ddl.getTableSchema('users'))
+        .execute(client!, db));
+      const schema1 = get1.results.g.records[0] as Record<string, unknown>;
+      const rules1 = (schema1.schema as unknown[]) ?? [];
+      expect(rules1.length).toBe(1);
+
+      // add second rule (different path)
+      br(await Batch.create('add-rule-2')
+        .add('a', ddl.addSchemaRule('users',
+          ddl.field(['email']).string().required().build(),
+        ))
+        .execute(client!, db));
+
+      // getTableSchema — should show BOTH name and email
+      const get2 = br(await Batch.create('get-schema-2')
+        .add('g', ddl.getTableSchema('users'))
+        .execute(client!, db));
+      const schema2 = get2.results.g.records[0] as Record<string, unknown>;
+      const rules2 = (schema2.schema as unknown[]) ?? [];
+      expect(rules2.length).toBe(2);
+
+      // add rule on SAME path (name) with different constraints — upsert
+      br(await Batch.create('add-rule-3')
+        .add('a', ddl.addSchemaRule('users',
+          ddl.field(['name']).string().minLen(3).maxLen(100).build(),
+        ))
+        .execute(client!, db));
+
+      // getTableSchema — still 2 rules (name REPLACED, not duplicated)
+      const get3 = br(await Batch.create('get-schema-3')
+        .add('g', ddl.getTableSchema('users'))
+        .execute(client!, db));
+      const schema3 = get3.results.g.records[0] as Record<string, unknown>;
+      const rules3 = (schema3.schema as unknown[]) ?? [];
+      expect(rules3.length).toBe(2);
+
+      // remove the email rule
+      br(await Batch.create('rm-rule')
+        .add('r', ddl.removeSchemaRule('users', ['email']))
+        .execute(client!, db));
+
+      // getTableSchema — only name remains
+      const get4 = br(await Batch.create('get-schema-4')
+        .add('g', ddl.getTableSchema('users'))
+        .execute(client!, db));
+      const schema4 = get4.results.g.records[0] as Record<string, unknown>;
+      const rules4 = (schema4.schema as unknown[]) ?? [];
+      expect(rules4.length).toBe(1);
+      const schema4str = JSON.stringify(get4.results.g.records[0]);
+      expect(schema4str).toContain('name');
+      expect(schema4str).not.toContain('email');
+    });
+
+    // ── 15. Interner dump (H.4 — interner_dump wire op) ────────────────
+    //
+    // Full dump returns the whole dictionary + epoch; delta dump (since=N)
+    // returns only entries with id > N.  We populate the interner via
+    // setTableSchema + addSchemaRule (which intern field-path names), then
+    // prove the delta semantics.
+
+    it('interner: internerDump full + delta (since) semantics', async () => {
+      const db = await setupDb(client!, 'ddl_intern', ['docs']);
+
+      // Populate interner with field names via setTableSchema
+      br(await Batch.create('set-schema')
+        .add('s', ddl.setTableSchema('docs', [
+          ddl.field(['title']).string().required().build(),
+          ddl.field(['body']).string().build(),
+        ]))
+        .execute(client!, db));
+
+      // Full dump — known field names appear with sane ids
+      const dump1 = br(await Batch.create('dump-1')
+        .add('d', ddl.internerDump())
+        .execute(client!, db));
+      const dumpRow1 = dump1.results.d.records[0] as Record<string, unknown>;
+      const entries1 = dumpRow1.entries as Array<[number, string]>;
+      const names1 = entries1.map(([, name]) => name);
+      expect(names1).toContain('title');
+      expect(names1).toContain('body');
+      const epoch1 = dumpRow1.epoch as number;
+      expect(epoch1).toBeGreaterThan(0);
+
+      // Add one more field name (interns "summary")
+      br(await Batch.create('add-field')
+        .add('a', ddl.addSchemaRule('docs',
+          ddl.field(['summary']).string().build(),
+        ))
+        .execute(client!, db));
+
+      // Delta dump — only entries with id > epoch1
+      const dump2 = br(await Batch.create('dump-2')
+        .add('d', ddl.internerDump({ since: epoch1 }))
+        .execute(client!, db));
+      const dumpRow2 = dump2.results.d.records[0] as Record<string, unknown>;
+      const entries2 = dumpRow2.entries as Array<[number, string]>;
+      const deltaNames = entries2.map(([, name]) => name);
+      // The new field must appear
+      expect(deltaNames).toContain('summary');
+      // Previously-known names must NOT appear (delta excludes old entries)
+      expect(deltaNames).not.toContain('title');
+      expect(deltaNames).not.toContain('body');
+      // All delta entries must have id > epoch1
+      for (const [id] of entries2) {
+        expect(id).toBeGreaterThan(epoch1);
+      }
+    });
+
+    // ── 16. Schema CAS (H.5 — expected_version on set_table_schema) ────
+    //
+    // set_table_schema returns schema_version.  A second call with the
+    // CORRECT expected_version succeeds; a third call with a STALE
+    // expected_version fails with "version_conflict".
+
+    it('schema: setTableSchema expected_version CAS — correct succeeds, stale fails with version_conflict', async () => {
+      const db = await setupDb(client!, 'ddl_schcas', ['items']);
+
+      // First set_table_schema — get its schema_version
+      const set1 = br(await Batch.create('set-1')
+        .add('s', ddl.setTableSchema('items', [
+          ddl.field(['name']).string().required().build(),
+        ]))
+        .execute(client!, db));
+      const setRow1 = set1.results.s.records[0] as Record<string, unknown>;
+      const version1 = setRow1.schema_version as number;
+      expect(version1).toBe(1);
+
+      // Second set with CORRECT expected_version — must succeed
+      const set2 = br(await Batch.create('set-2')
+        .add('s', ddl.setTableSchema('items', [
+          ddl.field(['name']).string().required().build(),
+          ddl.field(['age']).int().build(),
+        ], { expectedVersion: version1 }))
+        .execute(client!, db));
+      const setRow2 = set2.results.s.records[0] as Record<string, unknown>;
+      const version2 = setRow2.schema_version as number;
+      expect(version2).toBe(2);
+
+      // Third set with STALE expected_version — must fail with version_conflict
+      try {
+        br(await Batch.create('set-3')
+          .add('s', ddl.setTableSchema('items', [
+            ddl.field(['name']).string().required().build(),
+          ], { expectedVersion: 999 }))
+          .execute(client!, db));
+        expect.fail('should have thrown version_conflict');
+      } catch (e: unknown) {
+        expect((e as Error).message).toContain('version_conflict');
+      }
+    });
   },
 );
 
