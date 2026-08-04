@@ -22,7 +22,7 @@
 const hmac = require('../helpers/hmac');
 const { ddl } = require('@shamir/client');
 
-module.exports = async function ({ client, fixtures, test, assert, assertEq }) {
+module.exports = async function ({ client, fixtures, test, assert, assertEq, assertThrows }) {
   test('list databases includes default', async () => {
     const resp = await client.execute('default', {
       id: 'lsdb',
@@ -144,5 +144,75 @@ module.exports = async function ({ client, fixtures, test, assert, assertEq }) {
       !afterNames.includes('by_email'),
       `index still listed after drop: ${JSON.stringify(ls2.results.l.records[0].indexes)}`
     );
+  });
+
+  test('drop_index if_exists: existing drop → re-drop → if_exists no-op', async () => {
+    const dbName = await fixtures.setupDb(client, 'ddl_drop_ie', ['t']);
+
+    await client.execute(dbName, {
+      id: 'mk-idx',
+      queries: { i: ddl.createIndex('to_drop', 't', [['x']]) },
+    });
+
+    // Step 1: drop the EXISTING index — must report existed:true.
+    const drop1 = await client.execute(dbName, {
+      id: 'drop1',
+      queries: { d: hmac.drop_index_op(client, dbName, 'main', 't', 'to_drop') },
+    });
+    assertEq(drop1.results.d.records[0].existed, true);
+
+    // Step 2: re-drop WITHOUT if_exists. The table still exists, so the
+    // server resolves the table but finds no matching index → silently
+    // returns existed:false (does NOT error — see admin_table_index.rs
+    // ~line 508-520: drop_index returns Ok(false), not an error).
+    const drop2 = await client.execute(dbName, {
+      id: 'drop2',
+      queries: { d: hmac.drop_index_op(client, dbName, 'main', 't', 'to_drop') },
+    });
+    assertEq(drop2.results.d.records[0].existed, false);
+
+    // Step 3: re-drop WITH if_exists:true — clean no-op, existed:false.
+    const drop3 = await client.execute(dbName, {
+      id: 'drop3',
+      queries: {
+        d: hmac.drop_index_op(client, dbName, 'main', 't', 'to_drop', {
+          if_exists: true,
+        }),
+      },
+    });
+    assertEq(drop3.results.d.records[0].existed, false);
+  });
+
+  test('drop_index if_exists: non-existent table without if_exists errors, with if_exists no-op', async () => {
+    const dbName = await fixtures.setupDb(client, 'ddl_drop_ie_tbl', []);
+
+    // Drop index from a NON-EXISTENT table WITHOUT if_exists → the
+    // server fails at table resolution and returns an error.
+    await assertThrows(() =>
+      client.execute(dbName, {
+        id: 'drop-missing-strict',
+        queries: {
+          d: hmac.drop_index_op(client, dbName, 'main', 'no_such_table', 'idx'),
+        },
+      }),
+    );
+
+    // Same drop WITH if_exists:true → the early-exit guard short-circuits
+    // before table resolution, returning a clean existed:false no-op
+    // (admin_table_index.rs ~line 447-471).
+    const resp = await client.execute(dbName, {
+      id: 'drop-missing-if-exists',
+      queries: {
+        d: hmac.drop_index_op(
+          client,
+          dbName,
+          'main',
+          'no_such_table',
+          'idx',
+          { if_exists: true },
+        ),
+      },
+    });
+    assertEq(resp.results.d.records[0].existed, false);
   });
 };

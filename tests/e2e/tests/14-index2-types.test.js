@@ -17,7 +17,7 @@
 
 const { ddl, Query, write, filter } = require('@shamir/client');
 
-module.exports = async function ({ client, fixtures, test, assert, assertEq }) {
+module.exports = async function ({ client, fixtures, test, assert, assertEq, assertThrows }) {
   // ─────────────────────────────────────────────────────────────────────
   // FTS
   // ─────────────────────────────────────────────────────────────────────
@@ -408,5 +408,161 @@ module.exports = async function ({ client, fixtures, test, assert, assertEq }) {
     assertEq(labels.length, 2);
     assert(labels.includes('origin'), `origin in top-2: ${JSON.stringify(labels)}`);
     assert(labels.includes('close'), `close in top-2: ${JSON.stringify(labels)}`);
+  });
+
+  // ─────────────────────────────────────────────────────────────────────
+  // Covering (include) sorted index — btree family, not index2.
+  //
+  // A sorted index with `include` stores the included field's value
+  // directly in the index posting, so a range query that only projects
+  // included fields is served entirely from the index (no data-store
+  // fetch). The ONLY observable proof is `stats.index_used` ending in
+  // `_covering` (read_index_scan.rs line 172/204).
+  // ─────────────────────────────────────────────────────────────────────
+
+  test('covering: sorted index with include serves range query from index only', async () => {
+    const db = await fixtures.setupDb(client, 'cover_inc', ['scores']);
+
+    await client.execute(db, {
+      id: 'mk',
+      queries: {
+        i: ddl.createIndex('score_cover', 'scores', [['score']], {
+          sorted: true,
+          include: [['label']],
+        }),
+      },
+    });
+
+    await client.execute(db, {
+      id: 'ins',
+      queries: {
+        w1: write.insert('scores', { score: 10, label: 'ten', extra: 'a' }),
+        w2: write.insert('scores', { score: 20, label: 'twenty', extra: 'b' }),
+        w3: write.insert('scores', { score: 30, label: 'thirty', extra: 'c' }),
+        w4: write.insert('scores', { score: 40, label: 'forty', extra: 'd' }),
+        w5: write.insert('scores', { score: 50, label: 'fifty', extra: 'e' }),
+      },
+    });
+
+    // Range query projecting ONLY the included field — triggers the
+    // covering index-only path (all SELECT items present in
+    // included_fields, no residual, no order_by/group_by/agg).
+    const resp = await client.execute(db, {
+      id: 'q',
+      queries: {
+        r: Query.from('scores')
+          .select(['label'])
+          .where(filter.between('score', 20, 40))
+          .build(),
+      },
+    });
+
+    const labels = resp.results.r.records.map((r) => r.label).sort();
+    assertEq(labels.length, 3);
+    assert(labels.includes('twenty'), `twenty missing: ${JSON.stringify(labels)}`);
+    assert(labels.includes('thirty'), `thirty missing: ${JSON.stringify(labels)}`);
+    assert(labels.includes('forty'), `forty missing: ${JSON.stringify(labels)}`);
+
+    // Covering path proof: index_used must end with `_covering`.
+    const idx = resp.results.r.stats.index_used;
+    assert(
+      typeof idx === 'string' && idx.endsWith('_covering'),
+      `expected index_used ending in '_covering', got: ${JSON.stringify(idx)}`,
+    );
+  });
+
+  test('covering: include on non-sorted index is rejected', async () => {
+    const db = await fixtures.setupDb(client, 'cover_neg', ['t']);
+
+    // `include` without `sorted: true` must be rejected by the server
+    // (admin_table_index.rs ~line 389:
+    //  "include is only valid for sorted indexes").
+    const err = await assertThrows(() =>
+      client.execute(db, {
+        id: 'mk-bad',
+        queries: {
+          i: ddl.createIndex('bad_include', 't', [['score']], {
+            include: [['label']],
+          }),
+        },
+      }),
+    );
+    assert(
+      /include is only valid for sorted indexes/i.test(err.message),
+      `expected include-rejection error, got: ${err.message}`,
+    );
+  });
+
+  // ─────────────────────────────────────────────────────────────────────
+  // Composite (multi-field) regular index — btree family, not index2.
+  //
+  // A REGULAR (non-sorted, non-unique) index accepts multiple columns as
+  // one composite key. The planner matches an And(eq, eq) filter against
+  // the composite index when every path is covered by exactly one Eq
+  // (read_planner.rs ~line 232). Sorted indexes explicitly REJECT
+  // multi-field today — "composite TBD" (admin_table_index.rs ~line 392).
+  // ─────────────────────────────────────────────────────────────────────
+
+  test('composite: regular multi-field index serves AND equality query', async () => {
+    const db = await fixtures.setupDb(client, 'comp_reg', ['t']);
+
+    await client.execute(db, {
+      id: 'mk',
+      queries: {
+        i: ddl.createIndex('ab_comp', 't', [['a'], ['b']]),
+      },
+    });
+
+    await client.execute(db, {
+      id: 'ins',
+      queries: {
+        w1: write.insert('t', { a: 1, b: 'x', name: 'r1' }),
+        w2: write.insert('t', { a: 1, b: 'y', name: 'r2' }),
+        w3: write.insert('t', { a: 2, b: 'x', name: 'r3' }),
+        w4: write.insert('t', { a: 2, b: 'y', name: 'r4' }),
+      },
+    });
+
+    // And(eq(a,2), eq(b,'x')) — only r3 matches both.
+    const resp = await client.execute(db, {
+      id: 'q',
+      queries: {
+        r: Query.from('t')
+          .where(filter.and(filter.eq('a', 2), filter.eq('b', 'x')))
+          .build(),
+      },
+    });
+
+    const recs = resp.results.r.records;
+    assertEq(recs.length, 1);
+    assertEq(recs[0].name, 'r3');
+
+    // The composite index was used (index_used = index name string).
+    const idx = resp.results.r.stats.index_used;
+    assert(
+      idx === 'ab_comp',
+      `expected index_used 'ab_comp', got: ${JSON.stringify(idx)}`,
+    );
+  });
+
+  test('composite: sorted multi-field index is rejected (composite TBD)', async () => {
+    const db = await fixtures.setupDb(client, 'comp_sorted_neg', ['t']);
+
+    // Sorted + multi-field must be rejected — the current limitation is
+    // explicitly enforced (admin_table_index.rs ~line 392-397).
+    const err = await assertThrows(() =>
+      client.execute(db, {
+        id: 'mk-bad',
+        queries: {
+          i: ddl.createIndex('bad_comp_sorted', 't', [['a'], ['b']], {
+            sorted: true,
+          }),
+        },
+      }),
+    );
+    assert(
+      /composite TBD/i.test(err.message),
+      `expected composite TBD rejection, got: ${err.message}`,
+    );
   });
 };
