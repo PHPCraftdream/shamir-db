@@ -227,6 +227,115 @@ async fn drop_index_gated_by_table_write() {
 }
 
 // ============================================================================
+// #989: `if_exists` must not probe existence before `authorize_access`.
+// ============================================================================
+//
+// Regression for a pre-auth existence oracle. Before the fix, an
+// authenticated-but-unauthorized caller (no Write on the table) sending
+// `drop_index { if_exists: true }` / `rename_index { if_exists: true }` got a
+// DISTINGUISHABLE outcome — a silent `{"existed": false}` no-op when the
+// index/table/db did NOT exist (the probe returned before authorize_access was
+// ever called), and `access_denied` only when it DID exist. By toggling
+// if_exists the caller could thus learn whether a resource they have no right
+// to even query exists. authorize_access now runs first in both handlers.
+
+#[tokio::test]
+async fn drop_index_if_exists_denies_unauthorized_on_missing_index() {
+    let shamir = setup().await;
+    restrict_table(&shamir).await;
+
+    // No index "ghost" exists. Before the fix this returned a silent
+    // {"existed": false} no-op (probe ran before auth) — the oracle.
+    assert_access_denied!(
+        shamir,
+        Actor::User(OTHER),
+        "op",
+        ddl::drop_index("ghost", "items").repo("main").if_exists()
+    );
+}
+
+#[tokio::test]
+async fn drop_index_if_exists_denies_unauthorized_on_existing_index() {
+    let shamir = setup().await;
+
+    // Create index as System first.
+    let mut b = Batch::new();
+    b.id("pre");
+    b.op(
+        "idx",
+        ddl::create_index("idx_x", "items")
+            .repo("main")
+            .fields(vec![vec!["name".to_string()]]),
+    );
+    shamir
+        .execute("testdb", &b.to_request_via_msgpack())
+        .await
+        .unwrap();
+
+    restrict_table(&shamir).await;
+
+    // Index DOES exist. Even before the fix this fell through the if_exists
+    // guard to authorize_access → access_denied. Regression guard proving the
+    // reordering didn't change the existing-index path for an unauthorized
+    // caller.
+    assert_access_denied!(
+        shamir,
+        Actor::User(OTHER),
+        "op",
+        ddl::drop_index("idx_x", "items").repo("main").if_exists()
+    );
+}
+
+#[tokio::test]
+async fn rename_index_if_exists_denies_unauthorized_on_missing_index() {
+    let shamir = setup().await;
+    restrict_table(&shamir).await;
+
+    // No index "ghost" exists. Before the fix this returned a silent
+    // {"existed": false} no-op (probe ran before auth) — the oracle.
+    assert_access_denied!(
+        shamir,
+        Actor::User(OTHER),
+        "op",
+        ddl::rename_index("items", "ghost", "real")
+            .repo("main")
+            .if_exists()
+    );
+}
+
+#[tokio::test]
+async fn rename_index_if_exists_denies_unauthorized_on_existing_index() {
+    let shamir = setup().await;
+
+    // Create index as System first.
+    let mut b = Batch::new();
+    b.id("pre");
+    b.op(
+        "idx",
+        ddl::create_index("idx_x", "items")
+            .repo("main")
+            .fields(vec![vec!["name".to_string()]]),
+    );
+    shamir
+        .execute("testdb", &b.to_request_via_msgpack())
+        .await
+        .unwrap();
+
+    restrict_table(&shamir).await;
+
+    // Index DOES exist. Even before the fix this fell through the if_exists
+    // guard to authorize_access → access_denied. Regression guard.
+    assert_access_denied!(
+        shamir,
+        Actor::User(OTHER),
+        "op",
+        ddl::rename_index("items", "idx_x", "idx_y")
+            .repo("main")
+            .if_exists()
+    );
+}
+
+// ============================================================================
 // DropRepo — ResourcePath::store(db, repo), Action::Delete
 // ============================================================================
 

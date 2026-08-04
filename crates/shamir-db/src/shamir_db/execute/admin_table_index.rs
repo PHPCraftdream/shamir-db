@@ -510,6 +510,20 @@ impl ShamirAdminExecutor {
         let err_access =
             |e: shamir_types::access::AccessError| err_code("access_denied", e.to_string());
 
+        // Auth runs BEFORE the if_exists existence probe: an unauthorized
+        // caller must not be able to learn whether an index/table/db they have
+        // no rights to query exists, by toggling if_exists and observing the
+        // distinguishable outcomes (silent {"existed": false} no-op vs
+        // access_denied). This is a pre-auth existence oracle otherwise.
+        self.shamir
+            .authorize_access(
+                &self.actor,
+                &ResourcePath::table(self.db_name.clone(), op.repo.clone(), op.table.clone()),
+                Action::Write,
+            )
+            .await
+            .map_err(err_access)?;
+
         // if_exists early-exit: missing db, table, or index → no-op.
         //
         // Existence is checked across ALL FOUR index mechanisms (base_index
@@ -545,14 +559,6 @@ impl ShamirAdminExecutor {
             }
         }
 
-        self.shamir
-            .authorize_access(
-                &self.actor,
-                &ResourcePath::table(self.db_name.clone(), op.repo.clone(), op.table.clone()),
-                Action::Write,
-            )
-            .await
-            .map_err(err_access)?;
         let db = self
             .shamir
             .get_db(&self.db_name)
@@ -616,9 +622,25 @@ impl ShamirAdminExecutor {
         let err_access =
             |e: shamir_types::access::AccessError| err_code("access_denied", e.to_string());
 
+        // Auth runs BEFORE the if_exists existence probe: an unauthorized
+        // caller must not be able to learn whether an index/table/db they have
+        // no rights to query exists, by toggling if_exists and observing the
+        // distinguishable outcomes (silent {"existed": false} no-op vs
+        // access_denied). This is a pre-auth existence oracle otherwise.
+        // Write on the parent table (rename mutates the index's identity).
+        // Mirrors the index create/drop auth path.
+        self.shamir
+            .authorize_access(
+                &self.actor,
+                &ResourcePath::table(self.db_name.clone(), op.repo.clone(), op.table.clone()),
+                Action::Write,
+            )
+            .await
+            .map_err(err_access)?;
+
         // if_exists early-exit: missing db, table, or source index → no-op.
         //
-        // Mirrors handle_drop_index's early-exit guard (~line 513-546).
+        // Mirrors handle_drop_index's early-exit guard.
         // Existence is checked across ALL FOUR index mechanisms (base_index
         // regular, base_index unique, sorted, index2) because RenameIndexOp
         // carries no index_type hint — the source name alone must be
@@ -645,17 +667,6 @@ impl ShamirAdminExecutor {
                 })));
             }
         }
-
-        // Auth: Write on the parent table (rename mutates the index's
-        // identity). Mirrors the index create/drop auth path.
-        self.shamir
-            .authorize_access(
-                &self.actor,
-                &ResourcePath::table(self.db_name.clone(), op.repo.clone(), op.table.clone()),
-                Action::Write,
-            )
-            .await
-            .map_err(err_access)?;
 
         let db = self
             .shamir
