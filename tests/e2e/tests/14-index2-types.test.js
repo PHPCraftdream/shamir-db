@@ -122,6 +122,78 @@ module.exports = async function ({ client, fixtures, test, assert, assertEq }) {
     assertEq(resp.results.r.records.length, 1);
   });
 
+  test('fts: unicode tokenizer accepted and matches', async () => {
+    const db = await fixtures.setupDb(client, 'fts_unicode', ['posts']);
+
+    await client.execute(db, {
+      id: 'mk',
+      queries: {
+        i: ddl.createIndex('body_fts_uni', 'posts', [['body']], {
+          index_type: 'fts',
+          fts_tokenizer: 'unicode',
+        }),
+      },
+    });
+
+    // "alpha,beta" has NO whitespace between the two words. The unicode
+    // tokenizer splits on the comma (a non-alphanumeric boundary) into
+    // ["alpha","beta"], whereas the whitespace tokenizer would keep it
+    // as a single token "alpha,beta" — so a bare "beta" query only
+    // matches because the unicode boundary-splitting actually happened.
+    await client.execute(db, {
+      id: 'ins',
+      queries: {
+        w1: write.insert('posts', { body: 'alpha,beta gamma' }),
+        w2: write.insert('posts', { body: 'delta epsilon' }),
+      },
+    });
+
+    const resp = await client.execute(db, {
+      id: 'q',
+      queries: {
+        r: Query.from('posts').where(filter.fts('body', 'beta', 'and')).build(),
+      },
+    });
+    const recs = resp.results.r.records;
+    assertEq(recs.length, 1);
+    assertEq(recs[0].body, 'alpha,beta gamma');
+    // BM25-ranked FTS index path.
+    assertEq(resp.results.r.stats.index_used, 'index2_ranked');
+  });
+
+  test('fts: language hint accepted (no-op today)', async () => {
+    const db = await fixtures.setupDb(client, 'fts_lang', ['posts']);
+
+    // fts_language is stored but currently NOT consumed for any
+    // tokenization/stemming behaviour — the only honest assertion is
+    // that create_index accepts it without error and FTS still matches.
+    await client.execute(db, {
+      id: 'mk',
+      queries: {
+        i: ddl.createIndex('body_fts_lang', 'posts', [['body']], {
+          index_type: 'fts',
+          fts_language: 'en',
+        }),
+      },
+    });
+
+    await client.execute(db, {
+      id: 'ins',
+      queries: {
+        w: write.insert('posts', { body: 'hello world' }),
+      },
+    });
+
+    const resp = await client.execute(db, {
+      id: 'q',
+      queries: {
+        r: Query.from('posts').where(filter.fts('body', 'hello', 'and')).build(),
+      },
+    });
+    assertEq(resp.results.r.records.length, 1);
+    assertEq(resp.results.r.stats.index_used, 'index2_ranked');
+  });
+
   // ─────────────────────────────────────────────────────────────────────
   // Functional
   // ─────────────────────────────────────────────────────────────────────
@@ -188,6 +260,76 @@ module.exports = async function ({ client, fixtures, test, assert, assertEq }) {
     });
     assertEq(resp.results.r.records.length, 1);
     assertEq(resp.results.r.records[0].tag, 'first');
+  });
+
+  test('functional: TRIM(field) = lookup', async () => {
+    const db = await fixtures.setupDb(client, 'fn_trim', ['users']);
+
+    await client.execute(db, {
+      id: 'mk',
+      queries: {
+        i: ddl.createIndex('email_trim', 'users', [['email']], {
+          index_type: 'functional',
+          functional_op: 'trim',
+        }),
+      },
+    });
+
+    await client.execute(db, {
+      id: 'ins',
+      queries: {
+        w1: write.insert('users', { email: '  alice@foo.com  ', name: 'alice' }),
+        w2: write.insert('users', { email: 'bob@bar.org', name: 'bob' }),
+      },
+    });
+
+    const resp = await client.execute(db, {
+      id: 'q',
+      queries: {
+        r: Query.from('users')
+          .where(filter.computed('trim', 'email', 'eq', 'alice@foo.com'))
+          .build(),
+      },
+    });
+    const recs = resp.results.r.records;
+    assertEq(recs.length, 1);
+    assertEq(recs[0].name, 'alice');
+    assertEq(resp.results.r.stats.index_used, 'index2');
+  });
+
+  test('functional: LENGTH(field) = lookup', async () => {
+    const db = await fixtures.setupDb(client, 'fn_length', ['t']);
+
+    await client.execute(db, {
+      id: 'mk',
+      queries: {
+        i: ddl.createIndex('code_len', 't', [['code']], {
+          index_type: 'functional',
+          functional_op: 'length',
+        }),
+      },
+    });
+
+    await client.execute(db, {
+      id: 'ins',
+      queries: {
+        w1: write.insert('t', { code: 'abc', tag: 'short' }), // length 3
+        w2: write.insert('t', { code: 'abcdef', tag: 'long' }), // length 6
+      },
+    });
+
+    const resp = await client.execute(db, {
+      id: 'q',
+      queries: {
+        r: Query.from('t')
+          .where(filter.computed('length', 'code', 'eq', 6))
+          .build(),
+      },
+    });
+    const recs = resp.results.r.records;
+    assertEq(recs.length, 1);
+    assertEq(recs[0].tag, 'long');
+    assertEq(resp.results.r.stats.index_used, 'index2');
   });
 
   // ─────────────────────────────────────────────────────────────────────
