@@ -931,7 +931,23 @@ impl IndexManager {
                 .into_iter()
                 .map(|(k, v)| (k.into(), v))
                 .collect();
-            self.info_store.set_many(posting_writes).await?;
+            // P1-2 (#967): if this backfill write fails AFTER Phase 1's
+            // `save_index_info` already persisted the Building definition,
+            // the index is durably registered but NOT queryable. Enrich
+            // the error so the caller knows what happened and how to resolve.
+            self.info_store
+                .set_many(posting_writes)
+                .await
+                .map_err(|e| {
+                    shamir_storage::error::DbError::Internal(format!(
+                        "CREATE INDEX '{name_interned}': the index definition was \
+                     durably registered as Building (Phase 1 persist succeeded), \
+                     but the backfill posting write (Phase 2) failed: {e}. The \
+                     index is NOT queryable — it remains permanently Building \
+                     (planner-invisible) until rebuilt. Call TableManager::verify() \
+                     to confirm state, or TableManager::repair() to rebuild it."
+                    ))
+                })?;
         }
         for ik in cache_index_keys {
             self.posting_cache.remove(&ik);
@@ -974,7 +990,20 @@ impl IndexManager {
             ready_def.state = crate::state::IndexState::Ready;
             self.indexes.add_index(ready_def);
         }
-        self.save_index_info().await?;
+        // P1-2 (#967): if this Phase 3 persist fails, the index is Ready
+        // in THIS process's memory but durably Building on disk — enrich
+        // the error so the caller knows the state split and how to resolve.
+        self.save_index_info().await.map_err(|e| {
+            shamir_storage::error::DbError::Internal(format!(
+                "CREATE INDEX '{name_interned}': the backfill completed and the \
+                 index was flipped to Ready in memory, but the final durable \
+                 persist of the Ready state (Phase 3) failed: {e}. The index is \
+                 queryable in THIS process but durably Building on disk — a \
+                 restart will reload it as Building (planner-invisible). Call \
+                 TableManager::verify() to confirm state, or \
+                 TableManager::repair() to rebuild it."
+            ))
+        })?;
 
         log::info!(
             "Created index '{}' with {} entries (from seam)",
@@ -1082,8 +1111,23 @@ impl IndexManager {
         // registration boundary — same (posting_key, empty-value) pair.
         let mut count = 0usize;
         let mut stream = stream;
+        // P1-2 (#967): enricher for any Phase 2 backfill failure — the
+        // Building definition is already durably persisted by Phase 1 above.
+        let enrich_backfill = |e: shamir_storage::error::DbError| {
+            shamir_storage::error::DbError::Internal(format!(
+                "CREATE INDEX '{name_interned}': the index definition was \
+                 durably registered as Building (Phase 1 persist succeeded), \
+                 but the streaming backfill (Phase 2) failed: {e}. The index \
+                 is NOT queryable — it remains permanently Building \
+                 (planner-invisible) until rebuilt. Call TableManager::verify() \
+                 to confirm state, or TableManager::repair() to rebuild it."
+            ))
+        };
         while let Some(batch_result) = stream.next().await {
-            let batch = batch_result?;
+            let batch = match batch_result {
+                Ok(b) => b,
+                Err(e) => return Err(enrich_backfill(e)),
+            };
             let mut posting_writes: Vec<(Bytes, Bytes)> =
                 Vec::with_capacity(batch.len().min(131_072));
             let mut cache_index_keys: Vec<Bytes> = Vec::with_capacity(posting_writes.capacity());
@@ -1104,7 +1148,10 @@ impl IndexManager {
                     .into_iter()
                     .map(|(k, v)| (k.into(), v))
                     .collect();
-                self.info_store.set_many(posting_writes).await?;
+                self.info_store
+                    .set_many(posting_writes)
+                    .await
+                    .map_err(enrich_backfill)?;
             }
             for ik in cache_index_keys {
                 self.posting_cache.remove(&ik);
@@ -1126,7 +1173,19 @@ impl IndexManager {
             ready_def.state = crate::state::IndexState::Ready;
             self.indexes.add_index(ready_def);
         }
-        self.save_index_info().await?;
+        // P1-2 (#967): Phase 3 persist — same enrichment as
+        // `create_index_from_records` (see that method's matching comment).
+        self.save_index_info().await.map_err(|e| {
+            shamir_storage::error::DbError::Internal(format!(
+                "CREATE INDEX '{name_interned}': the backfill completed and the \
+                 index was flipped to Ready in memory, but the final durable \
+                 persist of the Ready state (Phase 3) failed: {e}. The index is \
+                 queryable in THIS process but durably Building on disk — a \
+                 restart will reload it as Building (planner-invisible). Call \
+                 TableManager::verify() to confirm state, or \
+                 TableManager::repair() to rebuild it."
+            ))
+        })?;
 
         log::info!(
             "Created index '{}' with {} entries (streamed from seam)",
@@ -1228,7 +1287,19 @@ impl IndexManager {
         // Sweep the (now orphan, planner-invisible) posting entries.
         // P0-3 (#959): extracted to `sweep_index_postings` so the recovery
         // path can re-run it idempotently.
-        self.sweep_index_postings(false, name_interned).await?;
+        // P1-2 (#967): a durable tombstone is already persisted — if this
+        // sweep fails, enrich the error with the partial-state context.
+        self.sweep_index_postings(false, name_interned)
+            .await
+            .map_err(|e| {
+                shamir_storage::error::DbError::Internal(format!(
+                    "DROP INDEX '{name_interned}': a durable drop tombstone was \
+                 persisted and the definition was retired from the planner, but \
+                 the posting sweep failed: {e}. On restart, recovery will resume \
+                 the sweep idempotently and finish the drop. Call \
+                 TableManager::verify() to confirm state."
+                ))
+            })?;
 
         // P0-3 (#959) test seam — park here (sweep complete, reduced
         // IndexInfo NOT yet persisted) if a test installed the post-sweep
@@ -1242,8 +1313,18 @@ impl IndexManager {
         }
 
         // Persist the reduced IndexInfo (definition removed).
+        // P1-2 (#967): the tombstone is still in place — if this persist
+        // fails, recovery will see the tombstone and finish the drop.
         if was_removed {
-            self.save_index_info().await?;
+            self.save_index_info().await.map_err(|e| {
+                shamir_storage::error::DbError::Internal(format!(
+                    "DROP INDEX '{name_interned}': a durable drop tombstone was \
+                     persisted, the definition was retired, and the posting sweep \
+                     completed, but persisting the reduced index metadata failed: \
+                     {e}. On restart, recovery will finish the drop idempotently. \
+                     Call TableManager::verify() to confirm state."
+                ))
+            })?;
         }
 
         // P0-3 (#959): clear the tombstone AFTER the reduced IndexInfo is
@@ -1254,7 +1335,19 @@ impl IndexManager {
         // crashes BEFORE this call (between IndexInfo persist and tombstone
         // clear), recovery sees the tombstone but the def is already gone
         // from IndexInfo — it just clears the tombstone (a no-op sweep).
-        self.clear_from_dropping(false, name_interned).await?;
+        // P1-2 (#967): if this fails, the tombstone remains — recovery
+        // will just clear it (a no-op on the already-finished drop).
+        self.clear_from_dropping(false, name_interned)
+            .await
+            .map_err(|e| {
+                shamir_storage::error::DbError::Internal(format!(
+                    "DROP INDEX '{name_interned}': the drop is essentially complete \
+                 (tombstone persisted, definition retired, sweep done, reduced \
+                 metadata persisted), but clearing the drop tombstone failed: {e}. \
+                 On restart, recovery will clear the tombstone as a no-op. Call \
+                 TableManager::verify() to confirm state."
+                ))
+            })?;
 
         Ok(was_removed)
     }

@@ -479,7 +479,19 @@ impl IndexManager {
                                 // `write_barrier_flags.rs`'s module doc for why this bit's ordering
                                 // must match the rest of the write-barrier predicate.
         self.write_barrier_flags.set(UNIQUE_INDEX_EXISTS);
-        self.save_index_info_unique().await?;
+        // P1-2 (#967): the posting entries are ALREADY durably written by the
+        // `set_many` above. If THIS definition persist fails, the postings are
+        // orphaned — on restart, no definition loads but postings remain.
+        self.save_index_info_unique().await.map_err(|e| {
+            shamir_storage::error::DbError::Internal(format!(
+                "CREATE UNIQUE INDEX '{name_interned}': the index posting \
+                 entries were durably written, but persisting the index \
+                 definition failed: {e}. The index definition is NOT persisted — \
+                 on restart, orphan postings will exist without a corresponding \
+                 definition. Call TableManager::verify() to confirm state, or \
+                 TableManager::repair() to rebuild it."
+            ))
+        })?;
 
         log::info!(
             "Created unique index '{}' with {} entries (from seam)",
@@ -532,7 +544,19 @@ impl IndexManager {
         // Sweep the (now orphan, planner-invisible) posting entries.
         // P0-3 (#959): extracted to `sweep_index_postings` for reuse by
         // the recovery path.
-        self.sweep_index_postings(true, name_interned).await?;
+        // P1-2 (#967): a durable tombstone is already persisted — enrich
+        // the error if this sweep fails.
+        self.sweep_index_postings(true, name_interned)
+            .await
+            .map_err(|e| {
+                shamir_storage::error::DbError::Internal(format!(
+                    "DROP UNIQUE INDEX '{name_interned}': a durable drop tombstone \
+                 was persisted and the definition was retired from the planner, \
+                 but the posting sweep failed: {e}. On restart, recovery will \
+                 resume the sweep idempotently and finish the drop. Call \
+                 TableManager::verify() to confirm state."
+                ))
+            })?;
 
         // P0-3 (#959) test seam — post-sweep, pre-persist crash window.
         // See `drop_index`'s matching hook for the full rationale.
@@ -541,14 +565,37 @@ impl IndexManager {
         }
 
         // Persist the reduced IndexInfo (definition removed).
+        // P1-2 (#967): the tombstone is still in place — if this persist
+        // fails, recovery will see the tombstone and finish the drop.
         if was_removed {
-            self.save_index_info_unique().await?;
+            self.save_index_info_unique().await.map_err(|e| {
+                shamir_storage::error::DbError::Internal(format!(
+                    "DROP UNIQUE INDEX '{name_interned}': a durable drop \
+                     tombstone was persisted, the definition was retired, and \
+                     the posting sweep completed, but persisting the reduced \
+                     index metadata failed: {e}. On restart, recovery will \
+                     finish the drop idempotently. Call TableManager::verify() \
+                     to confirm state."
+                ))
+            })?;
         }
 
         // P0-3 (#959): clear the tombstone AFTER the reduced IndexInfo is
         // durably persisted. See `drop_index`'s matching call for the
         // ordering rationale.
-        self.clear_from_dropping(true, name_interned).await?;
+        // P1-2 (#967): if this fails, the tombstone remains — recovery
+        // will just clear it (a no-op on the already-finished drop).
+        self.clear_from_dropping(true, name_interned)
+            .await
+            .map_err(|e| {
+                shamir_storage::error::DbError::Internal(format!(
+                    "DROP UNIQUE INDEX '{name_interned}': the drop is essentially \
+                 complete (tombstone persisted, definition retired, sweep done, \
+                 reduced metadata persisted), but clearing the drop tombstone \
+                 failed: {e}. On restart, recovery will clear the tombstone as \
+                 a no-op. Call TableManager::verify() to confirm state."
+                ))
+            })?;
 
         Ok(was_removed)
     }

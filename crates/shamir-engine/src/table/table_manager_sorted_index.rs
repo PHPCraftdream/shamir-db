@@ -159,9 +159,28 @@ impl TableManager {
         // self-healing is out of scope for this task.
         let stream = self.list_stream(1000);
         futures::pin_mut!(stream);
+        // P1-2 (#967): the `register` call above already durably persisted the
+        // Building definition. Enrich any backfill failure with the partial-
+        // state context so the caller knows the index is stuck as Building.
+        let enrich_backfill = |e: shamir_storage::error::DbError| {
+            shamir_storage::error::DbError::Internal(format!(
+                "CREATE SORTED INDEX '{index_name}': the index definition was \
+                 durably registered as Building, but the backfill failed: {e}. \
+                 The index is NOT queryable — it remains permanently Building \
+                 (planner-invisible) until rebuilt. Call TableManager::verify() \
+                 to confirm state, or TableManager::repair() to rebuild it."
+            ))
+        };
         while let Some(batch) = stream.next().await {
-            for (id, cow) in batch? {
-                let record = cow.into_inner()?;
+            let batch = match batch {
+                Ok(b) => b,
+                Err(e) => return Err(enrich_backfill(e)),
+            };
+            for (id, cow) in batch {
+                let record = match cow.into_inner() {
+                    Ok(r) => r,
+                    Err(e) => return Err(enrich_backfill(e)),
+                };
                 // F-71 (#898): the backfill is NOT a real MVCC write — it has
                 // no commit version of its own, so every `on_record_created`
                 // call here still passes the literal `0` placeholder used
@@ -175,7 +194,8 @@ impl TableManager {
                 // mirrors state as of `table_version`.
                 self.sorted_indexes
                     .on_record_created(&id, &record, 0)
-                    .await?;
+                    .await
+                    .map_err(enrich_backfill)?;
             }
             // F-72 (#899, P0) test seam: park here (mid-backfill, definition
             // still `Building` and hence planner-invisible) if a test
@@ -227,7 +247,17 @@ impl TableManager {
             .unwrap_or(0);
         self.sorted_indexes
             .mark_ready_at(name_interned, table_version)
-            .await?;
+            .await
+            .map_err(|e| {
+                shamir_storage::error::DbError::Internal(format!(
+                    "CREATE SORTED INDEX '{index_name}': the backfill completed, \
+                     but the final Ready flip + persist (mark_ready_at) failed: \
+                     {e}. The index is queryable in THIS process but durably \
+                     Building on disk — a restart will reload it as Building \
+                     (planner-invisible). Call TableManager::verify() to confirm \
+                     state, or TableManager::repair() to rebuild it."
+                ))
+            })?;
         Ok(())
     }
 

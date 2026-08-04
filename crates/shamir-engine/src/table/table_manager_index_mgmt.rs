@@ -332,7 +332,19 @@ impl TableManager {
         // re-running `bulk_populate_index2` over ALL backends: postings are
         // idempotent, but re-touching already-populated backends is needless
         // O(N·backends) work on every CREATE INDEX.
-        self.backfill_index2_backend(backend.as_ref()).await?;
+        self.backfill_index2_backend(backend.as_ref())
+            .await
+            .map_err(|e| {
+                shamir_storage::error::DbError::Internal(format!(
+                    "CREATE INDEX '{}': the index was durably persisted as \
+                     Building, but the backfill failed: {e}. The index is NOT \
+                     queryable — it remains permanently Building until rebuilt. \
+                     On restart, the table-open self-heal will detect the \
+                     Building state and re-backfill. Call TableManager::verify() \
+                     to confirm state, or TableManager::repair() to rebuild it.",
+                    op.create_index
+                ))
+            })?;
 
         // #534 finding-1 regression hook: park here (backfill done, backend NOT
         // yet registered) if a test installed a pause hook. Zero cost in the
@@ -343,10 +355,18 @@ impl TableManager {
             hook.wait_at_window().await;
         }
 
-        self.index2_registry
-            .insert(backend)
-            .await
-            .map_err(|e| shamir_storage::error::DbError::Internal(e.to_string()))?;
+        self.index2_registry.insert(backend).await.map_err(|e| {
+            shamir_storage::error::DbError::Internal(format!(
+                "CREATE INDEX '{}': the index was durably persisted as \
+                     Building and the backfill completed, but registering the \
+                     backend in the live registry failed: {e}. The index is \
+                     NOT queryable in THIS process — on restart, the table-open \
+                     self-heal will detect the Building state and re-backfill. \
+                     Call TableManager::verify() to confirm state, or \
+                     TableManager::repair() to rebuild it.",
+                op.create_index
+            ))
+        })?;
 
         // F-50 Step 3b: the backfill completed and the backend is now
         // registered, so flip its authoritative lifecycle state from
@@ -362,7 +382,19 @@ impl TableManager {
             .await;
 
         crate::index2::persistence::save_index2_metadata(&self.index2_registry, &self.info_store)
-            .await?;
+            .await
+            .map_err(|e| {
+                shamir_storage::error::DbError::Internal(format!(
+                    "CREATE INDEX '{}': the backfill completed and the index was \
+                     flipped to Ready in memory, but the final durable persist of \
+                     the Ready state failed: {e}. The index is queryable in THIS \
+                     process but durably Building on disk — on restart, the \
+                     table-open self-heal will detect the Building state and \
+                     re-backfill. Call TableManager::verify() to confirm state, \
+                     or TableManager::repair() to rebuild it.",
+                    op.create_index
+                ))
+            })?;
 
         Ok(())
     }
@@ -803,12 +835,30 @@ impl TableManager {
             hook.wait_at_window().await;
         }
         // Sweep the (now orphan, planner-invisible) posting entries.
-        backend
-            .drop_all()
-            .await
-            .map_err(|e| shamir_storage::error::DbError::Internal(e.to_string()))?;
+        backend.drop_all().await.map_err(|e| {
+            shamir_storage::error::DbError::Internal(format!(
+                "DROP INDEX '{name}': the backend was retired from the \
+                     planner-visible registry, but the posting sweep failed: {e}. \
+                     Postings may be partially swept. On restart, the index will \
+                     reload from metadata (still listed) with potentially missing \
+                     postings. Call TableManager::verify() to confirm state, or \
+                     TableManager::repair() to rebuild it."
+            ))
+        })?;
+        // P1-2 (#967): postings are swept (durable) but metadata still lists
+        // the index — if this persist fails, enrich the error.
         crate::index2::persistence::save_index2_metadata(&self.index2_registry, &self.info_store)
-            .await?;
+            .await
+            .map_err(|e| {
+                shamir_storage::error::DbError::Internal(format!(
+                    "DROP INDEX '{name}': the posting sweep completed, but \
+                     persisting the reduced index metadata failed: {e}. On \
+                     restart, the index will reload from the stale metadata \
+                     (still listed) but with no postings — call \
+                     TableManager::verify() to confirm state, or \
+                     TableManager::repair() to rebuild it."
+                ))
+            })?;
         Ok(true)
     }
 
@@ -1046,7 +1096,16 @@ impl TableManager {
             // Create the new index FIRST (registers + backfills under new_id).
             self.create_index(new_name, &path_refs).await?;
             // Then drop the old index (removes old-id postings only).
-            self.index_manager.drop_index(old_id).await?;
+            // P1-2 (#967): if this fails after create_index succeeded, both
+            // old and new indexes exist — enrich the error with context.
+            self.index_manager.drop_index(old_id).await.map_err(|e| {
+                shamir_storage::error::DbError::Internal(format!(
+                    "RENAME INDEX '{old_name}' → '{new_name}': the new index \
+                     '{new_name}' was created successfully, but dropping the old \
+                     index '{old_name}' failed: {e}. Both indexes now exist — \
+                     call TableManager::verify() to confirm state."
+                ))
+            })?;
         }
 
         // ── Unique (hash): write-barrier across drop→backfill→register ──────
@@ -1097,7 +1156,19 @@ impl TableManager {
             // Use the body variant: the barrier + lock are already held
             // above, and `create_unique_index` would re-acquire the lock →
             // deadlock (`tokio::sync::Mutex` is NOT reentrant).
-            self.create_unique_index_body(new_name, &path_refs).await?;
+            // P1-2 (#967): if this fails after drop_unique_index succeeded,
+            // the old index is gone but the new one doesn't exist.
+            self.create_unique_index_body(new_name, &path_refs)
+                .await
+                .map_err(|e| {
+                    shamir_storage::error::DbError::Internal(format!(
+                        "RENAME INDEX '{old_name}' → '{new_name}': the old unique \
+                         index '{old_name}' was dropped, but creating the new \
+                         unique index '{new_name}' failed: {e}. The old index is \
+                         gone — call TableManager::verify() to confirm state, or \
+                         re-create the index manually."
+                    ))
+                })?;
         }
 
         // ── Rekey sorted index posting entries ────────────────────────────────

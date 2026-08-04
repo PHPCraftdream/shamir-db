@@ -935,7 +935,19 @@ impl SortedIndexManager {
         // Sweep the (now orphan, planner-invisible) posting entries.
         // P0-3b (#972): extracted to `sweep_sorted_postings` so the recovery
         // path can re-run it idempotently.
-        self.sweep_sorted_postings(name_interned).await?;
+        // P1-2 (#967): a durable tombstone is already persisted — enrich
+        // the error if this sweep fails.
+        self.sweep_sorted_postings(name_interned)
+            .await
+            .map_err(|e| {
+                shamir_storage::error::DbError::Internal(format!(
+                    "DROP SORTED INDEX '{name_interned}': a durable drop tombstone \
+                 was persisted and the definition was retired from the planner, \
+                 but the posting sweep failed: {e}. On restart, recovery will \
+                 resume the sweep idempotently and finish the drop. Call \
+                 TableManager::verify() to confirm state."
+                ))
+            })?;
 
         // P0-3b (#972) test seam — park here (sweep complete, reduced defs
         // NOT yet persisted) if a test installed the post-sweep hook. This is
@@ -948,13 +960,35 @@ impl SortedIndexManager {
         }
 
         // Persist the reduced defs (definition removed).
-        self.persist_defs().await?;
+        // P1-2 (#967): the tombstone is still in place — if this persist
+        // fails, recovery will see the tombstone and finish the drop.
+        self.persist_defs().await.map_err(|e| {
+            shamir_storage::error::DbError::Internal(format!(
+                "DROP SORTED INDEX '{name_interned}': a durable drop tombstone \
+                 was persisted, the definition was retired, and the posting sweep \
+                 completed, but persisting the reduced definitions failed: {e}. \
+                 On restart, recovery will finish the drop idempotently. Call \
+                 TableManager::verify() to confirm state."
+            ))
+        })?;
 
         // P0-3b (#972): clear the tombstone AFTER the reduced defs are
         // durably persisted. `clear_from_dropping_sorted` persists first,
         // then updates in-memory — see that method's doc for the ordering
         // rationale.
-        self.clear_from_dropping_sorted(name_interned).await?;
+        // P1-2 (#967): if this fails, the tombstone remains — recovery
+        // will just clear it (a no-op on the already-finished drop).
+        self.clear_from_dropping_sorted(name_interned)
+            .await
+            .map_err(|e| {
+                shamir_storage::error::DbError::Internal(format!(
+                    "DROP SORTED INDEX '{name_interned}': the drop is essentially \
+                 complete (tombstone persisted, definition retired, sweep done, \
+                 reduced definitions persisted), but clearing the drop tombstone \
+                 failed: {e}. On restart, recovery will clear the tombstone as \
+                 a no-op. Call TableManager::verify() to confirm state."
+                ))
+            })?;
 
         Ok(true)
     }
@@ -1314,7 +1348,16 @@ impl SortedIndexManager {
         // If this fails AFTER the tombstone was written, the tombstone is left
         // in place — recovery will reconcile on restart (it checks which id the
         // definition is actually under before deciding to rename vs. just rekey).
-        self.rename_definition(old_id, new_id).await?;
+        // P1-2 (#967): enrich the error with partial-state context.
+        self.rename_definition(old_id, new_id).await.map_err(|e| {
+            shamir_storage::error::DbError::Internal(format!(
+                "RENAME SORTED INDEX ({old_id} → {new_id}): a durable rename \
+                 tombstone was persisted, but the definition swap + persist \
+                 failed: {e}. The tombstone is left in place — on restart, \
+                 recovery will reconcile the rename. Call TableManager::verify() \
+                 to confirm state."
+            ))
+        })?;
 
         // P0-5b (#962) test seam — park here (definition already swapped +
         // persisted under new_id, postings NOT yet rekeyed) if a test
@@ -1325,10 +1368,31 @@ impl SortedIndexManager {
         }
 
         // 3. Rekey the physical postings (settle loop).
-        self.rekey_postings(old_id, new_id).await?;
+        // P1-2 (#967): enrich — the definition swap already succeeded, so
+        // the rename is partially done (definition under new_id, postings
+        // still under old_id).
+        self.rekey_postings(old_id, new_id).await.map_err(|e| {
+            shamir_storage::error::DbError::Internal(format!(
+                "RENAME SORTED INDEX ({old_id} → {new_id}): the definition was \
+                 swapped and persisted under {new_id}, but rekeying the physical \
+                 postings from {old_id} failed: {e}. The tombstone is left in \
+                 place — on restart, recovery will finish the rekey. Call \
+                 TableManager::verify() to confirm state."
+            ))
+        })?;
 
         // 4. Clear the tombstone now that the rekey is durable.
-        self.clear_from_renaming_sorted(old_id).await?;
+        // P1-2 (#967): if this fails, the tombstone remains — recovery
+        // will just clear it (the rename is fully done).
+        self.clear_from_renaming_sorted(old_id).await.map_err(|e| {
+            shamir_storage::error::DbError::Internal(format!(
+                "RENAME SORTED INDEX ({old_id} → {new_id}): the rename is fully \
+                 complete (definition swapped, postings rekeyed), but clearing \
+                 the rename tombstone failed: {e}. On restart, recovery will \
+                 clear the tombstone as a no-op. Call TableManager::verify() \
+                 to confirm state."
+            ))
+        })?;
 
         Ok(())
     }
