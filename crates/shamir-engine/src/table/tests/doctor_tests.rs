@@ -8,15 +8,19 @@ use rust_decimal::Decimal;
 
 use crate::db_instance::db_instance::DbInstance;
 use crate::index::index_record_key::IndexRecordKey;
-use crate::repo::repo_types::BoxRepoFactory;
+use crate::index2::state::IndexState;
+use crate::repo::repo_instance::RepoInstance;
+use crate::repo::repo_types::{BoxRepo, BoxRepoFactory};
 use crate::repo::RepoConfig;
 use crate::table::tests::test_helpers::query_value_to_inner_tracked;
 use crate::table::TableConfig;
 use shamir_query_builder::{filter, write};
+use shamir_storage::storage_in_memory::InMemoryRepo;
 use shamir_storage::types::Store;
+use shamir_types::core::interner::{InternerKey, TouchInd};
 use shamir_types::mpack;
-use shamir_types::types::common::new_map;
-use shamir_types::types::value::QueryValue;
+use shamir_types::types::common::{new_map, new_map_wc};
+use shamir_types::types::value::{InnerValue, QueryValue};
 
 /// Build a fresh in-memory DB with a `users` table, a regular index
 /// on `city`, a unique index on `id`, and a sorted index on `score`.
@@ -488,4 +492,265 @@ async fn doctor_lens_parity_mixed_indexed_types() {
             ih.name_interned, ih.expected_entries, ih.actual_entries
         );
     }
+}
+
+// ============================================================================
+// P1-1 (#966) — doctor::verify() must surface stuck-Building base indexes
+// (regular / unique / sorted). A Building index is permanently planner-
+// invisible until an explicit doctor::repair() rebuilds it (the base_index
+// family has NO automatic open-time self-heal, unlike index2's F-50 Step
+// 3b). Each test below proves verify() catches the stuck state per family.
+// ============================================================================
+
+/// Build a minimal in-memory repo + table for the Building-detection tests.
+async fn make_pause_test_repo(table_name: &str) -> (RepoInstance, crate::table::TableManager) {
+    let repo = RepoInstance::new(
+        "test".into(),
+        BoxRepo::InMemory(Arc::new(InMemoryRepo::new())),
+        Vec::new(),
+    );
+    repo.add_table(TableConfig::new(table_name));
+    let tbl = repo.get_table(table_name).await.unwrap();
+    (repo, tbl)
+}
+
+/// Intern a name and return its u64 id.
+async fn intern_id(tbl: &crate::table::TableManager, name: &str) -> u64 {
+    let interner = tbl.interner().get().await.unwrap();
+    match interner.touch_ind(name).unwrap() {
+        TouchInd::Exists(k) | TouchInd::New(k) => k.id(),
+    }
+}
+
+/// Build a single-field `InnerValue::Map` record (string value).
+fn str_record(key: u64, val: &str) -> InnerValue {
+    let mut m = new_map_wc(1);
+    m.insert(InternerKey::new(key), InnerValue::Str(val.into()));
+    InnerValue::Map(m)
+}
+
+/// Build a single-field `InnerValue::Map` record (int value).
+fn int_record(key: u64, val: i64) -> InnerValue {
+    let mut m = new_map_wc(1);
+    m.insert(InternerKey::new(key), InnerValue::Int(val));
+    InnerValue::Map(m)
+}
+
+/// P1-1: a regular (hash) index stuck at `Building` mid-backfill must be
+/// surfaced by `verify()` as unhealthy — even if the partial entry count
+/// happens to match. Uses the existing `create_index_backfill_hook` pause
+/// seam (no new interruption mechanism). Also includes a post-release
+/// Ready check as the regression guard for this family.
+#[tokio::test]
+async fn verify_detects_building_regular_index() {
+    use shamir_index::base_index::backfill_pause_hook::BackfillPauseHook;
+
+    let (_repo, tbl) = make_pause_test_repo("people").await;
+    let status_key = intern_id(&tbl, "status").await;
+
+    // Pre-existing rows — the backfill has work to do and actually pauses.
+    for s in ["a", "b", "c"] {
+        tbl.insert(&str_record(status_key, s)).await.unwrap();
+    }
+
+    // Install the pause hook on the low-level IndexManager.
+    let hook = Arc::new(BackfillPauseHook::new());
+    tbl.index_manager_ref()
+        .set_create_index_backfill_hook(Some(Arc::clone(&hook)));
+
+    // Spawn create_index — registers at Building, then parks mid-backfill.
+    let tbl_c = tbl.clone();
+    let create = tokio::spawn(async move { tbl_c.create_index("status_idx", &["status"]).await });
+
+    hook.wait_until_parked().await;
+    let idx_id = intern_id(&tbl, "status_idx").await;
+
+    // THE PROOF: verify() while still Building.
+    let report = tbl.verify().await.unwrap();
+    let entry = report
+        .regular_indexes
+        .iter()
+        .find(|h| h.name_interned == idx_id)
+        .expect("status_idx in regular_indexes");
+    assert_eq!(
+        entry.state,
+        IndexState::Building,
+        "mid-backfill regular index must report Building"
+    );
+    assert!(
+        !entry.is_healthy(),
+        "a Building regular index must be unhealthy even if counts match"
+    );
+    assert!(
+        entry.message.is_some(),
+        "a Building regular index must carry a diagnostic message"
+    );
+    assert!(
+        !report.is_healthy(),
+        "a Building regular index must make the overall report unhealthy"
+    );
+
+    // Release — def flips to Ready.
+    hook.release();
+    create.await.unwrap().expect("create_index must complete");
+
+    // Regression guard: a fully-Ready regular index is healthy.
+    let report2 = tbl.verify().await.unwrap();
+    let entry2 = report2
+        .regular_indexes
+        .iter()
+        .find(|h| h.name_interned == idx_id)
+        .expect("status_idx in regular_indexes");
+    assert_eq!(entry2.state, IndexState::Ready);
+    assert!(entry2.is_healthy());
+    assert!(entry2.message.is_none());
+    assert!(report2.is_healthy());
+}
+
+/// P1-1: a unique (hash) index stuck at `Building` must be surfaced by
+/// `verify()` as unhealthy.
+///
+/// NOTE: the unique-index CREATE path uses the "Option B" design (register
+/// AFTER backfill, never `Building` in production — see
+/// `create_unique_index_body`'s audit A9 doc). There is therefore no pause
+/// hook for unique creates. This test simulates the stuck-Building state
+/// by re-registering the definition at `Building` via the public
+/// `create_unique_index_from_records` API (which adds whatever `state` it
+/// receives, no flip). This exercises the exact code path `verify()` uses
+/// to detect the gap — if a bug or future code change ever left a unique
+/// index at `Building`, `verify()` would catch it here. Also includes a
+/// pre-flip Ready check as the regression guard for this family.
+#[tokio::test]
+async fn verify_detects_building_unique_index() {
+    let (_repo, tbl) = make_pause_test_repo("uniq").await;
+    let id_key = intern_id(&tbl, "id").await;
+
+    for i in 0..5 {
+        tbl.insert(&str_record(id_key, &format!("u{i}")))
+            .await
+            .unwrap();
+    }
+
+    // Create the unique index normally — Ready.
+    tbl.create_unique_index("by_id", &["id"]).await.unwrap();
+    let idx_id = intern_id(&tbl, "by_id").await;
+
+    // Regression guard: a fully-Ready unique index is healthy.
+    let ready_report = tbl.verify().await.unwrap();
+    let ready_entry = ready_report
+        .unique_indexes
+        .iter()
+        .find(|h| h.name_interned == idx_id)
+        .expect("by_id in unique_indexes");
+    assert_eq!(ready_entry.state, IndexState::Ready);
+    assert!(ready_entry.is_healthy());
+    assert!(ready_report.is_healthy());
+
+    // Simulate a stuck-Building unique index: re-register the def at Building.
+    let def = tbl
+        .index_manager_ref()
+        .get_unique_index_definition(idx_id)
+        .expect("by_id unique index registered");
+    let mut building_def = def.clone();
+    building_def.state = IndexState::Building;
+    let records = tbl.collect_all_current_records().await.unwrap();
+    tbl.index_manager_ref()
+        .create_unique_index_from_records(building_def, records)
+        .await
+        .unwrap();
+
+    // THE PROOF: verify() must report the Building unique index as unhealthy.
+    let report = tbl.verify().await.unwrap();
+    let entry = report
+        .unique_indexes
+        .iter()
+        .find(|h| h.name_interned == idx_id)
+        .expect("by_id in unique_indexes");
+    assert_eq!(
+        entry.state,
+        IndexState::Building,
+        "a re-registered-at-Building unique index must report Building"
+    );
+    assert!(
+        !entry.is_healthy(),
+        "a Building unique index must be unhealthy"
+    );
+    assert!(
+        entry.message.is_some(),
+        "a Building unique index must carry a diagnostic message"
+    );
+    assert!(
+        !report.is_healthy(),
+        "a Building unique index must make the overall report unhealthy"
+    );
+}
+
+/// P1-1: a sorted (B-tree) index stuck at `Building` mid-backfill must be
+/// surfaced by `verify()` as unhealthy. Uses the existing
+/// `create_sorted_index_backfill_hook` pause seam. Also includes a
+/// post-release Ready check as the regression guard for this family.
+#[tokio::test]
+async fn verify_detects_building_sorted_index() {
+    let (_repo, tbl) = make_pause_test_repo("nums").await;
+    let score_key = intern_id(&tbl, "score").await;
+
+    for score in [10, 20, 30] {
+        tbl.insert(&int_record(score_key, score)).await.unwrap();
+    }
+
+    // Install the sorted-index-specific pause hook.
+    let hook = Arc::new(crate::table::index2_backfill_hook::BackfillPauseHook::new());
+    tbl.set_create_sorted_index_backfill_hook(Some(Arc::clone(&hook)));
+
+    // Spawn create_sorted_index — registers at Building, then parks.
+    let tbl_c = tbl.clone();
+    let create =
+        tokio::spawn(async move { tbl_c.create_sorted_index("score_sorted", &["score"]).await });
+
+    hook.wait_until_parked().await;
+    let idx_id = intern_id(&tbl, "score_sorted").await;
+
+    // THE PROOF: verify() while still Building.
+    let report = tbl.verify().await.unwrap();
+    let entry = report
+        .sorted_indexes
+        .iter()
+        .find(|h| h.name_interned == idx_id)
+        .expect("score_sorted in sorted_indexes");
+    assert_eq!(
+        entry.state,
+        IndexState::Building,
+        "mid-backfill sorted index must report Building"
+    );
+    assert!(
+        !entry.is_healthy(),
+        "a Building sorted index must be unhealthy even if counts match"
+    );
+    assert!(
+        entry.message.is_some(),
+        "a Building sorted index must carry a diagnostic message"
+    );
+    assert!(
+        !report.is_healthy(),
+        "a Building sorted index must make the overall report unhealthy"
+    );
+
+    // Release — def flips to Ready.
+    hook.release();
+    create
+        .await
+        .unwrap()
+        .expect("create_sorted_index must complete");
+
+    // Regression guard: a fully-Ready sorted index is healthy.
+    let report2 = tbl.verify().await.unwrap();
+    let entry2 = report2
+        .sorted_indexes
+        .iter()
+        .find(|h| h.name_interned == idx_id)
+        .expect("score_sorted in sorted_indexes");
+    assert_eq!(entry2.state, IndexState::Ready);
+    assert!(entry2.is_healthy());
+    assert!(entry2.message.is_none());
+    assert!(report2.is_healthy());
 }

@@ -65,17 +65,46 @@ impl VerifyReport {
     }
 }
 
+/// Per-index health snapshot for the regular / unique / sorted
+/// (base_index) families.
+///
+/// `is_healthy()` requires BOTH (a) the entry-count check (`expected ==
+/// actual`) AND (b) `state == IndexState::Ready`. A `Building` index
+/// whose partial entry count HAPPENS to match (e.g. a fresh table with
+/// zero rows, or a partial backfill that coincidentally matches) is still
+/// reported unhealthy — it is permanently planner-invisible until an
+/// explicit `doctor::repair()` rebuilds it (the base_index family has NO
+/// automatic open-time self-heal, unlike index2's F-50 Step 3b). The
+/// `message` field carries the operator-facing diagnostic for the
+/// state-unhealthy case; it is `None` when `state == Ready`. Mirrors
+/// [`Index2Health`]'s shape/behavior (P1-1, #966).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IndexHealth {
     pub name_interned: u64,
     pub expected_entries: u64,
     pub actual_entries: u64,
+    pub state: IndexState,
+    pub message: Option<String>,
 }
 
 impl IndexHealth {
     pub fn is_healthy(&self) -> bool {
-        self.expected_entries == self.actual_entries
+        self.expected_entries == self.actual_entries && self.state == IndexState::Ready
     }
+}
+
+/// P1-1 (#966): operator-facing diagnostic for a base_index (regular /
+/// unique / sorted) stuck in `Building` state. Mirrors `Index2Health`'s
+/// message style (~line 224). `None` when `Ready` (the entry-count fields
+/// are the diagnostic for a count mismatch; this message is specifically
+/// for the state gap).
+fn base_index_building_message(name_interned: u64, state: IndexState) -> Option<String> {
+    (state != IndexState::Ready).then(|| {
+        format!(
+            "index name_interned={name_interned} is in Building state — backfill \
+             was interrupted; run doctor::repair() to rebuild"
+        )
+    })
 }
 
 /// F-50 Step 3b — lifecycle health of a single index2 backend
@@ -188,6 +217,8 @@ impl TableManager {
                 name_interned: def.name_interned,
                 expected_entries: *expected,
                 actual_entries: actual,
+                state: def.state,
+                message: base_index_building_message(def.name_interned, def.state),
             });
         }
         let mut unique_indexes = Vec::with_capacity(unique_defs.len());
@@ -200,6 +231,8 @@ impl TableManager {
                 name_interned: def.name_interned,
                 expected_entries: *expected,
                 actual_entries: actual,
+                state: def.state,
+                message: base_index_building_message(def.name_interned, def.state),
             });
         }
         let mut sorted_indexes = Vec::with_capacity(sorted_defs.len());
@@ -209,6 +242,8 @@ impl TableManager {
                 name_interned: def.name_interned,
                 expected_entries: *expected,
                 actual_entries: actual,
+                state: def.state,
+                message: base_index_building_message(def.name_interned, def.state),
             });
         }
 
