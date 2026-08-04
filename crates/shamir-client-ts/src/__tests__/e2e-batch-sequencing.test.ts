@@ -203,5 +203,46 @@ describe.skipIf(!SERVER_AVAILABLE)(
 
       await expect(batch.execute(client!, db)).rejects.toThrow();
     });
+
+    // ═══════════════════════════════════════════════════════════════════
+    // Batch.durability — 'synced' / 'async_index' live-effect smoke.
+    // A durability/timing guarantee, not observable via query results alone;
+    // the honest e2e proof is that the option round-trips (the batch
+    // completes) and the write is immediately visible on read.
+    // (Cluster G #7)
+    // ═══════════════════════════════════════════════════════════════════
+
+    it('durability: synced transactional batch completes and write is visible', async () => {
+      const resp: BatchResponse = br(await Batch.create('dur-synced')
+        .add('ins', write.insert('items', [{ sku: 'DUR-SYNC', qty: 11 }]))
+        .transactional()
+        .durability('synced')
+        .execute(client!, db));
+      expect(resp.results.ins.records.length).toBe(1);
+
+      // Immediately visible on read — the write landed and is queryable.
+      const rd: BatchResponse = br(await Batch.create('dur-synced-rd')
+        .add('r', Query.from('items').where(filter.eq('sku', 'DUR-SYNC')).build())
+        .execute(client!, db));
+      expect(rd.results.r.records.length).toBe(1);
+      expect(rd.results.r.records[0].qty).toBe(11);
+    });
+
+    it('durability: async_index transactional batch completes and write is visible', async () => {
+      // async_index is documented as "only meaningful for transactional: true
+      // batches" — prove it round-trips without breaking the write.
+      const resp: BatchResponse = br(await Batch.create('dur-async')
+        .add('ins', write.insert('items', [{ sku: 'DUR-ASYNC', qty: 22 }]))
+        .transactional()
+        .durability('async_index')
+        .execute(client!, db));
+      expect(resp.results.ins.records.length).toBe(1);
+
+      const rd: BatchResponse = br(await Batch.create('dur-async-rd')
+        .add('r', Query.from('items').where(filter.eq('sku', 'DUR-ASYNC')).build())
+        .execute(client!, db));
+      expect(rd.results.r.records.length).toBe(1);
+      expect(rd.results.r.records[0].qty).toBe(22);
+    });
   },
 );

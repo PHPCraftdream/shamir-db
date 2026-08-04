@@ -17,6 +17,7 @@ import {
   select,
   write,
   ddl,
+  atVersion,
 } from '../index.js';
 import {
   SERVER_BIN,
@@ -1022,6 +1023,249 @@ describe.skipIf(!SERVER_AVAILABLE)(
       expect(recs.length).toBe(2);
       expect(recs[0].rev).toBe(3);
       expect(recs[1].rev).toBe(2);
+    });
+
+    it('history: from/to window bounds exclude versions outside the range', async () => {
+      // Capture the real version numbers of the three revs (rev 1/2/3) via a
+      // full ascending history read with version metadata included.
+      const full = br(await Batch.create('hist-fromto-full')
+        .add('r', Query.from('log')
+          .where(filter.eq('id', 'doc1'))
+          .withVersion()
+          .history({ order: 'asc' }))
+        .execute(client!, histDb));
+      const fullRecs = full.results.r.records;
+      expect(fullRecs.length).toBeGreaterThanOrEqual(3);
+      // revs ascend with version; find the version number of each rev.
+      const byRev: Record<number, number> = {};
+      for (const r of fullRecs) {
+        const rev = r.rev as number;
+        const ver = r._version as number;
+        if (rev >= 1 && rev <= 3 && ver !== undefined) byRev[rev] = ver;
+      }
+      const v1 = byRev[1];
+      const v2 = byRev[2];
+      const v3 = byRev[3];
+      expect(v1).toBeDefined();
+      expect(v2).toBeDefined();
+      expect(v3).toBeDefined();
+      expect(v1).toBeLessThanOrEqual(v2);
+      expect(v2).toBeLessThanOrEqual(v3);
+
+      // from=v2 → rev 1 (version v1) is EXCLUDED; rev 2/3 INCLUDED.
+      const fromResp = br(await Batch.create('hist-from')
+        .add('r', Query.from('log')
+          .where(filter.eq('id', 'doc1'))
+          .history({ order: 'asc', from: atVersion(v2) }))
+        .execute(client!, histDb));
+      const fromRevs = fromResp.results.r.records.map(r => r.rev as number);
+      expect(fromRevs).not.toContain(1);
+      expect(fromRevs).toContain(2);
+      expect(fromRevs).toContain(3);
+
+      // to=v2 → rev 3 (version v3) is EXCLUDED; rev 1/2 INCLUDED.
+      const toResp = br(await Batch.create('hist-to')
+        .add('r', Query.from('log')
+          .where(filter.eq('id', 'doc1'))
+          .history({ order: 'asc', to: atVersion(v2) }))
+        .execute(client!, histDb));
+      const toRevs = toResp.results.r.records.map(r => r.rev as number);
+      expect(toRevs).toContain(1);
+      expect(toRevs).toContain(2);
+      expect(toRevs).not.toContain(3);
+    });
+
+    // ═══════════════════════════════════════════════════════════════════
+    // 19. FIELD-EQ SHORTCUT — filter.fieldEq (op:"field") (Cluster G #1)
+    // Wire-identical to Eq but a distinct Filter::FieldEq variant.
+    // ═══════════════════════════════════════════════════════════════════
+
+    it('fieldEq: op:"field" matches the same rows as op:"eq"', async () => {
+      // fDb has 6 rows: 2 red (a,b), 2 blue (c,d), 2 green (e,f).
+      const fieldResp = br(await Batch.create('field-eq')
+        .add('r', Query.from('t').where(filter.fieldEq('tag', 'red')))
+        .execute(client!, fDb));
+      const eqResp = br(await Batch.create('plain-eq')
+        .add('r', Query.from('t').where(filter.eq('tag', 'red')))
+        .execute(client!, fDb));
+      const fieldIds = fieldResp.results.r.records.map(r => r.id).sort();
+      const eqIds = eqResp.results.r.records.map(r => r.id).sort();
+      // Both must match exactly the same set {a, b}.
+      expect(fieldIds).toEqual(['a', 'b']);
+      expect(fieldIds).toEqual(eqIds);
+    });
+
+    // ═══════════════════════════════════════════════════════════════════
+    // 20. $expr / $fn AS A FILTER VALUE (Cluster G #2)
+    // Not a top-level op — used as the right-hand side of a comparison,
+    // resolved per-row then compared against the field.
+    // ═══════════════════════════════════════════════════════════════════
+
+    it('$expr value: filter.eq(field, expr(...)) evaluates the expression and compares', async () => {
+      // fDb qty values: a=1, b=5, c=10, d=25, e=50, f=100.
+      // expr('add', [10, 15]) → 25 → matches only d (qty 25).
+      const resp = br(await Batch.create('expr-val')
+        .add('r', Query.from('t')
+          .where(filter.eq('qty', filter.expr('add', [10, 15]))))
+        .execute(client!, fDb));
+      const ids = resp.results.r.records.map(r => r.id).sort();
+      expect(ids).toEqual(['d']);
+      // Prove non-matching: c (qty 10) and e (qty 50) are excluded.
+      expect(ids).not.toContain('c');
+      expect(ids).not.toContain('e');
+    });
+
+    it('$fn value: filter.eq(field, fn(...)) evaluates the scalar call and compares', async () => {
+      // math/abs(-50) → 50 → matches only e (qty 50).
+      const resp = br(await Batch.create('fn-val')
+        .add('r', Query.from('t')
+          .where(filter.eq('qty', filter.fn('math/abs', [-50]))))
+        .execute(client!, fDb));
+      const ids = resp.results.r.records.map(r => r.id).sort();
+      expect(ids).toEqual(['e']);
+    });
+
+    // ═══════════════════════════════════════════════════════════════════
+    // 21. BINARY LITERAL ROUND-TRIP (Cluster G #3) — DEFERRED, real bug found.
+    //
+    // A Uint8Array field value written via write.insert() round-trips as a
+    // plain `{"0":0,"1":1,...}` object instead of binary/Uint8Array -- the
+    // record is silently corrupted server-side. Client-side msgpack encoding
+    // was verified correct in isolation (emits genuine bin8 wire bytes).
+    // Tracked as a new bug task (see TaskList) rather than shipped here per
+    // this cluster's brief ("STOP and report... instead of silently
+    // adjusting the test").
+    // ═══════════════════════════════════════════════════════════════════
+
+    // ═══════════════════════════════════════════════════════════════════
+    // 22. DISTINCT ON AGGREGATE SELECT ITEMS (Cluster G #4)
+    // Min/Max with distinct:true → accepted no-op; Sum/Avg/Count with
+    // distinct:true → REJECTED (distinct_not_supported_for_fast_path_agg).
+    // ═══════════════════════════════════════════════════════════════════
+
+    it('distinct aggregate: min with distinct:true is accepted (correct no-op)', async () => {
+      // fDb qty values: 1,5,10,25,50,100 → min is 1 regardless of distinct.
+      // Typed SelectItem literal passed to .select([...]) — builder-sanctioned.
+      const resp = br(await Batch.create('agg-min-distinct')
+        .add('r', Query.from('t')
+          .select([
+            {
+              type: 'aggregate',
+              func: 'min',
+              field: ['qty'],
+              distinct: true,
+              alias: 'min_qty',
+            },
+          ]))
+        .execute(client!, fDb));
+      expect(resp.results.r.records[0].min_qty).toBe(1);
+    });
+
+    it('distinct aggregate: sum with distinct:true is rejected', async () => {
+      // There is no SUM(DISTINCT x) — the fast-path aggregator has no
+      // distinct-dedup tracking. The server rejects with a typed error.
+      await expect(
+        Batch.create('agg-sum-distinct')
+          .add('r', Query.from('t')
+            .select([
+              {
+                type: 'aggregate',
+                func: 'sum',
+                field: ['qty'],
+                distinct: true,
+                alias: 'sum_qty',
+              },
+            ]))
+          .execute(client!, fDb),
+      ).rejects.toThrow(/distinct_not_supported_for_fast_path_agg/);
+    });
+
+    // ═══════════════════════════════════════════════════════════════════
+    // 23. FUNCLIB AGGREGATE BREADTH (Cluster G #5)
+    // median / stddev / percentile(args) / string_agg(args) beyond
+    // count_distinct (covered in section 17).
+    // ═══════════════════════════════════════════════════════════════════
+
+    let statDb: string;
+
+    it('aggFn-setup: create db + seed numeric/string rows', async () => {
+      statDb = await setupDb(client!, 'statagg', ['nums']);
+      // n values sorted: [2,4,4,4,5,5,7,9] (n=8) — clean for median/stddev.
+      // stddev: mean=5, pop-variance=4 → stddev=2 exactly.
+      await seed(client!, statDb, 'nums', [
+        { id: 's1', n: 2, word: 'red' },
+        { id: 's2', n: 4, word: 'blue' },
+        { id: 's3', n: 4, word: 'green' },
+        { id: 's4', n: 4, word: 'red' },
+        { id: 's5', n: 5, word: 'blue' },
+        { id: 's6', n: 5, word: 'green' },
+        { id: 's7', n: 7, word: 'red' },
+        { id: 's8', n: 9, word: 'blue' },
+      ]);
+    });
+
+    it('aggFn: median (no args) returns lower-median of even-count set', async () => {
+      // n=8 (even) → lower median = index n/2-1 = 3 → sorted[3] = 4.
+      const resp = br(await Batch.create('agg-median')
+        .add('r', Query.from('nums')
+          .select([select.aggregateFn('median', 'n', { alias: 'med' })]))
+        .execute(client!, statDb));
+      expect(resp.results.r.records[0].med).toBe(4);
+    });
+
+    it('aggFn: stddev (no args) returns population stddev', async () => {
+      // mean=5, pop-variance = 32/8 = 4 → stddev = sqrt(4) = 2.
+      // Dec serialises as a string on the wire → parseFloat.
+      const resp = br(await Batch.create('agg-stddev')
+        .add('r', Query.from('nums')
+          .select([select.aggregateFn('stddev', 'n', { alias: 'sd' })]))
+        .execute(client!, statDb));
+      const sd = parseFloat(resp.results.r.records[0].sd as unknown as string);
+      expect(sd).toBeCloseTo(2, 5);
+    });
+
+    it('aggFn: percentile args:[0.9] differs from default p=0.5 (args honored)', async () => {
+      // default p=0.5: idx = ceil(0.5*8)-1 = 3 → sorted[3] = 4.
+      // p=0.9:        idx = ceil(0.9*8)-1 = 7 → sorted[7] = 9.
+      const def = br(await Batch.create('agg-pct-default')
+        .add('r', Query.from('nums')
+          .select([select.aggregateFn('percentile', 'n', { alias: 'p' })]))
+        .execute(client!, statDb));
+      const p50 = def.results.r.records[0].p;
+
+      const explicit = br(await Batch.create('agg-pct-90')
+        .add('r', Query.from('nums')
+          .select([select.aggregateFn('percentile', 'n', { alias: 'p', args: [0.9] })]))
+        .execute(client!, statDb));
+      const p90 = explicit.results.r.records[0].p;
+
+      expect(p50).toBe(4);
+      expect(p90).toBe(9);
+      expect(p90).not.toBe(p50);
+    });
+
+    it('aggFn: string_agg explicit separator arg honored', async () => {
+      // 8 words: 3 red, 3 blue, 2 green. Default sep ","; explicit sep "-".
+      // If the separator arg were ignored, both would use "," — so the "-"
+      // result must contain "-" and NOT ",".
+      const def = br(await Batch.create('agg-str-default')
+        .add('r', Query.from('nums')
+          .select([select.aggregateFn('string_agg', 'word', { alias: 'joined' })]))
+        .execute(client!, statDb));
+      const defaultJoined = def.results.r.records[0].joined as unknown as string;
+      const defaultParts = defaultJoined.split(',').sort();
+      expect(defaultParts).toEqual(['blue', 'blue', 'blue', 'green', 'green', 'red', 'red', 'red']);
+
+      const dash = br(await Batch.create('agg-str-dash')
+        .add('r', Query.from('nums')
+          .select([select.aggregateFn('string_agg', 'word', { alias: 'joined', args: ['-'] })]))
+        .execute(client!, statDb));
+      const dashJoined = dash.results.r.records[0].joined as unknown as string;
+      // The explicit separator is honored: "-" present, "," absent.
+      expect(dashJoined).toContain('-');
+      expect(dashJoined).not.toContain(',');
+      // Same multiset of parts, just split on the new separator.
+      expect(dashJoined.split('-').sort()).toEqual(defaultParts);
     });
   },
 );
