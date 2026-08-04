@@ -159,6 +159,12 @@ impl TableManager {
         // self-healing is out of scope for this task.
         let stream = self.list_stream(1000);
         futures::pin_mut!(stream);
+        // P1-4 (#969): periodic progress log so an operator watching logs can
+        // see the DDL is progressing, not hung, during a long backfill scan.
+        let backfill_start = std::time::Instant::now();
+        let mut last_progress_log = std::time::Instant::now();
+        let mut sorted_count = 0usize;
+        let mut sorted_batch_no = 0u64;
         // P1-2 (#967): the `register` call above already durably persisted the
         // Building definition. Enrich any backfill failure with the partial-
         // state context so the caller knows the index is stuck as Building.
@@ -196,6 +202,19 @@ impl TableManager {
                     .on_record_created(&id, &record, 0)
                     .await
                     .map_err(enrich_backfill)?;
+                sorted_count += 1;
+            }
+            sorted_batch_no += 1;
+            if last_progress_log.elapsed() >= std::time::Duration::from_secs(5) {
+                log::info!(
+                    "CREATE SORTED INDEX '{}': backfill in progress — {} rows \
+                     indexed across {} batches ({:.1}s elapsed)",
+                    index_name,
+                    sorted_count,
+                    sorted_batch_no,
+                    backfill_start.elapsed().as_secs_f64()
+                );
+                last_progress_log = std::time::Instant::now();
             }
             // F-72 (#899, P0) test seam: park here (mid-backfill, definition
             // still `Building` and hence planner-invisible) if a test
@@ -258,6 +277,12 @@ impl TableManager {
                      state, or TableManager::repair() to rebuild it."
                 ))
             })?;
+        log::info!(
+            "Created sorted index '{}' with {} entries in {:.1}s",
+            index_name,
+            sorted_count,
+            backfill_start.elapsed().as_secs_f64()
+        );
         Ok(())
     }
 

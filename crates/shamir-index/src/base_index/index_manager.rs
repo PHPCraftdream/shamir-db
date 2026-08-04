@@ -34,6 +34,11 @@ use shamir_types::types::value::InnerValue;
 use std::collections::BTreeSet;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
+
+/// Log CREATE INDEX backfill progress at most this often (avoids spamming the
+/// log on every batch of a large table scan).
+const BACKFILL_PROGRESS_LOG_INTERVAL: Duration = Duration::from_secs(5);
 
 /// Maximum number of posting-list entries cached in memory per
 /// `IndexManager`. Hit on a cached entry is a single `HashMap::get`
@@ -1111,6 +1116,13 @@ impl IndexManager {
         // registration boundary — same (posting_key, empty-value) pair.
         let mut count = 0usize;
         let mut stream = stream;
+        // P1-4 (#969): periodic progress log so an operator watching logs can
+        // see the DDL is progressing, not hung, during a long backfill scan.
+        // Time-gated (not batch-gated) so the cadence is consistent regardless
+        // of the caller's batch size.
+        let backfill_start = Instant::now();
+        let mut last_progress_log = Instant::now();
+        let mut batch_no = 0u64;
         // P1-2 (#967): enricher for any Phase 2 backfill failure — the
         // Building definition is already durably persisted by Phase 1 above.
         let enrich_backfill = |e: shamir_storage::error::DbError| {
@@ -1156,6 +1168,18 @@ impl IndexManager {
             for ik in cache_index_keys {
                 self.posting_cache.remove(&ik);
             }
+            batch_no += 1;
+            if last_progress_log.elapsed() >= BACKFILL_PROGRESS_LOG_INTERVAL {
+                log::info!(
+                    "CREATE INDEX '{}': backfill in progress — {} rows indexed \
+                     across {} batches ({:.1}s elapsed)",
+                    name_interned,
+                    count,
+                    batch_no,
+                    backfill_start.elapsed().as_secs_f64()
+                );
+                last_progress_log = Instant::now();
+            }
         }
 
         // F-72 (#899, P0) test seam — IDENTICAL placement to
@@ -1188,9 +1212,10 @@ impl IndexManager {
         })?;
 
         log::info!(
-            "Created index '{}' with {} entries (streamed from seam)",
+            "Created index '{}' with {} entries in {:.1}s (streamed from seam)",
             name_interned,
-            count
+            count,
+            backfill_start.elapsed().as_secs_f64()
         );
         Ok(())
     }

@@ -348,6 +348,53 @@ artifact).
   full restart-vs-resume reasoning, and `IndexState` /
   `IndexDescriptor.state` / `IndexRegistry::set_state` in
   `crates/shamir-index/src/` for the lifecycle-state implementation.
+- **`CREATE INDEX` blocks all writers for the ENTIRE backfill scan — a write
+  OUTAGE on medium-to-large tables.** `CREATE INDEX` (regular/unique/sorted)
+  acquires F-70's write barrier (`begin_write_barrier` → raise bit → drain →
+  hold `unique_write_lock`) across the WHOLE Phase 1→2→3 backfill sequence, so
+  every concurrent writer that observes `needs_write_barrier() == true` queues
+  on `unique_write_lock` until the build drops the barrier at the end. On a
+  table large enough for the scan to take seconds or minutes, this is a
+  complete write outage, not a brief pause. The `f78_writer_latency` bench
+  measures the concrete stall: at 5k rows the build takes ~150 ms and writer
+  p50/p95/p99 ≈ 150 ms (all 64 writers queue for ~(build duration) then drain);
+  at **100k rows the build takes ~140–160 s and writer p50/p95/p99 ≈ 140–160 s**
+  — a ~2.5-minute write outage. (The scan is superlinear — ~920× slower than
+  5k for 20× the rows — so the stall grows faster than linearly with table
+  size; at 1M rows the extrapolation is hours.) See
+  `crates/shamir-engine/benches/f78_writer_latency.rs` for the bench, the
+  `create_index_from_stream` doc comment in
+  `crates/shamir-index/src/base_index/index_manager.rs` for the barrier
+  rationale, and the P1-4 operational-decision brief in
+  `docs/dev-artifacts/research/2026-08-03-new-wave-readonly-review.md` §P1-4
+  for the full scope.
+  - **The unique family additionally materializes the whole table into memory
+    (O(table) peak memory).** F-78 (#905) reduced peak memory for the regular
+    family (streaming instead of materializing), but the unique family still
+    materializes the whole table (`Vec`) before one `set_many` — duplicate
+    detection needs global knowledge, and a sound bounded-memory rewrite is a
+    separately-scoped task. See `create_unique_index_body`'s F-78 deferral
+    comment in `crates/shamir-engine/src/table/table_manager_index_mgmt.rs`.
+  - **Operational recommendation: run `CREATE INDEX` on large tables during a
+    maintenance window.** For TS/JS client callers, pass a generous
+    `requestTimeoutMs` (or `0` to disable) on the `execute`/`Batch.execute`
+    call that carries the `create_index` op — the default 35 s client timeout
+    will abort the request long before a 100k-row build completes. There is NO
+    server-side per-DDL timeout, so the only timeout that can fire is the
+    client's. See the JSDoc on `createIndex` in
+    `crates/shamir-client-ts/src/core/builders/ddl.ts`.
+  - **Progress visibility + post-crash recovery.** The backfill now emits
+    periodic `log::info!` progress lines (rows processed so far, elapsed time)
+    so an operator watching logs can confirm the DDL is progressing, not hung.
+    A `Building` index left behind by a crash or a cancelled build is surfaced
+    by `TableManager::verify()`/`doctor::repair()` (#966) — `verify()` reports
+    it as unhealthy with a diagnostic message, and `repair()` rebuilds it from
+    scratch.
+  - A full lock-free "online build" (persist `Building` → snapshot version →
+    lock-free bulk scan → delta replay → short cutover → `Ready`, releasing the
+    barrier between batches) is planned as a future improvement. It is tracked
+    as a post-alpha redesign in the review, NOT attempted in the current
+    alpha-minimum scope.
 
 ## 4. Subscriptions
 

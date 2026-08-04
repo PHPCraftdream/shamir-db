@@ -680,7 +680,25 @@ impl TableManager {
         // rationale + the bounded-memory approaches tracked as follow-up. The
         // regular-hash streaming fix landed fully tested + benchmarked; this
         // unique-family gap is the documented escape-hatch deferral.
+        //
+        // P1-4 (#969): the unique family has no per-batch progress point (it
+        // materializes-then-writes in one shot), so at minimum log start and
+        // completion of the table scan so an operator can see the DDL is
+        // progressing.
+        log::info!(
+            "CREATE UNIQUE INDEX '{}': starting backfill (scanning whole table — \
+             unique family materializes all rows, no streaming)",
+            index_def.name_interned
+        );
+        let backfill_start = std::time::Instant::now();
         let records = self.collect_all_current_records().await?;
+        log::info!(
+            "CREATE UNIQUE INDEX '{}': scanned {} records in {:.1}s, \
+             writing unique index...",
+            index_def.name_interned,
+            records.len(),
+            backfill_start.elapsed().as_secs_f64()
+        );
         self.index_manager
             .create_unique_index_from_records(index_def, records)
             .await

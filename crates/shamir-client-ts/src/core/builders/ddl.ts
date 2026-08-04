@@ -153,7 +153,19 @@ export function createTable(
   return op;
 }
 
-/** Create an index on a table. */
+/**
+ * Create an index on a table.
+ *
+ * **`CREATE INDEX` holds a table-wide write lock for the ENTIRE backfill
+ * scan** (every other writer queues for the full duration). On a
+ * medium-to-large table this is a write OUTAGE, not a brief pause — see
+ * KNOWN_LIMITATIONS.md §3. Because there is no server-side per-DDL timeout,
+ * the request is bounded only by the client's `requestTimeoutMs`. For a
+ * `createIndex` call against a large table, pass a generous
+ * `requestTimeoutMs` (or `0` to disable it) on the `execute`/`Batch.execute`
+ * call that carries this op, so the client does not abort a legitimately
+ * long-running build.
+ */
 export function createIndex(
   name: string,
   table: string,

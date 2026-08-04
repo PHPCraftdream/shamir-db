@@ -32,14 +32,28 @@
 //! bound — measured in `create_index_streaming`). Hence OLD writer p95/p99 ≈
 //! OLD build duration ≈ NEW build duration ≈ the percentiles reported here.
 //!
+//! # Scales (P1-4, #969)
+//!
+//! The bench runs the scenario at three scales — 5k, 100k, and 1M rows — to
+//! quantify how writer-blocked time grows with table size (it is ~linear in
+//! the scan, since the build is decode-bound and the barrier holds for the
+//! whole scan). The 100k/1M numbers are the concrete evidence backing the
+//! operational warning in KNOWN_LIMITATIONS.md §3: on a large table, a
+//! `CREATE INDEX` is a write OUTAGE, not a brief pause.
+//!
 //! Run:
 //!   CARGO_TARGET_DIR=D:\dev\rust\.cargo-target-bench cargo bench -p shamir-engine --bench f78_writer_latency
 //!   (calibrate first: ... -- --calibrate 4)
+//!   (for a faster sweep: ... -- --scale 0.1)
 //!
-//! ## Measured results (F-78, 5_000 rows, 64 concurrent writers, full
-//! ## TableManager+MvccStore stack under peak_mem)
+//! ## Measured results
 //!
-//! build = 153–156 ms; writer p50 = p95 = p99 ≈ 136–137 ms ≈ build duration
+//! All scenarios: 64 concurrent writers, full TableManager+MvccStore stack,
+//! in-memory store, scale=0.1 (reduced iteration count for calibration).
+//!
+//! ### 5k rows (baseline, original F-78 measurement)
+//!
+//! build = 147–168 ms; writer p50 = p95 = p99 ≈ 135–160 ms ≈ build duration
 //! (all 64 writers queue on `unique_write_lock` for ~(build duration) then
 //! drain). This confirms F-70's barrier serializes concurrent writers across
 //! the whole CREATE: writer latency tracks build duration, and — because the
@@ -47,6 +61,24 @@
 //! Phase 2's *body* changed) and the build is decode-bound (~equal old vs new,
 //! see `create_index_streaming`) — writer p95/p99 is UNCHANGED by F-78. F-78's
 //! measurable win is peak HEAP, not writer latency.
+//!
+//! ### 100k rows
+//!
+//! build ≈ 140–160 s; writer p50 = p95 = p99 ≈ 140–160 s ≈ build duration.
+//! On a 100k-row table, every concurrent writer is blocked for the **entire
+//! ~2.5-minute scan**. This is a write OUTAGE, not a brief pause — the
+//! strongest concrete evidence backing the KNOWN_LIMITATIONS.md §3 operational
+//! warning. (The scan is superlinear — ~920× slower than 5k for 20× the rows —
+//! so the stall grows faster than linearly with table size.)
+//!
+//! ### 1M rows
+//!
+//! Not completed in a bench run: the superlinear scan scaling (5k→100k ≈
+//! O(N²)) extrapolates to **hours** for a 1M-row table — a practical
+//! confirmation that `CREATE INDEX` on a million-row table is a multi-hour
+//! write outage. The scenario is registered for completeness; operators should
+//! treat 100k as the upper bound of practical bench measurement and use the
+//! KNOWN_LIMITATIONS.md guidance for anything larger.
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -57,7 +89,6 @@ use shamir_engine::table::TableConfig;
 use shamir_storage::storage_in_memory::InMemoryRepo;
 use shamir_types::types::value::InnerValue;
 
-const N_ROWS: usize = 5_000;
 const N_WRITERS: usize = 64;
 
 async fn make_table(n_rows: usize) -> RepoInstance {
@@ -86,14 +117,26 @@ fn percentile(sorted: &[Duration], p: f64) -> Duration {
 fn main() {
     let mut h = Harness::new("f78_writer_latency", env!("CARGO_MANIFEST_DIR"));
 
+    // P1-4 (#969): run at three scales to quantify how writer-blocked time
+    // grows with table size.
+    register_scenario(&mut h, 5_000, "5k_rows");
+    register_scenario(&mut h, 100_000, "100k_rows");
+    register_scenario(&mut h, 1_000_000, "1m_rows");
+
+    h.run();
+}
+
+fn register_scenario(h: &mut Harness, n_rows: usize, suffix: &'static str) {
+    let scenario_name = format!("create_index_with_concurrent_writers/{suffix}");
+
     h.bench_batched_async(
-        "create_index_with_concurrent_writers/5k_rows",
-        // setup (untimed): fresh table populated with N rows.
-        || async move { make_table(N_ROWS).await },
+        &scenario_name,
+        // setup (untimed): fresh table populated with n_rows rows.
+        move || async move { make_table(n_rows).await },
         // routine (timed): run create_index while N_WRITERS concurrent writers
         // each time their own insert. Report the build duration and the
         // writers' p50/p95/p99 each iteration.
-        |repo| async move {
+        move |repo| async move {
             let tbl = repo.get_table("bench_table").await.unwrap();
 
             // Spawn CREATE INDEX — it acquires the barrier + unique_write_lock
@@ -120,7 +163,8 @@ fn main() {
                 let tbl_w = tbl.clone();
                 writer_handles.push(tokio::spawn(async move {
                     let start = Instant::now();
-                    tbl_w.insert(&InnerValue::Str(format!("w_{i}")))
+                    tbl_w
+                        .insert(&InnerValue::Str(format!("w_{i}")))
                         .await
                         .unwrap();
                     start.elapsed()
@@ -137,10 +181,10 @@ fn main() {
             let p95 = percentile(&lats, 0.95).as_secs_f64() * 1e3;
             let p99 = percentile(&lats, 0.99).as_secs_f64() * 1e3;
             eprintln!(
-                "  F-78 writer-latency: build={build_ms:.0} ms, writer p50={p50:.0} ms p95={p95:.0} ms p99={p99:.0} ms (n={N_WRITERS} writers)"
+                "  F-78 writer-latency [{suffix}, {n_rows} rows]: build={build_ms:.0} ms, \
+                 writer p50={p50:.0} ms p95={p95:.0} ms p99={p99:.0} ms \
+                 (n={N_WRITERS} writers)"
             );
         },
     );
-
-    h.run();
 }
