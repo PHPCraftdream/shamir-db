@@ -14,6 +14,7 @@ mod handle;
 mod into_batch_op;
 mod isolation;
 pub mod subscribe;
+mod try_into_batch_op;
 
 pub use batch::*;
 pub use build_error::*;
@@ -22,6 +23,7 @@ pub use handle::*;
 pub use into_batch_op::*;
 pub use isolation::*;
 pub use subscribe::{SourceBuilder, Subscribe};
+pub use try_into_batch_op::*;
 
 #[cfg(test)]
 mod tests;

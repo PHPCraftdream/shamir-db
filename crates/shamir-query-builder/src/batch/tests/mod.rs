@@ -6,4 +6,5 @@ pub mod for_each_tests;
 pub mod sub_batch_tests;
 pub mod subscribe_tests;
 pub mod to_request_via_msgpack_tests;
+pub mod try_into_batch_op_tests;
 pub mod when_tests;

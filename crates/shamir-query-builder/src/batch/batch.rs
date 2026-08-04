@@ -16,6 +16,8 @@ use super::durability::Durability;
 use super::handle::Handle;
 use super::into_batch_op::IntoBatchOp;
 use super::isolation::Isolation;
+use super::try_into_batch_op::TryIntoBatchOp;
+use crate::write::BuilderError;
 
 /// Fluent batch assembler.
 ///
@@ -241,6 +243,76 @@ impl Batch {
         after: &[&Handle],
     ) -> Handle {
         self.add_entry_after(alias, op.into_batch_op(), true, after)
+    }
+
+    // ── fallible write-op insertion ───────────────────────────────
+    //
+    // Mirrors of the `update`/`upsert`/`delete` entry methods above that
+    // surface a missing-required-field as a typed `BuilderError` instead of
+    // panicking inside `IntoBatchOp`. Each calls the builder's own fallible
+    // `build()` and delegates to the same internal `add_entry`/`add_entry_after`
+    // its non-try sibling uses, so a well-formed op produces the identical wire
+    // shape (see `try_into_batch_op_tests`).
+
+    /// Fallible mirror of [`Batch::update`]: build `op` and add it, returning a
+    /// typed error if [`crate::write::Update`] is missing its `.set()` payload.
+    pub fn try_update(
+        &mut self,
+        alias: impl Into<String>,
+        op: crate::write::Update,
+    ) -> Result<Handle, BuilderError> {
+        Ok(self.add_entry(alias, BatchOp::Update(op.build()?), true))
+    }
+
+    /// Fallible mirror of [`Batch::update_after`].
+    pub fn try_update_after(
+        &mut self,
+        alias: impl Into<String>,
+        op: crate::write::Update,
+        after: &[&Handle],
+    ) -> Result<Handle, BuilderError> {
+        Ok(self.add_entry_after(alias, BatchOp::Update(op.build()?), true, after))
+    }
+
+    /// Fallible mirror of [`Batch::upsert`]: build `op` and add it, returning a
+    /// typed error if [`crate::write::Upsert`] is missing its `.key()` /
+    /// `.value()`.
+    pub fn try_upsert(
+        &mut self,
+        alias: impl Into<String>,
+        op: crate::write::Upsert,
+    ) -> Result<Handle, BuilderError> {
+        Ok(self.add_entry(alias, BatchOp::Set(op.build()?), true))
+    }
+
+    /// Fallible mirror of [`Batch::upsert_after`].
+    pub fn try_upsert_after(
+        &mut self,
+        alias: impl Into<String>,
+        op: crate::write::Upsert,
+        after: &[&Handle],
+    ) -> Result<Handle, BuilderError> {
+        Ok(self.add_entry_after(alias, BatchOp::Set(op.build()?), true, after))
+    }
+
+    /// Fallible mirror of [`Batch::delete`]: build `op` and add it, returning a
+    /// typed error if [`crate::write::Delete`] is missing its `.where_()` clause.
+    pub fn try_delete(
+        &mut self,
+        alias: impl Into<String>,
+        op: crate::write::Delete,
+    ) -> Result<Handle, BuilderError> {
+        Ok(self.add_entry(alias, BatchOp::Delete(op.build()?), true))
+    }
+
+    /// Fallible mirror of [`Batch::delete_after`].
+    pub fn try_delete_after(
+        &mut self,
+        alias: impl Into<String>,
+        op: crate::write::Delete,
+        after: &[&Handle],
+    ) -> Result<Handle, BuilderError> {
+        Ok(self.add_entry_after(alias, BatchOp::Delete(op.build()?), true, after))
     }
 
     // ── DDL: database ──────────────────────────────────────────────
@@ -479,6 +551,17 @@ impl Batch {
     /// Add (or replace by path) a single rule in a table's schema.
     pub fn add_schema_rule(&mut self, alias: impl Into<String>, op: impl IntoBatchOp) -> Handle {
         self.add_entry(alias, op.into_batch_op(), true)
+    }
+
+    /// Fallible mirror of [`Batch::add_schema_rule`]: build `op` and add it,
+    /// returning a typed error if [`crate::ddl::AddSchemaRuleBuilder`] is
+    /// missing its `.rule(...)`.
+    pub fn try_add_schema_rule(
+        &mut self,
+        alias: impl Into<String>,
+        op: crate::ddl::AddSchemaRuleBuilder,
+    ) -> Result<Handle, BuilderError> {
+        Ok(self.add_entry(alias, op.build()?, true))
     }
 
     /// Remove a rule from a table's schema by path.
@@ -741,6 +824,31 @@ impl Batch {
         after: &[&Handle],
     ) -> Handle {
         self.add_entry_after(alias, op.into_batch_op(), true, after)
+    }
+
+    /// Fallible mirror of [`Batch::op`]: build `op` via [`TryIntoBatchOp`] and
+    /// add it, returning a typed [`BuilderError`] when a required builder field
+    /// was never set instead of panicking. This is the only fallible entry
+    /// method for [`crate::ddl::AlterSubscriptionBuilder`] (which has no
+    /// dedicated non-try method, mirroring how the panicking path uses plain
+    /// `.op(...)` for it today).
+    pub fn try_op(
+        &mut self,
+        alias: impl Into<String>,
+        op: impl TryIntoBatchOp,
+    ) -> Result<Handle, BuilderError> {
+        Ok(self.add_entry(alias, op.try_into_batch_op()?, true))
+    }
+
+    /// Fallible mirror of [`Batch::op_after`]: build `op` via
+    /// [`TryIntoBatchOp`] and add it with explicit ordering dependencies.
+    pub fn try_op_after(
+        &mut self,
+        alias: impl Into<String>,
+        op: impl TryIntoBatchOp,
+        after: &[&Handle],
+    ) -> Result<Handle, BuilderError> {
+        Ok(self.add_entry_after(alias, op.try_into_batch_op()?, true, after))
     }
 
     // ── wire encoding (build + encode in one step) ─────────────────
