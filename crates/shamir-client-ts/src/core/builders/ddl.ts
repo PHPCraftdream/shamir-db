@@ -722,7 +722,7 @@ export function renameIndex(
   table: string,
   from: string,
   to: string,
-  opts?: { repo?: string },
+  opts?: { repo?: string; if_exists?: boolean },
 ): RenameIndexOp {
   const op: RenameIndexOp = {
     rename_index: from,
@@ -730,6 +730,7 @@ export function renameIndex(
     table,
   };
   if (opts?.repo !== undefined) op.repo = opts.repo;
+  if (opts?.if_exists) op.if_exists = true;
   return op;
 }
 

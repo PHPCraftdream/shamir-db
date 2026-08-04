@@ -502,6 +502,7 @@ export interface RenameIndexOp {
   to: string;
   table: string;
   repo?: string;
+  if_exists?: boolean;
 }
 
 export interface DropIndexOp {

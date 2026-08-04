@@ -616,6 +616,36 @@ impl ShamirAdminExecutor {
         let err_access =
             |e: shamir_types::access::AccessError| err_code("access_denied", e.to_string());
 
+        // if_exists early-exit: missing db, table, or source index → no-op.
+        //
+        // Mirrors handle_drop_index's early-exit guard (~line 513-546).
+        // Existence is checked across ALL FOUR index mechanisms (base_index
+        // regular, base_index unique, sorted, index2) because RenameIndexOp
+        // carries no index_type hint — the source name alone must be
+        // resolved before deciding to short-circuit.
+        if op.if_exists {
+            let db_opt = self.shamir.get_db(&self.db_name);
+            let table_opt = match &db_opt {
+                Some(db) => db.get_table(&op.repo, &op.table).await.ok(),
+                None => None,
+            };
+            let index_exists = match &table_opt {
+                Some(table) => {
+                    table.index_exists(&op.rename_index).await
+                        || table.unique_index_exists(&op.rename_index).await
+                        || table.sorted_index_exists(&op.rename_index).await
+                        || table.index2_exists(&op.rename_index).await
+                }
+                None => false,
+            };
+            if !index_exists {
+                return Ok(admin_result(mpack!({
+                    "renamed_index": @(QueryValue::Str(op.rename_index.clone())),
+                    "existed": false,
+                })));
+            }
+        }
+
         // Auth: Write on the parent table (rename mutates the index's
         // identity). Mirrors the index create/drop auth path.
         self.shamir
@@ -646,6 +676,7 @@ impl ShamirAdminExecutor {
             "to": @(QueryValue::Str(op.to.clone())),
             "table": @(QueryValue::Str(op.table.clone())),
             "repo": @(QueryValue::Str(op.repo.clone())),
+            "existed": @(QueryValue::Bool(true)),
         })))
     }
 }

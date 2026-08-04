@@ -105,6 +105,13 @@ pub struct RenameIndexOp {
     pub table: String,
     #[serde(default = "default_repo")]
     pub repo: String,
+    /// When `true`, renaming a non-existent source index (or one whose
+    /// parent db/table is missing) is a silent no-op returning
+    /// `{"renamed_index": <source>, "existed": false}` instead of an
+    /// error. The destination-occupied rejection is NOT affected by this
+    /// flag — it stays a hard error regardless.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub if_exists: bool,
 }
 
 /// Drop an index.
@@ -121,9 +128,18 @@ pub struct DropIndexOp {
     pub repo: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hmac: Option<String>,
-    /// When `true`, dropping a non-existent index (or one whose parent
-    /// db/table is missing) is a silent no-op returning
-    /// `{"existed": false}` instead of an error.
+    /// Governs ONLY the case where the parent **db or table itself** is
+    /// missing. When `true`, a missing db/table is a silent no-op
+    /// returning `{"existed": false}` instead of an error. When `false`
+    /// (the default), a missing db/table is a hard `Err` ("Database '...'
+    /// not found" / table lookup error).
+    ///
+    /// NOTE: dropping a non-existent index on an **existing** db/table is
+    /// **always** a silent no-op returning `{"existed": false}`,
+    /// regardless of this flag — the drop call is attempted unconditionally
+    /// and reports `removed = false` when nothing matched. See
+    /// `handle_drop_index`'s early-exit guard (~line 513-546) which keeps
+    /// this doc and the code path in sync.
     #[serde(default, skip_serializing_if = "is_false")]
     pub if_exists: bool,
 }

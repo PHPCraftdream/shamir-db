@@ -19,6 +19,7 @@ pub fn rename_index(
         from: from.into(),
         to: to.into(),
         repo: "main".to_owned(),
+        if_exists: false,
     }
 }
 
@@ -28,12 +29,20 @@ pub struct RenameIndex {
     from: String,
     to: String,
     repo: String,
+    if_exists: bool,
 }
 
 impl RenameIndex {
     /// Override the target repo (default `"main"`).
     pub fn repo(mut self, repo: impl Into<String>) -> Self {
         self.repo = repo.into();
+        self
+    }
+
+    /// Skip error if the source index does not exist (mirrors
+    /// `CreateIndex::if_not_exists` / `DropIndex::if_exists`).
+    pub fn if_exists(mut self) -> Self {
+        self.if_exists = true;
         self
     }
 
@@ -44,6 +53,7 @@ impl RenameIndex {
             to: self.to,
             table: self.table,
             repo: self.repo,
+            if_exists: self.if_exists,
         })
     }
 }

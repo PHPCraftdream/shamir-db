@@ -111,6 +111,11 @@ async fn rename_index_preserves_data_and_lookup() {
         resp.results["ri"].records[0].get_value_str("to"),
         Some("idx_mail")
     );
+    assert_eq!(
+        resp.results["ri"].records[0].get_value_bool("existed"),
+        Some(true),
+        "successful rename should report existed: true"
+    );
 
     // Query by the indexed field after rename — should STILL use the index,
     // now under the new name.
@@ -206,4 +211,144 @@ async fn rename_index_refuses_source_absent() {
         "expected QueryError, got {:?}",
         err
     );
+}
+
+/// `if_exists = true` on a genuinely-missing source index is a silent no-op
+/// returning `{renamed_index, existed: false}` — no error.
+#[tokio::test]
+async fn rename_index_if_exists_nonexistent_source_is_noop() {
+    let shamir = setup_shamir().await;
+    create_table(&shamir, "users").await;
+
+    // ghost → real with if_exists: no-op, not an error.
+    let mut b = Batch::new();
+    b.id(1);
+    b.rename_index(
+        "ri",
+        ddl::rename_index("users", "ghost", "real")
+            .repo("main")
+            .if_exists(),
+    );
+    let resp = exec(&shamir, b.to_request_via_msgpack()).await;
+    assert_eq!(
+        resp.results["ri"].records[0].get_value_str("renamed_index"),
+        Some("ghost"),
+        "no-op response echoes the source name"
+    );
+    assert_eq!(
+        resp.results["ri"].records[0].get_value_bool("existed"),
+        Some(false),
+        "if_exists on missing source → existed: false"
+    );
+}
+
+/// `if_exists = true` on a missing TABLE (or db) is also a silent no-op —
+/// mirrors drop-index's missing-parent behavior.
+#[tokio::test]
+async fn rename_index_if_exists_missing_table_is_noop() {
+    let shamir = setup_shamir().await;
+
+    let mut b = Batch::new();
+    b.id(1);
+    b.rename_index(
+        "ri",
+        ddl::rename_index("no_such_table", "ghost", "real")
+            .repo("main")
+            .if_exists(),
+    );
+    let resp = exec(&shamir, b.to_request_via_msgpack()).await;
+    assert_eq!(
+        resp.results["ri"].records[0].get_value_bool("existed"),
+        Some(false),
+        "if_exists on missing table → existed: false"
+    );
+}
+
+/// `if_exists = true` on an EXISTING source still performs the rename
+/// normally (the flag only short-circuits the source-missing case).
+#[tokio::test]
+async fn rename_index_if_exists_existing_source_still_renames() {
+    let shamir = setup_shamir().await;
+    create_table(&shamir, "users").await;
+
+    // Create a regular index on "email".
+    let mut b = Batch::new();
+    b.id(1);
+    b.create_index(
+        "ci",
+        ddl::create_index("idx_email", "users")
+            .field("email")
+            .repo("main"),
+    );
+    let _ = exec(&shamir, b.to_request_via_msgpack()).await;
+
+    // Rename with if_exists — source exists, so the rename proceeds.
+    let mut b = Batch::new();
+    b.id(2);
+    b.rename_index(
+        "ri",
+        ddl::rename_index("users", "idx_email", "idx_mail")
+            .repo("main")
+            .if_exists(),
+    );
+    let resp = exec(&shamir, b.to_request_via_msgpack()).await;
+    assert_eq!(
+        resp.results["ri"].records[0].get_value_str("renamed_index"),
+        Some("idx_email")
+    );
+    assert_eq!(
+        resp.results["ri"].records[0].get_value_str("to"),
+        Some("idx_mail")
+    );
+    assert_eq!(
+        resp.results["ri"].records[0].get_value_bool("existed"),
+        Some(true),
+        "if_exists on existing source → normal rename, existed: true"
+    );
+}
+
+/// Destination-occupied rejection still fires even with `if_exists = true` —
+/// `if_exists` only governs the source-missing case, NOT destination conflicts.
+#[tokio::test]
+async fn rename_index_if_exists_destination_occupied_still_errors() {
+    let shamir = setup_shamir().await;
+    create_table(&shamir, "users").await;
+
+    // Create two indexes.
+    let mut b = Batch::new();
+    b.id(1);
+    b.create_index(
+        "ci1",
+        ddl::create_index("idx_a", "users")
+            .field("email")
+            .repo("main"),
+    );
+    b.create_index(
+        "ci2",
+        ddl::create_index("idx_b", "users")
+            .field("name")
+            .repo("main"),
+    );
+    let _ = exec(&shamir, b.to_request_via_msgpack()).await;
+
+    // idx_a → idx_b with if_exists: still must fail (destination occupied).
+    let mut b = Batch::new();
+    b.id(2);
+    b.rename_index(
+        "ri",
+        ddl::rename_index("users", "idx_a", "idx_b")
+            .repo("main")
+            .if_exists(),
+    );
+    let err = exec_err(&shamir, b.to_request_via_msgpack()).await;
+    match err {
+        BatchError::QueryError { message, .. } => {
+            assert!(
+                message.to_lowercase().contains("already exists"),
+                "expected destination-exists refusal even with if_exists, got: {}",
+                message
+            );
+        }
+        other => panic!("expected QueryError, got {:?}", other),
+    }
 }

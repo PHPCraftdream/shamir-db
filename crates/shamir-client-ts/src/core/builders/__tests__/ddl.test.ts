@@ -1324,6 +1324,7 @@ describe('renameIndex', () => {
       table: 'users',
     });
     expect(op).not.toHaveProperty('repo');
+    expect(op).not.toHaveProperty('if_exists');
   });
 
   it('includes repo when explicitly set', () => {
@@ -1331,6 +1332,25 @@ describe('renameIndex', () => {
       repo: 'analytics',
     });
     expect(op.repo).toBe('analytics');
+  });
+
+  it('emits if_exists: true when set', () => {
+    const op = ddl.renameIndex('users', 'idx_email', 'idx_mail', {
+      if_exists: true,
+    });
+    expect(op.if_exists).toBe(true);
+  });
+
+  it('omits if_exists when not set', () => {
+    const op = ddl.renameIndex('users', 'idx_email', 'idx_mail');
+    expect(op).not.toHaveProperty('if_exists');
+  });
+
+  it('omits if_exists when explicitly false', () => {
+    const op = ddl.renameIndex('users', 'idx_email', 'idx_mail', {
+      if_exists: false,
+    });
+    expect(op).not.toHaveProperty('if_exists');
   });
 });
 
