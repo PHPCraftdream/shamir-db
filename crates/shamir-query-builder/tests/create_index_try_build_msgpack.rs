@@ -290,3 +290,200 @@ fn build_remains_permissive_for_invalid_combos() {
         Err(CreateIndexBuildError::UniqueAndSorted)
     ));
 }
+
+// ============================================================================
+// Part C (continued) — P1-6 (#970): cross-type validation rejection parity.
+// ============================================================================
+//
+// Each test mirrors a NEW check added in P1-6, which the server enforces in
+// `admin_table_index.rs` BEFORE the non-btree dispatch (closing the
+// "unique silently ignored for non-btree types" hole).
+
+/// No fields → [`CreateIndexBuildError::EmptyFields`].
+/// Server message: "CREATE INDEX requires at least one field".
+#[test]
+fn try_build_rejects_empty_fields() {
+    let result = create_index("idx_bad", "users").try_build();
+    assert_eq!(
+        result,
+        Err(CreateIndexBuildError::EmptyFields),
+        "empty fields must be rejected at construction time"
+    );
+}
+
+/// `unique` with `index_type("vector")` →
+/// [`CreateIndexBuildError::UniqueUnsupportedForType`].
+/// Server message: "`unique` is not supported for 'vector' indexes; ...".
+#[test]
+fn try_build_rejects_unique_with_vector() {
+    let result = create_index("idx_bad", "users")
+        .field("embedding")
+        .unique()
+        .index_type("vector")
+        .vector_dim(128)
+        .try_build();
+    assert_eq!(
+        result,
+        Err(CreateIndexBuildError::UniqueUnsupportedForType {
+            index_type: "vector".to_string()
+        }),
+        "unique + vector must be rejected at construction time"
+    );
+}
+
+/// `sorted` with `index_type("fts")` →
+/// [`CreateIndexBuildError::SortedUnsupportedForType`].
+/// Server message: "`sorted` is not supported for 'fts' indexes".
+#[test]
+fn try_build_rejects_sorted_with_fts() {
+    let result = create_index("idx_bad", "posts")
+        .field("body")
+        .sorted()
+        .index_type("fts")
+        .try_build();
+    assert_eq!(
+        result,
+        Err(CreateIndexBuildError::SortedUnsupportedForType {
+            index_type: "fts".to_string()
+        }),
+        "sorted + fts must be rejected at construction time"
+    );
+}
+
+/// Vector index with no `vector_dim` →
+/// [`CreateIndexBuildError::VectorDimRequired`].
+/// Server message: "vector index requires `vector_dim` > 0".
+#[test]
+fn try_build_rejects_vector_missing_dim() {
+    let result = create_index("idx_bad", "docs")
+        .field("embedding")
+        .index_type("vector")
+        .try_build();
+    assert_eq!(
+        result,
+        Err(CreateIndexBuildError::VectorDimRequired),
+        "vector index without vector_dim must be rejected at construction time"
+    );
+}
+
+/// Vector index with `vector_dim(0)` →
+/// [`CreateIndexBuildError::VectorDimRequired`].
+#[test]
+fn try_build_rejects_vector_zero_dim() {
+    let result = create_index("idx_bad", "docs")
+        .field("embedding")
+        .index_type("vector")
+        .vector_dim(0)
+        .try_build();
+    assert_eq!(
+        result,
+        Err(CreateIndexBuildError::VectorDimRequired),
+        "vector index with vector_dim=0 must be rejected at construction time"
+    );
+}
+
+/// Vector index with `vector_dim(1)` is accepted (boundary positive).
+#[test]
+fn try_build_accepts_vector_dim_one() {
+    let result = create_index("idx_ok", "docs")
+        .field("embedding")
+        .index_type("vector")
+        .vector_dim(1)
+        .try_build();
+    assert!(result.is_ok(), "vector_dim=1 must be accepted");
+}
+
+/// Vector index with misspelled metric →
+/// [`CreateIndexBuildError::UnknownVectorMetric`].
+/// Server message: "unknown vector_metric 'consine'; expected ...".
+#[test]
+fn try_build_rejects_unknown_vector_metric() {
+    let result = create_index("idx_bad", "docs")
+        .field("embedding")
+        .index_type("vector")
+        .vector_dim(128)
+        .vector_metric("consine")
+        .try_build();
+    assert_eq!(
+        result,
+        Err(CreateIndexBuildError::UnknownVectorMetric {
+            metric: "consine".to_string()
+        }),
+        "unknown vector_metric must be rejected at construction time"
+    );
+}
+
+/// Vector options on a non-vector index →
+/// [`CreateIndexBuildError::VectorOptionsOnNonVectorIndex`].
+/// Server message: "vector_dim/... are only valid for 'vector' indexes".
+#[test]
+fn try_build_rejects_vector_options_on_non_vector() {
+    let result = create_index("idx_bad", "users")
+        .field("email")
+        .vector_dim(128)
+        .try_build();
+    assert_eq!(
+        result,
+        Err(CreateIndexBuildError::VectorOptionsOnNonVectorIndex),
+        "vector_dim on a non-vector index must be rejected"
+    );
+}
+
+/// FTS options on a non-FTS index →
+/// [`CreateIndexBuildError::FtsOptionsOnNonFtsIndex`].
+/// Server message: "fts_tokenizer/fts_language are only valid for 'fts' indexes".
+#[test]
+fn try_build_rejects_fts_options_on_non_fts() {
+    let result = create_index("idx_bad", "users")
+        .field("email")
+        .fts_tokenizer("whitespace")
+        .try_build();
+    assert_eq!(
+        result,
+        Err(CreateIndexBuildError::FtsOptionsOnNonFtsIndex),
+        "fts_tokenizer on a non-fts index must be rejected"
+    );
+}
+
+/// Functional options on a non-functional index →
+/// [`CreateIndexBuildError::FunctionalOptionsOnNonFunctionalIndex`].
+/// Server message: "functional_op/functional_args are only valid for 'functional' indexes".
+#[test]
+fn try_build_rejects_functional_options_on_non_functional() {
+    let result = create_index("idx_bad", "users")
+        .field("email")
+        .functional_op("lower")
+        .try_build();
+    assert_eq!(
+        result,
+        Err(CreateIndexBuildError::FunctionalOptionsOnNonFunctionalIndex),
+        "functional_op on a non-functional index must be rejected"
+    );
+}
+
+/// Boundary: valid vector / fts / functional shapes are NOT rejected.
+#[test]
+fn try_build_accepts_valid_specialized_indexes() {
+    // vector with all valid options.
+    assert!(create_index("idx_vec", "docs")
+        .field("embedding")
+        .index_type("vector")
+        .vector_dim(384)
+        .vector_metric("cosine")
+        .try_build()
+        .is_ok());
+    // fts with valid tokenizer.
+    assert!(create_index("idx_fts", "posts")
+        .field("body")
+        .index_type("fts")
+        .fts_tokenizer("unicode")
+        .try_build()
+        .is_ok());
+    // functional with valid op.
+    assert!(create_index("idx_fn", "users")
+        .field("email")
+        .index_type("functional")
+        .functional_op("lower")
+        .try_build()
+        .is_ok());
+}

@@ -371,6 +371,80 @@ impl ShamirAdminExecutor {
             .collect();
         let path_refs: Vec<&str> = paths.iter().map(|s| s.as_str()).collect();
 
+        // P1-6 (#970): cross-type validation that runs for EVERY index_type.
+        // The original 3 checks below (sorted&&unique, include&&!sorted,
+        // sorted+multi-field) only run in the btree branch — i.e. AFTER the
+        // non-btree early return below — so a non-btree index_type silently
+        // ignored `.unique()`, `.sorted()`, and cross-family options (e.g.
+        // `.unique().index_type("vector")` silently created a non-unique
+        // vector index). These new checks close that gap.
+        //
+        // The exact wording is mirrored in
+        // `CreateIndexBuildError::Display` (Rust try_build) and the TS
+        // `createIndex()` builder so a caller sees the same explanation
+        // everywhere.
+        let itype = op.index_type.as_deref();
+        let non_btree = matches!(itype, Some("vector") | Some("fts") | Some("functional"));
+
+        // 1. At least one field for ANY index type.
+        if op.fields.is_empty() {
+            return Err(err("CREATE INDEX requires at least one field".to_string()));
+        }
+        // 2. `unique` is only meaningful for btree/hash indexes.
+        if op.unique && non_btree {
+            return Err(err(format!(
+                "`unique` is not supported for '{}' indexes; only btree/hash indexes can be unique",
+                itype.unwrap()
+            )));
+        }
+        // 3. `sorted` is only meaningful for btree indexes.
+        if op.sorted && non_btree {
+            return Err(err(format!(
+                "`sorted` is not supported for '{}' indexes",
+                itype.unwrap()
+            )));
+        }
+        // 4. Vector index requires a positive dimension.
+        if itype == Some("vector") && (op.vector_dim.is_none() || op.vector_dim == Some(0)) {
+            return Err(err("vector index requires `vector_dim` > 0".to_string()));
+        }
+        // 5. Vector metric must be a recognized value.
+        if itype == Some("vector") {
+            if let Some(m) = op.vector_metric.as_deref() {
+                if !matches!(m, "l2" | "dot" | "cosine") {
+                    return Err(err(format!(
+                        "unknown vector_metric '{}'; expected 'l2', 'dot', or 'cosine'",
+                        m
+                    )));
+                }
+            }
+        }
+        // 6. Vector-specific options are only valid for vector indexes.
+        if itype != Some("vector")
+            && (op.vector_dim.is_some()
+                || op.vector_metric.is_some()
+                || op.vector_quantization.is_some())
+        {
+            return Err(err(
+                "vector_dim/vector_metric/vector_quantization are only valid for 'vector' indexes"
+                    .to_string(),
+            ));
+        }
+        // 7. FTS-specific options are only valid for FTS indexes.
+        if itype != Some("fts") && (op.fts_tokenizer.is_some() || op.fts_language.is_some()) {
+            return Err(err(
+                "fts_tokenizer/fts_language are only valid for 'fts' indexes".to_string(),
+            ));
+        }
+        // 8. Functional-specific options are only valid for functional indexes.
+        if itype != Some("functional")
+            && (op.functional_op.is_some() || op.functional_args.is_some())
+        {
+            return Err(err(
+                "functional_op/functional_args are only valid for 'functional' indexes".to_string(),
+            ));
+        }
+
         if op.index_type.as_deref().is_some_and(|t| t != "btree") {
             table
                 .create_index_v2(op)

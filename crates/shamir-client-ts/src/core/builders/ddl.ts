@@ -193,6 +193,88 @@ export function createIndex(
         '(server rejects this combination — see admin_table_index.rs)',
     );
   }
+
+  // P1-6 (#970): cross-type validation — mirrors admin_table_index.rs and
+  // CreateIndex::try_build() so a caller sees the same rejection everywhere.
+  const itype = opts?.index_type;
+  const nonBtree =
+    itype === 'vector' || itype === 'fts' || itype === 'functional';
+
+  // 1. At least one field for any index type.
+  if (fields.length === 0) {
+    throw new Error(
+      'createIndex: CREATE INDEX requires at least one field ' +
+        '(server rejects an empty fields list for all index types — see admin_table_index.rs)',
+    );
+  }
+  // 2. unique is only for btree/hash indexes.
+  if (opts?.unique && nonBtree) {
+    throw new Error(
+      `createIndex: \`unique\` is not supported for '${itype}' indexes; ` +
+        `only btree/hash indexes can be unique (server rejects this combination — see admin_table_index.rs)`,
+    );
+  }
+  // 3. sorted is only for btree indexes.
+  if (opts?.sorted && nonBtree) {
+    throw new Error(
+      `createIndex: \`sorted\` is not supported for '${itype}' indexes ` +
+        `(server rejects this combination — see admin_table_index.rs)`,
+    );
+  }
+  // 4. Vector index requires vector_dim > 0.
+  if (
+    itype === 'vector' &&
+    (opts?.vector_dim === undefined || opts.vector_dim === 0)
+  ) {
+    throw new Error(
+      'createIndex: vector index requires `vector_dim` > 0 ' +
+        '(server rejects a missing or zero dimension — see admin_table_index.rs)',
+    );
+  }
+  // 5. Vector metric must be a recognized value.
+  if (itype === 'vector' && opts?.vector_metric !== undefined) {
+    const m = opts.vector_metric;
+    if (m !== 'l2' && m !== 'dot' && m !== 'cosine') {
+      throw new Error(
+        `createIndex: unknown vector_metric '${m}'; expected 'l2', 'dot', or 'cosine' ` +
+          `(server rejects unrecognized metric strings — see admin_table_index.rs)`,
+      );
+    }
+  }
+  // 6. Vector-specific options only on vector indexes.
+  if (
+    itype !== 'vector' &&
+    (opts?.vector_dim !== undefined ||
+      opts?.vector_metric !== undefined ||
+      opts?.vector_quantization !== undefined)
+  ) {
+    throw new Error(
+      'createIndex: vector_dim/vector_metric/vector_quantization are only valid for ' +
+        "'vector' indexes (server rejects these options on non-vector index types — see admin_table_index.rs)",
+    );
+  }
+  // 7. FTS-specific options only on FTS indexes.
+  if (
+    itype !== 'fts' &&
+    (opts?.fts_tokenizer !== undefined || opts?.fts_language !== undefined)
+  ) {
+    throw new Error(
+      'createIndex: fts_tokenizer/fts_language are only valid for ' +
+        "'fts' indexes (server rejects these options on non-fts index types — see admin_table_index.rs)",
+    );
+  }
+  // 8. Functional-specific options only on functional indexes.
+  if (
+    itype !== 'functional' &&
+    (opts?.functional_op !== undefined ||
+      opts?.functional_args !== undefined)
+  ) {
+    throw new Error(
+      'createIndex: functional_op/functional_args are only valid for ' +
+        "'functional' indexes (server rejects these options on non-functional index types — see admin_table_index.rs)",
+    );
+  }
+
   const op: CreateIndexOp = {
     create_index: name,
     table,

@@ -197,6 +197,107 @@ describe('createIndex', () => {
       ddl.createIndex('idx_bad', 't', [['f']], { unique: true, sorted: true }),
     ).toThrow(/cannot be both unique and sorted/);
   });
+
+  // ── P1-6 (#970): cross-type validation parity ──────────────────────
+
+  it('throws when fields is empty (all index types)', () => {
+    expect(() => ddl.createIndex('idx', 't', [])).toThrow(
+      /requires at least one field/,
+    );
+  });
+
+  it('throws when unique is set on a vector index', () => {
+    expect(() =>
+      ddl.createIndex('vidx', 't', [['f']], {
+        index_type: 'vector',
+        unique: true,
+        vector_dim: 128,
+      }),
+    ).toThrow(/unique.*not supported for 'vector'/);
+  });
+
+  it('throws when sorted is set on an fts index', () => {
+    expect(() =>
+      ddl.createIndex('fidx', 't', [['f']], {
+        index_type: 'fts',
+        sorted: true,
+      }),
+    ).toThrow(/sorted.*not supported for 'fts'/);
+  });
+
+  it('throws when vector index has no vector_dim', () => {
+    expect(() =>
+      ddl.createIndex('vidx', 't', [['f']], { index_type: 'vector' }),
+    ).toThrow(/vector_dim.*> 0/);
+  });
+
+  it('throws when vector index has vector_dim = 0', () => {
+    expect(() =>
+      ddl.createIndex('vidx', 't', [['f']], {
+        index_type: 'vector',
+        vector_dim: 0,
+      }),
+    ).toThrow(/vector_dim.*> 0/);
+  });
+
+  it('accepts vector_dim = 1 (boundary positive)', () => {
+    expect(() =>
+      ddl.createIndex('vidx', 't', [['f']], {
+        index_type: 'vector',
+        vector_dim: 1,
+      }),
+    ).not.toThrow();
+  });
+
+  it('throws when vector_metric is unrecognized', () => {
+    expect(() =>
+      ddl.createIndex('vidx', 't', [['f']], {
+        index_type: 'vector',
+        vector_dim: 128,
+        vector_metric: 'consine',
+      }),
+    ).toThrow(/unknown vector_metric 'consine'/);
+  });
+
+  it('throws when vector options are set on a non-vector index', () => {
+    expect(() =>
+      ddl.createIndex('idx', 't', [['f']], { vector_dim: 128 }),
+    ).toThrow(/only valid for 'vector' indexes/);
+  });
+
+  it('throws when fts options are set on a non-fts index', () => {
+    expect(() =>
+      ddl.createIndex('idx', 't', [['f']], { fts_tokenizer: 'whitespace' }),
+    ).toThrow(/only valid for 'fts' indexes/);
+  });
+
+  it('throws when functional options are set on a non-functional index', () => {
+    expect(() =>
+      ddl.createIndex('idx', 't', [['f']], { functional_op: 'lower' }),
+    ).toThrow(/only valid for 'functional' indexes/);
+  });
+
+  it('accepts valid specialized indexes (boundary positives)', () => {
+    expect(() =>
+      ddl.createIndex('vidx', 't', [['f']], {
+        index_type: 'vector',
+        vector_dim: 384,
+        vector_metric: 'cosine',
+      }),
+    ).not.toThrow();
+    expect(() =>
+      ddl.createIndex('fidx', 't', [['f']], {
+        index_type: 'fts',
+        fts_tokenizer: 'unicode',
+      }),
+    ).not.toThrow();
+    expect(() =>
+      ddl.createIndex('fnidx', 't', [['f']], {
+        index_type: 'functional',
+        functional_op: 'lower',
+      }),
+    ).not.toThrow();
+  });
 });
 
 // ── buffer config ops ───────────────────────────────────────────────

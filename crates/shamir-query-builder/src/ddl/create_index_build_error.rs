@@ -40,6 +40,60 @@ pub enum CreateIndexBuildError {
         /// The number of fields the caller supplied.
         field_count: usize,
     },
+    /// No fields were supplied.
+    ///
+    /// The server rejects this in `admin_table_index.rs` with "CREATE INDEX
+    /// requires at least one field" — applies to ALL index types.
+    EmptyFields,
+    /// `.unique()` was set with a non-btree `index_type` (`"vector"` /
+    /// `"fts"` / `"functional"`).
+    ///
+    /// Only btree/hash indexes can be unique; the server rejects this with
+    /// "`unique` is not supported for '{index_type}' indexes; only btree/hash
+    /// indexes can be unique".
+    UniqueUnsupportedForType {
+        /// The offending index_type string.
+        index_type: String,
+    },
+    /// `.sorted()` was set with a non-btree `index_type` (`"vector"` /
+    /// `"fts"` / `"functional"`).
+    ///
+    /// The server rejects this with "`sorted` is not supported for
+    /// '{index_type}' indexes".
+    SortedUnsupportedForType {
+        /// The offending index_type string.
+        index_type: String,
+    },
+    /// A vector index was requested but `vector_dim` was omitted or zero.
+    ///
+    /// The server rejects this with "vector index requires `vector_dim` > 0".
+    VectorDimRequired,
+    /// An unrecognized `vector_metric` string was supplied for a vector index.
+    ///
+    /// The server rejects this with "unknown vector_metric '{metric}';
+    /// expected 'l2', 'dot', or 'cosine'".
+    UnknownVectorMetric {
+        /// The unrecognized metric string.
+        metric: String,
+    },
+    /// Vector-specific options (`vector_dim` / `vector_metric` /
+    /// `vector_quantization`) were set on a non-vector index.
+    ///
+    /// The server rejects this with "vector_dim/vector_metric/
+    /// vector_quantization are only valid for 'vector' indexes".
+    VectorOptionsOnNonVectorIndex,
+    /// FTS-specific options (`fts_tokenizer` / `fts_language`) were set on a
+    /// non-FTS index.
+    ///
+    /// The server rejects this with "fts_tokenizer/fts_language are only
+    /// valid for 'fts' indexes".
+    FtsOptionsOnNonFtsIndex,
+    /// Functional-specific options (`functional_op` / `functional_args`)
+    /// were set on a non-functional index.
+    ///
+    /// The server rejects this with "functional_op/functional_args are only
+    /// valid for 'functional' indexes".
+    FunctionalOptionsOnNonFunctionalIndex,
 }
 
 impl std::fmt::Display for CreateIndexBuildError {
@@ -67,6 +121,66 @@ impl std::fmt::Display for CreateIndexBuildError {
                     "sorted index requires exactly one field, got {field_count}; sorted indexes \
                      are single-field scalar columns only (composite TBD) — the server rejects \
                      multi-field sorted indexes"
+                )
+            }
+            CreateIndexBuildError::EmptyFields => {
+                write!(
+                    f,
+                    "CREATE INDEX requires at least one field; call .field(...) — the server \
+                     (admin_table_index) rejects an empty fields list for all index types"
+                )
+            }
+            CreateIndexBuildError::UniqueUnsupportedForType { index_type } => {
+                write!(
+                    f,
+                    "`unique` is not supported for '{index_type}' indexes; only btree/hash \
+                     indexes can be unique — the server (admin_table_index) rejects this \
+                     combination"
+                )
+            }
+            CreateIndexBuildError::SortedUnsupportedForType { index_type } => {
+                write!(
+                    f,
+                    "`sorted` is not supported for '{index_type}' indexes — the server \
+                     (admin_table_index) rejects this combination"
+                )
+            }
+            CreateIndexBuildError::VectorDimRequired => {
+                write!(
+                    f,
+                    "vector index requires `vector_dim` > 0; call .vector_dim(n) with a \
+                     positive dimension — the server (admin_table_index) rejects a missing or \
+                     zero dimension"
+                )
+            }
+            CreateIndexBuildError::UnknownVectorMetric { metric } => {
+                write!(
+                    f,
+                    "unknown vector_metric '{metric}'; expected 'l2', 'dot', or 'cosine' — \
+                     the server (admin_table_index) rejects unrecognized metric strings"
+                )
+            }
+            CreateIndexBuildError::VectorOptionsOnNonVectorIndex => {
+                write!(
+                    f,
+                    "vector_dim/vector_metric/vector_quantization are only valid for 'vector' \
+                     indexes — the server (admin_table_index) rejects these options on any \
+                     non-vector index type"
+                )
+            }
+            CreateIndexBuildError::FtsOptionsOnNonFtsIndex => {
+                write!(
+                    f,
+                    "fts_tokenizer/fts_language are only valid for 'fts' indexes — the server \
+                     (admin_table_index) rejects these options on any non-fts index type"
+                )
+            }
+            CreateIndexBuildError::FunctionalOptionsOnNonFunctionalIndex => {
+                write!(
+                    f,
+                    "functional_op/functional_args are only valid for 'functional' indexes — \
+                     the server (admin_table_index) rejects these options on any \
+                     non-functional index type"
                 )
             }
         }

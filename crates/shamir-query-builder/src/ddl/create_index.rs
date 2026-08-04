@@ -161,21 +161,93 @@ impl CreateIndex {
     ///   without `.sorted()`.
     /// - [`CreateIndexBuildError::SortedMultiField`] — `.sorted()` with a field
     ///   count ≠ 1.
+    /// - [`CreateIndexBuildError::EmptyFields`] — no fields supplied.
+    /// - [`CreateIndexBuildError::UniqueUnsupportedForType`] — `.unique()`
+    ///   with a non-btree `index_type`.
+    /// - [`CreateIndexBuildError::SortedUnsupportedForType`] — `.sorted()`
+    ///   with a non-btree `index_type`.
+    /// - [`CreateIndexBuildError::VectorDimRequired`] — vector index without a
+    ///   positive `vector_dim`.
+    /// - [`CreateIndexBuildError::UnknownVectorMetric`] — vector index with an
+    ///   unrecognized `vector_metric` string.
+    /// - [`CreateIndexBuildError::VectorOptionsOnNonVectorIndex`] —
+    ///   vector-specific options on a non-vector index.
+    /// - [`CreateIndexBuildError::FtsOptionsOnNonFtsIndex`] — FTS-specific
+    ///   options on a non-FTS index.
+    /// - [`CreateIndexBuildError::FunctionalOptionsOnNonFunctionalIndex`] —
+    ///   functional-specific options on a non-functional index.
     ///
     /// `build()` is unchanged and remains the lenient path for existing call
     /// sites; new code that wants the parity checks should prefer `try_build()`.
     ///
-    /// **Scope limitation (F-87, #915):** these three checks cover only the
-    /// base_index btree-family combinations `admin_table_index.rs` checks BEFORE
-    /// dispatching a non-`"btree"` `index_type` to `create_index_v2`. A
-    /// non-btree `index_type` (`"vector"`/`"fts"`/`"functional"`) has
-    /// ADDITIONAL server-side validation this method does NOT replicate —
-    /// e.g. the one-vector-index-per-table constraint, functional-op
-    /// trustedness, FTS tokenizer DSL well-formedness. A caller can still get
-    /// a local `Ok` from `try_build()` for one of those families followed by
-    /// a server-side rejection on submit; that residual round-trip cost is a
-    /// known, accepted scope gap, not an oversight.
+    /// **Scope limitation (P1-6, #970):** the checks above now cover the
+    /// base_index btree-family combinations AND the cross-type /
+    /// family-specific-field mismatches that `admin_table_index.rs` enforces
+    /// before dispatching to `create_index_v2`. A non-btree `index_type`
+    /// (`"vector"`/`"fts"`/`"functional"`) has ADDITIONAL server-side
+    /// validation this method does NOT replicate — e.g. the
+    /// one-vector-index-per-table constraint, functional-op trustedness, FTS
+    /// tokenizer DSL well-formedness. A caller can still get a local `Ok`
+    /// from `try_build()` for one of those families followed by a server-side
+    /// rejection on submit; that residual round-trip cost is a known, accepted
+    /// scope gap, not an oversight.
     pub fn try_build(self) -> Result<BatchOp, CreateIndexBuildError> {
+        // P1-6 (#970): cross-type checks run BEFORE the existing btree-family
+        // checks so a non-btree index_type is rejected for the same reasons
+        // the server (admin_table_index.rs) rejects it — before any round trip.
+        let itype = self.index_type.as_deref();
+        let non_btree = matches!(itype, Some("vector") | Some("fts") | Some("functional"));
+
+        // 1. At least one field for ANY index type.
+        if self.fields.is_empty() {
+            return Err(CreateIndexBuildError::EmptyFields);
+        }
+        // 2. `unique` is only meaningful for btree/hash indexes.
+        if self.unique && non_btree {
+            return Err(CreateIndexBuildError::UniqueUnsupportedForType {
+                index_type: itype.unwrap().to_string(),
+            });
+        }
+        // 3. `sorted` is only meaningful for btree indexes.
+        if self.sorted && non_btree {
+            return Err(CreateIndexBuildError::SortedUnsupportedForType {
+                index_type: itype.unwrap().to_string(),
+            });
+        }
+        // 4. Vector index requires a positive dimension.
+        if itype == Some("vector") && (self.vector_dim.is_none() || self.vector_dim == Some(0)) {
+            return Err(CreateIndexBuildError::VectorDimRequired);
+        }
+        // 5. Vector metric must be a recognized value.
+        if itype == Some("vector") {
+            if let Some(m) = self.vector_metric.as_deref() {
+                if !matches!(m, "l2" | "dot" | "cosine") {
+                    return Err(CreateIndexBuildError::UnknownVectorMetric {
+                        metric: m.to_string(),
+                    });
+                }
+            }
+        }
+        // 6. Vector-specific options are only valid for vector indexes.
+        if itype != Some("vector")
+            && (self.vector_dim.is_some()
+                || self.vector_metric.is_some()
+                || self.vector_quantization.is_some())
+        {
+            return Err(CreateIndexBuildError::VectorOptionsOnNonVectorIndex);
+        }
+        // 7. FTS-specific options are only valid for FTS indexes.
+        if itype != Some("fts") && (self.fts_tokenizer.is_some() || self.fts_language.is_some()) {
+            return Err(CreateIndexBuildError::FtsOptionsOnNonFtsIndex);
+        }
+        // 8. Functional-specific options are only valid for functional indexes.
+        if itype != Some("functional")
+            && (self.functional_op.is_some() || self.functional_args.is_some())
+        {
+            return Err(CreateIndexBuildError::FunctionalOptionsOnNonFunctionalIndex);
+        }
+
+        // Existing btree-family checks (F-81 #908 / F-87 #915).
         if self.sorted && self.unique {
             return Err(CreateIndexBuildError::UniqueAndSorted);
         }
