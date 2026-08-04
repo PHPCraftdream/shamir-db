@@ -94,6 +94,17 @@ pub enum CreateIndexBuildError {
     /// The server rejects this with "functional_op/functional_args are only
     /// valid for 'functional' indexes".
     FunctionalOptionsOnNonFunctionalIndex,
+    /// `.include(...)` was set with a non-btree `index_type` (`"vector"` /
+    /// `"fts"` / `"functional"`).
+    ///
+    /// Covering fields are only meaningful for sorted btree indexes; the
+    /// server rejects this with "`include` is not supported for
+    /// '{index_type}' indexes; covering fields are only valid for sorted
+    /// indexes".
+    IncludeUnsupportedForType {
+        /// The offending index_type string.
+        index_type: String,
+    },
 }
 
 impl std::fmt::Display for CreateIndexBuildError {
@@ -181,6 +192,14 @@ impl std::fmt::Display for CreateIndexBuildError {
                     "functional_op/functional_args are only valid for 'functional' indexes — \
                      the server (admin_table_index) rejects these options on any \
                      non-functional index type"
+                )
+            }
+            CreateIndexBuildError::IncludeUnsupportedForType { index_type } => {
+                write!(
+                    f,
+                    "`include` is not supported for '{index_type}' indexes; covering fields are \
+                     only valid for sorted indexes — the server (admin_table_index) rejects this \
+                     combination"
                 )
             }
         }

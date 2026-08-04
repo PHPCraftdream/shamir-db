@@ -210,6 +210,28 @@ async fn server_rejects_empty_fields() {
     );
 }
 
+#[tokio::test]
+async fn server_rejects_include_on_non_btree() {
+    let shamir = setup().await;
+    let result = exec_create(
+        &shamir,
+        ddl::create_index("fts_include", "docs")
+            .field("body")
+            .index_type("fts")
+            .include([vec!["title".to_string()]]),
+    )
+    .await;
+    assert!(
+        result.is_err(),
+        "include on a non-btree index must be rejected"
+    );
+    let msg = result.unwrap_err();
+    assert!(
+        msg.contains("include") && msg.contains("fts"),
+        "error should mention 'include' and 'fts': {msg}"
+    );
+}
+
 // ============================================================================
 // Valid cases still succeed (regression guard).
 // ============================================================================

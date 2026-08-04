@@ -461,6 +461,26 @@ fn try_build_rejects_functional_options_on_non_functional() {
     );
 }
 
+/// `include` with `index_type("fts")` →
+/// [`CreateIndexBuildError::IncludeUnsupportedForType`].
+/// Server message: "`include` is not supported for 'fts' indexes; covering
+/// fields are only valid for sorted indexes".
+#[test]
+fn try_build_rejects_include_with_fts() {
+    let result = create_index("idx_bad", "posts")
+        .field("body")
+        .index_type("fts")
+        .include([vec!["title".to_string()]])
+        .try_build();
+    assert_eq!(
+        result,
+        Err(CreateIndexBuildError::IncludeUnsupportedForType {
+            index_type: "fts".to_string()
+        }),
+        "include + fts must be rejected at construction time"
+    );
+}
+
 /// Boundary: valid vector / fts / functional shapes are NOT rejected.
 #[test]
 fn try_build_accepts_valid_specialized_indexes() {

@@ -144,21 +144,28 @@ describe('createIndex', () => {
     expect(op).not.toHaveProperty('if_not_exists');
   });
 
-  it('includes index_type, vector options, include when set', () => {
+  it('includes index_type, vector options when set', () => {
     const op = ddl.createIndex('vidx', 'docs', [['embedding']], {
       index_type: 'vector',
       vector_dim: 128,
       vector_metric: 'cosine',
-      include: [['metadata']],
       if_not_exists: true,
     });
     expect(op.index_type).toBe('vector');
     expect(op.vector_dim).toBe(128);
     expect(op.vector_metric).toBe('cosine');
-    expect(op.include).toEqual([['metadata']]);
     expect(op.if_not_exists).toBe(true);
     // V5.2 #411 — absent when not opted-in (wire back-compat).
     expect(op).not.toHaveProperty('vector_quantization');
+  });
+
+  it('includes covering fields (include) when set on a sorted btree index', () => {
+    const op = ddl.createIndex('sidx', 'users', [['age']], {
+      sorted: true,
+      include: [['email']],
+    });
+    expect(op.sorted).toBe(true);
+    expect(op.include).toEqual([['email']]);
   });
 
   // ── V5.2 #411 — vector quantization (SQ8) ───────────────────────────
@@ -196,6 +203,12 @@ describe('createIndex', () => {
     expect(() =>
       ddl.createIndex('idx_bad', 't', [['f']], { unique: true, sorted: true }),
     ).toThrow(/cannot be both unique and sorted/);
+  });
+
+  it('throws when include is set without sorted (btree family)', () => {
+    expect(() =>
+      ddl.createIndex('idx_bad', 't', [['f']], { include: [['meta']] }),
+    ).toThrow(/include.*only valid for sorted indexes/);
   });
 
   // ── P1-6 (#970): cross-type validation parity ──────────────────────
@@ -275,6 +288,15 @@ describe('createIndex', () => {
     expect(() =>
       ddl.createIndex('idx', 't', [['f']], { functional_op: 'lower' }),
     ).toThrow(/only valid for 'functional' indexes/);
+  });
+
+  it('throws when include is set on a non-btree index', () => {
+    expect(() =>
+      ddl.createIndex('fidx', 't', [['f']], {
+        index_type: 'fts',
+        include: [['title']],
+      }),
+    ).toThrow(/include.*not supported for 'fts'/);
   });
 
   it('accepts valid specialized indexes (boundary positives)', () => {

@@ -176,6 +176,8 @@ impl CreateIndex {
     ///   options on a non-FTS index.
     /// - [`CreateIndexBuildError::FunctionalOptionsOnNonFunctionalIndex`] —
     ///   functional-specific options on a non-functional index.
+    /// - [`CreateIndexBuildError::IncludeUnsupportedForType`] — `.include(...)`
+    ///   with a non-btree `index_type`.
     ///
     /// `build()` is unchanged and remains the lenient path for existing call
     /// sites; new code that wants the parity checks should prefer `try_build()`.
@@ -245,6 +247,12 @@ impl CreateIndex {
             && (self.functional_op.is_some() || self.functional_args.is_some())
         {
             return Err(CreateIndexBuildError::FunctionalOptionsOnNonFunctionalIndex);
+        }
+        // 9. `include` (covering index) is only meaningful for sorted btree indexes.
+        if !self.include.is_empty() && non_btree {
+            return Err(CreateIndexBuildError::IncludeUnsupportedForType {
+                index_type: itype.unwrap().to_string(),
+            });
         }
 
         // Existing btree-family checks (F-81 #908 / F-87 #915).

@@ -274,6 +274,25 @@ export function createIndex(
         "'functional' indexes (server rejects these options on non-functional index types — see admin_table_index.rs)",
     );
   }
+  // 9. `include` (covering index) is only meaningful for sorted btree indexes.
+  if (opts?.include !== undefined && opts.include.length > 0 && nonBtree) {
+    throw new Error(
+      `createIndex: \`include\` is not supported for '${itype}' indexes; ` +
+        `covering fields are only valid for sorted indexes (server rejects this combination — see admin_table_index.rs)`,
+    );
+  }
+  // include without sorted is rejected for the btree family (mirrors the
+  // server's pre-existing check that runs after the non-btree dispatch).
+  if (
+    opts?.include !== undefined &&
+    opts.include.length > 0 &&
+    !opts?.sorted
+  ) {
+    throw new Error(
+      'createIndex: `include` is only valid for sorted indexes; call sorted: true ' +
+        'before include, or drop the include option (server rejects include without sorted — see admin_table_index.rs)',
+    );
+  }
 
   const op: CreateIndexOp = {
     create_index: name,

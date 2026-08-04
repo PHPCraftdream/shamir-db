@@ -444,6 +444,14 @@ impl ShamirAdminExecutor {
                 "functional_op/functional_args are only valid for 'functional' indexes".to_string(),
             ));
         }
+        // 9. `include` (covering index) is only meaningful for sorted btree indexes.
+        if !op.include.is_empty() && non_btree {
+            return Err(err(format!(
+                "`include` is not supported for '{}' indexes; covering fields are \
+                 only valid for sorted indexes",
+                itype.unwrap()
+            )));
+        }
 
         if op.index_type.as_deref().is_some_and(|t| t != "btree") {
             table
