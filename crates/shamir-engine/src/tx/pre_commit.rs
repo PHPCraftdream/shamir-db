@@ -539,6 +539,38 @@ pub(super) async fn pre_commit_prelock(
         }
     }
 
+    // P0-2 (#958): base_index (regular + unique) ops-plan re-derivation for
+    // the `IndexManager` family. A tx that staged before a base_index index
+    // was created would otherwise commit with zero ops for it (permanently
+    // missing posting for regular; for unique, additionally unconstrained
+    // duplicate). For unique defs specifically, the rederive records fresh
+    // `UniqueGuard`s (via `tx.record_unique_guard`) so Phase 2.6's
+    // commit-time re-validation — which runs immediately AFTER this step —
+    // covers constraints that did not exist at stage time. Also handles 2c:
+    // retracts staged ops for base_index indexes dropped between stage and
+    // commit.
+    //
+    // #987 (P0 ordering fix): this call MUST run AFTER Phase 2.5's lock
+    // acquisition and BEFORE Phase 2.6's `for g in &tx.unique_guards` loop.
+    // `tx.unique_guards` is consumed ONLY by that loop — recording guards
+    // after it iterates is a dead write, which was the exact #987 bug (a tx
+    // staging a duplicate of a pre-existing committed row before CREATE
+    // UNIQUE INDEX silently committed, and its SetPosting overwrote the
+    // owner's posting at the same deterministic key — index corruption).
+    // A table that gains its first unique index mid-tx is still locked here:
+    // Phase 2.5's `needs_write_barrier()` scan over `tx.write_set` sees
+    // `UNIQUE_INDEX_EXISTS` set the moment `CREATE UNIQUE INDEX` registers
+    // the def, so that table's `unique_write_lock` IS acquired even though
+    // `tx.unique_guards` (built from stage-time guards only) did not yet
+    // know about the constraint. Moving this call earlier keeps that lock
+    // held across both the guard recording and Phase 2.6's re-validation,
+    // preserving the check-then-act atomicity against non-tx unique writers.
+    //
+    // The index2 rederive (`rederive_index2_ops_post_stage`, run later
+    // below) is independent — separate generation counters, separate op
+    // families — and is left in its original position.
+    rederive_base_index_ops_post_stage(tx, repo).await?;
+
     // Phase 2.6: authoritative unique re-validation under per-table
     // unique_write_lock (held since Phase 2.5).
     //
@@ -606,16 +638,6 @@ pub(super) async fn pre_commit_prelock(
     // re-derivation entirely. See `rederive_index2_ops_post_stage` for the
     // old-value resolution (insert-vs-update-vs-delete) mechanism.
     rederive_index2_ops_post_stage(tx, repo).await?;
-
-    // P0-2 (#958): base_index (regular + unique) re-derivation — mirrors the
-    // index2/sorted gate above for the `IndexManager` family. A tx that
-    // staged before a base_index index was created would otherwise commit with
-    // zero ops for it (permanently missing posting for regular; for unique,
-    // additionally unconstrained duplicate). For unique defs specifically,
-    // the rederive records fresh `UniqueGuard`s so Phase 2.6's commit-time
-    // re-validation covers the new constraint. Also handles 2c: retracts
-    // staged ops for base_index indexes dropped between stage and commit.
-    rederive_base_index_ops_post_stage(tx, repo).await?;
 
     // F-48b test seam: parks strictly AFTER Phase 2.5's flag-check loop
     // (every table's `needs_write_barrier()` has been read and the writer

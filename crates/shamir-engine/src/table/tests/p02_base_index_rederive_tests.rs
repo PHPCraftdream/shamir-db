@@ -641,3 +641,116 @@ async fn p02_unique_multi_field_before_create_enforced() {
         "P0-2 2a unique multi-field: duplicate (a, b) must be rejected"
     );
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 2a — unique index: tx staged BEFORE CREATE conflicts with PRE-EXISTING
+//       committed row (#987 regression — the rederive's OWN guard must fire)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Regression for #987: a tx that stages a DUPLICATE unique value BEFORE the
+/// unique index exists, where the value is ALREADY owned by a pre-existing
+/// COMMITTED row, MUST be rejected at commit time.
+///
+/// This is the mirror of `p02_unique_concurrent_duplicate_one_wins`: there,
+/// the SECOND conflicting write carries a stage-time guard (it staged after
+/// CREATE). Here, the CONFLICTING tx is the one that staged BEFORE CREATE, so
+/// it has NO stage-time guard — the ONLY thing that can catch it is the
+/// `UniqueGuard` that `rederive_base_index_ops_post_stage` records at commit
+/// time, which Phase 2.6 must then re-validate.
+///
+/// Before the fix, `rederive_base_index_ops_post_stage` ran AFTER Phase 2.6,
+/// so the freshly-recorded guard was a dead write and the tx silently
+/// committed with `Ok(())`. Worse, its `plan_record_created_unique` produced
+/// a `SetPosting` at the SAME deterministic key `(index_id, value)` that R0's
+/// posting already occupies — so the commit OVERWROTE R0's posting, making
+/// R0 invisible through the unique index (index corruption, not merely an
+/// unconstrained duplicate).
+///
+/// The fix reorders the phases so the rederive runs AFTER Phase 2.5's lock
+/// acquisition and BEFORE Phase 2.6's re-validation loop.
+#[tokio::test]
+async fn p02_unique_staged_before_create_conflicts_with_preexisting_committed_row() {
+    use crate::tx::CommitError;
+
+    let repo = make_repo();
+    repo.add_table(TableConfig::new("t"));
+    let tbl = repo.get_table("t").await.unwrap();
+
+    let email_key = key_id(&tbl, "email").await;
+
+    // Step 1: commit R0 with the value BEFORE any unique index exists.
+    let r0 = tbl
+        .insert(&record_with_str(email_key, "dup@example.com"))
+        .await
+        .unwrap();
+
+    // Step 2: begin T1 and stage an insert of the SAME value, still before
+    // the unique index exists. Stage-time validation has nothing to check
+    // against (no unique def yet) — passes.
+    let (mut tx1, _guard1) = repo.begin_tx(IsolationLevel::Snapshot).await.unwrap();
+    let _r1 = tbl
+        .insert_tx(
+            &record_with_str(email_key, "dup@example.com"),
+            Some(&mut tx1),
+        )
+        .await
+        .unwrap();
+
+    // Step 3: CREATE the unique index — backfills from the committed
+    // snapshot (via `collect_all_current_records`, which routes through the
+    // MVCC seam), which includes R0's posting.
+    tbl.create_unique_index("idx_email", &["email"])
+        .await
+        .unwrap();
+    let idx_name = key_id(&tbl, "idx_email").await;
+
+    // Step 4: T1 commits. Expected: UniqueViolation (Phase 2.6 sees R0's
+    // posting via the guard the rederive recorded). Before the fix this
+    // returned Ok(()) — the exact regression. Assert the variant precisely
+    // so a future regression cannot hide behind a generic is_err().
+    let t1_result = repo.commit_tx(tx1).await;
+    assert!(
+        matches!(t1_result, Err(CommitError::UniqueViolation { .. })),
+        "#987: T1 staged a duplicate of a pre-existing committed row before \
+         CREATE UNIQUE INDEX; its commit MUST be rejected with \
+         UniqueViolation (the rederive's own guard must fire at Phase 2.6). \
+         Got {:?}",
+        t1_result
+    );
+
+    // Step 5: R0 must STILL be present and its unique posting must NOT have
+    // been overwritten by T1's aborted attempt.
+    //  (a) R0 is still in the data store.
+    let _ = tbl.get(r0).await.expect("R0 must still be present");
+
+    //  (b) R0 is still the owner of the unique posting (T1's SetPosting at
+    //      the same deterministic key must not have clobbered it — index
+    //      corruption check).
+    let owner = tbl
+        .index_manager_ref()
+        .lookup_by_unique_index(idx_name, &[InnerValue::Str("dup@example.com".into())])
+        .await
+        .expect("unique lookup must succeed");
+    assert_eq!(
+        owner,
+        Some(r0),
+        "#987: R0 must still own the unique posting — T1's aborted commit \
+         must not have overwritten it (index corruption check)"
+    );
+
+    //  (c) A THIRD tx inserting the same value is also rejected at stage
+    //      time, proving R0's posting is live (not T1's) and the constraint
+    //      is intact.
+    let (mut tx3, _guard3) = repo.begin_tx(IsolationLevel::Snapshot).await.unwrap();
+    let result = tbl
+        .insert_tx(
+            &record_with_str(email_key, "dup@example.com"),
+            Some(&mut tx3),
+        )
+        .await;
+    assert!(
+        result.is_err(),
+        "#987: a third insert of the same value must be rejected at stage \
+         time — proving R0's posting is live and the index is not corrupted"
+    );
+}
