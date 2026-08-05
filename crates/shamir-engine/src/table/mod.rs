@@ -1,4 +1,5 @@
 pub mod buffer_config;
+pub mod degraded_index_count;
 pub mod doctor;
 mod filtered_vector;
 #[cfg(test)]

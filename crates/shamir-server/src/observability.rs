@@ -223,6 +223,26 @@ pub enum ObservabilityError {
 /// registered at zero so Prometheus scrapers see them from the first
 /// scrape.
 ///
+/// `shamir_db` — #984: optional `Arc<ShamirDb>` used to compute the
+/// `shamir_degraded_indexes_total` gauge (count of indexes stuck in
+/// `Building` state across all open tables). Snapshotted every 5 s in
+/// the same background poller. Pass `None` in contexts without a live
+/// database (tests) — the gauge is still registered at zero.
+///
+/// # `/readyz` decision (#984)
+///
+/// `/readyz` stays **strictly binary and unchanged**: it still checks
+/// only "listeners bound". Rationale: (a) the module doc above
+/// documents that `/readyz` must stay cheap and subsystem-independent —
+/// wiring in a `ShamirDb` traversal would violate that invariant; (b) a
+/// degraded index is a *data-quality* issue, not a *boot-readiness*
+/// issue — the server is perfectly able to serve traffic, it just has
+/// a stuck index that needs `doctor::repair()`. Wiring it into
+/// `/readyz` would take a pod out of rotation for a non-fatal data
+/// issue, which is the wrong operational response. The
+/// `shamir_degraded_indexes_total` gauge on `/metrics` is the correct
+/// push signal: alert on it, but don't change traffic routing.
+///
 /// `allow_public_metrics` — M-tier audit M5. When `false` (default for
 /// callers), a non-loopback `addr` triggers
 /// [`ObservabilityError::NonLoopbackBindRejected`] before any socket
@@ -244,16 +264,19 @@ pub async fn spawn(
         install_recorder,
         tx_metrics,
         None,
+        None,
         allow_public_metrics,
     )
     .await
 }
 
 /// Same as [`spawn`], plus an optional [`ByteBudget`] to bridge into the
-/// `shamir_inflight_response_bytes_used`/`_cap` gauges (F-29, #822). Split
-/// out so `spawn`'s existing call sites/signature (already used directly by
-/// `observability_http.rs`'s tests) don't need updating just to add this one
-/// new optional argument.
+/// `shamir_inflight_response_bytes_used`/`_cap` gauges (F-29, #822), and an
+/// optional `Arc<shamir_db::ShamirDb>` to bridge into the
+/// `shamir_degraded_indexes_total` gauge (#984). Split out so `spawn`'s
+/// existing call sites/signature (already used directly by
+/// `observability_http.rs`'s tests) don't need updating just to add these
+/// new optional arguments.
 #[allow(clippy::too_many_arguments)]
 pub async fn spawn_with_byte_budget(
     addr: SocketAddr,
@@ -261,6 +284,7 @@ pub async fn spawn_with_byte_budget(
     install_recorder: bool,
     tx_metrics: Option<Arc<shamir_tx::TxMetrics>>,
     byte_budget: Option<ByteBudget>,
+    shamir_db: Option<Arc<shamir_db::ShamirDb>>,
     allow_public_metrics: bool,
 ) -> Result<ObservabilityHandle, ObservabilityError> {
     // 0. M-tier audit M5: reject non-loopback binds without explicit
@@ -372,6 +396,22 @@ pub async fn spawn_with_byte_budget(
          never be negative"
     );
 
+    // #984 — degraded (non-Ready) index count gauge. O(number of
+    // indexes across ALREADY-OPEN tables), in-memory only, zero store
+    // reads. Does NOT force-open closed tables — so the gauge reflects
+    // currently-open tables only (an index on a table that has never
+    // been accessed since boot is invisible until first query opens it).
+    metrics::describe_gauge!(
+        "shamir_degraded_indexes_total",
+        metrics::Unit::Count,
+        "Count of indexes NOT in Ready state (stuck-Building) across \
+         currently-open tables only. Zero store reads — inspects in-memory \
+         index registries. Does NOT open closed tables; an index on a \
+         table that has never been queried since boot is invisible here \
+         until first access opens it. Non-zero means an operator should \
+         run doctor::repair() to rebuild the stuck index(es)."
+    );
+
     // Zero-touch registration so gauges appear in /metrics from first scrape.
     metrics::gauge!("shamir_tx_started_total").set(0.0);
     metrics::gauge!("shamir_tx_committed_total").set(0.0);
@@ -388,6 +428,7 @@ pub async fn spawn_with_byte_budget(
             .map(|c| c as f64)
             .unwrap_or(-1.0),
     );
+    metrics::gauge!("shamir_degraded_indexes_total").set(0.0);
 
     // 4. Background poller: refresh process metrics every 5 s. Cheap
     // (~30-50 µs of work). The first collect() is invoked synchronously
@@ -402,6 +443,7 @@ pub async fn spawn_with_byte_budget(
     let shutdown_for_poller = shutdown.clone();
     let tx_metrics_clone = tx_metrics;
     let byte_budget_clone = byte_budget;
+    let shamir_db_clone = shamir_db;
     let poller_task = tokio::spawn(async move {
         let mut interval = tokio::time::interval(Duration::from_secs(5));
         // Burn the immediate first tick — we already collected once.
@@ -427,6 +469,13 @@ pub async fn spawn_with_byte_budget(
                     // registration above) needs a fresh snapshot every cycle.
                     if let Some(ref bb) = byte_budget_clone {
                         metrics::gauge!("shamir_inflight_response_bytes_used").set(bb.used() as f64);
+                    }
+                    // #984: degraded-index count — O(indexes) in-memory walk,
+                    // zero store reads.
+                    if let Some(ref db) = shamir_db_clone {
+                        let degraded = db.degraded_index_count().await;
+                        metrics::gauge!("shamir_degraded_indexes_total")
+                            .set(degraded as f64);
                     }
                 }
             }

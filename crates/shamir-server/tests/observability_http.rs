@@ -335,6 +335,7 @@ async fn metrics_exposes_finite_byte_budget_gauges() {
         true,
         None,
         Some(ByteBudget::new(Some(cap_bytes))),
+        None,
         false,
     )
     .await
@@ -346,6 +347,7 @@ async fn metrics_exposes_finite_byte_budget_gauges() {
             false,
             None,
             Some(ByteBudget::new(Some(cap_bytes))),
+            None,
             false,
         )
         .await
@@ -421,15 +423,16 @@ async fn metrics_exposes_unbounded_sentinel_when_no_byte_budget() {
     // Prometheus recorder can only be installed once per process, and
     // nextest may run this test before or after another test in the same
     // binary already installed it.
-    let handle = match spawn_with_byte_budget(addr, state.clone(), true, None, None, false).await {
-        Ok(h) => h,
-        Err(ObservabilityError::RecorderInstall(_)) => {
-            spawn_with_byte_budget(addr, state, false, None, None, false)
-                .await
-                .expect("spawn_with_byte_budget (recorder already installed)")
-        }
-        Err(e) => panic!("spawn_with_byte_budget: {e}"),
-    };
+    let handle =
+        match spawn_with_byte_budget(addr, state.clone(), true, None, None, None, false).await {
+            Ok(h) => h,
+            Err(ObservabilityError::RecorderInstall(_)) => {
+                spawn_with_byte_budget(addr, state, false, None, None, None, false)
+                    .await
+                    .expect("spawn_with_byte_budget (recorder already installed)")
+            }
+            Err(e) => panic!("spawn_with_byte_budget: {e}"),
+        };
 
     let (status, body) = http_get(handle.bound_addr, "/metrics").await;
     assert_eq!(status, 200, "metrics status");
@@ -437,6 +440,48 @@ async fn metrics_exposes_unbounded_sentinel_when_no_byte_budget() {
         body.contains("shamir_inflight_response_bytes_cap -1"),
         "cap gauge must expose the unbounded sentinel (-1) when no \
          ByteBudget is wired in, got first 800 bytes: {:?}",
+        &body.chars().take(800).collect::<String>()
+    );
+
+    handle.shutdown().await;
+}
+
+/// #984 — the `shamir_degraded_indexes_total` gauge must appear in
+/// `/metrics` output even at zero (pre-registered via
+/// `describe_gauge!` + zero-touch `gauge!(...).set(0.0)` at spawn time).
+/// Follows the same shape as `metrics_exposes_unbounded_sentinel_when_
+/// no_byte_budget`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn metrics_exposes_degraded_indexes_gauge_at_zero() {
+    use shamir_server::observability::{
+        spawn_with_byte_budget, ObservabilityError, ObservabilityState,
+    };
+
+    let state = ObservabilityState::new();
+    let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
+    let handle =
+        match spawn_with_byte_budget(addr, state.clone(), true, None, None, None, false).await {
+            Ok(h) => h,
+            Err(ObservabilityError::RecorderInstall(_)) => {
+                spawn_with_byte_budget(addr, state, false, None, None, None, false)
+                    .await
+                    .expect("spawn_with_byte_budget (recorder already installed)")
+            }
+            Err(e) => panic!("spawn_with_byte_budget: {e}"),
+        };
+
+    let (status, body) = http_get(handle.bound_addr, "/metrics").await;
+    assert_eq!(status, 200, "metrics status");
+    assert!(
+        body.contains("shamir_degraded_indexes_total"),
+        "metrics body must include shamir_degraded_indexes_total gauge, \
+         got first 800 bytes: {:?}",
+        &body.chars().take(800).collect::<String>()
+    );
+    // Zero-touch: starts at 0 (no ShamirDb passed, so poller leaves it at 0).
+    assert!(
+        body.contains("shamir_degraded_indexes_total 0"),
+        "degraded indexes gauge must start at 0, got: {:?}",
         &body.chars().take(800).collect::<String>()
     );
 

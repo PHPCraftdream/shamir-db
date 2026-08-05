@@ -654,4 +654,30 @@ impl ShamirDb {
             None => Ok(()),
         }
     }
+
+    /// #984 — count degraded (non-`Ready`) indexes across all ALREADY-OPEN
+    /// tables in all repos in all dbs. Pure in-memory — zero store reads.
+    /// Cost is O(number of indexes across open tables), NOT O(rows). Does
+    /// NOT force-open closed tables.
+    ///
+    /// Mirrors `flush_all`'s iteration pattern: `list_dbs` → `get_db` →
+    /// `list_repos` → `get_repo` → `degraded_index_count`. Each `get_*`
+    /// returns a cheap Arc-backed clone, so no DashMap guards are held
+    /// across `.await`.
+    pub async fn degraded_index_count(&self) -> u64 {
+        let db_names = self.list_dbs();
+        let mut count = 0u64;
+        for db_name in &db_names {
+            let Some(db) = self.get_db(db_name) else {
+                continue;
+            };
+            for repo_name in db.list_repos() {
+                let Some(repo) = db.get_repo(&repo_name) else {
+                    continue;
+                };
+                count += repo.degraded_index_count().await;
+            }
+        }
+        count
+    }
 }

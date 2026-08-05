@@ -7,6 +7,7 @@ pub mod concurrent_tests;
 pub mod corrupt_record_byte_path_tests;
 pub mod corrupt_record_tests;
 pub mod covering_read_tests;
+pub mod degraded_index_count_tests;
 pub mod delete_view_parity_tests;
 pub mod doctor_tests;
 pub mod explain_tests;

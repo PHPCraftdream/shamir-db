@@ -826,6 +826,7 @@ impl ServerLauncher {
                 true,
                 None,
                 Some(byte_budget.clone()),
+                Some(shamir.clone()),
                 allow_public_metrics,
             )
             .await
@@ -840,6 +841,7 @@ impl ServerLauncher {
                         false,
                         None,
                         Some(byte_budget.clone()),
+                        Some(shamir.clone()),
                         allow_public_metrics,
                     )
                     .await

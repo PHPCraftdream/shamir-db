@@ -429,6 +429,26 @@ impl RepoInstance {
         self.configs.iter().map(|e| e.key().clone()).collect()
     }
 
+    /// #984 — count degraded (non-`Ready`) indexes across all ALREADY-OPEN
+    /// tables in this repo. Pure in-memory — zero store reads. Does NOT
+    /// force-open closed tables (that would turn a cheap `/metrics` gauge
+    /// into an expensive scan and change server behaviour as a side-effect
+    /// of scraping). See [`TableManager::degraded_index_count`] for the
+    /// per-table cost model.
+    pub async fn degraded_index_count(&self) -> u64 {
+        // Collect Arc<OnceCell> clones first to avoid holding DashMap read
+        // guards across the `.await` points inside the loop.
+        let cells: Vec<Arc<OnceCell<TableManager>>> =
+            self.tables.iter().map(|e| Arc::clone(e.value())).collect();
+        let mut count = 0u64;
+        for cell in &cells {
+            if let Some(tm) = cell.get() {
+                count += tm.degraded_index_count().await;
+            }
+        }
+        count
+    }
+
     pub fn has_table(&self, table_name: &str) -> bool {
         self.configs.contains_key(table_name)
     }
