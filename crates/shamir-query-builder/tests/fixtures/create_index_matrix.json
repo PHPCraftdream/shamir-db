@@ -1,6 +1,7 @@
 {
   "_comment": "Shared declarative CREATE INDEX fixture matrix (#998). Single source of truth for valid + invalid CreateIndex cases, consumed by BOTH the Rust test (create_index_matrix.rs → CreateIndex::try_build) and the TS test (create_index_matrix.test.ts → createIndex()). Supersedes the flat create_index_try_build_msgpack.json — the 6 original valid-shape hex strings are merged here (single source of truth).",
   "_key_order_note": "rmp_serde::to_vec_named emits map keys in Rust STRUCT DECLARATION order: create_index, table, fields, unique, sorted, repo, then optional fields (index_type, fts_tokenizer, fts_language, functional_op, functional_args, vector_dim, vector_metric, vector_quantization, include, if_not_exists) in declaration order. The TS builder (ddl.ts createIndex) inserts keys in this same order so @msgpack/msgpack.encode (JS insertion order) produces byte-identical output for all field types involved (strings, bools, uint — no floats).",
+  "_check_order_note": "Rust (create_index.rs TryFrom<&CreateIndex> for IndexSpec) and TS (ddl.ts createIndex()) run their rejection checks in a DIFFERENT order: TS checks unique+sorted (UniqueAndSorted) FIRST, before its numbered checks (so it wins over e.g. EmptyFields on a multi-violation input), while Rust checks EmptyFields first (check 1) and UniqueAndSorted last (check 10, after the btree-family checks). No case in this matrix currently triggers two simultaneous violations, so no case exposes this divergence — but a future multi-violation case could get a different `reason_contains` winner in each language. Informational only; the check order is intentionally left unreconciled here.",
   "_value_notes": {
     "discriminator": "BatchOp::CreateIndex(CreateIndexOp) serializes as a single-key map — the first struct field create_index: String is the discriminator, and BatchOp's custom Serialize forwards directly to CreateIndexOp::serialize. So the wire bytes for BatchOp::CreateIndex(op) and CreateIndexOp are identical.",
     "bool_defaults": "unique=false → 0xc2 (msgpack false), NOT absent. CreateIndexOp uses #[serde(default)] for the bool fields, which means serde writes the default value (false) as msgpack false. Only if_not_exists uses skip_serializing_if=is_false (absent when false, 0xc3 when true).",
@@ -67,6 +68,12 @@
       "wire_hex": "87ac6372656174655f696e646578a76964785f696e65a57461626c65a57573657273a66669656c64739191a5656d61696ca6756e69717565c2a6736f72746564c2a47265706fa46d61696ead69665f6e6f745f657869737473c3"
     },
     {
+      "name": "vector_dim_one_accepted",
+      "input": { "name": "idx_vec_min", "table": "docs", "fields": [["embedding"]], "index_type": "vector", "vector_dim": 1 },
+      "expect": "accept",
+      "wire_hex": "88ac6372656174655f696e646578ab6964785f7665635f6d696ea57461626c65a4646f6373a66669656c64739191a9656d62656464696e67a6756e69717565c2a6736f72746564c2a47265706fa46d61696eaa696e6465785f74797065a6766563746f72aa766563746f725f64696d01"
+    },
+    {
       "name": "unique_and_sorted_rejected",
       "input": { "name": "idx_bad", "table": "users", "fields": [["email"]], "unique": true, "sorted": true },
       "expect": "reject",
@@ -105,6 +112,12 @@
     {
       "name": "vector_dim_required_rejected",
       "input": { "name": "idx_bad", "table": "docs", "fields": [["embedding"]], "index_type": "vector" },
+      "expect": "reject",
+      "reason_contains": "vector_dim"
+    },
+    {
+      "name": "vector_dim_zero_rejected",
+      "input": { "name": "idx_bad", "table": "docs", "fields": [["embedding"]], "index_type": "vector", "vector_dim": 0 },
       "expect": "reject",
       "reason_contains": "vector_dim"
     },

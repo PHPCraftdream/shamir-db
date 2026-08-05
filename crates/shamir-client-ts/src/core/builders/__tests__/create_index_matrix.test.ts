@@ -166,9 +166,14 @@ describe('create_index_matrix (shared fixture)', () => {
   });
 
   // ── Completeness: one reject case per error variant ──────────────────
+  //
+  // "At least" one per variant, not "exactly" — #1004 added a second
+  // VectorDimRequired case (`vector_dim_zero_rejected`, an explicit
+  // `vector_dim: 0` alongside the pre-existing omitted-dim case) as a
+  // boundary-value pair, so a variant can legitimately have >1 case.
 
-  it('has exactly 12 reject cases (one per CreateIndexBuildError variant)', () => {
-    expect(rejectCases.length).toBe(12);
+  it('has at least 12 reject cases (one per CreateIndexBuildError variant)', () => {
+    expect(rejectCases.length).toBeGreaterThanOrEqual(12);
   });
 
   it('has at least 9 accept cases (6 original + 3 additional)', () => {

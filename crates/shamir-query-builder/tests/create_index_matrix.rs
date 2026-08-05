@@ -220,6 +220,10 @@ fn matrix_all_reject_cases_fail_with_reason() {
 #[test]
 fn matrix_reject_cases_cover_all_error_variants() {
     // Confirm the matrix has at least one case per CreateIndexBuildError variant.
+    // Note: this is "at least one", not "exactly one" — #1004 added a second
+    // `VectorDimRequired` case (`vector_dim_zero_rejected`, an explicit
+    // `vector_dim: 0` alongside the pre-existing omitted-dim case) as a
+    // boundary-value pair, so a variant can legitimately have >1 case.
     let fx = load_fixture();
     let reject_names: Vec<&str> = fx
         .cases
@@ -251,10 +255,9 @@ fn matrix_reject_cases_cover_all_error_variants() {
         12,
         "sanity: expected exactly 12 error variants"
     );
-    assert_eq!(
-        reject_names.len(),
-        12,
-        "matrix must have exactly 12 reject cases (one per variant); got {reject_names:?}"
+    assert!(
+        reject_names.len() >= expected_variants.len(),
+        "matrix must have at least 12 reject cases (one per variant); got {reject_names:?}"
     );
 }
 
