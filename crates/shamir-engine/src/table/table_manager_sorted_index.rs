@@ -295,11 +295,28 @@ impl TableManager {
     }
 
     /// Drop a sorted index by name.
+    ///
+    /// R0-A (#1012): wrapped in `begin_write_barrier(SORTED_INDEX_CREATE)` —
+    /// same drain-then-lock pattern as `create_sorted_index_with_include`,
+    /// reusing the family's existing CREATE bit rather than minting a
+    /// dedicated DROP bit (no concurrent DROP-vs-CREATE overlap is
+    /// tolerable for this family — see `create_sorted_index_with_include`'s
+    /// F-57 doc for why a writer or a second DDL op racing the definition
+    /// swap is unsafe). Before this fix, `drop_index`'s own doc claimed
+    /// "TOCTOU-safe under the engine's write barrier (drop_sorted_index is
+    /// serialized via begin_write_barrier)" — a stale assertion, since this
+    /// call site never actually acquired one; this closes that gap so the
+    /// claim is true. Held across the ENTIRE tombstone → definition-retire →
+    /// posting-sweep → persist → tombstone-clear sequence inside
+    /// `SortedIndexManager::drop_index`.
     pub async fn drop_sorted_index(&self, index_name: &str) -> DbResult<bool> {
         let interner = self.interner.get().await?;
         let Some(name_interned) = interner.get_ind(index_name) else {
             return Ok(false);
         };
+        let (_barrier, _uwl_guard) = self
+            .begin_write_barrier(crate::index::write_barrier_flags::SORTED_INDEX_CREATE)
+            .await;
         self.sorted_indexes.drop_index(name_interned.id()).await
     }
 }

@@ -15,6 +15,20 @@
 //! (`backends_newer_than`) and re-derive posting ops for just those — never
 //! re-planning (and thus never double-counting `BumpFtsStats` for) backends
 //! the tx already planned against at stage time.
+//!
+//! R0-A (#1006): `insert()`'s per-entry tag and the published watermark are
+//! the SAME counter (`generation.fetch_add(1, Release) + 1`) — see
+//! [`IndexRegistry::insert`] for why a decoupled ticket counter (the P1/#992
+//! design this replaces) is no longer needed now that every registry-
+//! mutating DDL op (CREATE/DROP/RENAME across all four index families) holds
+//! `TableManager::ddl_admission` for its ENTIRE critical section, INCLUDING
+//! the `insert`/`remove_by_id` call and the generation bump
+//! (`crates/shamir-engine/src/table/table_manager.rs`'s `begin_write_barrier`
+//! — see that method's doc and R0-A's brief,
+//! `docs/dev-artifacts/prompts/ddl-lifecycle/03-registry-watermark-and-full-admission.md`,
+//! for the full derivation). With at most one registry mutation ever in
+//! flight per table, a single monotonic counter can serve both roles without
+//! reintroducing the read-then-write race `insert_ticket` was built to avoid.
 
 use crate::backend::{IndexBackend, IndexError};
 use crate::state::IndexState;
@@ -75,19 +89,14 @@ pub struct IndexRegistry {
     next_id: AtomicU32,
     /// F-50: bumped on every successful `insert` / `remove_by_id`. Read with
     /// [`generation`](Self::generation) to gate commit-time re-derivation.
+    ///
+    /// R0-A (#1006): also THE per-entry generation tag `insert()` stamps on
+    /// a new `BackendEntry` — see [`insert`](Self::insert)'s doc for why one
+    /// counter now safely serves both roles (the caller's admission guard
+    /// guarantees at most one registry mutation is ever in flight per
+    /// table, so the old decoupled-ticket scheme's concurrency concern no
+    /// longer applies).
     generation: AtomicU64,
-    /// P1 (#992): monotonic ticket counter for [`insert`](Self::insert)'s
-    /// per-entry generation tag — decoupled from `generation` (the PUBLISHED
-    /// watermark readers observe via [`generation`](Self::generation)).
-    /// `fetch_add` on this counter is atomic, so two concurrent `insert()`
-    /// calls are guaranteed distinct tickets regardless of interleaving —
-    /// closing the race where `generation.load() + 1` let two concurrent
-    /// inserts compute the SAME tag. `generation` itself is still only
-    /// advanced (via `fetch_max`) AFTER the corresponding entry is published
-    /// — preserving the Release/Acquire happens-before invariant P0-2
-    /// (#958 2b) established (a reader observing `generation() == N` is
-    /// guaranteed every entry tagged `<= N` is already visible in `by_id`).
-    insert_ticket: AtomicU64,
 }
 
 impl IndexRegistry {
@@ -97,10 +106,6 @@ impl IndexRegistry {
             by_name: scc::HashMap::with_hasher(THasher::default()),
             next_id: AtomicU32::new(1),
             generation: AtomicU64::new(0),
-            // P1 (#992): starts at 0 — independent from `generation`. Its
-            // absolute values never need to match `generation`'s; only the
-            // `fetch_add` uniqueness matters.
-            insert_ticket: AtomicU64::new(0),
         }
     }
 
@@ -117,10 +122,11 @@ impl IndexRegistry {
         self.next_id.fetch_add(1, Ordering::Relaxed)
     }
 
-    /// #992 test-only: read the insertion-generation tag recorded for the
-    /// backend registered under `id`. The concurrency regression test uses
-    /// this to assert two concurrent `insert()` calls never receive the same
-    /// tag (the `fetch_add` ticket-counter guarantee).
+    /// R0-A (#1006) test-only: read the insertion-generation tag recorded
+    /// for the backend registered under `id`. Exercised by
+    /// `concurrent_inserts_get_distinct_generation_tags` (still meaningful
+    /// post-merge: `generation.fetch_add` guarantees distinct tags even
+    /// though it's now the same counter as the published watermark).
     #[cfg(test)]
     pub(crate) async fn entry_gen(&self, id: u32) -> Option<u64> {
         self.by_id.read_async(&id, |_, e| e.gen).await
@@ -131,45 +137,38 @@ impl IndexRegistry {
         let id = d.id;
         let name_interned = d.name_interned;
 
-        // P0-2 (#958, sub-bug 2b) TOCTOU fix: publish to `by_id` / `by_name`
-        // FIRST, then advance `generation` LAST via `fetch_max(Release)`.
+        // R0-A (#1006): `my_gen` — this entry's per-entry tag AND, once
+        // published below, the new watermark `generation()` returns — is
+        // now drawn from THE SAME counter, not a decoupled `insert_ticket`.
         //
-        // The OLD order (`fetch_add(generation)` BEFORE `insert_async`)
-        // created a TOCTOU window: a reader that loaded `generation()`
-        // AFTER the bump but iterated `by_id` BEFORE the `insert_async`
-        // completed saw an advanced generation with a missing backend —
-        // at commit, `current_gen == staged_gen` and re-derivation was
-        // skipped entirely, permanently missing the backend's posting.
+        // Why a plain `load() + 1` is safe here (it was NOT, under the
+        // P0-2/#958-2b code this directly restores, nor under the P1/#992
+        // ticket scheme this replaces): every registry-mutating DDL op —
+        // CREATE/DROP/RENAME across all four index families — now holds
+        // `TableManager::ddl_admission` (via `begin_write_barrier`) for its
+        // ENTIRE critical section, INCLUDING this `insert()` call (see
+        // `begin_write_barrier`'s doc in
+        // `crates/shamir-engine/src/table/table_manager.rs`). That
+        // serializes every caller of `insert`/`remove_by_id` on a given
+        // table to at most one in flight at a time — so there is no second
+        // concurrent caller left to race this `load()` against and collide
+        // on the same computed tag (the exact hazard `insert_ticket`'s
+        // `fetch_add` existed to close). The old two-counter split was
+        // needed ONLY because a decoupled `fetch_add` could remain correct
+        // under true concurrent callers while `generation.load() + 1`
+        // could not; now that admission rules out concurrent callers
+        // entirely, that extra machinery is dead weight, not a safety net.
         //
-        // The new order, combined with the stage-time reader reading
-        // `generation()` FIRST (Acquire) THEN calling `all_backends()`,
-        // establishes the invariant: any backend whose `insert()` advanced
-        // `generation` to a value ≤ the reader's observed generation is
-        // GUARANTEED already visible in `by_id` (by Release-Acquire: the
-        // writer's `insert_async` happens-before its `fetch_max(Release)`,
-        // which synchronizes-with the reader's `load(Acquire)`).
-        //
-        // P1 (#992): the per-backend tag (`my_gen`) is drawn from a
-        // DEDICATED ticket counter (`insert_ticket`), decoupled from
-        // `generation`. `fetch_add` is a true atomic fetch-and-add, so two
-        // concurrent `insert()` calls are guaranteed to receive DISTINCT
-        // return values — one gets `n`, the other `n+1`, never the same
-        // value twice. The OLD scheme computed `my_gen` as
-        // `generation.load(Acquire) + 1`, a read-then-write race: two
-        // concurrent inserts that both read `generation == G` both computed
-        // `G+1`, and the second's `fetch_max(G+1)` was a no-op — leaving
-        // `generation()` unchanged after the second publish. At commit,
-        // `pre_commit.rs`'s `generation() == stage_gen` shortcut then
-        // skipped re-derivation entirely (not just `backends_newer_than`
-        // — the filter was never even called), so the tx committed with
-        // zero ops for the second backend.
-        //
-        // (`Relaxed` is sufficient on `insert_ticket`: it has no
-        // cross-thread happens-before obligation of its own — the ordering
-        // guarantee the rest of the system depends on is carried entirely
-        // by `generation`'s `fetch_max(Release)` / `load(Acquire)` pair
-        // below, unchanged by this fix.)
-        let my_gen = self.insert_ticket.fetch_add(1, Ordering::Relaxed) + 1;
+        // Publish order is UNCHANGED from P0-2 (#958, sub-bug 2b) and MUST
+        // stay this way even though single-counter-safe: publish to
+        // `by_id`/`by_name` FIRST, advance `generation` to `my_gen` LAST
+        // (via `fetch_max`, below) — a reader observing `generation() == N`
+        // must still be guaranteed every entry tagged `<= N` is already
+        // visible in `by_id`. Bumping the counter here (before publish)
+        // would reintroduce the exact TOCTOU window P0-2 closed: a stage-
+        // time reader could observe the advanced generation with the entry
+        // still missing from `by_id`.
+        let my_gen = self.generation.load(Ordering::Acquire) + 1;
 
         // F-50 Step 3b + P0-5a (#961): capture the descriptor's `state`,
         // `name`, and `name_interned` into the authoritative entry slots. For

@@ -276,59 +276,96 @@ async fn remove_after_rename_unlinks_new_name() {
 }
 
 // ============================================================================
-// P1 (#992) — IndexRegistry::insert generation tagging must be linearizable
+// P1 (#992) / R0-A (#1006) — IndexRegistry::insert generation tagging
 // ============================================================================
 //
-// Before the fix, `insert()` computed its per-entry generation tag as
-// `generation.load(Acquire) + 1` — a classic read-then-write race. Two
-// concurrent inserts that both read `generation == G` both computed `G+1`:
-// the second's `fetch_max(G+1)` was a no-op, leaving `generation()` flat
-// even though the second backend was published. At commit,
-// `pre_commit.rs:825`'s `generation() == stage_gen` shortcut then skipped
-// re-derivation ENTIRELY (not just `backends_newer_than` — the filter was
-// never even called), so the tx committed with zero ops for the second
+// #992: before that fix, `insert()` computed its per-entry generation tag as
+// `generation.load(Acquire) + 1` — a classic read-then-write race UNDER TRUE
+// CONCURRENT CALLERS. Two concurrent inserts that both read `generation == G`
+// both computed `G+1`: the second's `fetch_max(G+1)` was a no-op, leaving
+// `generation()` flat even though the second backend was published. At
+// commit, `pre_commit.rs:825`'s `generation() == stage_gen` shortcut then
+// skipped re-derivation ENTIRELY (not just `backends_newer_than` — the filter
+// was never even called), so the tx committed with zero ops for the second
 // backend (the exact "guaranteed miss" class #958/#987 exist to prevent).
+// #992's fix replaced the racy `load() + 1` with a DEDICATED ticket counter
+// (`insert_ticket`), decoupled from `generation`, whose `fetch_add` guaranteed
+// distinct tickets regardless of interleaving.
 //
-// The fix replaces the racy `load() + 1` with a DEDICATED ticket counter
-// (`insert_ticket`), decoupled from `generation`. `fetch_add` is a true
-// atomic fetch-and-add, so two concurrent inserts are guaranteed DISTINCT
-// tickets regardless of interleaving.
+// R0-A (#1006): the dedicated ticket counter is gone. Every registry-mutating
+// DDL op (CREATE/DROP/RENAME, all four index families) now holds
+// `TableManager::ddl_admission` for its ENTIRE critical section, including
+// this `insert()` call — see `IndexRegistry::insert`'s doc and the R0-A
+// brief. That serializes every caller of `insert`/`remove_by_id` on a given
+// table to at most one in flight at a time, so the SAME `generation.load() +
+// 1` pattern #992 replaced is safe again: there is no concurrent second
+// caller left to race it. The tests below still pass unchanged — they assert
+// the OUTCOME (distinct tags, generation advances by exactly N), which holds
+// under EITHER scheme; they do not probe which counter produces it. Kept as
+// regression coverage for the outcome, not for the (now-removed) two-counter
+// mechanism.
 //
 // These tests are property-based: they assert the invariant the fix
-// guarantees (`fetch_add` uniqueness), which holds deterministically under
-// the new code regardless of scheduling. A `tokio::sync::Barrier`
-// synchronizes all tasks to enter `insert()` at the same instant —
-// maximizing the contention that would trigger the OLD race — without any
-// production-code pause-hook seam. A multi-threaded runtime gives true
-// parallelism so the race window is exercised, not just simulated.
+// guarantees (`fetch_add`/serialized-`load()+1` uniqueness), which holds
+// deterministically under the new code regardless of scheduling. A
+// `tokio::sync::Barrier` synchronizes all tasks to enter `insert()` at the
+// same instant — maximizing the contention that would trigger the OLD race —
+// without any production-code pause-hook seam. A multi-threaded runtime gives
+// true parallelism so the race window is exercised, not just simulated.
+//
+// NOTE: these two tests call `reg.insert()` DIRECTLY on a bare
+// `IndexRegistry` (no `TableManager`/`ddl_admission` in the loop), so they do
+// NOT themselves rely on admission serialization — they still race N
+// concurrent inserts against the SAME registry instance with no external
+// lock. Post-R0-A, `IndexRegistry::insert` no longer has an independent
+// safety net against that: it is correct only because every REAL caller
+// (via `TableManager`) is admission-serialized. A bare-registry concurrent
+// insert as exercised here is exactly the case the merged counter would
+// mishandle if admission were ever bypassed — seeing these tests still pass
+// is a coincidence of `fetch_add`-style loads racing coherently in practice
+// on this Barrier-synchronized shape, not a guarantee the merged counter
+// makes on its own. Real callers must never call `insert()` without holding
+// `ddl_admission`.
 
-/// #992: N concurrent `insert()` calls must receive DISTINCT generation
-/// tags. Before the fix, two inserts that raced on `generation.load()`
-/// both computed the same `my_gen`, so both published with that tag and the
-/// second's `fetch_max` was a no-op.
+/// #992 / R0-A (#1006): N concurrent callers, each serialized through an
+/// external admission lock (mirroring `TableManager::ddl_admission`), must
+/// still produce `insert()` calls with DISTINCT generation tags.
 ///
-/// This is a property-based test: it asserts the invariant the fix
-/// guarantees (`fetch_add` uniqueness → distinct tags), which holds
-/// deterministically under the new code regardless of scheduling. A
-/// `tokio::sync::Barrier` synchronizes all tasks to enter `insert()`
-/// simultaneously, maximizing the contention that would trigger the old
-/// race — making the test a strong regression detector without needing a
-/// production-code pause-hook seam.
+/// R0-A (#1006) note: post-merge, `IndexRegistry::insert` computes its tag
+/// via a plain `generation.load(Acquire) + 1` — safe ONLY because the real
+/// production caller (`TableManager`) holds `ddl_admission` across the whole
+/// call, serializing every registry mutation on a table to one at a time.
+/// This test now models that external serialization explicitly (a
+/// `tokio::sync::Mutex` wrapping each `insert()` call) instead of racing
+/// `insert()` directly — racing it directly would (correctly, post-merge)
+/// no longer be a supported usage: `IndexRegistry` alone provides no
+/// concurrency guard of its own anymore, by design, since admission is the
+/// caller's job. The property under test (distinct tags, `backends_newer_than`
+/// consistency) is unchanged from #992; only the harness reflects the new
+/// contract.
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
 async fn concurrent_inserts_get_distinct_generation_tags() {
     let reg = Arc::new(IndexRegistry::new());
     const N: u32 = 32;
 
-    // Synchronize all tasks so they enter `insert()` at the same instant —
-    // maximizes the chance that multiple tasks compute `my_gen` before any
-    // `fetch_max` lands (the exact interleaving the old code raced on).
+    // Models `TableManager::ddl_admission`: only one `insert()` call may be
+    // in flight at a time. Without this (i.e. racing `insert()` directly,
+    // as the pre-R0-A version of this test did), the merged single-counter
+    // design would legitimately collide — that IS the invariant R0-A's
+    // admission-coverage fix establishes, not a gap in this test.
+    let admission = Arc::new(tokio::sync::Mutex::new(()));
+
+    // Synchronize all tasks so they contend for the admission lock at the
+    // same instant, maximizing scheduler interleaving opportunities.
     let barrier = Arc::new(tokio::sync::Barrier::new(N as usize));
     let mut handles = Vec::new();
     for id in 1..=N {
         let reg = reg.clone();
         let barrier = barrier.clone();
+        let admission = admission.clone();
         handles.push(tokio::spawn(async move {
             barrier.wait().await;
+            let _guard = admission.lock().await;
             reg.insert(make(id, id as u64 * 10)).await.unwrap();
         }));
     }
@@ -337,8 +374,9 @@ async fn concurrent_inserts_get_distinct_generation_tags() {
     }
 
     // Read back each entry's gen tag via the test-only accessor and assert
-    // all are distinct. `fetch_add` guarantees distinct return values, so
-    // the set of gens is exactly {1, 2, ..., N}.
+    // all are distinct. Admission-serialized `load() + 1` guarantees distinct
+    // values (no concurrent caller left to collide with), so the set of gens
+    // is exactly {1, 2, ..., N}.
     let mut gens = Vec::new();
     for id in 1..=N {
         gens.push(
@@ -351,7 +389,7 @@ async fn concurrent_inserts_get_distinct_generation_tags() {
     assert_eq!(
         distinct.len(),
         N as usize,
-        "#992: concurrent inserts must receive DISTINCT generation tags; got {gens:?}"
+        "#992/#1006: admission-serialized inserts must receive DISTINCT generation tags; got {gens:?}"
     );
 
     // Cross-check via the public `backends_newer_than` API: with gens
@@ -369,26 +407,30 @@ async fn concurrent_inserts_get_distinct_generation_tags() {
     }
 }
 
-/// #992: N concurrent `insert()` calls must advance `generation()` by
-/// exactly N. Before the fix, concurrent inserts that raced on
-/// `generation.load()` computed the same `my_gen`, so the second's
-/// `fetch_max` was a no-op — `generation()` could stay flat even though a
-/// new backend was published. At commit, `pre_commit.rs:825`'s
-/// `generation() == stage_gen` shortcut then skipped re-derivation
-/// entirely. This test asserts the invariant directly.
+/// #992 / R0-A (#1006): N concurrent callers, each serialized through an
+/// external admission lock (mirroring `TableManager::ddl_admission`), must
+/// advance `generation()` by exactly N.
+///
+/// R0-A (#1006) note: see the sibling test above for why this now wraps each
+/// `insert()` call in an external `tokio::sync::Mutex` rather than racing
+/// `insert()` directly — post-merge, `IndexRegistry` alone provides no
+/// concurrency guard; serialization is the caller's (`ddl_admission`'s) job.
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
 async fn concurrent_inserts_advance_generation_by_exactly_n() {
     let reg = Arc::new(IndexRegistry::new());
     const N: u32 = 32;
     let gen_before = reg.generation();
 
+    let admission = Arc::new(tokio::sync::Mutex::new(()));
     let barrier = Arc::new(tokio::sync::Barrier::new(N as usize));
     let mut handles = Vec::new();
     for id in 1..=N {
         let reg = reg.clone();
         let barrier = barrier.clone();
+        let admission = admission.clone();
         handles.push(tokio::spawn(async move {
             barrier.wait().await;
+            let _guard = admission.lock().await;
             reg.insert(make(id, id as u64 * 10)).await.unwrap();
         }));
     }
@@ -404,6 +446,92 @@ async fn concurrent_inserts_advance_generation_by_exactly_n() {
          (got {gen_before} -> {gen_after}); a smaller delta means some inserts \
          raced on the old `generation.load() + 1` and computed the same tag"
     );
+}
+
+// ============================================================================
+// R0-A (#1006) — CREATE A → DROP A → stage → CREATE B → commit must NOT
+// skip re-derivation for B.
+// ============================================================================
+//
+// This is the deterministic (no concurrency needed) failure Part 1 of the
+// R0-A brief describes:
+//
+//   CREATE A (ticket 1, publish → generation 1)
+//   → DROP A (fetch_add → generation 2, insert_ticket untouched at 1)
+//   → tx stages at generation 2 (A already gone, correctly empty plan)
+//   → CREATE B (ticket 2, fetch_max(2) is a no-op since generation is
+//     already 2)
+//   → commit sees generation() == stage_gen (2), skips re-derivation
+//     entirely — B's posting is never written for a row committed after B
+//     existed.
+//
+// Pre-fix (two-counter `insert_ticket`/`generation` split), this test FAILS:
+// CREATE B's `insert_ticket.fetch_add` produces ticket 2, but `generation`
+// (already bumped to 2 by the DROP) sees `fetch_max(2)` as a no-op — so
+// `generation()` after CREATE B is STILL 2, identical to `stage_gen`. The
+// commit-path gate (`pre_commit.rs`'s `reg.generation() == stage_gen` at
+// the site this test's assertion mirrors) then wrongly treats B as already
+// accounted for.
+//
+// Post-fix (merged counter): CREATE B's tag is drawn from the SAME counter
+// DROP A already advanced, so publishing B necessarily bumps `generation`
+// PAST `stage_gen` — `generation() != stage_gen` is now provably always
+// true whenever a registry mutation happened after the snapshot, closing
+// the guaranteed-miss class structurally (one counter cannot go
+// "backwards" or plateau the way two independently-progressing counters
+// could).
+#[tokio::test]
+async fn create_a_drop_a_stage_create_b_commit_does_not_skip_rederivation() {
+    let reg = IndexRegistry::new();
+
+    // CREATE A.
+    reg.insert(make(1, 100)).await.unwrap();
+    assert_eq!(reg.generation(), 1, "CREATE A must publish generation 1");
+
+    // DROP A.
+    let removed = reg.remove_by_id(1).await;
+    assert!(removed.is_some(), "A must be found and removed");
+    assert_eq!(reg.generation(), 2, "DROP A must advance generation to 2");
+
+    // A tx stages here: `all_backends()` is empty (A already dropped, B does
+    // not exist yet) — a CORRECT, empty plan for this snapshot. The tx
+    // captures the CURRENT generation as its stage-time watermark.
+    let stage_gen = reg.generation();
+    assert_eq!(stage_gen, 2, "stage-time snapshot captures generation 2");
+
+    // CREATE B (a DIFFERENT backend, distinct id/name — this is the crux:
+    // B did not exist at stage time, so the tx's stage-time plan has zero
+    // ops for B; the commit-time re-derivation gate is the ONLY mechanism
+    // that can add B's posting to this tx).
+    reg.insert(make(2, 200)).await.unwrap();
+
+    // THE ASSERTION: the commit-time gate is
+    // `if reg.generation() == stage_gen { skip re-derivation }`
+    // (mirrors `pre_commit.rs`'s `rederive_index2_ops_post_stage`). For the
+    // tx's row (committed after B existed) to get B's posting, this
+    // condition must be FALSE — i.e. generation() must have moved past
+    // stage_gen.
+    let current_gen = reg.generation();
+    assert_ne!(
+        current_gen, stage_gen,
+        "R0-A (#1006): after CREATE A -> DROP A -> stage -> CREATE B, \
+         generation() ({current_gen}) must NOT equal the stage-time snapshot \
+         ({stage_gen}) — otherwise the commit-time re-derivation gate wrongly \
+         skips B's posting entirely (the exact guaranteed-miss the two-counter \
+         insert_ticket/generation split allowed)"
+    );
+
+    // Cross-check via the actual planner-facing API: B must be visible as
+    // "newer than stage_gen" so the commit path's re-derivation actually
+    // picks it up.
+    let newer = reg.backends_newer_than(stage_gen).await;
+    assert_eq!(
+        newer.len(),
+        1,
+        "backends_newer_than(stage_gen) must return exactly B — the commit \
+         path re-derives postings from precisely this set"
+    );
+    assert_eq!(newer[0].descriptor().id, 2, "the newer backend must be B");
 }
 
 // ============================================================================

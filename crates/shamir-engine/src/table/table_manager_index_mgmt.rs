@@ -41,6 +41,61 @@ impl TableManager {
             };
         }
 
+        // P0-3b (#988) sub-bug 3b: namespace-reuse guard. Reject CREATE for
+        // a name whose DROP is still in flight. The tombstone stores descriptor
+        // ids (`Vec<u32>`), so we resolve each tombstoned id's name via the
+        // persisted metadata (the durable record) and check for a match with
+        // `op.create_index`. Mirrors `SortedIndexManager::register`'s guard
+        // (#972) — adapted for index2's id-based tombstone. On the normal path
+        // (no tombstone), this is a single cheap load that returns an empty vec.
+        //
+        // R0-A (#1012): this check MUST run BEFORE `begin_write_barrier`
+        // below, not after (moved here from immediately after the barrier
+        // acquisition). Reason: `drop_index2` (R0-A) now holds
+        // `ddl_admission` for its ENTIRE critical section, including while
+        // parked at its pre-sweep test hook — so a `create_index_v2` that
+        // took the barrier FIRST would block on the SAME per-table
+        // `ddl_admission` mutex until the in-flight drop fully completes,
+        // never reaching this tombstone check at all. That reintroduces a
+        // deadlock against the P0-3b (#988) test design, which requires
+        // `create_index_v2` to observe an in-flight drop's tombstone and
+        // reject QUICKLY (without waiting for the drop to finish) —
+        // confirmed by `p03b_index2_name_reuse_rejected_during_drop`
+        // (`table/tests/p03b_index2_drop_durability_tests.rs`), which timed
+        // out under nextest's 180s bound when this check ran after the
+        // barrier. Running the check first, cheaply, without holding
+        // admission, restores that fast-reject behavior.
+        //
+        // This reordering does not weaken the guard: the check still runs
+        // again for free effectively, because if a DROP starts and takes
+        // `ddl_admission` between this pre-check and our own
+        // `begin_write_barrier` call below, OUR barrier call simply blocks
+        // until that drop's entire critical section (including its
+        // tombstone clear) has completed — by the time we're admitted, the
+        // tombstone is gone and there is nothing left to reject against.
+        // The only residual is a benign race in caller-ordering (a CREATE
+        // issued microseconds before a DROP starts may "win" and proceed
+        // once the DROP releases admission, rather than being rejected) —
+        // not a correctness bug: no double-registration, no orphaned
+        // postings, no stale tombstone state.
+        let dropping_ids =
+            crate::index2::persistence::load_dropping_index2(&self.info_store).await?;
+        if !dropping_ids.is_empty() {
+            if let Some(persisted) =
+                crate::index2::persistence::load_index2_metadata(&self.info_store).await?
+            {
+                for d in &persisted.descriptors {
+                    if dropping_ids.contains(&d.id) && d.name == op.create_index {
+                        return Err(shamir_storage::error::DbError::Internal(format!(
+                            "Cannot create index '{}': a DROP INDEX for this name is \
+                             still in progress. Retry after the drop completes.",
+                            op.create_index
+                        )));
+                    }
+                }
+            }
+        }
+
         // #534 finding 1 (write-barrier, Option B — mirrors
         // `create_unique_index`'s own audit-A9 precedent). Hold the table-wide
         // `unique_write_lock` across the ENTIRE reserve-id → backfill →
@@ -85,31 +140,6 @@ impl TableManager {
         let (_barrier, _uwl_guard) = self
             .begin_write_barrier(crate::index::write_barrier_flags::INDEX2_CREATE)
             .await;
-
-        // P0-3b (#988) sub-bug 3b: namespace-reuse guard. Reject CREATE for
-        // a name whose DROP is still in flight. The tombstone stores descriptor
-        // ids (`Vec<u32>`), so we resolve each tombstoned id's name via the
-        // persisted metadata (the durable record) and check for a match with
-        // `op.create_index`. Mirrors `SortedIndexManager::register`'s guard
-        // (#972) — adapted for index2's id-based tombstone. On the normal path
-        // (no tombstone), this is a single cheap load that returns an empty vec.
-        let dropping_ids =
-            crate::index2::persistence::load_dropping_index2(&self.info_store).await?;
-        if !dropping_ids.is_empty() {
-            if let Some(persisted) =
-                crate::index2::persistence::load_index2_metadata(&self.info_store).await?
-            {
-                for d in &persisted.descriptors {
-                    if dropping_ids.contains(&d.id) && d.name == op.create_index {
-                        return Err(shamir_storage::error::DbError::Internal(format!(
-                            "Cannot create index '{}': a DROP INDEX for this name is \
-                             still in progress. Retry after the drop completes.",
-                            op.create_index
-                        )));
-                    }
-                }
-            }
-        }
 
         let interner = self.interner.get().await?;
         let mut interned_paths: SmallVec<[Vec<u64>; 2]> = SmallVec::new();
@@ -874,6 +904,19 @@ impl TableManager {
     /// # Returns
     /// `true` if a backend existed and was removed, `false` if no index2
     /// backend is registered under `name`.
+    ///
+    /// R0-A (#1012): wrapped in `begin_write_barrier(INDEX2_CREATE)` — reuses
+    /// the family's existing CREATE bit (mirrors `drop_sorted_index`'s
+    /// reasoning: no legitimate case needs a concurrent CREATE/DROP/RENAME
+    /// pair racing the SAME index2 backend, and a dedicated DROP bit would
+    /// only let an unrelated CREATE proceed unserialized against this drop's
+    /// registry mutation). Held across the ENTIRE tombstone → registry
+    /// `remove_by_id` → posting-sweep → metadata-persist → tombstone-clear
+    /// sequence below — before this fix, NOTHING serialized this method
+    /// against a concurrent CREATE/DROP/RENAME on the same table, so two
+    /// registry-mutating DDL ops could race `IndexRegistry`'s ticket/
+    /// generation bookkeeping (see `IndexRegistry`'s doc for the scenario
+    /// this closes).
     pub async fn drop_index2(&self, name: &str) -> DbResult<bool> {
         let interner = self.interner.get().await?;
         // `get_ind` is a pure lookup (does NOT mint a new id), so dropping a
@@ -881,6 +924,9 @@ impl TableManager {
         let Some(name_key) = interner.get_ind(name) else {
             return Ok(false);
         };
+        let (_barrier, _uwl_guard) = self
+            .begin_write_barrier(crate::index::write_barrier_flags::INDEX2_CREATE)
+            .await;
         let Some(backend) = self.index2_registry.get_by_name(name_key.id()).await else {
             return Ok(false);
         };
@@ -1655,7 +1701,17 @@ impl TableManager {
         // write-hook starts writing under new_id immediately; the rekey's
         // settle re-scan then catches any old-id entry a concurrent writer
         // landed in the brief rename→rekey window.
+        //
+        // R0-A (#1012): wrapped in `begin_write_barrier(SORTED_INDEX_CREATE)` —
+        // reuses the family's CREATE bit (same reasoning as `drop_sorted_index`),
+        // held across the ENTIRE tombstone → definition-swap → rekey →
+        // tombstone-clear sequence inside `rename_index_sorted`. Before this
+        // fix, nothing serialized this rename against a concurrent CREATE/
+        // DROP/RENAME on the same table's sorted family.
         if is_sorted {
+            let (_barrier, _uwl_guard) = self
+                .begin_write_barrier(crate::index::write_barrier_flags::SORTED_INDEX_CREATE)
+                .await;
             self.sorted_indexes
                 .rename_index_sorted(old_id, new_id)
                 .await?;
@@ -1665,7 +1721,18 @@ impl TableManager {
         // Physical posting entries are keyed by `index_id` (u32), not by
         // name_interned — no data movement needed. Only the by_name lookup
         // table in the registry changes, plus the persisted metadata.
+        //
+        // R0-A (#1012): wrapped in `begin_write_barrier(INDEX2_CREATE)` —
+        // reuses the family's CREATE bit (same reasoning as `drop_index2`),
+        // held across the `rename_entry` registry mutation AND the metadata
+        // persist below. Before this fix, nothing serialized this rename
+        // against a concurrent CREATE/DROP/RENAME on the same table's index2
+        // family — two registry-mutating ops could race `IndexRegistry`'s
+        // ticket/generation bookkeeping.
         if is_index2 {
+            let (_barrier, _uwl_guard) = self
+                .begin_write_barrier(crate::index::write_barrier_flags::INDEX2_CREATE)
+                .await;
             // rename_entry moves the by_name mapping old_id → new_id AND
             // updates the authoritative name slots in the by_id entry so the
             // rename survives `save_index2_metadata` (P0-5a / #961: without
