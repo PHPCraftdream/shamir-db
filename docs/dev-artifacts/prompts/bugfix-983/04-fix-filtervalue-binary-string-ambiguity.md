@@ -1,8 +1,11 @@
 # Brief — #983 fix (round 2): `FilterValue::Binary` misclassified as `String` on real wire input
 
-Task: #983. **This is a follow-up to the just-landed fix** (compare_values/
-scalar_ref_cmp/scalar_ref_cmp_qv Bin arms — already committed). That fix is
-CORRECT and necessary but **not sufficient**: personally re-verifying the
+Task: #983. **This is a follow-up to the just-applied fix** (compare_values/
+scalar_ref_cmp/scalar_ref_cmp_qv Bin arms — already implemented and gate-
+verified in the working tree, but NOT YET committed; you will see these as
+uncommitted changes via `git status`/`git diff` — that is expected, leave
+them exactly as they are). That fix is CORRECT and necessary but **not
+sufficient**: personally re-verifying the
 prior fix end-to-end (fresh `cargo build --release -p shamir-server`, fresh
 napi `.node` rebuild, real JS e2e run against both) still showed
 `filter.eq('blob', filter.bin([1,2,3]))` returning zero rows against a real
