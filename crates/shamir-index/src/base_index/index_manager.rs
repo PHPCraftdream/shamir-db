@@ -260,6 +260,21 @@ pub struct IndexManager {
     /// site. Mirrors #962's `rename_rekey_pause_hook`.
     pub(super) rename_mid_pause_hook:
         Arc<arc_swap::ArcSwapOption<crate::base_index::backfill_pause_hook::BackfillPauseHook>>,
+
+    /// #997 post-review fix (task #1000): test-only deterministic pause
+    /// point that fires in `TableManager::recover_hash_renames`'s
+    /// per-family loop, AFTER one tombstone entry has been fully
+    /// reconciled but BEFORE the next entry (or the final
+    /// `clear_all_renaming`) is processed. A regression test installs this
+    /// hook to simulate recovery being interrupted between two stranded
+    /// tombstone entries — the exact window that exposed the bug where a
+    /// per-entry `clear_from_renaming` call (deriving its snapshot from the
+    /// always-empty-at-open-time `renaming_regular`/`renaming_unique` maps)
+    /// silently discarded a not-yet-processed sibling entry's tombstone.
+    /// NOT `#[cfg(test)]`-gated — cross-crate test consumer, same reason as
+    /// `rename_mid_pause_hook`. `None` on every real path.
+    pub(super) recover_renames_between_entries_hook:
+        Arc<arc_swap::ArcSwapOption<crate::base_index::backfill_pause_hook::BackfillPauseHook>>,
 }
 
 impl Clone for IndexManager {
@@ -281,6 +296,9 @@ impl Clone for IndexManager {
             renaming_regular: Arc::clone(&self.renaming_regular),
             renaming_unique: Arc::clone(&self.renaming_unique),
             rename_mid_pause_hook: Arc::clone(&self.rename_mid_pause_hook),
+            recover_renames_between_entries_hook: Arc::clone(
+                &self.recover_renames_between_entries_hook,
+            ),
         }
     }
 }
@@ -395,6 +413,7 @@ impl IndexManager {
             renaming_regular: Arc::new(Mutex::new(BTreeMap::new())),
             renaming_unique: Arc::new(Mutex::new(BTreeMap::new())),
             rename_mid_pause_hook: Arc::new(arc_swap::ArcSwapOption::empty()),
+            recover_renames_between_entries_hook: Arc::new(arc_swap::ArcSwapOption::empty()),
         };
 
         // P0-3 (#959): resume any in-progress DROP INDEX operations that were
@@ -466,6 +485,28 @@ impl IndexManager {
     /// `ArcSwapOption::load_full()` Acquire load.
     pub async fn maybe_pause_rename_mid(&self) {
         if let Some(hook) = self.rename_mid_pause_hook.load_full() {
+            hook.wait_at_window().await;
+        }
+    }
+
+    /// #997 post-review fix (task #1000) test-only: install (or clear with
+    /// `None`) the deterministic pause point fired between entries in
+    /// `TableManager::recover_hash_renames`'s per-family reconciliation
+    /// loop. See the field's doc for the crash window this simulates.
+    pub fn set_recover_renames_between_entries_hook(
+        &self,
+        hook: Option<Arc<crate::base_index::backfill_pause_hook::BackfillPauseHook>>,
+    ) {
+        self.recover_renames_between_entries_hook.store(hook);
+    }
+
+    /// #997 post-review fix (task #1000) test-only: fire the
+    /// between-entries recovery pause hook if installed. Called by
+    /// `TableManager::recover_hash_renames` after each tombstone entry is
+    /// fully reconciled. `None` on every real path — one uncontended
+    /// `ArcSwapOption::load_full()` Acquire load.
+    pub async fn maybe_pause_recover_renames_between_entries(&self) {
+        if let Some(hook) = self.recover_renames_between_entries_hook.load_full() {
             hook.wait_at_window().await;
         }
     }
@@ -806,6 +847,41 @@ impl IndexManager {
         {
             let mut map = renaming.lock().unwrap();
             map.remove(&old_name_interned);
+        }
+        Ok(())
+    }
+
+    /// #997 (post-review fix): clear the ENTIRE persisted rename tombstone
+    /// list for one family by writing an explicit empty `Vec`, bypassing the
+    /// in-memory `renaming_regular`/`renaming_unique` map entirely.
+    ///
+    /// `TableManager::recover_hash_renames` MUST use this once per family
+    /// after its whole reconciliation loop finishes, NOT `clear_from_renaming`
+    /// per entry. At open time `renaming_regular`/`renaming_unique` start
+    /// empty (`IndexManager::new`) and `load_renaming_list` never rehydrates
+    /// them — it only returns a local `Vec`. So a per-entry
+    /// `clear_from_renaming` call during recovery would derive its snapshot
+    /// from that empty map and persist `[]` after the FIRST entry, silently
+    /// discarding the durable tombstone for every NOT-YET-recovered entry. If
+    /// recovery then failed or the process crashed again before finishing the
+    /// remaining entries, their stranded state would become permanently
+    /// invisible on the next restart. Mirrors #959's `recover_in_progress_drops`,
+    /// which writes an explicit empty `Vec<u64>` once after its loop instead
+    /// of calling `clear_from_dropping` per entry.
+    pub async fn clear_all_renaming(&self, is_unique: bool) -> DbResult<()> {
+        let renaming = if is_unique {
+            &self.renaming_unique
+        } else {
+            &self.renaming_regular
+        };
+        let key_str = if is_unique { "uidx_ren" } else { "idx_ren" };
+        let key = RecordId::system(key_str).to_bytes();
+        let empty = bincode::serialize(&Vec::<HashRenameTombstone>::new())
+            .map_err(|e| shamir_storage::error::DbError::Codec(e.to_string()))?;
+        self.info_store.set(key.into(), Bytes::from(empty)).await?;
+        {
+            let mut map = renaming.lock().unwrap();
+            map.clear();
         }
         Ok(())
     }

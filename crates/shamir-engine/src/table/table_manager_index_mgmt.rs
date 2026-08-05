@@ -1123,11 +1123,26 @@ impl TableManager {
                 self.drop_index(&entry.old_name).await?;
             }
 
-            // Step 3: clear the tombstone.
-            let old_id = self.intern_string(&entry.old_name).await?;
+            // #1000 test seam — park here (this entry fully reconciled, the
+            // tombstone list not yet cleared) if a test installed the
+            // between-entries pause hook. This is the exact window a
+            // regression test uses to prove a not-yet-processed sibling
+            // entry's tombstone survives an interruption here.
             self.index_manager
-                .clear_from_renaming(false, old_id)
-                .await?;
+                .maybe_pause_recover_renames_between_entries()
+                .await;
+        }
+
+        // Step 3: clear the WHOLE regular tombstone list once, after every
+        // loaded entry has been reconciled — NOT per-entry via
+        // `clear_from_renaming` (see `IndexManager::clear_all_renaming`'s doc
+        // comment for why a per-entry clear during recovery would silently
+        // discard not-yet-processed entries: `renaming_regular` is empty at
+        // open time, so `clear_from_renaming`'s snapshot-from-in-memory-map
+        // would persist `[]` after the FIRST entry, stranding any later
+        // entry's tombstone if recovery then failed or crashed again).
+        if !regular_renames.is_empty() {
+            self.index_manager.clear_all_renaming(false).await?;
         }
 
         // ── Unique family ───────────────────────────────────────────────
@@ -1171,9 +1186,18 @@ impl TableManager {
                 self.drop_unique_index(&entry.old_name).await?;
             }
 
-            // Step 3: clear the tombstone.
-            let old_id = self.intern_string(&entry.old_name).await?;
-            self.index_manager.clear_from_renaming(true, old_id).await?;
+            // #1000 test seam — same between-entries pause point as the
+            // regular family above.
+            self.index_manager
+                .maybe_pause_recover_renames_between_entries()
+                .await;
+        }
+
+        // Step 3: clear the WHOLE unique tombstone list once, after every
+        // loaded entry has been reconciled — same reasoning as the regular
+        // family above.
+        if !unique_renames.is_empty() {
+            self.index_manager.clear_all_renaming(true).await?;
         }
 
         log::info!(
