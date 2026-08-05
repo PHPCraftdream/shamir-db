@@ -530,7 +530,7 @@ jobs:
           ARCHIVE="shamir-server-${{ github.ref_name }}-${{ matrix.target }}.zip"
           sha256sum "${ARCHIVE}" > "${ARCHIVE}.sha256"
       - name: Upload archive artifact
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
           name: binary-${{ matrix.target }}
           path: |
@@ -688,7 +688,7 @@ jobs:
           find crates -name '*.cdx.json' -exec cp {} sbom/ \;
           ls -1 sbom/
       - name: Upload SBOM artifact
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
           name: sbom-cyclonedx
           path: sbom/*.cdx.json
@@ -741,7 +741,7 @@ jobs:
             exit 1
           fi
       - name: Upload signature artifacts
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
           name: signatures
           path: |
