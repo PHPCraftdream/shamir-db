@@ -27,8 +27,21 @@ impl ShamirAdminExecutor {
 
         validate_name_component(&op.create_db, "db_name")?;
 
+        // Auth runs BEFORE the if_not_exists existence probe (#995): an
+        // unauthorized caller must not be able to learn whether a database
+        // they have no Create right on already exists, by toggling
+        // if_not_exists (or relying on the duplicate-error path) and observing
+        // the distinguishable outcomes (silent {"existed": true} no-op /
+        // "exists" error vs access_denied). This is a pre-auth existence
+        // oracle otherwise. Mirrors #989's fix for handle_drop_index/
+        // handle_rename_index.
+        self.shamir
+            .authorize_access(&self.actor, &ResourcePath::Root, Action::Create)
+            .await
+            .map_err(err_access)?;
+
         // TOCTOU close (task #546): hold `db_create_lock` across the WHOLE
-        // exists-check -> authorize -> create sequence, so two concurrent
+        // exists-check -> create sequence, so two concurrent
         // `CREATE DATABASE` (or `IF NOT EXISTS`) calls for the SAME name
         // can't both observe "does not exist" and both proceed to create.
         // The audit framed this as narrow (create already happens under an
@@ -52,10 +65,6 @@ impl ShamirAdminExecutor {
             ));
         }
         self.shamir
-            .authorize_access(&self.actor, &ResourcePath::Root, Action::Create)
-            .await
-            .map_err(err_access)?;
-        self.shamir
             .create_db_as(&op.create_db, self.actor.clone())
             .await;
         Ok(admin_result(mpack!({
@@ -77,14 +86,12 @@ impl ShamirAdminExecutor {
         let err_access =
             |e: shamir_types::access::AccessError| err_code("access_denied", e.to_string());
 
-        // if_exists early-exit: missing db → no-op.
-        if op.if_exists && !self.shamir.has_db(&op.drop_db) {
-            return Ok(admin_result(mpack!({
-                "dropped": @(QueryValue::Str(op.drop_db.clone())),
-                "existed": false,
-            })));
-        }
-
+        // Auth runs BEFORE the if_exists existence probe (#995): an
+        // unauthorized caller must not be able to learn whether a database
+        // they have no Delete right on exists, by toggling if_exists and
+        // observing the distinguishable outcomes (silent {"existed": false}
+        // no-op vs access_denied). This is a pre-auth existence oracle
+        // otherwise. Mirrors #989's fix for handle_drop_index/handle_rename_index.
         self.shamir
             .authorize_access(
                 &self.actor,
@@ -93,6 +100,15 @@ impl ShamirAdminExecutor {
             )
             .await
             .map_err(err_access)?;
+
+        // if_exists early-exit: missing db → no-op.
+        if op.if_exists && !self.shamir.has_db(&op.drop_db) {
+            return Ok(admin_result(mpack!({
+                "dropped": @(QueryValue::Str(op.drop_db.clone())),
+                "existed": false,
+            })));
+        }
+
         // Referential integrity: check for child repositories.
         if let Some(db) = self.shamir.get_db(&op.drop_db) {
             let repos = db.list_repos();
@@ -170,8 +186,27 @@ impl ShamirAdminExecutor {
         validate_name_component(&self.db_name, "db_name")?;
         validate_name_component(&op.create_repo, "repo_name")?;
 
+        // Auth runs BEFORE the if_not_exists existence probe (#995): an
+        // unauthorized caller must not be able to learn whether a repository
+        // they have no Create right on already exists, by toggling
+        // if_not_exists (or relying on the duplicate-error path) and observing
+        // the distinguishable outcomes (silent {"existed": true} no-op /
+        // "exists" error vs access_denied). This is a pre-auth existence
+        // oracle otherwise. Mirrors #989's fix for handle_drop_index/
+        // handle_rename_index.
+        self.shamir
+            .authorize_access(
+                &self.actor,
+                &ResourcePath::Database {
+                    db: self.db_name.clone(),
+                },
+                Action::Create,
+            )
+            .await
+            .map_err(err_access)?;
+
         // TOCTOU close (task #546): hold a per-db lock across the WHOLE
-        // exists-check -> authorize -> create sequence, so two concurrent
+        // exists-check -> create sequence, so two concurrent
         // `CREATE REPO` (or `IF NOT EXISTS`) calls for the same (db, repo)
         // name can't both observe "does not exist" and both proceed to
         // create. Keyed by `db_name` (not globally) so repo creation in
@@ -204,17 +239,6 @@ impl ShamirAdminExecutor {
                 ));
             }
         }
-
-        self.shamir
-            .authorize_access(
-                &self.actor,
-                &ResourcePath::Database {
-                    db: self.db_name.clone(),
-                },
-                Action::Create,
-            )
-            .await
-            .map_err(err_access)?;
 
         let factory = match op.engine.as_deref() {
             Some("in_memory") => BoxRepoFactory::in_memory(),
@@ -306,6 +330,21 @@ impl ShamirAdminExecutor {
         let err_access =
             |e: shamir_types::access::AccessError| err_code("access_denied", e.to_string());
 
+        // Auth runs BEFORE the if_exists existence probe (#995): an
+        // unauthorized caller must not be able to learn whether a repository
+        // they have no Delete right on exists, by toggling if_exists and
+        // observing the distinguishable outcomes (silent {"existed": false}
+        // no-op vs access_denied). This is a pre-auth existence oracle
+        // otherwise. Mirrors #989's fix for handle_drop_index/handle_rename_index.
+        self.shamir
+            .authorize_access(
+                &self.actor,
+                &ResourcePath::store(self.db_name.clone(), op.drop_repo.clone()),
+                Action::Delete,
+            )
+            .await
+            .map_err(err_access)?;
+
         // if_exists early-exit: missing db or repo → no-op.
         if op.if_exists {
             let exists = self
@@ -320,14 +359,6 @@ impl ShamirAdminExecutor {
             }
         }
 
-        self.shamir
-            .authorize_access(
-                &self.actor,
-                &ResourcePath::store(self.db_name.clone(), op.drop_repo.clone()),
-                Action::Delete,
-            )
-            .await
-            .map_err(err_access)?;
         // Referential integrity: check for child tables.
         if let Some(db) = self.shamir.get_db(&self.db_name) {
             if let Ok(tables) = db.list_tables(&op.drop_repo) {

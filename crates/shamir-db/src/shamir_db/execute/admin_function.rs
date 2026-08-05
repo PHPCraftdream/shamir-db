@@ -117,14 +117,12 @@ impl ShamirAdminExecutor {
         let err_access =
             |e: shamir_types::access::AccessError| err_code("access_denied", e.to_string());
 
-        // if_exists early-exit: function not registered → no-op.
-        if op.if_exists && !self.shamir.functions().contains(&op.drop_function) {
-            return Ok(admin_result(mpack!({
-                "dropped_function": @(QueryValue::Str(op.drop_function.clone())),
-                "existed": false,
-            })));
-        }
-
+        // Auth runs BEFORE the if_exists existence probe (#995): an
+        // unauthorized caller must not be able to learn whether a function
+        // they have no Delete right on exists, by toggling if_exists and
+        // observing the distinguishable outcomes (silent {"existed": false}
+        // no-op vs access_denied). This is a pre-auth existence oracle
+        // otherwise. Mirrors #989's fix for handle_drop_index/handle_rename_index.
         self.shamir
             .authorize_access(
                 &self.actor,
@@ -135,6 +133,14 @@ impl ShamirAdminExecutor {
             )
             .await
             .map_err(err_access)?;
+
+        // if_exists early-exit: function not registered → no-op.
+        if op.if_exists && !self.shamir.functions().contains(&op.drop_function) {
+            return Ok(admin_result(mpack!({
+                "dropped_function": @(QueryValue::Str(op.drop_function.clone())),
+                "existed": false,
+            })));
+        }
 
         // Phase D.3 — bound-validator drop guard.
         //

@@ -96,6 +96,21 @@ impl ShamirAdminExecutor {
         let err_access =
             |e: shamir_types::access::AccessError| err_code("access_denied", e.to_string());
 
+        // Auth runs BEFORE the if_exists existence probe (#995): an
+        // unauthorized caller must not be able to learn whether a validator
+        // they have no Delete right on exists, by toggling if_exists and
+        // observing the distinguishable outcomes (silent {"existed": false}
+        // no-op vs access_denied). This is a pre-auth existence oracle
+        // otherwise. Mirrors #989's fix for handle_drop_index/handle_rename_index.
+        self.shamir
+            .authorize_access(
+                &self.actor,
+                &ResourcePath::FunctionNamespace,
+                Action::Delete,
+            )
+            .await
+            .map_err(err_access)?;
+
         // if_exists early-exit: validator not registered → no-op.
         if op.if_exists
             && self
@@ -110,14 +125,6 @@ impl ShamirAdminExecutor {
             })));
         }
 
-        self.shamir
-            .authorize_access(
-                &self.actor,
-                &ResourcePath::FunctionNamespace,
-                Action::Delete,
-            )
-            .await
-            .map_err(err_access)?;
         let existed = self
             .shamir
             .drop_validator_as(&op.drop_validator, self.actor.clone())

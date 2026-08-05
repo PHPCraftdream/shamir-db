@@ -28,6 +28,22 @@ impl ShamirAdminExecutor {
         let err_access =
             |e: shamir_types::access::AccessError| err_code("access_denied", e.to_string());
 
+        // Auth runs BEFORE the if_not_exists existence probe (#995): an
+        // unauthorized caller must not be able to learn whether a table they
+        // have no Create right on already exists, by toggling if_not_exists
+        // (or relying on the duplicate-error path) and observing the
+        // distinguishable outcomes (silent {"existed": true} no-op / "exists"
+        // error vs access_denied). This is a pre-auth existence oracle
+        // otherwise. Mirrors #989's fix for handle_drop_index/handle_rename_index.
+        self.shamir
+            .authorize_access(
+                &self.actor,
+                &ResourcePath::store(self.db_name.clone(), op.repo.clone()),
+                Action::Create,
+            )
+            .await
+            .map_err(err_access)?;
+
         // Check existence for if_not_exists / duplicate guard.
         if let Some(db) = self.shamir.get_db(&self.db_name) {
             if db.has_table(&op.repo, &op.create_table) {
@@ -48,14 +64,6 @@ impl ShamirAdminExecutor {
                 ));
             }
         }
-        self.shamir
-            .authorize_access(
-                &self.actor,
-                &ResourcePath::store(self.db_name.clone(), op.repo.clone()),
-                Action::Create,
-            )
-            .await
-            .map_err(err_access)?;
         // Route through ShamirDb so the table is persisted to the
         // catalogue and survives a restart (I.2).
         self.shamir
@@ -107,6 +115,21 @@ impl ShamirAdminExecutor {
         let err_access =
             |e: shamir_types::access::AccessError| err_code("access_denied", e.to_string());
 
+        // Auth runs BEFORE the if_exists existence probe (#995): an
+        // unauthorized caller must not be able to learn whether a table they
+        // have no Delete right on exists, by toggling if_exists and observing
+        // the distinguishable outcomes (silent {"existed": false} no-op vs
+        // access_denied). This is a pre-auth existence oracle otherwise.
+        // Mirrors #989's fix for handle_drop_index/handle_rename_index.
+        self.shamir
+            .authorize_access(
+                &self.actor,
+                &ResourcePath::table(self.db_name.clone(), op.repo.clone(), op.drop_table.clone()),
+                Action::Delete,
+            )
+            .await
+            .map_err(err_access)?;
+
         // if_exists early-exit: missing db or missing table → no-op.
         if op.if_exists {
             let exists = self
@@ -120,15 +143,6 @@ impl ShamirAdminExecutor {
                 })));
             }
         }
-
-        self.shamir
-            .authorize_access(
-                &self.actor,
-                &ResourcePath::table(self.db_name.clone(), op.repo.clone(), op.drop_table.clone()),
-                Action::Delete,
-            )
-            .await
-            .map_err(err_access)?;
 
         // Phase D.3 — reverse-FK drop guard.
         //
