@@ -499,6 +499,18 @@ impl TableManager {
         // `recover_in_progress_drops` (called from `SortedIndexManager::new`).
         mgr.recover_index2_drops().await?;
 
+        // #997: recover any RENAME INDEX operations on the base_index
+        // regular/unique (hash) families interrupted by a crash. Runs AFTER
+        // `recover_index2_drops` (same position as the index2 recovery)
+        // and BEFORE the `restore_on_open` loop. Lives on `TableManager`
+        // (not `IndexManager`) because a hash rename is a drop+rebuild that
+        // needs the record stream + interner for a backfill. The tombstone
+        // carries the resolved string names + paths so recovery can rebuild
+        // from nothing — essential for the unique path, which drops the OLD
+        // definition FIRST. See `recover_hash_renames`'s doc for the full
+        // crash-state matrix.
+        mgr.recover_hash_renames().await?;
+
         // Restore in-memory state from persisted data.
         //
         // Each backend restores itself via `restore_on_open`: most

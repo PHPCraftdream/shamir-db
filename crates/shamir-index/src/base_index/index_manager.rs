@@ -31,7 +31,7 @@ use shamir_types::record_view::RecordRef;
 use shamir_types::types::common::THasher;
 use shamir_types::types::record_id::RecordId;
 use shamir_types::types::value::InnerValue;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -47,6 +47,50 @@ const BACKFILL_PROGRESS_LOG_INTERVAL: Duration = Duration::from_secs(5);
 ///   (admin UIs, filter-by-status, find-by-id) concentrate on a handful
 ///   of values per index.
 const POSTING_CACHE_CAP: usize = 512;
+
+/// #997: durable RENAME INDEX tombstone payload for the base_index REGULAR
+/// and UNIQUE (hash) families. Unlike the sorted family's
+/// `old_id → new_id` rekey tombstone (#962, which only needs the id pair
+/// because a sorted rename is an in-place rekey of postings that survive
+/// under either id), a hash rename is a **drop + rebuild**: the hash
+/// physical key mixes `name_interned` into h1/h2 (`compute_leaf_hashes` /
+/// `compute_lookup_hashes`), so the OLD postings cannot be rekeyed — they
+/// must be swept and the index re-backfilled under the NEW name. Worse, the
+/// UNIQUE path drops the OLD definition FIRST (`drop_unique_index` before
+/// `create_unique_index_body`), so by the time a crash can strand this
+/// tombstone the old `IndexDefinition` — and therefore its `paths` — is
+/// already GONE from both memory and disk. This payload therefore MUST
+/// carry enough to rebuild from nothing.
+///
+/// Fields:
+/// - `old_name` / `new_name`: the resolved STRING names (NOT interned ids).
+///   Recovery re-interns them via the (reloaded) interner rather than
+///   trusting a stored u64 id survived the crash's interner persist — this
+///   is robust to a crash that stranded the tombstone BEFORE
+///   `create_index`'s F-42 interner persist ran, where `new_name`'s id
+///   might not even be durably interned yet. `old_name` is also what the
+///   rename was issued under, so it is always already interned.
+/// - `paths`: the resolved dot-separated STRING paths
+///   (`resolve_index_paths` direction). Strings (not the interned
+///   `Vec<IndexInfoItem>`) for the same robustness reason, AND because the
+///   rebuild calls `create_index` / `create_unique_index_body`, which take
+///   `&[&str]` — strings are needed at the call site regardless.
+///
+/// Persisted under `system:idx_ren` (regular) / `system:uidx_ren` (unique)
+/// as `Vec<HashRenameTombstone>` via bincode. Mirrors #959's
+/// `idx_drop`/`uidx_drop` (two keys, one per family) and #962's
+/// `sidx_ren`. See `IndexManager`'s `renaming_regular`/`renaming_unique`
+/// fields and `TableManager::recover_hash_renames`'s crash-state matrix.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct HashRenameTombstone {
+    /// The index name being renamed FROM (resolved string).
+    pub old_name: String,
+    /// The index name being renamed TO (resolved string).
+    pub new_name: String,
+    /// The index's field paths as resolved dot-separated strings
+    /// (e.g. `["user.email"]`), sufficient to rebuild the index.
+    pub paths: Vec<String>,
+}
 
 /// Менеджер индексов для одной таблицы.
 ///
@@ -176,6 +220,46 @@ pub struct IndexManager {
     /// same reason as `drop_index_pause_hook`. `None` on every real path.
     pub(super) drop_index_post_sweep_hook:
         Arc<arc_swap::ArcSwapOption<crate::base_index::backfill_pause_hook::BackfillPauseHook>>,
+
+    /// #997: in-memory mirror of the persisted "Renaming" tombstone for
+    /// in-progress RENAME INDEX operations on the REGULAR (hash,
+    /// `is_unique=0`) family. Keyed by `old_name_interned`; the value
+    /// carries the resolved string name + paths recovery needs to rebuild
+    /// from nothing (unlike sorted's `old_id → new_id` rekey tombstone, a
+    /// hash rename is a drop+rebuild whose OLD definition is GONE —
+    /// durably dropped FIRST in the unique path, and dropped second but
+    /// unrecoverable-from-postings in the regular path — by the time a
+    /// crash can strand the tombstone). `TableManager::rename_index` writes
+    /// the tombstone BEFORE the first mutating step and clears it AFTER
+    /// the last; on restart `TableManager::recover_hash_renames`
+    /// (engine-side — it needs the record stream + interner for a
+    /// backfill) finishes any interrupted rename. Mirrors #962's
+    /// `renaming_sorted` (structurally) and #959's `dropping_regular`
+    /// (same `IndexManager` owner) — see `HashRenameTombstone`'s doc and
+    /// `recover_hash_renames`'s crash-state matrix for the full reasoning.
+    ///
+    /// `std::sync::Mutex` is the sanctioned low-frequency fallback here
+    /// (CLAUDE.md): RENAME INDEX is a DDL op, contention is nil, the set
+    /// is empty 99.999 % of the time, and the lock is NEVER held across
+    /// an `.await` point. Mirrors `dropping_regular`.
+    pub(super) renaming_regular: Arc<Mutex<BTreeMap<u64, HashRenameTombstone>>>,
+    /// #997: same as `renaming_regular`, for the UNIQUE (hash,
+    /// `is_unique=1`) family. The unique path is the SEVERE crash case
+    /// (drop-OLD-first → create-NEW), so the tombstone's stored `paths`
+    /// are the ONLY way to rebuild the constraint after a crash.
+    pub(super) renaming_unique: Arc<Mutex<BTreeMap<u64, HashRenameTombstone>>>,
+
+    /// #997: test-only deterministic pause point that fires in
+    /// `TableManager::rename_index`'s regular+unique paths AFTER the
+    /// tombstone is written but BEFORE the second mutating step
+    /// (`drop_index` for regular, `create_unique_index_body` for unique) —
+    /// the exact mid-rename crash window. A regression test installs this
+    /// from `shamir-engine`'s test binary, so (like `drop_index_pause_hook`)
+    /// it is NOT `#[cfg(test)]`-gated. `None` on every real path; one
+    /// uncontended `ArcSwapOption::load_full()` Acquire load at the call
+    /// site. Mirrors #962's `rename_rekey_pause_hook`.
+    pub(super) rename_mid_pause_hook:
+        Arc<arc_swap::ArcSwapOption<crate::base_index::backfill_pause_hook::BackfillPauseHook>>,
 }
 
 impl Clone for IndexManager {
@@ -194,6 +278,9 @@ impl Clone for IndexManager {
             dropping_regular: Arc::clone(&self.dropping_regular),
             dropping_unique: Arc::clone(&self.dropping_unique),
             drop_index_post_sweep_hook: Arc::clone(&self.drop_index_post_sweep_hook),
+            renaming_regular: Arc::clone(&self.renaming_regular),
+            renaming_unique: Arc::clone(&self.renaming_unique),
+            rename_mid_pause_hook: Arc::clone(&self.rename_mid_pause_hook),
         }
     }
 }
@@ -305,6 +392,9 @@ impl IndexManager {
             dropping_regular: Arc::new(Mutex::new(BTreeSet::new())),
             dropping_unique: Arc::new(Mutex::new(BTreeSet::new())),
             drop_index_post_sweep_hook: Arc::new(arc_swap::ArcSwapOption::empty()),
+            renaming_regular: Arc::new(Mutex::new(BTreeMap::new())),
+            renaming_unique: Arc::new(Mutex::new(BTreeMap::new())),
+            rename_mid_pause_hook: Arc::new(arc_swap::ArcSwapOption::empty()),
         };
 
         // P0-3 (#959): resume any in-progress DROP INDEX operations that were
@@ -357,6 +447,27 @@ impl IndexManager {
         hook: Option<Arc<crate::base_index::backfill_pause_hook::BackfillPauseHook>>,
     ) {
         self.drop_index_post_sweep_hook.store(hook);
+    }
+
+    /// #997 test-only: install (or clear with `None`) the deterministic
+    /// rename mid-pause hook (fires after the tombstone is written, before
+    /// the second mutating step in `rename_index`). NOT `#[cfg(test)]`-gated
+    /// — cross-crate test consumer, same reason as the other hooks.
+    pub fn set_rename_mid_pause_hook(
+        &self,
+        hook: Option<Arc<crate::base_index::backfill_pause_hook::BackfillPauseHook>>,
+    ) {
+        self.rename_mid_pause_hook.store(hook);
+    }
+
+    /// #997 test-only: fire the rename mid-point pause hook if installed.
+    /// Called by `TableManager::rename_index` between the two mutating steps
+    /// of each hash-rename path. `None` on every real path — one uncontended
+    /// `ArcSwapOption::load_full()` Acquire load.
+    pub async fn maybe_pause_rename_mid(&self) {
+        if let Some(hook) = self.rename_mid_pause_hook.load_full() {
+            hook.wait_at_window().await;
+        }
     }
 
     /// Синхронизирует атомарные флаги с реальным состоянием индексов.
@@ -525,6 +636,176 @@ impl IndexManager {
         {
             let mut set = dropping.lock().unwrap();
             set.remove(&name_interned);
+        }
+        Ok(())
+    }
+
+    // ========================================================================
+    // #997 — RENAME INDEX (regular/unique hash) durable tombstone + crash
+    // recovery. Mirrors #959's `idx_drop`/`uidx_drop` (same `IndexManager`
+    // owner) and #962's `sidx_ren` (same operation, sorted family).
+    // ========================================================================
+    //
+    // The regular/unique hash RENAME is a drop+rebuild (the hash physical
+    // key mixes `name_interned` into h1/h2, so postings cannot be rekeyed —
+    // see `rename_index`'s doc). The tombstone therefore carries enough to
+    // rebuild from nothing: `HashRenameTombstone { old_name, new_name,
+    // paths }`. `TableManager::rename_index` writes the tombstone BEFORE
+    // the first mutating step and clears it AFTER the last; the engine-side
+    // `TableManager::recover_hash_renames` finishes any interrupted rename
+    // on restart (it needs the record stream + interner for a backfill, so
+    // it cannot live on `IndexManager`).
+    //
+    // Tombstone shape: `Vec<HashRenameTombstone>` serialized via bincode
+    // under `system:idx_ren` (regular) / `system:uidx_ren` (unique). An
+    // absent key or empty vec means "no in-progress renames".
+    //
+    // **CRITICAL** (the hard-won #959 collision lesson): `RecordId::system(name)`
+    // truncates `name` to 12 bytes (see `shamir_types::types::record_id::system`).
+    // `"idx_ren"` (7 bytes) is verified collision-free against every other
+    // base_index system key:
+    //   `"idx_drop"` → [0,0,0,0, 69,64,78,5f,64,72,6f,70, 00,00,00,00]  (8 bytes)
+    //   `"idx_ren"`  → [0,0,0,0, 69,64,78,5f,72,65,6e,00, 00,00,00,00]  (7 bytes)
+    // They share the first 4 bytes (`idx_`) but diverge at byte 8 (within
+    // the name): `0x64` (`d`) vs `0x72` (`r`) — NO collision.
+    //   `"indexes"`  → [0,0,0,0, 69,6e,64,65,78,65,73,00, 00,00,00,00]
+    //   `"idx_ren"`  → [0,0,0,0, 69,64,78,5f,72,65,6e,00, 00,00,00,00]
+    // Diverge at byte 5 (`n`=`0x6e` vs `d`=`0x64`) — NO collision.
+    //
+    // `"uidx_ren"` (8 bytes) is verified collision-free:
+    //   `"uidx_drop"`    → [0,0,0,0, 75,69,64,78,5f,64,72,6f,70,00,00,00]
+    //   `"uidx_ren"`     → [0,0,0,0, 75,69,64,78,5f,72,65,6e,00,00,00,00]
+    // Diverge at byte 9 (`d`=`0x64` vs `r`=`0x72`) — NO collision.
+    //   `"indexes_uniq"` → [0,0,0,0, 69,6e,64,65,78,65,73,5f,75,6e,69,71]  (truncated 12)
+    //   `"uidx_ren"`     → [0,0,0,0, 75,69,64,78,5f,72,65,6e,00,00,00,00]
+    // Diverge at byte 4 (`i`=`0x69` vs `u`=`0x75`) — NO collision.
+
+    /// #997: persist the in-memory `renaming_regular` map to `info_store`
+    /// under `system:idx_ren`. Serializes as a `Vec<HashRenameTombstone>`
+    /// (deterministic order via `BTreeMap`). An empty map writes an empty
+    /// `Vec` (NOT a key deletion) so the load path handles `NotFound` and
+    /// empty-vec uniformly. Mirrors #959's `save_dropping_regular`.
+    pub async fn save_renaming_regular(&self) -> DbResult<()> {
+        let snapshot: Vec<HashRenameTombstone> = {
+            let map = self.renaming_regular.lock().unwrap();
+            map.values().cloned().collect()
+        };
+        let key = RecordId::system("idx_ren").to_bytes();
+        let bytes = bincode::serialize(&snapshot)
+            .map_err(|e| shamir_storage::error::DbError::Codec(e.to_string()))?;
+        self.info_store.set(key.into(), Bytes::from(bytes)).await?;
+        Ok(())
+    }
+
+    /// #997: persist the in-memory `renaming_unique` map. Mirror of
+    /// `save_renaming_regular` for the unique family.
+    pub async fn save_renaming_unique(&self) -> DbResult<()> {
+        let snapshot: Vec<HashRenameTombstone> = {
+            let map = self.renaming_unique.lock().unwrap();
+            map.values().cloned().collect()
+        };
+        let key = RecordId::system("uidx_ren").to_bytes();
+        let bytes = bincode::serialize(&snapshot)
+            .map_err(|e| shamir_storage::error::DbError::Codec(e.to_string()))?;
+        self.info_store.set(key.into(), Bytes::from(bytes)).await?;
+        Ok(())
+    }
+
+    /// #997: load a persisted rename tombstone list from `info_store`.
+    /// Returns an empty `Vec` if the key is absent (`NotFound`) or contains
+    /// an empty vec — both mean "no in-progress renames". Mirrors #959's
+    /// `load_dropping_set` (adapted for the richer payload type).
+    pub async fn load_renaming_list(&self, is_unique: bool) -> DbResult<Vec<HashRenameTombstone>> {
+        let key_str = if is_unique { "uidx_ren" } else { "idx_ren" };
+        let key = RecordId::system(key_str).to_bytes();
+        match self.info_store.get(key.into()).await {
+            Ok(bytes) => {
+                if bytes.is_empty() {
+                    return Ok(Vec::new());
+                }
+                bincode::deserialize::<Vec<HashRenameTombstone>>(&bytes).map_err(|e| {
+                    shamir_storage::error::DbError::Codec(format!(
+                        "system:{key_str} decode failed: {e}"
+                    ))
+                })
+            }
+            Err(shamir_storage::error::DbError::NotFound(_)) => Ok(Vec::new()),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// #997: record a rename in the in-memory map, then persist durably.
+    /// MUST be called BEFORE the first mutating step in the rename
+    /// (`create_index` for regular, `drop_unique_index` for unique) so a
+    /// crash at any subsequent point is recoverable by
+    /// `TableManager::recover_hash_renames`.
+    ///
+    /// In-memory update happens FIRST, then the persist follows. If the
+    /// persist fails, the in-memory update is rolled back and the caller
+    /// receives `Err` — the rename MUST NOT proceed without a durable
+    /// tombstone. Mirrors #959's `add_to_dropping`.
+    pub async fn add_to_renaming(
+        &self,
+        is_unique: bool,
+        old_name_interned: u64,
+        entry: HashRenameTombstone,
+    ) -> DbResult<()> {
+        let renaming = if is_unique {
+            &self.renaming_unique
+        } else {
+            &self.renaming_regular
+        };
+        {
+            let mut map = renaming.lock().unwrap();
+            map.insert(old_name_interned, entry);
+        }
+        let result = if is_unique {
+            self.save_renaming_unique().await
+        } else {
+            self.save_renaming_regular().await
+        };
+        if result.is_err() {
+            let mut map = renaming.lock().unwrap();
+            map.remove(&old_name_interned);
+        }
+        result
+    }
+
+    /// #997: clear `old_name_interned` from the persisted tombstone, then
+    /// from the in-memory map. Persist-first ordering ensures the on-disk
+    /// state is always at least as advanced as the in-memory state.
+    ///
+    /// MUST be called AFTER the last mutating step succeeds (the new index
+    /// is registered + backfilled for regular; the new unique index is
+    /// registered + backfilled for unique). If the process crashes between
+    /// the last step and this clear, recovery sees the tombstone and
+    /// reconciles — see `TableManager::recover_hash_renames`'s crash-state
+    /// matrix. Mirrors #959's `clear_from_dropping`.
+    pub async fn clear_from_renaming(
+        &self,
+        is_unique: bool,
+        old_name_interned: u64,
+    ) -> DbResult<()> {
+        let renaming = if is_unique {
+            &self.renaming_unique
+        } else {
+            &self.renaming_regular
+        };
+        let snapshot: Vec<HashRenameTombstone> = {
+            let map = renaming.lock().unwrap();
+            map.iter()
+                .filter(|(&k, _)| k != old_name_interned)
+                .map(|(_, v)| v.clone())
+                .collect()
+        };
+        let key_str = if is_unique { "uidx_ren" } else { "idx_ren" };
+        let key = RecordId::system(key_str).to_bytes();
+        let bytes = bincode::serialize(&snapshot)
+            .map_err(|e| shamir_storage::error::DbError::Codec(e.to_string()))?;
+        self.info_store.set(key.into(), Bytes::from(bytes)).await?;
+        {
+            let mut map = renaming.lock().unwrap();
+            map.remove(&old_name_interned);
         }
         Ok(())
     }

@@ -998,6 +998,193 @@ impl TableManager {
         Ok(())
     }
 
+    /// #997: open-time recovery for RENAME INDEX operations on the
+    /// base_index REGULAR and UNIQUE (hash) families interrupted by a
+    /// crash. Called from `TableManager::create` AFTER
+    /// `recover_index2_drops` (same position in the open sequence as the
+    /// index2 drop recovery). Lives here (not on `IndexManager`) because
+    /// recovery needs the record stream + interner for a backfill, which
+    /// only `TableManager` has access to.
+    ///
+    /// Unlike the sorted family's RENAME recovery (#962, which re-runs an
+    /// idempotent rekey settle loop), a hash rename is a drop+rebuild. The
+    /// tombstone payload (`HashRenameTombstone`) carries the resolved
+    /// string names + paths recovery needs to rebuild from nothing — this
+    /// is ESSENTIAL for the unique path, which drops the OLD definition
+    /// FIRST, so by the time a crash can strand the tombstone the old
+    /// `IndexDefinition` is already gone from both memory and disk.
+    ///
+    /// # Crash-state matrix — REGULAR (create-new → drop-old)
+    ///
+    /// Tombstone written BEFORE `create_index`; cleared AFTER `drop_index`.
+    ///
+    /// | crash point                              | old present? | new state         | recovery action                                              |
+    /// |------------------------------------------|--------------|-------------------|--------------------------------------------------------------|
+    /// | after tombstone, before create           | yes          | absent            | create new, drop old, clear tombstone                        |
+    /// | during create (Phase 1 done, not Phase 3)| yes          | Building          | drop new (sweep partial), re-create new, drop old, clear     |
+    /// | after create, before drop                | yes          | Ready             | drop old, clear tombstone                                    |
+    /// | after drop, before clear                 | no           | Ready             | clear tombstone (already done)                               |
+    ///
+    /// # Crash-state matrix — UNIQUE (drop-old → create-new)
+    ///
+    /// Tombstone written BEFORE the barrier+drop; cleared AFTER create.
+    ///
+    /// | crash point                              | old present? | new state         | recovery action                                              |
+    /// |------------------------------------------|--------------|-------------------|--------------------------------------------------------------|
+    /// | after tombstone, before drop             | yes          | absent            | create new, drop old, clear tombstone                        |
+    /// | after drop, before/during create         | no           | absent            | create new (rebuild from paths), clear tombstone (SEVERE)    |
+    /// | during create (Phase 1 done, not Phase 3)| no           | Building          | drop new (sweep partial), re-create new, clear tombstone     |
+    /// | after create, before clear               | no           | Ready             | clear tombstone (already done)                               |
+    ///
+    /// # #966 self-heal ownership resolution
+    ///
+    /// #966's F-50 Step 3b self-heal (in `TableManager::create`, right before
+    /// `recover_index2_drops`) is **index2-only**: it iterates
+    /// `load_index2_metadata().descriptors` and heals Building backends. The
+    /// base_index `IndexManager` family has **NO** automatic Building
+    /// self-heal (grep-verified: `IndexManager::new` only loads definitions
+    /// via `IndexInfo::decode_bytes`, it does not re-run any backfill — see
+    /// the explicit note at `create_index_from_records`'s doc). Therefore:
+    ///
+    /// - A crashed regular `create_index` that leaves `new` as `Building` is
+    ///   **NOT** healed by #966. THIS recovery owns it: it drops the partial
+    ///   Building index (sweeping its stale postings) and re-creates fresh.
+    /// - A crashed unique `create_unique_index_body` that leaves `new` as
+    ///   `Building` is also **NOT** healed by #966. Same fix here.
+    /// - No overlap, no uncovered state. The two mechanisms own disjoint
+    ///   families (index2 vs base_index).
+    ///
+    /// # Unique-duplicate-during-recovery hazard
+    ///
+    /// A recovery-time unique-index rebuild runs a backfill that checks
+    /// uniqueness. In theory, writes could have landed while the unique
+    /// index didn't exist (the window this bug opens). In practice this is
+    /// **impossible** for this specific scenario: recovery runs during
+    /// `TableManager::create`, BEFORE any writer can access the table
+    /// (writers require a fully-open `TableManager`). The data is exactly as
+    /// it was when the original unique index was enforcing uniqueness, so
+    /// the backfill's duplicate check passes. If it somehow fails (data
+    /// corruption, bug), the error propagates and **fails the table open**
+    /// with a clear diagnostic — the table does NOT silently accept
+    /// duplicates. This is the safest of the defensible options: "fail the
+    /// open with a clear diagnostic" over "leave absent + surface via
+    /// doctor", because a silently-absent unique constraint that the
+    /// operator isn't warned about is the exact class of bug this task
+    /// closes.
+    ///
+    /// # Idempotence
+    ///
+    /// Every recovery action is idempotent: a double restart after recovery
+    /// finds an empty tombstone (the first recovery cleared it) and is a
+    /// clean no-op. The `create_index` / `drop_index` calls re-register /
+    /// re-sweep idempotently. Calling recovery twice in a row (without a
+    /// restart in between) is also a no-op on the second call because the
+    /// first call cleared the tombstone.
+    pub(crate) async fn recover_hash_renames(&self) -> DbResult<()> {
+        let regular_renames = self.index_manager.load_renaming_list(false).await?;
+        let unique_renames = self.index_manager.load_renaming_list(true).await?;
+
+        if regular_renames.is_empty() && unique_renames.is_empty() {
+            return Ok(());
+        }
+
+        log::info!(
+            "#997: recovering {} regular + {} unique in-progress hash RENAME(s)",
+            regular_renames.len(),
+            unique_renames.len()
+        );
+
+        // ── Regular family ──────────────────────────────────────────────
+        for entry in &regular_renames {
+            let path_refs: Vec<&str> = entry.paths.iter().map(|s| s.as_str()).collect();
+
+            // Step 1: ensure new index is in a clean, Ready state.
+            if self.index_exists(&entry.new_name).await {
+                let new_id = self.intern_string(&entry.new_name).await?;
+                if let Some(def) = self.index_manager.get_index_definition(new_id) {
+                    if def.state == crate::index2::state::IndexState::Building {
+                        log::warn!(
+                            "#997: regular rename target '{}' was left in Building \
+                             state by a crashed create — dropping partial and re-creating",
+                            entry.new_name
+                        );
+                        self.drop_index(&entry.new_name).await?;
+                        self.create_index(&entry.new_name, &path_refs).await?;
+                    }
+                    // else Ready — already done, leave as-is
+                }
+            } else {
+                // New doesn't exist — crash before/during create. Re-run.
+                self.create_index(&entry.new_name, &path_refs).await?;
+            }
+
+            // Step 2: drop old if still present.
+            if self.index_exists(&entry.old_name).await {
+                self.drop_index(&entry.old_name).await?;
+            }
+
+            // Step 3: clear the tombstone.
+            let old_id = self.intern_string(&entry.old_name).await?;
+            self.index_manager
+                .clear_from_renaming(false, old_id)
+                .await?;
+        }
+
+        // ── Unique family ───────────────────────────────────────────────
+        for entry in &unique_renames {
+            let path_refs: Vec<&str> = entry.paths.iter().map(|s| s.as_str()).collect();
+
+            // Step 1: ensure new unique index is in a clean, Ready state.
+            if self.unique_index_exists(&entry.new_name).await {
+                let new_id = self.intern_string(&entry.new_name).await?;
+                if let Some(def) = self.index_manager.get_unique_index_definition(new_id) {
+                    if def.state == crate::index2::state::IndexState::Building {
+                        log::warn!(
+                            "#997: unique rename target '{}' was left in Building \
+                             state by a crashed create — dropping partial and re-creating",
+                            entry.new_name
+                        );
+                        // Drop + re-create under the barrier (mirrors the
+                        // rename path's barrier+lock span).
+                        let (_barrier, _uwl_guard) = self
+                            .begin_write_barrier(
+                                crate::index::write_barrier_flags::UNIQUE_INDEX_CREATE,
+                            )
+                            .await;
+                        self.index_manager.drop_unique_index(new_id).await?;
+                        self.create_unique_index_body(&entry.new_name, &path_refs)
+                            .await?;
+                    }
+                    // else Ready — already done
+                }
+            } else {
+                // New doesn't exist. Either crash before drop (old still
+                // present) or crash after drop (SEVERE: both absent).
+                // Either way: create new. The backfill checks uniqueness —
+                // see the doc comment above for why this is safe.
+                self.create_unique_index(&entry.new_name, &path_refs)
+                    .await?;
+            }
+
+            // Step 2: drop old if still present.
+            if self.unique_index_exists(&entry.old_name).await {
+                self.drop_unique_index(&entry.old_name).await?;
+            }
+
+            // Step 3: clear the tombstone.
+            let old_id = self.intern_string(&entry.old_name).await?;
+            self.index_manager.clear_from_renaming(true, old_id).await?;
+        }
+
+        log::info!(
+            "#997: recovery complete — {} regular + {} unique hash RENAME(s) finalized",
+            regular_renames.len(),
+            unique_renames.len()
+        );
+
+        Ok(())
+    }
+
     /// Check if a sorted index exists by name.
     ///
     /// Mirrors [`index_exists`](Self::index_exists) /
@@ -1229,8 +1416,34 @@ impl TableManager {
             let paths = resolve_index_paths(interner, &old_def.paths);
             let path_refs: Vec<&str> = paths.iter().map(|s| s.as_str()).collect();
 
+            // #997: write a durable rename tombstone BEFORE the first mutating
+            // step (create_index). The tombstone carries the resolved string
+            // names + paths so recovery can rebuild from nothing if the crash
+            // strands it (unlike sorted's id-pair tombstone, a hash rename is
+            // drop+rebuild — the old def is gone by the time the tombstone
+            // matters). Cleared AFTER the last step succeeds. Mirrors #962's
+            // durable "Renaming" tombstone (sorted) and #959's `idx_drop`
+            // (same IndexManager owner).
+            self.index_manager
+                .add_to_renaming(
+                    false,
+                    old_id,
+                    crate::index::index_manager::HashRenameTombstone {
+                        old_name: old_name.to_string(),
+                        new_name: new_name.to_string(),
+                        paths: paths.clone(),
+                    },
+                )
+                .await?;
+
             // Create the new index FIRST (registers + backfills under new_id).
             self.create_index(new_name, &path_refs).await?;
+
+            // #997 test seam — park here (tombstone written, new index created,
+            // old index NOT yet dropped) if a test installed the pause hook.
+            // This is the EXACT crash window recovery tests simulate.
+            self.index_manager.maybe_pause_rename_mid().await;
+
             // Then drop the old index (removes old-id postings only).
             // P1-2 (#967): if this fails after create_index succeeded, both
             // old and new indexes exist — enrich the error with context.
@@ -1242,6 +1455,20 @@ impl TableManager {
                      call TableManager::verify() to confirm state."
                 ))
             })?;
+
+            // #997: clear the rename tombstone now that the rename is durable.
+            // If this fails, the tombstone remains — recovery will reconcile.
+            self.index_manager
+                .clear_from_renaming(false, old_id)
+                .await
+                .map_err(|e| {
+                    shamir_storage::error::DbError::Internal(format!(
+                        "RENAME INDEX '{old_name}' → '{new_name}': the rename is \
+                         complete (new index created, old dropped), but clearing \
+                         the rename tombstone failed: {e}. On restart, recovery \
+                         will reconcile. Call TableManager::verify() to confirm state."
+                    ))
+                })?;
         }
 
         // ── Unique (hash): write-barrier across drop→backfill→register ──────
@@ -1267,6 +1494,23 @@ impl TableManager {
             let paths = resolve_index_paths(interner, &old_def.paths);
             let path_refs: Vec<&str> = paths.iter().map(|s| s.as_str()).collect();
 
+            // #997: write the durable rename tombstone BEFORE the barrier (the
+            // tombstone write is an I/O op; holding the barrier during it is a
+            // real cost). A crash after the tombstone write but before the
+            // barrier/drop is safe: nothing was mutated yet, and recovery sees
+            // the tombstone + old still present → re-runs the rename.
+            self.index_manager
+                .add_to_renaming(
+                    true,
+                    old_id,
+                    crate::index::index_manager::HashRenameTombstone {
+                        old_name: old_name.to_string(),
+                        new_name: new_name.to_string(),
+                        paths: paths.clone(),
+                    },
+                )
+                .await?;
+
             // Hold the barrier bit + unique_write_lock across drop + create.
             // This is the SAME lock non-tx writers acquire
             // (table_manager_crud.rs) and the tx commit pipeline acquires
@@ -1289,6 +1533,12 @@ impl TableManager {
                 .await;
 
             self.index_manager.drop_unique_index(old_id).await?;
+
+            // #997 test seam — park here (tombstone written, old dropped,
+            // new NOT yet created) if a test installed the pause hook. This
+            // is the EXACT SEVERE crash window: neither index exists.
+            self.index_manager.maybe_pause_rename_mid().await;
+
             // Use the body variant: the barrier + lock are already held
             // above, and `create_unique_index` would re-acquire the lock →
             // deadlock (`tokio::sync::Mutex` is NOT reentrant).
@@ -1303,6 +1553,22 @@ impl TableManager {
                          unique index '{new_name}' failed: {e}. The old index is \
                          gone — call TableManager::verify() to confirm state, or \
                          re-create the index manually."
+                    ))
+                })?;
+
+            // #997: clear the rename tombstone now that the rename is durable.
+            // The barrier + lock are still held here (they release when the
+            // guards drop at end of block), but the clear is just a Store::set
+            // under a separate key — no contention concern.
+            self.index_manager
+                .clear_from_renaming(true, old_id)
+                .await
+                .map_err(|e| {
+                    shamir_storage::error::DbError::Internal(format!(
+                        "RENAME INDEX '{old_name}' → '{new_name}': the unique rename \
+                         is complete (old dropped, new created), but clearing the \
+                         rename tombstone failed: {e}. On restart, recovery will \
+                         reconcile. Call TableManager::verify() to confirm state."
                     ))
                 })?;
         }
