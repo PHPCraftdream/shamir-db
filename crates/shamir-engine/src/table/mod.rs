@@ -2,6 +2,7 @@ pub mod buffer_config;
 pub mod degraded_index_count;
 pub mod doctor;
 mod filtered_vector;
+pub mod in_flight_create_guard;
 #[cfg(test)]
 pub mod index2_backfill_hook;
 pub mod interner_manager;

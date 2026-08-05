@@ -41,6 +41,14 @@ impl TableManager {
             };
         }
 
+        // #1003: mark this create in flight for the ENTIRE method body — see
+        // `create_index`'s matching guard + `in_flight_create_guard`'s
+        // module doc. Installed AFTER the "btree" early-return above (that
+        // branch delegates to `create_index`/`create_unique_index`, which
+        // install their OWN guard — installing one here too would double-count
+        // the same in-flight create).
+        let _in_flight = self.in_flight_creates.enter();
+
         // #534 finding 1 (write-barrier, Option B — mirrors
         // `create_unique_index`'s own audit-A9 precedent). Hold the table-wide
         // `unique_write_lock` across the ENTIRE reserve-id → backfill →
@@ -553,6 +561,13 @@ impl TableManager {
     /// `false` a moment before the flag went up — same pattern as
     /// `create_index_v2`.
     pub async fn create_index(&self, name: &str, paths: &[&str]) -> DbResult<()> {
+        // #1003: mark this create in flight for the ENTIRE method body (RAII
+        // guard, dropped on every exit path including an early `?` return or
+        // a panic) so `degraded_index_count()` excludes the `Building` state
+        // this create is about to publish below — see
+        // `in_flight_create_guard`'s module doc for the false-positive this
+        // closes.
+        let _in_flight = self.in_flight_creates.enter();
         let mut index_def = self.build_index_definition(name, paths).await?;
         // F-72 (#899, P0): register at `Building` — `IndexManager::
         // create_index_from_records` persists this marker BEFORE the
@@ -641,6 +656,14 @@ impl TableManager {
     /// # Errors
     /// Returns `DbError::UniqueIndexCreationFailed` if duplicate values exist.
     pub async fn create_unique_index(&self, name: &str, paths: &[&str]) -> DbResult<()> {
+        // #1003: mark this create in flight for the ENTIRE method body — see
+        // `create_index`'s matching guard + `in_flight_create_guard`'s
+        // module doc. The unique family's real-path definition is never
+        // observably `Building` today (see `create_unique_index_from_records`'s
+        // doc), but the guard is installed uniformly across all four
+        // families per the brief, and covers a future/crash-recovery path
+        // that DOES register at `Building`.
+        let _in_flight = self.in_flight_creates.enter();
         // F-70 (#897, P0): canonical drain-then-lock acquisition — raise
         // `UNIQUE_INDEX_CREATE`, drain in-flight fast-path writers, THEN take
         // `unique_write_lock`. F-57 (#883) originally took the lock FIRST

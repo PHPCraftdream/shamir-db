@@ -4,10 +4,17 @@
 //! 1. A fully-`Ready` table (regular + unique + sorted indexes) reports
 //!    zero degraded indexes.
 //! 2. Each of the four index families (regular, unique, sorted, index2)
-//!    can be stuck in `Building` state and is counted as degraded.
+//!    can be stuck in `Building` state (crash-orphaned — hand-constructed
+//!    WITHOUT going through the live create path, simulating a `Building`
+//!    definition left over from a PAST process) and is counted as degraded.
 //! 3. The count path performs **zero store reads** — proven with a
 //!    `ReadCountingStore` wrapper that tallies every read-type `Store`
 //!    method call.
+//! 4. #1003 (follow-up to #984): a CREATE INDEX genuinely in flight in
+//!    THIS process (parked mid-backfill via the live create path, using
+//!    the existing test-only pause-hook mechanisms) must NOT count as
+//!    degraded — the false-positive #1003 fixes, proven for both the
+//!    regular-hash and index2 (functional) families.
 
 use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, Ordering::SeqCst};
@@ -17,6 +24,7 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use futures::Stream;
 
+use shamir_query_types::admin::types::CreateIndexOp;
 use shamir_storage::error::{DbError, DbResult};
 use shamir_storage::storage_in_memory::InMemoryStore;
 use shamir_storage::types::{RecordKey, Store};
@@ -29,6 +37,7 @@ use crate::index2::descriptor::IndexDescriptor;
 use crate::index2::expr::IndexExpr;
 use crate::index2::kind::{FunctionalConfig, IndexKind};
 use crate::index2::state::IndexState;
+use crate::table::index2_backfill_hook::BackfillPauseHook as Index2BackfillPauseHook;
 use crate::table::TableManager;
 
 // ---------------------------------------------------------------------------
@@ -170,6 +179,31 @@ fn build_building_functional_backend(
     build_index2_backend_with_resolver(desc, info_store, None)
 }
 
+/// A functional `lower(<field>)` CREATE INDEX op, for driving the LIVE
+/// `create_index_v2` path (as opposed to `build_building_functional_backend`'s
+/// direct backend construction) — mirrors
+/// `index2_create_barrier_tests::functional_lower_op`.
+fn functional_lower_op(name: &str, table: &str, field: &str) -> CreateIndexOp {
+    CreateIndexOp {
+        create_index: name.into(),
+        table: table.into(),
+        fields: vec![vec![field.into()]],
+        unique: false,
+        sorted: false,
+        repo: "main".into(),
+        index_type: Some("functional".into()),
+        fts_tokenizer: None,
+        fts_language: None,
+        functional_op: Some("lower".into()),
+        functional_args: None,
+        vector_dim: None,
+        vector_metric: None,
+        vector_quantization: None,
+        include: Vec::new(),
+        if_not_exists: false,
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -211,9 +245,12 @@ async fn degraded_index_count_zero_when_all_ready() {
     );
 }
 
-/// A regular (hash) index stuck at `Building` mid-backfill must be counted.
+/// #1003: a regular (hash) index whose CREATE INDEX is genuinely in flight
+/// (parked mid-backfill via the live create path, in THIS process) must
+/// NOT count as degraded — this is the exact false-positive scenario #1003
+/// fixes. A healthy, currently-building index is not "stuck".
 #[tokio::test]
-async fn degraded_index_count_detects_building_regular() {
+async fn degraded_index_count_live_in_progress_create_regular_not_degraded() {
     use shamir_index::base_index::backfill_pause_hook::BackfillPauseHook;
 
     let (data_store, info_store) = make_stores();
@@ -235,10 +272,13 @@ async fn degraded_index_count_detects_building_regular() {
 
     hook.wait_until_parked().await;
 
+    // The index is genuinely `Building` right now (backfill parked
+    // mid-flight, in THIS process) — but the in-flight-create counter
+    // (#1003) excludes it from the degraded tally.
     assert_eq!(
         tbl.degraded_index_count().await,
-        1,
-        "a Building regular index must count as degraded"
+        0,
+        "a healthy in-progress CREATE INDEX must NOT count as degraded (#1003)"
     );
 
     hook.release();
@@ -248,6 +288,58 @@ async fn degraded_index_count_detects_building_regular() {
         tbl.degraded_index_count().await,
         0,
         "after backfill completes, the regular index must be Ready"
+    );
+}
+
+/// #1003: a functional (index2) index whose CREATE INDEX is genuinely in
+/// flight (parked mid-create via `create_index_v2`'s live path, in THIS
+/// process) must NOT count as degraded. Same false-positive scenario as
+/// the regular-hash test above, exercised through `create_index_v2`'s own
+/// in-flight guard (a separate call site from `create_index`'s).
+#[tokio::test]
+async fn degraded_index_count_live_in_progress_create_index2_not_degraded() {
+    let (data_store, info_store) = make_stores();
+    let tbl = TableManager::create("t".into(), data_store, info_store)
+        .await
+        .unwrap();
+    let name_field = key_id(&tbl, "name").await;
+
+    for n in ["Alice", "Bob", "Carol"] {
+        tbl.insert(&str_record(name_field, n)).await.unwrap();
+    }
+
+    let hook = Arc::new(Index2BackfillPauseHook::new());
+    tbl.set_create_index2_backfill_hook(Some(Arc::clone(&hook)));
+
+    let tbl_c = tbl.clone();
+    let create = tokio::spawn(async move {
+        tbl_c
+            .create_index_v2(&functional_lower_op("lower_name", "t", "name"))
+            .await
+    });
+
+    hook.wait_until_parked().await;
+
+    // The functional backend is genuinely `Building` right now (backfill
+    // done, not yet registered — the exact window `create_index2_backfill_hook`
+    // parks at) — but the in-flight-create counter (#1003) excludes it.
+    assert_eq!(
+        tbl.degraded_index_count().await,
+        0,
+        "a healthy in-progress functional CREATE INDEX must NOT count as \
+         degraded (#1003)"
+    );
+
+    hook.release();
+    create
+        .await
+        .unwrap()
+        .expect("create_index_v2 must complete");
+
+    assert_eq!(
+        tbl.degraded_index_count().await,
+        0,
+        "after the create completes, the functional index must be Ready"
     );
 }
 
@@ -299,9 +391,12 @@ async fn degraded_index_count_detects_building_unique() {
     );
 }
 
-/// A sorted (B-tree) index stuck at `Building` mid-backfill must be counted.
+/// #1003: a sorted (B-tree) index whose CREATE INDEX is genuinely in flight
+/// (parked mid-backfill via the live create path, in THIS process) must
+/// NOT count as degraded — same false-positive scenario as the regular-hash
+/// test above, for the sorted family.
 #[tokio::test]
-async fn degraded_index_count_detects_building_sorted() {
+async fn degraded_index_count_live_in_progress_create_sorted_not_degraded() {
     let (data_store, info_store) = make_stores();
     let tbl = TableManager::create("t".into(), data_store, info_store)
         .await
@@ -321,10 +416,12 @@ async fn degraded_index_count_detects_building_sorted() {
 
     hook.wait_until_parked().await;
 
+    // Genuinely `Building` right now (backfill parked mid-flight, in THIS
+    // process) — the in-flight-create counter (#1003) excludes it.
     assert_eq!(
         tbl.degraded_index_count().await,
-        1,
-        "a Building sorted index must count as degraded"
+        0,
+        "a healthy in-progress CREATE SORTED INDEX must NOT count as degraded (#1003)"
     );
 
     hook.release();

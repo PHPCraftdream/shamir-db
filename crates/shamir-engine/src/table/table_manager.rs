@@ -150,6 +150,17 @@ pub struct TableManager {
     /// sibling barrier flags). See [`writer_drain_barrier`] for the full
     /// memory-model + reusability rationale.
     pub(super) writer_drain: super::writer_drain_barrier::WriterDrainBarrier,
+    /// #1003 (follow-up to #984) — process-local count of `CREATE INDEX`
+    /// operations currently in flight, across all four index families
+    /// (regular, unique, sorted, index2). `degraded_index_count()`
+    /// subtracts this from the raw non-`Ready` tally so a healthy,
+    /// currently-in-progress backfill (which sets `IndexState::Building`
+    /// BEFORE the backfill even starts, per F-72/#899) does not read as
+    /// "degraded" — only an index left `Building` by a crash in a PAST
+    /// process (this counter starts at 0 on every restart) still counts.
+    /// Shared across clones via `Arc` (same rationale as the sibling
+    /// barrier/counter fields). See [`in_flight_create_guard`].
+    pub(super) in_flight_creates: super::in_flight_create_guard::InFlightCreateCounter,
     pub(super) index2_registry: Arc<crate::index2::IndexRegistry>,
     pub(super) mvcc_store: Option<Arc<shamir_tx::MvccStore>>,
     /// Per-table validator bindings (S2). Lock-free reads via
@@ -284,6 +295,10 @@ impl Clone for TableManager {
             ddl_admission: Arc::clone(&self.ddl_admission),
             // F-48 — shared across clones (Arc<AtomicUsize> inside).
             writer_drain: self.writer_drain.clone(),
+            // #1003 — shared across clones (Arc<AtomicU64> inside), same
+            // rationale as `writer_drain`: a create in flight on any clone
+            // must be visible to `degraded_index_count()` called on another.
+            in_flight_creates: self.in_flight_creates.clone(),
             index2_registry: Arc::clone(&self.index2_registry),
             mvcc_store: self.mvcc_store.clone(),
             validator_bindings: Arc::clone(&self.validator_bindings),
@@ -364,6 +379,7 @@ impl TableManager {
             // F-95 (#957) — fresh per-table admission mutex.
             ddl_admission: Arc::new(tokio::sync::Mutex::new(())),
             writer_drain: super::writer_drain_barrier::WriterDrainBarrier::new(),
+            in_flight_creates: super::in_flight_create_guard::InFlightCreateCounter::new(),
             index2_registry: Arc::new(crate::index2::IndexRegistry::new()),
             mvcc_store: None,
             validator_bindings,
@@ -623,6 +639,7 @@ impl TableManager {
             write_barrier_flags,
             ddl_admission: Arc::new(tokio::sync::Mutex::new(())),
             writer_drain: super::writer_drain_barrier::WriterDrainBarrier::new(),
+            in_flight_creates: super::in_flight_create_guard::InFlightCreateCounter::new(),
             index2_registry: Arc::new(crate::index2::IndexRegistry::new()),
             mvcc_store: None,
             validator_bindings: Arc::new(arc_swap::ArcSwap::from_pointee(Vec::new())),

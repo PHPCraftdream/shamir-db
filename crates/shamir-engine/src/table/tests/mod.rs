@@ -30,6 +30,7 @@ pub mod filtered_vector_tests;
 pub mod fts_tokenizer_dsl_tests;
 pub mod has_any_index_tests;
 pub mod history_read_tests;
+pub mod in_flight_create_guard_tests;
 pub mod index2_create_barrier_tests;
 pub mod index2_empty_result_tests;
 pub mod index2_lifecycle_state_tests;
