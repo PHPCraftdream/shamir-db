@@ -364,3 +364,58 @@ async fn doctor_detects_building_index2_backend() {
         "a healthy backend must have no diagnostic message"
     );
 }
+
+/// R0-D (#1013): `verify()` surfaces a `Failed` backend as unhealthy, with
+/// the recorded failure reason (not just the enum variant) folded into the
+/// diagnostic message — this is the concrete proof of the brief's "propagate
+/// the underlying error string into the entry" requirement.
+#[tokio::test]
+async fn doctor_detects_failed_index2_backend_with_reason() {
+    let (data_store, info_store) = make_stores();
+    let mgr = TableManager::create("t".into(), data_store, info_store)
+        .await
+        .unwrap();
+
+    let name_field = key_id(&mgr, "name").await;
+    let name_key = key_id(&mgr, "lower_name").await;
+
+    let backend = build_building_functional_backend(
+        1,
+        "lower_name",
+        name_key,
+        vec![name_field],
+        &mgr.info_store,
+    );
+    mgr.index2_registry().insert(backend).await.unwrap();
+
+    // Simulate the table-open recovery path failing this backend closed.
+    mgr.index2_registry()
+        .set_failed(1, "restore_on_open failed: injected disk fault xyz")
+        .await;
+
+    let report = mgr.verify().await.unwrap();
+    assert_eq!(report.index2_backends.len(), 1);
+    let health = &report.index2_backends[0];
+    assert_eq!(health.state, IndexState::Failed);
+    assert!(
+        !health.healthy,
+        "a Failed backend must be reported unhealthy"
+    );
+    let msg = health
+        .message
+        .as_ref()
+        .expect("a Failed backend must carry a diagnostic message");
+    assert!(
+        msg.contains("Failed state"),
+        "message must mention Failed state, got: {msg}"
+    );
+    assert!(
+        msg.contains("injected disk fault xyz"),
+        "message must propagate the UNDERLYING failure reason, not just the \
+         enum variant, got: {msg}"
+    );
+    assert!(
+        !report.is_healthy(),
+        "a Failed backend must make the overall report unhealthy"
+    );
+}

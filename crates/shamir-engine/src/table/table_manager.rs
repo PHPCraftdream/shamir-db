@@ -459,6 +459,12 @@ impl TableManager {
         // decision memo (`docs/dev-artifacts/research/f50-step3-crash-restart-spike.md`
         // §2) for why restart-from-scratch was chosen over resume.
         let mut recovered_building_ids: Vec<u32> = Vec::new();
+        // R0-D (#1013): ids that failed the Building self-heal (a failed
+        // `drop_all`) and were marked `Failed` in the loop below. Threaded
+        // through to the `restore_on_open` loop so it does not redundantly
+        // (and pointlessly) attempt to restore a backend already known to
+        // be broken.
+        let mut failed_recovery_ids: Vec<u32> = Vec::new();
         if let Some(persisted) =
             crate::index2::persistence::load_index2_metadata(&mgr.info_store).await?
         {
@@ -488,36 +494,46 @@ impl TableManager {
                         backend.descriptor().name,
                         backend.descriptor().id
                     );
+                    let recovered_id = backend.descriptor().id;
+                    // R0-D (#1013): a failed `drop_all` is NOT safe to paper
+                    // over. Partial postings from the crashed attempt may
+                    // survive alongside whatever the backfill below writes —
+                    // for FTS specifically this means stats are not a clean
+                    // overwrite, silently double-counting. Fail CLOSED: mark
+                    // the backend `Failed` (planner-invisible, same as
+                    // `Building`) and skip both the backfill and the
+                    // Ready-flip, instead of proceeding as if recovery
+                    // succeeded.
                     if let Err(e) = backend.drop_all().await {
-                        // `drop_all` failure is not fatal: the backfill below
-                        // will re-write postings idempotently for most
-                        // backends (functional/vector). Log and continue —
-                        // matching `restore_on_open`'s own error policy.
-                        log::warn!(
+                        let reason = format!(
                             "index2 drop_all during restart-from-scratch for '{}' (id={}) \
-                             failed: {} — continuing with backfill (partial postings may persist)",
+                             failed: {e} — partial postings may persist; NOT proceeding with \
+                             backfill. Call TableManager::repair() once the underlying storage \
+                             fault is resolved.",
                             backend.descriptor().name,
-                            backend.descriptor().id,
-                            e
+                            backend.descriptor().id
                         );
+                        log::error!("{reason}");
+                        let _ = mgr.index2_registry.insert(backend).await;
+                        mgr.index2_registry.set_failed(recovered_id, reason).await;
+                        failed_recovery_ids.push(recovered_id);
+                        continue;
                     }
                     // Re-run the backfill (the same `backfill_index2_backend`
                     // `create_index_v2` uses). Errors propagate: a backfill
                     // failure on reopen is a genuine data-integrity problem,
                     // not a transient issue.
                     mgr.backfill_index2_backend(backend.as_ref()).await?;
-                }
-                let recovered_id = backend.descriptor().id;
-                let _ = mgr.index2_registry.insert(backend).await;
-                // Flip Building → Ready now that the backfill has completed
-                // (for Ready descriptors this is a no-op — their tuple slot
-                // already carries Ready from `insert`).
-                if was_building {
+                    let _ = mgr.index2_registry.insert(backend).await;
+                    // Flip Building → Ready now that the backfill has
+                    // completed.
                     mgr.index2_registry
                         .set_state(recovered_id, crate::index2::state::IndexState::Ready)
                         .await;
                     recovered_building_ids.push(recovered_id);
+                    continue;
                 }
+                let _ = mgr.index2_registry.insert(backend).await;
             }
             // Re-persist so the on-disk state matches the now-Ready in-memory
             // state. Without this, a second crash before the next
@@ -571,17 +587,31 @@ impl TableManager {
         {
             let backends = mgr.index2_registry.all_backends().await;
             for b in &backends {
-                if recovered_building_ids.contains(&b.descriptor().id) {
+                let id = b.descriptor().id;
+                if recovered_building_ids.contains(&id) || failed_recovery_ids.contains(&id) {
                     continue;
                 }
                 let info = Arc::clone(&mgr.info_store);
                 let data = Arc::clone(mgr.table.data_store());
+                // R0-D (#1013): a failed `restore_on_open` must NOT leave the
+                // backend registered as if recovery succeeded. Before this
+                // fix, the code logged a warning and moved on — the backend
+                // stayed at whatever in-memory state its freshly-constructed
+                // adapter started with (empty, for most backends), silently
+                // serving incomplete/empty results with no error signal.
+                // Fail CLOSED: mark the backend `Failed` (planner-invisible,
+                // counted by `degraded_index_count()`) so a client sees "no
+                // usable index" instead of a confident-looking wrong answer.
                 if let Err(e) = b.restore_on_open(info, data).await {
-                    log::warn!(
-                        "index2 restore_on_open failed for index {}: {}",
-                        b.descriptor().name,
-                        e
+                    let reason = format!(
+                        "index2 restore_on_open failed for index '{}' (id={id}): {e} — the \
+                         backend may be empty/incomplete; marking Failed instead of serving \
+                         possibly-incomplete results. Call TableManager::repair() once the \
+                         underlying storage fault is resolved.",
+                        b.descriptor().name
                     );
+                    log::error!("{reason}");
+                    mgr.index2_registry.set_failed(id, reason).await;
                 }
             }
         }

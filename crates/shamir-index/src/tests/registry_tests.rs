@@ -7,6 +7,7 @@ use crate::kind::{
 };
 use crate::persistence::{load_index2_metadata, save_index2_metadata};
 use crate::registry::IndexRegistry;
+use crate::state::IndexState;
 use async_trait::async_trait;
 use shamir_storage::storage_in_memory::InMemoryStore;
 use shamir_storage::types::Store;
@@ -402,5 +403,122 @@ async fn concurrent_inserts_advance_generation_by_exactly_n() {
         "#992: {N} concurrent inserts must advance generation() by exactly {N} \
          (got {gen_before} -> {gen_after}); a smaller delta means some inserts \
          raced on the old `generation.load() + 1` and computed the same tag"
+    );
+}
+
+// ============================================================================
+// R0-D (#1013) — IndexState::Failed: set_failed / failure_reason_of /
+// planner-visibility gate.
+// ============================================================================
+//
+// These tests exercise the registry-level primitives the table-open
+// recovery path (`table_manager.rs`) uses to fail a backend CLOSED when a
+// `drop_all` (Building self-heal) or `restore_on_open` call genuinely
+// fails. Before R0-D, `IndexState` had only `Ready`/`Building` and there was
+// no `set_failed` — a failed recovery attempt left the backend registered
+// at whatever state it already had (typically `Building`, still counted
+// degraded but NOT reporting WHY, and in the `restore_on_open` case
+// sometimes left as `Ready` from construction). These tests fail to even
+// COMPILE against the pre-fix code (no `IndexState::Failed`, no
+// `set_failed`, no `failure_reason_of`) — that IS the regression proof for
+// the enum/registry surface; the behavioural assertions below prove the
+// surface does what R0-D promises once it exists.
+
+#[tokio::test]
+async fn set_failed_moves_state_and_records_reason() {
+    let reg = IndexRegistry::new();
+    reg.insert(make(1, 100)).await.unwrap();
+    assert_eq!(reg.state_of(1).await, Some(IndexState::Ready));
+
+    let updated = reg.set_failed(1, "drop_all failed: injected fault").await;
+    assert!(
+        updated,
+        "set_failed must find and update a registered backend"
+    );
+    assert_eq!(
+        reg.state_of(1).await,
+        Some(IndexState::Failed),
+        "set_failed must move the authoritative state to Failed"
+    );
+    assert_eq!(
+        reg.failure_reason_of(1).await.as_deref(),
+        Some("drop_all failed: injected fault"),
+        "failure_reason_of must surface the exact reason passed to set_failed"
+    );
+}
+
+#[tokio::test]
+async fn set_failed_on_unregistered_id_is_noop_false() {
+    let reg = IndexRegistry::new();
+    let updated = reg.set_failed(999, "no such backend").await;
+    assert!(!updated, "set_failed on an absent id must return false");
+    assert_eq!(reg.failure_reason_of(999).await, None);
+}
+
+#[tokio::test]
+async fn failure_reason_of_is_none_before_and_after_healing() {
+    let reg = IndexRegistry::new();
+    reg.insert(make(2, 200)).await.unwrap();
+    assert_eq!(
+        reg.failure_reason_of(2).await,
+        None,
+        "a fresh Ready backend must carry no failure reason"
+    );
+
+    reg.set_failed(2, "boom").await;
+    assert_eq!(reg.failure_reason_of(2).await.as_deref(), Some("boom"));
+
+    // Healing back to Ready (mirrors doctor::repair()'s set_state(Ready)
+    // call) must clear the stale reason — otherwise a later, unrelated
+    // Failed transition (or a stale verify() read) could report the OLD
+    // message.
+    reg.set_state(2, IndexState::Ready).await;
+    assert_eq!(reg.state_of(2).await, Some(IndexState::Ready));
+    assert_eq!(
+        reg.failure_reason_of(2).await,
+        None,
+        "set_state to a non-Failed state must clear the recorded failure reason"
+    );
+}
+
+#[tokio::test]
+async fn failed_backend_is_invisible_to_planner_lookup() {
+    // Mirrors `find_by_field_and_kind`'s existing Building-exclusion test
+    // (none exists standalone today — this is the R0-D regression for the
+    // *same* Ready-gate now also covering Failed). A Building backend was
+    // already proven invisible by the index2_lifecycle_state_tests suite in
+    // shamir-engine; this proves the identical gate (`entry.state !=
+    // IndexState::Ready`) also excludes Failed, at the registry unit level,
+    // independent of the engine's higher-level table-open plumbing.
+    let reg = IndexRegistry::new();
+    let field_path = vec![42u64];
+    let desc = IndexDescriptor::new(
+        7,
+        "failed_idx",
+        700,
+        SmallVec::from_vec(vec![field_path.clone()]),
+        IndexKind::Btree { unique: false },
+    );
+    let backend: Arc<dyn IndexBackend> = Arc::new(DummyBackend(desc));
+    reg.insert(backend).await.unwrap();
+
+    // Sanity: visible while Ready.
+    assert!(
+        reg.find_by_field_and_kind(&field_path, "btree")
+            .await
+            .is_some(),
+        "a Ready backend must be planner-visible"
+    );
+
+    reg.set_failed(7, "restore_on_open failed: injected fault")
+        .await;
+
+    assert!(
+        reg.find_by_field_and_kind(&field_path, "btree")
+            .await
+            .is_none(),
+        "a Failed backend must be planner-INVISIBLE, exactly like Building — \
+         find_by_field_and_kind must return None so callers fall back to a \
+         full scan instead of querying a broken/incomplete backend"
     );
 }

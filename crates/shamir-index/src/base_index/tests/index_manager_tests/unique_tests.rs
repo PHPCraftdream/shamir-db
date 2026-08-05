@@ -1149,3 +1149,114 @@ async fn corrupt_unique_posting_aborts_validate_update() {
         "expected Codec corruption error to propagate to the update path"
     );
 }
+
+// ============================================================================
+// P2 (#1023) — create_unique_index backfill must fail CLOSED on a malformed
+// key / undecodable value, not silently skip the row.
+// ============================================================================
+//
+// Before the fix, `create_unique_index`'s live `data_store.iter_stream` scan
+// `continue`d past a record whose key was not exactly 16 bytes, or whose
+// value bytes failed `InnerValue::from_bytes`. That row never got a unique
+// posting written, but the backfill still reported success — a later insert
+// with a colliding value could be wrongly accepted because the original
+// occupant's posting was never recorded. Mirrors #960's fail-closed fix for
+// a corrupt EXISTING posting (`DbError::Codec`, not a silent `Ok`/skip).
+
+#[tokio::test]
+async fn backfill_aborts_on_malformed_key_instead_of_skipping() {
+    let (data_store, _info_store, manager) = create_manager();
+
+    // One well-formed record...
+    let good_id = RecordId::new();
+    let good_value = create_test_value(&[(1, InnerValue::Str("Alice".to_string()))]);
+    data_store
+        .set(good_id.to_bytes().into(), good_value.to_bytes().unwrap())
+        .await
+        .unwrap();
+
+    // ...and one record under a MALFORMED key (17 bytes, not the required
+    // 16-byte RecordId). This simulates a foreign/corrupt entry landing in
+    // the data store's keyspace.
+    let malformed_key: Vec<u8> = vec![0xAB; 17];
+    let malformed_value = create_test_value(&[(1, InnerValue::Str("Bob".to_string()))]);
+    data_store
+        .set(malformed_key.into(), malformed_value.to_bytes().unwrap())
+        .await
+        .unwrap();
+
+    let index_def = IndexDefinition::new(1001, vec![IndexInfoItem::new(vec![1])]);
+    let result = manager.create_unique_index(index_def).await;
+
+    assert!(
+        result.is_err(),
+        "backfill over a malformed key must return Err, not silently skip the row \
+         and report success; got {result:?}"
+    );
+    assert!(
+        matches!(
+            result.unwrap_err(),
+            shamir_storage::error::DbError::Codec(_)
+        ),
+        "expected a typed Codec error for the malformed key (mirrors #960's \
+         corrupt-posting fail-closed policy)"
+    );
+
+    // The abort must leave NO live unique index behind — the backfill never
+    // reached `create_unique_index_from_records`' registration step, so
+    // there is no half-populated index masquerading as complete.
+    assert!(
+        !manager.unique_index_exists(1001),
+        "an aborted backfill must not leave a live (necessarily incomplete) unique index"
+    );
+}
+
+#[tokio::test]
+async fn backfill_aborts_on_undecodable_value_instead_of_skipping() {
+    let (data_store, _info_store, manager) = create_manager();
+
+    // One well-formed record...
+    let good_id = RecordId::new();
+    let good_value = create_test_value(&[(1, InnerValue::Str("Alice".to_string()))]);
+    data_store
+        .set(good_id.to_bytes().into(), good_value.to_bytes().unwrap())
+        .await
+        .unwrap();
+
+    // ...and one record with a well-formed 16-byte key but GARBAGE value
+    // bytes that fail `InnerValue::from_bytes` (not valid MessagePack).
+    // `0xC1` is msgpack's reserved/never-used marker byte — guaranteed to
+    // fail ANY msgpack decode (unlike e.g. `0xFF`, a valid negative-fixint
+    // that `rmp_serde`'s `deserialize_any` happily accepts as `Int(-1)`
+    // without requiring the rest of the buffer to be consumed). Same
+    // reserved-byte technique `sorted_index_manager_tests::covering_tests`
+    // uses to seed a genuinely undecodable blob.
+    let garbage_id = RecordId::new();
+    data_store
+        .set(
+            garbage_id.to_bytes().into(),
+            Bytes::from_static(&[0xC1u8; 8]),
+        )
+        .await
+        .unwrap();
+
+    let index_def = IndexDefinition::new(1002, vec![IndexInfoItem::new(vec![1])]);
+    let result = manager.create_unique_index(index_def).await;
+
+    assert!(
+        result.is_err(),
+        "backfill over an undecodable value must return Err, not silently skip \
+         the row and report success; got {result:?}"
+    );
+    assert!(
+        matches!(
+            result.unwrap_err(),
+            shamir_storage::error::DbError::Codec(_)
+        ),
+        "expected a typed Codec error for the undecodable value"
+    );
+    assert!(
+        !manager.unique_index_exists(1002),
+        "an aborted backfill must not leave a live (necessarily incomplete) unique index"
+    );
+}

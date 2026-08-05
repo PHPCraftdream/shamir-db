@@ -41,9 +41,8 @@ use serde::{Deserialize, Serialize};
 
 /// Persisted lifecycle state of an index2 backend.
 ///
-/// Minimal two-variant form for the F-50 Step 3a spike. Step 3b may extend
-/// this (e.g. an `Error`/`Aborted` state for a failed/cancelled build once
-/// #872 lands a real cancel path); any new variant is an additive,
+/// Minimal two-variant form for the F-50 Step 3a spike, extended with
+/// `Failed` by R0-D (#1013): any new variant is an additive,
 /// backward-compatible enum change (bincode tags enum variants by ordinal,
 /// so appending is safe — only a re-order is breaking).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -57,4 +56,19 @@ pub enum IndexState {
     /// served by the planner and MUST be reconciled (restart-from-scratch
     /// — see the F-50 Step 3a memo).
     Building,
+    /// R0-D (#1013): open-path recovery for this backend was attempted and
+    /// genuinely failed (a `drop_all` during the Building self-heal errored,
+    /// or `restore_on_open` errored). Set INSTEAD of leaving the backend at
+    /// whatever state it had before the failed recovery attempt — fail
+    /// CLOSED rather than silently serving a half-initialised or
+    /// possibly-empty backend as if it were `Ready`. Like `Building`, a
+    /// `Failed` backend MUST NOT be served by the planner (every
+    /// `state != IndexState::Ready` / `state == IndexState::Ready` gate
+    /// already excludes it without modification — see
+    /// `IndexRegistry::find_by_field_and_kind` and
+    /// `SortedIndexManager::find_by_field_ready`) and IS counted by
+    /// `degraded_index_count()` (which also gates on `!= Ready`). Recovery
+    /// from `Failed` is manual today: an operator runs `doctor::repair()`
+    /// (or reopens the table after fixing the underlying storage fault).
+    Failed,
 }

@@ -252,18 +252,33 @@ impl TableManager {
         // so `desc.state` here is the LIVE registry's truth (not the stale
         // serialization carrier on the backend's own `IndexDescriptor`).
         // A `Building` backend is reported unhealthy with the operator-facing
-        // message from the Step 3a memo §4 design.
+        // message from the Step 3a memo §4 design. R0-D (#1013): a `Failed`
+        // backend is ALSO unhealthy — its message includes the underlying
+        // recovery-failure reason (`IndexRegistry::failure_reason_of`), not
+        // just the enum variant, so an operator sees WHY recovery failed,
+        // not just THAT it did.
         let mut index2_backends = Vec::new();
         for desc in self.index2_registry().all_descriptors().await {
             let healthy = desc.state == IndexState::Ready;
-            let message = if healthy {
-                None
-            } else {
-                Some(format!(
+            let message = match desc.state {
+                IndexState::Ready => None,
+                IndexState::Building => Some(format!(
                     "index2 backend '{}' (id={}) is in Building state — build was \
                      interrupted; reopen the table or run repair",
                     desc.name, desc.id
-                ))
+                )),
+                IndexState::Failed => {
+                    let reason = self
+                        .index2_registry()
+                        .failure_reason_of(desc.id)
+                        .await
+                        .unwrap_or_else(|| "no reason recorded".to_string());
+                    Some(format!(
+                        "index2 backend '{}' (id={}) is in Failed state — open-path recovery \
+                         failed: {reason}",
+                        desc.name, desc.id
+                    ))
+                }
             };
             index2_backends.push(Index2Health {
                 id: desc.id,
@@ -386,32 +401,42 @@ impl TableManager {
         self.counter().set_to(counter_after).await?;
 
         // F-50 Step 3b — optionally heal any index2 backend stuck in
-        // `Building` state. The self-healing open path is the PRIMARY
-        // recovery (it runs automatically on every table open); this
-        // `repair()` branch is the manual belt-and-suspenders trigger for an
-        // operator who notices a stuck Building index on a LIVE table (one
-        // whose backfill failed under `restore_on_open`'s non-fatal error
-        // policy) and wants to force a re-build without a full table reopen.
-        // It reuses the same restart-from-scratch logic as the open path:
-        // drop the partial postings, re-run the full backfill, flip Ready,
-        // and re-persist.
+        // `Building` (or, R0-D / #1013, `Failed`) state. The self-healing
+        // open path is the PRIMARY recovery for `Building` (it runs
+        // automatically on every table open); this `repair()` branch is the
+        // manual belt-and-suspenders trigger for an operator who notices a
+        // stuck `Building` OR `Failed` index on a LIVE table (the latter
+        // left behind by a genuinely failed `drop_all`/`restore_on_open` at
+        // open time — R0-D fails those CLOSED into `Failed` rather than
+        // silently retrying, so `repair()` is the intended manual recovery
+        // path for them) and wants to force a re-build without a full table
+        // reopen. It reuses the same restart-from-scratch logic as the open
+        // path: drop the partial postings, re-run the full backfill, flip
+        // Ready, and re-persist. Unlike the open-path self-heal, a failed
+        // `drop_all` here is reported but the backfill still runs — this is
+        // an EXPLICIT operator-triggered retry, not a silent automatic one;
+        // if the backfill also fails, `backfill_index2_backend`'s `?`
+        // propagates and the index stays `Failed` (unhealed) rather than
+        // being counted below.
         let mut index2_healed: u64 = 0;
         let index2_descs = self.index2_registry().all_descriptors().await;
         for desc in &index2_descs {
-            if desc.state != IndexState::Building {
+            if !matches!(desc.state, IndexState::Building | IndexState::Failed) {
                 continue;
             }
             if let Some(backend) = self.index2_registry().get_by_id(desc.id).await {
                 log::warn!(
-                    "repair: re-triggering restart-from-scratch for Building index2 \
+                    "repair: re-triggering restart-from-scratch for {:?} index2 \
                      backend '{}' (id={})",
+                    desc.state,
                     desc.name,
                     desc.id
                 );
                 if let Err(e) = backend.drop_all().await {
                     log::warn!(
-                        "repair: drop_all for Building index2 '{}' (id={}) failed: {} \
+                        "repair: drop_all for {:?} index2 '{}' (id={}) failed: {} \
                          — continuing with backfill",
+                        desc.state,
                         desc.name,
                         desc.id,
                         e

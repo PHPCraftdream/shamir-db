@@ -59,6 +59,14 @@ struct BackendEntry {
     /// (P0-5a / #961). Kept in lockstep with [`name`](Self::name) and with the
     /// `by_name` reverse index.
     name_interned: u64,
+    /// R0-D (#1013): human-readable reason the backend was moved to
+    /// [`IndexState::Failed`], if any. Process-local, in-memory only — NOT
+    /// persisted (`all_descriptors()` does not read it; `IndexDescriptor`
+    /// carries no matching field, so a restart loses the specific message
+    /// but not the `Failed` state itself, which self-heals via the same
+    /// recovery path that set it). `None` for every state other than
+    /// `Failed`. Surfaced by `doctor::verify()`'s `Index2Health::message`.
+    failure_reason: Option<String>,
 }
 
 pub struct IndexRegistry {
@@ -184,6 +192,7 @@ impl IndexRegistry {
                     state,
                     name,
                     name_interned,
+                    failure_reason: None,
                 },
             )
             .await
@@ -213,6 +222,33 @@ impl IndexRegistry {
         self.by_id
             .update_async(&id, |_, e| {
                 e.state = state;
+                // A transition to any state OTHER than `Failed` clears a
+                // stale failure reason from a previous failed attempt (e.g.
+                // `doctor::repair()` successfully re-healing a `Failed`
+                // backend back to `Ready`). `set_failed` is the only path
+                // that populates this field going forward.
+                if state != IndexState::Failed {
+                    e.failure_reason = None;
+                }
+            })
+            .await
+            .is_some()
+    }
+
+    /// R0-D (#1013): set the authoritative lifecycle state to
+    /// [`IndexState::Failed`] and record `reason` as the operator-facing
+    /// diagnostic (surfaced by `doctor::verify()`). Used by the table-open
+    /// recovery path when a `drop_all` (Building self-heal) or
+    /// `restore_on_open` call genuinely fails — fail CLOSED instead of
+    /// leaving the backend at whatever state it had before the failed
+    /// recovery attempt. Returns `true` if the backend was found and
+    /// updated, `false` if no backend is registered under `id` (no-op).
+    pub async fn set_failed(&self, id: u32, reason: impl Into<String>) -> bool {
+        let reason = reason.into();
+        self.by_id
+            .update_async(&id, |_, e| {
+                e.state = IndexState::Failed;
+                e.failure_reason = Some(reason.clone());
             })
             .await
             .is_some()
@@ -224,6 +260,19 @@ impl IndexRegistry {
     /// planner Ready-gate and the doctor consult.
     pub async fn state_of(&self, id: u32) -> Option<IndexState> {
         self.by_id.read_async(&id, |_, e| e.state).await
+    }
+
+    /// R0-D (#1013): the recorded failure reason for the backend registered
+    /// under `id`, if it is (or was) `Failed`. `None` if no backend is
+    /// registered, or if the backend has never been marked `Failed` (or was
+    /// healed back to a non-`Failed` state since — see [`set_state`]'s
+    /// clearing behavior). Consulted by `doctor::verify()`'s
+    /// `Index2Health::message`.
+    pub async fn failure_reason_of(&self, id: u32) -> Option<String> {
+        self.by_id
+            .read_async(&id, |_, e| e.failure_reason.clone())
+            .await
+            .flatten()
     }
 
     /// F-50: every backend whose insertion generation is strictly greater

@@ -264,10 +264,18 @@ pub trait IndexBackend: Send + Sync {
     /// reads. The two MAY be the same physical store on simple setups.
     ///
     /// Returns `Ok(())` once the backend is query-ready, by whichever path
-    /// succeeded. The caller (`TableManager::open`) logs a warning on
-    /// `Err` but does NOT abort the open — a half-initialised index is
-    /// preferable to a failed table open (the snapshot/rebuild may succeed
-    /// on a later retry).
+    /// succeeded. The caller (`TableManager::create`) does NOT abort the
+    /// table open on `Err` — a broken index is preferable to a failed table
+    /// open (the underlying storage fault may be transient, and other
+    /// indexes/tables must stay usable). R0-D (#1013): the caller DOES,
+    /// however, fail this specific backend CLOSED — it logs the error and
+    /// moves the backend's registry state to `Failed` (via
+    /// `IndexRegistry::set_failed`) instead of leaving it at whatever
+    /// in-memory state its freshly-constructed adapter started with (empty,
+    /// for most backends). `Failed` is planner-invisible exactly like
+    /// `Building`, so a client gets "no usable index" (falls back to a full
+    /// scan / errors per the query's own semantics) instead of a
+    /// confident-looking but silently incomplete/empty result.
     async fn restore_on_open(
         &self,
         _info_store: Arc<dyn Store>,

@@ -364,20 +364,43 @@ impl IndexManager {
 
         // Scan data_store into a decoded vec, then delegate to the
         // shared build logic in create_unique_index_from_records.
+        //
+        // P2 (#1023): a malformed key (not exactly 16 bytes) or an
+        // undecodable value now ABORTS the backfill with a typed
+        // `DbError::Codec`, instead of silently `continue`-ing past the
+        // row. Fail-open here previously left the row's unique posting
+        // never written — its "occupied" state became invisible to later
+        // duplicate-detection, so a subsequent insert with a colliding
+        // value could be wrongly accepted on top of the gap. Mirrors the
+        // fail-closed policy `#960` already established for a corrupt
+        // EXISTING unique posting a few methods above
+        // (`check_unique_key`'s `try_into` → `DbError::Codec`, not
+        // `Ok(None)`): both are "genuine corruption" abort. No existing
+        // caller or test relies on the lenient skip (verified: this is the
+        // only call site for `create_unique_index`'s live data_store scan;
+        // `create_unique_index_from_records`'s callers all pass
+        // already-decoded records and never see this loop).
         let mut stream = self.data_store.iter_stream(FULL_SCAN_BATCH);
         let mut records: Vec<(RecordId, InnerValue)> = Vec::with_capacity(4);
         while let Some(batch_result) = stream.next().await {
             let batch = batch_result?;
             for (key_bytes, value_bytes) in batch {
-                let arr: [u8; 16] = match key_bytes.as_ref().try_into() {
-                    Ok(a) => a,
-                    Err(_) => continue,
-                };
+                let arr: [u8; 16] = key_bytes.as_ref().try_into().map_err(|_| {
+                    shamir_storage::error::DbError::Codec(format!(
+                        "create_unique_index backfill: malformed record key, expected \
+                         16-byte RecordId, got {} bytes (genuine corruption — fail-closed, \
+                         aborting backfill rather than silently skipping the row)",
+                        key_bytes.as_ref().len()
+                    ))
+                })?;
                 let record_id = RecordId(arr);
-                let value = match InnerValue::from_bytes(value_bytes) {
-                    Ok(v) => v,
-                    Err(_) => continue,
-                };
+                let value = InnerValue::from_bytes(value_bytes).map_err(|e| {
+                    shamir_storage::error::DbError::Codec(format!(
+                        "create_unique_index backfill: record {record_id:?} value failed to \
+                         decode: {e} (fail-closed, aborting backfill rather than silently \
+                         skipping the row)"
+                    ))
+                })?;
                 records.push((record_id, value));
             }
         }

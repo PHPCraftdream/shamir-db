@@ -576,6 +576,55 @@ async fn degraded_index_count_detects_building_index2() {
     );
 }
 
+/// R0-D (#1013): a `Failed` index2 (functional) backend directly inserted
+/// into the registry must ALSO be counted as degraded — `degraded_index_count`
+/// gates on `state != IndexState::Ready`, which already covers any non-Ready
+/// variant without modification. This is the regression proof that adding
+/// `IndexState::Failed` did not silently fall outside that gate.
+#[tokio::test]
+async fn degraded_index_count_detects_failed_index2() {
+    let (data_store, info_store) = make_stores();
+    let mgr = TableManager::create("t".into(), data_store, info_store)
+        .await
+        .unwrap();
+
+    let name_field = key_id(&mgr, "name").await;
+    let name_key = key_id(&mgr, "lower_name").await;
+
+    let backend = build_building_functional_backend(
+        1,
+        "lower_name",
+        name_key,
+        vec![name_field],
+        &mgr.info_store,
+    );
+    mgr.index2_registry().insert(backend).await.unwrap();
+
+    // Move straight to Failed (mirrors what the table-open recovery path
+    // does on a genuine drop_all/restore_on_open failure).
+    mgr.index2_registry()
+        .set_failed(1, "injected test failure")
+        .await;
+    assert_eq!(
+        mgr.index2_registry().state_of(1).await,
+        Some(IndexState::Failed)
+    );
+
+    assert_eq!(
+        mgr.degraded_index_count().await,
+        1,
+        "a Failed index2 backend must count as degraded, exactly like Building"
+    );
+
+    // Heal back to Ready and verify the count drops to zero.
+    mgr.index2_registry().set_state(1, IndexState::Ready).await;
+    assert_eq!(
+        mgr.degraded_index_count().await,
+        0,
+        "after healing to Ready, the index2 backend must not count as degraded"
+    );
+}
+
 /// The count path must perform ZERO store reads — it inspects only the
 /// in-memory `.state` fields. Proven with a `ReadCountingStore` wrapper
 /// around both `data_store` and `info_store`.
