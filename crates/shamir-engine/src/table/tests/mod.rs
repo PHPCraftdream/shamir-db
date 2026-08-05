@@ -42,6 +42,7 @@ pub mod interner_manager_tests;
 pub mod keyset_seek_tests;
 pub mod multi_vector_index_guard_tests;
 pub mod p02_base_index_rederive_tests;
+pub mod p03b_index2_drop_durability_tests;
 pub mod persistence_tests;
 pub mod read_one_tx_tests;
 pub mod record_counter_tests;

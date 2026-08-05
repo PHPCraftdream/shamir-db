@@ -22,8 +22,10 @@
 use crate::descriptor::IndexDescriptor;
 use crate::{MetaEnvelope, MetaError};
 use bytes::Bytes;
+use futures::StreamExt;
 use serde::{Deserialize, Serialize};
-use shamir_storage::types::Store;
+use shamir_storage::types::{RecordKey, Store};
+use shamir_tunables::store_defaults::MAINT_SCAN_BATCH;
 use shamir_types::types::record_id::RecordId;
 use std::sync::Arc;
 
@@ -262,4 +264,141 @@ pub async fn legacy_indexes_need_rebuild(
 ) -> Result<bool, shamir_storage::error::DbError> {
     let stored = load_legacy_index_version(info_store).await?;
     Ok(stored < LEGACY_INDEX_FORMAT_VERSION)
+}
+
+// ============================================================================
+// P0-3b (#988): DROP INDEX durable tombstone + crash recovery (index2)
+// ============================================================================
+//
+// Mirrors #972's sorted-family and #959's base_index-family durable-tombstone
+// pattern for the index2 family (fts / functional / vector).
+//
+// Sub-bug 3c (crash-resurrection): the OLD `drop_index2` had retire →
+// sweep → persist ordering with NO durable tombstone. A crash between the
+// sweep and the `save_index2_metadata` persist left the on-disk
+// `PersistedIndexes` still listing the index as `Ready` while its postings
+// were gone — on restart the planner would route queries to an index with
+// zero postings, silently returning wrong (empty / missing) results. The
+// durable tombstone (written BEFORE the sweep, cleared AFTER the persist)
+// closes this: on restart, `TableManager::create`'s recovery hook sees the
+// tombstone, removes the stale backend, sweeps its postings (idempotent),
+// persists, and clears the tombstone.
+//
+// Sub-bug 3b (name-reuse ghost postings): an id in the tombstone set is
+// rejected by `create_index_v2`'s namespace-reuse guard (resolving the
+// tombstoned id's name via persisted metadata) until the tombstone clears.
+//
+// Tombstone shape: `Vec<u32>` (descriptor IDS, NOT `name_interned` —
+// index2 backends are keyed by the compact `u32` id, unlike sorted/base_index
+// which use `name_interned`) serialized via bincode under
+// `system:_m.idx.drop`. A separate key was chosen (mirroring #959's
+// `idx_drop`/`uidx_drop` and #972's `sidx_drop`) to avoid touching
+// `save_index2_metadata`/`load_index2_metadata`'s forward-compat fallback
+// chain. An absent key or empty vec means "no in-progress drops".
+//
+// **CRITICAL** (the hard-won #959 collision lesson): `RecordId::system(name)`
+// truncates `name` to 12 bytes. The key `"_m.idx.drop"` (11 bytes, no
+// truncation) is verified distinct from the two existing index2 system keys:
+//   `"_m.idx"`      → [0,0,0,0, 5f,6d,2e,69,64,78, 00,00,00,00,00,00]
+//   `"_m.idx.lfv"`  → [0,0,0,0, 5f,6d,2e,69,64,78, 2e,6c,66,76,00,00]
+//   `"_m.idx.drop"` → [0,0,0,0, 5f,6d,2e,69,64,78, 2e,64,72,6f,70,00]
+// They share the first 10 bytes (`\0\0\0\0_m.idx`) but diverge at byte 10
+// (0x00 vs 0x2e) and again at byte 11 (0x6c vs 0x64) — NO collision.
+
+/// System key for the index2 DROP tombstone (`Vec<u32>` of descriptor ids).
+fn meta_key_indexes_drop() -> RecordId {
+    RecordId::system("_m.idx.drop")
+}
+
+/// Load the persisted index2 DROP tombstone. Returns an empty `Vec` if the
+/// key is absent (`NotFound`) or contains an empty vec — both mean "no
+/// in-progress drops". Mirrors #972's `load_dropping_sorted`.
+pub async fn load_dropping_index2(
+    info_store: &Arc<dyn Store>,
+) -> Result<Vec<u32>, shamir_storage::error::DbError> {
+    let key = meta_key_indexes_drop().to_bytes();
+    match info_store.get(key.into()).await {
+        Ok(bytes) => {
+            if bytes.is_empty() {
+                return Ok(Vec::new());
+            }
+            bincode::deserialize::<Vec<u32>>(&bytes).map_err(|e| {
+                shamir_storage::error::DbError::Codec(format!(
+                    "system:_m.idx.drop decode failed: {e}"
+                ))
+            })
+        }
+        Err(shamir_storage::error::DbError::NotFound(_)) => Ok(Vec::new()),
+        Err(e) => Err(e),
+    }
+}
+
+/// Add `id` to the persisted index2 DROP tombstone. Loads the current set,
+/// appends the id, and writes it back. MUST be called BEFORE the sweep in
+/// `drop_index2` so a crash at any subsequent point is recoverable.
+///
+/// If the persist fails, the on-disk tombstone is unchanged — the caller
+/// (`drop_index2`) propagates the error and does NOT proceed with the drop.
+/// Mirrors #972's `add_to_dropping_sorted` (adapted for the free-function
+/// shape — `IndexRegistry` does not own an `info_store`).
+pub async fn add_to_dropping_index2(
+    id: u32,
+    info_store: &Arc<dyn Store>,
+) -> Result<(), shamir_storage::error::DbError> {
+    let mut current = load_dropping_index2(info_store).await?;
+    if !current.contains(&id) {
+        current.push(id);
+    }
+    let key = meta_key_indexes_drop().to_bytes();
+    let bytes = bincode::serialize(&current)
+        .map_err(|e| shamir_storage::error::DbError::Codec(e.to_string()))?;
+    info_store.set(key.into(), Bytes::from(bytes)).await?;
+    Ok(())
+}
+
+/// Remove `id` from the persisted index2 DROP tombstone. Loads the current
+/// set, removes the id, and writes it back. MUST be called AFTER
+/// `save_index2_metadata` (the reduced metadata must be durable first).
+/// Mirrors #972's `clear_from_dropping_sorted`.
+pub async fn clear_from_dropping_index2(
+    id: u32,
+    info_store: &Arc<dyn Store>,
+) -> Result<(), shamir_storage::error::DbError> {
+    let mut current = load_dropping_index2(info_store).await?;
+    current.retain(|&x| x != id);
+    let key = meta_key_indexes_drop().to_bytes();
+    let bytes = bincode::serialize(&current)
+        .map_err(|e| shamir_storage::error::DbError::Codec(e.to_string()))?;
+    info_store.set(key.into(), Bytes::from(bytes)).await?;
+    Ok(())
+}
+
+/// Sweep all posting entries for the given index2 descriptor id from
+/// `info_store`. Postings are keyed by `[index_id: u32 LE][type_tag]...`
+/// (see `posting_layout`), so a 4-byte prefix scan collects every entry.
+/// Removing already-removed keys is a no-op on every `Store` backend, so
+/// this is safe to call idempotently. Extracted as a free function so the
+/// recovery path can re-run it without holding a backend `Arc`.
+///
+/// Note: `VectorBackend::drop_all` is currently a no-op (the HNSW graph
+/// lives in memory and dies with the process); this sweep finds no
+/// posting-key entries for vector ids, which is consistent with that.
+/// Mirrors #972's `sweep_sorted_postings`.
+pub async fn sweep_index2_postings_by_id(
+    id: u32,
+    info_store: &Arc<dyn Store>,
+) -> Result<(), shamir_storage::error::DbError> {
+    let prefix = Bytes::copy_from_slice(&id.to_le_bytes());
+    let stream = info_store.scan_prefix_stream(prefix, MAINT_SCAN_BATCH);
+    futures::pin_mut!(stream);
+    let mut to_drop: Vec<RecordKey> = Vec::new();
+    while let Some(batch) = stream.next().await {
+        for (k, _) in batch? {
+            to_drop.push(k);
+        }
+    }
+    if !to_drop.is_empty() {
+        let _ = info_store.remove_many(to_drop).await?;
+    }
+    Ok(())
 }

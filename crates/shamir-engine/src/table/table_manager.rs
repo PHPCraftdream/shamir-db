@@ -226,6 +226,17 @@ pub struct TableManager {
     #[cfg(test)]
     pub(super) drop_index2_pause_hook:
         Arc<arc_swap::ArcSwapOption<super::index2_backfill_hook::BackfillPauseHook>>,
+    /// P0-3b (#988) test-only deterministic pause point: parks `drop_index2`
+    /// AFTER the posting sweep but BEFORE the reduced metadata is persisted —
+    /// the exact crash window sub-bug 3c exercises. A regression test
+    /// installs this hook, parks `drop_index2` mid-drop, drops the manager
+    /// (simulating a crash), then constructs a fresh `TableManager::create`
+    /// against the SAME stores and asserts the recovery path finishes the
+    /// drop. Mirrors sorted's `drop_index_post_sweep_hook` (#972). `None` in
+    /// every non-test build and by default in tests.
+    #[cfg(test)]
+    pub(super) drop_index2_post_sweep_hook:
+        Arc<arc_swap::ArcSwapOption<super::index2_backfill_hook::BackfillPauseHook>>,
 }
 
 /// Bundle wiring the non-tx write path to the SSI commit-write log.
@@ -291,6 +302,8 @@ impl Clone for TableManager {
             create_sorted_index_backfill_hook: Arc::clone(&self.create_sorted_index_backfill_hook),
             #[cfg(test)]
             drop_index2_pause_hook: Arc::clone(&self.drop_index2_pause_hook),
+            #[cfg(test)]
+            drop_index2_post_sweep_hook: Arc::clone(&self.drop_index2_post_sweep_hook),
         }
     }
 }
@@ -366,6 +379,8 @@ impl TableManager {
             create_sorted_index_backfill_hook: Arc::new(arc_swap::ArcSwapOption::empty()),
             #[cfg(test)]
             drop_index2_pause_hook: Arc::new(arc_swap::ArcSwapOption::empty()),
+            #[cfg(test)]
+            drop_index2_post_sweep_hook: Arc::new(arc_swap::ArcSwapOption::empty()),
         };
 
         // Resolve covering-index included_fields string paths to interned ids.
@@ -475,6 +490,14 @@ impl TableManager {
                 .await;
             }
         }
+
+        // P0-3b (#988): recover any index2 DROP INDEX operations interrupted
+        // by a crash. Runs AFTER the F-50 Step 3b block (which loaded
+        // persisted metadata and inserted backends into the registry) and
+        // BEFORE the `restore_on_open` loop (so we don't waste time rebuilding
+        // a backend that recovery is about to remove). Mirrors sorted's
+        // `recover_in_progress_drops` (called from `SortedIndexManager::new`).
+        mgr.recover_index2_drops().await?;
 
         // Restore in-memory state from persisted data.
         //
@@ -603,6 +626,8 @@ impl TableManager {
             create_sorted_index_backfill_hook: Arc::new(arc_swap::ArcSwapOption::empty()),
             #[cfg(test)]
             drop_index2_pause_hook: Arc::new(arc_swap::ArcSwapOption::empty()),
+            #[cfg(test)]
+            drop_index2_post_sweep_hook: Arc::new(arc_swap::ArcSwapOption::empty()),
         }
     }
 
@@ -747,6 +772,18 @@ impl TableManager {
         hook: Option<Arc<super::index2_backfill_hook::BackfillPauseHook>>,
     ) {
         self.drop_index2_pause_hook.store(hook);
+    }
+
+    /// P0-3b (#988) test-only: install (or clear with `None`) the deterministic
+    /// `drop_index2` post-sweep pause hook (fires after the posting sweep,
+    /// before the reduced metadata persist). See
+    /// `drop_index2_post_sweep_hook`'s field doc.
+    #[cfg(test)]
+    pub(crate) fn set_drop_index2_post_sweep_hook(
+        &self,
+        hook: Option<Arc<super::index2_backfill_hook::BackfillPauseHook>>,
+    ) {
+        self.drop_index2_post_sweep_hook.store(hook);
     }
 
     /// Clone the handle to this table's unique-write serialisation lock.

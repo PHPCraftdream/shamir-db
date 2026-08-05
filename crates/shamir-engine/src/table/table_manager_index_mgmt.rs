@@ -86,6 +86,31 @@ impl TableManager {
             .begin_write_barrier(crate::index::write_barrier_flags::INDEX2_CREATE)
             .await;
 
+        // P0-3b (#988) sub-bug 3b: namespace-reuse guard. Reject CREATE for
+        // a name whose DROP is still in flight. The tombstone stores descriptor
+        // ids (`Vec<u32>`), so we resolve each tombstoned id's name via the
+        // persisted metadata (the durable record) and check for a match with
+        // `op.create_index`. Mirrors `SortedIndexManager::register`'s guard
+        // (#972) — adapted for index2's id-based tombstone. On the normal path
+        // (no tombstone), this is a single cheap load that returns an empty vec.
+        let dropping_ids =
+            crate::index2::persistence::load_dropping_index2(&self.info_store).await?;
+        if !dropping_ids.is_empty() {
+            if let Some(persisted) =
+                crate::index2::persistence::load_index2_metadata(&self.info_store).await?
+            {
+                for d in &persisted.descriptors {
+                    if dropping_ids.contains(&d.id) && d.name == op.create_index {
+                        return Err(shamir_storage::error::DbError::Internal(format!(
+                            "Cannot create index '{}': a DROP INDEX for this name is \
+                             still in progress. Retry after the drop completes.",
+                            op.create_index
+                        )));
+                    }
+                }
+            }
+        }
+
         let interner = self.interner.get().await?;
         let mut interned_paths: SmallVec<[Vec<u64>; 2]> = SmallVec::new();
         for field_path in &op.fields {
@@ -755,62 +780,39 @@ impl TableManager {
     /// drop must do both so the surviving table never observes a stale
     /// descriptor or orphan postings.
     ///
-    /// Sequence (best-effort, non-atomic — crash-safety GAP below):
+    /// # Crash-safety sequence (P0-3b / #988 — durable tombstone)
+    ///
+    /// The order tombstone → retire → sweep → persist → clear-tombstone
+    /// closes the crash-resurrection gap that the retire → sweep → persist
+    /// order had (a crash between sweep and persist left the on-disk
+    /// `PersistedIndexes` still listing the index as `Ready` with zero
+    /// postings — the planner would route queries to a dead index, silently
+    /// returning empty/missing results). This mirrors the durable-tombstone
+    /// pattern from the base_index regular/unique family (#959) and the
+    /// sorted family (#972):
     ///   1. resolve the backend by interned name (`Ok(false)` if absent);
-    ///   2. `registry.remove_by_id(id)` to retire it from the planner-visible
+    ///   2. **persist a durable tombstone** (`add_to_dropping_index2`) recording
+    ///      that this descriptor id is being dropped — MUST succeed before
+    ///      the sweep, so a crash at any later point is recoverable;
+    ///   3. `registry.remove_by_id(id)` to retire it from the planner-visible
     ///      live set FIRST (F-76 / #903 — mirror image of F-72's `Building`
     ///      gate for CREATE). Also advances the F-50 generation counter;
-    ///   3. `backend.drop_all()` to sweep its (now orphan, planner-invisible)
+    ///   4. `backend.drop_all()` to sweep its (now orphan, planner-invisible)
     ///      posting entries — `backend` is held locally so it survives the
     ///      registry removal;
-    ///   4. `save_index2_metadata` to persist the reduced registry — it
+    ///   5. `save_index2_metadata` to persist the reduced registry — it
     ///      re-derives `PersistedIndexes` from the LIVE registry's
     ///      `all_descriptors()`, so calling it AFTER `remove_by_id`
-    ///      naturally persists the removal.
+    ///      naturally persists the removal;
+    ///   6. **clear the tombstone** (`clear_from_dropping_index2`) — the
+    ///      reduced metadata is now durable, so the tombstone is no longer
+    ///      needed.
     ///
-    /// # CRASH-SAFETY GAP (pre-existing, deliberately deferred — reviewed under #972)
-    ///
-    /// The order retire → sweep → persist is the SAME shape as the
-    /// crash-resurrection bug fixed for the base_index regular/unique family
-    /// (#959) and the sorted family (#972): a crash between step 3 (`drop_all`)
-    /// and step 4 (`save_index2_metadata`) leaves the on-disk
-    /// `PersistedIndexes` still listing the index as `Ready` while its
-    /// postings are gone — on restart the planner would route queries to an
-    /// index with zero postings, silently returning wrong (empty/missing)
-    /// results. This was known and intentionally deferred BEFORE #972 (the
-    /// original note pointed at F-50 Step 3b / #873), and #972 re-reviewed it
-    /// and left it deferred for a focused task — NOT a time-out.
-    ///
-    /// When this is picked up, copy the durable-tombstone pattern from the
-    /// sibling families. The closest analog is the SORTED family
-    /// (`SortedIndexManager` in `shamir-index/src/base_index/sorted_index_manager.rs`,
-    /// #972), which uses a separate `system:sidx_drop` key holding a
-    /// bincode `Vec<u64>` written BEFORE the sweep and cleared AFTER the
-    /// persist, with an open-time `recover_in_progress_drops` resuming any
-    /// interrupted drop. For index2 the tombstone would hold `Vec<u32>`
-    /// (descriptor ids, not `name_interned`) under a fresh `system:` key, and
-    /// the recovery hook belongs in `TableManager::create`'s index2-open loop
-    /// (where `load_index2_metadata` runs), right after the
-    /// Building-state self-heal block. ALSO add the matching namespace-reuse
-    /// guard (reject `create_index_v2` for an id in the tombstone set),
-    /// mirroring `SortedIndexManager::register`'s guard.
-    ///
-    /// **Two design options for the fix** (decide when scoped):
-    /// - **(a) Tombstone** (what #959/#972 use): a separate `system:` key,
-    ///   consistent with the other three families, minimal persistence-shape
-    ///   change. CRITICAL (the #959 lesson): `RecordId::system(name)`
-    ///   truncates `name` to 12 bytes — verify the chosen key's first 12
-    ///   bytes don't collide with `"_m.idx"` (→`"_m.idx"`) or
-    ///   `"_m.idx.lfv"` (→`"_m.idx.lfv"`). `"_m.idx.drop"` (11 bytes) is safe.
-    /// - **(b) State-based** (what the original deferral note gestured at,
-    ///   matching `create_index_v2`'s `Building`/`Ready` self-heal): add a
-    ///   `Dropping` state (or a `pending_drop` marker) to the descriptor and
-    ///   let the existing open-time self-heal loop reconcile it. More invasive
-    ///   (new enum variant, persistence forward-compat, planner state-gate).
-    ///
-    /// Option (a) is the lower-risk, pattern-consistent choice for a release;
-    /// (b) is more uniform with index2's own CREATE crash-safety but is
-    /// substantially more design surface.
+    /// On restart, [`recover_index2_drops`](Self::recover_index2_drops) in
+    /// `TableManager::create` sees any tombstone left by an interrupted drop
+    /// and finishes it idempotently (remove backend, sweep postings, persist,
+    /// clear tombstone). See that method's crash-state matrix for the full
+    /// recovery reasoning.
     ///
     /// F-76 (#903): the OLD order was `drop_all` → `remove_by_id`, which left
     /// a window in which a concurrent reader could still resolve the backend
@@ -836,13 +838,31 @@ impl TableManager {
         let Some(backend) = self.index2_registry.get_by_name(name_key.id()).await else {
             return Ok(false);
         };
+        let drop_id = backend.descriptor().id;
+
+        // P0-3b (#988): write a durable tombstone BEFORE retiring the backend
+        // or sweeping postings. If the process crashes after the sweep but
+        // before the reduced metadata is persisted, the on-disk metadata
+        // still lists the index — but the tombstone tells
+        // `recover_index2_drops` to finish the drop rather than resurrecting
+        // a broken "Ready but no postings" index. MUST succeed before
+        // proceeding; if the persist fails the on-disk tombstone is unchanged
+        // and we propagate `Err` without touching the registry or postings.
+        crate::index2::persistence::add_to_dropping_index2(drop_id, &self.info_store)
+            .await
+            .map_err(|e| {
+                shamir_storage::error::DbError::Internal(format!(
+                    "DROP INDEX '{name}': failed to persist the durable drop tombstone: {e}. \
+                     The backend was NOT retired and postings were NOT swept — the \
+                     index is still fully intact. Retry the DROP."
+                ))
+            })?;
+
         // F-76 (#903): retire the backend from the planner-visible registry
         // BEFORE sweeping its postings. See the method doc for the full
         // rationale. `backend` is held locally, so `drop_all` below still
         // runs after this removal.
-        self.index2_registry
-            .remove_by_id(backend.descriptor().id)
-            .await;
+        self.index2_registry.remove_by_id(drop_id).await;
         // F-76 test seam: park here (backend already retired from the
         // registry, postings not yet swept) if a test installed a pause hook.
         // With the fix, a concurrent read issued while parked here must fall
@@ -855,29 +875,127 @@ impl TableManager {
         // Sweep the (now orphan, planner-invisible) posting entries.
         backend.drop_all().await.map_err(|e| {
             shamir_storage::error::DbError::Internal(format!(
-                "DROP INDEX '{name}': the backend was retired from the \
-                     planner-visible registry, but the posting sweep failed: {e}. \
-                     Postings may be partially swept. On restart, the index will \
-                     reload from metadata (still listed) with potentially missing \
-                     postings. Call TableManager::verify() to confirm state, or \
-                     TableManager::repair() to rebuild it."
+                "DROP INDEX '{name}': a durable drop tombstone was persisted and \
+                     the backend was retired from the planner-visible registry, but \
+                     the posting sweep failed: {e}. On restart, recovery will resume \
+                     the sweep idempotently and finish the drop. Call \
+                     TableManager::verify() to confirm state."
             ))
         })?;
-        // P1-2 (#967): postings are swept (durable) but metadata still lists
-        // the index — if this persist fails, enrich the error.
+
+        // P0-3b (#988) test seam — park here (sweep complete, reduced metadata
+        // NOT yet persisted) if a test installed the post-sweep hook. This is
+        // the exact crash window sub-bug 3c exercises: a "crash" here (dropping
+        // the manager) leaves the tombstone on disk and the old metadata, and
+        // the recovery path in `TableManager::create` must finish the drop.
+        // NOT `#[cfg(test)]`-gated cost-wise — zero cost (`None`) on real path.
+        #[cfg(test)]
+        if let Some(hook) = self.drop_index2_post_sweep_hook.load_full() {
+            hook.wait_at_window().await;
+        }
+
+        // Persist the reduced metadata (backend removed from registry).
         crate::index2::persistence::save_index2_metadata(&self.index2_registry, &self.info_store)
             .await
             .map_err(|e| {
                 shamir_storage::error::DbError::Internal(format!(
-                    "DROP INDEX '{name}': the posting sweep completed, but \
-                     persisting the reduced index metadata failed: {e}. On \
-                     restart, the index will reload from the stale metadata \
-                     (still listed) but with no postings — call \
-                     TableManager::verify() to confirm state, or \
-                     TableManager::repair() to rebuild it."
+                    "DROP INDEX '{name}': a durable drop tombstone was persisted, \
+                     the backend was retired, and the posting sweep completed, but \
+                     persisting the reduced index metadata failed: {e}. On restart, \
+                     recovery will finish the drop idempotently. Call \
+                     TableManager::verify() to confirm state."
+                ))
+            })?;
+
+        // P0-3b (#988): clear the tombstone AFTER the reduced metadata is
+        // durably persisted. If this fails, the tombstone remains — recovery
+        // will just clear it (a no-op on the already-finished drop).
+        crate::index2::persistence::clear_from_dropping_index2(drop_id, &self.info_store)
+            .await
+            .map_err(|e| {
+                shamir_storage::error::DbError::Internal(format!(
+                    "DROP INDEX '{name}': the drop is essentially complete (tombstone \
+                     persisted, backend retired, sweep done, reduced metadata persisted), \
+                     but clearing the drop tombstone failed: {e}. On restart, recovery \
+                     will clear the tombstone as a no-op. Call TableManager::verify() \
+                     to confirm state."
                 ))
             })?;
         Ok(true)
+    }
+
+    /// P0-3b (#988): open-time recovery for index2 DROP INDEX operations
+    /// interrupted by a crash. Called from `TableManager::create` AFTER the
+    /// F-50 Step 3b self-heal block (which loaded persisted metadata and
+    /// inserted backends into the registry) and BEFORE the `restore_on_open`
+    /// loop (so we don't waste time rebuilding a backend recovery removes).
+    ///
+    /// # Crash-state matrix (mirrors #972's `recover_in_progress_drops`)
+    ///
+    /// The drop sequence is: tombstone → `remove_by_id` → sweep → persist →
+    /// clear-tombstone. On restart, the F-50 Step 3b block has already loaded
+    /// persisted metadata and inserted backends, so the registry reflects
+    /// whatever was on disk.
+    ///
+    /// | crash point                              | registry has backend? | postings? | tombstone? | recovery action                       |
+    /// |------------------------------------------|----------------------|-----------|------------|---------------------------------------|
+    /// | after tombstone-write, before sweep      | yes (from persisted)  | present   | yes        | remove_by_id, sweep, persist, clear   |
+    /// | after sweep, before persist              | yes (from persisted)  | gone      | yes        | remove_by_id, sweep (no-op), persist, clear |
+    /// | after persist, before clear              | no (not in persisted) | gone      | yes        | sweep (no-op), clear                  |
+    ///
+    /// In every case the recovery leaves the manager in a consistent state:
+    /// the backend is gone from the registry, its postings are swept, the
+    /// reduced metadata is persisted, and the tombstone is cleared. The sweep
+    /// is idempotent (prefix-scan + remove_many on already-removed keys is a
+    /// no-op), so calling recovery twice (two restart attempts) is a clean
+    /// no-op on the second call. Mirrors #972's `recover_in_progress_drops`.
+    pub(crate) async fn recover_index2_drops(&self) -> DbResult<()> {
+        let dropping = crate::index2::persistence::load_dropping_index2(&self.info_store).await?;
+        if dropping.is_empty() {
+            return Ok(());
+        }
+
+        log::info!(
+            "P0-3b (#988): recovering {} in-progress index2 DROP(s)",
+            dropping.len()
+        );
+
+        let mut changed = false;
+        for &id in &dropping {
+            // If the backend is still in the registry (crash happened before
+            // `save_index2_metadata` finalized the removal), retire it now.
+            // If it's already gone (crash after persist), this is a no-op.
+            if self.index2_registry.remove_by_id(id).await.is_some() {
+                changed = true;
+            }
+            // Always run the sweep (idempotent). Covers both the "sweep never
+            // ran" and "sweep ran but persist failed" cases. The sweep is a
+            // 4-byte prefix scan on `id.to_le_bytes()` — no backend Arc needed.
+            crate::index2::persistence::sweep_index2_postings_by_id(id, &self.info_store).await?;
+        }
+        if changed {
+            crate::index2::persistence::save_index2_metadata(
+                &self.index2_registry,
+                &self.info_store,
+            )
+            .await?;
+        }
+
+        // Clear the entire tombstone (write empty Vec<u32>; the load path
+        // treats empty-vec and NotFound identically).
+        let empty = bincode::serialize(&Vec::<u32>::new())
+            .map_err(|e| shamir_storage::error::DbError::Codec(e.to_string()))?;
+        let key = shamir_types::types::record_id::RecordId::system("_m.idx.drop").to_bytes();
+        self.info_store
+            .set(key.into(), bytes::Bytes::from(empty))
+            .await?;
+
+        log::info!(
+            "P0-3b (#988): recovery complete — {} index2 DROP(s) finalized",
+            dropping.len()
+        );
+
+        Ok(())
     }
 
     /// Check if a sorted index exists by name.
