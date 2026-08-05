@@ -165,25 +165,38 @@ fn audit_insert_body(bind_row: &str) -> BatchRequest {
 ///
 /// Used instead of a unique-index violation for the mid-loop-failure e2e
 /// scenario below (`for_each_iteration_error_mid_loop_rolls_back_whole_tx_over_real_wire`)
-/// because TWO separate, pre-existing (and out of scope here) issues make a
-/// unique-index-based cross-iteration conflict unreliable inside a single
-/// still-open transaction:
-///   1. `FilterValue`'s `#[serde(untagged)]` msgpack round-trip collapses a
-///      literal array whose every element is a small int (0-127) into the
-///      WRONG variant (`FilterValue::Binary` via `serde_bytes`, ambiguous
-///      with msgpack's positive-fixint encoding) instead of
-///      `FilterValue::Array` — so a small-valued `over` literal like
-///      `[1, 1, 2]` fails to resolve as a list at all, over the real wire.
-///   2. Even with values large enough to avoid (1), unique-index validation
-///      (`crates/shamir-index/src/base_index/index_manager_unique.rs`'s
+/// because of two issues — one now-fixed, one still-open (and out of scope
+/// here) — that make a unique-index-based cross-iteration conflict unreliable
+/// inside a single still-open transaction:
+///   1. FIXED as of #983 (commit `80d08caa`): `FilterValue`'s
+///      `#[serde(untagged)]` msgpack round-trip USED TO collapse a literal
+///      array whose every element is a small int (0-127) into the WRONG
+///      variant (`FilterValue::Binary` via `serde_bytes`, ambiguous with
+///      msgpack's positive-fixint encoding) instead of `FilterValue::Array` —
+///      so a small-valued `over` literal like `[1, 1, 2]` failed to resolve as
+///      a list at all, over the real wire. The strict `de_binary_strict`
+///      deserializer in `crates/shamir-query-types/src/filter/filter_value.rs`
+///      (which rejects `visit_seq`/`visit_str` callbacks, accepting only
+///      genuine byte-buffer wire shapes) now closes that ambiguity, so this is
+///      no longer a live blocker.
+///   2. STILL OPEN (unrelated to #983; `#987` fixed a DIFFERENT bug): unique-
+///      index validation (`crates/shamir-index/src/base_index/index_manager_unique.rs`'s
 ///      `validate_unique_for_create` plus the commit-time re-check in
-///      `crates/shamir-engine/src/tx/pre_commit.rs`'s `pre_commit_prelock`)
-///      only ever checks against DURABLE committed state — two inserts
-///      claiming the same unique key within the SAME still-uncommitted
+///      `crates/shamir-engine/src/tx/pre_commit.rs`'s `pre_commit_prelock`,
+///      Phase 2.6) only ever checks against DURABLE committed state — two
+///      inserts claiming the same unique key within the SAME still-uncommitted
 ///      transaction never cross-validate against each other, so a
-///      duplicate-within-one-tx silently commits instead of aborting.
+///      duplicate-within-one-tx silently commits instead of aborting. (`#987`
+///      moved `rederive_base_index_ops_post_stage` to run before Phase 2.6's
+///      loop so a tx staged BEFORE a mid-tx `CREATE UNIQUE INDEX` gets
+///      retroactively validated — a timing/ordering fix, NOT the general
+///      staged-vs-staged-in-the-same-tx gap described here.)
 ///
-/// `math/mod`'s div-by-zero technique sidesteps both: no duplicate values
+/// Issue (1) is fixed as of #983 (commit `80d08caa`); issue (2) alone still
+/// makes a unique-index-based conflict unreliable within a single open
+/// transaction, so this `math/mod` workaround remains necessary (reverting to
+/// a plain unique-index trigger would reintroduce the exact silent-commit flake
+/// (2) describes). The div-by-zero technique sidesteps it: no duplicate values
 /// needed (large, distinct `order_id`s throughout), and the failure is
 /// self-contained to the failing iteration's own insert (no cross-iteration
 /// durable-state check involved).

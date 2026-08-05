@@ -408,9 +408,18 @@ fn test_lte_int_boundary() {
 // `make_record` inserts `bin = InnerValue::Bin(vec![1, 2, 3])`. A
 // `FilterValue::Binary` literal MUST match byte-for-byte via the bytes-eval
 // path (`RawScalar::Bin` vs `FilterValue::Binary`, eval_bytes.rs ~487). This
-// pins the engine-side filter floor for #983: if a row is stored as `Bin`, the
-// binary-equality filter finds it (the defect for #983 is client-side — see the
-// TS bisection — so this Rust test must PASS unchanged).
+// test was written to pin down root cause #1 of #983 — a genuine engine-side
+// bug, NOT a client-side issue: the resolved-value comparison path
+// (`compare_values` in resolve.rs, plus its mirrors `scalar_ref_cmp`/
+// `scalar_ref_cmp_qv` in shamir-types) had NO `Bin`-vs-`Bin` arm, so every
+// `Eq`/`Ne`/`Gt`/`Gte`/`Lt`/`Lte` against a `Bin` field fell through to `None`
+// (no match) even for byte-identical values. That gap was found and fixed in
+// commit `80d08caa`, which added the `(Value::Bin(a), Value::Bin(b)) =>
+// Some(a.cmp(b))` arm at resolve.rs ~204 (and the matching arms in both
+// scalar_ref mirrors). #983's SECOND, independent root cause — the
+// `FilterValue` untagged-enum wire ambiguity — was also fixed in that same
+// commit (see `de_binary_strict` in filter_value.rs). This test guards the
+// engine-side fix and must PASS.
 
 #[test]
 fn test_eq_bin_match() {
