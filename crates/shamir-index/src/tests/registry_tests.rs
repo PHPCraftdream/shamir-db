@@ -273,3 +273,134 @@ async fn remove_after_rename_unlinks_new_name() {
     );
     assert!(reg.get_by_id(40).await.is_none());
 }
+
+// ============================================================================
+// P1 (#992) — IndexRegistry::insert generation tagging must be linearizable
+// ============================================================================
+//
+// Before the fix, `insert()` computed its per-entry generation tag as
+// `generation.load(Acquire) + 1` — a classic read-then-write race. Two
+// concurrent inserts that both read `generation == G` both computed `G+1`:
+// the second's `fetch_max(G+1)` was a no-op, leaving `generation()` flat
+// even though the second backend was published. At commit,
+// `pre_commit.rs:825`'s `generation() == stage_gen` shortcut then skipped
+// re-derivation ENTIRELY (not just `backends_newer_than` — the filter was
+// never even called), so the tx committed with zero ops for the second
+// backend (the exact "guaranteed miss" class #958/#987 exist to prevent).
+//
+// The fix replaces the racy `load() + 1` with a DEDICATED ticket counter
+// (`insert_ticket`), decoupled from `generation`. `fetch_add` is a true
+// atomic fetch-and-add, so two concurrent inserts are guaranteed DISTINCT
+// tickets regardless of interleaving.
+//
+// These tests are property-based: they assert the invariant the fix
+// guarantees (`fetch_add` uniqueness), which holds deterministically under
+// the new code regardless of scheduling. A `tokio::sync::Barrier`
+// synchronizes all tasks to enter `insert()` at the same instant —
+// maximizing the contention that would trigger the OLD race — without any
+// production-code pause-hook seam. A multi-threaded runtime gives true
+// parallelism so the race window is exercised, not just simulated.
+
+/// #992: N concurrent `insert()` calls must receive DISTINCT generation
+/// tags. Before the fix, two inserts that raced on `generation.load()`
+/// both computed the same `my_gen`, so both published with that tag and the
+/// second's `fetch_max` was a no-op.
+///
+/// This is a property-based test: it asserts the invariant the fix
+/// guarantees (`fetch_add` uniqueness → distinct tags), which holds
+/// deterministically under the new code regardless of scheduling. A
+/// `tokio::sync::Barrier` synchronizes all tasks to enter `insert()`
+/// simultaneously, maximizing the contention that would trigger the old
+/// race — making the test a strong regression detector without needing a
+/// production-code pause-hook seam.
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn concurrent_inserts_get_distinct_generation_tags() {
+    let reg = Arc::new(IndexRegistry::new());
+    const N: u32 = 32;
+
+    // Synchronize all tasks so they enter `insert()` at the same instant —
+    // maximizes the chance that multiple tasks compute `my_gen` before any
+    // `fetch_max` lands (the exact interleaving the old code raced on).
+    let barrier = Arc::new(tokio::sync::Barrier::new(N as usize));
+    let mut handles = Vec::new();
+    for id in 1..=N {
+        let reg = reg.clone();
+        let barrier = barrier.clone();
+        handles.push(tokio::spawn(async move {
+            barrier.wait().await;
+            reg.insert(make(id, id as u64 * 10)).await.unwrap();
+        }));
+    }
+    for h in handles {
+        h.await.unwrap();
+    }
+
+    // Read back each entry's gen tag via the test-only accessor and assert
+    // all are distinct. `fetch_add` guarantees distinct return values, so
+    // the set of gens is exactly {1, 2, ..., N}.
+    let mut gens = Vec::new();
+    for id in 1..=N {
+        gens.push(
+            reg.entry_gen(id)
+                .await
+                .expect("backend must be registered after concurrent insert"),
+        );
+    }
+    let distinct: BTreeSet<u64> = gens.iter().copied().collect();
+    assert_eq!(
+        distinct.len(),
+        N as usize,
+        "#992: concurrent inserts must receive DISTINCT generation tags; got {gens:?}"
+    );
+
+    // Cross-check via the public `backends_newer_than` API: with gens
+    // {1, ..., N}, `backends_newer_than(t)` returns exactly N-t backends
+    // for every threshold t in 0..=N. If any two gens collided (old bug),
+    // this sweep would return a wider-than-expected count for some t.
+    for t in 0..=N as u64 {
+        let got = reg.backends_newer_than(t).await.len() as u64;
+        let expected = N as u64 - t;
+        assert_eq!(
+            got, expected,
+            "#992: backends_newer_than({t}) returned {got} backends, expected {expected} \
+             (gens must be the contiguous set {{1..={N}}})"
+        );
+    }
+}
+
+/// #992: N concurrent `insert()` calls must advance `generation()` by
+/// exactly N. Before the fix, concurrent inserts that raced on
+/// `generation.load()` computed the same `my_gen`, so the second's
+/// `fetch_max` was a no-op — `generation()` could stay flat even though a
+/// new backend was published. At commit, `pre_commit.rs:825`'s
+/// `generation() == stage_gen` shortcut then skipped re-derivation
+/// entirely. This test asserts the invariant directly.
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn concurrent_inserts_advance_generation_by_exactly_n() {
+    let reg = Arc::new(IndexRegistry::new());
+    const N: u32 = 32;
+    let gen_before = reg.generation();
+
+    let barrier = Arc::new(tokio::sync::Barrier::new(N as usize));
+    let mut handles = Vec::new();
+    for id in 1..=N {
+        let reg = reg.clone();
+        let barrier = barrier.clone();
+        handles.push(tokio::spawn(async move {
+            barrier.wait().await;
+            reg.insert(make(id, id as u64 * 10)).await.unwrap();
+        }));
+    }
+    for h in handles {
+        h.await.unwrap();
+    }
+
+    let gen_after = reg.generation();
+    assert_eq!(
+        gen_after - gen_before,
+        N as u64,
+        "#992: {N} concurrent inserts must advance generation() by exactly {N} \
+         (got {gen_before} -> {gen_after}); a smaller delta means some inserts \
+         raced on the old `generation.load() + 1` and computed the same tag"
+    );
+}

@@ -68,6 +68,18 @@ pub struct IndexRegistry {
     /// F-50: bumped on every successful `insert` / `remove_by_id`. Read with
     /// [`generation`](Self::generation) to gate commit-time re-derivation.
     generation: AtomicU64,
+    /// P1 (#992): monotonic ticket counter for [`insert`](Self::insert)'s
+    /// per-entry generation tag — decoupled from `generation` (the PUBLISHED
+    /// watermark readers observe via [`generation`](Self::generation)).
+    /// `fetch_add` on this counter is atomic, so two concurrent `insert()`
+    /// calls are guaranteed distinct tickets regardless of interleaving —
+    /// closing the race where `generation.load() + 1` let two concurrent
+    /// inserts compute the SAME tag. `generation` itself is still only
+    /// advanced (via `fetch_max`) AFTER the corresponding entry is published
+    /// — preserving the Release/Acquire happens-before invariant P0-2
+    /// (#958 2b) established (a reader observing `generation() == N` is
+    /// guaranteed every entry tagged `<= N` is already visible in `by_id`).
+    insert_ticket: AtomicU64,
 }
 
 impl IndexRegistry {
@@ -77,6 +89,10 @@ impl IndexRegistry {
             by_name: scc::HashMap::with_hasher(THasher::default()),
             next_id: AtomicU32::new(1),
             generation: AtomicU64::new(0),
+            // P1 (#992): starts at 0 — independent from `generation`. Its
+            // absolute values never need to match `generation`'s; only the
+            // `fetch_add` uniqueness matters.
+            insert_ticket: AtomicU64::new(0),
         }
     }
 
@@ -91,6 +107,15 @@ impl IndexRegistry {
     /// Atomically allocate the next monotonic ID. Lock-free.
     pub fn allocate_id(&self) -> u32 {
         self.next_id.fetch_add(1, Ordering::Relaxed)
+    }
+
+    /// #992 test-only: read the insertion-generation tag recorded for the
+    /// backend registered under `id`. The concurrency regression test uses
+    /// this to assert two concurrent `insert()` calls never receive the same
+    /// tag (the `fetch_add` ticket-counter guarantee).
+    #[cfg(test)]
+    pub(crate) async fn entry_gen(&self, id: u32) -> Option<u64> {
+        self.by_id.read_async(&id, |_, e| e.gen).await
     }
 
     pub async fn insert(&self, backend: Arc<dyn IndexBackend>) -> Result<(), IndexError> {
@@ -116,18 +141,27 @@ impl IndexRegistry {
         // writer's `insert_async` happens-before its `fetch_max(Release)`,
         // which synchronizes-with the reader's `load(Acquire)`).
         //
-        // The per-backend tag (`my_gen`) is computed as `current_gen + 1`.
-        // Two concurrent inserts that read the same `current_gen` compute
-        // the same `my_gen` — both publish with that tag and both
-        // `fetch_max(my_gen)` (idempotent). `backends_newer_than(threshold)`
-        // uses strict-greater-than, so both are returned for any
-        // `threshold < my_gen`. A tag slightly below the final generation
-        // value (due to a concurrent insert's `fetch_max` landing between
-        // our load and our `fetch_max`) is harmless: it just means the
-        // backend is included in a slightly wider `backends_newer_than`
-        // filter — the resulting ops are idempotent (`SetPosting`
-        // overwrites, `RemovePosting` is a no-op on absent keys).
-        let my_gen = self.generation.load(Ordering::Acquire) + 1;
+        // P1 (#992): the per-backend tag (`my_gen`) is drawn from a
+        // DEDICATED ticket counter (`insert_ticket`), decoupled from
+        // `generation`. `fetch_add` is a true atomic fetch-and-add, so two
+        // concurrent `insert()` calls are guaranteed to receive DISTINCT
+        // return values — one gets `n`, the other `n+1`, never the same
+        // value twice. The OLD scheme computed `my_gen` as
+        // `generation.load(Acquire) + 1`, a read-then-write race: two
+        // concurrent inserts that both read `generation == G` both computed
+        // `G+1`, and the second's `fetch_max(G+1)` was a no-op — leaving
+        // `generation()` unchanged after the second publish. At commit,
+        // `pre_commit.rs`'s `generation() == stage_gen` shortcut then
+        // skipped re-derivation entirely (not just `backends_newer_than`
+        // — the filter was never even called), so the tx committed with
+        // zero ops for the second backend.
+        //
+        // (`Relaxed` is sufficient on `insert_ticket`: it has no
+        // cross-thread happens-before obligation of its own — the ordering
+        // guarantee the rest of the system depends on is carried entirely
+        // by `generation`'s `fetch_max(Release)` / `load(Acquire)` pair
+        // below, unchanged by this fix.)
+        let my_gen = self.insert_ticket.fetch_add(1, Ordering::Relaxed) + 1;
 
         // F-50 Step 3b + P0-5a (#961): capture the descriptor's `state`,
         // `name`, and `name_interned` into the authoritative entry slots. For
