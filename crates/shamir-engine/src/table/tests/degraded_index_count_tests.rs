@@ -368,8 +368,18 @@ async fn degraded_index_count_live_in_progress_create_index2_not_degraded() {
 /// index A must never affect whether index B is reported as degraded.
 #[tokio::test]
 async fn degraded_index_count_unrelated_in_flight_create_does_not_mask_stuck_index() {
-    use shamir_index::base_index::backfill_pause_hook::BackfillPauseHook;
-
+    // The "unrelated in-flight create" MUST be one that contributes ZERO to
+    // the raw non-Ready tally at its park point — otherwise this test can
+    // pass against the very scalar-counter bug it exists to catch (an
+    // `@oh` review caught exactly this in an earlier version of this test,
+    // which used the regular-hash family: `create_index` registers at
+    // `Building` BEFORE its own backfill pause point, so it too contributes
+    // 1 to the raw tally, and `2.saturating_sub(1) == 1` happens to match
+    // the assertion under the OLD buggy scalar model too). The index2
+    // family's `create_index2_backfill_hook` parks strictly BEFORE
+    // `index2_registry.insert` — the create is genuinely in flight (the
+    // in-flight guard is already entered) but contributes 0 to the raw
+    // tally, which is the property this test needs.
     let (data_store, info_store) = make_stores();
     let tbl = TableManager::create("t".into(), data_store, info_store)
         .await
@@ -403,19 +413,25 @@ async fn degraded_index_count_unrelated_in_flight_create_does_not_mask_stuck_ind
          unrelated create starts"
     );
 
-    // Now start a COMPLETELY UNRELATED create (a regular index on a
-    // different field) and park it mid-flight.
-    let hook = Arc::new(BackfillPauseHook::new());
-    tbl.index_manager_ref()
-        .set_create_index_backfill_hook(Some(Arc::clone(&hook)));
+    // Now start a COMPLETELY UNRELATED create (a functional index2 index on
+    // a different field) and park it BEFORE it's registered — contributing
+    // 0 to the raw tally while genuinely holding the in-flight guard.
+    let hook = Arc::new(Index2BackfillPauseHook::new());
+    tbl.set_create_index2_backfill_hook(Some(Arc::clone(&hook)));
     let tbl_c = tbl.clone();
-    let create = tokio::spawn(async move { tbl_c.create_index("by_name", &["name"]).await });
+    let create = tokio::spawn(async move {
+        tbl_c
+            .create_index_v2(&functional_lower_op("lower_name", "t", "name"))
+            .await
+    });
     hook.wait_until_parked().await;
 
-    // The unrelated create is genuinely in flight — but the stuck sorted
-    // index must STILL count as degraded. A scalar in-flight counter would
-    // wrongly subtract 1 here (masking the stuck index); the per-identity
-    // set must not.
+    // Raw tally here is 1 (just the hand-orphaned sorted index — the
+    // index2 create hasn't registered yet). The OLD scalar model computed
+    // `1.saturating_sub(1) == 0` here (masking the stuck index, since its
+    // in-flight COUNT was 1 regardless of which index was in flight); the
+    // per-identity set correctly leaves the stuck sorted index's count
+    // alone, since only "lower_name" (not "by_id") is in the in-flight set.
     assert_eq!(
         tbl.degraded_index_count().await,
         1,
@@ -424,7 +440,10 @@ async fn degraded_index_count_unrelated_in_flight_create_does_not_mask_stuck_ind
     );
 
     hook.release();
-    create.await.unwrap().expect("by_name create must complete");
+    create
+        .await
+        .unwrap()
+        .expect("lower_name create must complete");
 }
 
 /// A unique (hash) index re-registered at `Building` must be counted.

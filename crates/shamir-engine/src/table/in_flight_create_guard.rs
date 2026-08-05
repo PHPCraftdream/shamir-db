@@ -35,7 +35,16 @@
 //! index that never appears in the registry during its own backfill (the
 //! unique/index2 cases above) is simply never iterated over in the first
 //! place, so tracking its identity here is a no-op for it (harmless) and,
-//! critically, can never affect any OTHER index's count.
+//! critically, can never affect any OTHER index whose NAME differs from
+//! it. Caveat (a second `@oh` review found this, worth naming precisely):
+//! "identity" here means index NAME, which is unique per-name across the
+//! interner but NOT enforced unique across the four FAMILIES at create
+//! time (only `rename_index`'s destination-name guard checks across
+//! families) — so a crash-orphaned sorted index and a healthy in-flight
+//! regular-family create that happen to share the exact same name string
+//! would still collide. This is a pre-existing naming-collision gap in the
+//! index-family model generally, not something this identity-set fix
+//! introduces or could fix on its own.
 //!
 //! Refcounted (`BTreeMap<u64, u32>`, not a plain set) because two
 //! CONCURRENT creates racing for the same name (rare, but not structurally
