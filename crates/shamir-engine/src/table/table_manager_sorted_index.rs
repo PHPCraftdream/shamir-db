@@ -46,20 +46,20 @@ impl TableManager {
     ) -> DbResult<()> {
         use crate::index::sorted_index_manager::SortedIndexDefinition;
 
-        // #1003: mark this create in flight for the ENTIRE method body — see
-        // `TableManager::create_index`'s matching guard + `in_flight_create_guard`'s
-        // module doc. The sorted family registers at `Building` BEFORE the
-        // backfill loop below, so without this guard a healthy in-progress
-        // sorted-index create would false-positive `degraded_index_count()`
-        // for the whole backfill duration.
-        let _in_flight = self.in_flight_creates.enter();
-
         let interner = self.interner.get().await?;
         let name_interned = interner
             .touch_ind(index_name)
             .map_err(|e| shamir_storage::error::DbError::Codec(e.to_string()))?
             .key()
             .id();
+        // #1003: mark THIS index's name as in-flight for the rest of the
+        // method body — see `TableManager::create_index`'s matching guard +
+        // `in_flight_create_guard`'s module doc. The sorted family registers
+        // at `Building` BEFORE the backfill loop below, so without this
+        // guard a healthy in-progress sorted-index create would
+        // false-positive `degraded_index_count()` for the whole backfill
+        // duration.
+        let _in_flight = self.in_flight_creates.enter(name_interned);
         let mut path_ids: Vec<u64> = Vec::new();
         for seg in field_path {
             for part in seg.split('.') {

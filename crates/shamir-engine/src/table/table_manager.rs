@@ -150,17 +150,22 @@ pub struct TableManager {
     /// sibling barrier flags). See [`writer_drain_barrier`] for the full
     /// memory-model + reusability rationale.
     pub(super) writer_drain: super::writer_drain_barrier::WriterDrainBarrier,
-    /// #1003 (follow-up to #984) — process-local count of `CREATE INDEX`
-    /// operations currently in flight, across all four index families
-    /// (regular, unique, sorted, index2). `degraded_index_count()`
-    /// subtracts this from the raw non-`Ready` tally so a healthy,
-    /// currently-in-progress backfill (which sets `IndexState::Building`
-    /// BEFORE the backfill even starts, per F-72/#899) does not read as
-    /// "degraded" — only an index left `Building` by a crash in a PAST
-    /// process (this counter starts at 0 on every restart) still counts.
-    /// Shared across clones via `Arc` (same rationale as the sibling
-    /// barrier/counter fields). See [`in_flight_create_guard`].
-    pub(super) in_flight_creates: super::in_flight_create_guard::InFlightCreateCounter,
+    /// #1003 (follow-up to #984) — process-local set of index-name ids
+    /// (interned) whose `CREATE INDEX` is currently in flight, across all
+    /// four index families (regular, unique, sorted, index2).
+    /// `degraded_index_count()` skips a non-`Ready` definition ONLY if its
+    /// OWN name is in this set — a per-identity check, not a scalar
+    /// subtraction (an earlier scalar-counter version of this fix could
+    /// mask an unrelated genuinely-stuck index; see
+    /// [`in_flight_create_guard`]'s module doc for the full writeup). A
+    /// healthy, currently-in-progress backfill (which sets
+    /// `IndexState::Building` BEFORE the backfill even starts, per
+    /// F-72/#899) therefore does not read as "degraded" for its OWN index,
+    /// while an index left `Building` by a crash in a PAST process (this
+    /// set starts empty on every restart) still counts. Shared across
+    /// clones via `Arc` (same rationale as the sibling barrier/counter
+    /// fields).
+    pub(super) in_flight_creates: super::in_flight_create_guard::InFlightCreateSet,
     pub(super) index2_registry: Arc<crate::index2::IndexRegistry>,
     pub(super) mvcc_store: Option<Arc<shamir_tx::MvccStore>>,
     /// Per-table validator bindings (S2). Lock-free reads via
@@ -248,6 +253,19 @@ pub struct TableManager {
     #[cfg(test)]
     pub(super) drop_index2_post_sweep_hook:
         Arc<arc_swap::ArcSwapOption<super::index2_backfill_hook::BackfillPauseHook>>,
+    /// #1003 test-only deterministic pause point: parks `create_index_v2`'s
+    /// non-btree branch AFTER `index2_registry.insert` (the backend is now
+    /// live in the registry, still `Building`) but BEFORE `set_state(Ready)`
+    /// — the narrow window where `degraded_index_count()` can actually see
+    /// this specific index as non-`Ready`. Needed because the EXISTING
+    /// `create_index2_backfill_hook` parks strictly BEFORE the registry
+    /// insert, where the raw tally can't see the index at all regardless of
+    /// the in-flight-set fix — a review found the original test using that
+    /// hook was vacuous for exactly this reason. `None` in every non-test
+    /// build and by default in tests.
+    #[cfg(test)]
+    pub(super) index2_registered_before_ready_hook:
+        Arc<arc_swap::ArcSwapOption<super::index2_backfill_hook::BackfillPauseHook>>,
 }
 
 /// Bundle wiring the non-tx write path to the SSI commit-write log.
@@ -295,9 +313,10 @@ impl Clone for TableManager {
             ddl_admission: Arc::clone(&self.ddl_admission),
             // F-48 — shared across clones (Arc<AtomicUsize> inside).
             writer_drain: self.writer_drain.clone(),
-            // #1003 — shared across clones (Arc<AtomicU64> inside), same
-            // rationale as `writer_drain`: a create in flight on any clone
-            // must be visible to `degraded_index_count()` called on another.
+            // #1003 — shared across clones (Arc<Mutex<BTreeMap<..>>> inside),
+            // same rationale as `writer_drain`: a create in flight on any
+            // clone must be visible to `degraded_index_count()` called on
+            // another.
             in_flight_creates: self.in_flight_creates.clone(),
             index2_registry: Arc::clone(&self.index2_registry),
             mvcc_store: self.mvcc_store.clone(),
@@ -319,6 +338,10 @@ impl Clone for TableManager {
             drop_index2_pause_hook: Arc::clone(&self.drop_index2_pause_hook),
             #[cfg(test)]
             drop_index2_post_sweep_hook: Arc::clone(&self.drop_index2_post_sweep_hook),
+            #[cfg(test)]
+            index2_registered_before_ready_hook: Arc::clone(
+                &self.index2_registered_before_ready_hook,
+            ),
         }
     }
 }
@@ -379,7 +402,7 @@ impl TableManager {
             // F-95 (#957) — fresh per-table admission mutex.
             ddl_admission: Arc::new(tokio::sync::Mutex::new(())),
             writer_drain: super::writer_drain_barrier::WriterDrainBarrier::new(),
-            in_flight_creates: super::in_flight_create_guard::InFlightCreateCounter::new(),
+            in_flight_creates: super::in_flight_create_guard::InFlightCreateSet::new(),
             index2_registry: Arc::new(crate::index2::IndexRegistry::new()),
             mvcc_store: None,
             validator_bindings,
@@ -397,6 +420,8 @@ impl TableManager {
             drop_index2_pause_hook: Arc::new(arc_swap::ArcSwapOption::empty()),
             #[cfg(test)]
             drop_index2_post_sweep_hook: Arc::new(arc_swap::ArcSwapOption::empty()),
+            #[cfg(test)]
+            index2_registered_before_ready_hook: Arc::new(arc_swap::ArcSwapOption::empty()),
         };
 
         // Resolve covering-index included_fields string paths to interned ids.
@@ -639,7 +664,7 @@ impl TableManager {
             write_barrier_flags,
             ddl_admission: Arc::new(tokio::sync::Mutex::new(())),
             writer_drain: super::writer_drain_barrier::WriterDrainBarrier::new(),
-            in_flight_creates: super::in_flight_create_guard::InFlightCreateCounter::new(),
+            in_flight_creates: super::in_flight_create_guard::InFlightCreateSet::new(),
             index2_registry: Arc::new(crate::index2::IndexRegistry::new()),
             mvcc_store: None,
             validator_bindings: Arc::new(arc_swap::ArcSwap::from_pointee(Vec::new())),
@@ -657,6 +682,8 @@ impl TableManager {
             drop_index2_pause_hook: Arc::new(arc_swap::ArcSwapOption::empty()),
             #[cfg(test)]
             drop_index2_post_sweep_hook: Arc::new(arc_swap::ArcSwapOption::empty()),
+            #[cfg(test)]
+            index2_registered_before_ready_hook: Arc::new(arc_swap::ArcSwapOption::empty()),
         }
     }
 
@@ -813,6 +840,19 @@ impl TableManager {
         hook: Option<Arc<super::index2_backfill_hook::BackfillPauseHook>>,
     ) {
         self.drop_index2_post_sweep_hook.store(hook);
+    }
+
+    /// #1003 test-only: install (or clear with `None`) the deterministic
+    /// pause hook that fires after `create_index_v2`'s non-btree branch
+    /// registers the backend in the live registry (still `Building`) but
+    /// before it flips to `Ready`. See
+    /// `index2_registered_before_ready_hook`'s field doc.
+    #[cfg(test)]
+    pub(crate) fn set_index2_registered_before_ready_hook(
+        &self,
+        hook: Option<Arc<super::index2_backfill_hook::BackfillPauseHook>>,
+    ) {
+        self.index2_registered_before_ready_hook.store(hook);
     }
 
     /// Clone the handle to this table's unique-write serialisation lock.

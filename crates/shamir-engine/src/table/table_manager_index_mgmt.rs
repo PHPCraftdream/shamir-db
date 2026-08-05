@@ -41,14 +41,6 @@ impl TableManager {
             };
         }
 
-        // #1003: mark this create in flight for the ENTIRE method body — see
-        // `create_index`'s matching guard + `in_flight_create_guard`'s
-        // module doc. Installed AFTER the "btree" early-return above (that
-        // branch delegates to `create_index`/`create_unique_index`, which
-        // install their OWN guard — installing one here too would double-count
-        // the same in-flight create).
-        let _in_flight = self.in_flight_creates.enter();
-
         // #534 finding 1 (write-barrier, Option B — mirrors
         // `create_unique_index`'s own audit-A9 precedent). Hold the table-wide
         // `unique_write_lock` across the ENTIRE reserve-id → backfill →
@@ -143,6 +135,16 @@ impl TableManager {
         {
             TouchInd::Exists(k) | TouchInd::New(k) => k.id(),
         };
+
+        // #1003: mark THIS index's name as in-flight for the rest of the
+        // method body — see `create_index`'s matching guard +
+        // `in_flight_create_guard`'s module doc. Installed AFTER the "btree"
+        // early-return above (that branch delegates to
+        // `create_index`/`create_unique_index`, which install their OWN
+        // guard keyed on the SAME name — installing one here too would just
+        // be a harmless refcount bump on an identity already covered, but
+        // this call site never reaches here for a btree index anyway).
+        let _in_flight = self.in_flight_creates.enter(name_key);
 
         let first_path = interned_paths.first().cloned().unwrap_or_default();
 
@@ -401,6 +403,19 @@ impl TableManager {
             ))
         })?;
 
+        // #1003 test-only pause point: park here (backend now LIVE in the
+        // registry, still `Building`) if a test installed the hook. This is
+        // the narrow window where `degraded_index_count()` can actually see
+        // THIS index as non-`Ready` — the pre-existing
+        // `create_index2_backfill_hook` above parks strictly before this
+        // point, where the raw tally can't see the index at all regardless
+        // of the in-flight-set fix. Zero cost in the real path (`None`),
+        // compiled out of non-test builds.
+        #[cfg(test)]
+        if let Some(hook) = self.index2_registered_before_ready_hook.load_full() {
+            hook.wait_at_window().await;
+        }
+
         // F-50 Step 3b: the backfill completed and the backend is now
         // registered, so flip its authoritative lifecycle state from
         // `Building` (set at descriptor construction above and captured into
@@ -561,14 +576,14 @@ impl TableManager {
     /// `false` a moment before the flag went up — same pattern as
     /// `create_index_v2`.
     pub async fn create_index(&self, name: &str, paths: &[&str]) -> DbResult<()> {
-        // #1003: mark this create in flight for the ENTIRE method body (RAII
-        // guard, dropped on every exit path including an early `?` return or
-        // a panic) so `degraded_index_count()` excludes the `Building` state
-        // this create is about to publish below — see
-        // `in_flight_create_guard`'s module doc for the false-positive this
-        // closes.
-        let _in_flight = self.in_flight_creates.enter();
         let mut index_def = self.build_index_definition(name, paths).await?;
+        // #1003: mark THIS index's name as in-flight for the rest of the
+        // method body (RAII guard, dropped on every exit path including an
+        // early `?` return or a panic) so `degraded_index_count()` excludes
+        // the `Building` state this create is about to publish below — see
+        // `in_flight_create_guard`'s module doc for the false-positive this
+        // closes (and why it's a per-identity set, not a scalar count).
+        let _in_flight = self.in_flight_creates.enter(index_def.name_interned);
         // F-72 (#899, P0): register at `Building` — `IndexManager::
         // create_index_from_records` persists this marker BEFORE the
         // backfill runs and flips it to `Ready` (with its own durable
@@ -656,14 +671,9 @@ impl TableManager {
     /// # Errors
     /// Returns `DbError::UniqueIndexCreationFailed` if duplicate values exist.
     pub async fn create_unique_index(&self, name: &str, paths: &[&str]) -> DbResult<()> {
-        // #1003: mark this create in flight for the ENTIRE method body — see
-        // `create_index`'s matching guard + `in_flight_create_guard`'s
-        // module doc. The unique family's real-path definition is never
-        // observably `Building` today (see `create_unique_index_from_records`'s
-        // doc), but the guard is installed uniformly across all four
-        // families per the brief, and covers a future/crash-recovery path
-        // that DOES register at `Building`.
-        let _in_flight = self.in_flight_creates.enter();
+        // #1003: the in-flight guard is installed inside `create_unique_index_body`
+        // (right after the name is interned), not here — see that method's
+        // matching comment. This wrapper only acquires the barrier+lock.
         // F-70 (#897, P0): canonical drain-then-lock acquisition — raise
         // `UNIQUE_INDEX_CREATE`, drain in-flight fast-path writers, THEN take
         // `unique_write_lock`. F-57 (#883) originally took the lock FIRST
@@ -706,6 +716,19 @@ impl TableManager {
     /// make the FIRST unique-index create as safe as the second-and-later.
     async fn create_unique_index_body(&self, name: &str, paths: &[&str]) -> DbResult<()> {
         let index_def = self.build_index_definition(name, paths).await?;
+        // #1003: mark THIS index's name as in-flight for the rest of the
+        // method body — see `create_index`'s matching guard +
+        // `in_flight_create_guard`'s module doc. The unique family's real-path
+        // definition is never observably `Building` today (see
+        // `create_unique_index_from_records`'s doc) — since it's never
+        // iterated over as non-`Ready` during its own backfill in the first
+        // place, this guard is a no-op for THIS family's own count, but
+        // (being per-identity, not a scalar) it can never bleed into an
+        // unrelated index's count either. Installed uniformly across all four
+        // families, and covers a future/crash-recovery path that DOES
+        // register at `Building`. Also covers `rename_index`'s unique branch,
+        // which calls this body directly.
+        let _in_flight = self.in_flight_creates.enter(index_def.name_interned);
         // F-42 (#850) — see `create_index`'s matching comment: durably
         // persist the index-name/field-path ids BEFORE registering the
         // unique index. A persist failure aborts before publish, so no
