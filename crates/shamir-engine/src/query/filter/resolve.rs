@@ -201,6 +201,7 @@ where
         // precision loss); a non-numeric string is not comparable (`None`).
         (Value::Big(a), Value::Str(b)) => b.parse::<num_bigint::BigInt>().ok().map(|n| a.cmp(&n)),
         (Value::Str(a), Value::Big(b)) => a.parse::<num_bigint::BigInt>().ok().map(|n| n.cmp(b)),
+        (Value::Bin(a), Value::Bin(b)) => Some(a.cmp(b)),
         _ => None,
     }
 }

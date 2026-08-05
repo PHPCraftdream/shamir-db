@@ -136,10 +136,11 @@ fn big_to_f64(b: &num_bigint::BigInt) -> f64 {
 /// Compare a borrowed [`ScalarRef`] against an [`InnerValue`] scalar literal.
 ///
 /// Mirrors `compare_values` (engine `resolve.rs`) arm-for-arm — Null==Null,
-/// Bool, Int/Int, **cross-type Int/F64**, F64/F64, Str/Str, plus the
-/// `Dec`/`Big` cross-type arms (record-field `Int`/`F64` vs filter-literal
-/// `Dec`/`Big`). Returns `None` for non-comparable pairs (mismatched type
-/// families that have no numeric bridge, containers, `Bin`).
+/// Bool, Int/Int, **cross-type Int/F64**, F64/F64, Str/Str, `Bin`/`Bin`
+/// (lexicographic byte-wise ordering), plus the `Dec`/`Big` cross-type arms
+/// (record-field `Int`/`F64` vs filter-literal `Dec`/`Big`). Returns `None`
+/// for non-comparable pairs (mismatched type families that have no numeric
+/// bridge, containers).
 ///
 /// This is the reusable comparison helper that Stage-3 consumers call after
 /// extracting a `ScalarRef` via [`RecordRef::scalar_at`], replacing the old
@@ -166,6 +167,7 @@ pub fn scalar_ref_cmp(a: ScalarRef<'_>, b: &InnerValue) -> Option<Ordering> {
         // Big cross-type: f64 fallback (precision loss accepted — see `big_to_f64`).
         (ScalarRef::Int(a), InnerValue::Big(b)) => (a as f64).partial_cmp(&big_to_f64(b)),
         (ScalarRef::F64(a), InnerValue::Big(b)) => a.partial_cmp(&big_to_f64(b)),
+        (ScalarRef::Bin(a), InnerValue::Bin(b)) => Some(a.cmp(b.as_slice())),
         _ => None,
     }
 }
@@ -194,6 +196,7 @@ pub fn scalar_ref_cmp_qv(a: ScalarRef<'_>, b: &QueryValue) -> Option<Ordering> {
         // Big cross-type (see `scalar_ref_cmp` for rationale).
         (ScalarRef::Int(a), QueryValue::Big(b)) => (a as f64).partial_cmp(&big_to_f64(b)),
         (ScalarRef::F64(a), QueryValue::Big(b)) => a.partial_cmp(&big_to_f64(b)),
+        (ScalarRef::Bin(a), QueryValue::Bin(b)) => Some(a.cmp(b.as_slice())),
         _ => None,
     }
 }

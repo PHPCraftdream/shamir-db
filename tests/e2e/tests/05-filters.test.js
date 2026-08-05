@@ -4,9 +4,9 @@
 
 'use strict';
 
-const { Query, filter } = require('@shamir/client');
+const { Query, filter, write } = require('@shamir/client');
 
-module.exports = async function ({ client, fixtures, test, assertEq, assert }) {
+module.exports = async function ({ client, fixtures, test, assertEq, assertDeepEq, assert }) {
   let db;
   const seedRecords = [
     { id: 'a', qty: 1, tag: 'red', addr: { city: 'NYC' } },
@@ -110,5 +110,61 @@ module.exports = async function ({ client, fixtures, test, assertEq, assert }) {
     const ids = r.map((x) => x.id).sort();
     assert(ids.includes('a'));
     assert(ids.includes('c'));
+  });
+
+  // ── #983: Bin (Uint8Array) field comparison — tree-eval Bin gap ──────────
+
+  test('#983 setup: seed a record with a binary field', async () => {
+    const resp = await client.execute(db, {
+      id: 'ins-bin',
+      queries: {
+        ins: write.insert('t', {
+          id: 'bin1',
+          qty: 999,
+          tag: 'binfixture',
+          blob: filter.bin([1, 2, 3]),
+        }),
+      },
+    });
+    assertEq(resp.results.ins.records.length, 1);
+  });
+
+  test('#983 eq matches identical bytes (tree-eval Bin arm)', async () => {
+    const r = await read(filter.eq('blob', filter.bin([1, 2, 3])));
+    assertEq(r.length, 1);
+    assertEq(r[0].id, 'bin1');
+  });
+
+  test('#983 ne excludes identical bytes, matches everything else', async () => {
+    const r = await read(filter.ne('blob', filter.bin([1, 2, 3])));
+    // Every seeded row (a..e) has no `blob` field at all → Ne(null-ish
+    // resolution) — only assert the binfixture row itself is excluded.
+    const ids = r.map((x) => x.id);
+    assert(!ids.includes('bin1'), 'ne must exclude the exact-byte match');
+  });
+
+  test('#983 eq does not match different bytes', async () => {
+    const r = await read(filter.eq('blob', filter.bin([1, 2, 4])));
+    assertEq(r.length, 0);
+  });
+
+  test('#983: read-back blob is a real Uint8Array, not a plain object', async () => {
+    const resp = await client.execute(db, {
+      id: 'r-bin',
+      queries: {
+        r: Query.from('t').where(filter.eq('id', 'bin1')).build(),
+      },
+    });
+    const rec = resp.results.r.records[0];
+    assert(rec, 'bin1 record found');
+    // Node's msgpack decode may hand back a Buffer, which IS a Uint8Array
+    // subclass — instanceof Uint8Array covers both, unlike a JSON/string
+    // comparison which would misdiagnose a real Uint8Array as "corrupted"
+    // (JSON.stringify(new Uint8Array([1,2,3])) === '{"0":1,"1":2,"2":3}').
+    assert(
+      rec.blob instanceof Uint8Array,
+      `blob should be Uint8Array/Buffer, got: ${Object.prototype.toString.call(rec.blob)}`,
+    );
+    assertDeepEq(Array.from(rec.blob), [1, 2, 3]);
   });
 };

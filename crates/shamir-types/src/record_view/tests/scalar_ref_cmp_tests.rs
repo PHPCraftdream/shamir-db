@@ -219,11 +219,35 @@ fn mismatched_type_families_none() {
     assert_eq!(scalar_ref_cmp(ScalarRef::Null, &InnerValue::Int(0)), None,);
 }
 
+// ── Bin / Bin ───────────────────────────────────────────────────────────────
+
 #[test]
-fn bin_vs_anything_returns_none() {
-    // Bin is a ScalarRef variant but compare_values has no Bin arm → None.
+fn bin_bin_equal() {
     assert_eq!(
         scalar_ref_cmp(ScalarRef::Bin(&[1, 2, 3]), &InnerValue::Bin(vec![1, 2, 3])),
+        Some(Ordering::Equal),
+    );
+}
+
+#[test]
+fn bin_bin_not_equal() {
+    // [1, 2, 3] < [1, 2, 4] lexicographically (last byte differs).
+    assert_eq!(
+        scalar_ref_cmp(ScalarRef::Bin(&[1, 2, 3]), &InnerValue::Bin(vec![1, 2, 4])),
+        Some(Ordering::Less),
+    );
+    // [1, 2, 4] > [1, 2, 3] lexicographically.
+    assert_eq!(
+        scalar_ref_cmp(ScalarRef::Bin(&[1, 2, 4]), &InnerValue::Bin(vec![1, 2, 3])),
+        Some(Ordering::Greater),
+    );
+}
+
+#[test]
+fn bin_vs_mismatched_family_returns_none() {
+    // Bin vs Str: mismatched type families still return None.
+    assert_eq!(
+        scalar_ref_cmp(ScalarRef::Bin(&[1, 2, 3]), &InnerValue::Str("abc".into())),
         None,
     );
 }

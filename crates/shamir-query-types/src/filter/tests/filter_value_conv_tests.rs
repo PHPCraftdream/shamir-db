@@ -10,6 +10,7 @@
 
 use shamir_types::types::value::QueryValue;
 
+use crate::filter::filter_enum::Filter;
 use crate::filter::filter_value::{filter_value_to_query_value, query_value_to_filter_value};
 use crate::filter::FilterValue;
 
@@ -189,4 +190,146 @@ fn from_qv_list_converts_recursively() {
         got,
         FilterValue::Array(vec![FilterValue::Int(5), FilterValue::Bool(true)])
     );
+}
+
+// ── #983 round 2: FilterValue::Binary misclassified as String on real wire
+//    input (untagged-enum variant-order ambiguity) ──────────────────────────
+//
+// `FilterValue` is `#[serde(untagged)]`. Before the fix, `String` was
+// declared BEFORE `Binary`; the stdlib `String` Deserialize impl silently
+// accepts `visit_bytes`/`visit_byte_buf` as a fallback, so a genuine
+// msgpack bin8/16/32 payload whose bytes happen to be valid UTF-8 (e.g.
+// `[1, 2, 3]` — every byte <= 0x7F) was captured by the `String` arm and
+// never reached `Binary` at all. Reordering `Binary` before `String` fixes
+// this because untagged enums try variants in declaration order and take
+// the first successful match.
+
+/// The exact real-wire-bytes regression: bytes captured from a genuine JS
+/// client encode of
+/// `Query.from('t').where(filter.eq('blob', filter.bin([1,2,3]))).build()`
+/// via `@msgpack/msgpack`'s `encode()` (re-verified this session with a
+/// `node -e` one-liner using the same library — see brief
+/// `docs/dev-artifacts/prompts/bugfix-983/04-fix-filtervalue-binary-string-ambiguity.md`
+/// for the exact reproduction). The `value` field is unambiguously a
+/// msgpack **bin8** marker (`c4 03 01 02 03`), never a string.
+///
+/// FAILS before the fix: decodes to `FilterValue::String("\u{1}\u{2}\u{3}")`
+/// (because those 3 bytes happen to be valid UTF-8).
+/// PASSES after the fix: decodes to `FilterValue::Binary(vec![1, 2, 3])`.
+#[test]
+fn real_wire_bytes_bin8_payload_decodes_as_binary_not_string() {
+    let hex = "83a26f70a26571a56669656c6491a4626c6f62a576616c7565c403010203";
+    let bytes: Vec<u8> = (0..hex.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(&hex[i..i + 2], 16).unwrap())
+        .collect();
+
+    let filter: Filter =
+        rmp_serde::from_slice(&bytes).expect("real-wire Eq filter bytes must deserialize");
+
+    match filter {
+        Filter::Eq { field, value } => {
+            assert_eq!(field, vec!["blob".to_string()]);
+            assert_eq!(
+                value,
+                FilterValue::Binary(vec![1, 2, 3]),
+                "expected Binary([1,2,3]); a String variant here means the \
+                 untagged-enum ordering bug has regressed"
+            );
+        }
+        other => panic!("expected Filter::Eq, got {other:?}"),
+    }
+}
+
+/// Round-trip a `Filter::Eq` with a `Binary` value whose bytes are ALL in
+/// the valid-UTF8 ASCII range (`[1, 2, 3]`) — the exact shape that used to
+/// be misclassified as `String`. Must decode back as `Binary`.
+#[test]
+fn binary_value_all_ascii_range_round_trips_as_binary() {
+    let f = Filter::Eq {
+        field: vec!["blob".to_string()],
+        value: FilterValue::Binary(vec![1, 2, 3]),
+    };
+    let bytes = rmp_serde::to_vec_named(&f).unwrap();
+    let f2: Filter = rmp_serde::from_slice(&bytes).unwrap();
+    assert_eq!(f, f2);
+    match f2 {
+        Filter::Eq { value, .. } => assert_eq!(value, FilterValue::Binary(vec![1, 2, 3])),
+        other => panic!("expected Filter::Eq, got {other:?}"),
+    }
+}
+
+/// Round-trip a `Filter::Eq` with a `Binary` value containing invalid-UTF8
+/// bytes — this direction already worked before the fix (invalid UTF-8
+/// naturally falls through `String`'s Deserialize), but assert it explicitly
+/// so the fix isn't accidentally UTF8-payload-specific in either direction.
+#[test]
+fn binary_value_invalid_utf8_round_trips_as_binary() {
+    let f = Filter::Eq {
+        field: vec!["blob".to_string()],
+        value: FilterValue::Binary(vec![0xDE, 0xAD, 0xBE, 0xEF]),
+    };
+    let bytes = rmp_serde::to_vec_named(&f).unwrap();
+    let f2: Filter = rmp_serde::from_slice(&bytes).unwrap();
+    assert_eq!(f, f2);
+    match f2 {
+        Filter::Eq { value, .. } => {
+            assert_eq!(value, FilterValue::Binary(vec![0xDE, 0xAD, 0xBE, 0xEF]))
+        }
+        other => panic!("expected Filter::Eq, got {other:?}"),
+    }
+}
+
+/// Direction-reversal check: a genuine `String` filter value must still
+/// decode as `FilterValue::String` after the `Binary`/`String` reorder.
+/// This holds because a real JS string always encodes as msgpack
+/// str8/fixstr/str16/str32 — a distinct wire type from bin8/16/32 — and
+/// `serde_bytes`'s `Deserialize` for `Vec<u8>` does NOT accept
+/// `visit_str`/`visit_string` (unlike the reverse asymmetry that caused
+/// this bug), so there is no new String-vs-Binary collision in this
+/// direction.
+#[test]
+fn string_value_still_decodes_as_string_after_reorder() {
+    let f = Filter::Eq {
+        field: vec!["tag".to_string()],
+        value: FilterValue::String("hello".to_string()),
+    };
+    let bytes = rmp_serde::to_vec_named(&f).unwrap();
+    let f2: Filter = rmp_serde::from_slice(&bytes).unwrap();
+    assert_eq!(f, f2);
+    match f2 {
+        Filter::Eq { value, .. } => assert_eq!(value, FilterValue::String("hello".to_string())),
+        other => panic!("expected Filter::Eq, got {other:?}"),
+    }
+}
+
+/// A real JS ARRAY (not a `Uint8Array`) must still decode as
+/// `FilterValue::Array`, not `Binary` — msgpack array markers and bin8/16/32
+/// markers are structurally distinct wire types, so this collision is
+/// expected to be a non-issue, but verify it explicitly per the brief's
+/// due-diligence requirement rather than assuming.
+#[test]
+fn array_value_still_decodes_as_array_not_binary() {
+    let f = Filter::Eq {
+        field: vec!["tags".to_string()],
+        value: FilterValue::Array(vec![
+            FilterValue::Int(1),
+            FilterValue::Int(2),
+            FilterValue::Int(3),
+        ]),
+    };
+    let bytes = rmp_serde::to_vec_named(&f).unwrap();
+    let f2: Filter = rmp_serde::from_slice(&bytes).unwrap();
+    assert_eq!(f, f2);
+    match f2 {
+        Filter::Eq { value, .. } => assert_eq!(
+            value,
+            FilterValue::Array(vec![
+                FilterValue::Int(1),
+                FilterValue::Int(2),
+                FilterValue::Int(3)
+            ])
+        ),
+        other => panic!("expected Filter::Eq, got {other:?}"),
+    }
 }

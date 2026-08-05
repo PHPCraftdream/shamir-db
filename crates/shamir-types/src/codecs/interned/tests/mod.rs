@@ -1,3 +1,4 @@
+pub mod bin_roundtrip_tests;
 pub mod codec_tests;
 pub mod merge_storage_bytes_tests;
 pub mod messagepack_tests;

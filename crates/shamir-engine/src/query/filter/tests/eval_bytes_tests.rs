@@ -403,3 +403,39 @@ fn test_lte_int_boundary() {
     assert_eq!(compiled_true.matches_msgpack_bytes(&bytes), Some(true));
     assert_eq!(compiled_false.matches_msgpack_bytes(&bytes), Some(false));
 }
+
+// ── #983 regression: filter.eq on a binary field ─────────────────────────────
+// `make_record` inserts `bin = InnerValue::Bin(vec![1, 2, 3])`. A
+// `FilterValue::Binary` literal MUST match byte-for-byte via the bytes-eval
+// path (`RawScalar::Bin` vs `FilterValue::Binary`, eval_bytes.rs ~487). This
+// pins the engine-side filter floor for #983: if a row is stored as `Bin`, the
+// binary-equality filter finds it (the defect for #983 is client-side — see the
+// TS bisection — so this Rust test must PASS unchanged).
+
+#[test]
+fn test_eq_bin_match() {
+    let i = Interner::new();
+    let rec = make_record(&i);
+    let filter = Filter::Eq {
+        field: vec!["bin".into()],
+        value: FilterValue::Binary(vec![1, 2, 3]),
+    };
+    assert_agree(&i, &rec, &filter);
+    let bytes = encode(&rec);
+    let compiled = compile_filter(&filter, &i);
+    assert_eq!(compiled.matches_msgpack_bytes(&bytes), Some(true));
+}
+
+#[test]
+fn test_eq_bin_no_match() {
+    let i = Interner::new();
+    let rec = make_record(&i);
+    let filter = Filter::Eq {
+        field: vec!["bin".into()],
+        value: FilterValue::Binary(vec![1, 2, 4]),
+    };
+    assert_agree(&i, &rec, &filter);
+    let bytes = encode(&rec);
+    let compiled = compile_filter(&filter, &i);
+    assert_eq!(compiled.matches_msgpack_bytes(&bytes), Some(false));
+}
