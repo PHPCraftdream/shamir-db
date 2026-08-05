@@ -1,3 +1,5 @@
+use std::num::NonZeroU32;
+
 use shamir_query_types::admin::CreateIndexOp;
 use shamir_query_types::batch::BatchOp;
 use shamir_types::types::value::QueryValue;
@@ -5,6 +7,7 @@ use shamir_types::types::value::QueryValue;
 use crate::batch::IntoBatchOp;
 
 use super::create_index_build_error::CreateIndexBuildError;
+use super::IndexSpec;
 
 /// Create an index on a table. Returns a builder for the many optional
 /// knobs (unique, sorted, FTS, vector, functional).
@@ -194,80 +197,22 @@ impl CreateIndex {
     /// rejection on submit; that residual round-trip cost is a known, accepted
     /// scope gap, not an oversight.
     pub fn try_build(self) -> Result<BatchOp, CreateIndexBuildError> {
-        // P1-6 (#970): cross-type checks run BEFORE the existing btree-family
-        // checks so a non-btree index_type is rejected for the same reasons
-        // the server (admin_table_index.rs) rejects it — before any round trip.
-        let itype = self.index_type.as_deref();
-        let non_btree = matches!(itype, Some("vector") | Some("fts") | Some("functional"));
-
-        // 1. At least one field for ANY index type.
-        if self.fields.is_empty() {
-            return Err(CreateIndexBuildError::EmptyFields);
-        }
-        // 2. `unique` is only meaningful for btree/hash indexes.
-        if self.unique && non_btree {
-            return Err(CreateIndexBuildError::UniqueUnsupportedForType {
-                index_type: itype.unwrap().to_string(),
-            });
-        }
-        // 3. `sorted` is only meaningful for btree indexes.
-        if self.sorted && non_btree {
-            return Err(CreateIndexBuildError::SortedUnsupportedForType {
-                index_type: itype.unwrap().to_string(),
-            });
-        }
-        // 4. Vector index requires a positive dimension.
-        if itype == Some("vector") && (self.vector_dim.is_none() || self.vector_dim == Some(0)) {
-            return Err(CreateIndexBuildError::VectorDimRequired);
-        }
-        // 5. Vector metric must be a recognized value.
-        if itype == Some("vector") {
-            if let Some(m) = self.vector_metric.as_deref() {
-                if !matches!(m, "l2" | "dot" | "cosine") {
-                    return Err(CreateIndexBuildError::UnknownVectorMetric {
-                        metric: m.to_string(),
-                    });
-                }
-            }
-        }
-        // 6. Vector-specific options are only valid for vector indexes.
-        if itype != Some("vector")
-            && (self.vector_dim.is_some()
-                || self.vector_metric.is_some()
-                || self.vector_quantization.is_some())
-        {
-            return Err(CreateIndexBuildError::VectorOptionsOnNonVectorIndex);
-        }
-        // 7. FTS-specific options are only valid for FTS indexes.
-        if itype != Some("fts") && (self.fts_tokenizer.is_some() || self.fts_language.is_some()) {
-            return Err(CreateIndexBuildError::FtsOptionsOnNonFtsIndex);
-        }
-        // 8. Functional-specific options are only valid for functional indexes.
-        if itype != Some("functional")
-            && (self.functional_op.is_some() || self.functional_args.is_some())
-        {
-            return Err(CreateIndexBuildError::FunctionalOptionsOnNonFunctionalIndex);
-        }
-        // 9. `include` (covering index) is only meaningful for sorted btree indexes.
-        if !self.include.is_empty() && non_btree {
-            return Err(CreateIndexBuildError::IncludeUnsupportedForType {
-                index_type: itype.unwrap().to_string(),
-            });
-        }
-
-        // Existing btree-family checks (F-81 #908 / F-87 #915).
-        if self.sorted && self.unique {
-            return Err(CreateIndexBuildError::UniqueAndSorted);
-        }
-        if !self.include.is_empty() && !self.sorted {
-            return Err(CreateIndexBuildError::IncludeWithoutSorted);
-        }
-        if self.sorted && self.fields.len() != 1 {
-            return Err(CreateIndexBuildError::SortedMultiField {
-                field_count: self.fields.len(),
-            });
-        }
-        Ok(self.build())
+        // Validate the builder into a typed `IndexSpec`, then flatten the
+        // validated spec back into the wire `CreateIndexOp`. All 12 checks now
+        // live in `TryFrom<&CreateIndex> for IndexSpec` (see below); this method
+        // is just the spec-round-trip + the orthogonal-metadata attach.
+        //
+        // The borrow of `&self` for the conversion ends before the partial
+        // moves of `name` / `table` / `repo` / `if_not_exists` below (NLL), so
+        // the four orthogonal fields move straight into `into_op` — no clones
+        // of them, only of the validated kind-fields captured by the spec.
+        let spec = IndexSpec::try_from(&self)?;
+        Ok(BatchOp::CreateIndex(spec.into_op(
+            self.name,
+            self.table,
+            self.repo,
+            self.if_not_exists,
+        )))
     }
 
     /// Finalize into a [`BatchOp`].
@@ -289,6 +234,134 @@ impl CreateIndex {
             vector_quantization: self.vector_quantization,
             include: self.include,
             if_not_exists: self.if_not_exists,
+        })
+    }
+}
+
+/// Validate a [`CreateIndex`] builder into a typed [`IndexSpec`].
+///
+/// This is where `try_build()`'s 12 validation checks now live. The checks run
+/// in the **exact same order** as the pre-refactor inline `try_build()`, so the
+/// first-error decision is identical for every input — including all 21 cases
+/// of `create_index_matrix.json`. On success the matching [`IndexSpec`] variant
+/// is constructed; by construction it can no longer hold any of the
+/// combinations the checks above guard (e.g. a `Sorted` has a single `field`,
+/// `include` exists only on `Sorted`, `Vector::dim` is `NonZeroU32`, and no
+/// variant carries a sibling family's side-fields).
+impl TryFrom<&CreateIndex> for IndexSpec {
+    type Error = CreateIndexBuildError;
+
+    fn try_from(b: &CreateIndex) -> Result<Self, Self::Error> {
+        let itype = b.index_type.as_deref();
+        let non_btree = matches!(itype, Some("vector") | Some("fts") | Some("functional"));
+
+        // 1. At least one field for ANY index type.
+        if b.fields.is_empty() {
+            return Err(CreateIndexBuildError::EmptyFields);
+        }
+        // 2. `unique` is only meaningful for btree/hash indexes.
+        if b.unique && non_btree {
+            return Err(CreateIndexBuildError::UniqueUnsupportedForType {
+                index_type: itype.unwrap().to_string(),
+            });
+        }
+        // 3. `sorted` is only meaningful for btree indexes.
+        if b.sorted && non_btree {
+            return Err(CreateIndexBuildError::SortedUnsupportedForType {
+                index_type: itype.unwrap().to_string(),
+            });
+        }
+        // 4. Vector index requires a positive dimension.
+        if itype == Some("vector") && (b.vector_dim.is_none() || b.vector_dim == Some(0)) {
+            return Err(CreateIndexBuildError::VectorDimRequired);
+        }
+        // 5. Vector metric must be a recognized value.
+        if itype == Some("vector") {
+            if let Some(m) = b.vector_metric.as_deref() {
+                if !matches!(m, "l2" | "dot" | "cosine") {
+                    return Err(CreateIndexBuildError::UnknownVectorMetric {
+                        metric: m.to_string(),
+                    });
+                }
+            }
+        }
+        // 6. Vector-specific options are only valid for vector indexes.
+        if itype != Some("vector")
+            && (b.vector_dim.is_some()
+                || b.vector_metric.is_some()
+                || b.vector_quantization.is_some())
+        {
+            return Err(CreateIndexBuildError::VectorOptionsOnNonVectorIndex);
+        }
+        // 7. FTS-specific options are only valid for FTS indexes.
+        if itype != Some("fts") && (b.fts_tokenizer.is_some() || b.fts_language.is_some()) {
+            return Err(CreateIndexBuildError::FtsOptionsOnNonFtsIndex);
+        }
+        // 8. Functional-specific options are only valid for functional indexes.
+        if itype != Some("functional") && (b.functional_op.is_some() || b.functional_args.is_some())
+        {
+            return Err(CreateIndexBuildError::FunctionalOptionsOnNonFunctionalIndex);
+        }
+        // 9. `include` (covering index) is only meaningful for sorted btree indexes.
+        if !b.include.is_empty() && non_btree {
+            return Err(CreateIndexBuildError::IncludeUnsupportedForType {
+                index_type: itype.unwrap().to_string(),
+            });
+        }
+
+        // Existing btree-family checks (F-81 #908 / F-87 #915).
+        if b.sorted && b.unique {
+            return Err(CreateIndexBuildError::UniqueAndSorted);
+        }
+        if !b.include.is_empty() && !b.sorted {
+            return Err(CreateIndexBuildError::IncludeWithoutSorted);
+        }
+        if b.sorted && b.fields.len() != 1 {
+            return Err(CreateIndexBuildError::SortedMultiField {
+                field_count: b.fields.len(),
+            });
+        }
+
+        // All checks passed — build the variant. Each branch is now
+        // structurally incapable of holding the combinations rejected above.
+        Ok(match itype {
+            Some("vector") => IndexSpec::Vector {
+                fields: b.fields.clone(),
+                // Check 4 guarantees Some and > 0 here.
+                dim: NonZeroU32::new(b.vector_dim.expect("vector_dim checked Some & > 0"))
+                    .expect("vector_dim checked Some & > 0"),
+                metric: b.vector_metric.clone(),
+                quantization: b.vector_quantization.clone(),
+            },
+            Some("fts") => IndexSpec::Fts {
+                fields: b.fields.clone(),
+                tokenizer: b.fts_tokenizer.clone(),
+                language: b.fts_language.clone(),
+            },
+            Some("functional") => IndexSpec::Functional {
+                fields: b.fields.clone(),
+                op: b.functional_op.clone(),
+                args: b.functional_args.clone(),
+            },
+            // Btree family: `itype` is None (default) or any non-
+            // {vector,fts,functional} string (e.g. an explicit "btree"),
+            // preserved verbatim on the variant so try_build()/build() can
+            // never diverge.
+            _ if b.sorted => IndexSpec::Sorted {
+                // Check 12 guarantees exactly one field here.
+                field: b
+                    .fields
+                    .first()
+                    .expect("sorted index checked to have exactly one field")
+                    .clone(),
+                include: b.include.clone(),
+                index_type: itype.map(str::to_string),
+            },
+            _ => IndexSpec::Hash {
+                fields: b.fields.clone(),
+                unique: b.unique,
+                index_type: itype.map(str::to_string),
+            },
         })
     }
 }

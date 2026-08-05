@@ -41,6 +41,7 @@ mod drop_index;
 mod drop_repo;
 mod drop_table;
 mod function;
+mod index_spec;
 mod interner;
 mod interner_resolve;
 mod list;
@@ -53,6 +54,11 @@ mod replication;
 mod retention;
 mod schema;
 mod validator;
+
+/// Internal typed index-kind IR (NOT a wire type) that `CreateIndex::try_build`
+/// routes through to make mutually-exclusive index combinations
+/// unrepresentable at the type level.
+pub(crate) use index_spec::IndexSpec;
 
 pub use access_control::*;
 pub use auth::*;
