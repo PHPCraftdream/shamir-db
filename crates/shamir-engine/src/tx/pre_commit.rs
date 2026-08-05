@@ -1328,6 +1328,14 @@ async fn rederive_base_index_ops_post_stage(
         // 25 bytes. Both start with a 9-byte prefix: `[is_unique:u8,
         // name_interned:u64_le]`. Non-base_index ops have different key lengths
         // and are left untouched.
+        //
+        // **Contract for future index2 backends**: any NEW index2 backend's
+        // posting-key format MUST NOT produce a key of length exactly 41 or 25
+        // bytes whose first byte is 0 or 1 — such a key would be silently
+        // misidentified as a base_index op and retracted here. See
+        // `table::tests::p02c_retain_filter_key_collision_tests::retain_filter_key_collision_safety`
+        // for the regression test locking in the current safe values for every
+        // existing backend; extend it when adding a new backend.
         let mut live_prefixes: shamir_collections::TFxSet<(u8, u64)> =
             shamir_collections::TFxSet::default();
         for def in mgr.iter_indexes() {
