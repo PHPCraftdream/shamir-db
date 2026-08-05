@@ -167,13 +167,37 @@ describe('create_index_matrix (shared fixture)', () => {
 
   // ── Completeness: one reject case per error variant ──────────────────
   //
-  // "At least" one per variant, not "exactly" — #1004 added a second
-  // VectorDimRequired case (`vector_dim_zero_rejected`, an explicit
-  // `vector_dim: 0` alongside the pre-existing omitted-dim case) as a
-  // boundary-value pair, so a variant can legitimately have >1 case.
+  // A plain case-COUNT check (`rejectCases.length >= 12`) cannot actually
+  // prove per-variant coverage: deleting the sole case for one Rust
+  // CreateIndexBuildError variant would still pass at 12+ cases as long as
+  // some OTHER variant had picked up a second case (exactly what #1004's
+  // VectorDimRequired boundary-value pair did) — an `@oh` review caught the
+  // Rust mirror of this exact gap. TS has no typed error enum to match
+  // against (createIndex() just throws a plain Error), so this checks
+  // coverage by CASE NAME instead — each of these canonical names is this
+  // fixture's own established one-name-per-variant convention (see the
+  // Rust-side `variant_tag` function in create_index_matrix.rs for the
+  // authoritative variant list this must stay in sync with).
 
-  it('has at least 12 reject cases (one per CreateIndexBuildError variant)', () => {
-    expect(rejectCases.length).toBeGreaterThanOrEqual(12);
+  it('has a reject case for every CreateIndexBuildError variant, by canonical name', () => {
+    const rejectNames = new Set(rejectCases.map((c) => c.name));
+    const expectedCanonicalNames = [
+      'unique_and_sorted_rejected',
+      'include_without_sorted_rejected',
+      'sorted_multi_field_rejected',
+      'empty_fields_rejected',
+      'unique_unsupported_for_type_rejected',
+      'sorted_unsupported_for_type_rejected',
+      'vector_dim_required_rejected', // or vector_dim_zero_rejected — either proves VectorDimRequired
+      'unknown_vector_metric_rejected',
+      'vector_options_on_non_vector_rejected',
+      'fts_options_on_non_fts_rejected',
+      'functional_options_on_non_functional_rejected',
+      'include_unsupported_for_type_rejected',
+    ];
+    for (const name of expectedCanonicalNames) {
+      expect(rejectNames.has(name)).toBe(true);
+    }
   });
 
   it('has at least 9 accept cases (6 original + 3 additional)', () => {

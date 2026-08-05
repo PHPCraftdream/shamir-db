@@ -217,25 +217,58 @@ fn matrix_all_reject_cases_fail_with_reason() {
     }
 }
 
+/// Map a `CreateIndexBuildError` to a stable variant tag. Used ONLY by
+/// `matrix_reject_cases_cover_all_error_variants` to prove ACTUAL coverage —
+/// not a count comparison, which a prior version of this test relied on and
+/// which an `@oh` review found could pass at 12 reject cases even if the
+/// SOLE case for some variant were deleted (as long as some OTHER variant
+/// picked up a second case to keep the total at 12). Every arm is required
+/// (no `_ =>`), so adding a 13th `CreateIndexBuildError` variant without
+/// updating this function is a compile error, not a silent coverage gap.
+fn variant_tag(e: &CreateIndexBuildError) -> &'static str {
+    match e {
+        CreateIndexBuildError::UniqueAndSorted => "UniqueAndSorted",
+        CreateIndexBuildError::IncludeWithoutSorted => "IncludeWithoutSorted",
+        CreateIndexBuildError::SortedMultiField { .. } => "SortedMultiField",
+        CreateIndexBuildError::EmptyFields => "EmptyFields",
+        CreateIndexBuildError::UniqueUnsupportedForType { .. } => "UniqueUnsupportedForType",
+        CreateIndexBuildError::SortedUnsupportedForType { .. } => "SortedUnsupportedForType",
+        CreateIndexBuildError::VectorDimRequired => "VectorDimRequired",
+        CreateIndexBuildError::UnknownVectorMetric { .. } => "UnknownVectorMetric",
+        CreateIndexBuildError::VectorOptionsOnNonVectorIndex => "VectorOptionsOnNonVectorIndex",
+        CreateIndexBuildError::FtsOptionsOnNonFtsIndex => "FtsOptionsOnNonFtsIndex",
+        CreateIndexBuildError::FunctionalOptionsOnNonFunctionalIndex => {
+            "FunctionalOptionsOnNonFunctionalIndex"
+        }
+        CreateIndexBuildError::IncludeUnsupportedForType { .. } => "IncludeUnsupportedForType",
+    }
+}
+
 #[test]
 fn matrix_reject_cases_cover_all_error_variants() {
-    // Confirm the matrix has at least one case per CreateIndexBuildError variant.
-    // Note: this is "at least one", not "exactly one" — #1004 added a second
-    // `VectorDimRequired` case (`vector_dim_zero_rejected`, an explicit
-    // `vector_dim: 0` alongside the pre-existing omitted-dim case) as a
-    // boundary-value pair, so a variant can legitimately have >1 case.
+    // Actually run every reject case through try_build() and collect the
+    // REAL error variant each one produces — not just the case count. A
+    // variant can legitimately have >1 case (#1004 added a second
+    // `VectorDimRequired` case, `vector_dim_zero_rejected`, alongside the
+    // pre-existing omitted-dim case, as a boundary-value pair), so counting
+    // cases can never prove per-variant coverage on its own.
     let fx = load_fixture();
-    let reject_names: Vec<&str> = fx
-        .cases
-        .iter()
-        .filter_map(|c| match c {
-            MatrixCase::Reject { name, .. } => Some(name.as_str()),
-            _ => None,
-        })
-        .collect();
+    let mut covered: shamir_collections::TSet<&'static str> = shamir_collections::TSet::default();
+    let mut case_count = 0usize;
+    for case in &fx.cases {
+        let MatrixCase::Reject { name, input, .. } = case else {
+            continue;
+        };
+        case_count += 1;
+        let err = build_from_input(input)
+            .try_build()
+            .err()
+            .unwrap_or_else(|| {
+                panic!("case `{name}`: expected reject but try_build() returned Ok")
+            });
+        covered.insert(variant_tag(&err));
+    }
 
-    // Each of these fragments is a unique substring from a distinct
-    // CreateIndexBuildError variant's Display impl — one per variant.
     let expected_variants = [
         "UniqueAndSorted",
         "IncludeWithoutSorted",
@@ -255,10 +288,14 @@ fn matrix_reject_cases_cover_all_error_variants() {
         12,
         "sanity: expected exactly 12 error variants"
     );
-    assert!(
-        reject_names.len() >= expected_variants.len(),
-        "matrix must have at least 12 reject cases (one per variant); got {reject_names:?}"
-    );
+    for variant in expected_variants {
+        assert!(
+            covered.contains(variant),
+            "matrix has no reject case that actually produces \
+             CreateIndexBuildError::{variant} — a case count alone cannot \
+             prove this, {case_count} reject cases were run and produced: {covered:?}"
+        );
+    }
 }
 
 /// Build() (the infallible path) must remain permissive — it does NOT reject
