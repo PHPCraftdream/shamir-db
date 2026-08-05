@@ -293,6 +293,16 @@ export function createIndex(
         'before include, or drop the include option (server rejects include without sorted — see admin_table_index.rs)',
     );
   }
+  // 10. Sorted indexes are single-field scalar columns only (mirrors
+  // CreateIndexBuildError::SortedMultiField in Rust's try_build() and the
+  // server's "Sorted index requires exactly one field (composite TBD)" check
+  // in admin_table_index.rs).
+  if (opts?.sorted && fields.length !== 1) {
+    throw new Error(
+      `createIndex: a sorted index requires exactly one field, got ${fields.length}; ` +
+        'sorted indexes are single-field scalar columns only (server rejects multi-field sorted indexes — see admin_table_index.rs)',
+    );
+  }
 
   const op: CreateIndexOp = {
     create_index: name,

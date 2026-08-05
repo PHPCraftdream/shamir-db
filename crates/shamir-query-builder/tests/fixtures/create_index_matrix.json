@@ -1,0 +1,142 @@
+{
+  "_comment": "Shared declarative CREATE INDEX fixture matrix (#998). Single source of truth for valid + invalid CreateIndex cases, consumed by BOTH the Rust test (create_index_matrix.rs → CreateIndex::try_build) and the TS test (create_index_matrix.test.ts → createIndex()). Supersedes the flat create_index_try_build_msgpack.json — the 6 original valid-shape hex strings are merged here (single source of truth).",
+  "_key_order_note": "rmp_serde::to_vec_named emits map keys in Rust STRUCT DECLARATION order: create_index, table, fields, unique, sorted, repo, then optional fields (index_type, fts_tokenizer, fts_language, functional_op, functional_args, vector_dim, vector_metric, vector_quantization, include, if_not_exists) in declaration order. The TS builder (ddl.ts createIndex) inserts keys in this same order so @msgpack/msgpack.encode (JS insertion order) produces byte-identical output for all field types involved (strings, bools, uint — no floats).",
+  "_value_notes": {
+    "discriminator": "BatchOp::CreateIndex(CreateIndexOp) serializes as a single-key map — the first struct field create_index: String is the discriminator, and BatchOp's custom Serialize forwards directly to CreateIndexOp::serialize. So the wire bytes for BatchOp::CreateIndex(op) and CreateIndexOp are identical.",
+    "bool_defaults": "unique=false → 0xc2 (msgpack false), NOT absent. CreateIndexOp uses #[serde(default)] for the bool fields, which means serde writes the default value (false) as msgpack false. Only if_not_exists uses skip_serializing_if=is_false (absent when false, 0xc3 when true).",
+    "vector_dim": "Values 128-65535 use uint16 (0xcd prefix). e.g. 384 = cd0180, 256 = cd0100.",
+    "repo_default": "repo defaults to 'main' and is always present (#[serde(default = \"default_repo\")], no skip_serializing_if)."
+  },
+  "_consumer_notes": {
+    "rust": "Load via concat!(env!(\"CARGO_MANIFEST_DIR\"), \"/tests/fixtures/create_index_matrix.json\"). Map each case's input to create_index(name, table) + fluent setters, call try_build(), assert accept/reject + wire_hex + reason_contains.",
+    "ts": "Load via resolve(__dirname, '../../../../..', 'shamir-query-builder', 'tests', 'fixtures', 'create_index_matrix.json'). Map each case's input to createIndex(name, table, fields, opts), assert accept/reject + wire_hex + reason_contains."
+  },
+  "cases": [
+    {
+      "name": "regular",
+      "input": { "name": "idx_regular", "table": "users", "fields": [["email"]] },
+      "expect": "accept",
+      "wire_hex": "86ac6372656174655f696e646578ab6964785f726567756c6172a57461626c65a57573657273a66669656c64739191a5656d61696ca6756e69717565c2a6736f72746564c2a47265706fa46d61696e"
+    },
+    {
+      "name": "unique",
+      "input": { "name": "idx_unique", "table": "users", "fields": [["email"]], "unique": true },
+      "expect": "accept",
+      "wire_hex": "86ac6372656174655f696e646578aa6964785f756e69717565a57461626c65a57573657273a66669656c64739191a5656d61696ca6756e69717565c3a6736f72746564c2a47265706fa46d61696e"
+    },
+    {
+      "name": "sorted_include",
+      "input": { "name": "idx_sorted_inc", "table": "users", "fields": [["age"]], "sorted": true, "include": [["email"]] },
+      "expect": "accept",
+      "wire_hex": "87ac6372656174655f696e646578ae6964785f736f727465645f696e63a57461626c65a57573657273a66669656c64739191a3616765a6756e69717565c2a6736f72746564c3a47265706fa46d61696ea7696e636c7564659191a5656d61696c"
+    },
+    {
+      "name": "fts",
+      "input": { "name": "idx_fts", "table": "posts", "fields": [["body"]], "index_type": "fts", "fts_tokenizer": "whitespace" },
+      "expect": "accept",
+      "wire_hex": "88ac6372656174655f696e646578a76964785f667473a57461626c65a5706f737473a66669656c64739191a4626f6479a6756e69717565c2a6736f72746564c2a47265706fa46d61696eaa696e6465785f74797065a3667473ad6674735f746f6b656e697a6572aa77686974657370616365"
+    },
+    {
+      "name": "functional",
+      "input": { "name": "idx_func", "table": "users", "fields": [["email"]], "index_type": "functional", "functional_op": "lower" },
+      "expect": "accept",
+      "wire_hex": "88ac6372656174655f696e646578a86964785f66756e63a57461626c65a57573657273a66669656c64739191a5656d61696ca6756e69717565c2a6736f72746564c2a47265706fa46d61696eaa696e6465785f74797065aa66756e6374696f6e616cad66756e6374696f6e616c5f6f70a56c6f776572"
+    },
+    {
+      "name": "vector",
+      "input": { "name": "idx_vector", "table": "docs", "fields": [["embedding"]], "index_type": "vector", "vector_dim": 384, "vector_metric": "cosine" },
+      "expect": "accept",
+      "wire_hex": "89ac6372656174655f696e646578aa6964785f766563746f72a57461626c65a4646f6373a66669656c64739191a9656d62656464696e67a6756e69717565c2a6736f72746564c2a47265706fa46d61696eaa696e6465785f74797065a6766563746f72aa766563746f725f64696dcd0180ad766563746f725f6d6574726963a6636f73696e65"
+    },
+    {
+      "name": "vector_sq8",
+      "input": { "name": "idx_vec_sq8", "table": "docs", "fields": [["embedding"]], "index_type": "vector", "vector_dim": 256, "vector_metric": "cosine", "vector_quantization": "sq8" },
+      "expect": "accept",
+      "wire_hex": "8aac6372656174655f696e646578ab6964785f7665635f737138a57461626c65a4646f6373a66669656c64739191a9656d62656464696e67a6756e69717565c2a6736f72746564c2a47265706fa46d61696eaa696e6465785f74797065a6766563746f72aa766563746f725f64696dcd0100ad766563746f725f6d6574726963a6636f73696e65b3766563746f725f7175616e74697a6174696f6ea3737138"
+    },
+    {
+      "name": "fts_with_language",
+      "input": { "name": "idx_fts_lang", "table": "posts", "fields": [["body"]], "index_type": "fts", "fts_tokenizer": "unicode", "fts_language": "en" },
+      "expect": "accept",
+      "wire_hex": "89ac6372656174655f696e646578ac6964785f6674735f6c616e67a57461626c65a5706f737473a66669656c64739191a4626f6479a6756e69717565c2a6736f72746564c2a47265706fa46d61696eaa696e6465785f74797065a3667473ad6674735f746f6b656e697a6572a7756e69636f6465ac6674735f6c616e6775616765a2656e"
+    },
+    {
+      "name": "if_not_exists",
+      "input": { "name": "idx_ine", "table": "users", "fields": [["email"]], "if_not_exists": true },
+      "expect": "accept",
+      "wire_hex": "87ac6372656174655f696e646578a76964785f696e65a57461626c65a57573657273a66669656c64739191a5656d61696ca6756e69717565c2a6736f72746564c2a47265706fa46d61696ead69665f6e6f745f657869737473c3"
+    },
+    {
+      "name": "unique_and_sorted_rejected",
+      "input": { "name": "idx_bad", "table": "users", "fields": [["email"]], "unique": true, "sorted": true },
+      "expect": "reject",
+      "reason_contains": "sorted"
+    },
+    {
+      "name": "include_without_sorted_rejected",
+      "input": { "name": "idx_bad", "table": "users", "fields": [["email"]], "include": [["name"]] },
+      "expect": "reject",
+      "reason_contains": "include"
+    },
+    {
+      "name": "sorted_multi_field_rejected",
+      "input": { "name": "idx_bad", "table": "users", "fields": [["a"], ["b"]], "sorted": true },
+      "expect": "reject",
+      "reason_contains": "sorted"
+    },
+    {
+      "name": "empty_fields_rejected",
+      "input": { "name": "idx_bad", "table": "users", "fields": [] },
+      "expect": "reject",
+      "reason_contains": "field"
+    },
+    {
+      "name": "unique_unsupported_for_type_rejected",
+      "input": { "name": "idx_bad", "table": "users", "fields": [["embedding"]], "unique": true, "index_type": "vector", "vector_dim": 128 },
+      "expect": "reject",
+      "reason_contains": "unique"
+    },
+    {
+      "name": "sorted_unsupported_for_type_rejected",
+      "input": { "name": "idx_bad", "table": "posts", "fields": [["body"]], "sorted": true, "index_type": "fts" },
+      "expect": "reject",
+      "reason_contains": "sorted"
+    },
+    {
+      "name": "vector_dim_required_rejected",
+      "input": { "name": "idx_bad", "table": "docs", "fields": [["embedding"]], "index_type": "vector" },
+      "expect": "reject",
+      "reason_contains": "vector_dim"
+    },
+    {
+      "name": "unknown_vector_metric_rejected",
+      "input": { "name": "idx_bad", "table": "docs", "fields": [["embedding"]], "index_type": "vector", "vector_dim": 128, "vector_metric": "consine" },
+      "expect": "reject",
+      "reason_contains": "vector_metric"
+    },
+    {
+      "name": "vector_options_on_non_vector_rejected",
+      "input": { "name": "idx_bad", "table": "users", "fields": [["email"]], "vector_dim": 128 },
+      "expect": "reject",
+      "reason_contains": "vector"
+    },
+    {
+      "name": "fts_options_on_non_fts_rejected",
+      "input": { "name": "idx_bad", "table": "users", "fields": [["email"]], "fts_tokenizer": "whitespace" },
+      "expect": "reject",
+      "reason_contains": "fts"
+    },
+    {
+      "name": "functional_options_on_non_functional_rejected",
+      "input": { "name": "idx_bad", "table": "users", "fields": [["email"]], "functional_op": "lower" },
+      "expect": "reject",
+      "reason_contains": "functional"
+    },
+    {
+      "name": "include_unsupported_for_type_rejected",
+      "input": { "name": "idx_bad", "table": "posts", "fields": [["body"]], "index_type": "fts", "include": [["title"]] },
+      "expect": "reject",
+      "reason_contains": "include"
+    }
+  ]
+}

@@ -211,6 +211,15 @@ describe('createIndex', () => {
     ).toThrow(/include.*only valid for sorted indexes/);
   });
 
+  // ── #998: sorted-multi-field parity (was missing — now mirrors Rust's
+  //    CreateIndexBuildError::SortedMultiField) ─────────────────────────
+
+  it('throws when sorted index has more than one field', () => {
+    expect(() =>
+      ddl.createIndex('idx_bad', 't', [['a'], ['b']], { sorted: true }),
+    ).toThrow(/sorted index requires exactly one field.*got 2/);
+  });
+
   // ── P1-6 (#970): cross-type validation parity ──────────────────────
 
   it('throws when fields is empty (all index types)', () => {
