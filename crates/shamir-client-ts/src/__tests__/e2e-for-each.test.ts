@@ -120,6 +120,42 @@ describe.skipIf(!SERVER_AVAILABLE)(
       return inner;
     }
 
+    /**
+     * #1035: like `auditInsertBody`, but with an EXTRA `guard` field computed
+     * via `$fn: math/mod(1, $param <bindRow>)` (`crates/shamir-funclib/src/math.rs`'s
+     * `"mod"` entry, dispatch name `"math/mod"`) — errors with `div_by_zero`
+     * when its divisor argument is zero, a genuine, PURE, data-dependent
+     * function of the current iteration's own bind_row value.
+     *
+     * Used instead of a unique-index violation for the mid-loop-failure
+     * scenario below, mirroring the Rust twin's
+     * `audit_insert_body_with_div_guard` (`crates/shamir-client/tests/batch_for_each_e2e.rs`,
+     * see its doc comment for the full writeup): unique-index validation
+     * (`crates/shamir-index/src/base_index/index_manager_unique.rs`'s
+     * `validate_unique_for_create` plus the commit-time re-check in
+     * `crates/shamir-engine/src/tx/pre_commit.rs`'s Phase 2.6) only ever
+     * checks against DURABLE committed state — two inserts claiming the same
+     * unique key within the SAME still-uncommitted transaction never
+     * cross-validate against each other, so a duplicate-within-one-tx
+     * silently commits instead of aborting (a real, still-open engine gap,
+     * tracked separately — NOT what this test exists to exercise). The
+     * div-by-zero technique sidesteps it: no duplicate values needed (large,
+     * distinct `order_id`s throughout), and the failure is self-contained to
+     * the failing iteration's own insert.
+     */
+    function auditInsertBodyWithDivGuard(bindRow: string): Batch {
+      const inner = Batch.create('inner');
+      inner.add(
+        'audit',
+        write.insert('audit_log', {
+          order_id: { $param: bindRow },
+          note: 'audited',
+          guard: { $fn: { name: 'math/mod', args: [1, { $param: bindRow }] } },
+        }),
+      );
+      return inner;
+    }
+
     // ═══════════════════════════════════════════════════════════════════
     // Scenario 1 (canonical): read order ids for a customer via a real
     // $query column ref, then for_each-insert one audit_log row per order.
@@ -267,22 +303,16 @@ describe.skipIf(!SERVER_AVAILABLE)(
       const db = uniqueDbName('fe_txabort');
       await makeDb(db);
 
-      await client!.execute(db, {
-        id: `mk-index-${db}`,
-        queries: {
-          ix: ddl.createIndex('audit_log_order_id_uq', 'audit_log', [['order_id']], {
-            unique: true,
-            repo: 'main',
-          }),
-        },
-      });
-
       const batch = Batch.create('txn-abort');
       batch.add('good', write.insert('orders', { order_id: 1, customer_id: 'erin', amount: 1 }));
-      // over: [1, 1, 2] -- iteration 0 inserts order_id=1 (ok), iteration 1
-      // duplicates order_id=1 (unique-index violation), iteration 2 must
-      // never run.
-      batch.forEach('loop', [1, 1, 2], 'order_id', auditInsertBody('order_id'));
+      // #1035: over: [301, 0, 303] -- iteration 0 inserts order_id=301 (ok:
+      // math/mod(1, 301) succeeds), iteration 1 has order_id=0, so its
+      // `guard` field's math/mod(1, 0) div-by-zero fails the whole op,
+      // iteration 2 (order_id=303) must never run. 301/303 are both >=128 to
+      // avoid the msgpack fixint/Binary array-decoding ambiguity described
+      // on `auditInsertBodyWithDivGuard` (a WHOLE array of small ints 0-127
+      // is the trigger; 0 alone, mixed with >=128 values, is safe).
+      batch.forEach('loop', [301, 0, 303], 'order_id', auditInsertBodyWithDivGuard('order_id'));
       batch.transactional();
 
       let resp: BatchResponse | undefined;
