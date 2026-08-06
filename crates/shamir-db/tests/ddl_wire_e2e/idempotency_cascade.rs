@@ -608,3 +608,145 @@ async fn drop_validator_if_exists_nonexistent_is_noop() {
         Some(false),
     );
 }
+
+// =====================================================================
+// F-4 (#1029): IF NOT EXISTS must be a cross-family no-op for CREATE
+// INDEX, not just for the base_index (regular/unique) families.
+//
+// R0-C's cross-family name-uniqueness preflight
+// (`TableManager::any_index_exists`) unconditionally errors on a
+// duplicate name regardless of `if_not_exists`, once a request falls
+// through the handler's OWN `already_exists` pre-check. Before this
+// fix that pre-check only probed `unique_index_exists`/`index_exists`
+// (the base_index families), so a sorted/fts/vector/functional CREATE
+// with `IF NOT EXISTS` on an already-existing name of the SAME family
+// never short-circuited into the no-op branch — control fell through
+// into `create_sorted_index_with_include`/`create_index_v2`, where the
+// preflight then errored unconditionally. The fix widens the handler's
+// pre-check to `table.any_index_exists`, matching every family.
+// =====================================================================
+
+#[tokio::test]
+async fn create_sorted_index_with_if_not_exists_idempotent() {
+    let db = setup_db().await;
+
+    // First CREATE SORTED INDEX succeeds.
+    let mut b = Batch::new();
+    b.id("ci1");
+    b.create_index(
+        "op",
+        ddl::create_index("idx_age", "users").field("age").sorted(),
+    );
+    let req = b.to_request_via_msgpack();
+    db.execute("testdb", &req).await.unwrap();
+
+    // Second CREATE SORTED INDEX with IF NOT EXISTS on the same name
+    // must be a no-op, not the cross-family preflight error.
+    let mut b = Batch::new();
+    b.id("ci2");
+    b.create_index(
+        "op",
+        ddl::create_index("idx_age", "users")
+            .field("age")
+            .sorted()
+            .if_not_exists(),
+    );
+    let req = b.to_request_via_msgpack();
+    let resp = db
+        .execute("testdb", &req)
+        .await
+        .expect("IF NOT EXISTS on an existing sorted index must no-op, not error");
+    assert_eq!(
+        resp.results["op"].records[0].get_value_bool("created"),
+        Some(false)
+    );
+    assert_eq!(
+        resp.results["op"].records[0].get_value_bool("existed"),
+        Some(true)
+    );
+}
+
+#[tokio::test]
+async fn create_fts_index_with_if_not_exists_idempotent() {
+    let db = setup_db().await;
+
+    // First CREATE INDEX (fts) succeeds.
+    let mut b = Batch::new();
+    b.id("ci1");
+    b.create_index(
+        "op",
+        ddl::create_index("idx_body_fts", "users")
+            .field("name")
+            .index_type("fts"),
+    );
+    let req = b.to_request_via_msgpack();
+    db.execute("testdb", &req).await.unwrap();
+
+    // Second CREATE INDEX (fts) with IF NOT EXISTS on the same name
+    // must be a no-op, not the cross-family preflight error.
+    let mut b = Batch::new();
+    b.id("ci2");
+    b.create_index(
+        "op",
+        ddl::create_index("idx_body_fts", "users")
+            .field("name")
+            .index_type("fts")
+            .if_not_exists(),
+    );
+    let req = b.to_request_via_msgpack();
+    let resp = db
+        .execute("testdb", &req)
+        .await
+        .expect("IF NOT EXISTS on an existing fts index must no-op, not error");
+    assert_eq!(
+        resp.results["op"].records[0].get_value_bool("created"),
+        Some(false)
+    );
+    assert_eq!(
+        resp.results["op"].records[0].get_value_bool("existed"),
+        Some(true)
+    );
+}
+
+/// Sorted CREATE INDEX without `IF NOT EXISTS` on a duplicate name now
+/// errors, instead of the old silent last-write-wins replace that
+/// `SortedIndexManager::register` used to perform with no pre-check at
+/// all. This is INTENTIONAL — regular/unique CREATE already errored on
+/// a duplicate name without `if_not_exists` before R0-C ever landed
+/// (see `create_table_duplicate_without_if_not_exists_fails` above for
+/// the equivalent base_index/table contract). Sorted's old "silently
+/// replace" behavior was an accidental inconsistency (the handler
+/// simply never checked sorted's existence pre-R0-C), not a
+/// deliberately guaranteed contract — so this is a consistency fix
+/// aligning sorted with how every other family already behaved, not a
+/// regression.
+#[tokio::test]
+async fn create_sorted_index_duplicate_without_if_not_exists_now_errors() {
+    let db = setup_db().await;
+
+    // First CREATE SORTED INDEX succeeds.
+    let mut b = Batch::new();
+    b.id("ci1");
+    b.create_index(
+        "op",
+        ddl::create_index("idx_age2", "users").field("age").sorted(),
+    );
+    let req = b.to_request_via_msgpack();
+    db.execute("testdb", &req).await.unwrap();
+
+    // Second CREATE SORTED INDEX on the same name WITHOUT if_not_exists
+    // must error (not silently replace the definition).
+    let mut b = Batch::new();
+    b.id("ci2");
+    b.create_index(
+        "op",
+        ddl::create_index("idx_age2", "users").field("age").sorted(),
+    );
+    let req = b.to_request_via_msgpack();
+    let err = db.execute("testdb", &req).await.unwrap_err();
+    let msg = err.to_string();
+    assert!(
+        msg.contains("already exists"),
+        "expected 'already exists' error for duplicate sorted index name, got: {msg}"
+    );
+}

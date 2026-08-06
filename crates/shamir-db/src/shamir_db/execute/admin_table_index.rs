@@ -350,11 +350,18 @@ impl ShamirAdminExecutor {
             .await;
 
         // Check if the index already exists (for if_not_exists / dup guard).
-        let already_exists = if op.unique {
-            table.unique_index_exists(&op.create_index).await
-        } else {
-            table.index_exists(&op.create_index).await
-        };
+        //
+        // Checked across ALL FOUR index families (regular, unique, sorted,
+        // index2) via the shared cross-family helper — not just the
+        // base_index family `op.unique` selects. Before F-4 (#1029) this
+        // probed only `unique_index_exists`/`index_exists`, so sorted/fts/
+        // vector/functional CREATE never observed an existing SAME-family
+        // duplicate here; control fell through into
+        // `create_sorted_index_with_include`/`create_index_v2`, where R0-C's
+        // own cross-family preflight (`any_index_exists`) unconditionally
+        // errors regardless of `if_not_exists`. Using the same helper here
+        // makes `IF NOT EXISTS` a correct no-op for every family.
+        let already_exists = table.any_index_exists(&op.create_index).await;
         if already_exists {
             if op.if_not_exists {
                 return Ok(admin_result(mpack!({
