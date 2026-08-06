@@ -92,7 +92,7 @@ async fn plan_record_created_returns_sorted_posting() {
     let ops = mgr.plan_record_created(&rid, &rec, 0).unwrap();
     assert_eq!(ops.len(), 1);
     match &ops[0] {
-        IndexWriteOp::SetPosting { key, value } => {
+        IndexWriteOp::SetPosting { key, value, .. } => {
             // Key must end with record_id bytes.
             assert_eq!(&key[key.len() - 16..], &rid.to_bytes());
             assert!(value.is_empty());
@@ -112,7 +112,7 @@ async fn plan_record_deleted_returns_remove_sorted_posting() {
     let ops = mgr.plan_record_deleted(&rid, &rec).unwrap();
     assert_eq!(ops.len(), 1);
     match &ops[0] {
-        IndexWriteOp::RemovePosting { key } => {
+        IndexWriteOp::RemovePosting { key, .. } => {
             assert_eq!(&key[key.len() - 16..], &rid.to_bytes());
         }
         other => panic!("expected RemovePosting, got {other:?}"),
@@ -141,13 +141,13 @@ async fn equivalence_plan_apply_vs_direct() {
     let ops = mgr_b.plan_record_created(&rid, &rec, 1).unwrap();
     for op in &ops {
         match op {
-            IndexWriteOp::SetPosting { key, value } => {
+            IndexWriteOp::SetPosting { key, value, .. } => {
                 store_b
                     .set(key.clone().into(), value.clone())
                     .await
                     .unwrap();
             }
-            IndexWriteOp::RemovePosting { key } => {
+            IndexWriteOp::RemovePosting { key, .. } => {
                 let _ = store_b.remove(key.clone().into()).await.unwrap();
             }
             _ => {}

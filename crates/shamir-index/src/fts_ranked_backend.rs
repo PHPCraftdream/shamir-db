@@ -154,6 +154,7 @@ impl IndexBackend for FtsRankedBackend {
         if doc_len == 0 {
             return Ok(Vec::new());
         }
+        let provenance = crate::write_ops::index2_provenance(&self.descriptor);
         let mut ops = Vec::with_capacity(freq.len() + 1);
         for (th, tf) in &freq {
             let key = self.posting_key_for_token(*th, &rid);
@@ -162,6 +163,7 @@ impl IndexBackend for FtsRankedBackend {
             ops.push(IndexWriteOp::SetPosting {
                 key: Bytes::from(key),
                 value: Bytes::from(val),
+                provenance,
             });
         }
         ops.push(IndexWriteOp::BumpFtsStats { doc_len, sign: 1 });
@@ -179,12 +181,14 @@ impl IndexBackend for FtsRankedBackend {
         let (_, old_doc_len) = self.tokenize_with_freq(old);
         let new_set: TFxSet<u64> = new_freq.keys().copied().collect();
 
+        let provenance = crate::write_ops::index2_provenance(&self.descriptor);
         let mut ops = Vec::new();
         // Remove disappeared tokens.
         for &th in old_set.difference(&new_set) {
             let key = self.posting_key_for_token(th, &rid);
             ops.push(IndexWriteOp::RemovePosting {
                 key: Bytes::from(key),
+                provenance,
             });
         }
         // Add/update all tokens in new (tf or doc_len may have changed).
@@ -198,6 +202,7 @@ impl IndexBackend for FtsRankedBackend {
             ops.push(IndexWriteOp::SetPosting {
                 key: Bytes::from(key),
                 value: Bytes::from(val),
+                provenance,
             });
         }
         ops.push(IndexWriteOp::BumpFtsStats {
@@ -217,11 +222,13 @@ impl IndexBackend for FtsRankedBackend {
         rec: &(dyn RecordRef + Sync + '_),
     ) -> Result<Vec<IndexWriteOp>, IndexError> {
         let (freq, doc_len) = self.tokenize_with_freq(rec);
+        let provenance = crate::write_ops::index2_provenance(&self.descriptor);
         let mut ops = Vec::with_capacity(freq.len() + 1);
         for th in freq.keys() {
             let key = self.posting_key_for_token(*th, &rid);
             ops.push(IndexWriteOp::RemovePosting {
                 key: Bytes::from(key),
+                provenance,
             });
         }
         if doc_len > 0 {

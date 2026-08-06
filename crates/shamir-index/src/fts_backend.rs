@@ -136,12 +136,14 @@ impl IndexBackend for FtsBackend {
         rec: &(dyn RecordRef + Sync + '_),
     ) -> Result<Vec<IndexWriteOp>, IndexError> {
         let tokens = self.tokenize_record(rec);
+        let provenance = crate::write_ops::index2_provenance(&self.descriptor);
         let mut ops = Vec::with_capacity(tokens.len());
         for th in tokens {
             let key = self.posting_key_for_token(th, &rid);
             ops.push(IndexWriteOp::SetPosting {
                 key: Bytes::from(key),
                 value: Bytes::new(),
+                provenance,
             });
         }
         Ok(ops)
@@ -155,12 +157,14 @@ impl IndexBackend for FtsBackend {
     ) -> Result<Vec<IndexWriteOp>, IndexError> {
         let old_tokens = self.tokenize_record(old);
         let new_tokens = self.tokenize_record(new);
+        let provenance = crate::write_ops::index2_provenance(&self.descriptor);
         let mut ops = Vec::new();
         // Remove tokens that disappeared.
         for &th in old_tokens.difference(&new_tokens) {
             let key = self.posting_key_for_token(th, &rid);
             ops.push(IndexWriteOp::RemovePosting {
                 key: Bytes::from(key),
+                provenance,
             });
         }
         // Add tokens that appeared.
@@ -169,6 +173,7 @@ impl IndexBackend for FtsBackend {
             ops.push(IndexWriteOp::SetPosting {
                 key: Bytes::from(key),
                 value: Bytes::new(),
+                provenance,
             });
         }
         Ok(ops)
@@ -180,11 +185,13 @@ impl IndexBackend for FtsBackend {
         rec: &(dyn RecordRef + Sync + '_),
     ) -> Result<Vec<IndexWriteOp>, IndexError> {
         let tokens = self.tokenize_record(rec);
+        let provenance = crate::write_ops::index2_provenance(&self.descriptor);
         let mut ops = Vec::with_capacity(tokens.len());
         for th in tokens {
             let key = self.posting_key_for_token(th, &rid);
             ops.push(IndexWriteOp::RemovePosting {
                 key: Bytes::from(key),
+                provenance,
             });
         }
         Ok(ops)

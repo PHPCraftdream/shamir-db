@@ -199,6 +199,7 @@ impl IndexBackend for FunctionalBackend {
         Ok(vec![IndexWriteOp::SetPosting {
             key: Bytes::from(key),
             value: Bytes::new(),
+            provenance: crate::write_ops::index2_provenance(&self.descriptor),
         }])
     }
 
@@ -221,13 +222,16 @@ impl IndexBackend for FunctionalBackend {
         if old_hash != new_hash {
             let old_key = self.posting_key(&old_val, &rid);
             let new_key = self.posting_key(&new_val, &rid);
+            let provenance = crate::write_ops::index2_provenance(&self.descriptor);
             Ok(vec![
                 IndexWriteOp::RemovePosting {
                     key: Bytes::from(old_key),
+                    provenance,
                 },
                 IndexWriteOp::SetPosting {
                     key: Bytes::from(new_key),
                     value: Bytes::new(),
+                    provenance,
                 },
             ])
         } else {
@@ -249,6 +253,7 @@ impl IndexBackend for FunctionalBackend {
         let key = self.posting_key(&val, &rid);
         Ok(vec![IndexWriteOp::RemovePosting {
             key: Bytes::from(key),
+            provenance: crate::write_ops::index2_provenance(&self.descriptor),
         }])
     }
 

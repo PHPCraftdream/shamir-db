@@ -27,6 +27,7 @@ use dashmap::DashMap;
 use shamir_storage::error::DbResult;
 use shamir_storage::types::{KvOp, RecordKey, Store};
 use shamir_tunables::store_defaults::FULL_SCAN_BATCH;
+use shamir_tx::{IndexFamily, Provenance};
 use shamir_types::record_view::RecordRef;
 use shamir_types::types::common::THasher;
 use shamir_types::types::record_id::RecordId;
@@ -35,6 +36,13 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
+
+/// R0-B (#1008): [`Provenance`] for an op planned against `def` on the
+/// REGULAR (non-unique) base_index family. See
+/// `IndexDefinition::provenance`'s doc.
+fn regular_provenance(def: &IndexDefinition) -> Provenance {
+    def.provenance(IndexFamily::Regular)
+}
 
 /// Log CREATE INDEX backfill progress at most this often (avoids spamming the
 /// log on every batch of a large table scan).
@@ -1788,6 +1796,7 @@ impl IndexManager {
                 ops.push(IndexWriteOp::SetPosting {
                     key: posting_key,
                     value: Bytes::new(),
+                    provenance: regular_provenance(&def),
                 });
             }
         }
@@ -1830,6 +1839,7 @@ impl IndexManager {
 
         let mut ops = Vec::with_capacity(1024);
         for def in self.indexes.iter() {
+            let provenance = regular_provenance(&def);
             for (rid, value) in items.clone() {
                 if let Some(irk) =
                     build_index_key_from_record(false, def.name_interned, value, &def.paths)
@@ -1839,6 +1849,7 @@ impl IndexManager {
                     ops.push(IndexWriteOp::SetPosting {
                         key: posting_key,
                         value: Bytes::new(),
+                        provenance,
                     });
                 }
             }
@@ -1884,6 +1895,7 @@ impl IndexManager {
 
         let mut ops = Vec::with_capacity(4);
         for def in self.indexes.iter() {
+            let provenance = regular_provenance(&def);
             let old_key =
                 build_index_key_from_record(false, def.name_interned, old_value, &def.paths);
             let new_key =
@@ -1897,12 +1909,16 @@ impl IndexManager {
                     ops.push(IndexWriteOp::SetPosting {
                         key: posting_key,
                         value: Bytes::new(),
+                        provenance,
                     });
                 }
                 (Some(ok), None) => {
                     let index_key = ok.to_bytes();
                     let posting_key = build_posting_key(&index_key, record_id);
-                    ops.push(IndexWriteOp::RemovePosting { key: posting_key });
+                    ops.push(IndexWriteOp::RemovePosting {
+                        key: posting_key,
+                        provenance,
+                    });
                 }
                 (Some(ok), Some(nk)) => {
                     let old_bytes = ok.to_bytes();
@@ -1911,12 +1927,14 @@ impl IndexManager {
                         let old_posting_key = build_posting_key(&old_bytes, record_id);
                         ops.push(IndexWriteOp::RemovePosting {
                             key: old_posting_key,
+                            provenance,
                         });
 
                         let new_posting_key = build_posting_key(&new_bytes, record_id);
                         ops.push(IndexWriteOp::SetPosting {
                             key: new_posting_key,
                             value: Bytes::new(),
+                            provenance,
                         });
                     }
                 }
@@ -1962,7 +1980,10 @@ impl IndexManager {
             {
                 let index_key = irk.to_bytes();
                 let posting_key = build_posting_key(&index_key, record_id);
-                ops.push(IndexWriteOp::RemovePosting { key: posting_key });
+                ops.push(IndexWriteOp::RemovePosting {
+                    key: posting_key,
+                    provenance: regular_provenance(&def),
+                });
             }
         }
 
@@ -1987,10 +2008,10 @@ impl IndexManager {
         let mut kv_ops: Vec<KvOp> = Vec::with_capacity(ops.len());
         for op in ops {
             match op {
-                IndexWriteOp::SetPosting { key, value } => {
+                IndexWriteOp::SetPosting { key, value, .. } => {
                     kv_ops.push(KvOp::Set(key.clone().into(), value.clone()));
                 }
-                IndexWriteOp::RemovePosting { key } => {
+                IndexWriteOp::RemovePosting { key, .. } => {
                     kv_ops.push(KvOp::Remove(key.clone().into()));
                 }
                 IndexWriteOp::BumpFtsStats { .. } => {
@@ -2114,7 +2135,9 @@ impl IndexManager {
     pub fn invalidate_posting_cache_for_ops(&self, ops: &[IndexWriteOp]) {
         for op in ops {
             let key = match op {
-                IndexWriteOp::SetPosting { key, .. } | IndexWriteOp::RemovePosting { key } => key,
+                IndexWriteOp::SetPosting { key, .. } | IndexWriteOp::RemovePosting { key, .. } => {
+                    key
+                }
                 _ => continue,
             };
             if key.len() >= 25 {

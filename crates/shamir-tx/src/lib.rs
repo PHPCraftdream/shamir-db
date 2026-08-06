@@ -60,7 +60,7 @@ pub use changefeed::{
 };
 pub use completion_tracker::{CompletionTracker, State as CompletionState};
 pub use id_remap::{collect_referenced_ids, remap_inner_value_bytes, remap_value};
-pub use index_write_op::IndexWriteOp;
+pub use index_write_op::{IndexFamily, IndexWriteOp, Provenance};
 pub use layered_interner::{
     commit_interner_overlay, LayeredInterner, OverlayCommitResult, OVERLAY_ID_BASE,
 };

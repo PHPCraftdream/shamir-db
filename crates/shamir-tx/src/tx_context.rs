@@ -522,10 +522,10 @@ impl TxContext {
         }
         for (_token, op) in &self.index_write_set {
             match op {
-                crate::IndexWriteOp::SetPosting { key, value } => {
+                crate::IndexWriteOp::SetPosting { key, value, .. } => {
                     total = total.saturating_add(key.len()).saturating_add(value.len());
                 }
-                crate::IndexWriteOp::RemovePosting { key } => {
+                crate::IndexWriteOp::RemovePosting { key, .. } => {
                     total = total.saturating_add(key.len());
                 }
                 crate::IndexWriteOp::BumpFtsStats { .. } => {} // counter-only, no payload

@@ -72,14 +72,14 @@ async fn seed_indexed_record(tbl: &TableManager) -> (RecordId, Bytes) {
 
 fn op_to_sort_key(op: &shamir_tx::IndexWriteOp) -> Vec<u8> {
     match op {
-        shamir_tx::IndexWriteOp::SetPosting { key, value } => {
+        shamir_tx::IndexWriteOp::SetPosting { key, value, .. } => {
             let mut v = b"set:".to_vec();
             v.extend_from_slice(key);
             v.push(b'|');
             v.extend_from_slice(value);
             v
         }
-        shamir_tx::IndexWriteOp::RemovePosting { key } => {
+        shamir_tx::IndexWriteOp::RemovePosting { key, .. } => {
             let mut v = b"rm:".to_vec();
             v.extend_from_slice(key);
             v
@@ -408,10 +408,10 @@ async fn delete_tx_stages_remove_posting_for_base_index() {
         .collect();
     for (_, op) in tx.index_write_set {
         match op {
-            shamir_tx::IndexWriteOp::SetPosting { key, value } => {
+            shamir_tx::IndexWriteOp::SetPosting { key, value, .. } => {
                 tbl.info_store().set(key.into(), value).await.unwrap();
             }
-            shamir_tx::IndexWriteOp::RemovePosting { key } => {
+            shamir_tx::IndexWriteOp::RemovePosting { key, .. } => {
                 let _ = tbl.info_store().remove(key.into()).await;
             }
             shamir_tx::IndexWriteOp::BumpFtsStats { .. } => {}

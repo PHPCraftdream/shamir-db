@@ -103,6 +103,7 @@ async fn post_commit_phase5_failure_is_committed_then_recovered() {
         IndexWriteOp::SetPosting {
             key: posting_key.clone(),
             value: posting_val.clone(),
+            provenance: Default::default(),
         },
     ));
 
@@ -262,6 +263,7 @@ async fn deferred_materialization_increments_metric() {
         IndexWriteOp::SetPosting {
             key: Bytes::from_static(b"metric_posting_key"),
             value: Bytes::from_static(b"metric_posting_value"),
+            provenance: Default::default(),
         },
     ));
 
@@ -353,6 +355,7 @@ async fn multi_table_partial_deferral_is_reconciled_by_recovery() {
         IndexWriteOp::SetPosting {
             key: posting_a_key.clone(),
             value: posting_a_val.clone(),
+            provenance: Default::default(),
         },
     ));
 

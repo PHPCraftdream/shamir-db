@@ -1028,6 +1028,19 @@ impl SortedIndexManager {
             match new_vec.iter().position(|d| d.name_interned == old_id) {
                 Some(pos) => {
                     new_vec[pos].name_interned = new_id;
+                    // R0-B (#1008): bump the in-memory instance epoch on
+                    // RENAME — the SAME semantic Part 1's `generation` bump
+                    // establishes at manager granularity, applied here at
+                    // per-definition granularity. This is what lets
+                    // `pre_commit.rs`'s reconcile distinguish "a staged op
+                    // planned against this definition BEFORE the rename"
+                    // (stale — the op still carries the OLD name_interned
+                    // AND the OLD epoch) from "a freshly re-derived op
+                    // planned against the renamed definition" (carries the
+                    // NEW name_interned and the NEW epoch). See
+                    // `SortedIndexDefinition::instance_epoch`'s doc.
+                    new_vec[pos].instance_epoch =
+                        crate::base_index::sorted_index_definition::next_instance_epoch();
                     not_found = false;
                 }
                 None => {
@@ -1041,6 +1054,18 @@ impl SortedIndexManager {
                 "sorted index definition disappeared mid-rename".to_string(),
             ));
         }
+        // F-50 Step 2 (#870, Part D) / #1007: a RENAME changes the queryable
+        // def set's identity (a tx staged against the OLD name must be
+        // treated as stale after this point — see the class doc above), so
+        // it must advance `generation` exactly like `register`/`drop_index`
+        // already do. Before this fix, `rename_definition` performed the RCU
+        // swap + epoch-carry + persist but never bumped `generation`, so
+        // `pre_commit.rs`'s sorted rederive gate (`sorted_mgr.generation() ==
+        // stage_gen`) never fired for a tx that staged before a rename —
+        // the exact NP-2 gap #1007 closes. Placed AFTER the RCU swap
+        // succeeds, mirroring `register`/`drop_index`'s existing call-site
+        // placement (immediately after their own mutating RCU/removal).
+        self.generation.fetch_add(1, Ordering::AcqRel);
         // Carry the in-memory mutation-epoch entry from old_id to new_id —
         // see the doc above. `remove_sync` returns the removed AtomicU64
         // (if any); an index that was never mutated has no entry, which is
@@ -1471,7 +1496,11 @@ impl SortedIndexManager {
                 } else {
                     Bytes::new()
                 };
-                ops.push(IndexWriteOp::SetPosting { key, value });
+                ops.push(IndexWriteOp::SetPosting {
+                    key,
+                    value,
+                    provenance: def.provenance(),
+                });
             }
         }
         Ok(ops)
@@ -1501,6 +1530,7 @@ impl SortedIndexManager {
         let defs: Vec<SortedIndexDefinition> = self.iter_indexes();
         let mut ops = Vec::new();
         for def in &defs {
+            let provenance = def.provenance();
             for (rid, value) in items.clone() {
                 if let Some(encoded) = extract_and_encode(value, &def.field_path)? {
                     let key = self.build_entry_key(def.name_interned, &encoded, rid);
@@ -1509,7 +1539,11 @@ impl SortedIndexManager {
                     } else {
                         Bytes::new()
                     };
-                    ops.push(IndexWriteOp::SetPosting { key, value: pv });
+                    ops.push(IndexWriteOp::SetPosting {
+                        key,
+                        value: pv,
+                        provenance,
+                    });
                 }
             }
         }
@@ -1535,6 +1569,7 @@ impl SortedIndexManager {
         let defs: Vec<SortedIndexDefinition> = self.iter_indexes();
         let mut ops = Vec::new();
         for def in &defs {
+            let provenance = def.provenance();
             let old_enc = extract_and_encode(old, &def.field_path)?;
             let new_enc = extract_and_encode(new, &def.field_path)?;
             // For covering indexes, also rewrite the posting when the
@@ -1560,19 +1595,27 @@ impl SortedIndexManager {
             if key_changed {
                 if let Some(ref ov) = old_enc {
                     let key = self.build_entry_key(def.name_interned, ov, record_id);
-                    ops.push(IndexWriteOp::RemovePosting { key });
+                    ops.push(IndexWriteOp::RemovePosting { key, provenance });
                 }
                 if let Some(ref nv) = new_enc {
                     let key = self.build_entry_key(def.name_interned, nv, record_id);
                     let value = new_proj.clone().unwrap_or(Bytes::new());
-                    ops.push(IndexWriteOp::SetPosting { key, value });
+                    ops.push(IndexWriteOp::SetPosting {
+                        key,
+                        value,
+                        provenance,
+                    });
                 }
             } else {
                 // Key is the same but projection changed — overwrite in place.
                 if let Some(ref nv) = new_enc {
                     let key = self.build_entry_key(def.name_interned, nv, record_id);
                     let value = new_proj.clone().unwrap_or(Bytes::new());
-                    ops.push(IndexWriteOp::SetPosting { key, value });
+                    ops.push(IndexWriteOp::SetPosting {
+                        key,
+                        value,
+                        provenance,
+                    });
                 }
             }
         }
@@ -1597,7 +1640,10 @@ impl SortedIndexManager {
         for def in &defs {
             if let Some(encoded) = extract_and_encode(record, &def.field_path)? {
                 let key = self.build_entry_key(def.name_interned, &encoded, record_id);
-                ops.push(IndexWriteOp::RemovePosting { key });
+                ops.push(IndexWriteOp::RemovePosting {
+                    key,
+                    provenance: def.provenance(),
+                });
             }
         }
         Ok(ops)
@@ -1611,12 +1657,12 @@ impl SortedIndexManager {
     async fn apply_ops(&self, ops: &[IndexWriteOp]) -> DbResult<()> {
         for op in ops {
             match op {
-                IndexWriteOp::SetPosting { key, value } => {
+                IndexWriteOp::SetPosting { key, value, .. } => {
                     self.info_store
                         .set(key.clone().into(), value.clone())
                         .await?;
                 }
-                IndexWriteOp::RemovePosting { key } => {
+                IndexWriteOp::RemovePosting { key, .. } => {
                     let _ = self.info_store.remove(key.clone().into()).await?;
                 }
                 IndexWriteOp::BumpFtsStats { .. } => {
@@ -1674,7 +1720,7 @@ impl SortedIndexManager {
         for op in ops {
             let key = match op {
                 IndexWriteOp::SetPosting { key, .. } => key,
-                IndexWriteOp::RemovePosting { key } => key,
+                IndexWriteOp::RemovePosting { key, .. } => key,
                 IndexWriteOp::BumpFtsStats { .. } => continue,
             };
             if let Some(name_interned) = decode_sorted_index_name(key.as_ref()) {

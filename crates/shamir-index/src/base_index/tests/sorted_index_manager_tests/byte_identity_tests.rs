@@ -121,7 +121,7 @@ async fn every_scalar_type_produces_posting() {
             case.label
         );
         match &ops[0] {
-            IndexWriteOp::SetPosting { key, value } => {
+            IndexWriteOp::SetPosting { key, value, .. } => {
                 assert!(
                     !key.is_empty(),
                     "{}: posting key must not be empty",
@@ -250,7 +250,7 @@ async fn covering_projection_roundtrip() {
     let ops = mgr.plan_record_created(&rid, &rec, 7).unwrap();
     assert_eq!(ops.len(), 1, "one SetPosting for the covering index");
     match &ops[0] {
-        IndexWriteOp::SetPosting { key: _, value } => {
+        IndexWriteOp::SetPosting { key: _, value, .. } => {
             assert!(
                 !value.is_empty(),
                 "covering index must produce a projection"

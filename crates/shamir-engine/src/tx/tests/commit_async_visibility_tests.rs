@@ -135,6 +135,7 @@ async fn async_commit_index_converges_after_tail() {
         IndexWriteOp::SetPosting {
             key: posting_key.clone(),
             value: posting_val.clone(),
+            provenance: Default::default(),
         },
     ));
     tx.set_visibility(CommitVisibility::AsyncIndex);
@@ -190,6 +191,7 @@ async fn async_commit_background_failure_is_recovered() {
         IndexWriteOp::SetPosting {
             key: posting_key.clone(),
             value: posting_val.clone(),
+            provenance: Default::default(),
         },
     ));
     tx.set_visibility(CommitVisibility::AsyncIndex);
@@ -277,6 +279,7 @@ async fn sync_default_mode_returns_no_background_handle() {
         IndexWriteOp::SetPosting {
             key: posting_key.clone(),
             value: posting_val.clone(),
+            provenance: Default::default(),
         },
     ));
     // Visibility intentionally NOT set — exercises the `Default` impl.

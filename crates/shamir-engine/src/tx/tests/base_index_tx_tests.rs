@@ -70,13 +70,13 @@ fn record_with_int(key: u64, val: i64) -> InnerValue {
 async fn apply_staged_index_ops(info_store: &Arc<dyn Store>, tx: &TxContext) {
     for (_token, op) in &tx.index_write_set {
         match op {
-            IndexWriteOp::SetPosting { key, value } => {
+            IndexWriteOp::SetPosting { key, value, .. } => {
                 info_store
                     .set(key.clone().into(), value.clone())
                     .await
                     .unwrap();
             }
-            IndexWriteOp::RemovePosting { key } => {
+            IndexWriteOp::RemovePosting { key, .. } => {
                 let _ = info_store.remove(key.clone().into()).await;
             }
             IndexWriteOp::BumpFtsStats { .. } => {}
@@ -262,7 +262,7 @@ async fn staged_keys_match_non_tx_planner_output() {
         .index_write_set
         .iter()
         .filter_map(|(_t, op)| match op {
-            IndexWriteOp::SetPosting { key, value } => Some((key.clone(), value.clone())),
+            IndexWriteOp::SetPosting { key, value, .. } => Some((key.clone(), value.clone())),
             _ => None,
         })
         .collect();
@@ -275,7 +275,7 @@ async fn staged_keys_match_non_tx_planner_output() {
         .await
         .unwrap()
     {
-        if let IndexWriteOp::SetPosting { key, value } = op {
+        if let IndexWriteOp::SetPosting { key, value, .. } = op {
             expected.push((key, value));
         }
     }
@@ -284,7 +284,7 @@ async fn staged_keys_match_non_tx_planner_output() {
         .plan_record_created(&rid, &rec, 0)
         .unwrap()
     {
-        if let IndexWriteOp::SetPosting { key, value } = op {
+        if let IndexWriteOp::SetPosting { key, value, .. } = op {
             expected.push((key, value));
         }
     }

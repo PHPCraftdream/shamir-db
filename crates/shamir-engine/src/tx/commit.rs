@@ -316,7 +316,7 @@ pub async fn wal_ops_from_tx(tx: &TxContext) -> Vec<WalOpV2> {
 
     for (table_token, op) in &tx.index_write_set {
         match op {
-            shamir_tx::IndexWriteOp::SetPosting { key, value } => {
+            shamir_tx::IndexWriteOp::SetPosting { key, value, .. } => {
                 ops.push(WalOpV2::IndexPut {
                     table_id_interned: *table_token,
                     idx_id: 0,
@@ -324,7 +324,7 @@ pub async fn wal_ops_from_tx(tx: &TxContext) -> Vec<WalOpV2> {
                     value: value.clone(),
                 });
             }
-            shamir_tx::IndexWriteOp::RemovePosting { key } => {
+            shamir_tx::IndexWriteOp::RemovePosting { key, .. } => {
                 ops.push(WalOpV2::IndexDel {
                     table_id_interned: *table_token,
                     idx_id: 0,

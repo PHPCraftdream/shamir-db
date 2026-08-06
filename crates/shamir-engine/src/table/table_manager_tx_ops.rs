@@ -56,13 +56,53 @@ impl TableManager {
     ) -> DbResult<Vec<shamir_tx::IndexWriteOp>> {
         let mut all_ops = Vec::new();
         for backend in self.index2_registry.all_backends().await {
-            let ops = backend
+            let mut ops = backend
                 .plan_insert_tx(rid, rec, tx_id)
                 .await
                 .map_err(|e| shamir_storage::error::DbError::Internal(e.to_string()))?;
+            // R0-B (#1008): the backend only knows its OWN construction-time
+            // descriptor snapshot — stamp the REAL live instance epoch from
+            // the registry (see `index2_provenance`'s doc for why this
+            // two-step stamping is necessary for index2 specifically).
+            self.stamp_index2_provenance(&backend, &mut ops).await;
             all_ops.extend(ops);
         }
         Ok(all_ops)
+    }
+
+    /// R0-B (#1008): overwrite the placeholder `Provenance` every index2
+    /// backend's `plan_*`/`plan_*_tx` stamps (see
+    /// `shamir_index::write_ops::index2_provenance`'s doc) with the REAL
+    /// live instance epoch (`IndexRegistry::instance_epoch_of`) for
+    /// `backend`'s id. Shared by every index2 op-planning call site in this
+    /// file (`plan_insert_ops`/`plan_update_ops`/`plan_update_ops_ref`/
+    /// `plan_delete_ops`) so the commit-time reconcile
+    /// (`shamir-engine::tx::pre_commit::rederive_index2_ops_post_stage`) can
+    /// correctly match a staged op back to "is this still the same
+    /// instance". A backend somehow missing from the registry (should be
+    /// unreachable — the backend came FROM `all_backends()`) leaves the
+    /// placeholder `instance_epoch: 0` untouched, which the reconcile
+    /// correctly treats as "no live definition matches" (retract).
+    pub(super) async fn stamp_index2_provenance(
+        &self,
+        backend: &std::sync::Arc<dyn shamir_index::backend::IndexBackend>,
+        ops: &mut [shamir_tx::IndexWriteOp],
+    ) {
+        if ops.is_empty() {
+            return;
+        }
+        let id = backend.descriptor().id;
+        let name_interned = backend.descriptor().name_interned;
+        if let Some(instance_epoch) = self.index2_registry.instance_epoch_of(id).await {
+            let provenance = shamir_tx::Provenance {
+                family: shamir_tx::IndexFamily::Index2,
+                name_interned,
+                instance_epoch,
+            };
+            for op in ops.iter_mut() {
+                op.set_provenance(provenance);
+            }
+        }
     }
 
     /// HIGH-6: route any HNSW vectors carried by `rec` into the tx's own
@@ -157,10 +197,11 @@ impl TableManager {
     ) -> DbResult<Vec<shamir_tx::IndexWriteOp>> {
         let mut all_ops = Vec::new();
         for backend in self.index2_registry.all_backends().await {
-            let ops = backend
+            let mut ops = backend
                 .plan_update_tx(rid, old, new, tx_id)
                 .await
                 .map_err(|e| shamir_storage::error::DbError::Internal(e.to_string()))?;
+            self.stamp_index2_provenance(&backend, &mut ops).await;
             all_ops.extend(ops);
         }
         Ok(all_ops)
@@ -182,10 +223,11 @@ impl TableManager {
     {
         let mut all_ops = Vec::new();
         for backend in self.index2_registry.all_backends().await {
-            let ops = backend
+            let mut ops = backend
                 .plan_update_tx(rid, old, new, tx_id)
                 .await
                 .map_err(|e| shamir_storage::error::DbError::Internal(e.to_string()))?;
+            self.stamp_index2_provenance(&backend, &mut ops).await;
             all_ops.extend(ops);
         }
         Ok(all_ops)
@@ -209,10 +251,11 @@ impl TableManager {
     {
         let mut all_ops = Vec::new();
         for backend in self.index2_registry.all_backends().await {
-            let ops = backend
+            let mut ops = backend
                 .plan_delete_tx(rid, rec, tx_id)
                 .await
                 .map_err(|e| shamir_storage::error::DbError::Internal(e.to_string()))?;
+            self.stamp_index2_provenance(&backend, &mut ops).await;
             all_ops.extend(ops);
         }
         Ok(all_ops)

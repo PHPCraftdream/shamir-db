@@ -540,12 +540,14 @@ fn build_footprint_projects_index_set_postings_only() {
         IndexWriteOp::SetPosting {
             key: Bytes::from_static(b"K1"),
             value: Bytes::from_static(b"V"),
+            provenance: Default::default(),
         },
     ));
     tx.index_write_set.push((
         42,
         IndexWriteOp::RemovePosting {
             key: Bytes::from_static(b"K_DEL"),
+            provenance: Default::default(),
         },
     ));
     tx.index_write_set.push((

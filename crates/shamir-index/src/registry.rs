@@ -132,6 +132,22 @@ impl IndexRegistry {
         self.by_id.read_async(&id, |_, e| e.gen).await
     }
 
+    /// R0-B (#1008): PRODUCTION twin of [`entry_gen`](Self::entry_gen) —
+    /// the per-entry insertion-generation tag for the backend registered
+    /// under `id`, read by the commit-time reconcile
+    /// (`shamir-engine::tx::pre_commit`) and the tx-stage-time op planners
+    /// (`TableManager::plan_insert_ops`/`plan_update_ops`/`plan_delete_ops`)
+    /// as the index2 family's [`Provenance::instance_epoch`](shamir_tx::Provenance)
+    /// — see that field's doc for why this is the CORRECT epoch source for
+    /// index2 (unlike base_index/sorted, index2 backends have no
+    /// construction-time access to their own live epoch; only the registry
+    /// does). `None` if no backend is registered under `id` (the caller
+    /// treats a missing entry the same as "this instance is gone" —
+    /// consistent with every other DROP-detection path in this registry).
+    pub async fn instance_epoch_of(&self, id: u32) -> Option<u64> {
+        self.by_id.read_async(&id, |_, e| e.gen).await
+    }
+
     /// Register `backend` under both `by_id` and `by_name`.
     ///
     /// # Precondition (R0-C / #1009): caller must hold `ddl_admission`

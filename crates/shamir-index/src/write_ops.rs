@@ -1,11 +1,40 @@
 //! Write-op planning primitives for transactional index commit.
 
 use crate::backend::{IndexBackend, IndexError};
+use crate::descriptor::IndexDescriptor;
 use shamir_storage::types::{KvOp, Store};
 use std::sync::Arc;
 
 // Re-export from shamir-tx where the pure-data enum now lives.
 pub use shamir_tx::IndexWriteOp;
+pub use shamir_tx::{IndexFamily, Provenance};
+
+/// R0-B (#1008): PLACEHOLDER [`Provenance`] an index2 backend stamps onto
+/// the `IndexWriteOp`s its `plan_*`/`plan_*_tx` methods construct.
+///
+/// index2 backends only ever see their own construction-time `descriptor()`
+/// snapshot — they have NO access to `IndexRegistry`'s live per-entry `gen`
+/// (the actual index2 instance epoch, R0-A/#1006's `BackendEntry.gen`; see
+/// `Provenance`'s doc). `instance_epoch: 0` here is intentionally a
+/// recognizable placeholder, never the real epoch (the registry's
+/// `NEXT_INSTANCE_EPOCH`-style counters used by base_index/sorted start at
+/// 1, and `IndexRegistry::insert`'s `my_gen` is always `>= 1` too — `0` is
+/// unreachable as a REAL epoch across every family). Every caller with
+/// registry access — `TableManager::plan_insert_ops`/`plan_update_ops`/
+/// `plan_delete_ops` (stage time) and `rederive_index2_ops_post_stage`
+/// (commit time) — MUST overwrite this placeholder via
+/// `IndexWriteOp::set_provenance` using `IndexRegistry::instance_epoch_of`
+/// immediately after calling a backend's `plan_*`/`plan_*_tx`. The
+/// NON-tx direct-apply path (`apply_index_ops`) never stages ops for later
+/// reconcile, so the placeholder harmlessly reaches `apply_in_memory`/the
+/// store write without ever being compared.
+pub fn index2_provenance(descriptor: &IndexDescriptor) -> Provenance {
+    Provenance {
+        family: IndexFamily::Index2,
+        name_interned: descriptor.name_interned,
+        instance_epoch: 0,
+    }
+}
 
 /// Apply a slice of index write ops against a store + backend.
 ///
@@ -31,10 +60,10 @@ pub async fn apply_index_ops(
 
     for op in ops {
         match op {
-            IndexWriteOp::SetPosting { key, value } => {
+            IndexWriteOp::SetPosting { key, value, .. } => {
                 kv_ops.push(KvOp::Set(key.clone().into(), value.clone()));
             }
-            IndexWriteOp::RemovePosting { key } => {
+            IndexWriteOp::RemovePosting { key, .. } => {
                 kv_ops.push(KvOp::Remove(key.clone().into()));
             }
             other => in_memory_ops.push(other.clone()),
@@ -93,10 +122,10 @@ pub async fn apply_index_ops_at_commit(
 
     for op in ops {
         match op {
-            IndexWriteOp::SetPosting { key, value } => {
+            IndexWriteOp::SetPosting { key, value, .. } => {
                 kv_ops.push(KvOp::Set(key.clone().into(), value.clone()));
             }
-            IndexWriteOp::RemovePosting { key } => {
+            IndexWriteOp::RemovePosting { key, .. } => {
                 kv_ops.push(KvOp::Remove(key.clone().into()));
             }
             other => in_memory_ops.push(other.clone()),

@@ -370,10 +370,10 @@ async fn equivalence_plan_apply_vs_direct() {
     assert!(!ops.is_empty());
     for op in &ops {
         match op {
-            crate::write_ops::IndexWriteOp::SetPosting { key, value } => {
+            crate::write_ops::IndexWriteOp::SetPosting { key, value, .. } => {
                 info2.set(key.clone().into(), value.clone()).await.unwrap();
             }
-            crate::write_ops::IndexWriteOp::RemovePosting { key } => {
+            crate::write_ops::IndexWriteOp::RemovePosting { key, .. } => {
                 let _ = info2.remove(key.clone().into()).await;
             }
             _ => {}

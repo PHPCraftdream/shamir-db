@@ -52,6 +52,10 @@ impl From<IndexDefinitionNoState> for IndexDefinition {
             // Every pre-`state` persisted index was fully built; a `Building`
             // index could not have been persisted before this field existed.
             state: IndexState::default(),
+            // R0-B (#1008): mint a fresh in-memory epoch — this legacy shape
+            // predates the field entirely, same reasoning as every other
+            // load path (see `IndexDefinition::instance_epoch`'s doc).
+            instance_epoch: super::index_definition::next_instance_epoch(),
         }
     }
 }

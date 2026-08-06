@@ -18,6 +18,7 @@
 
 use crate::state::IndexState;
 use serde::{Deserialize, Serialize};
+use shamir_tx::{IndexFamily, Provenance};
 
 /// Distinguishes sorted-index physical keys from any other key kind
 /// that lives in the same info_store. Must NOT collide with
@@ -29,7 +30,12 @@ pub(crate) const SORTED_TAG: u8 = 0x80;
 
 /// Definition of a sorted index — minimal, since we only support
 /// single-field for now.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+///
+/// `PartialEq`/`Eq` are hand-written (NOT derived) so `instance_epoch`
+/// (in-memory-only identity, see that field's doc) does not participate in
+/// equality — mirrors `IndexDefinition`'s identical hand-written impl and
+/// its doc for the full rationale.
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SortedIndexDefinition {
     /// Interned id of the index name.
     pub name_interned: u64,
@@ -88,6 +94,43 @@ pub struct SortedIndexDefinition {
     /// the real fallback, mirroring `persistence::load_index2_metadata`.
     #[serde(default)]
     pub state: IndexState,
+
+    /// R0-B (#1008): in-memory-only instance identity, minted fresh on every
+    /// CREATE ([`register`](super::sorted_index_manager::SortedIndexManager::register))
+    /// and bumped on every RENAME
+    /// ([`rename_definition`](super::sorted_index_manager::SortedIndexManager::rename_definition)).
+    /// Mirrors `IndexDefinition::instance_epoch` (base_index regular/unique)
+    /// — see that field's doc for the full rationale: this is the tiebreaker
+    /// the commit-time reconcile in `shamir-engine::tx::pre_commit` uses to
+    /// distinguish a DROP+CREATE-same-name (ABA) or a RENAME from the SAME
+    /// live instance a tx staged ops against. `#[serde(skip)]` — mirrors the
+    /// existing [`included_fields_interned`](Self::included_fields_interned)
+    /// precedent immediately above: never persisted, only needs to survive
+    /// within one process's uptime. `default = "next_instance_epoch"` mints
+    /// a FRESH value on every deserialize path too (derive-based
+    /// `Deserialize`, including the `SortedIndexDefinitionV1`/
+    /// `SortedIndexDefinitionNoState` legacy-shape `From` conversions
+    /// below), so a definition reloaded from disk on restart never collides
+    /// with a stale in-memory epoch from before the restart.
+    #[serde(skip, default = "next_instance_epoch")]
+    pub instance_epoch: u64,
+}
+
+/// R0-B (#1008): process-wide monotonic counter minting fresh
+/// [`SortedIndexDefinition::instance_epoch`] values. See
+/// `index_definition.rs`'s identical `NEXT_INSTANCE_EPOCH` for the full
+/// rationale (a single global counter per family is enough — `Provenance`
+/// only ever compares epochs within the SAME family). A separate counter
+/// from base_index's is intentional: sorted and base_index (regular/unique)
+/// are different `IndexWriteOp` families (see
+/// `shamir_tx::index_write_op::IndexFamily`), so their epoch spaces never
+/// need to be comparable to each other.
+static NEXT_INSTANCE_EPOCH: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+/// Mint a fresh, process-wide-unique instance epoch. See
+/// [`NEXT_INSTANCE_EPOCH`]'s doc.
+pub(crate) fn next_instance_epoch() -> u64 {
+    NEXT_INSTANCE_EPOCH.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
 }
 
 impl SortedIndexDefinition {
@@ -99,6 +142,7 @@ impl SortedIndexDefinition {
             included_fields_interned: Vec::new(),
             ready_at_version: 0,
             state: IndexState::default(),
+            instance_epoch: next_instance_epoch(),
         }
     }
 
@@ -117,6 +161,7 @@ impl SortedIndexDefinition {
             included_fields_interned: Vec::new(),
             ready_at_version: 0,
             state: IndexState::default(),
+            instance_epoch: next_instance_epoch(),
         }
     }
 
@@ -135,6 +180,7 @@ impl SortedIndexDefinition {
             included_fields_interned,
             ready_at_version: 0,
             state: IndexState::default(),
+            instance_epoch: next_instance_epoch(),
         }
     }
 
@@ -142,7 +188,36 @@ impl SortedIndexDefinition {
     pub fn is_covering(&self) -> bool {
         !self.included_fields_interned.is_empty()
     }
+
+    /// R0-B (#1008): build the [`Provenance`] every `IndexWriteOp` planned
+    /// against this definition must carry. Mirrors
+    /// `IndexDefinition::provenance` (base_index regular/unique) — see that
+    /// method's doc.
+    pub fn provenance(&self) -> Provenance {
+        Provenance {
+            family: IndexFamily::Sorted,
+            name_interned: self.name_interned,
+            instance_epoch: self.instance_epoch,
+        }
+    }
 }
+
+impl PartialEq for SortedIndexDefinition {
+    fn eq(&self, other: &Self) -> bool {
+        // Deliberately excludes `instance_epoch` — see the struct doc.
+        // `included_fields_interned` was already excluded by convention
+        // before this field existed (it's a transient rebuild of
+        // `included_fields`, not independent content) — preserved here to
+        // keep pre-existing equality-based tests/behavior unchanged.
+        self.name_interned == other.name_interned
+            && self.field_path == other.field_path
+            && self.included_fields == other.included_fields
+            && self.ready_at_version == other.ready_at_version
+            && self.state == other.state
+    }
+}
+
+impl Eq for SortedIndexDefinition {}
 
 /// Legacy on-disk layout without `included_fields`. Used only during
 /// backward-compatible load of pre-covering-index persisted data.
@@ -166,6 +241,9 @@ impl From<SortedIndexDefinitionV1> for SortedIndexDefinition {
             // Pre-F-72 on-disk layout predates the lifecycle state entirely —
             // every such persisted index was, by definition, fully built.
             state: IndexState::default(),
+            // R0-B (#1008): mint a fresh in-memory epoch — see
+            // `SortedIndexDefinition::instance_epoch`'s doc.
+            instance_epoch: next_instance_epoch(),
         }
     }
 }
@@ -196,6 +274,9 @@ impl From<SortedIndexDefinitionNoState> for SortedIndexDefinition {
             // Every pre-`state` persisted index was fully built; a `Building`
             // index could not have been persisted before this field existed.
             state: IndexState::default(),
+            // R0-B (#1008): mint a fresh in-memory epoch — see
+            // `SortedIndexDefinition::instance_epoch`'s doc.
+            instance_epoch: next_instance_epoch(),
         }
     }
 }

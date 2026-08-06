@@ -265,6 +265,7 @@ async fn staged_bytes_accumulates_across_fields() {
         IndexWriteOp::SetPosting {
             key: Bytes::from_static(b"idx"),
             value: Bytes::from_static(b"post"),
+            provenance: Default::default(),
         },
     ));
     let after_index = tx.staged_bytes();

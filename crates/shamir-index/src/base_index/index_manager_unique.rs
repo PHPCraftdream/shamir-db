@@ -12,9 +12,16 @@ use bytes::Bytes;
 use shamir_storage::error::DbResult;
 use shamir_storage::types::RecordKey;
 use shamir_tunables::store_defaults::FULL_SCAN_BATCH;
+use shamir_tx::{IndexFamily, Provenance};
 use shamir_types::record_view::RecordRef;
 use shamir_types::types::record_id::RecordId;
 use shamir_types::types::value::InnerValue;
+
+/// R0-B (#1008): [`Provenance`] for an op planned against `def` on the
+/// UNIQUE base_index family. See `IndexDefinition::provenance`'s doc.
+fn unique_provenance(def: &IndexDefinition) -> Provenance {
+    def.provenance(IndexFamily::Unique)
+}
 
 impl IndexManager {
     // ============================================================================
@@ -696,6 +703,7 @@ impl IndexManager {
                 ops.push(IndexWriteOp::SetPosting {
                     key: irk.to_bytes(),
                     value: Bytes::copy_from_slice(record_id.as_bytes()),
+                    provenance: unique_provenance(&def),
                 });
             }
         }
@@ -719,6 +727,7 @@ impl IndexManager {
         }
         let mut ops = Vec::new();
         for def in self.indexes_unique.iter() {
+            let provenance = unique_provenance(&def);
             let old_key =
                 build_index_key_from_record(true, def.name_interned, old_value, &def.paths);
             let new_key =
@@ -729,19 +738,27 @@ impl IndexManager {
                     ops.push(IndexWriteOp::SetPosting {
                         key: nk.to_bytes(),
                         value: Bytes::copy_from_slice(record_id.as_bytes()),
+                        provenance,
                     });
                 }
                 (Some(ok), None) => {
-                    ops.push(IndexWriteOp::RemovePosting { key: ok.to_bytes() });
+                    ops.push(IndexWriteOp::RemovePosting {
+                        key: ok.to_bytes(),
+                        provenance,
+                    });
                 }
                 (Some(ok), Some(nk)) => {
                     let old_bytes = ok.to_bytes();
                     let new_bytes = nk.to_bytes();
                     if old_bytes != new_bytes {
-                        ops.push(IndexWriteOp::RemovePosting { key: old_bytes });
+                        ops.push(IndexWriteOp::RemovePosting {
+                            key: old_bytes,
+                            provenance,
+                        });
                         ops.push(IndexWriteOp::SetPosting {
                             key: new_bytes,
                             value: Bytes::copy_from_slice(record_id.as_bytes()),
+                            provenance,
                         });
                     }
                 }
@@ -768,6 +785,7 @@ impl IndexManager {
             {
                 ops.push(IndexWriteOp::RemovePosting {
                     key: irk.to_bytes(),
+                    provenance: unique_provenance(&def),
                 });
             }
         }
@@ -791,6 +809,7 @@ impl IndexManager {
         }
         let mut ops = Vec::with_capacity(1024);
         for def in self.indexes_unique.iter() {
+            let provenance = unique_provenance(&def);
             for (rid, value) in items.clone() {
                 if let Some(irk) =
                     build_index_key_from_record(true, def.name_interned, value, &def.paths)
@@ -798,6 +817,7 @@ impl IndexManager {
                     ops.push(IndexWriteOp::SetPosting {
                         key: irk.to_bytes(),
                         value: Bytes::copy_from_slice(rid.as_bytes()),
+                        provenance,
                     });
                 }
             }

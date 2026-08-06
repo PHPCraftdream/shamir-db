@@ -818,185 +818,235 @@ async fn rederive_index2_ops_post_stage(
             let Some(tbl) = repo.table_by_token_if_live(table_token).await else {
                 continue;
             };
-            // Generation gate: skip the per-record re-derivation entirely when no
-            // index2 backend was registered since stage. One atomic Acquire load.
-            let new_backends = {
-                let reg = tbl.index2_registry();
-                if reg.generation() == stage_gen {
-                    continue;
-                }
-                reg.backends_newer_than(stage_gen).await
-            };
-            if new_backends.is_empty() {
+            // Generation gate: skip EVERYTHING (both add and retract) when
+            // nothing changed since stage. One atomic Acquire load.
+            let reg = tbl.index2_registry();
+            if reg.generation() == stage_gen {
                 continue;
             }
+            // R0-B (#1008): unlike the pre-R0-B code, do NOT `continue` here
+            // when `new_backends` is empty. The generation advancing with no
+            // NEW backend means something was DROPPED (or replaced —
+            // ABA) since stage — exactly the case retraction below must
+            // catch. `backends_newer_than` only ever reports newly
+            // REGISTERED backends, so it is correctly empty for a pure-DROP
+            // generation bump; skipping the whole iteration on that empty
+            // check (the old shape) is precisely how index2 never retracted
+            // stale ops for a DROP'd backend.
+            let new_backends = reg.backends_newer_than(stage_gen).await;
             // Collect the staged ops for this table into an owned Vec so no borrow
             // of `tx.write_set` is held across the per-record async planning below.
+            // Retraction (below) does not need this — only the per-record ADD
+            // loop does — so an empty `new_backends` still runs retraction
+            // even if there happen to be no staged ops for this table.
             let staged_ops: Vec<KvOp> = match tx.write_set.get(&table_token) {
                 Some(staging) => staging.snapshot_ops(),
-                None => continue,
+                None => Vec::new(),
             };
             let data_store = tbl.data_store().clone();
 
             let mut appended: Vec<(u64, IndexWriteOp)> = Vec::new();
-            for kvop in staged_ops {
-                match kvop {
-                    KvOp::Set(k, v) => {
-                        // F-73: a staged key that doesn't decode as a RecordId is an
-                        // internal invariant violation (the staging path guarantees
-                        // well-formed keys reach here) — fail the tx, don't skip.
-                        let rid = RecordId::try_from_bytes(&k).ok_or_else(|| {
-                            TxError::Storage(DbError::Internal(format!(
-                                "rederive_index2_ops_post_stage: malformed staged key \
+            if !new_backends.is_empty() {
+                for kvop in staged_ops {
+                    match kvop {
+                        KvOp::Set(k, v) => {
+                            // F-73: a staged key that doesn't decode as a RecordId is an
+                            // internal invariant violation (the staging path guarantees
+                            // well-formed keys reach here) — fail the tx, don't skip.
+                            let rid = RecordId::try_from_bytes(&k).ok_or_else(|| {
+                                TxError::Storage(DbError::Internal(format!(
+                                    "rederive_index2_ops_post_stage: malformed staged key \
                                  (table_token={table_token}, {} bytes) — expected a \
                                  16-byte RecordId",
-                                k.len()
-                            )))
-                        })?;
-                        // F-73: a staged record that fails to decode is corruption,
-                        // not a normal runtime condition — fail the tx.
-                        let new_rec = InnerValue::from_bytes(&v).map_err(|e| {
-                            TxError::Storage(DbError::Codec(format!(
-                                "rederive_index2_ops_post_stage: staged record decode \
+                                    k.len()
+                                )))
+                            })?;
+                            // F-73: a staged record that fails to decode is corruption,
+                            // not a normal runtime condition — fail the tx.
+                            let new_rec = InnerValue::from_bytes(&v).map_err(|e| {
+                                TxError::Storage(DbError::Codec(format!(
+                                    "rederive_index2_ops_post_stage: staged record decode \
                                  failed (table_token={table_token}, rid={rid:?}): {e}"
-                            )))
-                        })?;
-                        // Phase 5a has not run: the store still holds the PRE-tx
-                        // value, so this one read distinguishes insert vs. update.
-                        match read_pre_tx_bytes(&data_store, table_token, rid, &k).await {
-                            Ok(Some(old_bytes)) => {
-                                // F-73: the pre-tx value MUST decode — it was written
-                                // by a prior successful commit through this same
-                                // codec. A decode failure here is corruption, not
-                                // "skip this record".
+                                )))
+                            })?;
+                            // Phase 5a has not run: the store still holds the PRE-tx
+                            // value, so this one read distinguishes insert vs. update.
+                            match read_pre_tx_bytes(&data_store, table_token, rid, &k).await {
+                                Ok(Some(old_bytes)) => {
+                                    // F-73: the pre-tx value MUST decode — it was written
+                                    // by a prior successful commit through this same
+                                    // codec. A decode failure here is corruption, not
+                                    // "skip this record".
+                                    let old_rec =
+                                        InnerValue::from_bytes(&old_bytes).map_err(|e| {
+                                            TxError::Storage(DbError::Codec(format!(
+                                                "rederive_index2_ops_post_stage: pre-tx record \
+                                         decode failed (table_token={table_token}, \
+                                         rid={rid:?}): {e}"
+                                            )))
+                                        })?;
+                                    for backend in &new_backends {
+                                        let mut ops = backend
+                                            .plan_update_tx(rid, &old_rec, &new_rec, tx_id)
+                                            .await
+                                            .map_err(|e| {
+                                                TxError::Storage(DbError::Internal(format!(
+                                                    "rederive_index2_ops_post_stage: \
+                                                 plan_update_tx failed \
+                                                 (table_token={table_token}, rid={rid:?}): {e}"
+                                                )))
+                                            })?;
+                                        // R0-B (#1008): stamp the REAL live
+                                        // instance epoch — see
+                                        // `index2_provenance`'s doc for why the
+                                        // backend itself cannot know it.
+                                        stamp_index2_ops_provenance(reg, backend, &mut ops).await;
+                                        appended
+                                            .extend(ops.into_iter().map(|op| (table_token, op)));
+                                        // F-50 Step 2 (#870, Part B): re-derive
+                                        // staged vectors for a new vector backend.
+                                        // VectorBackend::plan_update_tx is a no-op
+                                        // for a tx (HNSW embeddings route through
+                                        // tx.staged_vectors instead), so the posting
+                                        // loop above contributes nothing for it.
+                                        // Mirror stage_vector_deletes_on_update +
+                                        // stage_vectors from table_manager_tx_ops:
+                                        // if old carried a vector and new does not,
+                                        // stage a delete; otherwise stage the new.
+                                        if is_vector_backend(backend) {
+                                            if backend.staged_vector(rid, &old_rec).await.is_some()
+                                                && backend
+                                                    .staged_vector(rid, &new_rec)
+                                                    .await
+                                                    .is_none()
+                                            {
+                                                tx.stage_vector_delete(table_token, rid);
+                                            }
+                                            if let Some(vec) =
+                                                backend.staged_vector(rid, &new_rec).await
+                                            {
+                                                tx.stage_vector(table_token, rid, vec);
+                                            }
+                                        }
+                                    }
+                                }
+                                Ok(None) => {
+                                    // NotFound is the ONLY case treated as "this is an
+                                    // insert, not an update" — the proven semantics at
+                                    // this call site (see the fn's doc comment).
+                                    for backend in &new_backends {
+                                        let mut ops = backend
+                                            .plan_insert_tx(rid, &new_rec, tx_id)
+                                            .await
+                                            .map_err(|e| {
+                                                TxError::Storage(DbError::Internal(format!(
+                                                    "rederive_index2_ops_post_stage: \
+                                                 plan_insert_tx failed \
+                                                 (table_token={table_token}, rid={rid:?}): {e}"
+                                                )))
+                                            })?;
+                                        stamp_index2_ops_provenance(reg, backend, &mut ops).await;
+                                        appended
+                                            .extend(ops.into_iter().map(|op| (table_token, op)));
+                                        // F-50 Step 2 (#870, Part B): re-derive staged
+                                        // vector for a new vector backend (insert case).
+                                        // Mirror stage_vectors from table_manager_tx_ops.
+                                        if is_vector_backend(backend) {
+                                            if let Some(vec) =
+                                                backend.staged_vector(rid, &new_rec).await
+                                            {
+                                                tx.stage_vector(table_token, rid, vec);
+                                            }
+                                        }
+                                    }
+                                }
+                                // F-73: a non-NotFound storage error MUST abort the tx —
+                                // it used to be a silent best-effort skip, which let the
+                                // commit succeed while the row's posting for the new
+                                // index was permanently dropped.
+                                Err(e) => return Err(TxError::Storage(e)),
+                            }
+                        }
+                        KvOp::Remove(k) => {
+                            let rid = RecordId::try_from_bytes(&k).ok_or_else(|| {
+                                TxError::Storage(DbError::Internal(format!(
+                                    "rederive_index2_ops_post_stage: malformed staged key \
+                                 (table_token={table_token}, {} bytes) — expected a \
+                                 16-byte RecordId",
+                                    k.len()
+                                )))
+                            })?;
+                            // Nothing committed to delete from the index on a NotFound
+                            // read (the row was never materialized) — a non-NotFound
+                            // error still aborts the tx (F-73).
+                            if let Some(old_bytes) =
+                                read_pre_tx_bytes(&data_store, table_token, rid, &k).await?
+                            {
                                 let old_rec = InnerValue::from_bytes(&old_bytes).map_err(|e| {
                                     TxError::Storage(DbError::Codec(format!(
                                         "rederive_index2_ops_post_stage: pre-tx record \
-                                         decode failed (table_token={table_token}, \
-                                         rid={rid:?}): {e}"
+                                     decode failed (table_token={table_token}, \
+                                     rid={rid:?}): {e}"
                                     )))
                                 })?;
                                 for backend in &new_backends {
-                                    let ops = backend
-                                        .plan_update_tx(rid, &old_rec, &new_rec, tx_id)
+                                    let mut ops = backend
+                                        .plan_delete_tx(rid, &old_rec, tx_id)
                                         .await
                                         .map_err(|e| {
                                             TxError::Storage(DbError::Internal(format!(
                                                 "rederive_index2_ops_post_stage: \
-                                                 plan_update_tx failed \
-                                                 (table_token={table_token}, rid={rid:?}): {e}"
-                                            )))
-                                        })?;
-                                    appended.extend(ops.into_iter().map(|op| (table_token, op)));
-                                    // F-50 Step 2 (#870, Part B): re-derive
-                                    // staged vectors for a new vector backend.
-                                    // VectorBackend::plan_update_tx is a no-op
-                                    // for a tx (HNSW embeddings route through
-                                    // tx.staged_vectors instead), so the posting
-                                    // loop above contributes nothing for it.
-                                    // Mirror stage_vector_deletes_on_update +
-                                    // stage_vectors from table_manager_tx_ops:
-                                    // if old carried a vector and new does not,
-                                    // stage a delete; otherwise stage the new.
-                                    if is_vector_backend(backend) {
-                                        if backend.staged_vector(rid, &old_rec).await.is_some()
-                                            && backend.staged_vector(rid, &new_rec).await.is_none()
-                                        {
-                                            tx.stage_vector_delete(table_token, rid);
-                                        }
-                                        if let Some(vec) =
-                                            backend.staged_vector(rid, &new_rec).await
-                                        {
-                                            tx.stage_vector(table_token, rid, vec);
-                                        }
-                                    }
-                                }
-                            }
-                            Ok(None) => {
-                                // NotFound is the ONLY case treated as "this is an
-                                // insert, not an update" — the proven semantics at
-                                // this call site (see the fn's doc comment).
-                                for backend in &new_backends {
-                                    let ops = backend
-                                        .plan_insert_tx(rid, &new_rec, tx_id)
-                                        .await
-                                        .map_err(|e| {
-                                            TxError::Storage(DbError::Internal(format!(
-                                                "rederive_index2_ops_post_stage: \
-                                                 plan_insert_tx failed \
-                                                 (table_token={table_token}, rid={rid:?}): {e}"
-                                            )))
-                                        })?;
-                                    appended.extend(ops.into_iter().map(|op| (table_token, op)));
-                                    // F-50 Step 2 (#870, Part B): re-derive staged
-                                    // vector for a new vector backend (insert case).
-                                    // Mirror stage_vectors from table_manager_tx_ops.
-                                    if is_vector_backend(backend) {
-                                        if let Some(vec) =
-                                            backend.staged_vector(rid, &new_rec).await
-                                        {
-                                            tx.stage_vector(table_token, rid, vec);
-                                        }
-                                    }
-                                }
-                            }
-                            // F-73: a non-NotFound storage error MUST abort the tx —
-                            // it used to be a silent best-effort skip, which let the
-                            // commit succeed while the row's posting for the new
-                            // index was permanently dropped.
-                            Err(e) => return Err(TxError::Storage(e)),
-                        }
-                    }
-                    KvOp::Remove(k) => {
-                        let rid = RecordId::try_from_bytes(&k).ok_or_else(|| {
-                            TxError::Storage(DbError::Internal(format!(
-                                "rederive_index2_ops_post_stage: malformed staged key \
-                                 (table_token={table_token}, {} bytes) — expected a \
-                                 16-byte RecordId",
-                                k.len()
-                            )))
-                        })?;
-                        // Nothing committed to delete from the index on a NotFound
-                        // read (the row was never materialized) — a non-NotFound
-                        // error still aborts the tx (F-73).
-                        if let Some(old_bytes) =
-                            read_pre_tx_bytes(&data_store, table_token, rid, &k).await?
-                        {
-                            let old_rec = InnerValue::from_bytes(&old_bytes).map_err(|e| {
-                                TxError::Storage(DbError::Codec(format!(
-                                    "rederive_index2_ops_post_stage: pre-tx record \
-                                     decode failed (table_token={table_token}, \
-                                     rid={rid:?}): {e}"
-                                )))
-                            })?;
-                            for backend in &new_backends {
-                                let ops = backend
-                                    .plan_delete_tx(rid, &old_rec, tx_id)
-                                    .await
-                                    .map_err(|e| {
-                                        TxError::Storage(DbError::Internal(format!(
-                                            "rederive_index2_ops_post_stage: \
                                                  plan_delete_tx failed \
                                                  (table_token={table_token}, rid={rid:?}): {e}"
-                                        )))
-                                    })?;
-                                appended.extend(ops.into_iter().map(|op| (table_token, op)));
-                                // F-50 Step 2 (#870, Part B): re-derive staged
-                                // vector delete for a new vector backend.
-                                // Mirror stage_vector_delete.
-                                if is_vector_backend(backend)
-                                    && backend.staged_vector(rid, &old_rec).await.is_some()
-                                {
-                                    tx.stage_vector_delete(table_token, rid);
+                                            )))
+                                        })?;
+                                    stamp_index2_ops_provenance(reg, backend, &mut ops).await;
+                                    appended.extend(ops.into_iter().map(|op| (table_token, op)));
+                                    // F-50 Step 2 (#870, Part B): re-derive staged
+                                    // vector delete for a new vector backend.
+                                    // Mirror stage_vector_delete.
+                                    if is_vector_backend(backend)
+                                        && backend.staged_vector(rid, &old_rec).await.is_some()
+                                    {
+                                        tx.stage_vector_delete(table_token, rid);
+                                    }
                                 }
                             }
                         }
                     }
                 }
-            }
+            } // end `if !new_backends.is_empty()`
+              // Append the re-derived ops FIRST — mirrors the base_index/sorted
+              // ordering: they're planned against LIVE backends (freshly read
+              // from the registry above), so they carry the CURRENT
+              // `instance_epoch` and pass the retract filter below unchanged.
             if !appended.is_empty() {
                 tx.index_write_set.extend(appended);
             }
+
+            // R0-B (#1008): retract stale staged index2 ops. Before this fix,
+            // index2 had NO retraction at all — `rederive_index2_ops_post_stage`
+            // only ever appended. A backend DROP'd (or replaced — ABA, a new
+            // backend registered under the SAME name gets a NEW `id` and a
+            // fresh `entry.gen`) between stage and commit left its stale
+            // staged ops in `tx.index_write_set` forever, resurrecting
+            // postings for a gone index2 backend at Phase 5c.
+            let live_index2: shamir_collections::TFxSet<(u64, u64)> = {
+                let mut set = shamir_collections::TFxSet::default();
+                for backend in reg.all_backends().await {
+                    let d = backend.descriptor();
+                    if let Some(epoch) = reg.instance_epoch_of(d.id).await {
+                        set.insert((d.name_interned, epoch));
+                    }
+                }
+                set
+            };
+            retract_stale_provenance_ops(
+                tx,
+                table_token,
+                shamir_tx::IndexFamily::Index2,
+                &live_index2,
+            );
         }
     }
 
@@ -1104,9 +1154,34 @@ async fn rederive_index2_ops_post_stage(
                     }
                 }
             }
+            // Append the re-derived ops FIRST — mirrors
+            // `rederive_base_index_ops_post_stage`'s ordering: they're
+            // planned against current live defs, so they carry the CURRENT
+            // `instance_epoch` and pass the retract filter below unchanged.
             if !appended.is_empty() {
                 tx.index_write_set.extend(appended);
             }
+
+            // R0-B (#1008): retract stale staged sorted ops — the sorted
+            // family previously had NO retraction at all (only base_index
+            // did, via the now-replaced byte-length heuristic). Combined
+            // with Part 1's `SortedIndexManager::rename_definition` now
+            // bumping `generation` (so this gate fires after a rename too),
+            // this closes both failure modes: `stage → DROP sorted index →
+            // commit` (stale ops resurrecting postings for a gone index) and
+            // `stage sorted op → RENAME → commit` (stale ops still targeting
+            // the OLD name/epoch after the rename).
+            let live_sorted: shamir_collections::TFxSet<(u64, u64)> = sorted_mgr
+                .iter_indexes()
+                .into_iter()
+                .map(|def| (def.name_interned, def.instance_epoch))
+                .collect();
+            retract_stale_provenance_ops(
+                tx,
+                table_token,
+                shamir_tx::IndexFamily::Sorted,
+                &live_sorted,
+            );
         }
     }
 
@@ -1119,6 +1194,78 @@ async fn rederive_index2_ops_post_stage(
 /// `tx.staged_vectors` / `tx.staged_vector_deletes` instead).
 fn is_vector_backend(backend: &Arc<dyn shamir_index::backend::IndexBackend>) -> bool {
     matches!(backend.descriptor().kind, IndexKind::Vector(_))
+}
+
+/// R0-B (#1008): overwrite the placeholder `Provenance`
+/// `shamir_index::write_ops::index2_provenance` stamps on every op an
+/// index2 `backend` plans, with the REAL live instance epoch
+/// (`IndexRegistry::instance_epoch_of`) for that backend's id — mirrors
+/// `TableManager::stamp_index2_provenance` (the tx-STAGE-time twin of this
+/// COMMIT-time call site; see that method's doc for why a two-step stamp is
+/// necessary for index2 specifically: the backend only ever sees its own
+/// construction-time descriptor snapshot, never the registry's live `gen`).
+async fn stamp_index2_ops_provenance(
+    reg: &crate::index2::IndexRegistry,
+    backend: &Arc<dyn shamir_index::backend::IndexBackend>,
+    ops: &mut [IndexWriteOp],
+) {
+    if ops.is_empty() {
+        return;
+    }
+    let d = backend.descriptor();
+    if let Some(instance_epoch) = reg.instance_epoch_of(d.id).await {
+        let provenance = shamir_tx::Provenance {
+            family: shamir_tx::IndexFamily::Index2,
+            name_interned: d.name_interned,
+            instance_epoch,
+        };
+        for op in ops.iter_mut() {
+            op.set_provenance(provenance);
+        }
+    }
+}
+
+/// R0-B (#1008): the ONE unifying retraction rule shared by all three
+/// `rederive_*_ops_post_stage` functions below (base_index regular+unique,
+/// sorted, index2). Replaces three divergent pre-R0-B heuristics — the
+/// base_index family's byte-length/name `(is_unique, name_interned)` filter
+/// (vulnerable to ABA: a DROP+CREATE of the same name under a DIFFERENT
+/// definition still matched) and index2/sorted's COMPLETE ABSENCE of any
+/// retraction at all — with a single correct check: a staged op for `family`
+/// on `table_token` is retracted iff its `Provenance.(name_interned,
+/// instance_epoch)` does NOT match any entry in `live`, the CURRENT set of
+/// `(name_interned, instance_epoch)` pairs for every LIVE definition of that
+/// family. A match means "the definition this op was planned against is
+/// still the SAME instance" (survives); no match means the definition was
+/// dropped, or replaced (DROP+CREATE-same-name — ABA, now correctly
+/// distinguished because the new instance mints a FRESH epoch), or renamed
+/// (the OLD name_interned no longer belongs to any live instance).
+///
+/// Ops for OTHER tables or OTHER families are left untouched (each call site
+/// filters to its own table_token + family; a different family's ops simply
+/// don't match `op.provenance().family` and pass through unaffected — this
+/// makes it safe for all three call sites to run in sequence on the same
+/// `tx.index_write_set` without needing to coordinate).
+fn retract_stale_provenance_ops(
+    tx: &mut TxContext,
+    table_token: u64,
+    family: shamir_tx::IndexFamily,
+    live: &shamir_collections::TFxSet<(u64, u64)>,
+) {
+    tx.index_write_set.retain(|(tt, op)| {
+        if *tt != table_token {
+            return true; // Different table — not our concern.
+        }
+        let provenance = match op {
+            IndexWriteOp::SetPosting { provenance, .. } => provenance,
+            IndexWriteOp::RemovePosting { provenance, .. } => provenance,
+            IndexWriteOp::BumpFtsStats { .. } => return true, // No provenance to check.
+        };
+        if provenance.family != family {
+            return true; // A different family's op — not our concern.
+        }
+        live.contains(&(provenance.name_interned, provenance.instance_epoch))
+    });
 }
 
 /// P0-2 (#958): base_index `IndexManager` (regular + unique) ops-plan
@@ -1315,57 +1462,45 @@ async fn rederive_base_index_ops_post_stage(
             tx.index_write_set.extend(appended);
         }
 
-        // ── Sub-bug 2c: retract staged ops for DROP'd base_index indexes ──────
+        // ── Sub-bug 2c / R0-B (#1008): retract stale staged base_index ops ────
         //
         // An index that existed at stage time (contributing ops to
-        // `index_write_set`) but was DROP'd before commit leaves orphan ops
-        // that would resurrect a posting for a gone index. We retain only
-        // ops whose target base_index index is still live, plus all non-base_index
-        // ops (index2/sorted — different key formats) unchanged.
+        // `index_write_set`) but was DROP'd before commit — or DROP'd and
+        // then CREATE'd again under the SAME name with a DIFFERENT
+        // definition (ABA) — leaves orphan/wrong-instance ops that would
+        // resurrect a posting for a gone index, or contaminate a NEW index
+        // with postings computed against the OLD definition's fields.
         //
-        // base_index regular posting keys are exactly 41 bytes (25-byte
-        // IndexRecordKey + 16-byte RecordId); base_index unique keys are exactly
-        // 25 bytes. Both start with a 9-byte prefix: `[is_unique:u8,
-        // name_interned:u64_le]`. Non-base_index ops have different key lengths
-        // and are left untouched.
-        //
-        // **Contract for future index2 backends**: any NEW index2 backend's
-        // posting-key format MUST NOT produce a key of length exactly 41 or 25
-        // bytes whose first byte is 0 or 1 — such a key would be silently
-        // misidentified as a base_index op and retracted here. See
-        // `table::tests::p02c_retain_filter_key_collision_tests::retain_filter_key_collision_safety`
-        // for the regression test locking in the current safe values for every
-        // existing backend; extend it when adding a new backend.
-        let mut live_prefixes: shamir_collections::TFxSet<(u8, u64)> =
-            shamir_collections::TFxSet::default();
-        for def in mgr.iter_indexes() {
-            live_prefixes.insert((0u8, def.name_interned));
-        }
-        for def in mgr.iter_unique_indexes() {
-            live_prefixes.insert((1u8, def.name_interned));
-        }
-        tx.index_write_set.retain(|(tt, op)| {
-            if *tt != table_token {
-                return true; // Different table — not our concern.
-            }
-            let key: &[u8] = match op {
-                IndexWriteOp::SetPosting { key, .. } => key.as_ref(),
-                IndexWriteOp::RemovePosting { key } => key.as_ref(),
-                IndexWriteOp::BumpFtsStats { .. } => return true, // Not a posting op.
-            };
-            // Only base_index regular (41 bytes) and unique (25 bytes) keys are
-            // candidates for retraction. Anything else is index2/sorted —
-            // leave untouched.
-            if key.len() != 41 && key.len() != 25 {
-                return true;
-            }
-            let is_unique_byte = key[0];
-            if is_unique_byte > 1 {
-                return true; // Not a base_index key.
-            }
-            let name_interned = u64::from_le_bytes(key[1..9].try_into().unwrap_or([0u8; 8]));
-            live_prefixes.contains(&(is_unique_byte, name_interned))
-        });
+        // R0-B replaces the previous byte-length/name `(is_unique,
+        // name_interned)` heuristic — which could not distinguish an ABA
+        // replacement from the SAME live instance — with the uniform
+        // `(name_interned, instance_epoch)` provenance check (see
+        // `retract_stale_provenance_ops`'s doc). Every current definition's
+        // `instance_epoch` is a FRESH value on CREATE (and bumped on
+        // RENAME), so a staged op from a definition that no longer exists —
+        // or was replaced — never matches `live` and is retracted; a staged
+        // op from a definition that is STILL the same live instance always
+        // matches and survives.
+        let live_regular: shamir_collections::TFxSet<(u64, u64)> = mgr
+            .iter_indexes()
+            .map(|def| (def.name_interned, def.instance_epoch))
+            .collect();
+        let live_unique: shamir_collections::TFxSet<(u64, u64)> = mgr
+            .iter_unique_indexes()
+            .map(|def| (def.name_interned, def.instance_epoch))
+            .collect();
+        retract_stale_provenance_ops(
+            tx,
+            table_token,
+            shamir_tx::IndexFamily::Regular,
+            &live_regular,
+        );
+        retract_stale_provenance_ops(
+            tx,
+            table_token,
+            shamir_tx::IndexFamily::Unique,
+            &live_unique,
+        );
     }
 
     Ok(())

@@ -104,14 +104,14 @@ fn merge_inner_maps(original: &InnerValue, set_map: &TMap<InternerKey, InnerValu
 
 fn op_to_sort_key(op: &shamir_tx::IndexWriteOp) -> Vec<u8> {
     match op {
-        shamir_tx::IndexWriteOp::SetPosting { key, value } => {
+        shamir_tx::IndexWriteOp::SetPosting { key, value, .. } => {
             let mut v = b"set:".to_vec();
             v.extend_from_slice(key);
             v.push(b'|');
             v.extend_from_slice(value);
             v
         }
-        shamir_tx::IndexWriteOp::RemovePosting { key } => {
+        shamir_tx::IndexWriteOp::RemovePosting { key, .. } => {
             let mut v = b"rm:".to_vec();
             v.extend_from_slice(key);
             v

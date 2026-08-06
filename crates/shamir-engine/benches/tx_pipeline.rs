@@ -631,6 +631,7 @@ fn main() {
                                 IndexWriteOp::SetPosting {
                                     key: bytes::Bytes::from(format!("idx_k_{}", i)),
                                     value: bytes::Bytes::from(format!("idx_v_{}", i)),
+                                    provenance: Default::default(),
                                 },
                             ));
                         }
@@ -686,6 +687,7 @@ fn main() {
                                 IndexWriteOp::SetPosting {
                                     key: bytes::Bytes::from(format!("idx_k_{}", i)),
                                     value: bytes::Bytes::from(format!("idx_v_{}", i)),
+                                    provenance: Default::default(),
                                 },
                             ));
                         }

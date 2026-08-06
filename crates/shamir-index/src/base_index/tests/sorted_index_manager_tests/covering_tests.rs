@@ -365,7 +365,7 @@ async fn plan_record_created_covering_returns_nonempty_value() {
     let ops = mgr.plan_record_created(&rid, &rec, 42).unwrap();
     assert_eq!(ops.len(), 1);
     match &ops[0] {
-        IndexWriteOp::SetPosting { key: _, value } => {
+        IndexWriteOp::SetPosting { key: _, value, .. } => {
             assert!(
                 !value.is_empty(),
                 "plan_record_created must embed projection for covering index"

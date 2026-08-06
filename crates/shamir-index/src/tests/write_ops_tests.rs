@@ -74,6 +74,7 @@ async fn apply_set_posting_writes_to_store() {
     let ops = vec![IndexWriteOp::SetPosting {
         key: Bytes::from_static(b"posting_key_1"),
         value: Bytes::from_static(b"posting_val"),
+        provenance: Default::default(),
     }];
     apply_index_ops(&ops, &store, &backend).await.unwrap();
     let val = store
@@ -93,6 +94,7 @@ async fn apply_remove_posting_removes_from_store() {
     let backend = MockBackend::new();
     let ops = vec![IndexWriteOp::RemovePosting {
         key: Bytes::from_static(b"k"),
+        provenance: Default::default(),
     }];
     apply_index_ops(&ops, &store, &backend).await.unwrap();
     assert!(store.get(Bytes::from_static(b"k").into()).await.is_err());
@@ -161,13 +163,16 @@ async fn apply_mixed_ops_in_order() {
         IndexWriteOp::SetPosting {
             key: Bytes::from_static(b"a"),
             value: Bytes::from_static(b"1"),
+            provenance: Default::default(),
         },
         IndexWriteOp::SetPosting {
             key: Bytes::from_static(b"b"),
             value: Bytes::from_static(b"2"),
+            provenance: Default::default(),
         },
         IndexWriteOp::RemovePosting {
             key: Bytes::from_static(b"a"),
+            provenance: Default::default(),
         },
         IndexWriteOp::BumpFtsStats {
             doc_len: 7,
@@ -198,6 +203,7 @@ async fn apply_index_ops_tx_none_forwards() {
         IndexWriteOp::SetPosting {
             key: Bytes::from_static(b"k1"),
             value: Bytes::from_static(b"v1"),
+            provenance: Default::default(),
         },
         IndexWriteOp::BumpFtsStats {
             doc_len: 5,
@@ -223,6 +229,7 @@ async fn apply_index_ops_tx_some_stages_into_tx() {
         IndexWriteOp::SetPosting {
             key: Bytes::from_static(b"k2"),
             value: Bytes::from_static(b"v2"),
+            provenance: Default::default(),
         },
         IndexWriteOp::BumpFtsStats {
             doc_len: 7,
@@ -260,6 +267,7 @@ async fn apply_index_ops_tx_drop_leaves_no_postings() {
             IndexWriteOp::SetPosting {
                 key: Bytes::from_static(b"ghost"),
                 value: Bytes::from_static(b"v"),
+                provenance: Default::default(),
             },
             IndexWriteOp::BumpFtsStats {
                 doc_len: 3,
