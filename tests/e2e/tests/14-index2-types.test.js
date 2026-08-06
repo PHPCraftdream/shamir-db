@@ -552,7 +552,7 @@ module.exports = async function ({ client, fixtures, test, assert, assertEq, ass
     );
   });
 
-  test('composite: sorted multi-field index is rejected (composite TBD)', async () => {
+  test('composite: sorted multi-field index is rejected (single-field scalar only)', async () => {
     const db = await fixtures.setupDb(client, 'comp_sorted_neg', ['t']);
 
     // Sorted + multi-field must be rejected — the current limitation is
@@ -567,9 +567,17 @@ module.exports = async function ({ client, fixtures, test, assert, assertEq, ass
         },
       }),
     );
+    // #1036: the client-side query builder now validates field count
+    // BEFORE the request ever reaches the server (mirrors the server's own
+    // "Sorted index requires exactly one field (composite TBD)" check —
+    // see crates/shamir-client-ts/src/core/builders/ddl.ts and
+    // crates/shamir-query-builder/src/ddl/create_index_build_error.rs), so
+    // this test now observes the CLIENT's message, not the server's. Match
+    // the substring stable across both variants instead of the
+    // server-only "composite TBD" phrase.
     assert(
-      /composite TBD/i.test(err.message),
-      `expected composite TBD rejection, got: ${err.message}`,
+      /requires exactly one field/i.test(err.message),
+      `expected a "requires exactly one field" rejection, got: ${err.message}`,
     );
   });
 };
