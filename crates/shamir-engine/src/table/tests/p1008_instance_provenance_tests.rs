@@ -730,3 +730,107 @@ async fn rollback_after_multiple_rotations_leaves_no_partial_state() {
          commits after the earlier abort"
     );
 }
+
+// ─────────────────────────────────────────────────────────────────────────
+// F-1 (#1027) — batch INSERT (`insert_tx_many` / `insert_tx_many_bytes`)
+// never stamped index2 provenance, so a staged batch op carried the
+// placeholder `instance_epoch: 0` all the way to commit. ANY unrelated
+// index2 DDL between stage and commit then bumps the registry generation,
+// the commit-time reconcile derives `live_index2` from the CURRENT
+// registry, and the placeholder-epoch op matches nothing in it — it gets
+// silently RETRACTED even though the index it targets is still live and
+// untouched. This is the batch-path twin of
+// `drop_index2_before_commit_no_resurrected_posting` above, but instead of
+// proving a DROP'd index's posting is retracted, it proves a STILL-LIVE
+// index's posting SURVIVES an unrelated concurrent index2 CREATE — the
+// exact inverse assertion that discriminates the bug (pre-fix: posting is
+// wrongly retracted; post-fix: posting survives).
+// ─────────────────────────────────────────────────────────────────────────
+
+/// `insert_tx_many` (the `InnerValue`-tree batch path): stage a batch insert
+/// while `lower_name` (index2/functional) is live, create an UNRELATED
+/// second index2 backend before commit (bumps the registry generation
+/// without touching `lower_name` itself), then commit. The row's posting
+/// in `lower_name` must survive.
+#[tokio::test]
+async fn insert_tx_many_index2_posting_survives_unrelated_concurrent_create() {
+    let repo = make_repo();
+    repo.add_table(TableConfig::new("t"));
+    let tbl = repo.get_table("t").await.unwrap();
+    let name_key = key_id(&tbl, "name").await;
+
+    tbl.create_index_v2(&functional_lower_op("lower_name", "t", "name"))
+        .await
+        .unwrap();
+    let idx_name = key_id(&tbl, "lower_name").await;
+
+    let (mut tx, _guard) = repo.begin_tx(IsolationLevel::Snapshot).await.unwrap();
+    let values = vec![record_with_str(name_key, "Alice")];
+    let ids = tbl.insert_tx_many(&values, &mut tx).await.unwrap();
+    let rid = ids[0];
+
+    // Unrelated concurrent index2 DDL between stage and commit — bumps
+    // `IndexRegistry::generation` and forces the commit-time reconcile's
+    // rederive path to run, without touching `lower_name` at all.
+    tbl.create_index_v2(&functional_lower_op("lower_other", "t", "other"))
+        .await
+        .unwrap();
+
+    repo.commit_tx(tx).await.expect("commit must succeed");
+
+    let _ = tbl.get(rid).await.expect("row itself must commit");
+
+    let owners = functional_lookup(&tbl, idx_name, "alice").await;
+    assert!(
+        owners.contains(rid.as_bytes()),
+        "F-1: insert_tx_many's index2 posting must survive an unrelated \
+         concurrent index2 CREATE between stage and commit — a batch-staged \
+         op with an unstamped (placeholder instance_epoch: 0) provenance is \
+         wrongly retracted by the commit-time reconcile the moment ANY \
+         index2 DDL bumps the registry generation, even though lower_name \
+         itself was never touched"
+    );
+}
+
+/// `insert_tx_many_bytes` (the `RecordView`/lens batch path that
+/// `execute_insert_tx`/`execute_set_tx` — i.e. every transactional
+/// INSERT/UPSERT through the query executor — actually call): identical
+/// scenario to the tree-path test above, driven through the bytes-staged
+/// entry point instead.
+#[tokio::test]
+async fn insert_tx_many_bytes_index2_posting_survives_unrelated_concurrent_create() {
+    let repo = make_repo();
+    repo.add_table(TableConfig::new("t"));
+    let tbl = repo.get_table("t").await.unwrap();
+    let name_key = key_id(&tbl, "name").await;
+
+    tbl.create_index_v2(&functional_lower_op("lower_name", "t", "name"))
+        .await
+        .unwrap();
+    let idx_name = key_id(&tbl, "lower_name").await;
+
+    let (mut tx, _guard) = repo.begin_tx(IsolationLevel::Snapshot).await.unwrap();
+    let staged: Vec<bytes::Bytes> = vec![record_with_str(name_key, "Alice")
+        .to_bytes()
+        .expect("encode")];
+    let ids = tbl.insert_tx_many_bytes(&staged, &mut tx).await.unwrap();
+    let rid = ids[0];
+
+    // Unrelated concurrent index2 DDL between stage and commit.
+    tbl.create_index_v2(&functional_lower_op("lower_other", "t", "other"))
+        .await
+        .unwrap();
+
+    repo.commit_tx(tx).await.expect("commit must succeed");
+
+    let _ = tbl.get(rid).await.expect("row itself must commit");
+
+    let owners = functional_lookup(&tbl, idx_name, "alice").await;
+    assert!(
+        owners.contains(rid.as_bytes()),
+        "F-1: insert_tx_many_bytes's index2 posting must survive an unrelated \
+         concurrent index2 CREATE between stage and commit (same defect as \
+         insert_tx_many, on the path execute_insert_tx/execute_set_tx \
+         actually use for every tx INSERT/UPSERT, including a single row)"
+    );
+}

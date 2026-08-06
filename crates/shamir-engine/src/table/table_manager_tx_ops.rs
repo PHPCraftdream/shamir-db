@@ -593,10 +593,20 @@ impl TableManager {
             let tx_id = Some(tx.tx_id);
             for (rid, v) in ids.iter().zip(values.iter()) {
                 for backend in &backends {
-                    let ops = backend
+                    let mut ops = backend
                         .plan_insert_tx(*rid, v, tx_id)
                         .await
                         .map_err(|e| shamir_storage::error::DbError::Internal(e.to_string()))?;
+                    // F-1 (#1027): this inlined loop (kept inline to amortize
+                    // the `all_backends()` snapshot across the whole batch)
+                    // must stamp the REAL live instance epoch exactly like
+                    // `plan_insert_ops`/`plan_update_ops`/`plan_delete_ops`
+                    // do — an unstamped op carries the placeholder
+                    // `instance_epoch: 0` and gets silently retracted by the
+                    // commit-time reconcile the moment ANY index2 DDL bumps
+                    // the registry generation between stage and commit (see
+                    // `stamp_index2_provenance`'s doc).
+                    self.stamp_index2_provenance(backend, &mut ops).await;
                     index_ops.extend(ops);
                     if let Some(vec) = backend.staged_vector(*rid, v).await {
                         tx.stage_vector(token, *rid, vec);
@@ -774,10 +784,20 @@ impl TableManager {
             let tx_id = Some(tx.tx_id);
             for (rid, view) in ids.iter().zip(views.iter()) {
                 for backend in &backends {
-                    let ops = backend
+                    let mut ops = backend
                         .plan_insert_tx(*rid, view, tx_id)
                         .await
                         .map_err(|e| shamir_storage::error::DbError::Internal(e.to_string()))?;
+                    // F-1 (#1027): see the identical comment in
+                    // `insert_tx_many` — this inlined loop must stamp the
+                    // REAL live instance epoch or the op is silently
+                    // retracted by the commit-time reconcile the moment ANY
+                    // index2 DDL bumps the registry generation between stage
+                    // and commit. `insert_tx_many_bytes` is not a rare path:
+                    // it's what `execute_insert_tx`/`execute_set_tx` call for
+                    // every transactional INSERT/UPSERT, including a single
+                    // row.
+                    self.stamp_index2_provenance(backend, &mut ops).await;
                     index_ops.extend(ops);
                     if let Some(vec) = backend.staged_vector(*rid, view).await {
                         tx.stage_vector(token, *rid, vec);

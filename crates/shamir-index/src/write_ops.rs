@@ -19,15 +19,34 @@ pub use shamir_tx::{IndexFamily, Provenance};
 /// recognizable placeholder, never the real epoch (the registry's
 /// `NEXT_INSTANCE_EPOCH`-style counters used by base_index/sorted start at
 /// 1, and `IndexRegistry::insert`'s `my_gen` is always `>= 1` too — `0` is
-/// unreachable as a REAL epoch across every family). Every caller with
-/// registry access — `TableManager::plan_insert_ops`/`plan_update_ops`/
-/// `plan_delete_ops` (stage time) and `rederive_index2_ops_post_stage`
-/// (commit time) — MUST overwrite this placeholder via
-/// `IndexWriteOp::set_provenance` using `IndexRegistry::instance_epoch_of`
-/// immediately after calling a backend's `plan_*`/`plan_*_tx`. The
-/// NON-tx direct-apply path (`apply_index_ops`) never stages ops for later
-/// reconcile, so the placeholder harmlessly reaches `apply_in_memory`/the
-/// store write without ever being compared.
+/// unreachable as a REAL epoch across every family).
+///
+/// # The invariant (not a list of names — F-1/#1027)
+///
+/// A prior revision of this doc enumerated specific function names that
+/// "must overwrite" the placeholder. That list silently went stale: two
+/// more call sites (`TableManager::insert_tx_many`/`insert_tx_many_bytes`'s
+/// inlined index2 op-planning loops, which amortize the `all_backends()`
+/// snapshot across a whole batch instead of calling `plan_insert_ops`) were
+/// added later without updating it, and shipped never stamping — silently
+/// losing postings the moment any concurrent index2 DDL landed between
+/// stage and commit (fixed by F-1). Names drift; the invariant does not.
+/// State it precisely instead:
+///
+/// **ANY code path that adds an index2 `IndexWriteOp` to
+/// `tx.index_write_set` (directly, or via a staging helper whose output is
+/// later merged into it) MUST have overwritten this placeholder first**,
+/// via `IndexWriteOp::set_provenance` using `IndexRegistry::instance_epoch_of`
+/// (or the `TableManager::stamp_index2_provenance` helper that wraps it),
+/// immediately after calling a backend's `plan_*`/`plan_*_tx`. When adding a
+/// new call site that plans index2 ops for a tx, grep every call site that
+/// pushes into `tx.index_write_set` (or an accumulator later merged into
+/// it) for index2 ops specifically, and confirm each one stamps — do not
+/// trust an enumerated list (this one included) to still be complete.
+///
+/// The NON-tx direct-apply path (`apply_index_ops`) never stages ops for
+/// later reconcile, so the placeholder harmlessly reaches
+/// `apply_in_memory`/the store write without ever being compared.
 pub fn index2_provenance(descriptor: &IndexDescriptor) -> Provenance {
     Provenance {
         family: IndexFamily::Index2,

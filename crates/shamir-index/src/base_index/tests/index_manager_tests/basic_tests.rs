@@ -210,6 +210,103 @@ async fn test_create_index_missing_field_skipped() {
 }
 
 // ============================================================================
+// F-2 (#1028) — create_index backfill must fail CLOSED on a malformed key /
+// undecodable value, not silently skip the row. Mirrors #1023's fix for
+// create_unique_index's backfill (index_manager_unique.rs).
+// ============================================================================
+//
+// Before the fix, `create_index`'s live `data_store.iter_stream` scan
+// `continue`d past a record whose key was not exactly 16 bytes, or whose
+// value bytes failed `InnerValue::from_bytes`. That row never got a posting
+// written, but the backfill still reported success and marked the index
+// Ready — a later query planned through the index would silently never
+// return that row, even though a full scan would find it. Worse than the
+// unique-index case: that one only risks an unconstrained duplicate; this
+// one silently drops rows from query results.
+
+#[tokio::test]
+async fn test_create_index_backfill_aborts_on_malformed_key_instead_of_skipping() {
+    let (data_store, _info_store, manager) = create_manager();
+
+    // One well-formed record...
+    let good_id = RecordId::new();
+    let good_value = create_test_value(&[(1, InnerValue::Str("Alice".to_string()))]);
+    data_store
+        .set(good_id.to_bytes().into(), good_value.to_bytes().unwrap())
+        .await
+        .unwrap();
+
+    // ...and one record under a MALFORMED key (17 bytes, not the required
+    // 16-byte RecordId). This simulates a foreign/corrupt entry landing in
+    // the data store's keyspace.
+    let malformed_key: Vec<u8> = vec![0xAB; 17];
+    let malformed_value = create_test_value(&[(1, InnerValue::Str("Bob".to_string()))]);
+    data_store
+        .set(malformed_key.into(), malformed_value.to_bytes().unwrap())
+        .await
+        .unwrap();
+
+    let index_def = IndexDefinition::new(1001, vec![IndexInfoItem::new(vec![1])]);
+    let result = manager.create_index(index_def).await;
+
+    assert!(
+        result.is_err(),
+        "backfill over a malformed key must return Err, not silently skip the row \
+         and report success; got {result:?}"
+    );
+    assert!(
+        matches!(
+            result.unwrap_err(),
+            shamir_storage::error::DbError::Codec(_)
+        ),
+        "expected a typed Codec error for the malformed key (mirrors #1023's \
+         unique-index-backfill fail-closed policy)"
+    );
+}
+
+#[tokio::test]
+async fn test_create_index_backfill_aborts_on_undecodable_value_instead_of_skipping() {
+    let (data_store, _info_store, manager) = create_manager();
+
+    // One well-formed record...
+    let good_id = RecordId::new();
+    let good_value = create_test_value(&[(1, InnerValue::Str("Alice".to_string()))]);
+    data_store
+        .set(good_id.to_bytes().into(), good_value.to_bytes().unwrap())
+        .await
+        .unwrap();
+
+    // ...and one record with a well-formed 16-byte key but GARBAGE value
+    // bytes that fail `InnerValue::from_bytes` (not valid MessagePack).
+    // `0xC1` is msgpack's reserved/never-used marker byte — guaranteed to
+    // fail ANY msgpack decode.
+    let garbage_id = RecordId::new();
+    data_store
+        .set(
+            garbage_id.to_bytes().into(),
+            bytes::Bytes::from_static(&[0xC1u8; 8]),
+        )
+        .await
+        .unwrap();
+
+    let index_def = IndexDefinition::new(1002, vec![IndexInfoItem::new(vec![1])]);
+    let result = manager.create_index(index_def).await;
+
+    assert!(
+        result.is_err(),
+        "backfill over an undecodable value must return Err, not silently skip \
+         the row and report success; got {result:?}"
+    );
+    assert!(
+        matches!(
+            result.unwrap_err(),
+            shamir_storage::error::DbError::Codec(_)
+        ),
+        "expected a typed Codec error for the undecodable value"
+    );
+}
+
+// ============================================================================
 // drop_index tests
 // ============================================================================
 

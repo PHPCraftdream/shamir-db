@@ -1131,6 +1131,18 @@ impl IndexManager {
         // used here without breaking index-identity. A follow-up should
         // reconcile the lens's scalar decoding with `InnerValue`'s and
         // then switch this path to `RecordView` for zero-copy indexing.
+        //
+        // F-2 (#1028): a malformed key (not exactly 16 bytes) or an
+        // undecodable value now ABORTS the backfill with a typed
+        // `DbError::Codec`, instead of silently `continue`-ing past the
+        // row. Fail-open here previously left the row un-indexed while the
+        // index was still marked `Ready` — a later query planned through
+        // this index would silently never return that row, even though a
+        // full scan would find it (worse than the unique-index case #1023
+        // already fixed: that one risks an unconstrained duplicate; this
+        // one silently drops rows from query results). Mirrors #1023's
+        // fail-closed fix for `create_unique_index`'s backfill
+        // (`index_manager_unique.rs`).
         let mut count = 0usize;
         let mut stream = self.data_store.iter_stream(FULL_SCAN_BATCH);
         while let Some(batch_result) = stream.next().await {
@@ -1139,15 +1151,22 @@ impl IndexManager {
                 Vec::with_capacity(batch.len().min(131_072));
             let mut cache_index_keys: Vec<Bytes> = Vec::with_capacity(posting_writes.capacity());
             for (key_bytes, value_bytes) in &batch {
-                let arr: [u8; 16] = match key_bytes.as_ref().try_into() {
-                    Ok(a) => a,
-                    Err(_) => continue,
-                };
+                let arr: [u8; 16] = key_bytes.as_ref().try_into().map_err(|_| {
+                    shamir_storage::error::DbError::Codec(format!(
+                        "create_index backfill: malformed record key, expected 16-byte \
+                         RecordId, got {} bytes (genuine corruption — fail-closed, aborting \
+                         backfill rather than silently skipping the row)",
+                        key_bytes.as_ref().len()
+                    ))
+                })?;
                 let record_id = RecordId(arr);
-                let value = match InnerValue::from_bytes(value_bytes) {
-                    Ok(v) => v,
-                    Err(_) => continue,
-                };
+                let value = InnerValue::from_bytes(value_bytes).map_err(|e| {
+                    shamir_storage::error::DbError::Codec(format!(
+                        "create_index backfill: record {record_id:?} value failed to decode: \
+                         {e} (fail-closed, aborting backfill rather than silently skipping \
+                         the row)"
+                    ))
+                })?;
                 if let Some(irk) = build_index_key_from_record(false, name_interned, &value, &paths)
                 {
                     let index_key = irk.to_bytes();
