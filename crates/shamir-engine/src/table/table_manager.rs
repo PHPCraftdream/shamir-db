@@ -347,6 +347,34 @@ impl Clone for TableManager {
 }
 
 impl TableManager {
+    /// R0-C (#1009): build the table-open-wide error for a persisted index2
+    /// descriptor whose name collides with an already-registered backend.
+    ///
+    /// Once [`IndexRegistry::insert`](crate::index2::IndexRegistry::insert)
+    /// checks name availability before mutating (the #1009 fix), an `Err`
+    /// from `insert()` during open-path recovery means the ON-DISK METADATA
+    /// itself is contradictory — two persisted descriptors claim the same
+    /// name. There is no single "broken backend" to mark `Failed` the way
+    /// R0-D's fix does (that mechanism is for a backend that registered fine
+    /// but failed to RESTORE its content; this is a backend that can't even
+    /// be assigned a name slot) — so the correct response is stronger: fail
+    /// the WHOLE table open rather than silently drop one of the two
+    /// colliding descriptors and proceed with a partially-loaded table.
+    fn duplicate_persisted_index2_name_error(
+        name: &str,
+        colliding_id: u32,
+        source: &crate::index2::IndexError,
+    ) -> shamir_storage::error::DbError {
+        shamir_storage::error::DbError::Internal(format!(
+            "table open failed: persisted index2 metadata is corrupt — descriptor \
+             '{name}' (id={colliding_id}) could not be registered because its name is \
+             already taken by another persisted descriptor: {source}. On-disk metadata \
+             contains two descriptors claiming the same name; resolve the duplicate \
+             (rename or remove one of the colliding entries in the persisted index2 \
+             metadata) before this table can be reopened."
+        ))
+    }
+
     /// Create a new TableManager with all internal components.
     ///
     /// This is the preferred way to create a TableManager - it handles
@@ -514,7 +542,14 @@ impl TableManager {
                             backend.descriptor().id
                         );
                         log::error!("{reason}");
-                        let _ = mgr.index2_registry.insert(backend).await;
+                        let backend_name = backend.descriptor().name.clone();
+                        mgr.index2_registry.insert(backend).await.map_err(|e| {
+                            Self::duplicate_persisted_index2_name_error(
+                                &backend_name,
+                                recovered_id,
+                                &e,
+                            )
+                        })?;
                         mgr.index2_registry.set_failed(recovered_id, reason).await;
                         failed_recovery_ids.push(recovered_id);
                         continue;
@@ -524,7 +559,10 @@ impl TableManager {
                     // failure on reopen is a genuine data-integrity problem,
                     // not a transient issue.
                     mgr.backfill_index2_backend(backend.as_ref()).await?;
-                    let _ = mgr.index2_registry.insert(backend).await;
+                    let backend_name = backend.descriptor().name.clone();
+                    mgr.index2_registry.insert(backend).await.map_err(|e| {
+                        Self::duplicate_persisted_index2_name_error(&backend_name, recovered_id, &e)
+                    })?;
                     // Flip Building → Ready now that the backfill has
                     // completed.
                     mgr.index2_registry
@@ -533,7 +571,11 @@ impl TableManager {
                     recovered_building_ids.push(recovered_id);
                     continue;
                 }
-                let _ = mgr.index2_registry.insert(backend).await;
+                let desc_id = backend.descriptor().id;
+                let desc_name = backend.descriptor().name.clone();
+                mgr.index2_registry.insert(backend).await.map_err(|e| {
+                    Self::duplicate_persisted_index2_name_error(&desc_name, desc_id, &e)
+                })?;
             }
             // Re-persist so the on-disk state matches the now-Ready in-memory
             // state. Without this, a second crash before the next

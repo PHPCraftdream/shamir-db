@@ -18,6 +18,7 @@ use std::time::Instant;
 
 use futures::StreamExt;
 use serde::{Deserialize, Serialize};
+use shamir_collections::TFxMap;
 use shamir_storage::error::DbResult;
 use shamir_tunables::store_defaults::FULL_SCAN_BATCH;
 use shamir_types::record_view::{RecordRef, RecordView};
@@ -49,12 +50,36 @@ pub struct VerifyReport {
     /// that survived open — e.g. a backfill that failed under the
     /// non-fatal `restore_on_open` error policy.)
     pub index2_backends: Vec<Index2Health>,
+    /// R0-C (#1009): `by_id ↔ by_name ↔ persisted` consistency problems for
+    /// the index2 registry, one human-readable diagnostic string per
+    /// problem found. Empty when consistent (the common case — `insert()`'s
+    /// #1009 check-before-mutate fix and `TableManager::create`'s open-path
+    /// fail-closed behavior make a mismatch unreachable through normal use;
+    /// this is defense-in-depth for any future code path that might
+    /// reintroduce the hazard). Folds into
+    /// [`is_healthy`](Self::is_healthy)'s AND-chain.
+    pub index2_registry_consistency: Vec<String>,
+    /// R0-C (#1010): index names that exist in MORE than one of the four
+    /// index families (regular / unique / sorted / index2) on this table —
+    /// a cross-family namespace collision. Each entry is a human-readable
+    /// diagnostic naming the index and the families it was found in. Empty
+    /// when no collision exists (the common case post-fix — CREATE now
+    /// preflight-checks all four families under `ddl_admission`; this
+    /// surfaces PRE-EXISTING collisions from before that fix landed, or any
+    /// future regression). Deliberately NOT auto-repaired: there is no safe
+    /// default choice of which family "wins" — an operator must resolve it
+    /// explicitly (rename or drop one of the colliding indexes). Folds into
+    /// [`is_healthy`](Self::is_healthy)'s AND-chain.
+    pub cross_family_name_collisions: Vec<String>,
     pub elapsed_ms: u64,
 }
 
 impl VerifyReport {
     pub fn is_healthy(&self) -> bool {
-        self.counter_consistent && self.all_indexes_healthy()
+        self.counter_consistent
+            && self.all_indexes_healthy()
+            && self.index2_registry_consistency.is_empty()
+            && self.cross_family_name_collisions.is_empty()
     }
 
     pub fn all_indexes_healthy(&self) -> bool {
@@ -289,6 +314,21 @@ impl TableManager {
             });
         }
 
+        // R0-C (#1009): `by_id ↔ by_name ↔ persisted` consistency check for
+        // the index2 registry. Cheap — cross-references the three
+        // registry-level structures already loaded above / held in memory,
+        // no additional store scan. See `VerifyReport::index2_registry_consistency`'s
+        // doc for why this is defense-in-depth rather than a normally-reachable
+        // condition post-#1009.
+        let index2_registry_consistency = self.check_index2_registry_consistency().await?;
+
+        // R0-C (#1010): cross-family index name collisions. Walks all four
+        // families' names and reports any name present in more than one —
+        // see `any_index_exists`'s doc for the CREATE-time preflight this
+        // mirrors, and `VerifyReport::cross_family_name_collisions`'s doc for
+        // why this is surfaced, not auto-repaired.
+        let cross_family_name_collisions = self.check_cross_family_name_collisions().await;
+
         Ok(VerifyReport {
             records_in_data,
             counter_value,
@@ -297,8 +337,147 @@ impl TableManager {
             unique_indexes,
             sorted_indexes,
             index2_backends,
+            index2_registry_consistency,
+            cross_family_name_collisions,
             elapsed_ms: start.elapsed().as_millis() as u64,
         })
+    }
+
+    /// R0-C (#1009): cross-reference `IndexRegistry`'s `by_id`/`by_name`
+    /// maps against each other AND against the persisted `index2` metadata
+    /// blob, without a full posting re-scan. Returns one diagnostic string
+    /// per problem found (empty when consistent).
+    ///
+    /// Checks:
+    ///   1. `by_id ↔ by_name`: every live descriptor (from `all_descriptors()`,
+    ///      which reads the authoritative `by_id` tuple) must resolve back to
+    ///      itself via `get_by_name(name_interned)` — i.e. `by_name` must
+    ///      point at the SAME id `by_id` carries that name under. A mismatch
+    ///      here means a backend is visible by id but unreachable (or
+    ///      reachable under the wrong id) by name — exactly the #1009 defect
+    ///      class this whole task closes at the source.
+    ///   2. `live ↔ persisted`: every live descriptor's `(id, name_interned)`
+    ///      must match what is currently durable on disk. A mismatch means
+    ///      the in-memory registry has drifted from its own persisted
+    ///      snapshot (e.g. a persist step was skipped after a mutation).
+    async fn check_index2_registry_consistency(&self) -> DbResult<Vec<String>> {
+        let mut problems = Vec::new();
+
+        let live = self.index2_registry().all_descriptors().await;
+
+        // (1) by_id -> by_name -> by_id round-trip.
+        for desc in &live {
+            match self.index2_registry().get_by_name(desc.name_interned).await {
+                Some(backend) if backend.descriptor().id == desc.id => {}
+                Some(backend) => {
+                    problems.push(format!(
+                        "index2 registry inconsistency: by_id entry {} ('{}') carries \
+                         name_interned={}, but by_name resolves that name_interned to a \
+                         DIFFERENT id ({})",
+                        desc.id,
+                        desc.name,
+                        desc.name_interned,
+                        backend.descriptor().id
+                    ));
+                }
+                None => {
+                    problems.push(format!(
+                        "index2 registry inconsistency: by_id entry {} ('{}') carries \
+                         name_interned={}, but by_name has no entry for it — the backend \
+                         is visible by id but unreachable by name",
+                        desc.id, desc.name, desc.name_interned
+                    ));
+                }
+            }
+        }
+
+        // (2) live registry vs the persisted blob.
+        if let Some(persisted) =
+            crate::index2::persistence::load_index2_metadata(&self.info_store).await?
+        {
+            let persisted_by_id: TFxMap<u32, &crate::index2::IndexDescriptor> =
+                persisted.descriptors.iter().map(|d| (d.id, d)).collect();
+            for desc in &live {
+                match persisted_by_id.get(&desc.id) {
+                    Some(pd) if pd.name_interned == desc.name_interned => {}
+                    Some(pd) => {
+                        problems.push(format!(
+                            "index2 registry inconsistency: live entry {} carries \
+                             name_interned={} ('{}'), but the persisted descriptor for \
+                             the same id carries name_interned={} ('{}') — registry has \
+                             drifted from its own persisted snapshot",
+                            desc.id, desc.name_interned, desc.name, pd.name_interned, pd.name
+                        ));
+                    }
+                    None => {
+                        problems.push(format!(
+                            "index2 registry inconsistency: live entry {} ('{}') has no \
+                             matching persisted descriptor — registered in memory but not \
+                             durable",
+                            desc.id, desc.name
+                        ));
+                    }
+                }
+            }
+        } else if !live.is_empty() {
+            problems.push(format!(
+                "index2 registry inconsistency: {} live backend(s) registered but no \
+                 persisted index2 metadata exists on disk",
+                live.len()
+            ));
+        }
+
+        Ok(problems)
+    }
+
+    /// R0-C (#1010): walk all four index families' names on this table and
+    /// report any name present in more than one family. Returns one
+    /// diagnostic string per colliding name (empty when no collision).
+    ///
+    /// This is a startup/doctor-time SURFACE for pre-existing collisions
+    /// (tables that acquired a cross-family duplicate before the #1010
+    /// CREATE-time preflight landed) — it does not repair anything, since
+    /// there is no safe default choice of which family should keep the name.
+    async fn check_cross_family_name_collisions(&self) -> Vec<String> {
+        let mut names: TFxMap<u64, Vec<&'static str>> = shamir_collections::new_fx_map();
+        for def in self.index_manager_ref().iter_indexes() {
+            names.entry(def.name_interned).or_default().push("regular");
+        }
+        for def in self.index_manager_ref().iter_unique_indexes() {
+            names.entry(def.name_interned).or_default().push("unique");
+        }
+        for def in self.sorted_indexes().iter_indexes() {
+            names.entry(def.name_interned).or_default().push("sorted");
+        }
+        for desc in self.index2_registry().all_descriptors().await {
+            names.entry(desc.name_interned).or_default().push("index2");
+        }
+
+        let interner = self.interner.get().await.ok();
+        let mut problems: Vec<String> = names
+            .into_iter()
+            .filter(|(_, families)| families.len() > 1)
+            .map(|(name_interned, families)| {
+                let display_name = interner
+                    .as_ref()
+                    .and_then(|i| {
+                        i.get_str(&shamir_types::core::interner::InternerKey::new(
+                            name_interned,
+                        ))
+                    })
+                    .map(|s| (*s).to_string())
+                    .unwrap_or_else(|| format!("<name_interned={name_interned}>"));
+                format!(
+                    "cross-family name collision: '{display_name}' exists in more than one \
+                     index family: {}. This is not auto-repaired — no safe default choice \
+                     of which family should keep the name; rename or drop one of the \
+                     colliding indexes explicitly.",
+                    families.join(", ")
+                )
+            })
+            .collect();
+        problems.sort();
+        problems
     }
 
     /// Repair every derived state from `data_store`.

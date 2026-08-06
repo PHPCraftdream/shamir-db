@@ -111,6 +111,19 @@ impl TableManager {
         let (_barrier, _uwl_guard) = self
             .begin_write_barrier(crate::index::write_barrier_flags::SORTED_INDEX_CREATE)
             .await;
+        // R0-C (#1010): cross-family name-uniqueness preflight, done WHILE
+        // holding `ddl_admission` (via the barrier above) — see
+        // `TableManager::any_index_exists`'s doc and `create_index_v2`'s
+        // matching check for why the admission-guarded window is what
+        // closes the TOCTOU gap. `sorted_index_exists` (this family's own
+        // occupancy) is enforced separately by `SortedIndexManager::register`;
+        // this additionally rejects a name already used by ANY OTHER family.
+        if self.any_index_exists(index_name).await {
+            return Err(shamir_storage::error::DbError::KeyExists(format!(
+                "index '{index_name}' already exists on this table (possibly in a \
+                 different index family — names are unique per table across all families)"
+            )));
+        }
         // F-42 (#850) — same fix class as `create_index`/
         // `create_unique_index`: persist the interner's newly-touched
         // ids BEFORE `register` publishes the index. A persist failure

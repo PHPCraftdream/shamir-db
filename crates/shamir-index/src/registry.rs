@@ -132,10 +132,52 @@ impl IndexRegistry {
         self.by_id.read_async(&id, |_, e| e.gen).await
     }
 
+    /// Register `backend` under both `by_id` and `by_name`.
+    ///
+    /// # Precondition (R0-C / #1009): caller must hold `ddl_admission`
+    ///
+    /// This method is check-then-act: it reads `by_name` to reject a name
+    /// collision BEFORE mutating either map (see below), which is safe from
+    /// a concurrent second `insert()` on the SAME table ONLY because R0-A
+    /// (#1006) already guarantees `insert()` is called EXCLUSIVELY while the
+    /// caller holds `TableManager::ddl_admission` for that table — every
+    /// registry-mutating DDL op (CREATE/DROP/RENAME, all four index
+    /// families) takes that lock for its entire critical section, including
+    /// this call. That serializes every caller of `insert` on a given table
+    /// to at most one in flight at a time, so this check-then-act cannot be
+    /// beaten by a second concurrent `insert()` racing the same name (the
+    /// client-driven CREATE paths all go through admission; open-path
+    /// recovery in `TableManager::create` is single-task sequential by
+    /// construction, so no concurrent caller exists there either). Calling
+    /// this directly on a bare `IndexRegistry` with no external admission
+    /// guard (as some registry-level tests do) reintroduces a TOCTOU race —
+    /// acceptable there only because those tests don't exercise concurrent
+    /// callers against the same name.
+    ///
+    /// # Atomicity (#1009 fix)
+    ///
+    /// Before this fix, `insert()` published to `by_id` FIRST and `by_name`
+    /// SECOND — if the `by_name` publish failed (name already taken), the
+    /// function returned `Err` WITHOUT rolling back `by_id`, leaving an
+    /// orphan backend visible by id (to `all_backends()`/
+    /// `backends_newer_than()` and any planner path that iterates by id) but
+    /// unreachable by name (a `DROP` by that name would never find it). The
+    /// fix checks name availability FIRST via a cheap `contains_async`, and
+    /// returns `Err` without touching `by_id` at all if the name is taken —
+    /// "check before mutate" instead of "mutate then maybe roll back".
     pub async fn insert(&self, backend: Arc<dyn IndexBackend>) -> Result<(), IndexError> {
         let d = backend.descriptor();
         let id = d.id;
         let name_interned = d.name_interned;
+
+        // #1009: reject a name collision BEFORE touching `by_id` at all —
+        // see this method's doc for why this is safe under the caller's
+        // `ddl_admission` guarantee.
+        if self.by_name.contains_async(&name_interned).await {
+            return Err(IndexError::Backend(format!(
+                "index name {name_interned} already registered"
+            )));
+        }
 
         // R0-A (#1006): `my_gen` — this entry's per-entry tag AND, once
         // published below, the new watermark `generation()` returns — is

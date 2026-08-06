@@ -49,6 +49,7 @@ pub mod p03b_index2_drop_durability_tests;
 pub mod p997_hash_rename_durability_tests;
 pub mod persistence_tests;
 pub mod r0a_registry_watermark_admission_tests;
+pub mod r0c_registry_atomicity_and_namespace_tests;
 pub mod r0d_fail_closed_recovery_tests;
 pub mod read_one_tx_tests;
 pub mod record_counter_tests;

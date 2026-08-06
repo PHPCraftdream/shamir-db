@@ -80,6 +80,58 @@ async fn duplicate_id_rejected() {
     assert!(matches!(err, IndexError::Backend(_)));
 }
 
+// ============================================================================
+// R0-C (#1009) — insert() atomicity: a colliding name must leave `by_id`
+// untouched, not partially-published.
+// ============================================================================
+//
+// Before the fix, `insert()` published to `by_id` FIRST and `by_name`
+// SECOND. A colliding name failed the `by_name` publish and returned `Err`
+// WITHOUT rolling back `by_id` — the backend ended up registered by id
+// (visible to `all_backends()`/`backends_newer_than()`/any by-id lookup) but
+// unreachable by name (a DROP by that name would never find it). This test
+// fails against the pre-fix code: the pre-fix `by_id.insert_async` for the
+// colliding backend (id=99) SUCCEEDS (its id is unique — only the id=42
+// original occupies id 42; the collision is on NAME, not id), so
+// `reg.get_by_id(99)` would find the orphan and this assertion would fail.
+#[tokio::test]
+async fn insert_with_colliding_name_leaves_by_id_untouched() {
+    let reg = IndexRegistry::new();
+    // Original backend: id=42, name_interned=500.
+    reg.insert(make(42, 500)).await.unwrap();
+
+    // Colliding backend: DIFFERENT id (99), SAME name_interned (500).
+    let err = reg
+        .insert(make(99, 500))
+        .await
+        .expect_err("insert with a colliding name must fail");
+    assert!(
+        matches!(err, IndexError::Backend(_)),
+        "expected a Backend error naming the collision, got {err:?}"
+    );
+
+    // The colliding backend's id must NOT be visible in by_id — checked
+    // IMMEDIATELY after the failed call, not "eventually consistent".
+    assert!(
+        reg.get_by_id(99).await.is_none(),
+        "#1009: a failed insert (name collision) must leave NO by_id entry \
+         for the rejected backend — found one, meaning by_id was published \
+         before the by_name check/publish and never rolled back"
+    );
+    // The original occupant is unaffected.
+    assert_eq!(
+        reg.get_by_id(42).await.unwrap().descriptor().id,
+        42,
+        "the original occupant of the name must be untouched"
+    );
+    assert_eq!(
+        reg.get_by_name(500).await.unwrap().descriptor().id,
+        42,
+        "by_name must still resolve to the ORIGINAL occupant, not the \
+         rejected colliding backend"
+    );
+}
+
 #[tokio::test]
 async fn remove_drops_both_maps() {
     let reg = IndexRegistry::new();

@@ -141,6 +141,20 @@ impl TableManager {
             .begin_write_barrier(crate::index::write_barrier_flags::INDEX2_CREATE)
             .await;
 
+        // R0-C (#1010): cross-family name-uniqueness preflight, done WHILE
+        // holding `ddl_admission` (via the barrier above) so no other
+        // family's CREATE can interleave between this check and this
+        // method's eventual registration — see `any_index_exists`'s doc for
+        // why the admission-guarded window (not a handler-layer check
+        // before admission) is what closes the TOCTOU gap.
+        if self.any_index_exists(&op.create_index).await {
+            return Err(shamir_storage::error::DbError::KeyExists(format!(
+                "index '{}' already exists on this table (possibly in a different \
+                 index family — names are unique per table across all families)",
+                op.create_index
+            )));
+        }
+
         let interner = self.interner.get().await?;
         let mut interned_paths: SmallVec<[Vec<u64>; 2]> = SmallVec::new();
         for field_path in &op.fields {
@@ -632,6 +646,20 @@ impl TableManager {
         let (_barrier, _uwl_guard) = self
             .begin_write_barrier(crate::index::write_barrier_flags::REGULAR_INDEX_CREATE)
             .await;
+        // R0-C (#1010): cross-family name-uniqueness preflight, done WHILE
+        // holding `ddl_admission` (via the barrier above) — see
+        // `any_index_exists`'s doc and `create_index_v2`'s matching check for
+        // why the admission-guarded window (not a handler-layer check before
+        // admission) is what closes the TOCTOU gap. `index_exists` (this
+        // family's own occupancy) was already implicitly enforced by
+        // `IndexManager::create_index_from_stream`'s own registration; this
+        // additionally rejects a name already used by ANY OTHER family.
+        if self.any_index_exists(name).await {
+            return Err(shamir_storage::error::DbError::KeyExists(format!(
+                "index '{name}' already exists on this table (possibly in a different \
+                 index family — names are unique per table across all families)"
+            )));
+        }
         // F-42 (#850): persist the interner's newly-touched ids BEFORE the
         // index goes live — a persist failure must abort BEFORE publish, not
         // after. `build_index_definition` already interned the index NAME and
@@ -745,6 +773,21 @@ impl TableManager {
     /// flagged. The bit + drain (done by the caller, BEFORE the lock — F-70)
     /// make the FIRST unique-index create as safe as the second-and-later.
     async fn create_unique_index_body(&self, name: &str, paths: &[&str]) -> DbResult<()> {
+        // R0-C (#1010): cross-family name-uniqueness preflight, done WHILE
+        // holding `ddl_admission` — both callers (`create_unique_index` and
+        // `rename_index`'s unique branch) already acquired the barrier
+        // before reaching this body (see this method's doc). See
+        // `any_index_exists`'s doc and `create_index_v2`'s matching check
+        // for why the admission-guarded window is what closes the TOCTOU
+        // gap. `unique_index_exists` (this family's own occupancy) is
+        // enforced separately by `IndexManager`'s own registration; this
+        // additionally rejects a name already used by ANY OTHER family.
+        if self.any_index_exists(name).await {
+            return Err(shamir_storage::error::DbError::KeyExists(format!(
+                "index '{name}' already exists on this table (possibly in a different \
+                 index family — names are unique per table across all families)"
+            )));
+        }
         let index_def = self.build_index_definition(name, paths).await?;
         // #1003: mark THIS index's name as in-flight for the rest of the
         // method body — see `create_index`'s matching guard +
@@ -1398,6 +1441,26 @@ impl TableManager {
         false
     }
 
+    /// R0-C (#1010): does `name` exist in ANY of the four index families
+    /// (regular, unique, sorted, index2) on this table?
+    ///
+    /// Single shared helper combining `index_exists` / `unique_index_exists`
+    /// / `sorted_index_exists` / `index2_exists` so every CREATE path uses
+    /// the SAME cross-family check instead of drifting independent call
+    /// sites. Callers that need admission-time atomicity (i.e. every real
+    /// CREATE entry point) MUST call this AFTER acquiring
+    /// `begin_write_barrier` — see each `create_*` method's call site for
+    /// why: the admission-guarded window is what rules out another family's
+    /// CREATE interleaving between this check and the eventual registration
+    /// (the same TOCTOU class `create_index_v2`'s tombstone pre-check
+    /// comment documents for the drop-in-flight case).
+    pub async fn any_index_exists(&self, name: &str) -> bool {
+        self.index_exists(name).await
+            || self.unique_index_exists(name).await
+            || self.sorted_index_exists(name).await
+            || self.index2_exists(name).await
+    }
+
     // ============================================================================
     // Internal helpers
     // ============================================================================
@@ -1490,6 +1553,32 @@ impl TableManager {
             return Err(shamir_storage::error::DbError::Internal(format!(
                 "index '{}' not found on this table",
                 old_name
+            )));
+        }
+
+        // R0-C (#1010): refuse instead of silently resolving when `old_name`
+        // is a PRE-EXISTING cross-family collision (a name present in more
+        // than one of the four families — only reachable on a table that
+        // acquired the collision before the #1010 CREATE-time preflight
+        // landed, since CREATE now refuses to introduce a new one). Without
+        // this guard, the family-specific blocks below (`is_regular`,
+        // `is_unique`, `is_sorted`, `is_index2`) each act independently on
+        // EVERY family that matches `old_name` — not just one — silently
+        // renaming every colliding sibling instead of the single index the
+        // caller meant. A full redesign (explicit per-family disambiguator)
+        // is out of scope here (tracked as #1025); this is the low-risk
+        // "detect and refuse" the R0-C brief permits.
+        let matching_families = [is_regular, is_unique, is_sorted, is_index2]
+            .iter()
+            .filter(|&&m| m)
+            .count();
+        if matching_families > 1 {
+            return Err(shamir_storage::error::DbError::Internal(format!(
+                "index '{old_name}' exists in {matching_families} different index families \
+                 on this table (a pre-existing cross-family name collision) — RENAME INDEX \
+                 cannot safely resolve which one to rename. Run TableManager::verify() to \
+                 see the affected families, then drop or rename the colliding sibling(s) \
+                 individually before renaming '{old_name}'."
             )));
         }
 

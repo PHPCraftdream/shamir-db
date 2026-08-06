@@ -590,12 +590,50 @@ impl ShamirAdminExecutor {
             .await
             .map_err(|e| err(e.to_string()))?;
 
+        // R0-C (#1010): refuse instead of silently resolving when `op.drop_index`
+        // is a PRE-EXISTING cross-family collision. `op.unique` already tells
+        // us which base_index sub-family the caller means (regular vs
+        // unique), so the collision that matters here is whether `sorted` or
+        // `index2` ALSO carries this name — only reachable on a table that
+        // acquired the collision before the #1010 CREATE-time preflight
+        // landed. Without this guard, the short-circuit `||` chain below
+        // silently drops only the FIRST match and leaves any colliding
+        // sibling(s) untouched. A full redesign (explicit per-family
+        // disambiguator) is out of scope here (tracked as #1025); this is
+        // the low-risk "detect and refuse" the R0-C brief permits.
+        let base_index_has_it = if op.unique {
+            table.unique_index_exists(&op.drop_index).await
+        } else {
+            table.index_exists(&op.drop_index).await
+        };
+        let sorted_has_it = table.sorted_index_exists(&op.drop_index).await;
+        let index2_has_it = table.index2_exists(&op.drop_index).await;
+        let matching_families = [base_index_has_it, sorted_has_it, index2_has_it]
+            .iter()
+            .filter(|&&m| m)
+            .count();
+        if matching_families > 1 {
+            return Err(err_code(
+                "cross_family_collision",
+                format!(
+                    "index '{}' exists in {matching_families} different index families \
+                     on table '{}' (a pre-existing cross-family name collision) — DROP \
+                     INDEX cannot safely resolve which one to drop. Run \
+                     TableManager::verify() to see the affected families, then drop the \
+                     colliding sibling(s) individually.",
+                    op.drop_index, op.table
+                ),
+            ));
+        }
+
         // Resolution order: base_index first (preserves the existing behavior
         // and error messages for the common btree case unchanged), then the
         // base_index-miss falls through to sorted, then to index2. `DropIndexOp`
         // carries no `index_type`, so the name is resolved by trying each
         // mechanism in turn and returning the first hit. Short-circuit `||`
-        // skips the remaining lookups once one matches.
+        // skips the remaining lookups once one matches. (Safe to still
+        // short-circuit here: the guard above already refused if MORE THAN
+        // ONE family matched, so at most one of these can be true.)
         let removed = if op.unique {
             table
                 .drop_unique_index(&op.drop_index)
