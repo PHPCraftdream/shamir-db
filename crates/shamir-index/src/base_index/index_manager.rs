@@ -283,6 +283,18 @@ pub struct IndexManager {
     /// `rename_mid_pause_hook`. `None` on every real path.
     pub(super) recover_renames_between_entries_hook:
         Arc<arc_swap::ArcSwapOption<crate::base_index::backfill_pause_hook::BackfillPauseHook>>,
+
+    /// P0-3a (#1011): reader-vs-DROP mutual exclusion for the REGULAR
+    /// (non-unique hash) family only — see `crate::reader_drain_gate`'s
+    /// module doc for the full design. `lookup_by_index` (the sole
+    /// production read chokepoint) enters this gate for the duration of
+    /// its `info_store` scan; `drop_index` raises it before the RCU
+    /// retire and drains it before the posting sweep. The UNIQUE family
+    /// deliberately does NOT get its own instance of this gate — see
+    /// `check_unique_key`'s doc comment for why its production reads are
+    /// already serialized by `unique_write_lock`/`drain_writers` and would
+    /// gain nothing from one.
+    pub(super) reader_gate: crate::reader_drain_gate::ReaderDrainGate,
 }
 
 impl Clone for IndexManager {
@@ -307,6 +319,7 @@ impl Clone for IndexManager {
             recover_renames_between_entries_hook: Arc::clone(
                 &self.recover_renames_between_entries_hook,
             ),
+            reader_gate: self.reader_gate.clone(),
         }
     }
 }
@@ -422,6 +435,7 @@ impl IndexManager {
             renaming_unique: Arc::new(Mutex::new(BTreeMap::new())),
             rename_mid_pause_hook: Arc::new(arc_swap::ArcSwapOption::empty()),
             recover_renames_between_entries_hook: Arc::new(arc_swap::ArcSwapOption::empty()),
+            reader_gate: crate::reader_drain_gate::ReaderDrainGate::new(),
         };
 
         // P0-3 (#959): resume any in-progress DROP INDEX operations that were

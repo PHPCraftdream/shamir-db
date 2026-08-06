@@ -10,6 +10,7 @@ pub mod index_state_compat_tests;
 pub mod kind_tests;
 pub mod persistence_tests;
 pub mod posting_layout_tests;
+pub mod reader_drain_gate_tests;
 pub mod registry_tests;
 pub mod tokenizer_tests;
 pub mod write_ops_tests;
