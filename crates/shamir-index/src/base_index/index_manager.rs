@@ -2227,6 +2227,14 @@ impl IndexManager {
     /// entries are re-keyed separately by the engine (`rekey_hash_prefix`)
     /// before this method is called. Here we only swap the in-memory
     /// `IndexDefinition` and re-save the system blob.
+    ///
+    /// F-8 (2026-08-06): currently unused — the live regular-index RENAME
+    /// path (`TableManager::rename_index`) does drop-old+create-new instead,
+    /// which bumps `generation` as a side effect of going through the normal
+    /// create/drop call sites. If this method is ever wired up as a cheaper
+    /// in-place rename, `bump_generation()` below is required: without it,
+    /// `pre_commit.rs`'s `mgr.generation() == stage_gen` gate would not fire
+    /// for a tx staged before the rename, silently skipping re-derivation.
     pub async fn rename_index_definition(&self, old_id: u64, new_id: u64) -> DbResult<()> {
         let old_def = self.indexes.get_index(old_id).ok_or_else(|| {
             shamir_storage::error::DbError::Internal(
@@ -2236,6 +2244,7 @@ impl IndexManager {
         self.indexes.remove_index(old_id);
         let new_def = IndexDefinition::new(new_id, old_def.paths.clone());
         self.indexes.add_index(new_def);
+        self.bump_generation(); // F-8: gen gate for commit-time rederive
         self.save_index_info().await
     }
 
@@ -2245,6 +2254,9 @@ impl IndexManager {
     /// Metadata half of RENAME INDEX for unique indexes — the physical
     /// posting entries are re-keyed separately by the engine
     /// (`rekey_hash_prefix` with `is_unique=true`).
+    ///
+    /// F-8 (2026-08-06): same "currently unused, bump required if ever
+    /// wired up" note as [`rename_index_definition`](Self::rename_index_definition).
     pub async fn rename_unique_index_definition(&self, old_id: u64, new_id: u64) -> DbResult<()> {
         let old_def = self.indexes_unique.get_index(old_id).ok_or_else(|| {
             shamir_storage::error::DbError::Internal(
@@ -2254,6 +2266,7 @@ impl IndexManager {
         self.indexes_unique.remove_index(old_id);
         let new_def = IndexDefinition::new(new_id, old_def.paths.clone());
         self.indexes_unique.add_index(new_def);
+        self.bump_generation(); // F-8: gen gate for commit-time rederive
         self.save_index_info_unique().await
     }
 }

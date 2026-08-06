@@ -498,6 +498,35 @@ impl TableManager {
 
         let counter_before = self.count().await? as u64;
 
+        // F-3 (#1030): hold `ddl_admission` (via `begin_write_barrier`) for
+        // the WHOLE drop -> recreate self-heal sequence below. Pre-fix, these
+        // direct manager-level primitives (`index_manager_ref().drop_index`/
+        // `drop_unique_index`, `sorted_indexes().drop_index`,
+        // `sorted_indexes().register`) bypassed the barrier the
+        // `TableManager` wrapper methods (`drop_index`/`drop_unique_index`/
+        // `drop_sorted_index`) take — violating the precondition
+        // `IndexRegistry::insert`'s doc comment states every
+        // registry-mutating DDL op must uphold (see
+        // `crates/shamir-index/src/registry.rs`, "# Precondition"): a
+        // concurrent `CREATE INDEX` could race this self-heal's direct
+        // drops/registers to the same next generation-counter value,
+        // un-serialized. One `begin_write_barrier` acquisition covering the
+        // entire block (not one per call, which would only serialize against
+        // itself) restores that guarantee. Bit choice: `REGULAR_INDEX_CREATE`
+        // — the same single `ddl_admission` mutex backs every bit
+        // (`begin_write_barrier`'s Step 0), so any one existing bit is
+        // sufficient for the admission serialization this fix needs; `repair()`
+        // is an existing, accepted maintenance operation, so no new bit is
+        // minted. The raw manager primitives called below do NOT themselves
+        // acquire `ddl_admission`/`unique_write_lock` (confirmed by reading
+        // `TableManager::drop_index`/`drop_unique_index`/`drop_sorted_index`,
+        // which call these exact primitives AFTER already taking the
+        // barrier) — so acquiring it here once cannot re-enter the
+        // non-reentrant `tokio::sync::Mutex`.
+        let (_barrier, _uwl_guard) = self
+            .begin_write_barrier(crate::index::write_barrier_flags::REGULAR_INDEX_CREATE)
+            .await;
+
         for def in &regular_defs {
             let _ = self
                 .index_manager_ref()
@@ -569,6 +598,8 @@ impl TableManager {
                 }
             }
         }
+        drop(_barrier);
+        drop(_uwl_guard);
 
         // Recount counter from the data store.
         let mut counter_after: u64 = 0;

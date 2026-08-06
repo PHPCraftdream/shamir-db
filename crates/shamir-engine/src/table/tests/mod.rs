@@ -11,6 +11,7 @@ pub mod degraded_index_count_tests;
 pub mod delete_view_parity_tests;
 pub mod doctor_tests;
 pub mod explain_tests;
+pub mod f3_cascade_repair_admission_tests;
 pub mod f50_index_lifecycle_spike_tests;
 pub mod f50_step2_index_lifecycle_tests;
 pub mod f53a_streaming_topk_tests;

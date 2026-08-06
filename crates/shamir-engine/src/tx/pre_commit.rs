@@ -1031,6 +1031,14 @@ async fn rederive_index2_ops_post_stage(
             // fresh `entry.gen`) between stage and commit left its stale
             // staged ops in `tx.index_write_set` forever, resurrecting
             // postings for a gone index2 backend at Phase 5c.
+            // F-6 (2026-08-06): `d.name_interned` here is the SAME
+            // construction-time `descriptor()` snapshot `stamp_index2_provenance`
+            // (table_manager_tx_ops.rs) stamps staged ops with — deliberately,
+            // not `reg`'s authoritative `BackendEntry.name_interned` (which
+            // `rename_entry` DOES update). Matching two stale snapshots against
+            // each other is self-consistent; matching one stale and one
+            // authoritative would falsely retract every index2 op staged
+            // before a RENAME. Do not "fix" this side alone.
             let live_index2: shamir_collections::TFxSet<(u64, u64)> = {
                 let mut set = shamir_collections::TFxSet::default();
                 for backend in reg.all_backends().await {
@@ -1078,6 +1086,16 @@ async fn rederive_index2_ops_post_stage(
             if sorted_mgr.generation() == stage_gen {
                 continue;
             }
+            // F-7 (2026-08-06): unlike the index2 half above (which uses
+            // `Vec::new()` here so retraction below still runs even with no
+            // staged rows), a missing `write_set` entry `continue`s and
+            // skips retraction entirely for this table. Safe TODAY only
+            // because `stage_mutation` always calls `ensure_table_staging`
+            // first, so a table with a `sorted_stage_gens` entry always also
+            // has a `write_set` entry — this branch is currently
+            // unreachable. If that invariant ever changes, this needs the
+            // same `Vec::new()` treatment as index2 to avoid silently
+            // leaving stale sorted ops unretracted.
             let staged_ops: Vec<KvOp> = match tx.write_set.get(&table_token) {
                 Some(staging) => staging.snapshot_ops(),
                 None => continue,
@@ -1323,6 +1341,15 @@ async fn rederive_base_index_ops_post_stage(
         // Collect staged ops for this table into an owned Vec (same pattern
         // as the index2/sorted halves — no borrow of tx held across the
         // per-record async planning below).
+        //
+        // F-7 (2026-08-06): unlike the index2 half above (which uses
+        // `Vec::new()` here so retraction below still runs even with no
+        // staged rows), a missing `write_set` entry `continue`s and skips
+        // retraction entirely for this table — same asymmetry as sorted's
+        // equivalent branch, safe today ONLY because `stage_mutation` always
+        // calls `ensure_table_staging` first, making this branch currently
+        // unreachable. See sorted's identical comment above for the
+        // condition that would make this unsafe.
         let staged_ops: Vec<KvOp> = match tx.write_set.get(&table_token) {
             Some(staging) => staging.snapshot_ops(),
             None => continue,

@@ -92,6 +92,15 @@ impl TableManager {
             return;
         }
         let id = backend.descriptor().id;
+        // F-6 (2026-08-06): `descriptor()` is a construction-time snapshot —
+        // `IndexRegistry::rename_entry` updates the authoritative
+        // `BackendEntry.name_interned` (registry.rs) but never mutates the
+        // backend's own `descriptor()`. This is self-consistent ONLY because
+        // `pre_commit.rs`'s `live_index2` set (built from `all_backends()`)
+        // reads the SAME stale snapshot for its match key — do not "fix" one
+        // side to the authoritative value without also fixing the other, or
+        // every index2 op staged before a RENAME starts mismatching and gets
+        // wrongly retracted.
         let name_interned = backend.descriptor().name_interned;
         if let Some(instance_epoch) = self.index2_registry.instance_epoch_of(id).await {
             let provenance = shamir_tx::Provenance {

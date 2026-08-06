@@ -204,6 +204,41 @@ impl ShamirAdminExecutor {
         if op.cascade {
             if let Some(db) = self.shamir.get_db(&self.db_name) {
                 if let Ok(table) = db.get_table(&op.repo, &op.drop_table).await {
+                    // F-3 (#1030): hold `ddl_admission` (via `begin_write_barrier`)
+                    // for this WHOLE block of direct index-registry mutations.
+                    // Pre-fix, these manager-level primitives
+                    // (`index_manager_ref().drop_index`/`drop_unique_index`,
+                    // `sorted_indexes().drop_index`, `index2_registry().remove_by_id`)
+                    // bypassed the barrier `TableManager`'s own
+                    // `drop_index`/`drop_unique_index`/`drop_sorted_index`/
+                    // `drop_index2` wrappers take — violating the precondition
+                    // `IndexRegistry::insert`'s doc comment states every
+                    // registry-mutating DDL op must uphold (see
+                    // `crates/shamir-index/src/registry.rs`, "# Precondition"):
+                    // a concurrent `CREATE INDEX` could race this cascade's
+                    // direct drops to the same next generation-counter value,
+                    // un-serialized. One `begin_write_barrier` acquisition
+                    // covering the entire block (not four separate ones, which
+                    // would only serialize against itself) restores that
+                    // guarantee. Bit choice: `REGULAR_INDEX_CREATE` — the same
+                    // single `ddl_admission` mutex backs every bit
+                    // (`begin_write_barrier`'s Step 0), so any one existing bit
+                    // is sufficient for the admission serialization this fix
+                    // needs; no new bit is minted since the table is about to
+                    // be removed entirely regardless of which writers see the
+                    // slow path via this specific bit. The raw manager
+                    // primitives called below do NOT themselves acquire
+                    // `ddl_admission`/`unique_write_lock` (confirmed by reading
+                    // `TableManager::drop_index`/`drop_unique_index`/
+                    // `drop_sorted_index`/`drop_index2`, which call these exact
+                    // primitives AFTER already taking the barrier) — so
+                    // acquiring it here once cannot re-enter the non-reentrant
+                    // `tokio::sync::Mutex`.
+                    let (_barrier, _uwl_guard) = table
+                        .begin_write_barrier(
+                            shamir_engine::index::write_barrier_flags::REGULAR_INDEX_CREATE,
+                        )
+                        .await;
                     // base_index regular indexes.
                     let regular_ids: Vec<u64> = table
                         .index_manager_ref()

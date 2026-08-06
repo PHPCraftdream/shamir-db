@@ -35,12 +35,18 @@ pub enum IndexFamily {
 /// which could not distinguish two DIFFERENT definitions that happen to
 /// share a `name_interned` (a DROP followed by a CREATE of the same name —
 /// ABA). `instance_epoch` is the tiebreaker: every definition mints a FRESH
-/// epoch on CREATE and bumps it on RENAME (see
+/// epoch on CREATE (see
 /// `shamir_index::base_index::index_definition::IndexDefinition::instance_epoch`
 /// and `..::sorted_index_definition::SortedIndexDefinition::instance_epoch`
-/// for base_index/sorted; index2 reuses the ALREADY-correct
+/// for base_index/sorted — RENAME for these two families is drop-old +
+/// create-new under the hood, so it also mints a fresh epoch as a side
+/// effect of going through CREATE again; index2 reuses the ALREADY-correct
 /// `IndexRegistry`'s per-entry `BackendEntry.gen`, R0-A/#1006 — see that
-/// field's doc). A staged op's `(name_interned, instance_epoch)` pair is
+/// field's doc, and note `IndexRegistry::rename_entry` does NOT bump `gen`
+/// on rename, unlike base_index/sorted's drop+create path — this is safe
+/// today only because index2 posting keys are id-based, not name-based, so
+/// a stale `gen` after rename cannot cause an ABA match; F-5, 2026-08-06).
+/// A staged op's `(name_interned, instance_epoch)` pair is
 /// compared against the CURRENT live definition's pair at commit time: a
 /// match means "still the same instance, keep the op"; no match means "this
 /// instance no longer exists (dropped) or was replaced (ABA / renamed) —
