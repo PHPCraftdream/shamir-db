@@ -254,6 +254,32 @@ export interface QueryResult {
    * nothing was corrupt.
    */
   corrupt_records?: CorruptRecordRef[];
+  /**
+   * DDL operation ID for recoverable DDL operations (minted by the server).
+   *
+   * Present only for DDL ops that have crash-recovery tombstones (e.g.,
+   * `DROP INDEX` / `RENAME INDEX`). The client uses this to poll the
+   * operation's status via `client.getDdlOpStatus()` — especially important
+   * for crash-recovered ops where the synchronous response was lost or never sent.
+   *
+   * Mirrors `query_result.rs::QueryResult.op_id`
+   * (`#[serde(default, skip_serializing_if = "Option::is_none")]`) — omitted
+   * from the wire (and thus `undefined` here) when not a DDL op or pre-RFC.
+   */
+  op_id?: string;
+  /**
+   * DDL operation status (populated for the synchronous `Succeeded` case).
+   *
+   * This field is authoritative ONLY for the inline-succeeded common case.
+   * For crash-recovered operations, the client MUST poll via `op_id` and
+   * `client.getDdlOpStatus()` to see `SucceededViaCrashRecovery` — the
+   * synchronous response (if any) does NOT carry that state.
+   *
+   * Mirrors `query_result.rs::QueryResult.ddl_status`
+   * (`#[serde(default, skip_serializing_if = "Option::is_none")]`) — omitted
+   * from the wire (and thus `undefined` here) when not set.
+   */
+  ddl_status?: DdlOpState;
 }
 
 /** Transaction metadata (present on transactional batches). */
@@ -288,6 +314,51 @@ export interface WireInternerDelta {
  * `shamir-query-types::batch::edge_kind::EdgeKind` (OQL Epic 01 / Phase A).
  */
 export type EdgeKind = 'explicit' | 'data_flow' | 'both';
+
+// ── DDL operation status types (#1015) ────────────────────────────────────────
+
+/**
+ * State of a DDL operation. Mirrors `shamir-query-types::read::ddl::DdlOpState`.
+ */
+export type DdlOpState =
+  | { kind: 'in_progress' }
+  | {
+      kind: 'succeeded';
+      completed_at: number;
+    }
+  | {
+      kind: 'succeeded_via_crash_recovery';
+      completed_at_restart: number;
+    }
+  | {
+      kind: 'failed';
+      detail: string;
+    }
+  | { kind: 'unknown' };
+
+/**
+ * Classification of which DDL operation family this is.
+ * Mirrors `shamir-query-types::read::ddl::DdlOpKind`.
+ */
+export type DdlOpKind =
+  | { kind: 'create_hash_index'; index_name: string; table_name: string }
+  | { kind: 'create_unique_hash_index'; index_name: string; table_name: string }
+  | { kind: 'drop_hash_index'; index_name: string }
+  | { kind: 'drop_unique_hash_index'; index_name: string }
+  | { kind: 'rename_hash_index'; old_name: string; new_name: string }
+  | { kind: 'rename_unique_hash_index'; old_name: string; new_name: string }
+  | { kind: 'drop_index2'; index_name: string }
+  | { kind: 'other'; description: string };
+
+/**
+ * Full status of a DDL operation, queryable via `client.getDdlOpStatus()`.
+ * Mirrors `shamir-query-types::read::ddl::DdlOpStatus`.
+ */
+export interface DdlOpStatus {
+  op_id: string;
+  kind: DdlOpKind;
+  state: DdlOpState;
+}
 
 /** Batch response envelope. */
 export interface BatchResponse {

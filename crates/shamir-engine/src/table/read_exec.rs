@@ -314,6 +314,7 @@ impl TableManager {
                 skipped: false,
                 versions: None,
                 corrupt_records: Vec::new(),
+                ..Default::default()
             });
         }
 
@@ -420,6 +421,7 @@ impl TableManager {
                                     std::slice::from_ref(&id),
                                 ),
                                 corrupt_records: Vec::new(),
+                                ..Default::default()
                             });
                         }
                     }
@@ -447,6 +449,7 @@ impl TableManager {
                     skipped: false,
                     versions: None,
                     corrupt_records: Vec::new(),
+                    ..Default::default()
                 });
             }
         }
@@ -590,6 +593,7 @@ impl TableManager {
                         &survivor_ids,
                     ),
                     corrupt_records: corrupt,
+                    ..Default::default()
                 });
             }
         }
@@ -658,6 +662,7 @@ impl TableManager {
                                 skipped: false,
                                 versions: None,
                                 corrupt_records: Vec::new(),
+                                ..Default::default()
                             });
                         }
                     }
@@ -752,6 +757,7 @@ impl TableManager {
                                     std::slice::from_ref(&id),
                                 ),
                                 corrupt_records: Vec::new(),
+                                ..Default::default()
                             });
                         }
                     }
@@ -1240,6 +1246,7 @@ impl TableManager {
             skipped: false,
             versions,
             corrupt_records: corrupt,
+            ..Default::default()
         })
     }
 
@@ -1378,6 +1385,7 @@ impl TableManager {
             skipped: false,
             versions: collect_versions(query.with_version, self.mvcc_store_ref(), &version_ids),
             corrupt_records: corrupt,
+            ..Default::default()
         })
     }
 
@@ -1642,6 +1650,7 @@ impl TableManager {
             skipped: false,
             versions: collect_versions(query.with_version, self.mvcc_store_ref(), &version_ids),
             corrupt_records: corrupt,
+            ..Default::default()
         })
     }
 
@@ -2052,6 +2061,7 @@ impl TableManager {
             skipped: false,
             versions: None,
             corrupt_records: corrupt,
+            ..Default::default()
         })
     }
 
@@ -2339,6 +2349,7 @@ impl TableManager {
             skipped: false,
             versions: None,
             corrupt_records: corrupt,
+            ..Default::default()
         })
     }
 

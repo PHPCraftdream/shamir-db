@@ -2,13 +2,15 @@
 
 use crate::access::{Action, ResourcePath};
 use crate::query::batch::{BatchError, BatchOp};
-use crate::query::read::QueryResult;
+use crate::query::read::{DdlOpKind, DdlOpState, DdlOpStatus, QueryResult};
 use crate::shamir_db::shamir_db::schema_management::SCHEMA_FIELD;
 use crate::types::value::QueryValue;
+use shamir_engine::table::ddl_op_log;
 use shamir_types::mpack;
+use shamir_types::types::record_id::RecordId;
 
 use super::admin_dispatch::ShamirAdminExecutor;
-use super::helpers::{admin_result, apply_table_retention};
+use super::helpers::{admin_result, admin_result_with_op_id, apply_table_retention};
 
 impl ShamirAdminExecutor {
     pub(super) async fn handle_create_table(
@@ -697,10 +699,42 @@ impl ShamirAdminExecutor {
                 .await
                 .map_err(|e| err(e.to_string()))?;
 
-        Ok(admin_result(mpack!({
-            "dropped_index": @(QueryValue::Str(op.drop_index.clone())),
-            "existed": @(QueryValue::Bool(removed)),
-        })))
+        // Mint an op_id for recoverable DDL ops (hash DROP and index2 DROP are in scope)
+        let op_id = RecordId::system(&format!("ddl_drop_index_{}", op.drop_index));
+
+        // Write the Succeeded status to the DDL op log for polling.
+        let kind = if op.unique {
+            DdlOpKind::DropUniqueHashIndex {
+                index_name: op.drop_index.clone(),
+            }
+        } else {
+            DdlOpKind::DropHashIndex {
+                index_name: op.drop_index.clone(),
+            }
+        };
+        let status = DdlOpStatus {
+            op_id,
+            kind,
+            state: DdlOpState::Succeeded {
+                completed_at: std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_millis() as u64,
+            },
+        };
+        if let Err(e) = ddl_op_log::write_op_status(table.info_store(), &status).await {
+            // Log write failure but don't fail the operation — the client still
+            // got the op_id in the QueryResult, and polling will return Unknown.
+            eprintln!("Failed to write DDL op status: {}", e);
+        }
+
+        Ok(admin_result_with_op_id(
+            mpack!({
+                "dropped_index": @(QueryValue::Str(op.drop_index.clone())),
+                "existed": @(QueryValue::Bool(removed)),
+            }),
+            op_id,
+        ))
     }
 
     pub(super) async fn handle_rename_index(
@@ -784,12 +818,52 @@ impl ShamirAdminExecutor {
             .await
             .map_err(|e| err_code("rename_index_failed", e.to_string()))?;
 
-        Ok(admin_result(mpack!({
-            "renamed_index": @(QueryValue::Str(op.rename_index.clone())),
-            "to": @(QueryValue::Str(op.to.clone())),
-            "table": @(QueryValue::Str(op.table.clone())),
-            "repo": @(QueryValue::Str(op.repo.clone())),
-            "existed": @(QueryValue::Bool(true)),
-        })))
+        // Mint an op_id for recoverable DDL ops (hash RENAME is in scope)
+        let op_id = RecordId::system(&format!(
+            "ddl_rename_index_{}_to_{}",
+            op.rename_index, op.to
+        ));
+
+        // Write the Succeeded status to the DDL op log for polling.
+        // Determine if this is a unique index by checking which rename succeeded.
+        // (We already know the source exists; the rename call would have failed otherwise.)
+        let is_unique = table.unique_index_exists(&op.to).await;
+        let kind = if is_unique {
+            DdlOpKind::RenameUniqueHashIndex {
+                old_name: op.rename_index.clone(),
+                new_name: op.to.clone(),
+            }
+        } else {
+            DdlOpKind::RenameHashIndex {
+                old_name: op.rename_index.clone(),
+                new_name: op.to.clone(),
+            }
+        };
+        let status = DdlOpStatus {
+            op_id,
+            kind,
+            state: DdlOpState::Succeeded {
+                completed_at: std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_millis() as u64,
+            },
+        };
+        if let Err(e) = ddl_op_log::write_op_status(table.info_store(), &status).await {
+            // Log write failure but don't fail the operation — the client still
+            // got the op_id in the QueryResult, and polling will return Unknown.
+            eprintln!("Failed to write DDL op status: {}", e);
+        }
+
+        Ok(admin_result_with_op_id(
+            mpack!({
+                "renamed_index": @(QueryValue::Str(op.rename_index.clone())),
+                "to": @(QueryValue::Str(op.to.clone())),
+                "table": @(QueryValue::Str(op.table.clone())),
+                "repo": @(QueryValue::Str(op.repo.clone())),
+                "existed": @(QueryValue::Bool(true)),
+            }),
+            op_id,
+        ))
     }
 }

@@ -1646,6 +1646,7 @@ impl TableManager {
                         old_name: old_name.to_string(),
                         new_name: new_name.to_string(),
                         paths: paths.clone(),
+                        op_id: None,
                     },
                 )
                 .await?;
@@ -1721,6 +1722,7 @@ impl TableManager {
                         old_name: old_name.to_string(),
                         new_name: new_name.to_string(),
                         paths: paths.clone(),
+                        op_id: None,
                     },
                 )
                 .await?;

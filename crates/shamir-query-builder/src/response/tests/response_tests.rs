@@ -29,6 +29,7 @@ fn qresult(records: Vec<QueryRecord>) -> QueryResult {
         skipped: false,
         versions: None,
         corrupt_records: Vec::new(),
+        ..Default::default()
     }
 }
 

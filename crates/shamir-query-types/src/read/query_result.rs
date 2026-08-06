@@ -1,5 +1,6 @@
 //! QueryResult and QueryStats — query execution results.
 
+use super::ddl::DdlOpState;
 use serde::de::{Deserializer, Error as DeError};
 use serde::ser::Serializer;
 use serde::{Deserialize, Serialize};
@@ -175,4 +176,27 @@ pub struct QueryResult {
     /// `crates/shamir-client-ts/src/core/types/batch.ts`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub corrupt_records: Vec<CorruptRecordRef>,
+    /// DDL operation ID for recoverable DDL operations (minted by the server).
+    ///
+    /// Present only for DDL ops that have crash-recovery tombstones (e.g.,
+    /// `DROP INDEX` / `RENAME INDEX`). The client uses this to poll the
+    /// operation's status via `DbRequest::GetDdlOpStatus` — especially
+    /// important for crash-recovered ops where the synchronous response was
+    /// lost or never sent.
+    ///
+    /// Backward-compatible: `#[serde(default, skip_serializing_if = "Option::is_none")]`
+    /// → old peers never see this field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub op_id: Option<RecordId>,
+    /// DDL operation status (populated for the synchronous `Succeeded` case).
+    ///
+    /// This field is authoritative ONLY for the inline-succeeded common case.
+    /// For crash-recovered operations, the client MUST poll via `op_id` and
+    /// `DbRequest::GetDdlOpStatus` to see `SucceededViaCrashRecovery` — the
+    /// synchronous response (if any) does NOT carry that state.
+    ///
+    /// Backward-compatible: `#[serde(default, skip_serializing_if = "Option::is_none")]`
+    /// → old peers never see this field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ddl_status: Option<DdlOpState>,
 }

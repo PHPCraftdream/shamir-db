@@ -371,6 +371,7 @@ async fn test_filter_stream_with_query_ref() {
             skipped: false,
             versions: None,
             corrupt_records: vec![],
+            ..Default::default()
         },
     );
 
@@ -457,6 +458,7 @@ async fn test_filter_stream_query_ref_in_and() {
             skipped: false,
             versions: None,
             corrupt_records: vec![],
+            ..Default::default()
         },
     );
     refs.insert(
@@ -470,6 +472,7 @@ async fn test_filter_stream_query_ref_in_and() {
             skipped: false,
             versions: None,
             corrupt_records: vec![],
+            ..Default::default()
         },
     );
 
@@ -513,6 +516,7 @@ async fn test_filter_stream_query_ref_in_or_with_literal() {
             skipped: false,
             versions: None,
             corrupt_records: vec![],
+            ..Default::default()
         },
     );
 
@@ -555,6 +559,7 @@ async fn test_filter_stream_not_query_ref() {
             skipped: false,
             versions: None,
             corrupt_records: vec![],
+            ..Default::default()
         },
     );
 
@@ -595,6 +600,7 @@ async fn test_filter_stream_deep_nesting_with_multiple_query_refs() {
             skipped: false,
             versions: None,
             corrupt_records: vec![],
+            ..Default::default()
         },
     );
     refs.insert(
@@ -608,6 +614,7 @@ async fn test_filter_stream_deep_nesting_with_multiple_query_refs() {
             skipped: false,
             versions: None,
             corrupt_records: vec![],
+            ..Default::default()
         },
     );
 
@@ -702,6 +709,7 @@ async fn test_filter_stream_mixed_query_ref_field_ref_literal() {
             skipped: false,
             versions: None,
             corrupt_records: vec![],
+            ..Default::default()
         },
     );
 
@@ -808,6 +816,7 @@ async fn test_filter_stream_in_query_ref_column() {
             skipped: false,
             versions: None,
             corrupt_records: vec![],
+            ..Default::default()
         },
     );
 
@@ -851,6 +860,7 @@ async fn test_filter_stream_not_in_query_ref_column() {
             skipped: false,
             versions: None,
             corrupt_records: vec![],
+            ..Default::default()
         },
     );
 
@@ -899,6 +909,7 @@ async fn test_filter_stream_in_query_ref_nested_and() {
             skipped: false,
             versions: None,
             corrupt_records: vec![],
+            ..Default::default()
         },
     );
     refs.insert(
@@ -912,6 +923,7 @@ async fn test_filter_stream_in_query_ref_nested_and() {
             skipped: false,
             versions: None,
             corrupt_records: vec![],
+            ..Default::default()
         },
     );
 
@@ -961,6 +973,7 @@ async fn test_filter_stream_not_in_query_ref_with_or() {
             skipped: false,
             versions: None,
             corrupt_records: vec![],
+            ..Default::default()
         },
     );
 

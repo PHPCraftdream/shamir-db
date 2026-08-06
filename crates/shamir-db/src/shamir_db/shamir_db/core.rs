@@ -742,6 +742,44 @@ impl ShamirDb {
         format!("{}/{}/{}", db, repo, table)
     }
 
+    /// Poll a DDL operation's status by its operation ID (#1015).
+    ///
+    /// Returns the full `DdlOpStatus` if found, `None` if the operation is unknown
+    /// (GC'd, never existed, or a pre-RFC op that had no op_id).
+    ///
+    /// This is the mechanism that allows a client to learn whether a crashed-and-recovered
+    /// DDL op actually completed after a server restart.
+    pub async fn get_ddl_op_status(
+        &self,
+        db_name: &str,
+        repo_name: &str,
+        table_name: &str,
+        op_id_str: &str,
+    ) -> Result<Option<crate::query::read::DdlOpStatus>, shamir_storage::error::DbError> {
+        use shamir_engine::table::ddl_op_log;
+        use shamir_types::types::record_id::RecordId;
+        use std::str::FromStr;
+
+        // Parse the op_id from the string representation.
+        let op_id = RecordId::from_str(op_id_str).map_err(|e| {
+            shamir_storage::error::DbError::Internal(format!("Invalid op_id format: {}", e))
+        })?;
+
+        // Resolve the specific table's TableManager — op-status log is per-table.
+        let table = self
+            .get_table(db_name, repo_name, table_name)
+            .await
+            .map_err(|e| {
+                shamir_storage::error::DbError::Internal(format!(
+                    "Failed to resolve table '{}.{}.{}': {}",
+                    db_name, repo_name, table_name, e
+                ))
+            })?;
+
+        // Read the op status from this table's info_store.
+        ddl_op_log::read_op_status(table.info_store(), &op_id).await
+    }
+
     /// Build an [`FnCtx`] with globals, registry, net gateway, the
     /// function's secret_grants from [`function_meta`], and the given
     /// [`Actor`] (R2).

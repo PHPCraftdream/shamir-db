@@ -438,6 +438,12 @@ impl RequestHandler for ShamirDbHandler {
                 DbRequest::CancelCursor { cursor_id } => {
                     self.cancel_cursor(session, cursor_id).await
                 }
+                DbRequest::GetDdlOpStatus {
+                    db,
+                    repo,
+                    table,
+                    op_id,
+                } => self.get_ddl_op_status(&db, &repo, &table, &op_id).await,
             };
 
             // CR-B2: `ShamirDbHandler::execute` already serialized this
@@ -745,5 +751,24 @@ pub(super) fn error_code(e: &BatchError) -> &str {
         // CR-A5: a cursor page's serialized size exceeded
         // `max_result_size_bytes`; rejected outright, never truncated.
         BatchError::CursorPageTooLarge { .. } => "cursor_page_too_large",
+    }
+}
+
+impl ShamirDbHandler {
+    /// Handle `DbRequest::GetDdlOpStatus` — poll a DDL operation's status by ID.
+    async fn get_ddl_op_status(
+        &self,
+        db: &str,
+        repo: &str,
+        table: &str,
+        op_id_str: &str,
+    ) -> DbResponse {
+        match self.db.get_ddl_op_status(db, repo, table, op_id_str).await {
+            Ok(status) => DbResponse::DdlOpStatus { status },
+            Err(e) => DbResponse::Error {
+                code: "query".to_string(),
+                message: format!("Failed to read DDL op status: {}", e),
+            },
+        }
     }
 }

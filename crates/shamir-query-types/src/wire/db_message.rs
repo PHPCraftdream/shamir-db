@@ -258,6 +258,22 @@ pub enum DbRequest {
         /// The cursor to close.
         cursor_id: CursorId,
     },
+    /// Poll the status of a DDL operation by its operation ID.
+    ///
+    /// Returns the current `DdlOpStatus` for the given `op_id`, or `None`
+    /// if the operation is unknown (GC'd, never existed, or a pre-RFC op).
+    /// This is the mechanism that allows a client to learn whether a
+    /// crashed-and-recovered DDL op actually completed.
+    GetDdlOpStatus {
+        /// Target database name.
+        db: String,
+        /// Target repository name.
+        repo: String,
+        /// Target table name (the table on which the DDL op ran).
+        table: String,
+        /// The operation ID to query (from `QueryResult::op_id`).
+        op_id: String,
+    },
 }
 
 /// Application-layer DB response.
@@ -399,5 +415,13 @@ pub enum DbResponse {
     CursorClosed {
         /// The cursor id that is now (or already was) closed.
         cursor_id: CursorId,
+    },
+    /// Reply to [`DbRequest::GetDdlOpStatus`].
+    ///
+    /// Returns the full operation status if found, `None` if the operation
+    /// is unknown (GC'd, never existed, or a pre-RFC op that had no op_id).
+    DdlOpStatus {
+        /// The operation's full status, or `None` if unknown.
+        status: Option<crate::read::DdlOpStatus>,
     },
 }

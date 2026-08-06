@@ -50,6 +50,7 @@ fn call_result(value: QueryValue) -> QueryResult {
         skipped: false,
         versions: None,
         corrupt_records: vec![],
+        ..Default::default()
     }
 }
 
@@ -67,6 +68,7 @@ fn read_result(field: &str, val: QueryValue) -> QueryResult {
         skipped: false,
         versions: None,
         corrupt_records: vec![],
+        ..Default::default()
     }
 }
 

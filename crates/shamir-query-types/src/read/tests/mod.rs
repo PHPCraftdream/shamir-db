@@ -1,3 +1,4 @@
+pub mod ddl_tests;
 pub mod pagination_after_tests;
 pub mod query_record_tests;
 pub mod query_result_tests;

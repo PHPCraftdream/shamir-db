@@ -297,6 +297,7 @@ impl TableManager {
                 skipped: false,
                 versions: None,
                 corrupt_records: corrupt,
+                ..Default::default()
             });
         }
 
@@ -328,6 +329,7 @@ impl TableManager {
                 skipped: false,
                 versions: None,
                 corrupt_records: corrupt,
+                ..Default::default()
             });
         }
 
@@ -375,6 +377,7 @@ impl TableManager {
             skipped: false,
             versions: None,
             corrupt_records: corrupt,
+            ..Default::default()
         })
     }
 
@@ -582,6 +585,7 @@ impl TableManager {
             skipped: false,
             versions: None,
             corrupt_records: corrupt,
+            ..Default::default()
         })
     }
 }

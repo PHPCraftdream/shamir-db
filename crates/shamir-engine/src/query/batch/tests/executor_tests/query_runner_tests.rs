@@ -287,6 +287,7 @@ fn build_resolved_refs_excludes_explicit_only_edge() {
             skipped: false,
             versions: None,
             corrupt_records: vec![],
+            ..Default::default()
         },
     );
 
@@ -315,6 +316,7 @@ fn build_resolved_refs_includes_dataflow_edge() {
             skipped: false,
             versions: None,
             corrupt_records: vec![],
+            ..Default::default()
         },
     );
 
@@ -345,6 +347,7 @@ fn build_resolved_refs_includes_both_edge() {
             skipped: false,
             versions: None,
             corrupt_records: vec![],
+            ..Default::default()
         },
     );
 

@@ -100,6 +100,7 @@ fn test_in_query_ref_column() {
             skipped: false,
             versions: None,
             corrupt_records: vec![],
+            ..Default::default()
         },
     );
 
@@ -141,6 +142,7 @@ fn test_in_query_ref_column_no_match() {
             skipped: false,
             versions: None,
             corrupt_records: vec![],
+            ..Default::default()
         },
     );
 
@@ -181,6 +183,7 @@ fn test_not_in_query_ref_column() {
             skipped: false,
             versions: None,
             corrupt_records: vec![],
+            ..Default::default()
         },
     );
 

@@ -1,4 +1,5 @@
 pub mod buffer_config;
+pub mod ddl_op_log;
 pub mod degraded_index_count;
 pub mod doctor;
 mod filtered_vector;

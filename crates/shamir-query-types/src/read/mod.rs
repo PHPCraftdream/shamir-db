@@ -2,6 +2,7 @@
 //! Execution (`exec`) and query parsing (`parser`) live in shamir-engine.
 
 pub mod agg;
+pub mod ddl;
 pub mod group_by;
 pub mod limit;
 pub mod order_by;
@@ -13,6 +14,7 @@ pub mod select_expr;
 pub mod temporal;
 
 pub use agg::{AggFunc, AggregateField};
+pub use ddl::{DdlOpKind, DdlOpState, DdlOpStatus};
 pub use group_by::GroupBy;
 pub use limit::{Pagination, PaginationInfo};
 pub use order_by::{NullsOrder, OrderBy, OrderByItem, OrderDirection};

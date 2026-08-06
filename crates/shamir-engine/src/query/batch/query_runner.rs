@@ -86,6 +86,7 @@ pub(super) fn skipped_query_result() -> QueryResult {
         skipped: true,
         versions: None,
         corrupt_records: Vec::new(),
+        ..Default::default()
     }
 }
 
@@ -744,6 +745,7 @@ impl<'a> QueryRunner<'a> {
                 skipped: false,
                 versions: None,
                 corrupt_records: Vec::new(),
+                ..Default::default()
             });
         }
 
@@ -959,6 +961,7 @@ impl<'a> QueryRunner<'a> {
                 skipped: false,
                 versions: None,
                 corrupt_records: Vec::new(),
+                ..Default::default()
             });
         }
 
@@ -1054,6 +1057,7 @@ impl<'a> QueryRunner<'a> {
                 skipped: false,
                 versions: None,
                 corrupt_records: Vec::new(),
+                ..Default::default()
             });
         }
 
@@ -1071,6 +1075,7 @@ impl<'a> QueryRunner<'a> {
                 skipped: false,
                 versions: None,
                 corrupt_records: Vec::new(),
+                ..Default::default()
             });
         }
 
@@ -1847,6 +1852,7 @@ pub(super) fn write_result_to_query_result_with_encoding(
         skipped: false,
         versions: None,
         corrupt_records: Vec::new(),
+        ..Default::default()
     }
 }
 

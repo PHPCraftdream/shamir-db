@@ -72,6 +72,7 @@ fn qr(records: Vec<QueryRecord>) -> QueryResult {
         skipped: false,
         versions: None,
         corrupt_records: vec![],
+        ..Default::default()
     }
 }
 
@@ -248,6 +249,7 @@ fn optional_fields_present() {
         skipped: false,
         versions: None,
         corrupt_records: vec![],
+        ..Default::default()
     };
     let m = results_map([("full", res)]);
     assert_parity("all optionals present", &m);
@@ -266,6 +268,7 @@ fn optional_fields_absent() {
         skipped: false,
         versions: None,
         corrupt_records: vec![],
+        ..Default::default()
     };
     let m = results_map([("bare", res)]);
     assert_parity("all optionals absent", &m);
@@ -300,6 +303,7 @@ fn skipped_true_emitted() {
         skipped: false,
         versions: None,
         corrupt_records: vec![],
+        ..Default::default()
     };
     let res_true = QueryResult {
         records: Vec::new(),
@@ -310,6 +314,7 @@ fn skipped_true_emitted() {
         skipped: true,
         versions: None,
         corrupt_records: vec![],
+        ..Default::default()
     };
     let m = results_map([("a", res_false), ("b", res_true)]);
     assert_parity("skipped true/false", &m);
@@ -373,6 +378,7 @@ fn kitchen_sink() {
         skipped: false,
         versions: None,
         corrupt_records: vec![],
+        ..Default::default()
     };
     let simple = qr(vec![QueryRecord::Direct(mpack!("ok"))]);
     let m = results_map([("rich", rich), ("simple", simple)]);
@@ -459,6 +465,7 @@ fn u64_overflow_field_promotes_in_real_stats_and_pagination() {
         skipped: false,
         versions: None,
         corrupt_records: vec![],
+        ..Default::default()
     };
     let m = results_map([("huge", res)]);
 

@@ -147,6 +147,7 @@ fn rename_entry(old: &str, new: &str) -> HashRenameTombstone {
         old_name: old.into(),
         new_name: new.into(),
         paths: vec!["email".into()],
+        op_id: None,
     }
 }
 

@@ -69,6 +69,7 @@ fn query_ref_resolves_value_from_resolved_refs() {
             skipped: false,
             versions: None,
             corrupt_records: vec![],
+            ..Default::default()
         },
     );
 

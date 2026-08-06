@@ -910,6 +910,48 @@ impl Client {
         crate::cursor_stream::CursorStream::new(self, db, query, page_size)
     }
 
+    /// Poll a DDL operation's status by its operation ID.
+    ///
+    /// Returns the full `DdlOpStatus` if found, `None` if the operation is unknown
+    /// (GC'd, never existed, or a pre-RFC op that had no op_id).
+    ///
+    /// This is the mechanism that allows a client to learn whether a crashed-and-recovered
+    /// DDL op actually completed after a server restart.
+    pub async fn get_ddl_op_status(
+        &self,
+        db: &str,
+        repo: &str,
+        table: &str,
+        op_id: &str,
+    ) -> Result<Option<shamir_query_types::read::DdlOpStatus>, ClientError> {
+        let req = DbRequest::GetDdlOpStatus {
+            db: db.to_string(),
+            repo: repo.to_string(),
+            table: table.to_string(),
+            op_id: op_id.to_string(),
+        };
+        match self.roundtrip(&req).await? {
+            DbResponse::DdlOpStatus { status } => Ok(status),
+            DbResponse::Error { code, message } => {
+                // Treat `not_supported` as "feature unavailable" rather than a hard error.
+                // Old servers don't understand `GetDdlOpStatus` and return this code.
+                if code == "not_supported" {
+                    return Err(ClientError::Protocol(format!(
+                        "GetDdlOpStatus not supported by server: {}",
+                        message
+                    )));
+                }
+                Err(ClientError::Db {
+                    code: code.clone(),
+                    message: message.clone(),
+                })
+            }
+            other => Err(ClientError::Protocol(format!(
+                "expected DdlOpStatus, got {other:?}"
+            ))),
+        }
+    }
+
     /// Send a request and route the response via the rid-demux pending map.
     ///
     /// 1. Allocate rid and register the oneshot **before** writing (no race

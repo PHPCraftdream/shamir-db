@@ -100,6 +100,7 @@ async fn activate_subscriptions_injects_sub_id_into_response() {
             skipped: false,
             versions: None,
             corrupt_records: vec![],
+            ..Default::default()
         },
     );
 
@@ -212,6 +213,7 @@ async fn activate_subscriptions_enforces_per_connection_cap() {
                 skipped: false,
                 versions: None,
                 corrupt_records: vec![],
+                ..Default::default()
             },
         );
     }
@@ -330,6 +332,7 @@ async fn bridge_self_exit_releases_registry_slot() {
             skipped: false,
             versions: None,
             corrupt_records: vec![],
+            ..Default::default()
         },
     );
 

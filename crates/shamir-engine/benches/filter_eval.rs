@@ -351,6 +351,7 @@ fn main() {
             skipped: false,
             versions: None,
             corrupt_records: vec![],
+            ..Default::default()
         },
     );
     let refs: &'static TMap<String, QueryResult> = Box::leak(Box::new(refs));

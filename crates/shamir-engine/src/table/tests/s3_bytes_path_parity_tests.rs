@@ -165,6 +165,7 @@ async fn run_tree(tbl: &TableManager, query: &ReadQuery) -> QueryResult {
         skipped: false,
         versions: None,
         corrupt_records: Vec::new(),
+        ..Default::default()
     }
 }
 

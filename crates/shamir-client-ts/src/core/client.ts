@@ -1187,6 +1187,40 @@ export class ShamirClient {
   }
 
   /**
+   * Poll a DDL operation's status by its operation ID.
+   *
+   * Returns the full `DdlOpStatus` if found, `null` if the operation is unknown
+   * (GC'd, never existed, or a pre-RFC op that had no op_id).
+   *
+   * This is the mechanism that allows a client to learn whether a crashed-and-recovered
+   * DDL op actually completed after a server restart.
+   *
+   * @throws {ShamirDbError} If the server returns an error (including `not_supported`
+   *   for old servers that don't understand this request).
+   */
+  async getDdlOpStatus(
+    db: string,
+    repo: string,
+    table: string,
+    opId: string
+  ): Promise<import('./types/batch.js').DdlOpStatus | null> {
+    const r = await this.sendDbRequest({
+      op: 'get_ddl_op_status',
+      db,
+      repo,
+      table,
+      op_id: opId,
+    });
+    if (r.kind === 'ddl_op_status') {
+      return (r.status as import('./types/batch.js').DdlOpStatus | null) ?? null;
+    }
+    if (r.kind === 'error') {
+      throw new ShamirDbError(r.code as string, r.message as string);
+    }
+    throw new Error(`unexpected DbResponse kind for getDdlOpStatus: ${r.kind as string}`);
+  }
+
+  /**
    * Return a bound {@link Db} handle for `name`. Subsequent calls via
    * the handle (`db.run(...)`, `db.query(...)`, `db.batch(...)`, etc.)
    * automatically thread the client and database name — no re-threading.

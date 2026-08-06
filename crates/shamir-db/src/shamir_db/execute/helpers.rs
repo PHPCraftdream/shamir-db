@@ -1,10 +1,12 @@
 //! Shared helper functions used across admin executor sub-modules.
 
 use crate::query::batch::BatchError;
+use crate::query::read::DdlOpState;
 use crate::query::read::{QueryRecord, QueryResult, QueryStats};
 use crate::query::FilterValue;
 use crate::types::common::TMap;
 use crate::types::value::QueryValue;
+use shamir_types::types::record_id::RecordId;
 
 /// Construct a `QueryResult` for a successful admin operation.
 pub(super) fn admin_result(data: QueryValue) -> QueryResult {
@@ -22,6 +24,43 @@ pub(super) fn admin_result(data: QueryValue) -> QueryResult {
         skipped: false,
         versions: None,
         corrupt_records: Vec::new(),
+        op_id: None,
+        ddl_status: None,
+    }
+}
+
+/// Construct a `QueryResult` for a successful DDL operation with an operation ID.
+///
+/// This is the central place for stamping `op_id` into DDL results (RFC §3.2).
+/// The `op_id` is minted at dispatch time for recoverable DDL ops and passed
+/// through the DDL handler chain; this variant of `admin_result` attaches it
+/// to the `QueryResult` that gets returned to the client.
+///
+/// The `ddl_status` field is populated ONLY for the inline-succeeded common case
+/// (i.e., `Succeeded`). For crash-recovered operations, the client MUST poll
+/// via `DbRequest::GetDdlOpStatus` to see `SucceededViaCrashRecovery`.
+pub(super) fn admin_result_with_op_id(data: QueryValue, op_id: RecordId) -> QueryResult {
+    QueryResult {
+        records: vec![QueryRecord::Direct(data)],
+        stats: Some(QueryStats {
+            index_used: None,
+            records_scanned: 0,
+            records_returned: 1,
+            execution_time_us: 0,
+        }),
+        pagination: None,
+        value: None,
+        explain: None,
+        skipped: false,
+        versions: None,
+        corrupt_records: Vec::new(),
+        op_id: Some(op_id),
+        ddl_status: Some(DdlOpState::Succeeded {
+            completed_at: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_millis() as u64,
+        }),
     }
 }
 

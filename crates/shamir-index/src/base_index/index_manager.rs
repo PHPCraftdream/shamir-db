@@ -83,6 +83,8 @@ const POSTING_CACHE_CAP: usize = 512;
 ///   `Vec<IndexInfoItem>`) for the same robustness reason, AND because the
 ///   rebuild calls `create_index` / `create_unique_index_body`, which take
 ///   `&[&str]` — strings are needed at the call site regardless.
+/// - `op_id`: the DDL operation ID minted at dispatch time (#1015). Used by
+///   recovery to write `SucceededViaCrashRecovery` to the op-status log.
 ///
 /// Persisted under `system:idx_ren` (regular) / `system:uidx_ren` (unique)
 /// as `Vec<HashRenameTombstone>` via bincode. Mirrors #959's
@@ -98,6 +100,9 @@ pub struct HashRenameTombstone {
     /// The index's field paths as resolved dot-separated strings
     /// (e.g. `["user.email"]`), sufficient to rebuild the index.
     pub paths: Vec<String>,
+    /// The DDL operation ID minted at dispatch time (#1015).
+    /// Used by recovery to write `SucceededViaCrashRecovery` to the op-status log.
+    pub op_id: Option<String>,
 }
 
 /// Менеджер индексов для одной таблицы.
