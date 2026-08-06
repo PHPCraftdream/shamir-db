@@ -24,6 +24,7 @@ pub mod conn_limiter;
 pub mod connection;
 pub mod cursor_registry;
 pub mod db_handler;
+pub mod doctor;
 pub mod framer;
 pub mod logging;
 pub mod observability;

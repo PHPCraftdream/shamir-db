@@ -30,6 +30,7 @@ use zeroize::Zeroizing;
 
 use shamir_server::backup;
 use shamir_server::config::Config;
+use shamir_server::doctor;
 use shamir_server::server::BootstrapMode;
 use shamir_server::service::ServiceAction;
 
@@ -158,6 +159,36 @@ enum Subcmd {
         #[command(subcommand)]
         action: ServiceAction,
     },
+
+    /// Verify and optionally repair table integrity. **Offline only** — the
+    /// server for this `data_dir` must be stopped first (opens the data
+    /// directory directly via `ShamirDb::init`). Scans all tables (or a
+    /// filtered subset via `--db`/`--repo`/`--table`) and reports health
+    /// diagnostics: Building/Failed indexes, counter consistency, index2
+    /// registry consistency, and cross-family name collisions. With
+    /// `--apply`, repairs unhealthy tables by dropping and rebuilding all
+    /// indexes. Exits with non-zero if any table is unhealthy (useful for
+    /// CI/health checks).
+    Doctor {
+        /// Restrict to a single database (default: all databases).
+        #[arg(long, value_name = "DB")]
+        db: Option<String>,
+        /// Restrict to a single repository (default: all repositories).
+        #[arg(long, value_name = "REPO")]
+        repo: Option<String>,
+        /// Restrict to a single table (default: all tables).
+        #[arg(long, value_name = "TABLE")]
+        table: Option<String>,
+        /// Apply repairs to unhealthy tables (default: read-only verify).
+        #[arg(long)]
+        apply: bool,
+        /// Emit pretty-printed JSON output (default: human-readable text).
+        #[arg(long)]
+        pretty: bool,
+        /// Emit machine-readable JSON output (exclusive with `--pretty`).
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 fn main() -> anyhow::Result<()> {
@@ -271,6 +302,25 @@ async fn run_async(cli: Cli) -> anyhow::Result<()> {
                     shamir_server::service::status()?;
                 }
             }
+            return Ok(());
+        }
+        Some(Subcmd::Doctor {
+            db,
+            repo,
+            table,
+            apply,
+            pretty,
+            json,
+        }) => {
+            let args = doctor::DoctorArgs {
+                db,
+                repo,
+                table,
+                apply,
+                pretty,
+                json,
+            };
+            shamir_server::doctor::run(&config, &args).await?;
             return Ok(());
         }
         Some(Subcmd::Run { .. }) | None => {}
