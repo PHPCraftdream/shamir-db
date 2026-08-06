@@ -563,8 +563,22 @@ impl MvccStore {
         history_ops.push(KvOp::Set(ts_key(commit_version).into(), ts_val));
 
         // One batched write to history (data + ts, atomic).
+        //
+        // #1032 diagnostic instrumentation (follow-up to F-68/#895 task
+        // #124): this is the single genuine I/O + potential store-internal
+        // lock acquisition in this function — the prior instrumentation
+        // round did not cover it. If a hang recurs, before/after logs here
+        // (paired with `drain_to_history`'s per-version logs) show whether
+        // the stall is INSIDE `Store::transact` itself.
         if !history_ops.is_empty() {
+            log::debug!(
+                "write_committed_to_history: history.transact start version={commit_version} ops={}",
+                history_ops.len()
+            );
             self.history.transact(history_ops).await?;
+            log::debug!(
+                "write_committed_to_history: history.transact done version={commit_version}"
+            );
         }
 
         // Phase 3: maintain the in-memory ts-index (idempotent — duplicate

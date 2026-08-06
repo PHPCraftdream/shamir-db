@@ -40,9 +40,18 @@ impl MvccStore {
     /// Off hot path: this is a one-shot admin op (table rename / migration),
     /// so the O(N) overlay scan and per-version history writes are acceptable.
     pub async fn drain_to_history(&self) -> DbResult<()> {
+        // #1032 diagnostic instrumentation (follow-up to F-68/#895 task #124):
+        // the prior instrumentation round only logged the CALLER's
+        // before/after around this whole call (`rename_table_stores: calling
+        // drain_to_history` / `... returned after`), which is enough to show
+        // THAT this function is where a hang lands, but not WHICH step
+        // inside it. Adding a log per meaningful step below so the next CI
+        // recurrence pinpoints the exact stuck `.await`.
+        log::debug!("drain_to_history: enter");
         // Snapshot the visibility watermark ONCE. New writes landing after this
         // point are NOT drained (they belong to the next drain pass / drainer).
         let visibility = self.gate.last_committed();
+        log::debug!("drain_to_history: visibility={visibility}");
         if visibility == 0 {
             // No commits ever — overlay is empty by construction.
             return Ok(());
@@ -53,6 +62,10 @@ impl MvccStore {
         // returns ALL version entries — each distinct version is a distinct
         // row in the timeline and must land in history independently.
         let entries = self.overlay.iter_all_le(visibility);
+        log::debug!(
+            "drain_to_history: iter_all_le returned {} entries",
+            entries.len()
+        );
         if entries.is_empty() {
             // Overlay already drained (or was never populated — e.g. non-tx
             // writes that went directly to history). Nothing to do.
@@ -79,10 +92,22 @@ impl MvccStore {
         // `write_committed_to_history` is the same method the background
         // drainer calls; it does one `history.transact` per version and is
         // idempotent (re-writing an existing version-key is a no-op overwrite).
+        log::debug!(
+            "drain_to_history: writing {} version(s) to history: {:?}",
+            by_version.len(),
+            by_version.keys().collect::<Vec<_>>()
+        );
         for (commit_version, ops) in &by_version {
+            log::debug!(
+                "drain_to_history: write_committed_to_history version={commit_version} start"
+            );
             self.write_committed_to_history(ops, *commit_version)
                 .await?;
+            log::debug!(
+                "drain_to_history: write_committed_to_history version={commit_version} done"
+            );
         }
+        log::debug!("drain_to_history: all versions written, marking durable");
 
         // CRIT-3 (#437): mark durable ONLY the versions THIS call actually
         // drained (the keys of `by_version`), NOT the repo-global
