@@ -107,6 +107,7 @@ async fn create_index_register_first_indexes_concurrent_write() {
     let result = manager
         .lookup_by_index(5001, &[InnerValue::Str("concurrent".to_string())])
         .await
+        .unwrap()
         .unwrap();
     assert!(
         result.contains(&concurrent_id),
@@ -118,6 +119,7 @@ async fn create_index_register_first_indexes_concurrent_write() {
     let result_old = manager
         .lookup_by_index(5001, &[InnerValue::Str("old".to_string())])
         .await
+        .unwrap()
         .unwrap();
     assert!(
         result_old.contains(&existing_id),
@@ -191,6 +193,7 @@ async fn create_index_backfill_then_register_loses_concurrent_write() {
     let result = manager
         .lookup_by_index(5002, &[InnerValue::Str("lost".to_string())])
         .await
+        .unwrap()
         .unwrap();
     assert!(
         !result.contains(&concurrent_id),
@@ -241,6 +244,7 @@ async fn create_index_from_records_full_concurrent_write_survives() {
         let result = manager
             .lookup_by_index(5003, &[InnerValue::Int(i)])
             .await
+            .unwrap()
             .unwrap();
         assert_eq!(result.len(), 1, "snapshot record {} must be indexed", i);
     }
@@ -255,6 +259,7 @@ async fn create_index_from_records_full_concurrent_write_survives() {
     let result = manager
         .lookup_by_index(5003, &[InnerValue::Int(99)])
         .await
+        .unwrap()
         .unwrap();
     assert!(
         result.contains(&post_id),

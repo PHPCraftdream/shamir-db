@@ -43,6 +43,7 @@ async fn test_composite_index_update_one_field() {
             &[InnerValue::Str("Alice".to_string()), InnerValue::Int(30)],
         )
         .await
+        .unwrap()
         .unwrap();
     assert_eq!(result.len(), 1);
 
@@ -59,6 +60,7 @@ async fn test_composite_index_update_one_field() {
             &[InnerValue::Str("Alice".to_string()), InnerValue::Int(30)],
         )
         .await
+        .unwrap()
         .unwrap();
     assert!(old_result.is_empty());
 
@@ -69,6 +71,7 @@ async fn test_composite_index_update_one_field() {
             &[InnerValue::Str("Alice".to_string()), InnerValue::Int(31)],
         )
         .await
+        .unwrap()
         .unwrap();
     assert_eq!(new_result.len(), 1);
     assert!(new_result.contains(&record_id));
@@ -110,6 +113,7 @@ async fn test_composite_index_update_both_fields() {
             &[InnerValue::Str("Alice".to_string()), InnerValue::Int(30)],
         )
         .await
+        .unwrap()
         .unwrap();
     assert!(old_result.is_empty());
 
@@ -119,6 +123,7 @@ async fn test_composite_index_update_both_fields() {
             &[InnerValue::Str("Bob".to_string()), InnerValue::Int(25)],
         )
         .await
+        .unwrap()
         .unwrap();
     assert_eq!(new_result.len(), 1);
 }
@@ -150,7 +155,11 @@ async fn test_deeply_nested_path_index() {
     manager.create_index(index_def).await.unwrap();
 
     // Lookup by deep value
-    let result = manager.lookup_by_index(1001, &[deep_value]).await.unwrap();
+    let result = manager
+        .lookup_by_index(1001, &[deep_value])
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(result.len(), 1);
     assert!(result.contains(&record_id));
 }

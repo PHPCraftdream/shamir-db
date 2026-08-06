@@ -104,6 +104,7 @@ async fn index_definition_survives_but_postings_do_not() {
         .index_manager_ref()
         .lookup_by_index(name_interned, &[InnerValue::Int(42)])
         .await
+        .unwrap()
         .unwrap();
     assert_eq!(
         hits_before.len(),
@@ -139,6 +140,7 @@ async fn index_definition_survives_but_postings_do_not() {
         .index_manager_ref()
         .lookup_by_index(def2.name_interned, &[InnerValue::Int(42)])
         .await
+        .unwrap()
         .unwrap();
     assert_eq!(
         hits_after.len(),

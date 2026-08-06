@@ -165,6 +165,7 @@ async fn round_trip_single_field_every_type() {
         let result = manager
             .lookup_by_index(name_interned, &lookup_values)
             .await
+            .unwrap()
             .unwrap();
         // Audit 3.2: `lookup_by_index` now returns `Arc<[RecordId]>` — a
         // sorted, duplicate-free slice; compare against the expected slice.
@@ -340,6 +341,7 @@ async fn round_trip_composite_index() {
     let result = manager
         .lookup_by_index(name_interned, &lookup_values)
         .await
+        .unwrap()
         .unwrap();
     assert!(
         result.contains(&rid),

@@ -326,22 +326,28 @@ async fn child_has_reference(
         if let Some(base_field_id) = interner.get_ind(field) {
             let field_path = [base_field_id.id()];
             if let Some(idx_name) = table.find_single_field_index(&field_path) {
-                let ids = table
+                // P0-3a (#1011): `None` = DROP in its drain→sweep window — the
+                // index is momentarily unusable, so fall through to the full
+                // scan below instead of treating it as "no match" (which would
+                // wrongly let a RESTRICT-violating child row pass).
+                if let Some(ids) = table
                     .index_manager_ref()
                     .lookup_by_index(idx_name, std::slice::from_ref(&inner_value))
-                    .await?;
-                if !ids.is_empty() {
-                    return Ok(true);
+                    .await?
+                {
+                    if !ids.is_empty() {
+                        return Ok(true);
+                    }
+                    // Index says no match — authoritative for the COMMITTED
+                    // store, but cannot rule out a same-tx staged insert/update
+                    // (never in the index until commit). Mirrors
+                    // `ValidatorDb::exists_in_table`'s staged-overlay fallback.
+                    if let Some(field_id) = field_id {
+                        let key = shamir_types::core::interner::InternerKey::new(field_id);
+                        return Ok(staged_field_matches(tx, table.table_token(), &key, value));
+                    }
+                    return Ok(false);
                 }
-                // Index says no match — authoritative for the COMMITTED
-                // store, but cannot rule out a same-tx staged insert/update
-                // (never in the index until commit). Mirrors
-                // `ValidatorDb::exists_in_table`'s staged-overlay fallback.
-                if let Some(field_id) = field_id {
-                    let key = shamir_types::core::interner::InternerKey::new(field_id);
-                    return Ok(staged_field_matches(tx, table.table_token(), &key, value));
-                }
-                return Ok(false);
             }
         }
     }

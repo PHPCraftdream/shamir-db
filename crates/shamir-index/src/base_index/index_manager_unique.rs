@@ -173,6 +173,30 @@ impl IndexManager {
     }
 
     /// Check a unique constraint by its pre-computed index key bytes.
+    ///
+    /// P0-3a (#1011) — why the UNIQUE family gets NO `ReaderDrainGate`
+    /// (unlike the regular family's `lookup_by_index`): this is the unique
+    /// family's only production read chokepoint, and its ONLY production
+    /// callers are `validate_unique_for_create` / `validate_unique_for_update`
+    /// (via `check_unique_constraint`), BOTH of which are already serialized
+    /// against DROP UNIQUE by the per-table `unique_write_lock`. The writer
+    /// takes `unique_write_lock` BEFORE calling validate
+    /// (`table_manager_crud.rs`: the `unique_write_lock.lock().await` at the
+    /// insert/update paths precedes `validate_unique_for_create`/`_update`),
+    /// and DROP UNIQUE (`drop_unique_index` → `TableManager::drop_unique_index`)
+    /// runs under the same `begin_write_barrier` admission serialization. The
+    /// commit-time equivalent is covered too: `pre_commit.rs` Phase 2.5 acquires
+    /// every relevant table's `unique_write_lock` and holds it across Phase 2.6
+    /// (which reads `info_store().get()` directly under that lock). So a DROP
+    /// UNIQUE cannot physically overlap a `check_unique_key` read — adding a
+    /// gate here would serialize an already-serialized path.
+    ///
+    /// TRIPWIRE: `lookup_by_unique_index` (which delegates here) is TEST-ONLY
+    /// today (verified by workspace grep — every caller lives under a `tests/`
+    /// dir). If it ever gains a PRODUCTION caller that is NOT already inside a
+    /// `unique_write_lock` critical section, that caller's read path MUST get
+    /// its own `ReaderDrainGate` acquisition at that point — do NOT silently
+    /// rely on the unique-family lock serialization holding for a new caller.
     async fn check_unique_key(&self, index_key: &Bytes) -> DbResult<Option<RecordId>> {
         match self.info_store.get(index_key.clone().into()).await {
             Ok(bytes) => {

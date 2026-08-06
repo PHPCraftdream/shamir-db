@@ -89,6 +89,7 @@ async fn p02_regular_insert_before_create_posting_present() {
         .index_manager_ref()
         .lookup_by_index(idx_name, &[InnerValue::Str("alice".into())])
         .await
+        .unwrap()
         .unwrap();
     assert!(
         found.iter().any(|r| r == &rid),
@@ -136,6 +137,7 @@ async fn p02_regular_update_before_create_posting_present() {
         .index_manager_ref()
         .lookup_by_index(idx_name, &[InnerValue::Str("new".into())])
         .await
+        .unwrap()
         .unwrap();
     assert!(
         found_new.iter().any(|r| r == &rid),
@@ -191,6 +193,7 @@ async fn p02_regular_delete_before_create_commits_cleanly() {
         .index_manager_ref()
         .lookup_by_index(idx_name, &[InnerValue::Str("victim".into())])
         .await
+        .unwrap()
         .unwrap();
     assert!(
         found.is_empty(),
@@ -585,6 +588,7 @@ async fn p02_no_indexes_at_stage_rederive_fires() {
         .index_manager_ref()
         .lookup_by_index(idx_name, &[InnerValue::Str("bob".into())])
         .await
+        .unwrap()
         .unwrap();
     assert!(
         found.iter().any(|r| r == &rid),

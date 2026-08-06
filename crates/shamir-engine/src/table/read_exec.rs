@@ -615,37 +615,61 @@ impl TableManager {
                 {
                     if let SelectItem::CountAll { alias } = &query.select.items[0] {
                         let mut total: u64 = 0;
+                        let mut index_usable = true;
                         for values in &lookup_sets {
-                            let ids = self
+                            // P0-3a (#1011): `None` = a DROP of this index is
+                            // in its drain→sweep window — do NOT count it as 0
+                            // (a wrongly-empty count). Mark the index unusable
+                            // and fall through to the full-scan tail, which
+                            // recomputes the count correctly.
+                            match self
                                 .index_manager_ref()
                                 .lookup_by_index(idx_name, values)
-                                .await?;
-                            total += ids.len() as u64;
+                                .await?
+                            {
+                                Some(ids) => total += ids.len() as u64,
+                                None => {
+                                    index_usable = false;
+                                    break;
+                                }
+                            }
                         }
-                        let key = alias.as_deref().unwrap_or("count").to_string();
-                        let mut obj = new_map_wc(1);
-                        obj.insert(key, QueryValue::Int(total as i64));
-                        return Ok(QueryResult {
-                            records: vec![crate::query::read::QueryRecord::Direct(
-                                QueryValue::Map(obj),
-                            )],
-                            stats: Some(QueryStats {
-                                index_used: Some(format!("idx_{idx_name}")),
-                                records_scanned: total,
-                                records_returned: 1,
-                                execution_time_us: start.elapsed().as_micros() as u64,
-                            }),
-                            pagination: None,
-                            value: None,
-                            explain: None,
-                            skipped: false,
-                            versions: None,
-                            corrupt_records: Vec::new(),
-                        });
+                        if !index_usable {
+                            // Skip the count fast-path AND the `read_index_scan`
+                            // call below (it would observe the same `None`): the
+                            // DROP-window result must come from a full scan.
+                        } else {
+                            let key = alias.as_deref().unwrap_or("count").to_string();
+                            let mut obj = new_map_wc(1);
+                            obj.insert(key, QueryValue::Int(total as i64));
+                            return Ok(QueryResult {
+                                records: vec![crate::query::read::QueryRecord::Direct(
+                                    QueryValue::Map(obj),
+                                )],
+                                stats: Some(QueryStats {
+                                    index_used: Some(format!("idx_{idx_name}")),
+                                    records_scanned: total,
+                                    records_returned: 1,
+                                    execution_time_us: start.elapsed().as_micros() as u64,
+                                }),
+                                pagination: None,
+                                value: None,
+                                explain: None,
+                                skipped: false,
+                                versions: None,
+                                corrupt_records: Vec::new(),
+                            });
+                        }
                     }
                 }
 
-                return self
+                // P0-3a (#1011): `read_index_scan` now returns
+                // `Option<QueryResult>`: `None` means the index was momentarily
+                // unusable (DROP in its drain→sweep window) — the index scan
+                // returned no partial result, so fall through to the full-scan
+                // tail below. A silent empty result here would be
+                // indistinguishable from "the index has no matches".
+                if let Some(result) = self
                     .read_index_scan(
                         query,
                         ctx,
@@ -655,7 +679,11 @@ impl TableManager {
                         residual.as_ref(),
                         start,
                     )
-                    .await;
+                    .await?
+                {
+                    return Ok(result);
+                }
+                // Fall through to full scan.
             }
         }
 
@@ -1736,7 +1764,14 @@ impl TableManager {
                             } else {
                                 let mut rids = Vec::new();
                                 for values in &lookup_sets {
-                                    if let Ok(ids) = self
+                                    // P0-3a (#1011): `Ok(None)` = DROP in its
+                                    // drain→sweep window — treat as "no
+                                    // base-index candidates" and let the vector
+                                    // scan fall back to its full (unfiltered)
+                                    // walk, exactly like the prior `Err`/empty
+                                    // handling already does. NEVER silently count
+                                    // it as an empty candidate intersection.
+                                    if let Ok(Some(ids)) = self
                                         .index_manager_ref()
                                         .lookup_by_index(idx_name, values)
                                         .await

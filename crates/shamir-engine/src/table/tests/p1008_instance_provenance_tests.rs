@@ -381,6 +381,7 @@ async fn regular_aba_drop_create_same_name_no_field_a_contamination() {
         .index_manager_ref()
         .lookup_by_index(idx_name, &[InnerValue::Str("bvalue".into())])
         .await
+        .unwrap()
         .unwrap();
     assert!(
         found_b.iter().any(|r| r == &rid),
@@ -393,6 +394,7 @@ async fn regular_aba_drop_create_same_name_no_field_a_contamination() {
         .index_manager_ref()
         .lookup_by_index(idx_name, &[InnerValue::Str("avalue".into())])
         .await
+        .unwrap()
         .unwrap();
     assert!(
         found_a.is_empty(),
@@ -589,6 +591,7 @@ async fn multiple_transitions_before_commit_resolve_to_final_instance() {
         .index_manager_ref()
         .lookup_by_index(idx1, &[InnerValue::Str("cval".into())])
         .await
+        .unwrap()
         .unwrap();
     assert!(
         found_final.iter().any(|r| r == &rid),
@@ -602,6 +605,7 @@ async fn multiple_transitions_before_commit_resolve_to_final_instance() {
         .index_manager_ref()
         .lookup_by_index(idx1, &[InnerValue::Str("aval".into())])
         .await
+        .unwrap()
         .unwrap();
     assert!(
         found_stale.is_empty(),
@@ -614,6 +618,7 @@ async fn multiple_transitions_before_commit_resolve_to_final_instance() {
         .index_manager_ref()
         .lookup_by_index(idx2, &[InnerValue::Str("aval".into())])
         .await
+        .unwrap()
         .unwrap();
     assert!(
         found_idx2.is_empty(),

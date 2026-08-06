@@ -228,22 +228,32 @@ impl<'a> ValidatorDb<'a> {
             if let Some(field_id) = interner.get_ind(field) {
                 let field_path = [field_id.id()];
                 if let Some(idx_name) = target.find_single_field_index(&field_path) {
-                    let ids = target
+                    // P0-3a (#1011): `None` = DROP in its drain→sweep window —
+                    // index momentarily unusable; fall through to the full scan
+                    // below instead of treating it as "no match" (which would
+                    // wrongly let a duplicate pass validation).
+                    if let Some(ids) = target
                         .index_manager_ref()
                         .lookup_by_index(idx_name, std::slice::from_ref(&inner_value))
-                        .await?;
-                    if !ids.is_empty() {
-                        return Ok(true);
+                        .await?
+                    {
+                        if !ids.is_empty() {
+                            return Ok(true);
+                        }
+                        // Index says no match — authoritative for the COMMITTED
+                        // store, so skip the full-scan fallback below entirely
+                        // (it would re-scan the same store the index already
+                        // covers and can only agree). The index alone cannot
+                        // rule out a same-tx FK match though: a staged insert
+                        // into the target table (this tx, not yet committed) is
+                        // never in the index (indexing happens at commit), so go
+                        // straight to the staged-overlay probe.
+                        return Ok(self.staged_field_matches(
+                            target.table_token(),
+                            &field_id,
+                            value,
+                        ));
                     }
-                    // Index says no match — authoritative for the COMMITTED
-                    // store, so skip the full-scan fallback below entirely
-                    // (it would re-scan the same store the index already
-                    // covers and can only agree). The index alone cannot
-                    // rule out a same-tx FK match though: a staged insert
-                    // into the target table (this tx, not yet committed) is
-                    // never in the index (indexing happens at commit), so go
-                    // straight to the staged-overlay probe.
-                    return Ok(self.staged_field_matches(target.table_token(), &field_id, value));
                 }
             }
         }
@@ -347,17 +357,23 @@ impl<'a> ValidatorDb<'a> {
             if let Some(field_id) = interner.get_ind(field) {
                 let field_path = [field_id.id()];
                 if let Some(idx_name) = table.find_single_field_index(&field_path) {
-                    let ids = table
+                    // P0-3a (#1011): `None` = DROP in its drain→sweep window —
+                    // index momentarily unusable; fall through to the committed
+                    // full-scan fallback below instead of treating it as "no
+                    // match" (which would wrongly let a same-field duplicate pass).
+                    if let Some(ids) = table
                         .index_manager_ref()
                         .lookup_by_index(idx_name, std::slice::from_ref(&inner_value))
-                        .await?;
-                    // Audit 1.5/3.2: `ids` is now `Arc<[RecordId]>` (sorted slice); iterate.
-                    for id in ids.iter() {
-                        if Some(id) != exclude_rid {
-                            return Ok(true);
+                        .await?
+                    {
+                        // Audit 1.5/3.2: `ids` is now `Arc<[RecordId]>` (sorted slice); iterate.
+                        for id in ids.iter() {
+                            if Some(id) != exclude_rid {
+                                return Ok(true);
+                            }
                         }
+                        // All matches excluded → fall through to scan (rare).
                     }
-                    // All matches excluded → fall through to scan (rare).
                 }
             }
         }

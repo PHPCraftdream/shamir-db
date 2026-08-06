@@ -48,6 +48,7 @@ pub mod p02_base_index_rederive_tests;
 pub mod p02c_retain_filter_key_collision_tests;
 pub mod p03b_index2_drop_durability_tests;
 pub mod p1008_instance_provenance_tests;
+pub mod p1011_reader_drain_tests;
 pub mod p997_hash_rename_durability_tests;
 pub mod persistence_tests;
 pub mod r0a_registry_watermark_admission_tests;

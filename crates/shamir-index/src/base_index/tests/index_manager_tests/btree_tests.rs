@@ -130,6 +130,7 @@ async fn test_delete_last_record_removes_index_key() {
     let before = manager
         .lookup_by_index(1001, &[InnerValue::Str("unique_value".to_string())])
         .await
+        .unwrap()
         .unwrap();
     assert_eq!(before.len(), 1);
 
@@ -140,6 +141,7 @@ async fn test_delete_last_record_removes_index_key() {
     let after = manager
         .lookup_by_index(1001, &[InnerValue::Str("unique_value".to_string())])
         .await
+        .unwrap()
         .unwrap();
     assert!(after.is_empty());
 

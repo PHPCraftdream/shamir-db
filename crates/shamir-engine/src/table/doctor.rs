@@ -231,6 +231,24 @@ impl TableManager {
             }
         }
 
+        // P0-3a (#1011): a `begin_write_barrier` acquisition was tried here
+        // (mirroring `repair()`, F-3/#1030) to give the entry-count reads
+        // below a stable DDL snapshot against a concurrent DROP INDEX.
+        // REVERTED: `verify()` is a read-only DIAGNOSTIC whose whole purpose
+        // includes inspecting a table with an index STUCK in `Building`
+        // (e.g. a crashed/parked backfill) — exactly the scenario
+        // `doctor_tests::verify_detects_building_regular_index`/
+        // `_sorted_index` exercise by parking `create_index` mid-backfill
+        // (which holds the SAME barrier) and then calling `verify()`
+        // concurrently. Acquiring the barrier here self-deadlocks against
+        // that in-flight CREATE — confirmed by a genuine 180s TIMEOUT on
+        // both tests, not a flake. `verify()` must be able to report on a
+        // table exactly while something else holds the barrier; only
+        // `repair()` (a mutating self-heal, not read-only diagnosis) may
+        // require exclusivity. The pre-existing transient-miscount race this
+        // was meant to close remains open — same severity as before this
+        // slice, not a new regression.
+        //
         // For each index pull the actual entry count from info_store.
         let mut regular_indexes = Vec::with_capacity(regular_defs.len());
         for (def, expected) in regular_defs.iter().zip(expected_regular.iter()) {

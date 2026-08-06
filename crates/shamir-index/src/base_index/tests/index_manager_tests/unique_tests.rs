@@ -431,6 +431,7 @@ async fn test_regular_and_unique_indexes_coexist() {
     let regular_result = manager
         .lookup_by_index(1001, &[InnerValue::Str("regular".to_string())])
         .await
+        .unwrap()
         .unwrap();
     assert_eq!(regular_result.len(), 1);
 

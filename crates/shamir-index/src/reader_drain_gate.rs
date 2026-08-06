@@ -144,9 +144,11 @@ impl ReaderDrainGate {
         DropDrainGuard { gate: self.clone() }
     }
 
-    /// Test-only: current in-flight reader count.
-    #[cfg(test)]
-    pub(crate) fn in_flight_count(&self) -> usize {
+    /// Test-only: current in-flight reader count. Exposed for regression tests
+    /// to verify a reader is counted mid-flight (e.g., to prove `in_flight_count()
+    /// == 1` while a read is parked at `lookup_pause_hook`). Not `#[cfg(test)]`-gated
+    /// — cross-crate test consumer.
+    pub fn in_flight_count(&self) -> usize {
         self.in_flight.load(Ordering::Acquire)
     }
 

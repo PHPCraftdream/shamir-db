@@ -1297,10 +1297,18 @@ async fn index_candidate_ids(
             Some(n) => n,
             None => return Ok(None),
         };
-        let ids = table
+        let ids = match table
             .index_manager_ref()
             .lookup_by_index(idx_name, std::slice::from_ref(&inner))
-            .await?;
+            .await?
+        {
+            // P0-3a (#1011): `None` = a DROP of this index is in its drain→sweep
+            // window — the index is momentarily unusable. Bail to a full scan
+            // (`Ok(None)`) rather than treating it as "no matches", which would
+            // silently drop FK-referenced rows from the candidate set.
+            Some(ids) => ids,
+            None => return Ok(None),
+        };
         all.extend(ids.iter().copied());
     }
     Ok(Some(all.into_iter().collect()))

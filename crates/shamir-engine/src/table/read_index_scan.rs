@@ -648,14 +648,24 @@ impl TableManager {
         lookup_sets: &[Vec<InnerValue>],
         residual: Option<&Filter>,
         start: Instant,
-    ) -> DbResult<QueryResult> {
+    ) -> DbResult<Option<QueryResult>> {
         // 1. Lookup matching RecordIds from index (union across all sets)
         let mut record_ids = new_set::<RecordId>();
         for values in lookup_sets {
-            let ids = self
+            // P0-3a (#1011): `None` = a DROP of this index is in its
+            // drain→sweep window — the result is deliberately withheld. Return
+            // `Ok(None)` so `read_impl` falls through to its full-scan tail
+            // instead of returning a partial (wrong) row set here. Returning an
+            // empty set would silently look identical to "the index has no
+            // matches", which is strictly worse than the pre-fix status quo.
+            let ids = match self
                 .index_manager_ref()
                 .lookup_by_index(index_name, values)
-                .await?;
+                .await?
+            {
+                Some(ids) => ids,
+                None => return Ok(None),
+            };
             // Audit 1.5/3.2: `ids` is now `Arc<[RecordId]>` — a sorted
             // slice (O(1) cache-hit). Iterate the contiguous buffer to
             // union into the result set.
@@ -735,7 +745,7 @@ impl TableManager {
             let records: Vec<QueryRecord> =
                 records_qv.into_iter().map(QueryRecord::Direct).collect();
 
-            Ok(QueryResult {
+            Ok(Some(QueryResult {
                 records,
                 stats: Some(QueryStats {
                     index_used: Some(index_name_str),
@@ -749,7 +759,7 @@ impl TableManager {
                 skipped: false,
                 versions: None,
                 corrupt_records: Vec::new(),
-            })
+            }))
         } else {
             // ── Plain SELECT branch (S3 — zero-copy RecordView lens) ─────────
             let raw = self.get_many_bytes(&id_vec).await?;
@@ -791,7 +801,7 @@ impl TableManager {
             )? {
                 let elapsed = start.elapsed();
                 let records_returned = paged.len() as u64;
-                return Ok(QueryResult {
+                return Ok(Some(QueryResult {
                     records: paged,
                     stats: Some(QueryStats {
                         index_used: Some(index_name_str),
@@ -805,7 +815,7 @@ impl TableManager {
                     skipped: false,
                     versions: None,
                     corrupt_records: corrupt,
-                });
+                }));
             }
 
             let mut result_qv = apply_select_value_bytes(
@@ -832,7 +842,7 @@ impl TableManager {
             let records: Vec<QueryRecord> =
                 records_qv.into_iter().map(QueryRecord::Direct).collect();
 
-            Ok(QueryResult {
+            Ok(Some(QueryResult {
                 records,
                 stats: Some(QueryStats {
                     index_used: Some(index_name_str),
@@ -846,7 +856,7 @@ impl TableManager {
                 skipped: false,
                 versions: versions_from_matched(query, self.mvcc_store_ref(), &matched),
                 corrupt_records: corrupt,
-            })
+            }))
         }
     }
 }

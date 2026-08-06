@@ -1407,13 +1407,22 @@ impl TableManager {
         // path, propagate `Arc<BTreeSet<RecordId>>` out through this
         // wrapper (and `RepoInstance`/`DbInstance`) instead of adding a
         // second clone-avoidance layer here.
-        Ok(self
-            .index_manager
-            .lookup_by_index(name_id, values)
-            .await?
-            .iter()
-            .copied()
-            .collect())
+        // P0-3a (#1011): the internal `IndexManager::lookup_by_index` now
+        // returns `Option<Arc<[RecordId]>>`: `None` means a DROP of this index
+        // is currently in its drain→sweep window, so the result is
+        // deliberately withheld. This public introspection-by-name API is NOT a
+        // query-planning path — a silent empty result here would be
+        // indistinguishable from "the index legitimately has no matches", which
+        // is strictly worse than an honest error. Surface it as `NotFound`
+        // naming the index so the caller can re-plan / retry explicitly.
+        let ids = self.index_manager.lookup_by_index(name_id, values).await?;
+        let ids = ids.ok_or_else(|| {
+            shamir_storage::error::DbError::NotFound(format!(
+                "index '{name}' is currently being dropped (reader-drain window); \
+                 the lookup result is unavailable — retry or re-plan without this index"
+            ))
+        })?;
+        Ok(ids.iter().copied().collect())
     }
 
     /// Check if a regular index exists.

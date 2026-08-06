@@ -27,6 +27,7 @@ async fn test_create_index_with_null_value() {
     let result = manager
         .lookup_by_index(1001, &[InnerValue::Null])
         .await
+        .unwrap()
         .unwrap();
     assert_eq!(result.len(), 1);
     assert!(result.contains(&record_id));
@@ -51,7 +52,11 @@ async fn test_create_index_with_list_value() {
     let index_def = IndexDefinition::new(1001, vec![IndexInfoItem::new(vec![1])]);
     manager.create_index(index_def).await.unwrap();
 
-    let result = manager.lookup_by_index(1001, &[list]).await.unwrap();
+    let result = manager
+        .lookup_by_index(1001, &[list])
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(result.len(), 1);
     assert!(result.contains(&record_id));
 }
@@ -74,7 +79,11 @@ async fn test_create_index_with_map_value() {
     let index_def = IndexDefinition::new(1001, vec![IndexInfoItem::new(vec![1])]);
     manager.create_index(index_def).await.unwrap();
 
-    let result = manager.lookup_by_index(1001, &[map]).await.unwrap();
+    let result = manager
+        .lookup_by_index(1001, &[map])
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(result.len(), 1);
     assert!(result.contains(&record_id));
 }

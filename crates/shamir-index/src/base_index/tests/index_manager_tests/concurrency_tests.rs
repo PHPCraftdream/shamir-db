@@ -35,6 +35,7 @@ async fn test_concurrent_index_operations() {
             let result = mgr
                 .lookup_by_index(1001, &[InnerValue::Int(i)])
                 .await
+                .unwrap()
                 .unwrap();
             assert_eq!(result.len(), 1);
 
@@ -45,6 +46,7 @@ async fn test_concurrent_index_operations() {
             let result = mgr
                 .lookup_by_index(1001, &[InnerValue::Int(i)])
                 .await
+                .unwrap()
                 .unwrap();
             assert!(result.is_empty());
         });
@@ -108,6 +110,7 @@ async fn test_cache_invalidated_on_create() {
     let r0 = manager
         .lookup_by_index(1001, &[InnerValue::Int(42)])
         .await
+        .unwrap()
         .unwrap();
     assert!(r0.is_empty());
 
@@ -119,6 +122,7 @@ async fn test_cache_invalidated_on_create() {
     let r1 = manager
         .lookup_by_index(1001, &[InnerValue::Int(42)])
         .await
+        .unwrap()
         .unwrap();
     assert_eq!(r1.len(), 1, "create must invalidate the cached empty set");
     assert!(r1.contains(&id));
@@ -138,6 +142,7 @@ async fn test_cache_invalidated_on_delete() {
     let r0 = manager
         .lookup_by_index(1001, &[InnerValue::Int(7)])
         .await
+        .unwrap()
         .unwrap();
     assert_eq!(r0.len(), 1);
 
@@ -146,6 +151,7 @@ async fn test_cache_invalidated_on_delete() {
     let r1 = manager
         .lookup_by_index(1001, &[InnerValue::Int(7)])
         .await
+        .unwrap()
         .unwrap();
     assert!(
         r1.is_empty(),
@@ -170,12 +176,14 @@ async fn test_cache_invalidated_on_update_value_change() {
             .lookup_by_index(1001, &[InnerValue::Int(10)])
             .await
             .unwrap()
+            .unwrap()
             .len(),
         1
     );
     assert!(manager
         .lookup_by_index(1001, &[InnerValue::Int(20)])
         .await
+        .unwrap()
         .unwrap()
         .is_empty());
 
@@ -191,6 +199,7 @@ async fn test_cache_invalidated_on_update_value_change() {
             .lookup_by_index(1001, &[InnerValue::Int(10)])
             .await
             .unwrap()
+            .unwrap()
             .is_empty(),
         "old-bucket cache must be invalidated"
     );
@@ -198,6 +207,7 @@ async fn test_cache_invalidated_on_update_value_change() {
         manager
             .lookup_by_index(1001, &[InnerValue::Int(20)])
             .await
+            .unwrap()
             .unwrap()
             .len(),
         1,
@@ -222,6 +232,7 @@ async fn test_cache_hit_returns_same_arc() {
     let first = manager
         .lookup_by_index(1001, &[InnerValue::Int(99)])
         .await
+        .unwrap()
         .unwrap();
     assert_eq!(first.len(), 1);
 
@@ -229,6 +240,7 @@ async fn test_cache_hit_returns_same_arc() {
     let second = manager
         .lookup_by_index(1001, &[InnerValue::Int(99)])
         .await
+        .unwrap()
         .unwrap();
     assert!(
         Arc::ptr_eq(&first, &second),
@@ -239,6 +251,7 @@ async fn test_cache_hit_returns_same_arc() {
     let third = manager
         .lookup_by_index(1001, &[InnerValue::Int(99)])
         .await
+        .unwrap()
         .unwrap();
     assert!(
         Arc::ptr_eq(&first, &third),
@@ -269,6 +282,7 @@ async fn test_concurrent_reads_with_index() {
                 let result = mgr
                     .lookup_by_index(1001, &[InnerValue::Int(j)])
                     .await
+                    .unwrap()
                     .unwrap();
                 assert_eq!(result.len(), 1);
             }
@@ -384,10 +398,12 @@ async fn equivalence_plan_apply_vs_direct() {
     let r1 = mgr1
         .lookup_by_index(4001, &[InnerValue::Str("equiv".to_string())])
         .await
+        .unwrap()
         .unwrap();
     let r2 = mgr2
         .lookup_by_index(4001, &[InnerValue::Str("equiv".to_string())])
         .await
+        .unwrap()
         .unwrap();
     assert_eq!(r1, r2);
     assert!(r1.contains(&rid));

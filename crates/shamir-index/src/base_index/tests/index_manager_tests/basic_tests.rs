@@ -669,6 +669,7 @@ async fn test_lookup_by_index_empty_result() {
     let result = manager
         .lookup_by_index(1001, &[InnerValue::Str("nonexistent".to_string())])
         .await
+        .unwrap()
         .unwrap();
 
     assert!(result.is_empty());
@@ -689,6 +690,7 @@ async fn test_lookup_by_index_single_record() {
     let result = manager
         .lookup_by_index(1001, &[InnerValue::Str("Alice".to_string())])
         .await
+        .unwrap()
         .unwrap();
 
     assert_eq!(result.len(), 1);
@@ -725,6 +727,7 @@ async fn test_lookup_by_index_multiple_records() {
     let result = manager
         .lookup_by_index(1001, &[InnerValue::Str("Bob".to_string())])
         .await
+        .unwrap()
         .unwrap();
 
     assert_eq!(result.len(), 3);
@@ -749,6 +752,7 @@ async fn test_lookup_by_index_after_delete() {
     let result = manager
         .lookup_by_index(1001, &[InnerValue::Str("Charlie".to_string())])
         .await
+        .unwrap()
         .unwrap();
     assert_eq!(result.len(), 1);
 
@@ -759,6 +763,7 @@ async fn test_lookup_by_index_after_delete() {
     let result = manager
         .lookup_by_index(1001, &[InnerValue::Str("Charlie".to_string())])
         .await
+        .unwrap()
         .unwrap();
     assert!(result.is_empty());
 }
@@ -788,6 +793,7 @@ async fn test_lookup_by_index_composite() {
             &[InnerValue::Str("Alice".to_string()), InnerValue::Int(30)],
         )
         .await
+        .unwrap()
         .unwrap();
 
     assert_eq!(result.len(), 1);
@@ -800,6 +806,7 @@ async fn test_lookup_by_index_composite() {
             &[InnerValue::Str("Alice".to_string()), InnerValue::Int(25)],
         )
         .await
+        .unwrap()
         .unwrap();
 
     assert!(result.is_empty());
@@ -831,6 +838,7 @@ async fn test_lookup_by_index_different_values() {
     let result_a = manager
         .lookup_by_index(1001, &[InnerValue::Str("A".to_string())])
         .await
+        .unwrap()
         .unwrap();
     assert_eq!(result_a.len(), 1);
     assert!(result_a.contains(&record_id_a));
@@ -839,6 +847,7 @@ async fn test_lookup_by_index_different_values() {
     let result_b = manager
         .lookup_by_index(1001, &[InnerValue::Str("B".to_string())])
         .await
+        .unwrap()
         .unwrap();
     assert_eq!(result_b.len(), 1);
     assert!(result_b.contains(&record_id_b));
@@ -852,6 +861,7 @@ async fn test_lookup_by_index_non_existing_index() {
     let result = manager
         .lookup_by_index(9999, &[InnerValue::Str("test".to_string())])
         .await
+        .unwrap()
         .unwrap();
 
     assert!(result.is_empty());
@@ -923,6 +933,7 @@ async fn test_create_index_actually_indexes_records() {
         let result = manager
             .lookup_by_index(1001, &[InnerValue::Str(format!("value_{}", i))])
             .await
+            .unwrap()
             .unwrap();
         assert_eq!(result.len(), 1, "Expected 1 result for value_{}", i);
         assert!(
@@ -958,6 +969,7 @@ async fn test_create_index_with_many_records() {
         let result = manager
             .lookup_by_index(1001, &[InnerValue::Int(i as i64)])
             .await
+            .unwrap()
             .unwrap();
         assert_eq!(result.len(), 1);
         assert!(result.contains(&record_ids[i]));
@@ -989,6 +1001,7 @@ async fn test_create_index_with_duplicate_values() {
     let result = manager
         .lookup_by_index(1001, &[shared_value])
         .await
+        .unwrap()
         .unwrap();
     assert_eq!(result.len(), 5);
     for id in &shared_ids {
@@ -1083,10 +1096,12 @@ async fn test_create_index_streaming_matches_materialized() {
         let result_a = manager_a
             .lookup_by_index(NAME_INTERNED, std::slice::from_ref(lookup_val))
             .await
+            .unwrap()
             .unwrap();
         let result_b = manager_b
             .lookup_by_index(NAME_INTERNED, std::slice::from_ref(lookup_val))
             .await
+            .unwrap()
             .unwrap();
         assert_eq!(
             result_a, result_b,
@@ -1143,6 +1158,7 @@ async fn test_sorted_slice_matches_btreeset_oracle() {
     let result = manager
         .lookup_by_index(1001, &[InnerValue::Str("active".to_string())])
         .await
+        .unwrap()
         .unwrap();
     let oracle = btreeset_oracle(&hot_ids);
     // Same membership as the BTreeSet oracle.
@@ -1170,6 +1186,7 @@ async fn test_sorted_slice_matches_btreeset_oracle() {
     let empty = manager
         .lookup_by_index(1001, &[InnerValue::Str("nonexistent".to_string())])
         .await
+        .unwrap()
         .unwrap();
     assert!(empty.is_empty(), "disjoint query must return empty slice");
     assert_eq!(
@@ -1198,10 +1215,12 @@ async fn test_sorted_slice_single_and_cache_hit_identical() {
     let miss = manager
         .lookup_by_index(1001, &[InnerValue::Int(7)])
         .await
+        .unwrap()
         .unwrap();
     let hit = manager
         .lookup_by_index(1001, &[InnerValue::Int(7)])
         .await
+        .unwrap()
         .unwrap();
     assert_eq!(
         miss.as_ref(),

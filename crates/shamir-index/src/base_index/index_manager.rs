@@ -181,6 +181,19 @@ pub struct IndexManager {
     pub(super) drop_index_pause_hook:
         Arc<arc_swap::ArcSwapOption<crate::base_index::backfill_pause_hook::BackfillPauseHook>>,
 
+    /// P0-3a (#1011): test-only deterministic pause point INSIDE
+    /// `lookup_by_index`, fired AFTER the [`reader_gate`](Self::reader_gate)
+    /// guard is acquired and BEFORE the `info_store` scan loop begins — so a
+    /// test can park a read mid-flight WHILE it holds the gate's in-flight
+    /// counter, deterministically proving a concurrent `drop_index`'s drain
+    /// wait blocks until that read releases the guard. NOT `#[cfg(test)]`-gated
+    /// — cross-crate test consumer (`shamir-engine`'s `p1011_reader_drain_tests`
+    /// reaches it via `index_manager_ref()`), the SAME rationale documented on
+    /// `drop_index_pause_hook` above. `None` on every real path; one
+    /// uncontended `ArcSwapOption::load_full()` Acquire load at the call site.
+    pub(super) lookup_pause_hook:
+        Arc<arc_swap::ArcSwapOption<crate::base_index::backfill_pause_hook::BackfillPauseHook>>,
+
     /// P0-2 (#958): monotonic generation counter bumped whenever the set of
     /// base_index index definitions (regular OR unique) changes — i.e. on every
     /// `create_index` / `create_index_from_records` / `create_index_from_stream`
@@ -309,6 +322,7 @@ impl Clone for IndexManager {
             posting_cache: Arc::clone(&self.posting_cache),
             create_index_backfill_hook: Arc::clone(&self.create_index_backfill_hook),
             drop_index_pause_hook: Arc::clone(&self.drop_index_pause_hook),
+            lookup_pause_hook: Arc::clone(&self.lookup_pause_hook),
             generation: Arc::clone(&self.generation),
             dropping_regular: Arc::clone(&self.dropping_regular),
             dropping_unique: Arc::clone(&self.dropping_unique),
@@ -427,6 +441,7 @@ impl IndexManager {
             )),
             create_index_backfill_hook: Arc::new(arc_swap::ArcSwapOption::empty()),
             drop_index_pause_hook: Arc::new(arc_swap::ArcSwapOption::empty()),
+            lookup_pause_hook: Arc::new(arc_swap::ArcSwapOption::empty()),
             generation: Arc::new(AtomicU64::new(0)),
             dropping_regular: Arc::new(Mutex::new(BTreeSet::new())),
             dropping_unique: Arc::new(Mutex::new(BTreeSet::new())),
@@ -476,6 +491,40 @@ impl IndexManager {
         hook: Option<Arc<crate::base_index::backfill_pause_hook::BackfillPauseHook>>,
     ) {
         self.drop_index_pause_hook.store(hook);
+    }
+
+    /// P0-3a (#1011) test-only: install (or clear with `None`) the
+    /// deterministic `lookup_by_index` pause hook (fires inside the read
+    /// chokepoint, after the reader-gate guard is acquired and before the
+    /// `info_store` scan). NOT `#[cfg(test)]`-gated — cross-crate test
+    /// consumer, same reason as `set_drop_index_pause_hook`. See
+    /// `lookup_pause_hook`'s field doc.
+    pub fn set_lookup_pause_hook(
+        &self,
+        hook: Option<Arc<crate::base_index::backfill_pause_hook::BackfillPauseHook>>,
+    ) {
+        self.lookup_pause_hook.store(hook);
+    }
+
+    /// P0-3a (#1011) test/telemetry oracle: how many `drop_index` drains
+    /// genuinely had to wait for at least one in-flight reader. Passthrough to
+    /// [`reader_drain_gate::ReaderDrainGate::drain_waits`]. The drain-waits
+    /// counter is the test oracle that discriminates "gate genuinely blocked a
+    /// drain" from "gate was wired but never contended" — a lone `== 0`
+    /// assertion passes vacuously if the counter is never incremented, so test
+    /// suites always pair it with the contended `== 1` case (see
+    /// `p1011_reader_drain_tests`).
+    pub fn reader_drain_waits(&self) -> usize {
+        self.reader_gate.drain_waits()
+    }
+
+    /// P0-3a (#1011) test-only: expose the reader gate for in-flight count
+    /// checks. Used by regression tests to prove a reader is counted mid-flight
+    /// (e.g., to verify `in_flight_count() == 1` while a read is parked at
+    /// `lookup_pause_hook`). Not `#[cfg(test)]`-gated — cross-crate test
+    /// consumer, same reason as the other hooks.
+    pub fn reader_gate(&self) -> &crate::reader_drain_gate::ReaderDrainGate {
+        &self.reader_gate
     }
 
     /// P0-3 (#959) test-only: install (or clear with `None`) the deterministic
@@ -1627,9 +1676,17 @@ impl IndexManager {
     /// 2. **P0-3**: persist a durable tombstone (`system:idx_drop`)
     ///    recording that `name_interned` is being dropped — MUST succeed
     ///    before the sweep, so a crash at any later point is recoverable
+    ///
+    /// 2.5. **P0-3a (#1011)**: raise the `reader_gate` intent flag
+    ///    (`begin_drop`) — new readers back off to `Ok(None)`
     /// 3. Retires the definition from the in-memory Vec (planner-invisible
     ///    via RCU swap)
+    ///
+    /// 3.5. **P0-3a (#1011)**: drain in-flight readers
+    ///    (`wait_for_drain`) BEFORE the sweep
     /// 4. Sweeps all posting entries from `info_store`
+    ///
+    /// 4.5. **P0-3a (#1011)**: release the drain gate (`drop(drain_guard)`)
     /// 5. Persists the reduced `IndexInfo` (def removed)
     /// 6. **P0-3**: clears the tombstone
     ///
@@ -1639,6 +1696,10 @@ impl IndexManager {
     /// postings were mid-sweep — silently wrong/incomplete results, the
     /// mirror image of the F-72 CREATE bug. The RCU `remove_index` swap
     /// publishes a Vec without this definition atomically; every NEW reader
+    /// resolves the NEW Vec and falls back to a full scan. The OLD readers
+    /// that already resolved the OLD definition continue to read the OLD
+    /// postings — the drop does NOT start sweeping until they finish (step
+    /// 3.5).
     /// after this point no longer sees the index and falls back to a full
     /// scan. A reader that already snapshotted the old Vec keeps working
     /// against its own consistent view.
@@ -1654,21 +1715,38 @@ impl IndexManager {
     /// sees the tombstone, resumes the sweep (idempotent), removes the stale
     /// definition, persists, and clears the tombstone.
     ///
-    /// P0-3 (#959) sub-bug 3a — in-flight reader consistency (KNOWN GAP):
+    /// P0-3a (#1011) sub-bug 3a — in-flight reader consistency (CLOSED for
+    /// the REGULAR family; still OPEN for the sorted family and index2 —
+    /// tracked separately as #1037 / #1038):
     /// A reader that resolved the definition BEFORE `drop_index` retired it
-    /// holds an `Arc`-snapshot of the Vec and will continue to route a
-    /// lookup through `info_store`'s shared keyspace DURING the sweep. Such
-    /// a reader CAN observe a PARTIALLY-swept keyspace — some posting keys
-    /// already removed, others not yet — returning an incomplete (but never
-    /// wrong/corrupted) result set. `remove_many` only removes; it never
-    /// corrupts existing postings. Fully closing this race requires either
-    /// (a) a per-backend reader-count epoch mechanism (this codebase does
-    /// not have one) or (b) a grace period before the physical sweep — both
-    /// are substantial, separately-scoped work. The engine-side mitigation
-    /// (`TableManager::drop_index` wrapping the call in
-    /// `begin_write_barrier(REGULAR_INDEX_CREATE)`) serializes DROP against
-    /// concurrent WRITERS but does NOT serialize against concurrent READERS.
-    /// See the module doc on `dropping_regular` for the full write-up.
+    /// holds an `Arc`-snapshot of the Vec and will route a lookup through
+    /// `info_store`'s shared keyspace DURING the sweep. WITHOUT
+    /// synchronization such a reader CAN observe a PARTIALLY-swept keyspace —
+    /// some posting keys already removed, others not yet — returning an
+    /// incomplete (but never wrong/corrupted) result set. `remove_many` only
+    /// removes; it never corrupts existing postings.
+    ///
+    /// REGULAR family — CLOSED by the `reader_gate` drain gate (steps 2.5 /
+    /// 3.5 / 4.5 below): `lookup_by_index` acquires a [`reader_gate`](Self::reader_gate)
+    /// `ReadGuard` for the duration of its `info_store` scan, and `drop_index`
+    /// raises the gate's intent flag (step 2.5) before the RCU retire and
+    /// drains every in-flight reader (step 3.5) before the physical sweep — so
+    /// a reader either completes against the FULL pre-sweep keyspace or backs
+    /// off to `Ok(None)` (caller falls back to a full scan). The flag is
+    /// cleared after the sweep (step 4.5). See `crate::reader_drain_gate`'s
+    /// module doc for the memory-model proof and the placement invariant.
+    ///
+    /// SORTED family (#1037) and index2 (#1038) — STILL OPEN: their read
+    /// chokepoints (`lookup_range`/`lookup_min`/`lookup_max`/... and the
+    /// index2 dispatch accessors) do not yet acquire the gate. index2 needs a
+    /// structurally different (lease-based) variant. Until those slices land,
+    /// a concurrent DROP vs. an in-flight sorted/index2 read can still observe
+    /// a partially-swept keyspace on those families.
+    ///
+    /// The engine-side write serialization (`TableManager::drop_index`
+    /// wrapping the call in `begin_write_barrier(REGULAR_INDEX_CREATE)`)
+    /// serializes DROP against concurrent WRITERS (unchanged); the reader gate
+    /// adds the missing reader-vs-DROP serialization for the regular family.
     ///
     /// # Возвращает
     ///
@@ -1690,6 +1768,15 @@ impl IndexManager {
         // in-memory set on persist failure.
         self.add_to_dropping(false, name_interned).await?;
 
+        // P0-3a (#1011) step 2.5: raise the reader-drain gate's intent flag
+        // (SeqCst) BEFORE the RCU retire below. From this point every NEW
+        // `lookup_by_index` reader observes the flag and backs off (`Ok(None)`
+        // → caller falls back to a full scan). The flag stays up until
+        // `drain_guard` is dropped (step 4.5 + RAII safety net on early `?`).
+        // See `crate::reader_drain_gate`'s module doc for the memory-model
+        // proof and the deadlock-exclusion placement invariant.
+        let drain_guard = self.reader_gate.begin_drop();
+
         // F-76 (#903): retire the definition from the planner-visible Vec
         // FIRST (see the method doc). The RCU swap publishes a Vec without
         // this definition atomically.
@@ -1707,6 +1794,18 @@ impl IndexManager {
             hook.wait_at_window().await;
         }
 
+        // P0-3a (#1011) step 3.5: drain every reader that entered
+        // `lookup_by_index` BEFORE the flag went up (the gate's memory model
+        // guarantees such a reader is counted in `in_flight`, so this wait
+        // terminates — see the livelock-freedom argument in the gate's module
+        // doc). AFTER the RCU retire and the pause-hook park, BEFORE the sweep,
+        // so the physical `remove_many` cannot start until no reader is
+        // mid-scan of the shared keyspace. Bounded by the gate's escalating
+        // log; this wait sits inside the already-held
+        // `ddl_admission`+`unique_write_lock` critical section exactly as the
+        // mirror-image `WriterDrainBarrier::drain` does.
+        drain_guard.wait_for_drain().await;
+
         // Sweep the (now orphan, planner-invisible) posting entries.
         // P0-3 (#959): extracted to `sweep_index_postings` so the recovery
         // path can re-run it idempotently.
@@ -1723,6 +1822,16 @@ impl IndexManager {
                  TableManager::verify() to confirm state."
                 ))
             })?;
+
+        // P0-3a (#1011) step 4.5: the sweep finished — explicitly release the
+        // drain gate now so the (unrelated) persist / tombstone-clear steps
+        // below run with the gate already clear. RAII (`drain_guard`'s `Drop`
+        // clears the flag) remains the safety net for every early `?` return
+        // above, but an explicit early drop here mirrors `doctor::repair()`'s
+        // own early-barrier-release style and keeps the drain window as tight
+        // as possible (the flag is up from step 2.5 until HERE — the minimum
+        // span that still covers retire + drain + sweep).
+        drop(drain_guard);
 
         // P0-3 (#959) test seam — park here (sweep complete, reduced
         // IndexInfo NOT yet persisted) if a test installed the post-sweep
@@ -2101,18 +2210,50 @@ impl IndexManager {
         &self,
         name_interned: u64,
         values: &[InnerValue],
-    ) -> DbResult<Arc<[RecordId]>> {
+    ) -> DbResult<Option<Arc<[RecordId]>>> {
         use futures::StreamExt;
+
+        // P0-3a (#1011): acquire the reader-drain guard as the FIRST statement
+        // — before `build_index_key`, before the posting-cache probe, before
+        // anything that touches the shared `info_store` keyspace. `None` means a
+        // DROP INDEX is currently in its raise→sweep window: the caller MUST
+        // NOT read the physical store and MUST fall back (a full table scan, or
+        // an explicit `DbError::NotFound` for the introspection-by-name API) —
+        // collapsing `None` into an empty `Some` would silently convert the
+        // rare "incomplete" into a rare "wrongly empty", which is strictly
+        // worse than the pre-fix status quo. See `crate::reader_drain_gate`'s
+        // module doc for the placement invariant: this guard is always the
+        // INNERMOST synchronization primitive on the read path, so acquiring no
+        // other lock while it is held keeps no lock inversion constructible.
+        let Some(_guard) = self.reader_gate.enter() else {
+            return Ok(None);
+        };
 
         let index_key = build_index_key(false, name_interned, values).to_bytes();
 
         // Opt G: try the in-memory posting cache first. DashMap's
         // sharded RwLock lets unrelated concurrent lookups proceed
         // without serialising on a single mutex.
+        //
+        // P0-3a (#1011): this cache probe MUST be INSIDE the guard's scope
+        // (i.e. after `enter`). A racing reader that populated the cache with a
+        // PARTIAL result AFTER a concurrent sweep's `posting_cache.retain` ran
+        // would otherwise poison the cache with an entry that outlives the DROP
+        // and (same `name_interned` → same physical prefix) gets re-served if
+        // the index name is re-created — finding C-5 in the plan doc.
         // Audit 1.5: cache-HIT — это атомарный refcount-bump через
         // `Arc::clone`, а НЕ полный node-by-node клон `BTreeSet`.
         if let Some(cached) = self.posting_cache.get(&index_key) {
-            return Ok(Arc::clone(cached.value()));
+            return Ok(Some(Arc::clone(cached.value())));
+        }
+
+        // P0-3a (#1011) test seam: park here (guard HELD, scan not yet started)
+        // so a regression test can deterministically hold a read mid-flight
+        // inside the drain window. NOT `#[cfg(test)]`-gated — cross-crate test
+        // consumer, same reason as `drop_index_pause_hook`. `None` on every real
+        // path — one uncontended `ArcSwapOption::load_full()` Acquire load.
+        if let Some(hook) = self.lookup_pause_hook.load_full() {
+            hook.wait_at_window().await;
         }
 
         // Scan the 25-byte index prefix; every match is a posting
@@ -2158,7 +2299,7 @@ impl IndexManager {
         self.posting_cache
             .insert(index_key, Arc::clone(&record_ids_arc));
 
-        Ok(record_ids_arc)
+        Ok(Some(record_ids_arc))
     }
 
     /// Invalidate posting cache entries for every `SetPosting` /

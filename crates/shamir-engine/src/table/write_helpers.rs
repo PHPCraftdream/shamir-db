@@ -392,12 +392,18 @@ impl TableManager {
         // planner produced (Eq → 1 set, In → N sets).
         let mut record_ids: BTreeSet<RecordId> = BTreeSet::new();
         for values in lookup_sets {
-            let ids = self
+            match self
                 .index_manager_ref()
                 .lookup_by_index(idx_name, &values)
-                .await?;
-            // Audit 1.5/3.2: `ids` is now `Arc<[RecordId]>` (sorted slice); iterate.
-            record_ids.extend(ids.iter().copied());
+                .await?
+            {
+                // P0-3a (#1011): `None` = DROP in its drain→sweep window — the
+                // index is momentarily unusable. Signal "no index plan" so the
+                // caller (`execute_update`/`execute_delete`) falls back to its
+                // full scan, instead of returning a partial (wrong) row set.
+                Some(ids) => record_ids.extend(ids.iter().copied()),
+                None => return Ok(None),
+            }
         }
 
         // Compile the residual filter once (if any) so we evaluate it
@@ -451,17 +457,24 @@ impl TableManager {
         if key_fields.len() == 1 {
             let (path, value) = &key_fields[0];
             if let Some(idx_name) = self.find_single_field_index(path) {
-                let ids = self
+                // P0-3a (#1011): `None` = DROP in its drain→sweep window — the
+                // index is momentarily unusable, so fall through to the full
+                // scan below instead of returning `Ok(None)` (which the INSERT
+                // path treats as "no such record exists" — a wrongly-accepted
+                // duplicate / wrongly-overwritten key).
+                if let Some(ids) = self
                     .index_manager_ref()
                     .lookup_by_index(idx_name, std::slice::from_ref(value))
-                    .await?;
-                if let Some(&id) = ids.iter().next() {
-                    let inner = self.get(id).await?;
-                    return Ok(Some((id, inner)));
+                    .await?
+                {
+                    if let Some(&id) = ids.iter().next() {
+                        let inner = self.get(id).await?;
+                        return Ok(Some((id, inner)));
+                    }
+                    // Index says: no record with this key → don't scan,
+                    // INSERT path.
+                    return Ok(None);
                 }
-                // Index says: no record with this key → don't scan,
-                // INSERT path.
-                return Ok(None);
             }
         }
 

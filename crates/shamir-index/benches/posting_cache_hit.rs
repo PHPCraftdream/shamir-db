@@ -89,7 +89,11 @@ async fn build_manager_with_hot_posting(n_postings: usize) -> (IndexManager, Vec
 /// populates the cache), so every subsequent `lookup_by_index` in the
 /// timed closure is a HIT.
 async fn prime_cache(manager: &IndexManager, lookup_values: &[InnerValue]) {
-    let _ = manager.lookup_by_index(1001, lookup_values).await.unwrap();
+    let _ = manager
+        .lookup_by_index(1001, lookup_values)
+        .await
+        .unwrap()
+        .unwrap();
 }
 
 fn rt() -> tokio::runtime::Runtime {
@@ -122,6 +126,7 @@ fn main() {
             // deep-cloned the whole `BTreeSet` (O(|postings|)).
             let ids: Arc<_> = runtime
                 .block_on(manager_ref.lookup_by_index(1001, &lookup_values))
+                .unwrap()
                 .unwrap();
             // `len()` forces the `Arc` to be materialised (not DCE'd) but
             // is itself O(1) via the slice's `len` through the deref.
