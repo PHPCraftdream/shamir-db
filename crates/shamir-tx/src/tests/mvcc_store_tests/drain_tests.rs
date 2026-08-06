@@ -16,6 +16,8 @@ use shamir_storage::types::KvOp;
 use super::helpers::{count_history_entries, make_gate, make_mvcc, make_mvcc_with_gate};
 use crate::version_codec::encode_version_key;
 use shamir_storage::types::RecordKey;
+use std::sync::Arc;
+use std::time::Duration;
 
 /// Read the raw value stored in history under `encode_version_key(key, v)`.
 async fn history_raw(mvcc: &crate::mvcc_store::MvccStore, key: &[u8], v: u64) -> Option<Bytes> {
@@ -322,4 +324,70 @@ async fn drain_on_one_table_does_not_advance_watermark_past_another_undrained_ta
         v_b,
         "once B is ALSO drained, the shared watermark must advance to v_b"
     );
+}
+
+/// #1032: `drain_to_history` holds `drain_exclusive` for its ENTIRE
+/// duration, so a concurrent `write_committed_batch_to_history` (the
+/// background Drainer's periodic path) for the SAME table defers rather
+/// than racing `self.history.transact(...)` against it — the two-callers
+/// race a real CI run showed can hang the underlying store.
+///
+/// Proof, without any pause hook or timing-sensitive assertion beyond the
+/// standard "block until released" shape already used elsewhere in this
+/// codebase (e.g. F-3's admission tests): hold `drain_exclusive`
+/// externally BEFORE spawning `drain_to_history`, so the spawned call is
+/// guaranteed to park on the SAME lock this test already holds — no race
+/// to lose.
+#[tokio::test]
+async fn drain_to_history_blocks_concurrent_batched_drain() {
+    let mvcc = Arc::new(make_mvcc());
+
+    let v = mvcc
+        .set_versioned(
+            RecordKey::from(Bytes::from_static(b"k1")),
+            Bytes::from_static(b"v1"),
+        )
+        .await
+        .unwrap();
+    assert_eq!(mvcc.overlay_len(), 1);
+
+    // Hold the SAME field a real forced drain would hold, BEFORE spawning
+    // drain_to_history — guarantees the spawned call parks here, not a
+    // timing-dependent race to acquire first.
+    let held = mvcc.lock_drain_exclusive_for_test().await;
+
+    let mvcc_spawned = Arc::clone(&mvcc);
+    let drain_task = tokio::spawn(async move { mvcc_spawned.drain_to_history().await });
+
+    tokio::time::sleep(Duration::from_millis(80)).await;
+    assert!(
+        !drain_task.is_finished(),
+        "#1032: drain_to_history must block on drain_exclusive while it is \
+         externally held (pre-fix it took no such lock and would finish \
+         immediately)"
+    );
+    // Nothing drained yet — the overlay entry survives untouched.
+    assert_eq!(
+        mvcc.overlay_len(),
+        1,
+        "overlay must be untouched while drain_to_history is blocked"
+    );
+
+    drop(held);
+
+    drain_task
+        .await
+        .unwrap()
+        .expect("drain_to_history must complete once drain_exclusive is released");
+    assert_eq!(
+        mvcc.overlay_len(),
+        0,
+        "overlay must be drained after unblocking"
+    );
+    assert_eq!(
+        count_history_entries(&mvcc).await,
+        1,
+        "the drained entry must have landed in history"
+    );
+    let _ = v;
 }

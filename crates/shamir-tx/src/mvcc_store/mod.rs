@@ -192,6 +192,24 @@ pub struct MvccStore {
     ts_index: TreeIndex<(Reverse<u64>, Reverse<u64>), ()>,
     /// Whether the ts_index has been populated from history (lazy rebuild on first query).
     ts_index_ready: AtomicBool,
+    /// #1032: mutual exclusion between the two independent paths that both
+    /// write to `history` for this table — the background [`Drainer`]'s
+    /// periodic [`Self::write_committed_batch_to_history`] and a forced,
+    /// synchronous [`Self::drain_to_history`] (table RENAME's Phase F.2).
+    /// Both ultimately call `self.history.transact(...)`; a real CI
+    /// reproduction (task #1032) showed the two calls landing in the same
+    /// second can hang indefinitely — the doc at A14 (`pending_ts`, above)
+    /// already anticipated the two paths racing for the SAME data and
+    /// judged it data-safe (idempotent ops), but never anticipated the
+    /// underlying storage layer hanging under two genuinely concurrent
+    /// `transact` calls. `drain_to_history` holds this for its ENTIRE
+    /// duration (a one-shot admin op, low frequency, `tokio::sync::Mutex`
+    /// is the sanctioned exception for "guard held across `.await`,
+    /// bounded contention" per CLAUDE.md); `write_committed_batch_to_history`
+    /// (the Drainer's periodic path) only `try_lock`s — on contention it
+    /// defers this table to the next tick rather than blocking the
+    /// Drainer's whole loop on one table.
+    drain_exclusive: tokio::sync::Mutex<()>,
 }
 
 impl MvccStore {
@@ -213,7 +231,19 @@ impl MvccStore {
             vacuum_needs_scan: AtomicBool::new(false),
             ts_index: TreeIndex::new(),
             ts_index_ready: AtomicBool::new(false),
+            drain_exclusive: tokio::sync::Mutex::new(()),
         }
+    }
+
+    /// #1032 test seam: hold `drain_exclusive` externally so a test can
+    /// deterministically prove `write_committed_batch_to_history`/
+    /// `drain_to_history` back off / block on contention, without timing.
+    /// Intra-crate only (`crate::tests::mvcc_store_tests`) — `#[cfg(test)]`
+    /// is correct here, unlike the cross-crate pause hooks elsewhere in this
+    /// codebase that must stay production-compiled.
+    #[cfg(test)]
+    pub(crate) async fn lock_drain_exclusive_for_test(&self) -> tokio::sync::MutexGuard<'_, ()> {
+        self.drain_exclusive.lock().await
     }
 
     /// F-71 (#898): the repo-wide committed watermark this store's `gate`

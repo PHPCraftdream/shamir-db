@@ -347,3 +347,50 @@ async fn batch_seeds_cells_correctly() {
         "cell should be seeded to latest version"
     );
 }
+
+// =========================================================================
+// 5. #1032: batched drain defers (does NOT write) while `drain_exclusive`
+// is held by a concurrent forced `drain_to_history` (table RENAME's Phase
+// F.2) — deterministic, no real concurrency needed: externally hold the
+// same field a forced drain would hold, call the batched path, and prove
+// nothing landed in history. Then release and prove the SAME pass now
+// succeeds normally. This is the mechanism that closes the CI-reproduced
+// hang (task #1032): two concurrent `self.history.transact(...)` callers
+// for the same table could hang the underlying store; this mutual
+// exclusion prevents them from ever running concurrently.
+// =========================================================================
+#[tokio::test]
+async fn batched_drain_defers_when_drain_exclusive_held() {
+    let (mvcc, _, gate) = make_counting_mvcc();
+
+    let v = gate.assign_next_version();
+    let pass = vec![(
+        v,
+        vec![KvOp::Set(
+            Bytes::from_static(b"dk").into(),
+            Bytes::from_static(b"dv"),
+        )],
+    )];
+
+    let held = mvcc.lock_drain_exclusive_for_test().await;
+
+    mvcc.write_committed_batch_to_history(&pass)
+        .await
+        .expect("deferring is Ok(()), not an error");
+    assert_eq!(
+        scan_history(&mvcc).await.0.len(),
+        0,
+        "#1032: batched drain must defer (write nothing) while drain_exclusive is held"
+    );
+
+    drop(held);
+
+    mvcc.write_committed_batch_to_history(&pass)
+        .await
+        .expect("batched drain must succeed once drain_exclusive is released");
+    assert_eq!(
+        scan_history(&mvcc).await.0.len(),
+        1,
+        "batched drain must actually write once the lock is free"
+    );
+}

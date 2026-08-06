@@ -48,6 +48,12 @@ impl MvccStore {
         // inside it. Adding a log per meaningful step below so the next CI
         // recurrence pinpoints the exact stuck `.await`.
         log::debug!("drain_to_history: enter");
+        // #1032: exclude the background Drainer's `write_committed_batch_to_history`
+        // from this table for the ENTIRE duration of this force-drain — see
+        // `drain_exclusive`'s field doc (`mvcc_store/mod.rs`) for why two
+        // concurrent history-store writers can hang, not just race on data.
+        let _drain_guard = self.drain_exclusive.lock().await;
+        log::debug!("drain_to_history: acquired drain_exclusive");
         // Snapshot the visibility watermark ONCE. New writes landing after this
         // point are NOT drained (they belong to the next drain pass / drainer).
         let visibility = self.gate.last_committed();
