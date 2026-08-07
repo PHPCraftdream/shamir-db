@@ -498,24 +498,6 @@ impl AddSchemaRuleBuilder {
     }
 }
 
-impl From<AddSchemaRuleBuilder> for BatchOp {
-    fn from(b: AddSchemaRuleBuilder) -> Self {
-        // The `From` conversion is the infallible escape hatch used by the
-        // ergonomic `Batch::*` API (which itself is infallible). It preserves
-        // the historical panic-on-malformed-builder behavior; callers wanting
-        // a typed error should call `.build()` directly.
-        b.build()
-            .expect("AddSchemaRuleBuilder::into(): rule is required")
-    }
-}
-
-impl IntoBatchOp for AddSchemaRuleBuilder {
-    fn into_batch_op(self) -> BatchOp {
-        self.build()
-            .expect("AddSchemaRuleBuilder::into_batch_op(): rule is required")
-    }
-}
-
 // ── remove_schema_rule ─────────────────────────────────────────────────
 
 /// Remove a rule from a table's schema by path.

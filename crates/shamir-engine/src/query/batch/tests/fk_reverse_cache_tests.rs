@@ -163,10 +163,11 @@ async fn insert_child(resolver: &FkTestResolver, parent_id: i64) {
 async fn try_delete_parent(resolver: &FkTestResolver, id: i64) -> Result<(), String> {
     let mut b = Batch::new();
     b.id(3);
-    b.delete(
+    b.try_delete(
         "del_parent",
         write::delete("parent").where_(filter::eq("id", id)),
-    );
+    )
+    .unwrap();
     let req = b.build();
     match execute_batch(&req, resolver, None, None, Actor::System, "test").await {
         Ok(resp) => {

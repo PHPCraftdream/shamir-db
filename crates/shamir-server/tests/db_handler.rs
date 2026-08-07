@@ -212,36 +212,41 @@ async fn read_with_filter_order_limit_returns_full_payload() {
     let mut b = Batch::new();
     b.id("seed");
     b.return_only(std::iter::empty::<String>());
-    b.upsert(
+    b.try_upsert(
         "s1",
         upsert("items")
             .key(mpack!({"id": "a"}))
             .value(doc! { "id" => "a", "qty" => 3 }),
-    );
-    b.upsert(
+    )
+    .unwrap();
+    b.try_upsert(
         "s2",
         upsert("items")
             .key(mpack!({"id": "b"}))
             .value(doc! { "id" => "b", "qty" => 1 }),
-    );
-    b.upsert(
+    )
+    .unwrap();
+    b.try_upsert(
         "s3",
         upsert("items")
             .key(mpack!({"id": "c"}))
             .value(doc! { "id" => "c", "qty" => 4 }),
-    );
-    b.upsert(
+    )
+    .unwrap();
+    b.try_upsert(
         "s4",
         upsert("items")
             .key(mpack!({"id": "d"}))
             .value(doc! { "id" => "d", "qty" => 1 }),
-    );
-    b.upsert(
+    )
+    .unwrap();
+    b.try_upsert(
         "s5",
         upsert("items")
             .key(mpack!({"id": "e"}))
             .value(doc! { "id" => "e", "qty" => 5 }),
-    );
+    )
+    .unwrap();
     let seed = execute_built("prod", b.build());
     let _ = handler
         .handle(
@@ -320,36 +325,41 @@ async fn multi_query_batch_with_query_reference() {
     let mut b = Batch::new();
     b.id("seed");
     b.return_only(std::iter::empty::<String>());
-    b.upsert(
+    b.try_upsert(
         "u1",
         upsert("users")
             .key(mpack!({"id": 1}))
             .value(doc! { "id" => 1, "name" => "alice" }),
-    );
-    b.upsert(
+    )
+    .unwrap();
+    b.try_upsert(
         "u2",
         upsert("users")
             .key(mpack!({"id": 2}))
             .value(doc! { "id" => 2, "name" => "bob" }),
-    );
-    b.upsert(
+    )
+    .unwrap();
+    b.try_upsert(
         "o1",
         upsert("orders")
             .key(mpack!({"id": 100}))
             .value(doc! { "id" => 100, "user_id" => 1, "amt" => 9 }),
-    );
-    b.upsert(
+    )
+    .unwrap();
+    b.try_upsert(
         "o2",
         upsert("orders")
             .key(mpack!({"id": 101}))
             .value(doc! { "id" => 101, "user_id" => 1, "amt" => 4 }),
-    );
-    b.upsert(
+    )
+    .unwrap();
+    b.try_upsert(
         "o3",
         upsert("orders")
             .key(mpack!({"id": 102}))
             .value(doc! { "id" => 102, "user_id" => 2, "amt" => 7 }),
-    );
+    )
+    .unwrap();
     let seed = execute_built("prod", b.build());
     let _ = handler
         .handle(
@@ -449,12 +459,13 @@ async fn admin_batch_allowed_for_superuser() {
     // Verify table is usable: insert + read back.
     let mut b = Batch::new();
     b.id("rw");
-    b.upsert(
+    b.try_upsert(
         "ins",
         upsert("inventory")
             .key(mpack!({"sku": "X1"}))
             .value(doc! { "sku" => "X1", "stock" => 42 }),
-    );
+    )
+    .unwrap();
     b.query("rd", Query::from("inventory"));
     let rw = execute_built("prod", b.build());
     let res2 = decode(
@@ -922,12 +933,13 @@ async fn shomer_dac_denies_non_owner_through_handler_wire() {
     let mut b = Batch::new();
     b.id("seed");
     b.return_only(std::iter::empty::<String>());
-    b.upsert(
+    b.try_upsert(
         "s",
         upsert("secret")
             .key(mpack!({"id": 1}))
             .value(doc! { "id" => 1, "data" => "classified" }),
-    );
+    )
+    .unwrap();
     shamir.execute("acl", &b.build()).await.expect("seed");
 
     // Restrict the table: owner=User(1), mode=0o700 (owner rwx, nobody else).

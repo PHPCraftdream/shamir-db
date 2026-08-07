@@ -17,22 +17,18 @@ use crate::filter;
 use crate::wire::ToWire;
 use crate::write::{self, doc, BuilderError};
 
-/// Build two batches — one via a fallible `try_*` method, one via the
-/// existing non-try method — and assert their wire shapes are identical via
-/// msgpack round-trip.
-fn assert_try_matches_non_try(
-    try_path: impl FnOnce(&mut Batch),
-    non_try_path: impl FnOnce(&mut Batch),
-) {
+/// Build two batches via the fallible `try_*` method and assert their wire
+/// shapes are identical via msgpack round-trip (determinism guard).
+fn assert_try_path_deterministic(try_path: impl Fn(&mut Batch)) {
     let mut b1 = Batch::new();
     try_path(&mut b1);
     let j1 = b1.build().to_query_value().unwrap();
 
     let mut b2 = Batch::new();
-    non_try_path(&mut b2);
+    try_path(&mut b2);
     let j2 = b2.build().to_query_value().unwrap();
 
-    assert_eq!(j1, j2, "try_* path must produce the same wire shape");
+    assert_eq!(j1, j2, "try_* path must be deterministic");
 }
 
 // ============================================================================
@@ -49,20 +45,15 @@ fn try_update_without_set_returns_missing_set_value() {
 }
 
 #[test]
-fn try_update_happy_path_matches_non_try() {
+fn try_update_happy_path_produces_valid_batch() {
     let upd = || {
         write::update("users")
             .where_(filter::eq("id", 1))
             .set(doc().set("name", "Bob"))
     };
-    assert_try_matches_non_try(
-        |b| {
-            b.try_update("u", upd()).unwrap();
-        },
-        |b| {
-            b.update("u", upd());
-        },
-    );
+    assert_try_path_deterministic(|b| {
+        b.try_update("u", upd()).unwrap();
+    });
 }
 
 // ============================================================================
@@ -88,20 +79,15 @@ fn try_upsert_without_value_returns_missing_value() {
 }
 
 #[test]
-fn try_upsert_happy_path_matches_non_try() {
+fn try_upsert_happy_path_produces_valid_batch() {
     let ups = || {
         write::upsert("cache")
             .key(shamir_types::mpack!("k1"))
             .value(doc().set("v", 42))
     };
-    assert_try_matches_non_try(
-        |b| {
-            b.try_upsert("s", ups()).unwrap();
-        },
-        |b| {
-            b.upsert("s", ups());
-        },
-    );
+    assert_try_path_deterministic(|b| {
+        b.try_upsert("s", ups()).unwrap();
+    });
 }
 
 // ============================================================================
@@ -116,16 +102,11 @@ fn try_delete_without_where_returns_missing_where_clause() {
 }
 
 #[test]
-fn try_delete_happy_path_matches_non_try() {
+fn try_delete_happy_path_produces_valid_batch() {
     let del = || write::delete("sessions").where_(filter::eq("expired", true));
-    assert_try_matches_non_try(
-        |b| {
-            b.try_delete("d", del()).unwrap();
-        },
-        |b| {
-            b.delete("d", del());
-        },
-    );
+    assert_try_path_deterministic(|b| {
+        b.try_delete("d", del()).unwrap();
+    });
 }
 
 // ============================================================================
@@ -142,16 +123,11 @@ fn try_add_schema_rule_without_rule_returns_missing_rule() {
 }
 
 #[test]
-fn try_add_schema_rule_happy_path_matches_non_try() {
+fn try_add_schema_rule_happy_path_produces_valid_batch() {
     let rule = || ddl::add_schema_rule("users").rule(ddl::field(["status"]).string());
-    assert_try_matches_non_try(
-        |b| {
-            b.try_add_schema_rule("r", rule()).unwrap();
-        },
-        |b| {
-            b.add_schema_rule("r", rule());
-        },
-    );
+    assert_try_path_deterministic(|b| {
+        b.try_add_schema_rule("r", rule()).unwrap();
+    });
 }
 
 // ============================================================================
@@ -168,16 +144,11 @@ fn try_op_alter_subscription_without_action_returns_missing_action() {
 }
 
 #[test]
-fn try_op_alter_subscription_happy_path_matches_non_try() {
+fn try_op_alter_subscription_happy_path_produces_valid_batch() {
     let alter = || ddl::alter_subscription("sub1").pause();
-    assert_try_matches_non_try(
-        |b| {
-            b.try_op("sub", alter()).unwrap();
-        },
-        |b| {
-            b.op("sub", alter());
-        },
-    );
+    assert_try_path_deterministic(|b| {
+        b.try_op("sub", alter()).unwrap();
+    });
 }
 
 // ============================================================================

@@ -116,12 +116,13 @@ fn execute_bytes_with_durability(i: usize, durability: Option<&str>) -> Vec<u8> 
             other => panic!("unknown durability: {other}"),
         }
     }
-    b.upsert(
+    b.try_upsert(
         format!("w{i}"),
         upsert("items")
             .key(mpack!({ "id": @(QueryValue::from(id.as_str())) }))
             .value(doc! { "id" => id.clone(), "v" => i as i64 }),
-    );
+    )
+    .unwrap();
     let req = DbRequest::Execute {
         query_version: shamir_server::version::CURRENT_QUERY_LANG_VERSION,
         db: "app".into(),

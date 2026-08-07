@@ -192,10 +192,11 @@ async fn test_batch_with_delete() {
     // Delete inactive, then read
     let mut b = Batch::new();
     b.id(1);
-    b.delete(
+    b.try_delete(
         "cleanup",
         write::delete("users").where_(shamir_query_builder::filter::eq("status", "inactive")),
-    );
+    )
+    .unwrap();
     let req = b.build();
 
     let resp = execute_batch(&req, &resolver, None, None, Actor::System, "test")

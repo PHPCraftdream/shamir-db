@@ -264,22 +264,24 @@ async fn interactive_ssi_write_skew_across_calls_one_aborts() {
     // Call #2 on EACH tx: UPDATE the row the OTHER tx also read.
     let mut b = Batch::new();
     b.id(2);
-    b.update(
+    b.try_update(
         "w",
         write::update("users")
             .where_(shamir_query_builder::filter::eq("name", "alice"))
             .set(doc().set("val", "a2")),
-    );
+    )
+    .unwrap();
     let update_alice = b.build();
 
     let mut b = Batch::new();
     b.id(2);
-    b.update(
+    b.try_update(
         "w",
         write::update("users")
             .where_(shamir_query_builder::filter::eq("name", "bob"))
             .set(doc().set("val", "b2")),
-    );
+    )
+    .unwrap();
     let update_bob = b.build();
 
     let _ra2 = execute_in_open_tx(

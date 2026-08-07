@@ -228,7 +228,11 @@ async fn pause_stops_loop() {
     wait_for_bookmark(&follower, v1).await;
 
     // Pause → reconcile stops the loop.
-    alter(&follower, alter_subscription("sub_a").pause().into()).await;
+    alter(
+        &follower,
+        alter_subscription("sub_a").pause().build().unwrap(),
+    )
+    .await;
     sup.notify_changed().await;
     assert!(!sup.is_running("sub_a"), "paused loop must be deregistered");
     assert_eq!(sup.active_count(), 0);
@@ -263,7 +267,11 @@ async fn resume_restarts_loop() {
     sup.reconcile().await;
     wait_for_bookmark(&follower, v1).await;
 
-    alter(&follower, alter_subscription("sub_a").pause().into()).await;
+    alter(
+        &follower,
+        alter_subscription("sub_a").pause().build().unwrap(),
+    )
+    .await;
     sup.notify_changed().await;
     assert!(!sup.is_running("sub_a"));
 
@@ -272,7 +280,11 @@ async fn resume_restarts_loop() {
     let v2 = leader.current_commit_version("app", "main").await.unwrap();
 
     // Resume → reconcile restarts the loop → catches up to v2.
-    alter(&follower, alter_subscription("sub_a").resume().into()).await;
+    alter(
+        &follower,
+        alter_subscription("sub_a").resume().build().unwrap(),
+    )
+    .await;
     sup.notify_changed().await;
     assert!(sup.is_running("sub_a"), "resumed loop must be registered");
 

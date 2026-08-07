@@ -110,7 +110,8 @@ async fn alter_subscription_pause_resume_set_profile() {
     // pause → state paused
     let mut b = Batch::new();
     b.id(2);
-    b.op("alt", alter_subscription("sub_a").pause());
+    b.try_op("alt", alter_subscription("sub_a").pause())
+        .unwrap();
     shamir
         .execute("testdb", &b.to_request_via_msgpack())
         .await
@@ -123,7 +124,8 @@ async fn alter_subscription_pause_resume_set_profile() {
     // resume → state active
     let mut b = Batch::new();
     b.id(3);
-    b.op("alt", alter_subscription("sub_a").resume());
+    b.try_op("alt", alter_subscription("sub_a").resume())
+        .unwrap();
     shamir
         .execute("testdb", &b.to_request_via_msgpack())
         .await
@@ -136,7 +138,8 @@ async fn alter_subscription_pause_resume_set_profile() {
     // set_profile → profile updated
     let mut b = Batch::new();
     b.id(4);
-    b.op("alt", alter_subscription("sub_a").set_profile("profile_b"));
+    b.try_op("alt", alter_subscription("sub_a").set_profile("profile_b"))
+        .unwrap();
     shamir
         .execute("testdb", &b.to_request_via_msgpack())
         .await
@@ -316,7 +319,8 @@ async fn resync_required_round_trips_through_status_and_list_then_resume_recover
     // — no new admin action is needed for this new state value.
     let mut b = Batch::new();
     b.id(4);
-    b.op("alt", alter_subscription("sub_a").resume());
+    b.try_op("alt", alter_subscription("sub_a").resume())
+        .unwrap();
     shamir
         .execute("testdb", &b.to_request_via_msgpack())
         .await

@@ -157,7 +157,8 @@ fn insert_request(id: &str, record: QueryValue) -> BatchRequest {
 fn update_request(id: &str, key: &str, set: QueryValue) -> BatchRequest {
     let mut b = Batch::new();
     b.id(id);
-    b.update("upd", update("docs").where_(eq("key", key)).set(set));
+    b.try_update("upd", update("docs").where_(eq("key", key)).set(set))
+        .unwrap();
     b.to_request_via_msgpack()
 }
 

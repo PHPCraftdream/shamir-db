@@ -80,13 +80,14 @@ async fn update_record(shamir: &ShamirDb, db: &str, table: &str, name: &str, new
     use shamir_query_builder::write::update;
     let mut b = Batch::new();
     b.id(2);
-    b.update(
+    b.try_update(
         "u",
         update(table).where_(eq("name", name)).set(doc! {
             "name" => name,
             "age"  => new_age,
         }),
-    );
+    )
+    .unwrap();
     shamir
         .execute(db, &b.to_request_via_msgpack())
         .await

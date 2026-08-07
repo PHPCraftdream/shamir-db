@@ -234,12 +234,12 @@ async fn seed_users_inner(shamir: &ShamirDb, n: usize, table: &str) {
 
 fn req_set_one(target_id: &str, score: i64) -> BatchRequest {
     let mut b = Batch::new();
-    b.id("s").return_flagged().upsert(
+    b.id("s").return_flagged().try_upsert(
         "s",
         write::upsert("users")
             .key(mpack!({ "id": @(QueryValue::from(target_id)) }))
             .value(mpack!({ "id": @(QueryValue::from(target_id)), "score": @(QueryValue::from(score)), "name": "Updated", "active": true })),
-    );
+    ).unwrap();
     b.build()
 }
 
@@ -259,12 +259,15 @@ fn req_read_by_city(city: &str) -> BatchRequest {
 
 fn req_update_by_id(target_id: &str) -> BatchRequest {
     let mut b = Batch::new();
-    b.id("u").return_flagged().update(
-        "u",
-        write::update("users")
-            .where_(f::eq("id", target_id))
-            .set(mpack!({ "score": 1234 })),
-    );
+    b.id("u")
+        .return_flagged()
+        .try_update(
+            "u",
+            write::update("users")
+                .where_(f::eq("id", target_id))
+                .set(mpack!({ "score": 1234 })),
+        )
+        .unwrap();
     b.build()
 }
 
@@ -272,7 +275,8 @@ fn req_delete_by_id(target_id: &str) -> BatchRequest {
     let mut b = Batch::new();
     b.id("d")
         .return_flagged()
-        .delete("d", write::delete("users").where_(f::eq("id", target_id)));
+        .try_delete("d", write::delete("users").where_(f::eq("id", target_id)))
+        .unwrap();
     b.build()
 }
 
@@ -1056,12 +1060,12 @@ fn main() {
                         let id = counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                         handles.push(tokio::spawn(async move {
                             let mut b = Batch::new();
-                            b.id(id).upsert(
+                            b.id(id).try_upsert(
                                 "ups",
                                 write::upsert("users").key(mpack!({ "id": @(QueryValue::from(id)) })).value(
                                     mpack!({ "id": @(QueryValue::from(id)), "name": @(QueryValue::from(format!("w{id}"))), "score": @(QueryValue::from(id)) }),
                                 ),
-                            );
+                            ).unwrap();
                             let req = b.build();
                             s.execute("bench", &req).await.unwrap();
                         }));
@@ -1299,12 +1303,12 @@ fn main() {
             let mut b = Batch::new();
             b.id("flat_nb").return_flagged();
             b.query("user", Query::from("users").where_eq("id", TARGET));
-            b.upsert(
+            b.try_upsert(
                 "write",
                 write::upsert("users")
                     .key(mpack!({ "id": @(QueryValue::from(TARGET)) }))
                     .value(mpack!({ "id": @(QueryValue::from(TARGET)), "score": @(QueryValue::from(SCORE)), "name": "Bench", "active": true })),
-            );
+            ).unwrap();
             b.build()
         };
 
@@ -1313,12 +1317,12 @@ fn main() {
             let inner = {
                 let mut ib = Batch::new();
                 ib.id("inner_nb").return_flagged();
-                ib.upsert(
+                ib.try_upsert(
                     "write",
                     write::upsert("users").key(mpack!({ "id": @(QueryValue::from(TARGET)) })).value(
                         mpack!({ "id": @(QueryValue::from(TARGET)), "score": @(QueryValue::from(SCORE)), "name": "Bench", "active": true }),
                     ),
-                );
+                ).unwrap();
                 ib.build()
             };
 

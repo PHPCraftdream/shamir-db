@@ -285,12 +285,13 @@ fn create_table_req(name: &str) -> DbRequest {
 fn write_req(table: &str, sku: &str, qty: i64) -> DbRequest {
     let mut b = shamir_query_builder::batch::Batch::new();
     b.id("wr");
-    b.upsert(
+    b.try_upsert(
         "ins",
         shamir_query_builder::write::upsert(table)
             .key(mpack!({"sku": @(QueryValue::from(sku))}))
             .value(shamir_query_builder::doc! { "sku" => sku, "qty" => qty }),
-    );
+    )
+    .unwrap();
     DbRequest::Execute {
         query_version: shamir_server::version::CURRENT_QUERY_LANG_VERSION,
         db: "default".into(),

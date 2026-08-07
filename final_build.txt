@@ -1,0 +1,2364 @@
+   Compiling shamir-db v0.1.0-alpha.1 (D:\dev\rust\shamir-db\crates\shamir-db)
+   Compiling shamir-engine v0.1.0-alpha.1 (D:\dev\rust\shamir-db\crates\shamir-engine)
+   Compiling shamir-server v0.1.0-alpha.1 (D:\dev\rust\shamir-db\crates\shamir-server)
+error[E0277]: the trait bound `shamir_query_builder::write::Update: IntoBatchOp` is not satisfied
+   --> crates\shamir-db\tests\declarative_schema_stamping_e2e.rs:78:9
+    |
+ 76 |       b.update(
+    |         ------ required by a bound introduced by this call
+ 77 |           "upd",
+ 78 | /         update("events")
+ 79 | |             .where_(eq(filter_key, filter_val))
+ 80 | |             .set(set_map),
+    | |_________________________^ the trait `IntoBatchOp` is not implemented for `shamir_query_builder::write::Update`
+    |
+    = help: the following other types implement trait `IntoBatchOp`:
+              AlterBufferCfg
+              BatchOp
+              CallOp
+              ChgrpBuilder
+              CommitMig
+              DeleteOp
+              DescribeTableBuilder
+              DropValidator_
+            and 55 others
+note: required by a bound in `shamir_query_builder::batch::Batch::update`
+   --> D:\dev\rust\shamir-db\crates\shamir-query-builder\src\batch\batch.rs:198:65
+    |
+198 |     pub fn update(&mut self, alias: impl Into<String>, op: impl IntoBatchOp) -> Handle {
+    |                                                                 ^^^^^^^^^^^ required by this bound in `Batch::update`
+
+error[E0277]: the trait bound `shamir_query_builder::write::Update: IntoBatchOp` is not satisfied
+   --> crates\shamir-db\tests\cas_sequenced_e2e.rs:160:21
+    |
+160 |     b.update("upd", update("docs").where_(eq("key", key)).set(set));
+    |       ------        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the trait `IntoBatchOp` is not implemented for `shamir_query_builder::write::Update`
+    |       |
+    |       required by a bound introduced by this call
+    |
+    = help: the following other types implement trait `IntoBatchOp`:
+              AlterBufferCfg
+              BatchOp
+              CallOp
+              ChgrpBuilder
+              CommitMig
+              DeleteOp
+              DescribeTableBuilder
+              DropValidator_
+            and 55 others
+note: required by a bound in `shamir_query_builder::batch::Batch::update`
+   --> D:\dev\rust\shamir-db\crates\shamir-query-builder\src\batch\batch.rs:198:65
+    |
+198 |     pub fn update(&mut self, alias: impl Into<String>, op: impl IntoBatchOp) -> Handle {
+    |                                                                 ^^^^^^^^^^^ required by this bound in `Batch::update`
+
+error[E0277]: the trait bound `shamir_query_builder::write::Update: IntoBatchOp` is not satisfied
+   --> crates\shamir-db\tests\purge_history.rs:85:9
+    |
+ 83 |       b.update(
+    |         ------ required by a bound introduced by this call
+ 84 |           "u",
+ 85 | /         update(table).where_(eq("name", name)).set(doc! {
+ 86 | |             "name" => name,
+ 87 | |             "age"  => new_age,
+ 88 | |         }),
+    | |__________^ the trait `IntoBatchOp` is not implemented for `shamir_query_builder::write::Update`
+    |
+    = help: the following other types implement trait `IntoBatchOp`:
+              AlterBufferCfg
+              BatchOp
+              CallOp
+              ChgrpBuilder
+              CommitMig
+              DeleteOp
+              DescribeTableBuilder
+              DropValidator_
+            and 55 others
+note: required by a bound in `shamir_query_builder::batch::Batch::update`
+   --> D:\dev\rust\shamir-db\crates\shamir-query-builder\src\batch\batch.rs:198:65
+    |
+198 |     pub fn update(&mut self, alias: impl Into<String>, op: impl IntoBatchOp) -> Handle {
+    |                                                                 ^^^^^^^^^^^ required by this bound in `Batch::update`
+
+error[E0277]: the trait bound `shamir_query_builder::write::Update: IntoBatchOp` is not satisfied
+   --> crates\shamir-db\tests\declarative_schema_unique_e2e.rs:615:9
+    |
+613 |       b.update(
+    |         ------ required by a bound introduced by this call
+614 |           "upd",
+615 | /         update("users")
+616 | |             .where_(eq("email", "alice@skip.com"))
+617 | |             .set(mpack!({
+618 | |                 "name": "Alicia"
+619 | |             })),
+    | |_______________^ the trait `IntoBatchOp` is not implemented for `shamir_query_builder::write::Update`
+    |
+    = help: the following other types implement trait `IntoBatchOp`:
+              AlterBufferCfg
+              BatchOp
+              CallOp
+              ChgrpBuilder
+              CommitMig
+              DeleteOp
+              DescribeTableBuilder
+              DropValidator_
+            and 55 others
+note: required by a bound in `shamir_query_builder::batch::Batch::update`
+   --> D:\dev\rust\shamir-db\crates\shamir-query-builder\src\batch\batch.rs:198:65
+    |
+198 |     pub fn update(&mut self, alias: impl Into<String>, op: impl IntoBatchOp) -> Handle {
+    |                                                                 ^^^^^^^^^^^ required by this bound in `Batch::update`
+
+error[E0277]: the trait bound `shamir_query_builder::write::Delete: IntoBatchOp` is not satisfied
+   --> crates\shamir-db\tests\declarative_schema_fk_ondelete_e2e.rs:159:9
+    |
+157 |     b.delete(
+    |       ------ required by a bound introduced by this call
+158 |         "d",
+159 |         delete("departments").where_(shamir_query_builder::filter::eq("dept_id", 100)),
+    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the trait `IntoBatchOp` is not implemented for `shamir_query_builder::write::Delete`
+    |
+    = help: the following other types implement trait `IntoBatchOp`:
+              AlterBufferCfg
+              BatchOp
+              CallOp
+              ChgrpBuilder
+              CommitMig
+              DeleteOp
+              DescribeTableBuilder
+              DropValidator_
+            and 55 others
+note: required by a bound in `shamir_query_builder::batch::Batch::delete`
+   --> D:\dev\rust\shamir-db\crates\shamir-query-builder\src\batch\batch.rs:232:65
+    |
+232 |     pub fn delete(&mut self, alias: impl Into<String>, op: impl IntoBatchOp) -> Handle {
+    |                                                                 ^^^^^^^^^^^ required by this bound in `Batch::delete`
+
+For more information about this error, try `rustc --explain E0277`.
+error: could not compile `shamir-db` (test "declarative_schema_stamping_e2e") due to 1 previous error
+warning: build failed, waiting for other jobs to finish...
+error: could not compile `shamir-db` (test "cas_sequenced_e2e") due to 1 previous error
+error: could not compile `shamir-db` (test "purge_history") due to 1 previous error
+error: could not compile `shamir-db` (test "declarative_schema_fk_ondelete_e2e") due to 1 previous error
+error: could not compile `shamir-db` (test "declarative_schema_unique_e2e") due to 1 previous error
+error[E0277]: the trait bound `shamir_query_builder::write::Update: IntoBatchOp` is not satisfied
+   --> crates\shamir-db\src\shamir_db\tests\execute_tests.rs:99:9
+    |
+ 97 |       b.update(
+    |         ------ required by a bound introduced by this call
+ 98 |           "upd",
+ 99 | /         update("users")
+100 | |             .where_(eq("name", "Bob"))
+101 | |             .set(doc().set("status", "active"))
+102 | |             .returning(UpdateReturnMode::Changed),
+    | |_________________________________________________^ the trait `IntoBatchOp` is not implemented for `shamir_query_builder::write::Update`
+    |
+    = help: the following other types implement trait `IntoBatchOp`:
+              AlterBufferCfg
+              BatchOp
+              CallOp
+              ChgrpBuilder
+              CommitMig
+              DeleteOp
+              DescribeTableBuilder
+              DropValidator_
+            and 55 others
+note: required by a bound in `shamir_query_builder::batch::Batch::update`
+   --> D:\dev\rust\shamir-db\crates\shamir-query-builder\src\batch\batch.rs:198:65
+    |
+198 |     pub fn update(&mut self, alias: impl Into<String>, op: impl IntoBatchOp) -> Handle {
+    |                                                                 ^^^^^^^^^^^ required by this bound in `Batch::update`
+
+error[E0277]: the trait bound `shamir_query_builder::write::Delete: IntoBatchOp` is not satisfied
+   --> crates\shamir-db\src\shamir_db\tests\execute_tests.rs:115:21
+    |
+115 |     b.delete("del", delete("users").where_(eq("name", "Carol")));
+    |       ------        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the trait `IntoBatchOp` is not implemented for `shamir_query_builder::write::Delete`
+    |       |
+    |       required by a bound introduced by this call
+    |
+    = help: the following other types implement trait `IntoBatchOp`:
+              AlterBufferCfg
+              BatchOp
+              CallOp
+              ChgrpBuilder
+              CommitMig
+              DeleteOp
+              DescribeTableBuilder
+              DropValidator_
+            and 55 others
+note: required by a bound in `shamir_query_builder::batch::Batch::delete`
+   --> D:\dev\rust\shamir-db\crates\shamir-query-builder\src\batch\batch.rs:232:65
+    |
+232 |     pub fn delete(&mut self, alias: impl Into<String>, op: impl IntoBatchOp) -> Handle {
+    |                                                                 ^^^^^^^^^^^ required by this bound in `Batch::delete`
+
+error[E0277]: the trait bound `shamir_query_builder::write::Delete: IntoBatchOp` is not satisfied
+   --> crates\shamir-db\src\shamir_db\tests\execute_tests.rs:151:9
+    |
+149 |     b.delete(
+    |       ------ required by a bound introduced by this call
+150 |         "del",
+151 |         delete("users").where_(eq("status", "active")).returning(),
+    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the trait `IntoBatchOp` is not implemented for `shamir_query_builder::write::Delete`
+    |
+    = help: the following other types implement trait `IntoBatchOp`:
+              AlterBufferCfg
+              BatchOp
+              CallOp
+              ChgrpBuilder
+              CommitMig
+              DeleteOp
+              DescribeTableBuilder
+              DropValidator_
+            and 55 others
+note: required by a bound in `shamir_query_builder::batch::Batch::delete`
+   --> D:\dev\rust\shamir-db\crates\shamir-query-builder\src\batch\batch.rs:232:65
+    |
+232 |     pub fn delete(&mut self, alias: impl Into<String>, op: impl IntoBatchOp) -> Handle {
+    |                                                                 ^^^^^^^^^^^ required by this bound in `Batch::delete`
+
+error[E0277]: the trait bound `AlterSubscriptionBuilder: IntoBatchOp` is not satisfied
+   --> crates\shamir-db\src\shamir_db\tests\replication_ddl_tests.rs:113:17
+    |
+113 |     b.op("alt", alter_subscription("sub_a").pause());
+    |       --        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the trait `IntoBatchOp` is not implemented for `AlterSubscriptionBuilder`
+    |       |
+    |       required by a bound introduced by this call
+    |
+    = help: the following other types implement trait `IntoBatchOp`:
+              AlterBufferCfg
+              BatchOp
+              CallOp
+              ChgrpBuilder
+              CommitMig
+              DeleteOp
+              DescribeTableBuilder
+              DropValidator_
+            and 55 others
+note: required by a bound in `shamir_query_builder::batch::Batch::op`
+   --> D:\dev\rust\shamir-db\crates\shamir-query-builder\src\batch\batch.rs:806:61
+    |
+806 |     pub fn op(&mut self, alias: impl Into<String>, op: impl IntoBatchOp) -> Handle {
+    |                                                             ^^^^^^^^^^^ required by this bound in `Batch::op`
+
+error[E0277]: the trait bound `AlterSubscriptionBuilder: IntoBatchOp` is not satisfied
+   --> crates\shamir-db\src\shamir_db\tests\replication_ddl_tests.rs:126:17
+    |
+126 |     b.op("alt", alter_subscription("sub_a").resume());
+    |       --        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the trait `IntoBatchOp` is not implemented for `AlterSubscriptionBuilder`
+    |       |
+    |       required by a bound introduced by this call
+    |
+    = help: the following other types implement trait `IntoBatchOp`:
+              AlterBufferCfg
+              BatchOp
+              CallOp
+              ChgrpBuilder
+              CommitMig
+              DeleteOp
+              DescribeTableBuilder
+              DropValidator_
+            and 55 others
+note: required by a bound in `shamir_query_builder::batch::Batch::op`
+   --> D:\dev\rust\shamir-db\crates\shamir-query-builder\src\batch\batch.rs:806:61
+    |
+806 |     pub fn op(&mut self, alias: impl Into<String>, op: impl IntoBatchOp) -> Handle {
+    |                                                             ^^^^^^^^^^^ required by this bound in `Batch::op`
+
+error[E0277]: the trait bound `AlterSubscriptionBuilder: IntoBatchOp` is not satisfied
+   --> crates\shamir-db\src\shamir_db\tests\replication_ddl_tests.rs:139:17
+    |
+139 |     b.op("alt", alter_subscription("sub_a").set_profile("profile_b"));
+    |       --        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the trait `IntoBatchOp` is not implemented for `AlterSubscriptionBuilder`
+    |       |
+    |       required by a bound introduced by this call
+    |
+    = help: the following other types implement trait `IntoBatchOp`:
+              AlterBufferCfg
+              BatchOp
+              CallOp
+              ChgrpBuilder
+              CommitMig
+              DeleteOp
+              DescribeTableBuilder
+              DropValidator_
+            and 55 others
+note: required by a bound in `shamir_query_builder::batch::Batch::op`
+   --> D:\dev\rust\shamir-db\crates\shamir-query-builder\src\batch\batch.rs:806:61
+    |
+806 |     pub fn op(&mut self, alias: impl Into<String>, op: impl IntoBatchOp) -> Handle {
+    |                                                             ^^^^^^^^^^^ required by this bound in `Batch::op`
+
+error[E0277]: the trait bound `AlterSubscriptionBuilder: IntoBatchOp` is not satisfied
+   --> crates\shamir-db\src\shamir_db\tests\replication_ddl_tests.rs:319:17
+    |
+319 |     b.op("alt", alter_subscription("sub_a").resume());
+    |       --        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the trait `IntoBatchOp` is not implemented for `AlterSubscriptionBuilder`
+    |       |
+    |       required by a bound introduced by this call
+    |
+    = help: the following other types implement trait `IntoBatchOp`:
+              AlterBufferCfg
+              BatchOp
+              CallOp
+              ChgrpBuilder
+              CommitMig
+              DeleteOp
+              DescribeTableBuilder
+              DropValidator_
+            and 55 others
+note: required by a bound in `shamir_query_builder::batch::Batch::op`
+   --> D:\dev\rust\shamir-db\crates\shamir-query-builder\src\batch\batch.rs:806:61
+    |
+806 |     pub fn op(&mut self, alias: impl Into<String>, op: impl IntoBatchOp) -> Handle {
+    |                                                             ^^^^^^^^^^^ required by this bound in `Batch::op`
+
+error[E0277]: the trait bound `shamir_query_builder::write::Update: IntoBatchOp` is not satisfied
+    --> crates\shamir-server\src\db_handler\tests\cursor_handler_tests.rs:5106:9
+     |
+5104 |       update_batch.update(
+     |                    ------ required by a bound introduced by this call
+5105 |           "mv",
+5106 | /         shamir_query_builder::write::update("items")
+5107 | |             .where_(shamir_query_builder::filter::eq("seq", 30i64))
+5108 | |             .set(shamir_query_builder::doc! { "score" => 305i64 }),
+     | |__________________________________________________________________^ the trait `IntoBatchOp` is not implemented for `shamir_query_builder::write::Update`
+     |
+     = help: the following other types implement trait `IntoBatchOp`:
+               AlterBufferCfg
+               BatchOp
+               CallOp
+               ChgrpBuilder
+               CommitMig
+               DeleteOp
+               DescribeTableBuilder
+               DropValidator_
+             and 55 others
+note: required by a bound in `shamir_query_builder::batch::Batch::update`
+    --> D:\dev\rust\shamir-db\crates\shamir-query-builder\src\batch\batch.rs:198:65
+     |
+ 198 |     pub fn update(&mut self, alias: impl Into<String>, op: impl IntoBatchOp) -> Handle {
+     |                                                                 ^^^^^^^^^^^ required by this bound in `Batch::update`
+
+error[E0277]: the trait bound `shamir_query_builder::write::Update: IntoBatchOp` is not satisfied
+    --> crates\shamir-server\src\db_handler\tests\cursor_handler_tests.rs:5224:9
+     |
+5222 |       update_batch.update(
+     |                    ------ required by a bound introduced by this call
+5223 |           "mv",
+5224 | /         shamir_query_builder::write::update("items")
+5225 | |             .where_(shamir_query_builder::filter::eq("seq", 20i64))
+5226 | |             .set(shamir_query_builder::doc! { "score" => 205i64 }),
+     | |__________________________________________________________________^ the trait `IntoBatchOp` is not implemented for `shamir_query_builder::write::Update`
+     |
+     = help: the following other types implement trait `IntoBatchOp`:
+               AlterBufferCfg
+               BatchOp
+               CallOp
+               ChgrpBuilder
+               CommitMig
+               DeleteOp
+               DescribeTableBuilder
+               DropValidator_
+             and 55 others
+note: required by a bound in `shamir_query_builder::batch::Batch::update`
+    --> D:\dev\rust\shamir-db\crates\shamir-query-builder\src\batch\batch.rs:198:65
+     |
+ 198 |     pub fn update(&mut self, alias: impl Into<String>, op: impl IntoBatchOp) -> Handle {
+     |                                                                 ^^^^^^^^^^^ required by this bound in `Batch::update`
+
+error[E0277]: the trait bound `shamir_query_builder::write::Delete: IntoBatchOp` is not satisfied
+   --> crates\shamir-engine\src\query\batch\tests\fk_indexed_action_read_error_tests.rs:529:23
+    |
+529 |     b.delete("del_a", write::delete("a").where_(filter::eq("id", 1_i64)));
+    |       ------          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the trait `IntoBatchOp` is not implemented for `shamir_query_builder::write::Delete`
+    |       |
+    |       required by a bound introduced by this call
+    |
+    = help: the following other types implement trait `IntoBatchOp`:
+              AlterBufferCfg
+              BatchOp
+              CallOp
+              ChgrpBuilder
+              CommitMig
+              DeleteOp
+              DescribeTableBuilder
+              DropValidator_
+            and 55 others
+note: required by a bound in `shamir_query_builder::batch::Batch::delete`
+   --> D:\dev\rust\shamir-db\crates\shamir-query-builder\src\batch\batch.rs:232:65
+    |
+232 |     pub fn delete(&mut self, alias: impl Into<String>, op: impl IntoBatchOp) -> Handle {
+    |                                                                 ^^^^^^^^^^^ required by this bound in `Batch::delete`
+
+error[E0277]: the trait bound `AddSchemaRuleBuilder: IntoBatchOp` is not satisfied
+   --> crates\shamir-db\src\shamir_db\shamir_db\tests\keyset_safe_write_barrier_tests.rs:143:30
+    |
+143 |     b.add_schema_rule("asr", ddl::add_schema_rule("users").rule(rule));
+    |       ---------------        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the trait `IntoBatchOp` is not implemented for `AddSchemaRuleBuilder`
+    |       |
+    |       required by a bound introduced by this call
+    |
+    = help: the following other types implement trait `IntoBatchOp`:
+              AlterBufferCfg
+              BatchOp
+              CallOp
+              ChgrpBuilder
+              CommitMig
+              DeleteOp
+              DescribeTableBuilder
+              DropValidator_
+            and 55 others
+note: required by a bound in `shamir_query_builder::batch::Batch::add_schema_rule`
+   --> D:\dev\rust\shamir-db\crates\shamir-query-builder\src\batch\batch.rs:552:74
+    |
+552 |     pub fn add_schema_rule(&mut self, alias: impl Into<String>, op: impl IntoBatchOp) -> Handle {
+    |                                                                          ^^^^^^^^^^^ required by this bound in `Batch::add_schema_rule`
+
+error[E0277]: the trait bound `shamir_query_builder::write::Update: IntoBatchOp` is not satisfied
+   --> crates\shamir-engine\src\query\batch\tests\fk_race_closure_tests.rs:837:9
+    |
+835 |       b.update(
+    |         ------ required by a bound introduced by this call
+836 |           "upd_parent",
+837 | /         write::update("parent")
+838 | |             .where_(filter::eq("id", from))
+839 | |             .set(doc().set("id", to)),
+    | |_____________________________________^ the trait `IntoBatchOp` is not implemented for `shamir_query_builder::write::Update`
+    |
+    = help: the following other types implement trait `IntoBatchOp`:
+              AlterBufferCfg
+              BatchOp
+              CallOp
+              ChgrpBuilder
+              CommitMig
+              DeleteOp
+              DescribeTableBuilder
+              DropValidator_
+            and 55 others
+note: required by a bound in `shamir_query_builder::batch::Batch::update`
+   --> D:\dev\rust\shamir-db\crates\shamir-query-builder\src\batch\batch.rs:198:65
+    |
+198 |     pub fn update(&mut self, alias: impl Into<String>, op: impl IntoBatchOp) -> Handle {
+    |                                                                 ^^^^^^^^^^^ required by this bound in `Batch::update`
+
+error[E0277]: the trait bound `shamir_query_builder::write::Delete: IntoBatchOp` is not satisfied
+   --> crates\shamir-engine\src\query\batch\tests\fk_reverse_cache_tests.rs:168:9
+    |
+166 |     b.delete(
+    |       ------ required by a bound introduced by this call
+167 |         "del_parent",
+168 |         write::delete("parent").where_(filter::eq("id", id)),
+    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the trait `IntoBatchOp` is not implemented for `shamir_query_builder::write::Delete`
+    |
+    = help: the following other types implement trait `IntoBatchOp`:
+              AlterBufferCfg
+              BatchOp
+              CallOp
+              ChgrpBuilder
+              CommitMig
+              DeleteOp
+              DescribeTableBuilder
+              DropValidator_
+            and 55 others
+note: required by a bound in `shamir_query_builder::batch::Batch::delete`
+   --> D:\dev\rust\shamir-db\crates\shamir-query-builder\src\batch\batch.rs:232:65
+    |
+232 |     pub fn delete(&mut self, alias: impl Into<String>, op: impl IntoBatchOp) -> Handle {
+    |                                                                 ^^^^^^^^^^^ required by this bound in `Batch::delete`
+
+error[E0277]: the trait bound `shamir_query_builder::write::Delete: IntoBatchOp` is not satisfied
+   --> crates\shamir-db\src\shamir_db\shamir_db\tests\schema_rollback_tests.rs:572:9
+    |
+570 |       b.delete(
+    |         ------ required by a bound introduced by this call
+571 |           "del_dept",
+572 | /         shamir_query_builder::write::delete("departments")
+573 | |             .where_(shamir_query_builder::filter::eq("dept_id", 100)),
+    | |_____________________________________________________________________^ the trait `IntoBatchOp` is not implemented for `shamir_query_builder::write::Delete`
+    |
+    = help: the following other types implement trait `IntoBatchOp`:
+              AlterBufferCfg
+              BatchOp
+              CallOp
+              ChgrpBuilder
+              CommitMig
+              DeleteOp
+              DescribeTableBuilder
+              DropValidator_
+            and 55 others
+note: required by a bound in `shamir_query_builder::batch::Batch::delete`
+   --> D:\dev\rust\shamir-db\crates\shamir-query-builder\src\batch\batch.rs:232:65
+    |
+232 |     pub fn delete(&mut self, alias: impl Into<String>, op: impl IntoBatchOp) -> Handle {
+    |                                                                 ^^^^^^^^^^^ required by this bound in `Batch::delete`
+
+error[E0277]: the trait bound `shamir_query_builder::write::Delete: IntoBatchOp` is not satisfied
+   --> crates\shamir-db\src\shamir_db\shamir_db\tests\schema_rollback_tests.rs:612:9
+    |
+610 |       b.delete(
+    |         ------ required by a bound introduced by this call
+611 |           "del_dept",
+612 | /         shamir_query_builder::write::delete("departments")
+613 | |             .where_(shamir_query_builder::filter::eq("dept_id", 100)),
+    | |_____________________________________________________________________^ the trait `IntoBatchOp` is not implemented for `shamir_query_builder::write::Delete`
+    |
+    = help: the following other types implement trait `IntoBatchOp`:
+              AlterBufferCfg
+              BatchOp
+              CallOp
+              ChgrpBuilder
+              CommitMig
+              DeleteOp
+              DescribeTableBuilder
+              DropValidator_
+            and 55 others
+note: required by a bound in `shamir_query_builder::batch::Batch::delete`
+   --> D:\dev\rust\shamir-db\crates\shamir-query-builder\src\batch\batch.rs:232:65
+    |
+232 |     pub fn delete(&mut self, alias: impl Into<String>, op: impl IntoBatchOp) -> Handle {
+    |                                                                 ^^^^^^^^^^^ required by this bound in `Batch::delete`
+
+error[E0277]: the trait bound `shamir_query_builder::write::Delete: IntoBatchOp` is not satisfied
+   --> crates\shamir-engine\src\query\batch\tests\fk_ri_barrier_tests.rs:458:9
+    |
+456 |     del.delete(
+    |         ------ required by a bound introduced by this call
+457 |         "del_parent",
+458 |         write::delete("parent").where_(filter::eq("id", 1)),
+    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the trait `IntoBatchOp` is not implemented for `shamir_query_builder::write::Delete`
+    |
+    = help: the following other types implement trait `IntoBatchOp`:
+              AlterBufferCfg
+              BatchOp
+              CallOp
+              ChgrpBuilder
+              CommitMig
+              DeleteOp
+              DescribeTableBuilder
+              DropValidator_
+            and 55 others
+note: required by a bound in `shamir_query_builder::batch::Batch::delete`
+   --> D:\dev\rust\shamir-db\crates\shamir-query-builder\src\batch\batch.rs:232:65
+    |
+232 |     pub fn delete(&mut self, alias: impl Into<String>, op: impl IntoBatchOp) -> Handle {
+    |                                                                 ^^^^^^^^^^^ required by this bound in `Batch::delete`
+
+error[E0277]: the trait bound `shamir_query_builder::write::Delete: IntoBatchOp` is not satisfied
+    --> crates\shamir-engine\src\query\batch\tests\fk_ri_barrier_tests.rs:1002:9
+     |
+1000 |     del.delete(
+     |         ------ required by a bound introduced by this call
+1001 |         "del_parent",
+1002 |         write::delete("parent").where_(filter::eq("id", 1)),
+     |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the trait `IntoBatchOp` is not implemented for `shamir_query_builder::write::Delete`
+     |
+     = help: the following other types implement trait `IntoBatchOp`:
+               AlterBufferCfg
+               BatchOp
+               CallOp
+               ChgrpBuilder
+               CommitMig
+               DeleteOp
+               DescribeTableBuilder
+               DropValidator_
+             and 55 others
+note: required by a bound in `shamir_query_builder::batch::Batch::delete`
+    --> D:\dev\rust\shamir-db\crates\shamir-query-builder\src\batch\batch.rs:232:65
+     |
+ 232 |     pub fn delete(&mut self, alias: impl Into<String>, op: impl IntoBatchOp) -> Handle {
+     |                                                                 ^^^^^^^^^^^ required by this bound in `Batch::delete`
+
+error[E0277]: the trait bound `shamir_query_builder::write::Update: IntoBatchOp` is not satisfied
+    --> crates\shamir-engine\src\query\batch\tests\fk_ri_barrier_tests.rs:1223:9
+     |
+1221 |       upd.update(
+     |           ------ required by a bound introduced by this call
+1222 |           "upd_parent",
+1223 | /         write::update("parent")
+1224 | |             .where_(filter::eq("id", 1))
+1225 | |             .set(doc().set("id", 2)),
+     | |____________________________________^ the trait `IntoBatchOp` is not implemented for `shamir_query_builder::write::Update`
+     |
+     = help: the following other types implement trait `IntoBatchOp`:
+               AlterBufferCfg
+               BatchOp
+               CallOp
+               ChgrpBuilder
+               CommitMig
+               DeleteOp
+               DescribeTableBuilder
+               DropValidator_
+             and 55 others
+note: required by a bound in `shamir_query_builder::batch::Batch::update`
+    --> D:\dev\rust\shamir-db\crates\shamir-query-builder\src\batch\batch.rs:198:65
+     |
+ 198 |     pub fn update(&mut self, alias: impl Into<String>, op: impl IntoBatchOp) -> Handle {
+     |                                                                 ^^^^^^^^^^^ required by this bound in `Batch::update`
+
+error[E0277]: the trait bound `shamir_query_builder::write::Delete: IntoBatchOp` is not satisfied
+   --> crates\shamir-engine\src\query\batch\tests\executor_tests\basic_ops_tests.rs:197:9
+    |
+195 |     b.delete(
+    |       ------ required by a bound introduced by this call
+196 |         "cleanup",
+197 |         write::delete("users").where_(shamir_query_builder::filter::eq("status", "inactive")),
+    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the trait `IntoBatchOp` is not implemented for `shamir_query_builder::write::Delete`
+    |
+    = help: the following other types implement trait `IntoBatchOp`:
+              AlterBufferCfg
+              BatchOp
+              CallOp
+              ChgrpBuilder
+              CommitMig
+              DeleteOp
+              DescribeTableBuilder
+              DropValidator_
+            and 55 others
+note: required by a bound in `shamir_query_builder::batch::Batch::delete`
+   --> D:\dev\rust\shamir-db\crates\shamir-query-builder\src\batch\batch.rs:232:65
+    |
+232 |     pub fn delete(&mut self, alias: impl Into<String>, op: impl IntoBatchOp) -> Handle {
+    |                                                                 ^^^^^^^^^^^ required by this bound in `Batch::delete`
+
+error[E0277]: the trait bound `shamir_query_builder::write::Update: IntoBatchOp` is not satisfied
+   --> crates\shamir-engine\src\query\batch\tests\executor_tests\interactive_tx_tests.rs:269:9
+    |
+267 |       b.update(
+    |         ------ required by a bound introduced by this call
+268 |           "w",
+269 | /         write::update("users")
+270 | |             .where_(shamir_query_builder::filter::eq("name", "alice"))
+271 | |             .set(doc().set("val", "a2")),
+    | |________________________________________^ the trait `IntoBatchOp` is not implemented for `shamir_query_builder::write::Update`
+    |
+    = help: the following other types implement trait `IntoBatchOp`:
+              AlterBufferCfg
+              BatchOp
+              CallOp
+              ChgrpBuilder
+              CommitMig
+              DeleteOp
+              DescribeTableBuilder
+              DropValidator_
+            and 55 others
+note: required by a bound in `shamir_query_builder::batch::Batch::update`
+   --> D:\dev\rust\shamir-db\crates\shamir-query-builder\src\batch\batch.rs:198:65
+    |
+198 |     pub fn update(&mut self, alias: impl Into<String>, op: impl IntoBatchOp) -> Handle {
+    |                                                                 ^^^^^^^^^^^ required by this bound in `Batch::update`
+
+error[E0277]: the trait bound `shamir_query_builder::write::Update: IntoBatchOp` is not satisfied
+   --> crates\shamir-engine\src\query\batch\tests\executor_tests\interactive_tx_tests.rs:279:9
+    |
+277 |       b.update(
+    |         ------ required by a bound introduced by this call
+278 |           "w",
+279 | /         write::update("users")
+280 | |             .where_(shamir_query_builder::filter::eq("name", "bob"))
+281 | |             .set(doc().set("val", "b2")),
+    | |________________________________________^ the trait `IntoBatchOp` is not implemented for `shamir_query_builder::write::Update`
+    |
+    = help: the following other types implement trait `IntoBatchOp`:
+              AlterBufferCfg
+              BatchOp
+              CallOp
+              ChgrpBuilder
+              CommitMig
+              DeleteOp
+              DescribeTableBuilder
+              DropValidator_
+            and 55 others
+note: required by a bound in `shamir_query_builder::batch::Batch::update`
+   --> D:\dev\rust\shamir-db\crates\shamir-query-builder\src\batch\batch.rs:198:65
+    |
+198 |     pub fn update(&mut self, alias: impl Into<String>, op: impl IntoBatchOp) -> Handle {
+    |                                                                 ^^^^^^^^^^^ required by this bound in `Batch::update`
+
+error[E0277]: the trait bound `shamir_query_builder::write::Delete: IntoBatchOp` is not satisfied
+   --> crates\shamir-engine\src\query\batch\tests\executor_tests\permissions_tests.rs:176:9
+    |
+174 |     b.delete(
+    |       ------ required by a bound introduced by this call
+175 |         "del",
+176 |         write::delete("users").where_(shamir_query_builder::filter::eq("status", "active")),
+    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the trait `IntoBatchOp` is not implemented for `shamir_query_builder::write::Delete`
+    |
+    = help: the following other types implement trait `IntoBatchOp`:
+              AlterBufferCfg
+              BatchOp
+              CallOp
+              ChgrpBuilder
+              CommitMig
+              DeleteOp
+              DescribeTableBuilder
+              DropValidator_
+            and 55 others
+note: required by a bound in `shamir_query_builder::batch::Batch::delete`
+   --> D:\dev\rust\shamir-db\crates\shamir-query-builder\src\batch\batch.rs:232:65
+    |
+232 |     pub fn delete(&mut self, alias: impl Into<String>, op: impl IntoBatchOp) -> Handle {
+    |                                                                 ^^^^^^^^^^^ required by this bound in `Batch::delete`
+
+error[E0277]: the trait bound `shamir_query_builder::write::Update: IntoBatchOp` is not satisfied
+   --> crates\shamir-engine\src\query\batch\tests\executor_tests\permissions_tests.rs:273:9
+    |
+271 |     b.update(
+    |       ------ required by a bound introduced by this call
+272 |         "upd",
+273 |         write::update("users").set(doc().set("tag", "updated")),
+    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the trait `IntoBatchOp` is not implemented for `shamir_query_builder::write::Update`
+    |
+    = help: the following other types implement trait `IntoBatchOp`:
+              AlterBufferCfg
+              BatchOp
+              CallOp
+              ChgrpBuilder
+              CommitMig
+              DeleteOp
+              DescribeTableBuilder
+              DropValidator_
+            and 55 others
+note: required by a bound in `shamir_query_builder::batch::Batch::update`
+   --> D:\dev\rust\shamir-db\crates\shamir-query-builder\src\batch\batch.rs:198:65
+    |
+198 |     pub fn update(&mut self, alias: impl Into<String>, op: impl IntoBatchOp) -> Handle {
+    |                                                                 ^^^^^^^^^^^ required by this bound in `Batch::update`
+
+error[E0277]: the trait bound `shamir_query_builder::write::Update: IntoBatchOp` is not satisfied
+   --> crates\shamir-engine\src\query\batch\tests\executor_tests\ssi_tests.rs:122:9
+    |
+120 |       wb.update(
+    |          ------ required by a bound introduced by this call
+121 |           "w",
+122 | /         write::update("users")
+123 | |             .where_(shamir_query_builder::filter::eq("name", "alice"))
+124 | |             .set(doc().set("val", "rewritten")),
+    | |_______________________________________________^ the trait `IntoBatchOp` is not implemented for `shamir_query_builder::write::Update`
+    |
+    = help: the following other types implement trait `IntoBatchOp`:
+              AlterBufferCfg
+              BatchOp
+              CallOp
+              ChgrpBuilder
+              CommitMig
+              DeleteOp
+              DescribeTableBuilder
+              DropValidator_
+            and 55 others
+note: required by a bound in `shamir_query_builder::batch::Batch::update`
+   --> D:\dev\rust\shamir-db\crates\shamir-query-builder\src\batch\batch.rs:198:65
+    |
+198 |     pub fn update(&mut self, alias: impl Into<String>, op: impl IntoBatchOp) -> Handle {
+    |                                                                 ^^^^^^^^^^^ required by this bound in `Batch::update`
+
+error[E0277]: the trait bound `shamir_query_builder::write::Update: IntoBatchOp` is not satisfied
+   --> crates\shamir-engine\src\query\batch\tests\executor_tests\write_value_resolution_tests.rs:116:9
+    |
+114 |       let copy_name = b.op_silent(
+    |                         --------- required by a bound introduced by this call
+115 |           "copy_name",
+116 | /         write::update("users")
+117 | |             .where_(filter::eq("tag", "target"))
+118 | |             .set(doc().set("name", source.first().field("name"))),
+    | |_________________________________________________________________^ the trait `IntoBatchOp` is not implemented for `shamir_query_builder::write::Update`
+    |
+    = help: the following other types implement trait `IntoBatchOp`:
+              AlterBufferCfg
+              BatchOp
+              CallOp
+              ChgrpBuilder
+              CommitMig
+              DeleteOp
+              DescribeTableBuilder
+              DropValidator_
+            and 55 others
+note: required by a bound in `shamir_query_builder::batch::Batch::op_silent`
+   --> D:\dev\rust\shamir-db\crates\shamir-query-builder\src\batch\batch.rs:811:68
+    |
+811 |     pub fn op_silent(&mut self, alias: impl Into<String>, op: impl IntoBatchOp) -> Handle {
+    |                                                                    ^^^^^^^^^^^ required by this bound in `Batch::op_silent`
+
+error[E0277]: the trait bound `shamir_query_builder::write::Upsert: IntoBatchOp` is not satisfied
+   --> crates\shamir-engine\src\query\batch\tests\executor_tests\write_value_resolution_tests.rs:169:9
+    |
+167 |       let upsert_profile = b.op_silent(
+    |                              --------- required by a bound introduced by this call
+168 |           "upsert_profile",
+169 | /         write::upsert("orders")
+170 | |             .key(mpack!({"total": 200}))
+171 | |             .value(doc().set("owner", users.first().field("name"))),
+    | |___________________________________________________________________^ the trait `IntoBatchOp` is not implemented for `shamir_query_builder::write::Upsert`
+    |
+    = help: the following other types implement trait `IntoBatchOp`:
+              AlterBufferCfg
+              BatchOp
+              CallOp
+              ChgrpBuilder
+              CommitMig
+              DeleteOp
+              DescribeTableBuilder
+              DropValidator_
+            and 55 others
+note: required by a bound in `shamir_query_builder::batch::Batch::op_silent`
+   --> D:\dev\rust\shamir-db\crates\shamir-query-builder\src\batch\batch.rs:811:68
+    |
+811 |     pub fn op_silent(&mut self, alias: impl Into<String>, op: impl IntoBatchOp) -> Handle {
+    |                                                                    ^^^^^^^^^^^ required by this bound in `Batch::op_silent`
+
+error[E0277]: the trait bound `shamir_query_builder::write::Upsert: IntoBatchOp` is not satisfied
+   --> crates\shamir-engine\src\query\batch\tests\executor_tests\write_value_resolution_tests.rs:757:9
+    |
+755 |       inner.op_silent(
+    |             --------- required by a bound introduced by this call
+756 |           "upsert_row",
+757 | /         write::upsert("orders")
+758 | |             .key(doc().set("name", param("missing")))
+759 | |             .value(doc().set("total", 100)),
+    | |___________________________________________^ the trait `IntoBatchOp` is not implemented for `shamir_query_builder::write::Upsert`
+    |
+    = help: the following other types implement trait `IntoBatchOp`:
+              AlterBufferCfg
+              BatchOp
+              CallOp
+              ChgrpBuilder
+              CommitMig
+              DeleteOp
+              DescribeTableBuilder
+              DropValidator_
+            and 55 others
+note: required by a bound in `shamir_query_builder::batch::Batch::op_silent`
+   --> D:\dev\rust\shamir-db\crates\shamir-query-builder\src\batch\batch.rs:811:68
+    |
+811 |     pub fn op_silent(&mut self, alias: impl Into<String>, op: impl IntoBatchOp) -> Handle {
+    |                                                                    ^^^^^^^^^^^ required by this bound in `Batch::op_silent`
+
+error[E0277]: the trait bound `shamir_query_builder::write::Update: IntoBatchOp` is not satisfied
+    --> crates\shamir-engine\src\query\batch\tests\fk_actions_tests.rs:1175:9
+     |
+1173 |       b.update(
+     |         ------ required by a bound introduced by this call
+1174 |           "update_child_fk",
+1175 | /         write::update("child")
+1176 | |             .where_(filter::eq("parent_id", 1_i64))
+1177 | |             .set(doc().set("parent_id", 2_i64)),
+     | |_______________________________________________^ the trait `IntoBatchOp` is not implemented for `shamir_query_builder::write::Update`
+     |
+     = help: the following other types implement trait `IntoBatchOp`:
+               AlterBufferCfg
+               BatchOp
+               CallOp
+               ChgrpBuilder
+               CommitMig
+               DeleteOp
+               DescribeTableBuilder
+               DropValidator_
+             and 55 others
+note: required by a bound in `shamir_query_builder::batch::Batch::update`
+    --> D:\dev\rust\shamir-db\crates\shamir-query-builder\src\batch\batch.rs:198:65
+     |
+ 198 |     pub fn update(&mut self, alias: impl Into<String>, op: impl IntoBatchOp) -> Handle {
+     |                                                                 ^^^^^^^^^^^ required by this bound in `Batch::update`
+
+error[E0277]: the trait bound `shamir_query_builder::write::Delete: IntoBatchOp` is not satisfied
+   --> crates\shamir-engine\src\query\batch\tests\fk_indexed_action_read_error_tests.rs:321:9
+    |
+319 |     b.delete(
+    |       ------ required by a bound introduced by this call
+320 |         "del",
+321 |         write::delete("parent").where_(filter::eq("id", 1_i64)),
+    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the trait `IntoBatchOp` is not implemented for `shamir_query_builder::write::Delete`
+    |
+    = help: the following other types implement trait `IntoBatchOp`:
+              AlterBufferCfg
+              BatchOp
+              CallOp
+              ChgrpBuilder
+              CommitMig
+              DeleteOp
+              DescribeTableBuilder
+              DropValidator_
+            and 55 others
+note: required by a bound in `shamir_query_builder::batch::Batch::delete`
+   --> D:\dev\rust\shamir-db\crates\shamir-query-builder\src\batch\batch.rs:232:65
+    |
+232 |     pub fn delete(&mut self, alias: impl Into<String>, op: impl IntoBatchOp) -> Handle {
+    |                                                                 ^^^^^^^^^^^ required by this bound in `Batch::delete`
+
+error[E0277]: the trait bound `shamir_query_builder::write::Update: IntoBatchOp` is not satisfied
+   --> crates\shamir-engine\src\query\batch\tests\fk_indexed_action_read_error_tests.rs:394:9
+    |
+392 |       b.update(
+    |         ------ required by a bound introduced by this call
+393 |           "upd",
+394 | /         write::update("parent")
+395 | |             .where_(filter::eq("id", 5_i64))
+396 | |             .set(doc().set("id", 99_i64)),
+    | |_________________________________________^ the trait `IntoBatchOp` is not implemented for `shamir_query_builder::write::Update`
+    |
+    = help: the following other types implement trait `IntoBatchOp`:
+              AlterBufferCfg
+              BatchOp
+              CallOp
+              ChgrpBuilder
+              CommitMig
+              DeleteOp
+              DescribeTableBuilder
+              DropValidator_
+            and 55 others
+note: required by a bound in `shamir_query_builder::batch::Batch::update`
+   --> D:\dev\rust\shamir-db\crates\shamir-query-builder\src\batch\batch.rs:198:65
+    |
+198 |     pub fn update(&mut self, alias: impl Into<String>, op: impl IntoBatchOp) -> Handle {
+    |                                                                 ^^^^^^^^^^^ required by this bound in `Batch::update`
+
+error[E0277]: the trait bound `shamir_query_builder::write::Update: IntoBatchOp` is not satisfied
+   --> crates\shamir-engine\src\query\batch\tests\fk_on_update_tests.rs:233:9
+    |
+231 |       b.update(
+    |         ------ required by a bound introduced by this call
+232 |           "upd_parent",
+233 | /         write::update("parent")
+234 | |             .where_(filter::eq("id", 5))
+235 | |             .set(doc().set("id", 7)),
+    | |____________________________________^ the trait `IntoBatchOp` is not implemented for `shamir_query_builder::write::Update`
+    |
+    = help: the following other types implement trait `IntoBatchOp`:
+              AlterBufferCfg
+              BatchOp
+              CallOp
+              ChgrpBuilder
+              CommitMig
+              DeleteOp
+              DescribeTableBuilder
+              DropValidator_
+            and 55 others
+note: required by a bound in `shamir_query_builder::batch::Batch::update`
+   --> D:\dev\rust\shamir-db\crates\shamir-query-builder\src\batch\batch.rs:198:65
+    |
+198 |     pub fn update(&mut self, alias: impl Into<String>, op: impl IntoBatchOp) -> Handle {
+    |                                                                 ^^^^^^^^^^^ required by this bound in `Batch::update`
+
+error[E0277]: the trait bound `shamir_query_builder::write::Update: IntoBatchOp` is not satisfied
+   --> crates\shamir-engine\src\query\batch\tests\fk_on_update_tests.rs:301:9
+    |
+299 |       b.update(
+    |         ------ required by a bound introduced by this call
+300 |           "upd_parent",
+301 | /         write::update("parent")
+302 | |             .where_(filter::eq("id", 5))
+303 | |             .set(doc().set("id", 7)),
+    | |____________________________________^ the trait `IntoBatchOp` is not implemented for `shamir_query_builder::write::Update`
+    |
+    = help: the following other types implement trait `IntoBatchOp`:
+              AlterBufferCfg
+              BatchOp
+              CallOp
+              ChgrpBuilder
+              CommitMig
+              DeleteOp
+              DescribeTableBuilder
+              DropValidator_
+            and 55 others
+note: required by a bound in `shamir_query_builder::batch::Batch::update`
+   --> D:\dev\rust\shamir-db\crates\shamir-query-builder\src\batch\batch.rs:198:65
+    |
+198 |     pub fn update(&mut self, alias: impl Into<String>, op: impl IntoBatchOp) -> Handle {
+    |                                                                 ^^^^^^^^^^^ required by this bound in `Batch::update`
+
+error[E0277]: the trait bound `shamir_query_builder::write::Update: IntoBatchOp` is not satisfied
+   --> crates\shamir-engine\src\query\batch\tests\fk_on_update_tests.rs:375:9
+    |
+373 |       b.update(
+    |         ------ required by a bound introduced by this call
+374 |           "upd_parent",
+375 | /         write::update("parent")
+376 | |             .where_(filter::eq("id", 5))
+377 | |             .set(doc().set("id", 7)),
+    | |____________________________________^ the trait `IntoBatchOp` is not implemented for `shamir_query_builder::write::Update`
+    |
+    = help: the following other types implement trait `IntoBatchOp`:
+              AlterBufferCfg
+              BatchOp
+              CallOp
+              ChgrpBuilder
+              CommitMig
+              DeleteOp
+              DescribeTableBuilder
+              DropValidator_
+            and 55 others
+note: required by a bound in `shamir_query_builder::batch::Batch::update`
+   --> D:\dev\rust\shamir-db\crates\shamir-query-builder\src\batch\batch.rs:198:65
+    |
+198 |     pub fn update(&mut self, alias: impl Into<String>, op: impl IntoBatchOp) -> Handle {
+    |                                                                 ^^^^^^^^^^^ required by this bound in `Batch::update`
+
+error[E0277]: the trait bound `shamir_query_builder::write::Update: IntoBatchOp` is not satisfied
+   --> crates\shamir-engine\src\query\batch\tests\fk_on_update_tests.rs:467:9
+    |
+465 |       b.update(
+    |         ------ required by a bound introduced by this call
+466 |           "upd_parents",
+467 | /         write::update("parent")
+468 | |             .where_(filter::in_("id", [5, 6]))
+469 | |             .set(doc().set("id", 99)),
+    | |_____________________________________^ the trait `IntoBatchOp` is not implemented for `shamir_query_builder::write::Update`
+    |
+    = help: the following other types implement trait `IntoBatchOp`:
+              AlterBufferCfg
+              BatchOp
+              CallOp
+              ChgrpBuilder
+              CommitMig
+              DeleteOp
+              DescribeTableBuilder
+              DropValidator_
+            and 55 others
+note: required by a bound in `shamir_query_builder::batch::Batch::update`
+   --> D:\dev\rust\shamir-db\crates\shamir-query-builder\src\batch\batch.rs:198:65
+    |
+198 |     pub fn update(&mut self, alias: impl Into<String>, op: impl IntoBatchOp) -> Handle {
+    |                                                                 ^^^^^^^^^^^ required by this bound in `Batch::update`
+
+error[E0277]: the trait bound `shamir_query_builder::write::Update: IntoBatchOp` is not satisfied
+   --> crates\shamir-engine\src\query\batch\tests\fk_on_update_tests.rs:538:9
+    |
+536 |       b.update(
+    |         ------ required by a bound introduced by this call
+537 |           "upd_parent",
+538 | /         write::update("parent")
+539 | |             .where_(filter::eq("id", 5))
+540 | |             .set(doc().set("id", 7)),
+    | |____________________________________^ the trait `IntoBatchOp` is not implemented for `shamir_query_builder::write::Update`
+    |
+    = help: the following other types implement trait `IntoBatchOp`:
+              AlterBufferCfg
+              BatchOp
+              CallOp
+              ChgrpBuilder
+              CommitMig
+              DeleteOp
+              DescribeTableBuilder
+              DropValidator_
+            and 55 others
+note: required by a bound in `shamir_query_builder::batch::Batch::update`
+   --> D:\dev\rust\shamir-db\crates\shamir-query-builder\src\batch\batch.rs:198:65
+    |
+198 |     pub fn update(&mut self, alias: impl Into<String>, op: impl IntoBatchOp) -> Handle {
+    |                                                                 ^^^^^^^^^^^ required by this bound in `Batch::update`
+
+error[E0277]: the trait bound `shamir_query_builder::write::Update: IntoBatchOp` is not satisfied
+   --> crates\shamir-engine\src\query\batch\tests\fk_on_update_tests.rs:605:9
+    |
+603 |       b.update(
+    |         ------ required by a bound introduced by this call
+604 |           "upd_parent",
+605 | /         write::update("parent")
+606 | |             .where_(filter::eq("id", 5))
+607 | |             .set(doc().set("id", 7)),
+    | |____________________________________^ the trait `IntoBatchOp` is not implemented for `shamir_query_builder::write::Update`
+    |
+    = help: the following other types implement trait `IntoBatchOp`:
+              AlterBufferCfg
+              BatchOp
+              CallOp
+              ChgrpBuilder
+              CommitMig
+              DeleteOp
+              DescribeTableBuilder
+              DropValidator_
+            and 55 others
+note: required by a bound in `shamir_query_builder::batch::Batch::update`
+   --> D:\dev\rust\shamir-db\crates\shamir-query-builder\src\batch\batch.rs:198:65
+    |
+198 |     pub fn update(&mut self, alias: impl Into<String>, op: impl IntoBatchOp) -> Handle {
+    |                                                                 ^^^^^^^^^^^ required by this bound in `Batch::update`
+
+error[E0277]: the trait bound `shamir_query_builder::write::Update: IntoBatchOp` is not satisfied
+   --> crates\shamir-engine\src\query\batch\tests\fk_on_update_tests.rs:678:9
+    |
+676 |       b.update(
+    |         ------ required by a bound introduced by this call
+677 |           "upd_parent",
+678 | /         write::update("parent")
+679 | |             .where_(filter::eq("id", 5))
+680 | |             .set(doc().set("name", "renamed")),
+    | |______________________________________________^ the trait `IntoBatchOp` is not implemented for `shamir_query_builder::write::Update`
+    |
+    = help: the following other types implement trait `IntoBatchOp`:
+              AlterBufferCfg
+              BatchOp
+              CallOp
+              ChgrpBuilder
+              CommitMig
+              DeleteOp
+              DescribeTableBuilder
+              DropValidator_
+            and 55 others
+note: required by a bound in `shamir_query_builder::batch::Batch::update`
+   --> D:\dev\rust\shamir-db\crates\shamir-query-builder\src\batch\batch.rs:198:65
+    |
+198 |     pub fn update(&mut self, alias: impl Into<String>, op: impl IntoBatchOp) -> Handle {
+    |                                                                 ^^^^^^^^^^^ required by this bound in `Batch::update`
+
+error[E0277]: the trait bound `shamir_query_builder::write::Update: IntoBatchOp` is not satisfied
+   --> crates\shamir-engine\src\query\batch\tests\fk_on_update_tests.rs:752:9
+    |
+750 |       b.update(
+    |         ------ required by a bound introduced by this call
+751 |           "upd_parent",
+752 | /         write::update("parent")
+753 | |             .where_(filter::eq("id", 5))
+754 | |             .set(doc().set("id", 7)),
+    | |____________________________________^ the trait `IntoBatchOp` is not implemented for `shamir_query_builder::write::Update`
+    |
+    = help: the following other types implement trait `IntoBatchOp`:
+              AlterBufferCfg
+              BatchOp
+              CallOp
+              ChgrpBuilder
+              CommitMig
+              DeleteOp
+              DescribeTableBuilder
+              DropValidator_
+            and 55 others
+note: required by a bound in `shamir_query_builder::batch::Batch::update`
+   --> D:\dev\rust\shamir-db\crates\shamir-query-builder\src\batch\batch.rs:198:65
+    |
+198 |     pub fn update(&mut self, alias: impl Into<String>, op: impl IntoBatchOp) -> Handle {
+    |                                                                 ^^^^^^^^^^^ required by this bound in `Batch::update`
+
+error[E0277]: the trait bound `shamir_query_builder::write::Update: IntoBatchOp` is not satisfied
+   --> crates\shamir-engine\src\query\batch\tests\fk_on_update_tests.rs:826:9
+    |
+824 |       b.update(
+    |         ------ required by a bound introduced by this call
+825 |           "upd_parent",
+826 | /         write::update("parent")
+827 | |             .where_(filter::eq("id", 5))
+828 | |             .set(doc().set("id", 5)),
+    | |____________________________________^ the trait `IntoBatchOp` is not implemented for `shamir_query_builder::write::Update`
+    |
+    = help: the following other types implement trait `IntoBatchOp`:
+              AlterBufferCfg
+              BatchOp
+              CallOp
+              ChgrpBuilder
+              CommitMig
+              DeleteOp
+              DescribeTableBuilder
+              DropValidator_
+            and 55 others
+note: required by a bound in `shamir_query_builder::batch::Batch::update`
+   --> D:\dev\rust\shamir-db\crates\shamir-query-builder\src\batch\batch.rs:198:65
+    |
+198 |     pub fn update(&mut self, alias: impl Into<String>, op: impl IntoBatchOp) -> Handle {
+    |                                                                 ^^^^^^^^^^^ required by this bound in `Batch::update`
+
+error[E0277]: the trait bound `shamir_query_builder::write::Update: IntoBatchOp` is not satisfied
+   --> crates\shamir-engine\src\query\batch\tests\fk_on_update_tests.rs:929:9
+    |
+927 |       b.update(
+    |         ------ required by a bound introduced by this call
+928 |           "upd_user",
+929 | /         write::update("users")
+930 | |             .where_(filter::eq("id", 5))
+931 | |             .set(doc().set("id", 7)),
+    | |____________________________________^ the trait `IntoBatchOp` is not implemented for `shamir_query_builder::write::Update`
+    |
+    = help: the following other types implement trait `IntoBatchOp`:
+              AlterBufferCfg
+              BatchOp
+              CallOp
+              ChgrpBuilder
+              CommitMig
+              DeleteOp
+              DescribeTableBuilder
+              DropValidator_
+            and 55 others
+note: required by a bound in `shamir_query_builder::batch::Batch::update`
+   --> D:\dev\rust\shamir-db\crates\shamir-query-builder\src\batch\batch.rs:198:65
+    |
+198 |     pub fn update(&mut self, alias: impl Into<String>, op: impl IntoBatchOp) -> Handle {
+    |                                                                 ^^^^^^^^^^^ required by this bound in `Batch::update`
+
+error[E0277]: the trait bound `shamir_query_builder::write::Update: IntoBatchOp` is not satisfied
+    --> crates\shamir-engine\src\query\batch\tests\fk_on_update_tests.rs:1027:9
+     |
+1025 |       b.update(
+     |         ------ required by a bound introduced by this call
+1026 |           "upd_user",
+1027 | /         write::update("users")
+1028 | |             .where_(filter::eq("id", 5))
+1029 | |             .set(doc().set("id", 7)),
+     | |____________________________________^ the trait `IntoBatchOp` is not implemented for `shamir_query_builder::write::Update`
+     |
+     = help: the following other types implement trait `IntoBatchOp`:
+               AlterBufferCfg
+               BatchOp
+               CallOp
+               ChgrpBuilder
+               CommitMig
+               DeleteOp
+               DescribeTableBuilder
+               DropValidator_
+             and 55 others
+note: required by a bound in `shamir_query_builder::batch::Batch::update`
+    --> D:\dev\rust\shamir-db\crates\shamir-query-builder\src\batch\batch.rs:198:65
+     |
+ 198 |     pub fn update(&mut self, alias: impl Into<String>, op: impl IntoBatchOp) -> Handle {
+     |                                                                 ^^^^^^^^^^^ required by this bound in `Batch::update`
+
+error[E0277]: the trait bound `shamir_query_builder::write::Update: IntoBatchOp` is not satisfied
+    --> crates\shamir-engine\src\query\batch\tests\fk_on_update_tests.rs:1121:9
+     |
+1119 |       b.update(
+     |         ------ required by a bound introduced by this call
+1120 |           "upd_user",
+1121 | /         write::update("users")
+1122 | |             .where_(filter::eq("id", 5))
+1123 | |             .set(doc().set("id", 7)),
+     | |____________________________________^ the trait `IntoBatchOp` is not implemented for `shamir_query_builder::write::Update`
+     |
+     = help: the following other types implement trait `IntoBatchOp`:
+               AlterBufferCfg
+               BatchOp
+               CallOp
+               ChgrpBuilder
+               CommitMig
+               DeleteOp
+               DescribeTableBuilder
+               DropValidator_
+             and 55 others
+note: required by a bound in `shamir_query_builder::batch::Batch::update`
+    --> D:\dev\rust\shamir-db\crates\shamir-query-builder\src\batch\batch.rs:198:65
+     |
+ 198 |     pub fn update(&mut self, alias: impl Into<String>, op: impl IntoBatchOp) -> Handle {
+     |                                                                 ^^^^^^^^^^^ required by this bound in `Batch::update`
+
+error[E0277]: the trait bound `shamir_query_builder::write::Update: IntoBatchOp` is not satisfied
+    --> crates\shamir-engine\src\query\batch\tests\fk_on_update_tests.rs:1217:9
+     |
+1215 |       b.update(
+     |         ------ required by a bound introduced by this call
+1216 |           "upd_user",
+1217 | /         write::update("users")
+1218 | |             .where_(filter::eq("id", 5))
+1219 | |             .set(doc().set("id", 7)),
+     | |____________________________________^ the trait `IntoBatchOp` is not implemented for `shamir_query_builder::write::Update`
+     |
+     = help: the following other types implement trait `IntoBatchOp`:
+               AlterBufferCfg
+               BatchOp
+               CallOp
+               ChgrpBuilder
+               CommitMig
+               DeleteOp
+               DescribeTableBuilder
+               DropValidator_
+             and 55 others
+note: required by a bound in `shamir_query_builder::batch::Batch::update`
+    --> D:\dev\rust\shamir-db\crates\shamir-query-builder\src\batch\batch.rs:198:65
+     |
+ 198 |     pub fn update(&mut self, alias: impl Into<String>, op: impl IntoBatchOp) -> Handle {
+     |                                                                 ^^^^^^^^^^^ required by this bound in `Batch::update`
+
+error[E0277]: the trait bound `shamir_query_builder::write::Update: IntoBatchOp` is not satisfied
+    --> crates\shamir-engine\src\query\batch\tests\fk_on_update_tests.rs:1304:9
+     |
+1302 |       b.update(
+     |         ------ required by a bound introduced by this call
+1303 |           "upd_parent",
+1304 | /         write::update("parent")
+1305 | |             .where_(filter::eq("id", 5_i64))
+1306 | |             .set(doc().set("id", 7_i64)),
+     | |________________________________________^ the trait `IntoBatchOp` is not implemented for `shamir_query_builder::write::Update`
+     |
+     = help: the following other types implement trait `IntoBatchOp`:
+               AlterBufferCfg
+               BatchOp
+               CallOp
+               ChgrpBuilder
+               CommitMig
+               DeleteOp
+               DescribeTableBuilder
+               DropValidator_
+             and 55 others
+note: required by a bound in `shamir_query_builder::batch::Batch::update`
+    --> D:\dev\rust\shamir-db\crates\shamir-query-builder\src\batch\batch.rs:198:65
+     |
+ 198 |     pub fn update(&mut self, alias: impl Into<String>, op: impl IntoBatchOp) -> Handle {
+     |                                                                 ^^^^^^^^^^^ required by this bound in `Batch::update`
+
+error[E0277]: the trait bound `shamir_query_builder::write::Update: IntoBatchOp` is not satisfied
+    --> crates\shamir-engine\src\query\batch\tests\fk_on_update_tests.rs:1431:9
+     |
+1429 |       b.update(
+     |         ------ required by a bound introduced by this call
+1430 |           "upd",
+1431 | /         write::update("employees")
+1432 | |             .where_(filter::eq("id", 10_i64))
+1433 | |             .set(doc().set("id", 77_i64)),
+     | |_________________________________________^ the trait `IntoBatchOp` is not implemented for `shamir_query_builder::write::Update`
+     |
+     = help: the following other types implement trait `IntoBatchOp`:
+               AlterBufferCfg
+               BatchOp
+               CallOp
+               ChgrpBuilder
+               CommitMig
+               DeleteOp
+               DescribeTableBuilder
+               DropValidator_
+             and 55 others
+note: required by a bound in `shamir_query_builder::batch::Batch::update`
+    --> D:\dev\rust\shamir-db\crates\shamir-query-builder\src\batch\batch.rs:198:65
+     |
+ 198 |     pub fn update(&mut self, alias: impl Into<String>, op: impl IntoBatchOp) -> Handle {
+     |                                                                 ^^^^^^^^^^^ required by this bound in `Batch::update`
+
+error[E0277]: the trait bound `shamir_query_builder::write::Update: IntoBatchOp` is not satisfied
+    --> crates\shamir-engine\src\query\batch\tests\fk_on_update_tests.rs:1502:9
+     |
+1500 |       b.update(
+     |         ------ required by a bound introduced by this call
+1501 |           "upd",
+1502 | /         write::update("employees")
+1503 | |             .where_(filter::eq("id", 10_i64))
+1504 | |             .set(doc().set("id", 77_i64)),
+     | |_________________________________________^ the trait `IntoBatchOp` is not implemented for `shamir_query_builder::write::Update`
+     |
+     = help: the following other types implement trait `IntoBatchOp`:
+               AlterBufferCfg
+               BatchOp
+               CallOp
+               ChgrpBuilder
+               CommitMig
+               DeleteOp
+               DescribeTableBuilder
+               DropValidator_
+             and 55 others
+note: required by a bound in `shamir_query_builder::batch::Batch::update`
+    --> D:\dev\rust\shamir-db\crates\shamir-query-builder\src\batch\batch.rs:198:65
+     |
+ 198 |     pub fn update(&mut self, alias: impl Into<String>, op: impl IntoBatchOp) -> Handle {
+     |                                                                 ^^^^^^^^^^^ required by this bound in `Batch::update`
+
+error[E0277]: the trait bound `shamir_query_builder::write::Update: IntoBatchOp` is not satisfied
+    --> crates\shamir-engine\src\query\batch\tests\fk_on_update_tests.rs:1579:9
+     |
+1577 |       b.update(
+     |         ------ required by a bound introduced by this call
+1578 |           "upd",
+1579 | /         write::update("employees")
+1580 | |             .where_(filter::eq("id", 10_i64))
+1581 | |             .set(doc().set("id", 77_i64)),
+     | |_________________________________________^ the trait `IntoBatchOp` is not implemented for `shamir_query_builder::write::Update`
+     |
+     = help: the following other types implement trait `IntoBatchOp`:
+               AlterBufferCfg
+               BatchOp
+               CallOp
+               ChgrpBuilder
+               CommitMig
+               DeleteOp
+               DescribeTableBuilder
+               DropValidator_
+             and 55 others
+note: required by a bound in `shamir_query_builder::batch::Batch::update`
+    --> D:\dev\rust\shamir-db\crates\shamir-query-builder\src\batch\batch.rs:198:65
+     |
+ 198 |     pub fn update(&mut self, alias: impl Into<String>, op: impl IntoBatchOp) -> Handle {
+     |                                                                 ^^^^^^^^^^^ required by this bound in `Batch::update`
+
+error[E0277]: the trait bound `shamir_query_builder::write::Update: IntoBatchOp` is not satisfied
+    --> crates\shamir-engine\src\query\batch\tests\fk_on_update_tests.rs:1662:9
+     |
+1660 |       b.update(
+     |         ------ required by a bound introduced by this call
+1661 |           "upd",
+1662 | /         write::update("employees")
+1663 | |             .where_(filter::in_("id", [10_i64, 20_i64]))
+1664 | |             .set(doc().set("id", 99_i64)),
+     | |_________________________________________^ the trait `IntoBatchOp` is not implemented for `shamir_query_builder::write::Update`
+     |
+     = help: the following other types implement trait `IntoBatchOp`:
+               AlterBufferCfg
+               BatchOp
+               CallOp
+               ChgrpBuilder
+               CommitMig
+               DeleteOp
+               DescribeTableBuilder
+               DropValidator_
+             and 55 others
+note: required by a bound in `shamir_query_builder::batch::Batch::update`
+    --> D:\dev\rust\shamir-db\crates\shamir-query-builder\src\batch\batch.rs:198:65
+     |
+ 198 |     pub fn update(&mut self, alias: impl Into<String>, op: impl IntoBatchOp) -> Handle {
+     |                                                                 ^^^^^^^^^^^ required by this bound in `Batch::update`
+
+error[E0277]: the trait bound `shamir_query_builder::write::Update: IntoBatchOp` is not satisfied
+    --> crates\shamir-engine\src\query\batch\tests\fk_on_update_tests.rs:1787:9
+     |
+1785 |       b.update(
+     |         ------ required by a bound introduced by this call
+1786 |           "upd_parent",
+1787 | /         write::update("parent")
+1788 | |             .where_(filter::eq("id", 5))
+1789 | |             .set(doc().set("id", 7)),
+     | |____________________________________^ the trait `IntoBatchOp` is not implemented for `shamir_query_builder::write::Update`
+     |
+     = help: the following other types implement trait `IntoBatchOp`:
+               AlterBufferCfg
+               BatchOp
+               CallOp
+               ChgrpBuilder
+               CommitMig
+               DeleteOp
+               DescribeTableBuilder
+               DropValidator_
+             and 55 others
+note: required by a bound in `shamir_query_builder::batch::Batch::update`
+    --> D:\dev\rust\shamir-db\crates\shamir-query-builder\src\batch\batch.rs:198:65
+     |
+ 198 |     pub fn update(&mut self, alias: impl Into<String>, op: impl IntoBatchOp) -> Handle {
+     |                                                                 ^^^^^^^^^^^ required by this bound in `Batch::update`
+
+error[E0277]: the trait bound `shamir_query_builder::write::Update: IntoBatchOp` is not satisfied
+    --> crates\shamir-engine\src\query\batch\tests\fk_on_update_tests.rs:1796:9
+     |
+1794 |       b.update(
+     |         ------ required by a bound introduced by this call
+1795 |           "upd_child",
+1796 | /         write::update("child")
+1797 | |             .where_(filter::eq("cid", 50))
+1798 | |             .set(doc().set("label", "direct")),
+     | |______________________________________________^ the trait `IntoBatchOp` is not implemented for `shamir_query_builder::write::Update`
+     |
+     = help: the following other types implement trait `IntoBatchOp`:
+               AlterBufferCfg
+               BatchOp
+               CallOp
+               ChgrpBuilder
+               CommitMig
+               DeleteOp
+               DescribeTableBuilder
+               DropValidator_
+             and 55 others
+note: required by a bound in `shamir_query_builder::batch::Batch::update`
+    --> D:\dev\rust\shamir-db\crates\shamir-query-builder\src\batch\batch.rs:198:65
+     |
+ 198 |     pub fn update(&mut self, alias: impl Into<String>, op: impl IntoBatchOp) -> Handle {
+     |                                                                 ^^^^^^^^^^^ required by this bound in `Batch::update`
+
+error[E0277]: the trait bound `shamir_query_builder::write::Delete: IntoBatchOp` is not satisfied
+    --> crates\shamir-engine\src\query\batch\tests\fk_on_update_tests.rs:1865:21
+     |
+1865 |     b.delete("del", write::delete("items").where_(filter::eq("id", 5)));
+     |       ------        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the trait `IntoBatchOp` is not implemented for `shamir_query_builder::write::Delete`
+     |       |
+     |       required by a bound introduced by this call
+     |
+     = help: the following other types implement trait `IntoBatchOp`:
+               AlterBufferCfg
+               BatchOp
+               CallOp
+               ChgrpBuilder
+               CommitMig
+               DeleteOp
+               DescribeTableBuilder
+               DropValidator_
+             and 55 others
+note: required by a bound in `shamir_query_builder::batch::Batch::delete`
+    --> D:\dev\rust\shamir-db\crates\shamir-query-builder\src\batch\batch.rs:232:65
+     |
+ 232 |     pub fn delete(&mut self, alias: impl Into<String>, op: impl IntoBatchOp) -> Handle {
+     |                                                                 ^^^^^^^^^^^ required by this bound in `Batch::delete`
+
+error[E0277]: the trait bound `shamir_query_builder::write::Update: IntoBatchOp` is not satisfied
+    --> crates\shamir-engine\src\query\batch\tests\fk_on_update_tests.rs:1868:9
+     |
+1866 |       b.update(
+     |         ------ required by a bound introduced by this call
+1867 |           "upd",
+1868 | /         write::update("items")
+1869 | |             .where_(filter::eq("id", 5))
+1870 | |             .set(doc().set("name", "resurrected")),
+     | |__________________________________________________^ the trait `IntoBatchOp` is not implemented for `shamir_query_builder::write::Update`
+     |
+     = help: the following other types implement trait `IntoBatchOp`:
+               AlterBufferCfg
+               BatchOp
+               CallOp
+               ChgrpBuilder
+               CommitMig
+               DeleteOp
+               DescribeTableBuilder
+               DropValidator_
+             and 55 others
+note: required by a bound in `shamir_query_builder::batch::Batch::update`
+    --> D:\dev\rust\shamir-db\crates\shamir-query-builder\src\batch\batch.rs:198:65
+     |
+ 198 |     pub fn update(&mut self, alias: impl Into<String>, op: impl IntoBatchOp) -> Handle {
+     |                                                                 ^^^^^^^^^^^ required by this bound in `Batch::update`
+
+error[E0277]: the trait bound `shamir_query_builder::write::Update: IntoBatchOp` is not satisfied
+    --> crates\shamir-engine\src\query\batch\tests\fk_on_update_tests.rs:1979:9
+     |
+1977 |       b.update(
+     |         ------ required by a bound introduced by this call
+1978 |           "upd_parents",
+1979 | /         write::update("parent")
+1980 | |             .where_(filter::in_("id", [5, 6]))
+1981 | |             .set(doc().set("id", 99)),
+     | |_____________________________________^ the trait `IntoBatchOp` is not implemented for `shamir_query_builder::write::Update`
+     |
+     = help: the following other types implement trait `IntoBatchOp`:
+               AlterBufferCfg
+               BatchOp
+               CallOp
+               ChgrpBuilder
+               CommitMig
+               DeleteOp
+               DescribeTableBuilder
+               DropValidator_
+             and 55 others
+note: required by a bound in `shamir_query_builder::batch::Batch::update`
+    --> D:\dev\rust\shamir-db\crates\shamir-query-builder\src\batch\batch.rs:198:65
+     |
+ 198 |     pub fn update(&mut self, alias: impl Into<String>, op: impl IntoBatchOp) -> Handle {
+     |                                                                 ^^^^^^^^^^^ required by this bound in `Batch::update`
+
+error[E0277]: the trait bound `shamir_query_builder::write::Update: IntoBatchOp` is not satisfied
+    --> crates\shamir-engine\src\query\batch\tests\fk_on_update_tests.rs:2060:9
+     |
+2058 |       b.update(
+     |         ------ required by a bound introduced by this call
+2059 |           "upd_parent",
+2060 | /         write::update("parent")
+2061 | |             .where_(filter::eq("id", 5))
+2062 | |             .set(doc().set("id", 7)),
+     | |____________________________________^ the trait `IntoBatchOp` is not implemented for `shamir_query_builder::write::Update`
+     |
+     = help: the following other types implement trait `IntoBatchOp`:
+               AlterBufferCfg
+               BatchOp
+               CallOp
+               ChgrpBuilder
+               CommitMig
+               DeleteOp
+               DescribeTableBuilder
+               DropValidator_
+             and 55 others
+note: required by a bound in `shamir_query_builder::batch::Batch::update`
+    --> D:\dev\rust\shamir-db\crates\shamir-query-builder\src\batch\batch.rs:198:65
+     |
+ 198 |     pub fn update(&mut self, alias: impl Into<String>, op: impl IntoBatchOp) -> Handle {
+     |                                                                 ^^^^^^^^^^^ required by this bound in `Batch::update`
+
+error[E0277]: the trait bound `shamir_query_builder::write::Delete: IntoBatchOp` is not satisfied
+   --> crates\shamir-engine\src\query\batch\tests\fk_race_closure_tests.rs:340:9
+    |
+338 |     b.delete(
+    |       ------ required by a bound introduced by this call
+339 |         "del_parent",
+340 |         write::delete("parent").where_(filter::eq("id", 1)),
+    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the trait `IntoBatchOp` is not implemented for `shamir_query_builder::write::Delete`
+    |
+    = help: the following other types implement trait `IntoBatchOp`:
+              AlterBufferCfg
+              BatchOp
+              CallOp
+              ChgrpBuilder
+              CommitMig
+              DeleteOp
+              DescribeTableBuilder
+              DropValidator_
+            and 55 others
+note: required by a bound in `shamir_query_builder::batch::Batch::delete`
+   --> D:\dev\rust\shamir-db\crates\shamir-query-builder\src\batch\batch.rs:232:65
+    |
+232 |     pub fn delete(&mut self, alias: impl Into<String>, op: impl IntoBatchOp) -> Handle {
+    |                                                                 ^^^^^^^^^^^ required by this bound in `Batch::delete`
+
+error[E0277]: the trait bound `shamir_query_builder::write::Delete: IntoBatchOp` is not satisfied
+   --> crates\shamir-engine\src\query\batch\tests\fk_race_closure_tests.rs:426:9
+    |
+424 |     b.delete(
+    |       ------ required by a bound introduced by this call
+425 |         "del_parent",
+426 |         write::delete("parent").where_(filter::eq("id", 1)),
+    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the trait `IntoBatchOp` is not implemented for `shamir_query_builder::write::Delete`
+    |
+    = help: the following other types implement trait `IntoBatchOp`:
+              AlterBufferCfg
+              BatchOp
+              CallOp
+              ChgrpBuilder
+              CommitMig
+              DeleteOp
+              DescribeTableBuilder
+              DropValidator_
+            and 55 others
+note: required by a bound in `shamir_query_builder::batch::Batch::delete`
+   --> D:\dev\rust\shamir-db\crates\shamir-query-builder\src\batch\batch.rs:232:65
+    |
+232 |     pub fn delete(&mut self, alias: impl Into<String>, op: impl IntoBatchOp) -> Handle {
+    |                                                                 ^^^^^^^^^^^ required by this bound in `Batch::delete`
+
+error[E0277]: the trait bound `shamir_query_builder::write::Delete: IntoBatchOp` is not satisfied
+   --> crates\shamir-engine\src\query\batch\tests\fk_race_closure_tests.rs:501:13
+    |
+499 |         b.delete(
+    |           ------ required by a bound introduced by this call
+500 |             "del_parent",
+501 |             write::delete("parent").where_(filter::eq("id", 1)),
+    |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the trait `IntoBatchOp` is not implemented for `shamir_query_builder::write::Delete`
+    |
+    = help: the following other types implement trait `IntoBatchOp`:
+              AlterBufferCfg
+              BatchOp
+              CallOp
+              ChgrpBuilder
+              CommitMig
+              DeleteOp
+              DescribeTableBuilder
+              DropValidator_
+            and 55 others
+note: required by a bound in `shamir_query_builder::batch::Batch::delete`
+   --> D:\dev\rust\shamir-db\crates\shamir-query-builder\src\batch\batch.rs:232:65
+    |
+232 |     pub fn delete(&mut self, alias: impl Into<String>, op: impl IntoBatchOp) -> Handle {
+    |                                                                 ^^^^^^^^^^^ required by this bound in `Batch::delete`
+
+error[E0277]: the trait bound `shamir_query_builder::write::Delete: IntoBatchOp` is not satisfied
+   --> crates\shamir-engine\src\query\batch\tests\fk_race_closure_tests.rs:555:9
+    |
+553 |     wb.delete(
+    |        ------ required by a bound introduced by this call
+554 |         "del_child_race",
+555 |         write::delete("child").where_(filter::eq("label", "race")),
+    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the trait `IntoBatchOp` is not implemented for `shamir_query_builder::write::Delete`
+    |
+    = help: the following other types implement trait `IntoBatchOp`:
+              AlterBufferCfg
+              BatchOp
+              CallOp
+              ChgrpBuilder
+              CommitMig
+              DeleteOp
+              DescribeTableBuilder
+              DropValidator_
+            and 55 others
+note: required by a bound in `shamir_query_builder::batch::Batch::delete`
+   --> D:\dev\rust\shamir-db\crates\shamir-query-builder\src\batch\batch.rs:232:65
+    |
+232 |     pub fn delete(&mut self, alias: impl Into<String>, op: impl IntoBatchOp) -> Handle {
+    |                                                                 ^^^^^^^^^^^ required by this bound in `Batch::delete`
+
+error[E0277]: the trait bound `shamir_query_builder::write::Delete: IntoBatchOp` is not satisfied
+   --> crates\shamir-engine\src\query\batch\tests\fk_race_closure_tests.rs:570:9
+    |
+568 |     b.delete(
+    |       ------ required by a bound introduced by this call
+569 |         "del_parent",
+570 |         write::delete("parent").where_(filter::eq("id", 1)),
+    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the trait `IntoBatchOp` is not implemented for `shamir_query_builder::write::Delete`
+    |
+    = help: the following other types implement trait `IntoBatchOp`:
+              AlterBufferCfg
+              BatchOp
+              CallOp
+              ChgrpBuilder
+              CommitMig
+              DeleteOp
+              DescribeTableBuilder
+              DropValidator_
+            and 55 others
+note: required by a bound in `shamir_query_builder::batch::Batch::delete`
+   --> D:\dev\rust\shamir-db\crates\shamir-query-builder\src\batch\batch.rs:232:65
+    |
+232 |     pub fn delete(&mut self, alias: impl Into<String>, op: impl IntoBatchOp) -> Handle {
+    |                                                                 ^^^^^^^^^^^ required by this bound in `Batch::delete`
+
+error[E0277]: the trait bound `shamir_query_builder::write::Delete: IntoBatchOp` is not satisfied
+   --> crates\shamir-engine\src\query\batch\tests\fk_race_closure_tests.rs:645:9
+    |
+643 |     b.delete(
+    |       ------ required by a bound introduced by this call
+644 |         "del_parent",
+645 |         write::delete("parent").where_(filter::eq("id", 1)),
+    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the trait `IntoBatchOp` is not implemented for `shamir_query_builder::write::Delete`
+    |
+    = help: the following other types implement trait `IntoBatchOp`:
+              AlterBufferCfg
+              BatchOp
+              CallOp
+              ChgrpBuilder
+              CommitMig
+              DeleteOp
+              DescribeTableBuilder
+              DropValidator_
+            and 55 others
+note: required by a bound in `shamir_query_builder::batch::Batch::delete`
+   --> D:\dev\rust\shamir-db\crates\shamir-query-builder\src\batch\batch.rs:232:65
+    |
+232 |     pub fn delete(&mut self, alias: impl Into<String>, op: impl IntoBatchOp) -> Handle {
+    |                                                                 ^^^^^^^^^^^ required by this bound in `Batch::delete`
+
+error[E0277]: the trait bound `shamir_query_builder::write::Delete: IntoBatchOp` is not satisfied
+   --> crates\shamir-engine\src\query\batch\tests\fk_restrict_tests.rs:153:9
+    |
+151 |     b.delete(
+    |       ------ required by a bound introduced by this call
+152 |         "del_parent",
+153 |         write::delete("parent").where_(filter::eq("id", 1)),
+    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the trait `IntoBatchOp` is not implemented for `shamir_query_builder::write::Delete`
+    |
+    = help: the following other types implement trait `IntoBatchOp`:
+              AlterBufferCfg
+              BatchOp
+              CallOp
+              ChgrpBuilder
+              CommitMig
+              DeleteOp
+              DescribeTableBuilder
+              DropValidator_
+            and 55 others
+note: required by a bound in `shamir_query_builder::batch::Batch::delete`
+   --> D:\dev\rust\shamir-db\crates\shamir-query-builder\src\batch\batch.rs:232:65
+    |
+232 |     pub fn delete(&mut self, alias: impl Into<String>, op: impl IntoBatchOp) -> Handle {
+    |                                                                 ^^^^^^^^^^^ required by this bound in `Batch::delete`
+
+error[E0277]: the trait bound `shamir_query_builder::write::Delete: IntoBatchOp` is not satisfied
+   --> crates\shamir-engine\src\query\batch\tests\fk_restrict_tests.rs:213:9
+    |
+211 |     b.delete(
+    |       ------ required by a bound introduced by this call
+212 |         "del_child",
+213 |         write::delete("child").where_(filter::eq("parent_id", 1)),
+    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the trait `IntoBatchOp` is not implemented for `shamir_query_builder::write::Delete`
+    |
+    = help: the following other types implement trait `IntoBatchOp`:
+              AlterBufferCfg
+              BatchOp
+              CallOp
+              ChgrpBuilder
+              CommitMig
+              DeleteOp
+              DescribeTableBuilder
+              DropValidator_
+            and 55 others
+note: required by a bound in `shamir_query_builder::batch::Batch::delete`
+   --> D:\dev\rust\shamir-db\crates\shamir-query-builder\src\batch\batch.rs:232:65
+    |
+232 |     pub fn delete(&mut self, alias: impl Into<String>, op: impl IntoBatchOp) -> Handle {
+    |                                                                 ^^^^^^^^^^^ required by this bound in `Batch::delete`
+
+error[E0277]: the trait bound `shamir_query_builder::write::Delete: IntoBatchOp` is not satisfied
+   --> crates\shamir-engine\src\query\batch\tests\fk_restrict_tests.rs:229:9
+    |
+227 |     b.delete(
+    |       ------ required by a bound introduced by this call
+228 |         "del_parent",
+229 |         write::delete("parent").where_(filter::eq("id", 1)),
+    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the trait `IntoBatchOp` is not implemented for `shamir_query_builder::write::Delete`
+    |
+    = help: the following other types implement trait `IntoBatchOp`:
+              AlterBufferCfg
+              BatchOp
+              CallOp
+              ChgrpBuilder
+              CommitMig
+              DeleteOp
+              DescribeTableBuilder
+              DropValidator_
+            and 55 others
+note: required by a bound in `shamir_query_builder::batch::Batch::delete`
+   --> D:\dev\rust\shamir-db\crates\shamir-query-builder\src\batch\batch.rs:232:65
+    |
+232 |     pub fn delete(&mut self, alias: impl Into<String>, op: impl IntoBatchOp) -> Handle {
+    |                                                                 ^^^^^^^^^^^ required by this bound in `Batch::delete`
+
+error[E0277]: the trait bound `shamir_query_builder::write::Delete: IntoBatchOp` is not satisfied
+   --> crates\shamir-engine\src\query\batch\tests\fk_restrict_tests.rs:278:9
+    |
+276 |     b.delete(
+    |       ------ required by a bound introduced by this call
+277 |         "del_parent",
+278 |         write::delete("parent").where_(filter::eq("id", 1)),
+    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the trait `IntoBatchOp` is not implemented for `shamir_query_builder::write::Delete`
+    |
+    = help: the following other types implement trait `IntoBatchOp`:
+              AlterBufferCfg
+              BatchOp
+              CallOp
+              ChgrpBuilder
+              CommitMig
+              DeleteOp
+              DescribeTableBuilder
+              DropValidator_
+            and 55 others
+note: required by a bound in `shamir_query_builder::batch::Batch::delete`
+   --> D:\dev\rust\shamir-db\crates\shamir-query-builder\src\batch\batch.rs:232:65
+    |
+232 |     pub fn delete(&mut self, alias: impl Into<String>, op: impl IntoBatchOp) -> Handle {
+    |                                                                 ^^^^^^^^^^^ required by this bound in `Batch::delete`
+
+error[E0277]: the trait bound `shamir_query_builder::write::Delete: IntoBatchOp` is not satisfied
+   --> crates\shamir-engine\src\query\batch\tests\fk_restrict_tests.rs:315:9
+    |
+313 |     b.delete(
+    |       ------ required by a bound introduced by this call
+314 |         "del_parent",
+315 |         write::delete("parent").where_(filter::eq("id", 1)),
+    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the trait `IntoBatchOp` is not implemented for `shamir_query_builder::write::Delete`
+    |
+    = help: the following other types implement trait `IntoBatchOp`:
+              AlterBufferCfg
+              BatchOp
+              CallOp
+              ChgrpBuilder
+              CommitMig
+              DeleteOp
+              DescribeTableBuilder
+              DropValidator_
+            and 55 others
+note: required by a bound in `shamir_query_builder::batch::Batch::delete`
+   --> D:\dev\rust\shamir-db\crates\shamir-query-builder\src\batch\batch.rs:232:65
+    |
+232 |     pub fn delete(&mut self, alias: impl Into<String>, op: impl IntoBatchOp) -> Handle {
+    |                                                                 ^^^^^^^^^^^ required by this bound in `Batch::delete`
+
+error[E0277]: the trait bound `shamir_query_builder::write::Delete: IntoBatchOp` is not satisfied
+   --> crates\shamir-engine\src\query\batch\tests\fk_restrict_tests.rs:369:9
+    |
+367 |     b.delete(
+    |       ------ required by a bound introduced by this call
+368 |         "del_parent",
+369 |         write::delete("parent").where_(filter::eq("id", 1_i64)),
+    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the trait `IntoBatchOp` is not implemented for `shamir_query_builder::write::Delete`
+    |
+    = help: the following other types implement trait `IntoBatchOp`:
+              AlterBufferCfg
+              BatchOp
+              CallOp
+              ChgrpBuilder
+              CommitMig
+              DeleteOp
+              DescribeTableBuilder
+              DropValidator_
+            and 55 others
+note: required by a bound in `shamir_query_builder::batch::Batch::delete`
+   --> D:\dev\rust\shamir-db\crates\shamir-query-builder\src\batch\batch.rs:232:65
+    |
+232 |     pub fn delete(&mut self, alias: impl Into<String>, op: impl IntoBatchOp) -> Handle {
+    |                                                                 ^^^^^^^^^^^ required by this bound in `Batch::delete`
+
+error[E0277]: the trait bound `shamir_query_builder::write::Delete: IntoBatchOp` is not satisfied
+   --> crates\shamir-engine\src\query\batch\tests\fk_restrict_tests.rs:483:9
+    |
+481 |     b.delete(
+    |       ------ required by a bound introduced by this call
+482 |         "del_ceo",
+483 |         write::delete("employees").where_(filter::eq("id", 1_i64)),
+    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the trait `IntoBatchOp` is not implemented for `shamir_query_builder::write::Delete`
+    |
+    = help: the following other types implement trait `IntoBatchOp`:
+              AlterBufferCfg
+              BatchOp
+              CallOp
+              ChgrpBuilder
+              CommitMig
+              DeleteOp
+              DescribeTableBuilder
+              DropValidator_
+            and 55 others
+note: required by a bound in `shamir_query_builder::batch::Batch::delete`
+   --> D:\dev\rust\shamir-db\crates\shamir-query-builder\src\batch\batch.rs:232:65
+    |
+232 |     pub fn delete(&mut self, alias: impl Into<String>, op: impl IntoBatchOp) -> Handle {
+    |                                                                 ^^^^^^^^^^^ required by this bound in `Batch::delete`
+
+error[E0277]: the trait bound `shamir_query_builder::write::Delete: IntoBatchOp` is not satisfied
+   --> crates\shamir-engine\src\query\batch\tests\fk_restrict_tests.rs:547:9
+    |
+545 |     b.delete(
+    |       ------ required by a bound introduced by this call
+546 |         "del_child",
+547 |         write::delete("child").where_(filter::eq("parent_id", 1)),
+    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the trait `IntoBatchOp` is not implemented for `shamir_query_builder::write::Delete`
+    |
+    = help: the following other types implement trait `IntoBatchOp`:
+              AlterBufferCfg
+              BatchOp
+              CallOp
+              ChgrpBuilder
+              CommitMig
+              DeleteOp
+              DescribeTableBuilder
+              DropValidator_
+            and 55 others
+note: required by a bound in `shamir_query_builder::batch::Batch::delete`
+   --> D:\dev\rust\shamir-db\crates\shamir-query-builder\src\batch\batch.rs:232:65
+    |
+232 |     pub fn delete(&mut self, alias: impl Into<String>, op: impl IntoBatchOp) -> Handle {
+    |                                                                 ^^^^^^^^^^^ required by this bound in `Batch::delete`
+
+error[E0277]: the trait bound `shamir_query_builder::write::Delete: IntoBatchOp` is not satisfied
+   --> crates\shamir-engine\src\query\batch\tests\fk_restrict_tests.rs:551:9
+    |
+549 |     b.delete(
+    |       ------ required by a bound introduced by this call
+550 |         "del_parent",
+551 |         write::delete("parent").where_(filter::eq("id", 1)),
+    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the trait `IntoBatchOp` is not implemented for `shamir_query_builder::write::Delete`
+    |
+    = help: the following other types implement trait `IntoBatchOp`:
+              AlterBufferCfg
+              BatchOp
+              CallOp
+              ChgrpBuilder
+              CommitMig
+              DeleteOp
+              DescribeTableBuilder
+              DropValidator_
+            and 55 others
+note: required by a bound in `shamir_query_builder::batch::Batch::delete`
+   --> D:\dev\rust\shamir-db\crates\shamir-query-builder\src\batch\batch.rs:232:65
+    |
+232 |     pub fn delete(&mut self, alias: impl Into<String>, op: impl IntoBatchOp) -> Handle {
+    |                                                                 ^^^^^^^^^^^ required by this bound in `Batch::delete`
+
+error[E0277]: the trait bound `shamir_query_builder::write::Delete: IntoBatchOp` is not satisfied
+   --> crates\shamir-engine\src\query\batch\tests\fk_restrict_tests.rs:593:9
+    |
+591 |     b.delete(
+    |       ------ required by a bound introduced by this call
+592 |         "del",
+593 |         write::delete("employees").where_(filter::eq("id", 1_i64)),
+    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the trait `IntoBatchOp` is not implemented for `shamir_query_builder::write::Delete`
+    |
+    = help: the following other types implement trait `IntoBatchOp`:
+              AlterBufferCfg
+              BatchOp
+              CallOp
+              ChgrpBuilder
+              CommitMig
+              DeleteOp
+              DescribeTableBuilder
+              DropValidator_
+            and 55 others
+note: required by a bound in `shamir_query_builder::batch::Batch::delete`
+   --> D:\dev\rust\shamir-db\crates\shamir-query-builder\src\batch\batch.rs:232:65
+    |
+232 |     pub fn delete(&mut self, alias: impl Into<String>, op: impl IntoBatchOp) -> Handle {
+    |                                                                 ^^^^^^^^^^^ required by this bound in `Batch::delete`
+
+error[E0277]: the trait bound `shamir_query_builder::write::Delete: IntoBatchOp` is not satisfied
+   --> crates\shamir-engine\src\query\batch\tests\fk_ri_barrier_tests.rs:260:9
+    |
+258 |     del.delete(
+    |         ------ required by a bound introduced by this call
+259 |         "del_parent",
+260 |         write::delete("parent").where_(filter::eq("id", 1)),
+    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the trait `IntoBatchOp` is not implemented for `shamir_query_builder::write::Delete`
+    |
+    = help: the following other types implement trait `IntoBatchOp`:
+              AlterBufferCfg
+              BatchOp
+              CallOp
+              ChgrpBuilder
+              CommitMig
+              DeleteOp
+              DescribeTableBuilder
+              DropValidator_
+            and 55 others
+note: required by a bound in `shamir_query_builder::batch::Batch::delete`
+   --> D:\dev\rust\shamir-db\crates\shamir-query-builder\src\batch\batch.rs:232:65
+    |
+232 |     pub fn delete(&mut self, alias: impl Into<String>, op: impl IntoBatchOp) -> Handle {
+    |                                                                 ^^^^^^^^^^^ required by this bound in `Batch::delete`
+
+error[E0277]: the trait bound `shamir_query_builder::write::Delete: IntoBatchOp` is not satisfied
+   --> crates\shamir-engine\src\query\batch\tests\fk_ri_barrier_tests.rs:349:13
+    |
+347 |         del.delete(
+    |             ------ required by a bound introduced by this call
+348 |             "del_parent",
+349 |             write::delete("parent").where_(filter::eq("id", 1)),
+    |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the trait `IntoBatchOp` is not implemented for `shamir_query_builder::write::Delete`
+    |
+    = help: the following other types implement trait `IntoBatchOp`:
+              AlterBufferCfg
+              BatchOp
+              CallOp
+              ChgrpBuilder
+              CommitMig
+              DeleteOp
+              DescribeTableBuilder
+              DropValidator_
+            and 55 others
+note: required by a bound in `shamir_query_builder::batch::Batch::delete`
+   --> D:\dev\rust\shamir-db\crates\shamir-query-builder\src\batch\batch.rs:232:65
+    |
+232 |     pub fn delete(&mut self, alias: impl Into<String>, op: impl IntoBatchOp) -> Handle {
+    |                                                                 ^^^^^^^^^^^ required by this bound in `Batch::delete`
+
+error[E0277]: the trait bound `shamir_query_builder::write::Update: IntoBatchOp` is not satisfied
+   --> crates\shamir-engine\src\query\batch\tests\fk_ri_barrier_tests.rs:647:9
+    |
+645 |       upd.update(
+    |           ------ required by a bound introduced by this call
+646 |           "upd_parent",
+647 | /         write::update("parent")
+648 | |             .where_(filter::eq("id", 1))
+649 | |             .set(doc().set("id", 2)),
+    | |____________________________________^ the trait `IntoBatchOp` is not implemented for `shamir_query_builder::write::Update`
+    |
+    = help: the following other types implement trait `IntoBatchOp`:
+              AlterBufferCfg
+              BatchOp
+              CallOp
+              ChgrpBuilder
+              CommitMig
+              DeleteOp
+              DescribeTableBuilder
+              DropValidator_
+            and 55 others
+note: required by a bound in `shamir_query_builder::batch::Batch::update`
+   --> D:\dev\rust\shamir-db\crates\shamir-query-builder\src\batch\batch.rs:198:65
+    |
+198 |     pub fn update(&mut self, alias: impl Into<String>, op: impl IntoBatchOp) -> Handle {
+    |                                                                 ^^^^^^^^^^^ required by this bound in `Batch::update`
+
+error[E0277]: the trait bound `shamir_query_builder::write::Delete: IntoBatchOp` is not satisfied
+   --> crates\shamir-engine\src\query\batch\tests\fk_ri_barrier_tests.rs:733:13
+    |
+731 |         del.delete(
+    |             ------ required by a bound introduced by this call
+732 |             "del_parent",
+733 |             write::delete("parent").where_(filter::eq("id", 1)),
+    |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the trait `IntoBatchOp` is not implemented for `shamir_query_builder::write::Delete`
+    |
+    = help: the following other types implement trait `IntoBatchOp`:
+              AlterBufferCfg
+              BatchOp
+              CallOp
+              ChgrpBuilder
+              CommitMig
+              DeleteOp
+              DescribeTableBuilder
+              DropValidator_
+            and 55 others
+note: required by a bound in `shamir_query_builder::batch::Batch::delete`
+   --> D:\dev\rust\shamir-db\crates\shamir-query-builder\src\batch\batch.rs:232:65
+    |
+232 |     pub fn delete(&mut self, alias: impl Into<String>, op: impl IntoBatchOp) -> Handle {
+    |                                                                 ^^^^^^^^^^^ required by this bound in `Batch::delete`
+
+error[E0277]: the trait bound `shamir_query_builder::write::Delete: IntoBatchOp` is not satisfied
+   --> crates\shamir-engine\src\query\batch\tests\fk_ri_barrier_tests.rs:788:13
+    |
+786 |         del.delete(
+    |             ------ required by a bound introduced by this call
+787 |             "del_parent",
+788 |             write::delete("parent").where_(filter::eq("id", 1)),
+    |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the trait `IntoBatchOp` is not implemented for `shamir_query_builder::write::Delete`
+    |
+    = help: the following other types implement trait `IntoBatchOp`:
+              AlterBufferCfg
+              BatchOp
+              CallOp
+              ChgrpBuilder
+              CommitMig
+              DeleteOp
+              DescribeTableBuilder
+              DropValidator_
+            and 55 others
+note: required by a bound in `shamir_query_builder::batch::Batch::delete`
+   --> D:\dev\rust\shamir-db\crates\shamir-query-builder\src\batch\batch.rs:232:65
+    |
+232 |     pub fn delete(&mut self, alias: impl Into<String>, op: impl IntoBatchOp) -> Handle {
+    |                                                                 ^^^^^^^^^^^ required by this bound in `Batch::delete`
+
+error[E0277]: the trait bound `shamir_query_builder::write::Update: IntoBatchOp` is not satisfied
+   --> crates\shamir-engine\src\query\batch\tests\fk_ri_barrier_tests.rs:845:13
+    |
+843 |           upd.update(
+    |               ------ required by a bound introduced by this call
+844 |               "upd_parent",
+845 | /             write::update("parent")
+846 | |                 .where_(filter::eq("id", 1))
+847 | |                 .set(doc().set("id", 2)),
+    | |________________________________________^ the trait `IntoBatchOp` is not implemented for `shamir_query_builder::write::Update`
+    |
+    = help: the following other types implement trait `IntoBatchOp`:
+              AlterBufferCfg
+              BatchOp
+              CallOp
+              ChgrpBuilder
+              CommitMig
+              DeleteOp
+              DescribeTableBuilder
+              DropValidator_
+            and 55 others
+note: required by a bound in `shamir_query_builder::batch::Batch::update`
+   --> D:\dev\rust\shamir-db\crates\shamir-query-builder\src\batch\batch.rs:198:65
+    |
+198 |     pub fn update(&mut self, alias: impl Into<String>, op: impl IntoBatchOp) -> Handle {
+    |                                                                 ^^^^^^^^^^^ required by this bound in `Batch::update`
+
+error[E0277]: the trait bound `shamir_query_builder::write::Update: IntoBatchOp` is not satisfied
+   --> crates\shamir-engine\src\query\batch\tests\planner_tests.rs:397:9
+    |
+395 |       b.update(
+    |         ------ required by a bound introduced by this call
+396 |           "update_orders",
+397 | /         write::update("orders")
+398 | |             .where_(shamir_query_builder::filter::eq(
+399 | |                 "user_id",
+400 | |                 users.first().field("id"),
+401 | |             ))
+402 | |             .set(doc().set("status", "processed")),
+    | |__________________________________________________^ the trait `IntoBatchOp` is not implemented for `shamir_query_builder::write::Update`
+    |
+    = help: the following other types implement trait `IntoBatchOp`:
+              AlterBufferCfg
+              BatchOp
+              CallOp
+              ChgrpBuilder
+              CommitMig
+              DeleteOp
+              DescribeTableBuilder
+              DropValidator_
+            and 55 others
+note: required by a bound in `shamir_query_builder::batch::Batch::update`
+   --> D:\dev\rust\shamir-db\crates\shamir-query-builder\src\batch\batch.rs:198:65
+    |
+198 |     pub fn update(&mut self, alias: impl Into<String>, op: impl IntoBatchOp) -> Handle {
+    |                                                                 ^^^^^^^^^^^ required by this bound in `Batch::update`
+
+error[E0277]: the trait bound `shamir_query_builder::write::Upsert: IntoBatchOp` is not satisfied
+   --> crates\shamir-engine\src\query\batch\tests\planner_tests.rs:423:9
+    |
+421 |       b.upsert(
+    |         ------ required by a bound introduced by this call
+422 |           "set_user",
+423 | /         write::upsert("users")
+424 | |             .key(doc().set("id", users.first().field("id")).build())
+425 | |             .value(doc().set("status", "updated").build()),
+    | |__________________________________________________________^ the trait `IntoBatchOp` is not implemented for `shamir_query_builder::write::Upsert`
+    |
+    = help: the following other types implement trait `IntoBatchOp`:
+              AlterBufferCfg
+              BatchOp
+              CallOp
+              ChgrpBuilder
+              CommitMig
+              DeleteOp
+              DescribeTableBuilder
+              DropValidator_
+            and 55 others
+note: required by a bound in `shamir_query_builder::batch::Batch::upsert`
+   --> D:\dev\rust\shamir-db\crates\shamir-query-builder\src\batch\batch.rs:215:65
+    |
+215 |     pub fn upsert(&mut self, alias: impl Into<String>, op: impl IntoBatchOp) -> Handle {
+    |                                                                 ^^^^^^^^^^^ required by this bound in `Batch::upsert`
+
+error[E0277]: the trait bound `shamir_query_builder::write::Delete: IntoBatchOp` is not satisfied
+   --> crates\shamir-engine\src\query\batch\tests\planner_tests.rs:448:9
+    |
+446 |       b.delete(
+    |         ------ required by a bound introduced by this call
+447 |           "delete_orders",
+448 | /         write::delete("orders").where_(shamir_query_builder::filter::in_(
+449 | |             "user_id",
+450 | |             [inactive.column("id")],
+451 | |         )),
+    | |__________^ the trait `IntoBatchOp` is not implemented for `shamir_query_builder::write::Delete`
+    |
+    = help: the following other types implement trait `IntoBatchOp`:
+              AlterBufferCfg
+              BatchOp
+              CallOp
+              ChgrpBuilder
+              CommitMig
+              DeleteOp
+              DescribeTableBuilder
+              DropValidator_
+            and 55 others
+note: required by a bound in `shamir_query_builder::batch::Batch::delete`
+   --> D:\dev\rust\shamir-db\crates\shamir-query-builder\src\batch\batch.rs:232:65
+    |
+232 |     pub fn delete(&mut self, alias: impl Into<String>, op: impl IntoBatchOp) -> Handle {
+    |                                                                 ^^^^^^^^^^^ required by this bound in `Batch::delete`
+
+error[E0277]: the trait bound `shamir_query_builder::write::Upsert: IntoBatchOp` is not satisfied
+   --> crates\shamir-engine\src\query\batch\tests\planner_tests.rs:470:9
+    |
+468 |       b.upsert(
+    |         ------ required by a bound introduced by this call
+469 |           "set_target",
+470 | /         write::upsert("target_table")
+471 | |             .key(doc().set("id", 1).build())
+472 | |             .value(
+473 | |                 doc()
+...   |
+476 | |                     .build(),
+477 | |             ),
+    | |_____________^ the trait `IntoBatchOp` is not implemented for `shamir_query_builder::write::Upsert`
+    |
+    = help: the following other types implement trait `IntoBatchOp`:
+              AlterBufferCfg
+              BatchOp
+              CallOp
+              ChgrpBuilder
+              CommitMig
+              DeleteOp
+              DescribeTableBuilder
+              DropValidator_
+            and 55 others
+note: required by a bound in `shamir_query_builder::batch::Batch::upsert`
+   --> D:\dev\rust\shamir-db\crates\shamir-query-builder\src\batch\batch.rs:215:65
+    |
+215 |     pub fn upsert(&mut self, alias: impl Into<String>, op: impl IntoBatchOp) -> Handle {
+    |                                                                 ^^^^^^^^^^^ required by this bound in `Batch::upsert`
+
+error[E0277]: the trait bound `shamir_query_builder::write::Update: IntoBatchOp` is not satisfied
+   --> crates\shamir-engine\src\query\batch\tests\planner_tests.rs:520:9
+    |
+518 |       b.update(
+    |         ------ required by a bound introduced by this call
+519 |           "update_inventory",
+520 | /         write::update("inventory")
+521 | |             .where_(shamir_query_builder::filter::eq("product_id", 1))
+522 | |             .set(doc().set("quantity", 0)),
+    | |__________________________________________^ the trait `IntoBatchOp` is not implemented for `shamir_query_builder::write::Update`
+    |
+    = help: the following other types implement trait `IntoBatchOp`:
+              AlterBufferCfg
+              BatchOp
+              CallOp
+              ChgrpBuilder
+              CommitMig
+              DeleteOp
+              DescribeTableBuilder
+              DropValidator_
+            and 55 others
+note: required by a bound in `shamir_query_builder::batch::Batch::update`
+   --> D:\dev\rust\shamir-db\crates\shamir-query-builder\src\batch\batch.rs:198:65
+    |
+198 |     pub fn update(&mut self, alias: impl Into<String>, op: impl IntoBatchOp) -> Handle {
+    |                                                                 ^^^^^^^^^^^ required by this bound in `Batch::update`
+
+error[E0277]: the trait bound `shamir_query_builder::write::Update: IntoBatchOp` is not satisfied
+   --> crates\shamir-engine\src\query\batch\tests\planner_tests.rs:537:9
+    |
+535 |     b.update(
+    |       ------ required by a bound introduced by this call
+536 |         "update_all",
+537 |         write::update("users").set(doc().set("status", "active")),
+    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the trait `IntoBatchOp` is not implemented for `shamir_query_builder::write::Update`
+    |
+    = help: the following other types implement trait `IntoBatchOp`:
+              AlterBufferCfg
+              BatchOp
+              CallOp
+              ChgrpBuilder
+              CommitMig
+              DeleteOp
+              DescribeTableBuilder
+              DropValidator_
+            and 55 others
+note: required by a bound in `shamir_query_builder::batch::Batch::update`
+   --> D:\dev\rust\shamir-db\crates\shamir-query-builder\src\batch\batch.rs:198:65
+    |
+198 |     pub fn update(&mut self, alias: impl Into<String>, op: impl IntoBatchOp) -> Handle {
+    |                                                                 ^^^^^^^^^^^ required by this bound in `Batch::update`
+
+error[E0277]: the trait bound `shamir_query_builder::write::Update: IntoBatchOp` is not satisfied
+   --> crates\shamir-engine\src\query\batch\tests\planner_tests.rs:556:9
+    |
+554 |       b.update(
+    |         ------ required by a bound introduced by this call
+555 |           "update",
+556 | /         write::update("users")
+557 | |             .where_(shamir_query_builder::filter::eq("name", "Test"))
+558 | |             .set(doc().set("name", "Updated")),
+    | |______________________________________________^ the trait `IntoBatchOp` is not implemented for `shamir_query_builder::write::Update`
+    |
+    = help: the following other types implement trait `IntoBatchOp`:
+              AlterBufferCfg
+              BatchOp
+              CallOp
+              ChgrpBuilder
+              CommitMig
+              DeleteOp
+              DescribeTableBuilder
+              DropValidator_
+            and 55 others
+note: required by a bound in `shamir_query_builder::batch::Batch::update`
+   --> D:\dev\rust\shamir-db\crates\shamir-query-builder\src\batch\batch.rs:198:65
+    |
+198 |     pub fn update(&mut self, alias: impl Into<String>, op: impl IntoBatchOp) -> Handle {
+    |                                                                 ^^^^^^^^^^^ required by this bound in `Batch::update`
+
+error[E0277]: the trait bound `shamir_query_builder::write::Upsert: IntoBatchOp` is not satisfied
+   --> crates\shamir-engine\src\query\batch\tests\planner_tests.rs:562:9
+    |
+560 |       b.upsert(
+    |         ------ required by a bound introduced by this call
+561 |           "set",
+562 | /         write::upsert("users")
+563 | |             .key(doc().set("id", 1).build())
+564 | |             .value(doc().set("name", "Set").build()),
+    | |____________________________________________________^ the trait `IntoBatchOp` is not implemented for `shamir_query_builder::write::Upsert`
+    |
+    = help: the following other types implement trait `IntoBatchOp`:
+              AlterBufferCfg
+              BatchOp
+              CallOp
+              ChgrpBuilder
+              CommitMig
+              DeleteOp
+              DescribeTableBuilder
+              DropValidator_
+            and 55 others
+note: required by a bound in `shamir_query_builder::batch::Batch::upsert`
+   --> D:\dev\rust\shamir-db\crates\shamir-query-builder\src\batch\batch.rs:215:65
+    |
+215 |     pub fn upsert(&mut self, alias: impl Into<String>, op: impl IntoBatchOp) -> Handle {
+    |                                                                 ^^^^^^^^^^^ required by this bound in `Batch::upsert`
+
+error[E0277]: the trait bound `shamir_query_builder::write::Delete: IntoBatchOp` is not satisfied
+   --> crates\shamir-engine\src\query\batch\tests\planner_tests.rs:568:9
+    |
+566 |     b.delete(
+    |       ------ required by a bound introduced by this call
+567 |         "delete",
+568 |         write::delete("users").where_(shamir_query_builder::filter::eq("id", 999)),
+    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the trait `IntoBatchOp` is not implemented for `shamir_query_builder::write::Delete`
+    |
+    = help: the following other types implement trait `IntoBatchOp`:
+              AlterBufferCfg
+              BatchOp
+              CallOp
+              ChgrpBuilder
+              CommitMig
+              DeleteOp
+              DescribeTableBuilder
+              DropValidator_
+            and 55 others
+note: required by a bound in `shamir_query_builder::batch::Batch::delete`
+   --> D:\dev\rust\shamir-db\crates\shamir-query-builder\src\batch\batch.rs:232:65
+    |
+232 |     pub fn delete(&mut self, alias: impl Into<String>, op: impl IntoBatchOp) -> Handle {
+    |                                                                 ^^^^^^^^^^^ required by this bound in `Batch::delete`
+
+error: could not compile `shamir-server` (lib test) due to 2 previous errors
+error: could not compile `shamir-db` (lib test) due to 10 previous errors
+error: could not compile `shamir-engine` (lib test) due to 73 previous errors

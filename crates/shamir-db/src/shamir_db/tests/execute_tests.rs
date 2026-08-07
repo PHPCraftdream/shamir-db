@@ -94,13 +94,14 @@ async fn test_execute_crud_pipeline() {
     // 2. Update: activate Bob
     let mut b = Batch::new();
     b.id(1);
-    b.update(
+    b.try_update(
         "upd",
         update("users")
             .where_(eq("name", "Bob"))
             .set(doc().set("status", "active"))
             .returning(UpdateReturnMode::Changed),
-    );
+    )
+    .unwrap();
     let q2 = b.to_request_via_msgpack();
     let resp = shamir.execute("testdb", &q2).await.unwrap();
     assert_eq!(resp.results["upd"].records.len(), 1);
@@ -112,7 +113,8 @@ async fn test_execute_crud_pipeline() {
     // 3. Delete Carol + read remaining
     let mut b = Batch::new();
     b.id(1);
-    b.delete("del", delete("users").where_(eq("name", "Carol")));
+    b.try_delete("del", delete("users").where_(eq("name", "Carol")))
+        .unwrap();
     b.query("remaining", Query::from("users"));
     let q3 = b.to_request_via_msgpack();
     let resp = shamir.execute("testdb", &q3).await.unwrap();
@@ -146,10 +148,11 @@ async fn test_execute_delete_returning_returns_deleted_rows() {
     // executor, msgpack codec, and QueryRecord::Inserted deserialiser.
     let mut b = Batch::new();
     b.id(1);
-    b.delete(
+    b.try_delete(
         "del",
         delete("users").where_(eq("status", "active")).returning(),
-    );
+    )
+    .unwrap();
     let q2 = b.to_request_via_msgpack();
     let resp = shamir.execute("testdb", &q2).await.unwrap();
 

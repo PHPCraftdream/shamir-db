@@ -109,7 +109,8 @@ async fn try_update_tx(
     let mut b = Batch::new();
     b.id(1);
     b.transactional();
-    b.update("upd", update(table).where_(filter).set(set_doc));
+    b.try_update("upd", update(table).where_(filter).set(set_doc))
+        .unwrap();
     let resp = db
         .execute(db_name, &b.to_request_via_msgpack())
         .await

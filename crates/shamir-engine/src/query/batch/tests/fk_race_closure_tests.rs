@@ -335,10 +335,11 @@ async fn restrict_race_closed_end_to_end_via_execute_batch() {
     // the invariant under test.
     let mut b = Batch::new();
     b.id(2);
-    b.delete(
+    b.try_delete(
         "del_parent",
         write::delete("parent").where_(filter::eq("id", 1)),
-    );
+    )
+    .unwrap();
     let resp = execute_batch(&b.build(), &resolver, None, None, Actor::System, "test").await;
 
     // Verify the injected writer actually ran (the race genuinely fired).
@@ -421,10 +422,11 @@ async fn cascade_race_closed_end_to_end_via_execute_batch() {
 
     let mut b = Batch::new();
     b.id(2);
-    b.delete(
+    b.try_delete(
         "del_parent",
         write::delete("parent").where_(filter::eq("id", 1)),
-    );
+    )
+    .unwrap();
     let resp = execute_batch(&b.build(), &resolver, None, None, Actor::System, "test").await;
 
     assert!(
@@ -496,10 +498,11 @@ async fn quiescent_restrict_delete_does_not_spuriously_abort() {
         // `resolve_repo` hook is a pure no-op observer.
         let mut b = Batch::new();
         b.id(2);
-        b.delete(
+        b.try_delete(
             "del_parent",
             write::delete("parent").where_(filter::eq("id", 1)),
-        );
+        )
+        .unwrap();
         let resp = execute_batch(&b.build(), &resolver, None, None, Actor::System, "test").await;
         assert!(
             resp.is_ok(),
@@ -550,10 +553,11 @@ async fn resolved_race_retried_transparently_no_client_visible_error() {
         "ins_child_race",
         write::insert("child").row(doc().set("parent_id", 1).set("label", "race")),
     );
-    wb.delete(
+    wb.try_delete(
         "del_child_race",
         write::delete("child").where_(filter::eq("label", "race")),
-    );
+    )
+    .unwrap();
     *resolver.writer.lock().await = Some(InjectedWriter {
         req: wb.build(),
         resolver: TxTestResolver { repo: repo.clone() },
@@ -565,10 +569,11 @@ async fn resolved_race_retried_transparently_no_client_visible_error() {
 
     let mut b = Batch::new();
     b.id(2);
-    b.delete(
+    b.try_delete(
         "del_parent",
         write::delete("parent").where_(filter::eq("id", 1)),
-    );
+    )
+    .unwrap();
     let resp = execute_batch(&b.build(), &resolver, None, None, Actor::System, "test").await;
 
     assert!(
@@ -640,10 +645,11 @@ async fn never_interned_child_field_still_records_predicate_and_catches_race() {
 
     let mut b = Batch::new();
     b.id(2);
-    b.delete(
+    b.try_delete(
         "del_parent",
         write::delete("parent").where_(filter::eq("id", 1)),
-    );
+    )
+    .unwrap();
     let resp = execute_batch(&b.build(), &resolver, None, None, Actor::System, "test").await;
 
     assert!(
@@ -832,12 +838,13 @@ async fn rekey_parent(
 ) -> Result<crate::query::batch::BatchResponse, crate::query::batch::BatchError> {
     let mut b = Batch::new();
     b.id(2);
-    b.update(
+    b.try_update(
         "upd_parent",
         write::update("parent")
             .where_(filter::eq("id", from))
             .set(doc().set("id", to)),
-    );
+    )
+    .unwrap();
     execute_batch(&b.build(), resolver, None, None, Actor::System, "test").await
 }
 

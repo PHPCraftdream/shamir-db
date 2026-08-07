@@ -228,7 +228,7 @@ fn update_entry() {
     let upd = write::update("users")
         .where_(filter::eq("id", 1))
         .set(doc().set("name", "Bob"));
-    b.update("upd", upd);
+    b.try_update("upd", upd).unwrap();
     let req = b.build();
     let qv = req.to_query_value().unwrap();
     assert!(qv["queries"]["upd"].get("update").is_some());
@@ -240,7 +240,7 @@ fn upsert_entry() {
     let ups = write::upsert("cache")
         .key(shamir_types::mpack!("k1"))
         .value(doc().set("v", 42));
-    b.upsert("ups", ups);
+    b.try_upsert("ups", ups).unwrap();
     let req = b.build();
     let qv = req.to_query_value().unwrap();
     assert!(qv["queries"]["ups"].get("set").is_some());
@@ -250,7 +250,7 @@ fn upsert_entry() {
 fn delete_entry() {
     let mut b = Batch::new();
     let del = write::delete("sessions").where_(filter::eq("expired", true));
-    b.delete("del", del);
+    b.try_delete("del", del).unwrap();
     let req = b.build();
     let qv = req.to_query_value().unwrap();
     assert!(qv["queries"]["del"].get("delete_from").is_some());

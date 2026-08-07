@@ -329,12 +329,14 @@ async fn mvp_full_pipeline_ws_native_tls_scram_batch_query() {
     // separate batches as well). -----
     let mut ins_batch = shamir_query_builder::batch::Batch::new();
     ins_batch.id("ws-ins");
-    ins_batch.upsert(
-        "ins",
-        shamir_query_builder::write::upsert("ws_items")
-            .key(mpack!({"id": "a"}))
-            .value(shamir_query_builder::doc! { "id" => "a", "n" => 7 }),
-    );
+    ins_batch
+        .try_upsert(
+            "ins",
+            shamir_query_builder::write::upsert("ws_items")
+                .key(mpack!({"id": "a"}))
+                .value(shamir_query_builder::doc! { "id" => "a", "n" => 7 }),
+        )
+        .unwrap();
     let ins = ins_batch.build();
     let req_b = DbRequest::Execute {
         query_version: shamir_server::version::CURRENT_QUERY_LANG_VERSION,

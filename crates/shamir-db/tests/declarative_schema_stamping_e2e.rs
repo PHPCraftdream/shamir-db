@@ -73,12 +73,13 @@ async fn try_update_autocommit(
 ) -> Result<(), String> {
     let mut b = Batch::new();
     b.id(1);
-    b.update(
+    b.try_update(
         "upd",
         update("events")
             .where_(eq(filter_key, filter_val))
             .set(set_map),
-    );
+    )
+    .unwrap();
     db.execute("testdb", &b.to_request_via_msgpack())
         .await
         .map_err(|e| e.to_string())?;

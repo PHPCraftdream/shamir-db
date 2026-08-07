@@ -255,10 +255,11 @@ async fn explicit_snapshot_restrict_race_closed_via_ri_barrier() {
     // injected writer fires at resolve_repo #2 (after-scan / before-commit).
     let mut del = Batch::new();
     del.id(2);
-    del.delete(
+    del.try_delete(
         "del_parent",
         write::delete("parent").where_(filter::eq("id", 1)),
-    );
+    )
+    .unwrap();
     let exec_resp = execute_in_open_tx(
         &del.build(),
         &resolver,
@@ -344,10 +345,11 @@ async fn quiescent_explicit_snapshot_restrict_delete_does_not_spuriously_abort()
 
         let mut del = Batch::new();
         del.id(2);
-        del.delete(
+        del.try_delete(
             "del_parent",
             write::delete("parent").where_(filter::eq("id", 1)),
-        );
+        )
+        .unwrap();
         let exec_resp = execute_in_open_tx(
             &del.build(),
             &resolver,
@@ -453,10 +455,11 @@ async fn run_explicit_snapshot_delete_race(action: FkAction, writer_parent_id: i
 
     let mut del = Batch::new();
     del.id(2);
-    del.delete(
+    del.try_delete(
         "del_parent",
         write::delete("parent").where_(filter::eq("id", 1)),
-    );
+    )
+    .unwrap();
     let exec_resp = execute_in_open_tx(
         &del.build(),
         &resolver,
@@ -642,12 +645,13 @@ async fn explicit_snapshot_on_update_race_closed_via_ri_barrier() {
     // at ordinal 2.
     let mut upd = Batch::new();
     upd.id(2);
-    upd.update(
+    upd.try_update(
         "upd_parent",
         write::update("parent")
             .where_(filter::eq("id", 1))
             .set(doc().set("id", 2)),
-    );
+    )
+    .unwrap();
     let exec_resp = execute_in_open_tx(
         &upd.build(),
         &resolver,
@@ -728,10 +732,11 @@ async fn quiescent_explicit_snapshot_cascade_delete_does_not_spuriously_abort() 
 
         let mut del = Batch::new();
         del.id(2);
-        del.delete(
+        del.try_delete(
             "del_parent",
             write::delete("parent").where_(filter::eq("id", 1)),
-        );
+        )
+        .unwrap();
         let exec_resp = execute_in_open_tx(
             &del.build(),
             &resolver,
@@ -783,10 +788,11 @@ async fn quiescent_explicit_snapshot_set_null_delete_does_not_spuriously_abort()
 
         let mut del = Batch::new();
         del.id(2);
-        del.delete(
+        del.try_delete(
             "del_parent",
             write::delete("parent").where_(filter::eq("id", 1)),
-        );
+        )
+        .unwrap();
         let exec_resp = execute_in_open_tx(
             &del.build(),
             &resolver,
@@ -840,12 +846,13 @@ async fn quiescent_explicit_snapshot_on_update_does_not_spuriously_abort() {
         // fan-out plan → the update should commit cleanly.
         let mut upd = Batch::new();
         upd.id(2);
-        upd.update(
+        upd.try_update(
             "upd_parent",
             write::update("parent")
                 .where_(filter::eq("id", 1))
                 .set(doc().set("id", 2)),
-        );
+        )
+        .unwrap();
         let exec_resp = execute_in_open_tx(
             &upd.build(),
             &resolver,
@@ -997,10 +1004,11 @@ async fn run_concurrent_publish_during_commit_window_delete(
         .unwrap();
     let mut del = Batch::new();
     del.id(2);
-    del.delete(
+    del.try_delete(
         "del_parent",
         write::delete("parent").where_(filter::eq("id", 1)),
-    );
+    )
+    .unwrap();
     let exec_resp = execute_in_open_tx(
         &del.build(),
         &resolver,
@@ -1218,12 +1226,13 @@ async fn run_concurrent_publish_during_commit_window_on_update() -> ConcurrentPu
     // fan-out and passes.
     let mut upd = Batch::new();
     upd.id(2);
-    upd.update(
+    upd.try_update(
         "upd_parent",
         write::update("parent")
             .where_(filter::eq("id", 1))
             .set(doc().set("id", 2)),
-    );
+    )
+    .unwrap();
     let exec_resp = execute_in_open_tx(
         &upd.build(),
         &resolver,

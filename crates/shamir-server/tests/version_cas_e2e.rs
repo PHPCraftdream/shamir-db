@@ -74,12 +74,14 @@ async fn with_version_read_and_expected_version_write_e2e() {
 
     let mut put_b = Batch::new();
     put_b.id("put");
-    put_b.upsert(
-        "p",
-        upsert("kv")
-            .key(mpack!({"id": "row1"}))
-            .value(doc! { "id" => "row1", "val" => 1 }),
-    );
+    put_b
+        .try_upsert(
+            "p",
+            upsert("kv")
+                .key(mpack!({"id": "row1"}))
+                .value(doc! { "id" => "row1", "val" => 1 }),
+        )
+        .unwrap();
     client.execute("default", put_b.build()).await.expect("put");
 
     // Read-side: with_version() must return a version for the seeded row.
@@ -88,13 +90,14 @@ async fn with_version_read_and_expected_version_write_e2e() {
     // Write-side: expected_version(v0) must succeed and bump the version.
     let mut up_b = Batch::new();
     up_b.id("u");
-    up_b.update(
+    up_b.try_update(
         "u1",
         update("kv")
             .where_(filter::eq("id", "row1"))
             .set(doc! { "val" => 2 })
             .expected_version(v0),
-    );
+    )
+    .unwrap();
     client
         .execute("default", up_b.build())
         .await
@@ -107,13 +110,15 @@ async fn with_version_read_and_expected_version_write_e2e() {
     // typed `version_conflict` code — no row modified.
     let mut stale_b = Batch::new();
     stale_b.id("s");
-    stale_b.update(
-        "u2",
-        update("kv")
-            .where_(filter::eq("id", "row1"))
-            .set(doc! { "val" => 999 })
-            .expected_version(v0),
-    );
+    stale_b
+        .try_update(
+            "u2",
+            update("kv")
+                .where_(filter::eq("id", "row1"))
+                .set(doc! { "val" => 999 })
+                .expected_version(v0),
+        )
+        .unwrap();
     let err = client
         .execute("default", stale_b.build())
         .await
@@ -187,12 +192,14 @@ async fn concurrent_cas_via_real_server_exactly_one_wins() {
 
     let mut put_b = Batch::new();
     put_b.id("put");
-    put_b.upsert(
-        "p",
-        upsert("kv")
-            .key(mpack!({"id": "counter"}))
-            .value(doc! { "id" => "counter", "val" => 0 }),
-    );
+    put_b
+        .try_upsert(
+            "p",
+            upsert("kv")
+                .key(mpack!({"id": "counter"}))
+                .value(doc! { "id" => "counter", "val" => 0 }),
+        )
+        .unwrap();
     setup_client
         .execute("default", put_b.build())
         .await
@@ -207,26 +214,28 @@ async fn concurrent_cas_via_real_server_exactly_one_wins() {
     let task_a = tokio::spawn(async move {
         let mut b = Batch::new();
         b.id("a");
-        b.update(
+        b.try_update(
             "ua",
             update("kv")
                 .where_(filter::eq("id", "counter"))
                 .set(doc! { "val" => 100 })
                 .expected_version(v0),
-        );
+        )
+        .unwrap();
         b.transactional().isolation(Isolation::Serializable);
         client_a.execute("default", b.build()).await
     });
     let task_b = tokio::spawn(async move {
         let mut b = Batch::new();
         b.id("b");
-        b.update(
+        b.try_update(
             "ub",
             update("kv")
                 .where_(filter::eq("id", "counter"))
                 .set(doc! { "val" => 200 })
                 .expected_version(v0),
-        );
+        )
+        .unwrap();
         b.transactional().isolation(Isolation::Serializable);
         client_b.execute("default", b.build()).await
     });
@@ -300,13 +309,15 @@ async fn concurrent_cas_via_real_server_exactly_one_wins() {
 
     let mut retry_b = Batch::new();
     retry_b.id("retry");
-    retry_b.update(
-        "ur",
-        update("kv")
-            .where_(filter::eq("id", "counter"))
-            .set(doc! { "val" => 999 })
-            .expected_version(v1),
-    );
+    retry_b
+        .try_update(
+            "ur",
+            update("kv")
+                .where_(filter::eq("id", "counter"))
+                .set(doc! { "val" => 999 })
+                .expected_version(v1),
+        )
+        .unwrap();
     setup_client
         .execute("default", retry_b.build())
         .await
@@ -328,26 +339,28 @@ async fn concurrent_cas_via_real_server_exactly_one_wins() {
     let task_c = tokio::spawn(async move {
         let mut b = Batch::new();
         b.id("c");
-        b.update(
+        b.try_update(
             "uc",
             update("kv")
                 .where_(filter::eq("id", "counter"))
                 .set(doc! { "val" => 300 })
                 .expected_version(v2),
-        );
+        )
+        .unwrap();
         // No `.transactional()` at all — plain non-tx batch.
         client_c.execute("default", b.build()).await
     });
     let task_d = tokio::spawn(async move {
         let mut b = Batch::new();
         b.id("d");
-        b.update(
+        b.try_update(
             "ud",
             update("kv")
                 .where_(filter::eq("id", "counter"))
                 .set(doc! { "val" => 400 })
                 .expected_version(v2),
-        );
+        )
+        .unwrap();
         client_d.execute("default", b.build()).await
     });
 

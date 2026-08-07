@@ -47,16 +47,18 @@ async fn quickstart_kv_in_default_store() {
     // Step 4a — PUT.
     let mut put_b = shamir_query_builder::batch::Batch::new();
     put_b.id("put");
-    put_b.upsert(
-        "p",
-        shamir_query_builder::write::upsert("kv")
-            .key(mpack!({"id": "user:42"}))
-            .value(shamir_query_builder::doc! {
-                "id" => "user:42",
-                "name" => "Alice",
-                "score" => 7,
-            }),
-    );
+    put_b
+        .try_upsert(
+            "p",
+            shamir_query_builder::write::upsert("kv")
+                .key(mpack!({"id": "user:42"}))
+                .value(shamir_query_builder::doc! {
+                    "id" => "user:42",
+                    "name" => "Alice",
+                    "score" => 7,
+                }),
+        )
+        .unwrap();
     client.execute("default", put_b.build()).await.expect("put");
 
     // Step 4b — GET by key.

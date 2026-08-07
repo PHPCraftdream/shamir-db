@@ -128,12 +128,13 @@ fn tx_execute_bytes(tx_handle: u64, n: usize) -> Vec<u8> {
     b.return_only(std::iter::empty::<String>());
     for i in 0..n {
         let id = format!("k{i}");
-        b.upsert(
+        b.try_upsert(
             format!("s{i}"),
             upsert("items")
                 .key(mpack!({ "id": @(QueryValue::from(id.as_str())) }))
                 .value(doc! { "id" => id.clone(), "qty" => i as i64 }),
-        );
+        )
+        .unwrap();
     }
     encode(&DbRequest::TxExecute {
         query_version: shamir_server::version::CURRENT_QUERY_LANG_VERSION,

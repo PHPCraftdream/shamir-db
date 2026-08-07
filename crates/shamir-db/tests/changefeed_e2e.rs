@@ -118,12 +118,14 @@ async fn live_insert_update_delete_emit_expected_events() {
     let mut ubatch = Batch::named("upd");
     ubatch.id("upd");
     ubatch.transactional();
-    ubatch.update(
-        "u",
-        update("users").where_(eq("name", "alice")).set(doc! {
-            "age" => 31,
-        }),
-    );
+    ubatch
+        .try_update(
+            "u",
+            update("users").where_(eq("name", "alice")).set(doc! {
+                "age" => 31,
+            }),
+        )
+        .unwrap();
     shamir
         .execute("testdb", &ubatch.to_request_via_msgpack())
         .await
@@ -146,7 +148,9 @@ async fn live_insert_update_delete_emit_expected_events() {
     let mut dbatch = Batch::named("del");
     dbatch.id("del");
     dbatch.transactional();
-    dbatch.delete("d", delete("users").where_(eq("name", "alice")));
+    dbatch
+        .try_delete("d", delete("users").where_(eq("name", "alice")))
+        .unwrap();
     shamir
         .execute("testdb", &dbatch.to_request_via_msgpack())
         .await
@@ -344,12 +348,14 @@ async fn nontx_insert_update_delete_emit_expected_events() {
     // ── NON-TX UPDATE → Put with the updated value ───────────────────
     let mut ubatch = Batch::named("upd");
     ubatch.id("upd");
-    ubatch.update(
-        "u",
-        update("users").where_(eq("name", "alice")).set(doc! {
-            "age" => 31,
-        }),
-    );
+    ubatch
+        .try_update(
+            "u",
+            update("users").where_(eq("name", "alice")).set(doc! {
+                "age" => 31,
+            }),
+        )
+        .unwrap();
     shamir
         .execute("testdb", &ubatch.to_request_via_msgpack())
         .await
@@ -371,7 +377,9 @@ async fn nontx_insert_update_delete_emit_expected_events() {
     // ── NON-TX DELETE → Delete with no value ─────────────────────────
     let mut dbatch = Batch::named("del");
     dbatch.id("del");
-    dbatch.delete("d", delete("users").where_(eq("name", "alice")));
+    dbatch
+        .try_delete("d", delete("users").where_(eq("name", "alice")))
+        .unwrap();
     shamir
         .execute("testdb", &dbatch.to_request_via_msgpack())
         .await
@@ -534,12 +542,14 @@ async fn nontx_update_batch_version_is_max_of_per_record_writes() {
     // Update BOTH rows in one non-tx batch (matches WHERE age > 0).
     let mut ubatch = Batch::named("upd");
     ubatch.id("upd");
-    ubatch.update(
-        "u",
-        update("users")
-            .where_(shamir_query_builder::filter::gt("age", 0))
-            .set(doc! { "age" => 99 }),
-    );
+    ubatch
+        .try_update(
+            "u",
+            update("users")
+                .where_(shamir_query_builder::filter::gt("age", 0))
+                .set(doc! { "age" => 99 }),
+        )
+        .unwrap();
     shamir
         .execute("testdb", &ubatch.to_request_via_msgpack())
         .await

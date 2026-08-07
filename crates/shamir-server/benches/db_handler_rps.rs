@@ -75,18 +75,20 @@ async fn build_loaded_handler(count: usize) -> (Arc<ShamirDbHandler>, Arc<Sessio
     for i in 0..count {
         let city = cities[i % 4];
         let id = format!("user-{i}");
-        seed_batch.upsert(
-            format!("s{i}"),
-            upsert("users")
-                .key(doc! { "id" => id.clone() })
-                .value(doc! {
-                    "id"     => id.clone(),
-                    "name"   => format!("Name {i}"),
-                    "age"    => (i % 100) as i64,
-                    "city"   => city.to_string(),
-                    "active" => i % 2 == 0
-                }),
-        );
+        seed_batch
+            .try_upsert(
+                format!("s{i}"),
+                upsert("users")
+                    .key(doc! { "id" => id.clone() })
+                    .value(doc! {
+                        "id"     => id.clone(),
+                        "name"   => format!("Name {i}"),
+                        "age"    => (i % 100) as i64,
+                        "city"   => city.to_string(),
+                        "active" => i % 2 == 0
+                    }),
+            )
+            .unwrap();
     }
     let seed_req = DbRequest::Execute {
         query_version: shamir_server::version::CURRENT_QUERY_LANG_VERSION,

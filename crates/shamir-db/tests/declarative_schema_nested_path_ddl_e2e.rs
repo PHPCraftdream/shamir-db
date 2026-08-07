@@ -60,7 +60,8 @@ async fn exec_add_schema_rule(
     let rule = rule.build();
     let mut b = Batch::new();
     b.id(1);
-    b.add_schema_rule(alias, ddl::add_schema_rule(table).rule(rule));
+    b.try_add_schema_rule(alias, ddl::add_schema_rule(table).rule(rule))
+        .unwrap();
     let resp = db
         .execute(db_name, &b.to_request_via_msgpack())
         .await

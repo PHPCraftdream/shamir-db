@@ -171,10 +171,11 @@ async fn rls_delete_only_removes_matching_rows() {
     // Delete all via RLS — only active rows should be deleted.
     let mut b = Batch::new();
     b.id(2);
-    b.delete(
+    b.try_delete(
         "del",
         write::delete("users").where_(shamir_query_builder::filter::eq("status", "active")),
-    );
+    )
+    .unwrap();
     let delete_req = b.build();
 
     let resp = execute_batch_with_permissions(&delete_req, &resolver, None, &permissions, "test")
@@ -268,10 +269,11 @@ async fn rls_update_only_affects_matching_rows() {
     // Update ALL rows (no WHERE clause) — RLS should restrict to active only.
     let mut b = Batch::new();
     b.id(2);
-    b.update(
+    b.try_update(
         "upd",
         write::update("users").set(doc().set("tag", "updated")),
-    );
+    )
+    .unwrap();
     let update_req = b.build();
 
     let resp = execute_batch_with_permissions(&update_req, &resolver, None, &permissions, "test")

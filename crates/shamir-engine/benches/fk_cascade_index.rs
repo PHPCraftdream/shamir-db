@@ -235,10 +235,11 @@ async fn build_fixture(n: usize, with_index: bool) -> FkBenchResolver {
 fn cascade_delete_batch() -> shamir_query_types::batch::BatchRequest {
     let mut b = Batch::new();
     b.id(999);
-    b.delete(
+    b.try_delete(
         "del",
         write::delete("parent").where_(filter::eq("id", 1_i64)),
-    );
+    )
+    .unwrap();
     b.build()
 }
 

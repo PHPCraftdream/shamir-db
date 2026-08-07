@@ -2348,11 +2348,12 @@ async fn cursor_still_returns_a_row_deleted_mid_scroll() {
     // this delete.
     let owner = Actor::User(principal64([0xAB; 16]));
     let mut del = Batch::new();
-    del.delete(
+    del.try_delete(
         "d",
         shamir_query_builder::write::delete("items")
             .where_(shamir_query_builder::filter::eq("id", "k002")),
-    );
+    )
+    .unwrap();
     handler
         .db()
         .execute_as(owner, "app", &del.build())
@@ -2442,12 +2443,13 @@ async fn cursor_keeps_pinned_value_for_a_row_updated_mid_scroll() {
     // via a separate, real batch call.
     let owner = Actor::User(principal64([0xAB; 16]));
     let mut upd = Batch::new();
-    upd.update(
+    upd.try_update(
         "u",
         shamir_query_builder::write::update("items")
             .where_(shamir_query_builder::filter::eq("id", "k002"))
             .set(shamir_query_builder::doc! { "v" => 9999_i64 }),
-    );
+    )
+    .unwrap();
     handler
         .db()
         .execute_as(owner, "app", &upd.build())
@@ -4825,10 +4827,11 @@ async fn upsert_identical_rule_preserves_keyset_safe_proof() {
     // non-empty, but since the rule's path + type are UNCHANGED,
     // stamp_keyset_safe preserves the prior keyset_safe: true.
     let mut b = Batch::new();
-    b.add_schema_rule(
+    b.try_add_schema_rule(
         "ar",
         add_schema_rule("items").rule(field(["score"]).int().required().build()),
-    );
+    )
+    .unwrap();
     shamir
         .execute_as(owner, "app", &b.build())
         .await
@@ -5101,12 +5104,14 @@ async fn index_seek_falls_back_to_offset_on_concurrent_write_and_stays_there() {
     // the WHOLE index (a one-way ratchet), same scenario the spike proved.
     let owner = Actor::User(principal64([0xAB; 16]));
     let mut update_batch = Batch::new();
-    update_batch.update(
-        "mv",
-        shamir_query_builder::write::update("items")
-            .where_(shamir_query_builder::filter::eq("seq", 30i64))
-            .set(shamir_query_builder::doc! { "score" => 305i64 }),
-    );
+    update_batch
+        .try_update(
+            "mv",
+            shamir_query_builder::write::update("items")
+                .where_(shamir_query_builder::filter::eq("seq", 30i64))
+                .set(shamir_query_builder::doc! { "score" => 305i64 }),
+        )
+        .unwrap();
     handler
         .db()
         .execute_as(owner, "app", &update_batch.build())
@@ -5219,12 +5224,14 @@ async fn index_seek_offset_fallback_holds_permanently_across_page_3() {
     // Concurrent write trips the gate.
     let owner = Actor::User(principal64([0xAB; 16]));
     let mut update_batch = Batch::new();
-    update_batch.update(
-        "mv",
-        shamir_query_builder::write::update("items")
-            .where_(shamir_query_builder::filter::eq("seq", 20i64))
-            .set(shamir_query_builder::doc! { "score" => 205i64 }),
-    );
+    update_batch
+        .try_update(
+            "mv",
+            shamir_query_builder::write::update("items")
+                .where_(shamir_query_builder::filter::eq("seq", 20i64))
+                .set(shamir_query_builder::doc! { "score" => 205i64 }),
+        )
+        .unwrap();
     handler
         .db()
         .execute_as(owner, "app", &update_batch.build())

@@ -109,7 +109,7 @@ async fn concurrent_executes_return_correct_results() {
         .map(|sku| {
             let mut b = shamir_query_builder::batch::Batch::new();
             b.id("ins");
-            b.upsert(
+            b.try_upsert(
                 "w",
                 shamir_query_builder::write::upsert("items_e2e")
                     .key(mpack!({"sku": @(QueryValue::from(*sku))}))
@@ -117,7 +117,8 @@ async fn concurrent_executes_return_correct_results() {
                         "sku" => *sku,
                         "qty" => 1,
                     }),
-            );
+            )
+            .unwrap();
             client.execute("default", b.build())
         })
         .collect();

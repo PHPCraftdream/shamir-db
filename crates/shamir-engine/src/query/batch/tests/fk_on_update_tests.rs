@@ -228,12 +228,13 @@ async fn on_update_restrict_rejects_when_child_references_old() {
     // Update parent.id 5 → 7 while child still references 5 → must reject.
     let mut b = Batch::new();
     b.id(1);
-    b.update(
+    b.try_update(
         "upd_parent",
         write::update("parent")
             .where_(filter::eq("id", 5))
             .set(doc().set("id", 7)),
-    );
+    )
+    .unwrap();
     let req = b.build();
     let resp = execute_batch(&req, &resolver, None, None, Actor::System, "test").await;
 
@@ -296,12 +297,13 @@ async fn on_update_restrict_passes_when_no_child_references_old() {
     // Update parent.id 5 → 7 → should succeed (no references).
     let mut b = Batch::new();
     b.id(1);
-    b.update(
+    b.try_update(
         "upd_parent",
         write::update("parent")
             .where_(filter::eq("id", 5))
             .set(doc().set("id", 7)),
-    );
+    )
+    .unwrap();
     let req = b.build();
     let resp = execute_batch(&req, &resolver, None, None, Actor::System, "test")
         .await
@@ -370,12 +372,13 @@ async fn on_update_cascade_rekeys_child_fk() {
     // Update parent.id 5 → 7 → child.parent_id should become 7.
     let mut b = Batch::new();
     b.id(1);
-    b.update(
+    b.try_update(
         "upd_parent",
         write::update("parent")
             .where_(filter::eq("id", 5))
             .set(doc().set("id", 7)),
-    );
+    )
+    .unwrap();
     let req = b.build();
     let resp = execute_batch(&req, &resolver, None, None, Actor::System, "test")
         .await
@@ -462,12 +465,13 @@ async fn on_update_cascade_rekeys_multiple_children_and_rows() {
     // Re-key BOTH parents (5→8 and 6→9) via a where that matches both.
     let mut b = Batch::new();
     b.id(1);
-    b.update(
+    b.try_update(
         "upd_parents",
         write::update("parent")
             .where_(filter::in_("id", [5, 6]))
             .set(doc().set("id", 99)),
-    );
+    )
+    .unwrap();
     let req = b.build();
     execute_batch(&req, &resolver, None, None, Actor::System, "test")
         .await
@@ -533,12 +537,13 @@ async fn on_update_set_null_nulls_child_fk() {
     // Update parent.id 5 → 7 → child.parent_id should become Null.
     let mut b = Batch::new();
     b.id(1);
-    b.update(
+    b.try_update(
         "upd_parent",
         write::update("parent")
             .where_(filter::eq("id", 5))
             .set(doc().set("id", 7)),
-    );
+    )
+    .unwrap();
     let req = b.build();
     let resp = execute_batch(&req, &resolver, None, None, Actor::System, "test")
         .await
@@ -600,12 +605,13 @@ async fn on_update_set_null_on_non_nullable_errors() {
     // Update parent.id 5 → 7 → SetNull on non-nullable field → error.
     let mut b = Batch::new();
     b.id(1);
-    b.update(
+    b.try_update(
         "upd_parent",
         write::update("parent")
             .where_(filter::eq("id", 5))
             .set(doc().set("id", 7)),
-    );
+    )
+    .unwrap();
     let req = b.build();
     let resp = execute_batch(&req, &resolver, None, None, Actor::System, "test").await;
 
@@ -673,12 +679,13 @@ async fn on_update_noop_when_set_does_not_touch_ref_field() {
     // Update parent.name (NOT id) → no fan-out, child.parent_id stays 5.
     let mut b = Batch::new();
     b.id(1);
-    b.update(
+    b.try_update(
         "upd_parent",
         write::update("parent")
             .where_(filter::eq("id", 5))
             .set(doc().set("name", "renamed")),
-    );
+    )
+    .unwrap();
     let req = b.build();
     let resp = execute_batch(&req, &resolver, None, None, Actor::System, "test")
         .await
@@ -747,12 +754,13 @@ async fn on_update_no_action_no_fanout() {
     // Update parent.id 5 → 7 → child.parent_id must stay 5 (NoAction).
     let mut b = Batch::new();
     b.id(1);
-    b.update(
+    b.try_update(
         "upd_parent",
         write::update("parent")
             .where_(filter::eq("id", 5))
             .set(doc().set("id", 7)),
-    );
+    )
+    .unwrap();
     let req = b.build();
     let resp = execute_batch(&req, &resolver, None, None, Actor::System, "test")
         .await
@@ -821,12 +829,13 @@ async fn on_update_cascade_skips_when_old_equals_new() {
     // Update parent.id 5 → 5 (no-op value) → no fan-out.
     let mut b = Batch::new();
     b.id(1);
-    b.update(
+    b.try_update(
         "upd_parent",
         write::update("parent")
             .where_(filter::eq("id", 5))
             .set(doc().set("id", 5)),
-    );
+    )
+    .unwrap();
     let req = b.build();
     let resp = execute_batch(&req, &resolver, None, None, Actor::System, "test")
         .await
@@ -924,12 +933,13 @@ async fn on_update_cascade_two_child_tables_same_ref_field() {
     // Update users.id 5 → 7 → BOTH orders.user_id and sessions.user_id re-keyed.
     let mut b = Batch::new();
     b.id(1);
-    b.update(
+    b.try_update(
         "upd_user",
         write::update("users")
             .where_(filter::eq("id", 5))
             .set(doc().set("id", 7)),
-    );
+    )
+    .unwrap();
     let req = b.build();
     execute_batch(&req, &resolver, None, None, Actor::System, "test")
         .await
@@ -1022,12 +1032,13 @@ async fn on_update_cascade_two_fk_fields_same_ref_field() {
     // Update users.id 5 → 7 → BOTH sender_id and receiver_id re-keyed.
     let mut b = Batch::new();
     b.id(1);
-    b.update(
+    b.try_update(
         "upd_user",
         write::update("users")
             .where_(filter::eq("id", 5))
             .set(doc().set("id", 7)),
-    );
+    )
+    .unwrap();
     let req = b.build();
     execute_batch(&req, &resolver, None, None, Actor::System, "test")
         .await
@@ -1116,12 +1127,13 @@ async fn on_update_restrict_fires_even_when_sharing_ref_field_with_cascade() {
     // Update users.id 5 → 7 → RESTRICT must fire (restrict_child still refs 5).
     let mut b = Batch::new();
     b.id(1);
-    b.update(
+    b.try_update(
         "upd_user",
         write::update("users")
             .where_(filter::eq("id", 5))
             .set(doc().set("id", 7)),
-    );
+    )
+    .unwrap();
     let req = b.build();
     let resp = execute_batch(&req, &resolver, None, None, Actor::System, "test").await;
 
@@ -1212,12 +1224,13 @@ async fn on_update_cascade_single_fk_non_regression() {
     // Re-key only alice 5→7.
     let mut b = Batch::new();
     b.id(1);
-    b.update(
+    b.try_update(
         "upd_user",
         write::update("users")
             .where_(filter::eq("id", 5))
             .set(doc().set("id", 7)),
-    );
+    )
+    .unwrap();
     let req = b.build();
     execute_batch(&req, &resolver, None, None, Actor::System, "test")
         .await
@@ -1299,12 +1312,13 @@ async fn on_update_cascade_int_parent_f64_child_coercion() {
     // coercion (previously the strict match left the child invisible).
     let mut b = Batch::new();
     b.id(1);
-    b.update(
+    b.try_update(
         "upd_parent",
         write::update("parent")
             .where_(filter::eq("id", 5_i64))
             .set(doc().set("id", 7_i64)),
-    );
+    )
+    .unwrap();
     let req = b.build();
     let resp = execute_batch(&req, &resolver, None, None, Actor::System, "test")
         .await
@@ -1426,12 +1440,13 @@ async fn self_ref_on_update_cascade_rekeys_subordinates() {
     // Re-key CEO id 10 → 77 → both subordinates must cascade to 77.
     let mut b = Batch::new();
     b.id(1);
-    b.update(
+    b.try_update(
         "upd",
         write::update("employees")
             .where_(filter::eq("id", 10_i64))
             .set(doc().set("id", 77_i64)),
-    );
+    )
+    .unwrap();
     let req = b.build();
     execute_batch(&req, &resolver, None, None, Actor::System, "test")
         .await
@@ -1497,12 +1512,13 @@ async fn self_ref_on_update_restrict_blocks_rekey() {
     // Re-key CEO id 10 → 77 → must be REJECTED (Sub still references 10).
     let mut b = Batch::new();
     b.id(1);
-    b.update(
+    b.try_update(
         "upd",
         write::update("employees")
             .where_(filter::eq("id", 10_i64))
             .set(doc().set("id", 77_i64)),
-    );
+    )
+    .unwrap();
     let req = b.build();
     let resp = execute_batch(&req, &resolver, None, None, Actor::System, "test").await;
 
@@ -1574,12 +1590,13 @@ async fn self_ref_on_update_set_null_nulls_subordinates() {
     // Re-key CEO id 10 → 77 → Sub.manager_id must be nulled.
     let mut b = Batch::new();
     b.id(1);
-    b.update(
+    b.try_update(
         "upd",
         write::update("employees")
             .where_(filter::eq("id", 10_i64))
             .set(doc().set("id", 77_i64)),
-    );
+    )
+    .unwrap();
     let req = b.build();
     execute_batch(&req, &resolver, None, None, Actor::System, "test")
         .await
@@ -1657,12 +1674,13 @@ async fn self_ref_on_update_self_loop_overlapping_parent_and_child() {
     // Re-key BOTH R1 (10→99) and R2 (20→99) in one operation.
     let mut b = Batch::new();
     b.id(1);
-    b.update(
+    b.try_update(
         "upd",
         write::update("employees")
             .where_(filter::in_("id", [10_i64, 20_i64]))
             .set(doc().set("id", 99_i64)),
-    );
+    )
+    .unwrap();
     let req = b.build();
     execute_batch(&req, &resolver, None, None, Actor::System, "test")
         .await
@@ -1782,21 +1800,23 @@ async fn cascade_and_direct_update_on_same_child_row_both_survive() {
     b.id(1);
     b.transactional();
     // (a) Re-key parent 5→7 → cascade child.parent_id 5→7 (staged in tx).
-    b.update(
+    b.try_update(
         "upd_parent",
         write::update("parent")
             .where_(filter::eq("id", 5))
             .set(doc().set("id", 7)),
-    );
+    )
+    .unwrap();
     // (b) Direct UPDATE on the SAME child row, setting a DIFFERENT field.
     //    WHERE matches on `cid` (unchanged by the cascade) so the match is
     //    unambiguous regardless of read-your-own-writes.
-    b.update(
+    b.try_update(
         "upd_child",
         write::update("child")
             .where_(filter::eq("cid", 50))
             .set(doc().set("label", "direct")),
-    );
+    )
+    .unwrap();
     let req = b.build();
     let resp = execute_batch(&req, &resolver, None, None, Actor::System, "test")
         .await
@@ -1862,13 +1882,15 @@ async fn delete_then_update_same_row_in_one_tx_row_stays_deleted() {
     let mut b = Batch::new();
     b.id(1);
     b.transactional();
-    b.delete("del", write::delete("items").where_(filter::eq("id", 5)));
-    b.update(
+    b.try_delete("del", write::delete("items").where_(filter::eq("id", 5)))
+        .unwrap();
+    b.try_update(
         "upd",
         write::update("items")
             .where_(filter::eq("id", 5))
             .set(doc().set("name", "resurrected")),
-    );
+    )
+    .unwrap();
     let req = b.build();
     let resp = execute_batch(&req, &resolver, None, None, Actor::System, "test")
         .await
@@ -1974,12 +1996,13 @@ async fn on_update_cascade_with_index_fast_path_rekeys_same_children() {
     // Re-key BOTH parents (5,6 → 99) via a where that matches both.
     let mut b = Batch::new();
     b.id(1);
-    b.update(
+    b.try_update(
         "upd_parents",
         write::update("parent")
             .where_(filter::in_("id", [5, 6]))
             .set(doc().set("id", 99)),
-    );
+    )
+    .unwrap();
     let req = b.build();
     execute_batch(&req, &resolver, None, None, Actor::System, "test")
         .await
@@ -2055,12 +2078,13 @@ async fn on_update_set_null_with_index_fast_path_nulls_same_children() {
     // Re-key parent 5 → 7: both children's parent_id must be SET to Null.
     let mut b = Batch::new();
     b.id(1);
-    b.update(
+    b.try_update(
         "upd_parent",
         write::update("parent")
             .where_(filter::eq("id", 5))
             .set(doc().set("id", 7)),
-    );
+    )
+    .unwrap();
     let req = b.build();
     execute_batch(&req, &resolver, None, None, Actor::System, "test")
         .await

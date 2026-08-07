@@ -316,10 +316,11 @@ async fn cascade_index_fast_path_propagates_read_error() {
 
     let mut b = Batch::new();
     b.id(10);
-    b.delete(
+    b.try_delete(
         "del",
         write::delete("parent").where_(filter::eq("id", 1_i64)),
-    );
+    )
+    .unwrap();
     let result = execute_batch(&b.build(), &resolver, None, None, Actor::System, "test").await;
 
     assert!(
@@ -389,12 +390,13 @@ async fn on_update_index_fast_path_propagates_read_error() {
 
     let mut b = Batch::new();
     b.id(1);
-    b.update(
+    b.try_update(
         "upd",
         write::update("parent")
             .where_(filter::eq("id", 5_i64))
             .set(doc().set("id", 99_i64)),
-    );
+    )
+    .unwrap();
     let result = execute_batch(&b.build(), &resolver, None, None, Actor::System, "test").await;
 
     assert!(
@@ -526,7 +528,8 @@ async fn setup_grandchild_cascade_chain() -> FkTestResolver {
 async fn delete_a(resolver: &FkTestResolver) -> Result<BatchResponse, BatchError> {
     let mut b = Batch::new();
     b.id(4);
-    b.delete("del_a", write::delete("a").where_(filter::eq("id", 1_i64)));
+    b.try_delete("del_a", write::delete("a").where_(filter::eq("id", 1_i64)))
+        .unwrap();
     execute_batch(&b.build(), resolver, None, None, Actor::System, "test").await
 }
 

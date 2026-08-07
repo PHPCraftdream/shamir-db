@@ -190,10 +190,11 @@ async fn cascade_deletes_child_when_parent_deleted() {
     // Delete parent → child should also be deleted (Cascade).
     let mut b = Batch::new();
     b.id(3);
-    b.delete(
+    b.try_delete(
         "del_parent",
         write::delete("parent").where_(filter::eq("id", 1)),
-    );
+    )
+    .unwrap();
     let req = b.build();
     let resp = execute_batch(&req, &resolver, None, None, Actor::System, "test")
         .await
@@ -292,7 +293,8 @@ async fn cascade_chain_a_to_b_to_c() {
     // Delete A → B and C should also be cascade-deleted.
     let mut b = Batch::new();
     b.id(4);
-    b.delete("da", write::delete("a").where_(filter::eq("id", 1)));
+    b.try_delete("da", write::delete("a").where_(filter::eq("id", 1)))
+        .unwrap();
     let req = b.build();
     let resp = execute_batch(&req, &resolver, None, None, Actor::System, "test")
         .await
@@ -374,7 +376,8 @@ async fn cascade_cycle_triggers_depth_guard() {
     // Delete X → cascade should recurse X→Y→X→Y... and hit depth guard.
     let mut b = Batch::new();
     b.id(3);
-    b.delete("dx", write::delete("x").where_(filter::eq("id", 1)));
+    b.try_delete("dx", write::delete("x").where_(filter::eq("id", 1)))
+        .unwrap();
     let req = b.build();
     let resp = execute_batch(&req, &resolver, None, None, Actor::System, "test").await;
 
@@ -525,7 +528,8 @@ async fn cascade_diamond_topology_succeeds() {
     // deleted exactly once (no double-delete error mid-cascade).
     let mut b = Batch::new();
     b.id(5);
-    b.delete("da", write::delete("a").where_(filter::eq("id", 1)));
+    b.try_delete("da", write::delete("a").where_(filter::eq("id", 1)))
+        .unwrap();
     let req = b.build();
     let resp = execute_batch(&req, &resolver, None, None, Actor::System, "test")
         .await
@@ -599,10 +603,11 @@ async fn set_null_nulls_child_field_when_parent_deleted() {
     // Delete parent → child should survive with parent_id == Null.
     let mut b = Batch::new();
     b.id(3);
-    b.delete(
+    b.try_delete(
         "del_parent",
         write::delete("parent").where_(filter::eq("id", 1)),
-    );
+    )
+    .unwrap();
     let req = b.build();
     let resp = execute_batch(&req, &resolver, None, None, Actor::System, "test")
         .await
@@ -676,10 +681,11 @@ async fn set_null_on_non_nullable_field_errors() {
     // Delete parent → should fail with set_null_requires_nullable.
     let mut b = Batch::new();
     b.id(3);
-    b.delete(
+    b.try_delete(
         "del_parent",
         write::delete("parent").where_(filter::eq("id", 1)),
-    );
+    )
+    .unwrap();
     let req = b.build();
     let resp = execute_batch(&req, &resolver, None, None, Actor::System, "test").await;
 
@@ -754,10 +760,11 @@ async fn cascade_int_parent_f64_child_coercion() {
     // Delete parent (Int(1)) → child (F64(1.0)) must cascade-delete.
     let mut b = Batch::new();
     b.id(3);
-    b.delete(
+    b.try_delete(
         "del_parent",
         write::delete("parent").where_(filter::eq("id", 1_i64)),
-    );
+    )
+    .unwrap();
     let req = b.build();
     let resp = execute_batch(&req, &resolver, None, None, Actor::System, "test")
         .await
@@ -824,10 +831,11 @@ async fn cascade_f64_parent_int_child_coercion() {
     // Delete parent (F64(1.0)) → child (Int(1)) must cascade-delete.
     let mut b = Batch::new();
     b.id(3);
-    b.delete(
+    b.try_delete(
         "del_parent",
         write::delete("parent").where_(filter::eq("id", 1.0_f64)),
-    );
+    )
+    .unwrap();
     let req = b.build();
     let resp = execute_batch(&req, &resolver, None, None, Actor::System, "test")
         .await
@@ -886,10 +894,11 @@ async fn set_null_int_parent_f64_child_coercion() {
     // Delete parent → child survives with parent_id == Null (coercion applied).
     let mut b = Batch::new();
     b.id(3);
-    b.delete(
+    b.try_delete(
         "del_parent",
         write::delete("parent").where_(filter::eq("id", 1_i64)),
-    );
+    )
+    .unwrap();
     let req = b.build();
     let resp = execute_batch(&req, &resolver, None, None, Actor::System, "test")
         .await
@@ -980,10 +989,11 @@ async fn self_referential_set_null_nulls_direct_subordinates() {
     // grandchild, not a direct child of CEO).
     let mut b = Batch::new();
     b.id(4);
-    b.delete(
+    b.try_delete(
         "del_ceo",
         write::delete("employees").where_(filter::eq("id", 1_i64)),
-    );
+    )
+    .unwrap();
     let req = b.build();
     let resp = execute_batch(&req, &resolver, None, None, Actor::System, "test")
         .await
@@ -1073,10 +1083,11 @@ async fn transactional_insert_child_then_delete_parent_cascades_no_orphan() {
                 .set("label", "c1"),
         ),
     );
-    b.delete(
+    b.try_delete(
         "del_parent",
         write::delete("parent").where_(filter::eq("id", 1_i64)),
-    );
+    )
+    .unwrap();
     let req = b.build();
     let resp = execute_batch(&req, &resolver, None, None, Actor::System, "test")
         .await
@@ -1170,16 +1181,18 @@ async fn transactional_update_then_delete_parent_cascade_uses_updated_reference(
     let mut b = Batch::new();
     b.id(3);
     b.transactional();
-    b.update(
+    b.try_update(
         "update_child_fk",
         write::update("child")
             .where_(filter::eq("parent_id", 1_i64))
             .set(doc().set("parent_id", 2_i64)),
-    );
-    b.delete(
+    )
+    .unwrap();
+    b.try_delete(
         "del_parent_1",
         write::delete("parent").where_(filter::eq("id", 1_i64)),
-    );
+    )
+    .unwrap();
     let req = b.build();
     let resp = execute_batch(&req, &resolver, None, None, Actor::System, "test")
         .await
@@ -1272,10 +1285,11 @@ async fn transactional_insert_child_with_index_then_delete_parent_restrict_sees_
         "ins_child",
         write::insert("child").row(doc().set("parent_id", 1_i64).set("label", "x")),
     );
-    b.delete(
+    b.try_delete(
         "del_parent",
         write::delete("parent").where_(filter::eq("id", 1_i64)),
-    );
+    )
+    .unwrap();
     let req = b.build();
     let resp = execute_batch(&req, &resolver, None, None, Actor::System, "test").await;
 
@@ -1467,10 +1481,11 @@ async fn cascade_no_index_scan_path_deletes_referencing_children() {
 
     let mut b = Batch::new();
     b.id(10);
-    b.delete(
+    b.try_delete(
         "del",
         write::delete("parent").where_(filter::eq("id", 1_i64)),
-    );
+    )
+    .unwrap();
     execute_batch(&b.build(), &resolver, None, None, Actor::System, "test")
         .await
         .unwrap();
@@ -1488,10 +1503,11 @@ async fn cascade_with_index_fast_path_deletes_same_children() {
 
     let mut b = Batch::new();
     b.id(10);
-    b.delete(
+    b.try_delete(
         "del",
         write::delete("parent").where_(filter::eq("id", 1_i64)),
-    );
+    )
+    .unwrap();
     execute_batch(&b.build(), &resolver, None, None, Actor::System, "test")
         .await
         .unwrap();
@@ -1561,10 +1577,11 @@ async fn cascade_with_index_fast_path_falls_back_to_scan_for_staged_child_writes
         "ins_child2",
         write::insert("child").row(doc().set("cid", 11_i64).set("parent_id", 1_i64)),
     );
-    b.delete(
+    b.try_delete(
         "del_parent",
         write::delete("parent").where_(filter::eq("id", 1_i64)),
-    );
+    )
+    .unwrap();
     let req = b.build();
     let resp = execute_batch(&req, &resolver, None, None, Actor::System, "test")
         .await
@@ -1650,10 +1667,11 @@ async fn set_null_with_index_fast_path_nulls_same_children() {
 
     let mut b = Batch::new();
     b.id(30);
-    b.delete(
+    b.try_delete(
         "del_parent",
         write::delete("parent").where_(filter::eq("id", 1_i64)),
-    );
+    )
+    .unwrap();
     execute_batch(&b.build(), &resolver, None, None, Actor::System, "test")
         .await
         .unwrap();

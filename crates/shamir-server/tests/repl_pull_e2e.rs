@@ -496,12 +496,13 @@ async fn repl_hello_and_pull_with_events() {
         let mut wb = shamir_query_builder::batch::Batch::new();
         wb.id("write");
         wb.transactional();
-        wb.upsert(
+        wb.try_upsert(
             "ins",
             shamir_query_builder::write::upsert(table)
                 .key(mpack!({"sku": @(QueryValue::from(sku.clone()))}))
                 .value(shamir_query_builder::doc! { "sku" => sku, "qty" => i as i64 }),
-        );
+        )
+        .unwrap();
         let req = DbRequest::Execute {
             query_version: CURRENT_QUERY_LANG_VERSION,
             db: db.into(),
@@ -726,12 +727,13 @@ async fn repl_long_poll_empty_tail_does_not_hang() {
     let mut wb = shamir_query_builder::batch::Batch::new();
     wb.id("seed");
     wb.transactional();
-    wb.upsert(
+    wb.try_upsert(
         "ins",
         shamir_query_builder::write::upsert(table)
             .key(mpack!({"sku": "S1"}))
             .value(shamir_query_builder::doc! { "sku" => "S1", "qty" => 1i64 }),
-    );
+    )
+    .unwrap();
     let req = DbRequest::Execute {
         query_version: CURRENT_QUERY_LANG_VERSION,
         db: db.into(),

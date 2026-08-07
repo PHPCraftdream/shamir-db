@@ -140,12 +140,14 @@ async fn sdk_full_lifecycle() {
     // 4. write + read in one batch
     let mut batch = Batch::new();
     batch.id("rw");
-    batch.upsert(
-        "ins",
-        upsert("items")
-            .key(mpack!({"sku": "X1"}))
-            .value(doc! { "sku" => "X1", "qty" => 42 }),
-    );
+    batch
+        .try_upsert(
+            "ins",
+            upsert("items")
+                .key(mpack!({"sku": "X1"}))
+                .value(doc! { "sku" => "X1", "qty" => 42 }),
+        )
+        .unwrap();
     batch.query("rd", Query::from("items"));
     let work = batch.build();
     let resp = client.execute("prod", work).await.expect("rw");

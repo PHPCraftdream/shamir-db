@@ -392,7 +392,7 @@ fn test_plan_update_operation() {
     let mut b = Batch::new();
     b.id(1);
     let users = b.query("users", Query::from("users"));
-    b.update(
+    b.try_update(
         "update_orders",
         write::update("orders")
             .where_(shamir_query_builder::filter::eq(
@@ -400,7 +400,8 @@ fn test_plan_update_operation() {
                 users.first().field("id"),
             ))
             .set(doc().set("status", "processed")),
-    );
+    )
+    .unwrap();
     let request = b.build();
     let plan = BatchPlanner::plan(&request.queries, &BatchLimits::default()).unwrap();
 
@@ -418,12 +419,13 @@ fn test_plan_set_operation() {
     let mut b = Batch::new();
     b.id(1);
     let users = b.query("users", Query::from("users"));
-    b.upsert(
+    b.try_upsert(
         "set_user",
         write::upsert("users")
             .key(doc().set("id", users.first().field("id")).build())
             .value(doc().set("status", "updated").build()),
-    );
+    )
+    .unwrap();
     let request = b.build();
     let plan = BatchPlanner::plan(&request.queries, &BatchLimits::default()).unwrap();
 
@@ -443,13 +445,14 @@ fn test_plan_delete_operation() {
         "inactive_users",
         Query::from("users").where_eq("status", "inactive"),
     );
-    b.delete(
+    b.try_delete(
         "delete_orders",
         write::delete("orders").where_(shamir_query_builder::filter::in_(
             "user_id",
             [inactive.column("id")],
         )),
-    );
+    )
+    .unwrap();
     let request = b.build();
     let plan = BatchPlanner::plan(&request.queries, &BatchLimits::default()).unwrap();
 
@@ -465,7 +468,7 @@ fn test_plan_set_with_value_reference() {
     let mut b = Batch::new();
     b.id(1);
     let source = b.query("source", Query::from("source_table"));
-    b.upsert(
+    b.try_upsert(
         "set_target",
         write::upsert("target_table")
             .key(doc().set("id", 1).build())
@@ -475,7 +478,8 @@ fn test_plan_set_with_value_reference() {
                     .set("status", "copied")
                     .build(),
             ),
-    );
+    )
+    .unwrap();
     let request = b.build();
     let plan = BatchPlanner::plan(&request.queries, &BatchLimits::default()).unwrap();
 
@@ -515,12 +519,13 @@ fn test_plan_mixed_read_and_write() {
         "insert_order",
         write::insert("orders").row(doc().set("user_id", 1).set("product_id", 1)),
     );
-    b.update(
+    b.try_update(
         "update_inventory",
         write::update("inventory")
             .where_(shamir_query_builder::filter::eq("product_id", 1))
             .set(doc().set("quantity", 0)),
-    );
+    )
+    .unwrap();
     let request = b.build();
     let plan = BatchPlanner::plan(&request.queries, &BatchLimits::default()).unwrap();
 
@@ -532,10 +537,11 @@ fn test_plan_mixed_read_and_write() {
 fn test_plan_update_without_filter() {
     let mut b = Batch::new();
     b.id(1);
-    b.update(
+    b.try_update(
         "update_all",
         write::update("users").set(doc().set("status", "active")),
-    );
+    )
+    .unwrap();
     let request = b.build();
     let plan = BatchPlanner::plan(&request.queries, &BatchLimits::default()).unwrap();
 
@@ -551,22 +557,25 @@ fn test_plan_write_operations_serialization() {
         "insert",
         write::insert("users").row(doc().set("name", "Test")),
     );
-    b.update(
+    b.try_update(
         "update",
         write::update("users")
             .where_(shamir_query_builder::filter::eq("name", "Test"))
             .set(doc().set("name", "Updated")),
-    );
-    b.upsert(
+    )
+    .unwrap();
+    b.try_upsert(
         "set",
         write::upsert("users")
             .key(doc().set("id", 1).build())
             .value(doc().set("name", "Set").build()),
-    );
-    b.delete(
+    )
+    .unwrap();
+    b.try_delete(
         "delete",
         write::delete("users").where_(shamir_query_builder::filter::eq("id", 999)),
-    );
+    )
+    .unwrap();
     let request = b.build();
     assert_eq!(request.queries.len(), 4);
 

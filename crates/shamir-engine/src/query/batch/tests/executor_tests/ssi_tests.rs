@@ -117,12 +117,13 @@ async fn ssi_write_skew_detected_through_execute_batch() {
     let mut wb = Batch::new();
     wb.id("writer");
     wb.transactional();
-    wb.update(
+    wb.try_update(
         "w",
         write::update("users")
             .where_(shamir_query_builder::filter::eq("name", "alice"))
             .set(doc().set("val", "rewritten")),
-    );
+    )
+    .unwrap();
     let writer_req = wb.build();
 
     let resolver = GateBarrierResolver {

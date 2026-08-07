@@ -148,10 +148,11 @@ async fn restrict_rejects_parent_delete_when_child_exists() {
     // Try to delete the parent → should be rejected by the RESTRICT gate.
     let mut b = Batch::new();
     b.id(3);
-    b.delete(
+    b.try_delete(
         "del_parent",
         write::delete("parent").where_(filter::eq("id", 1)),
-    );
+    )
+    .unwrap();
     let req = b.build();
     let resp = execute_batch(&req, &resolver, None, None, Actor::System, "test").await;
 
@@ -208,10 +209,11 @@ async fn restrict_allows_parent_delete_after_child_removed() {
     // Delete the child first.
     let mut b = Batch::new();
     b.id(3);
-    b.delete(
+    b.try_delete(
         "del_child",
         write::delete("child").where_(filter::eq("parent_id", 1)),
-    );
+    )
+    .unwrap();
     let req = b.build();
     let resp = execute_batch(&req, &resolver, None, None, Actor::System, "test")
         .await
@@ -224,10 +226,11 @@ async fn restrict_allows_parent_delete_after_child_removed() {
     // Now delete the parent → should succeed (no more children).
     let mut b = Batch::new();
     b.id(4);
-    b.delete(
+    b.try_delete(
         "del_parent",
         write::delete("parent").where_(filter::eq("id", 1)),
-    );
+    )
+    .unwrap();
     let req = b.build();
     let resp = execute_batch(&req, &resolver, None, None, Actor::System, "test")
         .await
@@ -273,10 +276,11 @@ async fn no_action_fk_allows_parent_delete() {
     // Delete parent → should succeed because on_delete = NoAction.
     let mut b = Batch::new();
     b.id(3);
-    b.delete(
+    b.try_delete(
         "del_parent",
         write::delete("parent").where_(filter::eq("id", 1)),
-    );
+    )
+    .unwrap();
     let req = b.build();
     let resp = execute_batch(&req, &resolver, None, None, Actor::System, "test")
         .await
@@ -310,10 +314,11 @@ async fn unreferenced_parent_deletes_fine() {
     // Delete parent → should succeed (no children exist).
     let mut b = Batch::new();
     b.id(2);
-    b.delete(
+    b.try_delete(
         "del_parent",
         write::delete("parent").where_(filter::eq("id", 1)),
-    );
+    )
+    .unwrap();
     let req = b.build();
     let resp = execute_batch(&req, &resolver, None, None, Actor::System, "test")
         .await
@@ -364,10 +369,11 @@ async fn restrict_blocks_delete_with_int_parent_f64_child_coercion() {
     // mismatch (coercion must make the child visible to the restrict scan).
     let mut b = Batch::new();
     b.id(3);
-    b.delete(
+    b.try_delete(
         "del_parent",
         write::delete("parent").where_(filter::eq("id", 1_i64)),
-    );
+    )
+    .unwrap();
     let req = b.build();
     let resp = execute_batch(&req, &resolver, None, None, Actor::System, "test").await;
 
@@ -478,10 +484,11 @@ async fn self_referential_restrict_blocks_delete_when_subordinate_exists() {
     // Delete CEO → must be REJECTED (subordinate still references CEO).
     let mut b = Batch::new();
     b.id(3);
-    b.delete(
+    b.try_delete(
         "del_ceo",
         write::delete("employees").where_(filter::eq("id", 1_i64)),
-    );
+    )
+    .unwrap();
     let req = b.build();
     let resp = execute_batch(&req, &resolver, None, None, Actor::System, "test").await;
 
@@ -542,14 +549,16 @@ async fn transactional_delete_child_then_parent_succeeds_under_restrict() {
     let mut b = Batch::new();
     b.id(3);
     b.transactional();
-    b.delete(
+    b.try_delete(
         "del_child",
         write::delete("child").where_(filter::eq("parent_id", 1)),
-    );
-    b.delete(
+    )
+    .unwrap();
+    b.try_delete(
         "del_parent",
         write::delete("parent").where_(filter::eq("id", 1)),
-    );
+    )
+    .unwrap();
     let req = b.build();
     let resp = execute_batch(&req, &resolver, None, None, Actor::System, "test")
         .await
@@ -588,10 +597,11 @@ async fn self_referential_restrict_allows_delete_when_no_subordinates() {
     // Delete the leaf employee (id=1, no one references them) → must succeed.
     let mut b = Batch::new();
     b.id(2);
-    b.delete(
+    b.try_delete(
         "del",
         write::delete("employees").where_(filter::eq("id", 1_i64)),
-    );
+    )
+    .unwrap();
     let req = b.build();
     let resp = execute_batch(&req, &resolver, None, None, Actor::System, "test")
         .await

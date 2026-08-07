@@ -383,13 +383,15 @@ async fn filter_drops_unmatched_events() {
     // Delete the seed row — must yield exactly one Event push.
     let mut db_op = Batch::new();
     db_op.id(3);
-    db_op.delete(
-        "del",
-        delete("messages").where_(Filter::Eq {
-            field: vec!["_id".into()],
-            value: FilterValue::String("k1".into()),
-        }),
-    );
+    db_op
+        .try_delete(
+            "del",
+            delete("messages").where_(Filter::Eq {
+                field: vec!["_id".into()],
+                value: FilterValue::String("k1".into()),
+            }),
+        )
+        .unwrap();
     let _ = handler
         .handle(&s, &encode(&execute_built("app", db_op.build())), &conn)
         .await
@@ -477,13 +479,15 @@ async fn subscribe_via_macro() {
 
     let mut db_op = Batch::new();
     db_op.id(2);
-    db_op.delete(
-        "del",
-        delete("messages").where_(Filter::Eq {
-            field: vec!["_id".into()],
-            value: FilterValue::String("macro".into()),
-        }),
-    );
+    db_op
+        .try_delete(
+            "del",
+            delete("messages").where_(Filter::Eq {
+                field: vec!["_id".into()],
+                value: FilterValue::String("macro".into()),
+            }),
+        )
+        .unwrap();
     let _ = handler
         .handle(&s, &encode(&execute_built("app", db_op.build())), &conn)
         .await
@@ -557,13 +561,15 @@ async fn two_subscriptions_in_one_batch() {
     // DELETE → only the Delete-mask sub fires.
     let mut db_op = Batch::new();
     db_op.id(3);
-    db_op.delete(
-        "del",
-        delete("messages").where_(Filter::Eq {
-            field: vec!["_id".into()],
-            value: FilterValue::String("x1".into()),
-        }),
-    );
+    db_op
+        .try_delete(
+            "del",
+            delete("messages").where_(Filter::Eq {
+                field: vec!["_id".into()],
+                value: FilterValue::String("x1".into()),
+            }),
+        )
+        .unwrap();
     let _ = handler
         .handle(&s, &encode(&execute_built("app", db_op.build())), &conn)
         .await

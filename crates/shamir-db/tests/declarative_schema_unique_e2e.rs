@@ -610,14 +610,15 @@ async fn unique_update_skip_if_unchanged() {
     let mut b = Batch::new();
     b.id(1);
     b.transactional();
-    b.update(
+    b.try_update(
         "upd",
         update("users")
             .where_(eq("email", "alice@skip.com"))
             .set(mpack!({
                 "name": "Alicia"
             })),
-    );
+    )
+    .unwrap();
     let resp = db
         .execute("testdb", &b.to_request_via_msgpack())
         .await

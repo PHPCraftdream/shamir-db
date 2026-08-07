@@ -172,17 +172,19 @@ async fn batch_mixed_after_and_query_edges_report_expected_provenance() {
     // 3. update — BOTH an explicit `after` on `ins` AND a `$query` ref on
     //    `rd1` => EdgeKind::Both for the rd1 edge, EdgeKind::Explicit for
     //    the `ins` edge (ins has no $query ref from `upd`).
-    let upd = b.update_after(
-        "upd",
-        update("items")
-            .where_(shamir_client::builder::filter::eq(
-                "sku",
-                rd1.first().field("sku"),
-            ))
-            .set(doc! { "qty" => 2_i64 })
-            .returning(shamir_client::builder::write::UpdateReturnMode::All),
-        &[&ins],
-    );
+    let upd = b
+        .try_update_after(
+            "upd",
+            update("items")
+                .where_(shamir_client::builder::filter::eq(
+                    "sku",
+                    rd1.first().field("sku"),
+                ))
+                .set(doc! { "qty" => 2_i64 })
+                .returning(shamir_client::builder::write::UpdateReturnMode::All),
+            &[&ins],
+        )
+        .unwrap();
     b.after(&upd, &rd1); // add the $query-independent explicit edge too
 
     // 4. read2 — pure `$query` data-flow dependency on `upd`.

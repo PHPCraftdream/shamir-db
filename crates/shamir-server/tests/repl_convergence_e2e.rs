@@ -271,12 +271,13 @@ async fn dispatch(handler: &ShamirDbHandler, req: &DbRequest) -> DbResponse {
 fn client_write_batch() -> DbRequest {
     let mut b = Batch::new();
     b.id("w");
-    b.upsert(
+    b.try_upsert(
         "w1",
         shamir_query_builder::write::upsert(TABLE)
             .key(mpack!({ "id": "client-write" }))
             .value(doc! { "id" => "client-write", "v" => 999_i64 }),
-    );
+    )
+    .unwrap();
     DbRequest::Execute {
         query_version: CURRENT_QUERY_LANG_VERSION,
         db: DB.into(),

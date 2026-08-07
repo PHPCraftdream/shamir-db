@@ -140,18 +140,20 @@ async fn interactive_tx_happy_path_wire() {
     let mut wb = Batch::new();
     wb.id("w");
     wb.return_only(std::iter::empty::<String>());
-    wb.upsert(
+    wb.try_upsert(
         "s1",
         upsert("items")
             .key(mpack!({"id": "a"}))
             .value(doc! { "id" => "a", "qty" => 3 }),
-    );
-    wb.upsert(
+    )
+    .unwrap();
+    wb.try_upsert(
         "s2",
         upsert("items")
             .key(mpack!({"id": "b"}))
             .value(doc! { "id" => "b", "qty" => 5 }),
-    );
+    )
+    .unwrap();
     let wres = decode(
         &handler
             .handle(
@@ -269,12 +271,13 @@ async fn interactive_tx_rollback_discards_writes() {
     let mut wb = Batch::new();
     wb.id("w");
     wb.return_only(std::iter::empty::<String>());
-    wb.upsert(
+    wb.try_upsert(
         "s1",
         upsert("items")
             .key(mpack!({"id": "x"}))
             .value(doc! { "id" => "x", "qty" => 9 }),
-    );
+    )
+    .unwrap();
     let _ = handler
         .handle(
             &s,
@@ -355,12 +358,13 @@ async fn interactive_tx_foreign_session_rejected_wire() {
     let mut wb = Batch::new();
     wb.id("w");
     wb.return_only(std::iter::empty::<String>());
-    wb.upsert(
+    wb.try_upsert(
         "s",
         upsert("items")
             .key(mpack!({"id": "a"}))
             .value(doc! { "id" => "a", "qty" => 1 }),
-    );
+    )
+    .unwrap();
     let res = decode(
         &handler
             .handle(

@@ -154,10 +154,11 @@ async fn delete_parent(
     if transactional {
         b.transactional();
     }
-    b.delete(
+    b.try_delete(
         "d",
         delete("departments").where_(shamir_query_builder::filter::eq("dept_id", 100)),
-    );
+    )
+    .unwrap();
     db.execute("testdb", &b.to_request_via_msgpack())
         .await
         .map_err(|e| e.to_string())

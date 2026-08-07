@@ -840,6 +840,17 @@ impl Batch {
         Ok(self.add_entry(alias, op.try_into_batch_op()?, true))
     }
 
+    /// Fallible mirror of [`Batch::op_silent`]: build `op` via [`TryIntoBatchOp`]
+    /// and add it silently, returning a typed [`BuilderError`] when a required
+    /// builder field was never set instead of panicking.
+    pub fn try_op_silent(
+        &mut self,
+        alias: impl Into<String>,
+        op: impl TryIntoBatchOp,
+    ) -> Result<Handle, BuilderError> {
+        Ok(self.add_entry(alias, op.try_into_batch_op()?, false))
+    }
+
     /// Fallible mirror of [`Batch::op_after`]: build `op` via
     /// [`TryIntoBatchOp`] and add it with explicit ordering dependencies.
     pub fn try_op_after(

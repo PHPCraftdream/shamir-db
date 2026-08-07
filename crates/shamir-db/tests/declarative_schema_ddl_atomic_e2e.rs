@@ -191,10 +191,11 @@ async fn bad_type_tag_add_schema_rule_leaves_catalogue_unchanged() {
     // Attempt to add a rule with an unparseable type tag.
     let mut b = Batch::new();
     b.id(2);
-    b.add_schema_rule(
+    b.try_add_schema_rule(
         "ar_bad",
         ddl::add_schema_rule("users").rule(ddl::field(["age"]).type_tag("bogus_type")),
-    );
+    )
+    .unwrap();
     let resp = db.execute("testdb", &b.to_request_via_msgpack()).await;
     assert!(resp.is_err(), "bad type tag should error");
     let err = resp.unwrap_err().to_string();

@@ -140,7 +140,8 @@ async fn keyset_safe_true_for_empty_table_after_add_schema_rule() {
     let rule = ddl::field(["name"]).string().required().build();
     let mut b = Batch::new();
     b.id(1);
-    b.add_schema_rule("asr", ddl::add_schema_rule("users").rule(rule));
+    b.try_add_schema_rule("asr", ddl::add_schema_rule("users").rule(rule))
+        .unwrap();
     db.execute("testdb", &b.to_request_via_msgpack())
         .await
         .expect("add_schema_rule should succeed");

@@ -342,10 +342,11 @@ async fn ddl_add_remove_get_schema() {
     // Add a rule: age int min 0.
     let mut b = Batch::new();
     b.id(2);
-    b.add_schema_rule(
+    b.try_add_schema_rule(
         "ar",
         ddl::add_schema_rule("users").rule(ddl::field(["age"]).int().min(0).max(150)),
-    );
+    )
+    .unwrap();
     let resp = db
         .execute("testdb", &b.to_request_via_msgpack())
         .await

@@ -80,12 +80,13 @@ async fn build_handler(mode: NodeMode) -> ShamirDbHandler {
 /// A write batch: a single upsert of key `k1` into `items`.
 fn write_batch_upsert() -> shamir_query_builder::BatchRequest {
     let mut b = Batch::new();
-    b.upsert(
+    b.try_upsert(
         "w1",
         upsert("items")
             .key(mpack!({ "id": "k1" }))
             .value(doc! { "id" => "k1", "v" => 1_i64 }),
-    );
+    )
+    .unwrap();
     b.build()
 }
 

@@ -280,24 +280,6 @@ impl AlterSubscriptionBuilder {
     }
 }
 
-impl From<AlterSubscriptionBuilder> for BatchOp {
-    fn from(b: AlterSubscriptionBuilder) -> Self {
-        // The `From` conversion is the infallible escape hatch used by the
-        // ergonomic `Batch::*` API (which itself is infallible). It preserves
-        // the historical panic-on-malformed-builder behavior; callers wanting
-        // a typed error should call `.build()` directly.
-        b.build()
-            .expect("AlterSubscriptionBuilder::into(): terminal action is required")
-    }
-}
-
-impl IntoBatchOp for AlterSubscriptionBuilder {
-    fn into_batch_op(self) -> BatchOp {
-        self.build()
-            .expect("AlterSubscriptionBuilder::into_batch_op(): terminal action is required")
-    }
-}
-
 // ============================================================================
 // read-only introspection ops
 // ============================================================================

@@ -567,11 +567,12 @@ async fn fk_cache_reflects_restored_state_after_rolled_back_alter_elsewhere_in_r
     // this is a real cache-aside miss+rebuild via the production delete path.
     let mut b = Batch::new();
     b.id(4);
-    b.delete(
+    b.try_delete(
         "del_dept",
         shamir_query_builder::write::delete("departments")
             .where_(shamir_query_builder::filter::eq("dept_id", 100)),
-    );
+    )
+    .unwrap();
     let pre = db.execute("testdb", &b.to_request_via_msgpack()).await;
     assert!(
         pre.is_err(),
@@ -607,11 +608,12 @@ async fn fk_cache_reflects_restored_state_after_rolled_back_alter_elsewhere_in_r
     // correctly) this could wrongly serve a stale/corrupted view.
     let mut b = Batch::new();
     b.id(5);
-    b.delete(
+    b.try_delete(
         "del_dept",
         shamir_query_builder::write::delete("departments")
             .where_(shamir_query_builder::filter::eq("dept_id", 100)),
-    );
+    )
+    .unwrap();
     let post = db.execute("testdb", &b.to_request_via_msgpack()).await;
     assert!(
         post.is_err(),

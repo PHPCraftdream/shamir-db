@@ -111,12 +111,14 @@ async fn update_set_value_with_query_ref_resolves_to_real_value() {
     let mut b = Batch::new();
     b.id(2);
     let source = b.query("source", Query::from("users").where_eq("tag", "source"));
-    let copy_name = b.op_silent(
-        "copy_name",
-        write::update("users")
-            .where_(filter::eq("tag", "target"))
-            .set(doc().set("name", source.first().field("name"))),
-    );
+    let copy_name = b
+        .try_op_silent(
+            "copy_name",
+            write::update("users")
+                .where_(filter::eq("tag", "target"))
+                .set(doc().set("name", source.first().field("name"))),
+        )
+        .unwrap();
     // `check` has no `$query`/data-flow edge onto `copy_name` (it just reads
     // the same table by an unrelated filter), so without an explicit `after`
     // it plans into the SAME stage as `source` — running BEFORE `copy_name`
@@ -164,12 +166,14 @@ async fn upsert_value_with_query_ref_resolves_to_real_value() {
     let mut b = Batch::new();
     b.id(2);
     let users = b.query("users", Query::from("users"));
-    let upsert_profile = b.op_silent(
-        "upsert_profile",
-        write::upsert("orders")
-            .key(mpack!({"total": 200}))
-            .value(doc().set("owner", users.first().field("name"))),
-    );
+    let upsert_profile = b
+        .try_op_silent(
+            "upsert_profile",
+            write::upsert("orders")
+                .key(mpack!({"total": 200}))
+                .value(doc().set("owner", users.first().field("name"))),
+        )
+        .unwrap();
     // See the `after` rationale in `insert_value_with_query_ref_resolves_to_real_value`.
     let check = b.query("check", Query::from("orders"));
     b.after(&check, &upsert_profile);
@@ -752,12 +756,14 @@ async fn upsert_key_with_unbound_param_errors_proving_key_is_resolved() {
 
     let mut inner = Batch::new();
     inner.id(1);
-    inner.op_silent(
-        "upsert_row",
-        write::upsert("orders")
-            .key(doc().set("name", param("missing")))
-            .value(doc().set("total", 100)),
-    );
+    inner
+        .try_op_silent(
+            "upsert_row",
+            write::upsert("orders")
+                .key(doc().set("name", param("missing")))
+                .value(doc().set("total", 100)),
+        )
+        .unwrap();
     let inner_req = inner.build();
 
     // Empty bind map → "missing" is unbound.
