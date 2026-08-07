@@ -15,6 +15,25 @@ use shamir_types::access::Actor;
 use shamir_types::types::common::{new_map, new_map_wc, TMap};
 use shamir_types::types::value::QueryValue;
 
+/// A single op taking longer than this is logged (#1019): the cooperative
+/// deadline (see `execution_deadline.rs`'s module doc, "Deliberate
+/// non-goal") cannot interrupt a stall INSIDE one op's `.await` — it only
+/// notices the overrun at the NEXT checkpoint, once the stalled op finally
+/// returns. That makes a single-op stall indistinguishable, from the
+/// error alone, from "many small ops accumulated past the budget" — this
+/// warning exists so a future occurrence is diagnosable (which alias, how
+/// long) straight from the log instead of only a wall-clock/budget
+/// mismatch in the error message.
+const SLOW_OP_WARN_THRESHOLD: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// Log a warning if a single op's execution took longer than
+/// [`SLOW_OP_WARN_THRESHOLD`]. See its doc comment for why this exists.
+fn warn_if_op_slow(alias: &str, elapsed: std::time::Duration) {
+    if elapsed > SLOW_OP_WARN_THRESHOLD {
+        log::warn!("batch op '{alias}' took {elapsed:?} to execute (exceeds the {SLOW_OP_WARN_THRESHOLD:?} slow-op logging threshold)");
+    }
+}
+
 /// Execute a batch request against a table resolver.
 ///
 /// 1. Plans the execution (topological sort into parallel stages)
@@ -373,6 +392,7 @@ pub(super) async fn execute_plan_impl(
                 continue;
             }
 
+            let op_started = Instant::now();
             let result = execute_single_impl(
                 alias,
                 entry,
@@ -388,6 +408,7 @@ pub(super) async fn execute_plan_impl(
                 deadline,
             )
             .await?;
+            warn_if_op_slow(alias, op_started.elapsed());
             all_results.insert(alias.clone(), result);
         }
     }
@@ -497,7 +518,9 @@ pub(super) async fn execute_plan_tx_impl(
                 result_encoding,
                 deadline,
             };
+            let op_started = Instant::now();
             let result = runner.run(alias, entry, &resolved_refs).await?;
+            warn_if_op_slow(alias, op_started.elapsed());
             all_results.insert(alias.clone(), result);
         }
     }
