@@ -1,6 +1,12 @@
 name: perf-gate
 
-# F-53d (#877) — release-blocking performance gate.
+# F-53d (#877) — manual, operator-run performance gate (workflow_dispatch
+# only — see below). NOT part of the automatic release DAG: F-62 (#888)
+# had wired an inline copy of this job into release.yml's tag-triggered
+# pipeline; that decision was reversed by explicit operator instruction
+# (#1020, 2026-08-07) — no benchmark runs automatically, on any trigger,
+# anywhere. This workflow is the only way to run the gate, and only when
+# a human explicitly triggers it.
 #
 # WHY SELF-HOSTED, NOT ubuntu-latest: absolute ns/op timing gates need a
 # STABLE machine. GitHub-hosted runners are shared-tenancy and too noisy for

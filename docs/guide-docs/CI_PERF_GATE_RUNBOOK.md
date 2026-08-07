@@ -1,28 +1,26 @@
 # CI performance gate — operator runbook
 
-This document is for the human operator bringing the F-53d (#877)
-release-blocking performance gate online. **As of this writing the gate is
-wired into CI but NOT yet live** — `.github/workflows/perf-gate.yml`
-targets `runs-on: [self-hosted, shamir-bench]`, a runner label with no
-machine registered against it. Every PR into `master` will show that job
-stuck in "Queued" until you complete the steps below. That is expected,
-not a bug.
+This document is for the human operator who wants to run the F-53d (#877)
+performance gate. **The gate is a manual, operator-run action, never an
+automatic one.** `.github/workflows/perf-gate.yml` is `workflow_dispatch`
+only — it does not trigger on `push`/`pull_request`, so it never queues on
+a PR or blocks anything by itself; a maintainer must explicitly click "Run
+workflow" (or run `./scripts/bench_gate.sh` locally). It targets
+`runs-on: [self-hosted, shamir-bench]`, a runner label with no machine
+registered against it as of this writing — until one is registered, a
+manually-triggered run will sit in "Queued". That is expected, not a bug.
 
-> **F-62 (#888) — the release pipeline now depends on this gate too.**
-> `.github/workflows/release.yml`'s tag-triggered pipeline now includes its
-> own inline `perf-gate` job (same `./scripts/bench_gate.sh` recipe, same
-> `[self-hosted, shamir-bench]` runner), duplicated inline rather than
-> depended on via cross-workflow `needs:` (which GitHub Actions does not
-> support — see the `sbom` job there for the same duplicate-the-recipe
-> pattern). Every downstream release job (`build`, `docker`, `sbom`, `sign`,
-> `github-release`) `needs:` it. **Consequence: a `v*` tag push will queue
-> the ENTIRE release pipeline on this same unregistered-runner condition**
-> — until you complete the steps below (register the runner + capture the
-> baseline), no tag can ship. That is the intended release-blocking
-> semantics, not a bug: do not weaken the dependency to let a release
-> through. This is exactly what the roadmap's §7 "Definition of done for
-> first tag" line ("perf-gate прошёл на том же frozen SHA") asks for,
-> turned from a manual checklist item into a structurally enforced gate.
+> **F-62 (#888) — REVERSED (#1020, 2026-08-07, explicit operator
+> decision).** F-62 had wired a release-blocking inline `perf-gate` job
+> into `.github/workflows/release.yml`'s tag-triggered pipeline (same
+> `./scripts/bench_gate.sh` recipe, same `[self-hosted, shamir-bench]`
+> runner), so every downstream release job depended on it and a `v*` tag
+> push would queue the entire release pipeline until a runner was
+> registered. **That job has been removed.** No benchmark runs
+> automatically, on any trigger, anywhere — performance gating is
+> available only as the manual action described in this runbook. Do not
+> re-add a `perf-gate` job to `release.yml`'s automatic trigger without a
+> fresh, explicit operator decision reversing this one.
 
 ## Why self-hosted, not a GitHub-hosted runner
 

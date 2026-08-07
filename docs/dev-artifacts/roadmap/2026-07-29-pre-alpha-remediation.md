@@ -183,14 +183,11 @@ DDL surface, пока CREATE INDEX не имеет единой семантик
 
 - [ ] #881–#887 (волна 1) закрыты и смёржены.
 - [ ] #888–#890 (волна 2) закрыты; решение по F-64 принято пользователем.
-- [ ] `bench-baseline.json` захвачен на зарегистрированной self-hosted
-      машине и закоммичен (ручной operator-шаг).
 - [ ] Заморожен release-candidate SHA.
 - [ ] `cargo fmt --all -- --check` чисто.
 - [ ] `cargo clippy --workspace --all-targets --locked -- -D warnings` чисто.
 - [ ] `./scripts/test.sh --full --locked` зелено.
 - [ ] Adversarial race-тесты из P0-2/P0-3/P0-4 зелены.
-- [ ] perf-gate прошёл на том же frozen SHA.
 - [ ] version / CHANGELOG / tag согласованы.
 - [ ] secret/history scan перед переключением репозитория в public.
 - [ ] Проверены checksums, SBOM, cosign по инструкции runbook.
