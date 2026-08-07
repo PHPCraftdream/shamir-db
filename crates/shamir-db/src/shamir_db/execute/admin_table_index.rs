@@ -606,12 +606,8 @@ impl ShamirAdminExecutor {
             };
             let index_exists = match &table_opt {
                 Some(table) => {
-                    let base_index = if op.unique {
-                        table.unique_index_exists(&op.drop_index).await
-                    } else {
-                        table.index_exists(&op.drop_index).await
-                    };
-                    base_index
+                    table.index_exists(&op.drop_index).await
+                        || table.unique_index_exists(&op.drop_index).await
                         || table.sorted_index_exists(&op.drop_index).await
                         || table.index2_exists(&op.drop_index).await
                 }
@@ -634,25 +630,19 @@ impl ShamirAdminExecutor {
             .await
             .map_err(|e| err(e.to_string()))?;
 
-        // R0-C (#1010): refuse instead of silently resolving when `op.drop_index`
-        // is a PRE-EXISTING cross-family collision. `op.unique` already tells
-        // us which base_index sub-family the caller means (regular vs
-        // unique), so the collision that matters here is whether `sorted` or
-        // `index2` ALSO carries this name — only reachable on a table that
-        // acquired the collision before the #1010 CREATE-time preflight
-        // landed. Without this guard, the short-circuit `||` chain below
-        // silently drops only the FIRST match and leaves any colliding
-        // sibling(s) untouched. A full redesign (explicit per-family
-        // disambiguator) is out of scope here (tracked as #1025); this is
-        // the low-risk "detect and refuse" the R0-C brief permits.
-        let base_index_has_it = if op.unique {
-            table.unique_index_exists(&op.drop_index).await
-        } else {
-            table.index_exists(&op.drop_index).await
-        };
-        let sorted_has_it = table.sorted_index_exists(&op.drop_index).await;
-        let index2_has_it = table.index2_exists(&op.drop_index).await;
-        let matching_families = [base_index_has_it, sorted_has_it, index2_has_it]
+        // R0-C (#1010, #1025): refuse instead of silently resolving when
+        // `op.drop_index` is a PRE-EXISTING cross-family collision. Index names
+        // are now globally unique per table across all four families (regular
+        // hash, unique hash, sorted, index2), so a name can exist in at most one
+        // family. This guard detects and refuses legacy collisions (only
+        // reachable on tables that acquired them before #1010's CREATE-time
+        // preflight landed). Mirrors TableManager::rename_index's exact
+        // classification pattern.
+        let is_regular = table.index_exists(&op.drop_index).await;
+        let is_unique = table.unique_index_exists(&op.drop_index).await;
+        let is_sorted = table.sorted_index_exists(&op.drop_index).await;
+        let is_index2 = table.index2_exists(&op.drop_index).await;
+        let matching_families = [is_regular, is_unique, is_sorted, is_index2]
             .iter()
             .filter(|&&m| m)
             .count();
@@ -670,62 +660,79 @@ impl ShamirAdminExecutor {
             ));
         }
 
-        // Resolution order: base_index first (preserves the existing behavior
-        // and error messages for the common btree case unchanged), then the
-        // base_index-miss falls through to sorted, then to index2. `DropIndexOp`
-        // carries no `index_type`, so the name is resolved by trying each
-        // mechanism in turn and returning the first hit. Short-circuit `||`
-        // skips the remaining lookups once one matches. (Safe to still
-        // short-circuit here: the guard above already refused if MORE THAN
-        // ONE family matched, so at most one of these can be true.)
-        let removed = if op.unique {
-            table
-                .drop_unique_index(&op.drop_index)
-                .await
-                .map_err(|e| err(e.to_string()))?
-        } else {
+        // Dispatch to the ONE matching family's drop call — the server now
+        // resolves the index family from the catalog, not from the client's
+        // `op.unique` hint. This matches TableManager::rename_index's pattern.
+        // Safe to short-circuit: the guard above already refused if MORE THAN
+        // ONE family matched, so at most one of these can be true.
+        let removed = if is_regular {
             table
                 .drop_index(&op.drop_index)
                 .await
                 .map_err(|e| err(e.to_string()))?
-        };
-        let removed = removed
-            || table
+        } else if is_unique {
+            table
+                .drop_unique_index(&op.drop_index)
+                .await
+                .map_err(|e| err(e.to_string()))?
+        } else if is_sorted {
+            table
                 .drop_sorted_index(&op.drop_index)
                 .await
                 .map_err(|e| err(e.to_string()))?
-            || table
+        } else if is_index2 {
+            table
                 .drop_index2(&op.drop_index)
                 .await
-                .map_err(|e| err(e.to_string()))?;
+                .map_err(|e| err(e.to_string()))?
+        } else {
+            // No index exists in any family — return existed:false (no-op).
+            // This matches the pre-existing behavior when the client's unique
+            // hint didn't match any index.
+            false
+        };
 
         // Mint an op_id for recoverable DDL ops (hash DROP and index2 DROP are in scope)
         let op_id = RecordId::system(&format!("ddl_drop_index_{}", op.drop_index));
 
         // Write the Succeeded status to the DDL op log for polling.
-        let kind = if op.unique {
-            DdlOpKind::DropUniqueHashIndex {
-                index_name: op.drop_index.clone(),
+        // Use the ACTUAL resolved family (from the catalog), not the client's
+        // `op.unique` hint, so the log reflects the truth even when a caller's
+        // hint was wrong. Only write when we actually dropped an index.
+        // Sorted-family drops have no dedicated `DdlOpKind` variant yet (never
+        // wired to op-id status logging, same pre-existing scope gap as
+        // before #1025) — falls back to `DropHashIndex` like the rest of this
+        // status-log mechanism does for untracked families.
+        if removed {
+            let kind = if is_unique {
+                DdlOpKind::DropUniqueHashIndex {
+                    index_name: op.drop_index.clone(),
+                }
+            } else if is_index2 {
+                DdlOpKind::DropIndex2 {
+                    index_name: op.drop_index.clone(),
+                }
+            } else {
+                // is_regular or is_sorted
+                DdlOpKind::DropHashIndex {
+                    index_name: op.drop_index.clone(),
+                }
+            };
+            let status = DdlOpStatus {
+                op_id,
+                kind,
+                state: DdlOpState::Succeeded {
+                    completed_at: std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap()
+                        .as_millis() as u64,
+                },
+            };
+            if let Err(e) = ddl_op_log::write_op_status(table.info_store(), &status).await {
+                // Log write failure but don't fail the operation — the client still
+                // got the op_id in the QueryResult, and polling will return Unknown.
+                eprintln!("Failed to write DDL op status: {}", e);
             }
-        } else {
-            DdlOpKind::DropHashIndex {
-                index_name: op.drop_index.clone(),
-            }
-        };
-        let status = DdlOpStatus {
-            op_id,
-            kind,
-            state: DdlOpState::Succeeded {
-                completed_at: std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap()
-                    .as_millis() as u64,
-            },
-        };
-        if let Err(e) = ddl_op_log::write_op_status(table.info_store(), &status).await {
-            // Log write failure but don't fail the operation — the client still
-            // got the op_id in the QueryResult, and polling will return Unknown.
-            eprintln!("Failed to write DDL op status: {}", e);
         }
 
         Ok(admin_result_with_op_id(

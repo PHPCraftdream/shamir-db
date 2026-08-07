@@ -27,6 +27,13 @@ pub struct DropIndex {
 
 impl DropIndex {
     /// Mark that the index being dropped is a unique index.
+    ///
+    /// **Note:** This field is now informational-only and used only for HMAC
+    /// canonical input generation. The server resolves the actual index family
+    /// from the catalog (regular hash, unique hash, sorted, or index2) and drops
+    /// whichever family the index actually belongs to — it no longer trusts the
+    /// client's `unique` hint for resolution. Setting this incorrectly does not
+    /// affect which index is dropped, only changes the bytes signed into the HMAC.
     pub fn unique(mut self) -> Self {
         self.unique = true;
         self

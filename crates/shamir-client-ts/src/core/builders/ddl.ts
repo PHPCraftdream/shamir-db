@@ -1018,7 +1018,16 @@ export function renameIndex(
   return op;
 }
 
-/** Drop an index (HMAC-gated). */
+/**
+ * Drop an index (HMAC-gated).
+ *
+ * **Note:** The `unique` option is now informational-only and used only for
+ * HMAC canonical input generation. The server resolves the actual index family
+ * from the catalog (regular hash, unique hash, sorted, or index2) and drops
+ * whichever family the index actually belongs to — it no longer trusts the
+ * client's `unique` hint for resolution. Setting this incorrectly does not
+ * affect which index is dropped, only changes the bytes signed into the HMAC.
+ */
 export function dropIndex(
   signer: HmacSigner,
   dbInUse: string,
