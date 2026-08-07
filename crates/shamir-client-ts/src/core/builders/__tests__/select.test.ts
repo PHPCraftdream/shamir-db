@@ -17,6 +17,8 @@ import {
   max,
   aggregateFn,
   func,
+  expr,
+  selectExpr,
   select,
 } from '../select.js';
 
@@ -289,6 +291,59 @@ describe('func', () => {
   });
 });
 
+describe('expr', () => {
+  it('no alias omits the alias key (#1024)', () => {
+    const item = expr(selectExpr.literal(1));
+    expect(item).toEqual({ type: 'expr', expr: { op: 'literal', value: 1 } });
+    expect(item).not.toHaveProperty('alias');
+  });
+
+  it('with alias adds the alias key', () => {
+    const item = expr(
+      selectExpr.add(selectExpr.field('price'), selectExpr.literal(1)),
+      'bumped',
+    );
+    expect(item).toEqual({
+      type: 'expr',
+      expr: {
+        op: 'add',
+        left: { op: 'field', path: ['price'] },
+        right: { op: 'literal', value: 1 },
+      },
+      alias: 'bumped',
+    });
+  });
+});
+
+describe('selectExpr', () => {
+  it('add/sub/mul/div build the matching binary op shape', () => {
+    const a = selectExpr.literal(1);
+    const b = selectExpr.literal(2);
+    expect(selectExpr.add(a, b)).toEqual({ op: 'add', left: a, right: b });
+    expect(selectExpr.sub(a, b)).toEqual({ op: 'sub', left: a, right: b });
+    expect(selectExpr.mul(a, b)).toEqual({ op: 'mul', left: a, right: b });
+    expect(selectExpr.div(a, b)).toEqual({ op: 'div', left: a, right: b });
+  });
+
+  it('field normalises a bare string spec to a path array', () => {
+    expect(selectExpr.field('age')).toEqual({ op: 'field', path: ['age'] });
+  });
+
+  it('field keeps an array spec as-is', () => {
+    expect(selectExpr.field(['address', 'zip'])).toEqual({
+      op: 'field',
+      path: ['address', 'zip'],
+    });
+  });
+
+  it('literal wraps null/bool/number/string values', () => {
+    expect(selectExpr.literal(null)).toEqual({ op: 'literal', value: null });
+    expect(selectExpr.literal(true)).toEqual({ op: 'literal', value: true });
+    expect(selectExpr.literal(42)).toEqual({ op: 'literal', value: 42 });
+    expect(selectExpr.literal('x')).toEqual({ op: 'literal', value: 'x' });
+  });
+});
+
 describe('select namespace', () => {
   it('exposes every constructor as a function', () => {
     expect(typeof select.all).toBe('function');
@@ -302,5 +357,6 @@ describe('select namespace', () => {
     expect(typeof select.max).toBe('function');
     expect(typeof select.aggregateFn).toBe('function');
     expect(typeof select.func).toBe('function');
+    expect(typeof select.expr).toBe('function');
   });
 });

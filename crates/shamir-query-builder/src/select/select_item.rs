@@ -1,7 +1,7 @@
 //! Ergonomic constructors for [`SelectItem`].
 
 use shamir_query_types::filter::FilterValue;
-use shamir_query_types::read::SelectItem;
+use shamir_query_types::read::{SelectExpr, SelectItem};
 
 use crate::val::IntoFieldPath;
 
@@ -49,6 +49,32 @@ pub fn func(
         args: args.into_iter().collect(),
         alias: Some(alias.into()),
     }
+}
+
+// ── computed expression (SelectItem::Expression) ────────────────────
+
+/// Computed SELECT expression (`SelectItem::Expression`) with an alias.
+///
+/// `expr` is a [`SelectExpr`] tree (`Add`/`Sub`/`Mul`/`Div` over field refs
+/// and literals — see `shamir_query_types::read::select_expr`); build one
+/// directly via `SelectExpr`'s variants (no dedicated builder DSL for
+/// `SelectExpr` itself yet, mirroring how `func`'s `args` are built directly
+/// via `FilterValue`).
+///
+/// #1024: evaluated at execution time by translating `expr` into the
+/// equivalent `FilterValue::Expr` shape and routing it through the same
+/// pipeline `SelectItem::Function` uses.
+pub fn expr_as(alias: impl Into<String>, expr: SelectExpr) -> SelectItem {
+    SelectItem::Expression {
+        expr,
+        alias: Some(alias.into()),
+    }
+}
+
+/// Computed SELECT expression (`SelectItem::Expression`) with no alias —
+/// the output key defaults to `"expr"` (see `SelectProjection::new`).
+pub fn expr(expr: SelectExpr) -> SelectItem {
+    SelectItem::Expression { expr, alias: None }
 }
 
 // ── count_all ───────────────────────────────────────────────────────

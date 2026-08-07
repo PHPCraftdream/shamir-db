@@ -116,6 +116,94 @@ fn test_func_nested_args() {
     );
 }
 
+// ── expr / expr_as (computed SELECT expression, #1024) ──────────────
+
+#[test]
+fn test_expr_as_literal_only() {
+    use shamir_query_types::read::{SelectExpr, SelectExprValue};
+
+    assert_wire(
+        expr_as(
+            "five",
+            SelectExpr::Add {
+                left: Box::new(SelectExpr::Literal {
+                    value: SelectExprValue::Int(2),
+                }),
+                right: Box::new(SelectExpr::Literal {
+                    value: SelectExprValue::Int(3),
+                }),
+            },
+        ),
+        mpack!({
+            "type": "expr",
+            "expr": {
+                "op": "add",
+                "left": {
+                    "op": "literal",
+                    "value": 2
+                },
+                "right": {
+                    "op": "literal",
+                    "value": 3
+                }
+            },
+            "alias": "five"
+        }),
+    );
+}
+
+#[test]
+fn test_expr_as_field_arithmetic() {
+    use shamir_query_types::read::SelectExpr;
+
+    assert_wire(
+        expr_as(
+            "total",
+            SelectExpr::Mul {
+                left: Box::new(SelectExpr::Field {
+                    path: vec!["price".to_string()],
+                }),
+                right: Box::new(SelectExpr::Field {
+                    path: vec!["qty".to_string()],
+                }),
+            },
+        ),
+        mpack!({
+            "type": "expr",
+            "expr": {
+                "op": "mul",
+                "left": {
+                    "op": "field",
+                    "path": ["price"]
+                },
+                "right": {
+                    "op": "field",
+                    "path": ["qty"]
+                }
+            },
+            "alias": "total"
+        }),
+    );
+}
+
+#[test]
+fn test_expr_no_alias_omits_alias_key() {
+    use shamir_query_types::read::{SelectExpr, SelectExprValue};
+
+    assert_wire(
+        expr(SelectExpr::Literal {
+            value: SelectExprValue::Int(1),
+        }),
+        mpack!({
+            "type": "expr",
+            "expr": {
+                "op": "literal",
+                "value": 1
+            }
+        }),
+    );
+}
+
 // ── count_all ────────────────────────────────────────────────────────
 
 #[test]

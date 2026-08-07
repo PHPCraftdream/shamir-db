@@ -1,35 +1,36 @@
-//! F-26 (#819) — `SelectItem::Expression` must be REJECTED, not silently
-//! dropped, by every production read plan.
+//! #1024 (follow-up to F-26 / #819) — `SelectItem::Expression` must
+//! EVALUATE, not error, through every production read plan.
 //!
 //! `SelectProjection::new` (`crates/shamir-engine/src/query/read/
 //! select_projection.rs`) is the single choke point every read plan funnels
-//! its projection through — but a bare `_ => {}` catch-all used to let a
-//! computed `SelectItem::Expression` fall through silently, returning a
-//! result row with the field simply absent instead of an error. These tests
-//! exercise the reject through three DISTINCT production entry points (full
-//! scan, index2/hash-index scan, temporal AsOf) rather than only the shared
-//! `SelectProjection` constructor in isolation, proving every plan type
-//! actually surfaces the same typed rejection.
+//! its projection through. Before #1024 a computed `SelectItem::Expression`
+//! was REJECTED here with `DbError::Validation("select_expression_not_
+//! supported")` — this file used to assert that rejection. #1024 replaced
+//! the reject with a real translation (`SelectExpr::to_filter_value`) into
+//! the SAME `FilterValue`/`resolve_filter_query` pipeline `SelectItem::
+//! Function` already uses. These tests now exercise the computed field
+//! actually being evaluated through three DISTINCT production entry points
+//! (full scan, index2/hash-index scan, temporal AsOf) rather than only the
+//! shared `SelectProjection` constructor in isolation, proving every plan
+//! type surfaces the same correct result AND that the old rejection error
+//! no longer fires for any of them.
 
 use std::sync::Arc;
 
 use shamir_query_types::filter::{FieldPath, Filter, FilterValue};
 use shamir_query_types::read::select::Select;
 use shamir_query_types::read::{At, ReadQuery, SelectExpr, SelectExprValue, SelectItem, Temporal};
-use shamir_storage::error::DbError;
 use shamir_storage::storage_in_memory::InMemoryStore;
 use shamir_storage::types::Store;
 use shamir_tx::{MvccStore, RepoTxGate, Retention};
 use shamir_types::types::common::new_map;
-use shamir_types::types::value::InnerValue;
+use shamir_types::types::value::{InnerValue, QueryValue};
 
 use crate::query::filter::eval_context::FilterContext;
 use crate::table::TableManager;
 
-/// A `SELECT age, <computed expr> AS bogus` item list — the `Expression`
-/// arm is a scaffolded-but-never-finished variant (see `select.rs`'s doc
-/// comment); its exact expression shape doesn't matter for this test, only
-/// that `SelectItem::Expression` is present in `select.items`.
+/// A `SELECT age, (age + 1) AS bumped` item list — proves a real arithmetic
+/// `SelectExpr::Add { Field, Literal }` tree, not just a bare literal.
 fn select_with_expression() -> Select {
     Select {
         items: vec![
@@ -38,26 +39,37 @@ fn select_with_expression() -> Select {
                 alias: None,
             },
             SelectItem::Expression {
-                expr: SelectExpr::Literal {
-                    value: SelectExprValue::Int(1),
+                expr: SelectExpr::Add {
+                    left: Box::new(SelectExpr::Field {
+                        path: vec!["age".to_string()],
+                    }),
+                    right: Box::new(SelectExpr::Literal {
+                        value: SelectExprValue::Int(1),
+                    }),
                 },
-                alias: Some("bogus".to_string()),
+                alias: Some("bumped".to_string()),
             },
         ],
         distinct: false,
     }
 }
 
-/// Assert `err` is `DbError::Validation` carrying the stable
-/// `select_expression_not_supported` code (the SAME code the plain
-/// projection reject and the aggregate-path reject both use).
-fn assert_rejects_select_expression(err: DbError) {
-    match err {
-        DbError::Validation(msg) => assert!(
-            msg.contains("select_expression_not_supported"),
-            "expected the select_expression_not_supported code, got: {msg}"
-        ),
-        other => panic!("expected DbError::Validation, got {other:?}"),
+/// Assert every record in `records` has `bumped == age + 1` and that the
+/// old `select_expression_not_supported` rejection did not fire (the caller
+/// already unwrapped an `Ok(QueryResult)`, so this only re-checks values).
+fn assert_expression_evaluated(records: &[shamir_query_types::read::QueryRecord]) {
+    assert!(!records.is_empty(), "expected at least one row");
+    for r in records {
+        let qv = r.as_value();
+        let age = match &qv["age"] {
+            QueryValue::Int(i) => *i,
+            other => panic!("expected age: Int, got {other:?}"),
+        };
+        let bumped = match &qv["bumped"] {
+            QueryValue::Int(i) => *i,
+            other => panic!("expected bumped: Int, got {other:?}"),
+        };
+        assert_eq!(bumped, age + 1, "bumped must equal age + 1");
     }
 }
 
@@ -87,7 +99,7 @@ async fn seed_rows(tbl: &TableManager) -> Vec<shamir_types::types::record_id::Re
 // ─────────────────────────────────────────────────────────────────────────
 
 #[tokio::test]
-async fn full_scan_rejects_select_expression() {
+async fn full_scan_evaluates_select_expression() {
     let tbl = make_table().await;
     seed_rows(&tbl).await;
 
@@ -96,8 +108,8 @@ async fn full_scan_rejects_select_expression() {
     let ctx = FilterContext::new(interner, &refs);
 
     let query = ReadQuery::new("t").select(select_with_expression());
-    let err = tbl.read(&query, &ctx).await.unwrap_err();
-    assert_rejects_select_expression(err);
+    let result = tbl.read(&query, &ctx).await.unwrap();
+    assert_expression_evaluated(&result.records);
 }
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -108,7 +120,7 @@ async fn full_scan_rejects_select_expression() {
 // ─────────────────────────────────────────────────────────────────────────
 
 #[tokio::test]
-async fn index2_scan_rejects_select_expression() {
+async fn index2_scan_evaluates_select_expression() {
     let tbl = make_table().await;
     seed_rows(&tbl).await;
     tbl.create_index("age_idx", &["age"]).await.unwrap();
@@ -123,8 +135,10 @@ async fn index2_scan_rejects_select_expression() {
             field: FieldPath::from(vec!["age".to_string()]),
             value: FilterValue::Int(30),
         });
-    let err = tbl.read(&query, &ctx).await.unwrap_err();
-    assert_rejects_select_expression(err);
+    let result = tbl.read(&query, &ctx).await.unwrap();
+    assert_expression_evaluated(&result.records);
+    assert_eq!(result.records.len(), 1);
+    assert_eq!(result.records[0].as_value()["bumped"], QueryValue::Int(31));
 }
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -133,7 +147,7 @@ async fn index2_scan_rejects_select_expression() {
 // ─────────────────────────────────────────────────────────────────────────
 
 #[tokio::test]
-async fn temporal_asof_rejects_select_expression() {
+async fn temporal_asof_evaluates_select_expression() {
     let data: Arc<dyn Store> = Arc::new(InMemoryStore::new());
     let info: Arc<dyn Store> = Arc::new(InMemoryStore::new());
     let history: Arc<dyn Store> = Arc::new(InMemoryStore::new());
@@ -157,6 +171,6 @@ async fn temporal_asof_rejects_select_expression() {
     query.temporal = Temporal::AsOf {
         at: At::Version(v1),
     };
-    let err = tbl.read(&query, &ctx).await.unwrap_err();
-    assert_rejects_select_expression(err);
+    let result = tbl.read(&query, &ctx).await.unwrap();
+    assert_expression_evaluated(&result.records);
 }

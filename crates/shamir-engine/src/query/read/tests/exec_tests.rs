@@ -993,14 +993,14 @@ fn validate_rejects_args_on_unsupported_aggregate() {
 }
 
 #[test]
-fn validate_rejects_select_expression_mixed_into_aggregate_select() {
-    // F-26 (#819): a computed `SelectItem::Expression` mixed into an
-    // aggregate SELECT (alongside a legitimate CountAll) must be rejected
-    // with the SAME stable code as the plain-projection reject
-    // (`SelectProjection::new`) — `build_aggregate_object`'s match used to
-    // silently drop `Expression` items (`SelectItem::All |
-    // SelectItem::Expression { .. } => {}`), which would have returned a
-    // result row missing the computed field with no error.
+fn validate_accepts_select_expression_mixed_into_aggregate_select() {
+    // #1024 (follow-up to F-26 / #819): a computed `SelectItem::Expression`
+    // mixed into an aggregate SELECT (alongside a legitimate CountAll) is no
+    // longer rejected — `build_aggregate_object` now evaluates it via the
+    // same `func_slots`/`resolve_filter_query` pipeline `SelectItem::
+    // Function` uses. Proves the OLD `select_expression_not_supported`
+    // rejection is genuinely gone from the aggregate-validation path, not
+    // just the plain-projection path.
     let select = Select {
         items: vec![
             select::count_all("cnt"),
@@ -1013,16 +1013,10 @@ fn validate_rejects_select_expression_mixed_into_aggregate_select() {
         ],
         distinct: false,
     };
-    let err = validate_aggregate_select(&select).unwrap_err();
-    match err {
-        DbError::Validation(msg) => {
-            assert!(
-                msg.contains("select_expression_not_supported"),
-                "got: {msg}"
-            )
-        }
-        other => panic!("expected Validation error, got {other:?}"),
-    }
+    assert!(
+        validate_aggregate_select(&select).is_ok(),
+        "SelectItem::Expression must no longer be rejected in an aggregate SELECT"
+    );
 }
 
 // ============================================================================

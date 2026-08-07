@@ -13,6 +13,7 @@ import type {
 import type {
   AggFunc,
   AggregateField,
+  SelectExpr,
   SelectItem,
 } from '../types/query.js';
 
@@ -142,6 +143,39 @@ export function func(
   return item;
 }
 
+/**
+ * A computed SELECT expression (`SelectItem::Expression`). #1024: evaluated
+ * server-side by translating `expr` into the equivalent `FilterValue::Expr`
+ * shape and routing it through the same pipeline `func` (above) uses.
+ * `expr` is a {@link SelectExpr} tree — build one with the `SelectExpr`
+ * literal shapes directly (e.g. `{ op: 'add', left: ..., right: ... }`), or
+ * with the small helpers on `selectExpr` below. With no `alias`, the output
+ * key defaults to `"expr"` server-side (mirrors the wire tag).
+ */
+export function expr(expr: SelectExpr, alias?: string): SelectItem {
+  const item: SelectItem = { type: 'expr', expr };
+  if (alias !== undefined) item.alias = alias;
+  return item;
+}
+
+/**
+ * Small ergonomic constructors for {@link SelectExpr} nodes — the operand
+ * tree `select.expr()`'s first argument expects. Mirrors `crates/
+ * shamir-query-builder/src/select/select_item.rs`'s `SelectExpr` usage
+ * convention (build the tree directly via its variants).
+ */
+export const selectExpr = {
+  add: (left: SelectExpr, right: SelectExpr): SelectExpr => ({ op: 'add', left, right }),
+  sub: (left: SelectExpr, right: SelectExpr): SelectExpr => ({ op: 'sub', left, right }),
+  mul: (left: SelectExpr, right: SelectExpr): SelectExpr => ({ op: 'mul', left, right }),
+  div: (left: SelectExpr, right: SelectExpr): SelectExpr => ({ op: 'div', left, right }),
+  field: (spec: string | string[]): SelectExpr => ({ op: 'field', path: fp(spec) }),
+  literal: (value: null | boolean | number | string): SelectExpr => ({
+    op: 'literal',
+    value,
+  }),
+};
+
 /** Aggregate namespace — every select constructor in one object. */
 export const select = {
   all,
@@ -155,4 +189,5 @@ export const select = {
   max,
   aggregateFn,
   func,
+  expr,
 };

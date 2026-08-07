@@ -12,7 +12,16 @@
  */
 
 export * from './filter.js';
-export * from './select.js';
+export {
+  all, field, countAll,
+  aggregate, count, sum, avg, min, max,
+  aggregateFn, func,
+  selectExpr,
+  select,
+  // `expr` is NOT re-exported here — it collides with filter.ts's `expr`
+  // (the `$expr` FilterValue builder). Use `select.expr(...)` or import
+  // directly from './select.js'.
+} from './select.js';
 export * from './write.js';
 export {
   currentOnly, olderThan, olderThanAge,

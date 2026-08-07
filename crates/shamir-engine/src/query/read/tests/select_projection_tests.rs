@@ -16,6 +16,8 @@ use shamir_types::core::interner::Interner;
 use shamir_types::types::common::new_map_wc;
 use shamir_types::types::value::{InnerValue, QueryValue};
 
+use shamir_query_types::read::{SelectExpr, SelectExprValue};
+
 use crate::query::filter::{Cond, Filter, FilterValue};
 use crate::query::read::select_projection::SelectProjection;
 use crate::query::read::{Select, SelectItem};
@@ -340,4 +342,135 @@ fn project_value_builtins_only_still_works() {
         }
         _ => panic!("expected QueryValue::Map, got {:?}", qval),
     }
+}
+
+// ============================================================================
+// #1024 — `SelectItem::Expression` evaluation (replaces the old
+// `select_expression_not_supported` rejection).
+// ============================================================================
+
+/// Arithmetic `SelectExpr` over real field data: `SELECT (price * qty) AS
+/// total` computes the product from the record's own fields, proving the
+/// translated `FilterValue::Expr` tree resolves `FieldRef`s against the
+/// actual row via the SAME `resolve_filter_query` pipeline
+/// `SelectItem::Function` uses.
+#[test]
+fn project_value_expression_arithmetic_over_field_data() {
+    let interner = Arc::new(Interner::new());
+    let record = make_record(
+        &interner,
+        vec![("price", InnerValue::Int(3)), ("qty", InnerValue::Int(4))],
+    );
+
+    let select = Select {
+        items: vec![SelectItem::Expression {
+            expr: SelectExpr::Mul {
+                left: Box::new(SelectExpr::Field {
+                    path: vec!["price".to_string()],
+                }),
+                right: Box::new(SelectExpr::Field {
+                    path: vec!["qty".to_string()],
+                }),
+            },
+            alias: Some("total".to_string()),
+        }],
+        distinct: false,
+    };
+    let proj = SelectProjection::new(&select, &interner, ScalarResolver::builtins_only()).unwrap();
+    let qval = proj.project_value(&record, &interner);
+
+    match &qval {
+        QueryValue::Map(m) => {
+            assert_eq!(
+                m.get("total"),
+                Some(&QueryValue::Int(12)),
+                "price(3) * qty(4) must compute to 12 via the translated FilterExpr"
+            );
+        }
+        _ => panic!("expected QueryValue::Map, got {:?}", qval),
+    }
+}
+
+/// Literal-only `SelectExpr` (no field reference at all) — proves the
+/// translation and evaluation work even when there is nothing to resolve
+/// from the record.
+#[test]
+fn project_value_expression_literal_only() {
+    let interner = Arc::new(Interner::new());
+    let record = make_record(&interner, vec![("name", InnerValue::Str("x".into()))]);
+
+    let select = Select {
+        items: vec![SelectItem::Expression {
+            expr: SelectExpr::Add {
+                left: Box::new(SelectExpr::Literal {
+                    value: SelectExprValue::Int(2),
+                }),
+                right: Box::new(SelectExpr::Literal {
+                    value: SelectExprValue::Int(3),
+                }),
+            },
+            alias: Some("five".to_string()),
+        }],
+        distinct: false,
+    };
+    let proj = SelectProjection::new(&select, &interner, ScalarResolver::builtins_only()).unwrap();
+    let qval = proj.project_value(&record, &interner);
+
+    match &qval {
+        QueryValue::Map(m) => {
+            assert_eq!(m.get("five"), Some(&QueryValue::Int(5)));
+        }
+        _ => panic!("expected QueryValue::Map, got {:?}", qval),
+    }
+}
+
+/// No alias given — the output key defaults to the literal `"expr"` (there
+/// is no natural per-item name like `SelectItem::Function`'s `name` field).
+#[test]
+fn project_value_expression_without_alias_defaults_to_expr_key() {
+    let interner = Arc::new(Interner::new());
+    let record = make_record(&interner, vec![]);
+
+    let select = Select {
+        items: vec![SelectItem::Expression {
+            expr: SelectExpr::Literal {
+                value: SelectExprValue::Int(7),
+            },
+            alias: None,
+        }],
+        distinct: false,
+    };
+    let proj = SelectProjection::new(&select, &interner, ScalarResolver::builtins_only()).unwrap();
+    let qval = proj.project_value(&record, &interner);
+
+    match &qval {
+        QueryValue::Map(m) => {
+            assert_eq!(m.get("expr"), Some(&QueryValue::Int(7)));
+        }
+        _ => panic!("expected QueryValue::Map, got {:?}", qval),
+    }
+}
+
+/// Proves the OLD rejection is genuinely gone: `SelectProjection::new` used
+/// to return `Err(DbError::Validation("select_expression_not_supported"))`
+/// for ANY `SelectItem::Expression`, including the trivial literal shape
+/// used by the old reject tests. Constructing the SAME shape now succeeds.
+#[test]
+fn project_value_expression_no_longer_rejected() {
+    let interner = Arc::new(Interner::new());
+    let select = Select {
+        items: vec![SelectItem::Expression {
+            expr: SelectExpr::Literal {
+                value: SelectExprValue::Int(1),
+            },
+            alias: Some("bogus".to_string()),
+        }],
+        distinct: false,
+    };
+    let result = SelectProjection::new(&select, &interner, ScalarResolver::builtins_only());
+    assert!(
+        result.is_ok(),
+        "SelectItem::Expression must no longer be rejected by SelectProjection::new, got {:?}",
+        result.err()
+    );
 }

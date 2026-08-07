@@ -655,56 +655,59 @@ fn cursor_with_version_not_supported_is_a_distinct_batch_error_variant() {
     );
 }
 
-/// F-26 (#819) — a cursor's every internal read rewrites `temporal` to
-/// `Temporal::AsOf { at: At::Version(pinned_version) }` internally
-/// (`create_cursor`'s doc comment above), routing through
+/// #1024 (follow-up to F-26 / #819) — a cursor's every internal read
+/// rewrites `temporal` to `Temporal::AsOf { at: At::Version(pinned_version) }`
+/// internally (`create_cursor`'s doc comment above), routing through
 /// `TableManager::read_as_of` in `shamir-engine`'s `read_temporal.rs` —
-/// exercising the SAME `SelectProjection::new` reject as a plain temporal
-/// read, but through the cursor wire entry point specifically. A computed
-/// `SelectItem::Expression` in the cursor's SELECT must surface as a clean
-/// `DbResponse::Error`, not a `CursorPage` silently missing the computed
-/// field.
+/// exercising the SAME `SelectProjection::new` evaluation path as a plain
+/// temporal read, but through the cursor wire entry point specifically. A
+/// computed `SelectItem::Expression` in the cursor's SELECT must now
+/// EVALUATE and surface its computed value in the `CursorPage`, not error
+/// (proves the old `select_expression_not_supported` rejection is gone from
+/// the cursor path too).
 #[tokio::test]
-async fn create_cursor_rejects_select_expression() {
+async fn create_cursor_evaluates_select_expression() {
     let handler = build_handler_with_rows(3, CursorLimitsCap::UNLIMITED).await;
     let session = alice_session();
 
-    let query = ReadQuery::new("items").select(Select {
-        items: vec![
-            SelectItem::Field {
-                path: vec!["v".to_string()],
-                alias: None,
-            },
-            SelectItem::Expression {
-                expr: SelectExpr::Literal {
-                    value: SelectExprValue::Int(1),
+    let query = ReadQuery::new("items")
+        .select(Select {
+            items: vec![
+                SelectItem::Field {
+                    path: vec!["v".to_string()],
+                    alias: None,
                 },
-                alias: Some("bogus".to_string()),
-            },
-        ],
-        distinct: false,
-    });
+                SelectItem::Expression {
+                    expr: SelectExpr::Add {
+                        left: Box::new(SelectExpr::Field {
+                            path: vec!["v".to_string()],
+                        }),
+                        right: Box::new(SelectExpr::Literal {
+                            value: SelectExprValue::Int(1),
+                        }),
+                    },
+                    alias: Some("bumped".to_string()),
+                },
+            ],
+            distinct: false,
+        })
+        .order_by(OrderBy::asc("v"));
 
-    let resp = send(&handler, &session, create_cursor_req(query, 2)).await;
+    let resp = send(&handler, &session, create_cursor_req(query, 3)).await;
     match resp {
-        DbResponse::Error { message, .. } => {
-            assert!(
-                message.contains("select_expression_not_supported"),
-                "expected the select_expression_not_supported code in the \
-                 error message, got: {message}"
-            );
+        DbResponse::CursorPage { page, .. } => {
+            assert_eq!(page.records.len(), 3);
+            for r in &page.records {
+                let v = r.get_value_i64("v").expect("v must be present");
+                let bumped = r.get_value_i64("bumped").expect("bumped must be present");
+                assert_eq!(bumped, v + 1, "bumped must equal v + 1");
+            }
         }
         other => panic!(
-            "a computed SelectItem::Expression must be rejected, not accepted \
-             (which would silently return a CursorPage missing the computed \
-             field), got {other:?}"
+            "a computed SelectItem::Expression must evaluate through the \
+             cursor path, got {other:?}"
         ),
     }
-    assert_eq!(
-        handler.cursor_registry().len(),
-        0,
-        "a rejected CreateCursor must not register a cursor"
-    );
 }
 
 /// Regression guard: a PLAIN (non-cursor) read with `with_version = true`

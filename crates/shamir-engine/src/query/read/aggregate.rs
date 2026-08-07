@@ -867,21 +867,14 @@ pub fn validate_aggregate_select(select: &Select) -> shamir_storage::error::DbRe
                 // Min/Max: distinct is a correct no-op (min/max of a set ==
                 // min/max of its distinct subset). Allow silently.
             }
-            // F-26 (#819): `build_aggregate_object`'s match on `SelectItem`
-            // silently drops `Expression` items (`SelectItem::All |
-            // SelectItem::Expression { .. } => {}`) — a computed field mixed
-            // into an aggregate SELECT would otherwise vanish from the
-            // output with no error, same as the plain-projection hole this
-            // task closes. `validate_aggregate_select` is the one function
-            // every aggregate execution path (GROUP BY, aggregate-all,
-            // across every read plan) calls before building results, so
-            // rejecting here catches it uniformly. Same stable code as the
-            // plain-projection reject (`SelectProjection::new`).
-            SelectItem::Expression { .. } => {
-                return Err(shamir_storage::error::DbError::Validation(
-                    "select_expression_not_supported".to_string(),
-                ));
-            }
+            // #1024: `SelectItem::Expression` in an aggregate context is no
+            // longer rejected — `build_aggregate_object` now evaluates it via
+            // the same `func_slots`/`resolve_filter_query` pipeline
+            // `SelectItem::Function` uses (translated through
+            // `SelectExpr::to_filter_value`), same as the plain-projection
+            // path (`SelectProjection::new`). No validation needed here: a
+            // computed expression carries no `args`/`distinct` shape to
+            // check, unlike `AggregateFn`/`Aggregate` above.
             _ => {}
         }
     }
@@ -1013,15 +1006,22 @@ pub(super) fn build_aggregate_object(
                 };
                 func_slots.push((key, fv));
             }
-            // F-26 (#819): `SelectItem::Expression` reaching this point is
-            // unreachable in production — every caller of
-            // `build_aggregate_object` (`apply_group_by`,
-            // `apply_aggregate_all`) is only invoked after
-            // `validate_aggregate_select` has already rejected it. Kept as a
-            // silent no-op (not a `debug_assert`/`unreachable!`) rather than
-            // panicking, matching this file's existing skip-defensively
-            // convention for malformed input.
-            SelectItem::All | SelectItem::Expression { .. } => {}
+            // #1024: a computed SELECT expression inside an aggregate
+            // context (e.g. `SELECT price * qty AS total GROUP BY ...`) is
+            // evaluated the SAME way as a plain-projection `Expression` item
+            // — translate `SelectExpr` to the equivalent `FilterValue::Expr`
+            // tree and evaluate it against the group's first record, reusing
+            // the SAME `func_slots` pipeline `SelectItem::Function` already
+            // populates below. This mirrors the field-projection fallback's
+            // "first record represents the group" convention (a computed
+            // expression is not itself an aggregate, so it has no per-group
+            // accumulation semantics — same rationale `SelectItem::Field`
+            // uses here).
+            SelectItem::Expression { expr, alias } => {
+                let key = alias.clone().unwrap_or_else(|| "expr".to_string());
+                func_slots.push((key, expr.to_filter_value()));
+            }
+            SelectItem::All => {}
         }
     }
 

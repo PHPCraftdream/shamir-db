@@ -36,6 +36,21 @@ export type AggFunc = 'count' | 'sum' | 'avg' | 'min' | 'max';
  */
 export type AggregateField = FieldPath | null;
 
+/**
+ * A simple computed-field expression (`SelectExpr`, `#[serde(tag = "op",
+ * rename_all = "snake_case")]`) — the AST `SelectItem::Expression` carries.
+ * `Add`/`Sub`/`Mul`/`Div` are binary arithmetic over nested `SelectExpr`
+ * operands; `field` is a record field reference; `literal` is a scalar
+ * constant. Mirrors `crates/shamir-query-types/src/read/select_expr.rs`.
+ */
+export type SelectExpr =
+  | { op: 'add'; left: SelectExpr; right: SelectExpr }
+  | { op: 'sub'; left: SelectExpr; right: SelectExpr }
+  | { op: 'mul'; left: SelectExpr; right: SelectExpr }
+  | { op: 'div'; left: SelectExpr; right: SelectExpr }
+  | { op: 'field'; path: FieldPath }
+  | { op: 'literal'; value: null | boolean | number | string };
+
 // ── Select ───────────────────────────────────────────────────────────
 
 /**
@@ -64,15 +79,13 @@ export type SelectItem =
     }
   | { type: 'function'; name: string; args: FilterValue[]; alias?: string }
   /**
-   * Computed SELECT expression. Accepted by this type and the wire/parser,
-   * but F-26 (#819): the server currently REJECTS any query whose `select`
-   * contains this variant with a typed `select_expression_not_supported`
-   * error at execution time (no evaluator implemented yet) — it is never
-   * silently dropped from the projected result. Kept in the type for a
-   * future real implementation; a client constructing one today gets a
-   * clear rejection, not missing data.
+   * Computed SELECT expression. #1024 (follow-up to F-26 / #819): the
+   * server evaluates this by translating `expr` into the equivalent
+   * `FilterValue::Expr` shape and routing it through the same evaluation
+   * pipeline `SelectItem::Function`'s `args` already use — no longer
+   * rejected at execution time.
    */
-  | { type: 'expr'; expr: unknown; alias?: string };
+  | { type: 'expr'; expr: SelectExpr; alias?: string };
 
 /** Projection set (`Select`). `distinct` is always present on the wire. */
 export interface Select {
