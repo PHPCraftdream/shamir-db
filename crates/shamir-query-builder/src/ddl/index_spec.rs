@@ -48,10 +48,10 @@ use shamir_types::types::value::QueryValue;
 /// See the [module docs](self) for the rationale and for which runtime checks
 /// each variant's shape makes structurally impossible.
 ///
-/// Fields are `pub(crate)` so the conversion (in `create_index.rs`) can build
-/// variants and the in-crate tests can construct/match them directly. The type
-/// itself is not exported beyond the crate — it is an internal IR, not a wire
-/// type.
+/// Fields are `pub(crate)` so the conversion (in `create_index.rs`) and the
+/// typed `CreateIndex` constructors can build variants directly, and the
+/// in-crate tests can construct/match them directly. The type itself is not
+/// exported beyond the crate — it is an internal IR, not a wire type.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum IndexSpec {
     /// Hash/btree-family index (the default when no `index_type` — or any

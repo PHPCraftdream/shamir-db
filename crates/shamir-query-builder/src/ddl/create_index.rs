@@ -7,6 +7,9 @@ use shamir_types::types::value::QueryValue;
 use crate::batch::IntoBatchOp;
 
 use super::create_index_build_error::CreateIndexBuildError;
+use super::metric::Metric;
+use super::quantization::Quantization;
+use super::tokenizer::Tokenizer;
 use super::IndexSpec;
 
 /// Create an index on a table. Returns a builder for the many optional
@@ -53,6 +56,253 @@ pub struct CreateIndex {
 }
 
 impl CreateIndex {
+    /// Create a hash/btree index on one or more fields (not unique).
+    ///
+    /// This is a **strict-by-default** typed constructor: it produces a valid
+    /// `BatchOp` directly with no need for `try_build()`. The output is
+    /// byte-identical to the equivalent stringly `.fields(...).build()` call.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use shamir_query_builder::ddl::create_index;
+    ///
+    /// let op = create_index("idx_email", "users")
+    ///     .hash(vec![vec!["email".to_string()]]);
+    /// ```
+    pub fn hash(self, fields: impl Into<Vec<Vec<String>>>) -> BatchOp {
+        let spec = IndexSpec::Hash {
+            fields: fields.into(),
+            unique: false,
+            index_type: None,
+        };
+
+        BatchOp::CreateIndex(spec.into_op(self.name, self.table, self.repo, self.if_not_exists))
+    }
+
+    /// Create a unique hash/btree index on one or more fields.
+    ///
+    /// This is a **strict-by-default** typed constructor: it produces a valid
+    /// `BatchOp` directly with no need for `try_build()`. The output is
+    /// byte-identical to the equivalent stringly `.fields(...).unique().build()` call.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use shamir_query_builder::ddl::create_index;
+    ///
+    /// let op = create_index("idx_email_unique", "users")
+    ///     .unique_index(vec![vec!["email".to_string()]]);
+    /// ```
+    pub fn unique_index(self, fields: impl Into<Vec<Vec<String>>>) -> BatchOp {
+        let spec = IndexSpec::Hash {
+            fields: fields.into(),
+            unique: true,
+            index_type: None,
+        };
+
+        BatchOp::CreateIndex(spec.into_op(self.name, self.table, self.repo, self.if_not_exists))
+    }
+
+    /// Create a sorted (value-ordered) index on a single field.
+    ///
+    /// This is a **strict-by-default** typed constructor: it produces a valid
+    /// `BatchOp` directly with no need for `try_build()`. The output is
+    /// byte-identical to the equivalent stringly `.field(...).sorted().build()` call.
+    ///
+    /// The `field` parameter accepts a single field path (`Vec<String>` or
+    /// `impl Into<Vec<String>>`), making multi-field sorted indexes a compile-time
+    /// error.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use shamir_query_builder::ddl::create_index;
+    ///
+    /// let op = create_index("idx_age", "users")
+    ///     .sorted_index(vec!["age".to_string()]);
+    /// ```
+    pub fn sorted_index(self, field: impl Into<Vec<String>>) -> BatchOp {
+        let spec = IndexSpec::Sorted {
+            field: field.into(),
+            include: Vec::new(),
+            index_type: None,
+        };
+
+        BatchOp::CreateIndex(spec.into_op(self.name, self.table, self.repo, self.if_not_exists))
+    }
+
+    /// Create a sorted index with covering (include) fields.
+    ///
+    /// This is a **strict-by-default** typed constructor: it produces a valid
+    /// `BatchOp` directly with no need for `try_build()`. The output is
+    /// byte-identical to the equivalent stringly `.field(...).sorted().include(...).build()` call.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use shamir_query_builder::ddl::create_index;
+    ///
+    /// let op = create_index("idx_age_inc", "users")
+    ///     .sorted_with_include(
+    ///         vec!["age".to_string()],
+    ///         vec![vec!["email".to_string()]],
+    ///     );
+    /// ```
+    pub fn sorted_with_include(
+        self,
+        field: impl Into<Vec<String>>,
+        include: impl IntoIterator<Item = Vec<String>>,
+    ) -> BatchOp {
+        let spec = IndexSpec::Sorted {
+            field: field.into(),
+            include: include.into_iter().collect(),
+            index_type: None,
+        };
+
+        BatchOp::CreateIndex(spec.into_op(self.name, self.table, self.repo, self.if_not_exists))
+    }
+
+    /// Create a full-text search index on a single field with a tokenizer.
+    ///
+    /// This is a **strict-by-default** typed constructor: it produces a valid
+    /// `BatchOp` directly with no need for `try_build()`. The output is
+    /// byte-identical to the equivalent stringly `.field(...).index_type("fts").fts_tokenizer(...).build()` call.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use shamir_query_builder::ddl::{create_index, Tokenizer};
+    ///
+    /// let op = create_index("idx_body", "posts")
+    ///     .fts(vec!["body".to_string()], Tokenizer::Whitespace);
+    /// ```
+    pub fn fts(self, field: impl Into<Vec<String>>, tokenizer: Tokenizer) -> BatchOp {
+        self.fts_with_language(field, tokenizer, None)
+    }
+
+    /// Create a full-text search index with a language hint.
+    ///
+    /// This is a **strict-by-default** typed constructor: it produces a valid
+    /// `BatchOp` directly with no need for `try_build()`.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use shamir_query_builder::ddl::{create_index, Tokenizer};
+    ///
+    /// let op = create_index("idx_body_lang", "posts")
+    ///     .fts_with_language(
+    ///         vec!["body".to_string()],
+    ///         Tokenizer::Unicode,
+    ///         Some("en".to_string()),
+    ///     );
+    /// ```
+    pub fn fts_with_language(
+        self,
+        field: impl Into<Vec<String>>,
+        tokenizer: Tokenizer,
+        language: Option<String>,
+    ) -> BatchOp {
+        let spec = IndexSpec::Fts {
+            fields: vec![field.into()],
+            tokenizer: Some(tokenizer.into()),
+            language,
+        };
+
+        BatchOp::CreateIndex(spec.into_op(self.name, self.table, self.repo, self.if_not_exists))
+    }
+
+    /// Create a functional (derived) index on a single field.
+    ///
+    /// This is a **strict-by-default** typed constructor: it produces a valid
+    /// `BatchOp` directly with no need for `try_build()`. The output is
+    /// byte-identical to the equivalent stringly `.field(...).index_type("functional").functional_op(...).build()` call.
+    ///
+    /// The `func` parameter is a plain function name string (e.g., `"lower"`),
+    /// matching what `functional_op` already stores in the wire format.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use shamir_query_builder::ddl::create_index;
+    ///
+    /// let op = create_index("idx_email_lower", "users")
+    ///     .functional(vec!["email".to_string()], "lower");
+    /// ```
+    pub fn functional(self, field: impl Into<Vec<String>>, func: impl Into<String>) -> BatchOp {
+        self.functional_with_args(field, func, Vec::new())
+    }
+
+    /// Create a functional index with arguments.
+    ///
+    /// This is a **strict-by-default** typed constructor that accepts both the
+    /// function name and optional arguments.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use shamir_query_builder::ddl::create_index;
+    /// use shamir_types::types::value::QueryValue;
+    ///
+    /// let op = create_index("idx_custom", "users")
+    ///     .functional_with_args(
+    ///         vec!["email".to_string()],
+    ///         "my_func",
+    ///         vec![QueryValue::from("arg1")],
+    ///     );
+    /// ```
+    pub fn functional_with_args(
+        self,
+        field: impl Into<Vec<String>>,
+        func: impl Into<String>,
+        args: Vec<QueryValue>,
+    ) -> BatchOp {
+        let spec = IndexSpec::Functional {
+            fields: vec![field.into()],
+            op: Some(func.into()),
+            args: if args.is_empty() { None } else { Some(args) },
+        };
+
+        BatchOp::CreateIndex(spec.into_op(self.name, self.table, self.repo, self.if_not_exists))
+    }
+
+    /// Create a vector index on a single field with dimension, metric, and quantization.
+    ///
+    /// This is a **strict-by-default** typed constructor: it produces a valid
+    /// `BatchOp` directly with no need for `try_build()`. The output is
+    /// byte-identical to the equivalent stringly `.field(...).index_type("vector").vector_dim(...).vector_metric(...).vector_quantization(...).build()` call.
+    ///
+    /// The `dim` parameter is `NonZeroU32`, making zero or absent dimensions
+    /// a compile-time impossibility.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use shamir_query_builder::ddl::{create_index, Metric, Quantization};
+    /// use std::num::NonZeroU32;
+    ///
+    /// let dim = NonZeroU32::new(384).unwrap();
+    /// let op = create_index("idx_embedding", "docs")
+    ///     .vector(vec!["embedding".to_string()], dim, Metric::Cosine, Quantization::Off);
+    /// ```
+    pub fn vector(
+        self,
+        field: impl Into<Vec<String>>,
+        dim: NonZeroU32,
+        metric: Metric,
+        quantization: Quantization,
+    ) -> BatchOp {
+        let spec = IndexSpec::Vector {
+            fields: vec![field.into()],
+            dim,
+            metric: Some(metric.into()),
+            quantization: quantization.into(),
+        };
+
+        BatchOp::CreateIndex(spec.into_op(self.name, self.table, self.repo, self.if_not_exists))
+    }
+
     /// Set the indexed field paths.
     ///
     /// Each element is a path (e.g. `vec!["email"]` or

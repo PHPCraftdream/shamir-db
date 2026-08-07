@@ -45,7 +45,9 @@ mod index_spec;
 mod interner;
 mod interner_resolve;
 mod list;
+mod metric;
 mod migration;
+mod quantization;
 mod rename_db;
 mod rename_index;
 mod rename_repo;
@@ -53,11 +55,12 @@ mod rename_table;
 mod replication;
 mod retention;
 mod schema;
+mod tokenizer;
 mod validator;
 
 /// Internal typed index-kind IR (NOT a wire type) that `CreateIndex::try_build`
-/// routes through to make mutually-exclusive index combinations
-/// unrepresentable at the type level.
+/// and the typed `CreateIndex` constructors route through to make
+/// mutually-exclusive index combinations unrepresentable at the type level.
 pub(crate) use index_spec::IndexSpec;
 
 pub use access_control::*;
@@ -77,7 +80,9 @@ pub use function::*;
 pub use interner::*;
 pub use interner_resolve::*;
 pub use list::*;
+pub use metric::*;
 pub use migration::*;
+pub use quantization::*;
 pub use rename_db::*;
 pub use rename_index::*;
 pub use rename_repo::*;
@@ -85,6 +90,7 @@ pub use rename_table::*;
 pub use replication::*;
 pub use retention::*;
 pub use schema::*;
+pub use tokenizer::*;
 pub use validator::*;
 
 #[cfg(test)]

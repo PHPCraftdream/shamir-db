@@ -332,6 +332,261 @@ export function createIndex(
   return op;
 }
 
+// ── Typed index constructors (strict-by-default) ───────────────────────────
+
+/** FTS tokenizer string literal type. */
+export type Tokenizer = 'whitespace' | 'unicode';
+
+/** Vector metric string literal type. */
+export type Metric = 'l2' | 'cosine' | 'dot';
+
+/** Vector quantization string literal type (undefined = Off/unquantized). */
+export type Quantization = 'sq8' | undefined;
+
+/**
+ * Create a hash/btree index on one or more fields (not unique).
+ *
+ * This is a **strict-by-default** typed constructor: it produces a valid
+ * `CreateIndexOp` directly with no validation needed. The output is
+ * byte-identical to the equivalent `createIndex()` call with the same fields.
+ *
+ * @param name Index name
+ * @param table Table name
+ * @param fields Field paths (array of path arrays)
+ * @param opts Optional: repo, if_not_exists
+ */
+export function hashIndex(
+  name: string,
+  table: string,
+  fields: string[][],
+  opts?: { repo?: string; if_not_exists?: boolean },
+): CreateIndexOp {
+  const op: CreateIndexOp = {
+    create_index: name,
+    table,
+    fields,
+    unique: false,
+    sorted: false,
+    repo: repoOrDefault(opts?.repo),
+  };
+  if (opts?.if_not_exists) op.if_not_exists = true;
+  return op;
+}
+
+/**
+ * Create a unique hash/btree index on one or more fields.
+ *
+ * This is a **strict-by-default** typed constructor: it produces a valid
+ * `CreateIndexOp` directly with no validation needed.
+ *
+ * @param name Index name
+ * @param table Table name
+ * @param fields Field paths (array of path arrays)
+ * @param opts Optional: repo, if_not_exists
+ */
+export function uniqueIndex(
+  name: string,
+  table: string,
+  fields: string[][],
+  opts?: { repo?: string; if_not_exists?: boolean },
+): CreateIndexOp {
+  const op: CreateIndexOp = {
+    create_index: name,
+    table,
+    fields,
+    unique: true,
+    sorted: false,
+    repo: repoOrDefault(opts?.repo),
+  };
+  if (opts?.if_not_exists) op.if_not_exists = true;
+  return op;
+}
+
+/**
+ * Create a sorted (value-ordered) index on a single field.
+ *
+ * This is a **strict-by-default** typed constructor: it produces a valid
+ * `CreateIndexOp` directly with no validation needed. The field parameter
+ * is typed as a single path (string[]), making multi-field sorted indexes
+ * a type error.
+ *
+ * @param name Index name
+ * @param table Table name
+ * @param field Single field path
+ * @param opts Optional: repo, if_not_exists
+ */
+export function sortedIndex(
+  name: string,
+  table: string,
+  field: string[],
+  opts?: { repo?: string; if_not_exists?: boolean },
+): CreateIndexOp {
+  const op: CreateIndexOp = {
+    create_index: name,
+    table,
+    fields: [field],
+    unique: false,
+    sorted: true,
+    repo: repoOrDefault(opts?.repo),
+  };
+  if (opts?.if_not_exists) op.if_not_exists = true;
+  return op;
+}
+
+/**
+ * Create a sorted index with covering (include) fields.
+ *
+ * This is a **strict-by-default** typed constructor that accepts both the
+ * sorted field and covering fields.
+ *
+ * @param name Index name
+ * @param table Table name
+ * @param field Single field path
+ * @param include Covering field paths
+ * @param opts Optional: repo, if_not_exists
+ */
+export function sortedWithIncludeIndex(
+  name: string,
+  table: string,
+  field: string[],
+  include: string[][],
+  opts?: { repo?: string; if_not_exists?: boolean },
+): CreateIndexOp {
+  const op: CreateIndexOp = {
+    create_index: name,
+    table,
+    fields: [field],
+    unique: false,
+    sorted: true,
+    repo: repoOrDefault(opts?.repo),
+    include: include.length > 0 ? include : undefined,
+  };
+  if (opts?.if_not_exists) op.if_not_exists = true;
+  return op;
+}
+
+/**
+ * Create a full-text search index on a single field with a tokenizer.
+ *
+ * This is a **strict-by-default** typed constructor: it produces a valid
+ * `CreateIndexOp` directly with no validation needed.
+ *
+ * @param name Index name
+ * @param table Table name
+ * @param field Single field path
+ * @param tokenizer FTS tokenizer ('whitespace' | 'unicode')
+ * @param opts Optional: language, repo, if_not_exists
+ */
+export function ftsIndex(
+  name: string,
+  table: string,
+  field: string[],
+  tokenizer: Tokenizer,
+  opts?: {
+    language?: string;
+    repo?: string;
+    if_not_exists?: boolean;
+  },
+): CreateIndexOp {
+  const op: CreateIndexOp = {
+    create_index: name,
+    table,
+    fields: [field],
+    unique: false,
+    sorted: false,
+    repo: repoOrDefault(opts?.repo),
+    index_type: 'fts',
+    fts_tokenizer: tokenizer,
+  };
+  if (opts?.language !== undefined) op.fts_language = opts.language;
+  if (opts?.if_not_exists) op.if_not_exists = true;
+  return op;
+}
+
+/**
+ * Create a functional (derived) index on a single field.
+ *
+ * This is a **strict-by-default** typed constructor: it produces a valid
+ * `CreateIndexOp` directly with no validation needed.
+ *
+ * @param name Index name
+ * @param table Table name
+ * @param field Single field path
+ * @param func Function name
+ * @param opts Optional: args, repo, if_not_exists
+ */
+export function functionalIndex(
+  name: string,
+  table: string,
+  field: string[],
+  func: string,
+  opts?: {
+    args?: import('../types/write.js').WireValue[];
+    repo?: string;
+    if_not_exists?: boolean;
+  },
+): CreateIndexOp {
+  const op: CreateIndexOp = {
+    create_index: name,
+    table,
+    fields: [field],
+    unique: false,
+    sorted: false,
+    repo: repoOrDefault(opts?.repo),
+    index_type: 'functional',
+    functional_op: func,
+  };
+  if (opts?.args !== undefined && opts.args.length > 0)
+    op.functional_args = opts.args;
+  if (opts?.if_not_exists) op.if_not_exists = true;
+  return op;
+}
+
+/**
+ * Create a vector index on a single field with dimension, metric, and quantization.
+ *
+ * This is a **strict-by-default** typed constructor: it produces a valid
+ * `CreateIndexOp` directly with no validation needed.
+ *
+ * @param name Index name
+ * @param table Table name
+ * @param field Single field path
+ * @param dim Vector dimension (must be > 0)
+ * @param metric Vector metric ('l2' | 'cosine' | 'dot')
+ * @param quantization Quantization mode ('sq8' | undefined = Off)
+ * @param opts Optional: repo, if_not_exists
+ */
+export function vectorIndex(
+  name: string,
+  table: string,
+  field: string[],
+  dim: number,
+  metric: Metric,
+  quantization: Quantization,
+  opts?: { repo?: string; if_not_exists?: boolean },
+): CreateIndexOp {
+  if (dim <= 0) {
+    throw new Error(
+      `vectorIndex: vector_dim must be > 0, got ${dim} ` +
+        '(server rejects zero or negative dimensions — see admin_table_index.rs)',
+    );
+  }
+  const op: CreateIndexOp = {
+    create_index: name,
+    table,
+    fields: [field],
+    unique: false,
+    sorted: false,
+    repo: repoOrDefault(opts?.repo),
+    index_type: 'vector',
+    vector_dim: dim,
+    vector_metric: metric,
+  };
+  if (quantization !== undefined) op.vector_quantization = quantization;
+  if (opts?.if_not_exists) op.if_not_exists = true;
+  return op;
+}
+
 /** Persist a full buffer config for a table. */
 export function setBufferConfig(
   table: string,
