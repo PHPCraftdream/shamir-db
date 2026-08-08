@@ -13,7 +13,7 @@ use crate::query::filter::eval::{compile_filter, FilterNode};
 use crate::query::filter::eval_context::FilterContext;
 use crate::query::filter::Filter;
 use crate::query::read::{exec, QueryRecord, QueryResult, QueryStats, ReadQuery, SelectItem};
-use shamir_storage::error::DbResult;
+use shamir_storage::error::{DbError, DbResult};
 use shamir_types::core::interner::{Interner, InternerKey};
 use shamir_types::types::common::{new_map, new_set};
 use shamir_types::types::record_id::RecordId;
@@ -100,121 +100,137 @@ impl TableManager {
 
                         if all_covered {
                             // ── Index-only execution path ─────────────────────
-                            let entries = self
+                            // P0-3a (#1037): if the index is being dropped, fall through to
+                            // the full-fetch path below. This preserves the pre-fix behavior
+                            // (which would have served the full scan anyway) and is strictly
+                            // better than a silent empty result.
+                            let entries_opt = self
                                 .sorted_indexes()
                                 .lookup_range_with_values(index_name, lower_encoded, upper_encoded)
-                                .await?;
+                                .await;
 
-                            let mut matched: Vec<(RecordId, InnerValue)> =
-                                Vec::with_capacity(entries.len());
-                            let mut fallback: Vec<RecordId> = Vec::new();
+                            match entries_opt {
+                                Err(DbError::IndexDrainInProgress(_)) => {
+                                    // Index is in drain window — fall back to full scan.
+                                    // This matches slice 1's behavior (read_index_scan.rs:660-679).
+                                }
+                                Err(e) => return Err(e),
+                                Ok(entries) => {
+                                    let mut matched: Vec<(RecordId, InnerValue)> =
+                                        Vec::with_capacity(entries.len());
+                                    let mut fallback: Vec<RecordId> = Vec::new();
 
-                            for (id, pv) in &entries {
-                                match decode_covering_projection(pv) {
-                                    Some((v, proj))
-                                        if mvcc
-                                            .live_version(id.as_bytes())
-                                            .is_none_or(|hwm| hwm == v) =>
-                                    {
-                                        // Posting is fresh — reconstruct the row.
-                                        let mut inner_map = new_map();
-                                        for (dotted_name, leaf) in proj {
-                                            // dotted_name is a single segment here
-                                            // (eligibility gate ensures top-level fields only).
-                                            let key = interner
-                                                .touch_ind(dotted_name.as_str())
-                                                .map_err(|e| {
-                                                    shamir_storage::error::DbError::Codec(
-                                                        e.to_string(),
-                                                    )
-                                                })?
-                                                .into_key();
-                                            inner_map.insert(key, leaf);
+                                    for (id, pv) in &entries {
+                                        match decode_covering_projection(pv) {
+                                            Some((v, proj))
+                                                if mvcc
+                                                    .live_version(id.as_bytes())
+                                                    .is_none_or(|hwm| hwm == v) =>
+                                            {
+                                                // Posting is fresh — reconstruct the row.
+                                                let mut inner_map = new_map();
+                                                for (dotted_name, leaf) in proj {
+                                                    // dotted_name is a single segment here
+                                                    // (eligibility gate ensures top-level fields only).
+                                                    let key = interner
+                                                        .touch_ind(dotted_name.as_str())
+                                                        .map_err(|e| {
+                                                            shamir_storage::error::DbError::Codec(
+                                                                e.to_string(),
+                                                            )
+                                                        })?
+                                                        .into_key();
+                                                    inner_map.insert(key, leaf);
+                                                }
+                                                matched.push((*id, InnerValue::Map(inner_map)));
+                                            }
+                                            _ => {
+                                                // None (corrupt/empty posting) or version mismatch —
+                                                // fall back to a full fetch.
+                                                fallback.push(*id);
+                                            }
                                         }
-                                        matched.push((*id, InnerValue::Map(inner_map)));
                                     }
-                                    _ => {
-                                        // None (corrupt/empty posting) or version mismatch —
-                                        // fall back to a full fetch.
-                                        fallback.push(*id);
+
+                                    // Resolve fallbacks with a single get_many call.
+                                    // A `None` result means the record was deleted after the
+                                    // posting was written — silently skip it (no phantom).
+                                    if !fallback.is_empty() {
+                                        let recs = self.get_many(&fallback).await?;
+                                        for (id, opt) in fallback.iter().zip(recs) {
+                                            if let Some(record) = opt {
+                                                matched.push((*id, record));
+                                            }
+                                            // None → deleted record; skip to prevent phantom reads.
+                                        }
                                     }
+
+                                    let records_scanned = matched.len() as u64;
+
+                                    // Pipeline tail: no residual, no group_by, no aggregates,
+                                    // no order_by (all excluded by the eligibility guard above).
+                                    if let Some((paged, pagination)) = try_project_page_only(
+                                        query,
+                                        &matched,
+                                        interner,
+                                        ctx.scalars.clone(),
+                                    )? {
+                                        let records_returned = paged.len() as u64;
+                                        return Ok(QueryResult {
+                                            records: paged,
+                                            stats: Some(QueryStats {
+                                                index_used: Some(format!(
+                                                    "sorted_idx_{index_name}_covering"
+                                                )),
+                                                records_scanned,
+                                                records_returned,
+                                                execution_time_us: start.elapsed().as_micros()
+                                                    as u64,
+                                            }),
+                                            pagination,
+                                            value: None,
+                                            explain: None,
+                                            skipped: false,
+                                            versions: None,
+                                            corrupt_records: Vec::new(),
+                                            ..Default::default()
+                                        });
+                                    }
+
+                                    let result_qv = exec::apply_select_value(
+                                        &matched,
+                                        &query.select,
+                                        interner,
+                                        ctx.scalars.clone(),
+                                    )?;
+                                    let (paged_qv, pagination) = exec::apply_pagination(
+                                        result_qv,
+                                        &query.pagination,
+                                        query.count_total,
+                                    );
+                                    let paged: Vec<QueryRecord> =
+                                        paged_qv.into_iter().map(QueryRecord::Direct).collect();
+                                    let records_returned = paged.len() as u64;
+                                    return Ok(QueryResult {
+                                        records: paged,
+                                        stats: Some(QueryStats {
+                                            index_used: Some(format!(
+                                                "sorted_idx_{index_name}_covering"
+                                            )),
+                                            records_scanned,
+                                            records_returned,
+                                            execution_time_us: start.elapsed().as_micros() as u64,
+                                        }),
+                                        pagination,
+                                        value: None,
+                                        explain: None,
+                                        skipped: false,
+                                        versions: None,
+                                        corrupt_records: Vec::new(),
+                                        ..Default::default()
+                                    });
                                 }
                             }
-
-                            // Resolve fallbacks with a single get_many call.
-                            // A `None` result means the record was deleted after the
-                            // posting was written — silently skip it (no phantom).
-                            if !fallback.is_empty() {
-                                let recs = self.get_many(&fallback).await?;
-                                for (id, opt) in fallback.iter().zip(recs) {
-                                    if let Some(record) = opt {
-                                        matched.push((*id, record));
-                                    }
-                                    // None → deleted record; skip to prevent phantom reads.
-                                }
-                            }
-
-                            let records_scanned = matched.len() as u64;
-
-                            // Pipeline tail: no residual, no group_by, no aggregates,
-                            // no order_by (all excluded by the eligibility guard above).
-                            if let Some((paged, pagination)) = try_project_page_only(
-                                query,
-                                &matched,
-                                interner,
-                                ctx.scalars.clone(),
-                            )? {
-                                let records_returned = paged.len() as u64;
-                                return Ok(QueryResult {
-                                    records: paged,
-                                    stats: Some(QueryStats {
-                                        index_used: Some(format!(
-                                            "sorted_idx_{index_name}_covering"
-                                        )),
-                                        records_scanned,
-                                        records_returned,
-                                        execution_time_us: start.elapsed().as_micros() as u64,
-                                    }),
-                                    pagination,
-                                    value: None,
-                                    explain: None,
-                                    skipped: false,
-                                    versions: None,
-                                    corrupt_records: Vec::new(),
-                                    ..Default::default()
-                                });
-                            }
-
-                            let result_qv = exec::apply_select_value(
-                                &matched,
-                                &query.select,
-                                interner,
-                                ctx.scalars.clone(),
-                            )?;
-                            let (paged_qv, pagination) = exec::apply_pagination(
-                                result_qv,
-                                &query.pagination,
-                                query.count_total,
-                            );
-                            let paged: Vec<QueryRecord> =
-                                paged_qv.into_iter().map(QueryRecord::Direct).collect();
-                            let records_returned = paged.len() as u64;
-                            return Ok(QueryResult {
-                                records: paged,
-                                stats: Some(QueryStats {
-                                    index_used: Some(format!("sorted_idx_{index_name}_covering")),
-                                    records_scanned,
-                                    records_returned,
-                                    execution_time_us: start.elapsed().as_micros() as u64,
-                                }),
-                                pagination,
-                                value: None,
-                                explain: None,
-                                skipped: false,
-                                versions: None,
-                                corrupt_records: Vec::new(),
-                                ..Default::default()
-                            });
                         }
                     }
                 }

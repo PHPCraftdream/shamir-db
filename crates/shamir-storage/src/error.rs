@@ -79,6 +79,14 @@ pub enum DbError {
     /// branch on `ShamirDbError.code === "version_conflict"`.
     #[error("Version conflict: {0}")]
     VersionConflict(String),
+
+    /// An index is currently being dropped and is in its reader-drain window.
+    /// The lookup result is deliberately withheld. Callers should retry or
+    /// re-plan without this index.
+    #[error(
+        "Index '{0}' is currently being dropped; lookup result unavailable — retry or re-plan"
+    )]
+    IndexDrainInProgress(String),
 }
 
 impl From<CodecError> for DbError {
@@ -96,6 +104,7 @@ impl DbError {
         match self {
             DbError::VersionConflict(_) => Some("version_conflict"),
             DbError::Conflict(_) => Some("tx_conflict"),
+            DbError::IndexDrainInProgress(_) => Some("index_drain_in_progress"),
             _ => None,
         }
     }

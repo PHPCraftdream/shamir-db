@@ -376,53 +376,63 @@ impl TableManager {
                     // index (CREATE INDEX backfill in flight) must fall
                     // through to the full scan below, not answer MIN from a
                     // half-populated index.
+                    // P0-3a (#1037): IndexDrainInProgress also falls through.
                     if let Some(def) = self.sorted_indexes().find_by_field_ready(&field_path) {
-                        if let Some(id) =
-                            self.sorted_indexes().lookup_min(def.name_interned).await?
-                        {
-                            // Load the record and extract the field value.
-                            let record = self.get(id).await?;
-                            let val =
-                                crate::query::filter::eval::resolve_field(&record, &field_path);
-                            let qv_val = match val {
-                                Some(v) => {
-                                    shamir_types::codecs::interned::inner_value_to_query_value(
-                                        &v, interner,
-                                    )?
-                                }
-                                None => QueryValue::Null,
-                            };
-                            let key = alias
-                                .as_deref()
-                                .unwrap_or_else(|| path.last().map(|s| s.as_str()).unwrap_or("min"))
-                                .to_string();
-                            let mut obj = new_map_wc(1);
-                            obj.insert(key, qv_val);
-                            return Ok(QueryResult {
-                                records: vec![crate::query::read::QueryRecord::Direct(
-                                    QueryValue::Map(obj),
-                                )],
-                                stats: Some(QueryStats {
-                                    index_used: Some(format!(
-                                        "sorted_idx_{}_min",
-                                        def.name_interned
-                                    )),
-                                    records_scanned: 1,
-                                    records_returned: 1,
-                                    execution_time_us: start.elapsed().as_micros() as u64,
-                                }),
-                                pagination: None,
-                                value: None,
-                                explain: None,
-                                skipped: false,
-                                versions: collect_versions(
-                                    query.with_version,
-                                    self.mvcc_store_ref(),
-                                    std::slice::from_ref(&id),
-                                ),
-                                corrupt_records: Vec::new(),
-                                ..Default::default()
-                            });
+                        match self.sorted_indexes().lookup_min(def.name_interned).await {
+                            Err(DbError::IndexDrainInProgress(_)) => {
+                                // Index is in drain window — fall through to full scan.
+                            }
+                            Err(e) => return Err(e),
+                            Ok(Some(id)) => {
+                                // Load the record and extract the field value.
+                                let record = self.get(id).await?;
+                                let val =
+                                    crate::query::filter::eval::resolve_field(&record, &field_path);
+                                let qv_val = match val {
+                                    Some(v) => {
+                                        shamir_types::codecs::interned::inner_value_to_query_value(
+                                            &v, interner,
+                                        )?
+                                    }
+                                    None => QueryValue::Null,
+                                };
+                                let key = alias
+                                    .as_deref()
+                                    .unwrap_or_else(|| {
+                                        path.last().map(|s| s.as_str()).unwrap_or("min")
+                                    })
+                                    .to_string();
+                                let mut obj = new_map_wc(1);
+                                obj.insert(key, qv_val);
+                                return Ok(QueryResult {
+                                    records: vec![crate::query::read::QueryRecord::Direct(
+                                        QueryValue::Map(obj),
+                                    )],
+                                    stats: Some(QueryStats {
+                                        index_used: Some(format!(
+                                            "sorted_idx_{}_min",
+                                            def.name_interned
+                                        )),
+                                        records_scanned: 1,
+                                        records_returned: 1,
+                                        execution_time_us: start.elapsed().as_micros() as u64,
+                                    }),
+                                    pagination: None,
+                                    value: None,
+                                    explain: None,
+                                    skipped: false,
+                                    versions: collect_versions(
+                                        query.with_version,
+                                        self.mvcc_store_ref(),
+                                        std::slice::from_ref(&id),
+                                    ),
+                                    corrupt_records: Vec::new(),
+                                    ..Default::default()
+                                });
+                            }
+                            Ok(None) => {
+                                // Index genuinely has no entries — fall through to full scan.
+                            }
                         }
                     }
                 }
@@ -713,52 +723,62 @@ impl TableManager {
             {
                 if let Some(field_path) = intern_field_path(path, interner) {
                     // F-72 (#899, P0): state-filtered — see the MIN arm above.
+                    // P0-3a (#1037): IndexDrainInProgress also falls through.
                     if let Some(def) = self.sorted_indexes().find_by_field_ready(&field_path) {
-                        if let Some(id) =
-                            self.sorted_indexes().lookup_max(def.name_interned).await?
-                        {
-                            let record = self.get(id).await?;
-                            let val =
-                                crate::query::filter::eval::resolve_field(&record, &field_path);
-                            let qv_val = match val {
-                                Some(v) => {
-                                    shamir_types::codecs::interned::inner_value_to_query_value(
-                                        &v, interner,
-                                    )?
-                                }
-                                None => QueryValue::Null,
-                            };
-                            let key = alias
-                                .as_deref()
-                                .unwrap_or_else(|| path.last().map(|s| s.as_str()).unwrap_or("max"))
-                                .to_string();
-                            let mut obj = new_map_wc(1);
-                            obj.insert(key, qv_val);
-                            return Ok(QueryResult {
-                                records: vec![crate::query::read::QueryRecord::Direct(
-                                    QueryValue::Map(obj),
-                                )],
-                                stats: Some(QueryStats {
-                                    index_used: Some(format!(
-                                        "sorted_idx_{}_max",
-                                        def.name_interned
-                                    )),
-                                    records_scanned: 1,
-                                    records_returned: 1,
-                                    execution_time_us: start.elapsed().as_micros() as u64,
-                                }),
-                                pagination: None,
-                                value: None,
-                                explain: None,
-                                skipped: false,
-                                versions: collect_versions(
-                                    query.with_version,
-                                    self.mvcc_store_ref(),
-                                    std::slice::from_ref(&id),
-                                ),
-                                corrupt_records: Vec::new(),
-                                ..Default::default()
-                            });
+                        match self.sorted_indexes().lookup_max(def.name_interned).await {
+                            Err(DbError::IndexDrainInProgress(_)) => {
+                                // Index is in drain window — fall through to full scan.
+                            }
+                            Err(e) => return Err(e),
+                            Ok(Some(id)) => {
+                                let record = self.get(id).await?;
+                                let val =
+                                    crate::query::filter::eval::resolve_field(&record, &field_path);
+                                let qv_val = match val {
+                                    Some(v) => {
+                                        shamir_types::codecs::interned::inner_value_to_query_value(
+                                            &v, interner,
+                                        )?
+                                    }
+                                    None => QueryValue::Null,
+                                };
+                                let key = alias
+                                    .as_deref()
+                                    .unwrap_or_else(|| {
+                                        path.last().map(|s| s.as_str()).unwrap_or("max")
+                                    })
+                                    .to_string();
+                                let mut obj = new_map_wc(1);
+                                obj.insert(key, qv_val);
+                                return Ok(QueryResult {
+                                    records: vec![crate::query::read::QueryRecord::Direct(
+                                        QueryValue::Map(obj),
+                                    )],
+                                    stats: Some(QueryStats {
+                                        index_used: Some(format!(
+                                            "sorted_idx_{}_max",
+                                            def.name_interned
+                                        )),
+                                        records_scanned: 1,
+                                        records_returned: 1,
+                                        execution_time_us: start.elapsed().as_micros() as u64,
+                                    }),
+                                    pagination: None,
+                                    value: None,
+                                    explain: None,
+                                    skipped: false,
+                                    versions: collect_versions(
+                                        query.with_version,
+                                        self.mvcc_store_ref(),
+                                        std::slice::from_ref(&id),
+                                    ),
+                                    corrupt_records: Vec::new(),
+                                    ..Default::default()
+                                });
+                            }
+                            Ok(None) => {
+                                // Index genuinely has no entries — fall through to full scan.
+                            }
                         }
                     }
                 }
@@ -775,10 +795,11 @@ impl TableManager {
         // Checked BEFORE #6 because `Pagination::After` also resolves to
         // a finite (skip=0, take=limit) pair — without this ordering the
         // generic ORDER BY + LIMIT path would shadow the seek.
+        // P0-3a (#1037): if the sorted index is being dropped, fall through to full scan.
         if let Some((idx_name, encoded_key, after_id, limit, direction)) =
             self.try_plan_keyset_seek(query, interner)
         {
-            return self
+            match self
                 .read_keyset_seek(
                     query,
                     ctx,
@@ -790,7 +811,14 @@ impl TableManager {
                     direction,
                     start,
                 )
-                .await;
+                .await
+            {
+                Ok(result) => return Ok(result),
+                Err(DbError::IndexDrainInProgress(_)) => {
+                    // Index is in drain window — fall through to full scan below.
+                }
+                Err(e) => return Err(e),
+            }
         }
 
         // Opt #6 — sorted-index ORDER BY field ASC LIMIT K fast path.
@@ -810,12 +838,20 @@ impl TableManager {
         //
         // Falls through to the existing paths when the shape doesn't
         // match (DESC, multi-field order_by, residual filter, etc.).
+        // P0-3a (#1037): if the sorted index is being dropped, fall through to full scan.
         if let Some((idx_name, take, skip, direction)) =
             self.try_plan_order_limit_fast_path(query, interner)
         {
-            return self
+            match self
                 .read_order_limit_fast(query, ctx, interner, idx_name, take, skip, direction, start)
-                .await;
+                .await
+            {
+                Ok(result) => return Ok(result),
+                Err(DbError::IndexDrainInProgress(_)) => {
+                    // Index is in drain window — fall through to full scan below.
+                }
+                Err(e) => return Err(e),
+            }
         }
 
         // Sorted-index plan (range / Gte / Lte / Between). Only kicks
@@ -825,7 +861,10 @@ impl TableManager {
             if let Some((idx_name, lo, hi, residual)) =
                 self.try_plan_sorted_index_scan(filter, interner)
             {
-                return self
+                // P0-3a (#1037): if the sorted index is being dropped, fall through
+                // to full scan instead of returning an error. This preserves the
+                // pre-fix behavior and matches slice 1's behavior for regular indexes.
+                match self
                     .read_sorted_index_scan(
                         query,
                         ctx,
@@ -836,7 +875,14 @@ impl TableManager {
                         residual.as_ref(),
                         start,
                     )
-                    .await;
+                    .await
+                {
+                    Ok(result) => return Ok(result),
+                    Err(DbError::IndexDrainInProgress(_)) => {
+                        // Index is in drain window — fall through to full scan below.
+                    }
+                    Err(e) => return Err(e),
+                }
             }
         }
 
@@ -847,7 +893,8 @@ impl TableManager {
             if let Some((idx_name, lo, hi, residual)) =
                 self.try_plan_and_range_index_scan(filter, interner)
             {
-                return self
+                // P0-3a (#1037): same fall-through logic as the sorted-index plan above.
+                match self
                     .read_sorted_index_scan(
                         query,
                         ctx,
@@ -858,7 +905,14 @@ impl TableManager {
                         residual.as_ref(),
                         start,
                     )
-                    .await;
+                    .await
+                {
+                    Ok(result) => return Ok(result),
+                    Err(DbError::IndexDrainInProgress(_)) => {
+                        // Index is in drain window — fall through to full scan below.
+                    }
+                    Err(e) => return Err(e),
+                }
             }
         }
 

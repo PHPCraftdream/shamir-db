@@ -92,7 +92,7 @@ use shamir_types::types::record_id::RecordId;
 
 use crate::query::filter::eval_context::FilterContext;
 use crate::query::read::{exec, QueryRecord, QueryResult, QueryStats, ReadQuery};
-use shamir_storage::error::DbResult;
+use shamir_storage::error::{DbError, DbResult};
 
 use super::read_exec::apply_select_value_bytes;
 use super::table_manager::TableManager;
@@ -218,7 +218,8 @@ impl TableManager {
             // encoded value still equals `encoded_key`, so re-passing it on
             // every internal-loop iteration is safe (mirrors `read_keyset_seek`
             // / task #537's fix).
-            let (id_vec, cursor) = self
+            // P0-3a (#1037): if the sorted index is being dropped, fall back to full scan.
+            let (id_vec, cursor) = match self
                 .sorted_indexes()
                 .lookup_range_first_k_page(
                     index_name,
@@ -228,7 +229,15 @@ impl TableManager {
                     need,
                     forward,
                 )
-                .await?;
+                .await
+            {
+                Ok(result) => result,
+                Err(DbError::IndexDrainInProgress(_)) => {
+                    // Index is in drain window — fall back to full scan.
+                    return Ok(None);
+                }
+                Err(e) => return Err(e),
+            };
             candidates_examined += id_vec.len() as u64;
 
             // CR-C3 (#778): batch-fetch the AS-OF bytes for all candidates in

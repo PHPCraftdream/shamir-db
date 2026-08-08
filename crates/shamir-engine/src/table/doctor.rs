@@ -280,7 +280,21 @@ impl TableManager {
         }
         let mut sorted_indexes = Vec::with_capacity(sorted_defs.len());
         for (def, expected) in sorted_defs.iter().zip(expected_sorted.iter()) {
-            let actual = self.sorted_indexes().entry_count(def.name_interned).await?;
+            // P0-3a (#1037): if the sorted index is being dropped, surface it as
+            // a retryable error instead of silently reporting 0 entries (which would
+            // be indistinguishable from a genuinely empty index). Mirrors slice 1's
+            // behavior in table_manager_index_mgmt.rs (lines 1418-1424).
+            let actual = match self.sorted_indexes().entry_count(def.name_interned).await {
+                Ok(count) => count,
+                Err(shamir_storage::error::DbError::IndexDrainInProgress(index_name)) => {
+                    return Err(shamir_storage::error::DbError::NotFound(format!(
+                        "sorted index '{index_name}' (interned={}) is currently being dropped; \
+                         verify result unavailable — retry after drop completes",
+                        def.name_interned
+                    )));
+                }
+                Err(e) => return Err(e),
+            };
             sorted_indexes.push(IndexHealth {
                 name_interned: def.name_interned,
                 expected_entries: *expected,

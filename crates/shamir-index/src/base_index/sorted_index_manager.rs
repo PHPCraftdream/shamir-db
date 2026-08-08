@@ -32,7 +32,7 @@ use crate::base_index::sorted_index_definition::{
     SortedIndexDefinitionNoState, SortedIndexDefinitionV1, SORTED_TAG,
 };
 use crate::write_ops::IndexWriteOp;
-use shamir_storage::error::DbResult;
+use shamir_storage::error::{DbError, DbResult};
 use shamir_storage::types::{KvOp, RecordKey, Store};
 use shamir_tunables::store_defaults::{FULL_SCAN_BATCH, MAINT_SCAN_BATCH};
 use shamir_types::core::interner::{Interner, InternerKey};
@@ -258,6 +258,15 @@ pub struct SortedIndexManager {
     /// `drop_index_post_sweep_hook`.
     rename_rekey_pause_hook:
         Arc<arc_swap::ArcSwapOption<crate::base_index::backfill_pause_hook::BackfillPauseHook>>,
+
+    /// P0-3a (#1037) — reader-vs-DROP mutual exclusion gate for the sorted
+    /// index family. Mirrors `IndexManager::reader_gate` (slice 1, #1011).
+    /// Closes the race where a reader that resolves an index definition BEFORE
+    /// `drop_index` retires it can scan the shared `info_store` keyspace WHILE
+    /// the sweep runs, observing a partially-swept keyspace. See
+    /// `crate::reader_drain_gate`'s module doc for the full design (flag +
+    /// counter + reader back-off, not epoch-parity RCU).
+    pub(super) reader_gate: crate::reader_drain_gate::ReaderDrainGate,
 }
 
 impl Clone for SortedIndexManager {
@@ -277,6 +286,7 @@ impl Clone for SortedIndexManager {
             drop_index_post_sweep_hook: Arc::clone(&self.drop_index_post_sweep_hook),
             renaming_sorted: Arc::clone(&self.renaming_sorted),
             rename_rekey_pause_hook: Arc::clone(&self.rename_rekey_pause_hook),
+            reader_gate: self.reader_gate.clone(),
         }
     }
 }
@@ -297,6 +307,7 @@ impl SortedIndexManager {
             drop_index_post_sweep_hook: Arc::new(arc_swap::ArcSwapOption::empty()),
             renaming_sorted: Arc::new(Mutex::new(BTreeMap::new())),
             rename_rekey_pause_hook: Arc::new(arc_swap::ArcSwapOption::empty()),
+            reader_gate: crate::reader_drain_gate::ReaderDrainGate::new(),
         };
         m.load().await?;
         // P0-3b (#972): resume any in-progress DROP INDEX operations that were
@@ -355,6 +366,27 @@ impl SortedIndexManager {
         hook: Option<Arc<crate::base_index::backfill_pause_hook::BackfillPauseHook>>,
     ) {
         self.rename_rekey_pause_hook.store(hook);
+    }
+
+    /// P0-3a (#1037) test/telemetry oracle: how many `drop_index` drains
+    /// genuinely had to wait for at least one in-flight reader. Passthrough to
+    /// [`reader_drain_gate::ReaderDrainGate::drain_waits`]. The drain-waits
+    /// counter is the test oracle that discriminates "gate genuinely blocked a
+    /// drain" from "gate was wired but never contended" — a lone `== 0`
+    /// assertion passes vacuously if the counter is never incremented, so test
+    /// suites always pair it with the contended `== 1` case (see
+    /// `p1037_sorted_reader_drain_tests`).
+    pub fn reader_drain_waits(&self) -> usize {
+        self.reader_gate.drain_waits()
+    }
+
+    /// P0-3a (#1037) test-only: expose the reader gate for in-flight count
+    /// checks. Used by regression tests to prove a reader is counted mid-flight
+    /// (e.g., to verify `in_flight_count() == 1` while a read is parked). Not
+    /// `#[cfg(test)]`-gated — cross-crate test consumer, same reason as the
+    /// other hooks.
+    pub fn reader_gate(&self) -> &crate::reader_drain_gate::ReaderDrainGate {
+        &self.reader_gate
     }
 
     /// F-50 Step 2 (#870): current sorted-index generation. Bumped (monotonic)
@@ -897,6 +929,15 @@ impl SortedIndexManager {
         // in-memory set on persist failure.
         self.add_to_dropping_sorted(name_interned).await?;
 
+        // P0-3a (#1037) step 2.5: raise the reader-drain gate's intent flag
+        // (SeqCst) BEFORE the RCU retire below. From this point every NEW
+        // sorted-index reader observes the flag and backs off (empty result
+        // → caller falls back to a full scan). The flag stays up until
+        // `drain_guard` is dropped (step 4.5 + RAII safety net on early `?`).
+        // See `crate::reader_drain_gate`'s module doc for the memory-model
+        // proof and the deadlock-exclusion placement invariant.
+        let drain_guard = self.reader_gate.begin_drop();
+
         // F-76 (#903): retire the definition from the planner-visible Vec
         // FIRST (RCU swap publishes a Vec without this definition atomically).
         let mut existed = false;
@@ -915,6 +956,8 @@ impl SortedIndexManager {
             // possible if a concurrent un-serialized caller violated the
             // engine's write-barrier contract). Undo the tombstone we just
             // wrote and report not-found — nothing was swept or persisted.
+            // The RAII guard is dropped here on early return (step 4.5's safety
+            // net), clearing the flag.
             self.clear_from_dropping_sorted(name_interned).await?;
             return Ok(false);
         }
@@ -932,6 +975,18 @@ impl SortedIndexManager {
             hook.wait_at_window().await;
         }
 
+        // P0-3a (#1037) step 3.5: drain every reader that entered one of the
+        // 8 sorted-index read chokepoints BEFORE the flag went up (the gate's
+        // memory model guarantees such a reader is counted in `in_flight`,
+        // so this wait terminates — see the livelock-freedom argument in the
+        // gate's module doc). AFTER the RCU retire and the pause-hook park,
+        // BEFORE the sweep, so the physical sweep cannot start until no
+        // reader is mid-scan of the shared keyspace. Bounded by the gate's
+        // escalating log; this wait sits inside the already-held
+        // `ddl_admission` critical section exactly as the mirror-image
+        // `WriterDrainBarrier::drain` does.
+        drain_guard.wait_for_drain().await;
+
         // Sweep the (now orphan, planner-invisible) posting entries.
         // P0-3b (#972): extracted to `sweep_sorted_postings` so the recovery
         // path can re-run it idempotently.
@@ -948,6 +1003,14 @@ impl SortedIndexManager {
                  TableManager::verify() to confirm state."
                 ))
             })?;
+
+        // P0-3a (#1037) step 4.5: the sweep finished — explicitly release the
+        // drain guard now so the (unrelated) persist / tombstone-clear steps
+        // below run with the gate already clear. RAII (`drain_guard`'s `Drop`
+        // clears the flag) remains the safety net for every early `?` return
+        // above (including the `!existed` rollback branch), but an explicit
+        // early drop here keeps the drain window as tight as possible.
+        drop(drain_guard);
 
         // P0-3b (#972) test seam — park here (sweep complete, reduced defs
         // NOT yet persisted) if a test installed the post-sweep hook. This is
@@ -1851,6 +1914,19 @@ impl SortedIndexManager {
         start_encoded: Option<&[u8]>,
         end_encoded: Option<&[u8]>,
     ) -> DbResult<BTreeSet<RecordId>> {
+        // P0-3a (#1037): acquire the reader-drain guard as the FIRST statement.
+        // `None` means a DROP INDEX is currently in its raise→sweep window: the
+        // caller MUST NOT read the physical store and MUST fall back (a full
+        // table scan). See `crate::reader_drain_gate`'s module doc for the
+        // placement invariant: this guard is always the INNERMOST
+        // synchronization primitive on the read path.
+        let Some(_guard) = self.reader_gate.enter() else {
+            // We don't have the human-readable name available (only name_interned),
+            // so use the numeric ID in the error message.
+            let index_name = format!("sorted_index_{}", name_interned);
+            return Err(DbError::IndexDrainInProgress(index_name));
+        };
+
         let prefix = self.entry_prefix(name_interned);
         let (lower, upper) = self.range_bounds(&prefix, start_encoded, end_encoded);
 
@@ -1884,6 +1960,14 @@ impl SortedIndexManager {
         start_encoded: Option<&[u8]>,
         end_encoded: Option<&[u8]>,
     ) -> DbResult<Vec<(RecordId, Bytes)>> {
+        // P0-3a (#1037): acquire the reader-drain guard as the FIRST statement.
+        let Some(_guard) = self.reader_gate.enter() else {
+            // We don't have the human-readable name available (only name_interned),
+            // so use the numeric ID in the error message.
+            let index_name = format!("sorted_index_{}", name_interned);
+            return Err(DbError::IndexDrainInProgress(index_name));
+        };
+
         let prefix = self.entry_prefix(name_interned);
         let (lower, upper) = self.range_bounds(&prefix, start_encoded, end_encoded);
 
@@ -1907,6 +1991,14 @@ impl SortedIndexManager {
     /// `iter_range_stream` with batch_size=1 reads exactly the first
     /// entry on B-tree backends; in-memory falls back to its default.
     pub async fn lookup_min(&self, name_interned: u64) -> DbResult<Option<RecordId>> {
+        // P0-3a (#1037): acquire the reader-drain guard as the FIRST statement.
+        let Some(_guard) = self.reader_gate.enter() else {
+            // We don't have the human-readable name available (only name_interned),
+            // so use the numeric ID in the error message.
+            let index_name = format!("sorted_index_{}", name_interned);
+            return Err(DbError::IndexDrainInProgress(index_name));
+        };
+
         let prefix = self.entry_prefix(name_interned);
         let (lower, upper) = self.range_bounds(&prefix, None, None);
         let stream = self
@@ -1925,6 +2017,14 @@ impl SortedIndexManager {
     /// Uses `iter_range_stream_reverse` so disk backends seek
     /// straight to the upper bound and walk one entry backwards.
     pub async fn lookup_max(&self, name_interned: u64) -> DbResult<Option<RecordId>> {
+        // P0-3a (#1037): acquire the reader-drain guard as the FIRST statement.
+        let Some(_guard) = self.reader_gate.enter() else {
+            // We don't have the human-readable name available (only name_interned),
+            // so use the numeric ID in the error message.
+            let index_name = format!("sorted_index_{}", name_interned);
+            return Err(DbError::IndexDrainInProgress(index_name));
+        };
+
         let prefix = self.entry_prefix(name_interned);
         let (lower, upper) = self.range_bounds(&prefix, None, None);
         let stream = self
@@ -1942,6 +2042,14 @@ impl SortedIndexManager {
     /// Last K record ids under the sorted prefix, in value-DESC order.
     /// Mirror of `lookup_first_k` using `iter_range_stream_reverse`.
     pub async fn lookup_last_k(&self, name_interned: u64, k: usize) -> DbResult<Vec<RecordId>> {
+        // P0-3a (#1037): acquire the reader-drain guard as the FIRST statement.
+        let Some(_guard) = self.reader_gate.enter() else {
+            // We don't have the human-readable name available (only name_interned),
+            // so use the numeric ID in the error message.
+            let index_name = format!("sorted_index_{}", name_interned);
+            return Err(DbError::IndexDrainInProgress(index_name));
+        };
+
         if k == 0 {
             return Ok(Vec::new());
         }
@@ -2056,6 +2164,14 @@ impl SortedIndexManager {
         k: usize,
         forward: bool,
     ) -> DbResult<(Vec<RecordId>, Option<Bytes>)> {
+        // P0-3a (#1037): acquire the reader-drain guard as the FIRST statement.
+        let Some(_guard) = self.reader_gate.enter() else {
+            // We don't have the human-readable name available (only name_interned),
+            // so use the numeric ID in the error message.
+            let index_name = format!("sorted_index_{}", name_interned);
+            return Err(DbError::IndexDrainInProgress(index_name));
+        };
+
         if k == 0 {
             return Ok((Vec::new(), None));
         }
@@ -2167,6 +2283,14 @@ impl SortedIndexManager {
 
     /// First K record ids under the sorted prefix, in value-asc order.
     pub async fn lookup_first_k(&self, name_interned: u64, k: usize) -> DbResult<Vec<RecordId>> {
+        // P0-3a (#1037): acquire the reader-drain guard as the FIRST statement.
+        let Some(_guard) = self.reader_gate.enter() else {
+            // We don't have the human-readable name available (only name_interned),
+            // so use the numeric ID in the error message.
+            let index_name = format!("sorted_index_{}", name_interned);
+            return Err(DbError::IndexDrainInProgress(index_name));
+        };
+
         if k == 0 {
             return Ok(Vec::new());
         }
@@ -2373,6 +2497,16 @@ impl SortedIndexManager {
     /// Count of entries currently in the sorted index — used by the
     /// doctor's verify pass. O(K) where K is the entry count.
     pub async fn entry_count(&self, name_interned: u64) -> DbResult<u64> {
+        // P0-3a (#1037): acquire the reader-drain guard as the FIRST statement.
+        // `None` means a DROP INDEX is currently in its raise→sweep window:
+        // the caller must report an error (fall back to full scan or similar).
+        let Some(_guard) = self.reader_gate.enter() else {
+            // We don't have the human-readable name available (only name_interned),
+            // so use the numeric ID in the error message.
+            let index_name = format!("sorted_index_{}", name_interned);
+            return Err(DbError::IndexDrainInProgress(index_name));
+        };
+
         let prefix = self.entry_prefix(name_interned);
         let mut count: u64 = 0;
         let stream = self.info_store.scan_prefix_stream(prefix, 1024);
