@@ -179,27 +179,21 @@ fn audit_insert_body(bind_row: &str) -> BatchRequest {
 ///      (which rejects `visit_seq`/`visit_str` callbacks, accepting only
 ///      genuine byte-buffer wire shapes) now closes that ambiguity, so this is
 ///      no longer a live blocker.
-///   2. STILL OPEN (unrelated to #983; `#987` fixed a DIFFERENT bug): unique-
-///      index validation (`crates/shamir-index/src/base_index/index_manager_unique.rs`'s
-///      `validate_unique_for_create` plus the commit-time re-check in
-///      `crates/shamir-engine/src/tx/pre_commit.rs`'s `pre_commit_prelock`,
-///      Phase 2.6) only ever checks against DURABLE committed state — two
-///      inserts claiming the same unique key within the SAME still-uncommitted
-///      transaction never cross-validate against each other, so a
-///      duplicate-within-one-tx silently commits instead of aborting. (`#987`
-///      moved `rederive_base_index_ops_post_stage` to run before Phase 2.6's
-///      loop so a tx staged BEFORE a mid-tx `CREATE UNIQUE INDEX` gets
-///      retroactively validated — a timing/ordering fix, NOT the general
-///      staged-vs-staged-in-the-same-tx gap described here.)
+///   2. FIXED by #1039: unique-index validation now includes an intra-tx
+///      dedup check in Phase 2.6 (`crates/shamir-engine/src/tx/pre_commit.rs`)
+///      using an O(1)-amortized TFxMap keyed by (table_token, index_key). Two
+///      inserts claiming the same unique key within the SAME transaction now
+///      correctly abort with UniqueViolation instead of silently committing.
+///      (`#987` moved `rederive_base_index_ops_post_stage` to run before Phase
+///      2.6's loop so a tx staged BEFORE a mid-tx `CREATE UNIQUE INDEX` gets
+///      retroactively validated — a timing/ordering fix, which remains relevant;
+///      #1039 closed the staged-vs-staged-in-the-same-tx gap.)
 ///
-/// Issue (1) is fixed as of #983 (commit `80d08caa`); issue (2) alone still
-/// makes a unique-index-based conflict unreliable within a single open
-/// transaction, so this `math/mod` workaround remains necessary (reverting to
-/// a plain unique-index trigger would reintroduce the exact silent-commit flake
-/// (2) describes). The div-by-zero technique sidesteps it: no duplicate values
-/// needed (large, distinct `order_id`s throughout), and the failure is
-/// self-contained to the failing iteration's own insert (no cross-iteration
-/// durable-state check involved).
+/// Issue (1) is fixed as of #983 (commit `80d08caa`); issue (2) is now fixed
+/// by #1039, so a unique-index-based conflict would be reliable within a single
+/// open transaction. This `math/mod` workaround is retained for historical
+/// compatibility — the div-by-zero technique is self-contained to the failing
+/// iteration's own insert (no cross-iteration durable-state check involved).
 fn audit_insert_body_with_div_guard(bind_row: &str) -> BatchRequest {
     let mut inner = Batch::new();
     inner.insert(

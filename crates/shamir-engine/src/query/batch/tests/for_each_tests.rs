@@ -210,8 +210,13 @@ fn insert_order_body(bind_row: &str) -> BatchRequest {
 /// (`tx::pre_commit::pre_commit_prelock`'s per-guard check against
 /// `info_store`) — two inserts claiming the same key within ONE
 /// still-uncommitted tx never cross-check each other and both silently
-/// pass). A bind_row value of `0` makes THIS iteration's own insert fail,
-/// independent of what any other iteration did.
+/// pass).
+///
+/// NOTE: The intra-tx unique-key gap described above was FIXED by #1039.
+/// Phase 2.6 now includes an O(1)-amortized dedup check using TFxMap
+/// keyed by (table_token, index_key) that cross-validates guards within
+/// the same transaction. A bind_row value of `0` makes THIS iteration's
+/// own insert fail, independent of what any other iteration did.
 fn insert_order_body_with_div_guard(bind_row: &str) -> BatchRequest {
     let mut param_obj = new_map();
     param_obj.insert("$param".to_string(), QueryValue::Str(bind_row.to_string()));

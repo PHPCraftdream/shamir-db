@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use shamir_collections::TFxMap;
 use shamir_storage::error::DbError;
 use shamir_storage::types::{KvOp, RecordKey};
 use shamir_tx::{
@@ -582,12 +583,40 @@ pub(super) async fn pre_commit_prelock(
     // writers: no other writer can interleave between this check and the
     // Phase 5c posting write (the uwl_guard is held continuously).
     //
-    // The unique key is deterministic in the value, so a byte-equal
-    // `info_store.get(index_key)` settles ownership:
-    //   - NotFound          → key free                 → OK
-    //   - Some == our owner  → update self-write        → OK
-    //   - Some != our owner  → another record owns it   → abort
+    // #1039 — Intra-tx dedup: two operations within the SAME transaction can
+    // claim the same unique-index key. The stage-time validation is optimistic
+    // (checks only durable committed state), so both guards are recorded.
+    // We must cross-check guards against each other here BEFORE the durable
+    // state check to catch intra-tx collisions.
+    //
+    // Design: O(1)-amortized check using TFxMap<(table_token, index_key), RecordId>
+    // keyed by the unique claim. For each guard:
+    //   - If key already seen with DIFFERENT owner → intra-tx collision → abort
+    //   - If key already seen with SAME owner → self-write re-validation → OK
+    //   - If key not yet seen → insert and proceed to durable check
+    //
+    // The key is (table_token, index_key) to prevent false collisions across
+    // different unique indexes on the same table (each has its own info_store).
+    let mut seen: TFxMap<(u64, bytes::Bytes), RecordId> = TFxMap::default();
     for g in &tx.unique_guards {
+        // Intra-tx dedup check (cheaper, no I/O) — run first.
+        let key = (g.table_token, g.index_key.clone());
+        if let Some(&prior_owner) = seen.get(&key) {
+            // Same key seen before. If different owner, it's a collision.
+            if prior_owner != g.owner {
+                repo.tx_metrics().on_tx_aborted_unique();
+                return Err(TxError::UniqueViolation {
+                    key: g.index_key.clone(),
+                });
+            }
+            // Same owner (self-write re-validating its own key) → OK, skip
+            // to next guard without touching info_store (already checked).
+            continue;
+        }
+        // First time seeing this key → record it and proceed to durable check.
+        seen.insert(key, g.owner);
+
+        // Original durable-state check (still needed for concurrent txs).
         if let Some(tbl) = repo.table_by_token(g.table_token).await? {
             match tbl.info_store().get(g.index_key.clone().into()).await {
                 Ok(existing) => {
