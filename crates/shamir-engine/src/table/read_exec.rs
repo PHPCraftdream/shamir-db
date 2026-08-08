@@ -1754,17 +1754,26 @@ impl TableManager {
 
         // Resolve the vector backend by field path + "vector" kind.
         let field_path = crate::query::filter::eval::intern_field_path(&fvq.field, interner);
-        let backend = match &field_path {
+        let lease_result = match &field_path {
             Some(fp) => {
                 self.index2_registry()
-                    .find_by_field_and_kind(fp, "vector")
+                    .lease_by_field_and_kind(fp, "vector")
                     .await
             }
-            None => None,
+            None => Ok(None),
         };
-        let backend = match backend {
-            Some(b) => b,
-            None => {
+        let backend = match lease_result {
+            Err(DbError::IndexDrainInProgress(_)) => {
+                // P0-3a (#1038): Index is in drain window — fall back to full scan.
+                // This degrades to the documented "unranked residual filter" behavior,
+                // which is correct-but-slower (not silently wrong).
+                return self
+                    .read_fallback_no_vector_index(query, ctx, interner, tx, start)
+                    .await;
+            }
+            Err(e) => return Err(e),
+            Ok(Some(lease)) => lease.backend,
+            Ok(None) => {
                 // No vector index on this field — fall through to the legacy
                 // full-scan path (VectorSimilarity compiles to FilterNode::True,
                 // so the scan returns residual-matched rows unranked). This is

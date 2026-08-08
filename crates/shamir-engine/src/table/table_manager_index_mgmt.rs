@@ -993,6 +993,15 @@ impl TableManager {
                 ))
             })?;
 
+        // P0-3a (#1038) step 2.5: raise the reader-drain gate's intent flag
+        // (SeqCst) BEFORE the retire below. From this point every NEW
+        // index2 reader acquires a lease that observes the flag and backs off
+        // (Err(IndexDrainInProgress) → caller falls back to a full scan).
+        // The flag stays up until `drain_guard` is dropped (step 4.5 + RAII
+        // safety net on early `?`). See `reader_drain_gate`'s module doc for
+        // the memory-model proof and the deadlock-exclusion placement invariant.
+        let drain_guard = self.index2_registry.reader_gate().begin_drop();
+
         // F-76 (#903): retire the backend from the planner-visible registry
         // BEFORE sweeping its postings. See the method doc for the full
         // rationale. `backend` is held locally, so `drop_all` below still
@@ -1007,6 +1016,16 @@ impl TableManager {
         if let Some(hook) = self.drop_index2_pause_hook.load_full() {
             hook.wait_at_window().await;
         }
+
+        // P0-3a (#1038) step 3.5: drain every reader that entered
+        // `lease_by_field_and_kind` BEFORE the flag went up (the gate's
+        // memory model guarantees such a reader is counted in `in_flight`,
+        // so this wait terminates — see the livelock-freedom argument in the
+        // gate's module doc). AFTER the retire and the pause-hook park, BEFORE
+        // the sweep, so the physical sweep cannot start until no reader is
+        // holding a lease against the backend.
+        drain_guard.wait_for_drain().await;
+
         // Sweep the (now orphan, planner-invisible) posting entries.
         backend.drop_all().await.map_err(|e| {
             shamir_storage::error::DbError::Internal(format!(
@@ -1017,6 +1036,14 @@ impl TableManager {
                      TableManager::verify() to confirm state."
             ))
         })?;
+
+        // P0-3a (#1038) step 4.5: the sweep finished — explicitly release the
+        // drain guard now so the (unrelated) persist / tombstone-clear steps
+        // below run with the gate already clear. RAII (`drain_guard`'s `Drop`
+        // clears the flag) remains the safety net for every early `?` return
+        // above, but an explicit early drop here keeps the drain window as
+        // tight as possible.
+        drop(drain_guard);
 
         // P0-3b (#988) test seam — park here (sweep complete, reduced metadata
         // NOT yet persisted) if a test installed the post-sweep hook. This is

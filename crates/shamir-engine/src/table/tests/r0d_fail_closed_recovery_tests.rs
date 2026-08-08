@@ -410,12 +410,13 @@ async fn failed_restore_on_open_marks_vector_backend_failed() {
     );
 
     // Planner-invisibility: the Failed backend must not be reachable via the
-    // name-keyed lookup's Ready-gated sibling — `find_by_field_and_kind`
+    // name-keyed lookup's Ready-gated sibling — `lease_by_field_and_kind`
     // (used by query planning) must not return it.
     let plan = mgr2
         .index2_registry()
-        .find_by_field_and_kind(&[emb_field], "vector")
-        .await;
+        .lease_by_field_and_kind(&[emb_field], "vector")
+        .await
+        .unwrap();
     assert!(
         plan.is_none(),
         "a Failed vector backend must be planner-invisible, exactly like Building"

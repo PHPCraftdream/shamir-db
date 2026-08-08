@@ -7,6 +7,7 @@
 use crate::query::filter::eval::{filter_value_to_inner, intern_field_path};
 use crate::query::filter::{Filter, FilterValue};
 use crate::query::read::{exec, ReadQuery};
+use shamir_storage::error::DbError;
 use shamir_types::core::interner::Interner;
 use shamir_types::core::sort_codec;
 use shamir_types::types::record_id::RecordId;
@@ -45,7 +46,14 @@ impl TableManager {
         match filter {
             Filter::Fts { field, query, mode } => {
                 let interned = intern_field_path(field, interner)?;
-                let backend = registry.find_by_field_and_kind(&interned, "fts").await?;
+                // P0-3a (#1038): if the FTS backend is being dropped, fall back to None
+                // (caller will try other index types or full scan).
+                let lease = match registry.lease_by_field_and_kind(&interned, "fts").await {
+                    Err(DbError::IndexDrainInProgress(_)) => return None,
+                    Err(_e) => return None, // Other errors: fall back to full scan
+                    Ok(result) => result?,
+                };
+                let backend = lease.backend;
                 let tokens: Vec<u64> = backend.tokenize_query(query);
                 let fts_mode = if mode == "or" {
                     FtsMode::OrAny
@@ -69,7 +77,14 @@ impl TableManager {
             } => {
                 use shamir_index::vector::SearchOpts;
                 let interned = intern_field_path(field, interner)?;
-                let backend = registry.find_by_field_and_kind(&interned, "vector").await?;
+                // P0-3a (#1038): if the vector backend is being dropped, fall back to None
+                // (caller will try other index types or full scan).
+                let lease = match registry.lease_by_field_and_kind(&interned, "vector").await {
+                    Err(DbError::IndexDrainInProgress(_)) => return None,
+                    Err(_e) => return None, // Other errors: fall back to full scan
+                    Ok(result) => result?,
+                };
+                let backend = lease.backend;
                 backend
                     .lookup(IndexQuery::Vector {
                         vec: query.clone(),
@@ -86,9 +101,17 @@ impl TableManager {
                 field, cmp, value, ..
             } if cmp == "eq" => {
                 let interned = intern_field_path(field, interner)?;
-                let backend = registry
-                    .find_by_field_and_kind(&interned, "functional")
-                    .await?;
+                // P0-3a (#1038): if the functional backend is being dropped, fall back to None
+                // (caller will try other index types or full scan).
+                let lease = match registry
+                    .lease_by_field_and_kind(&interned, "functional")
+                    .await
+                {
+                    Err(DbError::IndexDrainInProgress(_)) => return None,
+                    Err(_e) => return None, // Other errors: fall back to full scan
+                    Ok(result) => result?,
+                };
+                let backend = lease.backend;
                 let resolved = crate::query::filter::eval::filter_value_to_inner(value)?;
                 let hash =
                     crate::index2::functional_backend::FunctionalBackend::hash_value(&resolved);

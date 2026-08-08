@@ -663,7 +663,7 @@ async fn failure_reason_of_is_none_before_and_after_healing() {
 
 #[tokio::test]
 async fn failed_backend_is_invisible_to_planner_lookup() {
-    // Mirrors `find_by_field_and_kind`'s existing Building-exclusion test
+    // Mirrors `lease_by_field_and_kind`'s existing Building-exclusion test
     // (none exists standalone today — this is the R0-D regression for the
     // *same* Ready-gate now also covering Failed). A Building backend was
     // already proven invisible by the index2_lifecycle_state_tests suite in
@@ -684,8 +684,9 @@ async fn failed_backend_is_invisible_to_planner_lookup() {
 
     // Sanity: visible while Ready.
     assert!(
-        reg.find_by_field_and_kind(&field_path, "btree")
+        reg.lease_by_field_and_kind(&field_path, "btree")
             .await
+            .unwrap()
             .is_some(),
         "a Ready backend must be planner-visible"
     );
@@ -694,11 +695,12 @@ async fn failed_backend_is_invisible_to_planner_lookup() {
         .await;
 
     assert!(
-        reg.find_by_field_and_kind(&field_path, "btree")
+        reg.lease_by_field_and_kind(&field_path, "btree")
             .await
+            .unwrap()
             .is_none(),
-        "a Failed backend must be planner-INVISIBLE, exactly like Building — \
-         find_by_field_and_kind must return None so callers fall back to a \
+        "a Failed backend must be planner-INVISIBLE, exactly like Building -- \
+         lease_by_field_and_kind must return Ok(None) so callers fall back to a \
          full scan instead of querying a broken/incomplete backend"
     );
 }

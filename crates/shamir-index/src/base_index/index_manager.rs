@@ -1737,16 +1737,28 @@ impl IndexManager {
     /// raises the gate's intent flag (step 2.5) before the RCU retire and
     /// drains every in-flight reader (step 3.5) before the physical sweep — so
     /// a reader either completes against the FULL pre-sweep keyspace or backs
-    /// off to `Ok(None)` (caller falls back to a full scan). The flag is
-    /// cleared after the sweep (step 4.5). See `crate::reader_drain_gate`'s
+    /// off to `Err(IndexDrainInProgress)` (caller falls back to a full scan).
+    /// The flag is cleared after the sweep (step 4.5). See `crate::reader_drain_gate`'s
     /// module doc for the memory-model proof and the placement invariant.
     ///
-    /// SORTED family (#1037) and index2 (#1038) — STILL OPEN: their read
-    /// chokepoints (`lookup_range`/`lookup_min`/`lookup_max`/... and the
-    /// index2 dispatch accessors) do not yet acquire the gate. index2 needs a
-    /// structurally different (lease-based) variant. Until those slices land,
-    /// a concurrent DROP vs. an in-flight sorted/index2 read can still observe
-    /// a partially-swept keyspace on those families.
+    /// SORTED family (#1037) — CLOSED by the same `ReaderDrainGate` pattern:
+    /// all 8 sorted-index read chokepoints (`lookup_range`, `lookup_min`,
+    /// `lookup_max`, `lookup_last_k`, `lookup_range_first_k_page`,
+    /// `lookup_first_k`, `lookup_range_with_values`, `entry_count`) acquire
+    /// the gate's `ReadGuard`, and `drop_index` raises the intent flag before
+    /// the retire, drains before the sweep. The back-off signal is
+    /// `DbError::IndexDrainInProgress` (distinguishable from "no matches").
+    ///
+    /// index2 family (#1038) — CLOSED by the LEASE variant of the same pattern:
+    /// `lease_by_field_and_kind` returns a `BackendLease` that bundles the
+    /// backend `Arc` with a `ReadGuard`, and the caller holds that lease for
+    /// the duration of the read. `drop_index2` raises the intent flag before
+    /// the retire, drains before the sweep. This is the correct shape for
+    /// index2 because resolve and read are already connected through an
+    /// `Arc<dyn IndexBackend>` handle — gating the resolve (which produces the
+    /// `Arc`) is sufficient, unlike slices 1/2 which gate each individual scan
+    /// method. The back-off signal is `DbError::IndexDrainInProgress`.
+    ///
     ///
     /// The engine-side write serialization (`TableManager::drop_index`
     /// wrapping the call in `begin_write_barrier(REGULAR_INDEX_CREATE)`)

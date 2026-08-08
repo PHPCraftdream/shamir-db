@@ -54,7 +54,7 @@ pub use persistence::{
 };
 pub use posting_layout::{build_posting_key, type_tag, PostingKeyRef};
 pub use reader_drain_gate::{DropDrainGuard, ReadGuard, ReaderDrainGate};
-pub use registry::IndexRegistry;
+pub use registry::{BackendLease, IndexRegistry};
 pub use state::IndexState;
 pub use write_ops::{apply_index_ops, IndexWriteOp};
 

@@ -31,10 +31,38 @@
 //! reintroducing the read-then-write race `insert_ticket` was built to avoid.
 
 use crate::backend::{IndexBackend, IndexError};
+use crate::reader_drain_gate::ReaderDrainGate;
 use crate::state::IndexState;
 use shamir_collections::THasher;
+use shamir_storage::error::{DbError, DbResult};
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
+
+/// Lease-based read guard for index2 backends.
+///
+/// Bundles the backend `Arc` with an RAII drain-guard that outlives the
+/// caller's read. The guard prevents a DROP INDEX from sweeping the physical
+/// postings while the caller holds this lease — readers either complete
+/// against the full pre-sweep keyspace or back off with
+/// `DbError::IndexDrainInProgress`.
+///
+/// P0-3a (#1038): this is the LEASE variant of the ReaderDrainGate pattern,
+/// distinct from slices 1/2's chokepoint-scan gate. Index2 resolves a backend
+/// once (via `lease_by_field_and_kind`) and holds the `Arc` for the rest of
+/// the read — the gate lives in the lease, not at each individual backend
+/// method call.
+pub struct BackendLease {
+    pub backend: Arc<dyn IndexBackend>,
+    _guard: crate::reader_drain_gate::ReadGuard,
+}
+
+impl std::fmt::Debug for BackendLease {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("BackendLease")
+            .field("backend", &"<dyn IndexBackend>")
+            .finish()
+    }
+}
 
 /// Authoritative per-backend record held in [`IndexRegistry::by_id`].
 ///
@@ -97,6 +125,22 @@ pub struct IndexRegistry {
     /// table, so the old decoupled-ticket scheme's concurrency concern no
     /// longer applies).
     generation: AtomicU64,
+    /// P0-3a (#1038) — reader-vs-DROP mutual exclusion gate for the index2
+    /// family. Mirrors `IndexManager::reader_gate` (slice 1, #1011) and
+    /// `SortedIndexManager::reader_gate` (slice 2, #1037), but uses a LEASE
+    /// pattern instead of a chokepoint gate: `lease_by_field_and_kind` returns
+    /// a `BackendLease` that bundles the backend `Arc` with a drain-guard, and
+    /// the caller holds that lease for the duration of the read. This is the
+    /// correct shape for index2 because resolve and read are already connected
+    /// through an `Arc<dyn IndexBackend>` handle — gating the resolve (which
+    /// produces the `Arc`) is sufficient, unlike slices 1/2 which gate each
+    /// individual scan method.
+    ///
+    /// Closes the race where a reader that resolves an index BEFORE
+    /// `drop_index2` retires it can read the physical postings WHILE the sweep
+    /// runs, observing a partially-swept keyspace. See `reader_drain_gate`'s
+    /// module doc for the full design (flag + counter + reader back-off).
+    pub(super) reader_gate: ReaderDrainGate,
 }
 
 impl IndexRegistry {
@@ -106,6 +150,7 @@ impl IndexRegistry {
             by_name: scc::HashMap::with_hasher(THasher::default()),
             next_id: AtomicU32::new(1),
             generation: AtomicU64::new(0),
+            reader_gate: ReaderDrainGate::new(),
         }
     }
 
@@ -332,6 +377,27 @@ impl IndexRegistry {
             .flatten()
     }
 
+    /// P0-3a (#1038) test/telemetry oracle: how many `drop_index2` drains
+    /// genuinely had to wait for at least one in-flight reader. Passthrough to
+    /// [`reader_drain_gate::ReaderDrainGate::drain_waits`]. The drain-waits
+    /// counter is the test oracle that discriminates "gate genuinely blocked a
+    /// drain" from "gate was wired but never contended" — a lone `== 0`
+    /// assertion passes vacuously if the counter is never incremented, so test
+    /// suites always pair it with the contended `== 1` case (see
+    /// `p1038_index2_reader_drain_tests`).
+    pub fn reader_drain_waits(&self) -> usize {
+        self.reader_gate.drain_waits()
+    }
+
+    /// P0-3a (#1038) test-only: expose the reader gate for in-flight count
+    /// checks. Used by regression tests to prove a reader is counted mid-flight
+    /// (e.g., to verify `in_flight_count() == 1` while a read is parked). Not
+    /// `#[cfg(test)]`-gated — cross-crate test consumer, same reason as the
+    /// other hooks.
+    pub fn reader_gate(&self) -> &ReaderDrainGate {
+        &self.reader_gate
+    }
+
     /// F-50: every backend whose insertion generation is strictly greater
     /// than `threshold_gen` — i.e. every backend registered AFTER the caller
     /// captured `threshold_gen` (typically at tx stage time). Used by the
@@ -510,22 +576,49 @@ impl IndexRegistry {
     }
 
     /// Find a backend whose first field path matches and whose kind
-    /// matches the given tag ("fts", "functional", "vector", "btree").
+    /// matches the given tag ("fts", "functional", "vector", "btree"),
+    /// returning a LEASE that bundles the backend with a drain guard.
+    ///
+    /// Returns:
+    /// - `Ok(None)` — no `Ready` backend matching the criteria (caller falls
+    ///   back to a different plan, e.g. full scan)
+    /// - `Err(DbError::IndexDrainInProgress(_))` — a matching backend exists
+    ///   but a DROP is in its drain→sweep window; caller must fall back
+    ///   (full scan or unranked residual filter for vector)
+    /// - `Ok(Some(lease))` — success, caller holds the lease for the duration
+    ///   of the read (RAII guard drops on scope exit)
+    ///
+    /// P0-3a (#1038): acquires the reader-drain guard as the FIRST statement.
+    /// `None` means a DROP INDEX is currently in its raise→sweep window: the
+    /// caller MUST NOT read the backend and MUST fall back. This is the
+    /// lease-based variant of slices 1/2's chokepoint gate — index2 resolves
+    /// a backend once (here) and holds the `Arc` for the rest of the read,
+    /// so gating the resolve is sufficient.
     ///
     /// F-50 Step 3b Ready-gate: a backend in `Building` state is INVISIBLE
     /// to this lookup — the planner and every read path that dispatches via
-    /// `find_by_field_and_kind` fall through to a full scan as if the
+    /// `lease_by_field_and_kind` fall through to a full scan as if the
     /// half-built index did not exist. This is the correctness anchor for
     /// restart-from-scratch: a `Building` backend's partial postings are
     /// safely droppable because no reader can have depended on them. DDL
     /// paths that need to reach a `Building` backend (e.g. `drop_index2`)
     /// resolve by name via [`get_by_name`](Self::get_by_name), which is
-    /// intentionally NOT state-filtered.
-    pub async fn find_by_field_and_kind(
+    /// intentionally NOT state-filtered (and also NOT drain-gated, as all its
+    /// callers are DDL-writer or introspection, not read-dispatch).
+    pub async fn lease_by_field_and_kind(
         &self,
         field_path: &[u64],
         kind_tag: &str,
-    ) -> Option<Arc<dyn IndexBackend>> {
+    ) -> DbResult<Option<BackendLease>> {
+        // P0-3a (#1038): acquire the reader-drain guard as the FIRST statement.
+        let Some(_guard) = self.reader_gate.enter() else {
+            // We don't have a human-readable name here (only field_path and kind_tag),
+            // so use a generic but informative error message.
+            return Err(DbError::IndexDrainInProgress(format!(
+                "index2 backend (kind={kind_tag}, field_path={field_path:?})"
+            )));
+        };
+
         let mut found = None;
         self.by_id
             .iter_async(|_, entry| {
@@ -549,7 +642,8 @@ impl IndexRegistry {
                 true
             })
             .await;
-        found
+
+        Ok(found.map(|backend| BackendLease { backend, _guard }))
     }
 }
 
