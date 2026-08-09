@@ -1306,7 +1306,7 @@ fn retract_stale_provenance_ops(
         let provenance = match op {
             IndexWriteOp::SetPosting { provenance, .. } => provenance,
             IndexWriteOp::RemovePosting { provenance, .. } => provenance,
-            IndexWriteOp::BumpFtsStats { .. } => return true, // No provenance to check.
+            IndexWriteOp::BumpFtsStats { provenance, .. } => provenance,
         };
         if provenance.family != family {
             return true; // A different family's op — not our concern.

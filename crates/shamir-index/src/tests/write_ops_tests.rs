@@ -108,10 +108,12 @@ async fn apply_bump_fts_stats_delegates_to_backend() {
         IndexWriteOp::BumpFtsStats {
             doc_len: 10,
             sign: 1,
+            provenance: Default::default(),
         },
         IndexWriteOp::BumpFtsStats {
             doc_len: 5,
             sign: -1,
+            provenance: Default::default(),
         },
     ];
     apply_index_ops(&ops, &store, &backend).await.unwrap();
@@ -177,6 +179,7 @@ async fn apply_mixed_ops_in_order() {
         IndexWriteOp::BumpFtsStats {
             doc_len: 7,
             sign: 1,
+            provenance: Default::default(),
         },
     ];
     apply_index_ops(&ops, &store, &backend).await.unwrap();
@@ -208,6 +211,7 @@ async fn apply_index_ops_tx_none_forwards() {
         IndexWriteOp::BumpFtsStats {
             doc_len: 5,
             sign: 1,
+            provenance: Default::default(),
         },
     ];
     apply_index_ops_tx(&ops, &store, &backend, 0, None)
@@ -234,6 +238,7 @@ async fn apply_index_ops_tx_some_stages_into_tx() {
         IndexWriteOp::BumpFtsStats {
             doc_len: 7,
             sign: 1,
+            provenance: Default::default(),
         },
     ];
     const TBL_TOKEN: u64 = 0xdead_beef;
@@ -272,6 +277,7 @@ async fn apply_index_ops_tx_drop_leaves_no_postings() {
             IndexWriteOp::BumpFtsStats {
                 doc_len: 3,
                 sign: 1,
+                provenance: Default::default(),
             },
         ];
         apply_index_ops_tx(&ops, &store, &backend, 1, Some(&mut tx))

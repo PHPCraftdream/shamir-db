@@ -271,14 +271,25 @@ async fn apply_in_memory_bumps_stats() {
     let i = Interner::new();
     let store: Arc<dyn Store> = Arc::new(InMemoryStore::new());
     let fts = make_backend(&i, Arc::clone(&store));
+
+    // Build a placeholder provenance (never checked in this unit test path)
+    use shamir_tx::{IndexFamily, Provenance};
+    let provenance = Provenance {
+        family: IndexFamily::Index2,
+        name_interned: 1,
+        instance_epoch: 1,
+    };
+
     let ops = vec![
         IndexWriteOp::BumpFtsStats {
             doc_len: 10,
             sign: 1,
+            provenance,
         },
         IndexWriteOp::BumpFtsStats {
             doc_len: 3,
             sign: 1,
+            provenance,
         },
     ];
     fts.apply_in_memory(&ops).await.unwrap();

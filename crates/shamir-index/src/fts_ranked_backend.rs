@@ -58,6 +58,16 @@ impl FtsRankedBackend {
             .load(std::sync::atomic::Ordering::Relaxed)
     }
 
+    /// #1063: sum of all document lengths tracked by the in-memory BM25 stats.
+    /// Exposed so engine-side tests can assert `BumpFtsStats` didn't pollute
+    /// one FTS backend's stats with another's when multiple FTS indexes exist
+    /// on the same table (cross-field `doc_len` contamination).
+    pub fn sum_doc_len(&self) -> u64 {
+        self.stats
+            .sum_doc_len
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
     /// Resolve `self.field_path` to its interned-key form (see
     /// `FtsBackend::ipath`).
     fn ipath(&self) -> SmallVec<[InternerKey; 4]> {
@@ -166,7 +176,11 @@ impl IndexBackend for FtsRankedBackend {
                 provenance,
             });
         }
-        ops.push(IndexWriteOp::BumpFtsStats { doc_len, sign: 1 });
+        ops.push(IndexWriteOp::BumpFtsStats {
+            doc_len,
+            sign: 1,
+            provenance,
+        });
         Ok(ops)
     }
 
@@ -208,10 +222,12 @@ impl IndexBackend for FtsRankedBackend {
         ops.push(IndexWriteOp::BumpFtsStats {
             doc_len: old_doc_len,
             sign: -1,
+            provenance,
         });
         ops.push(IndexWriteOp::BumpFtsStats {
             doc_len: new_doc_len,
             sign: 1,
+            provenance,
         });
         Ok(ops)
     }
@@ -232,7 +248,11 @@ impl IndexBackend for FtsRankedBackend {
             });
         }
         if doc_len > 0 {
-            ops.push(IndexWriteOp::BumpFtsStats { doc_len, sign: -1 });
+            ops.push(IndexWriteOp::BumpFtsStats {
+                doc_len,
+                sign: -1,
+                provenance,
+            });
         }
         Ok(ops)
     }
@@ -261,7 +281,7 @@ impl IndexBackend for FtsRankedBackend {
     /// optimisation, not a correctness fix.)
     async fn apply_in_memory(&self, ops: &[IndexWriteOp]) -> Result<(), IndexError> {
         for op in ops {
-            if let IndexWriteOp::BumpFtsStats { doc_len, sign } = op {
+            if let IndexWriteOp::BumpFtsStats { doc_len, sign, .. } = op {
                 if *sign > 0 {
                     self.stats.on_insert(*doc_len);
                 } else {

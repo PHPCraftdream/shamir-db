@@ -555,6 +555,7 @@ fn build_footprint_projects_index_set_postings_only() {
         IndexWriteOp::BumpFtsStats {
             doc_len: 7,
             sign: 1,
+            provenance: Default::default(),
         },
     ));
 

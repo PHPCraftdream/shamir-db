@@ -108,13 +108,28 @@ pub enum IndexWriteOp {
     /// Bump FtsRankedBackend's in-memory BM25 stats (doc_count +
     /// sum_doc_len). `sign` is +1 for insert, -1 for delete.
     /// Never persisted as a posting — applied via `apply_in_memory`.
-    BumpFtsStats { doc_len: u32, sign: i8 },
+    ///
+    /// R0-B (#1008): carries `provenance` like the posting ops so it can be
+    /// retracted if the owning FTS backend is dropped between stage and
+    /// commit. The commit-time reconcile logic (see `Provenance`'s doc)
+    /// checks the `(name_interned, instance_epoch)` pair against the
+    /// current live index2 instances and discards stale bumps, preventing
+    /// corrupt BM25 aggregates (e.g., a bump for a dropped backend being
+    /// applied to a newly created backend with the same name — ABA).
+    BumpFtsStats {
+        doc_len: u32,
+        sign: i8,
+        /// R0-B (#1008): identity of the index instance this bump was
+        /// planned against — see [`Provenance`]'s doc. Used by
+        /// `shamir-engine::tx::pre_commit`'s reconcile logic to retract a
+        /// staged bump whose instance no longer matches the current live
+        /// definition (DROP, or DROP+CREATE-same-name/ABA).
+        provenance: Provenance,
+    },
 }
 
 impl IndexWriteOp {
-    /// R0-B (#1008): overwrite this op's [`Provenance`] in place. A no-op for
-    /// [`IndexWriteOp::BumpFtsStats`] (it carries no provenance — it is
-    /// in-memory-only and never retracted by the commit-time reconcile).
+    /// R0-B (#1008): overwrite this op's [`Provenance`] in place.
     ///
     /// index2 backends (`FunctionalBackend`/`FtsBackend`/`FtsRankedBackend`/
     /// `VectorBackend`) construct their `IndexWriteOp`s with only a
@@ -130,10 +145,10 @@ impl IndexWriteOp {
     pub fn set_provenance(&mut self, new_provenance: Provenance) {
         match self {
             IndexWriteOp::SetPosting { provenance, .. }
-            | IndexWriteOp::RemovePosting { provenance, .. } => {
+            | IndexWriteOp::RemovePosting { provenance, .. }
+            | IndexWriteOp::BumpFtsStats { provenance, .. } => {
                 *provenance = new_provenance;
             }
-            IndexWriteOp::BumpFtsStats { .. } => {}
         }
     }
 }

@@ -116,11 +116,11 @@ pub async fn apply_index_ops(
 ///   (`recovery::replay_v2_op`), so re-applying after a happy-path
 ///   commit is idempotent (`set`/`remove` are last-write-wins).
 ///
-/// - `BumpFtsStats` → broadcast to **all** of the table's index2
-///   backends via `apply_in_memory`. Only the FTS-ranked backend
-///   reacts (its `apply_in_memory` matches `BumpFtsStats`); every other
-///   backend's default impl is a no-op. Broadcasting is necessary
-///   because the op carries no idx_id to pinpoint the owning backend.
+/// - `BumpFtsStats` → grouped by owning backend via their `provenance`
+///   (`(name_interned, instance_epoch)` pair) and applied only to the
+///   matching backend. This prevents double-counting when multiple FTS
+///   indexes exist on the same table, and ensures stale bumps for
+///   dropped/recreated indexes are never applied (see `Provenance`'s doc).
 ///   `BumpFtsStats` is in-memory only and is **not** serialised to the
 ///   WAL (`wal_ops_from_tx` skips it), so crash recovery rebuilds these
 ///   counters via `rebuild()` on open rather than replaying them.
@@ -134,8 +134,7 @@ pub async fn apply_index_ops_at_commit(
     // fjall, persy, nebari, canopy) the batch is one fsync instead of N
     // — exactly mirroring the V2 WAL recovery path's effect when it
     // batch-replays IndexPut/IndexDel. Last-write-wins semantics are
-    // preserved by feeding ops in their original order. BumpFtsStats is
-    // in-memory only and unchanged.
+    // preserved by feeding ops in their original order.
     let mut kv_ops: Vec<KvOp> = Vec::with_capacity(ops.len());
     let mut in_memory_ops: Vec<IndexWriteOp> = Vec::new();
 
@@ -159,8 +158,41 @@ pub async fn apply_index_ops_at_commit(
     }
 
     if !in_memory_ops.is_empty() {
-        for backend in backends {
-            backend.apply_in_memory(&in_memory_ops).await?;
+        // Group in-memory ops by backend using their provenance.
+        // BumpFtsStats now carries provenance (R0-B/#1063), so we can
+        // match it to the correct backend by comparing
+        // (name_interned, instance_epoch) pairs.
+        use shamir_collections::TFxMap;
+        use shamir_tx::IndexWriteOp;
+
+        let mut ops_by_backend: TFxMap<(u64, u64), Vec<IndexWriteOp>> = TFxMap::default();
+        for op in &in_memory_ops {
+            if let IndexWriteOp::BumpFtsStats { provenance, .. } = op {
+                ops_by_backend
+                    .entry((provenance.name_interned, provenance.instance_epoch))
+                    .or_default()
+                    .push(op.clone());
+            }
+        }
+
+        // Apply each backend's ops only to that backend.
+        // Note: for index2, instance_epoch is stored in the registry's BackendEntry.gen field
+        // (see R0-A/#1006), not in IndexDescriptor itself. We need to look up the backend's gen
+        // by its name_interned from the registry. However, we only have access to backends
+        // directly, so we'll match by name_interned only and let the provenance check ensure
+        // the epoch is correct via the commit-time reconcile (retract_stale_provenance_ops).
+        for ((name_interned, _instance_epoch), ops) in ops_by_backend {
+            // Find backend by name_interned (the instance_epoch check already happened
+            // in retract_stale_provenance_ops, so any backend we find here is guaranteed
+            // to have the correct epoch).
+            if let Some(backend) = backends
+                .iter()
+                .find(|b| b.descriptor().name_interned == name_interned)
+            {
+                if !ops.is_empty() {
+                    backend.apply_in_memory(&ops).await?;
+                }
+            }
         }
     }
 
