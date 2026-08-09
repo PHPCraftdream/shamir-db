@@ -1,7 +1,7 @@
 # RFC: Online CREATE INDEX (snapshot → CDC → catch-up → short barrier)
 
 **Status: DRAFT — pending review**
-**Version:** v2 — revised 2026-08-09 (see revision notes below)
+**Version:** v3 — revised 2026-08-09 (see revision notes below)
 **Author:** S.H.A.M.I.R. DB engineering
 **Date:** 2026-08-07
 **Tracks:** #1018 (P1-5, this RFC), #969 (P1-4, the bench + operational-warning
@@ -9,6 +9,34 @@ this RFC replaces the recommendation for), #1044 (PERF backlog, unique-family
 O(table) memory — related but NOT solved here), #1048 (P1-2 sub-slice B, the
 tombstone `op_id` carry this RFC's §5 slicing depends on for CREATE's own
 future op-status wiring).
+
+## Revision log (v3)
+
+Found during #1088 (Phase C+D) brief preparation, independently verified
+against `build_posting_key`/`build_index_key_from_record`
+(`crates/shamir-index/src/base_index/index_keys.rs:255-311`) before writing
+this correction:
+
+6. **Fixed a real correctness gap in Claim 2's idempotency argument (§2.4,
+   §3).** v2's Phase C read only the CURRENT record state and implicitly
+   assumed "recompute from current state" always targets the SAME physical
+   posting key Phase A wrote. False: the posting key embeds a hash of the
+   INDEXED VALUE (`index_key(25b) || record_id(16b)`, key = f(value) ++
+   record_id), so a record that existed at the pin (Phase A wrote posting
+   key K_old = f(value_at_pin) ++ id) and was then UPDATED to a different
+   indexed value or DELETED during the barrier-free window produces a
+   DIFFERENT key (K_new = f(value_now) ++ id, or nothing at all for a
+   delete) — K_old is never revisited by "recompute from current state"
+   alone, orphaning it permanently (a future ordinary write to that record
+   diffs against ITS OWN current "old", never against the ancient pin-time
+   value, so the orphan is never cleaned up by the normal write path
+   either). Concretely: a query against the OLD indexed value would return
+   a phantom match against a record that no longer has that value. Fixed by
+   requiring Phase C to diff PIN-TIME state against CURRENT state per dirty
+   id (not just read current state) — see revised §2.2, §2.4, §3 below.
+   This requires the `SnapshotGuard` (§2.2) to stay alive through Phase C
+   (not just Phase A), so `MvccStore::get_at(key, pin)` remains valid for
+   the pin-time read.
 
 ## Revision log (v2)
 
@@ -265,11 +293,25 @@ collect — "the oldest live snapshot, or `last_committed` when no snapshot is o
 Without a registered snapshot, `min_alive` tracks the moving watermark and can
 collect versions Phase A's scan still needs mid-scan.
 
-Phase A must acquire and hold a `RepoTxGate::open_snapshot()` RAII
-`SnapshotGuard` (`crates/shamir-tx/src/repo_tx_gate.rs:356`, exported at
-`crates/shamir-tx/src/lib.rs:74`) for the ENTIRE duration of the scan — released
-only when Phase A completes or the build aborts. The guard registers the version
-in `active_snapshots`, keeping it alive for GC purposes until the guard drops.
+Phase A must acquire a `RepoTxGate::open_snapshot()` RAII `SnapshotGuard`
+(`crates/shamir-tx/src/repo_tx_gate.rs:356`, exported at
+`crates/shamir-tx/src/lib.rs:74`). The guard registers the version in
+`active_snapshots`, keeping it alive for GC purposes until the guard drops.
+
+**v3 correction: the guard's lifetime extends through Phase C, not just
+Phase A.** v2 released the guard the moment Phase A's scan finished,
+reasoning that Phase C only needed the CURRENT version. That is
+insufficient — Phase C also needs to read the record's state AT THE PIN
+(via `MvccStore::get_at(key, pin)`) for every dirty id, to know exactly
+which posting key (if any) Phase A wrote for it, so it can be diffed
+against the current state and removed if stale (see the corrected §2.4 and
+§3 Claim 2 below for why this is required, not optional). The guard is
+therefore held from Phase A's start through Phase C's convergence (handed
+off to Phase D, which drops it after applying the final residual — see
+§2.5). This extends the GC-pin duration from "Phase A's scan time" to
+"Phase A's scan time + Phase C's catch-up time", which can matter under
+sustained write load (§6.2's convergence-heuristic residual risk already
+bounds Phase C's duration, so this is a bounded, not unbounded, extension).
 
 Crash safety: a crash drops the guard along with everything else. Restart re-pins
 a FRESH version (the old pin is stale — time has passed, more writes landed), which
@@ -358,14 +400,35 @@ drains the dirty-set built during Phase A's run:
 
 1. Read all dirty-set entries for this `build_id`.
 2. For each `RecordId` in the dirty-set:
-   - Re-read the record at the **current version** (not the pinned version)
-     via `MvccStore::get_at(record_id, current_committed_version())`.
-   - Recompute the posting by calling the SAME planning methods that a live
-     `Ready` index uses (`IndexManager::plan_record_created`/`plan_record_updated`/
-     `plan_record_deleted` for the current record state). This is NOT new
-     posting-maintenance logic — it's the same code path, just invoked from
-     the catch-up loop instead of inline from the write path.
-   - Apply the computed posting to the building index's posting keyspace.
+   - **v3 correction (was: read only current state — see revision log
+     entry 6).** Read the record at BOTH the **pinned version** (via
+     `MvccStore::get_at(record_id, pin)`, the guard from §2.2 keeps this
+     valid) and the **current version** (via `get_at(record_id,
+     current_committed_version())`). The pin-time read reconstructs
+     EXACTLY what Phase A's posting write for this row was (`None` if the
+     row didn't exist at the pin — Phase A never wrote a posting for it).
+   - Compute `old_key = build_posting_key(pin_time_value)` (`None` if the
+     row didn't exist at the pin) and `new_key =
+     build_posting_key(current_value)` (`None` if the row is deleted now).
+     Because the posting key embeds a hash of the indexed value
+     (`index_keys.rs:255-311`), `old_key` and `new_key` differ whenever the
+     row's indexed value changed OR the row was created/deleted in the
+     window — NOT just when the row is untouched.
+   - If `old_key != new_key`: remove the STALE posting at `old_key` (if
+     `Some`) and write the posting at `new_key` (if `Some`). If
+     `old_key == new_key`: no-op (the row was touched but its indexed
+     value ended up the same, e.g. two updates that cancel out, or an
+     unrelated field changed).
+   - This CANNOT go through `IndexManager::plan_record_created`/
+     `plan_record_updated`/`plan_record_deleted` as v2 said — those are
+     the same methods whose `Building`+in-flight gate (§2.3) is what
+     ROUTES writes to the dirty-set in the first place; calling them here
+     would just re-capture the id instead of writing. Phase C needs a
+     small internal bypass on `IndexManager` (e.g.
+     `apply_catchup_record(name_interned, record_id, old_value, new_value)`)
+     that computes both keys and writes/removes directly against
+     `info_store`, unconditionally, for this one def — used ONLY by Phase
+     C/D, never by the live write paths.
 3. Because Phase A can take minutes, MORE writes will have accumulated by
    the time step 1-2 finish than existed when step 1 started (writers continue
    unobstructed during Phase C too). Loop: go back to step 1.
@@ -385,12 +448,17 @@ drain work (bounded by however many distinct rows were touched) consumes time;
 no `O(table)` work happens here.
 
 **Idempotency and last-write-wins by construction.** Because Phase C re-reads
-each `RecordId` at the CURRENT committed version (not a stored value from the
-time of capture), recompute-from-current-state is inherently idempotent —
-applying Phase C multiple times for the same id converges to the same final
-posting state. Last-write-wins falls out too — we read the final committed
-state, so the last write to that id wins by definition. No `seq`/`last_applied_seq`
-bookkeeping is needed.
+each `RecordId` at the CURRENT committed version for the `new_key` side (not a
+stored value from the time of capture), the "what should exist now" half of
+the diff is inherently idempotent — applying Phase C multiple times for the
+same id keeps recomputing the same `new_key`. Last-write-wins falls out too —
+we read the final committed state, so the last write to that id wins by
+definition. No `seq`/`last_applied_seq` bookkeeping is needed. The `old_key`
+side is idempotent for a different reason: it is always read at the SAME
+fixed `pin` version for the lifetime of one build, so repeated Phase C passes
+for the same id compute the same `old_key` every time and its removal is a
+no-op once already applied (removing an already-absent key is a no-op on the
+underlying store).
 
 ### 2.5 Phase D — short publish barrier
 
@@ -398,11 +466,16 @@ bookkeeping is needed.
    canonical order as §1.1/§2.3 step 1.
 2. Apply the FINAL residual of the dirty-set (whatever accumulated since
    Phase C's last convergence check — bounded by the loop's threshold, i.e.
-   small by construction).
+   small by construction), using the SAME pin-vs-current diff from §2.4
+   (the `SnapshotGuard` from §2.2 is still held at this point — see v3
+   correction below).
 3. Flip `Building → Ready` and persist (identical to today's Phase 3,
    `index_manager.rs:1645-1664`).
 4. Delete the dirty-set for this `build_id` (GC, §2.3).
-5. Release the barrier (RAII drop, same as today).
+5. Release the barrier (RAII drop, same as today) AND drop the
+   `SnapshotGuard` (v3: this is the guard's final release point — see
+   §2.2's revised guard-lifetime note; it must outlive step 2's diff, the
+   last point that needs `get_at(id, pin)`).
 
 Because step 2's work is bounded (the convergence criterion from §2.4
 guarantees it), the barrier is held for `O(final residual)` time —
@@ -484,15 +557,25 @@ consumer of it.
   for a row that's ALSO in the dirty-set.** If Phase A's snapshot scan (at
   pinned version V) writes a posting for row R at the V-state, and R was
   ALSO written after V (captured in the dirty-set), Phase A's posting write
-  for R and Phase C's recompute for R must not race destructively. This is
-  why Phase C's recompute is idempotent (as §2.4 argues) — applying Phase
-  A's posting for R, then recomputing R's posting from the current state,
-  converges to the SAME final posting state. No lock is needed between Phase
-  A's write and Phase C's recompute for the SAME key because both are
-  idempotent operations on the SAME (key → posting) mapping — the last one
-  to run wins, and "last" is well-defined because Phase C runs strictly
-  AFTER Phase A's stream completes (no concurrent execution of the two for
-  the same index).
+  for R and Phase C's recompute for R must not race destructively.
+  **v3 correction:** the v2 text here claimed both operations are
+  "idempotent operations on the SAME (key → posting) mapping" — that is
+  only true when R's indexed value did NOT change between V and now. When
+  it DID change (or R was deleted), Phase A's write and the row's
+  post-window state target TWO DIFFERENT physical keys (the posting key
+  embeds a hash of the value — see revision log entry 6), so "last write
+  wins on the same key" does not apply; there is no race to resolve by
+  ordering because there are two distinct keys, not contention on one. What
+  actually closes this is §2.4's corrected diff: Phase C reads the row's
+  value AT V (via the still-open `SnapshotGuard`, `get_at(id, pin)`) to
+  learn EXACTLY which key (if any) Phase A wrote, diffs it against the
+  row's current state, and removes the V-key / writes the current-key as
+  needed. No lock is required between Phase A's write and Phase C's
+  diff-and-fix because Phase C runs strictly AFTER Phase A's stream
+  completes (no concurrent execution of the two for the same index) and
+  reads the SAME fixed `pin` version Phase A scanned at, so it always sees
+  exactly what Phase A wrote — never a partial or newer view of "Phase A's
+  work."
 
 **Claim 3 — no crash leaves an unrecoverable half-state.** See §4 in full;
 summary: the dirty-set persists across a crash (durable `info_store` writes,
