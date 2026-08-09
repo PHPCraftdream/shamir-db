@@ -447,7 +447,7 @@ async fn p03_3c_live_drop_crash_at_post_sweep_hook_regular() {
     // Start drop_index and let it park at the post-sweep hook.
     let mgr = manager.clone();
     tokio::select! {
-        _ = mgr.drop_index(name_interned) => {
+        _ = mgr.drop_index(name_interned, None) => {
             panic!("drop_index completed before post-sweep hook fired");
         }
         _ = hook.wait_until_parked() => {
@@ -505,7 +505,7 @@ async fn p03_3b_regular_name_reuse_rejected_during_drop() {
     // Start drop in a background task.
     let mgr = manager.clone();
     let drop_task = tokio::spawn(async move {
-        mgr.drop_index(name_interned).await.unwrap();
+        mgr.drop_index(name_interned, None).await.unwrap();
     });
 
     // Wait for the drop to park (tombstone written, def retired, pre-sweep).
@@ -566,7 +566,7 @@ async fn p03_3b_unique_name_reuse_rejected_during_drop() {
 
     let mgr = manager.clone();
     let drop_task = tokio::spawn(async move {
-        mgr.drop_unique_index(name_interned).await.unwrap();
+        mgr.drop_unique_index(name_interned, None).await.unwrap();
     });
 
     hook.wait_until_parked().await;
@@ -624,7 +624,7 @@ async fn p03_normal_drop_regular_still_works() {
     assert!(manager.index_exists(name_interned));
     assert_eq!(count_postings(&info_store, false, name_interned).await, 2);
 
-    let removed = manager.drop_index(name_interned).await.unwrap();
+    let removed = manager.drop_index(name_interned, None).await.unwrap();
     assert!(removed);
     assert!(!manager.index_exists(name_interned));
     assert!(!manager.has_indexes());
@@ -673,7 +673,10 @@ async fn p03_normal_drop_unique_still_works() {
         .unwrap();
     assert!(manager.unique_index_exists(name_interned));
 
-    let removed = manager.drop_unique_index(name_interned).await.unwrap();
+    let removed = manager
+        .drop_unique_index(name_interned, None)
+        .await
+        .unwrap();
     assert!(removed);
     assert!(!manager.unique_index_exists(name_interned));
     assert!(!manager.has_unique_indexes());

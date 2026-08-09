@@ -128,7 +128,7 @@ async fn p1011_reader_blocks_drop_until_released() {
 
     // Now spawn the DROP.
     let tbl_d = tbl.clone();
-    let drop_task = tokio::spawn(async move { tbl_d.drop_index("status_idx").await });
+    let drop_task = tokio::spawn(async move { tbl_d.drop_index("status_idx", None).await });
 
     // Give the DROP a moment to reach `wait_for_drain` (it must block).
     tokio::time::sleep(tokio::time::Duration::from_millis(80)).await;
@@ -241,7 +241,7 @@ async fn p1011_reader_backs_off_while_drop_parked() {
 
     // Spawn the DROP — it will park after definition retire, before drain.
     let tbl_d = tbl.clone();
-    let drop_task = tokio::spawn(async move { tbl_d.drop_index("status_idx").await });
+    let drop_task = tokio::spawn(async move { tbl_d.drop_index("status_idx", None).await });
 
     // Rendezvous: the DROP is parked.
     drop_hook.wait_until_parked().await;
@@ -314,7 +314,7 @@ async fn p1011_uncontended_drop_counts_zero_waits() {
     assert_eq!(gate.drain_waits(), 0, "sanity: no waits yet");
 
     // DROP with no concurrent readers.
-    tbl.drop_index("status_idx").await.unwrap();
+    tbl.drop_index("status_idx", None).await.unwrap();
 
     assert_eq!(
         gate.drain_waits(),
@@ -409,7 +409,7 @@ async fn p1011_guard_released_on_error_path() {
 
     // Now prove a DROP doesn't block (the counter is zero).
     let drop_start = std::time::Instant::now();
-    tbl.drop_index("status_idx").await.unwrap();
+    tbl.drop_index("status_idx", None).await.unwrap();
     assert!(
         drop_start.elapsed() < tokio::time::Duration::from_secs(1),
         "P0-3a: a DROP after the reader exited must not block on drain"

@@ -178,7 +178,7 @@ async fn p1038_index2_lease_holds_blocks_drop_until_released() {
 
     // Now spawn the DROP (which will park at the pause hook).
     let tbl_d = tbl.clone();
-    let drop_task = tokio::spawn(async move { tbl_d.drop_index2("lower_name").await });
+    let drop_task = tokio::spawn(async move { tbl_d.drop_index2("lower_name", None).await });
 
     // Rendezvous: the DROP is parked.
     drop_hook.wait_until_parked().await;
@@ -244,7 +244,7 @@ async fn p1038_index2_lease_returns_drain_error_not_none() {
 
     // Spawn the DROP (which will park at the pause hook after retiring the backend).
     let tbl_d = tbl.clone();
-    let drop_task = tokio::spawn(async move { tbl_d.drop_index2("lower_name").await });
+    let drop_task = tokio::spawn(async move { tbl_d.drop_index2("lower_name", None).await });
 
     // Rendezvous: the DROP is parked (backend retired, drain not yet called).
     drop_hook.wait_until_parked().await;
@@ -316,7 +316,7 @@ async fn p1038_index2_backoff_pairing_contended_and_uncontended() {
     // -----------------------------------------------------------------
     // 3a. Uncontended DROP — drain_waits() stays at 0
     // -----------------------------------------------------------------
-    let drop_result = tbl.drop_index2("lower_name").await;
+    let drop_result = tbl.drop_index2("lower_name", None).await;
     assert!(drop_result.unwrap(), "DROP should succeed");
 
     let waits = gate.drain_waits();
@@ -358,7 +358,7 @@ async fn p1038_index2_backoff_pairing_contended_and_uncontended() {
 
     // Now spawn the DROP.
     let tbl_d = tbl.clone();
-    let drop_task = tokio::spawn(async move { tbl_d.drop_index2("lower_name2").await });
+    let drop_task = tokio::spawn(async move { tbl_d.drop_index2("lower_name2", None).await });
 
     // Rendezvous: the DROP is parked.
     drop_hook.wait_until_parked().await;

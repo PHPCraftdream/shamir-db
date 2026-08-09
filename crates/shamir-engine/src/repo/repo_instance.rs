@@ -1293,7 +1293,7 @@ impl RepoInstance {
     /// Drop a regular index from a table.
     pub async fn drop_index(&self, table_name: &str, index_name: &str) -> DbResult<bool> {
         let table = self.get_table(table_name).await?;
-        table.drop_index(index_name).await
+        table.drop_index(index_name, None).await
     }
 
     /// cancel-safe: NO — same shape as `drop_index`. Partial cancellation
@@ -1302,7 +1302,7 @@ impl RepoInstance {
     /// Drop a unique index from a table.
     pub async fn drop_unique_index(&self, table_name: &str, index_name: &str) -> DbResult<bool> {
         let table = self.get_table(table_name).await?;
-        table.drop_unique_index(index_name).await
+        table.drop_unique_index(index_name, None).await
     }
 
     /// cancel-safe: yes — read-only: looks up the table and queries

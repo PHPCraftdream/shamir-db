@@ -85,7 +85,9 @@ impl TableManager {
                 crate::index2::persistence::load_index2_metadata(&self.info_store).await?
             {
                 for d in &persisted.descriptors {
-                    if dropping_ids.contains(&d.id) && d.name == op.create_index {
+                    if dropping_ids.iter().any(|(id, _, _)| *id == d.id)
+                        && d.name == op.create_index
+                    {
                         return Err(shamir_storage::error::DbError::Internal(format!(
                             "Cannot create index '{}': a DROP INDEX for this name is \
                              still in progress. Retry after the drop completes.",
@@ -861,7 +863,9 @@ impl TableManager {
     ///
     /// # Returns
     /// `true` if index existed and was removed, `false` if not found.
-    pub async fn drop_index(&self, name: &str) -> DbResult<bool> {
+    ///
+    /// #1051: accepts `op_id` minted at dispatch time for crash recovery status writes.
+    pub async fn drop_index(&self, name: &str, op_id: Option<RecordId>) -> DbResult<bool> {
         let name_id = self.intern_string(name).await?;
         // P0-3 (#959): drain-then-lock — raise the REGULAR_INDEX_CREATE bit,
         // drain in-flight fast-path writers, then take `unique_write_lock`.
@@ -870,7 +874,8 @@ impl TableManager {
         let (_barrier, _uwl_guard) = self
             .begin_write_barrier(crate::index::write_barrier_flags::REGULAR_INDEX_CREATE)
             .await;
-        self.index_manager.drop_index(name_id).await
+        let op_id_str = op_id.map(|id| id.to_string());
+        self.index_manager.drop_index(name_id, op_id_str).await
     }
 
     /// Drop a unique index by name.
@@ -881,13 +886,18 @@ impl TableManager {
     ///
     /// # Returns
     /// `true` if index existed and was removed, `false` if not found.
-    pub async fn drop_unique_index(&self, name: &str) -> DbResult<bool> {
+    ///
+    /// #1051: accepts `op_id` minted at dispatch time for crash recovery status writes.
+    pub async fn drop_unique_index(&self, name: &str, op_id: Option<RecordId>) -> DbResult<bool> {
         let name_id = self.intern_string(name).await?;
         // P0-3 (#959): drain-then-lock — see `drop_index`'s doc.
         let (_barrier, _uwl_guard) = self
             .begin_write_barrier(crate::index::write_barrier_flags::UNIQUE_INDEX_CREATE)
             .await;
-        self.index_manager.drop_unique_index(name_id).await
+        let op_id_str = op_id.map(|id| id.to_string());
+        self.index_manager
+            .drop_unique_index(name_id, op_id_str)
+            .await
     }
 
     /// Drop an index2 backend (`fts` / `functional` / `vector`) by name.
@@ -960,7 +970,9 @@ impl TableManager {
     /// registry-mutating DDL ops could race `IndexRegistry`'s ticket/
     /// generation bookkeeping (see `IndexRegistry`'s doc for the scenario
     /// this closes).
-    pub async fn drop_index2(&self, name: &str) -> DbResult<bool> {
+    ///
+    /// #1051: accepts `op_id` minted at dispatch time for crash recovery status writes.
+    pub async fn drop_index2(&self, name: &str, op_id: Option<RecordId>) -> DbResult<bool> {
         let interner = self.interner.get().await?;
         // `get_ind` is a pure lookup (does NOT mint a new id), so dropping a
         // name that was never interned cannot pollute the interner.
@@ -974,8 +986,10 @@ impl TableManager {
             return Ok(false);
         };
         let drop_id = backend.descriptor().id;
+        let drop_name = backend.descriptor().name.clone();
+        let op_id_str = op_id.map(|id| id.to_string());
 
-        // P0-3b (#988): write a durable tombstone BEFORE retiring the backend
+        // P0-3b (#988 / #1051): write a durable tombstone BEFORE retiring the backend
         // or sweeping postings. If the process crashes after the sweep but
         // before the reduced metadata is persisted, the on-disk metadata
         // still lists the index — but the tombstone tells
@@ -983,15 +997,20 @@ impl TableManager {
         // a broken "Ready but no postings" index. MUST succeed before
         // proceeding; if the persist fails the on-disk tombstone is unchanged
         // and we propagate `Err` without touching the registry or postings.
-        crate::index2::persistence::add_to_dropping_index2(drop_id, &self.info_store)
-            .await
-            .map_err(|e| {
-                shamir_storage::error::DbError::Internal(format!(
-                    "DROP INDEX '{name}': failed to persist the durable drop tombstone: {e}. \
+        crate::index2::persistence::add_to_dropping_index2(
+            drop_id,
+            drop_name,
+            op_id_str,
+            &self.info_store,
+        )
+        .await
+        .map_err(|e| {
+            shamir_storage::error::DbError::Internal(format!(
+                "DROP INDEX '{name}': failed to persist the durable drop tombstone: {e}. \
                      The backend was NOT retired and postings were NOT swept — the \
                      index is still fully intact. Retry the DROP."
-                ))
-            })?;
+            ))
+        })?;
 
         // P0-3a (#1038) step 2.5: raise the reader-drain gate's intent flag
         // (SeqCst) BEFORE the retire below. From this point every NEW
@@ -1089,13 +1108,12 @@ impl TableManager {
     // #1048: write SucceededViaCrashRecovery status for recovered hash DROP operations.
     // This is a public helper called from TableManager::create.
     pub async fn write_hash_drop_recovery_status(
-        dropping_regular: &[u64],
-        dropping_unique: &[u64],
+        dropping_regular: &[(u64, Option<String>)],
+        dropping_unique: &[(u64, Option<String>)],
         interner: &super::interner_manager::InternerManager,
         info_store: Arc<dyn shamir_storage::types::Store>,
     ) -> Result<(), shamir_storage::error::DbError> {
         use shamir_query_types::read::{DdlOpKind, DdlOpState, DdlOpStatus};
-        use shamir_types::types::record_id::RecordId;
 
         // Resolve name_interned back to string names using the interner
         // and write SucceededViaCrashRecovery for each recovered operation.
@@ -1106,63 +1124,79 @@ impl TableManager {
         })?;
 
         // Regular family
-        for &name_interned in dropping_regular {
+        for &(name_interned, ref op_id_str) in dropping_regular {
             if let Some(name) = interner_guard.with_str(
                 &shamir_types::core::interner::InternerKey::new(name_interned),
                 |s| s.to_string(),
             ) {
-                let op_id = RecordId::system(&format!("ddl_drop_index_{}", name));
-                let status = DdlOpStatus {
-                    op_id,
-                    kind: DdlOpKind::DropHashIndex {
-                        index_name: name.clone(),
-                    },
-                    state: DdlOpState::SucceededViaCrashRecovery {
-                        completed_at_restart: std::time::SystemTime::now()
-                            .duration_since(std::time::UNIX_EPOCH)
-                            .unwrap()
-                            .as_millis() as u64,
-                    },
-                };
-                if let Err(e) =
-                    crate::table::ddl_op_log::write_op_status(&info_store, &status).await
-                {
-                    log::error!(
-                        "#1048: failed to write SucceededViaCrashRecovery status for \
-                         recovered hash DROP (regular) '{}': {e}",
-                        name
-                    );
+                // Skip status write if op_id is None (pre-#1051 tombstone or no-op caller)
+                if let Some(op_id_str) = op_id_str {
+                    let op_id = std::str::FromStr::from_str(op_id_str).map_err(|e| {
+                        shamir_storage::error::DbError::Codec(format!(
+                            "#1051: failed to parse op_id '{op_id_str}': {e}"
+                        ))
+                    })?;
+                    let status = DdlOpStatus {
+                        op_id,
+                        kind: DdlOpKind::DropHashIndex {
+                            index_name: name.clone(),
+                        },
+                        state: DdlOpState::SucceededViaCrashRecovery {
+                            completed_at_restart: std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .unwrap()
+                                .as_millis()
+                                as u64,
+                        },
+                    };
+                    if let Err(e) =
+                        crate::table::ddl_op_log::write_op_status(&info_store, &status).await
+                    {
+                        log::error!(
+                            "#1048: failed to write SucceededViaCrashRecovery status for \
+                             recovered hash DROP (regular) '{}': {e}",
+                            name
+                        );
+                    }
                 }
             }
         }
 
         // Unique family
-        for &name_interned in dropping_unique {
+        for &(name_interned, ref op_id_str) in dropping_unique {
             if let Some(name) = interner_guard.with_str(
                 &shamir_types::core::interner::InternerKey::new(name_interned),
                 |s| s.to_string(),
             ) {
-                let op_id = RecordId::system(&format!("ddl_drop_index_{}", name));
-                let status = DdlOpStatus {
-                    op_id,
-                    kind: DdlOpKind::DropUniqueHashIndex {
-                        index_name: name.clone(),
-                    },
-                    state: DdlOpState::SucceededViaCrashRecovery {
-                        completed_at_restart: std::time::SystemTime::now()
-                            .duration_since(std::time::UNIX_EPOCH)
-                            .unwrap()
-                            .as_millis() as u64,
-                    },
-                };
-                if let Err(e) =
-                    crate::table::ddl_op_log::write_op_status(&info_store, &status).await
-                {
-                    log::error!(
-                        "#1048: failed to write SucceededViaCrashRecovery status for \
-                         recovered hash DROP (unique) '{}': {e}",
-                        name
-                    );
+                // Skip status write if op_id is None (pre-#1051 tombstone or no-op caller)
+                if let Some(op_id_str) = op_id_str {
+                    let op_id = std::str::FromStr::from_str(op_id_str).map_err(|e| {
+                        shamir_storage::error::DbError::Codec(format!(
+                            "#1051: failed to parse op_id '{op_id_str}': {e}"
+                        ))
+                    })?;
+                    let status = DdlOpStatus {
+                        op_id,
+                        kind: DdlOpKind::DropUniqueHashIndex {
+                            index_name: name.clone(),
+                        },
+                        state: DdlOpState::SucceededViaCrashRecovery {
+                            completed_at_restart: std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .unwrap()
+                                .as_millis()
+                                as u64,
+                        },
+                    };
+                    if let Err(e) =
+                        crate::table::ddl_op_log::write_op_status(&info_store, &status).await
+                    {
+                        log::error!(
+                            "#1048: failed to write SucceededViaCrashRecovery status for \
+                             recovered hash DROP (unique) '{}': {e}",
+                            name
+                        );
+                    }
                 }
             }
         }
@@ -1207,17 +1241,17 @@ impl TableManager {
         );
 
         let mut changed = false;
-        for &id in &dropping {
+        for (id, _name, _op_id) in &dropping {
             // If the backend is still in the registry (crash happened before
             // `save_index2_metadata` finalized the removal), retire it now.
             // If it's already gone (crash after persist), this is a no-op.
-            if self.index2_registry.remove_by_id(id).await.is_some() {
+            if self.index2_registry.remove_by_id(*id).await.is_some() {
                 changed = true;
             }
             // Always run the sweep (idempotent). Covers both the "sweep never
             // ran" and "sweep ran but persist failed" cases. The sweep is a
             // 4-byte prefix scan on `id.to_le_bytes()` — no backend Arc needed.
-            crate::index2::persistence::sweep_index2_postings_by_id(id, &self.info_store).await?;
+            crate::index2::persistence::sweep_index2_postings_by_id(*id, &self.info_store).await?;
         }
         if changed {
             crate::index2::persistence::save_index2_metadata(
@@ -1229,7 +1263,7 @@ impl TableManager {
 
         // Clear the entire tombstone (write empty Vec<u32>; the load path
         // treats empty-vec and NotFound identically).
-        let empty = bincode::serialize(&Vec::<u32>::new())
+        let empty = bincode::serialize(&Vec::<(u32, String, Option<String>)>::new())
             .map_err(|e| shamir_storage::error::DbError::Codec(e.to_string()))?;
         let key = shamir_types::types::record_id::RecordId::system("_m.idx.drop").to_bytes();
         self.info_store
@@ -1244,29 +1278,23 @@ impl TableManager {
         Ok(())
     }
 
-    // #1048: write SucceededViaCrashRecovery status for recovered index2 DROP operations.
+    // #1048 / #1051: write SucceededViaCrashRecovery status for recovered index2 DROP operations.
     // This is a public helper called from TableManager::create.
     pub async fn write_index2_drop_recovery_status(
-        dropping_ids: &[u32],
-        descriptors: &[crate::index2::descriptor::IndexDescriptor],
+        dropping_entries: &[(u32, String, Option<String>)],
         info_store: Arc<dyn shamir_storage::types::Store>,
     ) -> Result<(), shamir_storage::error::DbError> {
         use shamir_query_types::read::{DdlOpKind, DdlOpState, DdlOpStatus};
-        use shamir_types::types::record_id::RecordId;
+        use std::str::FromStr;
 
-        // Resolve each dropped id to its name using the persisted descriptors
-        // (which were loaded before recovery removed the backends from the registry).
-        use shamir_collections::TFxMap;
-        let id_to_name: TFxMap<u32, String> = descriptors
-            .iter()
-            .map(|desc| (desc.id, desc.name.clone()))
-            .collect();
-
-        for &id in dropping_ids {
-            if let Some(name) = id_to_name.get(&id) {
-                // Deterministic op_id regeneration: use the same formula as handle_drop_index
-                // (which handles all index families after #1025's unification).
-                let op_id = RecordId::system(&format!("ddl_drop_index_{}", name));
+        for &(_id, ref name, ref op_id_str) in dropping_entries {
+            // Skip status write if op_id is None (pre-#1051 tombstone or no-op caller)
+            if let Some(op_id_str) = op_id_str {
+                let op_id = RecordId::from_str(op_id_str).map_err(|e| {
+                    shamir_storage::error::DbError::Codec(format!(
+                        "#1051: failed to parse op_id '{op_id_str}': {e}"
+                    ))
+                })?;
                 let status = DdlOpStatus {
                     op_id,
                     kind: DdlOpKind::DropIndex2 {
@@ -1283,23 +1311,12 @@ impl TableManager {
                     crate::table::ddl_op_log::write_op_status(&info_store, &status).await
                 {
                     log::error!(
-                        "#1048: failed to write SucceededViaCrashRecovery status for \
+                        "#1048 / #1051: failed to write SucceededViaCrashRecovery status for \
                          recovered index2 DROP '{}' (id={}): {e}",
                         name,
-                        id
+                        _id
                     );
                 }
-            } else {
-                // Name not found in persisted descriptors — this can happen if the crash
-                // occurred before the descriptor was persisted (during CREATE, not DROP).
-                // Log a warning but don't fail — the drop will still be recovered correctly,
-                // just without the op-status entry (which is acceptable for this edge case).
-                log::warn!(
-                    "#1048: recovered index2 DROP (id={}) has no matching descriptor in \
-                     persisted metadata — cannot write op-status entry. This is acceptable \
-                     for the crash-before-persist edge case.",
-                    id
-                );
             }
         }
 
@@ -1416,7 +1433,7 @@ impl TableManager {
                              state by a crashed create — dropping partial and re-creating",
                             entry.new_name
                         );
-                        self.drop_index(&entry.new_name).await?;
+                        self.drop_index(&entry.new_name, None).await?;
                         self.create_index(&entry.new_name, &path_refs).await?;
                     }
                     // else Ready — already done, leave as-is
@@ -1428,7 +1445,7 @@ impl TableManager {
 
             // Step 2: drop old if still present.
             if self.index_exists(&entry.old_name).await {
-                self.drop_index(&entry.old_name).await?;
+                self.drop_index(&entry.old_name, None).await?;
             }
 
             // #1000 test seam — park here (this entry fully reconciled, the
@@ -1511,7 +1528,7 @@ impl TableManager {
                                 crate::index::write_barrier_flags::UNIQUE_INDEX_CREATE,
                             )
                             .await;
-                        self.index_manager.drop_unique_index(new_id).await?;
+                        self.index_manager.drop_unique_index(new_id, None).await?;
                         self.create_unique_index_body(&entry.new_name, &path_refs)
                             .await?;
                     }
@@ -1528,7 +1545,7 @@ impl TableManager {
 
             // Step 2: drop old if still present.
             if self.unique_index_exists(&entry.old_name).await {
-                self.drop_unique_index(&entry.old_name).await?;
+                self.drop_unique_index(&entry.old_name, None).await?;
             }
 
             // #1000 test seam — same between-entries pause point as the
@@ -1922,7 +1939,7 @@ impl TableManager {
             // P1-2 (#967): if this fails after create_index succeeded, both
             // old and new indexes exist — enrich the error with context AND
             // write a structured `Failed { detail }` to the op-status log.
-            match self.index_manager.drop_index(old_id).await {
+            match self.index_manager.drop_index(old_id, None).await {
                 Ok(_) => {}
                 Err(e) => {
                     let detail = format!(
@@ -2033,7 +2050,7 @@ impl TableManager {
                 .begin_write_barrier(crate::index::write_barrier_flags::UNIQUE_INDEX_CREATE)
                 .await;
 
-            self.index_manager.drop_unique_index(old_id).await?;
+            self.index_manager.drop_unique_index(old_id, None).await?;
 
             // #997 test seam — park here (tombstone written, old dropped,
             // new NOT yet created) if a test installed the pause hook. This

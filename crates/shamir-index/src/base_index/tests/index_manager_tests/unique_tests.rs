@@ -257,12 +257,12 @@ async fn test_drop_unique_index() {
     assert!(manager.has_unique_indexes());
 
     // Drop
-    let result = manager.drop_unique_index(1001).await.unwrap();
+    let result = manager.drop_unique_index(1001, None).await.unwrap();
     assert!(result);
     assert!(!manager.has_unique_indexes());
 
     // Drop non-existent
-    let result = manager.drop_unique_index(1002).await.unwrap();
+    let result = manager.drop_unique_index(1002, None).await.unwrap();
     assert!(!result);
 }
 

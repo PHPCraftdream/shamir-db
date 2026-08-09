@@ -134,7 +134,7 @@ async fn create_a_drop_a_stage_create_b_commit_indexes_b() {
         .await
         .unwrap();
     assert!(
-        tbl.drop_index2("lower_a").await.unwrap(),
+        tbl.drop_index2("lower_a", None).await.unwrap(),
         "DROP A must succeed"
     );
 
@@ -277,7 +277,7 @@ async fn drop_index2_acquires_write_barrier() {
     let guard = tbl.unique_write_lock().lock_owned().await;
 
     let tbl_drop = tbl.clone();
-    let drop_task = tokio::spawn(async move { tbl_drop.drop_index2("lower_name").await });
+    let drop_task = tokio::spawn(async move { tbl_drop.drop_index2("lower_name", None).await });
 
     tokio::time::sleep(Duration::from_millis(80)).await;
     assert!(
@@ -434,7 +434,7 @@ async fn two_ddls_on_index2_family_are_never_concurrently_inside_barrier() {
     // to complete while CREATE ("lower_a") is still parked — proving the
     // two registry-mutating ops are mutually exclusive on this table.
     let tbl_drop = tbl.clone();
-    let drop_b = tokio::spawn(async move { tbl_drop.drop_index2("lower_b").await });
+    let drop_b = tokio::spawn(async move { tbl_drop.drop_index2("lower_b", None).await });
 
     tokio::time::sleep(Duration::from_millis(80)).await;
     assert!(

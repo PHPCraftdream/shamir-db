@@ -426,7 +426,10 @@ async fn p02_regular_drop_index_before_commit_no_orphan() {
         .unwrap();
 
     // DROP the index BEFORE commit.
-    tbl.index_manager_ref().drop_index(idx_name).await.unwrap();
+    tbl.index_manager_ref()
+        .drop_index(idx_name, None)
+        .await
+        .unwrap();
 
     // Commit — the rederive MUST retract the stale posting op for the
     // dropped index (2c fix).
@@ -514,7 +517,7 @@ async fn p02_unique_drop_index_before_commit_no_orphan() {
 
     // DROP the unique index BEFORE commit.
     tbl.index_manager_ref()
-        .drop_unique_index(idx_name)
+        .drop_unique_index(idx_name, None)
         .await
         .unwrap();
 

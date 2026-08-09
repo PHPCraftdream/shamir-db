@@ -267,7 +267,7 @@ async fn p997_regular_crash_after_drop_before_clear() {
         .await
         .unwrap();
         mgr.create_index("by_email_new", &["email"]).await.unwrap();
-        mgr.drop_index("by_email").await.unwrap();
+        mgr.drop_index("by_email", None).await.unwrap();
         drop(mgr);
     }
 
@@ -397,7 +397,7 @@ async fn p997_unique_severe_both_absent() {
         )
         .await
         .unwrap();
-        mgr.drop_unique_index("uniq_email").await.unwrap();
+        mgr.drop_unique_index("uniq_email", None).await.unwrap();
         drop(mgr);
     }
 
@@ -552,7 +552,7 @@ async fn p997_unique_duplicate_during_recovery_fails_open() {
         )
         .await
         .unwrap();
-        mgr.drop_unique_index("uniq_email").await.unwrap();
+        mgr.drop_unique_index("uniq_email", None).await.unwrap();
         drop(mgr);
     }
 

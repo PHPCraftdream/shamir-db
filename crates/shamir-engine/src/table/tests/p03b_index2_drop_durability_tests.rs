@@ -363,7 +363,7 @@ async fn p03b_index2_live_drop_crash_at_post_sweep_hook() {
     // branch (the drop future) is cancelled, simulating a crash.
     let mgr_c = mgr.clone();
     tokio::select! {
-        _ = mgr_c.drop_index2("lower_name") => {
+        _ = mgr_c.drop_index2("lower_name", None) => {
             panic!("drop_index2 completed before post-sweep hook fired");
         }
         _ = hook.wait_until_parked() => {
@@ -428,7 +428,7 @@ async fn p03b_index2_name_reuse_rejected_during_drop() {
     // Start drop in a background task.
     let mgr_c = mgr.clone();
     let drop_task = tokio::spawn(async move {
-        mgr_c.drop_index2("lower_name").await.unwrap();
+        mgr_c.drop_index2("lower_name", None).await.unwrap();
     });
 
     // Wait for the drop to park (tombstone written, backend retired, pre-sweep).
@@ -493,7 +493,7 @@ async fn p03b_index2_normal_drop_still_works() {
     let id = backend.descriptor().id;
     assert!(count_postings(&info_store, id).await > 0);
 
-    let removed = mgr.drop_index2("lower_name").await.unwrap();
+    let removed = mgr.drop_index2("lower_name", None).await.unwrap();
     assert!(removed);
     assert!(mgr.index2_registry().all_backends().await.is_empty());
     assert_eq!(

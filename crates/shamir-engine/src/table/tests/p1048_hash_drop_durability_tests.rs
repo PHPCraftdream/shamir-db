@@ -103,7 +103,7 @@ async fn p1048_e2e_hash_drop_op_id_recovery() {
         // before the sweep — the exact crash window from #959)
         let mgr_c = mgr.clone();
         let drop_task = tokio::spawn(async move {
-            mgr_c.drop_index(index_name).await.unwrap();
+            mgr_c.drop_index(index_name, Some(op_id)).await.unwrap();
         });
 
         // Wait for the pause hook to fire (DROP is mid-flight)
@@ -211,7 +211,10 @@ async fn p1048_e2e_unique_hash_drop_op_id_recovery() {
 
         let mgr_c = mgr.clone();
         let drop_task = tokio::spawn(async move {
-            mgr_c.drop_unique_index(index_name).await.unwrap();
+            mgr_c
+                .drop_unique_index(index_name, Some(op_id))
+                .await
+                .unwrap();
         });
 
         // Wait for the pause hook to fire (DROP is mid-flight)

@@ -32,7 +32,7 @@ use shamir_types::record_view::RecordRef;
 use shamir_types::types::common::THasher;
 use shamir_types::types::record_id::RecordId;
 use shamir_types::types::value::InnerValue;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -102,6 +102,27 @@ pub struct HashRenameTombstone {
     pub paths: Vec<String>,
     /// The DDL operation ID minted at dispatch time (#1015).
     /// Used by recovery to write `SucceededViaCrashRecovery` to the op-status log.
+    pub op_id: Option<String>,
+}
+
+/// #1051: tombstone entry for in-progress DROP INDEX operations on the
+/// hash families (regular and unique). Carries the `name_interned` of the
+/// index being dropped and the operation ID minted at dispatch time.
+///
+/// Persisted under `system:idx_drop` (regular) / `system:uidx_drop` (unique)
+/// as `Vec<HashDropTombstone>` via bincode. An absent key or empty vec means
+/// "no in-progress drops".
+///
+/// The `op_id` field enables recovery to write `SucceededViaCrashRecovery`
+/// to the op-status log with the correct operation ID, ensuring clients can
+/// poll the exact operation they triggered.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct HashDropTombstone {
+    /// The `name_interned` of the index being dropped.
+    pub name_interned: u64,
+    /// The DDL operation ID minted at dispatch time (#1015 / #1051).
+    /// Used by recovery to write `SucceededViaCrashRecovery` to the op-status log.
+    /// `None` for pre-#1051 tombstones (backward compatibility).
     pub op_id: Option<String>,
 }
 
@@ -214,7 +235,7 @@ pub struct IndexManager {
     /// `UniqueGuard`s so the existing Phase 2.6 re-validation covers them.
     pub(super) generation: Arc<AtomicU64>,
 
-    /// P0-3 (#959): in-memory mirror of the persisted tombstone set for
+    /// P0-3 (#959 / #1051): in-memory mirror of the persisted tombstone set for
     /// in-progress base_index DROP INDEX operations (regular family). When
     /// `drop_index` starts, it adds `name_interned` here AND persists it
     /// durably (see `add_to_dropping`) BEFORE sweeping postings; when the
@@ -225,15 +246,18 @@ pub struct IndexManager {
     /// `create_index[_from_records][_from_stream]` to reject a CREATE that
     /// would reuse a name whose DROP is still in flight (sub-bug 3b).
     ///
+    /// Keyed by `name_interned`; the value is the `op_id` minted at dispatch
+    /// time (#1051) for crash recovery status writes.
+    ///
     /// `std::sync::Mutex` is the sanctioned low-frequency fallback here
     /// (CLAUDE.md: "only low-frequency/setup fallbacks, justified inline").
     /// DROP INDEX is a DDL operation — contention is nil in normal
-    /// operation and the set is empty 99.999 % of the time. A `DashSet`
+    /// operation and the set is empty 99.999 % of the time. A `DashMap`
     /// would be unjustified overkill for a guard that fires once per DDL.
     /// The lock is NEVER held across an `.await` point.
-    pub(super) dropping_regular: Arc<Mutex<BTreeSet<u64>>>,
-    /// P0-3 (#959): same as `dropping_regular`, for the unique family.
-    pub(super) dropping_unique: Arc<Mutex<BTreeSet<u64>>>,
+    pub(super) dropping_regular: Arc<Mutex<BTreeMap<u64, Option<String>>>>,
+    /// P0-3 (#959 / #1051): same as `dropping_regular`, for the unique family.
+    pub(super) dropping_unique: Arc<Mutex<BTreeMap<u64, Option<String>>>>,
 
     /// P0-3 (#959): test-only deterministic pause point that fires AFTER
     /// the posting sweep but BEFORE the reduced `IndexInfo` is persisted —
@@ -448,8 +472,8 @@ impl IndexManager {
             drop_index_pause_hook: Arc::new(arc_swap::ArcSwapOption::empty()),
             lookup_pause_hook: Arc::new(arc_swap::ArcSwapOption::empty()),
             generation: Arc::new(AtomicU64::new(0)),
-            dropping_regular: Arc::new(Mutex::new(BTreeSet::new())),
-            dropping_unique: Arc::new(Mutex::new(BTreeSet::new())),
+            dropping_regular: Arc::new(Mutex::new(BTreeMap::new())),
+            dropping_unique: Arc::new(Mutex::new(BTreeMap::new())),
             drop_index_post_sweep_hook: Arc::new(arc_swap::ArcSwapOption::empty()),
             renaming_regular: Arc::new(Mutex::new(BTreeMap::new())),
             renaming_unique: Arc::new(Mutex::new(BTreeMap::new())),
@@ -621,15 +645,15 @@ impl IndexManager {
     // original candidates `"indexes_dropping"` / `"indexes_unique_dropping"`
     // collided with `"indexes_unique"` (both truncate to `"indexes_uniq"`).
 
-    /// P0-3 (#959): persist the current in-memory `dropping_regular` set to
-    /// `info_store` under `system:idx_drop`. Serializes the set as a
-    /// `Vec<u64>` (deterministic order via `BTreeSet`). An empty set writes
-    /// an empty `Vec<u64>` (NOT a key deletion) so the load path handles
+    /// P0-3 (#959 / #1051): persist the current in-memory `dropping_regular` map to
+    /// `info_store` under `system:idx_drop`. Serializes the map as a
+    /// `Vec<(u64, Option<String>)>` (deterministic order via `BTreeMap`'s sorted iter).
+    /// An empty map writes an empty vec (NOT a key deletion) so the load path handles
     /// both `NotFound` and empty-vec uniformly.
     pub(super) async fn save_dropping_regular(&self) -> DbResult<()> {
-        let snapshot: Vec<u64> = {
-            let set = self.dropping_regular.lock().unwrap();
-            set.iter().copied().collect()
+        let snapshot: Vec<(u64, Option<String>)> = {
+            let map = self.dropping_regular.lock().unwrap();
+            map.iter().map(|(&k, v)| (k, v.clone())).collect()
         };
         let key = RecordId::system("idx_drop").to_bytes();
         let bytes = bincode::serialize(&snapshot)
@@ -638,12 +662,12 @@ impl IndexManager {
         Ok(())
     }
 
-    /// P0-3 (#959): persist the current in-memory `dropping_unique` set.
+    /// P0-3 (#959 / #1051): persist the current in-memory `dropping_unique` map.
     /// Mirror of `save_dropping_regular` for the unique family.
     pub(super) async fn save_dropping_unique(&self) -> DbResult<()> {
-        let snapshot: Vec<u64> = {
-            let set = self.dropping_unique.lock().unwrap();
-            set.iter().copied().collect()
+        let snapshot: Vec<(u64, Option<String>)> = {
+            let map = self.dropping_unique.lock().unwrap();
+            map.iter().map(|(&k, v)| (k, v.clone())).collect()
         };
         let key = RecordId::system("uidx_drop").to_bytes();
         let bytes = bincode::serialize(&snapshot)
@@ -652,10 +676,17 @@ impl IndexManager {
         Ok(())
     }
 
-    /// P0-3 (#959): load a persisted dropping set from `info_store`. Returns
-    /// an empty `Vec` if the key is absent (`NotFound`) or contains an empty
-    /// vec — both mean "no in-progress drops".
-    pub(super) async fn load_dropping_set(&self, is_unique: bool) -> DbResult<Vec<u64>> {
+    /// P0-3 (#959 / #1051): load a persisted dropping map from `info_store`. Returns
+    /// an empty `Vec` if the key is absent (`NotFound`) or contains an empty vec —
+    /// both mean "no in-progress drops".
+    ///
+    /// #1051 backward compatibility: tries to deserialize as `Vec<(u64, Option<String>)>`
+    /// first (new format with op_id). If that fails, falls back to `Vec<u64>` (old format
+    /// without op_id), treating all entries as having `op_id = None`.
+    pub(super) async fn load_dropping_set(
+        &self,
+        is_unique: bool,
+    ) -> DbResult<Vec<(u64, Option<String>)>> {
         let key_str = if is_unique { "uidx_drop" } else { "idx_drop" };
         let key = RecordId::system(key_str).to_bytes();
         match self.info_store.get(key.into()).await {
@@ -663,11 +694,20 @@ impl IndexManager {
                 if bytes.is_empty() {
                     return Ok(Vec::new());
                 }
-                bincode::deserialize::<Vec<u64>>(&bytes).map_err(|e| {
-                    shamir_storage::error::DbError::Codec(format!(
-                        "system:{key_str} decode failed: {e}"
-                    ))
-                })
+                // Try new format first: Vec<(u64, Option<String>)>
+                match bincode::deserialize::<Vec<(u64, Option<String>)>>(&bytes) {
+                    Ok(new_format) => Ok(new_format),
+                    Err(_) => {
+                        // Fall back to old format: Vec<u64> (pre-#1051)
+                        let old_format: Vec<u64> = bincode::deserialize(&bytes).map_err(|e| {
+                            shamir_storage::error::DbError::Codec(format!(
+                                "system:{key_str} decode failed: {e}"
+                            ))
+                        })?;
+                        // Convert to new format with op_id = None
+                        Ok(old_format.into_iter().map(|id| (id, None)).collect())
+                    }
+                }
             }
             Err(shamir_storage::error::DbError::NotFound(_)) => Ok(Vec::new()),
             Err(e) => Err(e),
@@ -678,10 +718,12 @@ impl IndexManager {
     /// BEFORE IndexManager::new clears the tombstones. This allows TableManager
     /// to write SucceededViaCrashRecovery status for recovered hash DROP operations.
     /// Returns an empty `Vec` if the key is absent or contains an empty vec.
+    ///
+    /// #1051 backward compatibility: see `load_dropping_set`.
     pub async fn load_dropping_set_standalone(
         is_unique: bool,
         info_store: &Arc<dyn Store>,
-    ) -> DbResult<Vec<u64>> {
+    ) -> DbResult<Vec<(u64, Option<String>)>> {
         let key_str = if is_unique { "uidx_drop" } else { "idx_drop" };
         let key = RecordId::system(key_str).to_bytes();
         match info_store.get(key.into()).await {
@@ -689,19 +731,28 @@ impl IndexManager {
                 if bytes.is_empty() {
                     return Ok(Vec::new());
                 }
-                bincode::deserialize::<Vec<u64>>(&bytes).map_err(|e| {
-                    shamir_storage::error::DbError::Codec(format!(
-                        "system:{key_str} decode failed: {e}"
-                    ))
-                })
+                // Try new format first: Vec<(u64, Option<String>)>
+                match bincode::deserialize::<Vec<(u64, Option<String>)>>(&bytes) {
+                    Ok(new_format) => Ok(new_format),
+                    Err(_) => {
+                        // Fall back to old format: Vec<u64> (pre-#1051)
+                        let old_format: Vec<u64> = bincode::deserialize(&bytes).map_err(|e| {
+                            shamir_storage::error::DbError::Codec(format!(
+                                "system:{key_str} decode failed: {e}"
+                            ))
+                        })?;
+                        // Convert to new format with op_id = None
+                        Ok(old_format.into_iter().map(|id| (id, None)).collect())
+                    }
+                }
             }
             Err(shamir_storage::error::DbError::NotFound(_)) => Ok(Vec::new()),
             Err(e) => Err(e),
         }
     }
 
-    /// P0-3 (#959): add `name_interned` to the in-memory dropping set, then
-    /// persist the updated set durably. MUST be called BEFORE the sweep in
+    /// P0-3 (#959 / #1051): add `name_interned` to the in-memory dropping map, then
+    /// persist the updated map durably. MUST be called BEFORE the sweep in
     /// `drop_index` / `drop_unique_index` so a crash at any subsequent point
     /// is recoverable.
     ///
@@ -712,10 +763,15 @@ impl IndexManager {
     /// tombstone. A crash between the in-memory update and the persist is
     /// safe: nothing has been swept or persisted yet, so the on-disk state
     /// is unchanged (old IndexInfo, postings intact).
+    ///
+    /// #1051: accepts an optional `op_id` minted at dispatch time. `None` means
+    /// the caller does not have an op_id (e.g., a non-DDL path), and the tombstone
+    /// entry will have `op_id = None` (backward compatible with pre-#1051 format).
     pub(super) async fn add_to_dropping(
         &self,
         is_unique: bool,
         name_interned: u64,
+        op_id: Option<String>,
     ) -> DbResult<()> {
         let dropping = if is_unique {
             &self.dropping_unique
@@ -723,8 +779,8 @@ impl IndexManager {
             &self.dropping_regular
         };
         {
-            let mut set = dropping.lock().unwrap();
-            set.insert(name_interned);
+            let mut map = dropping.lock().unwrap();
+            map.insert(name_interned, op_id);
         }
         let result = if is_unique {
             self.save_dropping_unique().await
@@ -732,15 +788,15 @@ impl IndexManager {
             self.save_dropping_regular().await
         };
         if result.is_err() {
-            // Roll back the in-memory set so the guard stays consistent.
-            let mut set = dropping.lock().unwrap();
-            set.remove(&name_interned);
+            // Roll back the in-memory map so the guard stays consistent.
+            let mut map = dropping.lock().unwrap();
+            map.remove(&name_interned);
         }
         result
     }
 
-    /// P0-3 (#959): clear `name_interned` from the persisted tombstone, then
-    /// from the in-memory set. Persist-first ordering ensures the on-disk
+    /// P0-3 (#959 / #1051): clear `name_interned` from the persisted tombstone, then
+    /// from the in-memory map. Persist-first ordering ensures the on-disk
     /// state is always at least as advanced as the in-memory state: a crash
     /// between persist and in-memory update leaves a stale in-memory entry
     /// that dies with the process, while the on-disk tombstone is already
@@ -762,11 +818,11 @@ impl IndexManager {
             &self.dropping_regular
         };
         // Compute the snapshot without the entry (do NOT modify in-memory yet).
-        let snapshot: Vec<u64> = {
-            let set = dropping.lock().unwrap();
-            set.iter()
-                .filter(|&&k| k != name_interned)
-                .copied()
+        let snapshot: Vec<(u64, Option<String>)> = {
+            let map = dropping.lock().unwrap();
+            map.iter()
+                .filter(|(&k, _)| k != name_interned)
+                .map(|(&k, v)| (k, v.clone()))
                 .collect()
         };
         // Persist first.
@@ -777,8 +833,8 @@ impl IndexManager {
         self.info_store.set(key.into(), Bytes::from(bytes)).await?;
         // Only now update in-memory.
         {
-            let mut set = dropping.lock().unwrap();
-            set.remove(&name_interned);
+            let mut map = dropping.lock().unwrap();
+            map.remove(&name_interned);
         }
         Ok(())
     }
@@ -1048,7 +1104,7 @@ impl IndexManager {
 
         // ── Regular family ───────────────────────────────────────────────
         let mut regular_changed = false;
-        for &name_interned in &dropping_regular {
+        for &(name_interned, ref _op_id) in &dropping_regular {
             if self.indexes.contains(name_interned) {
                 // Crash between tombstone-write and IndexInfo-persist:
                 // def is still in IndexInfo at Ready. Resume the drop.
@@ -1068,7 +1124,7 @@ impl IndexManager {
 
         // ── Unique family ────────────────────────────────────────────────
         let mut unique_changed = false;
-        for &name_interned in &dropping_unique {
+        for &(name_interned, ref _op_id) in &dropping_unique {
             if self.indexes_unique.contains(name_interned) {
                 self.indexes_unique.remove_index(name_interned);
                 self.bump_generation();
@@ -1083,9 +1139,9 @@ impl IndexManager {
         }
 
         // ── Clear both tombstones ────────────────────────────────────────
-        // Write empty Vec<u64> for both keys (cheaper than a remove, and
+        // Write empty Vec<(u64, Option<String>)> for both keys (cheaper than a remove, and
         // the load path treats empty-vec and NotFound identically).
-        let empty = bincode::serialize(&Vec::<u64>::new())
+        let empty = bincode::serialize(&Vec::<(u64, Option<String>)>::new())
             .map_err(|e| shamir_storage::error::DbError::Codec(e.to_string()))?;
         let key_regular = RecordId::system("idx_drop").to_bytes();
         self.info_store
@@ -1100,7 +1156,7 @@ impl IndexManager {
         self.sync_flags();
 
         log::info!(
-            "P0-3 (#959): recovery complete — {} regular + {} unique DROP(s) finalized",
+            "P0-3 (#959 / #1051): recovery complete — {} regular + {} unique DROP(s) finalized",
             dropping_regular.len(),
             dropping_unique.len()
         );
@@ -1193,7 +1249,7 @@ impl IndexManager {
             .dropping_regular
             .lock()
             .unwrap()
-            .contains(&name_interned)
+            .contains_key(&name_interned)
         {
             return Err(shamir_storage::error::DbError::Internal(format!(
                 "Cannot create regular index '{name_interned}': \
@@ -1368,7 +1424,7 @@ impl IndexManager {
             .dropping_regular
             .lock()
             .unwrap()
-            .contains(&name_interned)
+            .contains_key(&name_interned)
         {
             return Err(shamir_storage::error::DbError::Internal(format!(
                 "Cannot create regular index '{name_interned}': \
@@ -1569,7 +1625,7 @@ impl IndexManager {
             .dropping_regular
             .lock()
             .unwrap()
-            .contains(&name_interned)
+            .contains_key(&name_interned)
         {
             return Err(shamir_storage::error::DbError::Internal(format!(
                 "Cannot create regular index '{name_interned}': \
@@ -1795,21 +1851,23 @@ impl IndexManager {
     ///
     /// `true` — индекс существовал и был удалён
     /// `false` — индекс не найден
-    pub async fn drop_index(&self, name_interned: u64) -> DbResult<bool> {
+    ///
+    /// #1051: accepts `op_id` minted at dispatch time for crash recovery status writes.
+    pub async fn drop_index(&self, name_interned: u64, op_id: Option<String>) -> DbResult<bool> {
         // Быстрая проверка существования индекса
         if !self.indexes.contains(name_interned) {
             return Ok(false);
         }
 
-        // P0-3 (#959): write a durable tombstone BEFORE retiring the
+        // P0-3 (#959 / #1051): write a durable tombstone BEFORE retiring the
         // definition or sweeping postings. If the process crashes after
         // the sweep but before the reduced IndexInfo is persisted, the
         // on-disk metadata still lists the index as `Ready` — but the
         // tombstone tells `recover_in_progress_drops` to finish the drop
         // rather than resurrecting a broken "Ready but no postings" index.
         // MUST succeed before proceeding; `add_to_dropping` rolls back the
-        // in-memory set on persist failure.
-        self.add_to_dropping(false, name_interned).await?;
+        // in-memory map on persist failure.
+        self.add_to_dropping(false, name_interned, op_id).await?;
 
         // P0-3a (#1011) step 2.5: raise the reader-drain gate's intent flag
         // (SeqCst) BEFORE the RCU retire below. From this point every NEW

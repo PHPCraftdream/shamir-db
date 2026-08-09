@@ -157,7 +157,7 @@ async fn p1048_e2e_index2_drop_op_id_recovery() {
         // simulating a real crash (the whole process dies, taking all stacks with it).
         let mgr_c = mgr.clone();
         tokio::select! {
-            _ = mgr_c.drop_index2(index_name) => {
+            _ = mgr_c.drop_index2(index_name, Some(op_id)) => {
                 panic!("drop_index2 completed before post-sweep hook fired");
             }
             _ = pause_hook.wait_until_parked() => {

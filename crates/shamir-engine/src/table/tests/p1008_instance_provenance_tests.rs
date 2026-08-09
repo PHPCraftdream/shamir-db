@@ -136,7 +136,10 @@ async fn drop_regular_before_commit_no_resurrected_posting() {
         .await
         .unwrap();
 
-    tbl.index_manager_ref().drop_index(idx_name).await.unwrap();
+    tbl.index_manager_ref()
+        .drop_index(idx_name, None)
+        .await
+        .unwrap();
 
     repo.commit_tx(tx).await.expect("commit must succeed");
 
@@ -189,7 +192,7 @@ async fn drop_unique_before_commit_no_resurrected_posting() {
         .unwrap();
 
     tbl.index_manager_ref()
-        .drop_unique_index(idx_name)
+        .drop_unique_index(idx_name, None)
         .await
         .unwrap();
 
@@ -299,7 +302,7 @@ async fn drop_index2_before_commit_no_resurrected_posting() {
         .await
         .unwrap();
 
-    tbl.drop_index2("lower_name").await.unwrap();
+    tbl.drop_index2("lower_name", None).await.unwrap();
 
     repo.commit_tx(tx).await.expect("commit must succeed");
 
@@ -370,7 +373,10 @@ async fn regular_aba_drop_create_same_name_no_field_a_contamination() {
 
     // ABA: DROP the field-`a` index, CREATE a NEW index under the SAME name
     // on field `b`.
-    tbl.index_manager_ref().drop_index(idx_name).await.unwrap();
+    tbl.index_manager_ref()
+        .drop_index(idx_name, None)
+        .await
+        .unwrap();
     let def_b = IndexDefinition::new(idx_name, vec![IndexInfoItem::new(vec![b_key])]);
     tbl.index_manager_ref().create_index(def_b).await.unwrap();
 
@@ -431,7 +437,7 @@ async fn unique_aba_drop_create_same_name_no_false_conflict() {
         .unwrap();
 
     tbl.index_manager_ref()
-        .drop_unique_index(idx_name)
+        .drop_unique_index(idx_name, None)
         .await
         .unwrap();
     let def_b = IndexDefinition::new(idx_name, vec![IndexInfoItem::new(vec![b_key])]);
@@ -572,7 +578,10 @@ async fn multiple_transitions_before_commit_resolve_to_final_instance() {
 
     // DROP idx2.
     let idx2 = key_id(&tbl, "idx2").await;
-    tbl.index_manager_ref().drop_index(idx2).await.unwrap();
+    tbl.index_manager_ref()
+        .drop_index(idx2, None)
+        .await
+        .unwrap();
 
     // CREATE a NEW index under the ORIGINAL name "idx1", this time on field
     // `c` — a same-name-as-the-original-name recreation with a different
@@ -677,7 +686,7 @@ async fn rollback_after_multiple_rotations_leaves_no_partial_state() {
     tbl.create_index_v2(&functional_lower_op("lower_name", "t", "name"))
         .await
         .unwrap();
-    tbl.drop_index2("lower_name").await.unwrap();
+    tbl.drop_index2("lower_name", None).await.unwrap();
     tbl.create_index_v2(&functional_lower_op("lower_name", "t", "name"))
         .await
         .unwrap();

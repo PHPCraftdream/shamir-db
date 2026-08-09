@@ -248,7 +248,7 @@ impl ShamirAdminExecutor {
                         .map(|d| d.name_interned)
                         .collect();
                     for id in regular_ids {
-                        let _ = table.index_manager_ref().drop_index(id).await;
+                        let _ = table.index_manager_ref().drop_index(id, None).await;
                     }
                     // base_index unique indexes.
                     let unique_ids: Vec<u64> = table
@@ -257,7 +257,7 @@ impl ShamirAdminExecutor {
                         .map(|d| d.name_interned)
                         .collect();
                     for id in unique_ids {
-                        let _ = table.index_manager_ref().drop_unique_index(id).await;
+                        let _ = table.index_manager_ref().drop_unique_index(id, None).await;
                     }
                     // Sorted indexes.
                     let sorted_ids: Vec<u64> = table
@@ -660,6 +660,9 @@ impl ShamirAdminExecutor {
             ));
         }
 
+        // Mint an op_id for recoverable DDL ops (hash DROP and index2 DROP are in scope)
+        let op_id = RecordId::new();
+
         // Dispatch to the ONE matching family's drop call — the server now
         // resolves the index family from the catalog, not from the client's
         // `op.unique` hint. This matches TableManager::rename_index's pattern.
@@ -667,12 +670,12 @@ impl ShamirAdminExecutor {
         // ONE family matched, so at most one of these can be true.
         let removed = if is_regular {
             table
-                .drop_index(&op.drop_index)
+                .drop_index(&op.drop_index, Some(op_id))
                 .await
                 .map_err(|e| err(e.to_string()))?
         } else if is_unique {
             table
-                .drop_unique_index(&op.drop_index)
+                .drop_unique_index(&op.drop_index, Some(op_id))
                 .await
                 .map_err(|e| err(e.to_string()))?
         } else if is_sorted {
@@ -682,7 +685,7 @@ impl ShamirAdminExecutor {
                 .map_err(|e| err(e.to_string()))?
         } else if is_index2 {
             table
-                .drop_index2(&op.drop_index)
+                .drop_index2(&op.drop_index, Some(op_id))
                 .await
                 .map_err(|e| err(e.to_string()))?
         } else {
@@ -691,9 +694,6 @@ impl ShamirAdminExecutor {
             // hint didn't match any index.
             false
         };
-
-        // Mint an op_id for recoverable DDL ops (hash DROP and index2 DROP are in scope)
-        let op_id = RecordId::system(&format!("ddl_drop_index_{}", op.drop_index));
 
         // Write the Succeeded status to the DDL op log for polling.
         // Use the ACTUAL resolved family (from the catalog), not the client's
@@ -821,10 +821,7 @@ impl ShamirAdminExecutor {
             .map_err(|e| err(e.to_string()))?;
 
         // Mint an op_id for recoverable DDL ops (hash RENAME is in scope)
-        let op_id = RecordId::system(&format!(
-            "ddl_rename_index_{}_to_{}",
-            op.rename_index, op.to
-        ));
+        let op_id = RecordId::new();
 
         table
             .rename_index(&op.rename_index, &op.to, Some(op_id))

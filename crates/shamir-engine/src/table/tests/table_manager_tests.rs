@@ -270,12 +270,12 @@ async fn test_drop_index() {
     table.create_index("email_idx", &["email"]).await.unwrap();
     assert!(table.index_exists("email_idx").await);
 
-    let dropped = table.drop_index("email_idx").await.unwrap();
+    let dropped = table.drop_index("email_idx", None).await.unwrap();
     assert!(dropped);
     assert!(!table.index_exists("email_idx").await);
 
     // Drop non-existent returns false
-    let dropped_again = table.drop_index("email_idx").await.unwrap();
+    let dropped_again = table.drop_index("email_idx", None).await.unwrap();
     assert!(!dropped_again);
 }
 

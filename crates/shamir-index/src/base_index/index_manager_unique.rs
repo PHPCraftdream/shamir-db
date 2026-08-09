@@ -479,7 +479,7 @@ impl IndexManager {
             .dropping_unique
             .lock()
             .unwrap()
-            .contains(&name_interned)
+            .contains_key(&name_interned)
         {
             return Err(shamir_storage::error::DbError::Internal(format!(
                 "Cannot create unique index '{name_interned}': \
@@ -571,14 +571,20 @@ impl IndexManager {
     ///
     /// `true` — индекс существовал и был удалён
     /// `false` — индекс не найден
-    pub async fn drop_unique_index(&self, name_interned: u64) -> DbResult<bool> {
+    ///
+    /// #1051: accepts `op_id` minted at dispatch time for crash recovery status writes.
+    pub async fn drop_unique_index(
+        &self,
+        name_interned: u64,
+        op_id: Option<String>,
+    ) -> DbResult<bool> {
         if !self.indexes_unique.contains(name_interned) {
             return Ok(false);
         }
 
-        // P0-3 (#959): write a durable tombstone BEFORE retiring/sweeping.
+        // P0-3 (#959 / #1051): write a durable tombstone BEFORE retiring/sweeping.
         // See `drop_index`'s doc for the crash-state matrix.
-        self.add_to_dropping(true, name_interned).await?;
+        self.add_to_dropping(true, name_interned, op_id).await?;
 
         // F-76 (#903): retire the definition FIRST (RCU swap publishes a Vec
         // without this definition atomically; the shared write-barrier bit is

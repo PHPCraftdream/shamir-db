@@ -1,8 +1,8 @@
 //! DDL operation status log (#1015) — durable append-only store for DDL op states.
 //!
-//! The op-status log is keyed by `system:ddl_op:<op_id>` and stores `DdlOpStatus`
-//! structs. It lives in the same `info_store` that tombstones use, but is
-//! semantically distinct:
+//! The op-status log is keyed by a prefix + the raw 16 bytes of the op_id
+//! and stores `DdlOpStatus` structs. It lives in the same `info_store` that
+//! tombstones use, but is semantically distinct:
 //! - Tombstones are cleared on success and keyed by name (internal recovery only).
 //! - Op-status records survive success and are keyed by a stable `op_id` (client-visible).
 //!
@@ -25,13 +25,17 @@ use std::sync::Arc;
 #[allow(dead_code)]
 const DDL_OP_LOG_CAP: usize = 10000;
 
-/// Prefix for all DDL operation status keys.
-const DDL_OP_KEY_PREFIX: &str = "ddl_op:";
+/// Prefix for all DDL operation status keys (7 ASCII bytes: "ddl_op:").
+const DDL_OP_KEY_PREFIX: &[u8] = b"ddl_op:";
 
-/// Builds the `system:ddl_op:<op_id>` key for a given operation ID.
+/// Builds the storage key for a given operation ID.
+/// The key is the prefix "ddl_op:" (7 bytes) followed by the raw 16 bytes of the op_id.
+/// This avoids a second pass through RecordId::system which would truncate the key.
 pub fn op_status_key(op_id: &RecordId) -> RecordKey {
-    let key_str = format!("{}{}", DDL_OP_KEY_PREFIX, op_id);
-    RecordId::system(&key_str).to_bytes().into()
+    let mut key_bytes = Vec::with_capacity(DDL_OP_KEY_PREFIX.len() + 16);
+    key_bytes.extend_from_slice(DDL_OP_KEY_PREFIX);
+    key_bytes.extend_from_slice(op_id.as_bytes());
+    RecordKey::from_slice(&key_bytes)
 }
 
 /// Writes a DDL operation status to the log.

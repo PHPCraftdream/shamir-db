@@ -132,7 +132,7 @@ async fn f76_regular_hash_drop_invisible_during_sweep() {
     // Spawn the DROP; it retires the definition FIRST (RCU swap), then parks
     // — postings not yet swept, definition already gone from the planner.
     let tbl_c = tbl.clone();
-    let drop_task = tokio::spawn(async move { tbl_c.drop_index("status_idx").await });
+    let drop_task = tokio::spawn(async move { tbl_c.drop_index("status_idx", None).await });
 
     // Rendezvous: the DROP is parked — definition retired, postings intact.
     hook.wait_until_parked().await;
@@ -244,7 +244,7 @@ async fn f76_index2_drop_invisible_during_sweep() {
 
     // Spawn the DROP.
     let tbl_c = tbl.clone();
-    let drop_task = tokio::spawn(async move { tbl_c.drop_index2("lower_name").await });
+    let drop_task = tokio::spawn(async move { tbl_c.drop_index2("lower_name", None).await });
 
     // Rendezvous: the DROP is parked — backend retired from the registry,
     // postings not yet swept.
@@ -333,7 +333,7 @@ async fn f76_unique_hash_drop_retires_definition_before_sweep() {
 
     // Spawn the DROP.
     let tbl_c = tbl.clone();
-    let drop_task = tokio::spawn(async move { tbl_c.drop_unique_index("email_uniq").await });
+    let drop_task = tokio::spawn(async move { tbl_c.drop_unique_index("email_uniq", None).await });
 
     // Rendezvous: the DROP is parked — definition retired, postings not yet
     // swept.

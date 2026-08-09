@@ -288,13 +288,11 @@ pub async fn legacy_indexes_need_rebuild(
 // rejected by `create_index_v2`'s namespace-reuse guard (resolving the
 // tombstoned id's name via persisted metadata) until the tombstone clears.
 //
-// Tombstone shape: `Vec<u32>` (descriptor IDS, NOT `name_interned` —
-// index2 backends are keyed by the compact `u32` id, unlike sorted/base_index
-// which use `name_interned`) serialized via bincode under
-// `system:_m.idx.drop`. A separate key was chosen (mirroring #959's
-// `idx_drop`/`uidx_drop` and #972's `sidx_drop`) to avoid touching
-// `save_index2_metadata`/`load_index2_metadata`'s forward-compat fallback
-// chain. An absent key or empty vec means "no in-progress drops".
+// Tombstone shape: `Vec<(u32, String, Option<String>)>` (descriptor id, index name, op_id)
+// serialized via bincode under `system:_m.idx.drop`. A separate key was chosen
+// (mirroring #959's `idx_drop`/`uidx_drop` and #972's `sidx_drop`) to avoid touching
+// `save_index2_metadata`/`load_index2_metadata`'s forward-compat fallback chain.
+// An absent key or empty vec means "no in-progress drops".
 //
 // **CRITICAL** (the hard-won #959 collision lesson): `RecordId::system(name)`
 // truncates `name` to 12 bytes. The key `"_m.idx.drop"` (11 bytes, no
@@ -304,8 +302,14 @@ pub async fn legacy_indexes_need_rebuild(
 //   `"_m.idx.drop"` → [0,0,0,0, 5f,6d,2e,69,64,78, 2e,64,72,6f,70,00]
 // They share the first 10 bytes (`\0\0\0\0_m.idx`) but diverge at byte 10
 // (0x00 vs 0x2e) and again at byte 11 (0x6c vs 0x64) — NO collision.
+//
+// #1051: the tombstone now carries the index name and operation ID minted at dispatch time
+// (the `String` and `Option<String>` components). This enables recovery to:
+// 1. Use the id for registry operations (remove_by_id, sweep)
+// 2. Use the name to write the correct DdlOpStatus
+// 3. Use the op_id to ensure clients can poll the exact operation they triggered
 
-/// System key for the index2 DROP tombstone (`Vec<u32>` of descriptor ids).
+/// System key for the index2 DROP tombstone (`Vec<(u32, String, Option<String>)>` of id + name + op_id).
 fn meta_key_indexes_drop() -> RecordId {
     RecordId::system("_m.idx.drop")
 }
@@ -313,20 +317,37 @@ fn meta_key_indexes_drop() -> RecordId {
 /// Load the persisted index2 DROP tombstone. Returns an empty `Vec` if the
 /// key is absent (`NotFound`) or contains an empty vec — both mean "no
 /// in-progress drops". Mirrors #972's `load_dropping_sorted`.
+///
+/// #1051 backward compatibility: tries to deserialize as `Vec<(u32, String, Option<String>)>`
+/// first (new format with name and op_id). If that fails, falls back to `Vec<u32>` (old format
+/// without name/op_id), treating all entries as having empty name and `op_id = None`.
 pub async fn load_dropping_index2(
     info_store: &Arc<dyn Store>,
-) -> Result<Vec<u32>, shamir_storage::error::DbError> {
+) -> Result<Vec<(u32, String, Option<String>)>, shamir_storage::error::DbError> {
     let key = meta_key_indexes_drop().to_bytes();
     match info_store.get(key.into()).await {
         Ok(bytes) => {
             if bytes.is_empty() {
                 return Ok(Vec::new());
             }
-            bincode::deserialize::<Vec<u32>>(&bytes).map_err(|e| {
-                shamir_storage::error::DbError::Codec(format!(
-                    "system:_m.idx.drop decode failed: {e}"
-                ))
-            })
+            // Try new format first: Vec<(u32, String, Option<String>)>
+            match bincode::deserialize::<Vec<(u32, String, Option<String>)>>(&bytes) {
+                Ok(new_format) => Ok(new_format),
+                Err(_) => {
+                    // Fall back to old format: Vec<u32> (pre-#1051)
+                    let old_format: Vec<u32> = bincode::deserialize(&bytes).map_err(|e| {
+                        shamir_storage::error::DbError::Codec(format!(
+                            "system:_m.idx.drop decode failed: {e}"
+                        ))
+                    })?;
+                    // Convert to new format with empty name and op_id = None
+                    // (we can't recover the name in this case, so status writes will be skipped)
+                    Ok(old_format
+                        .into_iter()
+                        .map(|id| (id, String::new(), None))
+                        .collect())
+                }
+            }
         }
         Err(shamir_storage::error::DbError::NotFound(_)) => Ok(Vec::new()),
         Err(e) => Err(e),
@@ -334,20 +355,26 @@ pub async fn load_dropping_index2(
 }
 
 /// Add `id` to the persisted index2 DROP tombstone. Loads the current set,
-/// appends the id, and writes it back. MUST be called BEFORE the sweep in
+/// appends the entry, and writes it back. MUST be called BEFORE the sweep in
 /// `drop_index2` so a crash at any subsequent point is recoverable.
 ///
 /// If the persist fails, the on-disk tombstone is unchanged — the caller
 /// (`drop_index2`) propagates the error and does NOT proceed with the drop.
 /// Mirrors #972's `add_to_dropping_sorted` (adapted for the free-function
 /// shape — `IndexRegistry` does not own an `info_store`).
+///
+/// #1051: accepts `name` and `op_id` minted at dispatch time. `op_id = None` means
+/// the caller does not have an op_id (e.g., a non-DDL path), and the tombstone entry
+/// will have `op_id = None` (backward compatible with pre-#1051 format).
 pub async fn add_to_dropping_index2(
     id: u32,
+    name: String,
+    op_id: Option<String>,
     info_store: &Arc<dyn Store>,
 ) -> Result<(), shamir_storage::error::DbError> {
     let mut current = load_dropping_index2(info_store).await?;
-    if !current.contains(&id) {
-        current.push(id);
+    if !current.iter().any(|&(existing_id, _, _)| existing_id == id) {
+        current.push((id, name, op_id));
     }
     let key = meta_key_indexes_drop().to_bytes();
     let bytes = bincode::serialize(&current)
@@ -365,7 +392,7 @@ pub async fn clear_from_dropping_index2(
     info_store: &Arc<dyn Store>,
 ) -> Result<(), shamir_storage::error::DbError> {
     let mut current = load_dropping_index2(info_store).await?;
-    current.retain(|&x| x != id);
+    current.retain(|&(existing_id, _, _)| existing_id != id);
     let key = meta_key_indexes_drop().to_bytes();
     let bytes = bincode::serialize(&current)
         .map_err(|e| shamir_storage::error::DbError::Codec(e.to_string()))?;
