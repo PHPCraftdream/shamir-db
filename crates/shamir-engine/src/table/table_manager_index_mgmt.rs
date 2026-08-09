@@ -13,10 +13,19 @@ use super::table_manager::TableManager;
 use crate::index::index_definition::IndexDefinition;
 use crate::index::index_info_item::IndexInfoItem;
 
+/// Result structure for #1088 Phase C/D: the SnapshotGuard and pin version
+/// must be returned from Phase B+A and kept alive through Phase C/D.
+#[allow(dead_code)]
+pub(crate) struct PhaseBAResult {
+    pub guard: shamir_tx::SnapshotGuard,
+    pub pin: u64,
+}
+
 impl TableManager {
-    // ============================================================================
-    // Index Management API (string paths → interned internally)
-    // ============================================================================
+    #[allow(dead_code)]
+    const CATCHUP_ITERATION_CAP: usize = 10; // RFC v3 §2.4/§6.2 — conservative
+                                             // fixed cap, no tunables precedent
+                                             // for this yet; local const is fine.
 
     /// Create a regular or specialized (fts/vector/functional) index.
     ///
@@ -2219,18 +2228,24 @@ impl TableManager {
     /// - `batch_size`: Batch size for the `snapshot_stream` scan (same role as
     ///   `list_stream`'s parameter).
     ///
-    /// # Concurrency
+    /// #1088: Phase C (catch-up loop) + Phase D (publish barrier) for online CREATE INDEX.
+    ///
+    /// Phase B+A backfill (returns SnapshotGuard for Phase C/D use).
     ///
     /// Phase B holds the write barrier (`REGULAR_INDEX_CREATE`) across the snapshot
     /// pin and registration. Phase A runs barrier-free — the snapshot is versioned,
     /// so concurrent writes are visible to the dirty-set capture mechanism (activated
     /// by `mark_build_in_flight` in Phase B) but do not interfere with the scan.
+    ///
+    /// Returns `Ok(None)` when changefeed is not wired (online build unavailable).
+    /// Returns `Ok(Some(PhaseBAResult { guard, pin }))` on success, where `guard`
+    /// must be kept alive through Phase C/D (it pins the version for pin-time reads).
     #[allow(dead_code)] // Will be wired in #1089
     pub(crate) async fn phase_b_a_backfill(
         &self,
         index_def: crate::index::index_definition::IndexDefinition,
         batch_size: usize,
-    ) -> DbResult<bool> {
+    ) -> DbResult<Option<PhaseBAResult>> {
         use futures::StreamExt;
 
         let name_interned = index_def.name_interned;
@@ -2245,11 +2260,11 @@ impl TableManager {
             .await;
 
         // Under the barrier, open the snapshot. If changefeed is not wired,
-        // online build is unavailable for this table — return false signal
+        // online build is unavailable for this table — return None signal
         // for the caller (#1089) to fall back to the old path.
         let Some(guard) = self.open_index_build_snapshot().await else {
             // Barrier guard drops here (RAII), releasing bit+lock.
-            return Ok(false);
+            return Ok(None);
         };
 
         let pin = guard.version();
@@ -2396,10 +2411,9 @@ impl TableManager {
             }
         }
 
-        // ── SnapshotGuard dropped here (RAII) ─────────────────────────────────────
-        // The guard goes out of scope, releasing the version pin. Phase C (#1088)
-        // is now free to proceed with dirty-set drain and catch-up.
-
+        // ── Return SnapshotGuard and pin to caller (Phase C/D) ─────────────────────
+        // The guard must stay alive through Phase C/D to support pin-time reads.
+        // Caller is responsible for dropping it after Phase D completes.
         log::info!(
             "CREATE INDEX '{}': Phase B+A completed — {} rows indexed in {:.1}s, index \
              left in Building state (dirty-set capture active)",
@@ -2408,7 +2422,104 @@ impl TableManager {
             backfill_start.elapsed().as_secs_f64()
         );
 
-        Ok(true)
+        Ok(Some(PhaseBAResult { guard, pin }))
+    }
+
+    #[allow(dead_code)]
+    pub(crate) async fn phase_c_d_catchup_and_publish(
+        &self,
+        name_interned: u64,
+        phase_ba: PhaseBAResult,
+    ) -> DbResult<()> {
+        let PhaseBAResult { guard, pin } = phase_ba;
+
+        // ── Phase C: barrier-free catch-up loop ─────────────────────────────
+        for _ in 0..Self::CATCHUP_ITERATION_CAP {
+            let dirty = self.index_manager.drain_dirty_set(name_interned);
+            if dirty.is_empty() {
+                break;
+            }
+            self.apply_catchup_for_ids(name_interned, &dirty, pin)
+                .await?;
+        }
+
+        // ── Phase D: short publish barrier ──────────────────────────────────
+        let (_barrier, _uwl_guard) = self
+            .begin_write_barrier(crate::index::write_barrier_flags::REGULAR_INDEX_CREATE)
+            .await;
+
+        // Final residual — whatever accumulated since the loop above's last
+        // drain. Bounded by construction (the loop only exits on empty or cap).
+        let final_dirty = self.index_manager.drain_dirty_set(name_interned);
+        if !final_dirty.is_empty() {
+            self.apply_catchup_for_ids(name_interned, &final_dirty, pin)
+                .await?;
+        }
+
+        // Flip Building -> Ready + persist — mirror index_manager.rs:1645-1673
+        // (create_index_from_stream's Phase 3) EXACTLY: flip in-memory first,
+        // then save_index_info(), matching the existing publish-then-persist
+        // ordering invariant (F-72/#899) documented there.
+        self.index_manager
+            .flip_to_ready(name_interned)
+            .await
+            .map_err(|e| {
+                shamir_storage::error::DbError::Internal(format!(
+                    "CREATE INDEX '{name_interned}': catch-up completed and the \
+                     index was flipped to Ready in memory, but the final durable \
+                     persist of the Ready state (Phase D) failed: {e}. The index is \
+                     queryable in THIS process but durably Building on disk — a \
+                     restart will reload it as Building (planner-invisible). Call \
+                     TableManager::verify() to confirm state, or \
+                     TableManager::repair() to rebuild it."
+                ))
+            })?;
+
+        self.index_manager.clear_build_in_flight(name_interned);
+
+        drop(guard); // release the pin — Phase C/D's last use of get_at(pin) was above.
+                     // _barrier / _uwl_guard drop via RAII at function end.
+
+        Ok(())
+    }
+
+    /// Shared by Phase C's loop and Phase D's final residual: batched
+    /// pin-vs-current read for `ids`, then one `apply_catchup_batch` call.
+    #[allow(dead_code)]
+    async fn apply_catchup_for_ids(
+        &self,
+        name_interned: u64,
+        ids: &[shamir_types::types::record_id::RecordId],
+        pin: u64,
+    ) -> DbResult<()> {
+        let mvcc = self.mvcc_store().ok_or_else(|| {
+            shamir_storage::error::DbError::Internal(
+                "apply_catchup_for_ids: mvcc_store unavailable mid-catchup".to_string(),
+            )
+        })?;
+
+        let keys: Vec<bytes::Bytes> = ids.iter().map(|id| id.to_bytes()).collect();
+        let at_pin = mvcc.get_at_many(&keys, pin).await?;
+        let at_now = self.get_many(ids).await?; // TableManager::get_many, already
+                                                // decodes to InnerValue (table_manager_crud.rs:607)
+
+        let mut deltas = Vec::with_capacity(ids.len());
+        for i in 0..ids.len() {
+            let old_value = at_pin[i]
+                .as_ref()
+                .map(InnerValue::from_bytes)
+                .transpose()
+                .map_err(|e| {
+                    shamir_storage::error::DbError::Internal(format!(
+                        "Phase C: failed to decode pin-time value: {e}"
+                    ))
+                })?;
+            deltas.push((ids[i], old_value, at_now[i].clone()));
+        }
+
+        self.index_manager
+            .apply_catchup_batch(name_interned, deltas)
+            .await
     }
 }
 

@@ -103,7 +103,7 @@ async fn p1087_phase_b_a_correctness_no_concurrency() {
         .phase_b_a_backfill(index_def.clone(), 1000)
         .await
         .expect("phase_b_a_backfill should succeed");
-    assert!(result, "online build should succeed");
+    let _result = result.expect("online build should succeed");
 
     // Assert index is in Building state (NOT flipped to Ready).
     let def = tbl
@@ -168,7 +168,7 @@ async fn p1087_phase_b_a_concurrent_write_captured_in_dirty_set() {
         .await
         .expect("backfill task should not panic")
         .expect("phase_b_a_backfill should succeed");
-    assert!(result, "online build should succeed");
+    let _result = result; // Keep result alive (guard/pin), test doesn't need it.
 
     // Drain the dirty-set and verify the concurrent RID is there.
     let dirty_set = tbl.index_manager_ref().drain_dirty_set(name_interned);
@@ -203,8 +203,8 @@ async fn p1087_phase_b_a_fallback_when_changefeed_absent() {
         .await
         .expect("phase_b_a_backfill should not error");
     assert!(
-        !result,
-        "should return false (unavailable) for table without changefeed"
+        result.is_none(),
+        "should return None (unavailable) for table without changefeed"
     );
 
     // Assert index is NOT registered.

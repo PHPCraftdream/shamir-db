@@ -1652,15 +1652,10 @@ impl IndexManager {
         // planner in THIS still-live process is the only place `Ready` is
         // visible without yet being durable — acceptable because the
         // postings backing that Ready view already exist).
-        if let Some(def) = self.indexes.get_index(name_interned) {
-            let mut ready_def = def;
-            ready_def.state = crate::state::IndexState::Ready;
-            self.indexes.add_index(ready_def);
-        }
         // P1-2 (#967): if this Phase 3 persist fails, the index is Ready
         // in THIS process's memory but durably Building on disk — enrich
         // the error so the caller knows the state split and how to resolve.
-        self.save_index_info().await.map_err(|e| {
+        self.flip_to_ready(name_interned).await.map_err(|e| {
             shamir_storage::error::DbError::Internal(format!(
                 "CREATE INDEX '{name_interned}': the backfill completed and the \
                  index was flipped to Ready in memory, but the final durable \
@@ -1854,14 +1849,9 @@ impl IndexManager {
 
         // ── Phase 3: flip Building → Ready, persist BEFORE returning ────────
         // (Identical to `create_index_from_records` — see that method's doc.)
-        if let Some(def) = self.indexes.get_index(name_interned) {
-            let mut ready_def = def;
-            ready_def.state = crate::state::IndexState::Ready;
-            self.indexes.add_index(ready_def);
-        }
         // P1-2 (#967): Phase 3 persist — same enrichment as
         // `create_index_from_records` (see that method's matching comment).
-        self.save_index_info().await.map_err(|e| {
+        self.flip_to_ready(name_interned).await.map_err(|e| {
             shamir_storage::error::DbError::Internal(format!(
                 "CREATE INDEX '{name_interned}': the backfill completed and the \
                  index was flipped to Ready in memory, but the final durable \
@@ -1882,6 +1872,24 @@ impl IndexManager {
         Ok(())
     }
 
+    /// #1088: Flip an index from Building to Ready and persist the change.
+    ///
+    /// This performs the same flip sequence as Phase 3 of
+    /// `create_index_from_records` and `create_index_from_stream`:
+    /// - Flips the definition in-memory from Building to Ready
+    /// - Persists the metadata to `info_store`
+    ///
+    /// This method is used by Phase D of the online build path.
+    pub async fn flip_to_ready(&self, name_interned: u64) -> DbResult<()> {
+        // Flip in-memory first, then persist (F-72 ordering).
+        if let Some(def) = self.indexes.get_index(name_interned) {
+            let mut ready_def = def;
+            ready_def.state = crate::state::IndexState::Ready;
+            self.indexes.add_index(ready_def);
+        }
+        self.save_index_info().await
+    }
+
     /// #1087: Register an index at `Building` state (Phase 1 of online CREATE INDEX).
     ///
     /// This performs the same registration sequence as Phase 1 of
@@ -1900,6 +1908,67 @@ impl IndexManager {
         self.bump_generation();
         self.has_indexes.store(true, Ordering::Release);
         self.save_index_info().await?;
+        Ok(())
+    }
+
+    /// #1088: apply a batch of pin-vs-current posting diffs directly for a
+    /// specific Building+in-flight def, bypassing the in-flight dirty-set-
+    /// capture gate (`is_build_in_flight`). Called ONLY from Phase C/D's
+    /// catch-up loop (`TableManager::phase_c_d_catchup_and_publish`, a
+    /// different crate) — every other write path routes through
+    /// plan_record_created/updated/deleted, which correctly captures to the
+    /// dirty-set while a build is in-flight; calling those here would just
+    /// re-capture instead of writing.
+    ///
+    /// `deltas`: one `(record_id, value_at_pin, value_now)` triple per drained
+    /// dirty-set id. `value_at_pin`/`value_now` are `None` when the row did not
+    /// exist at that version (pin: Phase A's scan never saw it and wrote no
+    /// posting for it; now: the row is deleted).
+    pub async fn apply_catchup_batch(
+        &self,
+        name_interned: u64,
+        deltas: Vec<(RecordId, Option<InnerValue>, Option<InnerValue>)>,
+    ) -> DbResult<()> {
+        let Some(def) = self.indexes.get_index(name_interned) else {
+            return Ok(());
+        };
+
+        let mut removes: Vec<RecordKey> = Vec::new();
+        let mut sets: Vec<(RecordKey, Bytes)> = Vec::new();
+        let mut cache_keys: Vec<Bytes> = Vec::new();
+
+        for (record_id, old_value, new_value) in &deltas {
+            let old_key = old_value
+                .as_ref()
+                .and_then(|v| build_index_key_from_record(false, name_interned, v, &def.paths))
+                .map(|irk| irk.to_bytes());
+            let new_key = new_value
+                .as_ref()
+                .and_then(|v| build_index_key_from_record(false, name_interned, v, &def.paths))
+                .map(|irk| irk.to_bytes());
+
+            if old_key == new_key {
+                continue; // unchanged: both None, or same computed key
+            }
+            if let Some(ok) = &old_key {
+                removes.push(build_posting_key(ok, record_id).into());
+                cache_keys.push(ok.clone());
+            }
+            if let Some(nk) = &new_key {
+                sets.push((build_posting_key(nk, record_id).into(), Bytes::new()));
+                cache_keys.push(nk.clone());
+            }
+        }
+
+        if !removes.is_empty() {
+            self.info_store.remove_many(removes).await?;
+        }
+        if !sets.is_empty() {
+            self.info_store.set_many(sets).await?;
+        }
+        for k in cache_keys {
+            self.posting_cache.remove(&k);
+        }
         Ok(())
     }
 

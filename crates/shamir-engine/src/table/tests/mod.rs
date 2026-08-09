@@ -55,6 +55,7 @@ pub mod p1051_op_id_uniqueness_tests;
 pub mod p1057_snapshot_guard_tests;
 pub mod p1063_multi_fts_index_stats_tests;
 pub mod p1087_phase_b_a_tests;
+pub mod p1088_phase_c_d_tests;
 pub mod p967_ddl_structured_error_tests;
 pub mod p997_hash_rename_durability_tests;
 pub mod persistence_tests;
