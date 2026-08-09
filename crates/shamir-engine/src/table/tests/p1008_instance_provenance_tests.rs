@@ -498,7 +498,7 @@ async fn sorted_rename_between_stage_and_commit_no_orphan_lands_under_new_name()
 
     // RENAME between stage and commit — Part 1 (generation bump) + Part 2
     // (instance_epoch bump + reconcile retraction) both engage here.
-    tbl.rename_index("idx_old", "idx_new").await.unwrap();
+    tbl.rename_index("idx_old", "idx_new", None).await.unwrap();
     let new_id = key_id(&tbl, "idx_new").await;
 
     repo.commit_tx(tx).await.expect("commit must succeed");
@@ -568,7 +568,7 @@ async fn multiple_transitions_before_commit_resolve_to_final_instance() {
     // RENAME idx1 -> idx2 (still on field a; regular-family rename is
     // create-new+drop-old under the hood, which already mints a fresh
     // instance via `create_index`).
-    tbl.rename_index("idx1", "idx2").await.unwrap();
+    tbl.rename_index("idx1", "idx2", None).await.unwrap();
 
     // DROP idx2.
     let idx2 = key_id(&tbl, "idx2").await;

@@ -674,6 +674,32 @@ impl IndexManager {
         }
     }
 
+    /// #1048: standalone version of `load_dropping_set` for use by TableManager
+    /// BEFORE IndexManager::new clears the tombstones. This allows TableManager
+    /// to write SucceededViaCrashRecovery status for recovered hash DROP operations.
+    /// Returns an empty `Vec` if the key is absent or contains an empty vec.
+    pub async fn load_dropping_set_standalone(
+        is_unique: bool,
+        info_store: &Arc<dyn Store>,
+    ) -> DbResult<Vec<u64>> {
+        let key_str = if is_unique { "uidx_drop" } else { "idx_drop" };
+        let key = RecordId::system(key_str).to_bytes();
+        match info_store.get(key.into()).await {
+            Ok(bytes) => {
+                if bytes.is_empty() {
+                    return Ok(Vec::new());
+                }
+                bincode::deserialize::<Vec<u64>>(&bytes).map_err(|e| {
+                    shamir_storage::error::DbError::Codec(format!(
+                        "system:{key_str} decode failed: {e}"
+                    ))
+                })
+            }
+            Err(shamir_storage::error::DbError::NotFound(_)) => Ok(Vec::new()),
+            Err(e) => Err(e),
+        }
+    }
+
     /// P0-3 (#959): add `name_interned` to the in-memory dropping set, then
     /// persist the updated set durably. MUST be called BEFORE the sweep in
     /// `drop_index` / `drop_unique_index` so a crash at any subsequent point
@@ -1828,6 +1854,10 @@ impl IndexManager {
         // path can re-run it idempotently.
         // P1-2 (#967): a durable tombstone is already persisted — if this
         // sweep fails, enrich the error with the partial-state context.
+        // NOTE: Cannot write DdlOpState::Failed here because this layer
+        // (IndexManager) does not have op_id in scope. The enriched error
+        // message is the only signal to the caller (TableManager::rename_index
+        // already writes Failed status for rename-specific failures).
         self.sweep_index_postings(false, name_interned)
             .await
             .map_err(|e| {
@@ -1864,6 +1894,8 @@ impl IndexManager {
         // Persist the reduced IndexInfo (definition removed).
         // P1-2 (#967): the tombstone is still in place — if this persist
         // fails, recovery will see the tombstone and finish the drop.
+        // NOTE: Cannot write DdlOpState::Failed here because this layer
+        // (IndexManager) does not have op_id in scope.
         if was_removed {
             self.save_index_info().await.map_err(|e| {
                 shamir_storage::error::DbError::Internal(format!(
@@ -1886,6 +1918,8 @@ impl IndexManager {
         // from IndexInfo — it just clears the tombstone (a no-op sweep).
         // P1-2 (#967): if this fails, the tombstone remains — recovery
         // will just clear it (a no-op on the already-finished drop).
+        // NOTE: Cannot write DdlOpState::Failed here because this layer
+        // (IndexManager) does not have op_id in scope.
         self.clear_from_dropping(false, name_interned)
             .await
             .map_err(|e| {

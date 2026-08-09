@@ -105,7 +105,7 @@ async fn rename_index_refuses_pre_existing_cross_family_collision() {
     let table = db.get_table("main", "items").await.unwrap();
 
     let err = table
-        .rename_index("shared_name", "renamed")
+        .rename_index("shared_name", "renamed", None)
         .await
         .expect_err("RENAME INDEX must refuse when the source name collides across families");
     let msg = err.to_string();

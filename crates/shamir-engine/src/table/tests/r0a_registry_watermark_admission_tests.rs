@@ -311,7 +311,7 @@ async fn rename_index_sorted_branch_acquires_write_barrier() {
 
     let tbl_rename = tbl.clone();
     let rename_task =
-        tokio::spawn(async move { tbl_rename.rename_index("by_age", "by_age_new").await });
+        tokio::spawn(async move { tbl_rename.rename_index("by_age", "by_age_new", None).await });
 
     tokio::time::sleep(Duration::from_millis(80)).await;
     assert!(
@@ -353,7 +353,7 @@ async fn rename_index_index2_branch_acquires_write_barrier() {
     let tbl_rename = tbl.clone();
     let rename_task = tokio::spawn(async move {
         tbl_rename
-            .rename_index("lower_name", "lower_name_new")
+            .rename_index("lower_name", "lower_name_new", None)
             .await
     });
 

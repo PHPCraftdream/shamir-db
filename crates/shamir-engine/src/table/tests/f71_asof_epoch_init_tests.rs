@@ -537,7 +537,7 @@ async fn rename_index_then_mutation_declines_seek_for_pre_rename_pin() {
     let pinned = gate.last_committed();
 
     // RENAME the index.
-    tbl.rename_index("score_idx", "score_idx_renamed")
+    tbl.rename_index("score_idx", "score_idx_renamed", None)
         .await
         .unwrap();
 
@@ -590,7 +590,7 @@ async fn rename_index_alone_seek_matches_baseline_for_pre_rename_pin() {
     }
     let pinned = gate.last_committed();
 
-    tbl.rename_index("score_idx", "score_idx_renamed")
+    tbl.rename_index("score_idx", "score_idx_renamed", None)
         .await
         .unwrap();
 

@@ -992,6 +992,8 @@ impl SortedIndexManager {
         // path can re-run it idempotently.
         // P1-2 (#967): a durable tombstone is already persisted — enrich
         // the error if this sweep fails.
+        // NOTE: Cannot write DdlOpState::Failed here because this layer
+        // (SortedIndexManager) does not have op_id in scope.
         self.sweep_sorted_postings(name_interned)
             .await
             .map_err(|e| {
@@ -1025,6 +1027,8 @@ impl SortedIndexManager {
         // Persist the reduced defs (definition removed).
         // P1-2 (#967): the tombstone is still in place — if this persist
         // fails, recovery will see the tombstone and finish the drop.
+        // NOTE: Cannot write DdlOpState::Failed here because this layer
+        // (SortedIndexManager) does not have op_id in scope.
         self.persist_defs().await.map_err(|e| {
             shamir_storage::error::DbError::Internal(format!(
                 "DROP SORTED INDEX '{name_interned}': a durable drop tombstone \
@@ -1041,6 +1045,8 @@ impl SortedIndexManager {
         // rationale.
         // P1-2 (#967): if this fails, the tombstone remains — recovery
         // will just clear it (a no-op on the already-finished drop).
+        // NOTE: Cannot write DdlOpState::Failed here because this layer
+        // (SortedIndexManager) does not have op_id in scope.
         self.clear_from_dropping_sorted(name_interned)
             .await
             .map_err(|e| {
@@ -1437,6 +1443,8 @@ impl SortedIndexManager {
         // in place — recovery will reconcile on restart (it checks which id the
         // definition is actually under before deciding to rename vs. just rekey).
         // P1-2 (#967): enrich the error with partial-state context.
+        // NOTE: Cannot write DdlOpState::Failed here because this layer
+        // (SortedIndexManager) does not have op_id in scope.
         self.rename_definition(old_id, new_id).await.map_err(|e| {
             shamir_storage::error::DbError::Internal(format!(
                 "RENAME SORTED INDEX ({old_id} → {new_id}): a durable rename \
@@ -1459,6 +1467,8 @@ impl SortedIndexManager {
         // P1-2 (#967): enrich — the definition swap already succeeded, so
         // the rename is partially done (definition under new_id, postings
         // still under old_id).
+        // NOTE: Cannot write DdlOpState::Failed here because this layer
+        // (SortedIndexManager) does not have op_id in scope.
         self.rekey_postings(old_id, new_id).await.map_err(|e| {
             shamir_storage::error::DbError::Internal(format!(
                 "RENAME SORTED INDEX ({old_id} → {new_id}): the definition was \
@@ -1472,6 +1482,8 @@ impl SortedIndexManager {
         // 4. Clear the tombstone now that the rekey is durable.
         // P1-2 (#967): if this fails, the tombstone remains — recovery
         // will just clear it (the rename is fully done).
+        // NOTE: Cannot write DdlOpState::Failed here because this layer
+        // (SortedIndexManager) does not have op_id in scope.
         self.clear_from_renaming_sorted(old_id).await.map_err(|e| {
             shamir_storage::error::DbError::Internal(format!(
                 "RENAME SORTED INDEX ({old_id} → {new_id}): the rename is fully \

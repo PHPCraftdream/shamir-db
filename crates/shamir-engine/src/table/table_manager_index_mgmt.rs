@@ -1086,6 +1086,90 @@ impl TableManager {
         Ok(true)
     }
 
+    // #1048: write SucceededViaCrashRecovery status for recovered hash DROP operations.
+    // This is a public helper called from TableManager::create.
+    pub async fn write_hash_drop_recovery_status(
+        dropping_regular: &[u64],
+        dropping_unique: &[u64],
+        interner: &super::interner_manager::InternerManager,
+        info_store: Arc<dyn shamir_storage::types::Store>,
+    ) -> Result<(), shamir_storage::error::DbError> {
+        use shamir_query_types::read::{DdlOpKind, DdlOpState, DdlOpStatus};
+        use shamir_types::types::record_id::RecordId;
+
+        // Resolve name_interned back to string names using the interner
+        // and write SucceededViaCrashRecovery for each recovered operation.
+        let interner_guard = interner.get().await.map_err(|e| {
+            shamir_storage::error::DbError::Internal(format!(
+                "#1048: failed to get interner for hash DROP recovery status: {e}"
+            ))
+        })?;
+
+        // Regular family
+        for &name_interned in dropping_regular {
+            if let Some(name) = interner_guard.with_str(
+                &shamir_types::core::interner::InternerKey::new(name_interned),
+                |s| s.to_string(),
+            ) {
+                let op_id = RecordId::system(&format!("ddl_drop_index_{}", name));
+                let status = DdlOpStatus {
+                    op_id,
+                    kind: DdlOpKind::DropHashIndex {
+                        index_name: name.clone(),
+                    },
+                    state: DdlOpState::SucceededViaCrashRecovery {
+                        completed_at_restart: std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap()
+                            .as_millis() as u64,
+                    },
+                };
+                if let Err(e) =
+                    crate::table::ddl_op_log::write_op_status(&info_store, &status).await
+                {
+                    log::error!(
+                        "#1048: failed to write SucceededViaCrashRecovery status for \
+                         recovered hash DROP (regular) '{}': {e}",
+                        name
+                    );
+                }
+            }
+        }
+
+        // Unique family
+        for &name_interned in dropping_unique {
+            if let Some(name) = interner_guard.with_str(
+                &shamir_types::core::interner::InternerKey::new(name_interned),
+                |s| s.to_string(),
+            ) {
+                let op_id = RecordId::system(&format!("ddl_drop_index_{}", name));
+                let status = DdlOpStatus {
+                    op_id,
+                    kind: DdlOpKind::DropUniqueHashIndex {
+                        index_name: name.clone(),
+                    },
+                    state: DdlOpState::SucceededViaCrashRecovery {
+                        completed_at_restart: std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap()
+                            .as_millis() as u64,
+                    },
+                };
+                if let Err(e) =
+                    crate::table::ddl_op_log::write_op_status(&info_store, &status).await
+                {
+                    log::error!(
+                        "#1048: failed to write SucceededViaCrashRecovery status for \
+                         recovered hash DROP (unique) '{}': {e}",
+                        name
+                    );
+                }
+            }
+        }
+
+        Ok(())
+    }
+
     /// P0-3b (#988): open-time recovery for index2 DROP INDEX operations
     /// interrupted by a crash. Called from `TableManager::create` AFTER the
     /// F-50 Step 3b self-heal block (which loaded persisted metadata and
@@ -1156,6 +1240,68 @@ impl TableManager {
             "P0-3b (#988): recovery complete — {} index2 DROP(s) finalized",
             dropping.len()
         );
+
+        Ok(())
+    }
+
+    // #1048: write SucceededViaCrashRecovery status for recovered index2 DROP operations.
+    // This is a public helper called from TableManager::create.
+    pub async fn write_index2_drop_recovery_status(
+        dropping_ids: &[u32],
+        descriptors: &[crate::index2::descriptor::IndexDescriptor],
+        info_store: Arc<dyn shamir_storage::types::Store>,
+    ) -> Result<(), shamir_storage::error::DbError> {
+        use shamir_query_types::read::{DdlOpKind, DdlOpState, DdlOpStatus};
+        use shamir_types::types::record_id::RecordId;
+
+        // Resolve each dropped id to its name using the persisted descriptors
+        // (which were loaded before recovery removed the backends from the registry).
+        use shamir_collections::TFxMap;
+        let id_to_name: TFxMap<u32, String> = descriptors
+            .iter()
+            .map(|desc| (desc.id, desc.name.clone()))
+            .collect();
+
+        for &id in dropping_ids {
+            if let Some(name) = id_to_name.get(&id) {
+                // Deterministic op_id regeneration: use the same formula as handle_drop_index
+                // (which handles all index families after #1025's unification).
+                let op_id = RecordId::system(&format!("ddl_drop_index_{}", name));
+                let status = DdlOpStatus {
+                    op_id,
+                    kind: DdlOpKind::DropIndex2 {
+                        index_name: name.clone(),
+                    },
+                    state: DdlOpState::SucceededViaCrashRecovery {
+                        completed_at_restart: std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap()
+                            .as_millis() as u64,
+                    },
+                };
+                if let Err(e) =
+                    crate::table::ddl_op_log::write_op_status(&info_store, &status).await
+                {
+                    log::error!(
+                        "#1048: failed to write SucceededViaCrashRecovery status for \
+                         recovered index2 DROP '{}' (id={}): {e}",
+                        name,
+                        id
+                    );
+                }
+            } else {
+                // Name not found in persisted descriptors — this can happen if the crash
+                // occurred before the descriptor was persisted (during CREATE, not DROP).
+                // Log a warning but don't fail — the drop will still be recovered correctly,
+                // just without the op-status entry (which is acceptable for this edge case).
+                log::warn!(
+                    "#1048: recovered index2 DROP (id={}) has no matching descriptor in \
+                     persisted metadata — cannot write op-status entry. This is acceptable \
+                     for the crash-before-persist edge case.",
+                    id
+                );
+            }
+        }
 
         Ok(())
     }
@@ -1305,6 +1451,43 @@ impl TableManager {
         // entry's tombstone if recovery then failed or crashed again).
         if !regular_renames.is_empty() {
             self.index_manager.clear_all_renaming(false).await?;
+
+            // #1048: write SucceededViaCrashRecovery for each recovered regular rename
+            // that has an op_id. Skip silently for None (backward compat).
+            use shamir_query_types::read::{DdlOpKind, DdlOpState, DdlOpStatus};
+            use shamir_types::types::record_id::RecordId;
+            use std::str::FromStr;
+            for entry in &regular_renames {
+                if let Some(ref op_id_str) = entry.op_id {
+                    if let Ok(op_id) = RecordId::from_str(op_id_str) {
+                        let status = DdlOpStatus {
+                            op_id,
+                            kind: DdlOpKind::RenameHashIndex {
+                                old_name: entry.old_name.clone(),
+                                new_name: entry.new_name.clone(),
+                            },
+                            state: DdlOpState::SucceededViaCrashRecovery {
+                                completed_at_restart: std::time::SystemTime::now()
+                                    .duration_since(std::time::UNIX_EPOCH)
+                                    .unwrap()
+                                    .as_millis()
+                                    as u64,
+                            },
+                        };
+                        if let Err(e) =
+                            crate::table::ddl_op_log::write_op_status(&self.info_store, &status)
+                                .await
+                        {
+                            log::error!(
+                                "#1048: failed to write SucceededViaCrashRecovery status for \
+                                 recovered regular rename '{} → '{}': {e}",
+                                entry.old_name,
+                                entry.new_name
+                            );
+                        }
+                    }
+                }
+            }
         }
 
         // ── Unique family ───────────────────────────────────────────────
@@ -1360,6 +1543,43 @@ impl TableManager {
         // family above.
         if !unique_renames.is_empty() {
             self.index_manager.clear_all_renaming(true).await?;
+
+            // #1048: write SucceededViaCrashRecovery for each recovered unique rename
+            // that has an op_id. Skip silently for None (backward compat).
+            use shamir_query_types::read::{DdlOpKind, DdlOpState, DdlOpStatus};
+            use shamir_types::types::record_id::RecordId;
+            use std::str::FromStr;
+            for entry in &unique_renames {
+                if let Some(ref op_id_str) = entry.op_id {
+                    if let Ok(op_id) = RecordId::from_str(op_id_str) {
+                        let status = DdlOpStatus {
+                            op_id,
+                            kind: DdlOpKind::RenameUniqueHashIndex {
+                                old_name: entry.old_name.clone(),
+                                new_name: entry.new_name.clone(),
+                            },
+                            state: DdlOpState::SucceededViaCrashRecovery {
+                                completed_at_restart: std::time::SystemTime::now()
+                                    .duration_since(std::time::UNIX_EPOCH)
+                                    .unwrap()
+                                    .as_millis()
+                                    as u64,
+                            },
+                        };
+                        if let Err(e) =
+                            crate::table::ddl_op_log::write_op_status(&self.info_store, &status)
+                                .await
+                        {
+                            log::error!(
+                                "#1048: failed to write SucceededViaCrashRecovery status for \
+                                 recovered unique rename '{} → '{}': {e}",
+                                entry.old_name,
+                                entry.new_name
+                            );
+                        }
+                    }
+                }
+            }
         }
 
         log::info!(
@@ -1568,9 +1788,21 @@ impl TableManager {
     ///     authoritative name slots in the registry's `by_id` entry are updated
     ///     (P0-5a / #961), then the persisted metadata is re-saved.
     ///
-    /// Returns `Err` when the source does not exist or the destination name is
-    /// already occupied by any index on this table.
-    pub async fn rename_index(&self, old_name: &str, new_name: &str) -> DbResult<()> {
+    /// RENAME INDEX (hash regular + unique, sorted, index2) by name.
+    ///
+    /// `old_name` must exist; `new_name` must be free. Returns `Err` when the
+    /// source does not exist or the destination name is already occupied by any
+    /// index on this table.
+    ///
+    /// `op_id` is the operation ID minted at dispatch time (#1015); threaded
+    /// through to tombstones so recovery can write `SucceededViaCrashRecovery`
+    /// status under the same ID.
+    pub async fn rename_index(
+        &self,
+        old_name: &str,
+        new_name: &str,
+        op_id: Option<shamir_types::types::record_id::RecordId>,
+    ) -> DbResult<()> {
         let old_id = self.intern_string(old_name).await?;
         let new_id = self.intern_string(new_name).await?;
 
@@ -1673,7 +1905,7 @@ impl TableManager {
                         old_name: old_name.to_string(),
                         new_name: new_name.to_string(),
                         paths: paths.clone(),
-                        op_id: None,
+                        op_id: op_id.as_ref().map(|id| id.to_string()),
                     },
                 )
                 .await?;
@@ -1688,15 +1920,41 @@ impl TableManager {
 
             // Then drop the old index (removes old-id postings only).
             // P1-2 (#967): if this fails after create_index succeeded, both
-            // old and new indexes exist — enrich the error with context.
-            self.index_manager.drop_index(old_id).await.map_err(|e| {
-                shamir_storage::error::DbError::Internal(format!(
-                    "RENAME INDEX '{old_name}' → '{new_name}': the new index \
-                     '{new_name}' was created successfully, but dropping the old \
-                     index '{old_name}' failed: {e}. Both indexes now exist — \
-                     call TableManager::verify() to confirm state."
-                ))
-            })?;
+            // old and new indexes exist — enrich the error with context AND
+            // write a structured `Failed { detail }` to the op-status log.
+            match self.index_manager.drop_index(old_id).await {
+                Ok(_) => {}
+                Err(e) => {
+                    let detail = format!(
+                        "RENAME INDEX '{old_name}' → '{new_name}': the new index \
+                         '{new_name}' was created successfully, but dropping the old \
+                         index '{old_name}' failed: {e}. Both indexes now exist — \
+                         call TableManager::verify() to confirm state."
+                    );
+                    // Write structured failure status if op_id is available.
+                    if let Some(ref id) = op_id {
+                        let status = shamir_query_types::read::DdlOpStatus {
+                            op_id: *id,
+                            kind: shamir_query_types::read::DdlOpKind::RenameHashIndex {
+                                old_name: old_name.to_string(),
+                                new_name: new_name.to_string(),
+                            },
+                            state: shamir_query_types::read::DdlOpState::Failed {
+                                detail: detail.clone(),
+                            },
+                        };
+                        if let Err(write_err) =
+                            crate::table::ddl_op_log::write_op_status(&self.info_store, &status)
+                                .await
+                        {
+                            log::error!(
+                                "#967: failed to write Failed status for RENAME '{old_name}' → '{new_name}': {write_err}",
+                            );
+                        }
+                    }
+                    return Err(shamir_storage::error::DbError::Internal(detail));
+                }
+            }
 
             // #997: clear the rename tombstone now that the rename is durable.
             // If this fails, the tombstone remains — recovery will reconcile.
@@ -1749,7 +2007,7 @@ impl TableManager {
                         old_name: old_name.to_string(),
                         new_name: new_name.to_string(),
                         paths: paths.clone(),
-                        op_id: None,
+                        op_id: op_id.as_ref().map(|id| id.to_string()),
                     },
                 )
                 .await?;
@@ -1786,18 +2044,43 @@ impl TableManager {
             // above, and `create_unique_index` would re-acquire the lock →
             // deadlock (`tokio::sync::Mutex` is NOT reentrant).
             // P1-2 (#967): if this fails after drop_unique_index succeeded,
-            // the old index is gone but the new one doesn't exist.
-            self.create_unique_index_body(new_name, &path_refs)
-                .await
-                .map_err(|e| {
-                    shamir_storage::error::DbError::Internal(format!(
+            // the old index is gone but the new one doesn't exist — enrich the
+            // error with context AND write a structured `Failed { detail }`
+            // to the op-status log.
+            match self.create_unique_index_body(new_name, &path_refs).await {
+                Ok(_) => {}
+                Err(e) => {
+                    let detail = format!(
                         "RENAME INDEX '{old_name}' → '{new_name}': the old unique \
                          index '{old_name}' was dropped, but creating the new \
                          unique index '{new_name}' failed: {e}. The old index is \
                          gone — call TableManager::verify() to confirm state, or \
                          re-create the index manually."
-                    ))
-                })?;
+                    );
+                    // Write structured failure status if op_id is available.
+                    if let Some(ref id) = op_id {
+                        let status = shamir_query_types::read::DdlOpStatus {
+                            op_id: *id,
+                            kind: shamir_query_types::read::DdlOpKind::RenameUniqueHashIndex {
+                                old_name: old_name.to_string(),
+                                new_name: new_name.to_string(),
+                            },
+                            state: shamir_query_types::read::DdlOpState::Failed {
+                                detail: detail.clone(),
+                            },
+                        };
+                        if let Err(write_err) =
+                            crate::table::ddl_op_log::write_op_status(&self.info_store, &status)
+                                .await
+                        {
+                            log::error!(
+                                "#967: failed to write Failed status for unique RENAME '{old_name}' → '{new_name}': {write_err}",
+                            );
+                        }
+                    }
+                    return Err(shamir_storage::error::DbError::Internal(detail));
+                }
+            }
 
             // #997: clear the rename tombstone now that the rename is durable.
             // The barrier + lock are still held here (they release when the

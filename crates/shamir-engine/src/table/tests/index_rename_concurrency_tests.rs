@@ -66,7 +66,9 @@ async fn rename_regular_index_basic() {
         .unwrap();
 
     // Rename it.
-    tbl.rename_index("by_email", "by_email_new").await.unwrap();
+    tbl.rename_index("by_email", "by_email_new", None)
+        .await
+        .unwrap();
 
     // Old name is gone, new name exists.
     assert!(!tbl.index_exists("by_email").await);
@@ -104,7 +106,7 @@ async fn rename_unique_index_basic() {
         .unwrap();
 
     // Rename it.
-    tbl.rename_index("uniq_email", "uniq_email_new")
+    tbl.rename_index("uniq_email", "uniq_email_new", None)
         .await
         .unwrap();
 
@@ -216,7 +218,7 @@ async fn unique_rename_preserves_unique_constraint() {
 
     // Rename — the unique_write_lock (held by the fix) ensures no
     // duplicate can slip in during the rename.
-    tbl.rename_index("uniq_email", "uniq_email_renamed")
+    tbl.rename_index("uniq_email", "uniq_email_renamed", None)
         .await
         .unwrap();
 
@@ -269,7 +271,7 @@ async fn regular_rename_concurrent_write_not_lost() {
 
     // Rename — with the fix (create-new-first), the new index is registered
     // before the old is dropped, so concurrent writes are captured.
-    tbl.rename_index("by_status", "by_status_new")
+    tbl.rename_index("by_status", "by_status_new", None)
         .await
         .unwrap();
 

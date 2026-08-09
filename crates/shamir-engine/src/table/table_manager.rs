@@ -395,6 +395,24 @@ impl TableManager {
             .register(Arc::new(interner.clone()) as Arc<dyn super::persistable::Persistable>);
         persist_registry.register(Arc::clone(&counter) as Arc<dyn super::persistable::Persistable>);
 
+        // #1048: read the hash DROP tombstones BEFORE IndexManager::new clears them,
+        // so we can write SucceededViaCrashRecovery status using the interner to resolve
+        // name_interned back to string names.
+        let dropping_regular_before =
+            shamir_index::base_index::index_manager::IndexManager::load_dropping_set_standalone(
+                false,
+                &info_store,
+            )
+            .await
+            .unwrap_or_default();
+        let dropping_unique_before =
+            shamir_index::base_index::index_manager::IndexManager::load_dropping_set_standalone(
+                true,
+                &info_store,
+            )
+            .await
+            .unwrap_or_default();
+
         let index_manager =
             IndexManager::new(Arc::clone(&data_store), Arc::clone(&info_store)).await?;
         // F-69 (#896): clone the SAME packed word `index_manager` uses for its
@@ -403,6 +421,24 @@ impl TableManager {
         let write_barrier_flags = index_manager.write_barrier_flags();
         let sorted_indexes = SortedIndexManager::new(Arc::clone(&info_store)).await?;
         let table = Table::new(data_store);
+
+        // #1048: write SucceededViaCrashRecovery status for any hash DROP
+        // operations that were recovered. Use the interner to resolve name_interned
+        // back to string names and regenerate the deterministic op_id.
+        if !dropping_regular_before.is_empty() || !dropping_unique_before.is_empty() {
+            TableManager::write_hash_drop_recovery_status(
+                &dropping_regular_before,
+                &dropping_unique_before,
+                &interner,
+                Arc::clone(&info_store),
+            ).await
+            .map_err(|e| {
+                log::error!("#1048: failed to write SucceededViaCrashRecovery status for recovered hash DROP operations: {e}");
+                shamir_storage::error::DbError::Internal(format!(
+                    "#1048: failed to write SucceededViaCrashRecovery status for recovered hash DROP operations: {e}"
+                ))
+            })?;
+        }
 
         // Pre-load validator bindings from the info-twin (S2).
         let (validator_bindings, initial_bindings_len) =
@@ -493,9 +529,13 @@ impl TableManager {
         // (and pointlessly) attempt to restore a backend already known to
         // be broken.
         let mut failed_recovery_ids: Vec<u32> = Vec::new();
+        // #1048: capture persisted index2 descriptors before the block ends,
+        // so we can resolve dropped ids to names for op-status writing.
+        let persisted_index2_descriptors: Vec<crate::index2::descriptor::IndexDescriptor>;
         if let Some(persisted) =
             crate::index2::persistence::load_index2_metadata(&mgr.info_store).await?
         {
+            persisted_index2_descriptors = persisted.descriptors.clone();
             mgr.index2_registry.set_next_id(persisted.next_id);
             for desc in persisted.descriptors {
                 if matches!(desc.kind, crate::index2::kind::IndexKind::Btree { .. }) {
@@ -588,6 +628,8 @@ impl TableManager {
                 )
                 .await;
             }
+        } else {
+            persisted_index2_descriptors = Vec::new();
         }
 
         // P0-3b (#988): recover any index2 DROP INDEX operations interrupted
@@ -596,6 +638,33 @@ impl TableManager {
         // BEFORE the `restore_on_open` loop (so we don't waste time rebuilding
         // a backend that recovery is about to remove). Mirrors sorted's
         // `recover_in_progress_drops` (called from `SortedIndexManager::new`).
+        //
+        // #1048: read the dropping tombstone BEFORE recover_index2_drops clears it,
+        // so we can write SucceededViaCrashRecovery status using the persisted
+        // descriptors to resolve ids back to names.
+        let dropping_index2_before = crate::index2::persistence::load_dropping_index2(&info_store)
+            .await
+            .unwrap_or_default();
+        //
+        // #1048: write SucceededViaCrashRecovery status for recovered index2 DROP operations.
+        // Resolve ids to names using the persisted descriptors and regenerate the
+        // deterministic op_id. This is synchronous (no tokio::spawn) to avoid a race
+        // where a client could poll GetDdlOpStatus immediately after restart and see
+        // "Unknown" instead of "SucceededViaCrashRecovery".
+        if !dropping_index2_before.is_empty() {
+            TableManager::write_index2_drop_recovery_status(
+                &dropping_index2_before,
+                &persisted_index2_descriptors,
+                Arc::clone(&info_store),
+            )
+            .await
+            .map_err(|e| {
+                log::error!("#1048: failed to write SucceededViaCrashRecovery status for recovered index2 DROP operations: {e}");
+                shamir_storage::error::DbError::Internal(format!(
+                    "#1048: failed to write SucceededViaCrashRecovery status for recovered index2 DROP operations: {e}"
+                ))
+            })?;
+        }
         mgr.recover_index2_drops().await?;
 
         // #997: recover any RENAME INDEX operations on the base_index

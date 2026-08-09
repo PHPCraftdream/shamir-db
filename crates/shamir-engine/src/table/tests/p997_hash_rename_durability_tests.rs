@@ -459,7 +459,7 @@ async fn p997_unique_crash_after_create_before_clear() {
         .unwrap();
         // Use rename_index directly (which does the full sequence), then
         // re-seed the tombstone to simulate the crash-before-clear state.
-        mgr.rename_index("uniq_email", "uniq_email_new")
+        mgr.rename_index("uniq_email", "uniq_email_new", None)
             .await
             .unwrap();
         drop(mgr);
@@ -619,7 +619,7 @@ async fn p997_regular_live_rename_crash_at_mid_hook() {
     // old NOT yet dropped).
     let mgr_c = mgr.clone();
     tokio::select! {
-        _ = mgr_c.rename_index("by_email", "by_email_new") => {
+        _ = mgr_c.rename_index("by_email", "by_email_new", None) => {
             panic!("rename completed before mid-pause hook fired");
         }
         _ = hook.wait_until_parked() => {
@@ -688,7 +688,7 @@ async fn p997_unique_live_rename_crash_at_mid_hook() {
     // new NOT yet created — the SEVERE crash window).
     let mgr_c = mgr.clone();
     tokio::select! {
-        _ = mgr_c.rename_index("uniq_email", "uniq_email_new") => {
+        _ = mgr_c.rename_index("uniq_email", "uniq_email_new", None) => {
             panic!("rename completed before mid-pause hook fired");
         }
         _ = hook.wait_until_parked() => {
@@ -753,7 +753,9 @@ async fn p997_regular_rename_no_crash_regression() {
     mgr.create_index("by_email", &["email"]).await.unwrap();
 
     // Normal rename — no crash.
-    mgr.rename_index("by_email", "by_email_new").await.unwrap();
+    mgr.rename_index("by_email", "by_email_new", None)
+        .await
+        .unwrap();
 
     assert!(!mgr.index_exists("by_email").await);
     assert!(mgr.index_exists("by_email_new").await);
@@ -792,7 +794,7 @@ async fn p997_unique_rename_no_crash_regression() {
         .unwrap();
 
     // Normal rename — no crash.
-    mgr.rename_index("uniq_email", "uniq_email_new")
+    mgr.rename_index("uniq_email", "uniq_email_new", None)
         .await
         .unwrap();
 
@@ -943,5 +945,211 @@ async fn p1000_regular_recovery_interrupted_between_entries_preserves_sibling_to
     assert!(
         load_regular_rename_tombstone(&info_store).await.is_empty(),
         "tombstone list must be fully cleared once both entries are done"
+    );
+}
+
+// ============================================================================
+// #1048 (P1-2 sub-slice B): e2e crash-recovery test proving RFC §2.3's
+// worked example — op_id carried through rename → crash → recovery →
+// SucceededViaCrashRecovery status.
+//
+// This test reuses the existing `maybe_pause_rename_mid()` test seam to
+// simulate a crash mid-rename, then verifies that polling for the SAME op_id
+// returns `SucceededViaCrashRecovery` after recovery completes.
+// ============================================================================
+
+#[tokio::test]
+async fn p1048_e2e_unique_rename_severe_case_op_id_threading() {
+    let (data_store, info_store) = make_stores();
+
+    // Step 1: create a table with a unique index and data
+    {
+        let mgr = TableManager::create(
+            "people".into(),
+            Arc::clone(&data_store),
+            Arc::clone(&info_store),
+        )
+        .await
+        .unwrap();
+        let email_field = key_id(&mgr, "email").await;
+        mgr.insert(&record_with_str(email_field, "a@b.com"))
+            .await
+            .unwrap();
+        mgr.interner.persist().await.unwrap();
+        mgr.create_unique_index("uniq_email", &["email"])
+            .await
+            .unwrap();
+        drop(mgr);
+    }
+
+    // Step 2: mint a real op_id (simulating dispatch) and start a rename
+    // that will pause mid-flight
+    let op_id = RecordId::system("ddl_rename_index_uniq_email_to_uniq_email_new_test");
+    let pause_hook = Arc::new(BackfillPauseHook::new());
+
+    {
+        let mgr = TableManager::create(
+            "people".into(),
+            Arc::clone(&data_store),
+            Arc::clone(&info_store),
+        )
+        .await
+        .unwrap();
+
+        // Install the pause hook BEFORE starting the rename
+        mgr.index_manager_ref()
+            .set_rename_mid_pause_hook(Some(pause_hook.clone()));
+
+        // This will write the tombstone with op_id, then pause mid-rename
+        // (after drop_unique_index, before create_unique_index_body — the
+        // EXACT SEVERE crash window from RFC §2.3)
+        let rename_task = tokio::spawn(async move {
+            mgr.rename_index("uniq_email", "uniq_email_new", Some(op_id))
+                .await
+        });
+
+        // Wait for the pause hook to fire (rename is mid-flight)
+        pause_hook.wait_until_parked().await;
+
+        // Drop the rename_task and let mgr be dropped naturally to simulate a crash
+        drop(rename_task);
+    }
+
+    // Step 3: verify tombstone was written with op_id
+    let tombstone_list = load_unique_rename_tombstone(&info_store).await;
+    assert_eq!(tombstone_list.len(), 1, "must have one stranded tombstone");
+    let tombstone = &tombstone_list[0];
+    assert_eq!(tombstone.old_name, "uniq_email");
+    assert_eq!(tombstone.new_name, "uniq_email_new");
+    assert_eq!(
+        tombstone.op_id,
+        Some(op_id.to_string()),
+        "tombstone must carry the op_id minted at dispatch"
+    );
+
+    // Step 4: reopen (simulate server restart) — recovery will complete the rename
+    let mgr = TableManager::create("people".into(), data_store, Arc::clone(&info_store))
+        .await
+        .unwrap();
+
+    // Verify the rename completed: old is gone, new exists
+    assert!(
+        !mgr.unique_index_exists("uniq_email").await,
+        "old unique index must be gone after recovery"
+    );
+    assert!(
+        mgr.unique_index_exists("uniq_email_new").await,
+        "new unique index must exist after recovery"
+    );
+
+    // Verify uniqueness is still enforced
+    let email_field = key_id(&mgr, "email").await;
+    let dup = mgr.insert(&record_with_str(email_field, "a@b.com")).await;
+    assert!(
+        dup.is_err(),
+        "uniqueness must still be enforced after recovery"
+    );
+
+    // Step 5: poll for the op_id and verify we got SucceededViaCrashRecovery
+    use crate::table::ddl_op_log;
+    use shamir_query_types::read::{DdlOpState, DdlOpStatus};
+
+    let status: Option<DdlOpStatus> = ddl_op_log::read_op_status(&info_store, &op_id)
+        .await
+        .expect("read_op_status should not error");
+    assert!(
+        status.is_some(),
+        "op_id must be present in the op-status log after recovery"
+    );
+    let status = status.unwrap();
+    assert_eq!(
+        status.op_id, op_id,
+        "returned status must have the same op_id"
+    );
+
+    match status.state {
+        DdlOpState::SucceededViaCrashRecovery {
+            completed_at_restart,
+        } => {
+            // Success! The recovery wrote the correct status.
+            assert!(
+                completed_at_restart > 0,
+                "completed_at_restart must be a valid timestamp"
+            );
+        }
+        other => panic!(
+            "Expected SucceededViaCrashRecovery after crash recovery, got {:?}",
+            other
+        ),
+    }
+
+    // Tombstone must be cleared
+    assert!(
+        load_unique_rename_tombstone(&info_store).await.is_empty(),
+        "tombstone must be cleared after recovery"
+    );
+}
+
+// ============================================================================
+// #1048: backward-compatibility test — a tombstone with op_id: None (pre-#1048
+// data) recovers cleanly without attempting an op-status write or erroring.
+// ============================================================================
+
+#[tokio::test]
+async fn p1048_backward_compat_none_op_id_recovers_cleanly() {
+    let (data_store, info_store) = make_stores();
+
+    // Step 1: create a table with a regular index and data
+    {
+        let mgr = TableManager::create(
+            "people".into(),
+            Arc::clone(&data_store),
+            Arc::clone(&info_store),
+        )
+        .await
+        .unwrap();
+        let email_field = key_id(&mgr, "email").await;
+        mgr.insert(&record_with_str(email_field, "a@b.com"))
+            .await
+            .unwrap();
+        mgr.interner.persist().await.unwrap();
+        mgr.create_index("by_email", &["email"]).await.unwrap();
+        drop(mgr);
+    }
+
+    // Step 2: seed a tombstone with op_id: None (simulating pre-#1048 data)
+    let tombstone = HashRenameTombstone {
+        old_name: "by_email".to_string(),
+        new_name: "by_email_new".to_string(),
+        paths: vec!["email".to_string()],
+        op_id: None, // ← pre-#1048 tombstone (no op_id)
+    };
+    seed_regular_rename_tombstone(&info_store, &tombstone).await;
+
+    // Step 3: reopen — recovery must complete the rename without error
+    let mgr = TableManager::create("people".into(), data_store, Arc::clone(&info_store))
+        .await
+        .expect("recovery must succeed even with None op_id");
+
+    // Verify the rename completed
+    assert!(!mgr.index_exists("by_email").await);
+    assert!(mgr.index_exists("by_email_new").await);
+
+    // Tombstone must be cleared
+    assert!(
+        load_regular_rename_tombstone(&info_store).await.is_empty(),
+        "tombstone must be cleared after recovery"
+    );
+
+    // No op-status record should have been written (since op_id was None)
+    use crate::table::ddl_op_log;
+    use shamir_query_types::read::DdlOpStatus;
+    let dummy_op_id = RecordId::system("dummy");
+    let status: Option<DdlOpStatus> = ddl_op_log::read_op_status(&info_store, &dummy_op_id)
+        .await
+        .expect("read_op_status should not error");
+    assert!(
+        status.is_none(),
+        "no op-status record should exist for a None op_id tombstone"
     );
 }

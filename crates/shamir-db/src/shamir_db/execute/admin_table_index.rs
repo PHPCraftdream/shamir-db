@@ -820,16 +820,16 @@ impl ShamirAdminExecutor {
             .await
             .map_err(|e| err(e.to_string()))?;
 
-        table
-            .rename_index(&op.rename_index, &op.to)
-            .await
-            .map_err(|e| err_code("rename_index_failed", e.to_string()))?;
-
         // Mint an op_id for recoverable DDL ops (hash RENAME is in scope)
         let op_id = RecordId::system(&format!(
             "ddl_rename_index_{}_to_{}",
             op.rename_index, op.to
         ));
+
+        table
+            .rename_index(&op.rename_index, &op.to, Some(op_id))
+            .await
+            .map_err(|e| err_code("rename_index_failed", e.to_string()))?;
 
         // Write the Succeeded status to the DDL op log for polling.
         // Determine if this is a unique index by checking which rename succeeded.
