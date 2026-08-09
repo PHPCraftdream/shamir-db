@@ -22,6 +22,7 @@ use crate::base_index::index_keys::{
 use crate::base_index::index_record_key::IndexRecordKey;
 use crate::base_index::write_barrier_flags::{WriteBarrierFlags, UNIQUE_INDEX_EXISTS};
 use crate::write_ops::IndexWriteOp;
+use crate::IndexState;
 use bytes::Bytes;
 use dashmap::DashMap;
 use shamir_storage::error::DbResult;
@@ -32,7 +33,7 @@ use shamir_types::record_view::RecordRef;
 use shamir_types::types::common::THasher;
 use shamir_types::types::record_id::RecordId;
 use shamir_types::types::value::InnerValue;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -259,6 +260,63 @@ pub struct IndexManager {
     /// P0-3 (#959 / #1051): same as `dropping_regular`, for the unique family.
     pub(super) dropping_unique: Arc<Mutex<BTreeMap<u64, Option<String>>>>,
 
+    /// #1058: in-flight online build registry for the regular (hash) family.
+    /// Tracks which indexes are currently in Phase B/C/D (barrier-free,
+    /// dirty-set-capturing). Keyed by `name_interned`; presence indicates an
+    /// online build is in flight for that index.
+    ///
+    /// Uses `scc::HashMap` (lock-free, CAS-based, sharded) per this repo's
+    /// NORMATIVE concurrency invariants (CLAUDE.md pillar 5, "shared registry"
+    /// row). The `is_build_in_flight()` method is called from inside
+    /// `plan_record_created`/`plan_record_updated`/`plan_record_deleted`,
+    /// which are the shared planning methods every insert/update/delete funnels
+    /// through (per the write-path audit). This is a hot-path check, so
+    /// lock-free is required — using a blocking `std::sync::Mutex` here would
+    /// serialize all writes on any table with a `Building` index, violating
+    /// the repo's stated idiom.
+    ///
+    /// The brief (#1059) owns the lifecycle — registration at Phase B start,
+    /// removal at Phase D completion or abort. This slice (1c) only provides
+    /// the data structure and API, not the lifecycle wiring.
+    pub(super) in_flight_builds: Arc<scc::HashMap<u64, (), THasher>>,
+
+    /// #1058: in-memory dirty-set for in-flight online builds (regular family).
+    /// Keyed by `name_interned`; each value is a set of `RecordId`s touched
+    /// by writes while that index's online build is in flight. Phase C reads
+    /// each dirty-set and re-indexes the affected records. This is IN-MEMORY
+    /// only — per RFC v2 §4.2, a crash loses the dirty-set, but slice 1's
+    /// conservative crash-recovery policy is restart-from-scratch (a crash
+    /// also restarts Phase A from scratch per #1060's design), so nothing needs
+    /// the set to survive a crash in slice 1. The dirty-set is never persisted;
+    /// resumable Phase-C recovery is explicitly deferred to slice 2+.
+    ///
+    /// Uses `Arc<Mutex<BTreeMap<u64, Arc<Mutex<BTreeSet<RecordId>>>>>>`:
+    /// - `BTreeSet` provides sorted, duplicate-free RecordId storage (cheap
+    ///   iteration for Phase C drain, dedup by construction).
+    /// - `Mutex` protects concurrent modifications — acceptable here because
+    ///   this is only touched AFTER `is_build_in_flight()` has already
+    ///   returned true (i.e., only for indexes genuinely mid-online-build,
+    ///   a legitimately rare/low-frequency case). The lock is NEVER held
+    ///   across an `.await` point.
+    ///
+    /// TODO: Convert to `scc::HashMap` for full lock-free consistency with
+    /// `in_flight_builds`. This is deferred because the hot-path check lives
+    /// in `is_build_in_flight` (now lock-free), and `dirty_sets` is only
+    /// accessed after that check passes — the blocking cost is bounded to the
+    /// number of concurrent writes to actively-building indexes (near-zero
+    /// in normal operation). A future cleanup can migrate this to scc for
+    /// uniformity.
+    ///
+    /// Registry/dirty-set lifecycle (owned by #1059, not this slice):
+    /// - Phase B start: `mark_build_in_flight(name_interned)` creates the
+    ///   registry entry.
+    /// - During Phase B/C: writes touching the building index add `RecordId`s
+    ///   to its dirty-set (via the planning methods' dirty-set capture logic).
+    /// - Phase D completion: `clear_build_in_flight(name_interned)` removes the
+    ///   entry, Phase C drains the dirty-set before this happens.
+    #[allow(clippy::type_complexity)]
+    pub(super) dirty_sets: Arc<Mutex<BTreeMap<u64, Arc<Mutex<BTreeSet<RecordId>>>>>>,
+
     /// P0-3 (#959): test-only deterministic pause point that fires AFTER
     /// the posting sweep but BEFORE the reduced `IndexInfo` is persisted —
     /// the exact crash window sub-bug 3c tests. A regression test installs
@@ -355,6 +413,8 @@ impl Clone for IndexManager {
             generation: Arc::clone(&self.generation),
             dropping_regular: Arc::clone(&self.dropping_regular),
             dropping_unique: Arc::clone(&self.dropping_unique),
+            in_flight_builds: Arc::clone(&self.in_flight_builds),
+            dirty_sets: Arc::clone(&self.dirty_sets),
             drop_index_post_sweep_hook: Arc::clone(&self.drop_index_post_sweep_hook),
             renaming_regular: Arc::clone(&self.renaming_regular),
             renaming_unique: Arc::clone(&self.renaming_unique),
@@ -474,6 +534,8 @@ impl IndexManager {
             generation: Arc::new(AtomicU64::new(0)),
             dropping_regular: Arc::new(Mutex::new(BTreeMap::new())),
             dropping_unique: Arc::new(Mutex::new(BTreeMap::new())),
+            in_flight_builds: Arc::new(scc::HashMap::with_hasher(THasher::default())),
+            dirty_sets: Arc::new(Mutex::new(BTreeMap::new())),
             drop_index_post_sweep_hook: Arc::new(arc_swap::ArcSwapOption::empty()),
             renaming_regular: Arc::new(Mutex::new(BTreeMap::new())),
             renaming_unique: Arc::new(Mutex::new(BTreeMap::new())),
@@ -813,6 +875,77 @@ impl IndexManager {
             map.remove(&name_interned);
         }
         Ok(())
+    }
+
+    // ========================================================================
+    // #1058: In-flight online build registry (regular family) + dirty-set
+    // capture. Lifecycle owned by #1059; this slice provides data structures
+    // and API only.
+    // ========================================================================
+    //
+    // The registry answers: "is `name_interned` currently in an in-flight online
+    // build?" (Phase B/C/D — barrier-free, dirty-set-capturing). Presence in
+    // the `in_flight_builds` HashMap means "yes". The dirty-set stores
+    // `RecordId`s touched by writes to that building index, for Phase C's
+    // catch-up replay.
+    //
+    // Storage is IN-MEMORY ONLY — per RFC v2 §4.2, a crash loses the dirty-set,
+    // but slice 1's conservative crash-recovery policy is restart-from-scratch
+    // (a crash also restarts Phase A from scratch per #1060's design), so
+    // nothing needs the set to survive a crash in slice 1. The dirty-set is
+    // never persisted; resumable Phase-C recovery is explicitly deferred to
+    // slice 2+.
+
+    /// #1058: mark an index as having an in-flight online build (Phase B/C/D).
+    /// Called by #1059 at Phase B start. If the index is already in the registry,
+    /// this is a no-op (safe idempotency — #1059 should call this exactly once per build).
+    pub fn mark_build_in_flight(&self, name_interned: u64) {
+        self.in_flight_builds
+            .entry_sync(name_interned)
+            .or_insert(());
+        // The dirty-set entry is created lazily in `get_or_create_dirty_set`
+        // to avoid allocating a BTreeSet for builds that complete before any
+        // writes touch the indexed fields.
+    }
+
+    /// #1058: check if an index has an in-flight online build. Used by the
+    /// planning methods (`plan_record_created`, `plan_record_updated`,
+    /// `plan_record_deleted`) to decide whether to capture to dirty-set vs.
+    /// produce direct posting ops.
+    ///
+    /// Uses `scc::HashMap::get_sync` for lock-free access — critical for the
+    /// hot-path call site inside the planning methods.
+    pub fn is_build_in_flight(&self, name_interned: u64) -> bool {
+        self.in_flight_builds.get_sync(&name_interned).is_some()
+    }
+
+    /// #1058: remove an index from the in-flight build registry. Called by
+    /// #1059 at Phase D completion or abort. Also removes the dirty-set entry
+    /// (Phase C should have drained it before this is called, but we clean up
+    /// regardless for safety). If the index is not in the registry, this is a
+    /// no-op.
+    pub fn clear_build_in_flight(&self, name_interned: u64) {
+        let _ = self.in_flight_builds.remove_sync(&name_interned);
+        let mut dirty = self.dirty_sets.lock().unwrap();
+        dirty.remove(&name_interned);
+    }
+
+    /// #1058: get the dirty-set for an in-flight build (internal helper for
+    /// the planning methods). Returns `None` if the index is not in the registry.
+    fn get_or_create_dirty_set(
+        &self,
+        name_interned: u64,
+    ) -> Option<Arc<Mutex<BTreeSet<RecordId>>>> {
+        if !self.is_build_in_flight(name_interned) {
+            return None;
+        }
+
+        let mut dirty = self.dirty_sets.lock().unwrap();
+        dirty
+            .entry(name_interned)
+            .or_insert_with(|| Arc::new(Mutex::new(BTreeSet::new())))
+            .clone()
+            .into()
     }
 
     // ========================================================================
@@ -2021,16 +2154,33 @@ impl IndexManager {
 
         let mut ops = Vec::with_capacity(4);
         for def in self.indexes.iter() {
+            // #1058: if this def is Building AND has an active in-flight build,
+            // capture RecordId to dirty-set instead of producing SetPosting.
+            let in_flight =
+                def.state == IndexState::Building && self.is_build_in_flight(def.name_interned);
+
             if let Some(irk) =
                 build_index_key_from_record(false, def.name_interned, value, &def.paths)
             {
-                let index_key = irk.to_bytes();
-                let posting_key = build_posting_key(&index_key, record_id);
-                ops.push(IndexWriteOp::SetPosting {
-                    key: posting_key,
-                    value: Bytes::new(),
-                    provenance: regular_provenance(&def),
-                });
+                if in_flight {
+                    // Capture to dirty-set — no SetPosting for this def.
+                    if let Some(dirty_set) = self.get_or_create_dirty_set(def.name_interned) {
+                        let mut set = dirty_set.lock().unwrap();
+                        set.insert(*record_id);
+                    }
+                } else {
+                    // Normal path: produce SetPosting for Ready defs (or Building
+                    // defs not yet in-flight-registered — those still need direct
+                    // writes for the "delta catch-up for free" mechanism before
+                    // Phase B starts).
+                    let index_key = irk.to_bytes();
+                    let posting_key = build_posting_key(&index_key, record_id);
+                    ops.push(IndexWriteOp::SetPosting {
+                        key: posting_key,
+                        value: Bytes::new(),
+                        provenance: regular_provenance(&def),
+                    });
+                }
             }
         }
 
@@ -2128,47 +2278,67 @@ impl IndexManager {
 
         let mut ops = Vec::with_capacity(4);
         for def in self.indexes.iter() {
+            // #1058: if this def is Building AND has an active in-flight build,
+            // capture RecordId to dirty-set instead of producing posting ops.
+            let in_flight =
+                def.state == IndexState::Building && self.is_build_in_flight(def.name_interned);
+
             let provenance = regular_provenance(&def);
             let old_key =
                 build_index_key_from_record(false, def.name_interned, old_value, &def.paths);
             let new_key =
                 build_index_key_from_record(false, def.name_interned, new_value, &def.paths);
 
-            match (old_key, new_key) {
-                (None, None) => {}
-                (None, Some(nk)) => {
-                    let index_key = nk.to_bytes();
-                    let posting_key = build_posting_key(&index_key, record_id);
-                    ops.push(IndexWriteOp::SetPosting {
-                        key: posting_key,
-                        value: Bytes::new(),
-                        provenance,
-                    });
+            if in_flight {
+                // Capture to dirty-set if the write touches this index's fields.
+                // We capture for ANY key change (including None→None, though that
+                // is a no-op — the dirty-set handles it fine as an over-inclusive
+                // but harmless entry).
+                let touches_index = old_key.is_some() || new_key.is_some();
+                if touches_index {
+                    if let Some(dirty_set) = self.get_or_create_dirty_set(def.name_interned) {
+                        let mut set = dirty_set.lock().unwrap();
+                        set.insert(*record_id);
+                    }
                 }
-                (Some(ok), None) => {
-                    let index_key = ok.to_bytes();
-                    let posting_key = build_posting_key(&index_key, record_id);
-                    ops.push(IndexWriteOp::RemovePosting {
-                        key: posting_key,
-                        provenance,
-                    });
-                }
-                (Some(ok), Some(nk)) => {
-                    let old_bytes = ok.to_bytes();
-                    let new_bytes = nk.to_bytes();
-                    if old_bytes != new_bytes {
-                        let old_posting_key = build_posting_key(&old_bytes, record_id);
-                        ops.push(IndexWriteOp::RemovePosting {
-                            key: old_posting_key,
-                            provenance,
-                        });
-
-                        let new_posting_key = build_posting_key(&new_bytes, record_id);
+            } else {
+                // Normal path: produce RemovePosting/SetPosting as usual.
+                match (old_key, new_key) {
+                    (None, None) => {}
+                    (None, Some(nk)) => {
+                        let index_key = nk.to_bytes();
+                        let posting_key = build_posting_key(&index_key, record_id);
                         ops.push(IndexWriteOp::SetPosting {
-                            key: new_posting_key,
+                            key: posting_key,
                             value: Bytes::new(),
                             provenance,
                         });
+                    }
+                    (Some(ok), None) => {
+                        let index_key = ok.to_bytes();
+                        let posting_key = build_posting_key(&index_key, record_id);
+                        ops.push(IndexWriteOp::RemovePosting {
+                            key: posting_key,
+                            provenance,
+                        });
+                    }
+                    (Some(ok), Some(nk)) => {
+                        let old_bytes = ok.to_bytes();
+                        let new_bytes = nk.to_bytes();
+                        if old_bytes != new_bytes {
+                            let old_posting_key = build_posting_key(&old_bytes, record_id);
+                            ops.push(IndexWriteOp::RemovePosting {
+                                key: old_posting_key,
+                                provenance,
+                            });
+
+                            let new_posting_key = build_posting_key(&new_bytes, record_id);
+                            ops.push(IndexWriteOp::SetPosting {
+                                key: new_posting_key,
+                                value: Bytes::new(),
+                                provenance,
+                            });
+                        }
                     }
                 }
             }
@@ -2208,15 +2378,30 @@ impl IndexManager {
 
         let mut ops = Vec::with_capacity(4);
         for def in self.indexes.iter() {
+            // #1058: if this def is Building AND has an active in-flight build,
+            // capture RecordId to dirty-set instead of producing RemovePosting.
+            let in_flight =
+                def.state == IndexState::Building && self.is_build_in_flight(def.name_interned);
+
             if let Some(irk) =
                 build_index_key_from_record(false, def.name_interned, old_value, &def.paths)
             {
-                let index_key = irk.to_bytes();
-                let posting_key = build_posting_key(&index_key, record_id);
-                ops.push(IndexWriteOp::RemovePosting {
-                    key: posting_key,
-                    provenance: regular_provenance(&def),
-                });
+                if in_flight {
+                    // Capture to dirty-set — no RemovePosting for this def.
+                    if let Some(dirty_set) = self.get_or_create_dirty_set(def.name_interned) {
+                        let mut set = dirty_set.lock().unwrap();
+                        set.insert(*record_id);
+                    }
+                } else {
+                    // Normal path: produce RemovePosting for Ready defs (or Building
+                    // defs not yet in-flight-registered).
+                    let index_key = irk.to_bytes();
+                    let posting_key = build_posting_key(&index_key, record_id);
+                    ops.push(IndexWriteOp::RemovePosting {
+                        key: posting_key,
+                        provenance: regular_provenance(&def),
+                    });
+                }
             }
         }
 
