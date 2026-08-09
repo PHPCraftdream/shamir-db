@@ -266,6 +266,16 @@ pub struct TableManager {
     #[cfg(test)]
     pub(super) index2_registered_before_ready_hook:
         Arc<arc_swap::ArcSwapOption<super::index2_backfill_hook::BackfillPauseHook>>,
+    /// #1087 test-only deterministic pause point: parks `phase_b_a_backfill`
+    /// mid-scan (after registering at Building, before completing Phase A).
+    /// Lets a regression test drive a concurrent writer into the exact
+    /// dirty-set capture window this task enables — confirming that
+    /// `mark_build_in_flight` is called BEFORE Phase A starts scanning.
+    /// Reuses the same `BackfillPauseHook` primitive as other index hooks.
+    /// `None` in every non-test build and by default in tests.
+    #[cfg(test)]
+    pub(super) online_index_backfill_hook:
+        Arc<arc_swap::ArcSwapOption<super::index2_backfill_hook::BackfillPauseHook>>,
 }
 
 /// Bundle wiring the non-tx write path to the SSI commit-write log.
@@ -342,6 +352,8 @@ impl Clone for TableManager {
             index2_registered_before_ready_hook: Arc::clone(
                 &self.index2_registered_before_ready_hook,
             ),
+            #[cfg(test)]
+            online_index_backfill_hook: Arc::clone(&self.online_index_backfill_hook),
         }
     }
 }
@@ -488,6 +500,8 @@ impl TableManager {
             drop_index2_post_sweep_hook: Arc::new(arc_swap::ArcSwapOption::empty()),
             #[cfg(test)]
             index2_registered_before_ready_hook: Arc::new(arc_swap::ArcSwapOption::empty()),
+            #[cfg(test)]
+            online_index_backfill_hook: Arc::new(arc_swap::ArcSwapOption::empty()),
         };
 
         // Resolve covering-index included_fields string paths to interned ids.
@@ -823,6 +837,8 @@ impl TableManager {
             drop_index2_post_sweep_hook: Arc::new(arc_swap::ArcSwapOption::empty()),
             #[cfg(test)]
             index2_registered_before_ready_hook: Arc::new(arc_swap::ArcSwapOption::empty()),
+            #[cfg(test)]
+            online_index_backfill_hook: Arc::new(arc_swap::ArcSwapOption::empty()),
         }
     }
 

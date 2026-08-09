@@ -2199,6 +2199,217 @@ impl TableManager {
 
         Ok(())
     }
+
+    /// #1087: Phase B (micro-barrier) + Phase A (barrier-free backfill) for online CREATE INDEX.
+    ///
+    /// Performs the first two phases of online CREATE INDEX orchestration (RFC v2).
+    /// Returns `Ok(true)` on success, `Ok(false)` if online build is unavailable
+    /// (changefeed not wired), or `Err` on failure.
+    ///
+    /// Phase B: acquire barrier, open snapshot, register at Building, mark in-flight.
+    /// Phase A: barrier-free scan via `mvcc_store().snapshot_stream()`, backfill postings.
+    ///
+    /// The index remains in `Building` state after this method returns (Phase C+D
+    /// flip to Ready happens in #1088). The in-flight registry and dirty-set remain
+    /// active, so concurrent writes during Phase A are captured.
+    ///
+    /// # Parameters
+    ///
+    /// - `index_def`: Index definition with `state` already set to `Building` by the caller.
+    /// - `batch_size`: Batch size for the `snapshot_stream` scan (same role as
+    ///   `list_stream`'s parameter).
+    ///
+    /// # Concurrency
+    ///
+    /// Phase B holds the write barrier (`REGULAR_INDEX_CREATE`) across the snapshot
+    /// pin and registration. Phase A runs barrier-free — the snapshot is versioned,
+    /// so concurrent writes are visible to the dirty-set capture mechanism (activated
+    /// by `mark_build_in_flight` in Phase B) but do not interfere with the scan.
+    #[allow(dead_code)] // Will be wired in #1089
+    pub(crate) async fn phase_b_a_backfill(
+        &self,
+        index_def: crate::index::index_definition::IndexDefinition,
+        batch_size: usize,
+    ) -> DbResult<bool> {
+        use futures::StreamExt;
+
+        let name_interned = index_def.name_interned;
+
+        // ── Phase B: micro-barrier (raise → drain → lock) ──────────────────────
+        // F-70 (#897): canonical drain-then-lock acquisition — raise
+        // `REGULAR_INDEX_CREATE`, drain in-flight fast-path writers, THEN take
+        // `unique_write_lock`. This order is load-bearing (see F-70 deadlock
+        // proof in `writer_drain_barrier.rs` and `f70_lock_order_inversion_tests.rs`).
+        let (_barrier, _uwl_guard) = self
+            .begin_write_barrier(crate::index::write_barrier_flags::REGULAR_INDEX_CREATE)
+            .await;
+
+        // Under the barrier, open the snapshot. If changefeed is not wired,
+        // online build is unavailable for this table — return false signal
+        // for the caller (#1089) to fall back to the old path.
+        let Some(guard) = self.open_index_build_snapshot().await else {
+            // Barrier guard drops here (RAII), releasing bit+lock.
+            return Ok(false);
+        };
+
+        let pin = guard.version();
+
+        // Capture paths before moving index_def.
+        let paths = index_def.paths.clone();
+
+        // ── Register at Building (same sequence as create_index_from_stream Phase 1) ──
+        // F-72 (#899, P0): register first at Building, durably persist, then
+        // backfill. This makes the index planner-invisible until Phase D flips
+        // it to Ready, avoiding half-populated index queries.
+        self.index_manager
+            .register_index_at_building(index_def)
+            .await?;
+
+        // #1058: mark in-flight so live write-hooks capture to dirty-set.
+        self.index_manager.mark_build_in_flight(name_interned);
+
+        // ── Drop barrier guards (RAII) ─────────────────────────────────────────
+        // Phase A is barrier-free — writers must be able to proceed while we scan.
+        // The SnapshotGuard (`guard`) stays alive through Phase A to pin the
+        // version floor, but the barrier bit and lock are released now.
+        drop(_barrier);
+        drop(_uwl_guard);
+
+        // ── Phase A: barrier-free backfill scan ─────────────────────────────────
+        // `guard` (SnapshotGuard) remains alive through the scan — it pins the
+        // version floor for the snapshot_stream. Writers can now proceed
+        // concurrently; any write that touches the indexed paths is captured
+        // in the dirty-set (activated by mark_build_in_flight above). Phase C
+        // (#1088) drains and applies those deltas.
+
+        let mvcc = self.mvcc_store().ok_or_else(|| {
+            shamir_storage::error::DbError::Internal(
+                "phase_b_a_backfill: mvcc_store unavailable but open_index_build_snapshot succeeded"
+                    .to_string(),
+            )
+        })?;
+
+        // Stream from the pinned snapshot (same at_version for all batches).
+        let stream = mvcc.snapshot_stream(batch_size, pin);
+
+        // Adapt each batch: decode (Bytes, Bytes) to (RecordId, InnerValue).
+        let posting_stream = stream.map(move |batch_result| {
+            batch_result.and_then(|batch| {
+                batch
+                    .into_iter()
+                    .map(|(key_bytes, value_bytes)| {
+                        use shamir_types::types::record_id::RecordId;
+                        use shamir_types::types::value::InnerValue;
+
+                        let record_id = RecordId::try_from_bytes(&key_bytes).ok_or_else(|| {
+                            shamir_storage::error::DbError::Internal(
+                                "Failed to parse RecordId from key".to_string(),
+                            )
+                        })?;
+
+                        let inner_value = InnerValue::from_bytes(&value_bytes).map_err(|e| {
+                            shamir_storage::error::DbError::Internal(format!(
+                                "Failed to decode InnerValue: {e}"
+                            ))
+                        })?;
+
+                        Ok((record_id, inner_value))
+                    })
+                    .collect::<DbResult<Vec<_>>>()
+            })
+        });
+
+        // ── Backfill: batch-write postings (same pattern as create_index_from_stream Phase 2) ──
+        let mut count = 0usize;
+
+        // Use helpers from index_manager for building posting keys.
+        use shamir_index::base_index::index_keys::{
+            build_index_key_from_record, build_posting_key,
+        };
+
+        let backfill_start = std::time::Instant::now();
+        let mut last_progress_log = std::time::Instant::now();
+        let mut batch_no = 0u64;
+        const BACKFILL_PROGRESS_LOG_INTERVAL: std::time::Duration =
+            std::time::Duration::from_secs(5);
+
+        let mut posting_stream = Box::pin(posting_stream);
+
+        while let Some(batch_result) = posting_stream.next().await {
+            // Test seam: pause mid-scan after processing at least one batch.
+            #[cfg(test)]
+            {
+                if batch_no == 1 {
+                    if let Some(hook) = self.online_index_backfill_hook.load_full() {
+                        hook.wait_at_window().await;
+                    }
+                }
+            }
+
+            let batch = batch_result.map_err(|e| {
+                shamir_storage::error::DbError::Internal(format!(
+                    "CREATE INDEX '{name_interned}': online build backfill (Phase A) failed: {e}. \
+                         The index is Building (planner-invisible) but under-populated."
+                ))
+            })?;
+
+            // Declare per-batch accumulators FRESH inside the loop (no shadowing).
+            let mut posting_writes: Vec<(bytes::Bytes, bytes::Bytes)> = Vec::with_capacity(131_072);
+            let mut cache_index_keys: Vec<bytes::Bytes> = Vec::with_capacity(131_072);
+
+            for (record_id, value) in &batch {
+                if let Some(irk) = build_index_key_from_record(false, name_interned, value, &paths)
+                {
+                    let index_key = irk.to_bytes();
+                    let posting_key = build_posting_key(&index_key, record_id);
+                    posting_writes.push((posting_key, bytes::Bytes::new()));
+                    cache_index_keys.push(index_key);
+                    count += 1;
+                }
+            }
+
+            if !posting_writes.is_empty() {
+                // Use the new IndexManager helper to write the batch and clear cache.
+                self.index_manager
+                    .write_postings_batch(posting_writes, cache_index_keys)
+                    .await
+                    .map_err(|e| {
+                        shamir_storage::error::DbError::Internal(format!(
+                            "CREATE INDEX '{name_interned}': online build backfill (Phase A) \
+                             failed: {e}. The index is Building (planner-invisible) but \
+                             under-populated."
+                        ))
+                    })?;
+            }
+
+            batch_no += 1;
+            if last_progress_log.elapsed() >= BACKFILL_PROGRESS_LOG_INTERVAL {
+                log::info!(
+                    "CREATE INDEX '{}': online backfill (Phase A) in progress — {} rows \
+                     indexed across {} batches ({:.1}s elapsed)",
+                    name_interned,
+                    count,
+                    batch_no,
+                    backfill_start.elapsed().as_secs_f64()
+                );
+                last_progress_log = std::time::Instant::now();
+            }
+        }
+
+        // ── SnapshotGuard dropped here (RAII) ─────────────────────────────────────
+        // The guard goes out of scope, releasing the version pin. Phase C (#1088)
+        // is now free to proceed with dirty-set drain and catch-up.
+
+        log::info!(
+            "CREATE INDEX '{}': Phase B+A completed — {} rows indexed in {:.1}s, index \
+             left in Building state (dirty-set capture active)",
+            name_interned,
+            count,
+            backfill_start.elapsed().as_secs_f64()
+        );
+
+        Ok(true)
+    }
 }
 
 /// Resolve interned path ids back to dot-separated string paths.

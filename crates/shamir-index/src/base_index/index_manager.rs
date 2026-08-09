@@ -1882,6 +1882,51 @@ impl IndexManager {
         Ok(())
     }
 
+    /// #1087: Register an index at `Building` state (Phase 1 of online CREATE INDEX).
+    ///
+    /// This performs the same registration sequence as Phase 1 of
+    /// `create_index_from_records` and `create_index_from_stream`:
+    /// - Adds the definition to the in-memory index registry at `Building` state
+    /// - Bumps the generation
+    /// - Sets the `has_indexes` flag
+    /// - Persists the metadata to `info_store`
+    ///
+    /// This method is used by the Phase B+A online build path, which performs
+    /// registration here and then does a barrier-free backfill via Phase A.
+    pub async fn register_index_at_building(&self, index_def: IndexDefinition) -> DbResult<()> {
+        // Phase 1: register the definition FIRST, at Building
+        // (Identical sequence to create_index_from_records Phase 1)
+        self.indexes.add_index(index_def);
+        self.bump_generation();
+        self.has_indexes.store(true, Ordering::Release);
+        self.save_index_info().await?;
+        Ok(())
+    }
+
+    /// #1087: write a batch of postings during online build's Phase A backfill,
+    /// and clear the posting cache for the affected index keys. Mirrors the
+    /// inline batch-write step inside `create_index_from_stream`'s Phase 2 body
+    /// (same `set_many` + `posting_cache.remove` pattern) — this is that same
+    /// logic, exposed as a callable unit for the online-build orchestration
+    /// living in `TableManager` (a different crate).
+    pub async fn write_postings_batch(
+        &self,
+        posting_writes: Vec<(Bytes, Bytes)>,
+        cache_index_keys: Vec<Bytes>,
+    ) -> DbResult<()> {
+        if !posting_writes.is_empty() {
+            let posting_writes: Vec<(RecordKey, Bytes)> = posting_writes
+                .into_iter()
+                .map(|(k, v)| (k.into(), v))
+                .collect();
+            self.info_store.set_many(posting_writes).await?;
+        }
+        for ik in cache_index_keys {
+            self.posting_cache.remove(&ik);
+        }
+        Ok(())
+    }
+
     /// Удаляет индекс по его имени.
     ///
     /// Процесс удаления (F-76 / #903 — definition retired BEFORE the posting

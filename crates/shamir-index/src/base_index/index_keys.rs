@@ -303,7 +303,7 @@ pub fn extract_index_leaves(
 
 /// Compose the physical posting key:
 /// `index_key (25b) || record_id (16b)` = 41 bytes.
-pub(super) fn build_posting_key(index_key: &Bytes, record_id: &RecordId) -> Bytes {
+pub fn build_posting_key(index_key: &Bytes, record_id: &RecordId) -> Bytes {
     let mut k = Vec::with_capacity(index_key.len() + 16);
     k.extend_from_slice(index_key);
     k.extend_from_slice(record_id.as_bytes());
