@@ -608,8 +608,10 @@ impl IndexManager {
         // the recovery path.
         // P1-2 (#967): a durable tombstone is already persisted — enrich
         // the error if this sweep fails.
-        // NOTE: Cannot write DdlOpState::Failed here because this layer
-        // (IndexManagerUnique) does not have op_id in scope.
+        // NOTE: Cannot write DdlOpState::Failed here even though `op_id` is
+        // in scope (a parameter of this function, #1051) — this crate
+        // (`shamir-index`) has no access to `shamir-engine`'s `ddl_op_log`,
+        // which sits one layer up.
         self.sweep_index_postings(true, name_interned)
             .await
             .map_err(|e| {
@@ -631,8 +633,10 @@ impl IndexManager {
         // Persist the reduced IndexInfo (definition removed).
         // P1-2 (#967): the tombstone is still in place — if this persist
         // fails, recovery will see the tombstone and finish the drop.
-        // NOTE: Cannot write DdlOpState::Failed here because this layer
-        // (IndexManagerUnique) does not have op_id in scope.
+        // NOTE: Cannot write DdlOpState::Failed here even though `op_id` is
+        // in scope (a parameter of this function, #1051) — this crate
+        // (`shamir-index`) has no access to `shamir-engine`'s `ddl_op_log`,
+        // which sits one layer up.
         if was_removed {
             self.save_index_info_unique().await.map_err(|e| {
                 shamir_storage::error::DbError::Internal(format!(
@@ -651,8 +655,10 @@ impl IndexManager {
         // ordering rationale.
         // P1-2 (#967): if this fails, the tombstone remains — recovery
         // will just clear it (a no-op on the already-finished drop).
-        // NOTE: Cannot write DdlOpState::Failed here because this layer
-        // (IndexManagerUnique) does not have op_id in scope.
+        // NOTE: Cannot write DdlOpState::Failed here even though `op_id` is
+        // in scope (a parameter of this function, #1051) — this crate
+        // (`shamir-index`) has no access to `shamir-engine`'s `ddl_op_log`,
+        // which sits one layer up.
         self.clear_from_dropping(true, name_interned)
             .await
             .map_err(|e| {

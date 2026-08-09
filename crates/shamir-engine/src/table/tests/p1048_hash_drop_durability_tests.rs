@@ -2,7 +2,9 @@
 //! #1048: E2E tests for hash DROP (regular + unique) crash-recovery op_id status writes.
 //!
 //! Tests that hash DROP's crash recovery writes SucceededViaCrashRecovery
-//! under the SAME deterministic op_id the client received at dispatch time.
+//! under the SAME op_id the client received at dispatch time (#1051: minted
+//! via `RecordId::new()`, carried through the tombstone — no longer
+//! regenerated deterministically from the index name).
 //!
 //! Mirrors the structure of p997_hash_rename_durability_tests.rs' RENAME test.
 
@@ -45,12 +47,14 @@ async fn key_id(mgr: &TableManager, name: &str) -> u64 {
 // ============================================================================
 
 /// #1048: E2E test that a regular hash DROP's crash recovery writes
-/// SucceededViaCrashRecovery under the SAME deterministic op_id the client
-/// received at dispatch time.
+/// SucceededViaCrashRecovery under the SAME op_id the client received at
+/// dispatch time.
 ///
 /// Test structure mirrors the RENAME test:
 /// 1. Create a table with a regular index + data
-/// 2. Mint a real op_id using the same deterministic formula as handle_drop_index
+/// 2. Mint a real op_id via `RecordId::new()` (#1051: matches how
+///    `handle_drop_index` mints it at dispatch time — no longer a
+///    deterministic formula derivable from the index name alone)
 /// 3. Start a DROP that will pause mid-flight (using the existing pause hook)
 /// 4. Wait for the pause hook to fire (DROP is mid-flight)
 /// 5. Simulate a crash by dropping the manager
@@ -78,9 +82,10 @@ async fn p1048_e2e_hash_drop_op_id_recovery() {
         drop(mgr);
     }
 
-    // Step 2: mint a real op_id (simulating dispatch) using the SAME formula as handle_drop_index
+    // Step 2: mint a real op_id (simulating dispatch), matching how
+    // handle_drop_index mints it via RecordId::new() (#1051).
     let index_name = "by_email";
-    let op_id = RecordId::system(&format!("ddl_drop_index_{}", index_name));
+    let op_id = RecordId::new();
 
     // Step 3: start a DROP that will pause mid-flight
     let pause_hook =
@@ -127,7 +132,7 @@ async fn p1048_e2e_hash_drop_op_id_recovery() {
 
     // Step 5: poll for the op_id and verify we got SucceededViaCrashRecovery
     use crate::table::ddl_op_log;
-    use shamir_query_types::read::{DdlOpState, DdlOpStatus};
+    use shamir_query_types::read::{DdlOpKind, DdlOpState, DdlOpStatus};
 
     let status: Option<DdlOpStatus> = ddl_op_log::read_op_status(&info_store, &op_id)
         .await
@@ -141,6 +146,20 @@ async fn p1048_e2e_hash_drop_op_id_recovery() {
         status.op_id, op_id,
         "returned status must have the same op_id"
     );
+    // #1051: assert on the record's IDENTITY, not just its presence under
+    // op_id — this is what makes the test discriminating against a
+    // regression that regenerates op_id from the name (which would still
+    // satisfy status.op_id == op_id for a single-index test, but would
+    // report the wrong index_name if two indexes were involved).
+    match &status.kind {
+        DdlOpKind::DropHashIndex { index_name: got } => {
+            assert_eq!(
+                got, index_name,
+                "recovered status must name the dropped index"
+            )
+        }
+        other => panic!("expected DropHashIndex, got {:?}", other),
+    }
 
     match status.state {
         DdlOpState::SucceededViaCrashRecovery {
@@ -160,8 +179,8 @@ async fn p1048_e2e_hash_drop_op_id_recovery() {
 }
 
 /// #1048: E2E test that a unique hash DROP's crash recovery writes
-/// SucceededViaCrashRecovery under the SAME deterministic op_id the client
-/// received at dispatch time.
+/// SucceededViaCrashRecovery under the SAME op_id the client received at
+/// dispatch time.
 ///
 /// Mirrors the regular hash DROP test above, but for the unique family.
 #[tokio::test]
@@ -188,9 +207,10 @@ async fn p1048_e2e_unique_hash_drop_op_id_recovery() {
         drop(mgr);
     }
 
-    // Step 2: mint a real op_id (simulating dispatch)
+    // Step 2: mint a real op_id (simulating dispatch), matching how
+    // handle_drop_index mints it via RecordId::new() (#1051).
     let index_name = "uniq_email";
-    let op_id = RecordId::system(&format!("ddl_drop_index_{}", index_name));
+    let op_id = RecordId::new();
 
     // Step 3: start a DROP that will pause mid-flight
     let pause_hook =
@@ -236,14 +256,16 @@ async fn p1048_e2e_unique_hash_drop_op_id_recovery() {
         "unique index must be gone after recovery"
     );
 
-    // Verify uniqueness is still enforced (we can insert the duplicate)
+    // Verify uniqueness is NO LONGER enforced — the unique index was
+    // dropped and recovery finished the drop, so the duplicate insert
+    // must succeed.
     let email_field = key_id(&mgr, "email").await;
     let record = record_with_str(email_field, "a@b.com");
     mgr.insert(&record).await.unwrap();
 
     // Step 5: poll for the op_id and verify SucceededViaCrashRecovery
     use crate::table::ddl_op_log;
-    use shamir_query_types::read::{DdlOpState, DdlOpStatus};
+    use shamir_query_types::read::{DdlOpKind, DdlOpState, DdlOpStatus};
 
     let status: Option<DdlOpStatus> = ddl_op_log::read_op_status(&info_store, &op_id)
         .await
@@ -257,6 +279,16 @@ async fn p1048_e2e_unique_hash_drop_op_id_recovery() {
         status.op_id, op_id,
         "returned status must have the same op_id"
     );
+    // #1051: discriminate on the record's identity, not just op_id presence.
+    match &status.kind {
+        DdlOpKind::DropUniqueHashIndex { index_name: got } => {
+            assert_eq!(
+                got, index_name,
+                "recovered status must name the dropped index"
+            )
+        }
+        other => panic!("expected DropUniqueHashIndex, got {:?}", other),
+    }
 
     match status.state {
         DdlOpState::SucceededViaCrashRecovery {

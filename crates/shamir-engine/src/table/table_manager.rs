@@ -422,9 +422,11 @@ impl TableManager {
         let sorted_indexes = SortedIndexManager::new(Arc::clone(&info_store)).await?;
         let table = Table::new(data_store);
 
-        // #1048: write SucceededViaCrashRecovery status for any hash DROP
-        // operations that were recovered. Use the interner to resolve name_interned
-        // back to string names and regenerate the deterministic op_id.
+        // #1048 / #1051: write SucceededViaCrashRecovery status for any hash
+        // DROP operations that were recovered. Use the interner to resolve
+        // name_interned back to string names; the op_id itself is read
+        // directly off the tombstone entry (minted with real entropy at
+        // dispatch time — no longer regenerated deterministically).
         if !dropping_regular_before.is_empty() || !dropping_unique_before.is_empty() {
             TableManager::write_hash_drop_recovery_status(
                 &dropping_regular_before,

@@ -213,7 +213,8 @@ async fn p03_3c_regular_crash_after_sweep_does_not_resurrect() {
     // Tombstone must be cleared.
     let tomb_key = RecordId::system("idx_drop").to_bytes();
     let tomb_bytes = info_store.get(tomb_key.into()).await.unwrap();
-    let tomb: Vec<u64> = bincode::deserialize(&tomb_bytes).unwrap();
+    // #1051: tombstone entries are now (id, Option<op_id>) tuples.
+    let tomb: Vec<(u64, Option<String>)> = bincode::deserialize(&tomb_bytes).unwrap();
     assert!(
         tomb.is_empty(),
         "3c FAIL: tombstone should be cleared after recovery"
@@ -314,7 +315,8 @@ async fn p03_3c_idempotent_resume_double_restart() {
     // Tombstone must be empty (cleared by first recovery, absent for second).
     let tomb_key = RecordId::system("idx_drop").to_bytes();
     let tomb_bytes = info_store.get(tomb_key.into()).await.unwrap();
-    let tomb: Vec<u64> = bincode::deserialize(&tomb_bytes).unwrap();
+    // #1051: tombstone entries are now (id, Option<op_id>) tuples.
+    let tomb: Vec<(u64, Option<String>)> = bincode::deserialize(&tomb_bytes).unwrap();
     assert!(
         tomb.is_empty(),
         "3c idempotent: tombstone empty after second restart"
@@ -396,7 +398,8 @@ async fn p03_3c_regular_crash_after_persist_before_tombstone_clear() {
     // Tombstone must be cleared by recovery.
     let tomb_key = RecordId::system("idx_drop").to_bytes();
     let tomb_bytes = info_store.get(tomb_key.into()).await.unwrap();
-    let tomb: Vec<u64> = bincode::deserialize(&tomb_bytes).unwrap();
+    // #1051: tombstone entries are now (id, Option<op_id>) tuples.
+    let tomb: Vec<(u64, Option<String>)> = bincode::deserialize(&tomb_bytes).unwrap();
     assert!(
         tomb.is_empty(),
         "3c: stale tombstone cleared after recovery"
@@ -638,9 +641,10 @@ async fn p03_normal_drop_regular_still_works() {
     let tomb_key = RecordId::system("idx_drop").to_bytes();
     match info_store.get(tomb_key.into()).await {
         Ok(bytes) => {
-            let tomb: Vec<u64> = bincode::deserialize(&bytes).unwrap();
+            // #1051: tombstone entries are now (id, Option<op_id>) tuples.
+            let tomb: Vec<(u64, Option<String>)> = bincode::deserialize(&bytes).unwrap();
             assert!(
-                !tomb.contains(&name_interned),
+                !tomb.iter().any(|(id, _)| *id == name_interned),
                 "tombstone must not contain the dropped name after normal drop"
             );
         }
@@ -736,5 +740,63 @@ async fn p03_3c_recovery_does_not_affect_surviving_indexes() {
         count_postings(&info_store, false, surviving_name).await,
         1,
         "surviving index postings intact"
+    );
+}
+
+// ============================================================================
+// #1051: hash DROP tombstone backward compatibility
+// ============================================================================
+
+/// #1051: a pre-#1051 tombstone (bare `Vec<u64>`, no op_id field) must still
+/// load correctly, with every entry's op_id treated as `None`.
+///
+/// `seed_tombstone` already serializes the OLD shape (`Vec<u64>` via
+/// `bincode::serialize(names)`), making it a ready-made pre-#1051 fixture.
+#[tokio::test]
+async fn p1051_old_format_hash_drop_tombstone_decodes_with_none_op_id() {
+    let (data_store, info_store) = make_stores();
+
+    let manager = IndexManager::new(Arc::clone(&data_store), Arc::clone(&info_store))
+        .await
+        .unwrap();
+
+    seed_tombstone(&info_store, false, &[1, 2]).await;
+    let regular = manager.load_dropping_set(false).await.unwrap();
+    assert_eq!(
+        regular,
+        vec![(1, None), (2, None)],
+        "old-format Vec<u64> tombstone must decode with op_id: None per entry"
+    );
+
+    seed_tombstone(&info_store, true, &[3]).await;
+    let unique = manager.load_dropping_set(true).await.unwrap();
+    assert_eq!(
+        unique,
+        vec![(3, None)],
+        "old-format Vec<u64> unique tombstone must decode with op_id: None"
+    );
+}
+
+/// #1051: a NEW-format tombstone (`Vec<(u64, Option<String>)>`, carrying a
+/// real op_id) must round-trip through save/load unchanged — the companion
+/// case to the backward-compat test above.
+#[tokio::test]
+async fn p1051_new_format_hash_drop_tombstone_round_trips_op_id() {
+    let (data_store, info_store) = make_stores();
+
+    let manager = IndexManager::new(Arc::clone(&data_store), Arc::clone(&info_store))
+        .await
+        .unwrap();
+
+    let op_id = RecordId::new();
+    let new_format: Vec<(u64, Option<String>)> = vec![(7, Some(op_id.to_string())), (8, None)];
+    let key = RecordId::system("idx_drop").to_bytes();
+    let bytes = bincode::serialize(&new_format).unwrap();
+    info_store.set(key.into(), bytes.into()).await.unwrap();
+
+    let loaded = manager.load_dropping_set(false).await.unwrap();
+    assert_eq!(
+        loaded, new_format,
+        "new-format tombstone must round-trip exactly, op_id included"
     );
 }

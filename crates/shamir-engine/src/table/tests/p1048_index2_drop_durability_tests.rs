@@ -2,7 +2,9 @@
 //! #1048: E2E tests for index2 DROP crash-recovery op_id status writes.
 //!
 //! Tests that index2 DROP's crash recovery writes SucceededViaCrashRecovery
-//! under the SAME deterministic op_id the client received at dispatch time.
+//! under the SAME op_id the client received at dispatch time (#1051: minted
+//! via `RecordId::new()`, carried through the tombstone — no longer
+//! regenerated deterministically from the index name).
 //!
 //! Mirrors the structure of p997_hash_rename_durability_tests.rs' RENAME test.
 
@@ -71,12 +73,13 @@ async fn key_id(mgr: &TableManager, name: &str) -> u64 {
 // ============================================================================
 
 /// #1048: E2E test that an index2 DROP's crash recovery writes
-/// SucceededViaCrashRecovery under the SAME deterministic op_id the client
-/// received at dispatch time.
+/// SucceededViaCrashRecovery under the SAME op_id the client received at
+/// dispatch time.
 ///
 /// Test structure mirrors the RENAME test:
 /// 1. Create a table with an index2 (functional) index + data
-/// 2. Mint a real op_id using the same deterministic formula as handle_drop_index
+/// 2. Mint a real op_id via `RecordId::new()` (#1051: matches how
+///    `handle_drop_index` mints it at dispatch time)
 /// 3. Start a DROP that will pause mid-flight (using the existing pause hook)
 /// 4. Wait for the pause hook to fire (DROP is mid-flight)
 /// 5. Simulate a crash by dropping the manager
@@ -109,9 +112,10 @@ async fn p1048_e2e_index2_drop_op_id_recovery() {
         drop(mgr);
     }
 
-    // Step 2: mint a real op_id (simulating dispatch) using the SAME formula as handle_drop_index
+    // Step 2: mint a real op_id (simulating dispatch), matching how
+    // handle_drop_index mints it via RecordId::new() (#1051).
     let index_name = "lower_name";
-    let op_id = RecordId::system(&format!("ddl_drop_index_{}", index_name));
+    let op_id = RecordId::new();
 
     // Step 3: start a DROP that will pause mid-flight
     let pause_hook = Arc::new(BackfillPauseHook::new());
@@ -187,7 +191,7 @@ async fn p1048_e2e_index2_drop_op_id_recovery() {
 
     // Step 5: poll for the op_id and verify we got SucceededViaCrashRecovery
     use crate::table::ddl_op_log;
-    use shamir_query_types::read::{DdlOpState, DdlOpStatus};
+    use shamir_query_types::read::{DdlOpKind, DdlOpState, DdlOpStatus};
 
     let status: Option<DdlOpStatus> = ddl_op_log::read_op_status(&info_store, &op_id)
         .await
@@ -201,6 +205,18 @@ async fn p1048_e2e_index2_drop_op_id_recovery() {
         status.op_id, op_id,
         "returned status must have the same op_id"
     );
+    // #1051: discriminate on the record's identity, not just op_id presence
+    // — proves the tombstone-carried index name (replacing the old
+    // descriptor-lookup mechanism) actually resolves to the right name.
+    match &status.kind {
+        DdlOpKind::DropIndex2 { index_name: got } => {
+            assert_eq!(
+                got, index_name,
+                "recovered status must name the dropped index"
+            )
+        }
+        other => panic!("expected DropIndex2, got {:?}", other),
+    }
 
     match status.state {
         DdlOpState::SucceededViaCrashRecovery {

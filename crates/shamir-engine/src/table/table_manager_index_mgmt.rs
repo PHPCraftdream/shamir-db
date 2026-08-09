@@ -1,7 +1,9 @@
 use std::collections::BTreeSet;
+use std::str::FromStr;
 use std::sync::Arc;
 
 use futures::StreamExt;
+use shamir_query_types::read::{DdlOpKind, DdlOpState, DdlOpStatus};
 use shamir_storage::error::DbResult;
 use shamir_types::core::interner::TouchInd;
 use shamir_types::types::record_id::RecordId;
@@ -1113,8 +1115,6 @@ impl TableManager {
         interner: &super::interner_manager::InternerManager,
         info_store: Arc<dyn shamir_storage::types::Store>,
     ) -> Result<(), shamir_storage::error::DbError> {
-        use shamir_query_types::read::{DdlOpKind, DdlOpState, DdlOpStatus};
-
         // Resolve name_interned back to string names using the interner
         // and write SucceededViaCrashRecovery for each recovered operation.
         let interner_guard = interner.get().await.map_err(|e| {
@@ -1131,11 +1131,20 @@ impl TableManager {
             ) {
                 // Skip status write if op_id is None (pre-#1051 tombstone or no-op caller)
                 if let Some(op_id_str) = op_id_str {
-                    let op_id = std::str::FromStr::from_str(op_id_str).map_err(|e| {
-                        shamir_storage::error::DbError::Codec(format!(
-                            "#1051: failed to parse op_id '{op_id_str}': {e}"
-                        ))
-                    })?;
+                    // A corrupt op_id string is a best-effort miss on the
+                    // status log, not a reason to fail the whole table open
+                    // — the actual index recovery (this function's caller)
+                    // has already succeeded by the time this runs.
+                    let op_id = match std::str::FromStr::from_str(op_id_str) {
+                        Ok(id) => id,
+                        Err(e) => {
+                            log::error!(
+                                "#1051: failed to parse op_id '{op_id_str}' for recovered \
+                                 hash DROP (regular) '{name}': {e} — skipping status write"
+                            );
+                            continue;
+                        }
+                    };
                     let status = DdlOpStatus {
                         op_id,
                         kind: DdlOpKind::DropHashIndex {
@@ -1170,11 +1179,18 @@ impl TableManager {
             ) {
                 // Skip status write if op_id is None (pre-#1051 tombstone or no-op caller)
                 if let Some(op_id_str) = op_id_str {
-                    let op_id = std::str::FromStr::from_str(op_id_str).map_err(|e| {
-                        shamir_storage::error::DbError::Codec(format!(
-                            "#1051: failed to parse op_id '{op_id_str}': {e}"
-                        ))
-                    })?;
+                    // See the regular-family arm above for why this is
+                    // best-effort (log + skip), not a hard failure.
+                    let op_id = match std::str::FromStr::from_str(op_id_str) {
+                        Ok(id) => id,
+                        Err(e) => {
+                            log::error!(
+                                "#1051: failed to parse op_id '{op_id_str}' for recovered \
+                                 hash DROP (unique) '{name}': {e} — skipping status write"
+                            );
+                            continue;
+                        }
+                    };
                     let status = DdlOpStatus {
                         op_id,
                         kind: DdlOpKind::DropUniqueHashIndex {
@@ -1261,7 +1277,7 @@ impl TableManager {
             .await?;
         }
 
-        // Clear the entire tombstone (write empty Vec<u32>; the load path
+        // Clear the entire tombstone (write empty Vec; the load path
         // treats empty-vec and NotFound identically).
         let empty = bincode::serialize(&Vec::<(u32, String, Option<String>)>::new())
             .map_err(|e| shamir_storage::error::DbError::Codec(e.to_string()))?;
@@ -1284,17 +1300,23 @@ impl TableManager {
         dropping_entries: &[(u32, String, Option<String>)],
         info_store: Arc<dyn shamir_storage::types::Store>,
     ) -> Result<(), shamir_storage::error::DbError> {
-        use shamir_query_types::read::{DdlOpKind, DdlOpState, DdlOpStatus};
-        use std::str::FromStr;
-
         for &(_id, ref name, ref op_id_str) in dropping_entries {
             // Skip status write if op_id is None (pre-#1051 tombstone or no-op caller)
             if let Some(op_id_str) = op_id_str {
-                let op_id = RecordId::from_str(op_id_str).map_err(|e| {
-                    shamir_storage::error::DbError::Codec(format!(
-                        "#1051: failed to parse op_id '{op_id_str}': {e}"
-                    ))
-                })?;
+                // A corrupt op_id string is a best-effort miss on the
+                // status log, not a reason to fail the whole table open —
+                // the actual index2 recovery (this function's caller) has
+                // already succeeded by the time this runs.
+                let op_id = match RecordId::from_str(op_id_str) {
+                    Ok(id) => id,
+                    Err(e) => {
+                        log::error!(
+                            "#1051: failed to parse op_id '{op_id_str}' for recovered \
+                             index2 DROP '{name}': {e} — skipping status write"
+                        );
+                        continue;
+                    }
+                };
                 let status = DdlOpStatus {
                     op_id,
                     kind: DdlOpKind::DropIndex2 {
@@ -1471,9 +1493,6 @@ impl TableManager {
 
             // #1048: write SucceededViaCrashRecovery for each recovered regular rename
             // that has an op_id. Skip silently for None (backward compat).
-            use shamir_query_types::read::{DdlOpKind, DdlOpState, DdlOpStatus};
-            use shamir_types::types::record_id::RecordId;
-            use std::str::FromStr;
             for entry in &regular_renames {
                 if let Some(ref op_id_str) = entry.op_id {
                     if let Ok(op_id) = RecordId::from_str(op_id_str) {
@@ -1563,9 +1582,6 @@ impl TableManager {
 
             // #1048: write SucceededViaCrashRecovery for each recovered unique rename
             // that has an op_id. Skip silently for None (backward compat).
-            use shamir_query_types::read::{DdlOpKind, DdlOpState, DdlOpStatus};
-            use shamir_types::types::record_id::RecordId;
-            use std::str::FromStr;
             for entry in &unique_renames {
                 if let Some(ref op_id_str) = entry.op_id {
                     if let Ok(op_id) = RecordId::from_str(op_id_str) {

@@ -1,8 +1,9 @@
 use crate::descriptor::IndexDescriptor;
 use crate::kind::{FunctionalConfig, IndexKind, TokenizerKind};
 use crate::persistence::{
-    legacy_indexes_need_rebuild, load_index2_metadata, load_legacy_index_version,
-    save_index2_metadata, save_legacy_index_version, PersistedIndexes, LEGACY_INDEX_FORMAT_VERSION,
+    add_to_dropping_index2, legacy_indexes_need_rebuild, load_dropping_index2,
+    load_index2_metadata, load_legacy_index_version, save_index2_metadata,
+    save_legacy_index_version, PersistedIndexes, LEGACY_INDEX_FORMAT_VERSION,
 };
 use crate::MetaEnvelope;
 use bytes::Bytes;
@@ -140,5 +141,54 @@ async fn legacy_rebuild_when_old_version() {
     assert!(
         legacy_indexes_need_rebuild(&store).await.unwrap(),
         "old version must trigger rebuild"
+    );
+}
+
+// ============================================================================
+// #1051 — index2 DROP tombstone backward compatibility
+// ============================================================================
+
+/// #1051: a pre-#1051 index2 DROP tombstone (bare `Vec<u32>`, no name/op_id
+/// fields) must still load correctly, with every entry given an empty name
+/// and `op_id: None`.
+#[tokio::test]
+async fn p1051_old_format_index2_drop_tombstone_decodes_with_empty_name_and_none_op_id() {
+    let store: Arc<dyn Store> = Arc::new(InMemoryStore::new());
+
+    let old_format: Vec<u32> = vec![10, 20];
+    let key = RecordId::system("_m.idx.drop").to_bytes();
+    let bytes = bincode::serialize(&old_format).unwrap();
+    store.set(key.into(), Bytes::from(bytes)).await.unwrap();
+
+    let loaded = load_dropping_index2(&store).await.unwrap();
+    assert_eq!(
+        loaded,
+        vec![(10, String::new(), None), (20, String::new(), None)],
+        "old-format Vec<u32> tombstone must decode with empty name and op_id: None"
+    );
+}
+
+/// #1051: a NEW-format index2 DROP tombstone round-trips its name and op_id
+/// through `add_to_dropping_index2` / `load_dropping_index2`.
+#[tokio::test]
+async fn p1051_new_format_index2_drop_tombstone_round_trips_name_and_op_id() {
+    let store: Arc<dyn Store> = Arc::new(InMemoryStore::new());
+
+    let op_id = RecordId::new();
+    add_to_dropping_index2(5, "lower_name".to_string(), Some(op_id.to_string()), &store)
+        .await
+        .unwrap();
+    add_to_dropping_index2(6, "upper_name".to_string(), None, &store)
+        .await
+        .unwrap();
+
+    let loaded = load_dropping_index2(&store).await.unwrap();
+    assert_eq!(
+        loaded,
+        vec![
+            (5, "lower_name".to_string(), Some(op_id.to_string())),
+            (6, "upper_name".to_string(), None),
+        ],
+        "new-format tombstone must round-trip name and op_id exactly"
     );
 }

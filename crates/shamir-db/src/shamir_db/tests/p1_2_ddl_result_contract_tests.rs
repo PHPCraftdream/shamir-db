@@ -5,6 +5,10 @@
 //! - GetDdlOpStatus poll finds the correct record for the op_id
 //! - Polling unknown op_id returns None
 //! - Polling right op_id but wrong table returns None (routing correctness)
+//! - #1051: two DROP INDEX dispatches on one table mint distinct op_ids and
+//!   are independently pollable — pins `RecordId::new()` at the actual
+//!   dispatch site (`handle_drop_index`), not just at the lower engine
+//!   layer `p1051_op_id_uniqueness_tests.rs` (shamir-engine) already covers.
 
 use shamir_query_builder::batch::Batch;
 use shamir_query_builder::ddl;
@@ -211,4 +215,80 @@ async fn poll_right_op_id_wrong_table_returns_none() {
         correct_status.op_id, *op_id,
         "status should be found on the correct table"
     );
+}
+
+/// #1051: two DROP INDEX ops on the SAME table, dispatched through the real
+/// `handle_drop_index` entry point (not constructed directly), must mint
+/// DISTINCT op_ids, and each must be independently pollable to the correct
+/// operation. This is the regression pin the #1051 review (finding 2) asked
+/// for: reverting `handle_drop_index`'s `RecordId::new()` mint back to the
+/// old `RecordId::system(&format!("ddl_drop_index_{name}"))` formula makes
+/// this test fail (both op_ids collapse to the same value) while every
+/// other test in the workspace stays green, since they all construct their
+/// own op_id directly rather than going through dispatch.
+#[tokio::test]
+async fn two_drop_index_dispatches_on_one_table_mint_distinct_pollable_op_ids() {
+    let shamir = ShamirDb::init_memory().await.unwrap();
+    shamir.create_db("testdb").await;
+    let repo_config =
+        RepoConfig::new("main", BoxRepoFactory::in_memory()).add_table(TableConfig::new("items"));
+    shamir.add_repo("testdb", repo_config).await.unwrap();
+
+    let db = shamir.get_db("testdb").unwrap();
+    let table = db.get_table("main", "items").await.unwrap();
+    table.create_index("idx_city", &["city"]).await.unwrap();
+    table.create_index("idx_zip", &["zip"]).await.unwrap();
+
+    let mut b1 = Batch::new();
+    b1.id(1);
+    b1.drop_index("d", ddl::drop_index("idx_city", "items").repo("main"));
+    let resp1 = shamir
+        .execute("testdb", &b1.to_request_via_msgpack())
+        .await
+        .unwrap();
+    let op_id_city = *resp1.results["d"]
+        .op_id
+        .as_ref()
+        .expect("op_id must be set");
+
+    let mut b2 = Batch::new();
+    b2.id(1);
+    b2.drop_index("d", ddl::drop_index("idx_zip", "items").repo("main"));
+    let resp2 = shamir
+        .execute("testdb", &b2.to_request_via_msgpack())
+        .await
+        .unwrap();
+    let op_id_zip = *resp2.results["d"]
+        .op_id
+        .as_ref()
+        .expect("op_id must be set");
+
+    assert_ne!(
+        op_id_city, op_id_zip,
+        "two DROP INDEX ops on the same table must mint distinct op_ids"
+    );
+
+    let status_city = shamir
+        .get_ddl_op_status("testdb", "main", "items", &op_id_city.to_string())
+        .await
+        .expect("get_ddl_op_status should succeed")
+        .expect("idx_city's status record must exist");
+    let status_zip = shamir
+        .get_ddl_op_status("testdb", "main", "items", &op_id_zip.to_string())
+        .await
+        .expect("get_ddl_op_status should succeed")
+        .expect("idx_zip's status record must exist");
+
+    match &status_city.kind {
+        shamir_query_types::read::DdlOpKind::DropHashIndex { index_name } => {
+            assert_eq!(index_name, "idx_city")
+        }
+        other => panic!("expected DropHashIndex for idx_city, got {:?}", other),
+    }
+    match &status_zip.kind {
+        shamir_query_types::read::DdlOpKind::DropHashIndex { index_name } => {
+            assert_eq!(index_name, "idx_zip")
+        }
+        other => panic!("expected DropHashIndex for idx_zip, got {:?}", other),
+    }
 }

@@ -633,10 +633,10 @@ impl IndexManager {
     // until the tombstone clears, preventing ghost postings from namespace
     // reuse.
     //
-    // Tombstone shape: `Vec<u64>` serialized via bincode under
-    // `system:idx_drop` (regular) / `system:uidx_drop`
-    // (unique). A separate key was chosen over extending `IndexInfo`'s
-    // serialized shape to avoid touching `IndexInfo::decode_bytes`'s delicate
+    // Tombstone shape: `Vec<(u64, Option<String>)>` (id, op_id — #1051)
+    // serialized via bincode under `system:idx_drop` (regular) /
+    // `system:uidx_drop` (unique). A separate key was chosen over extending
+    // `IndexInfo`'s serialized shape to avoid touching `IndexInfo::decode_bytes`'s delicate
     // bincode forward-compat fallback chain (current-shape → pre-`state`
     // legacy shape). An absent key or empty vec means "no in-progress drops".
     //
@@ -687,31 +687,7 @@ impl IndexManager {
         &self,
         is_unique: bool,
     ) -> DbResult<Vec<(u64, Option<String>)>> {
-        let key_str = if is_unique { "uidx_drop" } else { "idx_drop" };
-        let key = RecordId::system(key_str).to_bytes();
-        match self.info_store.get(key.into()).await {
-            Ok(bytes) => {
-                if bytes.is_empty() {
-                    return Ok(Vec::new());
-                }
-                // Try new format first: Vec<(u64, Option<String>)>
-                match bincode::deserialize::<Vec<(u64, Option<String>)>>(&bytes) {
-                    Ok(new_format) => Ok(new_format),
-                    Err(_) => {
-                        // Fall back to old format: Vec<u64> (pre-#1051)
-                        let old_format: Vec<u64> = bincode::deserialize(&bytes).map_err(|e| {
-                            shamir_storage::error::DbError::Codec(format!(
-                                "system:{key_str} decode failed: {e}"
-                            ))
-                        })?;
-                        // Convert to new format with op_id = None
-                        Ok(old_format.into_iter().map(|id| (id, None)).collect())
-                    }
-                }
-            }
-            Err(shamir_storage::error::DbError::NotFound(_)) => Ok(Vec::new()),
-            Err(e) => Err(e),
-        }
+        Self::load_dropping_set_standalone(is_unique, &self.info_store).await
     }
 
     /// #1048: standalone version of `load_dropping_set` for use by TableManager
@@ -1912,10 +1888,12 @@ impl IndexManager {
         // path can re-run it idempotently.
         // P1-2 (#967): a durable tombstone is already persisted — if this
         // sweep fails, enrich the error with the partial-state context.
-        // NOTE: Cannot write DdlOpState::Failed here because this layer
-        // (IndexManager) does not have op_id in scope. The enriched error
-        // message is the only signal to the caller (TableManager::rename_index
-        // already writes Failed status for rename-specific failures).
+        // NOTE: Cannot write DdlOpState::Failed here even though `op_id` is
+        // in scope (a parameter of this function, #1051) — this crate
+        // (`shamir-index`) has no access to `shamir-engine`'s `ddl_op_log`,
+        // which sits one layer up. The enriched error message is the only
+        // signal to the caller (`TableManager::rename_index` already writes
+        // Failed status for rename-specific failures).
         self.sweep_index_postings(false, name_interned)
             .await
             .map_err(|e| {
@@ -1952,8 +1930,10 @@ impl IndexManager {
         // Persist the reduced IndexInfo (definition removed).
         // P1-2 (#967): the tombstone is still in place — if this persist
         // fails, recovery will see the tombstone and finish the drop.
-        // NOTE: Cannot write DdlOpState::Failed here because this layer
-        // (IndexManager) does not have op_id in scope.
+        // NOTE: Cannot write DdlOpState::Failed here even though `op_id` is
+        // in scope (a parameter of this function, #1051) — this crate
+        // (`shamir-index`) has no access to `shamir-engine`'s `ddl_op_log`,
+        // which sits one layer up.
         if was_removed {
             self.save_index_info().await.map_err(|e| {
                 shamir_storage::error::DbError::Internal(format!(
@@ -1976,8 +1956,10 @@ impl IndexManager {
         // from IndexInfo — it just clears the tombstone (a no-op sweep).
         // P1-2 (#967): if this fails, the tombstone remains — recovery
         // will just clear it (a no-op on the already-finished drop).
-        // NOTE: Cannot write DdlOpState::Failed here because this layer
-        // (IndexManager) does not have op_id in scope.
+        // NOTE: Cannot write DdlOpState::Failed here even though `op_id` is
+        // in scope (a parameter of this function, #1051) — this crate
+        // (`shamir-index`) has no access to `shamir-engine`'s `ddl_op_log`,
+        // which sits one layer up.
         self.clear_from_dropping(false, name_interned)
             .await
             .map_err(|e| {
