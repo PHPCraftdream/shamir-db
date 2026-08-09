@@ -1338,6 +1338,25 @@ impl MvccStore {
         self.current_stream_impl(batch, true)
     }
 
+    /// Version-pinned stream: yield all `(key, value)` pairs visible at
+    /// `at_version`. Tombstones (empty value) are suppressed — this is the
+    /// correct default for Phase A backfill (online CREATE INDEX) where rows
+    /// deleted at or before the pinned version must NOT produce a posting.
+    ///
+    /// Behaves like [`current_stream`](Self::current_stream) but pins the scan
+    /// at an explicit version rather than `gate.last_committed()`. The pinned
+    /// version is captured at stream-open time and used to filter both history
+    /// and overlay entries (newest version ≤ at_version is visible).
+    ///
+    /// Emits in batches of `batch`.
+    pub fn snapshot_stream(
+        &self,
+        batch: usize,
+        at_version: u64,
+    ) -> impl futures::Stream<Item = DbResult<Vec<(Bytes, Bytes)>>> + Send {
+        self.snapshot_stream_impl(batch, at_version, false)
+    }
+
     /// Shared implementation behind [`current_stream`](Self::current_stream)
     /// and
     /// [`current_stream_with_tombstones`](Self::current_stream_with_tombstones).
@@ -1349,11 +1368,29 @@ impl MvccStore {
         batch: usize,
         include_tombstones: bool,
     ) -> impl futures::Stream<Item = DbResult<Vec<(Bytes, Bytes)>>> + Send {
+        self.snapshot_stream_impl(batch, self.gate.last_committed(), include_tombstones)
+    }
+
+    /// Shared implementation behind [`current_stream`](Self::current_stream),
+    /// [`current_stream_with_tombstones`](Self::current_stream_with_tombstones), and
+    /// [`snapshot_stream`](Self::snapshot_stream).
+    ///
+    /// `at_version` is the explicit version floor (usually `gate.last_committed()` for
+    /// the current-stream variants).
+    /// `include_tombstones` selects which of the two semantics
+    /// `StreamingGroupByState`'s flush points apply — see
+    /// `version_entry.rs`'s `flush_group`/`drain_overlay`.
+    fn snapshot_stream_impl(
+        &self,
+        batch: usize,
+        at_version: u64,
+        include_tombstones: bool,
+    ) -> impl futures::Stream<Item = DbResult<Vec<(Bytes, Bytes)>>> + Send {
         use futures::stream::unfold;
 
         let history = Arc::clone(&self.history);
-        // R3: capture committed floor at stream-open time.
-        let floor = self.gate.last_committed();
+        // R3: capture committed floor at stream-open time (explicit parameter).
+        let floor = at_version;
         // P1b: materialise the overlay's per-key winner ≤ floor at open. The
         // overlay is the SMALL side of the merge (bounded window), so loading
         // it into a map and merging during the history group-by is cheap.

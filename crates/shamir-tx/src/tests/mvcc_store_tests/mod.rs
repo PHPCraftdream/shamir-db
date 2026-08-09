@@ -21,6 +21,7 @@ pub mod pending_ts_race_tests;
 pub mod point_read_alloc_tests;
 pub mod publish_monotonic_tests;
 pub mod retention_tests;
+pub mod snapshot_stream_tests;
 pub mod stream_tests;
 pub mod ts_atomicity_tests;
 pub mod ts_index_tests;
