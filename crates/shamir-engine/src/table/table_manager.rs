@@ -1291,6 +1291,37 @@ impl TableManager {
         self.mvcc_store_ref().cloned()
     }
 
+    /// Acquire a snapshot guard for Phase A of online CREATE INDEX.
+    ///
+    /// Returns `Some(guard)` if this table has a changefeed attached (i.e.,
+    /// if it was created through `RepoInstance::create_table_context`, which
+    /// always attaches both `mvcc_store` and `changefeed`). Returns `None`
+    /// for system tables or direct-constructed test tables that lack a changefeed.
+    ///
+    /// The guard pins the MVCC version it protects via `gate.active_snapshots`,
+    /// preventing GC from reclaiming any version ≥ `guard.version()` until the
+    /// guard is dropped. Phase A's backfill scan must hold this guard for its
+    /// entire lifetime — dropping it mid-scan would leave the scan vulnerable to
+    /// GC removing versions it still needs, resulting in data loss.
+    ///
+    /// **Contract:** The caller MUST ensure the guard outlives the scan it
+    /// protects. Acquire the guard FIRST, then use `guard.version()` as the
+    /// pin version — this is the version provably protected from GC. Do not
+    /// read `current_committed_version()` separately; that could race with
+    /// concurrent commits and pin a version the guard does not protect.
+    ///
+    /// Returns an async `SnapshotGuard` — `await` is required.
+    ///
+    /// #1057 (slice 1b): primitive added, not yet wired into create_index path
+    /// (that's slice 1d). Allow dead-code until then.
+    #[allow(dead_code)]
+    pub(crate) async fn open_index_build_snapshot(&self) -> Option<shamir_tx::SnapshotGuard> {
+        match self.changefeed.as_ref() {
+            Some(cf) => Some(cf.gate.open_snapshot().await),
+            None => None,
+        }
+    }
+
     /// Wire this table's non-tx write path to the SSI commit-write log.
     ///
     /// Returns `self` so callers can chain after `create()` (mirrors

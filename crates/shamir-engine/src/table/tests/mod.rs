@@ -52,6 +52,7 @@ pub mod p1011_reader_drain_tests;
 pub mod p1048_hash_drop_durability_tests;
 pub mod p1048_index2_drop_durability_tests;
 pub mod p1051_op_id_uniqueness_tests;
+pub mod p1057_snapshot_guard_tests;
 pub mod p1063_multi_fts_index_stats_tests;
 pub mod p967_ddl_structured_error_tests;
 pub mod p997_hash_rename_durability_tests;
