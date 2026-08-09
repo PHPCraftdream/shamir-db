@@ -1,6 +1,7 @@
 # RFC: Online CREATE INDEX (snapshot → CDC → catch-up → short barrier)
 
 **Status: DRAFT — pending review**
+**Version:** v2 — revised 2026-08-09 (see revision notes below)
 **Author:** S.H.A.M.I.R. DB engineering
 **Date:** 2026-08-07
 **Tracks:** #1018 (P1-5, this RFC), #969 (P1-4, the bench + operational-warning
@@ -8,6 +9,50 @@ this RFC replaces the recommendation for), #1044 (PERF backlog, unique-family
 O(table) memory — related but NOT solved here), #1048 (P1-2 sub-slice B, the
 tombstone `op_id` carry this RFC's §5 slicing depends on for CREATE's own
 future op-status wiring).
+
+## Revision log (v2)
+
+This revision incorporates the findings of `2026-08-09-p1054-write-path-audit.md`
+and corrects four technical gaps identified during code review:
+
+1. **Removed Open Question 1 (§6)** — The RFC incorrectly claimed no `pub` table-wide
+   "current committed version" accessor existed. `MvccStore::current_committed_version()`
+   (`crates/shamir-tx/src/mvcc_store/mod.rs:266`) is already `pub` and used by
+   `TableManager::mvcc_store()` (`table_manager.rs:1290`) for exactly this purpose in
+   sorted-index backfill. §2.2's pin description now cites this existing primitive.
+
+2. **Corrected §2.2's `snapshot_stream` framing** — The RFC called this "the single
+   largest new piece of engine machinery." False: `MvccStore::current_stream_impl`
+   (`crates/shamir-tx/src/mvcc_store/mod.rs:1347-1372`) is already version-pinned at
+   stream-open (captures `floor = self.gate.last_committed()` at line 1356). The only
+   change needed is exposing `floor` as a parameter instead of hardcoding it — a
+   thin wrapper (`snapshot_stream(batch, at_version)`), not new machinery.
+
+3. **Added SnapshotGuard to Phase A (§2.2, §3, §4)** — The RFC lacked GC protection for
+   the pinned version during Phase A's potentially long-running scan. MVCC GC uses
+   `min_alive()` to decide what versions to collect; without a registered snapshot,
+   versions Phase A needs can be reclaimed mid-scan. Phase A must acquire and hold a
+   `RepoTxGate::open_snapshot()` RAII `SnapshotGuard` for the entire scan duration
+   (`crates/shamir-tx/src/repo_tx_gate.rs:356`, exported at `lib.rs:74`). Crash safety:
+   a crash drops the guard with everything else, and restart re-pins a fresh version
+   (matches §4.2's conservative restart-from-scratch policy).
+
+4. **Rewrote §2.3 (Phase B) based on the write-path audit** — The RFC's "live write-hook"
+   abstraction doesn't exist as described. The actual mechanism: tx-staged writes and
+   non-tx CRUD writes both funnel through `IndexManager::plan_record_created`/
+   `plan_record_updated`/`plan_record_deleted` (and `SortedIndexManager` equivalents),
+   which iterate ALL registered index defs with NO `IndexState` filter. Dirty-set capture
+   is an `IndexState`-conditional inside these shared planning methods — when a def is
+   `Building` AND has an active in-flight-build registry entry, route to dirty-set
+   capture instead of producing direct `SetPosting`/`RemovePosting` ops. This is a single
+   choke point, not ~15 scattered call sites (see the audit for full analysis).
+
+5. **Threw dirty-set design through the document** — Per an operator decision (2026-08-09),
+   this RFC uses a **dirty-set** of touched `RecordId`s (no values, no `seq` tracking), not
+   a CDC log with `(RecordId, DeltaOp)` values. Phase C re-reads each id at the current
+   version and recomputes its posting directly. Idempotency and last-write-wins fall out
+   by construction. Updated §2.3 (mechanism), §2.4 (Phase C), §3 Claim 2 (concurrency
+   argument now simpler, not weaker), and §4.2 (crash recovery matrix tradeoffs).
 
 > This is a **proposal** for review, not a final contract. Every code
 > reference below is illustrative unless explicitly marked "existing". Every
@@ -188,32 +233,49 @@ explicitly contrasts it with `AsOf`'s `get_at(id, pinned_version)`, confirming
 `current_stream` has no snapshot-version parameter at all).
 
 The online build needs a **version-pinned** scan so Phase B (§2.3) can define
-"everything after this version is a delta" precisely. The codebase already
-has the primitive: `MvccStore::get_at(key, snapshot_version)`
+"everything after this version is a delta" precisely. The codebase already has
+the primitive: `MvccStore::get_at(key, snapshot_version)`
 (`mvcc_store/mod.rs:1097`) is exactly what `read_as_of`
 (`crates/shamir-engine/src/table/read_temporal.rs:45-72`) uses to serve
 `AsOf(Version(v))` reads. Phase A's snapshot scan needs an **enumeration**
 variant of this idea — walk the keyspace as of a pinned version, not just
-point-lookup it — which does not exist today as a reusable primitive (grep
-confirms `current_stream`/`current_stream_with_tombstones` are the only
-production enumeration streams, and neither is version-pinned). **New
-primitive needed:** a `snapshot_stream(batch_size, at_version)` on
-`MvccStore`, built the same way `current_stream_impl`
-(`mvcc_store/mod.rs:1341+`) already batches, but filtering each key's winner
-by "the newest version ≤ `at_version`" instead of "the newest version,
-period." This is the single largest new piece of *engine* machinery this RFC
-proposes (as opposed to reusing table/index-layer machinery).
+point-lookup it. **This is NOT new machinery:** `MvccStore::current_stream_impl`
+(`crates/shamir-tx/src/mvcc_store/mod.rs:1347-1372`) is already version-pinned at
+stream-open — it captures `floor = self.gate.last_committed()` at line 1356,
+filters "newest version ≤ floor" in its group-by state machine, and merges the
+overlay via `self.overlay.snapshot_le(floor)` (lines 1367-1372). The only change
+needed is exposing `floor` as a parameter instead of hardcoding it to
+`last_committed()` — a thin wrapper `snapshot_stream(batch, at_version)` that
+calls `current_stream_impl` with the caller-specified floor. This is tens of
+lines of parameterization, not new engine machinery.
 
-**What the pinned version is.** At Phase A's start, before any scan work: read
-the table's current highest committed version (a value that must exist
-somewhere in `shamir-tx`'s version-tracking machinery — this RFC did not find
-a single already-`pub` "give me the current watermark" accessor exported at
-the `TableManager` layer; `MvccStore::current_version(key)`
-(`mvcc_store/mod.rs:1445`) is `pub(crate)` and per-key, not a table-wide
-watermark). **Open question (see §6.1):** whether to add a genuinely new
-table-wide "last committed version" accessor, or to derive the pin from the
-version the `WriterDrainBarrier`/`ddl_admission` sequence observes at a
-microsecond flag-raise (a much smaller barrier than today's, see §2.3).
+**What the pinned version is.** At Phase A's start, before any scan work:
+read the table's current committed version via `MvccStore::current_committed_version()`
+(`crates/shamir-tx/src/mvcc_store/mod.rs:266`, already `pub`) and
+`TableManager::mvcc_store()` (`crates/shamir-engine/src/table/table_manager.rs:1290`,
+already `pub`). This accessor is already used for exactly this purpose in
+sorted-index backfill (`table_manager_sorted_index.rs:286`), so the design reuses
+an existing primitive without adding new surface.
+
+**GC protection — holding the version alive during the scan.** Phase A runs for
+potentially minutes without a barrier, so MVCC garbage collection must not reclaim
+the versions Phase A's scan still needs. MVCC GC uses `min_alive()`
+(`crates/shamir-tx/src/mvcc_store/mvcc_gc.rs:286`) to determine which versions to
+collect — "the oldest live snapshot, or `last_committed` when no snapshot is open."
+Without a registered snapshot, `min_alive` tracks the moving watermark and can
+collect versions Phase A's scan still needs mid-scan.
+
+Phase A must acquire and hold a `RepoTxGate::open_snapshot()` RAII
+`SnapshotGuard` (`crates/shamir-tx/src/repo_tx_gate.rs:356`, exported at
+`crates/shamir-tx/src/lib.rs:74`) for the ENTIRE duration of the scan — released
+only when Phase A completes or the build aborts. The guard registers the version
+in `active_snapshots`, keeping it alive for GC purposes until the guard drops.
+
+Crash safety: a crash drops the guard along with everything else. Restart re-pins
+a FRESH version (the old pin is stale — time has passed, more writes landed), which
+matches §4.2's conservative restart-from-scratch policy (Phase A is always redone
+from scratch after a crash, never resumed). This is not a new hazard beyond what
+§4.2 already handles.
 
 ### 2.3 Phase B — durable delta capture (concurrent with Phase A)
 
@@ -223,117 +285,123 @@ row that is (a) newer than the snapshot's pinned version, and (b) never seen
 by Phase A's enumeration. That row must not be lost from the index being
 built.
 
-**Mechanism: a short micro-barrier BEFORE Phase A starts, to register the
-live write-hook, then release it immediately.** This reuses, not replaces,
-the existing "register-first" invariant `create_index_from_stream`'s own doc
-already relies on (`index_manager.rs:1557-1559`, Phase 1: `self.indexes.add_index(index_def)`
-happens BEFORE the backfill loop, specifically so the live per-write
-`index_manager` hook starts maintaining postings for this index's definition
-from that moment on). Concretely, for the online design:
+**Mechanism: capture dirty `RecordId`s via a single choke point.**
+Per the write-path audit (`2026-08-09-p1054-write-path-audit.md`), tx-staged
+writes and non-tx CRUD writes both funnel through the SAME shared planning
+methods:
+- `IndexManager::plan_record_created`/`plan_record_updated`/`plan_record_deleted`
+  (`crates/shamir-index/src/base_index/index_manager.rs:2023`, `:2074`, `:2130`)
+- `SortedIndexManager::plan_record_created`/`plan_record_updated`/`plan_record_deleted`
+  (`crates/shamir-index/src/base_index/sorted_index_manager.rs:1564`, `:1644`, `:1713`)
+
+These methods iterate over **all registered index definitions with NO filter on
+`IndexState`** — they produce `SetPosting`/`RemovePosting` ops for `Building`
+defs just as readily as for `Ready` defs. This is why the dirty-set capture
+belongs INSIDE these shared methods, NOT at ~15 scattered call sites in
+`table_manager_tx_ops.rs` and `table_manager_crud.rs`.
+
+**The dirty-set design (operator decision, 2026-08-09).** This RFC uses a
+**dirty-set** of touched `RecordId`s (no values, no `seq` tracking), not a
+CDC log with `(RecordId, DeltaOp)` values. Storage cost is O(distinct rows
+touched) instead of O(writes × value size). Phase C (§2.4) re-reads each id at
+the current version and recomputes its posting directly. Idempotency and
+last-write-wins fall out by construction — recompute-from-current-state is
+inherently idempotent, and the last write wins because we read the final
+committed state.
+
+**Capture logic inside the shared planning methods:**
 
 1. Acquire `begin_write_barrier(REGULAR_INDEX_CREATE)` — same call, same
    order, as today.
-2. Under the barrier: read the pinned snapshot version (§2.2), register the
-   index definition at `Building` (identical to today's Phase 1,
-   `index_manager.rs:1559-1562`) — this is what makes the live write-hook
-   start capturing postings for every NEW write from this instant.
+2. Under the barrier: read the pinned snapshot version (§2.2), acquire the
+   `SnapshotGuard` for GC protection, register the index definition at
+   `Building` (identical to today's Phase 1, `index_manager.rs:1559-1562`).
 3. **Release the barrier immediately** (drop the guard) — this is the "short"
-   part; step 1-2 together are sub-millisecond, matching
-   `begin_write_barrier`'s own doc note that acquisition "is sub-ms once no
-   writers are in-flight" (echoed in the `f78_writer_latency.rs` bench's own
-   comment at line 156).
+   part; step 1-2 together are sub-millisecond.
 4. Only NOW start Phase A's (barrier-free) snapshot scan, reading at the
    pinned version from step 2.
+5. **Dirty-set capture starts the moment the def is registered at `Building`**:
+   Inside each shared planning method's loop over defs, check:
+   - If `def.state == IndexState::Building` AND this Building index has an
+     active in-flight-build registry entry (a new per-`IndexManager` registry,
+     one entry per name, mirroring the existing `in_flight_creates` RAII-guard
+     set already used for `degraded_index_count()` bookkeeping,
+     `table_manager_index_mgmt.rs:630`):
+     - Add the `RecordId` to the dirty-set for this index (persisted in
+       `info_store` under a key prefix like `system:ddl_dirty_set:<build_id>`).
+     - Do NOT produce a `SetPosting`/`RemovePosting` op for this specific def
+       (or produce it AND dirty-set — either works, but skipping the op is
+       simpler and avoids unnecessary posting writes).
+   - If `def.state == IndexState::Ready` (or no active build):
+     - Produce the `SetPosting`/`RemovePosting` op as usual.
 
-**Where captured deltas land.** Today's live write-hook (`index_manager`'s
-per-write posting maintenance, the same mechanism that already runs for every
-`Ready` index on every write) writes postings **directly** into the same
-posting keyspace Phase A's backfill also writes into
-(`build_posting_key`/`set_many`, `index_manager.rs:1595-1618`). This is
-**already** how today's whole-barrier design "gets delta catch-up for free"
-(the doc comment's own words) — because nothing else can write during the
-whole build, there is no actual *race* between the hook's writes and the
-backfill's writes, just an ordering coincidence that happens to be safe.
+This single-choke-point design works for both tx-staged and non-tx CRUD writes
+without duplication, avoids missing a call site in future refactors, and
+matches the audit's finding that both paths share the SAME underlying planning
+mechanism.
 
-Under the online design, Phase A and the live hook run **concurrently**, so
-this direct-write sharing is no longer trivially safe: the hook could write a
-posting for record R at the same moment Phase A's scan is enumerating R at an
-older or newer position in the keyspace, or R could be **updated twice**
-(insert then delete) while Phase A hasn't reached it yet, and Phase A's stale
-read could re-insert a posting the hook already correctly removed
-(a lost-tombstone race). **This is the reason a delta LOG (not a direct
-posting write) is needed**, not a cosmetic architecture preference:
-
-- A new **per-build delta log** — `DdlDeltaLog` (illustrative name) — keyed
-  by `(build_id, seq)`, storing `(RecordId, DeltaOp)` where `DeltaOp` is
-  `Insert(InnerValue) | Update(InnerValue) | Delete`. Appended to by the live
-  write-hook for every write whose row falls within the index's paths, for
-  the duration of the build (from Phase B step 2 to Phase D's completion).
-- The hook does **not** touch the posting keyspace directly during an
-  in-progress online build — it only appends to the delta log. (This is a
-  behavior change from today's hook, gated on "is there an in-progress build
-  for this index" — a new per-`IndexManager` in-flight-build registry, one
-  entry per name, mirroring the existing `in_flight_creates`
-  RAII-guard set already used for `degraded_index_count()` bookkeeping,
-  `table_manager_index_mgmt.rs:630`.)
-- **Idempotent replay contract:** the delta log's `seq` is a monotonic
-  counter (`AtomicU64`, table-scoped or index-build-scoped), so Phase C/D can
-  track "last applied seq" and never double-apply. Each `DeltaOp` applies
-  the same `build_posting_key`/`set_many` (Insert/Update) or a targeted
-  `remove_many` (Delete) that the existing hook already knows how to do —
-  Phase C is NOT new posting-maintenance logic, it is the SAME per-row
-  posting-maintenance code path, invoked from a replay loop instead of
-  inline from the write path.
-- **Storage:** the same `info_store` the tombstones and the new
-  `ddl_op_log` module already use
-  (`crates/shamir-engine/src/table/ddl_op_log.rs:1-11`'s own doc explicitly
-  states it "lives in the same `info_store` that tombstones use" — the same
-  pattern applies here: no new storage substrate, a new key prefix
-  `system:ddl_delta:<build_id>:<seq>`).
-- **GC:** the whole delta log for a `build_id` is deleted once Phase D
-  completes (either success — the index reaches `Ready` — or a permanent
-  abort). A crash mid-build leaves the log around; see §4 for the recovery
-  story (the log is exactly what makes resumable catch-up possible, unlike
-  today's restart-from-scratch model).
+**Storage and GC:** The dirty-set lives in the same `info_store` the tombstones
+and the new `ddl_op_log` module already use
+(`crates/shamir-engine/src/table/ddl_op_log.rs:1-11`'s own doc explicitly
+states it "lives in the same `info_store` that tombstones use"). A new key
+prefix `system:ddl_dirty_set:<build_id>` stores the set of touched `RecordId`s
+as a compact set (e.g., a roaring bitmap or a sorted array of `RecordId`s —
+the exact encoding is an implementation detail, not a design constraint). The
+entire dirty-set for a `build_id` is deleted once Phase D completes (either
+success or a permanent abort). A crash mid-build leaves the dirty-set around;
+see §4 for the recovery story.
 
 ### 2.4 Phase C — catch-up (barrier-free, looped)
 
 Once Phase A's scan completes (every pre-pin row has a posting), Phase C
-drains the delta log built during Phase A's run:
+drains the dirty-set built during Phase A's run:
 
-1. Read all delta-log entries with `seq > last_applied_seq` (initially 0).
-2. Apply them in `seq` order (idempotent — see §2.3), advancing
-   `last_applied_seq`.
-3. Because Phase A can take minutes, MORE deltas will have accumulated by
-   the time step 1-2 finish than existed when step 1 started. Loop: go back
-   to step 1.
+1. Read all dirty-set entries for this `build_id`.
+2. For each `RecordId` in the dirty-set:
+   - Re-read the record at the **current version** (not the pinned version)
+     via `MvccStore::get_at(record_id, current_committed_version())`.
+   - Recompute the posting by calling the SAME planning methods that a live
+     `Ready` index uses (`IndexManager::plan_record_created`/`plan_record_updated`/
+     `plan_record_deleted` for the current record state). This is NOT new
+     posting-maintenance logic — it's the same code path, just invoked from
+     the catch-up loop instead of inline from the write path.
+   - Apply the computed posting to the building index's posting keyspace.
+3. Because Phase A can take minutes, MORE writes will have accumulated by
+   the time step 1-2 finish than existed when step 1 started (writers continue
+   unobstructed during Phase C too). Loop: go back to step 1.
 4. **Convergence criterion** (the "moving target" problem the task brief
    flags): stop looping and proceed to Phase D once EITHER (a) a full
-   iteration of step 1-2 applies **zero** new deltas (the log is caught up),
-   OR (b) the residual delta count drops below a small fixed threshold (e.g.
-   `< 100` entries, tunable — see `shamir-tunables` precedent for similarly
-   small operational knobs) AND has been non-increasing for N consecutive
-   iterations (prevents chasing a workload with sustained write throughput
-   above the catch-up apply rate forever). Whichever fires first hands off to
-   Phase D with a small, bounded residual to finish under the barrier.
-   **This is a genuine open design point flagged for review, not fully
-   settled here — see §6.2.**
+   iteration of step 1-2 finds the dirty-set empty (caught up), OR (b) the
+   dirty-set size drops below a small fixed threshold (e.g. `< 100` entries,
+   tunable) AND has been non-increasing for N consecutive iterations (prevents
+   chasing a workload with sustained write throughput above the catch-up apply
+   rate forever). Whichever fires first hands off to Phase D with a small,
+   bounded residual to finish under the barrier. **This is a genuine open
+   design point flagged for review, not fully settled here — see §6.2.**
 
 This phase never holds `unique_write_lock` or raises a `WriteBarrierFlags`
-bit — writers continue completely unobstructed. Only the actual delta *apply*
-work (bounded by however many deltas exist) consumes time; no `O(table)`
-work happens here.
+bit — writers continue completely unobstructed. Only the actual dirty-set
+drain work (bounded by however many distinct rows were touched) consumes time;
+no `O(table)` work happens here.
+
+**Idempotency and last-write-wins by construction.** Because Phase C re-reads
+each `RecordId` at the CURRENT committed version (not a stored value from the
+time of capture), recompute-from-current-state is inherently idempotent —
+applying Phase C multiple times for the same id converges to the same final
+posting state. Last-write-wins falls out too — we read the final committed
+state, so the last write to that id wins by definition. No `seq`/`last_applied_seq`
+bookkeeping is needed.
 
 ### 2.5 Phase D — short publish barrier
 
 1. Acquire `begin_write_barrier(REGULAR_INDEX_CREATE)` — same call, same
    canonical order as §1.1/§2.3 step 1.
-2. Apply the FINAL residual of the delta log (whatever accumulated since
+2. Apply the FINAL residual of the dirty-set (whatever accumulated since
    Phase C's last convergence check — bounded by the loop's threshold, i.e.
    small by construction).
 3. Flip `Building → Ready` and persist (identical to today's Phase 3,
    `index_manager.rs:1645-1664`).
-4. Delete the delta log for this `build_id` (GC, §2.3).
+4. Delete the dirty-set for this `build_id` (GC, §2.3).
 5. Release the barrier (RAII drop, same as today).
 
 Because step 2's work is bounded (the convergence criterion from §2.4
@@ -378,56 +446,67 @@ state machine.
 **Claim 2 — no committed write during the snapshot+catchup window is lost.**
 This is the crux the redesign has to prove that today's whole-barrier design
 gets "for free."
+
+**This claim depends on the `SnapshotGuard` from §2.2 holding for Phase A's
+entire duration.** Without it, MVCC GC could reclaim a version Phase A's
+scan still needs mid-scan (`min_alive()` tracks the moving watermark absent
+a registered snapshot — `mvcc_gc.rs:286`), silently truncating what "every
+write before the pin is captured by the scan" means: a row whose pre-pin
+version was garbage-collected would read as absent rather than as its
+pinned-version value, which is indistinguishable from a genuinely-deleted
+row and would corrupt the built index. The argument below assumes the guard
+is held; §2.2 is the enforcement mechanism, this is the correctness
+consumer of it.
 - Every write that commits **before** Phase B step 2 (index registered at
-  `Building`, live hook now capturing) is covered by Phase A's snapshot scan
+  `Building`, dirty-set capture now active) is covered by Phase A's snapshot scan
   IF its commit version ≤ the pinned version read in the same step. Since
-  step 2 reads the pin and registers the hook in the SAME barriered critical
+  step 2 reads the pin and registers the index in the SAME barriered critical
   section (Phase B steps 1-3 all happen under one `begin_write_barrier`
-  acquisition, not two separate ones), there is no window between "pin
-  chosen" and "hook active" for a write to fall into — this is exactly why
-  Phase B needs its own (short) barrier acquisition, not merely "start the
-  scan and start the hook independently." A write that raced the barrier
-  itself (arrived before the intent bit went up, drained by
-  `drain_writers()`) is guaranteed to have committed (and thus be captured by
-  the pin, being ≤ the version read after the drain) before Phase A ever
-  starts — same guarantee `begin_write_barrier`'s existing drain step already
-  provides for every other DDL path.
-- Every write that commits **after** Phase B step 2 (hook active) is
-  appended to the delta log (§2.3), regardless of whether Phase A has already
-  scanned that row or not — the hook does not consult Phase A's progress, it
-  unconditionally logs. A row updated twice (Phase A hasn't reached it,
-  hook logs Insert then Update) is applied in `seq` order at Phase C/D,
-  landing on the LAST state, which matches "commit order defines final
-  state" — the same ordering guarantee any single-writer-lock design would
-  give, just deferred.
-- **The one genuine new hazard vs. today: Phase A's own read of a row
-  the hook has ALSO logged a delta for.** If Phase A's snapshot scan (at
-  pinned version V) reads row R's value as of V, and R was ALSO written again
-  after V (logged in the delta log), Phase A's posting write for R (at the
-  V-state) and Phase C's replay of R's post-V delta must not race each other
-  destructively. This is why Phase C's replay must be **idempotent per-key,
-  last-write-wins by `seq`**, not a blind append: applying Phase A's posting
-  for R, then replaying R's delta-log entries in order, converges to the
-  SAME final posting state regardless of interleaving, because each replay
-  step is "recompute R's posting from R's CURRENT full value" (an
-  overwrite/idempotent posting-maintenance step, identical in kind to what
-  the ALREADY-existing live write-hook does for every `Ready` index today —
-  not a new mutation primitive, the same one, just invoked from a replay
-  loop). No lock is needed between Phase A's write and Phase C's replay of
-  the SAME key because both are idempotent, commutative-to-final-state
-  operations on the SAME (key → posting) mapping — the last one to run wins,
-  and "last" is well-defined by `seq` order (Phase C never runs concurrently
-  with Phase A; it starts strictly after Phase A's stream completes).
+  acquisition), there is no window between "pin chosen" and "dirty-set active"
+  for a write to fall into — this is exactly why Phase B needs its own (short)
+  barrier acquisition, not merely "start the scan and start dirty-set capture
+  independently." A write that raced the barrier itself (arrived before the
+  intent bit went up, drained by `drain_writers()`) is guaranteed to have
+  committed (and thus be captured by the pin, being ≤ the version read after
+  the drain) before Phase A ever starts — same guarantee `begin_write_barrier`'s
+  existing drain step already provides for every other DDL path.
+- Every write that commits **after** Phase B step 2 (dirty-set active) adds
+  its `RecordId` to the dirty-set (§2.3), regardless of whether Phase A has
+  already scanned that row or not — the capture does not consult Phase A's
+  progress, it unconditionally adds the id. A row updated twice while Phase A
+  hasn't reached it will appear once in the dirty-set (duplicates are
+  deduplicated by the set's structure), and Phase C will re-read the FINAL
+  state at the current version when it drains the set — no bookkeeping of
+  intermediate states is needed. This is SIMPLER than the CDC-log+seq argument
+  in v1: last-write-wins falls out by construction because we read the final
+  committed state.
+- **The one genuine new hazard vs. today: Phase A's own write of a posting
+  for a row that's ALSO in the dirty-set.** If Phase A's snapshot scan (at
+  pinned version V) writes a posting for row R at the V-state, and R was
+  ALSO written after V (captured in the dirty-set), Phase A's posting write
+  for R and Phase C's recompute for R must not race destructively. This is
+  why Phase C's recompute is idempotent (as §2.4 argues) — applying Phase
+  A's posting for R, then recomputing R's posting from the current state,
+  converges to the SAME final posting state. No lock is needed between Phase
+  A's write and Phase C's recompute for the SAME key because both are
+  idempotent operations on the SAME (key → posting) mapping — the last one
+  to run wins, and "last" is well-defined because Phase C runs strictly
+  AFTER Phase A's stream completes (no concurrent execution of the two for
+  the same index).
 
 **Claim 3 — no crash leaves an unrecoverable half-state.** See §4 in full;
-summary: the delta log persists across a crash (durable `info_store` writes,
+summary: the dirty-set persists across a crash (durable `info_store` writes,
 same durability class as the existing tombstones), so unlike today's
 restart-from-scratch model, a crash during Phase C/D can, in principle,
-RESUME catch-up from the last durably-applied `seq` rather than redoing the
-whole Phase A scan — see §4.2 for why this RFC still recommends
-restart-from-scratch for Phase A itself (matching the existing precedent) but
-proposes resumable catch-up as a genuinely new capability THIS design enables
-that the old design structurally could not.
+RESUME catch-up from where it left off — see §4.2 for why this RFC still
+recommends restart-from-scratch for Phase A itself (matching the existing
+precedent) but proposes resumable catch-up as a genuinely new capability THIS
+design enables that the old design structurally could not. With the dirty-set
+design, resumability is simpler than the CDC-log+seq approach in v1: Phase C
+just drains the dirty-set from where it left off (no `last_applied_seq` to
+track — the dirty-set is the set of all ids that were touched, and Phase C
+recomputes from current state for each, so resuming just means "continue
+draining").
 
 **Residual risk this RFC does NOT fully close (flagged for review, §6.2):**
 the convergence criterion (§2.4) is a heuristic, not a proof — a sustained
@@ -455,11 +534,11 @@ no idempotency guarantee for a resumed range scan.
 
 **This RFC's design changes the premise that rejection was based on.** The
 online build introduces exactly the missing pieces:
-- A durable, ordered, idempotent-to-replay **delta log** (§2.3) — this IS a
-  checkpoint mechanism, just not one the F-50 spike had in scope.
-- Phase C/D's replay is ALREADY required to be idempotent (Claim 2, §3) for
-  the concurrency argument to hold — so idempotent-resume is not extra work,
-  it is a byproduct of correctness the design already needs.
+- A durable **dirty-set** of touched `RecordId`s (§2.3) — this IS a checkpoint
+  mechanism, just not one the F-50 spike had in scope.
+- Phase C/D's recompute-from-current-state is ALREADY required to be idempotent
+  (Claim 2, §3) for the concurrency argument to hold — so idempotent-resume is
+  not extra work, it is a byproduct of correctness the design already needs.
 
 **What is still NOT resumable, and why that's still the right call:** Phase
 A's snapshot scan itself. The F-50 spike's core argument — "the scan has no
@@ -473,14 +552,14 @@ passed, more deltas exist).
 
 ### 4.2 The crash-state matrix
 
-| crash point | on-disk state | delta log | recovery action |
+| crash point | on-disk state | dirty-set | recovery action |
 |---|---|---|---|
 | before Phase B (no barrier acquired yet) | no `Building` descriptor persisted | none | nothing to recover — CREATE never started durably; client sees the connection drop / error, may retry the whole DDL |
-| during Phase B (barrier held, registering) | possibly `Building` persisted, hook maybe not yet live | none or partial | **restart-from-scratch**, same as today: table-open self-heal (mirroring #966/#1013's existing `Building`-detection) drops any partial postings, re-runs the WHOLE online-build sequence (fresh pin, fresh Phase A) |
-| during Phase A (barrier-free scan) | `Building` persisted, hook live | growing | table-open self-heal detects `Building`, discards the stale delta log (its deltas are all relative to a pin that's now behind current state anyway), restarts the WHOLE sequence — same as the row above. **Not resumable, by design (§4.1).** |
-| during Phase C (catch-up loop) | `Building` persisted, Phase A's postings ALREADY durably written (`set_many` per batch, same as today) | non-empty, entries durable | **NEW capability**: recovery can, in principle, resume catch-up from `last_applied_seq` instead of redoing Phase A — Phase A's own postings are already correct and durable (nothing about Phase A itself needs redoing), only the delta replay needs to continue. This is the concrete payoff of the delta-log design. **Left as an explicit slice-2+ optimization, not required for slice 1's correctness** — slice 1 may conservatively restart-from-scratch here too (simpler, still correct, just gives up the resumability payoff) until the resume path is itself implemented and tested; see §5.1. |
+| during Phase B (barrier held, registering) | possibly `Building` persisted, dirty-set capture not yet active | none or partial | **restart-from-scratch**, same as today: table-open self-heal (mirroring #966/#1013's existing `Building`-detection) drops any partial postings and the stale dirty-set, re-runs the WHOLE online-build sequence (fresh pin, fresh Phase A) |
+| during Phase A (barrier-free scan) | `Building` persisted, dirty-set active | growing | table-open self-heal detects `Building`, discards the stale dirty-set (its ids are relative to a pin that's now behind current state anyway, and Phase C re-reads from current state so the stale dirty-set is harmless but misleading), restarts the WHOLE sequence — same as the row above. **Not resumable, by design (§4.1).** |
+| during Phase C (catch-up loop) | `Building` persisted, Phase A's postings ALREADY durably written (`set_many` per batch, same as today) | non-empty, durable | **NEW capability with dirty-set:** recovery can, in principle, resume catch-up from where it left off — Phase C just continues draining the dirty-set (no `last_applied_seq` to track, unlike v1's CDC-log approach). Phase A's own postings are already correct and durable (nothing about Phase A itself needs redoing), only the dirty-set drain needs to continue. This is the concrete payoff of the dirty-set design. **Left as an explicit slice-2+ optimization, not required for slice 1's correctness** — slice 1 may conservatively restart-from-scratch here too (simpler, still correct, just gives up the resumability payoff) until the resume path is itself implemented and tested; see §5.1. **Tradeoff:** dirty-set loses the per-op detail of a CDC-log (no exact sequence of operations to replay, just the set of ids touched). This is accepted as a deliberate design choice — storage is O(distinct rows) instead of O(writes × value size), and recompute-from-current-state is simpler than seq-ordered replay. |
 | during Phase D (short barrier held) | `Building` still on disk (Ready-flip is the LAST step, same ordering as today's Phase 3) | small residual | same as today's Phase-3-interrupted case: `Building` on disk, self-heal restarts the whole sequence. Because Phase D is bounded/short by construction, this crash window is proportionally much SMALLER (a few ms of exposure vs. minutes today) even though the recovery action itself is unchanged. |
-| after Phase D's Ready-flip persist, before delta-log GC | `Ready` persisted, correct | stale, unreferenced | recovery (or a lazy periodic sweep) deletes the orphaned delta-log entries for this `build_id` — harmless, no correctness impact, purely a cleanup residual (mirrors the existing accepted pattern of a tombstone surviving past its logical need, e.g. `ddl_op_log.rs`'s own `DDL_OP_LOG_CAP`/FIFO-eviction TODO) |
+| after Phase D's Ready-flip persist, before dirty-set GC | `Ready` persisted, correct | stale, unreferenced | recovery (or a lazy periodic sweep) deletes the orphaned dirty-set for this `build_id` — harmless, no correctness impact, purely a cleanup residual (mirrors the existing accepted pattern of a tombstone surviving past its logical need, e.g. `ddl_op_log.rs`'s own `DDL_OP_LOG_CAP`/FIFO-eviction TODO) |
 
 ### 4.3 Does the doctor/`verify()`/`repair()` machinery need to change?
 
@@ -568,11 +647,11 @@ This is explicitly NOT a one-PR feature — mirroring #1015's RFC §4 style.
 **In scope:**
 - `MvccStore::snapshot_stream(batch_size, at_version)` (§2.2) — the new
   version-pinned enumeration primitive.
-- The per-build delta log (§2.3): storage primitives (mirroring
+- The per-build dirty-set (§2.3): storage primitives (mirroring
   `ddl_op_log.rs`'s `write`/`read` shape), the in-flight-build registry that
   gates the live write-hook between "direct posting write" (today's
-  behavior, unchanged for any index NOT mid-online-build) and "log to delta
-  log" (new behavior, only for an index actively in Phase B-D).
+  behavior, unchanged for any index NOT mid-online-build) and "add to
+  dirty-set" (new behavior, only for an index actively in Phase B-D).
 - Phase A/B/C/D wired into `TableManager::create_index` (regular family
   only — `create_unique_index`/`create_index_v2` UNCHANGED, still today's
   whole-barrier path).
@@ -593,7 +672,7 @@ This is explicitly NOT a one-PR feature — mirroring #1015's RFC §4 style.
 - Sorted family (§5.3).
 - index2 family (§5.4).
 - Resumable Phase-C-crash recovery (§4.2's deferred row) — ship
-  restart-from-scratch first, add resume once the delta-log mechanics are
+  restart-from-scratch first, add resume once the dirty-set mechanics are
   proven in production-shaped tests.
 - `DdlOpStatus` wiring for CREATE INDEX (§4.4) — its own follow-up slice(s),
   NOT bundled here.
@@ -607,9 +686,9 @@ This is explicitly NOT a one-PR feature — mirroring #1015's RFC §4 style.
 **Why deferred, not just "later for schedule reasons."** The unique family's
 correctness argument (§3, Claim 2) gets materially harder: duplicate
 detection needs GLOBAL knowledge of all keys seen so far, but under the
-online design, Phase A's snapshot scan and Phase C's delta replay are
+online design, Phase A's snapshot scan and Phase C's dirty-set drain are
 happening at DIFFERENT times against a growing key set — a duplicate could be
-introduced by a delta (a row updated to collide with an existing value)
+introduced by a dirty-set-captured write (a row updated to collide with an existing value)
 AFTER Phase A already validated no-duplicates-as-of-the-pin. Today's
 whole-barrier design sidesteps this entirely (nothing else can write, so
 "no duplicates" is checked once, atomically, against a fully static view).
@@ -634,7 +713,7 @@ migration-poll-precedent framing and P0-3a's plan doc,
 "Slice 2 — sorted family (`SortedIndexManager`, 8 chokepoints)" for the
 READER side of a similar problem). A sorted index's backfill also has
 ordering invariants (key-range structure) a hash index's flat posting-set
-backfill does not — interaction between THIS RFC's delta-log replay and the
+backfill does not — interaction between THIS RFC's dirty-set drain and the
 sorted family's existing rekey/settle machinery needs its own investigation
 before slicing in an online build for it. Mechanically similar in spirit to
 slice 1, but not "the same code with a different backend" — deferred.
@@ -650,7 +729,7 @@ actually served" — meaning index2's barrier is ALREADY narrower in coverage
 than the base_index families' barrier, for unrelated historical reasons (the
 commit pipeline plans index2 ops at STAGE time against an `all_backends()`
 snapshot, materializing later at commit Phase 5a, neither of which consults
-the barrier flag today). Layering a delta-log online-build design on top of
+the barrier flag today). Layering a dirty-set online-build design on top of
 an ALREADY-incomplete barrier is a bigger, structurally different problem
 than slices 1-3, which all build on top of a barrier that IS complete for
 their write paths. index2 needs its own scoping pass, likely starting from
@@ -660,53 +739,39 @@ closing THAT pre-existing gap first.
 
 ## 6. Open questions for review
 
-1. **Where does the snapshot pin's "current version" come from?** (§2.2) No
-   existing `pub` table-wide "current committed version" accessor was found
-   at the `TableManager` layer (`MvccStore::current_version` is
-   `pub(crate)` and per-key). Options: (a) add a new table-wide watermark
-   accessor (new engine surface, needs its own correctness argument for what
-   "current" means under concurrent commits — likely "the version last
-   observed by the barrier's own drain step," since that is already a
-   point where every prior write is provably durable); (b) derive the pin
-   implicitly from SOMETHING already computed during Phase B's micro-barrier
-   (e.g., the highest version any drained writer reported). Needs a decision
-   before slice 1 implementation starts — this RFC leans (a) for
-   explicitness but did not find a concrete existing primitive to reuse, so
-   flags it rather than assuming a design.
-
-2. **Convergence criterion — exact thresholds.** (§2.4) "Zero new deltas OR
+1. **Convergence criterion — exact thresholds.** (§2.4) "Zero new deltas OR
    residual < threshold for N iterations" is a shape, not a number. Needs
    reviewer input on the threshold/N (or agreement to ship the
    simpler "hard iteration cap, unconditionally publish after cap" version
    for slice 1 and treat the adaptive version as a slice-1.5 refinement).
 
-3. **Unique-family duplicate-detection strategy under concurrent deltas.**
+2. **Unique-family duplicate-detection strategy under concurrent deltas.**
    (§5.2) Option (a) late-fail-whole-build vs. (b) narrow per-key barrier
    during replay — genuinely undecided, needs its own short design pass
    before slice 2 starts.
 
-4. **Resumable Phase-C crash recovery — worth the complexity, or is
+3. **Resumable Phase-C crash recovery — worth the complexity, or is
    restart-from-scratch acceptable indefinitely?** (§4.2) Slice 1 ships
    conservative (always restart-from-scratch). Given that Phase D's barrier
    is already short, is a crash specifically inside Phase C rare/cheap
    enough that resumability is never worth building? Lean "build it
-   eventually" (the delta log makes it nearly free once proven), but flag
+   eventually" (the dirty-set makes it nearly free once proven), but flag
    for reviewer — this could also be explicitly deferred forever if the
    team judges Phase-C crash windows rare enough in practice.
 
-5. **Should the delta log be per-index-build or per-table?** (§2.3) This
-   RFC assumes per-`build_id` (one log per in-flight CREATE INDEX). If
+4. **Should the dirty-set be per-index-build or per-table?** (§2.3) This
+   RFC assumes per-`build_id` (one dirty-set per in-flight CREATE INDEX). If
    MULTIPLE indexes are ever created concurrently on the same table (today's
    `ddl_admission` mutex serializes DDL per table, so this cannot happen
    currently — but if `ddl_admission`'s per-table serialization is ever
    relaxed, e.g. to allow concurrent creates on DIFFERENT indexes of the
-   SAME table), would a shared per-table delta log (filtered by which
-   index's paths a delta touches) be more efficient than N independent full
-   per-build logs each duplicating the same underlying write stream? Not
+   SAME table), would a shared per-table dirty-set (filtered by which
+   index's paths a write touches) be more efficient than N independent full
+   per-build dirty-sets each duplicating the same underlying write stream? Not
    urgent (today's serialization makes this moot), but worth a one-line
    decision so slice 1's storage-key scheme doesn't need to change later.
 
-6. **`DdlOpState` extension for build-phase progress** (§4.4) — new
+5. **`DdlOpState` extension for build-phase progress** (§4.4) — new
    `BuildPhase` sub-status, additive field, exact shape. Deliberately NOT
    designed in this RFC (its own follow-up), but flagged so reviewers know
    it is coming and can weigh in on whether it should piggyback on THIS
@@ -779,9 +844,9 @@ manifest-only per this repo's §"Test organisation" rule):
    correctness-equivalence test (materialize-vs-stream postings-identical
    assertion, mentioned in `create_index_from_stream`'s "Why a separate
    method" doc, `index_manager.rs:1483-1490`) against the NEW online-build
-   path too, proving the delta-log-mediated build produces byte-identical
+   path too, proving the dirty-set-mediated build produces byte-identical
    posting sets to the old whole-barrier build for the SAME fixture with NO
-   concurrent writes (the degenerate case where Phase B/C/D's delta log is
+   concurrent writes (the degenerate case where Phase B/C/D's dirty-set is
    empty).
 
 ---
@@ -836,4 +901,17 @@ manifest-only per this repo's §"Test organisation" rule):
   version-pinned-read precedent this RFC's Phase A snapshot reuses in
   spirit); `crates/shamir-engine/src/table/table_manager_streaming.rs:91-116`
   (`list_stream`, confirmed to wrap `current_stream`, i.e. NOT version-pinned
-  today).
+  today); `crates/shamir-tx/src/mvcc_store/mod.rs:266` (`current_committed_version`,
+  the `pub` accessor used for the pinned version); `:1347-1372`
+  (`current_stream_impl`, the already-version-pinned stream primitive this RFC
+  parameterizes); `crates/shamir-tx/src/repo_tx_gate.rs:356` (`open_snapshot`,
+  returns a `SnapshotGuard` RAII guard for GC protection during Phase A,
+  exported at `crates/shamir-tx/src/lib.rs:74`).
+- Write-path audit: `docs/dev-artifacts/research/2026-08-09-p1054-write-path-audit.md`
+  (full document — exhaustive enumeration of all write paths that mutate postings,
+  proving the single-choke-point capture design in §2.3).
+- IndexManager planning methods: `crates/shamir-index/src/base_index/index_manager.rs:2023`
+  (`plan_record_created`), `:2074` (`plan_record_updated`), `:2130` (`plan_record_deleted`);
+  `crates/shamir-index/src/base_index/sorted_index_manager.rs:1564`
+  (`plan_record_created`), `:1644` (`plan_record_updated`), `:1713`
+  (`plan_record_deleted`).
