@@ -456,3 +456,82 @@ async fn test_building_not_in_flight_direct_writes() {
     let dirty = manager.dirty_sets.lock().unwrap();
     assert!(!dirty.contains_key(&1001));
 }
+
+// ============================================================================
+// #1059: drain_dirty_set tests
+// ============================================================================
+
+#[tokio::test]
+async fn test_drain_dirty_set_basic() {
+    let (_, _, manager) = create_manager();
+
+    // Create a regular index on field 1 through the normal registration path
+    // first (sets `has_indexes`, bumps generation, etc. — going straight to
+    // `indexes.add_index` with a hand-built Building def, with no prior
+    // registration, skips `has_indexes`, which makes `plan_record_created`
+    // short-circuit to an empty Vec before ever reaching the dirty-set
+    // capture logic). Then replace the Ready def with a Building one, same
+    // pattern as `test_scenario_2_in_flight_capture_to_dirty_set` above.
+    let index_def = IndexDefinition::new(1001, vec![IndexInfoItem::new(vec![1])]);
+    manager.create_index(index_def.clone()).await.unwrap();
+    let mut building_def = index_def.clone();
+    building_def.state = IndexState::Building;
+    manager.indexes.add_index(building_def);
+
+    // Mark in-flight.
+    manager.mark_build_in_flight(1001);
+
+    // Write 3 records touching field 1 — they should be captured to dirty-set.
+    let rid1 = RecordId::new();
+    let rid2 = RecordId::new();
+    let rid3 = RecordId::new();
+    let value = create_test_value(&[(1, InnerValue::Str("alice".into()))]);
+
+    manager.plan_record_created(&rid1, &value).await.unwrap();
+    manager.plan_record_created(&rid2, &value).await.unwrap();
+    manager.plan_record_created(&rid3, &value).await.unwrap();
+
+    // Drain and verify we get all 3 ids.
+    let drained = manager.drain_dirty_set(1001);
+    assert_eq!(drained.len(), 3);
+    assert!(drained.contains(&rid1));
+    assert!(drained.contains(&rid2));
+    assert!(drained.contains(&rid3));
+
+    // Immediate second drain should return empty.
+    let drained2 = manager.drain_dirty_set(1001);
+    assert!(drained2.is_empty());
+
+    // Add more records after the first drain.
+    let rid4 = RecordId::new();
+    let rid5 = RecordId::new();
+    manager.plan_record_created(&rid4, &value).await.unwrap();
+    manager.plan_record_created(&rid5, &value).await.unwrap();
+
+    // Second drain should see only the new records.
+    let drained3 = manager.drain_dirty_set(1001);
+    assert_eq!(drained3.len(), 2);
+    assert!(drained3.contains(&rid4));
+    assert!(drained3.contains(&rid5));
+}
+
+#[tokio::test]
+async fn test_drain_dirty_set_not_in_flight() {
+    let (_, _, manager) = create_manager();
+
+    // Do NOT mark in-flight.
+    let drained = manager.drain_dirty_set(1001);
+    assert!(drained.is_empty());
+}
+
+#[tokio::test]
+async fn test_drain_dirty_set_empty() {
+    let (_, _, manager) = create_manager();
+
+    // Mark in-flight but don't write any records.
+    manager.mark_build_in_flight(1001);
+
+    // Drain should return empty.
+    let drained = manager.drain_dirty_set(1001);
+    assert!(drained.is_empty());
+}

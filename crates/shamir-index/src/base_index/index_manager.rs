@@ -930,6 +930,25 @@ impl IndexManager {
         dirty.remove(&name_interned);
     }
 
+    /// #1059: drain the dirty-set for `name_interned`, returning every RecordId
+    /// captured since the last drain (or since the build started, for the first
+    /// drain). Returns an empty Vec if nothing was captured or the index isn't
+    /// in-flight. Draining clears the set — a RecordId captured AFTER this call
+    /// returns is not lost, it accumulates for the NEXT drain.
+    pub fn drain_dirty_set(&self, name_interned: u64) -> Vec<RecordId> {
+        if !self.is_build_in_flight(name_interned) {
+            return Vec::new();
+        }
+        let dirty = self.dirty_sets.lock().unwrap();
+        match dirty.get(&name_interned) {
+            Some(set) => {
+                let mut inner = set.lock().unwrap();
+                std::mem::take(&mut *inner).into_iter().collect()
+            }
+            None => Vec::new(),
+        }
+    }
+
     /// #1058: get the dirty-set for an in-flight build (internal helper for
     /// the planning methods). Returns `None` if the index is not in the registry.
     fn get_or_create_dirty_set(
