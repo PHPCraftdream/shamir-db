@@ -100,7 +100,7 @@ async fn p1087_phase_b_a_correctness_no_concurrency() {
 
     // Run Phase B+A.
     let result = tbl
-        .phase_b_a_backfill(index_def.clone(), 1000)
+        .phase_b_a_backfill("idx_name", index_def.clone(), 1000)
         .await
         .expect("phase_b_a_backfill should succeed");
     let _result = result.expect("online build should succeed");
@@ -141,8 +141,11 @@ async fn p1087_phase_b_a_concurrent_write_captured_in_dirty_set() {
     // Spawn Phase B+A in a task.
     let tbl_clone = tbl.clone();
     let index_def_clone = index_def.clone();
-    let backfill_task =
-        tokio::spawn(async move { tbl_clone.phase_b_a_backfill(index_def_clone, 1).await });
+    let backfill_task = tokio::spawn(async move {
+        tbl_clone
+            .phase_b_a_backfill("idx_name", index_def_clone, 1)
+            .await
+    });
 
     // Wait for the hook to park (after first batch).
     hook.wait_until_parked().await;
@@ -199,7 +202,7 @@ async fn p1087_phase_b_a_fallback_when_changefeed_absent() {
 
     // Run Phase B+A.
     let result = tbl
-        .phase_b_a_backfill(index_def, 1000)
+        .phase_b_a_backfill("idx_name", index_def, 1000)
         .await
         .expect("phase_b_a_backfill should not error");
     assert!(

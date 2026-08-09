@@ -15,17 +15,15 @@ use crate::index::index_info_item::IndexInfoItem;
 
 /// Result structure for #1088 Phase C/D: the SnapshotGuard and pin version
 /// must be returned from Phase B+A and kept alive through Phase C/D.
-#[allow(dead_code)]
 pub(crate) struct PhaseBAResult {
     pub guard: shamir_tx::SnapshotGuard,
     pub pin: u64,
 }
 
 impl TableManager {
-    #[allow(dead_code)]
-    const CATCHUP_ITERATION_CAP: usize = 10; // RFC v3 §2.4/§6.2 — conservative
-                                             // fixed cap, no tunables precedent
-                                             // for this yet; local const is fine.
+    pub(crate) const CATCHUP_ITERATION_CAP: usize = 10; // RFC v3 §2.4/§6.2 — conservative
+                                                        // fixed cap, no tunables precedent
+                                                        // for this yet; local const is fine.
 
     /// Create a regular or specialized (fts/vector/functional) index.
     ///
@@ -649,80 +647,94 @@ impl TableManager {
         // closes (a concurrent planner read must never observe a
         // half-populated index).
         index_def.state = crate::index2::state::IndexState::Building;
-        // F-70 (#897, P0): canonical drain-then-lock acquisition — raise
-        // `REGULAR_INDEX_CREATE`, drain in-flight fast-path writers, THEN
-        // take `unique_write_lock`. F-57 (#883) originally acquired the lock
-        // FIRST here, which this task found deadlocks against
-        // `pre_commit_prelock`'s drain-guard-then-lock shape on a second
-        // table. See `TableManager::begin_write_barrier` and
-        // `writer_drain_barrier`'s "F-70" doc section.
-        let (_barrier, _uwl_guard) = self
-            .begin_write_barrier(crate::index::write_barrier_flags::REGULAR_INDEX_CREATE)
-            .await;
-        // R0-C (#1010): cross-family name-uniqueness preflight, done WHILE
-        // holding `ddl_admission` (via the barrier above) — see
-        // `any_index_exists`'s doc and `create_index_v2`'s matching check for
-        // why the admission-guarded window (not a handler-layer check before
-        // admission) is what closes the TOCTOU gap. `index_exists` (this
-        // family's own occupancy) was already implicitly enforced by
-        // `IndexManager::create_index_from_stream`'s own registration; this
-        // additionally rejects a name already used by ANY OTHER family.
-        if self.any_index_exists(name).await {
-            return Err(shamir_storage::error::DbError::KeyExists(format!(
-                "index '{name}' already exists on this table (possibly in a different \
-                 index family — names are unique per table across all families)"
-            )));
-        }
         // F-42 (#850): persist the interner's newly-touched ids BEFORE the
         // index goes live — a persist failure must abort BEFORE publish, not
         // after. `build_index_definition` already interned the index NAME and
         // every field-path segment in-memory (`intern_string`/`intern_path` →
         // `touch_ind`); the ONLY thing deferred to this point is the DURABLE
-        // flush of those already-assigned ids, so moving it ahead of the
-        // streaming backfill below is a pure ordering change with no
-        // functional side effect. Confirmed by reading the actual signatures:
-        // `create_index_from_stream(index_def, stream)` consumes the
-        // already-built `IndexDefinition` (whose `name_interned` u64 was set
-        // in-memory by `build_index_definition`) and a stream built
-        // independently from `list_stream` — neither depends on the interner
-        // having been durably persisted. Pre-F-42 a persist failure here
+        // flush of those already-assigned ids. Pre-F-42 a persist failure here
         // returned `Err` but left the just-registered index LIVE in
         // `index_manager` — a live index whose interner ids may not survive a
         // restart, the exact F-33 corruption class reopened at the failure
         // path. Reordering means a persist failure aborts before any publish,
         // so no rollback is needed.
         self.interner.persist().await?;
-        // F-78 (#905): stream the backfill instead of materializing the WHOLE
-        // table into a `Vec<(RecordId, InnerValue)>`. `list_stream` already
-        // yields batches in O(batch) memory; we adapt each `RecordCow` to a
-        // decoded `InnerValue` here (the same decode `collect_all_current_records`
-        // did, but per-batch instead of for the whole table) and hand the
-        // stream to `IndexManager::create_index_from_stream`, which batch-
-        // writes postings via `set_many` per batch (one transactional commit
-        // per batch) instead of one giant `set_many` at the end. Peak memory
-        // drops from O(table) to O(batch).
-        //
-        // `collect_all_current_records` is intentionally LEFT in place — it
-        // still has other callers (`doctor::repair()` and two parity tests).
-        //
-        // Write-delta catch-up is already FREE: the barrier+lock above
-        // (`begin_write_barrier(REGULAR_INDEX_CREATE)`) serializes every
-        // concurrent writer for the whole create (in both the old materialize
-        // shape and this streaming shape), and Phase 1's register-at-Building
-        // (inside `create_index_from_stream`) activates the live write-hook so
-        // a row written at the registration boundary gets its posting
-        // maintained by that hook — the SAME mechanism the old path relied on.
-        // Streaming adds no new lost-write window and needs no new mechanism.
-        let stream = self.list_stream(1000).map(|batch| {
-            batch.and_then(|rows| {
-                rows.into_iter()
-                    .map(|(id, cow)| cow.into_inner().map(|v| (id, v)))
-                    .collect()
-            })
-        });
-        self.index_manager
-            .create_index_from_stream(index_def, stream)
-            .await
+
+        // #1089: Try the online-build path first (RFC v3 Phase B+A → Phase C+D).
+        // This path is barrier-free for the long-running scan, allowing concurrent
+        // writers to proceed. If the table has no changefeed wired (e.g. a system
+        // table or a directly-constructed test table), fall back to the whole-barrier
+        // path below.
+        match self
+            .phase_b_a_backfill(name, index_def.clone(), 1000)
+            .await?
+        {
+            Some(phase_ba) => {
+                // Online build available: run Phase C+D (catch-up and publish).
+                self.phase_c_d_catchup_and_publish(index_def.name_interned, phase_ba)
+                    .await
+            }
+            None => {
+                // Online build unavailable (no changefeed): fall back to the
+                // whole-barrier path used before RFC v3.
+                //
+                // F-70 (#897, P0): canonical drain-then-lock acquisition — raise
+                // `REGULAR_INDEX_CREATE`, drain in-flight fast-path writers, THEN
+                // take `unique_write_lock`. F-57 (#883) originally acquired the lock
+                // FIRST here, which this task found deadlocks against
+                // `pre_commit_prelock`'s drain-guard-then-lock shape on a second
+                // table. See `TableManager::begin_write_barrier` and
+                // `writer_drain_barrier`'s "F-70" doc section.
+                let (_barrier, _uwl_guard) = self
+                    .begin_write_barrier(crate::index::write_barrier_flags::REGULAR_INDEX_CREATE)
+                    .await;
+                // R0-C (#1010): cross-family name-uniqueness preflight, done WHILE
+                // holding `ddl_admission` (via the barrier above) — see
+                // `any_index_exists`'s doc and `create_index_v2`'s matching check for
+                // why the admission-guarded window (not a handler-layer check before
+                // admission) is what closes the TOCTOU gap. `index_exists` (this
+                // family's own occupancy) was already implicitly enforced by
+                // `IndexManager::create_index_from_stream`'s own registration; this
+                // additionally rejects a name already used by ANY OTHER family.
+                if self.any_index_exists(name).await {
+                    return Err(shamir_storage::error::DbError::KeyExists(format!(
+                        "index '{name}' already exists on this table (possibly in a different \
+                         index family — names are unique per table across all families)"
+                    )));
+                }
+                // F-78 (#905): stream the backfill instead of materializing the WHOLE
+                // table into a `Vec<(RecordId, InnerValue)>`. `list_stream` already
+                // yields batches in O(batch) memory; we adapt each `RecordCow` to a
+                // decoded `InnerValue` here (the same decode `collect_all_current_records`
+                // did, but per-batch instead of for the whole table) and hand the
+                // stream to `IndexManager::create_index_from_stream`, which batch-
+                // writes postings via `set_many` per batch (one transactional commit
+                // per batch) instead of one giant `set_many` at the end. Peak memory
+                // drops from O(table) to O(batch).
+                //
+                // `collect_all_current_records` is intentionally LEFT in place — it
+                // still has other callers (`doctor::repair()` and two parity tests).
+                //
+                // Write-delta catch-up is already FREE: the barrier+lock above
+                // (`begin_write_barrier(REGULAR_INDEX_CREATE)`) serializes every
+                // concurrent writer for the whole create (in both the old materialize
+                // shape and this streaming shape), and Phase 1's register-at-Building
+                // (inside `create_index_from_stream`) activates the live write-hook so
+                // a row written at the registration boundary gets its posting
+                // maintained by that hook — the SAME mechanism the old path relied on.
+                // Streaming adds no new lost-write window and needs no new mechanism.
+                let stream = self.list_stream(1000).map(|batch| {
+                    batch.and_then(|rows| {
+                        rows.into_iter()
+                            .map(|(id, cow)| cow.into_inner().map(|v| (id, v)))
+                            .collect()
+                    })
+                });
+                self.index_manager
+                    .create_index_from_stream(index_def, stream)
+                    .await
+            }
+        }
     }
 
     /// Create a unique index on specified paths.
@@ -2221,14 +2233,11 @@ impl TableManager {
     /// The index remains in `Building` state after this method returns (Phase C+D
     /// flip to Ready happens in #1088). The in-flight registry and dirty-set remain
     /// active, so concurrent writes during Phase A are captured.
-    ///
-    /// # Parameters
-    ///
     /// - `index_def`: Index definition with `state` already set to `Building` by the caller.
     /// - `batch_size`: Batch size for the `snapshot_stream` scan (same role as
     ///   `list_stream`'s parameter).
     ///
-    /// #1088: Phase C (catch-up loop) + Phase D (publish barrier) for online CREATE INDEX.
+    /// #1089: Phase C (catch-up loop) + Phase D (publish barrier) for online CREATE INDEX.
     ///
     /// Phase B+A backfill (returns SnapshotGuard for Phase C/D use).
     ///
@@ -2240,9 +2249,9 @@ impl TableManager {
     /// Returns `Ok(None)` when changefeed is not wired (online build unavailable).
     /// Returns `Ok(Some(PhaseBAResult { guard, pin }))` on success, where `guard`
     /// must be kept alive through Phase C/D (it pins the version for pin-time reads).
-    #[allow(dead_code)] // Will be wired in #1089
     pub(crate) async fn phase_b_a_backfill(
         &self,
+        name: &str,
         index_def: crate::index::index_definition::IndexDefinition,
         batch_size: usize,
     ) -> DbResult<Option<PhaseBAResult>> {
@@ -2258,6 +2267,20 @@ impl TableManager {
         let (_barrier, _uwl_guard) = self
             .begin_write_barrier(crate::index::write_barrier_flags::REGULAR_INDEX_CREATE)
             .await;
+
+        // R0-C (#1010): cross-family name-uniqueness preflight, done WHILE
+        // holding `ddl_admission` (via the barrier above) — see
+        // `any_index_exists`'s doc and `create_index`'s matching check for
+        // why the admission-guarded window (not a handler-layer check before
+        // admission) is what closes the TOCTOU gap. `index_exists` (this
+        // family's own occupancy) is enforced by `register_index_at_building`
+        // below; this additionally rejects a name already used by ANY OTHER family.
+        if self.any_index_exists(name).await {
+            return Err(shamir_storage::error::DbError::KeyExists(format!(
+                "index '{name}' already exists on this table (possibly in a different \
+                 index family — names are unique per table across all families)"
+            )));
+        }
 
         // Under the barrier, open the snapshot. If changefeed is not wired,
         // online build is unavailable for this table — return None signal
@@ -2425,7 +2448,6 @@ impl TableManager {
         Ok(Some(PhaseBAResult { guard, pin }))
     }
 
-    #[allow(dead_code)]
     pub(crate) async fn phase_c_d_catchup_and_publish(
         &self,
         name_interned: u64,

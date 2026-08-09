@@ -94,7 +94,7 @@ async fn p1088_phase_c_d_no_concurrent_writes() {
 
     // Run Phase B+A.
     let phase_ba = tbl
-        .phase_b_a_backfill(index_def.clone(), 1000)
+        .phase_b_a_backfill("idx_name", index_def.clone(), 1000)
         .await
         .expect("phase_b_a_backfill should succeed")
         .expect("online build should succeed");
@@ -146,7 +146,7 @@ async fn p1088_phase_c_d_insert_during_window() {
 
     // Run Phase B+A.
     let phase_ba = tbl
-        .phase_b_a_backfill(index_def.clone(), 1000)
+        .phase_b_a_backfill("idx_name", index_def.clone(), 1000)
         .await
         .expect("phase_b_a_backfill should succeed")
         .expect("online build should succeed");
@@ -217,7 +217,7 @@ async fn p1088_phase_c_d_update_to_different_value_during_window() {
 
     // Run Phase B+A.
     let phase_ba = tbl
-        .phase_b_a_backfill(index_def.clone(), 1000)
+        .phase_b_a_backfill("idx_name", index_def.clone(), 1000)
         .await
         .expect("phase_b_a_backfill should succeed")
         .expect("online build should succeed");
@@ -303,7 +303,7 @@ async fn p1088_phase_c_d_delete_during_window() {
 
     // Run Phase B+A.
     let phase_ba = tbl
-        .phase_b_a_backfill(index_def.clone(), 1000)
+        .phase_b_a_backfill("idx_name", index_def.clone(), 1000)
         .await
         .expect("phase_b_a_backfill should succeed")
         .expect("online build should succeed");
@@ -361,7 +361,7 @@ async fn p1088_phase_c_d_hard_iteration_cap() {
 
     // Run Phase B+A.
     let phase_ba = tbl
-        .phase_b_a_backfill(index_def.clone(), 1000)
+        .phase_b_a_backfill("idx_name", index_def.clone(), 1000)
         .await
         .expect("phase_b_a_backfill should succeed")
         .expect("online build should succeed");
@@ -435,7 +435,7 @@ async fn p1088_phase_c_d_post_phase_d_normal_writes() {
 
     // Run Phase B+A.
     let phase_ba = tbl
-        .phase_b_a_backfill(index_def.clone(), 1000)
+        .phase_b_a_backfill("idx_name", index_def.clone(), 1000)
         .await
         .expect("phase_b_a_backfill should succeed")
         .expect("online build should succeed");

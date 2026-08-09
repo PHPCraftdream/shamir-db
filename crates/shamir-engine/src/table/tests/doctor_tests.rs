@@ -543,20 +543,27 @@ fn int_record(key: u64, val: i64) -> InnerValue {
 /// Ready check as the regression guard for this family.
 #[tokio::test]
 async fn verify_detects_building_regular_index() {
-    use shamir_index::base_index::backfill_pause_hook::BackfillPauseHook;
+    use crate::table::index2_backfill_hook::BackfillPauseHook;
 
     let (_repo, tbl) = make_pause_test_repo("people").await;
     let status_key = intern_id(&tbl, "status").await;
+
+    // Filler rows to force multiple backfill batches (batch_size = 1000).
+    for i in 0..1200 {
+        tbl.insert(&str_record(status_key, &format!("filler_{i}")))
+            .await
+            .unwrap();
+    }
 
     // Pre-existing rows — the backfill has work to do and actually pauses.
     for s in ["a", "b", "c"] {
         tbl.insert(&str_record(status_key, s)).await.unwrap();
     }
 
-    // Install the pause hook on the low-level IndexManager.
+    // Install the pause hook on the TableManager's online-index path.
     let hook = Arc::new(BackfillPauseHook::new());
-    tbl.index_manager_ref()
-        .set_create_index_backfill_hook(Some(Arc::clone(&hook)));
+    tbl.online_index_backfill_hook
+        .store(Some(Arc::clone(&hook)));
 
     // Spawn create_index — registers at Building, then parks mid-backfill.
     let tbl_c = tbl.clone();

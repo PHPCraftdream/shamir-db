@@ -111,13 +111,26 @@ async fn read_between_score(
 /// flips to `Ready`), the SAME query must then use the index.
 #[tokio::test]
 async fn f72_regular_index_planner_invisible_during_backfill() {
-    use shamir_index::base_index::backfill_pause_hook::BackfillPauseHook;
+    use crate::table::index2_backfill_hook::BackfillPauseHook;
 
     let repo = make_repo();
     repo.add_table(TableConfig::new("people"));
     let tbl = repo.get_table("people").await.unwrap();
     let status_key = key_id(&tbl, "status").await;
     let id_key = key_id(&tbl, "id").await;
+
+    // Filler rows to force multiple backfill batches (batch_size = 1000).
+    // Use status "filler" so they don't match the "active" query below.
+    for i in 0..1200 {
+        tbl.insert(&record_with_status(
+            status_key,
+            "filler",
+            id_key,
+            1000 + i as i64,
+        ))
+        .await
+        .unwrap();
+    }
 
     // Three pre-existing rows, two matching "active" — this is the COMPLETE
     // correct set the concurrent read must observe regardless of whether the
@@ -128,11 +141,10 @@ async fn f72_regular_index_planner_invisible_during_backfill() {
             .unwrap();
     }
 
-    // Install the pause hook on the low-level IndexManager (create_index's
-    // backfill lives in `shamir-index`, a lower crate than `TableManager`).
+    // Install the pause hook on the TableManager's online-index path.
     let hook = Arc::new(BackfillPauseHook::new());
-    tbl.index_manager_ref()
-        .set_create_index_backfill_hook(Some(Arc::clone(&hook)));
+    tbl.online_index_backfill_hook
+        .store(Some(Arc::clone(&hook)));
 
     // Spawn the create; it registers the def at `Building`, then parks
     // mid-backfill (postings written, still `Building`, pre-`Ready`-flip).
