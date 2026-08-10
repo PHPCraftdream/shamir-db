@@ -54,6 +54,7 @@ pub mod p1048_index2_drop_durability_tests;
 pub mod p1051_op_id_uniqueness_tests;
 pub mod p1057_snapshot_guard_tests;
 pub mod p1059_online_create_index_tests;
+pub mod p1060_online_index_crash_recovery_tests;
 pub mod p1063_multi_fts_index_stats_tests;
 pub mod p1087_phase_b_a_tests;
 pub mod p1088_phase_c_d_tests;

@@ -276,6 +276,27 @@ pub struct TableManager {
     #[cfg(test)]
     pub(super) online_index_backfill_hook:
         Arc<arc_swap::ArcSwapOption<super::index2_backfill_hook::BackfillPauseHook>>,
+    /// P-1060: test-only pause hook for Phase B crash simulation.
+    /// Fires after `mark_build_in_flight` but before dropping barrier guards.
+    /// At this point: Building is durably persisted, in-flight flag is set,
+    /// barrier is still held. Proves the index stays Building after crash.
+    #[cfg(test)]
+    pub(super) phase_b_pause_hook:
+        Arc<arc_swap::ArcSwapOption<super::index2_backfill_hook::BackfillPauseHook>>,
+    /// P-1060: test-only pause hook for Phase C crash simulation.
+    /// Fires at the top of the catch-up loop (first iteration), before the
+    /// first dirty-set drain. At this point: Building is on disk, Phase A
+    /// postings are durable, SnapshotGuard is held, no barrier.
+    #[cfg(test)]
+    pub(super) phase_c_pause_hook:
+        Arc<arc_swap::ArcSwapOption<super::index2_backfill_hook::BackfillPauseHook>>,
+    /// P-1060: test-only pause hook for Phase D crash simulation.
+    /// Fires after the publish barrier is acquired but before the final
+    /// residual drain. At this point: Building is STILL on disk (the flip
+    /// is the last step of Phase D), barrier is held.
+    #[cfg(test)]
+    pub(super) phase_d_pause_hook:
+        Arc<arc_swap::ArcSwapOption<super::index2_backfill_hook::BackfillPauseHook>>,
 }
 
 /// Bundle wiring the non-tx write path to the SSI commit-write log.
@@ -354,6 +375,12 @@ impl Clone for TableManager {
             ),
             #[cfg(test)]
             online_index_backfill_hook: Arc::clone(&self.online_index_backfill_hook),
+            #[cfg(test)]
+            phase_b_pause_hook: Arc::clone(&self.phase_b_pause_hook),
+            #[cfg(test)]
+            phase_c_pause_hook: Arc::clone(&self.phase_c_pause_hook),
+            #[cfg(test)]
+            phase_d_pause_hook: Arc::clone(&self.phase_d_pause_hook),
         }
     }
 }
@@ -502,6 +529,12 @@ impl TableManager {
             index2_registered_before_ready_hook: Arc::new(arc_swap::ArcSwapOption::empty()),
             #[cfg(test)]
             online_index_backfill_hook: Arc::new(arc_swap::ArcSwapOption::empty()),
+            #[cfg(test)]
+            phase_b_pause_hook: Arc::new(arc_swap::ArcSwapOption::empty()),
+            #[cfg(test)]
+            phase_c_pause_hook: Arc::new(arc_swap::ArcSwapOption::empty()),
+            #[cfg(test)]
+            phase_d_pause_hook: Arc::new(arc_swap::ArcSwapOption::empty()),
         };
 
         // Resolve covering-index included_fields string paths to interned ids.
@@ -839,6 +872,12 @@ impl TableManager {
             index2_registered_before_ready_hook: Arc::new(arc_swap::ArcSwapOption::empty()),
             #[cfg(test)]
             online_index_backfill_hook: Arc::new(arc_swap::ArcSwapOption::empty()),
+            #[cfg(test)]
+            phase_b_pause_hook: Arc::new(arc_swap::ArcSwapOption::empty()),
+            #[cfg(test)]
+            phase_c_pause_hook: Arc::new(arc_swap::ArcSwapOption::empty()),
+            #[cfg(test)]
+            phase_d_pause_hook: Arc::new(arc_swap::ArcSwapOption::empty()),
         }
     }
 
@@ -1008,6 +1047,39 @@ impl TableManager {
         hook: Option<Arc<super::index2_backfill_hook::BackfillPauseHook>>,
     ) {
         self.index2_registered_before_ready_hook.store(hook);
+    }
+
+    /// P-1060 test-only: install (or clear with `None`) the deterministic
+    /// Phase B pause hook (fires after `mark_build_in_flight` but before
+    /// dropping barrier guards). See `phase_b_pause_hook`'s field doc.
+    #[cfg(test)]
+    pub(crate) fn set_phase_b_pause_hook(
+        &self,
+        hook: Option<Arc<super::index2_backfill_hook::BackfillPauseHook>>,
+    ) {
+        self.phase_b_pause_hook.store(hook);
+    }
+
+    /// P-1060 test-only: install (or clear with `None`) the deterministic
+    /// Phase C pause hook (fires at the top of the catch-up loop, first iteration).
+    /// See `phase_c_pause_hook`'s field doc.
+    #[cfg(test)]
+    pub(crate) fn set_phase_c_pause_hook(
+        &self,
+        hook: Option<Arc<super::index2_backfill_hook::BackfillPauseHook>>,
+    ) {
+        self.phase_c_pause_hook.store(hook);
+    }
+
+    /// P-1060 test-only: install (or clear with `None`) the deterministic
+    /// Phase D pause hook (fires after the publish barrier is acquired but
+    /// before the final residual drain). See `phase_d_pause_hook`'s field doc.
+    #[cfg(test)]
+    pub(crate) fn set_phase_d_pause_hook(
+        &self,
+        hook: Option<Arc<super::index2_backfill_hook::BackfillPauseHook>>,
+    ) {
+        self.phase_d_pause_hook.store(hook);
     }
 
     /// Clone the handle to this table's unique-write serialisation lock.

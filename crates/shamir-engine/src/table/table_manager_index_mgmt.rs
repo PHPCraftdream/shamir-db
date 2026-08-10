@@ -2306,6 +2306,16 @@ impl TableManager {
         // #1058: mark in-flight so live write-hooks capture to dirty-set.
         self.index_manager.mark_build_in_flight(name_interned);
 
+        // P-1060: test seam - pause after mark_build_in_flight, before dropping barrier.
+        // At this point: Building is durably persisted, in-flight flag is set,
+        // barrier is still held.
+        #[cfg(test)]
+        {
+            if let Some(hook) = self.phase_b_pause_hook.load_full() {
+                hook.wait_at_window().await;
+            }
+        }
+
         // ── Drop barrier guards (RAII) ─────────────────────────────────────────
         // Phase A is barrier-free — writers must be able to proceed while we scan.
         // The SnapshotGuard (`guard`) stays alive through Phase A to pin the
@@ -2456,7 +2466,21 @@ impl TableManager {
         let PhaseBAResult { guard, pin } = phase_ba;
 
         // ── Phase C: barrier-free catch-up loop ─────────────────────────────
-        for _ in 0..Self::CATCHUP_ITERATION_CAP {
+        for (iteration, _) in (0..Self::CATCHUP_ITERATION_CAP).enumerate() {
+            // P-1060: test seam - pause at the top of the catch-up loop (first iteration).
+            // At this point: Building is on disk, Phase A postings are durable,
+            // SnapshotGuard is held, no barrier.
+            #[cfg(test)]
+            {
+                if iteration == 0 {
+                    if let Some(hook) = self.phase_c_pause_hook.load_full() {
+                        hook.wait_at_window().await;
+                    }
+                }
+            }
+
+            let _ = iteration; // Used in cfg(test) block above
+
             let dirty = self.index_manager.drain_dirty_set(name_interned);
             if dirty.is_empty() {
                 break;
@@ -2469,6 +2493,16 @@ impl TableManager {
         let (_barrier, _uwl_guard) = self
             .begin_write_barrier(crate::index::write_barrier_flags::REGULAR_INDEX_CREATE)
             .await;
+
+        // P-1060: test seam - pause after barrier acquisition, before final residual drain.
+        // At this point: Building is STILL on disk (the flip is the last step),
+        // barrier is held.
+        #[cfg(test)]
+        {
+            if let Some(hook) = self.phase_d_pause_hook.load_full() {
+                hook.wait_at_window().await;
+            }
+        }
 
         // Final residual — whatever accumulated since the loop above's last
         // drain. Bounded by construction (the loop only exits on empty or cap).
