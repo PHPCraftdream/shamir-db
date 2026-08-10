@@ -562,13 +562,13 @@ impl TableManager {
         for def in &regular_defs {
             let _ = self
                 .index_manager_ref()
-                .drop_index(def.name_interned, None)
+                .drop_index(def.name_interned, None, None)
                 .await?;
         }
         for def in &unique_defs {
             let _ = self
                 .index_manager_ref()
-                .drop_unique_index(def.name_interned, None)
+                .drop_unique_index(def.name_interned, None, None)
                 .await?;
         }
         for def in &sorted_defs {

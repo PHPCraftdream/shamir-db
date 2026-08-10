@@ -573,10 +573,16 @@ impl IndexManager {
     /// `false` — индекс не найден
     ///
     /// #1051: accepts `op_id` minted at dispatch time for crash recovery status writes.
+    ///
+    /// #1069: if `op_id` and `index_name` are both provided, writes terminal
+    /// `Succeeded` status BEFORE clearing the tombstone (ensuring crash-safety for
+    /// the inline path). The recovery paths write their own status, so this is
+    /// only needed for the synchronous success path.
     pub async fn drop_unique_index(
         &self,
         name_interned: u64,
         op_id: Option<String>,
+        index_name: Option<&str>,
     ) -> DbResult<bool> {
         if !self.indexes_unique.contains(name_interned) {
             return Ok(false);
@@ -584,6 +590,8 @@ impl IndexManager {
 
         // P0-3 (#959 / #1051): write a durable tombstone BEFORE retiring/sweeping.
         // See `drop_index`'s doc for the crash-state matrix.
+        // Clone op_id so we still have it for status write later.
+        let op_id_clone = op_id.clone();
         self.add_to_dropping(true, name_interned, op_id).await?;
 
         // F-76 (#903): retire the definition FIRST (RCU swap publishes a Vec
@@ -650,15 +658,47 @@ impl IndexManager {
             })?;
         }
 
+        // #1069: Write terminal Succeeded status BEFORE clearing tombstone.
+        // This ensures crash-safety for the inline path.
+        if was_removed {
+            if let (Some(op_id_str), Some(index_name_str)) = (op_id_clone.as_deref(), index_name) {
+                let op_id_parsed =
+                    <RecordId as std::str::FromStr>::from_str(op_id_str).map_err(|e| {
+                        shamir_storage::error::DbError::Codec(format!("Invalid op_id: {e}"))
+                    })?;
+                let status = shamir_query_types::read::DdlOpStatus {
+                    op_id: op_id_parsed,
+                    kind: shamir_query_types::read::DdlOpKind::DropUniqueHashIndex {
+                        index_name: index_name_str.to_string(),
+                    },
+                    state: shamir_query_types::read::DdlOpState::Succeeded {
+                        completed_at: std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap()
+                            .as_millis() as u64,
+                    },
+                };
+                // Do not swallow status-write errors — log loudly.
+                if let Err(e) = super::ddl_op_log::write_op_status(&self.info_store, &status).await
+                {
+                    log::error!(
+                        "#1069: DROP UNIQUE INDEX '{}' succeeded, but failed to write \
+                         Succeeded status: {}. The drop completed successfully, but polling by \
+                         op_id {:?} will return Unknown. Call TableManager::verify() to confirm \
+                         the index was dropped.",
+                        index_name_str,
+                        e,
+                        op_id_parsed
+                    );
+                }
+            }
+        }
+
         // P0-3 (#959): clear the tombstone AFTER the reduced IndexInfo is
         // durably persisted. See `drop_index`'s matching call for the
         // ordering rationale.
         // P1-2 (#967): if this fails, the tombstone remains — recovery
         // will just clear it (a no-op on the already-finished drop).
-        // NOTE: Cannot write DdlOpState::Failed here even though `op_id` is
-        // in scope (a parameter of this function, #1051) — this crate
-        // (`shamir-index`) has no access to `shamir-engine`'s `ddl_op_log`,
-        // which sits one layer up.
         self.clear_from_dropping(true, name_interned)
             .await
             .map_err(|e| {

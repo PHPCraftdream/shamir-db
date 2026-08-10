@@ -1,6 +1,7 @@
 //! Index-level DDL operations: create / drop index.
 
 use serde::{Deserialize, Serialize};
+use shamir_types::types::record_id::RecordId;
 use shamir_types::types::value::QueryValue;
 
 use super::db_ops::is_false;
@@ -112,6 +113,16 @@ pub struct RenameIndexOp {
     /// flag — it stays a hard error regardless.
     #[serde(default, skip_serializing_if = "is_false")]
     pub if_exists: bool,
+    /// Client-supplied correlation ID. If present, the server uses this as
+    /// the `op_id` for the operation, enabling the client to poll by this ID
+    /// even if the response is lost (crash or disconnect). If absent, the
+    /// server mints a fresh `RecordId::new()` (backward compatible).
+    ///
+    /// Idempotent retry: if this field is set and a status record already
+    /// exists for this `request_id`, the server short-circuits and returns
+    /// the existing status instead of re-executing the mutation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_id: Option<RecordId>,
 }
 
 /// Drop an index.
@@ -142,4 +153,14 @@ pub struct DropIndexOp {
     /// this doc and the code path in sync.
     #[serde(default, skip_serializing_if = "is_false")]
     pub if_exists: bool,
+    /// Client-supplied correlation ID. If present, the server uses this as
+    /// the `op_id` for the operation, enabling the client to poll by this ID
+    /// even if the response is lost (crash or disconnect). If absent, the
+    /// server mints a fresh `RecordId::new()` (backward compatible).
+    ///
+    /// Idempotent retry: if this field is set and a status record already
+    /// exists for this `request_id`, the server short-circuits and returns
+    /// the existing status instead of re-executing the mutation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_id: Option<RecordId>,
 }

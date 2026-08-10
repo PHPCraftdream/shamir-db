@@ -329,6 +329,19 @@ pub struct IndexManager {
     pub(super) drop_index_post_sweep_hook:
         Arc<arc_swap::ArcSwapOption<crate::base_index::backfill_pause_hook::BackfillPauseHook>>,
 
+    /// #1069 test-only deterministic pause point: parks `drop_index` (regular)
+    /// AND `drop_unique_index` (unique) AFTER the terminal `Succeeded` status
+    /// is written but BEFORE `clear_from_dropping` runs — the exact crash
+    /// window the inline-path write-order fix closes. A regression test
+    /// installs this hook, parks the drop at that point, then reads the
+    /// op-status log via `ddl_op_log::read_op_status` and asserts it already
+    /// shows `Succeeded`, proving the status write is durable before the
+    /// tombstone clear could crash and lose it. NOT `#[cfg(test)]`-gated —
+    /// cross-crate test consumer, same reason as `drop_index_pause_hook`.
+    /// `None` on every real path.
+    pub(super) drop_index_status_pause_hook:
+        Arc<arc_swap::ArcSwapOption<crate::base_index::backfill_pause_hook::BackfillPauseHook>>,
+
     /// #997: in-memory mirror of the persisted "Renaming" tombstone for
     /// in-progress RENAME INDEX operations on the REGULAR (hash,
     /// `is_unique=0`) family. Keyed by `old_name_interned`; the value
@@ -416,6 +429,7 @@ impl Clone for IndexManager {
             in_flight_builds: Arc::clone(&self.in_flight_builds),
             dirty_sets: Arc::clone(&self.dirty_sets),
             drop_index_post_sweep_hook: Arc::clone(&self.drop_index_post_sweep_hook),
+            drop_index_status_pause_hook: Arc::clone(&self.drop_index_status_pause_hook),
             renaming_regular: Arc::clone(&self.renaming_regular),
             renaming_unique: Arc::clone(&self.renaming_unique),
             rename_mid_pause_hook: Arc::clone(&self.rename_mid_pause_hook),
@@ -537,6 +551,7 @@ impl IndexManager {
             in_flight_builds: Arc::new(scc::HashMap::with_hasher(THasher::default())),
             dirty_sets: Arc::new(Mutex::new(BTreeMap::new())),
             drop_index_post_sweep_hook: Arc::new(arc_swap::ArcSwapOption::empty()),
+            drop_index_status_pause_hook: Arc::new(arc_swap::ArcSwapOption::empty()),
             renaming_regular: Arc::new(Mutex::new(BTreeMap::new())),
             renaming_unique: Arc::new(Mutex::new(BTreeMap::new())),
             rename_mid_pause_hook: Arc::new(arc_swap::ArcSwapOption::empty()),
@@ -628,6 +643,18 @@ impl IndexManager {
         hook: Option<Arc<crate::base_index::backfill_pause_hook::BackfillPauseHook>>,
     ) {
         self.drop_index_post_sweep_hook.store(hook);
+    }
+
+    /// #1069 test-only: install (or clear with `None`) the deterministic
+    /// pause point that fires AFTER the terminal `Succeeded` status is written
+    /// but BEFORE `clear_from_dropping` runs. This is the exact window the
+    /// inline-path write-order fix proves is crash-safe. NOT `#[cfg(test)]`-
+    /// gated — cross-crate test consumer, same reason as the other hooks.
+    pub fn set_drop_index_status_pause_hook(
+        &self,
+        hook: Option<Arc<crate::base_index::backfill_pause_hook::BackfillPauseHook>>,
+    ) {
+        self.drop_index_status_pause_hook.store(hook);
     }
 
     /// #997 test-only: install (or clear with `None`) the deterministic
@@ -2095,7 +2122,17 @@ impl IndexManager {
     /// `false` — индекс не найден
     ///
     /// #1051: accepts `op_id` minted at dispatch time for crash recovery status writes.
-    pub async fn drop_index(&self, name_interned: u64, op_id: Option<String>) -> DbResult<bool> {
+    ///
+    /// #1069: if `op_id` and `index_name` are both provided, writes terminal
+    /// `Succeeded` status BEFORE clearing the tombstone (ensuring crash-safety for
+    /// the inline path). The recovery paths write their own status, so this is
+    /// only needed for the synchronous success path.
+    pub async fn drop_index(
+        &self,
+        name_interned: u64,
+        op_id: Option<String>,
+        index_name: Option<&str>,
+    ) -> DbResult<bool> {
         // Быстрая проверка существования индекса
         if !self.indexes.contains(name_interned) {
             return Ok(false);
@@ -2109,6 +2146,8 @@ impl IndexManager {
         // rather than resurrecting a broken "Ready but no postings" index.
         // MUST succeed before proceeding; `add_to_dropping` rolls back the
         // in-memory map on persist failure.
+        // Clone op_id so we still have it for status write later.
+        let op_id_for_status = op_id.clone();
         self.add_to_dropping(false, name_interned, op_id).await?;
 
         // P0-3a (#1011) step 2.5: raise the reader-drain gate's intent flag
@@ -2212,6 +2251,48 @@ impl IndexManager {
             })?;
         }
 
+        // #1069: Write terminal Succeeded status BEFORE clearing tombstone.
+        // This ensures crash-safety for the inline path: if we crash after this
+        // write but before tombstone clear, the status is durable and recovery
+        // will find it (tombstone clear is idempotent, so recovery re-clearing
+        // is safe).
+        if was_removed {
+            if let (Some(op_id_str), Some(index_name_str)) =
+                (op_id_for_status.as_deref(), index_name)
+            {
+                let op_id_parsed =
+                    <RecordId as std::str::FromStr>::from_str(op_id_str).map_err(|e| {
+                        shamir_storage::error::DbError::Codec(format!("Invalid op_id: {e}"))
+                    })?;
+                let status = shamir_query_types::read::DdlOpStatus {
+                    op_id: op_id_parsed,
+                    kind: shamir_query_types::read::DdlOpKind::DropHashIndex {
+                        index_name: index_name_str.to_string(),
+                    },
+                    state: shamir_query_types::read::DdlOpState::Succeeded {
+                        completed_at: std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap()
+                            .as_millis() as u64,
+                    },
+                };
+                // Do not swallow status-write errors — log loudly.
+                if let Err(e) =
+                    crate::base_index::ddl_op_log::write_op_status(&self.info_store, &status).await
+                {
+                    log::error!(
+                        "#1069: DROP INDEX (regular) '{}' succeeded, but failed to write \
+                         Succeeded status: {}. The drop completed successfully, but polling by \
+                         op_id {:?} will return Unknown. Call TableManager::verify() to confirm \
+                         the index was dropped.",
+                        index_name_str,
+                        e,
+                        op_id_parsed
+                    );
+                }
+            }
+        }
+
         // P0-3 (#959): clear the tombstone AFTER the reduced IndexInfo is
         // durably persisted. `clear_from_dropping` persists first, then
         // updates in-memory — if the process crashes between persist and
@@ -2222,10 +2303,6 @@ impl IndexManager {
         // from IndexInfo — it just clears the tombstone (a no-op sweep).
         // P1-2 (#967): if this fails, the tombstone remains — recovery
         // will just clear it (a no-op on the already-finished drop).
-        // NOTE: Cannot write DdlOpState::Failed here even though `op_id` is
-        // in scope (a parameter of this function, #1051) — this crate
-        // (`shamir-index`) has no access to `shamir-engine`'s `ddl_op_log`,
-        // which sits one layer up.
         self.clear_from_dropping(false, name_interned)
             .await
             .map_err(|e| {

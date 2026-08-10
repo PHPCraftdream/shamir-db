@@ -320,7 +320,7 @@ async fn test_drop_existing_index() {
     assert!(manager.has_indexes());
 
     // Drop index
-    let result = manager.drop_index(1001, None).await.unwrap();
+    let result = manager.drop_index(1001, None, None).await.unwrap();
     assert!(result);
     assert!(!manager.has_indexes());
 }
@@ -329,7 +329,7 @@ async fn test_drop_existing_index() {
 async fn test_drop_non_existing_index() {
     let (_, _, manager) = create_manager();
 
-    let result = manager.drop_index(999, None).await.unwrap();
+    let result = manager.drop_index(999, None, None).await.unwrap();
     assert!(!result);
 }
 
@@ -345,11 +345,11 @@ async fn test_drop_last_index_updates_flag() {
     assert!(manager.has_indexes());
 
     // Drop first - flag should still be true
-    manager.drop_index(1001, None).await.unwrap();
+    manager.drop_index(1001, None, None).await.unwrap();
     assert!(manager.has_indexes());
 
     // Drop second - flag should be false
-    manager.drop_index(1002, None).await.unwrap();
+    manager.drop_index(1002, None, None).await.unwrap();
     assert!(!manager.has_indexes());
 }
 
@@ -369,7 +369,7 @@ async fn test_drop_index_with_data() {
     manager.create_index(index_def).await.unwrap();
 
     // Drop index
-    let result = manager.drop_index(1001, None).await.unwrap();
+    let result = manager.drop_index(1001, None, None).await.unwrap();
     assert!(result);
     assert!(!manager.has_indexes());
 }

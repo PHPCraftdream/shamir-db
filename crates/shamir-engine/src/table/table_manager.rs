@@ -682,35 +682,10 @@ impl TableManager {
         // a backend that recovery is about to remove). Mirrors sorted's
         // `recover_in_progress_drops` (called from `SortedIndexManager::new`).
         //
-        // #1048 / #1051: read the dropping tombstone BEFORE recover_index2_drops clears it,
-        // so we can write SucceededViaCrashRecovery status. The tombstone now carries the
-        // index name and op_id directly, so we don't need descriptor resolution.
-        let dropping_index2_before = crate::index2::persistence::load_dropping_index2(&info_store)
-            .await
-            .unwrap_or_default();
+        // #1069: index2 DROP recovery now writes SucceededViaCrashRecovery status
+        // directly within recover_index2_drops(), BEFORE clearing the tombstone.
+        // No pre-load or post-write needed here.
         mgr.recover_index2_drops().await?;
-
-        // #1048 / #1051: write SucceededViaCrashRecovery status for recovered index2 DROP operations.
-        // The tombstone now carries both the index name and the op_id, so we don't need
-        // to resolve names via descriptors. This is synchronous (no tokio::spawn) to avoid a race
-        // where a client could poll GetDdlOpStatus immediately after restart and see
-        // "Unknown" instead of "SucceededViaCrashRecovery".
-        //
-        // CRITICAL: moved to run AFTER recover_index2_drops() (finding 3) — we must not write
-        // a success claim for an operation that hasn't actually finished recovering yet.
-        if !dropping_index2_before.is_empty() {
-            TableManager::write_index2_drop_recovery_status(
-                &dropping_index2_before,
-                Arc::clone(&info_store),
-            )
-            .await
-            .map_err(|e| {
-                log::error!("#1048 / #1051: failed to write SucceededViaCrashRecovery status for recovered index2 DROP operations: {e}");
-                shamir_storage::error::DbError::Internal(format!(
-                    "#1048 / #1051: failed to write SucceededViaCrashRecovery status for recovered index2 DROP operations: {e}"
-                ))
-            })?;
-        }
 
         // #997: recover any RENAME INDEX operations on the base_index
         // regular/unique (hash) families interrupted by a crash. Runs AFTER

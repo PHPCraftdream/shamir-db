@@ -13,6 +13,7 @@ shamir-funclib     = { path = "../shamir-funclib" }
 shamir-storage     = { path = "../shamir-storage", default-features = false }
 shamir-tx          = { path = "../shamir-tx" }
 shamir-tunables    = { path = "../shamir-tunables" }
+shamir-query-types = { path = "../shamir-query-types" }
 dashmap         = "6.1.0"
 
 # Async / runtime

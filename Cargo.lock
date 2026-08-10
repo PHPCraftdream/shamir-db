@@ -3544,6 +3544,7 @@ dependencies = [
  "shamir-collections",
  "shamir-funclib",
  "shamir-numa",
+ "shamir-query-types",
  "shamir-storage",
  "shamir-tunables",
  "shamir-tx",

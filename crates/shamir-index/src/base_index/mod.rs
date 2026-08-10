@@ -6,6 +6,7 @@
 // perspective). The hook is a zero-cost `None` on every real path (see
 // `IndexManager::create_index_backfill_hook`'s field doc).
 pub mod backfill_pause_hook;
+pub mod ddl_op_log;
 pub mod index_definition;
 pub mod index_info;
 pub mod index_info_item;

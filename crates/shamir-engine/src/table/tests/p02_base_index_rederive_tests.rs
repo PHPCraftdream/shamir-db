@@ -427,7 +427,7 @@ async fn p02_regular_drop_index_before_commit_no_orphan() {
 
     // DROP the index BEFORE commit.
     tbl.index_manager_ref()
-        .drop_index(idx_name, None)
+        .drop_index(idx_name, None, Some("idx_name"))
         .await
         .unwrap();
 
@@ -517,7 +517,7 @@ async fn p02_unique_drop_index_before_commit_no_orphan() {
 
     // DROP the unique index BEFORE commit.
     tbl.index_manager_ref()
-        .drop_unique_index(idx_name, None)
+        .drop_unique_index(idx_name, None, Some("idx_email"))
         .await
         .unwrap();
 

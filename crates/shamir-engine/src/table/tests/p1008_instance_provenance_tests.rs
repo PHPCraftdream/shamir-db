@@ -137,7 +137,7 @@ async fn drop_regular_before_commit_no_resurrected_posting() {
         .unwrap();
 
     tbl.index_manager_ref()
-        .drop_index(idx_name, None)
+        .drop_index(idx_name, None, Some("idx_name"))
         .await
         .unwrap();
 
@@ -192,7 +192,7 @@ async fn drop_unique_before_commit_no_resurrected_posting() {
         .unwrap();
 
     tbl.index_manager_ref()
-        .drop_unique_index(idx_name, None)
+        .drop_unique_index(idx_name, None, Some("idx_email"))
         .await
         .unwrap();
 
@@ -374,7 +374,7 @@ async fn regular_aba_drop_create_same_name_no_field_a_contamination() {
     // ABA: DROP the field-`a` index, CREATE a NEW index under the SAME name
     // on field `b`.
     tbl.index_manager_ref()
-        .drop_index(idx_name, None)
+        .drop_index(idx_name, None, Some("idx_x"))
         .await
         .unwrap();
     let def_b = IndexDefinition::new(idx_name, vec![IndexInfoItem::new(vec![b_key])]);
@@ -437,7 +437,7 @@ async fn unique_aba_drop_create_same_name_no_false_conflict() {
         .unwrap();
 
     tbl.index_manager_ref()
-        .drop_unique_index(idx_name, None)
+        .drop_unique_index(idx_name, None, Some("idx_u"))
         .await
         .unwrap();
     let def_b = IndexDefinition::new(idx_name, vec![IndexInfoItem::new(vec![b_key])]);
@@ -579,7 +579,7 @@ async fn multiple_transitions_before_commit_resolve_to_final_instance() {
     // DROP idx2.
     let idx2 = key_id(&tbl, "idx2").await;
     tbl.index_manager_ref()
-        .drop_index(idx2, None)
+        .drop_index(idx2, None, Some("idx2"))
         .await
         .unwrap();
 

@@ -1,5 +1,6 @@
 use shamir_query_types::admin::RenameIndexOp;
 use shamir_query_types::batch::BatchOp;
+use shamir_types::types::record_id::RecordId;
 
 use crate::batch::IntoBatchOp;
 
@@ -20,6 +21,7 @@ pub fn rename_index(
         to: to.into(),
         repo: "main".to_owned(),
         if_exists: false,
+        request_id: None,
     }
 }
 
@@ -30,6 +32,7 @@ pub struct RenameIndex {
     to: String,
     repo: String,
     if_exists: bool,
+    request_id: Option<RecordId>,
 }
 
 impl RenameIndex {
@@ -46,6 +49,19 @@ impl RenameIndex {
         self
     }
 
+    /// Set a client-supplied correlation ID. If present, the server uses this as
+    /// the `op_id` for the operation, enabling the client to poll by this ID
+    /// even if the response is lost (crash or disconnect). If absent, the
+    /// server mints a fresh `RecordId::new()`.
+    ///
+    /// Idempotent retry: if this field is set and a status record already
+    /// exists for this `request_id`, the server short-circuits and returns
+    /// the existing status instead of re-executing the mutation.
+    pub fn request_id(mut self, request_id: RecordId) -> Self {
+        self.request_id = Some(request_id);
+        self
+    }
+
     /// Finalize into a [`BatchOp`].
     pub fn build(self) -> BatchOp {
         BatchOp::RenameIndex(RenameIndexOp {
@@ -54,6 +70,7 @@ impl RenameIndex {
             table: self.table,
             repo: self.repo,
             if_exists: self.if_exists,
+            request_id: self.request_id,
         })
     }
 }

@@ -261,7 +261,7 @@ async fn p12_drop_index_sweep_failure_enriched() {
     // Arm: fail `remove_many` (used by the posting sweep).
     faulty.fail_remove_many.store(true, Ordering::SeqCst);
 
-    let result = mgr.drop_index(name_interned, None).await;
+    let result = mgr.drop_index(name_interned, None, None).await;
     assert!(result.is_err(), "should fail");
     let msg = result.unwrap_err().to_string();
 

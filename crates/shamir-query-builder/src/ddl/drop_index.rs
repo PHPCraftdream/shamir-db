@@ -1,5 +1,6 @@
 use shamir_query_types::admin::DropIndexOp;
 use shamir_query_types::batch::BatchOp;
+use shamir_types::types::record_id::RecordId;
 
 use crate::batch::IntoBatchOp;
 
@@ -12,6 +13,7 @@ pub fn drop_index(name: impl Into<String>, table: impl Into<String>) -> DropInde
         repo: "main".to_owned(),
         hmac: None,
         if_exists: false,
+        request_id: None,
     }
 }
 
@@ -23,6 +25,7 @@ pub struct DropIndex {
     repo: String,
     hmac: Option<String>,
     if_exists: bool,
+    request_id: Option<RecordId>,
 }
 
 impl DropIndex {
@@ -58,6 +61,19 @@ impl DropIndex {
         self
     }
 
+    /// Set a client-supplied correlation ID. If present, the server uses this as
+    /// the `op_id` for the operation, enabling the client to poll by this ID
+    /// even if the response is lost (crash or disconnect). If absent, the
+    /// server mints a fresh `RecordId::new()`.
+    ///
+    /// Idempotent retry: if this field is set and a status record already
+    /// exists for this `request_id`, the server short-circuits and returns
+    /// the existing status instead of re-executing the mutation.
+    pub fn request_id(mut self, request_id: RecordId) -> Self {
+        self.request_id = Some(request_id);
+        self
+    }
+
     /// Finalize into a [`BatchOp`].
     pub fn build(self) -> BatchOp {
         BatchOp::DropIndex(DropIndexOp {
@@ -67,6 +83,7 @@ impl DropIndex {
             repo: self.repo,
             hmac: self.hmac,
             if_exists: self.if_exists,
+            request_id: self.request_id,
         })
     }
 }

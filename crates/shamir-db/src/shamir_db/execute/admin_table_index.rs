@@ -7,10 +7,11 @@ use crate::shamir_db::shamir_db::schema_management::SCHEMA_FIELD;
 use crate::types::value::QueryValue;
 use shamir_engine::table::ddl_op_log;
 use shamir_types::mpack;
-use shamir_types::types::record_id::RecordId;
 
 use super::admin_dispatch::ShamirAdminExecutor;
 use super::helpers::{admin_result, admin_result_with_op_id, apply_table_retention};
+
+use log::error;
 
 impl ShamirAdminExecutor {
     pub(super) async fn handle_create_table(
@@ -248,7 +249,7 @@ impl ShamirAdminExecutor {
                         .map(|d| d.name_interned)
                         .collect();
                     for id in regular_ids {
-                        let _ = table.index_manager_ref().drop_index(id, None).await;
+                        let _ = table.index_manager_ref().drop_index(id, None, None).await;
                     }
                     // base_index unique indexes.
                     let unique_ids: Vec<u64> = table
@@ -257,7 +258,10 @@ impl ShamirAdminExecutor {
                         .map(|d| d.name_interned)
                         .collect();
                     for id in unique_ids {
-                        let _ = table.index_manager_ref().drop_unique_index(id, None).await;
+                        let _ = table
+                            .index_manager_ref()
+                            .drop_unique_index(id, None, None)
+                            .await;
                     }
                     // Sorted indexes.
                     let sorted_ids: Vec<u64> = table
@@ -660,8 +664,81 @@ impl ShamirAdminExecutor {
             ));
         }
 
-        // Mint an op_id for recoverable DDL ops (hash DROP and index2 DROP are in scope)
-        let op_id = RecordId::new();
+        // Defect 4 (#1069): Use client-supplied request_id as op_id if present,
+        // otherwise mint a new one. This enables idempotent retry and correlation
+        // even if the response is lost (crash or disconnect).
+        let op_id = op.request_id.unwrap_or_default();
+
+        // Defect 1 (#1069): Idempotent retry check — if a status record already
+        // exists for this op_id (from a previous send of the same request),
+        // short-circuit and return the existing status instead of re-executing.
+        if let Ok(Some(existing_status)) =
+            ddl_op_log::read_op_status(table.info_store(), &op_id).await
+        {
+            // An existing status means this op_id was already processed.
+            // Return a response with the existing op_id and let polling determine the outcome.
+            return Ok(admin_result_with_op_id(
+                mpack!({
+                    "dropped_index": @(QueryValue::Str(op.drop_index.clone())),
+                    "existed": @(QueryValue::Bool(matches!(existing_status.state,
+                        DdlOpState::Succeeded { .. } |
+                        DdlOpState::SucceededViaCrashRecovery { .. }))),
+                }),
+                op_id,
+            ));
+        }
+
+        // Determine the operation kind for status logging.
+        // We need to know the family before the mutation for the InProgress write.
+        let kind = if is_unique {
+            DdlOpKind::DropUniqueHashIndex {
+                index_name: op.drop_index.clone(),
+            }
+        } else if is_index2 {
+            DdlOpKind::DropIndex2 {
+                index_name: op.drop_index.clone(),
+            }
+        } else if is_regular {
+            DdlOpKind::DropHashIndex {
+                index_name: op.drop_index.clone(),
+            }
+        } else if is_sorted {
+            // Sorted-family drops have no dedicated DdlOpKind variant yet in this slice.
+            // Fall back to DropHashIndex for status logging (same pre-existing scope gap).
+            DdlOpKind::DropHashIndex {
+                index_name: op.drop_index.clone(),
+            }
+        } else {
+            // No index exists in any family — short-circuit with existed:false.
+            // Don't write any status for a no-op.
+            return Ok(admin_result_with_op_id(
+                mpack!({
+                    "dropped_index": @(QueryValue::Str(op.drop_index.clone())),
+                    "existed": @(QueryValue::Bool(false)),
+                }),
+                op_id,
+            ));
+        };
+
+        // Defect 1 (#1069): Write InProgress status BEFORE the first mutating step.
+        // This is the crash-safe contract: if the process crashes after this write
+        // and before the mutation completes, recovery will finish the op.
+        let in_progress_status = DdlOpStatus {
+            op_id,
+            kind: kind.clone(),
+            state: DdlOpState::InProgress,
+        };
+        if let Err(e) = ddl_op_log::write_op_status(table.info_store(), &in_progress_status).await {
+            // If we can't write InProgress, we have no choice but to continue:
+            // the mutation will happen, and we'll try to write Succeeded after.
+            // Log the error loudly so operators know the crash-safety contract is weakened.
+            error!(
+                "DDL op #1069: failed to write InProgress status for DROP INDEX '{}': {}. \
+                 Crash-safety contract weakened — if this process crashes before Succeeded \
+                 is written, polling will not find the op.",
+                op.drop_index, e
+            );
+        }
 
         // Dispatch to the ONE matching family's drop call — the server now
         // resolves the index family from the catalog, not from the client's
@@ -695,45 +772,13 @@ impl ShamirAdminExecutor {
             false
         };
 
-        // Write the Succeeded status to the DDL op log for polling.
-        // Use the ACTUAL resolved family (from the catalog), not the client's
-        // `op.unique` hint, so the log reflects the truth even when a caller's
-        // hint was wrong. Only write when we actually dropped an index.
+        // #1069 round 2: Terminal status is now written INSIDE IndexManager BEFORE
+        // tombstone clear. No redundant write needed here — drop_index/drop_unique_index
+        // already wrote it durably before their own clear_from_dropping call.
         // Sorted-family drops have no dedicated `DdlOpKind` variant yet (never
         // wired to op-id status logging, same pre-existing scope gap as
         // before #1025) — falls back to `DropHashIndex` like the rest of this
         // status-log mechanism does for untracked families.
-        if removed {
-            let kind = if is_unique {
-                DdlOpKind::DropUniqueHashIndex {
-                    index_name: op.drop_index.clone(),
-                }
-            } else if is_index2 {
-                DdlOpKind::DropIndex2 {
-                    index_name: op.drop_index.clone(),
-                }
-            } else {
-                // is_regular or is_sorted
-                DdlOpKind::DropHashIndex {
-                    index_name: op.drop_index.clone(),
-                }
-            };
-            let status = DdlOpStatus {
-                op_id,
-                kind,
-                state: DdlOpState::Succeeded {
-                    completed_at: std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .unwrap()
-                        .as_millis() as u64,
-                },
-            };
-            if let Err(e) = ddl_op_log::write_op_status(table.info_store(), &status).await {
-                // Log write failure but don't fail the operation — the client still
-                // got the op_id in the QueryResult, and polling will return Unknown.
-                eprintln!("Failed to write DDL op status: {}", e);
-            }
-        }
 
         Ok(admin_result_with_op_id(
             mpack!({
@@ -820,18 +865,37 @@ impl ShamirAdminExecutor {
             .await
             .map_err(|e| err(e.to_string()))?;
 
-        // Mint an op_id for recoverable DDL ops (hash RENAME is in scope)
-        let op_id = RecordId::new();
+        // Defect 4 (#1069): Use client-supplied request_id as op_id if present,
+        // otherwise mint a new one. This enables idempotent retry and correlation
+        // even if the response is lost (crash or disconnect).
+        let op_id = op.request_id.unwrap_or_default();
 
-        table
-            .rename_index(&op.rename_index, &op.to, Some(op_id))
-            .await
-            .map_err(|e| err_code("rename_index_failed", e.to_string()))?;
+        // Defect 1 (#1069): Idempotent retry check — if a status record already
+        // exists for this op_id (from a previous send of the same request),
+        // short-circuit and return the existing status instead of re-executing.
+        if let Ok(Some(existing_status)) =
+            ddl_op_log::read_op_status(table.info_store(), &op_id).await
+        {
+            // An existing status means this op_id was already processed.
+            // Return a response with the existing op_id and let polling determine the outcome.
+            return Ok(admin_result_with_op_id(
+                mpack!({
+                    "renamed_index": @(QueryValue::Str(op.rename_index.clone())),
+                    "to": @(QueryValue::Str(op.to.clone())),
+                    "table": @(QueryValue::Str(op.table.clone())),
+                    "repo": @(QueryValue::Str(op.repo.clone())),
+                    "existed": @(QueryValue::Bool(matches!(existing_status.state,
+                        DdlOpState::Succeeded { .. } |
+                        DdlOpState::SucceededViaCrashRecovery { .. }))),
+                }),
+                op_id,
+            ));
+        }
 
-        // Write the Succeeded status to the DDL op log for polling.
-        // Determine if this is a unique index by checking which rename succeeded.
-        // (We already know the source exists; the rename call would have failed otherwise.)
-        let is_unique = table.unique_index_exists(&op.to).await;
+        // Determine the operation kind BEFORE the mutation.
+        // For RENAME, we check if the source index is unique (the family we'll drop),
+        // which determines the DdlOpKind variant.
+        let is_unique = table.unique_index_exists(&op.rename_index).await;
         let kind = if is_unique {
             DdlOpKind::RenameUniqueHashIndex {
                 old_name: op.rename_index.clone(),
@@ -843,21 +907,34 @@ impl ShamirAdminExecutor {
                 new_name: op.to.clone(),
             }
         };
-        let status = DdlOpStatus {
+
+        // Defect 1 (#1069): Write InProgress status BEFORE the first mutating step.
+        // This is the crash-safe contract: if the process crashes after this write
+        // and before the mutation completes, recovery will finish the op.
+        let in_progress_status = DdlOpStatus {
             op_id,
-            kind,
-            state: DdlOpState::Succeeded {
-                completed_at: std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap()
-                    .as_millis() as u64,
-            },
+            kind: kind.clone(),
+            state: DdlOpState::InProgress,
         };
-        if let Err(e) = ddl_op_log::write_op_status(table.info_store(), &status).await {
-            // Log write failure but don't fail the operation — the client still
-            // got the op_id in the QueryResult, and polling will return Unknown.
-            eprintln!("Failed to write DDL op status: {}", e);
+        if let Err(e) = ddl_op_log::write_op_status(table.info_store(), &in_progress_status).await {
+            // If we can't write InProgress, we have no choice but to continue:
+            // the mutation will happen, and we'll try to write Succeeded after.
+            // Log the error loudly so operators know the crash-safety contract is weakened.
+            error!(
+                "DDL op #1069: failed to write InProgress status for RENAME INDEX '{} → '{}': {}. \
+                 Crash-safety contract weakened — if this process crashes before Succeeded \
+                 is written, polling will not find the op.",
+                op.rename_index, op.to, e
+            );
         }
+
+        table
+            .rename_index(&op.rename_index, &op.to, Some(op_id))
+            .await
+            .map_err(|e| err_code("rename_index_failed", e.to_string()))?;
+
+        // #1069 round 2: Terminal status is now written INSIDE TableManager::rename_index
+        // BEFORE tombstone clear (clear_from_renaming). No redundant write needed here.
 
         Ok(admin_result_with_op_id(
             mpack!({
