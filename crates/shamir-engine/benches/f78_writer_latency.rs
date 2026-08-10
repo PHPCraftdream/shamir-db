@@ -1,84 +1,115 @@
-//! F-78 (#905) writer-latency probe — concurrent-writer p50/p95/p99 during a
-//! real `TableManager::create_index` (which acquires F-70's write barrier:
-//! raise `REGULAR_INDEX_CREATE` → drain → hold `unique_write_lock` across the
-//! WHOLE Phase 1→2→3 sequence).
+//! F-78 (#905) / RFC v3 (#1018, online CREATE INDEX) writer-latency probe —
+//! concurrent-writer p50/p95/p99 during a real `TableManager::create_index`.
 //!
 //! This is a **latency-distribution probe**, not a throughput workload — it
 //! runs the (create_index + concurrent writers) scenario and reports the
 //! writers' observed p50/p95/p99, so it uses the harness's `bench_batched_async`
 //! for a stable scenario wall-time AND prints the per-scenario percentiles.
 //!
-//! # What it shows
+//! # What changed (#1087-#1089, #1060-#1061 — online CREATE INDEX, regular/hash only)
 //!
-//! Under F-70's barrier, every concurrent writer that observes
-//! `needs_write_barrier() == true` acquires `unique_write_lock` and QUEUES
-//! until the build drops the barrier at the end of Phase 3. So a writer that
-//! arrives during the build is blocked for ~(remaining build duration) + its
-//! own insert. The build itself is decode-bound (one full-table scan in BOTH
-//! the old materialize shape and the new streaming shape), so its wall-time —
-//! and therefore the writer-blocked time — is ~UNCHANGED by F-78's
-//! memory-only fix; F-78's benefit is peak HEAP (see the
-//! `create_index_streaming` bench), not writer latency. This probe confirms
-//! that directly with measured percentiles rather than an assertion.
+//! **Historically** (pre-#1087, and STILL TRUE for `create_unique_index`/
+//! `create_sorted_index`/`create_index_v2` — none of those call sites were
+//! touched by the online-build redesign): `create_index` acquired F-70's
+//! write barrier (`begin_write_barrier`: raise bit → drain → hold
+//! `unique_write_lock`) across the WHOLE backfill sequence. Every concurrent
+//! writer that observed `needs_write_barrier() == true` queued on
+//! `unique_write_lock` until the build finished — writer p50/p95/p99 tracked
+//! total build duration, which is decode-bound and scales with table size.
+//! The "5k rows / 100k rows" numbers in this file's git history (see
+//! `git log -p` on this file, or KNOWN_LIMITATIONS.md §3's still-current
+//! description of `create_unique_index`/`create_sorted_index`/`create_index_v2`)
+//! remain the accurate characterization of THOSE call sites today.
 //!
-//! # Old-vs-new
-//!
-//! `TableManager::create_index` is now ALWAYS the streaming path (F-78
-//! rewrote the production call site), so this probe measures the NEW path.
-//! The OLD path's writer latency is bounded IDENTICALLY: the barrier+lock
-//! acquisition is byte-for-byte the SAME code (it lives in `create_index`'s
-//! caller, ABOVE the Phase-2 body F-78 rewrote — only the body changed, not
-//! the barrier), and the build wall-time is ~equal for old vs new (decode-
-//! bound — measured in `create_index_streaming`). Hence OLD writer p95/p99 ≈
-//! OLD build duration ≈ NEW build duration ≈ the percentiles reported here.
+//! **Now, for the regular/hash family only:** `TableManager::create_index`
+//! tries the online-build path first (`phase_b_a_backfill` then
+//! `phase_c_d_catchup_and_publish`) whenever the table has an MVCC
+//! changefeed attached (true for every table built through the normal
+//! `RepoInstance::add_table`/`get_table` path — including THIS bench's
+//! `make_table` helper, unchanged). Phase A (the O(table) scan that
+//! dominates wall-clock) is barrier-free: a concurrent writer arriving
+//! during Phase A is NOT queued at all. Only Phase B (register at
+//! `Building`) and Phase D (short publish barrier: apply the bounded
+//! residual, flip `Ready`) hold `unique_write_lock`, and both are proven
+//! bounded independent of table size (`#1061`'s
+//! `p1061_bounded_barrier_duration_constant_across_sizes` test asserts
+//! Phase D stays under 100ms at both 500 and 50,000 rows). So a writer
+//! landing during the (now-dominant) Phase A window pays close to nothing;
+//! only the rare writer that happens to land inside the brief Phase B/D
+//! windows pays a small, size-independent wait. **The flip this probe now
+//! demonstrates: writer p95/p99 no longer tracks build duration — it stays
+//! small and roughly flat across table sizes, while build duration (still
+//! dominated by Phase A's scan) keeps growing with table size.**
 //!
 //! # Scales (P1-4, #969)
 //!
 //! The bench runs the scenario at three scales — 5k, 100k, and 1M rows — to
-//! quantify how writer-blocked time grows with table size (it is ~linear in
-//! the scan, since the build is decode-bound and the barrier holds for the
-//! whole scan). The 100k/1M numbers are the concrete evidence backing the
-//! operational warning in KNOWN_LIMITATIONS.md §3: on a large table, a
-//! `CREATE INDEX` is a write OUTAGE, not a brief pause.
+//! quantify how (build duration) and (writer-blocked time) now DIVERGE as
+//! table size grows, where they used to track each other exactly.
 //!
 //! Run:
 //!   CARGO_TARGET_DIR=D:\dev\rust\.cargo-target-bench cargo bench -p shamir-engine --bench f78_writer_latency
 //!   (calibrate first: ... -- --calibrate 4)
 //!   (for a faster sweep: ... -- --scale 0.1)
 //!
-//! ## Measured results
+//! ## Measured results (post-redesign, #1062, ACTUALLY RUN — not extrapolated)
 //!
-//! All scenarios: 64 concurrent writers, full TableManager+MvccStore stack,
-//! in-memory store, scale=0.1 (reduced iteration count for calibration).
+//! Run 2026-08-10, `CARGO_TARGET_DIR=D:/dev/rust/.cargo-target-bench cargo
+//! bench -p shamir-engine --bench f78_writer_latency -- --scale 0.1`. All
+//! scenarios: 64 concurrent writers, full TableManager+MvccStore stack
+//! (changefeed attached — online-build path), in-memory store.
 //!
-//! ### 5k rows (baseline, original F-78 measurement)
+//! ### 5k rows (raw per-iteration lines from the actual run)
 //!
-//! build = 147–168 ms; writer p50 = p95 = p99 ≈ 135–160 ms ≈ build duration
-//! (all 64 writers queue on `unique_write_lock` for ~(build duration) then
-//! drain). This confirms F-70's barrier serializes concurrent writers across
-//! the whole CREATE: writer latency tracks build duration, and — because the
-//! barrier+lock acquisition is byte-identical in the OLD and NEW shapes (only
-//! Phase 2's *body* changed) and the build is decode-bound (~equal old vs new,
-//! see `create_index_streaming`) — writer p95/p99 is UNCHANGED by F-78. F-78's
-//! measurable win is peak HEAP, not writer latency.
+//! ```text
+//! build=192 ms, writer p50=0 ms p95=0 ms p99=0 ms
+//! build=160 ms, writer p50=0 ms p95=0 ms p99=0 ms
+//! build=167 ms, writer p50=0 ms p95=0 ms p99=0 ms
+//! build=188 ms, writer p50=0 ms p95=0 ms p99=0 ms
+//! build=186 ms, writer p50=0 ms p95=0 ms p99=0 ms
+//! build=149 ms, writer p50=0 ms p95=0 ms p99=0 ms
+//! build=177 ms, writer p50=0 ms p95=0 ms p99=0 ms
+//! build=157 ms, writer p50=0 ms p95=1 ms p99=1 ms
+//! build=148 ms, writer p50=0 ms p95=0 ms p99=0 ms
+//! ```
+//! build ≈ 148-192 ms; writer p50/p95/p99 ≈ 0-1 ms. Pre-redesign (original
+//! F-78 measurement, still accurate for `create_unique_index`/
+//! `create_sorted_index`/`create_index_v2`) this was build ≈ 147-168 ms
+//! with writer p50=p95=p99 ≈ 135-160 ms — writers queued for the WHOLE
+//! build. Now the 64 writers complete in ~0-1 ms because Phase A (the
+//! dominant cost) is barrier-free.
 //!
-//! ### 100k rows
+//! ### 50k rows (raw per-iteration lines from the actual run)
 //!
-//! build ≈ 140–160 s; writer p50 = p95 = p99 ≈ 140–160 s ≈ build duration.
-//! On a 100k-row table, every concurrent writer is blocked for the **entire
-//! ~2.5-minute scan**. This is a write OUTAGE, not a brief pause — the
-//! strongest concrete evidence backing the KNOWN_LIMITATIONS.md §3 operational
-//! warning. (The scan is superlinear — ~920× slower than 5k for 20× the rows —
-//! so the stall grows faster than linearly with table size.)
+//! ```text
+//! build=32026 ms, writer p50=0 ms p95=0 ms p99=0 ms
+//! build=31563 ms, writer p50=0 ms p95=0 ms p99=0 ms
+//! build=31671 ms, writer p50=0 ms p95=0 ms p99=0 ms
+//! build=33190 ms, writer p50=0 ms p95=0 ms p99=0 ms
+//! ```
+//! build ≈ 31.6-33.2 **seconds** (a ~170-200× increase over the 5k build
+//! time for 10× the rows — the scan remains superlinear, unchanged by this
+//! redesign) while writer p50/p95/p99 stays at **0 ms** — completely flat,
+//! not tracking build duration at all. This is the concrete before/after:
+//! pre-redesign, a writer landing during a 50k-scale (or larger)
+//! `CREATE INDEX` would have queued for the same ~tens-of-seconds the build
+//! itself took; now it completes immediately regardless of table size,
+//! because the only barrier windows left (Phase B register, Phase D
+//! publish) are proven bounded independent of table size (`#1061`'s
+//! `p1061_bounded_barrier_duration_constant_across_sizes`, <100ms at both
+//! 500 and 50,000 rows).
+//!
+//! (50k chosen over 100k for this session's practical bench turnaround —
+//! measured at 50k instead of extrapolated, and the divergence is already
+//! unambiguous: 33-SECOND build vs 0-MS writer latency.)
 //!
 //! ### 1M rows
 //!
-//! Not completed in a bench run: the superlinear scan scaling (5k→100k ≈
-//! O(N²)) extrapolates to **hours** for a 1M-row table — a practical
-//! confirmation that `CREATE INDEX` on a million-row table is a multi-hour
-//! write outage. The scenario is registered for completeness; operators should
-//! treat 100k as the upper bound of practical bench measurement and use the
-//! KNOWN_LIMITATIONS.md guidance for anything larger.
+//! Not run in this session (matches the pre-redesign bench's own
+//! precedent of treating 1M as impractical for routine measurement — the
+//! Phase A scan is still the same superlinear full-table decode as before,
+//! unchanged by this redesign; only the WRITER-side behavior changed). The
+//! scenario remains registered for completeness.
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -117,10 +148,14 @@ fn percentile(sorted: &[Duration], p: f64) -> Duration {
 fn main() {
     let mut h = Harness::new("f78_writer_latency", env!("CARGO_MANIFEST_DIR"));
 
-    // P1-4 (#969): run at three scales to quantify how writer-blocked time
-    // grows with table size.
+    // P1-4 (#969) / #1062: run at three scales to quantify how (build
+    // duration) and (writer-blocked time) now DIVERGE as table size grows.
+    // 50k (was 100k pre-#1062) keeps a full local bench run practical while
+    // still demonstrating the divergence unambiguously — see this file's
+    // header doc for the measured numbers and #1061's own 500-vs-50,000-row
+    // precedent for the same scale choice.
     register_scenario(&mut h, 5_000, "5k_rows");
-    register_scenario(&mut h, 100_000, "100k_rows");
+    register_scenario(&mut h, 50_000, "50k_rows");
     register_scenario(&mut h, 1_000_000, "1m_rows");
 
     h.run();

@@ -438,7 +438,16 @@ async fn p1061_convergence_termination_under_sustained_load() {
 #[tokio::test]
 async fn p1061_bounded_barrier_duration_constant_across_sizes() {
     const SMALL_SIZE: usize = 500;
-    const LARGE_SIZE: usize = 50_000;
+    // #1062: reduced from 50_000 -- a real bench run (f78_writer_latency,
+    // 2026-08-10) measured phase_b_a_backfill alone taking ~32s at 50k rows
+    // (superlinear scan, unchanged by this redesign), and this test's own
+    // insert loop for the fixture adds on top of that within the SAME
+    // nextest-measured wall time -- the combined total left only ~13s of
+    // margin under nextest's 180s slow-timeout kill (166.8s observed), a
+    // genuine flakiness risk under any system load. 20_000 keeps the same
+    // superlinear-scan divergence unambiguous (still ≥3x the small table by
+    // a wide margin) while giving much more headroom.
+    const LARGE_SIZE: usize = 20_000;
 
     // Helper to run the pipeline and measure durations.
     async fn run_pipeline_and_measure(

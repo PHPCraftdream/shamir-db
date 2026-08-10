@@ -348,26 +348,29 @@ artifact).
   full restart-vs-resume reasoning, and `IndexState` /
   `IndexDescriptor.state` / `IndexRegistry::set_state` in
   `crates/shamir-index/src/` for the lifecycle-state implementation.
-- **`CREATE INDEX` blocks all writers for the ENTIRE backfill scan — a write
-  OUTAGE on medium-to-large tables.** `CREATE INDEX` (regular/unique/sorted)
-  acquires F-70's write barrier (`begin_write_barrier` → raise bit → drain →
-  hold `unique_write_lock`) across the WHOLE Phase 1→2→3 backfill sequence, so
+- **`CREATE INDEX` on the `unique`/`sorted`/`index2` families still blocks all
+  writers for the ENTIRE backfill scan — a write OUTAGE on medium-to-large
+  tables.** (The regular/hash family no longer has this limitation — see the
+  next bullet.) `create_unique_index`/`create_sorted_index`/`create_index_v2`
+  each still acquire F-70's write barrier (`begin_write_barrier` → raise bit →
+  drain → hold `unique_write_lock`) across their WHOLE backfill sequence, so
   every concurrent writer that observes `needs_write_barrier() == true` queues
   on `unique_write_lock` until the build drops the barrier at the end. On a
   table large enough for the scan to take seconds or minutes, this is a
-  complete write outage, not a brief pause. The `f78_writer_latency` bench
-  measures the concrete stall: at 5k rows the build takes ~150 ms and writer
-  p50/p95/p99 ≈ 150 ms (all 64 writers queue for ~(build duration) then drain);
-  at **100k rows the build takes ~140–160 s and writer p50/p95/p99 ≈ 140–160 s**
-  — a ~2.5-minute write outage. (The scan is superlinear — ~920× slower than
-  5k for 20× the rows — so the stall grows faster than linearly with table
-  size; at 1M rows the extrapolation is hours.) See
-  `crates/shamir-engine/benches/f78_writer_latency.rs` for the bench, the
-  `create_index_from_stream` doc comment in
-  `crates/shamir-index/src/base_index/index_manager.rs` for the barrier
-  rationale, and the P1-4 operational-decision brief in
+  complete write outage, not a brief pause. The `f78_writer_latency` bench's
+  ORIGINAL measurement (still the accurate characterization of these three
+  families' behavior today) found: at 5k rows the build took ~150 ms and
+  writer p50/p95/p99 ≈ 150 ms (all 64 writers queue for ~(build duration) then
+  drain); at **100k rows the build took ~140–160 s and writer p50/p95/p99 ≈
+  140–160 s** — a ~2.5-minute write outage. (The scan is superlinear — ~920×
+  slower than 5k for 20× the rows — so the stall grows faster than linearly
+  with table size; at 1M rows the extrapolation is hours.) See
+  `create_unique_index_body`/`create_sorted_index_with_include`/
+  `create_index_v2` in `crates/shamir-engine/src/table/table_manager_index_mgmt.rs`
+  for the still-current whole-barrier implementations, and the P1-4
+  operational-decision brief in
   `docs/dev-artifacts/research/2026-08-03-new-wave-readonly-review.md` §P1-4
-  for the full scope.
+  for the full original scope.
   - **The unique family additionally materializes the whole table into memory
     (O(table) peak memory).** F-78 (#905) reduced peak memory for the regular
     family (streaming instead of materializing), but the unique family still
@@ -375,26 +378,53 @@ artifact).
     detection needs global knowledge, and a sound bounded-memory rewrite is a
     separately-scoped task. See `create_unique_index_body`'s F-78 deferral
     comment in `crates/shamir-engine/src/table/table_manager_index_mgmt.rs`.
-  - **Operational recommendation: run `CREATE INDEX` on large tables during a
-    maintenance window.** For TS/JS client callers, pass a generous
-    `requestTimeoutMs` (or `0` to disable) on the `execute`/`Batch.execute`
-    call that carries the `create_index` op — the default 35 s client timeout
-    will abort the request long before a 100k-row build completes. There is NO
-    server-side per-DDL timeout, so the only timeout that can fire is the
-    client's. See the JSDoc on `createIndex` in
-    `crates/shamir-client-ts/src/core/builders/ddl.ts`.
+  - **Operational recommendation: run `CREATE INDEX` (unique/sorted/index2) on
+    large tables during a maintenance window.** For TS/JS client callers, pass
+    a generous `requestTimeoutMs` (or `0` to disable) on the `execute`/
+    `Batch.execute` call that carries the `create_index`/`create_unique_index`/
+    `create_sorted_index` op — the default 35 s client timeout will abort the
+    request long before a 100k-row build completes. There is NO server-side
+    per-DDL timeout, so the only timeout that can fire is the client's. See
+    the JSDoc on `createIndex` in `crates/shamir-client-ts/src/core/builders/ddl.ts`.
   - **Progress visibility + post-crash recovery.** The backfill now emits
     periodic `log::info!` progress lines (rows processed so far, elapsed time)
     so an operator watching logs can confirm the DDL is progressing, not hung.
     A `Building` index left behind by a crash or a cancelled build is surfaced
     by `TableManager::verify()`/`doctor::repair()` (#966) — `verify()` reports
     it as unhealthy with a diagnostic message, and `repair()` rebuilds it from
-    scratch.
-  - A full lock-free "online build" (persist `Building` → snapshot version →
-    lock-free bulk scan → delta replay → short cutover → `Ready`, releasing the
-    barrier between batches) is planned as a future improvement. It is tracked
-    as a post-alpha redesign in the review, NOT attempted in the current
-    alpha-minimum scope.
+    scratch. For the regular/hash family specifically, `repair()`'s rebuild
+    still uses the whole-barrier path (see the next bullet's note on
+    `doctor::repair()` scope) — only the interactive `create_index` DDL got
+    the online-build treatment.
+- **Regular/hash `CREATE INDEX` no longer blocks writers for the whole scan —
+  online build (RFC, #1018, landed #1087-#1089/#1060-#1062).** `TableManager::
+  create_index` (regular/hash family ONLY — NOT `create_unique_index`,
+  `create_sorted_index`, or `create_index_v2`, which remain on the
+  whole-barrier path described above) now snapshots a pinned MVCC version,
+  scans it BARRIER-FREE (Phase A), captures concurrent writes into a
+  dirty-set instead of blocking them, drains that dirty-set in a barrier-free
+  catch-up loop (Phase C), and only re-acquires the write barrier for a
+  short, bounded final step (Phase D: apply the residual, flip `Ready`).
+  Falls back to the old whole-barrier path automatically for tables without
+  an MVCC changefeed attached (e.g. system tables). Re-measured with the SAME
+  `f78_writer_latency` bench, 2026-08-10 (`CARGO_TARGET_DIR=D:/dev/rust/.cargo-target-bench
+  cargo bench -p shamir-engine --bench f78_writer_latency -- --scale 0.1`):
+  at 5k rows, build ≈ 148-192 ms, writer p50/p95/p99 ≈ **0-1 ms** (was ≈
+  135-160 ms, tracking build duration); at 50k rows, build ≈ 31.6-33.2
+  **seconds** (scan itself unchanged — still superlinear, same decode cost as
+  before) while writer p50/p95/p99 stays at **0 ms** — completely flat,
+  independent of table size. `doctor::repair()`'s regular-family rebuild
+  path was deliberately NOT switched to online build (`#1089` found this
+  would reopen a serialization race — F-3, #1030 — between concurrent
+  `CREATE INDEX` calls and `repair()`'s multi-family drop-then-recreate loop;
+  a safe fix needs its own bulk online-build entry point, tracked as a
+  follow-up, not attempted here). Crash recovery for an interrupted online
+  build (`#1060`) is intentionally conservative for this first landing:
+  a crash at any point leaves the index safely `Building` (never falsely
+  `Ready`) but does NOT resume — the same manual `TableManager::repair()`
+  recovery as before. See `docs/dev-artifacts/research/2026-08-07-online-index-build-rfc.md`
+  for the full design and `crates/shamir-engine/benches/f78_writer_latency.rs`
+  for the bench and its complete measured numbers.
 
 ## 4. Subscriptions
 
