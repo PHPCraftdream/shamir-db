@@ -3431,6 +3431,7 @@ dependencies = [
  "shamir-collections",
  "shamir-engine",
  "shamir-funclib",
+ "shamir-index",
  "shamir-query-builder",
  "shamir-query-types",
  "shamir-storage",

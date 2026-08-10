@@ -2293,6 +2293,17 @@ impl IndexManager {
             }
         }
 
+        // #1069 test seam — park here (terminal Succeeded status already
+        // durably written, tombstone NOT yet cleared) if a test installed
+        // the status pause hook. This is the exact crash window the
+        // write-order fix closes; see `drop_index_status_pause_hook`'s
+        // field doc. NOT `#[cfg(test)]`-gated — cross-crate test consumer,
+        // same reason as `drop_index_pause_hook`. `None` on every real path
+        // — one uncontended `ArcSwapOption::load_full()` Acquire load.
+        if let Some(hook) = self.drop_index_status_pause_hook.load_full() {
+            hook.wait_at_window().await;
+        }
+
         // P0-3 (#959): clear the tombstone AFTER the reduced IndexInfo is
         // durably persisted. `clear_from_dropping` persists first, then
         // updates in-memory — if the process crashes between persist and

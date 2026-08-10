@@ -91,6 +91,12 @@ futures     = "0.3"            # audit #540 fault-injecting Store test double (i
 # Unifies in the `test-util` feature so `RepoInstance::install_table_for_test`
 # (audit #540 fault-injection seam) exists when shamir-db's own tests compile.
 shamir-engine = { path = "../shamir-engine", default-features = false, features = ["test-util"] }
+# #1065 round 4: `BackfillPauseHook` (the deterministic pause-hook test seam
+# `set_drop_index_pause_hook`/`set_drop_index_status_pause_hook` take) lives
+# in shamir-index and is only transitively available via shamir-engine —
+# Cargo requires it be a direct dependency to `use` it from shamir-db's own
+# tests. Dev-only; no production code in this crate depends on shamir-index.
+shamir-index = { path = "../shamir-index" }
 bench-scale-tool = { workspace = true, features = ["async"] }
 wat         = "1.226"
 shamir-query-builder = { path = "../shamir-query-builder" }

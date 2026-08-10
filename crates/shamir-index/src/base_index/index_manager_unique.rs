@@ -694,6 +694,14 @@ impl IndexManager {
             }
         }
 
+        // #1069 test seam (shared with the regular-hash drop hook). Park
+        // here (terminal Succeeded status already durably written,
+        // tombstone NOT yet cleared) if a test installed the status pause
+        // hook. NOT `#[cfg(test)]`-gated — cross-crate test consumer.
+        if let Some(hook) = self.drop_index_status_pause_hook.load_full() {
+            hook.wait_at_window().await;
+        }
+
         // P0-3 (#959): clear the tombstone AFTER the reduced IndexInfo is
         // durably persisted. See `drop_index`'s matching call for the
         // ordering rationale.
