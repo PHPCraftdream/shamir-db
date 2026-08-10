@@ -1,5 +1,6 @@
 use futures::StreamExt;
 use shamir_storage::error::DbResult;
+use shamir_types::types::record_id::RecordId;
 
 use super::table_manager::TableManager;
 
@@ -322,7 +323,16 @@ impl TableManager {
     /// claim is true. Held across the ENTIRE tombstone → definition-retire →
     /// posting-sweep → persist → tombstone-clear sequence inside
     /// `SortedIndexManager::drop_index`.
-    pub async fn drop_sorted_index(&self, index_name: &str) -> DbResult<bool> {
+    ///
+    /// #1067: accepts `op_id` (mirrors `drop_index`/`drop_unique_index`'s
+    /// convention), threaded down to `SortedIndexManager::drop_index` as
+    /// `op_id.map(|id| id.to_string())` so the terminal `DdlOpStatus` write
+    /// carries the caller's correlation id.
+    pub async fn drop_sorted_index(
+        &self,
+        index_name: &str,
+        op_id: Option<RecordId>,
+    ) -> DbResult<bool> {
         let interner = self.interner.get().await?;
         let Some(name_interned) = interner.get_ind(index_name) else {
             return Ok(false);
@@ -330,6 +340,12 @@ impl TableManager {
         let (_barrier, _uwl_guard) = self
             .begin_write_barrier(crate::index::write_barrier_flags::SORTED_INDEX_CREATE)
             .await;
-        self.sorted_indexes.drop_index(name_interned.id()).await
+        self.sorted_indexes
+            .drop_index(
+                name_interned.id(),
+                op_id.map(|id| id.to_string()),
+                Some(index_name),
+            )
+            .await
     }
 }

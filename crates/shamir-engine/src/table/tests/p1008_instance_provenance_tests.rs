@@ -242,7 +242,7 @@ async fn drop_sorted_before_commit_no_resurrected_posting() {
         .await
         .unwrap();
 
-    tbl.drop_sorted_index("idx_score").await.unwrap();
+    tbl.drop_sorted_index("idx_score", None).await.unwrap();
 
     repo.commit_tx(tx).await.expect("commit must succeed");
 

@@ -315,7 +315,7 @@ async fn p05b_live_rename_crash_at_rekey_hook() {
     // (rename_definition already swapped + persisted the def to new_id).
     let mgr_clone = mgr.clone();
     tokio::select! {
-        _ = mgr_clone.rename_index_sorted(old_id, new_id) => {
+        _ = mgr_clone.rename_index_sorted(old_id, new_id, None, None, None) => {
             panic!("rename_index_sorted completed before the rekey hook fired");
         }
         _ = hook.wait_until_parked() => {
@@ -383,7 +383,9 @@ async fn p05b_normal_rename_leaves_no_tombstone() {
     assert!(mgr.find_by_name_interned(old_id).is_some());
 
     // Full rename via the public orchestration entry point.
-    mgr.rename_index_sorted(old_id, new_id).await.unwrap();
+    mgr.rename_index_sorted(old_id, new_id, None, None, None)
+        .await
+        .unwrap();
 
     assert!(
         mgr.find_by_name_interned(new_id).is_some(),

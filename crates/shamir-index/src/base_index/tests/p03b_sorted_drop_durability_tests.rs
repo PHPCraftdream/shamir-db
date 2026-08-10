@@ -321,7 +321,7 @@ async fn p03b_3c_live_drop_crash_at_post_sweep_hook() {
     // reduced defs NOT yet persisted).
     let mgr_clone = mgr.clone();
     tokio::select! {
-        _ = mgr_clone.drop_index(name_interned) => {
+        _ = mgr_clone.drop_index(name_interned, None, None) => {
             panic!("drop_index completed before post-sweep hook fired");
         }
         _ = hook.wait_until_parked() => {
@@ -378,7 +378,10 @@ async fn p03b_3b_name_reuse_rejected_during_drop() {
     // Start drop in a background task.
     let mgr_clone = mgr.clone();
     let drop_task = tokio::spawn(async move {
-        mgr_clone.drop_index(name_interned).await.unwrap();
+        mgr_clone
+            .drop_index(name_interned, None, None)
+            .await
+            .unwrap();
     });
 
     // Wait for the drop to park (tombstone written, def retired, pre-sweep).
@@ -427,7 +430,7 @@ async fn p03b_normal_drop_still_works() {
         .unwrap();
     assert!(mgr.find_by_name_interned(name_interned).is_some());
 
-    let removed = mgr.drop_index(name_interned).await.unwrap();
+    let removed = mgr.drop_index(name_interned, None, None).await.unwrap();
     assert!(removed);
     assert!(mgr.find_by_name_interned(name_interned).is_none());
     assert!(!mgr.has_indexes());

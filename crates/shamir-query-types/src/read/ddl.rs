@@ -68,6 +68,25 @@ pub enum DdlOpKind {
         /// Index name.
         index_name: String,
     },
+    /// `DROP INDEX` (sorted family).
+    DropSortedIndex {
+        /// Index name.
+        index_name: String,
+    },
+    /// `RENAME INDEX` (sorted family).
+    RenameSortedIndex {
+        /// Old index name.
+        old_name: String,
+        /// New index name.
+        new_name: String,
+    },
+    /// `RENAME INDEX` (index2 family — FTS / functional / vector).
+    RenameIndex2 {
+        /// Old index name.
+        old_name: String,
+        /// New index name.
+        new_name: String,
+    },
     /// Placeholder for other DDL operations not yet wired in this slice
     /// (e.g., CREATE/DROP TABLE, CREATE/DROP DATABASE, etc.).
     Other {

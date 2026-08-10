@@ -237,7 +237,7 @@ async fn drop_sorted_index_acquires_write_barrier() {
     let guard = tbl.unique_write_lock().lock_owned().await;
 
     let tbl_drop = tbl.clone();
-    let drop_task = tokio::spawn(async move { tbl_drop.drop_sorted_index("by_age").await });
+    let drop_task = tokio::spawn(async move { tbl_drop.drop_sorted_index("by_age", None).await });
 
     tokio::time::sleep(Duration::from_millis(80)).await;
     assert!(

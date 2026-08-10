@@ -911,7 +911,17 @@ impl SortedIndexManager {
     /// closes this: on restart, `recover_in_progress_drops` sees the
     /// tombstone, resumes the sweep (idempotent), removes the stale
     /// definition, persists, and clears the tombstone.
-    pub async fn drop_index(&self, name_interned: u64) -> DbResult<bool> {
+    ///
+    /// #1067: accepts `op_id`/`index_name` so the terminal `Succeeded`
+    /// status can be written BEFORE the tombstone clear (mirrors #1069's
+    /// write-order fix for the base_index `IndexManager::drop_index`/
+    /// `drop_unique_index` — see this same function's step 6 below).
+    pub async fn drop_index(
+        &self,
+        name_interned: u64,
+        op_id: Option<String>,
+        index_name: Option<&str>,
+    ) -> DbResult<bool> {
         // Fast existence check. TOCTOU-safe under the engine's write barrier
         // (drop_sorted_index is serialized via begin_write_barrier); mirrors
         // #959's base_index `if !self.indexes.contains(...)`.
@@ -1038,6 +1048,46 @@ impl SortedIndexManager {
                  TableManager::verify() to confirm state."
             ))
         })?;
+
+        // #1067: Write terminal Succeeded status BEFORE clearing the
+        // tombstone. This is the exact same crash-safety write-order fix
+        // #1069 applied to the base_index `IndexManager::drop_index`/
+        // `drop_unique_index`: if we crash after this write but before the
+        // tombstone clear, the status is durable and recovery will find it
+        // (the tombstone clear is idempotent, so recovery re-clearing is
+        // safe).
+        if let (Some(op_id_str), Some(index_name_str)) = (op_id.as_deref(), index_name) {
+            let op_id_parsed =
+                <RecordId as std::str::FromStr>::from_str(op_id_str).map_err(|e| {
+                    shamir_storage::error::DbError::Codec(format!("Invalid op_id: {e}"))
+                })?;
+            let status = shamir_query_types::read::DdlOpStatus {
+                op_id: op_id_parsed,
+                kind: shamir_query_types::read::DdlOpKind::DropSortedIndex {
+                    index_name: index_name_str.to_string(),
+                },
+                state: shamir_query_types::read::DdlOpState::Succeeded {
+                    completed_at: std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap()
+                        .as_millis() as u64,
+                },
+            };
+            // Do not swallow status-write errors — log loudly.
+            if let Err(e) =
+                crate::base_index::ddl_op_log::write_op_status(&self.info_store, &status).await
+            {
+                log::error!(
+                    "#1067: DROP INDEX (sorted) '{}' succeeded, but failed to write \
+                     Succeeded status: {}. The drop completed successfully, but polling by \
+                     op_id {:?} will return Unknown. Call TableManager::verify() to confirm \
+                     the index was dropped.",
+                    index_name_str,
+                    e,
+                    op_id_parsed
+                );
+            }
+        }
 
         // P0-3b (#972): clear the tombstone AFTER the reduced defs are
         // durably persisted. `clear_from_dropping_sorted` persists first,
@@ -1434,7 +1484,21 @@ impl SortedIndexManager {
     /// `recover_in_progress_renames`, which finishes the rekey (the whole
     /// point of the tombstone). This matches #972's model: a crashed DDL op is
     /// finished by restart-recovery, not by re-issuing the command.
-    pub async fn rename_index_sorted(&self, old_id: u64, new_id: u64) -> DbResult<()> {
+    ///
+    /// #1067: accepts `op_id`/`old_name`/`new_name` (resolved by the caller,
+    /// which already has the string names in scope — this layer only ever
+    /// dealt in interned ids before) so the terminal `Succeeded` status can
+    /// be written AFTER step 3 (`rekey_postings`) but BEFORE step 4 (the
+    /// tombstone clear) — the same before-the-clear write-order discipline
+    /// as `drop_index` above and the base_index `IndexManager` family.
+    pub async fn rename_index_sorted(
+        &self,
+        old_id: u64,
+        new_id: u64,
+        op_id: Option<String>,
+        old_name: Option<&str>,
+        new_name: Option<&str>,
+    ) -> DbResult<()> {
         // 1. Durable tombstone BEFORE the definition swap.
         self.add_to_renaming_sorted(old_id, new_id).await?;
 
@@ -1479,11 +1543,57 @@ impl SortedIndexManager {
             ))
         })?;
 
+        // #1067: Write terminal Succeeded status AFTER the rekey but BEFORE
+        // clearing the tombstone — same before-the-clear write-order
+        // discipline as `drop_index` above and the base_index `IndexManager`
+        // family's #1069 fix. `op_id`/`old_name`/`new_name` are now
+        // parameters (previously this layer had no op_id in scope at all).
+        if let (Some(op_id_str), Some(old_name_str), Some(new_name_str)) =
+            (op_id.as_deref(), old_name, new_name)
+        {
+            let op_id_parsed =
+                <RecordId as std::str::FromStr>::from_str(op_id_str).map_err(|e| {
+                    shamir_storage::error::DbError::Codec(format!("Invalid op_id: {e}"))
+                })?;
+            let status = shamir_query_types::read::DdlOpStatus {
+                op_id: op_id_parsed,
+                kind: shamir_query_types::read::DdlOpKind::RenameSortedIndex {
+                    old_name: old_name_str.to_string(),
+                    new_name: new_name_str.to_string(),
+                },
+                state: shamir_query_types::read::DdlOpState::Succeeded {
+                    completed_at: std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap()
+                        .as_millis() as u64,
+                },
+            };
+            // Do not swallow status-write errors — log loudly.
+            if let Err(e) =
+                crate::base_index::ddl_op_log::write_op_status(&self.info_store, &status).await
+            {
+                log::error!(
+                    "#1067: RENAME INDEX (sorted) '{}' -> '{}' succeeded, but failed to \
+                     write Succeeded status: {}. The rename completed successfully, but \
+                     polling by op_id {:?} will return Unknown. Call \
+                     TableManager::verify() to confirm the index was renamed.",
+                    old_name_str,
+                    new_name_str,
+                    e,
+                    op_id_parsed
+                );
+            }
+        }
+
         // 4. Clear the tombstone now that the rekey is durable.
         // P1-2 (#967): if this fails, the tombstone remains — recovery
         // will just clear it (the rename is fully done).
         // NOTE: Cannot write DdlOpState::Failed here because this layer
-        // (SortedIndexManager) does not have op_id in scope.
+        // (SortedIndexManager) does not have op_id in scope for a FAILURE —
+        // by the time op_id/old_name/new_name are available (as of #1067),
+        // every fallible step above already returned via `?` before this
+        // point, so there is no reachable failure site left in this
+        // function to attach a Failed status to.
         self.clear_from_renaming_sorted(old_id).await.map_err(|e| {
             shamir_storage::error::DbError::Internal(format!(
                 "RENAME SORTED INDEX ({old_id} → {new_id}): the rename is fully \

@@ -501,7 +501,7 @@ async fn drop_index_removes_definition_and_entries() {
         let rec = record_with_int(201, score);
         mgr.on_record_created(&id, &rec, 1).await.unwrap();
     }
-    let dropped = mgr.drop_index(101).await.unwrap();
+    let dropped = mgr.drop_index(101, None, None).await.unwrap();
     assert!(dropped);
     assert!(!mgr.has_indexes());
     // Re-register the same name — should start empty.
@@ -515,7 +515,7 @@ async fn drop_index_removes_definition_and_entries() {
 #[tokio::test]
 async fn drop_index_nonexistent_returns_false() {
     let (_, mgr) = fresh_mgr().await;
-    assert!(!mgr.drop_index(9999).await.unwrap());
+    assert!(!mgr.drop_index(9999, None, None).await.unwrap());
 }
 
 #[tokio::test]

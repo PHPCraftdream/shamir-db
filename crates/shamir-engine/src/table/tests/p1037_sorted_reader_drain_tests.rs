@@ -99,7 +99,7 @@ async fn p1037_sorted_reader_blocks_drop_until_released() {
 
     // Now spawn the DROP (which will park at the pause hook).
     let tbl_d = tbl.clone();
-    let drop_task = tokio::spawn(async move { tbl_d.drop_sorted_index("salary_idx").await });
+    let drop_task = tokio::spawn(async move { tbl_d.drop_sorted_index("salary_idx", None).await });
 
     // Rendezvous: the DROP is parked.
     drop_hook.wait_until_parked().await;
@@ -171,7 +171,7 @@ async fn p1037_sorted_reader_backs_off_while_drop_parked() {
 
     // Spawn the DROP — it will park after definition retire, before drain.
     let tbl_d = tbl.clone();
-    let drop_task = tokio::spawn(async move { tbl_d.drop_sorted_index("salary_idx").await });
+    let drop_task = tokio::spawn(async move { tbl_d.drop_sorted_index("salary_idx", None).await });
 
     // Rendezvous: the DROP is parked.
     drop_hook.wait_until_parked().await;
@@ -246,7 +246,7 @@ async fn p1037_sorted_uncontended_drop_counts_zero_waits() {
     assert_eq!(gate.drain_waits(), 0, "sanity: no waits yet");
 
     // DROP with no concurrent readers.
-    tbl.drop_sorted_index("salary_idx").await.unwrap();
+    tbl.drop_sorted_index("salary_idx", None).await.unwrap();
 
     assert_eq!(
         gate.drain_waits(),
@@ -342,7 +342,7 @@ async fn p1037_sorted_entry_count_backs_off_during_drop() {
 
     // Spawn the DROP — it will park after definition retire, before drain.
     let tbl_d = tbl.clone();
-    let drop_task = tokio::spawn(async move { tbl_d.drop_sorted_index("salary_idx").await });
+    let drop_task = tokio::spawn(async move { tbl_d.drop_sorted_index("salary_idx", None).await });
 
     // Rendezvous: the DROP is parked.
     drop_hook.wait_until_parked().await;
@@ -404,7 +404,7 @@ async fn p1037_sorted_guard_released_on_nonexistent_rollback() {
     // Attempt to drop a non-existent index — this hits the early `!exists`
     // return path in drop_index (before the drain guard is even acquired in
     // the happy path, but we verify the gate state anyway).
-    let result = tbl.drop_sorted_index("salary_idx").await.unwrap();
+    let result = tbl.drop_sorted_index("salary_idx", None).await.unwrap();
 
     assert!(!result, "drop_sorted_index must return false for non-existent index");
 

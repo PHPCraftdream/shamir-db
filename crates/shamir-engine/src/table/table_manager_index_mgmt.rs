@@ -1115,6 +1115,40 @@ impl TableManager {
                 ))
             })?;
 
+        // #1067: Write terminal Succeeded status BEFORE clearing the
+        // tombstone — this DROP INDEX2 path never wrote ANY terminal status
+        // before this fix (not even a misclassified one — the `DdlOpKind::DropIndex2`
+        // classification at the `admin_table_index.rs` dispatch site only
+        // covered the `InProgress` write; nothing here ever wrote `Succeeded`,
+        // so polling after a successful index2 drop returned `Unknown`
+        // forever). Mirrors #1069's write-order fix (write BEFORE the
+        // tombstone clear) for the base_index/sorted families.
+        if let Some(ref id) = op_id {
+            let status = shamir_query_types::read::DdlOpStatus {
+                op_id: *id,
+                kind: shamir_query_types::read::DdlOpKind::DropIndex2 {
+                    index_name: name.to_string(),
+                },
+                state: shamir_query_types::read::DdlOpState::Succeeded {
+                    completed_at: std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap()
+                        .as_millis() as u64,
+                },
+            };
+            // Do not swallow status-write errors — log loudly.
+            if let Err(e) =
+                crate::table::ddl_op_log::write_op_status(&self.info_store, &status).await
+            {
+                log::error!(
+                    "#1067: DROP INDEX (index2) '{name}' succeeded, but failed to write \
+                     Succeeded status: {e}. The drop completed successfully, but polling by \
+                     op_id {id:?} will return Unknown. Call TableManager::verify() to confirm \
+                     the index was dropped."
+                );
+            }
+        }
+
         // P0-3b (#988): clear the tombstone AFTER the reduced metadata is
         // durably persisted. If this fails, the tombstone remains — recovery
         // will just clear it (a no-op on the already-finished drop).
@@ -1427,10 +1461,13 @@ impl TableManager {
     /// interruption (a later entry's tombstone survives untouched) and is
     /// strictly safer than batching.
     ///
-    /// Does NOT write any `DdlOpStatus`/`ddl_op_log` entries — index2
-    /// RENAME's op-status integration is explicitly out of scope here and
-    /// tracked separately as #1067. `op_id` is loaded from the tombstone but
-    /// currently unused.
+    /// #1067: writes `SucceededViaCrashRecovery` for the resolved `op_id`
+    /// BEFORE clearing each entry's tombstone (mirrors `recover_index2_drops`'s
+    /// own write-before-clear ordering, and #1069's write-order fix for the
+    /// base_index hash/unique families). If a tombstone entry carries no
+    /// `op_id` (pre-#1067 tombstone, or a non-DDL caller), the status write
+    /// is skipped silently — same convention `recover_index2_drops` already
+    /// uses for a `None` op_id.
     pub(crate) async fn recover_index2_renames(&self) -> DbResult<()> {
         let renaming = crate::index2::persistence::load_renaming_index2(&self.info_store).await?;
         if renaming.is_empty() {
@@ -1442,7 +1479,7 @@ impl TableManager {
             renaming.len()
         );
 
-        for (id, old_name, new_name, _op_id) in &renaming {
+        for (id, old_name, new_name, op_id_str) in &renaming {
             match self.index2_registry.get_by_id(*id).await {
                 None => {
                     log::warn!(
@@ -1496,6 +1533,59 @@ impl TableManager {
                              replayed by recovery"
                         );
                     }
+                }
+            }
+
+            // #1067: Write SucceededViaCrashRecovery BEFORE clearing this
+            // entry's tombstone — if we crash after this write but before
+            // the clear, recovery will see the tombstone and finish
+            // idempotently (the tombstone clear is idempotent). Skip
+            // silently if the tombstone entry carries no op_id.
+            if let Some(op_id_str) = op_id_str {
+                let op_id = match RecordId::from_str(op_id_str) {
+                    Ok(id) => id,
+                    Err(e) => {
+                        log::error!(
+                            "#1067: failed to parse op_id '{op_id_str}' for recovered \
+                             index2 RENAME '{old_name}' -> '{new_name}' (id={id}): {e} — \
+                             skipping status write"
+                        );
+                        crate::index2::persistence::clear_from_renaming_index2(
+                            *id,
+                            &self.info_store,
+                        )
+                        .await?;
+                        continue;
+                    }
+                };
+                let status = DdlOpStatus {
+                    op_id,
+                    kind: DdlOpKind::RenameIndex2 {
+                        old_name: old_name.clone(),
+                        new_name: new_name.clone(),
+                    },
+                    state: DdlOpState::SucceededViaCrashRecovery {
+                        completed_at_restart: std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap()
+                            .as_millis() as u64,
+                    },
+                };
+                // Do not swallow status-write errors — log loudly.
+                if let Err(e) =
+                    crate::table::ddl_op_log::write_op_status(&self.info_store, &status).await
+                {
+                    log::error!(
+                        "#1067: failed to write SucceededViaCrashRecovery status for recovered \
+                         index2 RENAME '{}' -> '{}' (id={}): {}. The rename completed \
+                         successfully, but polling by op_id {:?} will return Unknown. Call \
+                         TableManager::verify() to confirm the index was renamed.",
+                        old_name,
+                        new_name,
+                        id,
+                        e,
+                        op_id
+                    );
                 }
             }
 
@@ -2403,8 +2493,19 @@ impl TableManager {
             let (_barrier, _uwl_guard) = self
                 .begin_write_barrier(crate::index::write_barrier_flags::SORTED_INDEX_CREATE)
                 .await;
+            // #1067: thread op_id + the resolved string names down so the
+            // terminal DdlOpStatus write (inside rename_index_sorted, before
+            // its own tombstone clear) carries the caller's correlation id —
+            // mirrors how the is_unique/regular branches above already pass
+            // their own op_id into their respective drop/create calls.
             self.sorted_indexes
-                .rename_index_sorted(old_id, new_id)
+                .rename_index_sorted(
+                    old_id,
+                    new_id,
+                    op_id.as_ref().map(|id| id.to_string()),
+                    Some(old_name),
+                    Some(new_name),
+                )
                 .await?;
         }
 
@@ -2514,6 +2615,44 @@ impl TableManager {
                 &self.info_store,
             )
             .await?;
+
+            // #1067: Write terminal Succeeded status AFTER save_index2_metadata
+            // succeeds but BEFORE clearing the rename tombstone — the same
+            // before-the-clear write-order discipline #1069 established for
+            // the is_unique/regular branches above (and #1066 itself already
+            // used for the tombstone clear position). Deferred by #1066,
+            // which built the tombstone/recovery mechanics but explicitly
+            // left the DdlOpStatus integration to this task.
+            if let Some(ref id) = op_id {
+                let status = shamir_query_types::read::DdlOpStatus {
+                    op_id: *id,
+                    kind: shamir_query_types::read::DdlOpKind::RenameIndex2 {
+                        old_name: old_name.to_string(),
+                        new_name: new_name.to_string(),
+                    },
+                    state: shamir_query_types::read::DdlOpState::Succeeded {
+                        completed_at: std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap()
+                            .as_millis() as u64,
+                    },
+                };
+                // Do not swallow status-write errors — log loudly.
+                if let Err(e) =
+                    crate::table::ddl_op_log::write_op_status(&self.info_store, &status).await
+                {
+                    log::error!(
+                        "#1067: RENAME INDEX (index2) '{}' → '{}' succeeded, but failed to write \
+                         Succeeded status: {}. The rename completed successfully, but polling by \
+                         op_id {:?} will return Unknown. Call TableManager::verify() to confirm \
+                         the index was renamed.",
+                        old_name,
+                        new_name,
+                        e,
+                        id
+                    );
+                }
+            }
 
             // #1066: clear the tombstone now that the rename is durable. If
             // this fails, log loudly but do NOT fail the rename — it

@@ -572,7 +572,10 @@ impl TableManager {
                 .await?;
         }
         for def in &sorted_defs {
-            let _ = self.sorted_indexes().drop_index(def.name_interned).await?;
+            let _ = self
+                .sorted_indexes()
+                .drop_index(def.name_interned, None, None)
+                .await?;
         }
 
         // Use the shared seam helper: routes attached→log / unattached→data_store.

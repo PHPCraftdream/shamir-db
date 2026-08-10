@@ -271,7 +271,7 @@ impl ShamirAdminExecutor {
                         .map(|d| d.name_interned)
                         .collect();
                     for id in sorted_ids {
-                        let _ = table.sorted_indexes().drop_index(id).await;
+                        let _ = table.sorted_indexes().drop_index(id, None, None).await;
                     }
                     // index2 registry — remove all backends.
                     let backends = table.index2_registry().all_backends().await;
@@ -703,9 +703,7 @@ impl ShamirAdminExecutor {
                 index_name: op.drop_index.clone(),
             }
         } else if is_sorted {
-            // Sorted-family drops have no dedicated DdlOpKind variant yet in this slice.
-            // Fall back to DropHashIndex for status logging (same pre-existing scope gap).
-            DdlOpKind::DropHashIndex {
+            DdlOpKind::DropSortedIndex {
                 index_name: op.drop_index.clone(),
             }
         } else {
@@ -757,7 +755,7 @@ impl ShamirAdminExecutor {
                 .map_err(|e| err(e.to_string()))?
         } else if is_sorted {
             table
-                .drop_sorted_index(&op.drop_index)
+                .drop_sorted_index(&op.drop_index, Some(op_id))
                 .await
                 .map_err(|e| err(e.to_string()))?
         } else if is_index2 {
@@ -773,12 +771,12 @@ impl ShamirAdminExecutor {
         };
 
         // #1069 round 2: Terminal status is now written INSIDE IndexManager BEFORE
-        // tombstone clear. No redundant write needed here — drop_index/drop_unique_index
-        // already wrote it durably before their own clear_from_dropping call.
-        // Sorted-family drops have no dedicated `DdlOpKind` variant yet (never
-        // wired to op-id status logging, same pre-existing scope gap as
-        // before #1025) — falls back to `DropHashIndex` like the rest of this
-        // status-log mechanism does for untracked families.
+        // tombstone clear. No redundant write needed here — drop_index/drop_unique_index/
+        // drop_index2 already wrote it durably before their own clear_from_dropping call.
+        // #1067: the sorted family now follows the same pattern — its terminal
+        // status is written inside SortedIndexManager::drop_index, BEFORE its
+        // own tombstone clear, using the DropSortedIndex DdlOpKind classified
+        // above (no more DropHashIndex fallback).
 
         Ok(admin_result_with_op_id(
             mpack!({
@@ -893,15 +891,57 @@ impl ShamirAdminExecutor {
         }
 
         // Determine the operation kind BEFORE the mutation.
-        // For RENAME, we check if the source index is unique (the family we'll drop),
-        // which determines the DdlOpKind variant.
+        //
+        // #1067: resolve ALL FOUR families the same way `handle_drop_index`
+        // does a few dozen lines above (via the catalog, not just
+        // `is_unique`) — before this fix, `is_regular`/`is_sorted`/
+        // `is_index2` all silently collapsed into the `RenameHashIndex`
+        // fallback, misreporting a sorted or index2 rename as a hash rename.
+        // Mirrors `handle_drop_index`'s cross-family-collision guard
+        // reasoning: at most one of these can be true for a name that isn't
+        // a pre-existing legacy collision (R0-C, #1010/#1025).
+        let is_regular = table.index_exists(&op.rename_index).await;
         let is_unique = table.unique_index_exists(&op.rename_index).await;
+        let is_sorted = table.sorted_index_exists(&op.rename_index).await;
+        let is_index2 = table.index2_exists(&op.rename_index).await;
+        let matching_families = [is_regular, is_unique, is_sorted, is_index2]
+            .iter()
+            .filter(|&&m| m)
+            .count();
+        if matching_families > 1 {
+            return Err(err_code(
+                "cross_family_collision",
+                format!(
+                    "index '{}' exists in {matching_families} different index families \
+                     on table '{}' (a pre-existing cross-family name collision) — RENAME \
+                     INDEX cannot safely resolve which one to rename. Run \
+                     TableManager::verify() to see the affected families, then rename or \
+                     drop the colliding sibling(s) individually.",
+                    op.rename_index, op.table
+                ),
+            ));
+        }
         let kind = if is_unique {
             DdlOpKind::RenameUniqueHashIndex {
                 old_name: op.rename_index.clone(),
                 new_name: op.to.clone(),
             }
+        } else if is_sorted {
+            DdlOpKind::RenameSortedIndex {
+                old_name: op.rename_index.clone(),
+                new_name: op.to.clone(),
+            }
+        } else if is_index2 {
+            DdlOpKind::RenameIndex2 {
+                old_name: op.rename_index.clone(),
+                new_name: op.to.clone(),
+            }
         } else {
+            // Falls back to RenameHashIndex only for the actual hash family
+            // (is_regular) — or when NONE of the four families match, which
+            // means `table.rename_index` below will itself error with "index
+            // not found" (matching the pre-existing behavior: this dispatch
+            // handler doesn't special-case that case, `rename_index` does).
             DdlOpKind::RenameHashIndex {
                 old_name: op.rename_index.clone(),
                 new_name: op.to.clone(),
