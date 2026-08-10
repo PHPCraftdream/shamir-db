@@ -159,7 +159,15 @@ fn resolve_repo(
 /// `Store` link internally, so these two calls are sufficient — no more, no
 /// less. `Actor::System`/`Actor::Admin` short-circuit to `Ok(())` inside
 /// `authorize_access` itself (admin bypass, same as everywhere else).
-async fn authorize_cursor_read(
+///
+/// `pub(super)`: also used by `handler.rs`'s `get_ddl_op_status` (#1064) —
+/// a DDL-status poll is a read of that table's operational state, so it
+/// gets the SAME table-Read gate a cursor read does. Authorizing BEFORE any
+/// table/repo resolution (this function takes plain name strings, not
+/// resolved handles) is what keeps an unauthorized caller's response
+/// indistinguishable from a not-found response — see `get_ddl_op_status`'s
+/// call site for why the ordering matters.
+pub(super) async fn authorize_cursor_read(
     db: &shamir_db::ShamirDb,
     actor: &shamir_db::access::Actor,
     db_name: &str,
@@ -202,7 +210,7 @@ fn wrap_engine_err(e: impl std::fmt::Display) -> BatchError {
     }
 }
 
-fn error_response(e: &BatchError) -> DbResponse {
+pub(super) fn error_response(e: &BatchError) -> DbResponse {
     DbResponse::Error {
         code: super::handler::error_code(e).to_string(),
         message: e.to_string(),

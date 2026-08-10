@@ -91,6 +91,7 @@ use super::admin::{
     is_coarse_admin_gate_exempt, set_replicator, set_superuser, AdminGlue,
 };
 use super::config::{CursorLimitsCap, NodeMode, QueryLimitsCap, SlowQueryConfig, TxLimitsCap};
+use super::cursor_handlers::{authorize_cursor_read, error_response};
 use super::subscribe_handler;
 
 /// Absolute lifetime cap for an interactive (Phase B) transaction — bounds
@@ -443,7 +444,10 @@ impl RequestHandler for ShamirDbHandler {
                     repo,
                     table,
                     op_id,
-                } => self.get_ddl_op_status(&db, &repo, &table, &op_id).await,
+                } => {
+                    self.get_ddl_op_status(session, &db, &repo, &table, &op_id)
+                        .await
+                }
             };
 
             // CR-B2: `ShamirDbHandler::execute` already serialized this
@@ -756,13 +760,35 @@ pub(super) fn error_code(e: &BatchError) -> &str {
 
 impl ShamirDbHandler {
     /// Handle `DbRequest::GetDdlOpStatus` — poll a DDL operation's status by ID.
+    ///
+    /// #1064 (P0 SECURITY): this poll previously ran with NO authorization at
+    /// all — any authenticated client that knew (or guessed, or found in a
+    /// log/metric) an `op_id` could read another actor's DDL status,
+    /// including `Failed.detail` internal error text, and use the
+    /// found/not-found distinction as a db/repo/table existence oracle.
+    /// Gated the same way `create_cursor` gates a cursor read
+    /// (`authorize_cursor_read`: `Action::Read` on the `Database`, then on
+    /// the `Table`) — reused directly rather than duplicated, since a DDL
+    /// status poll is semantically "read this table's operational state."
+    /// Authorizing BEFORE any table/repo resolution (using the raw name
+    /// strings, exactly like `create_cursor` does) is what keeps an
+    /// unauthorized caller's response indistinguishable from a genuine
+    /// not-found — `self.db.get_ddl_op_status` (which does the actual
+    /// resolution and can reveal unknown-db/unknown-repo distinctly) is
+    /// never even called unless authorization already succeeded.
     async fn get_ddl_op_status(
         &self,
+        session: &Session,
         db: &str,
         repo: &str,
         table: &str,
         op_id_str: &str,
     ) -> DbResponse {
+        let actor = session_actor(session);
+        if let Err(e) = authorize_cursor_read(&self.db, &actor, db, repo, table).await {
+            return error_response(&e);
+        }
+
         match self.db.get_ddl_op_status(db, repo, table, op_id_str).await {
             Ok(status) => DbResponse::DdlOpStatus { status },
             Err(e) => DbResponse::Error {
