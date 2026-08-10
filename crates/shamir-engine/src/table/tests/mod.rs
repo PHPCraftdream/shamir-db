@@ -57,6 +57,7 @@ pub mod p1059_online_create_index_tests;
 pub mod p1060_online_index_crash_recovery_tests;
 pub mod p1061_pipeline_property_tests;
 pub mod p1063_multi_fts_index_stats_tests;
+pub mod p1066_index2_rename_durability_tests;
 pub mod p1087_phase_b_a_tests;
 pub mod p1088_phase_c_d_tests;
 pub mod p967_ddl_structured_error_tests;

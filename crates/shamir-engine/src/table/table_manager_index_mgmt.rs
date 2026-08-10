@@ -1379,6 +1379,141 @@ impl TableManager {
         Ok(())
     }
 
+    /// #1066: open-time recovery for RENAME INDEX operations on the index2
+    /// (FTS / functional / vector) family interrupted by a crash. Called
+    /// from `TableManager::create` immediately after `recover_index2_drops`
+    /// — both touch the SAME `index2_registry` and
+    /// `save_index2_metadata`/`load_index2_metadata` persistence path, so
+    /// keeping them adjacent respects the ordering these two recovery
+    /// passes share (drop recovery must resolve the registry's shape before
+    /// rename recovery reasons about the SAME ids). This runs BEFORE
+    /// `recover_hash_renames`, which touches a completely different
+    /// subsystem (`IndexManager`, base_index hash family).
+    ///
+    /// Unlike the index2 DROP tombstone (which always needs a sweep) or the
+    /// hash RENAME tombstone (a drop+rebuild that needs the record stream),
+    /// an index2 rename is a pure in-memory registry rekey — physical
+    /// posting entries are keyed by the numeric `id`, not by name. So
+    /// recovery never needs to touch postings; it only needs to make sure
+    /// the registry (and thus the persisted metadata) ends up reflecting
+    /// `new_name` for the tombstoned id, then clear the tombstone.
+    ///
+    /// Recovery semantics per `(id, old_name, new_name, op_id)` entry from
+    /// `load_renaming_index2`:
+    /// - Backend not found by `id` at all — nothing to recover (shouldn't
+    ///   normally happen since index2 ids are never reused/dropped mid-rename
+    ///   by this specific bug). Log a warning and just clear the tombstone so
+    ///   it doesn't strand forever.
+    /// - Backend found and already resolvable under `new_name`'s interned id
+    ///   (the common case: crash happened between `save_index2_metadata` and
+    ///   `clear_from_renaming_index2`, or the crash landed even later) — the
+    ///   rename already completed. Just clear the tombstone (idempotent
+    ///   finish).
+    /// - Backend found but still resolvable under `old_name`'s interned id
+    ///   (crash happened before `rename_entry` ran, or before
+    ///   `save_index2_metadata` persisted it) — re-run `rename_entry` +
+    ///   `save_index2_metadata` to completion, THEN clear the tombstone.
+    ///
+    /// Per-entry tombstone clearing (via `clear_from_renaming_index2` inside
+    /// the loop, NOT a single batched "clear the whole list at the end")
+    /// mirrors `recover_hash_renames`'s OPPOSITE choice deliberately: hash
+    /// rename's batched clear is safe there because `IndexManager`'s
+    /// in-memory `renaming_*` maps are always empty at open time, so a
+    /// per-entry `clear_from_renaming` (which persists from that in-memory
+    /// snapshot) would silently discard sibling entries (the #1000 bug).
+    /// `clear_from_renaming_index2` here has NO such trap — it loads the
+    /// CURRENT on-disk list, removes just `id`, and writes back, so calling
+    /// it once per entry is safe against a partial-recovery-of-recovery
+    /// interruption (a later entry's tombstone survives untouched) and is
+    /// strictly safer than batching.
+    ///
+    /// Does NOT write any `DdlOpStatus`/`ddl_op_log` entries — index2
+    /// RENAME's op-status integration is explicitly out of scope here and
+    /// tracked separately as #1067. `op_id` is loaded from the tombstone but
+    /// currently unused.
+    pub(crate) async fn recover_index2_renames(&self) -> DbResult<()> {
+        let renaming = crate::index2::persistence::load_renaming_index2(&self.info_store).await?;
+        if renaming.is_empty() {
+            return Ok(());
+        }
+
+        log::info!(
+            "#1066: recovering {} in-progress index2 RENAME(s)",
+            renaming.len()
+        );
+
+        for (id, old_name, new_name, _op_id) in &renaming {
+            match self.index2_registry.get_by_id(*id).await {
+                None => {
+                    log::warn!(
+                        "#1066: index2 RENAME recovery found a tombstone for id={id} \
+                         ('{old_name}' -> '{new_name}') but no backend with that id exists — \
+                         nothing to recover; clearing the stale tombstone"
+                    );
+                }
+                Some(_backend) => {
+                    let new_name_interned = self.intern_string(new_name).await?;
+                    // #1066: persist the (possibly freshly-minted) interned
+                    // id for `new_name` BEFORE using it below. Mirrors the
+                    // `rename_index` dispatch path's own persist — without
+                    // this, a second crash right after recovery could again
+                    // strand an undurable interned id.
+                    self.interner.persist().await?;
+                    let already_renamed = self
+                        .index2_registry
+                        .get_by_name(new_name_interned)
+                        .await
+                        .map(|b| b.descriptor().id == *id)
+                        .unwrap_or(false);
+
+                    if already_renamed {
+                        log::info!(
+                            "#1066: index2 RENAME '{old_name}' -> '{new_name}' (id={id}) was \
+                             already durable — tombstone-only reconciliation"
+                        );
+                    } else {
+                        let old_name_interned = self.intern_string(old_name).await?;
+                        let ok = self
+                            .index2_registry
+                            .rename_entry(old_name_interned, new_name.clone(), new_name_interned)
+                            .await;
+                        if !ok {
+                            return Err(shamir_storage::error::DbError::Internal(format!(
+                                "#1066: index2 RENAME recovery failed to rename id={id} \
+                                 ('{old_name}' -> '{new_name}') — rename_entry reported no \
+                                 matching old-name mapping (concurrent conflict during \
+                                 recovery, which should be impossible before the table is \
+                                 open to writers)"
+                            )));
+                        }
+                        crate::index2::persistence::save_index2_metadata(
+                            &self.index2_registry,
+                            &self.info_store,
+                        )
+                        .await?;
+                        log::info!(
+                            "#1066: index2 RENAME '{old_name}' -> '{new_name}' (id={id}) \
+                             replayed by recovery"
+                        );
+                    }
+                }
+            }
+
+            // Clear this entry's tombstone immediately — safe against a
+            // partial-recovery-of-recovery interruption (see doc comment
+            // above for why this differs from recover_hash_renames' batched
+            // clear).
+            crate::index2::persistence::clear_from_renaming_index2(*id, &self.info_store).await?;
+        }
+
+        log::info!(
+            "#1066: recovery complete — {} index2 RENAME(s) finalized",
+            renaming.len()
+        );
+
+        Ok(())
+    }
+
     /// #997: open-time recovery for RENAME INDEX operations on the
     /// base_index REGULAR and UNIQUE (hash) families interrupted by a
     /// crash. Called from `TableManager::create` AFTER
@@ -2285,10 +2420,71 @@ impl TableManager {
         // against a concurrent CREATE/DROP/RENAME on the same table's index2
         // family — two registry-mutating ops could race `IndexRegistry`'s
         // ticket/generation bookkeeping.
+        //
+        // #1066: `rename_entry` (mutates the live registry) and
+        // `save_index2_metadata` (persists it) are two sequential,
+        // non-atomic steps with no rollback between them. A durable RENAME
+        // tombstone (mirroring index2 DROP's `add_to_dropping_index2` /
+        // `clear_from_dropping_index2`) is written BEFORE `rename_entry` and
+        // cleared AFTER `save_index2_metadata` succeeds, so a storage error
+        // or task cancellation anywhere in this window is recoverable via
+        // `recover_index2_renames` on the next table open.
         if is_index2 {
             let (_barrier, _uwl_guard) = self
                 .begin_write_barrier(crate::index::write_barrier_flags::INDEX2_CREATE)
                 .await;
+
+            // #1066: `new_id` (interned above via `self.intern_string(new_name)`
+            // at the top of this function) MUST be durable BEFORE anything
+            // below references it — otherwise a crash before the interner's
+            // next incidental persist leaves `new_name`'s interned id
+            // unrecoverable, and a FRESH interner minted on restart can
+            // assign that SAME numeric id to a completely different string
+            // (the interner's id counter resumes from the last persisted
+            // entry). `recover_index2_renames` would then silently compare
+            // against the wrong string. Mirrors `create_index`/
+            // `create_unique_index_body`'s own `self.interner.persist()`
+            // call before publishing a newly-interned name.
+            self.interner.persist().await?;
+
+            // Re-resolve the backend to get its u32 descriptor id — reuse
+            // the SAME lookup `is_index2` was computed from above (by
+            // old_id), not a different derivation (e.g. via new_id or a
+            // fresh lookup by new_name).
+            let backend = self
+                .index2_registry
+                .get_by_name(old_id)
+                .await
+                .ok_or_else(|| {
+                    shamir_storage::error::DbError::Internal(
+                        "index2 backend disappeared mid-rename".to_string(),
+                    )
+                })?;
+            let index2_id = backend.descriptor().id;
+
+            // #1066: write the durable rename tombstone BEFORE rename_entry
+            // mutates the live registry, so a crash/error at any subsequent
+            // point is recoverable. Mirrors add_to_dropping_index2's
+            // ordering guarantee. Nothing has moved yet at this point, so
+            // propagating a raw error on failure is safe.
+            crate::index2::persistence::add_to_renaming_index2(
+                index2_id,
+                old_name.to_string(),
+                new_name.to_string(),
+                op_id.as_ref().map(|id| id.to_string()),
+                &self.info_store,
+            )
+            .await?;
+
+            // #1066 test seam — park here (tombstone written, registry NOT
+            // yet mutated) if a test installed the early pause hook. This is
+            // the crash window where both registry and disk still show the
+            // OLD name but the tombstone is already durable.
+            #[cfg(test)]
+            if let Some(hook) = self.rename_index2_early_pause_hook.load_full() {
+                hook.wait_at_window().await;
+            }
+
             // rename_entry moves the by_name mapping old_id → new_id AND
             // updates the authoritative name slots in the by_id entry so the
             // rename survives `save_index2_metadata` (P0-5a / #961: without
@@ -2303,11 +2499,36 @@ impl TableManager {
                     "index2 rename_entry failed (concurrent conflict?)".to_string(),
                 ));
             }
+
+            // #1066 test seam — park here (registry mutated to the NEW
+            // name, metadata NOT yet persisted) if a test installed the mid
+            // pause hook. This is the EXACT crash window the tombstone
+            // closes: registry shows new_name, disk still shows old_name.
+            #[cfg(test)]
+            if let Some(hook) = self.rename_index2_mid_pause_hook.load_full() {
+                hook.wait_at_window().await;
+            }
+
             crate::index2::persistence::save_index2_metadata(
                 &self.index2_registry,
                 &self.info_store,
             )
             .await?;
+
+            // #1066: clear the tombstone now that the rename is durable. If
+            // this fails, log loudly but do NOT fail the rename — it
+            // already succeeded; recovery reconciles the stale-but-harmless
+            // tombstone on next restart.
+            if let Err(e) =
+                crate::index2::persistence::clear_from_renaming_index2(index2_id, &self.info_store)
+                    .await
+            {
+                log::error!(
+                    "#1066: RENAME INDEX (index2) '{old_name}' -> '{new_name}': the rename is \
+                     complete, but clearing the rename tombstone failed: {e}. On restart, \
+                     recovery will reconcile. Call TableManager::verify() to confirm state."
+                );
+            }
         }
 
         Ok(())

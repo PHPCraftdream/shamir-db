@@ -400,6 +400,123 @@ pub async fn clear_from_dropping_index2(
     Ok(())
 }
 
+// ============================================================================
+// #1066: RENAME INDEX durable tombstone + crash recovery (index2)
+// ============================================================================
+//
+// Mirrors the DROP tombstone triple immediately above
+// (`meta_key_indexes_drop` / `load_dropping_index2` / `add_to_dropping_index2`
+// / `clear_from_dropping_index2`), adapted for RENAME instead of DROP.
+// `rename_entry` (mutates the live `IndexRegistry` in memory) and
+// `save_index2_metadata` (persists it) are two sequential, non-atomic steps
+// with no rollback between them — a storage error or task cancellation in
+// that window leaves the runtime registry showing the NEW name while disk
+// still has the OLD one. This tombstone closes that window the same way the
+// DROP tombstone closes drop_index2's sweep→persist window.
+//
+// Tombstone shape: `Vec<(u32, String, String, Option<String>)>` (descriptor
+// id, old name, new name, op_id) serialized via bincode under a dedicated
+// key, so it never touches `save_index2_metadata`/`load_index2_metadata`'s
+// forward-compat decode chain.
+//
+// This is a BRAND NEW key as of #1066 — there is no legacy on-disk format to
+// fall back to (unlike the DROP tombstone's `Vec<u32>` pre-#1051 fallback),
+// so `load_renaming_index2` decodes directly with no shadow-shape branch.
+//
+// **CRITICAL** (the #959 collision lesson, re-verified here):
+// `RecordId::system(name)` truncates `name` to 12 bytes. The key
+// `"_m.idx.ren"` (10 bytes, no truncation) is distinct from the three
+// existing index2 system keys at byte 7:
+//   `"_m.idx"`      → [..., 5f,6d,2e,69,64,78, 00,00,00,00,00,00]
+//   `"_m.idx.lfv"`  → [..., 5f,6d,2e,69,64,78, 2e,6c,66,76,00,00]
+//   `"_m.idx.drop"` → [..., 5f,6d,2e,69,64,78, 2e,64,72,6f,70,00]
+//   `"_m.idx.ren"`  → [..., 5f,6d,2e,69,64,78, 2e,72,65,6e,00,00]
+// All four share the first 6 non-zero bytes (`_m.idx`) but diverge at byte 6
+// (0x00 for the bare key vs 0x2e for the suffixed ones) and, among the
+// suffixed keys, at byte 7 (0x6c '.lfv' vs 0x64 '.drop' vs 0x72 '.ren') —
+// NO collision.
+
+/// System key for the index2 RENAME tombstone
+/// (`Vec<(u32, String, String, Option<String>)>` of id + old_name + new_name
+/// + op_id).
+fn meta_key_indexes_rename() -> RecordId {
+    RecordId::system("_m.idx.ren")
+}
+
+/// Load the persisted index2 RENAME tombstone. Returns an empty `Vec` if the
+/// key is absent (`NotFound`) or contains an empty vec — both mean "no
+/// in-progress renames". Mirrors `load_dropping_index2`, but this key is new
+/// as of #1066 — there is no legacy format to fall back to, so a decode
+/// failure is a genuine error rather than a fallback trigger.
+pub async fn load_renaming_index2(
+    info_store: &Arc<dyn Store>,
+) -> Result<Vec<(u32, String, String, Option<String>)>, shamir_storage::error::DbError> {
+    let key = meta_key_indexes_rename().to_bytes();
+    match info_store.get(key.into()).await {
+        Ok(bytes) => {
+            if bytes.is_empty() {
+                return Ok(Vec::new());
+            }
+            bincode::deserialize::<Vec<(u32, String, String, Option<String>)>>(&bytes).map_err(
+                |e| {
+                    shamir_storage::error::DbError::Codec(format!(
+                        "system:_m.idx.ren decode failed: {e}"
+                    ))
+                },
+            )
+        }
+        Err(shamir_storage::error::DbError::NotFound(_)) => Ok(Vec::new()),
+        Err(e) => Err(e),
+    }
+}
+
+/// Add `id` to the persisted index2 RENAME tombstone. Loads the current set,
+/// appends the entry (skipping if `id` is already present, same de-dup guard
+/// as `add_to_dropping_index2`), and writes it back.
+///
+/// MUST be called BEFORE `rename_entry` mutates the live registry, so a
+/// crash/error at any subsequent point is recoverable from the tombstone.
+///
+/// If the persist fails, the on-disk tombstone is unchanged — the caller
+/// (`rename_index`) propagates the error and does NOT proceed with the
+/// rename. Mirrors `add_to_dropping_index2`'s free-function shape —
+/// `IndexRegistry` does not own an `info_store`.
+pub async fn add_to_renaming_index2(
+    id: u32,
+    old_name: String,
+    new_name: String,
+    op_id: Option<String>,
+    info_store: &Arc<dyn Store>,
+) -> Result<(), shamir_storage::error::DbError> {
+    let mut current = load_renaming_index2(info_store).await?;
+    if !current.iter().any(|&(existing_id, ..)| existing_id == id) {
+        current.push((id, old_name, new_name, op_id));
+    }
+    let key = meta_key_indexes_rename().to_bytes();
+    let bytes = bincode::serialize(&current)
+        .map_err(|e| shamir_storage::error::DbError::Codec(e.to_string()))?;
+    info_store.set(key.into(), Bytes::from(bytes)).await?;
+    Ok(())
+}
+
+/// Remove `id` from the persisted index2 RENAME tombstone. Loads the current
+/// set, removes the id, and writes it back.
+///
+/// MUST be called AFTER `save_index2_metadata` durably persists the renamed
+/// registry. Mirrors `clear_from_dropping_index2`.
+pub async fn clear_from_renaming_index2(
+    id: u32,
+    info_store: &Arc<dyn Store>,
+) -> Result<(), shamir_storage::error::DbError> {
+    let mut current = load_renaming_index2(info_store).await?;
+    current.retain(|&(existing_id, ..)| existing_id != id);
+    let key = meta_key_indexes_rename().to_bytes();
+    let bytes = bincode::serialize(&current)
+        .map_err(|e| shamir_storage::error::DbError::Codec(e.to_string()))?;
+    info_store.set(key.into(), Bytes::from(bytes)).await?;
+    Ok(())
+}
+
 /// Sweep all posting entries for the given index2 descriptor id from
 /// `info_store`. Postings are keyed by `[index_id: u32 LE][type_tag]...`
 /// (see `posting_layout`), so a 4-byte prefix scan collects every entry.

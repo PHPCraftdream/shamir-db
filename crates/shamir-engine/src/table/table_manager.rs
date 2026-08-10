@@ -253,6 +253,28 @@ pub struct TableManager {
     #[cfg(test)]
     pub(super) drop_index2_post_sweep_hook:
         Arc<arc_swap::ArcSwapOption<super::index2_backfill_hook::BackfillPauseHook>>,
+    /// #1066 test-only deterministic pause point: parks `rename_index`'s
+    /// `is_index2` branch AFTER the durable RENAME tombstone is written but
+    /// BEFORE `rename_entry` mutates the live registry. Lets a regression
+    /// test observe/crash in the exact window where the tombstone is durable
+    /// while both registry and disk still show the OLD name (matrix row:
+    /// "crash before rename_entry" → recovery re-runs the rename from
+    /// scratch). `None` in every non-test build and by default in tests.
+    #[cfg(test)]
+    pub(super) rename_index2_early_pause_hook:
+        Arc<arc_swap::ArcSwapOption<super::index2_backfill_hook::BackfillPauseHook>>,
+    /// #1066 test-only deterministic pause point: parks `rename_index`'s
+    /// `is_index2` branch AFTER `rename_entry` mutates the live registry but
+    /// BEFORE `save_index2_metadata` persists it — the exact crash window
+    /// this task's tombstone closes (registry shows the NEW name, disk still
+    /// has the OLD name, tombstone present). A regression test installs this
+    /// hook, parks the rename mid-flight, drops the manager (simulating a
+    /// crash), then reopens against the SAME stores and asserts recovery
+    /// (`recover_index2_renames`) finishes the rename. `None` in every
+    /// non-test build and by default in tests.
+    #[cfg(test)]
+    pub(super) rename_index2_mid_pause_hook:
+        Arc<arc_swap::ArcSwapOption<super::index2_backfill_hook::BackfillPauseHook>>,
     /// #1003 test-only deterministic pause point: parks `create_index_v2`'s
     /// non-btree branch AFTER `index2_registry.insert` (the backend is now
     /// live in the registry, still `Building`) but BEFORE `set_state(Ready)`
@@ -369,6 +391,10 @@ impl Clone for TableManager {
             drop_index2_pause_hook: Arc::clone(&self.drop_index2_pause_hook),
             #[cfg(test)]
             drop_index2_post_sweep_hook: Arc::clone(&self.drop_index2_post_sweep_hook),
+            #[cfg(test)]
+            rename_index2_early_pause_hook: Arc::clone(&self.rename_index2_early_pause_hook),
+            #[cfg(test)]
+            rename_index2_mid_pause_hook: Arc::clone(&self.rename_index2_mid_pause_hook),
             #[cfg(test)]
             index2_registered_before_ready_hook: Arc::clone(
                 &self.index2_registered_before_ready_hook,
@@ -525,6 +551,10 @@ impl TableManager {
             drop_index2_pause_hook: Arc::new(arc_swap::ArcSwapOption::empty()),
             #[cfg(test)]
             drop_index2_post_sweep_hook: Arc::new(arc_swap::ArcSwapOption::empty()),
+            #[cfg(test)]
+            rename_index2_early_pause_hook: Arc::new(arc_swap::ArcSwapOption::empty()),
+            #[cfg(test)]
+            rename_index2_mid_pause_hook: Arc::new(arc_swap::ArcSwapOption::empty()),
             #[cfg(test)]
             index2_registered_before_ready_hook: Arc::new(arc_swap::ArcSwapOption::empty()),
             #[cfg(test)]
@@ -687,6 +717,17 @@ impl TableManager {
         // No pre-load or post-write needed here.
         mgr.recover_index2_drops().await?;
 
+        // #1066: recover any index2 RENAME operations interrupted by a
+        // crash. Runs immediately AFTER `recover_index2_drops` — both touch
+        // the SAME `index2_registry` and `save_index2_metadata` persistence
+        // path (drop recovery must settle the registry's shape first), and
+        // BEFORE `recover_hash_renames` below, which touches a completely
+        // different subsystem (`IndexManager`, base_index hash family).
+        // Also BEFORE the `restore_on_open` loop, same reasoning as the drop
+        // recovery above. See `recover_index2_renames`'s doc for the full
+        // recovery semantics.
+        mgr.recover_index2_renames().await?;
+
         // #997: recover any RENAME INDEX operations on the base_index
         // regular/unique (hash) families interrupted by a crash. Runs AFTER
         // `recover_index2_drops` (same position as the index2 recovery)
@@ -843,6 +884,10 @@ impl TableManager {
             drop_index2_pause_hook: Arc::new(arc_swap::ArcSwapOption::empty()),
             #[cfg(test)]
             drop_index2_post_sweep_hook: Arc::new(arc_swap::ArcSwapOption::empty()),
+            #[cfg(test)]
+            rename_index2_early_pause_hook: Arc::new(arc_swap::ArcSwapOption::empty()),
+            #[cfg(test)]
+            rename_index2_mid_pause_hook: Arc::new(arc_swap::ArcSwapOption::empty()),
             #[cfg(test)]
             index2_registered_before_ready_hook: Arc::new(arc_swap::ArcSwapOption::empty()),
             #[cfg(test)]
@@ -1009,6 +1054,31 @@ impl TableManager {
         hook: Option<Arc<super::index2_backfill_hook::BackfillPauseHook>>,
     ) {
         self.drop_index2_post_sweep_hook.store(hook);
+    }
+
+    /// #1066 test-only: install (or clear with `None`) the deterministic
+    /// `rename_index` (`is_index2` branch) early pause hook (fires after the
+    /// durable RENAME tombstone is written, before `rename_entry` mutates
+    /// the live registry). See `rename_index2_early_pause_hook`'s field doc.
+    #[cfg(test)]
+    pub(crate) fn set_rename_index2_early_pause_hook(
+        &self,
+        hook: Option<Arc<super::index2_backfill_hook::BackfillPauseHook>>,
+    ) {
+        self.rename_index2_early_pause_hook.store(hook);
+    }
+
+    /// #1066 test-only: install (or clear with `None`) the deterministic
+    /// `rename_index` (`is_index2` branch) mid pause hook (fires after
+    /// `rename_entry` mutates the live registry, before
+    /// `save_index2_metadata` persists it). See
+    /// `rename_index2_mid_pause_hook`'s field doc.
+    #[cfg(test)]
+    pub(crate) fn set_rename_index2_mid_pause_hook(
+        &self,
+        hook: Option<Arc<super::index2_backfill_hook::BackfillPauseHook>>,
+    ) {
+        self.rename_index2_mid_pause_hook.store(hook);
     }
 
     /// #1003 test-only: install (or clear with `None`) the deterministic
