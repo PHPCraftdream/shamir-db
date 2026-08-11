@@ -5,7 +5,7 @@ use shamir_query_types::batch::{
 };
 use shamir_query_types::call::CallOp;
 use shamir_query_types::filter::{Filter, FilterValue};
-use shamir_query_types::read::ReadQuery;
+use shamir_query_types::read::{ReadQuery, Select, SelectItem};
 use shamir_query_types::subscribe::{SubscribeOp, UnsubscribeOp};
 use shamir_types::types::value::QueryValue;
 
@@ -911,23 +911,10 @@ impl Batch {
     /// and must not reference the entry's own alias.
     pub fn try_build(&self) -> Result<BatchRequest, BuildError> {
         for (alias, entry) in &self.queries {
-            // Validate $query refs.
-            //
-            // Encode the op to msgpack and decode as QueryValue so we can
-            // walk the tree as a plain QueryValue map.
-            let bytes = rmp_serde::to_vec_named(&entry.op).map_err(|e| {
-                BuildError::SerializationFailed {
-                    alias: alias.clone(),
-                    reason: e.to_string(),
-                }
-            })?;
-            let qv: shamir_types::types::value::QueryValue = rmp_serde::from_slice(&bytes)
-                .map_err(|e| BuildError::SerializationFailed {
-                    alias: alias.clone(),
-                    reason: e.to_string(),
-                })?;
-            let mut refs = Vec::new();
-            collect_query_refs(&qv, &mut refs);
+            // Validate $query refs — typed walk, see collect_op_query_refs's
+            // doc for which BatchOp variants get the fast (no-serialization)
+            // path vs. the conservative msgpack-round-trip fallback.
+            let refs = collect_op_query_refs(alias, &entry.op)?;
             for raw_ref in &refs {
                 let base = extract_base_alias(raw_ref);
                 if base == *alias {
@@ -973,21 +960,13 @@ impl Batch {
             // Validate `when` refs — a `when: Filter` may contain `$query`
             // refs (e.g. `Filter::Eq { value: FilterValue::QueryRef{..} }`)
             // that must resolve the same way WHERE-clause `$query` refs do:
-            // same alias-existence/self-reference checks, same walking
-            // approach (serialize to `QueryValue`, walk for `"$query"` keys).
+            // same alias-existence/self-reference checks. `when` is already
+            // a typed `Filter` (unlike `op`, which is an enum with untyped
+            // fallback variants) — walked directly via `collect_filter_refs`,
+            // no serialization needed at all.
             if let Some(when) = &entry.when {
-                let bytes =
-                    rmp_serde::to_vec_named(when).map_err(|e| BuildError::SerializationFailed {
-                        alias: alias.clone(),
-                        reason: e.to_string(),
-                    })?;
-                let qv: shamir_types::types::value::QueryValue = rmp_serde::from_slice(&bytes)
-                    .map_err(|e| BuildError::SerializationFailed {
-                        alias: alias.clone(),
-                        reason: e.to_string(),
-                    })?;
                 let mut refs = Vec::new();
-                collect_query_refs(&qv, &mut refs);
+                collect_filter_refs(when, &mut refs);
                 for raw_ref in &refs {
                     let base = extract_base_alias(raw_ref);
                     if base == *alias {
@@ -1158,6 +1137,214 @@ fn collect_query_refs(value: &shamir_types::types::value::QueryValue, out: &mut 
         }
         _ => {}
     }
+}
+
+// ============================================================================
+// #1093: typed $query-ref walkers — no msgpack round-trip.
+//
+// `try_build` used to serialize EVERY entry's op to msgpack and decode it
+// back into a `QueryValue` tree purely to walk it for `"$query"` keys (see
+// `collect_query_refs` above), paying an O(payload) allocate+encode+decode
+// pass on every call for even the largest insert/update payloads. Most of
+// the query-ref-bearing data is ALREADY typed (`InsertOp.values`,
+// `UpdateOp.set`, `SetOp.key`/`value` are `QueryValue` — `collect_query_refs`
+// above already walks a `&QueryValue` directly, no serialization needed for
+// those) or reachable through `Filter`/`FilterValue`'s own bounded,
+// already-typed enum shape. These two functions walk that shape directly.
+//
+// Investigated (2026-08-11) whether to extend this typed path to ALL
+// `BatchOp` variants (not just the 5 covered by `collect_op_query_refs`
+// below) and found the full surface is deeper than the review that raised
+// this task assumed: `ReadQuery.select` alone required mapping
+// `Select`/`SelectItem`/`SelectExpr` (a THIRD, separate expression tree from
+// `Filter`/`FilterExpr`) before this could be implemented correctly for
+// reads. The other ~75 `BatchOp` variants (DDL/admin/introspection ops) have
+// NOT been individually audited for a similarly-hidden query-ref-bearing
+// field — `collect_op_query_refs`'s fallback arm below intentionally keeps
+// the ORIGINAL, unconditionally-correct msgpack round-trip for all of them,
+// rather than risk silently under-validating one. See task #1093 for the
+// full investigation notes if extending this further.
+
+/// Collect all `$query` refs from a `Filter` tree — exhaustive over every
+/// variant (this codebase's convention for `Filter`/`BatchOp` matches, per
+/// `BatchOp::is_write`'s own doc: a new variant must compile-error here
+/// until explicitly classified, not silently fall through a wildcard).
+fn collect_filter_refs(filter: &Filter, out: &mut Vec<String>) {
+    match filter {
+        Filter::Eq { value, .. }
+        | Filter::Ne { value, .. }
+        | Filter::Gt { value, .. }
+        | Filter::Gte { value, .. }
+        | Filter::Lt { value, .. }
+        | Filter::Lte { value, .. }
+        | Filter::Contains { value, .. }
+        | Filter::FieldEq { value, .. } => collect_filter_value_refs(value, out),
+        Filter::In { values, .. }
+        | Filter::NotIn { values, .. }
+        | Filter::ContainsAny { values, .. }
+        | Filter::ContainsAll { values, .. } => {
+            for v in values {
+                collect_filter_value_refs(v, out);
+            }
+        }
+        Filter::Between { from, to, .. } => {
+            collect_filter_value_refs(from, out);
+            collect_filter_value_refs(to, out);
+        }
+        Filter::Like { .. }
+        | Filter::ILike { .. }
+        | Filter::Regex { .. }
+        | Filter::IsNull { .. }
+        | Filter::IsNotNull { .. }
+        | Filter::Exists { .. }
+        | Filter::NotExists { .. }
+        | Filter::Fts { .. }
+        | Filter::VectorSimilarity { .. } => {}
+        Filter::And { filters } | Filter::Or { filters } => {
+            for f in filters {
+                collect_filter_refs(f, out);
+            }
+        }
+        Filter::Not { filter } => collect_filter_refs(filter, out),
+        Filter::ValueCompare { left, right, .. } => {
+            collect_filter_value_refs(left, out);
+            collect_filter_value_refs(right, out);
+        }
+        Filter::Computed {
+            expr_args, value, ..
+        } => {
+            if let Some(args) = expr_args {
+                for v in args {
+                    collect_filter_value_refs(v, out);
+                }
+            }
+            collect_filter_value_refs(value, out);
+        }
+    }
+}
+
+/// Collect all `$query` refs from a `FilterValue` tree — exhaustive over
+/// every variant, same convention as [`collect_filter_refs`].
+fn collect_filter_value_refs(value: &FilterValue, out: &mut Vec<String>) {
+    match value {
+        FilterValue::QueryRef { alias, .. } => out.push(alias.clone()),
+        FilterValue::Array(vs) => {
+            for v in vs {
+                collect_filter_value_refs(v, out);
+            }
+        }
+        FilterValue::FnCall { call } => match call {
+            shamir_query_types::filter::FnCall::Simple(_) => {}
+            shamir_query_types::filter::FnCall::Complex { args, .. } => {
+                for v in args {
+                    collect_filter_value_refs(v, out);
+                }
+            }
+        },
+        FilterValue::Expr { expr } => {
+            for v in &expr.args {
+                collect_filter_value_refs(v, out);
+            }
+        }
+        FilterValue::Cond { cond } => {
+            collect_filter_refs(&cond.condition, out);
+            collect_filter_value_refs(&cond.then, out);
+            collect_filter_value_refs(&cond.or_else, out);
+        }
+        FilterValue::Null
+        | FilterValue::Bool(_)
+        | FilterValue::Int(_)
+        | FilterValue::Float(_)
+        | FilterValue::Binary(_)
+        | FilterValue::String(_)
+        | FilterValue::FieldRef { .. }
+        | FilterValue::Param { .. } => {}
+    }
+}
+
+/// Collect all `$query` refs from a `Select` projection — `SelectItem`'s
+/// `Function`/`AggregateFn` variants carry `args: Vec<FilterValue>` (dynamic
+/// per-record function arguments, may reference another query's result);
+/// `Expression`'s `SelectExpr` is a closed arithmetic tree over field refs
+/// and literals ONLY (no `$query`/`$fn`/`$ref` capability — verified against
+/// its own definition, `select_expr.rs`) so it needs no walk.
+fn collect_select_refs(select: &Select, out: &mut Vec<String>) {
+    for item in &select.items {
+        match item {
+            SelectItem::Function { args, .. } | SelectItem::AggregateFn { args, .. } => {
+                for v in args {
+                    collect_filter_value_refs(v, out);
+                }
+            }
+            SelectItem::All
+            | SelectItem::Field { .. }
+            | SelectItem::Aggregate { .. }
+            | SelectItem::CountAll { .. }
+            | SelectItem::Expression { .. } => {}
+        }
+    }
+}
+
+/// Collect all `$query` refs from a `ReadQuery` — `where`, `select`'s
+/// function-argument lists, and `group_by`'s `having` clause.
+fn collect_read_query_refs(q: &ReadQuery, out: &mut Vec<String>) {
+    if let Some(filter) = &q.r#where {
+        collect_filter_refs(filter, out);
+    }
+    collect_select_refs(&q.select, out);
+    if let Some(gb) = &q.group_by {
+        if let Some(having) = &gb.having {
+            collect_filter_refs(having, out);
+        }
+    }
+}
+
+/// Collect all `$query` refs from a single entry's `op`.
+///
+/// Typed fast path (no serialization) for the 5 ops that carry the bulk of
+/// real-world payload size — `Read`/`Insert`/`Update`/`Set`/`Delete`, each
+/// individually audited (see this section's module doc) for every field
+/// that can carry a `Filter`/`FilterValue`/`QueryValue`. Every OTHER
+/// `BatchOp` variant (DDL/admin/introspection/`Batch`/`ForEach`/`Call`/etc.)
+/// falls back to the original, unconditionally-correct msgpack round-trip
+/// via [`collect_query_refs`] — deliberately, not yet individually audited
+/// (see this section's module doc for why extending the fast path further
+/// was deferred).
+fn collect_op_query_refs(alias: &str, op: &BatchOp) -> Result<Vec<String>, BuildError> {
+    let mut refs = Vec::new();
+    match op {
+        BatchOp::Read(q) => collect_read_query_refs(q, &mut refs),
+        BatchOp::Insert(i) => {
+            for v in &i.values {
+                collect_query_refs(v, &mut refs);
+            }
+        }
+        BatchOp::Update(u) => {
+            if let Some(f) = &u.where_clause {
+                collect_filter_refs(f, &mut refs);
+            }
+            collect_query_refs(&u.set, &mut refs);
+        }
+        BatchOp::Set(s) => {
+            collect_query_refs(&s.key, &mut refs);
+            collect_query_refs(&s.value, &mut refs);
+        }
+        BatchOp::Delete(d) => collect_filter_refs(&d.where_clause, &mut refs),
+        other => {
+            let bytes =
+                rmp_serde::to_vec_named(other).map_err(|e| BuildError::SerializationFailed {
+                    alias: alias.to_string(),
+                    reason: e.to_string(),
+                })?;
+            let qv: shamir_types::types::value::QueryValue = rmp_serde::from_slice(&bytes)
+                .map_err(|e| BuildError::SerializationFailed {
+                    alias: alias.to_string(),
+                    reason: e.to_string(),
+                })?;
+            collect_query_refs(&qv, &mut refs);
+        }
+    }
+    Ok(refs)
 }
 
 /// If `s` carries a path tail (`[`/`.` after the base alias), return

@@ -350,6 +350,68 @@ fn try_build_self_reference() {
 }
 
 // ============================================================================
+// try_build — #1093 typed $query-ref walk: SELECT function args, GROUP BY
+// HAVING, and $cond then/else must all still be found WITHOUT the msgpack
+// round-trip these paths now bypass.
+// ============================================================================
+
+/// A `$query` ref inside a `SelectItem::Function`'s `args` (a dynamic
+/// per-record scalar function argument) must still resolve like any other
+/// `$query` ref — this exercises `collect_select_refs`, a code path with no
+/// prior test coverage before #1093 added the typed walk.
+#[test]
+fn try_build_finds_query_ref_inside_select_function_args() {
+    let mut b = Batch::new();
+    let users = b.query("users", Query::from("users"));
+    b.query(
+        "orders",
+        Query::from("orders").select([crate::select::func(
+            "matches_user",
+            "strings/upper",
+            [qref("nope_alias", "[].name")],
+        )]),
+    );
+    let _ = users;
+    let result = b.try_build();
+    assert!(result.is_err());
+    match result.unwrap_err() {
+        BuildError::UnknownAlias {
+            alias,
+            referenced_by,
+        } => {
+            assert_eq!(alias, "nope_alias");
+            assert_eq!(referenced_by, "orders");
+        }
+        other => panic!("expected UnknownAlias, got {:?}", other),
+    }
+}
+
+/// A `$query` ref inside a `GROUP BY ... HAVING` clause must still resolve —
+/// exercises `collect_read_query_refs`'s `group_by.having` branch.
+#[test]
+fn try_build_finds_query_ref_inside_group_by_having() {
+    let mut b = Batch::new();
+    b.query(
+        "orders",
+        Query::from("orders")
+            .group_by("uid")
+            .having(crate::filter::eq("total", qref("nope_alias", "[].sum"))),
+    );
+    let result = b.try_build();
+    assert!(result.is_err());
+    match result.unwrap_err() {
+        BuildError::UnknownAlias {
+            alias,
+            referenced_by,
+        } => {
+            assert_eq!(alias, "nope_alias");
+            assert_eq!(referenced_by, "orders");
+        }
+        other => panic!("expected UnknownAlias, got {:?}", other),
+    }
+}
+
+// ============================================================================
 // try_build — SerializationFailed (#1083)
 //
 // `try_build`'s $query-ref walk used to `.expect(...)` on the msgpack
