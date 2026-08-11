@@ -98,7 +98,13 @@ async fn run_async_write_worker(
                 }
             }
         }
-        pending.fetch_sub(1, Ordering::Relaxed);
+        // Release: pairs with `wait_for_async_writes`'s `Acquire` load —
+        // establishes happens-before so a flusher that observes
+        // `pending == 0` here is guaranteed to also observe this job's
+        // `last_error.store` above, if any. Plain `Relaxed` on both sides
+        // would let a flusher see the decrement without the error store
+        // becoming visible yet, reporting a clean flush one call too early.
+        pending.fetch_sub(1, Ordering::Release);
         // Wake every task parked in `wait_for_async_writes` so it can
         // recheck `pending == 0` — see that function for why a plain
         // `yield_now` busy-poll was replaced with this.
@@ -320,14 +326,45 @@ impl CachedStore {
         Ok(())
     }
 
-    /// Flush all pending async writes (only for Async mode).
-    /// For Sync mode, this is a no-op.
+    /// Flush pending async writes AND propagate the flush down to `inner`
+    /// (its own buffered state — e.g. a `MemBufferStore` overlay or an
+    /// fsync — needs this regardless of `CachedStore`'s own write mode).
+    ///
+    /// `inner.flush()` runs unconditionally, even when waiting on pending
+    /// async writes surfaces a background failure — an early return there
+    /// would silently skip `inner`'s own durability work for every OTHER,
+    /// successfully-buffered write, not just the one that failed (a
+    /// regression caught by @oh review, 2026-08-11, in an earlier version
+    /// of this fix). This is the canonical implementation; `Store::flush`
+    /// below delegates to it (method resolution prefers this inherent
+    /// method over the trait one on a bare `self.flush()` call even
+    /// inside that trait impl, so there is exactly one code path, not two
+    /// that could silently diverge — see the same review, which caught
+    /// this INHERENT method never calling `inner.flush()` at all under
+    /// the pre-existing implementation).
     pub async fn flush(&self) -> DbResult<()> {
-        if matches!(self.mode, WriteMode::Sync) {
-            return Ok(());
-        }
+        let bg_result = if matches!(self.mode, WriteMode::Sync) {
+            Ok(())
+        } else {
+            self.wait_for_async_writes().await
+        };
+        let inner_result = self.inner.flush().await;
 
-        self.wait_for_async_writes().await
+        if let Err(ref e) = bg_result {
+            if inner_result.is_ok() {
+                return bg_result;
+            }
+            // Both failed: `inner_result` is the more actionable signal
+            // (the flush this call actually attempted just failed), but
+            // log the background failure so it isn't silently dropped —
+            // `wait_for_async_writes` already cleared it out of
+            // `write_error`, so this is its only remaining trace.
+            log::error!(
+                "storage_cached flush: inner.flush() failed AND a prior background write also \
+                 failed ({e}); returning inner's error, background failure logged here"
+            );
+        }
+        inner_result
     }
 
     /// Park until every job the background write worker has already
@@ -346,7 +383,10 @@ impl CachedStore {
     async fn wait_for_async_writes(&self) -> DbResult<()> {
         loop {
             let notified = self.write_notify.notified();
-            if self.pending_writes.load(Ordering::Relaxed) == 0 {
+            // Acquire: pairs with the worker's `Release` fetch_sub — see
+            // that call site for why plain `Relaxed` here could miss a
+            // same-job `last_error` store.
+            if self.pending_writes.load(Ordering::Acquire) == 0 {
                 break;
             }
             notified.await;
@@ -663,13 +703,16 @@ impl Store for CachedStore {
     /// without this override the trait dispatcher would land on
     /// the default no-op and async-mode writes would not become
     /// durable on a `flush()` callsite.
+    ///
+    /// Delegates to the inherent [`CachedStore::flush`] rather than
+    /// duplicating its logic — Rust's method resolution prefers an
+    /// inherent method over a trait method for a bare `self.flush()`
+    /// call even from inside this very trait impl, so this is a genuine
+    /// delegation, not infinite recursion. See the inherent method's doc
+    /// for why there must be exactly one implementation, not two that
+    /// could silently diverge.
     async fn flush(&self) -> DbResult<()> {
-        // Wait for the in-flight background `set`/`remove` tasks (only
-        // present in `WriteMode::Async`; no-op for `Sync`) and surface
-        // any background write failure — see `wait_for_async_writes`.
-        self.wait_for_async_writes().await?;
-        // Now ensure the inner store's own buffered state lands.
-        self.inner.flush().await
+        self.flush().await
     }
 }
 

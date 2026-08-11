@@ -1098,3 +1098,115 @@ async fn test_async_flush_surfaces_background_failure_via_dyn_store() {
         "Store::flush via dyn dispatch must also surface the background failure"
     );
 }
+
+// ============================================================================
+// Regression (found by @oh review, 2026-08-11): `Store::flush` must run
+// `inner.flush()` unconditionally, even when a background write failed.
+// An earlier version of the #1082 fix used `wait_for_async_writes().await?`,
+// which short-circuited past `inner.flush()` entirely on ANY recorded
+// background error -- silently skipping `inner`'s own durability work
+// (e.g. draining a MemBuffer overlay, fsync) for every OTHER,
+// successfully-buffered write, not just the one that failed.
+// ============================================================================
+
+/// A `Store` wrapper whose `set` fails for exactly one designated key and
+/// counts `flush()` calls that reach it. Everything else delegates.
+struct PartialFailStore {
+    inner: Arc<dyn Store>,
+    fail_key: RecordKey,
+    flush_called: Arc<std::sync::atomic::AtomicBool>,
+}
+
+#[async_trait]
+impl Store for PartialFailStore {
+    async fn insert(&self, value: Bytes) -> DbResult<RecordKey> {
+        self.inner.insert(value).await
+    }
+
+    async fn set(&self, key: RecordKey, value: Bytes) -> DbResult<bool> {
+        if key == self.fail_key {
+            return Err(DbError::Storage("simulated failure for this key".into()));
+        }
+        self.inner.set(key, value).await
+    }
+
+    async fn get(&self, key: RecordKey) -> DbResult<Bytes> {
+        self.inner.get(key).await
+    }
+
+    async fn remove(&self, key: RecordKey) -> DbResult<bool> {
+        self.inner.remove(key).await
+    }
+
+    async fn flush(&self) -> DbResult<()> {
+        self.flush_called.store(true, Ordering::SeqCst);
+        self.inner.flush().await
+    }
+
+    fn iter_stream(
+        &self,
+        batch_size: usize,
+    ) -> Pin<Box<dyn Stream<Item = Result<Vec<(RecordKey, Bytes)>, crate::error::DbError>> + Send>>
+    {
+        self.inner.iter_stream(batch_size)
+    }
+
+    fn scan_prefix_stream(
+        &self,
+        prefix: Bytes,
+        batch_size: usize,
+    ) -> Pin<Box<dyn Stream<Item = Result<Vec<(RecordKey, Bytes)>, crate::error::DbError>> + Send>>
+    {
+        self.inner.scan_prefix_stream(prefix, batch_size)
+    }
+}
+
+/// A background write failure for ONE key must not prevent `inner.flush()`
+/// from running at all -- if it did, every OTHER, successfully-buffered
+/// write would silently fail to become durable at the next `flush()`,
+/// typically the graceful-shutdown flush (the one call that actually
+/// matters).
+#[tokio::test]
+async fn test_async_flush_runs_inner_flush_despite_background_failure() {
+    let plain_inner = Arc::new(InMemoryStore::new()) as Arc<dyn Store>;
+    let flush_called = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let fail_key = RecordKey::from_slice(b"will-fail");
+    let partial_fail_inner = Arc::new(PartialFailStore {
+        inner: plain_inner.clone(),
+        fail_key: fail_key.clone(),
+        flush_called: flush_called.clone(),
+    }) as Arc<dyn Store>;
+    let cached = CachedStore::new_async(partial_fail_inner).await.unwrap();
+
+    // One background write fails...
+    cached
+        .set(fail_key.clone(), Bytes::from_static(b"v"))
+        .await
+        .unwrap();
+    // ...but a second, different write must still succeed in the background.
+    let ok_key = RecordKey::from_slice(b"will-succeed");
+    cached
+        .set(ok_key.clone(), Bytes::from_static(b"ok"))
+        .await
+        .unwrap();
+
+    // flush() must surface the background failure...
+    assert!(
+        cached.flush().await.is_err(),
+        "flush() must still report the background failure"
+    );
+
+    // ...but inner.flush() must have run regardless -- the regression this
+    // test guards against is an early `?` on the background-error branch
+    // that skipped it entirely.
+    assert!(
+        flush_called.load(Ordering::SeqCst),
+        "inner.flush() must run even when a background write failed -- \
+         skipping it silently drops every OTHER buffered write, not just \
+         the one that failed"
+    );
+
+    // And the successfully-written key actually landed in inner.
+    let got = plain_inner.get(ok_key).await.unwrap();
+    assert_eq!(got.as_ref(), b"ok");
+}
