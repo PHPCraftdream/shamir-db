@@ -915,10 +915,17 @@ impl Batch {
             //
             // Encode the op to msgpack and decode as QueryValue so we can
             // walk the tree as a plain QueryValue map.
-            let bytes = rmp_serde::to_vec_named(&entry.op)
-                .expect("BatchOp msgpack serialization is infallible");
-            let qv: shamir_types::types::value::QueryValue =
-                rmp_serde::from_slice(&bytes).expect("BatchOp→QueryValue round-trip is infallible");
+            let bytes = rmp_serde::to_vec_named(&entry.op).map_err(|e| {
+                BuildError::SerializationFailed {
+                    alias: alias.clone(),
+                    reason: e.to_string(),
+                }
+            })?;
+            let qv: shamir_types::types::value::QueryValue = rmp_serde::from_slice(&bytes)
+                .map_err(|e| BuildError::SerializationFailed {
+                    alias: alias.clone(),
+                    reason: e.to_string(),
+                })?;
             let mut refs = Vec::new();
             collect_query_refs(&qv, &mut refs);
             for raw_ref in &refs {
@@ -969,10 +976,16 @@ impl Batch {
             // same alias-existence/self-reference checks, same walking
             // approach (serialize to `QueryValue`, walk for `"$query"` keys).
             if let Some(when) = &entry.when {
-                let bytes = rmp_serde::to_vec_named(when)
-                    .expect("Filter msgpack serialization is infallible");
+                let bytes =
+                    rmp_serde::to_vec_named(when).map_err(|e| BuildError::SerializationFailed {
+                        alias: alias.clone(),
+                        reason: e.to_string(),
+                    })?;
                 let qv: shamir_types::types::value::QueryValue = rmp_serde::from_slice(&bytes)
-                    .expect("Filter→QueryValue round-trip is infallible");
+                    .map_err(|e| BuildError::SerializationFailed {
+                        alias: alias.clone(),
+                        reason: e.to_string(),
+                    })?;
                 let mut refs = Vec::new();
                 collect_query_refs(&qv, &mut refs);
                 for raw_ref in &refs {

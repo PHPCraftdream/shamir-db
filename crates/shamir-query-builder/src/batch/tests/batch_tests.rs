@@ -350,6 +350,34 @@ fn try_build_self_reference() {
 }
 
 // ============================================================================
+// try_build — SerializationFailed (#1083)
+//
+// `try_build`'s $query-ref walk used to `.expect(...)` on the msgpack
+// encode/decode round-trip it uses internally, panicking a public non-test
+// API instead of returning a `Result`. There is no way to construct a
+// `BatchOp`/`Filter` value that actually fails msgpack encoding today (every
+// field is a plain, always-serializable type) — which is exactly why the
+// panic looked safe to the original author. This test instead proves the
+// error TYPE itself is sound: constructible, matchable, and formats a
+// useful message — the guarantee that matters is that a future codec
+// failure surfaces as `Err(BuildError::SerializationFailed { .. })`, not a
+// panic, which is a property of `try_build`'s `?`-based control flow (see
+// `batch.rs`), not something a black-box test can trigger through valid
+// builder inputs.
+// ============================================================================
+
+#[test]
+fn build_error_serialization_failed_display() {
+    let err = BuildError::SerializationFailed {
+        alias: "bad_entry".to_string(),
+        reason: "simulated codec failure".to_string(),
+    };
+    let msg = err.to_string();
+    assert!(msg.contains("bad_entry"));
+    assert!(msg.contains("simulated codec failure"));
+}
+
+// ============================================================================
 // op / op_silent escape hatches
 // ============================================================================
 

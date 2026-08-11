@@ -26,6 +26,20 @@ pub enum BuildError {
         /// The raw `after` string that carried the path tail.
         raw: String,
     },
+    /// The msgpack round-trip `try_build` uses to walk an entry's op (or its
+    /// `when` guard) for `$query` refs failed. In practice this means the
+    /// entry holds a value msgpack cannot represent (e.g. a `QueryValue`
+    /// carrying a non-finite float, or a map with non-string keys) — surface
+    /// it as a typed error instead of panicking, since `try_build` exists
+    /// specifically so a malformed batch produces a `Result::Err`, not a
+    /// panic, at the client's own validation call site.
+    SerializationFailed {
+        /// The alias of the entry that failed to serialize/deserialize.
+        alias: String,
+        /// The underlying codec error, as a string (codec errors aren't
+        /// `Clone`, and `BuildError` derives `PartialEq`/`Clone`).
+        reason: String,
+    },
 }
 
 impl std::fmt::Display for BuildError {
@@ -50,6 +64,9 @@ impl std::fmt::Display for BuildError {
                      '$query' reference if you need the value",
                     raw, alias
                 )
+            }
+            BuildError::SerializationFailed { alias, reason } => {
+                write!(f, "entry '{}' could not be validated: {}", alias, reason)
             }
         }
     }
