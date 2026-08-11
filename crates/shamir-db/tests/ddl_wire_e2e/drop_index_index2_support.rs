@@ -299,32 +299,27 @@ async fn drop_index_if_exists_reports_existed_true_for_index2_and_sorted() {
 }
 
 // =====================================================================
-// Scenario 4 (regression guard): dropping a non-existent name with
-// `if_exists: false` preserves the pre-existing behavior exactly — the
-// common btree case is unchanged by the new sorted/index2 fallbacks.
+// Scenario 4: dropping a non-existent name without `if_exists` is an error.
 // =====================================================================
 #[tokio::test]
-async fn drop_index_nonexistent_without_if_exists_is_unchanged() {
+async fn drop_index_nonexistent_without_if_exists_returns_error() {
     let db = setup_db().await;
 
     let mut b = Batch::new();
     b.id("di");
-    // No if_exists → must NOT error (current behavior returns existed:false),
-    // and none of the four mechanisms should spuriously match a phantom name.
+    // No if_exists → must error (new semantics: if_exists:false on missing index
+    // is a hard error, mirroring DROP TABLE).
     b.drop_index("op", ddl::drop_index("no_such_idx", "users"));
     let req = b.to_request_via_msgpack();
-    let resp = db
+    let err = db
         .execute("testdb", &req)
         .await
-        .expect("drop non-existent index");
+        .expect_err("drop non-existent index should error");
 
-    // Pre-existing behavior: a non-existent index reports existed:false (a
-    // silent no-op result, NOT an error). The new sorted/index2 fallbacks
-    // must not change this — they all return Ok(false) for a name no
-    // mechanism has.
     assert_eq!(
-        resp.results["op"].records[0].get_value_bool("existed"),
-        Some(false),
-        "dropping a non-existent index with if_exists:false must be unchanged (existed:false)"
+        err.code(),
+        Some("index_not_found"),
+        "expected index_not_found for missing index without if_exists, got: {:?}",
+        err.code()
     );
 }

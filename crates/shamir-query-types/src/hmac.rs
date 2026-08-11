@@ -30,7 +30,7 @@
 //! | drop_db             | `b"drop_db\0<db>"`                                                           |
 //! | drop_repo           | `b"drop_repo\0<db_in_use>\0<repo>"`                                          |
 //! | drop_table          | `b"drop_table\0<db_in_use>\0<repo>\0<table>"`                                |
-//! | drop_index          | `b"drop_index\0<db_in_use>\0<repo>\0<table>\0<index>\0<unique:0|1>"`         |
+//! | drop_index          | `b"drop_index\0<db_in_use>\0<repo>\0<table>\0<index>"`                |
 //! | drop_user           | `b"drop_user\0<username>"`                                                   |
 //! | grant_role          | `b"grant_role\0<role>\0<user>"`                                              |
 //! | revoke_role         | `b"revoke_role\0<role>\0<user>"`                                             |
@@ -115,21 +115,13 @@ pub fn canonical_drop_table(db_in_use: &str, repo: &str, table: &str) -> Vec<u8>
     ])
 }
 
-pub fn canonical_drop_index(
-    db_in_use: &str,
-    repo: &str,
-    table: &str,
-    index: &str,
-    unique: bool,
-) -> Vec<u8> {
-    let unique_byte: &[u8] = if unique { b"1" } else { b"0" };
+pub fn canonical_drop_index(db_in_use: &str, repo: &str, table: &str, index: &str) -> Vec<u8> {
     join_null(&[
         b"drop_index",
         db_in_use.as_bytes(),
         repo.as_bytes(),
         table.as_bytes(),
         index.as_bytes(),
-        unique_byte,
     ])
 }
 

@@ -189,7 +189,7 @@ export class Db {
     repo: string,
     table: string,
     index: string,
-    opts?: { unique?: boolean },
+    opts?: { if_exists?: boolean },
   ): Promise<QueryResult> {
     return this.run(ddl.dropIndex(this.client, this.name, repo, table, index, opts));
   }

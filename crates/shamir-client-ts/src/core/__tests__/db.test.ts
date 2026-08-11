@@ -199,19 +199,18 @@ describe('Db handle (unit)', () => {
     expect(result.records).toEqual([{ id: 'fake', ok: true }]);
   });
 
-  it('db.dropIndex(...) sends HMAC-signed op with optional unique', async () => {
+  it('db.dropIndex(...) sends HMAC-signed op', async () => {
     const captured: Captured[] = [];
     const fc = fakeClient(captured);
     const db = new Db(asClient(fc), 'my_app');
 
-    await db.dropIndex('main', 't', 'by_email', { unique: true });
+    await db.dropIndex('main', 't', 'by_email');
 
     const batch = captured[0].batch as {
       queries: Record<string, object>;
     };
     const op = batch.queries['_'] as Record<string, unknown>;
     expect(op.drop_index).toBe('by_email');
-    expect(op.unique).toBe(true);
     expect(typeof op.hmac).toBe('string');
   });
 

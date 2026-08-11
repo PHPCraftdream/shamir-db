@@ -128,29 +128,18 @@ pub struct RenameIndexOp {
 /// Drop an index.
 ///
 /// Requires `hmac` over
-/// `b"drop_index\0<db_in_use>\0<repo>\0<table>\0<index>\0<unique:0|1>"`.
+/// `b"drop_index\0<db_in_use>\0<repo>\0<table>\0<index>"`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DropIndexOp {
     pub drop_index: String,
     pub table: String,
-    #[serde(default)]
-    pub unique: bool,
     #[serde(default = "default_repo")]
     pub repo: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hmac: Option<String>,
-    /// Governs ONLY the case where the parent **db or table itself** is
-    /// missing. When `true`, a missing db/table is a silent no-op
+    /// When `true`, a missing db, table, or index is a silent no-op
     /// returning `{"existed": false}` instead of an error. When `false`
-    /// (the default), a missing db/table is a hard `Err` ("Database '...'
-    /// not found" / table lookup error).
-    ///
-    /// NOTE: dropping a non-existent index on an **existing** db/table is
-    /// **always** a silent no-op returning `{"existed": false}`,
-    /// regardless of this flag — the drop call is attempted unconditionally
-    /// and reports `removed = false` when nothing matched. See
-    /// `handle_drop_index`'s early-exit guard (~line 513-546) which keeps
-    /// this doc and the code path in sync.
+    /// (the default), any missing entity is a hard `Err`.
     #[serde(default, skip_serializing_if = "is_false")]
     pub if_exists: bool,
     /// Client-supplied correlation ID. If present, the server uses this as

@@ -133,33 +133,6 @@ module.exports = async function ({ client, fixtures, test, assert, assertEq, ass
     assertEq(resp.results.d.records[0].existed, true);
   });
 
-  test('drop_index unique=true requires its own tag flavour', async () => {
-    const dbName = await fixtures.setupDb(client, 'hmac_idx_uniq', ['t']);
-    await client.execute(dbName, {
-      id: 0,
-      queries: {
-        i: ddl.createIndex('by_em', 't', [['email']], { unique: true }),
-      },
-    });
-
-    // Compute a tag for the non-unique form but submit unique=true —
-    // server must reject as hmac_mismatch.
-    const wrong = hmac.drop_index_op(client, dbName, 'main', 't', 'by_em'); // unique:false default
-    wrong.unique = true; // tamper with the op without re-signing
-    await assertThrows(
-      () => client.execute(dbName, { id: 1, queries: { d: wrong } }),
-      (e) => /hmac_mismatch/.test(e.message || ''),
-      'expected hmac_mismatch error after tampering unique flag'
-    );
-
-    // Correct: regenerate with unique:true.
-    const correct = hmac.drop_index_op(client, dbName, 'main', 't', 'by_em', {
-      unique: true,
-    });
-    const ok = await client.execute(dbName, { id: 2, queries: { d: correct } });
-    assertEq(ok.results.d.records[0].dropped_index, 'by_em');
-  });
-
   test('mixed batch: one drop without hmac fails the whole batch', async () => {
     const dbName = await fixtures.setupDb(client, 'hmac_mixed', ['t']);
     await assertThrows(

@@ -9,7 +9,6 @@ pub fn drop_index(name: impl Into<String>, table: impl Into<String>) -> DropInde
     DropIndex {
         name: name.into(),
         table: table.into(),
-        unique: false,
         repo: "main".to_owned(),
         hmac: None,
         if_exists: false,
@@ -21,7 +20,6 @@ pub fn drop_index(name: impl Into<String>, table: impl Into<String>) -> DropInde
 pub struct DropIndex {
     name: String,
     table: String,
-    unique: bool,
     repo: String,
     hmac: Option<String>,
     if_exists: bool,
@@ -29,19 +27,6 @@ pub struct DropIndex {
 }
 
 impl DropIndex {
-    /// Mark that the index being dropped is a unique index.
-    ///
-    /// **Note:** This field is now informational-only and used only for HMAC
-    /// canonical input generation. The server resolves the actual index family
-    /// from the catalog (regular hash, unique hash, sorted, or index2) and drops
-    /// whichever family the index actually belongs to — it no longer trusts the
-    /// client's `unique` hint for resolution. Setting this incorrectly does not
-    /// affect which index is dropped, only changes the bytes signed into the HMAC.
-    pub fn unique(mut self) -> Self {
-        self.unique = true;
-        self
-    }
-
     /// Override the target repo (default `"main"`).
     pub fn repo(mut self, repo: impl Into<String>) -> Self {
         self.repo = repo.into();
@@ -79,7 +64,6 @@ impl DropIndex {
         BatchOp::DropIndex(DropIndexOp {
             drop_index: self.name,
             table: self.table,
-            unique: self.unique,
             repo: self.repo,
             hmac: self.hmac,
             if_exists: self.if_exists,

@@ -362,20 +362,15 @@ fn drop_index_wire() {
         mpack!({
             "drop_index": "name_idx",
             "table": "users",
-            "unique": false,
             "repo": "main"
         })
     );
 }
 
 #[test]
-fn drop_index_unique_with_hmac() {
-    let op = ddl::drop_index("email_idx", "users")
-        .unique()
-        .hmac("dead")
-        .build();
+fn drop_index_with_hmac() {
+    let op = ddl::drop_index("email_idx", "users").hmac("dead").build();
     let j = roundtrip(&op);
-    assert_eq!(j["unique"], true);
     assert_eq!(j["hmac"], "dead");
 }
 

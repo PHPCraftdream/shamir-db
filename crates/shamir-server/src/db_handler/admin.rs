@@ -664,13 +664,7 @@ pub(super) fn check_destructive_hmacs(
                 op.hmac.as_ref(),
             ),
             BatchOp::DropIndex(op) => (
-                canon::canonical_drop_index(
-                    db_name,
-                    &op.repo,
-                    &op.table,
-                    &op.drop_index,
-                    op.unique,
-                ),
+                canon::canonical_drop_index(db_name, &op.repo, &op.table, &op.drop_index),
                 op.hmac.as_ref(),
             ),
             BatchOp::DropUser(op) => (canon::canonical_drop_user(&op.drop_user), op.hmac.as_ref()),

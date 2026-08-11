@@ -36,12 +36,8 @@ fn canonical_inputs_are_null_separated() {
         b"drop_table\0mydb\0main\0users"
     );
     assert_eq!(
-        canonical_drop_index("mydb", "main", "users", "by_email", false),
-        b"drop_index\0mydb\0main\0users\0by_email\x000"
-    );
-    assert_eq!(
-        canonical_drop_index("mydb", "main", "users", "by_email", true),
-        b"drop_index\0mydb\0main\0users\0by_email\x001"
+        canonical_drop_index("mydb", "main", "users", "by_email"),
+        b"drop_index\0mydb\0main\0users\0by_email"
     );
     assert_eq!(canonical_drop_user("bob"), b"drop_user\0bob");
 

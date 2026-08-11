@@ -369,7 +369,7 @@ async fn drop_index_with_correct_hmac_accepted() {
 
     let tag = canon::compute_tag_hex(
         &session_key(&session),
-        &canon::canonical_drop_index("prod", "main", "items", "by_id", false),
+        &canon::canonical_drop_index("prod", "main", "items", "by_id"),
     );
     let mut b = Batch::new();
     b.id(1);
@@ -389,53 +389,6 @@ async fn drop_index_with_correct_hmac_accepted() {
     let rec = &resp.results["d"].records[0];
     assert_eq!(rec.get_value_str("dropped_index"), Some("by_id"));
     assert_eq!(rec.get_value_bool("existed"), Some(true));
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn drop_index_unique_flag_changes_canonical() {
-    // unique=true vs unique=false must produce different tags. If
-    // a client signs the non-unique form but sends unique=true, the
-    // gate must refuse.
-    let shamir = make_db_with_table("prod", "items").await;
-    let handler = ShamirDbHandler::new(shamir);
-    let session = root_session();
-
-    let mut b = Batch::new();
-    b.id(0);
-    b.create_index(
-        "i",
-        ddl::create_index("by_em", "items").field("email").unique(),
-    );
-    let mk = execute_built("prod", b.build());
-    let _ = handler
-        .handle(&session, &encode(&mk), &ConnectionServices::without_push(0))
-        .await
-        .unwrap();
-
-    // Tag computed for unique=false but request says unique=true.
-    let mismatched = canon::compute_tag_hex(
-        &session_key(&session),
-        &canon::canonical_drop_index("prod", "main", "items", "by_em", false),
-    );
-    let mut b = Batch::new();
-    b.id(1);
-    b.drop_index(
-        "d",
-        ddl::drop_index("by_em", "items").unique().hmac(&mismatched),
-    );
-    let req = execute_built("prod", b.build());
-    let res = decode(
-        &handler
-            .handle(
-                &session,
-                &encode(&req),
-                &ConnectionServices::without_push(0),
-            )
-            .await
-            .unwrap(),
-    );
-    let (code, _) = expect_error(res);
-    assert_eq!(code, "hmac_mismatch");
 }
 
 // --------------------------------------------------------------------------

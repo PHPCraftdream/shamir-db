@@ -1057,13 +1057,6 @@ export function renameIndex(
 
 /**
  * Drop an index (HMAC-gated).
- *
- * **Note:** The `unique` option is now informational-only and used only for
- * HMAC canonical input generation. The server resolves the actual index family
- * from the catalog (regular hash, unique hash, sorted, or index2) and drops
- * whichever family the index actually belongs to — it no longer trusts the
- * client's `unique` hint for resolution. Setting this incorrectly does not
- * affect which index is dropped, only changes the bytes signed into the HMAC.
  */
 export function dropIndex(
   signer: HmacSigner,
@@ -1071,16 +1064,15 @@ export function dropIndex(
   repo: string,
   table: string,
   index: string,
-  opts?: { unique?: boolean; if_exists?: boolean },
+  opts?: { if_exists?: boolean },
 ): DropIndexOp {
-  const unique = opts?.unique ?? false;
-  const canonical = canonicalDropIndex(dbInUse, repo, table, index, unique);
+  const canonical = canonicalDropIndex(dbInUse, repo, table, index);
   const op: DropIndexOp = {
     drop_index: index,
     table,
     repo,
     hmac: signer.hmacTagHex(canonical),
-  };  if (unique) op.unique = true;
+  };
   if (opts?.if_exists) op.if_exists = true;
   return op;
 }

@@ -707,14 +707,15 @@ impl ShamirAdminExecutor {
                 index_name: op.drop_index.clone(),
             }
         } else {
-            // No index exists in any family — short-circuit with existed:false.
-            // Don't write any status for a no-op.
-            return Ok(admin_result_with_op_id(
-                mpack!({
-                    "dropped_index": @(QueryValue::Str(op.drop_index.clone())),
-                    "existed": @(QueryValue::Bool(false)),
-                }),
-                op_id,
+            // No index exists in any family — if_exists is false (otherwise
+            // the early-exit guard above would have returned), so this is a
+            // hard error, mirroring DROP TABLE's semantics.
+            return Err(err_code(
+                "index_not_found",
+                format!(
+                    "index '{}' not found on table '{}'",
+                    op.drop_index, op.table
+                ),
             ));
         };
 
@@ -764,10 +765,10 @@ impl ShamirAdminExecutor {
                 .await
                 .map_err(|e| err(e.to_string()))?
         } else {
-            // No index exists in any family — return existed:false (no-op).
-            // This matches the pre-existing behavior when the client's unique
-            // hint didn't match any index.
-            false
+            // Unreachable: the `kind` determination block above already
+            // returned early when no family matched. If we reach here,
+            // it's a programmer bug.
+            unreachable!("drop_index dispatch reached else branch despite kind match");
         };
 
         // #1069 round 2: Terminal status is now written INSIDE IndexManager BEFORE

@@ -115,7 +115,6 @@ export function canonicalDropIndex(
   repo: string,
   table: string,
   index: string,
-  unique: boolean,
 ): Uint8Array {
   return joinNull([
     'drop_index',
@@ -123,7 +122,6 @@ export function canonicalDropIndex(
     repo,
     table,
     index,
-    unique ? '1' : '0',
   ]);
 }
 

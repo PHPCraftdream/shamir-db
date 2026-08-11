@@ -510,7 +510,6 @@ export interface DropIndexOp {
   table: string;
   repo: string;
   hmac: string;
-  unique?: true;
   if_exists?: boolean;
 }
 

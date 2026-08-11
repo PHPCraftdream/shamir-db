@@ -1194,8 +1194,8 @@ describe('HMAC-gated ops', () => {
     });
   });
 
-  it('dropIndex — hmac from canonicalDropIndex; unique omitted when false', () => {
-    const canonical = canonicalDropIndex('mydb', 'main', 'users', 'idx_email', false);
+  it('dropIndex — hmac from canonicalDropIndex', () => {
+    const canonical = canonicalDropIndex('mydb', 'main', 'users', 'idx_email');
     const op = ddl.dropIndex(fakeSigner, 'mydb', 'main', 'users', 'idx_email');
     expect(op).toEqual({
       drop_index: 'idx_email',
@@ -1203,16 +1203,6 @@ describe('HMAC-gated ops', () => {
       repo: 'main',
       hmac: fakeSigner.hmacTagHex(canonical),
     });
-    expect(op).not.toHaveProperty('unique');
-  });
-
-  it('dropIndex with unique=true — canonical uses 1, wire includes unique', () => {
-    const canonical = canonicalDropIndex('mydb', 'main', 'users', 'idx_pk', true);
-    const op = ddl.dropIndex(fakeSigner, 'mydb', 'main', 'users', 'idx_pk', {
-      unique: true,
-    });
-    expect(op.unique).toBe(true);
-    expect(op.hmac).toBe(fakeSigner.hmacTagHex(canonical));
   });
 
   it('startMigration — hmac from canonicalStartMigration', () => {

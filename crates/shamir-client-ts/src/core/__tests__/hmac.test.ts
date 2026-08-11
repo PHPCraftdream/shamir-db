@@ -51,15 +51,10 @@ describe('canonical inputs are null-separated (hmac.rs vectors)', () => {
       b('drop_table\0mydb\0main\0users'),
     );
   });
-  it('drop_index (unique=false → trailing "0")', () => {
-    expect(
-      arr(canonicalDropIndex('mydb', 'main', 'users', 'by_email', false)),
-    ).toEqual(b('drop_index\0mydb\0main\0users\0by_email\x000'));
-  });
-  it('drop_index (unique=true → trailing "1")', () => {
-    expect(
-      arr(canonicalDropIndex('mydb', 'main', 'users', 'by_email', true)),
-    ).toEqual(b('drop_index\0mydb\0main\0users\0by_email\x001'));
+  it('drop_index', () => {
+    expect(arr(canonicalDropIndex('mydb', 'main', 'users', 'by_email'))).toEqual(
+      b('drop_index\0mydb\0main\0users\0by_email'),
+    );
   });
   it('drop_user', () => {
     expect(arr(canonicalDropUser('bob'))).toEqual(b('drop_user\0bob'));

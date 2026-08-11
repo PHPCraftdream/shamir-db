@@ -14,11 +14,10 @@ use shamir_types::core::interner::TouchInd;
 use super::helpers::*;
 
 // =====================================================================
-// Scenario 1: Mismatched-flag drop succeeds correctly — unique index
-// dropped with unique: false (wrong/default value).
+// Scenario 1: Catalog-based resolution correctly drops a unique index.
 // =====================================================================
 #[tokio::test]
-async fn drop_unique_index_with_mismatched_unique_false() {
+async fn drop_unique_index_via_catalog_resolution() {
     let db = setup_db().await;
 
     // 1. Create a UNIQUE index.
@@ -37,23 +36,19 @@ async fn drop_unique_index_with_mismatched_unique_false() {
             .expect("create unique index");
     }
 
-    // 2. DROP INDEX with unique: false (wrong/default value) — must succeed
-    //    and drop the correct (unique) index.
+    // 2. DROP INDEX — must succeed and drop the correct (unique) index.
     let removed = {
         let mut b = Batch::new();
         b.id("di");
-        b.drop_index("op", ddl::drop_index("idx_name", "users")); // unique defaults to false
+        b.drop_index("op", ddl::drop_index("idx_name", "users"));
         let req = b.to_request_via_msgpack();
-        let resp = db
-            .execute("testdb", &req)
-            .await
-            .expect("drop with mismatched flag");
+        let resp = db.execute("testdb", &req).await.expect("drop");
         resp.results["op"].records[0].get_value_bool("existed")
     };
     assert_eq!(
         removed,
         Some(true),
-        "DROP with unique:false on a unique index must succeed and report existed:true"
+        "DROP must succeed and report existed:true"
     );
 
     // 3. Verify the index is actually gone (not a no-op).
@@ -65,11 +60,10 @@ async fn drop_unique_index_with_mismatched_unique_false() {
 }
 
 // =====================================================================
-// Scenario 2: Mismatched-flag drop succeeds correctly — regular index
-// dropped with unique: true (wrong value).
+// Scenario 2: Catalog-based resolution correctly drops a regular index.
 // =====================================================================
 #[tokio::test]
-async fn drop_regular_index_with_mismatched_unique_true() {
+async fn drop_regular_index_via_catalog_resolution() {
     let db = setup_db().await;
 
     // 1. Create a REGULAR (non-unique) index.
@@ -86,23 +80,19 @@ async fn drop_regular_index_with_mismatched_unique_true() {
             .expect("create regular index");
     }
 
-    // 2. DROP INDEX with unique: true (wrong value) — must still succeed
-    //    and drop the correct (regular) index.
+    // 2. DROP INDEX — must succeed and drop the correct (regular) index.
     let removed = {
         let mut b = Batch::new();
         b.id("di");
-        b.drop_index("op", ddl::drop_index("idx_age", "users").unique()); // wrong: unique=true
+        b.drop_index("op", ddl::drop_index("idx_age", "users"));
         let req = b.to_request_via_msgpack();
-        let resp = db
-            .execute("testdb", &req)
-            .await
-            .expect("drop with mismatched flag");
+        let resp = db.execute("testdb", &req).await.expect("drop");
         resp.results["op"].records[0].get_value_bool("existed")
     };
     assert_eq!(
         removed,
         Some(true),
-        "DROP with unique:true on a regular index must succeed and report existed:true"
+        "DROP must succeed and report existed:true"
     );
 
     // 3. Verify the index is actually gone.
@@ -114,11 +104,11 @@ async fn drop_regular_index_with_mismatched_unique_true() {
 }
 
 // =====================================================================
-// Scenario 3: Same mismatched-flag proof through the if_exists = true
-// early-exit path specifically — unique index dropped with unique:false.
+// Scenario 3: Catalog-based resolution works correctly through the
+// if_exists = true early-exit path — unique index.
 // =====================================================================
 #[tokio::test]
-async fn drop_unique_index_with_mismatched_flag_via_if_exists() {
+async fn drop_unique_index_via_catalog_resolution_if_exists() {
     let db = setup_db().await;
 
     // 1. Create a UNIQUE index.
@@ -137,9 +127,8 @@ async fn drop_unique_index_with_mismatched_flag_via_if_exists() {
             .expect("create unique index");
     }
 
-    // 2. DROP INDEX ... IF EXISTS with unique: false (wrong value) — must
-    //    succeed and drop the correct (unique) index, NOT no-op as
-    //    "existed: false".
+    // 2. DROP INDEX ... IF EXISTS — must succeed and drop the
+    //    correct (unique) index, NOT no-op as "existed: false".
     let removed = {
         let mut b = Batch::new();
         b.id("di");
@@ -148,14 +137,10 @@ async fn drop_unique_index_with_mismatched_flag_via_if_exists() {
         let resp = db
             .execute("testdb", &req)
             .await
-            .expect("drop with mismatched flag via if_exists");
+            .expect("drop with if_exists");
         resp.results["op"].records[0].get_value_bool("existed")
     };
-    assert_eq!(
-        removed,
-        Some(true),
-        "IF EXISTS with unique:false on a unique index must report existed:true"
-    );
+    assert_eq!(removed, Some(true), "IF EXISTS must report existed:true");
 
     // 3. Verify the index is actually gone.
     let table = db.get_table("testdb", "main", "users").await.unwrap();
@@ -166,11 +151,11 @@ async fn drop_unique_index_with_mismatched_flag_via_if_exists() {
 }
 
 // =====================================================================
-// Scenario 4: Same mismatched-flag proof through the if_exists = true
-// early-exit path — regular index dropped with unique:true.
+// Scenario 4: Catalog-based resolution works correctly through the
+// if_exists = true early-exit path — regular index.
 // =====================================================================
 #[tokio::test]
-async fn drop_regular_index_with_mismatched_flag_via_if_exists() {
+async fn drop_regular_index_via_catalog_resolution_if_exists() {
     let db = setup_db().await;
 
     // 1. Create a REGULAR (non-unique) index.
@@ -184,27 +169,20 @@ async fn drop_regular_index_with_mismatched_flag_via_if_exists() {
             .expect("create regular index");
     }
 
-    // 2. DROP INDEX ... IF EXISTS with unique: true (wrong value) — must
-    //    succeed and drop the correct (regular) index.
+    // 2. DROP INDEX ... IF EXISTS — must succeed and drop the
+    //    correct (regular) index.
     let removed = {
         let mut b = Batch::new();
         b.id("di");
-        b.drop_index(
-            "op",
-            ddl::drop_index("idx_score", "users").unique().if_exists(),
-        );
+        b.drop_index("op", ddl::drop_index("idx_score", "users").if_exists());
         let req = b.to_request_via_msgpack();
         let resp = db
             .execute("testdb", &req)
             .await
-            .expect("drop with mismatched flag via if_exists");
+            .expect("drop with if_exists");
         resp.results["op"].records[0].get_value_bool("existed")
     };
-    assert_eq!(
-        removed,
-        Some(true),
-        "IF EXISTS with unique:true on a regular index must report existed:true"
-    );
+    assert_eq!(removed, Some(true), "IF EXISTS must report existed:true");
 
     // 3. Verify the index is actually gone.
     let table = db.get_table("testdb", "main", "users").await.unwrap();
@@ -215,11 +193,11 @@ async fn drop_regular_index_with_mismatched_flag_via_if_exists() {
 }
 
 // =====================================================================
-// Scenario 5: DdlOpKind in the op-status log reflects the true family,
-// not the client's declared flag — unique index dropped with unique:false.
+// Scenario 5: DdlOpKind in the op-status log reflects the true family —
+// unique index.
 // =====================================================================
 #[tokio::test]
-async fn ddl_op_kind_reflects_true_family_unique_dropped_with_mismatched_flag() {
+async fn ddl_op_kind_reflects_true_family_unique_index() {
     let db = setup_db().await;
 
     // 1. Create a UNIQUE index.
@@ -238,19 +216,18 @@ async fn ddl_op_kind_reflects_true_family_unique_dropped_with_mismatched_flag() 
             .expect("create unique index");
     }
 
-    // 2. DROP INDEX with unique: false (wrong value) and capture op_id.
+    // 2. DROP INDEX and capture op_id.
     let op_id = {
         let mut b = Batch::new();
         b.id("di");
-        b.drop_index("op", ddl::drop_index("idx_phone", "users")); // unique defaults to false
+        b.drop_index("op", ddl::drop_index("idx_phone", "users"));
         let req = b.to_request_via_msgpack();
         let resp = db.execute("testdb", &req).await.expect("drop");
         resp.results["op"].op_id.expect("op_id must be set")
     };
 
     // 3. Poll the op status via get_ddl_op_status and assert the logged
-    //    kind is DropUniqueHashIndex (the TRUE family), not DropHashIndex
-    //    (which would reflect the client's wrong unique:false hint).
+    //    kind is DropUniqueHashIndex (the TRUE family).
     let status = db
         .get_ddl_op_status("testdb", "main", "users", &op_id.to_string())
         .await
@@ -262,7 +239,7 @@ async fn ddl_op_kind_reflects_true_family_unique_dropped_with_mismatched_flag() 
         DdlOpKind::DropUniqueHashIndex {
             index_name: "idx_phone".to_string()
         },
-        "DdlOpKind must reflect the TRUE family (unique), not the client's wrong hint"
+        "DdlOpKind must reflect the TRUE family (unique)"
     );
 
     // 4. Verify state is Succeeded.
@@ -276,10 +253,10 @@ async fn ddl_op_kind_reflects_true_family_unique_dropped_with_mismatched_flag() 
 
 // =====================================================================
 // Scenario 6: DdlOpKind in the op-status log reflects the true family —
-// regular index dropped with unique:true.
+// regular index.
 // =====================================================================
 #[tokio::test]
-async fn ddl_op_kind_reflects_true_family_regular_dropped_with_mismatched_flag() {
+async fn ddl_op_kind_reflects_true_family_regular_index() {
     let db = setup_db().await;
 
     // 1. Create a REGULAR (non-unique) index.
@@ -296,19 +273,18 @@ async fn ddl_op_kind_reflects_true_family_regular_dropped_with_mismatched_flag()
             .expect("create regular index");
     }
 
-    // 2. DROP INDEX with unique: true (wrong value) and capture op_id.
+    // 2. DROP INDEX and capture op_id.
     let op_id = {
         let mut b = Batch::new();
         b.id("di");
-        b.drop_index("op", ddl::drop_index("idx_address", "users").unique()); // wrong: unique=true
+        b.drop_index("op", ddl::drop_index("idx_address", "users"));
         let req = b.to_request_via_msgpack();
         let resp = db.execute("testdb", &req).await.expect("drop");
         resp.results["op"].op_id.expect("op_id must be set")
     };
 
     // 3. Poll the op status and assert the logged kind is DropHashIndex
-    //    (the TRUE family), not DropUniqueHashIndex (which would reflect
-    //    the client's wrong unique:true hint).
+    //    (the TRUE family).
     let status = db
         .get_ddl_op_status("testdb", "main", "users", &op_id.to_string())
         .await
@@ -320,7 +296,7 @@ async fn ddl_op_kind_reflects_true_family_regular_dropped_with_mismatched_flag()
         DdlOpKind::DropHashIndex {
             index_name: "idx_address".to_string()
         },
-        "DdlOpKind must reflect the TRUE family (regular), not the client's wrong hint"
+        "DdlOpKind must reflect the TRUE family (regular)"
     );
 
     // 4. Verify state is Succeeded.
@@ -458,5 +434,56 @@ async fn drop_index_refuses_genuine_cross_family_collision() {
         "expected code 'cross_family_collision', got: {:?} ({})",
         err.code(),
         err
+    );
+}
+
+// =====================================================================
+// Scenario 9: if_exists: false on a missing index is a hard error.
+// =====================================================================
+#[tokio::test]
+async fn drop_index_missing_without_if_exists_returns_error() {
+    let db = setup_db().await;
+
+    // DROP INDEX on a table that exists but has no such index, without
+    // if_exists → must return an error, not a no-op.
+    let mut b = Batch::new();
+    b.id("di");
+    b.drop_index("op", ddl::drop_index("nonexistent_idx", "users"));
+    let req = b.to_request_via_msgpack();
+    let err = db.execute("testdb", &req).await.unwrap_err();
+
+    assert_eq!(
+        err.code(),
+        Some("index_not_found"),
+        "expected index_not_found, got: {:?}",
+        err.code()
+    );
+}
+
+// =====================================================================
+// Scenario 10: if_exists: true on a missing index is a silent no-op.
+// =====================================================================
+#[tokio::test]
+async fn drop_index_missing_with_if_exists_returns_existed_false() {
+    let db = setup_db().await;
+
+    // DROP INDEX ... IF EXISTS on a missing index → must return
+    // {"existed": false} instead of an error.
+    let mut b = Batch::new();
+    b.id("di");
+    b.drop_index(
+        "op",
+        ddl::drop_index("nonexistent_idx", "users").if_exists(),
+    );
+    let req = b.to_request_via_msgpack();
+    let resp = db
+        .execute("testdb", &req)
+        .await
+        .expect("DROP INDEX ... IF EXISTS should not error");
+    let existed = resp.results["op"].records[0].get_value_bool("existed");
+    assert_eq!(
+        existed,
+        Some(false),
+        "IF EXISTS on missing index should return existed:false"
     );
 }
