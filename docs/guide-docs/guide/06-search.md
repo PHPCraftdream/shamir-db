@@ -464,8 +464,14 @@ Windows). Recall@10 ≈ 0.978 — в пределах ≤5% цели.
 
 Crash-safety (V2.4): любая порча снапшота (truncated chunk → crc mismatch,
 garbage manifest, `hnsw_rs` version mismatch) маршрутизируется в
-warn+rebuild без abort'а open'а. Recall после рестарта подтверждён
-e2e-тестами (10K векторов, recall@10 ≥ 0.90 vs brute-force ground truth).
+warn+rebuild без abort'а open'а. Это проверяется двумя РАЗНЫМИ тестами
+(`crates/shamir-index/src/vector/tests/crash_recovery_tests.rs`, #1070):
+fidelity — снапшот-дамп и загрузка одного и того же графа возвращают
+ИДЕНТИЧНЫХ соседей и дистанции (детерминированная проверка, нулевой допуск);
+и quality — recall@10 свежепостроенного графа (3K векторов, не 10K) против
+brute-force ground truth, порог ≥ 0.90. Порог подтверждён кросс-платформенным
+прогоном (`.github/workflows/hnsw-recall-matrix.yml`, вручную запускаемый) —
+60 прогонов (20 × Linux/macOS/Windows) дали минимум 0.968, максимум 0.998.
 
 ## 10. Транзакции и FTS/Vector
 
@@ -581,9 +587,10 @@ const rows = await db.query('users')
 
 * **FTS без индекса — работает, но медленно.** Создай индекс, как только
   данных становится больше нескольких сотен записей.
-* **HNSW — approximate.** Recall@10 на 1K векторах — ~95–99% (проверено
-  тестами). Для exact KNN на малых данных (≤256) — автоматический
-  brute-force.
+* **HNSW — approximate.** Recall@10 на 1K векторах — наблюдаемый диапазон
+  80–90% (60 прогонов, 3 платформы, `.github/workflows/hnsw-recall-matrix.yml`
+  запуск 31472514970; тест — `recall_at_10_on_1k_vectors`). Для exact KNN
+  на малых данных (≤256) — автоматический brute-force.
 * **SQ8-квантование** (`vector_quantization: 'sq8'`) экономит ~3–4× RAM
   при <3% loss recall@10 — включай, если индекс в RAM и память важнее
   пиковой QPS (см. §8).

@@ -577,9 +577,10 @@ async fn restart_preserves_recall_at_10_against_brute_force() {
     let recall = total_hits as f64 / (total_queries as f64 * k as f64);
     // #1070: machine-parseable line for the cross-platform recall-matrix
     // workflow (`.github/workflows/hnsw-recall-matrix.yml`) to grep out of
-    // CI logs — `success-output = "immediate"` for this test is set in
-    // `.config/nextest.toml` so this prints even when the assertion below
-    // passes, not just on failure.
+    // CI logs — that workflow passes `--success-output=immediate` on its
+    // nextest invocation so this prints even when the assertion below
+    // passes, not just on failure (nextest's own default only captures
+    // stdout and shows it on a FAILING run).
     println!("#1070 recall_at_10=3k:{recall:.4}");
     // F-68 (#895, cluster A) derivation for the 0.75 floor below (was 0.90):
     //
@@ -662,9 +663,52 @@ async fn restart_preserves_recall_at_10_against_brute_force() {
     // survive the snapshot round-trip — a genuine corruption craters
     // recall far below this, as the adjacent `rebuild_count == 1` tests
     // prove is the correct signal for actual corruption.
+    //
+    // F-1070 (#1070) recalibration from 0.60 to 0.90 — real cross-platform
+    // matrix, not another single-run reaction:
+    //
+    // #1070 also split this test's OLD job (fidelity + quality conflated)
+    // into two — `snapshot_roundtrip_preserves_graph_topology_exactly`
+    // (above) now catches genuine dump/reload corruption with ZERO
+    // tolerance, which means THIS test's floor no longer has to double as
+    // a corruption tripwire; it only needs to reflect actual HNSW
+    // construction-quality variance. That freed it up to be recalibrated
+    // from real data instead of another isolated CI-failure reaction.
+    //
+    // `.github/workflows/hnsw-recall-matrix.yml` (manual `workflow_dispatch`)
+    // ran this exact test 20 times on EACH of ubuntu-latest, macos-latest,
+    // and windows-latest (60 runs total, same DIM=16/N_E2E=3000/query-set
+    // params as every prior observation in this comment) — run
+    // 31472514970:
+    //   ubuntu-latest:  min 0.968, max 0.992, mean 0.983 (n=20)
+    //   windows-latest: min 0.970, max 0.998, mean 0.986 (n=20)
+    //   macos-latest:   min 0.978, max 0.996, mean 0.987 (n=20)
+    //   overall worst single run across all 60: 0.968.
+    //
+    // This is drastically tighter and higher than either historical CI
+    // failure (0.800, 0.638) that drove the floor down twice before —
+    // neither reproduced even once in 60 fresh cross-platform runs. Those
+    // two observations were real (not fabricated), but with 60 fresh data
+    // points now available, they read as one-off anomalies (a noisy
+    // runner, a transient scheduling artifact, or a code state since
+    // changed) rather than the steady-state distribution. A 0.60 floor
+    // tuned to tolerate them is now needlessly loose by roughly 35 points
+    // against the observed worst case.
+    //
+    // Floor recalibrated to 0.90: restores the ORIGINAL pre-F-68 value —
+    // which the docs (`docs/guide-docs/guide/06-search.md`) had continued
+    // to claim the whole time, even while the test's own floor drifted
+    // down to 0.60 underneath it — and sits with real margin (6.8 points)
+    // below the fresh worst-observed value (0.968), backed by 60 runs
+    // across 3 platforms rather than a single machine's local
+    // instrumentation. If a genuine platform-specific regression
+    // resurfaces, re-run the matrix workflow before touching this floor
+    // again — don't drop it from a single new CI failure the way F-68 and
+    // F-1034 did.
     assert!(
-        recall >= 0.60,
-        "recall@10 after restart ({recall:.3}) below 0.60 floor — \
-         snapshot reload may have corrupted the graph"
+        recall >= 0.90,
+        "recall@10 after restart ({recall:.3}) below 0.90 floor — \
+         snapshot reload may have corrupted the graph, or re-run \
+         .github/workflows/hnsw-recall-matrix.yml before recalibrating"
     );
 }

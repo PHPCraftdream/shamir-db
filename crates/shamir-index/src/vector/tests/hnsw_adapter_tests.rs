@@ -128,11 +128,26 @@ async fn recall_at_10_on_1k_vectors() {
     //   1. raise ef_search well above the dataset's natural variance
     //      (a search that visits ~half the graph hits recall 1.0
     //      almost always);
-    //   2. require recall ≥ 0.5 — a soft floor that catches gross
-    //      regressions (broken Distance impl, broken pruning) without
-    //      flaking on the ~5% of runs where the random graph is
-    //      adversarial.
+    //   2. require recall ≥ 0.75 (was 0.5 — see #1070 recalibration below)
+    //      — a floor that catches gross regressions (broken Distance impl,
+    //      broken pruning) without flaking on ordinary construction
+    //      variance.
     // Tighter recall validation belongs in a separate bench-only run.
+    //
+    // #1070: single-query recall against ONE fixed query (`vecs[0]`), so
+    // `recall` can only land on multiples of 0.1 (0/10..10/10) — this is
+    // NOT the same statistical setup as the 50-query 3k-vector test in
+    // `crash_recovery_tests.rs`. `.github/workflows/hnsw-recall-matrix.yml`
+    // (run 31472514970) ran this test 20 times on EACH of ubuntu-latest,
+    // windows-latest, macos-latest (60 runs total): every single run landed
+    // on EXACTLY 0.80 or 0.90, split roughly evenly, on all three
+    // platforms — never lower, never a perfect 1.0. This is the actual
+    // basis for the docs' (`docs/guide-docs/guide/06-search.md`) "~95-99%"
+    // claim, which was NEVER true for this test — the real observed range
+    // is 80-90%, not 95-99%; the doc has been corrected accordingly. Floor
+    // set to 0.75, one full quantum (0.1) below the observed worst case
+    // (0.80) across all 60 runs — 0.5 was needlessly loose against real
+    // data. Re-run the matrix workflow before adjusting this floor again.
     let dim = 32;
     let n = 1000;
     let adapter = HnswAdapter::new(
@@ -187,7 +202,7 @@ async fn recall_at_10_on_1k_vectors() {
     // workflow (`.github/workflows/hnsw-recall-matrix.yml`) to grep out of
     // CI logs.
     println!("#1070 recall_at_10=1k:{recall:.4}");
-    assert!(recall >= 0.5, "recall@10 = {recall:.2} — expected >= 0.50");
+    assert!(recall >= 0.75, "recall@10 = {recall:.2} — expected >= 0.75");
 }
 
 #[tokio::test]
