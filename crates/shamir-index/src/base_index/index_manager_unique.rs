@@ -80,15 +80,36 @@ impl IndexManager {
     }
 
     /// Like `validate_unique_for_create`, but a durable conflict is NOT an
-    /// error if the conflicting index_key is present in `released_in_tx` —
-    /// the caller (insert_tx) has already determined, by walking its own
-    /// tx.index_write_set, that this key was legitimately vacated earlier
-    /// in the SAME transaction (a release-then-reclaim pattern invisible to
-    /// a durable-only check).
+    /// error if the conflicting index_key is present in `released_in_tx`
+    /// **AND** the durable owner currently holding that key
+    /// (`existing_id`) is itself a record this SAME transaction has staged
+    /// a write (Set or Remove) for, per `touched_records_in_tx` — the
+    /// caller (`insert_tx`) has already determined, by walking its own
+    /// `tx.index_write_set`, that this key was released by a `RemovePosting`
+    /// somewhere in this tx, and by consulting `tx.write_set`, that the
+    /// durable owner is a record this tx genuinely mutated.
+    ///
+    /// #1096 follow-up (found by `@oh` review): checking `released_in_tx`
+    /// alone is NOT sufficient and is a genuine uniqueness-bypass hazard.
+    /// Under `Snapshot` isolation (last-writer-wins, no write-write
+    /// conflict detection — see `pre_commit.rs`'s `claim_write_set`), this
+    /// tx's own plan to release `index_key` was built against a
+    /// possibly-STALE snapshot: by the time this check runs, a DIFFERENT,
+    /// concurrently-committed tx may have already reclaimed the same key
+    /// for an unrelated record. `released_in_tx.contains(index_key)` alone
+    /// cannot distinguish "the record I'm about to release still durably
+    /// owns this key" from "someone else already claimed it after my
+    /// snapshot was taken" — both look identical from `index_key` alone.
+    /// Cross-checking that the CURRENT durable owner (`existing_id`) is a
+    /// record THIS tx has touched closes that hole: if a concurrent tx won
+    /// the race, `existing_id` is a record this tx never staged a write
+    /// for, so `touched_records_in_tx` correctly rejects the tolerance and
+    /// this call falls through to `DuplicateKey`.
     pub async fn validate_unique_for_create_with_released(
         &self,
         value: &(impl RecordRef + ?Sized),
         released_in_tx: &shamir_collections::TFxSet<Vec<u8>>,
+        touched_records_in_tx: &shamir_collections::TFxSet<[u8; 16]>,
     ) -> DbResult<()> {
         if !self.has_unique_indexes() {
             return Ok(());
@@ -100,7 +121,9 @@ impl IndexManager {
             {
                 let index_key = irk.to_bytes();
                 if let Some(existing_id) = self.check_unique_key(&index_key).await? {
-                    if released_in_tx.contains(index_key.as_ref()) {
+                    if released_in_tx.contains(index_key.as_ref())
+                        && touched_records_in_tx.contains(existing_id.as_bytes())
+                    {
                         continue; // released earlier in this same tx — safe to reclaim
                     }
                     return Err(shamir_storage::error::DbError::DuplicateKey(format!(
@@ -158,6 +181,65 @@ impl IndexManager {
                             def.name_interned, existing_id
                         )));
                     }
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Like `validate_unique_for_update`, but a durable conflict on the
+    /// NEW key is NOT an error under the same tx-aware release-then-reclaim
+    /// tolerance as [`validate_unique_for_create_with_released`] — see that
+    /// method's doc for the full rationale (including why checking
+    /// `released_in_tx` alone would be a uniqueness-bypass hazard under
+    /// `Snapshot` isolation's stale-read possibility).
+    ///
+    /// #1096 follow-up: an UPDATE can also be the reclaiming half of a
+    /// release-then-reclaim pair (`tx: DELETE A{email:"x"}; UPDATE C SET
+    /// email="x"`), not just an INSERT — this method closes that call site.
+    pub async fn validate_unique_for_update_with_released(
+        &self,
+        record_id: &RecordId,
+        old_value: &(impl RecordRef + ?Sized),
+        new_value: &(impl RecordRef + ?Sized),
+        released_in_tx: &shamir_collections::TFxSet<Vec<u8>>,
+        touched_records_in_tx: &shamir_collections::TFxSet<[u8; 16]>,
+    ) -> DbResult<()> {
+        if !self.has_unique_indexes() {
+            return Ok(());
+        }
+
+        let defs: Vec<IndexDefinition> = self.indexes_unique.iter().collect();
+        for def in defs {
+            let old_key =
+                build_index_key_from_record(true, def.name_interned, old_value, &def.paths);
+            let new_key =
+                build_index_key_from_record(true, def.name_interned, new_value, &def.paths);
+
+            // If the key is unchanged or both absent, skip.
+            match (&old_key, &new_key) {
+                (None, None) => continue,
+                (Some(o), Some(n)) if o.to_bytes() == n.to_bytes() => continue,
+                _ => {}
+            }
+
+            // Check the new key (if present).
+            if let Some(nk) = &new_key {
+                let index_key = nk.to_bytes();
+                if let Some(existing_id) = self.check_unique_key(&index_key).await? {
+                    if &existing_id == record_id {
+                        continue;
+                    }
+                    if released_in_tx.contains(index_key.as_ref())
+                        && touched_records_in_tx.contains(existing_id.as_bytes())
+                    {
+                        continue; // released earlier in this same tx — safe to reclaim
+                    }
+                    return Err(shamir_storage::error::DbError::DuplicateKey(format!(
+                        "Unique index '{}' violated: value already exists for record {:?}",
+                        def.name_interned, existing_id
+                    )));
                 }
             }
         }

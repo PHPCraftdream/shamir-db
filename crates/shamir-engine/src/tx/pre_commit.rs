@@ -724,15 +724,30 @@ pub(super) async fn pre_commit_prelock(
         // `index_write_set` (`ever_released`) — the durable value is the
         // record this tx's own DELETE/UPDATE-off is removing; Phase 5c will
         // overwrite it atomically with the same posting ops validated here.
-        // The key bytes deterministically encode the indexed value, so a
-        // RemovePosting for this exact key in this tx can only have been
-        // planned against whatever record currently holds it durably.
+        //
+        // #1096 follow-up (found by `@oh` review): `ever_released` alone is
+        // NOT sufficient — it only proves this tx PLANNED to release the
+        // key, not that the plan is still valid. Under `Snapshot` isolation
+        // (documented last-writer-wins, no write-write conflict detection —
+        // see `claim_write_set` above), that plan was built against a
+        // possibly-STALE snapshot: a concurrently-committed tx may already
+        // have reclaimed this key for an UNRELATED record between this tx's
+        // snapshot and this check. Requiring the CURRENT durable owner
+        // (`existing`) to be a record THIS tx has itself staged a write for
+        // (`tx.write_set`) closes that hole — a record this tx never wrote
+        // is never in its own write set, so a stale-snapshot race correctly
+        // falls through to `UniqueViolation` below instead of silently
+        // admitting two live records for the same unique value.
         if let Some(tbl) = repo.table_by_token(g.table_token).await? {
             match tbl.info_store().get(g.index_key.clone().into()).await {
                 Ok(existing) => {
-                    if existing.as_ref() != owner.as_bytes().as_slice()
-                        && !ever_released.contains(&key)
-                    {
+                    let released_and_touched = ever_released.contains(&key)
+                        && RecordId::try_from_bytes(&existing).is_some_and(|existing_id| {
+                            tx.write_set
+                                .get(&g.table_token)
+                                .is_some_and(|s| s.staged_op(existing_id.as_bytes()).is_some())
+                        });
+                    if existing.as_ref() != owner.as_bytes().as_slice() && !released_and_touched {
                         repo.tx_metrics().on_tx_aborted_unique();
                         return Err(TxError::UniqueViolation {
                             key: g.index_key.clone(),

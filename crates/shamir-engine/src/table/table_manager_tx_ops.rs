@@ -20,14 +20,18 @@ pub(super) struct StagedMutation {
 /// as of the CURRENT staging point — the exact same `live`/`released`
 /// walk `pre_commit.rs`'s Step 1 uses, scoped to just `table_token` and
 /// producing a set instead of aborting on conflict.
+///
+/// Only a *necessary*, not sufficient, condition for tolerating a durable
+/// conflict — see [`touched_records_in_tx`]'s doc for why the caller must
+/// ALSO cross-check the durable owner against this tx's own data write set
+/// (found by `@oh` review: this set alone is a uniqueness-bypass hazard
+/// under `Snapshot` isolation's stale-read possibility).
 pub(crate) fn released_unique_keys_in_tx(
     tx: &shamir_tx::TxContext,
     table_token: u64,
 ) -> shamir_collections::TFxSet<Vec<u8>> {
     use shamir_tx::{IndexFamily, IndexWriteOp};
-    use shamir_types::types::record_id::RecordId;
 
-    let mut live: shamir_collections::TFxMap<Vec<u8>, RecordId> = shamir_collections::new_fx_map();
     let mut released: shamir_collections::TFxSet<Vec<u8>> = shamir_collections::new_fx_set();
     for (tt, op) in &tx.index_write_set {
         if *tt != table_token {
@@ -35,26 +39,57 @@ pub(crate) fn released_unique_keys_in_tx(
         }
         match op {
             IndexWriteOp::SetPosting {
-                key,
-                value,
-                provenance,
+                key, provenance, ..
             } if provenance.family == IndexFamily::Unique => {
-                live.insert(
-                    key.to_vec(),
-                    RecordId::try_from_bytes(value).unwrap_or_default(),
-                );
                 released.remove(key.as_ref());
             }
             IndexWriteOp::RemovePosting { key, provenance }
                 if provenance.family == IndexFamily::Unique =>
             {
-                live.remove(key.as_ref());
                 released.insert(key.to_vec());
             }
             _ => {}
         }
     }
     released
+}
+
+/// #1096 follow-up (found by `@oh` review): the 16-byte id of every record
+/// THIS transaction has staged a write (Set or Remove) for on `table_token`,
+/// per `tx.write_set`'s `StagingStore`. Paired with
+/// [`released_unique_keys_in_tx`], this closes a genuine uniqueness-bypass
+/// hole: `released_unique_keys_in_tx` alone only proves "this tx planned to
+/// release this exact key" — it says nothing about whether that plan is
+/// still valid by the time the check runs. Under `Snapshot` isolation
+/// (documented last-writer-wins, no write-write conflict detection — see
+/// `pre_commit.rs`'s `claim_write_set`), this tx's release plan was built
+/// against a possibly-STALE snapshot: a concurrently-committed tx may have
+/// already reclaimed the durable key for an unrelated record between this
+/// tx's snapshot and the check running. Requiring the CURRENT durable owner
+/// to be a record this tx itself touched rules that out — a record this tx
+/// never wrote is never in this set, so a stale-snapshot race correctly
+/// falls through to `DuplicateKey`/`UniqueViolation` instead of silently
+/// creating two live records for the same unique value.
+///
+/// `RecordKey::from_slice(rid.as_bytes())` is the established layout every
+/// data-level staged op in this file uses (see `insert_tx`/`update_tx`/
+/// `delete_tx`'s `KvOp::Set`/`KvOp::Remove` construction) — so a plain
+/// 16-byte equality check against `RecordId::as_bytes()` is exact, no
+/// `RecordKey` round-trip needed.
+pub(crate) fn touched_records_in_tx(
+    tx: &shamir_tx::TxContext,
+    table_token: u64,
+) -> shamir_collections::TFxSet<[u8; 16]> {
+    let mut touched: shamir_collections::TFxSet<[u8; 16]> = shamir_collections::new_fx_set();
+    if let Some(staging) = tx.write_set.get(&table_token) {
+        for key in staging.keys() {
+            let bytes = key.as_slice();
+            if let Ok(id) = <[u8; 16]>::try_from(bytes) {
+                touched.insert(id);
+            }
+        }
+    }
+    touched
 }
 
 impl TableManager {
@@ -458,10 +493,12 @@ impl TableManager {
         //
         // #1096: tx-aware — check if a conflicting durable key was released
         // earlier in this same tx (via DELETE or UPDATE-off), in which case
-        // it's safe to reclaim.
+        // it's safe to reclaim. `touched` closes the stale-snapshot
+        // bypass — see `touched_records_in_tx`'s doc.
         let released = released_unique_keys_in_tx(tx, self.table_token());
+        let touched = touched_records_in_tx(tx, self.table_token());
         self.index_manager
-            .validate_unique_for_create_with_released(value, &released)
+            .validate_unique_for_create_with_released(value, &released, &touched)
             .await?;
 
         // Record a UniqueGuard per unique key this value claims, so
@@ -572,9 +609,10 @@ impl TableManager {
         if self.index_manager.has_unique_indexes() {
             let mut batch_seen: TFxSet<(u64, Vec<u8>)> = TFxSet::default();
             let released = released_unique_keys_in_tx(tx, self.table_token());
+            let touched = touched_records_in_tx(tx, self.table_token());
             for (i, v) in values.iter().enumerate() {
                 self.index_manager
-                    .validate_unique_for_create_with_released(v, &released)
+                    .validate_unique_for_create_with_released(v, &released, &touched)
                     .await?;
                 for def in self.index_manager.iter_unique_indexes() {
                     if let Some(vs) = crate::index::index_keys::extract_index_leaves(v, &def.paths)
@@ -771,10 +809,21 @@ impl TableManager {
 
         // 1. Batch-validate unique indexes — same shape as `insert_tx_many`
         //    but driven through the lens (`&views[i]` as `&impl RecordRef`).
+        //
+        // #1096 follow-up (found by `@oh` review): this is the path
+        // `execute_insert_tx`/`execute_set_tx` actually call for every
+        // wire INSERT/UPSERT (see the F-1 comment on `insert_tx_many_bytes`'s
+        // index2-planning loop below) — it must get the SAME tx-aware
+        // released-key treatment `insert_tx`/`insert_tx_many` have, not just
+        // the direct-API paths unit tests exercise.
         if self.index_manager.has_unique_indexes() {
             let mut batch_seen: TFxSet<(u64, Vec<u8>)> = TFxSet::default();
+            let released = released_unique_keys_in_tx(tx, self.table_token());
+            let touched = touched_records_in_tx(tx, self.table_token());
             for (i, view) in views.iter().enumerate() {
-                self.index_manager.validate_unique_for_create(view).await?;
+                self.index_manager
+                    .validate_unique_for_create_with_released(view, &released, &touched)
+                    .await?;
                 for def in self.index_manager.iter_unique_indexes() {
                     if let Some(vs) =
                         crate::index::index_keys::extract_index_leaves(view, &def.paths)
@@ -945,13 +994,29 @@ impl TableManager {
         // HIGH-6: stage-time unique validation (read-only). For an
         // existing record this excludes the record itself; for a fresh
         // insert it behaves like create-validation.
-        match &old {
-            Some(old_val) => {
-                self.index_manager
-                    .validate_unique_for_update(&id, old_val, value)
-                    .await?
+        //
+        // #1096 follow-up (found by `@oh` review): tx-aware — an UPDATE can
+        // be either half of a release-then-reclaim pair (the release, via
+        // `validate_unique_for_update`'s old->new diff; or the reclaim, via
+        // the `None` upsert-into-fresh-id branch), so both need the same
+        // released-key + touched-record treatment `insert_tx` has.
+        {
+            let released = released_unique_keys_in_tx(tx, self.table_token());
+            let touched = touched_records_in_tx(tx, self.table_token());
+            match &old {
+                Some(old_val) => {
+                    self.index_manager
+                        .validate_unique_for_update_with_released(
+                            &id, old_val, value, &released, &touched,
+                        )
+                        .await?
+                }
+                None => {
+                    self.index_manager
+                        .validate_unique_for_create_with_released(value, &released, &touched)
+                        .await?
+                }
             }
-            None => self.index_manager.validate_unique_for_create(value).await?,
         }
 
         // Record a UniqueGuard per unique key the NEW value claims, owner
@@ -1060,8 +1125,19 @@ impl TableManager {
             match (RecordView::new(old_bytes), RecordView::new(&new_bytes)) {
                 (Ok(old_view), Ok(new_view)) => {
                     // Stage-time unique validation via the lens.
+                    //
+                    // #1096 follow-up (found by `@oh` review): tx-aware —
+                    // this is the wire path `execute_update_tx` calls for
+                    // every transactional UPDATE, so it needs the same
+                    // released-key + touched-record treatment `update_tx`
+                    // has (see `touched_records_in_tx`'s doc for why both
+                    // are required, not just the released-key set).
+                    let released = released_unique_keys_in_tx(tx, self.table_token());
+                    let touched = touched_records_in_tx(tx, self.table_token());
                     self.index_manager
-                        .validate_unique_for_update(&id, &old_view, &new_view)
+                        .validate_unique_for_update_with_released(
+                            &id, &old_view, &new_view, &released, &touched,
+                        )
                         .await?;
 
                     // UniqueGuards for commit-time re-validation.
@@ -1106,8 +1182,12 @@ impl TableManager {
                         ))
                     })?;
 
+                    let released = released_unique_keys_in_tx(tx, self.table_token());
+                    let touched = touched_records_in_tx(tx, self.table_token());
                     self.index_manager
-                        .validate_unique_for_update(&id, &old_tree, &new_tree)
+                        .validate_unique_for_update_with_released(
+                            &id, &old_tree, &new_tree, &released, &touched,
+                        )
                         .await?;
                     for index_key in self.index_manager.unique_keys_for(&new_tree) {
                         tx.record_unique_guard(shamir_tx::UniqueGuard {
