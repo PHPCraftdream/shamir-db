@@ -42,6 +42,61 @@
 //! is fully covered: the batch is stopped at the next unit-of-work
 //! boundary and does no further work.
 //!
+//! # #1085 investigation: a per-op "stuck op" watchdog was tried and
+//! reverted — read this before attempting one again
+//!
+//! The observability gap this non-goal leaves (a single stuck op produces
+//! NO log signal at all until — if ever — it returns) is real, and was the
+//! subject of a 2026-08-11 investigation (task #1085) into adding a live
+//! diagnostic watchdog: a mechanism that logs "op X still running after Ns"
+//! WHILE an op is stuck, from outside its own `.await`, without attempting
+//! to cancel it (i.e. strictly additive to the correctness picture above).
+//!
+//! Two implementations were tried at the two call sites that invoke
+//! `execute_single_impl`/`QueryRunner::run` (`batch_execute.rs`'s
+//! `execute_plan_impl` and `execute_plan_tx_impl`):
+//!
+//! 1. **Inline `tokio::select!` racing a `tokio::time::interval` against
+//!    the op's future**, the op future pinned via `tokio::pin!`. This
+//!    inlines the (already large, and — via `execute_single_impl`'s nested
+//!    `BatchOp::Batch`/`ForEach` re-entry into the boxed
+//!    `execute_batch_impl` and `fk_actions`' cascade recursion up to
+//!    `CASCADE_DEPTH_LIMIT` levels — depth-multiplied) op future's full
+//!    state directly into the wrapper's own stack frame, at EVERY
+//!    recursive call site. Reproduced "has overflowed its stack" in
+//!    `shamir-engine`'s FK-cascade/RI-barrier tests.
+//! 2. **`Box::pin`-ing the op future before racing it**, to keep the
+//!    wrapper's own frame constant-size (mirroring exactly why
+//!    `execute_batch_impl` above is boxed). Fixed the FK-cascade failures,
+//!    but a BROADER run of `shamir-db`'s integration suite still showed
+//!    ~200 unrelated tests (DDL, access-control, rename, temporal — no
+//!    deep recursion involved) failing with the SAME "has overflowed its
+//!    stack" error, including in complete isolation (single test, not just
+//!    under nextest's parallel load).
+//!
+//! That second result — an ordinary, non-recursive DDL test overflowing
+//! the stack from what should be a few extra bytes of locals — indicates
+//! the test binaries' available stack budget on this platform (Windows) is
+//! ALREADY thin enough that essentially any addition to the per-op hot
+//! path's frame size is unsafe, not just deeply-recursive ones. A THIRD
+//! attempt (moving the ticker into its own `tokio::spawn`ed task, so the
+//! calling frame holds only a `JoinHandle` + `Instant` and the op future is
+//! awaited completely unwrapped) reproduced the SAME broad stack-overflow
+//! set — meaning the hazard is not specific to any one wrapping technique
+//! tried so far.
+//!
+//! **Before attempting this again:** first measure the actual headroom
+//! (how many bytes of margin exist in the relevant test binaries' thread
+//! stacks, on Windows specifically — `RUST_MIN_STACK` / a dedicated
+//! large-stack OS thread for the watchdog's own execution context may be
+//! required regardless of which in-process technique is used), and
+//! consider an OUT-OF-PROCESS or OS-thread-based watchdog (a plain
+//! `std::thread::spawn` with an explicit large stack size, communicating
+//! via a lock-free flag/atomic timestamp the async side updates on each
+//! checkpoint) that never touches the async call graph's own stack at all,
+//! rather than another in-runtime `tokio::spawn`/`select!` variant. See
+//! task #1094 for the tracked follow-up.
+//!
 //! [`check`]: ExecutionDeadline::check
 
 use std::time::{Duration, Instant};
