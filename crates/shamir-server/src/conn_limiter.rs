@@ -106,12 +106,23 @@ impl Drop for ConnGuard {
 // connections from one source IP.
 //
 // Design (per CLAUDE.md concurrency ideology):
-//   * Backing store: `DashMap<IpAddr, AtomicUsize, THasher>` — lock-free
-//     shard locks, workspace-default `FxHasher`. NOT `std::sync::Mutex`.
-//   * Counter is an `AtomicUsize` INSIDE the value, so the per-IP
-//     increment/decrement is a CAS on the atomic — the DashMap shard lock
-//     is held only for the `entry().or_insert_with()` slot resolution,
-//     not for the counter read-modify-write.
+//   * Backing store: `DashMap<IpAddr, AtomicUsize, THasher>` — sharded
+//     locks, workspace-default `FxHasher`. NOT `std::sync::Mutex`.
+//   * Counter is an `AtomicUsize` INSIDE the value. `try_acquire`'s CAS
+//     retry loop reads/writes it through the `entry()` `RefMut` borrow,
+//     so — despite an earlier version of this comment claiming
+//     otherwise (F-2, #1077) — the shard's write lock IS held for the
+//     ENTIRE `try_acquire` critical section, not released early. This
+//     is deliberate, not an oversight: it fully serializes `try_acquire`
+//     against `release()`'s `get_mut` + remove-if-zero on the SAME IP
+//     (same shard key), closing the exact TOCTOU race #1073 found in
+//     `CursorRegistry::register` (an outstanding `Arc<AtomicUsize>`
+//     clone taken AFTER dropping the shard guard can race a concurrent
+//     removal's "is it still zero" check, since a raw CAS on an escaped
+//     Arc is invisible to the map's locking). A future perf pass that
+//     wants to shrink this critical section MUST re-verify against that
+//     exact race before dropping the guard early — see `try_acquire`'s
+//     doc comment.
 //   * RAII guard with `Drop` — same pattern as `ConnGuard`, so every
 //     early-exit path (panic, TLS failure, timeout) releases automatically.
 //   * Map-bounded: the guard's `Drop` removes the entry when the count
@@ -146,10 +157,17 @@ impl PerIpLimiter {
     /// Returns `Some(guard)` on success — drop the guard to release the
     /// slot. Returns `None` when this IP is already at its cap.
     ///
-    /// The counter lives in an `AtomicUsize` inside the map value, so the
-    /// CAS retry loop here does NOT hold the DashMap shard lock — it only
-    /// holds it transiently inside `entry().or_insert_with()` to materialise
-    /// the `Arc`/atomic if absent.
+    /// The counter lives in an `AtomicUsize` inside the map value. The CAS
+    /// retry loop below borrows it from the `entry()` `RefMut`, so it DOES
+    /// hold the DashMap shard's write lock for the whole loop, not just for
+    /// `entry().or_insert_with()`'s slot resolution — a prior version of
+    /// this comment claimed the lock was released early, which was false
+    /// (F-2, #1077). Do NOT "fix" this by cloning the counter into an owned
+    /// handle and dropping the `entry` guard early: that is the exact shape
+    /// of the race #1073 found in `CursorRegistry::register` (see the
+    /// module-level design comment above for why holding the guard here is
+    /// what keeps `try_acquire` safely serialized against `release()`'s
+    /// remove-if-zero on the same IP).
     pub fn try_acquire(&self, ip: IpAddr) -> Option<PerIpGuard> {
         if self.cap == 0 {
             // No per-IP cap configured — no-op guard (no map entry created).
@@ -160,8 +178,11 @@ impl PerIpLimiter {
         }
 
         // Materialise the per-IP atomic if this is the first connection
-        // from `ip`. `or_insert_with` takes the shard lock only for the
-        // vacant case; the occupied case is a fast read.
+        // from `ip`. `entry()` always takes the shard's WRITE lock (it must
+        // be able to insert), whether or not the key turns out to already
+        // be present — and `entry` is held past this point, through the CAS
+        // loop below, until `try_acquire` returns (see the doc comment
+        // above and the module-level design comment for why).
         let entry = self.counts.entry(ip).or_insert_with(|| AtomicUsize::new(0));
         let counter = entry.value();
 
