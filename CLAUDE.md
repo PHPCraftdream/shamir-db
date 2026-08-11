@@ -374,21 +374,76 @@ shape of the access pattern, in this order of preference:
 (bootstrap, one-shot init, test fixtures). Every hot-path use must be
 justified inline with a comment that names the contention model.
 
-**Sanctioned runtime exception (F-79 / #906):** the sole remaining
-`std::sync::Mutex` on a runtime struct is
-`RepoTxGate::pending_commits: std::sync::Mutex<Vec<PendingCommit>>` in
-`crates/shamir-tx/src/repo_tx_gate.rs`. It is sanctioned because the field
-is **dead scaffolding** — the group-commit leader/follower path
-(`tx/group_commit.rs`) that drove it was removed in F-54 (#865), and
-`enqueue_pending` / `drain_pending` have zero live callers. The contention
-model is nonexistent (never locked on any path), so the "banned in hot
-paths" rule (which targets *live* hot paths) does not reach it. If/when
-group-commit is revived, this field MUST be re-evaluated against the
-F-66/F-79 poisoning precedent (`ri_barrier_tokens` / `PredicateSet` were
-both migrated to lock-free `scc::*` for that reason) before it takes a
-live call. The sibling per-tx sites (`TxContext::ri_barrier_tokens`,
-`TxContext::predicate_set`) are already lock-free `scc::*` — they are NOT
-exceptions.
+**Sanctioned `std::sync::Mutex` exceptions (F-9 / #1076 revision —
+supersedes a prior "sole remaining exception" claim that drifted false as
+more DDL-guard-set fields were added over time).** `std::sync::Mutex` on a
+runtime struct is sanctioned only under one of these three categories, each
+with its own contention-model argument. A new instance must fit one of
+these categories (with its own inline comment naming the model) or migrate
+to a lock-free primitive per the table above — it may NOT cite "precedent"
+from another instance as its own justification.
+
+1. **Dead scaffolding.**
+   `RepoTxGate::pending_commits: std::sync::Mutex<Vec<PendingCommit>>`
+   (`crates/shamir-tx/src/repo_tx_gate.rs`) — the group-commit
+   leader/follower path (`tx/group_commit.rs`) that drove it was removed in
+   F-54 (#865), and `enqueue_pending` / `drain_pending` have zero live
+   callers. The contention model is nonexistent (never locked on any path).
+   If/when group-commit is revived, this field MUST be re-evaluated against
+   the F-66/F-79 poisoning precedent (`ri_barrier_tokens` / `PredicateSet`
+   were both migrated to lock-free `scc::*` for that reason) before it takes
+   a live call. The sibling per-tx sites (`TxContext::ri_barrier_tokens`,
+   `TxContext::predicate_set`) are already lock-free `scc::*` — they are NOT
+   exceptions.
+
+2. **DDL-only guard sets — genuinely rare admin ops, never a per-record hot
+   path.** This is a whole CLASS, not a single field, and grows as new DDL
+   families are added — do not re-litigate each new instance, just confirm
+   it fits: guarded state is touched only during `CREATE`/`DROP`/`RENAME
+   INDEX` (or an online-build's in-flight window, itself gated by a
+   lock-free fast-path check first), never on a write/read hot path, and the
+   lock is never held across an `.await`. Current members:
+   `shamir-index/src/base_index/index_manager.rs`'s `dropping_regular`,
+   `dropping_unique`, `renaming_regular`, `renaming_unique`, `dirty_sets`
+   (the last gated by `is_build_in_flight()`'s lock-free check —
+   `dirty_sets` itself is only ever touched for an index genuinely mid-build);
+   `sorted_index_manager.rs`'s `dropping_sorted`, `renaming_sorted`;
+   `shamir-engine/src/table/in_flight_create_guard.rs`'s
+   `InFlightCreateSet::ids`. Each carries its own "DDL op, contention is
+   nil" inline comment — that is the enforcement mechanism, not this list.
+
+3. **First-touch-only population, never on the read-hot path.**
+   `Interner::reverse_write_lock: std::sync::Mutex<()>`
+   (`crates/shamir-types/src/core/interner/interner.rs`) serializes reverse-
+   spine WRITES only (first-touch population of a distinct field NAME,
+   never repeated for a name already seen) — every read
+   (`get_str`/`with_str`/`reverse_snapshot`/etc.) stays 100% lock-free via
+   `ArcSwap::load` and never touches this lock. The struct doc there also
+   records a genuine, reproducible data-loss race a prior fully-lock-free
+   attempt hit — read it before proposing a lock-free replacement here.
+
+**NOT covered by the above — hot-by-call-frequency, tracked migration
+candidates, not permanent exceptions:**
+`shamir-wal/src/segment_set.rs`'s `SegmentSet::inner` (taken on every
+`append_batch` — the WAL group-commit append path) and
+`shamir-connect/src/server/session.rs`'s `Session::post_auth_bucket` (taken
+on every post-auth request). Both currently argue LOW actual contention
+despite HIGH call frequency (`SegmentSet::inner`: single-writer model, the
+group-commit leader is the sole appender; `post_auth_bucket`: contention
+bounded by one connection's own concurrency cap, not workspace-wide) — that
+argument is real but is a *contention* defense, not a *frequency* one, and
+the "banned in hot paths" rule bans by frequency. Treat both as **known,
+tracked debt** (see #1076's migration follow-up), not as a fourth
+sanctioned category — do not cite them as precedent for a new hot-path
+`std::sync::Mutex`.
+
+`parking_lot::Mutex` sites on runtime structs are governed by the same
+"every hot-path use must be justified inline" rule from the table above,
+not by this section (which has only ever spoken to `std::sync::Mutex`) —
+a spot audit during the #1076 revision found no `parking_lot::Mutex` site
+that is a genuine per-request/per-write hot path without its own inline
+contention-model comment; re-verify per-instance rather than assuming this
+list is exhaustive, the same drift that caused this revision can recur.
 
 ---
 
