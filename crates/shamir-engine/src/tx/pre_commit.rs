@@ -613,6 +613,27 @@ pub(super) async fn pre_commit_prelock(
     // but DOES push a guard — that key still needs committed-state validation.
     // For keys in the write-set walk, the FINAL owner from the walk is used
     // (may differ from the guard's owner if the key was released and reclaimed);
+    //
+    // **Honest scope note (found by @oh review, 2026-08-11): #1074 does NOT
+    // fully close #1039's "release-then-reclaim within one tx" scenario.**
+    // This whole Step 1/Step 2 walk only runs if the tx's later INSERT/UPDATE
+    // ever reaches `pre_commit` in the first place. It only fixes the case
+    // where the PRIOR owner of the key was ALSO created earlier in the SAME
+    // transaction (so the earlier stage-time check at `insert_tx`/
+    // `validate_unique_for_create`, which reads only DURABLE storage, sees
+    // no conflict — the prior owner was never durable). When the prior
+    // owner is DURABLE committed state from an EARLIER transaction (e.g.
+    // `tx1: INSERT A {email:"x"}; COMMIT` then `tx2: DELETE A; INSERT B
+    // {email:"x"}`), `insert_tx`'s stage-time
+    // `validate_unique_for_create` call rejects the INSERT of `B`
+    // synchronously, with `DuplicateKey`, BEFORE it is ever staged into
+    // `tx.index_write_set` — this walk never runs, because the tx never
+    // gets this far. That stage-time check
+    // (`table_manager_tx_ops.rs::insert_tx`, "HIGH-6: stage-time unique
+    // validation") is read-only against committed state and has no
+    // visibility into this SAME transaction's own not-yet-committed
+    // `DELETE A` — a fail-CLOSED gap (rejects a legitimate operation, never
+    // admits a real duplicate), tracked as a follow-up, not fixed here.
     // for keys NOT in the write set (self-write), the guard's owner stands.
     //
     // Why option (a) / naive overwrite on `unique_guards` is insufficient: it
