@@ -444,7 +444,11 @@ first, not rewrite blind.
 migrated off `std::sync::Mutex` (#1090, 2026-08-11) to two independent
 atomics — see that struct's own doc for why splitting the two fields
 (`micro_tokens` via a `fetch_update` CAS retry loop; `last_refill_at_ns`
-via a racy-but-benign `swap`) is sound. No longer a tracked-debt site.
+via `fetch_max`, NOT a plain `swap` — an @oh review the same day caught
+that `swap` lets the refill watermark regress under out-of-order
+concurrent callers, an unbounded over-refill hazard that also existed,
+identically, in the pre-migration `Mutex` version) is sound. No longer a
+tracked-debt site.
 
 `parking_lot::Mutex` sites on runtime structs are governed by the same
 "every hot-path use must be justified inline" rule from the table above,

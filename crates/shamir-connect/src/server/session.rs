@@ -195,15 +195,24 @@ pub struct Session {
 ///   This is the ONLY property that actually matters for the rate limiter's
 ///   security guarantee (no concurrent request can debit a token that
 ///   another concurrent request already debited).
-/// - `last_refill_at_ns` is updated via a plain `swap` — under concurrent
-///   callers, whichever swap lands last "wins" the elapsed-time base BOTH
-///   callers compute their refill against. This is benign: it can only make
-///   a refill slightly LOWER than the fully-precise value would (never
-///   higher — refill is always `elapsed_ns.saturating_mul(rate)` off SOME
-///   real, recent timestamp), and the very next call's refill self-corrects
-///   against whatever `now_ns` ends up stored. `capacity()` also hard-caps
-///   the result regardless. No exploitable over-refill / bypass is
-///   constructible from this raciness.
+/// - `last_refill_at_ns` is updated via [`AtomicU64::fetch_max`], NOT a plain
+///   `swap` (an earlier version of this fix used `swap` and asserted a false
+///   "can only under-refill, never over-refill" invariant here — caught by
+///   @oh review, 2026-08-11: a plain `swap` lets the watermark REGRESS under
+///   concurrent callers whose `now_ns` arrive out of order, e.g. a caller
+///   preempted between reading the wall clock and reaching the atomic op;
+///   the next call then re-credits an already-credited interval, an
+///   unbounded over-refill with no aggregate cap — `capacity()`'s per-call
+///   clamp does not prevent repeated re-crediting of the SAME wall-clock
+///   span across multiple calls). `fetch_max` returns the prior value
+///   (same `elapsed` computation a `swap` would give) while ALSO
+///   guaranteeing the stored watermark never regresses, so `elapsed` is
+///   always computed against a genuinely later-or-equal point — the total
+///   refill across any sequence of calls is bounded by the true wall-clock
+///   span between them. This is a genuine correctness improvement over the
+///   ORIGINAL `std::sync::Mutex`-guarded implementation too: that version
+///   captured `now_ns` outside its own critical section and stored it
+///   unconditionally, carrying the identical regression hazard.
 struct PostAuthBucket {
     micro_tokens: AtomicU64,
     last_refill_at_ns: AtomicU64,
@@ -325,13 +334,26 @@ impl Session {
         let rate = shamir_tunables::instance_defaults::POST_AUTH_RATE_LIMIT_PER_SEC as u64;
         let cost = 1_000_000_000u64;
 
-        // Benign raciness under concurrent callers on the SAME session —
-        // see PostAuthBucket's struct doc. The load-bearing atomicity is in
-        // the `fetch_update` CAS loop below, not here.
+        // `fetch_max`, NOT `swap` (found by @oh review, 2026-08-11): a plain
+        // `swap` lets `last_refill_at_ns` regress under concurrent callers
+        // whose `now_ns` values arrive out of order (e.g. a caller preempted
+        // between reading the wall clock and reaching this line) -- the
+        // NEXT call then re-credits an interval that was already credited,
+        // an unbounded over-refill with no aggregate cap (only a per-call
+        // `min(capacity)` clamp, which doesn't prevent repeated re-crediting
+        // of the SAME wall-clock interval). `fetch_max` returns the prior
+        // value (same `elapsed` computation as `swap` did) while ALSO
+        // guaranteeing the stored value never regresses -- every `elapsed`
+        // computed from it is against a genuinely later-or-equal watermark,
+        // so the total refill across any sequence of calls is bounded by
+        // the true wall-clock span, closing the over-credit hole. See
+        // PostAuthBucket's struct doc for the full property; the load-
+        // bearing DEBIT atomicity is still the `fetch_update` CAS loop
+        // below, unchanged.
         let prev_refill_ns = self
             .post_auth_bucket
             .last_refill_at_ns
-            .swap(now_ns, Ordering::Relaxed);
+            .fetch_max(now_ns, Ordering::Relaxed);
         let elapsed = now_ns.saturating_sub(prev_refill_ns);
         let refill = elapsed.saturating_mul(rate);
 
