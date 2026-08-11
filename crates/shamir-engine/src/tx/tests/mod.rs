@@ -18,6 +18,7 @@ pub mod index_rollback_tests;
 pub mod interner_checkpoint_tests;
 pub mod non_tx_mvcc_routing_tests;
 pub mod oracle_stress_tests;
+pub mod p1096_tx_aware_unique_check;
 pub mod pessimistic_lock_tests;
 pub mod pessimistic_lost_update_tests;
 pub mod predicate_range_tests;

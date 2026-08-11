@@ -29,6 +29,9 @@ mod table_manager_replication;
 mod table_manager_sorted_index;
 mod table_manager_streaming;
 mod table_manager_tx_ops;
+
+#[cfg(test)]
+pub(crate) use table_manager_tx_ops::released_unique_keys_in_tx;
 mod table_manager_validators;
 mod tx_scan_overlay;
 mod write_exec;

@@ -79,6 +79,40 @@ impl IndexManager {
         Ok(())
     }
 
+    /// Like `validate_unique_for_create`, but a durable conflict is NOT an
+    /// error if the conflicting index_key is present in `released_in_tx` —
+    /// the caller (insert_tx) has already determined, by walking its own
+    /// tx.index_write_set, that this key was legitimately vacated earlier
+    /// in the SAME transaction (a release-then-reclaim pattern invisible to
+    /// a durable-only check).
+    pub async fn validate_unique_for_create_with_released(
+        &self,
+        value: &(impl RecordRef + ?Sized),
+        released_in_tx: &shamir_collections::TFxSet<Vec<u8>>,
+    ) -> DbResult<()> {
+        if !self.has_unique_indexes() {
+            return Ok(());
+        }
+        let defs: Vec<IndexDefinition> = self.indexes_unique.iter().collect();
+        for def in &defs {
+            if let Some(irk) =
+                build_index_key_from_record(true, def.name_interned, value, &def.paths)
+            {
+                let index_key = irk.to_bytes();
+                if let Some(existing_id) = self.check_unique_key(&index_key).await? {
+                    if released_in_tx.contains(index_key.as_ref()) {
+                        continue; // released earlier in this same tx — safe to reclaim
+                    }
+                    return Err(shamir_storage::error::DbError::DuplicateKey(format!(
+                        "Unique index '{}' violated: value already exists for record {:?}",
+                        def.name_interned, existing_id
+                    )));
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// Проверяет уникальность перед обновлением записи.
     ///
     /// Должен вызываться ДО записи в таблицу.

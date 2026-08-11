@@ -16,6 +16,47 @@ pub(super) struct StagedMutation {
     pub(super) counter_delta: i64,
 }
 
+/// #1096: which unique keys THIS transaction has released-and-not-reclaimed
+/// as of the CURRENT staging point — the exact same `live`/`released`
+/// walk `pre_commit.rs`'s Step 1 uses, scoped to just `table_token` and
+/// producing a set instead of aborting on conflict.
+pub(crate) fn released_unique_keys_in_tx(
+    tx: &shamir_tx::TxContext,
+    table_token: u64,
+) -> shamir_collections::TFxSet<Vec<u8>> {
+    use shamir_tx::{IndexFamily, IndexWriteOp};
+    use shamir_types::types::record_id::RecordId;
+
+    let mut live: shamir_collections::TFxMap<Vec<u8>, RecordId> = shamir_collections::new_fx_map();
+    let mut released: shamir_collections::TFxSet<Vec<u8>> = shamir_collections::new_fx_set();
+    for (tt, op) in &tx.index_write_set {
+        if *tt != table_token {
+            continue;
+        }
+        match op {
+            IndexWriteOp::SetPosting {
+                key,
+                value,
+                provenance,
+            } if provenance.family == IndexFamily::Unique => {
+                live.insert(
+                    key.to_vec(),
+                    RecordId::try_from_bytes(value).unwrap_or_default(),
+                );
+                released.remove(key.as_ref());
+            }
+            IndexWriteOp::RemovePosting { key, provenance }
+                if provenance.family == IndexFamily::Unique =>
+            {
+                live.remove(key.as_ref());
+                released.insert(key.to_vec());
+            }
+            _ => {}
+        }
+    }
+    released
+}
+
 impl TableManager {
     /// Apply a staged mutation to the TxContext.
     pub(super) async fn stage_mutation(
@@ -414,7 +455,14 @@ impl TableManager {
         // committed state). Optimistic fast-reject for the common
         // single-writer duplicate; the tx-concurrent case is settled by
         // the commit-time guard below.
-        self.index_manager.validate_unique_for_create(value).await?;
+        //
+        // #1096: tx-aware — check if a conflicting durable key was released
+        // earlier in this same tx (via DELETE or UPDATE-off), in which case
+        // it's safe to reclaim.
+        let released = released_unique_keys_in_tx(tx, self.table_token());
+        self.index_manager
+            .validate_unique_for_create_with_released(value, &released)
+            .await?;
 
         // Record a UniqueGuard per unique key this value claims, so
         // commit_tx Phase 2.6 re-validates it under commit_lock (closes
@@ -518,10 +566,16 @@ impl TableManager {
         //    persisted check + batch-local seen set (so two rows in
         //    ONE batch claiming the same unique value reject the
         //    later one rather than silently overwriting).
+        //
+        // #1096: tx-aware — also check for keys released by earlier
+        // staged ops (DELETE or UPDATE-off) in the same tx.
         if self.index_manager.has_unique_indexes() {
             let mut batch_seen: TFxSet<(u64, Vec<u8>)> = TFxSet::default();
+            let released = released_unique_keys_in_tx(tx, self.table_token());
             for (i, v) in values.iter().enumerate() {
-                self.index_manager.validate_unique_for_create(v).await?;
+                self.index_manager
+                    .validate_unique_for_create_with_released(v, &released)
+                    .await?;
                 for def in self.index_manager.iter_unique_indexes() {
                     if let Some(vs) = crate::index::index_keys::extract_index_leaves(v, &def.paths)
                     {

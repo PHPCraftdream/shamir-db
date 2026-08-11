@@ -614,26 +614,28 @@ pub(super) async fn pre_commit_prelock(
     // For keys in the write-set walk, the FINAL owner from the walk is used
     // (may differ from the guard's owner if the key was released and reclaimed);
     //
-    // **Honest scope note (found by @oh review, 2026-08-11): #1074 does NOT
-    // fully close #1039's "release-then-reclaim within one tx" scenario.**
-    // This whole Step 1/Step 2 walk only runs if the tx's later INSERT/UPDATE
-    // ever reaches `pre_commit` in the first place. It only fixes the case
-    // where the PRIOR owner of the key was ALSO created earlier in the SAME
-    // transaction (so the earlier stage-time check at `insert_tx`/
-    // `validate_unique_for_create`, which reads only DURABLE storage, sees
-    // no conflict — the prior owner was never durable). When the prior
-    // owner is DURABLE committed state from an EARLIER transaction (e.g.
-    // `tx1: INSERT A {email:"x"}; COMMIT` then `tx2: DELETE A; INSERT B
-    // {email:"x"}`), `insert_tx`'s stage-time
-    // `validate_unique_for_create` call rejects the INSERT of `B`
-    // synchronously, with `DuplicateKey`, BEFORE it is ever staged into
-    // `tx.index_write_set` — this walk never runs, because the tx never
-    // gets this far. That stage-time check
-    // (`table_manager_tx_ops.rs::insert_tx`, "HIGH-6: stage-time unique
-    // validation") is read-only against committed state and has no
-    // visibility into this SAME transaction's own not-yet-committed
-    // `DELETE A` — a fail-CLOSED gap (rejects a legitimate operation, never
-    // admits a real duplicate), tracked as a follow-up, not fixed here.
+    // **#1096 closes the "release-then-reclaim a DURABLE (prior-tx) unique
+    // value within one tx" scenario** (found not fully covered by #1074 in
+    // an @oh review, 2026-08-11): `tx1: INSERT A {email:"x"}; COMMIT` then
+    // `tx2: DELETE A; INSERT B {email:"x"}`. Two call sites needed fixing,
+    // one per copy of the durable-only assumption:
+    //   - `table_manager_tx_ops.rs::insert_tx`'s stage-time
+    //     `validate_unique_for_create` (read-only against committed state)
+    //     now takes `released_unique_keys_in_tx` (this same live/released
+    //     walk, run at stage time against only the value's own claimed
+    //     keys) so it no longer synchronously rejects `INSERT B` with
+    //     `DuplicateKey` before it is ever staged into
+    //     `tx.index_write_set`.
+    //   - THIS function's Step 2 durable check (below) independently made
+    //     the same durable-only assumption: even after `INSERT B` reaches
+    //     staging, `info_store.get(index_key)` still returns `A` (Phase 5c's
+    //     materialize write, which would remove `A`'s posting, hasn't run
+    //     yet — pre_commit validates BEFORE that write). Step 2 now
+    //     tolerates a durable-owner mismatch when the key is in
+    //     `ever_released` — this tx's own `index_write_set` staged a
+    //     `RemovePosting` for that exact key earlier, so the stale durable
+    //     owner is provably the record being released, not an unrelated
+    //     conflict.
     // for keys NOT in the write set (self-write), the guard's owner stands.
     //
     // Why option (a) / naive overwrite on `unique_guards` is insufficient: it
@@ -647,8 +649,16 @@ pub(super) async fn pre_commit_prelock(
     // `live`: (table_token, index_key) → record CURRENTLY owning it as of the
     // op being processed.  `released`: keys vacated by a RemovePosting so the
     // guard loop (step 2) can distinguish "released" from "never in write set".
+    // `ever_released`: the union of every key that had AT LEAST ONE
+    // RemovePosting during the walk, whether or not it was later reclaimed —
+    // #1096: Step 2's durable check needs this (not just the final-state
+    // `released`) to recognize a release-then-reclaim-within-this-tx of a
+    // key whose PRIOR owner is DURABLE (committed by an earlier tx), where
+    // `released` alone would already have been cleared by the reclaiming
+    // SetPosting.
     let mut live: TFxMap<(u64, bytes::Bytes), RecordId> = TFxMap::default();
     let mut released: TFxSet<(u64, bytes::Bytes)> = TFxSet::default();
+    let mut ever_released: TFxSet<(u64, bytes::Bytes)> = TFxSet::default();
     for (table_token, op) in &tx.index_write_set {
         match op {
             IndexWriteOp::SetPosting {
@@ -677,7 +687,8 @@ pub(super) async fn pre_commit_prelock(
             {
                 let k = (*table_token, key.clone());
                 live.remove(&k);
-                released.insert(k);
+                released.insert(k.clone());
+                ever_released.insert(k);
             }
             _ => {}
         }
@@ -707,10 +718,21 @@ pub(super) async fn pre_commit_prelock(
 
         // Durable-state check against committed storage (unchanged in spirit
         // from #1039 — this task fixes what "seen" represents, not this check).
+        //
+        // #1096: a durable owner that differs from `owner` is NOT a conflict
+        // when this tx itself released this exact key earlier in its own
+        // `index_write_set` (`ever_released`) — the durable value is the
+        // record this tx's own DELETE/UPDATE-off is removing; Phase 5c will
+        // overwrite it atomically with the same posting ops validated here.
+        // The key bytes deterministically encode the indexed value, so a
+        // RemovePosting for this exact key in this tx can only have been
+        // planned against whatever record currently holds it durably.
         if let Some(tbl) = repo.table_by_token(g.table_token).await? {
             match tbl.info_store().get(g.index_key.clone().into()).await {
                 Ok(existing) => {
-                    if existing.as_ref() != owner.as_bytes().as_slice() {
+                    if existing.as_ref() != owner.as_bytes().as_slice()
+                        && !ever_released.contains(&key)
+                    {
                         repo.tx_metrics().on_tx_aborted_unique();
                         return Err(TxError::UniqueViolation {
                             key: g.index_key.clone(),
