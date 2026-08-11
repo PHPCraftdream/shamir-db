@@ -45,11 +45,28 @@
 //!   `dropping.load` (after incrementing) observes `true` → **reader backs
 //!   off** (decrements back out, returns `None`).
 //!
-//! Livelock-freedom (the property epoch-parity exists to buy, and a naive
-//! single counter without the flag lacks): once `dropping` is `true`, no
-//! reader can proceed past its own check without immediately backing off,
-//! so `in_flight` is monotonically non-increasing from that point — the
-//! drain wait is guaranteed to terminate.
+//! Termination (the property epoch-parity exists to buy, and a naive single
+//! counter without the flag lacks) — **not** proved via strict monotonicity
+//! of `in_flight` after `dropping` goes true, despite an earlier version of
+//! this doc claiming exactly that (F-10, 2026-08-09 review): `enter()`'s own
+//! ordering (`fetch_add` BEFORE the flag check) means a reader arriving
+//! AFTER the flag is already `true` still transiently bumps `in_flight` by 1
+//! for the handful of instructions between its `fetch_add` and the
+//! `fetch_sub` that undoes it once it observes `dropping == true` — so
+//! `in_flight` is not monotonically non-increasing once `dropping` flips,
+//! and `wait_for_drain`'s sampling loop can, in principle, keep re-observing
+//! a nonzero count under a continuous stream of new readers even after
+//! every PRE-flag reader has long since finished. What IS true, and is what
+//! actually bounds the wait: every pre-flag reader is counted exactly once
+//! and decrements exactly once (no reader can hold the count forever
+//! without a bug elsewhere), and every post-flag reader's straddling window
+//! is O(1) instructions — nanoseconds, not microseconds — so in practice the
+//! sampling loop's `yield_now` gap is always eventually wide enough to land
+//! on an instant with zero straddling readers. This is a practical
+//! termination guarantee, not a formal starvation-freedom proof against an
+//! adversarial unbroken stream of concurrent `enter()` calls — the same
+//! class of guarantee this codebase already accepts for
+//! `WriterDrainBarrier::drain`'s mirror-image unbounded wait.
 //!
 //! # Placement — INSIDE the read chokepoint, never at the earlier "resolve"
 //! step
