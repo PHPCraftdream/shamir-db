@@ -21,12 +21,30 @@
 //!    check from the `format_version` test in `vector_restore_tests`) →
 //!    `load_snapshot` returns `VersionMismatch` → `restore_on_open` warns +
 //!    rebuilds.
-//! 4. **e2e restart preserves recall@10** — build a 10k-vector graph, dump
-//!    a snapshot, "restart" via `restore_on_open`, and assert recall@10
-//!    against a fresh brute-force ground truth stays at HNSW-graph quality
-//!    (≥ 0.60 — leaves headroom for the layer-assignment RNG noise that is
-//!    inherent to a reload of an hnsw_rs dump; see the test's inline comment
-//!    for the F-68 and F-1034 recalibration history).
+//! 4. **snapshot round-trip, split into two DIFFERENT checks (#1070)** —
+//!    the original single test conflated a deterministic structural
+//!    guarantee with a statistical quality measurement; codex review flagged
+//!    the resulting floor (0.60) as wildly inconsistent with the docs'
+//!    marketing claim (recall@10 ≥ 0.90). Splitting them:
+//!    - **4a. `snapshot_roundtrip_preserves_graph_topology_exactly`
+//!      (fidelity)** — build a graph, query it, dump + reload via
+//!      `restore_on_open`, and assert the reloaded graph answers the SAME
+//!      queries with EXACTLY the same neighbours/order/distances as before
+//!      the dump. Zero tolerance, deterministic — a genuinely corrupt/
+//!      mismatched reload fails this immediately and unambiguously, which
+//!      is what actually matters for crash-safety.
+//!    - **4b. `restart_preserves_recall_at_10_against_brute_force`
+//!      (quality)** — recall@10 of a freshly-built 3k-vector graph against
+//!      exact brute-force ground truth. Inherently statistical (`hnsw_rs`
+//!      0.3.4's construction-time RNG is unseedable — see the test's inline
+//!      comment for the full F-68/F-1034 recalibration history and the
+//!      cross-platform recall-matrix workflow
+//!      (`.github/workflows/hnsw-recall-matrix.yml`), added by #1070 to
+//!      measure the actual Linux/macOS/Windows recall distribution rather
+//!      than react to isolated single CI failures one at a time).
+//!      This test is about HNSW's inherent approximate-search quality, not
+//!      about the crash-recovery path per se — 4a is what actually proves
+//!      dump/reload didn't corrupt anything.
 
 use crate::backend::{IndexBackend, IndexQuery, IndexResult};
 use crate::descriptor::IndexDescriptor;
@@ -363,18 +381,127 @@ async fn hnsw_rs_version_mismatch_on_open_falls_back_to_rebuild() {
 }
 
 // ----------------------------------------------------------------------------
-// 4. e2e restart preserves recall@10 (10k vectors)
+// 4a. snapshot round-trip preserves graph topology EXACTLY (fidelity —
+//     deterministic, not statistical)
+// ----------------------------------------------------------------------------
+//
+// #1070: this is the check the OLD single `restart_preserves_recall_at_10_
+// against_brute_force` test was half-heartedly trying to be, per its own
+// inline comment pointing at the adjacent `rebuild_count == 1` corruption
+// tests as "the right signal for actual corruption". Dump+reload via
+// `restore_on_open`'s snapshot-hit path (`rebuild_count == 0`, confirmed
+// below) reconstructs the SAME graph object that was dumped — no new nodes,
+// no re-run of `LayerGenerator`'s unseedable RNG, no re-scheduled
+// `parallel_insert`. Querying that reloaded graph must therefore return
+// IDENTICAL neighbours, in the SAME order, at IDENTICAL distances to
+// querying the SAME graph before it was ever dumped — this has NOTHING to
+// do with HNSW's approximate quality (that's construction-time variance,
+// see the quality test below); it is purely "did serialization/
+// deserialization preserve the graph". A genuinely corrupt/mismatched
+// reload does not "recall slightly worse" — it silently reconstructs a
+// DIFFERENT graph, which this exact-match assertion (zero tolerance) is
+// far more sensitive to than any statistical recall floor could be.
+
+// ----------------------------------------------------------------------------
+// 4b. e2e restart preserves recall@10 (3k vectors) — quality, statistical
 // ----------------------------------------------------------------------------
 
-/// Number of vectors for the e2e recall test. 10k matches the brief's
-/// "insert 10K" target; large enough that a full-scan rebuild would be
-/// visibly slower than a snapshot load (the cold-start bench quantifies the
-/// gap), and that the HNSW graph path (not brute-force) is active.
+/// Number of vectors for the e2e recall test. 3k is large enough that a
+/// full-scan rebuild would be visibly slower than a snapshot load (the
+/// cold-start bench quantifies the gap), and that the HNSW graph path (not
+/// brute-force) is active.
 // 3k > BRUTE_FORCE_MAX (256) so the HNSW graph path is exercised, and recall@10
 // vs exact brute-force is statistically meaningful — while keeping the test off
 // the SLOW list. The 100K/1M scale is covered by the cold-start bench, not here.
 // Build via `upsert_batch` (the production path), NOT a serial `upsert` loop.
 const N_E2E: usize = 3_000;
+
+/// #1070: builds a fresh HNSW graph, dumps it, reloads it into a fresh
+/// backend via `restore_on_open`, and asserts the reloaded graph answers the
+/// SAME fixed query set with EXACTLY the same neighbours/order/distances as
+/// the pre-dump graph. Zero tolerance — this is a deterministic structural
+/// check, not a statistical one (see the module doc and the sibling quality
+/// test below for why these two concerns were split).
+#[tokio::test]
+async fn snapshot_roundtrip_preserves_graph_topology_exactly() {
+    let adapter = build_adapter(DIM, VectorMetric::L2);
+    let build_batch: Vec<(RecordId, Vec<f32>)> = (0..N_E2E)
+        .map(|k| (rid(k), lcg_vec(DIM as usize, k as u64 * 7 + 1)))
+        .collect();
+    adapter.upsert_batch(&build_batch).await.unwrap();
+
+    let queries: Vec<Vec<f32>> = (0..50u64).map(|s| lcg_vec(DIM as usize, s + 99)).collect();
+    let k: u32 = 10;
+
+    // Baseline: query the in-memory graph BEFORE any dump/reload.
+    let mut baseline: Vec<Vec<(RecordId, f32)>> = Vec::with_capacity(queries.len());
+    for q in &queries {
+        let r = adapter
+            .search(q, k, crate::vector::SearchOpts::with_ef_search(64), None)
+            .await
+            .unwrap();
+        baseline.push(r);
+    }
+
+    let info_store: Arc<dyn Store> = Arc::new(InMemoryStore::new());
+    let data_store: Arc<dyn Store> = Arc::new(InMemoryStore::new());
+    let id: u32 = 21;
+    let keyspace = format!("__vec_snap__{}", id);
+    snapshot::dump_snapshot(&adapter, &info_store, &keyspace)
+        .await
+        .unwrap();
+
+    let i = Interner::new();
+    let backend = make_backend(&i, id, DIM, VectorMetric::L2);
+    backend
+        .restore_on_open(Arc::clone(&info_store), Arc::clone(&data_store))
+        .await
+        .unwrap();
+    assert_eq!(
+        backend.rebuild_count(),
+        0,
+        "a valid snapshot must load without a full rebuild — a rebuild would \
+         re-run construction (fresh RNG draws) and this exact-match \
+         assertion would be comparing two DIFFERENT graphs, not proving \
+         round-trip fidelity"
+    );
+
+    for (q, expected) in queries.iter().zip(baseline.iter()) {
+        let got = backend
+            .lookup(IndexQuery::Vector {
+                vec: q.clone(),
+                k,
+                opts: crate::vector::SearchOpts::with_ef_search(64),
+            })
+            .await
+            .unwrap();
+        let got_pairs: Vec<(RecordId, f32)> = match got {
+            IndexResult::Ranked(ranked) => ranked,
+            _ => panic!("expected Ranked result"),
+        };
+        assert_eq!(
+            got_pairs.len(),
+            expected.len(),
+            "reloaded graph returned a different result COUNT than the \
+             pre-dump graph for the same query"
+        );
+        for ((got_rid, got_score), (exp_rid, exp_score)) in got_pairs.iter().zip(expected.iter()) {
+            assert_eq!(
+                got_rid, exp_rid,
+                "reloaded graph must return the SAME neighbour in the SAME \
+                 rank position as the pre-dump graph — any deviation means \
+                 the snapshot round-trip altered the graph topology, not \
+                 just approximate-search variance"
+            );
+            assert!(
+                (got_score - exp_score).abs() < 1e-5,
+                "reloaded graph's distance for {got_rid:?} ({got_score}) must \
+                 match the pre-dump graph's distance ({exp_score}) within \
+                 floating-point round-trip tolerance"
+            );
+        }
+    }
+}
 
 #[tokio::test]
 async fn restart_preserves_recall_at_10_against_brute_force() {
@@ -448,6 +575,12 @@ async fn restart_preserves_recall_at_10_against_brute_force() {
     }
 
     let recall = total_hits as f64 / (total_queries as f64 * k as f64);
+    // #1070: machine-parseable line for the cross-platform recall-matrix
+    // workflow (`.github/workflows/hnsw-recall-matrix.yml`) to grep out of
+    // CI logs — `success-output = "immediate"` for this test is set in
+    // `.config/nextest.toml` so this prints even when the assertion below
+    // passes, not just on failure.
+    println!("#1070 recall_at_10=3k:{recall:.4}");
     // F-68 (#895, cluster A) derivation for the 0.75 floor below (was 0.90):
     //
     // Root cause: `hnsw_rs` 0.3.4's `LayerGenerator::new` seeds via

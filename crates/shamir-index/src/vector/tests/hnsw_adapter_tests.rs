@@ -183,6 +183,10 @@ async fn recall_at_10_on_1k_vectors() {
     let hnsw_top10: TFxSet<RecordId> = hnsw_results.iter().map(|(r, _)| *r).collect();
 
     let recall = gt_top10.intersection(&hnsw_top10).count() as f64 / 10.0;
+    // #1070: machine-parseable line for the cross-platform recall-matrix
+    // workflow (`.github/workflows/hnsw-recall-matrix.yml`) to grep out of
+    // CI logs.
+    println!("#1070 recall_at_10=1k:{recall:.4}");
     assert!(recall >= 0.5, "recall@10 = {recall:.2} — expected >= 0.50");
 }
 

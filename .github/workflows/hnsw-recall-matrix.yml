@@ -1,0 +1,79 @@
+name: HNSW recall matrix (#1070)
+
+# Manual-dispatch-only diagnostic workflow — measures the REAL cross-platform
+# recall@10 distribution for the two statistical HNSW quality tests
+# (`restart_preserves_recall_at_10_against_brute_force`, 3k vectors, and
+# `recall_at_10_on_1k_vectors`, 1k vectors) across Linux/macOS/Windows.
+#
+# Why this exists: `hnsw_rs` 0.3.4 seeds its layer-assignment RNG from OS
+# entropy with no public seed hook, so graph construction quality varies by
+# platform in a way that has never been directly measured — only inferred
+# from isolated single-run CI failures (F-68, F-1034). This workflow runs
+# each test N times per OS and prints one `recall_at_10=<value>` line per
+# run so a human can collect min/max/mean per platform and set doc claims /
+# test floors from real data instead of another isolated observation.
+#
+# NOT part of the push/PR gate — `on: workflow_dispatch` only. Each run
+# costs real CI minutes on this public repo (3 OS x N x ~2 tests), so this
+# is dispatched deliberately, not on every commit.
+
+on:
+  workflow_dispatch:
+    inputs:
+      runs_per_os:
+        description: "How many times to run each recall test, per OS"
+        required: false
+        default: "20"
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+permissions:
+  contents: read
+
+jobs:
+  recall-matrix:
+    name: recall matrix (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6.0.3
+      - uses: dtolnay/rust-toolchain@d0befba8b9ddf874327619e84c39b094edd58b66  # 1.93.0
+      # Same pin as ci.yml's `test` job — see that job's comment for why the
+      # version is pinned (the `.cargo/config.toml` perimeter guard gates on
+      # the $NEXTEST env var this exact binary sets).
+      - uses: taiki-e/install-action@18b1216eba7f8039b0f8d131d5473787f0edce68  # v2.85.3
+        with:
+          tool: nextest@0.9.137
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32  # v2
+      # Build once — every repeated run below reuses the same test binary.
+      # `--success-output=immediate` forces the `println!("#1070
+      # recall_at_10=...")` line to appear in the log on a PASSING run too,
+      # not just a failing one (nextest's default only shows captured output
+      # on failure).
+      - name: Run restart_preserves_recall_at_10_against_brute_force (3k vectors) x N
+        shell: bash
+        run: |
+          set -euo pipefail
+          N="${{ github.event.inputs.runs_per_os || '20' }}"
+          for i in $(seq 1 "$N"); do
+            echo "--- run $i/$N ---"
+            NEXTEST=1 cargo nextest run --locked -p shamir-index --lib \
+              -E 'test(restart_preserves_recall_at_10_against_brute_force)' \
+              --success-output=immediate --no-fail-fast
+          done
+      - name: Run recall_at_10_on_1k_vectors x N
+        shell: bash
+        run: |
+          set -euo pipefail
+          N="${{ github.event.inputs.runs_per_os || '20' }}"
+          for i in $(seq 1 "$N"); do
+            echo "--- run $i/$N ---"
+            NEXTEST=1 cargo nextest run --locked -p shamir-index --lib \
+              -E 'test(recall_at_10_on_1k_vectors)' \
+              --success-output=immediate --no-fail-fast
+          done
