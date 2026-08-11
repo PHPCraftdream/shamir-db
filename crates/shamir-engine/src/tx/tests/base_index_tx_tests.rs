@@ -651,3 +651,119 @@ async fn intra_tx_two_different_unique_indexes_no_collision() {
         .await
         .expect("two different unique indexes must not collide");
 }
+
+/// #1074 — a key released via UPDATE-off and then reclaimed by a DIFFERENT
+/// record within the same transaction must commit successfully. Before #1074,
+/// the #1039 claims-only intra-tx check false-rejected this pattern: it saw
+/// `(K_x, A)` then `(K_x, B)` (different owners) and aborted, even though A
+/// had legitimately moved off `x` before B claimed it.
+///
+/// ```
+/// INSERT A {email: "x"}   → guard (K_x, A), SetPosting(K_x, A)
+/// UPDATE A SET email = "z" → guard (K_z, A), RemovePosting(K_x), SetPosting(K_z, A)
+/// INSERT B {email: "x"}   → guard (K_x, B), SetPosting(K_x, B)
+/// ```
+/// Final state `K_x -> B`, `K_z -> A` is completely valid.
+#[tokio::test]
+async fn intra_tx_update_off_then_reclaim_same_key() {
+    let repo = make_repo();
+    repo.add_table(TableConfig::new("t"));
+    let tbl = repo.get_table("t").await.unwrap();
+    tbl.create_unique_index("by_email", &["email"])
+        .await
+        .unwrap();
+    let email_id = key_id(&tbl, "by_email").await;
+    let email_field = key_id(&tbl, "email").await;
+
+    let (mut tx, _g) = repo.begin_tx(IsolationLevel::Snapshot).await.unwrap();
+    let rid_a = tbl
+        .insert_tx(&record_with_str(email_field, "x"), Some(&mut tx))
+        .await
+        .unwrap();
+    tbl.update_tx(rid_a, &record_with_str(email_field, "z"), Some(&mut tx))
+        .await
+        .unwrap();
+    let rid_b = tbl
+        .insert_tx(&record_with_str(email_field, "x"), Some(&mut tx))
+        .await
+        .unwrap();
+
+    // Commit MUST succeed — A vacated "x" before B claimed it.
+    repo.commit_tx(tx)
+        .await
+        .expect("release-then-reclaim via UPDATE must commit");
+
+    // Final state: K_x -> B, K_z -> A.
+    let owner_x = tbl
+        .index_manager()
+        .lookup_by_unique_index(email_id, &[InnerValue::Str("x".into())])
+        .await
+        .unwrap();
+    assert_eq!(
+        owner_x,
+        Some(rid_b),
+        "K_x must resolve to B (the reclaiming record)"
+    );
+
+    let owner_z = tbl
+        .index_manager()
+        .lookup_by_unique_index(email_id, &[InnerValue::Str("z".into())])
+        .await
+        .unwrap();
+    assert_eq!(
+        owner_z,
+        Some(rid_a),
+        "K_z must resolve to A (the record that moved off x)"
+    );
+}
+
+/// #1074 — a key released via DELETE and then reclaimed by a DIFFERENT record
+/// within the same transaction must commit successfully. DELETE pushes no
+/// UniqueGuard at all, so the #1039 check saw only `(K_x, A)` then `(K_x, B)`
+/// (from the two inserts) and false-rejected — the delete's RemovePosting was
+/// invisible to the claims-only check.
+///
+/// ```
+/// INSERT A {email: "x"} → guard (K_x, A), SetPosting(K_x, A)
+/// DELETE A              → RemovePosting(K_x)   [no guard pushed]
+/// INSERT B {email: "x"} → guard (K_x, B), SetPosting(K_x, B)
+/// ```
+#[tokio::test]
+async fn intra_tx_delete_then_reclaim_same_key() {
+    let repo = make_repo();
+    repo.add_table(TableConfig::new("t"));
+    let tbl = repo.get_table("t").await.unwrap();
+    tbl.create_unique_index("by_email", &["email"])
+        .await
+        .unwrap();
+    let email_id = key_id(&tbl, "by_email").await;
+    let email_field = key_id(&tbl, "email").await;
+
+    let (mut tx, _g) = repo.begin_tx(IsolationLevel::Snapshot).await.unwrap();
+    let rid_a = tbl
+        .insert_tx(&record_with_str(email_field, "x"), Some(&mut tx))
+        .await
+        .unwrap();
+    tbl.delete_tx(rid_a, Some(&mut tx)).await.unwrap();
+    let rid_b = tbl
+        .insert_tx(&record_with_str(email_field, "x"), Some(&mut tx))
+        .await
+        .unwrap();
+
+    // Commit MUST succeed — A was deleted before B claimed "x".
+    repo.commit_tx(tx)
+        .await
+        .expect("delete-then-reclaim must commit");
+
+    // Final state: K_x -> B.
+    let owner_x = tbl
+        .index_manager()
+        .lookup_by_unique_index(email_id, &[InnerValue::Str("x".into())])
+        .await
+        .unwrap();
+    assert_eq!(
+        owner_x,
+        Some(rid_b),
+        "K_x must resolve to B (the reclaiming record)"
+    );
+}

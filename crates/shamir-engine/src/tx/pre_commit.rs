@@ -1,11 +1,11 @@
 use std::sync::Arc;
 
-use shamir_collections::TFxMap;
+use shamir_collections::{TFxMap, TFxSet};
 use shamir_storage::error::DbError;
 use shamir_storage::types::{KvOp, RecordKey};
 use shamir_tx::{
-    CellReservationGuard, IndexWriteOp, IsolationLevel, RepoTxGate, RepoWalManager, TxContext,
-    UniqueGuard,
+    CellReservationGuard, IndexFamily, IndexWriteOp, IsolationLevel, RepoTxGate, RepoWalManager,
+    TxContext, UniqueGuard,
 };
 use shamir_types::core::interner::InternerKey;
 use shamir_types::types::record_id::RecordId;
@@ -583,44 +583,113 @@ pub(super) async fn pre_commit_prelock(
     // writers: no other writer can interleave between this check and the
     // Phase 5c posting write (the uwl_guard is held continuously).
     //
-    // #1039 — Intra-tx dedup: two operations within the SAME transaction can
-    // claim the same unique-index key. The stage-time validation is optimistic
-    // (checks only durable committed state), so both guards are recorded.
-    // We must cross-check guards against each other here BEFORE the durable
-    // state check to catch intra-tx collisions.
+    // #1039 / #1074 — Intra-tx unique dedup + cross-tx re-validation.
     //
-    // Design: O(1)-amortized check using TFxMap<(table_token, index_key), RecordId>
-    // keyed by the unique claim. For each guard:
-    //   - If key already seen with DIFFERENT owner → intra-tx collision → abort
-    //   - If key already seen with SAME owner → self-write re-validation → OK
-    //   - If key not yet seen → insert and proceed to durable check
+    // #1039 added an intra-tx dedup pass over `tx.unique_guards`. But
+    // `unique_guards` is a chronological list of point-in-time CLAIMS — DELETE
+    // never pushes a guard, and an UPDATE that moves a record OFF a unique key
+    // pushes no "release" marker for the old key either. So #1039's check
+    // treated the FIRST owner seen for a key as authoritative and
+    // false-rejected any later guard with a different owner, even when the
+    // first owner had legitimately vacated that key earlier in the same tx
+    // (via UPDATE-off or DELETE) — a legal pattern that committed fine before
+    // #1039 (#1074 regression).
     //
-    // The key is (table_token, index_key) to prevent false collisions across
-    // different unique indexes on the same table (each has its own info_store).
-    let mut seen: TFxMap<(u64, bytes::Bytes), RecordId> = TFxMap::default();
-    for g in &tx.unique_guards {
-        // Intra-tx dedup check (cheaper, no I/O) — run first.
-        let key = (g.table_token, g.index_key.clone());
-        if let Some(&prior_owner) = seen.get(&key) {
-            // Same key seen before. If different owner, it's a collision.
-            if prior_owner != g.owner {
-                repo.tx_metrics().on_tx_aborted_unique();
-                return Err(TxError::UniqueViolation {
-                    key: g.index_key.clone(),
-                });
-            }
-            // Same owner (self-write re-validating its own key) → OK, skip
-            // to next guard without touching info_store (already checked).
-            continue;
-        }
-        // First time seeing this key → record it and proceed to durable check.
-        seen.insert(key, g.owner);
+    // #1074 fix: use `tx.index_write_set` — the authoritative ordered storage
+    // mutation sequence — for the intra-tx conflict detection. `RemovePosting`
+    // (emitted by `plan_record_updated_unique` / `plan_record_deleted_unique`
+    // when a record moves off or is deleted from a unique key) IS the release
+    // marker that `unique_guards` lacks. Walking the unique-family ops in
+    // staging order and tracking live ownership per key gives the TRUE final
+    // per-key state:
+    //   - SetPosting on a key whose current live owner is a DIFFERENT record →
+    //     genuine intra-tx collision (no release between them) → abort.
+    //   - RemovePosting releases the key, so a LATER SetPosting from a
+    //     different record is a legitimate release-then-reclaim, not a conflict.
+    //
+    // `tx.unique_guards` is still iterated for the durable-state (cross-tx)
+    // check, because an update re-writing the SAME unique value produces NO
+    // SetPosting (plan_record_updated_unique is a no-op when old_key == new_key)
+    // but DOES push a guard — that key still needs committed-state validation.
+    // For keys in the write-set walk, the FINAL owner from the walk is used
+    // (may differ from the guard's owner if the key was released and reclaimed);
+    // for keys NOT in the write set (self-write), the guard's owner stands.
+    //
+    // Why option (a) / naive overwrite on `unique_guards` is insufficient: it
+    // has no release markers, so it cannot distinguish "A moved off K before B
+    // claimed it" from "A never moved off K and B is a genuine duplicate" —
+    // the former must commit, the latter must abort, but both produce the same
+    // claims-only guard sequence [(K, A), (K, B)].
 
-        // Original durable-state check (still needed for concurrent txs).
+    // Step 1 — Walk unique-family ops in index_write_set in staging order to
+    // detect intra-tx conflicts and determine the final live owner per key.
+    // `live`: (table_token, index_key) → record CURRENTLY owning it as of the
+    // op being processed.  `released`: keys vacated by a RemovePosting so the
+    // guard loop (step 2) can distinguish "released" from "never in write set".
+    let mut live: TFxMap<(u64, bytes::Bytes), RecordId> = TFxMap::default();
+    let mut released: TFxSet<(u64, bytes::Bytes)> = TFxSet::default();
+    for (table_token, op) in &tx.index_write_set {
+        match op {
+            IndexWriteOp::SetPosting {
+                key,
+                value,
+                provenance,
+            } if provenance.family == IndexFamily::Unique => {
+                let k = (*table_token, key.clone());
+                let owner = RecordId::try_from_bytes(value).unwrap_or_default();
+                if let Some(&prior) = live.get(&k) {
+                    if prior != owner {
+                        // Two DIFFERENT records claim the same unique key with
+                        // no intervening RemovePosting — genuine intra-tx
+                        // collision (the #1039 positive case).
+                        repo.tx_metrics().on_tx_aborted_unique();
+                        return Err(TxError::UniqueViolation { key: key.clone() });
+                    }
+                    // Same owner re-claiming its own key — not a conflict.
+                    continue;
+                }
+                live.insert(k.clone(), owner);
+                released.remove(&k);
+            }
+            IndexWriteOp::RemovePosting { key, provenance }
+                if provenance.family == IndexFamily::Unique =>
+            {
+                let k = (*table_token, key.clone());
+                live.remove(&k);
+                released.insert(k);
+            }
+            _ => {}
+        }
+    }
+
+    // Step 2 — Durable-state (cross-tx) check. Iterate tx.unique_guards to
+    // discover every unique key this tx claims. For each key:
+    //   - In `live`  → use the FINAL owner from the write-set walk (may differ
+    //     from the guard's owner if the key was released and reclaimed).
+    //   - In `released` only → the tx vacated this key; no durable check needed.
+    //   - In neither → self-write (update re-writing same value: no SetPosting,
+    //     but the guard's owner is the valid claim).
+    let mut checked: TFxSet<(u64, bytes::Bytes)> = TFxSet::default();
+    for g in &tx.unique_guards {
+        let key = (g.table_token, g.index_key.clone());
+        if !checked.insert(key.clone()) {
+            continue; // already durable-checked this key
+        }
+
+        let owner = if let Some(&final_owner) = live.get(&key) {
+            final_owner
+        } else if released.contains(&key) {
+            continue; // key vacated by this tx — no claim to validate
+        } else {
+            g.owner // self-write: no index op, guard's owner is authoritative
+        };
+
+        // Durable-state check against committed storage (unchanged in spirit
+        // from #1039 — this task fixes what "seen" represents, not this check).
         if let Some(tbl) = repo.table_by_token(g.table_token).await? {
             match tbl.info_store().get(g.index_key.clone().into()).await {
                 Ok(existing) => {
-                    if existing.as_ref() != g.owner.as_bytes().as_slice() {
+                    if existing.as_ref() != owner.as_bytes().as_slice() {
                         repo.tx_metrics().on_tx_aborted_unique();
                         return Err(TxError::UniqueViolation {
                             key: g.index_key.clone(),
