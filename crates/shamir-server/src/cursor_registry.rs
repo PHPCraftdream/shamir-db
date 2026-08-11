@@ -414,16 +414,36 @@ impl CursorRegistry {
             .entry(owner_sid)
             .or_insert_with(|| Arc::new(AtomicUsize::new(0)));
         let counter = Arc::clone(slot.value());
-        drop(slot);
 
-        // CAS loop: only admit if the count is still below the cap at the
-        // moment of the bump (no TOCTOU window between a `load` and a
-        // separate `fetch_add`).
+        // #1073 (F-1): the CAS loop runs WHILE still holding `slot` — the
+        // shard write lock `dashmap`'s `entry()` took for `owner_sid`. This
+        // is the SAME shard write lock `free_session_slot`'s `remove_if`
+        // takes (see that method's doc comment for the `dashmap` internals
+        // this rests on), so the increment below is now atomic relative to
+        // a concurrent `remove()` of the last cursor on this session:
+        // either `free_session_slot` runs entirely before this `entry()`
+        // call (this loop then correctly starts a fresh `AtomicUsize(0)`
+        // via `or_insert_with`), or entirely after `slot` is dropped below
+        // (it observes the post-increment, non-zero count and does not
+        // remove the entry). There is no window where this loop can bump
+        // an `Arc<AtomicUsize>` that `free_session_slot` has already (or is
+        // about to) orphan or `fetch_sub` past zero — closing both failure
+        // scenarios in this task's description: cap overrun via two
+        // independently-created counters, and a permanent lock-out via
+        // `fetch_sub` wrapping a zeroed/removed counter to `usize::MAX`.
+        //
+        // Holding the shard lock across the loop body is safe: nothing
+        // else in this method touches `by_session` again before `slot`
+        // drops, so there is no reentrancy risk, and the loop itself does
+        // not block on anything external — with the lock held, no other
+        // thread can mutate this SAME counter concurrently, so in practice
+        // the `compare_exchange` below succeeds on its first attempt.
         loop {
             let cur = counter.load(Ordering::Acquire);
             if cur >= max_per_session as usize {
                 // `cursor` (the just-built Cursor + SnapshotGuard) drops
                 // here — RAII release, same pattern as TxAlreadyOpen.
+                drop(slot);
                 return Err(CursorRegistryError::CursorLimitExceeded {
                     limit: max_per_session,
                 });
@@ -435,6 +455,7 @@ impl CursorRegistry {
                 break;
             }
         }
+        drop(slot);
 
         let arc = Arc::new(cursor);
         self.open.insert(cursor_id, Arc::clone(&arc));
@@ -564,6 +585,18 @@ impl CursorRegistry {
     /// interleaving preserves correct cap accounting — a session can never
     /// exceed `max_per_session` split across two independently-created
     /// counters.
+    ///
+    /// #1073 (F-1): this atomicity argument only holds because `register`
+    /// holds the shard write lock (`slot`, the `entry()` guard) across its
+    /// ENTIRE CAS loop, not just the `entry()` call itself — an earlier
+    /// version dropped `slot` immediately after cloning the counter `Arc`,
+    /// so the increment below could interleave with this `remove_if`
+    /// after all: the entry could be removed (or removed then recreated)
+    /// between `register`'s `entry()` returning and its CAS actually
+    /// running, orphaning a counter or `fetch_sub`-ing an already-zeroed
+    /// one to `usize::MAX`. See `register`'s CAS-loop comment for the
+    /// current (fixed) locking discipline this doc comment's claim
+    /// depends on.
     fn free_session_slot(&self, owner_sid: &[u8; 32]) {
         self.by_session.remove_if(owner_sid, |_, counter| {
             // Pre-decrement value == 1 means the NEW value is 0.
