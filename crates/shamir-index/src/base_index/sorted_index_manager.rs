@@ -2020,8 +2020,8 @@ impl SortedIndexManager {
     }
 
     /// Range lookup: return all record IDs whose indexed value is in
-    /// `[start, end]` (both inclusive). `start` / `end` are the
-    /// already-encoded value bytes (call sites use
+    /// `[start, end]` (both inclusive), sorted ascending and duplicate-free.
+    /// `start` / `end` are the already-encoded value bytes (call sites use
     /// `sort_codec::encode_*` to produce them).
     ///
     /// Builds the lower / upper bounds in the physical-key space and
@@ -2030,12 +2030,20 @@ impl SortedIndexManager {
     /// to `lower` and stops at `upper`, doing zero wasted work
     /// outside the range. In-memory / cached fall back to
     /// `iter_range_stream`'s default filter wrapper, still correct.
+    ///
+    /// F-12 (#1079): returns `Vec<RecordId>`, not `BTreeSet<RecordId>` — the
+    /// hash family already dropped per-element `BTreeSet::insert` (node
+    /// allocation + rebalance on every element) in favor of a flat `Vec`
+    /// (see `IndexManager::lookup_by_index`'s doc comment); every caller of
+    /// this method immediately re-collected the `BTreeSet` into a `Vec`
+    /// anyway (see the removed `read_index_scan.rs` collect), so the
+    /// `BTreeSet` was pure overhead on both ends.
     pub async fn lookup_range(
         &self,
         name_interned: u64,
         start_encoded: Option<&[u8]>,
         end_encoded: Option<&[u8]>,
-    ) -> DbResult<BTreeSet<RecordId>> {
+    ) -> DbResult<Vec<RecordId>> {
         // P0-3a (#1037): acquire the reader-drain guard as the FIRST statement.
         // `None` means a DROP INDEX is currently in its raise→sweep window: the
         // caller MUST NOT read the physical store and MUST fall back (a full
@@ -2057,14 +2065,21 @@ impl SortedIndexManager {
             .iter_range_stream(Some(lower), Some(upper), MAINT_SCAN_BATCH);
         futures::pin_mut!(stream);
 
-        let mut out: BTreeSet<RecordId> = BTreeSet::new();
+        // `Vec::push` into one contiguous buffer, then a single
+        // `sort_unstable` + `dedup` reproduces the exact sorted,
+        // duplicate-free output a `BTreeSet` would have (the scan is only
+        // record-id-ordered WITHIN one indexed value's postings, not across
+        // the whole range, so the sort is still required).
+        let mut out: Vec<RecordId> = Vec::new();
         while let Some(batch) = stream.next().await {
             for (k, _) in batch? {
                 if let Some(id) = decode_record_id_suffix(k.as_ref()) {
-                    out.insert(id);
+                    out.push(id);
                 }
             }
         }
+        out.sort_unstable();
+        out.dedup();
         Ok(out)
     }
 
@@ -2449,7 +2464,7 @@ impl SortedIndexManager {
         start_encoded: Option<&[u8]>,
         end_encoded: Option<&[u8]>,
         tx: Option<&shamir_tx::TxContext>,
-    ) -> DbResult<BTreeSet<RecordId>> {
+    ) -> DbResult<Vec<RecordId>> {
         if let Some(t) = tx {
             if t.isolation == shamir_tx::IsolationLevel::Serializable {
                 let prefix = self.entry_prefix(name_interned);

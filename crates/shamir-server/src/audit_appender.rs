@@ -655,6 +655,33 @@ impl FjallAuditAppender {
     }
 }
 
+/// Run blocking I/O without stalling a tokio worker thread, when doing so
+/// is actually possible.
+///
+/// PERF (#1079): `append_entry` (Strict mode) and `checkpoint` both do
+/// synchronous fsyncs, called inline from whatever task emitted the audit
+/// event — no dedicated flusher task backs those two paths (unlike Batched
+/// mode's periodic `open_batched` loop, which already wraps its
+/// `flush_buffer()` call in `tokio::task::block_in_place`).
+/// `block_in_place` panics outside a multi-thread tokio runtime — both
+/// "no runtime at all" (several `audit_appender.rs` tests exercise this
+/// trait directly as plain synchronous `#[test]` functions) and "a
+/// current-thread runtime" (the default `#[tokio::test]` flavor) — so this
+/// checks `runtime_flavor()` explicitly rather than just runtime presence,
+/// falling back to a direct call in both cases (correct in both: with no
+/// runtime, or a single-thread one, there is no separate worker thread to
+/// protect from the block).
+fn blocking_io<T>(f: impl FnOnce() -> T) -> T {
+    let is_multi_thread = tokio::runtime::Handle::try_current()
+        .map(|h| h.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread)
+        .unwrap_or(false);
+    if is_multi_thread {
+        tokio::task::block_in_place(f)
+    } else {
+        f()
+    }
+}
+
 // `AuditAppender` is defined in `shamir-connect` and `Arc` is from `std`,
 // so the orphan rule forbids `impl AuditAppender for Arc<FjallAuditAppender>`.
 // Instead we implement on `FjallAuditAppender` directly — when callers wrap
@@ -664,9 +691,11 @@ impl AuditAppender for FjallAuditAppender {
     fn append_entry(&self, entry: &AuditEntry) {
         match &self.mode {
             Durab::Strict => {
-                if let Err(e) = self.append_strict(entry) {
-                    tracing::error!(error = %e, "audit appender strict write failed");
-                }
+                blocking_io(|| {
+                    if let Err(e) = self.append_strict(entry) {
+                        tracing::error!(error = %e, "audit appender strict write failed");
+                    }
+                });
             }
             Durab::Batched { buffer, .. } => {
                 buffer.lock().push(entry.clone());
@@ -675,11 +704,13 @@ impl AuditAppender for FjallAuditAppender {
     }
 
     fn checkpoint(&self, next_seq: u64, prev_hmac: &[u8; 32]) {
-        if let Err(e) = self.flush_buffer() {
-            tracing::error!(error = %e, "audit appender flush before checkpoint failed");
-        }
-        if let Err(e) = self.write_checkpoint(next_seq, prev_hmac) {
-            tracing::error!(error = %e, "audit appender checkpoint write failed");
-        }
+        blocking_io(|| {
+            if let Err(e) = self.flush_buffer() {
+                tracing::error!(error = %e, "audit appender flush before checkpoint failed");
+            }
+            if let Err(e) = self.write_checkpoint(next_seq, prev_hmac) {
+                tracing::error!(error = %e, "audit appender checkpoint write failed");
+            }
+        });
     }
 }

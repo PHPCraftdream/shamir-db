@@ -239,8 +239,10 @@ impl TableManager {
         // ── End covering index-only gate ─────────────────────────────────────
         // Fall through to the existing full-fetch path (byte-identical below).
 
-        // 1. Lookup matching RecordIds from the sorted index.
-        let record_ids = self
+        // 1. Lookup matching RecordIds from the sorted index. F-12 (#1079):
+        //    `lookup_range` now returns an already-sorted, already-deduped
+        //    `Vec<RecordId>` directly, so no second collect is needed here.
+        let id_vec = self
             .sorted_indexes()
             .lookup_range(index_name, lower_encoded, upper_encoded)
             .await?;
@@ -251,8 +253,6 @@ impl TableManager {
         let has_group_by = query.group_by.is_some();
         let has_agg = exec::has_aggregates(&query.select);
         let needs_inner = has_group_by || has_agg;
-
-        let id_vec: Vec<RecordId> = record_ids.iter().copied().collect();
 
         // S4: aggregate paths now use bytes + RecordView lens (same as the
         // plain SELECT branch). No full InnerValue decode per row.
