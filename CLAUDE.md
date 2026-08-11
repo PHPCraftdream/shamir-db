@@ -425,17 +425,26 @@ from another instance as its own justification.
 **NOT covered by the above — hot-by-call-frequency, tracked migration
 candidates, not permanent exceptions:**
 `shamir-wal/src/segment_set.rs`'s `SegmentSet::inner` (taken on every
-`append_batch` — the WAL group-commit append path) and
-`shamir-connect/src/server/session.rs`'s `Session::post_auth_bucket` (taken
-on every post-auth request). Both currently argue LOW actual contention
-despite HIGH call frequency (`SegmentSet::inner`: single-writer model, the
-group-commit leader is the sole appender; `post_auth_bucket`: contention
-bounded by one connection's own concurrency cap, not workspace-wide) — that
-argument is real but is a *contention* defense, not a *frequency* one, and
-the "banned in hot paths" rule bans by frequency. Treat both as **known,
-tracked debt** (see #1076's migration follow-up), not as a fourth
-sanctioned category — do not cite them as precedent for a new hot-path
-`std::sync::Mutex`.
+`append_batch` — the WAL group-commit append path). Currently argues LOW
+actual contention despite HIGH call frequency (single-writer model, the
+group-commit leader is the sole appender) — that argument is real but is a
+*contention* defense, not a *frequency* one, and the "banned in hot paths"
+rule bans by frequency. Treat as **known, tracked debt** (see #1090's
+follow-up), not as a fourth sanctioned category — do not cite it as
+precedent for a new hot-path `std::sync::Mutex`. A 2026-08-11 measurement
+(`wal_append` bench, `bench_scale_tool`) found per-op latency genuinely
+rising with concurrency at 64 concurrent appenders — but the SAME rise
+appears in the `mem` sink scenario, which never touches `SegmentSet` at
+all, so the growth is not yet attributable specifically to this lock (more
+likely `WalGroupCommit.pending`'s mutex + leader-election coordination) —
+a migration attempt needs to isolate `SegmentSet`'s own contribution
+first, not rewrite blind.
+
+`shamir-connect/src/server/session.rs`'s `Session::post_auth_bucket` was
+migrated off `std::sync::Mutex` (#1090, 2026-08-11) to two independent
+atomics — see that struct's own doc for why splitting the two fields
+(`micro_tokens` via a `fetch_update` CAS retry loop; `last_refill_at_ns`
+via a racy-but-benign `swap`) is sound. No longer a tracked-debt site.
 
 `parking_lot::Mutex` sites on runtime structs are governed by the same
 "every hot-path use must be justified inline" rule from the table above,

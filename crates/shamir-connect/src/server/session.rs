@@ -173,22 +173,40 @@ pub struct Session {
     /// single atomic `swap(None)` so exactly one caller observes a non-empty
     /// slot — the §12.5 double-submit guard with no TOCTOU window.
     pub pending_changepw_challenge: ArcSwapOption<PendingChangePwChallenge>,
-    /// Post-auth request-rate token bucket (task #608). Bounded per-session
-    /// contention (≤ `max_in_flight` concurrent requests on one session) —
-    /// mirrors the pre-auth `InMemoryRateLimiter`'s per-subnet `DashMap`
-    /// shard-lock precedent (`rate_limit.rs`), just scoped to one session
-    /// instead of a sharded map. `std::sync::Mutex` is the sanctioned
-    /// exception here (CLAUDE.md): no `.await` is held across the lock, and
-    /// contention is bounded by the connection's own concurrency cap, not a
-    /// workspace-wide hot path.
-    post_auth_bucket: std::sync::Mutex<PostAuthBucket>,
+    /// Post-auth request-rate token bucket (task #608, migrated off
+    /// `std::sync::Mutex` per #1090). Two independent atomics, not one
+    /// struct behind a lock — see [`PostAuthBucket`]'s doc for why this is
+    /// sound: the load-bearing security property (no concurrent caller can
+    /// double-spend a token) lives entirely in `micro_tokens`'s CAS retry
+    /// loop; `last_refill_at_ns` tolerates benign raciness.
+    post_auth_bucket: PostAuthBucket,
 }
 
 /// Fixed-point token-bucket state — mirrors `rate_limit.rs`'s `BucketState`
 /// shape (`micro_tokens` = tokens × 1e9, refill without floats).
+///
+/// **Lock-free design (#1090).** `micro_tokens` and `last_refill_at_ns` are
+/// two INDEPENDENT atomics rather than one struct behind a `Mutex` — this is
+/// sound only because the two fields have different consistency
+/// requirements:
+/// - `micro_tokens` is updated via [`AtomicU64::fetch_update`]'s CAS retry
+///   loop, which is a genuine atomic read-modify-write: exactly one
+///   concurrent caller can transition it from `X` to `X - cost` at a time.
+///   This is the ONLY property that actually matters for the rate limiter's
+///   security guarantee (no concurrent request can debit a token that
+///   another concurrent request already debited).
+/// - `last_refill_at_ns` is updated via a plain `swap` — under concurrent
+///   callers, whichever swap lands last "wins" the elapsed-time base BOTH
+///   callers compute their refill against. This is benign: it can only make
+///   a refill slightly LOWER than the fully-precise value would (never
+///   higher — refill is always `elapsed_ns.saturating_mul(rate)` off SOME
+///   real, recent timestamp), and the very next call's refill self-corrects
+///   against whatever `now_ns` ends up stored. `capacity()` also hard-caps
+///   the result regardless. No exploitable over-refill / bypass is
+///   constructible from this raciness.
 struct PostAuthBucket {
-    micro_tokens: u64,
-    last_refill_at_ns: u64,
+    micro_tokens: AtomicU64,
+    last_refill_at_ns: AtomicU64,
 }
 
 impl PostAuthBucket {
@@ -224,10 +242,10 @@ impl Session {
             binding_mode,
             channel_binding_at_auth,
             pending_changepw_challenge: ArcSwapOption::const_empty(),
-            post_auth_bucket: std::sync::Mutex::new(PostAuthBucket {
-                micro_tokens: PostAuthBucket::capacity(),
-                last_refill_at_ns: now_ns,
-            }),
+            post_auth_bucket: PostAuthBucket {
+                micro_tokens: AtomicU64::new(PostAuthBucket::capacity()),
+                last_refill_at_ns: AtomicU64::new(now_ns),
+            },
         }
     }
 
@@ -303,21 +321,47 @@ impl Session {
     /// pre-auth/post-restart-abuse concept, not applicable to an
     /// already-authenticated session).
     pub fn check_post_auth_rate_limit(&self, now_ns: u64) -> Option<u32> {
-        let mut b = self.post_auth_bucket.lock().unwrap();
         let capacity = PostAuthBucket::capacity();
         let rate = shamir_tunables::instance_defaults::POST_AUTH_RATE_LIMIT_PER_SEC as u64;
-
-        let elapsed = now_ns.saturating_sub(b.last_refill_at_ns);
-        let refill = elapsed.saturating_mul(rate);
-        b.micro_tokens = b.micro_tokens.saturating_add(refill).min(capacity);
-        b.last_refill_at_ns = now_ns;
-
         let cost = 1_000_000_000u64;
-        if b.micro_tokens >= cost {
-            b.micro_tokens -= cost;
+
+        // Benign raciness under concurrent callers on the SAME session —
+        // see PostAuthBucket's struct doc. The load-bearing atomicity is in
+        // the `fetch_update` CAS loop below, not here.
+        let prev_refill_ns = self
+            .post_auth_bucket
+            .last_refill_at_ns
+            .swap(now_ns, Ordering::Relaxed);
+        let elapsed = now_ns.saturating_sub(prev_refill_ns);
+        let refill = elapsed.saturating_mul(rate);
+
+        // Atomic refill + debit: exactly one concurrent caller can observe
+        // (and act on) tokens >= cost for a given pre-refill value, since
+        // fetch_update is a genuine CAS retry loop. `admitted`/
+        // `tokens_after_refill` are overwritten on every retry, so after
+        // the loop they reflect the ONE closure invocation that actually
+        // committed.
+        let mut admitted = false;
+        let mut tokens_after_refill = 0u64;
+        self.post_auth_bucket
+            .micro_tokens
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |tokens| {
+                let refilled = tokens.saturating_add(refill).min(capacity);
+                tokens_after_refill = refilled;
+                if refilled >= cost {
+                    admitted = true;
+                    Some(refilled - cost)
+                } else {
+                    admitted = false;
+                    Some(refilled)
+                }
+            })
+            .expect("closure always returns Some, fetch_update never errors");
+
+        if admitted {
             None
         } else {
-            let deficit = cost - b.micro_tokens;
+            let deficit = cost.saturating_sub(tokens_after_refill);
             let secs_to_wait = (deficit / rate) / 1_000_000_000;
             Some((secs_to_wait as u32).max(1))
         }

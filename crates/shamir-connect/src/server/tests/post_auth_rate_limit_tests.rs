@@ -76,3 +76,44 @@ fn single_request_on_fresh_session_is_always_allowed() {
     let session = fresh_session(now_ns);
     assert!(session.check_post_auth_rate_limit(now_ns).is_none());
 }
+
+/// #1090: `PostAuthBucket` migrated from `std::sync::Mutex` to two
+/// independent atomics (`micro_tokens` via a `fetch_update` CAS retry loop,
+/// `last_refill_at_ns` via a racy-but-benign `swap`). The property that
+/// actually matters for security — no concurrent caller can double-spend a
+/// token — must hold even when many threads hammer the SAME session at the
+/// SAME instant. A burst-sized bucket under `N > burst` concurrent callers
+/// at one instant must admit EXACTLY `burst` of them, never more (a naive
+/// non-atomic refactor of the old lock-guarded read-modify-write would
+/// admit more under a lost-update race).
+#[test]
+fn concurrent_callers_never_admit_more_than_the_burst_budget() {
+    use std::sync::Arc;
+    use std::thread;
+
+    let now_ns = 1_000_000_000u64;
+    let session = Arc::new(fresh_session(now_ns));
+    let burst = POST_AUTH_RATE_LIMIT_PER_SEC as usize;
+    // Deliberately over-subscribe: 4x the burst budget, all racing at the
+    // exact same `now_ns` so none of them get a refill edge to exploit.
+    let concurrent_callers = burst * 4;
+
+    let handles: Vec<_> = (0..concurrent_callers)
+        .map(|_| {
+            let session = Arc::clone(&session);
+            thread::spawn(move || session.check_post_auth_rate_limit(now_ns).is_none())
+        })
+        .collect();
+
+    let admitted = handles
+        .into_iter()
+        .map(|h| h.join().expect("thread must not panic"))
+        .filter(|&was_admitted| was_admitted)
+        .count();
+
+    assert_eq!(
+        admitted, burst,
+        "exactly `burst` concurrent callers must be admitted, never more (double-spend) \
+         or fewer (a lost update that drops an already-earned admission)"
+    );
+}
