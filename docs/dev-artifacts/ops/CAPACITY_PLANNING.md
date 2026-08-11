@@ -68,6 +68,96 @@ at 100 MB → ~170 rotated files/day. With 30-day retention that's ~510
 files / ~17 GB on disk for audit alone. Adjust `max_file_size_mb` and
 `retention_days` accordingly.
 
+## Index & cursor sizing (engine-level)
+
+The numbers above are server/auth-level. These cover engine-level costs
+that scale with table size and index count — release-review follow-up
+(#1086), all EXTRAPOLATED from real, already-measured benchmarks (no
+fresh bench run backs these directly; each row below cites the actual
+source measurement).
+
+### Cursor rescans (offset-fallback / non-keyset-eligible pages)
+
+A cursor `FetchNext` page that ISN'T eligible for the F-53b keyset-seek
+fast path — a multi-column `ORDER BY`, an unindexed/computed `ORDER BY`,
+or a page where a concurrent write to the indexed field tripped the
+per-index mutation high-water gate — re-runs a FULL pinned-snapshot
+table scan on EVERY call (`KNOWN_LIMITATIONS.md` §6). Cost scales with
+total table size, not `page_size`.
+
+No dedicated cursor-rescan benchmark exists yet. The nearest measured
+analog is the (pre-online-build) regular/hash `CREATE INDEX` backfill
+scan — it reads every row at the same O(N) cost class, though it also
+writes postings, so treat these as a conservative UPPER bound on a
+pure-read rescan:
+
+| Table size | Full-scan-class cost | Source |
+|---|---|---|
+| 5k rows | ~150–170 ms | `f78_writer_latency` bench, measured |
+| 100k rows | ~140–160 s | `f78_writer_latency` bench, measured (P1-4/#969) |
+| 1M rows | hours (extrapolated — scan is superlinear) | RFC `2026-08-07-online-index-build-rfc.md` §1.2 |
+
+The CR-C3 fix (batched MVCC version resolution) measured 13–25× faster
+over a real fjall-backed store across 1k–100k keys for the per-row
+version-lookup part of a page's scan — it meaningfully reduces, but does
+not eliminate, the O(N) shape above.
+
+**Guidance:** for tables beyond low tens of thousands of rows, use a
+single-column indexed `ORDER BY` with no `WHERE` clause (the only
+currently keyset-seek-eligible shape) to avoid this cost entirely.
+Anything else pays the full-table-scan-per-page cost at the scale shown.
+
+### FTS / functional index rebuild (restart, and `CREATE INDEX`)
+
+Every `index2` backend (FTS, functional, vector) EXCEPT vector's own
+snapshot-restore path does a full data-store rebuild on `restore_on_open`
+— i.e. on every table open / server restart while such an index exists
+(`table_manager.rs`, default `IndexBackend::restore_on_open`). Cost is
+O(rows × indexes): each FTS/functional index on a table independently
+re-scans and re-derives the FULL table on open — nothing is shared
+across indexes.
+
+`CREATE INDEX` for these families (and a restart-rebuild, which reruns
+the identical backfill code) is NOT on the barrier-free "online build"
+path landed for regular/hash in #1054–#1062 — it remains on the
+ORIGINAL whole-write-barrier backfill, so the pre-online-build
+regular/hash numbers apply directly as a per-index cost floor (FTS/
+functional per-row cost is typically HIGHER than plain hash indexing —
+tokenization + BM25 stats for FTS, function invocation for functional —
+so these are a floor, not a ceiling):
+
+| Table size | Build/rebuild duration (per index) | Source |
+|---|---|---|
+| 5k rows | 147–168 ms | `f78_writer_latency` bench, measured |
+| 100k rows | ~140–160 s | `f78_writer_latency` bench, measured (P1-4/#969) |
+| 1M rows | hours (extrapolated — scan is superlinear) | RFC `2026-08-07-online-index-build-rfc.md` §1.2 |
+
+**Guidance:** N FTS/functional indexes on one table multiply restart
+time roughly linearly (O(rows × indexes)) — budget accordingly for
+tables with several such indexes at 100k+ rows. `doctor::repair()`'s
+multi-family rebuild loop pays the same underlying cost per family.
+
+### Vector index quality (HNSW recall) — #1070, 2026-08-11
+
+60 fresh CI runs (20 × 3 OS: ubuntu/windows/macos) against both
+statistical recall tests replaced outdated/incorrect doc claims:
+
+- `restart_preserves_recall_at_10_against_brute_force` (**3K** vectors —
+  docs previously and incorrectly said 10K): min 0.968 (ubuntu) / 0.970
+  (windows) / 0.978 (macos), mean 0.983–0.987 across all three. Recall
+  floor recalibrated to **0.90** (had been lowered to 0.60 chasing two
+  historical single-run CI outliers that did not reproduce even once
+  across the fresh 60-run sweep).
+- `recall_at_10_on_1k_vectors` (single-query, so recall only lands on
+  multiples of 0.1): every one of 60 runs landed at exactly 0.80 or 0.90
+  across all 3 platforms, never lower. Floor raised to **0.75**. The
+  docs' old "~95–99%" claim was never actually true — corrected to the
+  real observed 80–90% range.
+
+See `docs/guide-docs/guide/06-search.md` for the current, corrected
+vector-index documentation and `.github/workflows/hnsw-recall-matrix.yml`
+for the cross-platform matrix workflow that produced these numbers.
+
 ## Recommended sizing
 
 For three workload tiers — these are starting points, validate against

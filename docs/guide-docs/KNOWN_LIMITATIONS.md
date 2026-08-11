@@ -347,7 +347,12 @@ artifact).
   `docs/dev-artifacts/research/f50-step3-crash-restart-spike.md` §2 for the
   full restart-vs-resume reasoning, and `IndexState` /
   `IndexDescriptor.state` / `IndexRegistry::set_state` in
-  `crates/shamir-index/src/` for the lifecycle-state implementation.
+  `crates/shamir-index/src/` for the lifecycle-state implementation. This
+  O(N) rebuild applies to EVERY `index2` open, not just post-crash
+  recovery — see `docs/dev-artifacts/ops/CAPACITY_PLANNING.md`'s "Index &
+  cursor sizing" section for measured/extrapolated per-index rebuild
+  duration by table size (O(rows × indexes) with multiple FTS/functional
+  indexes on one table).
 - **`CREATE INDEX` on the `unique`/`sorted`/`index2` families still blocks all
   writers for the ENTIRE backfill scan — a write OUTAGE on medium-to-large
   tables.** (The regular/hash family no longer has this limitation — see the
@@ -497,7 +502,9 @@ artifact).
   tradeoff, since a current-state index cannot place a row whose pinned
   posting was moved/removed); and (c) the cursor's own boundary-filter +
   OFFSET pagination shape, which has not yet been converted to emit
-  `Pagination::After` (a follow-up task).
+  `Pagination::After` (a follow-up task). See
+  `docs/dev-artifacts/ops/CAPACITY_PLANNING.md`'s "Index & cursor sizing"
+  section for measured/extrapolated cost numbers by table size.
 - **Result-size and connection caps (current defaults).** A batch
   response is clamped to `max_result_size_bytes` (default **64 MiB**),
   and the server enforces a global `max_active_connections` cap (default
