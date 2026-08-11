@@ -87,8 +87,27 @@ impl SelectProjection {
     /// evaluation, including a `Select` built directly by Rust code that
     /// bypasses the wire parser.
     pub fn new(select: &Select, interner: &Interner, scalars: ScalarResolver) -> DbResult<Self> {
-        let is_all =
-            select.items.is_empty() || select.items.iter().any(|i| matches!(i, SelectItem::All));
+        // #1069 Defect 1: `SELECT *` combined with other projected items used
+        // to silently drop the extras — `is_all` went true the moment ANY
+        // item was `All`, and the branch below then discarded `fields`/
+        // `funcs` wholesale, so `[All, Expression(price * qty AS total)]`
+        // returned just the raw record with `total` gone, no error. `*` has
+        // no defined merge semantics with named/computed columns (does it
+        // mean "the whole record plus these", nested or flattened?), so —
+        // mirroring F-26 (#819)'s precedent of rejecting an ambiguous/
+        // unsupported SELECT shape outright instead of guessing — this is a
+        // validation error, not a best-effort merge.
+        let has_all = select.items.iter().any(|i| matches!(i, SelectItem::All));
+        if has_all && select.items.len() > 1 {
+            return Err(shamir_storage::error::DbError::Validation(format!(
+                "SELECT * cannot be combined with other projected columns or expressions \
+                 (found {} additional item(s) alongside '*') — '*' has no defined merge \
+                 semantics with named columns. Select only '*' for the whole record, or \
+                 remove '*' and list the specific columns/expressions you want.",
+                select.items.len() - 1
+            )));
+        }
+        let is_all = select.items.is_empty() || has_all;
 
         let (fields, funcs) = if is_all {
             (Vec::new(), Vec::new())
@@ -134,6 +153,33 @@ impl SelectProjection {
                     _ => {}
                 }
             }
+
+            // #1069 Defect 2: every unaliased `SelectItem::Expression`
+            // defaulted to the SAME literal key `"expr"` (and any two items
+            // — aliased or not, field/function/expression — could collide on
+            // an explicit or defaulted key), so `obj.insert` in
+            // `project_value` silently last-write-wins over the earlier
+            // column. Validate output-key uniqueness across `fields` + `funcs`
+            // combined, up front, once per query compile — not per record.
+            let mut seen_keys: shamir_types::types::common::TSet<&str> =
+                shamir_types::types::common::new_set_wc(fields.len() + funcs.len());
+            for (_, key) in &fields {
+                if !seen_keys.insert(key.as_str()) {
+                    return Err(shamir_storage::error::DbError::Validation(format!(
+                        "SELECT projection has a duplicate output column name '{key}' — \
+                         add an explicit alias (AS <name>) to disambiguate."
+                    )));
+                }
+            }
+            for (key, _) in &funcs {
+                if !seen_keys.insert(key.as_str()) {
+                    return Err(shamir_storage::error::DbError::Validation(format!(
+                        "SELECT projection has a duplicate output column name '{key}' — \
+                         add an explicit alias (AS <name>) to disambiguate."
+                    )));
+                }
+            }
+
             (fields, funcs)
         };
 
@@ -200,6 +246,31 @@ impl SelectProjection {
                 .with_field_path_cache(&self.funcs_field_path_cache)
                 .with_query_ref_cache(&self.funcs_query_ref_cache);
             for (key, fv) in &self.funcs {
+                // #1069 Defect 3 — DOCUMENTED, DELIBERATE alpha-scope
+                // decision (not an accidental fallthrough): `resolve_filter_query`
+                // returns `Option<QueryValue>` by design, and folds EVERY
+                // failure class into `None` uniformly across the WHOLE filter
+                // evaluator — unresolvable field/query refs, unknown/erroring
+                // scalar functions (`ctx.scalars.call(..).ok()` in
+                // `resolve.rs`'s `FnCall` arm), division-by-zero and integer
+                // overflow (`resolve.rs`'s `FilterExprOp::Div`/`Mod`/checked-
+                // arithmetic arms), and arity/type mismatches. This is the
+                // SAME "silent-miss" semantics WHERE/`when`/`for_each` already
+                // rely on (see `resolve.rs`'s `Cond` arm doc, "Silent-miss
+                // inheritance"), not something specific to SELECT projection.
+                // A "strict mode" that surfaces WASM-trap/scalar errors
+                // distinctly from ordinary null-propagation (division by
+                // zero, missing field) would require giving
+                // `resolve_filter_query` a typed `Result` return —a
+                // cross-cutting change to the shared evaluator affecting
+                // WHERE/`when`/`for_each` as much as SELECT, not a
+                // projection-local fix, and out of scope for this task's
+                // single-context slice. Until that redesign lands, SELECT
+                // projection maps `None` to `QueryValue::Null` as its
+                // documented, intentional behavior — division by zero, a
+                // missing field, and an erroring scalar function are all
+                // indistinguishable `Null` in the output today, by design,
+                // not by accident.
                 let val = resolve_filter_query(fv, record, &ctx).unwrap_or(QueryValue::Null);
                 obj.insert(key.clone(), val);
             }

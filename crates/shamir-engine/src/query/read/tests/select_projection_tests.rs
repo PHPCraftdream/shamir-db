@@ -474,3 +474,256 @@ fn project_value_expression_no_longer_rejected() {
         result.err()
     );
 }
+
+// ============================================================================
+// #1069 Defect 1 — `SELECT *` combined with other items must error, not
+// silently drop the extras.
+// ============================================================================
+
+/// Before the fix: `[All, Expression(2+3 AS five)]` silently returned just
+/// the raw record — `is_all` went true because SOME item was `All`, and
+/// `fields`/`funcs` (including the `five` expression) were discarded
+/// wholesale, with no error at all. Must now be a validation error.
+#[test]
+fn select_star_combined_with_expression_is_rejected() {
+    let interner = Arc::new(Interner::new());
+    let select = Select {
+        items: vec![
+            SelectItem::All,
+            SelectItem::Expression {
+                expr: SelectExpr::Add {
+                    left: Box::new(SelectExpr::Literal {
+                        value: SelectExprValue::Int(2),
+                    }),
+                    right: Box::new(SelectExpr::Literal {
+                        value: SelectExprValue::Int(3),
+                    }),
+                },
+                alias: Some("five".to_string()),
+            },
+        ],
+        distinct: false,
+    };
+    let result = SelectProjection::new(&select, &interner, ScalarResolver::builtins_only());
+    match result {
+        Err(shamir_storage::error::DbError::Validation(_)) => {}
+        other => panic!(
+            "SELECT * combined with another item must be rejected with a \
+             Validation error, not silently drop the extra item; got {}",
+            match other {
+                Ok(_) => "Ok(..)".to_string(),
+                Err(e) => format!("Err({e})"),
+            }
+        ),
+    }
+}
+
+/// Same rejection for `[All, Field]` — the defect applied to ANY extra
+/// item alongside `*`, not just `Expression`.
+#[test]
+fn select_star_combined_with_field_is_rejected() {
+    let interner = Arc::new(Interner::new());
+    let select = Select {
+        items: vec![
+            SelectItem::All,
+            SelectItem::Field {
+                path: vec!["name".to_string()],
+                alias: None,
+            },
+        ],
+        distinct: false,
+    };
+    let result = SelectProjection::new(&select, &interner, ScalarResolver::builtins_only());
+    assert!(
+        result.is_err(),
+        "SELECT * combined with a field must be rejected"
+    );
+}
+
+/// Regression guard: `*` alone (the normal, common case) still works.
+#[test]
+fn select_star_alone_still_works() {
+    let interner = Arc::new(Interner::new());
+    let record = make_record(&interner, vec![("x", InnerValue::Int(1))]);
+    let select = Select {
+        items: vec![SelectItem::All],
+        distinct: false,
+    };
+    let proj = SelectProjection::new(&select, &interner, ScalarResolver::builtins_only()).unwrap();
+    let qval = proj.project_value(&record, &interner);
+    match &qval {
+        QueryValue::Map(m) => assert_eq!(m.get("x"), Some(&QueryValue::Int(1))),
+        _ => panic!("expected QueryValue::Map"),
+    }
+}
+
+// ============================================================================
+// #1069 Defect 2 — colliding output column names must error, not
+// silently last-write-wins.
+// ============================================================================
+
+/// Before the fix: two unaliased `SelectItem::Expression` items both
+/// defaulted to the literal key `"expr"`, so the second silently overwrote
+/// the first in the output map. Must now be a validation error.
+#[test]
+fn two_unaliased_expressions_collide_and_are_rejected() {
+    let interner = Arc::new(Interner::new());
+    let one = || SelectExpr::Literal {
+        value: SelectExprValue::Int(1),
+    };
+    let select = Select {
+        items: vec![
+            SelectItem::Expression {
+                expr: one(),
+                alias: None,
+            },
+            SelectItem::Expression {
+                expr: one(),
+                alias: None,
+            },
+        ],
+        distinct: false,
+    };
+    let result = SelectProjection::new(&select, &interner, ScalarResolver::builtins_only());
+    match result {
+        Err(shamir_storage::error::DbError::Validation(_)) => {}
+        other => panic!(
+            "two unaliased expressions colliding on the default 'expr' key must be \
+             rejected with a Validation error, not silently last-write-wins; got {}",
+            match other {
+                Ok(_) => "Ok(..)".to_string(),
+                Err(e) => format!("Err({e})"),
+            }
+        ),
+    }
+}
+
+/// A field and a function colliding on an EXPLICIT alias must also be
+/// rejected — the collision check covers all item kinds, not just the
+/// `"expr"` default.
+#[test]
+fn field_and_function_colliding_on_explicit_alias_is_rejected() {
+    let interner = Arc::new(Interner::new());
+    let select = Select {
+        items: vec![
+            SelectItem::Field {
+                path: vec!["name".to_string()],
+                alias: Some("out".to_string()),
+            },
+            SelectItem::Function {
+                name: "strings/upper".to_string(),
+                args: vec![FilterValue::field_ref("name")],
+                alias: Some("out".to_string()),
+            },
+        ],
+        distinct: false,
+    };
+    let result = SelectProjection::new(&select, &interner, ScalarResolver::builtins_only());
+    assert!(
+        result.is_err(),
+        "a field and a function colliding on the same explicit alias must be rejected"
+    );
+}
+
+/// Regression guard: distinct aliases for two otherwise-identical
+/// expressions still work fine.
+#[test]
+fn two_expressions_with_distinct_aliases_both_survive() {
+    let interner = Arc::new(Interner::new());
+    let record = make_record(&interner, vec![]);
+    let select = Select {
+        items: vec![
+            SelectItem::Expression {
+                expr: SelectExpr::Literal {
+                    value: SelectExprValue::Int(1),
+                },
+                alias: Some("a".to_string()),
+            },
+            SelectItem::Expression {
+                expr: SelectExpr::Literal {
+                    value: SelectExprValue::Int(2),
+                },
+                alias: Some("b".to_string()),
+            },
+        ],
+        distinct: false,
+    };
+    let proj = SelectProjection::new(&select, &interner, ScalarResolver::builtins_only()).unwrap();
+    let qval = proj.project_value(&record, &interner);
+    match &qval {
+        QueryValue::Map(m) => {
+            assert_eq!(m.get("a"), Some(&QueryValue::Int(1)));
+            assert_eq!(m.get("b"), Some(&QueryValue::Int(2)));
+        }
+        _ => panic!("expected QueryValue::Map"),
+    }
+}
+
+// ============================================================================
+// #1069 Defect 3 — documented (not accidental) Null-collapse semantics for
+// evaluation failures in SELECT projection.
+// ============================================================================
+
+/// Division by zero in a SELECT expression must produce `Null` — this is
+/// now a DOCUMENTED contract (see `project_value`'s doc comment on the
+/// `funcs` loop), matching the SAME silent-miss semantics
+/// `resolve_filter_query` already applies uniformly to WHERE/`when`/
+/// `for_each`, not an accident specific to this one operator.
+#[test]
+fn division_by_zero_in_select_expression_produces_documented_null() {
+    let interner = Arc::new(Interner::new());
+    let record = make_record(&interner, vec![]);
+    let select = Select {
+        items: vec![SelectItem::Expression {
+            expr: SelectExpr::Div {
+                left: Box::new(SelectExpr::Literal {
+                    value: SelectExprValue::Int(10),
+                }),
+                right: Box::new(SelectExpr::Literal {
+                    value: SelectExprValue::Int(0),
+                }),
+            },
+            alias: Some("result".to_string()),
+        }],
+        distinct: false,
+    };
+    let proj = SelectProjection::new(&select, &interner, ScalarResolver::builtins_only()).unwrap();
+    let qval = proj.project_value(&record, &interner);
+    match &qval {
+        QueryValue::Map(m) => {
+            assert_eq!(
+                m.get("result"),
+                Some(&QueryValue::Null),
+                "division by zero must produce the documented Null (not an error, not \
+                 a crash, not a raw float Infinity)"
+            );
+        }
+        _ => panic!("expected QueryValue::Map"),
+    }
+}
+
+/// An erroring scalar function call (unknown function name) must ALSO
+/// produce `Null` in the projection output — same collapse point as
+/// division by zero, both routed through `resolve_filter_query`'s uniform
+/// `None`-on-any-failure contract.
+#[test]
+fn unknown_scalar_function_in_select_produces_documented_null() {
+    let interner = Arc::new(Interner::new());
+    let record = make_record(&interner, vec![("n", InnerValue::Int(1))]);
+    let select = Select {
+        items: vec![SelectItem::Function {
+            name: "this_function_does_not_exist".to_string(),
+            args: vec![FilterValue::field_ref("n")],
+            alias: Some("result".to_string()),
+        }],
+        distinct: false,
+    };
+    let proj = SelectProjection::new(&select, &interner, ScalarResolver::builtins_only()).unwrap();
+    let qval = proj.project_value(&record, &interner);
+    match &qval {
+        QueryValue::Map(m) => {
+            assert_eq!(m.get("result"), Some(&QueryValue::Null));
+        }
+        _ => panic!("expected QueryValue::Map"),
+    }
+}
