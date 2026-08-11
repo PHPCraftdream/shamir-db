@@ -151,22 +151,15 @@ async fn run_tree(tbl: &TableManager, query: &ReadQuery) -> QueryResult {
 
     let records_returned = records.len() as u64;
 
-    QueryResult {
+    QueryResult::with_stats(
         records,
-        stats: Some(crate::query::read::QueryStats {
+        crate::query::read::QueryStats {
             index_used: None,
             records_scanned: 0,
             records_returned,
             execution_time_us: 0,
-        }),
-        pagination: None,
-        value: None,
-        explain: None,
-        skipped: false,
-        versions: None,
-        corrupt_records: Vec::new(),
-        ..Default::default()
-    }
+        },
+    )
 }
 
 /// Compare two QueryResults, ignoring stats differences.

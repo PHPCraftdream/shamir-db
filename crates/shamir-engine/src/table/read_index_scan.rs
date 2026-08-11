@@ -176,9 +176,9 @@ impl TableManager {
                                         ctx.scalars.clone(),
                                     )? {
                                         let records_returned = paged.len() as u64;
-                                        return Ok(QueryResult {
-                                            records: paged,
-                                            stats: Some(QueryStats {
+                                        return Ok(QueryResult::with_stats(
+                                            paged,
+                                            QueryStats {
                                                 index_used: Some(format!(
                                                     "sorted_idx_{index_name}_covering"
                                                 )),
@@ -186,15 +186,9 @@ impl TableManager {
                                                 records_returned,
                                                 execution_time_us: start.elapsed().as_micros()
                                                     as u64,
-                                            }),
-                                            pagination,
-                                            value: None,
-                                            explain: None,
-                                            skipped: false,
-                                            versions: None,
-                                            corrupt_records: Vec::new(),
-                                            ..Default::default()
-                                        });
+                                            },
+                                        )
+                                        .with_pagination(pagination));
                                     }
 
                                     let result_qv = exec::apply_select_value(
@@ -211,24 +205,18 @@ impl TableManager {
                                     let paged: Vec<QueryRecord> =
                                         paged_qv.into_iter().map(QueryRecord::Direct).collect();
                                     let records_returned = paged.len() as u64;
-                                    return Ok(QueryResult {
-                                        records: paged,
-                                        stats: Some(QueryStats {
+                                    return Ok(QueryResult::with_stats(
+                                        paged,
+                                        QueryStats {
                                             index_used: Some(format!(
                                                 "sorted_idx_{index_name}_covering"
                                             )),
                                             records_scanned,
                                             records_returned,
                                             execution_time_us: start.elapsed().as_micros() as u64,
-                                        }),
-                                        pagination,
-                                        value: None,
-                                        explain: None,
-                                        skipped: false,
-                                        versions: None,
-                                        corrupt_records: Vec::new(),
-                                        ..Default::default()
-                                    });
+                                        },
+                                    )
+                                    .with_pagination(pagination));
                                 }
                             }
                         }
@@ -306,22 +294,16 @@ impl TableManager {
             let paged: Vec<QueryRecord> = paged_qv.into_iter().map(QueryRecord::Direct).collect();
             let records_returned = paged.len() as u64;
 
-            Ok(QueryResult {
-                records: paged,
-                stats: Some(QueryStats {
+            Ok(QueryResult::with_stats(
+                paged,
+                QueryStats {
                     index_used: Some(format!("sorted_idx_{index_name}")),
                     records_scanned,
                     records_returned,
                     execution_time_us: start.elapsed().as_micros() as u64,
-                }),
-                pagination,
-                value: None,
-                explain: None,
-                skipped: false,
-                versions: None,
-                corrupt_records: Vec::new(),
-                ..Default::default()
-            })
+                },
+            )
+            .with_pagination(pagination))
         } else {
             // ── Plain SELECT branch (S3 — zero-copy RecordView lens) ─────────
             let raw = self.get_many_bytes(&id_vec).await?;
@@ -362,22 +344,17 @@ impl TableManager {
                 &mut corrupt,
             )? {
                 let records_returned = paged.len() as u64;
-                return Ok(QueryResult {
-                    records: paged,
-                    stats: Some(QueryStats {
+                return Ok(QueryResult::with_stats(
+                    paged,
+                    QueryStats {
                         index_used: Some(format!("sorted_idx_{index_name}")),
                         records_scanned,
                         records_returned,
                         execution_time_us: start.elapsed().as_micros() as u64,
-                    }),
-                    pagination,
-                    value: None,
-                    explain: None,
-                    skipped: false,
-                    versions: None,
-                    corrupt_records: corrupt,
-                    ..Default::default()
-                });
+                    },
+                )
+                .with_pagination(pagination)
+                .with_corrupt_records(corrupt));
             }
 
             let mut result_qv = apply_select_value_bytes(
@@ -398,22 +375,22 @@ impl TableManager {
             let paged: Vec<QueryRecord> = paged_qv.into_iter().map(QueryRecord::Direct).collect();
             let records_returned = paged.len() as u64;
 
-            Ok(QueryResult {
-                records: paged,
-                stats: Some(QueryStats {
+            Ok(QueryResult::with_stats(
+                paged,
+                QueryStats {
                     index_used: Some(format!("sorted_idx_{index_name}")),
                     records_scanned,
                     records_returned,
                     execution_time_us: start.elapsed().as_micros() as u64,
-                }),
-                pagination,
-                value: None,
-                explain: None,
-                skipped: false,
-                versions: versions_from_matched(query, self.mvcc_store_ref(), &matched),
-                corrupt_records: corrupt,
-                ..Default::default()
-            })
+                },
+            )
+            .with_pagination(pagination)
+            .with_versions(versions_from_matched(
+                query,
+                self.mvcc_store_ref(),
+                &matched,
+            ))
+            .with_corrupt_records(corrupt))
         }
     }
 
@@ -639,22 +616,17 @@ impl TableManager {
             })
             .collect();
 
-        Ok(QueryResult {
-            records: result,
-            stats: Some(QueryStats {
+        Ok(QueryResult::with_stats(
+            result,
+            QueryStats {
                 index_used: Some(format!("sorted_idx_{index_name}_keyset")),
                 records_scanned,
                 records_returned,
                 execution_time_us: start.elapsed().as_micros() as u64,
-            }),
-            pagination: exec::fast_path_pagination(&query.pagination),
-            value: None,
-            explain: None,
-            skipped: false,
-            versions: None,
-            corrupt_records: corrupt,
-            ..Default::default()
-        })
+            },
+        )
+        .with_pagination(exec::fast_path_pagination(&query.pagination))
+        .with_corrupt_records(corrupt))
     }
     ///
     /// Index scan path: fetch records by index, apply residual filter + pipeline.
@@ -768,22 +740,18 @@ impl TableManager {
             let records: Vec<QueryRecord> =
                 records_qv.into_iter().map(QueryRecord::Direct).collect();
 
-            Ok(Some(QueryResult {
-                records,
-                stats: Some(QueryStats {
-                    index_used: Some(index_name_str),
-                    records_scanned,
-                    records_returned,
-                    execution_time_us: elapsed.as_micros() as u64,
-                }),
-                pagination,
-                value: None,
-                explain: None,
-                skipped: false,
-                versions: None,
-                corrupt_records: Vec::new(),
-                ..Default::default()
-            }))
+            Ok(Some(
+                QueryResult::with_stats(
+                    records,
+                    QueryStats {
+                        index_used: Some(index_name_str),
+                        records_scanned,
+                        records_returned,
+                        execution_time_us: elapsed.as_micros() as u64,
+                    },
+                )
+                .with_pagination(pagination),
+            ))
         } else {
             // ── Plain SELECT branch (S3 — zero-copy RecordView lens) ─────────
             let raw = self.get_many_bytes(&id_vec).await?;
@@ -825,22 +793,19 @@ impl TableManager {
             )? {
                 let elapsed = start.elapsed();
                 let records_returned = paged.len() as u64;
-                return Ok(Some(QueryResult {
-                    records: paged,
-                    stats: Some(QueryStats {
-                        index_used: Some(index_name_str),
-                        records_scanned,
-                        records_returned,
-                        execution_time_us: elapsed.as_micros() as u64,
-                    }),
-                    pagination,
-                    value: None,
-                    explain: None,
-                    skipped: false,
-                    versions: None,
-                    corrupt_records: corrupt,
-                    ..Default::default()
-                }));
+                return Ok(Some(
+                    QueryResult::with_stats(
+                        paged,
+                        QueryStats {
+                            index_used: Some(index_name_str),
+                            records_scanned,
+                            records_returned,
+                            execution_time_us: elapsed.as_micros() as u64,
+                        },
+                    )
+                    .with_pagination(pagination)
+                    .with_corrupt_records(corrupt),
+                ));
             }
 
             let mut result_qv = apply_select_value_bytes(
@@ -867,22 +832,24 @@ impl TableManager {
             let records: Vec<QueryRecord> =
                 records_qv.into_iter().map(QueryRecord::Direct).collect();
 
-            Ok(Some(QueryResult {
-                records,
-                stats: Some(QueryStats {
-                    index_used: Some(index_name_str),
-                    records_scanned,
-                    records_returned,
-                    execution_time_us: elapsed.as_micros() as u64,
-                }),
-                pagination,
-                value: None,
-                explain: None,
-                skipped: false,
-                versions: versions_from_matched(query, self.mvcc_store_ref(), &matched),
-                corrupt_records: corrupt,
-                ..Default::default()
-            }))
+            Ok(Some(
+                QueryResult::with_stats(
+                    records,
+                    QueryStats {
+                        index_used: Some(index_name_str),
+                        records_scanned,
+                        records_returned,
+                        execution_time_us: elapsed.as_micros() as u64,
+                    },
+                )
+                .with_pagination(pagination)
+                .with_versions(versions_from_matched(
+                    query,
+                    self.mvcc_store_ref(),
+                    &matched,
+                ))
+                .with_corrupt_records(corrupt),
+            ))
         }
     }
 }

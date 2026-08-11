@@ -63,17 +63,7 @@ fn results_map(
 
 /// Minimal `QueryResult` (only `records`, everything else default/absent).
 fn qr(records: Vec<QueryRecord>) -> QueryResult {
-    QueryResult {
-        records,
-        stats: None,
-        pagination: None,
-        value: None,
-        explain: None,
-        skipped: false,
-        versions: None,
-        corrupt_records: vec![],
-        ..Default::default()
-    }
+    QueryResult::records_only(records)
 }
 
 // ── edge cases: empty map, multiple aliases ─────────────────────────────────
@@ -259,17 +249,7 @@ fn optional_fields_present() {
 fn optional_fields_absent() {
     // All Option fields None — confirms `skip_serializing_if = "Option::is_none"`
     // OMITS them (a None field must NOT appear as a null-valued key).
-    let res = QueryResult {
-        records: vec![QueryRecord::Direct(mpack!(1))],
-        stats: None,
-        pagination: None,
-        value: None,
-        explain: None,
-        skipped: false,
-        versions: None,
-        corrupt_records: vec![],
-        ..Default::default()
-    };
+    let res = QueryResult::records_only(vec![QueryRecord::Direct(mpack!(1))]);
     let m = results_map([("bare", res)]);
     assert_parity("all optionals absent", &m);
 
@@ -294,17 +274,7 @@ fn skipped_true_emitted() {
     // skip_serializing_if = "std::ops::Not::not": skipped=false is OMITTED,
     // skipped=true is EMITTED. Confirms the new path matches, not just
     // "represents bool correctly".
-    let res_false = QueryResult {
-        records: Vec::new(),
-        stats: None,
-        pagination: None,
-        value: None,
-        explain: None,
-        skipped: false,
-        versions: None,
-        corrupt_records: vec![],
-        ..Default::default()
-    };
+    let res_false = QueryResult::records_only(Vec::new());
     let res_true = QueryResult {
         records: Vec::new(),
         stats: None,
@@ -313,8 +283,9 @@ fn skipped_true_emitted() {
         explain: None,
         skipped: true,
         versions: None,
-        corrupt_records: vec![],
-        ..Default::default()
+        corrupt_records: Vec::new(),
+        op_id: None,
+        ddl_status: None,
     };
     let m = results_map([("a", res_false), ("b", res_true)]);
     assert_parity("skipped true/false", &m);

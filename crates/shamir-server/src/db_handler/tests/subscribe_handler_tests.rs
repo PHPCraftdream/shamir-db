@@ -91,17 +91,7 @@ async fn activate_subscriptions_injects_sub_id_into_response() {
     initial_value.insert("sources_count".to_string(), QueryValue::Int(1));
     response.results.insert(
         "my_sub".to_string(),
-        QueryResult {
-            records: vec![],
-            stats: None,
-            pagination: None,
-            value: Some(QueryValue::Map(initial_value)),
-            explain: None,
-            skipped: false,
-            versions: None,
-            corrupt_records: vec![],
-            ..Default::default()
-        },
+        QueryResult::with_value(QueryValue::Map(initial_value)),
     );
 
     super::super::subscribe_handler::activate_subscriptions(
@@ -204,17 +194,7 @@ async fn activate_subscriptions_enforces_per_connection_cap() {
         v.insert("subscription_grant".to_string(), QueryValue::Bool(true));
         response.results.insert(
             alias.to_string(),
-            QueryResult {
-                records: vec![],
-                stats: None,
-                pagination: None,
-                value: Some(QueryValue::Map(v)),
-                explain: None,
-                skipped: false,
-                versions: None,
-                corrupt_records: vec![],
-                ..Default::default()
-            },
+            QueryResult::with_value(QueryValue::Map(v)),
         );
     }
 
@@ -323,17 +303,7 @@ async fn bridge_self_exit_releases_registry_slot() {
     v.insert("subscription_grant".to_string(), QueryValue::Bool(true));
     response.results.insert(
         "self_exit".to_string(),
-        QueryResult {
-            records: vec![],
-            stats: None,
-            pagination: None,
-            value: Some(QueryValue::Map(v)),
-            explain: None,
-            skipped: false,
-            versions: None,
-            corrupt_records: vec![],
-            ..Default::default()
-        },
+        QueryResult::with_value(QueryValue::Map(v)),
     );
 
     super::super::subscribe_handler::activate_subscriptions(

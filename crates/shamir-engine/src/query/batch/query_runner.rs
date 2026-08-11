@@ -77,17 +77,7 @@ pub(super) fn build_resolved_refs(
 /// `stats: Some(..)`) and from "filtered by `return_only`" (alias absent
 /// from `results` entirely, unrelated to this flag).
 pub(super) fn skipped_query_result() -> QueryResult {
-    QueryResult {
-        records: Vec::new(),
-        stats: None,
-        pagination: None,
-        value: None,
-        explain: None,
-        skipped: true,
-        versions: None,
-        corrupt_records: Vec::new(),
-        ..Default::default()
-    }
+    QueryResult::skipped()
 }
 
 /// True if `alias`'s dependencies (per `provenance`) contain at least one
@@ -745,7 +735,8 @@ impl<'a> QueryRunner<'a> {
                 skipped: false,
                 versions: None,
                 corrupt_records: Vec::new(),
-                ..Default::default()
+                op_id: None,
+                ddl_status: None,
             });
         }
 
@@ -952,17 +943,7 @@ impl<'a> QueryRunner<'a> {
                 iterations.push(value);
             }
 
-            return Ok(QueryResult {
-                records: Vec::new(),
-                stats: None,
-                pagination: None,
-                value: Some(QueryValue::List(iterations)),
-                explain: None,
-                skipped: false,
-                versions: None,
-                corrupt_records: Vec::new(),
-                ..Default::default()
-            });
+            return Ok(QueryResult::with_value(QueryValue::List(iterations)));
         }
 
         // Admin ops — delegate to AdminExecutor (no tx).
@@ -1048,17 +1029,7 @@ impl<'a> QueryRunner<'a> {
                 "sources_count".to_string(),
                 QueryValue::Int(op.subscribe.len() as i64),
             );
-            return Ok(QueryResult {
-                records: Vec::new(),
-                stats: None,
-                pagination: None,
-                value: Some(QueryValue::Map(grant_map)),
-                explain: None,
-                skipped: false,
-                versions: None,
-                corrupt_records: Vec::new(),
-                ..Default::default()
-            });
+            return Ok(QueryResult::with_value(QueryValue::Map(grant_map)));
         }
 
         // Unsubscribe — return a grant marker; real deactivation is server-side.
@@ -1066,17 +1037,7 @@ impl<'a> QueryRunner<'a> {
             let mut grant_map = new_map();
             grant_map.insert("unsubscribe_grant".to_string(), QueryValue::Bool(true));
             grant_map.insert("sub_id".to_string(), QueryValue::Int(op.unsubscribe as i64));
-            return Ok(QueryResult {
-                records: Vec::new(),
-                stats: None,
-                pagination: None,
-                value: Some(QueryValue::Map(grant_map)),
-                explain: None,
-                skipped: false,
-                versions: None,
-                corrupt_records: Vec::new(),
-                ..Default::default()
-            });
+            return Ok(QueryResult::with_value(QueryValue::Map(grant_map)));
         }
 
         let table_ref = entry.op.table_ref().unwrap();
@@ -1838,22 +1799,15 @@ pub(super) fn write_result_to_query_result_with_encoding(
         } else {
             wr.records.into_iter().map(QueryRecord::from).collect()
         };
-    QueryResult {
+    QueryResult::with_stats(
         records,
-        stats: Some(QueryStats {
+        QueryStats {
             index_used: None,
             records_scanned: wr.affected,
             records_returned: wr.affected,
             execution_time_us: wr.execution_time_us,
-        }),
-        pagination: None,
-        value: None,
-        explain: None,
-        skipped: false,
-        versions: None,
-        corrupt_records: Vec::new(),
-        ..Default::default()
-    }
+        },
+    )
 }
 
 /// Recursively walks a filter tree and returns `Some("variant_name")` for the

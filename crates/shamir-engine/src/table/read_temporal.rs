@@ -283,22 +283,17 @@ impl TableManager {
                 exec::topk_pagination(&query.pagination, query.count_total, topk_total);
             let records_returned = qvs.len() as u64;
             let records: Vec<QueryRecord> = qvs.into_iter().map(QueryRecord::Direct).collect();
-            return Ok(QueryResult {
+            return Ok(QueryResult::with_stats(
                 records,
-                stats: Some(QueryStats {
+                QueryStats {
                     index_used: Some("temporal_asof".to_string()),
                     records_scanned,
                     records_returned,
                     execution_time_us: start.elapsed().as_micros() as u64,
-                }),
-                pagination,
-                value: None,
-                explain: None,
-                skipped: false,
-                versions: None,
-                corrupt_records: corrupt,
-                ..Default::default()
-            });
+                },
+            )
+            .with_pagination(pagination)
+            .with_corrupt_records(corrupt));
         }
 
         // Pipeline tail — same helpers as the collecting / index-scan paths.
@@ -315,22 +310,17 @@ impl TableManager {
             &mut corrupt,
         )? {
             let records_returned = paged.len() as u64;
-            return Ok(QueryResult {
-                records: paged,
-                stats: Some(QueryStats {
+            return Ok(QueryResult::with_stats(
+                paged,
+                QueryStats {
                     index_used: Some("temporal_asof".to_string()),
                     records_scanned,
                     records_returned,
                     execution_time_us: start.elapsed().as_micros() as u64,
-                }),
-                pagination,
-                value: None,
-                explain: None,
-                skipped: false,
-                versions: None,
-                corrupt_records: corrupt,
-                ..Default::default()
-            });
+                },
+            )
+            .with_pagination(pagination)
+            .with_corrupt_records(corrupt));
         }
 
         let mut result_qv = if has_group_by {
@@ -363,22 +353,17 @@ impl TableManager {
 
         let records_returned = records_qv.len() as u64;
         let records: Vec<QueryRecord> = records_qv.into_iter().map(QueryRecord::Direct).collect();
-        Ok(QueryResult {
+        Ok(QueryResult::with_stats(
             records,
-            stats: Some(QueryStats {
+            QueryStats {
                 index_used: Some("temporal_asof".to_string()),
                 records_scanned,
                 records_returned,
                 execution_time_us: start.elapsed().as_micros() as u64,
-            }),
-            pagination,
-            value: None,
-            explain: None,
-            skipped: false,
-            versions: None,
-            corrupt_records: corrupt,
-            ..Default::default()
-        })
+            },
+        )
+        .with_pagination(pagination)
+        .with_corrupt_records(corrupt))
     }
 
     /// T4-history: the per-record version timeline.
@@ -571,21 +556,15 @@ impl TableManager {
         }
 
         let records_returned = out_records.len() as u64;
-        Ok(QueryResult {
-            records: out_records,
-            stats: Some(QueryStats {
+        Ok(QueryResult::with_stats(
+            out_records,
+            QueryStats {
                 index_used: Some("temporal_history".to_string()),
                 records_scanned: matched_ids.len() as u64,
                 records_returned,
                 execution_time_us: start.elapsed().as_micros() as u64,
-            }),
-            pagination: None,
-            value: None,
-            explain: None,
-            skipped: false,
-            versions: None,
-            corrupt_records: corrupt,
-            ..Default::default()
-        })
+            },
+        )
+        .with_corrupt_records(corrupt))
     }
 }

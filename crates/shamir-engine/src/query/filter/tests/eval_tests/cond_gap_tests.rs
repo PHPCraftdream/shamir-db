@@ -225,17 +225,9 @@ fn test_cond_then_branch_is_query_ref() {
     let mut refs: TMap<String, QueryResult> = new_map();
     refs.insert(
         "users".to_string(),
-        QueryResult {
-            records: vec![QueryRecord::Direct(mpack!({"id": 42, "name": "Alice"}))],
-            stats: None,
-            pagination: None,
-            value: None,
-            explain: None,
-            skipped: false,
-            versions: None,
-            corrupt_records: vec![],
-            ..Default::default()
-        },
+        QueryResult::records_only(vec![QueryRecord::Direct(
+            mpack!({"id": 42, "name": "Alice"}),
+        )]),
     );
     let ctx = FilterContext::new(&interner, &refs);
 

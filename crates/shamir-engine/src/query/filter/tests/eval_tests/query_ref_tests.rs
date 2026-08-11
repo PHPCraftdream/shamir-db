@@ -23,17 +23,9 @@ fn test_query_ref_eq() {
     let mut refs: TMap<String, QueryResult> = new_map();
     refs.insert(
         "users".to_string(),
-        QueryResult {
-            records: vec![QueryRecord::Direct(mpack!({"id": 42, "name": "Alice"}))],
-            stats: None,
-            pagination: None,
-            value: None,
-            explain: None,
-            skipped: false,
-            versions: None,
-            corrupt_records: vec![],
-            ..Default::default()
-        },
+        QueryResult::records_only(vec![QueryRecord::Direct(
+            mpack!({"id": 42, "name": "Alice"}),
+        )]),
     );
 
     let ctx = FilterContext::new(&interner, &refs);
@@ -61,17 +53,7 @@ fn test_query_ref_no_match() {
     let mut refs: TMap<String, QueryResult> = new_map();
     refs.insert(
         "users".to_string(),
-        QueryResult {
-            records: vec![QueryRecord::Direct(mpack!({"id": 42}))],
-            stats: None,
-            pagination: None,
-            value: None,
-            explain: None,
-            skipped: false,
-            versions: None,
-            corrupt_records: vec![],
-            ..Default::default()
-        },
+        QueryResult::records_only(vec![QueryRecord::Direct(mpack!({"id": 42}))]),
     );
 
     let ctx = FilterContext::new(&interner, &refs);

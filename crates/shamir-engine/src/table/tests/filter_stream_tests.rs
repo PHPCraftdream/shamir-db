@@ -362,17 +362,7 @@ async fn test_filter_stream_with_query_ref() {
     let mut refs = new_map();
     refs.insert(
         "threshold".to_string(),
-        QueryResult {
-            records: vec![QueryRecord::Direct(mpack!({"min_score": 70}))],
-            stats: None,
-            pagination: None,
-            value: None,
-            explain: None,
-            skipped: false,
-            versions: None,
-            corrupt_records: vec![],
-            ..Default::default()
-        },
+        QueryResult::records_only(vec![QueryRecord::Direct(mpack!({"min_score": 70}))]),
     );
 
     let interner = table.interner().get().await.unwrap();
@@ -449,31 +439,11 @@ async fn test_filter_stream_query_ref_in_and() {
     let mut refs = new_map();
     refs.insert(
         "config".to_string(),
-        QueryResult {
-            records: vec![QueryRecord::Direct(mpack!({"min_age": 25}))],
-            stats: None,
-            pagination: None,
-            value: None,
-            explain: None,
-            skipped: false,
-            versions: None,
-            corrupt_records: vec![],
-            ..Default::default()
-        },
+        QueryResult::records_only(vec![QueryRecord::Direct(mpack!({"min_age": 25}))]),
     );
     refs.insert(
         "scoring".to_string(),
-        QueryResult {
-            records: vec![QueryRecord::Direct(mpack!({"cutoff": 60}))],
-            stats: None,
-            pagination: None,
-            value: None,
-            explain: None,
-            skipped: false,
-            versions: None,
-            corrupt_records: vec![],
-            ..Default::default()
-        },
+        QueryResult::records_only(vec![QueryRecord::Direct(mpack!({"cutoff": 60}))]),
     );
 
     let interner = table.interner().get().await.unwrap();
@@ -507,17 +477,7 @@ async fn test_filter_stream_query_ref_in_or_with_literal() {
     let mut refs = new_map();
     refs.insert(
         "vip_list".to_string(),
-        QueryResult {
-            records: vec![QueryRecord::Direct(mpack!({"score_threshold": 90}))],
-            stats: None,
-            pagination: None,
-            value: None,
-            explain: None,
-            skipped: false,
-            versions: None,
-            corrupt_records: vec![],
-            ..Default::default()
-        },
+        QueryResult::records_only(vec![QueryRecord::Direct(mpack!({"score_threshold": 90}))]),
     );
 
     let interner = table.interner().get().await.unwrap();
@@ -550,17 +510,7 @@ async fn test_filter_stream_not_query_ref() {
     let mut refs = new_map();
     refs.insert(
         "limits".to_string(),
-        QueryResult {
-            records: vec![QueryRecord::Direct(mpack!({"max_age": 30}))],
-            stats: None,
-            pagination: None,
-            value: None,
-            explain: None,
-            skipped: false,
-            versions: None,
-            corrupt_records: vec![],
-            ..Default::default()
-        },
+        QueryResult::records_only(vec![QueryRecord::Direct(mpack!({"max_age": 30}))]),
     );
 
     let interner = table.interner().get().await.unwrap();
@@ -591,31 +541,11 @@ async fn test_filter_stream_deep_nesting_with_multiple_query_refs() {
     let mut refs = new_map();
     refs.insert(
         "age_range".to_string(),
-        QueryResult {
-            records: vec![QueryRecord::Direct(mpack!({"min": 24, "max": 31}))],
-            stats: None,
-            pagination: None,
-            value: None,
-            explain: None,
-            skipped: false,
-            versions: None,
-            corrupt_records: vec![],
-            ..Default::default()
-        },
+        QueryResult::records_only(vec![QueryRecord::Direct(mpack!({"min": 24, "max": 31}))]),
     );
     refs.insert(
         "status_config".to_string(),
-        QueryResult {
-            records: vec![QueryRecord::Direct(mpack!({"allowed": "active"}))],
-            stats: None,
-            pagination: None,
-            value: None,
-            explain: None,
-            skipped: false,
-            versions: None,
-            corrupt_records: vec![],
-            ..Default::default()
-        },
+        QueryResult::records_only(vec![QueryRecord::Direct(mpack!({"allowed": "active"}))]),
     );
 
     let interner = table.interner().get().await.unwrap();
@@ -700,17 +630,7 @@ async fn test_filter_stream_mixed_query_ref_field_ref_literal() {
     let mut refs = new_map();
     refs.insert(
         "bonus".to_string(),
-        QueryResult {
-            records: vec![QueryRecord::Direct(mpack!({"threshold": 50}))],
-            stats: None,
-            pagination: None,
-            value: None,
-            explain: None,
-            skipped: false,
-            versions: None,
-            corrupt_records: vec![],
-            ..Default::default()
-        },
+        QueryResult::records_only(vec![QueryRecord::Direct(mpack!({"threshold": 50}))]),
     );
 
     let interner = table.interner().get().await.unwrap();
@@ -804,20 +724,10 @@ async fn test_filter_stream_in_query_ref_column() {
     let mut refs = new_map();
     refs.insert(
         "whitelist".to_string(),
-        QueryResult {
-            records: vec![
-                QueryRecord::Direct(mpack!({"status": "active"})),
-                QueryRecord::Direct(mpack!({"status": "inactive"})),
-            ],
-            stats: None,
-            pagination: None,
-            value: None,
-            explain: None,
-            skipped: false,
-            versions: None,
-            corrupt_records: vec![],
-            ..Default::default()
-        },
+        QueryResult::records_only(vec![
+            QueryRecord::Direct(mpack!({"status": "active"})),
+            QueryRecord::Direct(mpack!({"status": "inactive"})),
+        ]),
     );
 
     let interner = table.interner().get().await.unwrap();
@@ -848,20 +758,10 @@ async fn test_filter_stream_not_in_query_ref_column() {
     let mut refs = new_map();
     refs.insert(
         "exclude_scores".to_string(),
-        QueryResult {
-            records: vec![
-                QueryRecord::Direct(mpack!({"val": 45})),
-                QueryRecord::Direct(mpack!({"val": 70})),
-            ],
-            stats: None,
-            pagination: None,
-            value: None,
-            explain: None,
-            skipped: false,
-            versions: None,
-            corrupt_records: vec![],
-            ..Default::default()
-        },
+        QueryResult::records_only(vec![
+            QueryRecord::Direct(mpack!({"val": 45})),
+            QueryRecord::Direct(mpack!({"val": 70})),
+        ]),
     );
 
     let interner = table.interner().get().await.unwrap();
@@ -897,34 +797,14 @@ async fn test_filter_stream_in_query_ref_nested_and() {
     let mut refs = new_map();
     refs.insert(
         "allowed_statuses".to_string(),
-        QueryResult {
-            records: vec![
-                QueryRecord::Direct(mpack!({"s": "active"})),
-                QueryRecord::Direct(mpack!({"s": "inactive"})),
-            ],
-            stats: None,
-            pagination: None,
-            value: None,
-            explain: None,
-            skipped: false,
-            versions: None,
-            corrupt_records: vec![],
-            ..Default::default()
-        },
+        QueryResult::records_only(vec![
+            QueryRecord::Direct(mpack!({"s": "active"})),
+            QueryRecord::Direct(mpack!({"s": "inactive"})),
+        ]),
     );
     refs.insert(
         "min_scores".to_string(),
-        QueryResult {
-            records: vec![QueryRecord::Direct(mpack!({"threshold": 60}))],
-            stats: None,
-            pagination: None,
-            value: None,
-            explain: None,
-            skipped: false,
-            versions: None,
-            corrupt_records: vec![],
-            ..Default::default()
-        },
+        QueryResult::records_only(vec![QueryRecord::Direct(mpack!({"threshold": 60}))]),
     );
 
     let interner = table.interner().get().await.unwrap();
@@ -961,20 +841,10 @@ async fn test_filter_stream_not_in_query_ref_with_or() {
     let mut refs = new_map();
     refs.insert(
         "blacklist".to_string(),
-        QueryResult {
-            records: vec![
-                QueryRecord::Direct(mpack!({"n": "Dave"})),
-                QueryRecord::Direct(mpack!({"n": "Eve"})),
-            ],
-            stats: None,
-            pagination: None,
-            value: None,
-            explain: None,
-            skipped: false,
-            versions: None,
-            corrupt_records: vec![],
-            ..Default::default()
-        },
+        QueryResult::records_only(vec![
+            QueryRecord::Direct(mpack!({"n": "Dave"})),
+            QueryRecord::Direct(mpack!({"n": "Eve"})),
+        ]),
     );
 
     let interner = table.interner().get().await.unwrap();

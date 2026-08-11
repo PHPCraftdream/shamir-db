@@ -367,17 +367,7 @@ fn cursor_id_serializes_as_bare_integer_not_wrapped_object() {
 fn cursor_page_response_roundtrip_and_tag() {
     let resp = DbResponse::CursorPage {
         cursor_id: CursorId(5),
-        page: crate::read::QueryResult {
-            records: vec![],
-            stats: None,
-            pagination: None,
-            value: None,
-            explain: None,
-            skipped: false,
-            versions: None,
-            corrupt_records: vec![],
-            ..Default::default()
-        },
+        page: crate::read::QueryResult::records_only(vec![]),
         has_more: true,
     };
     let v = to_qv(&resp);

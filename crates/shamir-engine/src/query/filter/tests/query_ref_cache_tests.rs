@@ -41,17 +41,7 @@ use crate::query::read::{QueryRecord, QueryResult, Select, SelectItem};
 /// A minimal `QueryResult` carrying a Call-result `value` (the value-first
 /// path — `resolve_query_ref_value` applies `path` to `value`, not `records`).
 fn call_result(value: QueryValue) -> QueryResult {
-    QueryResult {
-        records: vec![],
-        stats: None,
-        pagination: None,
-        value: Some(value),
-        explain: None,
-        skipped: false,
-        versions: None,
-        corrupt_records: vec![],
-        ..Default::default()
-    }
+    QueryResult::with_value(value)
 }
 
 /// A minimal `QueryResult` carrying one `Direct` record (the Read-records
@@ -59,17 +49,7 @@ fn call_result(value: QueryValue) -> QueryResult {
 fn read_result(field: &str, val: QueryValue) -> QueryResult {
     let mut rec = new_map();
     rec.insert(field.to_string(), val);
-    QueryResult {
-        records: vec![QueryRecord::Direct(QueryValue::Map(rec))],
-        stats: None,
-        pagination: None,
-        value: None,
-        explain: None,
-        skipped: false,
-        versions: None,
-        corrupt_records: vec![],
-        ..Default::default()
-    }
+    QueryResult::records_only(vec![QueryRecord::Direct(QueryValue::Map(rec))])
 }
 
 /// Build a `resolved_refs` map with a single alias `key` → `qr`.

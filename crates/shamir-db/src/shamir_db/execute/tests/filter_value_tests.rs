@@ -60,17 +60,7 @@ fn query_ref_resolves_value_from_resolved_refs() {
     let mut refs: TMap<String, QueryResult> = TMap::default();
     refs.insert(
         "q1".to_string(),
-        QueryResult {
-            records: vec![],
-            stats: None,
-            pagination: None,
-            value: Some(QueryValue::Int(42)),
-            explain: None,
-            skipped: false,
-            versions: None,
-            corrupt_records: vec![],
-            ..Default::default()
-        },
+        QueryResult::with_value(QueryValue::Int(42)),
     );
 
     let qv = filter_value_to_query_value(&FilterValue::query_ref("q1"), &refs);

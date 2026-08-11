@@ -87,21 +87,11 @@ fn test_in_query_ref_column() {
     let mut refs: TMap<String, QueryResult> = new_map();
     refs.insert(
         "allowed_users".to_string(),
-        QueryResult {
-            records: vec![
-                QueryRecord::Direct(mpack!({"id": 1})),
-                QueryRecord::Direct(mpack!({"id": 2})),
-                QueryRecord::Direct(mpack!({"id": 5})),
-            ],
-            stats: None,
-            pagination: None,
-            value: None,
-            explain: None,
-            skipped: false,
-            versions: None,
-            corrupt_records: vec![],
-            ..Default::default()
-        },
+        QueryResult::records_only(vec![
+            QueryRecord::Direct(mpack!({"id": 1})),
+            QueryRecord::Direct(mpack!({"id": 2})),
+            QueryRecord::Direct(mpack!({"id": 5})),
+        ]),
     );
 
     let ctx = FilterContext::new(&interner, &refs);
@@ -130,20 +120,10 @@ fn test_in_query_ref_column_no_match() {
     let mut refs: TMap<String, QueryResult> = new_map();
     refs.insert(
         "allowed_users".to_string(),
-        QueryResult {
-            records: vec![
-                QueryRecord::Direct(mpack!({"id": 1})),
-                QueryRecord::Direct(mpack!({"id": 2})),
-            ],
-            stats: None,
-            pagination: None,
-            value: None,
-            explain: None,
-            skipped: false,
-            versions: None,
-            corrupt_records: vec![],
-            ..Default::default()
-        },
+        QueryResult::records_only(vec![
+            QueryRecord::Direct(mpack!({"id": 1})),
+            QueryRecord::Direct(mpack!({"id": 2})),
+        ]),
     );
 
     let ctx = FilterContext::new(&interner, &refs);
@@ -171,20 +151,10 @@ fn test_not_in_query_ref_column() {
     let mut refs: TMap<String, QueryResult> = new_map();
     refs.insert(
         "blocked".to_string(),
-        QueryResult {
-            records: vec![
-                QueryRecord::Direct(mpack!({"id": 1})),
-                QueryRecord::Direct(mpack!({"id": 2})),
-            ],
-            stats: None,
-            pagination: None,
-            value: None,
-            explain: None,
-            skipped: false,
-            versions: None,
-            corrupt_records: vec![],
-            ..Default::default()
-        },
+        QueryResult::records_only(vec![
+            QueryRecord::Direct(mpack!({"id": 1})),
+            QueryRecord::Direct(mpack!({"id": 2})),
+        ]),
     );
 
     let ctx = FilterContext::new(&interner, &refs);

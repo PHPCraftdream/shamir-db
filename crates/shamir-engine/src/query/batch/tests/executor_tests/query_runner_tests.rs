@@ -276,20 +276,7 @@ async fn insert_returning_id_vs_name_encoding_parity() {
 #[test]
 fn build_resolved_refs_excludes_explicit_only_edge() {
     let mut all_results: shamir_types::types::common::TMap<String, QueryResult> = new_map();
-    all_results.insert(
-        "a".to_string(),
-        QueryResult {
-            records: vec![],
-            stats: None,
-            pagination: None,
-            value: None,
-            explain: None,
-            skipped: false,
-            versions: None,
-            corrupt_records: vec![],
-            ..Default::default()
-        },
-    );
+    all_results.insert("a".to_string(), QueryResult::records_only(vec![]));
 
     let mut provenance = new_map();
     provenance.insert("a".to_string(), EdgeKind::Explicit);
@@ -305,20 +292,7 @@ fn build_resolved_refs_excludes_explicit_only_edge() {
 #[test]
 fn build_resolved_refs_includes_dataflow_edge() {
     let mut all_results: shamir_types::types::common::TMap<String, QueryResult> = new_map();
-    all_results.insert(
-        "a".to_string(),
-        QueryResult {
-            records: vec![],
-            stats: None,
-            pagination: None,
-            value: None,
-            explain: None,
-            skipped: false,
-            versions: None,
-            corrupt_records: vec![],
-            ..Default::default()
-        },
-    );
+    all_results.insert("a".to_string(), QueryResult::records_only(vec![]));
 
     let mut provenance = new_map();
     provenance.insert("a".to_string(), EdgeKind::DataFlow);
@@ -336,20 +310,7 @@ fn build_resolved_refs_includes_dataflow_edge() {
 #[test]
 fn build_resolved_refs_includes_both_edge() {
     let mut all_results: shamir_types::types::common::TMap<String, QueryResult> = new_map();
-    all_results.insert(
-        "a".to_string(),
-        QueryResult {
-            records: vec![],
-            stats: None,
-            pagination: None,
-            value: None,
-            explain: None,
-            skipped: false,
-            versions: None,
-            corrupt_records: vec![],
-            ..Default::default()
-        },
-    );
+    all_results.insert("a".to_string(), QueryResult::records_only(vec![]));
 
     let mut provenance = new_map();
     provenance.insert("a".to_string(), EdgeKind::Both);

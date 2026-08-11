@@ -305,17 +305,7 @@ impl TableManager {
         // ── EXPLAIN dry-run: planner only, no materialisation ──────────
         if query.explain {
             let plan = self.build_explain_plan(query, interner);
-            return Ok(QueryResult {
-                records: Vec::new(),
-                stats: None,
-                pagination: None,
-                value: None,
-                explain: Some(plan),
-                skipped: false,
-                versions: None,
-                corrupt_records: Vec::new(),
-                ..Default::default()
-            });
+            return Ok(QueryResult::with_explain(plan));
         }
 
         // F-7 (#797): `with_version` asks for a per-record version array that
@@ -404,11 +394,11 @@ impl TableManager {
                                     .to_string();
                                 let mut obj = new_map_wc(1);
                                 obj.insert(key, qv_val);
-                                return Ok(QueryResult {
-                                    records: vec![crate::query::read::QueryRecord::Direct(
-                                        QueryValue::Map(obj),
-                                    )],
-                                    stats: Some(QueryStats {
+                                return Ok(QueryResult::with_stats(
+                                    vec![crate::query::read::QueryRecord::Direct(QueryValue::Map(
+                                        obj,
+                                    ))],
+                                    QueryStats {
                                         index_used: Some(format!(
                                             "sorted_idx_{}_min",
                                             def.name_interned
@@ -416,19 +406,13 @@ impl TableManager {
                                         records_scanned: 1,
                                         records_returned: 1,
                                         execution_time_us: start.elapsed().as_micros() as u64,
-                                    }),
-                                    pagination: None,
-                                    value: None,
-                                    explain: None,
-                                    skipped: false,
-                                    versions: collect_versions(
-                                        query.with_version,
-                                        self.mvcc_store_ref(),
-                                        std::slice::from_ref(&id),
-                                    ),
-                                    corrupt_records: Vec::new(),
-                                    ..Default::default()
-                                });
+                                    },
+                                )
+                                .with_versions(collect_versions(
+                                    query.with_version,
+                                    self.mvcc_store_ref(),
+                                    std::slice::from_ref(&id),
+                                )));
                             }
                             Ok(None) => {
                                 // Index genuinely has no entries — fall through to full scan.
@@ -443,24 +427,17 @@ impl TableManager {
                 let key = alias.as_deref().unwrap_or("count").to_string();
                 let mut obj = new_map_wc(1);
                 obj.insert(key, QueryValue::Int(count as i64));
-                return Ok(QueryResult {
-                    records: vec![crate::query::read::QueryRecord::Direct(QueryValue::Map(
+                return Ok(QueryResult::with_stats(
+                    vec![crate::query::read::QueryRecord::Direct(QueryValue::Map(
                         obj,
                     ))],
-                    stats: Some(QueryStats {
+                    QueryStats {
                         index_used: Some("__record_counter__".to_string()),
                         records_scanned: 0,
                         records_returned: 1,
                         execution_time_us: start.elapsed().as_micros() as u64,
-                    }),
-                    pagination: None,
-                    value: None,
-                    explain: None,
-                    skipped: false,
-                    versions: None,
-                    corrupt_records: Vec::new(),
-                    ..Default::default()
-                });
+                    },
+                ));
             }
         }
 
@@ -656,24 +633,17 @@ impl TableManager {
                             let key = alias.as_deref().unwrap_or("count").to_string();
                             let mut obj = new_map_wc(1);
                             obj.insert(key, QueryValue::Int(total as i64));
-                            return Ok(QueryResult {
-                                records: vec![crate::query::read::QueryRecord::Direct(
-                                    QueryValue::Map(obj),
-                                )],
-                                stats: Some(QueryStats {
+                            return Ok(QueryResult::with_stats(
+                                vec![crate::query::read::QueryRecord::Direct(QueryValue::Map(
+                                    obj,
+                                ))],
+                                QueryStats {
                                     index_used: Some(format!("idx_{idx_name}")),
                                     records_scanned: total,
                                     records_returned: 1,
                                     execution_time_us: start.elapsed().as_micros() as u64,
-                                }),
-                                pagination: None,
-                                value: None,
-                                explain: None,
-                                skipped: false,
-                                versions: None,
-                                corrupt_records: Vec::new(),
-                                ..Default::default()
-                            });
+                                },
+                            ));
                         }
                     }
                 }
@@ -1286,22 +1256,18 @@ impl TableManager {
         // table has no MVCC backing (mirrors the existing FG-2 pattern).
         let versions = collect_versions(query.with_version, self.mvcc_store_ref(), &paged_ids);
 
-        Ok(QueryResult {
+        Ok(QueryResult::with_stats(
             records,
-            stats: Some(QueryStats {
+            QueryStats {
                 index_used: None,
                 records_scanned,
                 records_returned,
                 execution_time_us: elapsed.as_micros() as u64,
-            }),
-            pagination,
-            value: None,
-            explain: None,
-            skipped: false,
-            versions,
-            corrupt_records: corrupt,
-            ..Default::default()
-        })
+            },
+        )
+        .with_pagination(pagination)
+        .with_versions(versions)
+        .with_corrupt_records(corrupt))
     }
 
     /// Counting path: streams all records, counts total matched, but only
@@ -1425,22 +1391,22 @@ impl TableManager {
             Some(matched_total),
         ));
 
-        Ok(QueryResult {
-            records: result,
-            stats: Some(QueryStats {
+        Ok(QueryResult::with_stats(
+            result,
+            QueryStats {
                 index_used: None,
                 records_scanned,
                 records_returned,
                 execution_time_us: elapsed.as_micros() as u64,
-            }),
-            pagination,
-            value: None,
-            explain: None,
-            skipped: false,
-            versions: collect_versions(query.with_version, self.mvcc_store_ref(), &version_ids),
-            corrupt_records: corrupt,
-            ..Default::default()
-        })
+            },
+        )
+        .with_pagination(pagination)
+        .with_versions(collect_versions(
+            query.with_version,
+            self.mvcc_store_ref(),
+            &version_ids,
+        ))
+        .with_corrupt_records(corrupt))
     }
 
     /// Streaming path: SELECT + PAGINATION only (no ORDER BY, GROUP BY, DISTINCT,
@@ -1690,22 +1656,22 @@ impl TableManager {
             Some(PaginationInfo::compute(&query.pagination, None).with_has_next(has_next))
         };
 
-        Ok(QueryResult {
-            records: result,
-            stats: Some(QueryStats {
+        Ok(QueryResult::with_stats(
+            result,
+            QueryStats {
                 index_used: None,
                 records_scanned,
                 records_returned,
                 execution_time_us: elapsed.as_micros() as u64,
-            }),
-            pagination,
-            value: None,
-            explain: None,
-            skipped: false,
-            versions: collect_versions(query.with_version, self.mvcc_store_ref(), &version_ids),
-            corrupt_records: corrupt,
-            ..Default::default()
-        })
+            },
+        )
+        .with_pagination(pagination)
+        .with_versions(collect_versions(
+            query.with_version,
+            self.mvcc_store_ref(),
+            &version_ids,
+        ))
+        .with_corrupt_records(corrupt))
     }
 
     /// V3.1 / P3 leaf 3.1 — filtered ANN execution path.

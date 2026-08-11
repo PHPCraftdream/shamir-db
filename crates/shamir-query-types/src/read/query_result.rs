@@ -200,3 +200,121 @@ pub struct QueryResult {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ddl_status: Option<DdlOpState>,
 }
+
+impl QueryResult {
+    /// Create a `QueryResult` with only a `value` field set (function/procedure return values).
+    ///
+    /// All other fields are set to their defaults: empty records, no stats, no pagination,
+    /// no explain, not skipped, no versions, no corrupt records.
+    pub fn with_value(value: QueryValue) -> Self {
+        Self {
+            records: Vec::new(),
+            stats: None,
+            pagination: None,
+            value: Some(value),
+            explain: None,
+            skipped: false,
+            versions: None,
+            corrupt_records: Vec::new(),
+            op_id: None,
+            ddl_status: None,
+        }
+    }
+
+    /// Create a `QueryResult` with only an `explain` field set (EXPLAIN queries).
+    ///
+    /// All other fields are set to their defaults: empty records, no stats, no pagination,
+    /// no value, not skipped, no versions, no corrupt records.
+    pub fn with_explain(plan: ExplainPlan) -> Self {
+        Self {
+            records: Vec::new(),
+            stats: None,
+            pagination: None,
+            value: None,
+            explain: Some(plan),
+            skipped: false,
+            versions: None,
+            corrupt_records: Vec::new(),
+            op_id: None,
+            ddl_status: None,
+        }
+    }
+
+    /// Create a `QueryResult` with `records` and `stats` set.
+    ///
+    /// Use builder methods to optionally add pagination, versions, or corrupt records:
+    /// ```ignore
+    /// QueryResult::with_stats(records, stats)
+    ///     .with_pagination(pagination)
+    ///     .with_versions(versions)
+    /// ```
+    pub fn with_stats(records: Vec<QueryRecord>, stats: QueryStats) -> Self {
+        Self {
+            records,
+            stats: Some(stats),
+            pagination: None,
+            value: None,
+            explain: None,
+            skipped: false,
+            versions: None,
+            corrupt_records: Vec::new(),
+            op_id: None,
+            ddl_status: None,
+        }
+    }
+
+    /// Create a `QueryResult` with only `records` set (minimal result).
+    ///
+    /// All other fields are set to their defaults. This is primarily useful for test fixtures.
+    pub fn records_only(records: Vec<QueryRecord>) -> Self {
+        Self {
+            records,
+            stats: None,
+            pagination: None,
+            value: None,
+            explain: None,
+            skipped: false,
+            versions: None,
+            corrupt_records: Vec::new(),
+            op_id: None,
+            ddl_status: None,
+        }
+    }
+
+    /// Builder method: set `pagination` field.
+    pub fn with_pagination(mut self, pagination: Option<PaginationInfo>) -> Self {
+        self.pagination = pagination;
+        self
+    }
+
+    /// Builder method: set `versions` field.
+    pub fn with_versions(mut self, versions: Option<Vec<u64>>) -> Self {
+        self.versions = versions;
+        self
+    }
+
+    /// Builder method: set `corrupt_records` field.
+    pub fn with_corrupt_records(mut self, corrupt_records: Vec<CorruptRecordRef>) -> Self {
+        self.corrupt_records = corrupt_records;
+        self
+    }
+
+    /// Create a `QueryResult` for a skipped operation (`skipped: true`).
+    ///
+    /// All other fields are set to their defaults: empty records, no stats, no pagination,
+    /// no value, no explain, no versions, no corrupt records.
+    pub fn skipped() -> Self {
+        Self {
+            records: Vec::new(),
+            stats: None,
+            pagination: None,
+            value: None,
+            explain: None,
+            skipped: true,
+            versions: None,
+            corrupt_records: Vec::new(),
+            op_id: None,
+            ddl_status: None,
+        }
+    }
+}

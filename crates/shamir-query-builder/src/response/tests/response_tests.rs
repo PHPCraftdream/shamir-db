@@ -20,17 +20,7 @@ fn record(v: QueryValue) -> QueryRecord {
 
 /// Build a `QueryResult` from a vec of `QueryRecord`s.
 fn qresult(records: Vec<QueryRecord>) -> QueryResult {
-    QueryResult {
-        records,
-        stats: None,
-        pagination: None,
-        value: None,
-        explain: None,
-        skipped: false,
-        versions: None,
-        corrupt_records: Vec::new(),
-        ..Default::default()
-    }
+    QueryResult::records_only(records)
 }
 
 /// Build a minimal `BatchResponse` with the given results map.

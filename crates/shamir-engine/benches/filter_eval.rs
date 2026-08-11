@@ -340,20 +340,7 @@ fn main() {
         .map(|i| QueryRecord::Direct(mpack!({"val": @ Value::Int(i as i64)})))
         .collect();
     let mut refs: TMap<String, QueryResult> = new_map_wc(1);
-    refs.insert(
-        "ref".to_string(),
-        QueryResult {
-            records: ref_records,
-            stats: None,
-            pagination: None,
-            value: None,
-            explain: None,
-            skipped: false,
-            versions: None,
-            corrupt_records: vec![],
-            ..Default::default()
-        },
-    );
+    refs.insert("ref".to_string(), QueryResult::records_only(ref_records));
     let refs: &'static TMap<String, QueryResult> = Box::leak(Box::new(refs));
     let ctx2: &'static FilterContext<'static> =
         Box::leak(Box::new(FilterContext::new(interner2, refs)));

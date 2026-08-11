@@ -347,21 +347,18 @@ impl TableManager {
             })
             .collect();
 
-        Ok(Some(QueryResult {
-            records,
-            stats: Some(QueryStats {
-                index_used: Some(format!("sorted_idx_{index_name}_asof_keyset")),
-                records_scanned,
-                records_returned,
-                execution_time_us: start.elapsed().as_micros() as u64,
-            }),
-            pagination: exec::fast_path_pagination(&query.pagination),
-            value: None,
-            explain: None,
-            skipped: false,
-            versions: None,
-            corrupt_records: corrupt,
-            ..Default::default()
-        }))
+        Ok(Some(
+            QueryResult::with_stats(
+                records,
+                QueryStats {
+                    index_used: Some(format!("sorted_idx_{index_name}_asof_keyset")),
+                    records_scanned,
+                    records_returned,
+                    execution_time_us: start.elapsed().as_micros() as u64,
+                },
+            )
+            .with_pagination(exec::fast_path_pagination(&query.pagination))
+            .with_corrupt_records(corrupt),
+        ))
     }
 }

@@ -28,20 +28,7 @@ fn age_record(interner: &Interner, age: i64) -> InnerValue {
 // ── helper: build a ref map with one alias → QueryResult ─────────
 fn ref_map(alias: &str, records: Vec<QueryRecord>) -> TMap<String, QueryResult> {
     let mut refs = new_map();
-    refs.insert(
-        alias.to_string(),
-        QueryResult {
-            records,
-            stats: None,
-            pagination: None,
-            value: None,
-            explain: None,
-            skipped: false,
-            versions: None,
-            corrupt_records: vec![],
-            ..Default::default()
-        },
-    );
+    refs.insert(alias.to_string(), QueryResult::records_only(records));
     refs
 }
 

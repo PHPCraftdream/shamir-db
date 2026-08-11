@@ -53,16 +53,6 @@ impl FunctionInvoker for ShamirFunctionInvoker {
             })?;
 
         // Map QueryValue -> QueryResult with `value` field.
-        Ok(QueryResult {
-            records: vec![],
-            stats: None,
-            pagination: None,
-            value: Some(qv),
-            explain: None,
-            skipped: false,
-            versions: None,
-            corrupt_records: Vec::new(),
-            ..Default::default()
-        })
+        Ok(QueryResult::with_value(qv))
     }
 }
