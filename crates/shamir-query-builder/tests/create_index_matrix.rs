@@ -241,6 +241,7 @@ fn variant_tag(e: &CreateIndexBuildError) -> &'static str {
             "FunctionalOptionsOnNonFunctionalIndex"
         }
         CreateIndexBuildError::IncludeUnsupportedForType { .. } => "IncludeUnsupportedForType",
+        CreateIndexBuildError::ConflictingBuilderState { .. } => "ConflictingBuilderState",
     }
 }
 

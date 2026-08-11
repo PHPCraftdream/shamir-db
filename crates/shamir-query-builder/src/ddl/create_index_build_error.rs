@@ -105,6 +105,27 @@ pub enum CreateIndexBuildError {
         /// The offending index_type string.
         index_type: String,
     },
+    /// A stringly setter left state on the builder that a typed terminal
+    /// constructor (`.hash()`, `.unique_index()`, `.sorted_index()`, …) would
+    /// silently discard.
+    ///
+    /// Unlike the variants above (which mirror server-side rejections), this is
+    /// a purely client-side builder-misuse detector: the typed constructors read
+    /// only `name` / `table` / `repo` / `if_not_exists` off the builder, so any
+    /// other setter call (`.unique()`, `.fields()`, `.vector_dim()`, …) is dead
+    /// state that gets overwritten by the constructor's own parameters. Rather
+    /// than silently drop it — which in the worst case (`.unique().hash(...)`)
+    /// sends `unique: false` over the wire despite the caller asking for a
+    /// uniqueness constraint — the constructor returns this error.
+    ///
+    /// `method` is the typed constructor name (e.g. `"hash"`); `field` is the
+    /// conflicting setter field name (e.g. `"unique"`).
+    ConflictingBuilderState {
+        /// The typed constructor that detected the conflict (e.g. `"hash"`).
+        method: &'static str,
+        /// The builder field carrying stale state (e.g. `"unique"`).
+        field: &'static str,
+    },
 }
 
 impl std::fmt::Display for CreateIndexBuildError {
@@ -200,6 +221,16 @@ impl std::fmt::Display for CreateIndexBuildError {
                     "`include` is not supported for '{index_type}' indexes; covering fields are \
                      only valid for sorted indexes — the server (admin_table_index) rejects this \
                      combination"
+                )
+            }
+            CreateIndexBuildError::ConflictingBuilderState { method, field } => {
+                write!(
+                    f,
+                    "the typed constructor .{method}() does not read the builder's .{field}() \
+                     state; the parameter(s) passed to .{method}() are authoritative, so the prior \
+                     .{field}() call would be silently discarded — drop the .{field}() call, or \
+                     switch to the typed constructor that matches your intent (this is a \
+                     client-side builder-misuse check, not a server-side rejection)"
                 )
             }
         }

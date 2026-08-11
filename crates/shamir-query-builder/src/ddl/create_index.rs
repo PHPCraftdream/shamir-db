@@ -56,11 +56,121 @@ pub struct CreateIndex {
 }
 
 impl CreateIndex {
+    /// Detect builder state set by the stringly setters that a typed terminal
+    /// constructor would silently discard.
+    ///
+    /// Returns [`CreateIndexBuildError::ConflictingBuilderState`] on the first
+    /// stale field found. This is the core of the F-7 fix (#1075): every typed
+    /// constructor calls this before building its `IndexSpec` variant, so a
+    /// caller mixing stringly setters with a typed terminal gets an error
+    /// instead of a silently-wrong `BatchOp`.
+    ///
+    /// # The `bool` ambiguity
+    ///
+    /// `unique: bool` and `sorted: bool` have no sentinel for "never touched" —
+    /// their default is `false`, and the setter can only flip them to `true`.
+    /// So the ONLY distinguishable conflict is `true` (setter was called) vs
+    /// `false` (default). When the typed constructor itself produces the same
+    /// `true` value for that field (e.g. `.unique_index()` always sets
+    /// `unique: true`), a prior setter call is **redundant** (same intent), not
+    /// a conflict, and is exempted via the corresponding `*_ok` flag.
+    ///
+    /// `unique_ok`: exempt `self.unique` (used by `.unique_index()`).
+    /// `sorted_ok`: exempt `self.sorted` (used by `.sorted_index()` /
+    /// `.sorted_with_include()`).
+    fn check_conflicting_state(
+        &self,
+        method: &'static str,
+        unique_ok: bool,
+        sorted_ok: bool,
+    ) -> Result<(), CreateIndexBuildError> {
+        if !unique_ok && self.unique {
+            return Err(CreateIndexBuildError::ConflictingBuilderState {
+                method,
+                field: "unique",
+            });
+        }
+        if !sorted_ok && self.sorted {
+            return Err(CreateIndexBuildError::ConflictingBuilderState {
+                method,
+                field: "sorted",
+            });
+        }
+        if !self.fields.is_empty() {
+            return Err(CreateIndexBuildError::ConflictingBuilderState {
+                method,
+                field: "fields",
+            });
+        }
+        if self.index_type.is_some() {
+            return Err(CreateIndexBuildError::ConflictingBuilderState {
+                method,
+                field: "index_type",
+            });
+        }
+        if self.fts_tokenizer.is_some() {
+            return Err(CreateIndexBuildError::ConflictingBuilderState {
+                method,
+                field: "fts_tokenizer",
+            });
+        }
+        if self.fts_language.is_some() {
+            return Err(CreateIndexBuildError::ConflictingBuilderState {
+                method,
+                field: "fts_language",
+            });
+        }
+        if self.functional_op.is_some() {
+            return Err(CreateIndexBuildError::ConflictingBuilderState {
+                method,
+                field: "functional_op",
+            });
+        }
+        if self.functional_args.is_some() {
+            return Err(CreateIndexBuildError::ConflictingBuilderState {
+                method,
+                field: "functional_args",
+            });
+        }
+        if self.vector_dim.is_some() {
+            return Err(CreateIndexBuildError::ConflictingBuilderState {
+                method,
+                field: "vector_dim",
+            });
+        }
+        if self.vector_metric.is_some() {
+            return Err(CreateIndexBuildError::ConflictingBuilderState {
+                method,
+                field: "vector_metric",
+            });
+        }
+        if self.vector_quantization.is_some() {
+            return Err(CreateIndexBuildError::ConflictingBuilderState {
+                method,
+                field: "vector_quantization",
+            });
+        }
+        if !self.include.is_empty() {
+            return Err(CreateIndexBuildError::ConflictingBuilderState {
+                method,
+                field: "include",
+            });
+        }
+        Ok(())
+    }
+
     /// Create a hash/btree index on one or more fields (not unique).
     ///
-    /// This is a **strict-by-default** typed constructor: it produces a valid
-    /// `BatchOp` directly with no need for `try_build()`. The output is
-    /// byte-identical to the equivalent stringly `.fields(...).build()` call.
+    /// This is a **strict-by-default** typed constructor: it validates the
+    /// builder state and field count, then produces a valid [`BatchOp`]. The
+    /// output is byte-identical to the equivalent stringly
+    /// `.fields(...).build()` call.
+    ///
+    /// Returns [`CreateIndexBuildError::ConflictingBuilderState`] if any
+    /// stringly setter (`.unique()`, `.sorted()`, `.index_type()`, …) was called
+    /// before this method — the typed constructor's `fields` parameter is
+    /// authoritative and would silently discard such state. Returns
+    /// [`CreateIndexBuildError::EmptyFields`] if `fields` is empty.
     ///
     /// # Example
     ///
@@ -68,23 +178,46 @@ impl CreateIndex {
     /// use shamir_query_builder::ddl::create_index;
     ///
     /// let op = create_index("idx_email", "users")
-    ///     .hash(vec![vec!["email".to_string()]]);
+    ///     .hash(vec![vec!["email".to_string()]])
+    ///     .unwrap();
     /// ```
-    pub fn hash(self, fields: impl Into<Vec<Vec<String>>>) -> BatchOp {
+    pub fn hash(
+        self,
+        fields: impl Into<Vec<Vec<String>>>,
+    ) -> Result<BatchOp, CreateIndexBuildError> {
+        self.check_conflicting_state("hash", false, false)?;
+        let fields = fields.into();
+        if fields.is_empty() {
+            return Err(CreateIndexBuildError::EmptyFields);
+        }
         let spec = IndexSpec::Hash {
-            fields: fields.into(),
+            fields,
             unique: false,
             index_type: None,
         };
 
-        BatchOp::CreateIndex(spec.into_op(self.name, self.table, self.repo, self.if_not_exists))
+        Ok(BatchOp::CreateIndex(spec.into_op(
+            self.name,
+            self.table,
+            self.repo,
+            self.if_not_exists,
+        )))
     }
 
     /// Create a unique hash/btree index on one or more fields.
     ///
-    /// This is a **strict-by-default** typed constructor: it produces a valid
-    /// `BatchOp` directly with no need for `try_build()`. The output is
-    /// byte-identical to the equivalent stringly `.fields(...).unique().build()` call.
+    /// This is a **strict-by-default** typed constructor: it validates the
+    /// builder state and field count, then produces a valid [`BatchOp`]. The
+    /// output is byte-identical to the equivalent stringly
+    /// `.fields(...).unique().build()` call.
+    ///
+    /// A prior `.unique()` call is **redundant** (same intent) and is NOT
+    /// treated as a conflict — `unique: bool` has no sentinel for "never
+    /// touched", so there is no way to distinguish it from the default.
+    ///
+    /// Returns [`CreateIndexBuildError::ConflictingBuilderState`] if any other
+    /// stringly setter was called before this method. Returns
+    /// [`CreateIndexBuildError::EmptyFields`] if `fields` is empty.
     ///
     /// # Example
     ///
@@ -92,27 +225,50 @@ impl CreateIndex {
     /// use shamir_query_builder::ddl::create_index;
     ///
     /// let op = create_index("idx_email_unique", "users")
-    ///     .unique_index(vec![vec!["email".to_string()]]);
+    ///     .unique_index(vec![vec!["email".to_string()]])
+    ///     .unwrap();
     /// ```
-    pub fn unique_index(self, fields: impl Into<Vec<Vec<String>>>) -> BatchOp {
+    pub fn unique_index(
+        self,
+        fields: impl Into<Vec<Vec<String>>>,
+    ) -> Result<BatchOp, CreateIndexBuildError> {
+        self.check_conflicting_state("unique_index", true, false)?;
+        let fields = fields.into();
+        if fields.is_empty() {
+            return Err(CreateIndexBuildError::EmptyFields);
+        }
         let spec = IndexSpec::Hash {
-            fields: fields.into(),
+            fields,
             unique: true,
             index_type: None,
         };
 
-        BatchOp::CreateIndex(spec.into_op(self.name, self.table, self.repo, self.if_not_exists))
+        Ok(BatchOp::CreateIndex(spec.into_op(
+            self.name,
+            self.table,
+            self.repo,
+            self.if_not_exists,
+        )))
     }
 
     /// Create a sorted (value-ordered) index on a single field.
     ///
-    /// This is a **strict-by-default** typed constructor: it produces a valid
-    /// `BatchOp` directly with no need for `try_build()`. The output is
-    /// byte-identical to the equivalent stringly `.field(...).sorted().build()` call.
+    /// This is a **strict-by-default** typed constructor: it validates the
+    /// builder state and field count, then produces a valid [`BatchOp`]. The
+    /// output is byte-identical to the equivalent stringly
+    /// `.field(...).sorted().build()` call.
     ///
     /// The `field` parameter accepts a single field path (`Vec<String>` or
     /// `impl Into<Vec<String>>`), making multi-field sorted indexes a compile-time
     /// error.
+    ///
+    /// A prior `.sorted()` call is **redundant** (same intent) and is NOT
+    /// treated as a conflict — `sorted: bool` has no sentinel for "never
+    /// touched", so there is no way to distinguish it from the default.
+    ///
+    /// Returns [`CreateIndexBuildError::ConflictingBuilderState`] if any other
+    /// stringly setter was called before this method. Returns
+    /// [`CreateIndexBuildError::EmptyFields`] if `field` is an empty path.
     ///
     /// # Example
     ///
@@ -120,23 +276,45 @@ impl CreateIndex {
     /// use shamir_query_builder::ddl::create_index;
     ///
     /// let op = create_index("idx_age", "users")
-    ///     .sorted_index(vec!["age".to_string()]);
+    ///     .sorted_index(vec!["age".to_string()])
+    ///     .unwrap();
     /// ```
-    pub fn sorted_index(self, field: impl Into<Vec<String>>) -> BatchOp {
+    pub fn sorted_index(
+        self,
+        field: impl Into<Vec<String>>,
+    ) -> Result<BatchOp, CreateIndexBuildError> {
+        self.check_conflicting_state("sorted_index", false, true)?;
+        let field = field.into();
+        if field.is_empty() {
+            return Err(CreateIndexBuildError::EmptyFields);
+        }
         let spec = IndexSpec::Sorted {
-            field: field.into(),
+            field,
             include: Vec::new(),
             index_type: None,
         };
 
-        BatchOp::CreateIndex(spec.into_op(self.name, self.table, self.repo, self.if_not_exists))
+        Ok(BatchOp::CreateIndex(spec.into_op(
+            self.name,
+            self.table,
+            self.repo,
+            self.if_not_exists,
+        )))
     }
 
     /// Create a sorted index with covering (include) fields.
     ///
-    /// This is a **strict-by-default** typed constructor: it produces a valid
-    /// `BatchOp` directly with no need for `try_build()`. The output is
-    /// byte-identical to the equivalent stringly `.field(...).sorted().include(...).build()` call.
+    /// This is a **strict-by-default** typed constructor: it validates the
+    /// builder state and field count, then produces a valid [`BatchOp`]. The
+    /// output is byte-identical to the equivalent stringly
+    /// `.field(...).sorted().include(...).build()` call.
+    ///
+    /// A prior `.sorted()` call is **redundant** (same intent) and is NOT
+    /// treated as a conflict.
+    ///
+    /// Returns [`CreateIndexBuildError::ConflictingBuilderState`] if any other
+    /// stringly setter was called before this method. Returns
+    /// [`CreateIndexBuildError::EmptyFields`] if `field` is an empty path.
     ///
     /// # Example
     ///
@@ -147,27 +325,43 @@ impl CreateIndex {
     ///     .sorted_with_include(
     ///         vec!["age".to_string()],
     ///         vec![vec!["email".to_string()]],
-    ///     );
+    ///     )
+    ///     .unwrap();
     /// ```
     pub fn sorted_with_include(
         self,
         field: impl Into<Vec<String>>,
         include: impl IntoIterator<Item = Vec<String>>,
-    ) -> BatchOp {
+    ) -> Result<BatchOp, CreateIndexBuildError> {
+        self.check_conflicting_state("sorted_with_include", false, true)?;
+        let field = field.into();
+        if field.is_empty() {
+            return Err(CreateIndexBuildError::EmptyFields);
+        }
         let spec = IndexSpec::Sorted {
-            field: field.into(),
+            field,
             include: include.into_iter().collect(),
             index_type: None,
         };
 
-        BatchOp::CreateIndex(spec.into_op(self.name, self.table, self.repo, self.if_not_exists))
+        Ok(BatchOp::CreateIndex(spec.into_op(
+            self.name,
+            self.table,
+            self.repo,
+            self.if_not_exists,
+        )))
     }
 
     /// Create a full-text search index on a single field with a tokenizer.
     ///
-    /// This is a **strict-by-default** typed constructor: it produces a valid
-    /// `BatchOp` directly with no need for `try_build()`. The output is
-    /// byte-identical to the equivalent stringly `.field(...).index_type("fts").fts_tokenizer(...).build()` call.
+    /// This is a **strict-by-default** typed constructor: it validates the
+    /// builder state and field count, then produces a valid [`BatchOp`]. The
+    /// output is byte-identical to the equivalent stringly
+    /// `.field(...).index_type("fts").fts_tokenizer(...).build()` call.
+    ///
+    /// Returns [`CreateIndexBuildError::ConflictingBuilderState`] if any
+    /// stringly setter was called before this method. Returns
+    /// [`CreateIndexBuildError::EmptyFields`] if `field` is an empty path.
     ///
     /// # Example
     ///
@@ -175,16 +369,25 @@ impl CreateIndex {
     /// use shamir_query_builder::ddl::{create_index, Tokenizer};
     ///
     /// let op = create_index("idx_body", "posts")
-    ///     .fts(vec!["body".to_string()], Tokenizer::Whitespace);
+    ///     .fts(vec!["body".to_string()], Tokenizer::Whitespace)
+    ///     .unwrap();
     /// ```
-    pub fn fts(self, field: impl Into<Vec<String>>, tokenizer: Tokenizer) -> BatchOp {
+    pub fn fts(
+        self,
+        field: impl Into<Vec<String>>,
+        tokenizer: Tokenizer,
+    ) -> Result<BatchOp, CreateIndexBuildError> {
         self.fts_with_language(field, tokenizer, None)
     }
 
     /// Create a full-text search index with a language hint.
     ///
-    /// This is a **strict-by-default** typed constructor: it produces a valid
-    /// `BatchOp` directly with no need for `try_build()`.
+    /// This is a **strict-by-default** typed constructor: it validates the
+    /// builder state and field count, then produces a valid [`BatchOp`].
+    ///
+    /// Returns [`CreateIndexBuildError::ConflictingBuilderState`] if any
+    /// stringly setter was called before this method. Returns
+    /// [`CreateIndexBuildError::EmptyFields`] if `field` is an empty path.
     ///
     /// # Example
     ///
@@ -196,31 +399,47 @@ impl CreateIndex {
     ///         vec!["body".to_string()],
     ///         Tokenizer::Unicode,
     ///         Some("en".to_string()),
-    ///     );
+    ///     )
+    ///     .unwrap();
     /// ```
     pub fn fts_with_language(
         self,
         field: impl Into<Vec<String>>,
         tokenizer: Tokenizer,
         language: Option<String>,
-    ) -> BatchOp {
+    ) -> Result<BatchOp, CreateIndexBuildError> {
+        self.check_conflicting_state("fts_with_language", false, false)?;
+        let field = field.into();
+        if field.is_empty() {
+            return Err(CreateIndexBuildError::EmptyFields);
+        }
         let spec = IndexSpec::Fts {
-            fields: vec![field.into()],
+            fields: vec![field],
             tokenizer: Some(tokenizer.into()),
             language,
         };
 
-        BatchOp::CreateIndex(spec.into_op(self.name, self.table, self.repo, self.if_not_exists))
+        Ok(BatchOp::CreateIndex(spec.into_op(
+            self.name,
+            self.table,
+            self.repo,
+            self.if_not_exists,
+        )))
     }
 
     /// Create a functional (derived) index on a single field.
     ///
-    /// This is a **strict-by-default** typed constructor: it produces a valid
-    /// `BatchOp` directly with no need for `try_build()`. The output is
-    /// byte-identical to the equivalent stringly `.field(...).index_type("functional").functional_op(...).build()` call.
+    /// This is a **strict-by-default** typed constructor: it validates the
+    /// builder state and field count, then produces a valid [`BatchOp`]. The
+    /// output is byte-identical to the equivalent stringly
+    /// `.field(...).index_type("functional").functional_op(...).build()` call.
     ///
     /// The `func` parameter is a plain function name string (e.g., `"lower"`),
     /// matching what `functional_op` already stores in the wire format.
+    ///
+    /// Returns [`CreateIndexBuildError::ConflictingBuilderState`] if any
+    /// stringly setter was called before this method. Returns
+    /// [`CreateIndexBuildError::EmptyFields`] if `field` is an empty path.
     ///
     /// # Example
     ///
@@ -228,16 +447,26 @@ impl CreateIndex {
     /// use shamir_query_builder::ddl::create_index;
     ///
     /// let op = create_index("idx_email_lower", "users")
-    ///     .functional(vec!["email".to_string()], "lower");
+    ///     .functional(vec!["email".to_string()], "lower")
+    ///     .unwrap();
     /// ```
-    pub fn functional(self, field: impl Into<Vec<String>>, func: impl Into<String>) -> BatchOp {
+    pub fn functional(
+        self,
+        field: impl Into<Vec<String>>,
+        func: impl Into<String>,
+    ) -> Result<BatchOp, CreateIndexBuildError> {
         self.functional_with_args(field, func, Vec::new())
     }
 
     /// Create a functional index with arguments.
     ///
-    /// This is a **strict-by-default** typed constructor that accepts both the
-    /// function name and optional arguments.
+    /// This is a **strict-by-default** typed constructor that validates the
+    /// builder state and field count, accepts both the function name and
+    /// optional arguments, and produces a valid [`BatchOp`].
+    ///
+    /// Returns [`CreateIndexBuildError::ConflictingBuilderState`] if any
+    /// stringly setter was called before this method. Returns
+    /// [`CreateIndexBuildError::EmptyFields`] if `field` is an empty path.
     ///
     /// # Example
     ///
@@ -250,31 +479,48 @@ impl CreateIndex {
     ///         vec!["email".to_string()],
     ///         "my_func",
     ///         vec![QueryValue::from("arg1")],
-    ///     );
+    ///     )
+    ///     .unwrap();
     /// ```
     pub fn functional_with_args(
         self,
         field: impl Into<Vec<String>>,
         func: impl Into<String>,
         args: Vec<QueryValue>,
-    ) -> BatchOp {
+    ) -> Result<BatchOp, CreateIndexBuildError> {
+        self.check_conflicting_state("functional_with_args", false, false)?;
+        let field = field.into();
+        if field.is_empty() {
+            return Err(CreateIndexBuildError::EmptyFields);
+        }
         let spec = IndexSpec::Functional {
-            fields: vec![field.into()],
+            fields: vec![field],
             op: Some(func.into()),
             args: if args.is_empty() { None } else { Some(args) },
         };
 
-        BatchOp::CreateIndex(spec.into_op(self.name, self.table, self.repo, self.if_not_exists))
+        Ok(BatchOp::CreateIndex(spec.into_op(
+            self.name,
+            self.table,
+            self.repo,
+            self.if_not_exists,
+        )))
     }
 
     /// Create a vector index on a single field with dimension, metric, and quantization.
     ///
-    /// This is a **strict-by-default** typed constructor: it produces a valid
-    /// `BatchOp` directly with no need for `try_build()`. The output is
-    /// byte-identical to the equivalent stringly `.field(...).index_type("vector").vector_dim(...).vector_metric(...).vector_quantization(...).build()` call.
+    /// This is a **strict-by-default** typed constructor: it validates the
+    /// builder state and field count, then produces a valid [`BatchOp`]. The
+    /// output is byte-identical to the equivalent stringly
+    /// `.field(...).index_type("vector").vector_dim(...).vector_metric(...).vector_quantization(...).build()`
+    /// call.
     ///
     /// The `dim` parameter is `NonZeroU32`, making zero or absent dimensions
     /// a compile-time impossibility.
+    ///
+    /// Returns [`CreateIndexBuildError::ConflictingBuilderState`] if any
+    /// stringly setter was called before this method. Returns
+    /// [`CreateIndexBuildError::EmptyFields`] if `field` is an empty path.
     ///
     /// # Example
     ///
@@ -284,7 +530,8 @@ impl CreateIndex {
     ///
     /// let dim = NonZeroU32::new(384).unwrap();
     /// let op = create_index("idx_embedding", "docs")
-    ///     .vector(vec!["embedding".to_string()], dim, Metric::Cosine, Quantization::Off);
+    ///     .vector(vec!["embedding".to_string()], dim, Metric::Cosine, Quantization::Off)
+    ///     .unwrap();
     /// ```
     pub fn vector(
         self,
@@ -292,15 +539,25 @@ impl CreateIndex {
         dim: NonZeroU32,
         metric: Metric,
         quantization: Quantization,
-    ) -> BatchOp {
+    ) -> Result<BatchOp, CreateIndexBuildError> {
+        self.check_conflicting_state("vector", false, false)?;
+        let field = field.into();
+        if field.is_empty() {
+            return Err(CreateIndexBuildError::EmptyFields);
+        }
         let spec = IndexSpec::Vector {
-            fields: vec![field.into()],
+            fields: vec![field],
             dim,
             metric: Some(metric.into()),
             quantization: quantization.into(),
         };
 
-        BatchOp::CreateIndex(spec.into_op(self.name, self.table, self.repo, self.if_not_exists))
+        Ok(BatchOp::CreateIndex(spec.into_op(
+            self.name,
+            self.table,
+            self.repo,
+            self.if_not_exists,
+        )))
     }
 
     /// Set the indexed field paths.

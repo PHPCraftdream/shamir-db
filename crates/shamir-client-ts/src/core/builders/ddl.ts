@@ -346,9 +346,9 @@ export type Quantization = 'sq8' | undefined;
 /**
  * Create a hash/btree index on one or more fields (not unique).
  *
- * This is a **strict-by-default** typed constructor: it produces a valid
- * `CreateIndexOp` directly with no validation needed. The output is
- * byte-identical to the equivalent `createIndex()` call with the same fields.
+ * This is a **strict-by-default** typed constructor: it validates that
+ * `fields` is non-empty, then produces a valid `CreateIndexOp` directly.
+ * The output is byte-identical to the equivalent `createIndex()` call.
  *
  * @param name Index name
  * @param table Table name
@@ -361,6 +361,12 @@ export function hashIndex(
   fields: string[][],
   opts?: { repo?: string; if_not_exists?: boolean },
 ): CreateIndexOp {
+  if (fields.length === 0) {
+    throw new Error(
+      'hashIndex: CREATE INDEX requires at least one field ' +
+        '(server rejects an empty fields list for all index types — see admin_table_index.rs)',
+    );
+  }
   const op: CreateIndexOp = {
     create_index: name,
     table,
@@ -376,8 +382,8 @@ export function hashIndex(
 /**
  * Create a unique hash/btree index on one or more fields.
  *
- * This is a **strict-by-default** typed constructor: it produces a valid
- * `CreateIndexOp` directly with no validation needed.
+ * This is a **strict-by-default** typed constructor: it validates that
+ * `fields` is non-empty, then produces a valid `CreateIndexOp` directly.
  *
  * @param name Index name
  * @param table Table name
@@ -390,6 +396,12 @@ export function uniqueIndex(
   fields: string[][],
   opts?: { repo?: string; if_not_exists?: boolean },
 ): CreateIndexOp {
+  if (fields.length === 0) {
+    throw new Error(
+      'uniqueIndex: CREATE INDEX requires at least one field ' +
+        '(server rejects an empty fields list for all index types — see admin_table_index.rs)',
+    );
+  }
   const op: CreateIndexOp = {
     create_index: name,
     table,
@@ -405,10 +417,10 @@ export function uniqueIndex(
 /**
  * Create a sorted (value-ordered) index on a single field.
  *
- * This is a **strict-by-default** typed constructor: it produces a valid
- * `CreateIndexOp` directly with no validation needed. The field parameter
- * is typed as a single path (string[]), making multi-field sorted indexes
- * a type error.
+ * This is a **strict-by-default** typed constructor: it validates that
+ * `field` is non-empty, then produces a valid `CreateIndexOp` directly.
+ * The field parameter is typed as a single path (string[]), making
+ * multi-field sorted indexes a type error.
  *
  * @param name Index name
  * @param table Table name
@@ -421,6 +433,12 @@ export function sortedIndex(
   field: string[],
   opts?: { repo?: string; if_not_exists?: boolean },
 ): CreateIndexOp {
+  if (field.length === 0) {
+    throw new Error(
+      'sortedIndex: CREATE INDEX requires at least one field ' +
+        '(server rejects an empty fields list for all index types — see admin_table_index.rs)',
+    );
+  }
   const op: CreateIndexOp = {
     create_index: name,
     table,
@@ -436,8 +454,9 @@ export function sortedIndex(
 /**
  * Create a sorted index with covering (include) fields.
  *
- * This is a **strict-by-default** typed constructor that accepts both the
- * sorted field and covering fields.
+ * This is a **strict-by-default** typed constructor that validates the
+ * field path is non-empty, accepts both the sorted field and covering
+ * fields, and produces a valid `CreateIndexOp`.
  *
  * @param name Index name
  * @param table Table name
@@ -452,6 +471,12 @@ export function sortedWithIncludeIndex(
   include: string[][],
   opts?: { repo?: string; if_not_exists?: boolean },
 ): CreateIndexOp {
+  if (field.length === 0) {
+    throw new Error(
+      'sortedWithIncludeIndex: CREATE INDEX requires at least one field ' +
+        '(server rejects an empty fields list for all index types — see admin_table_index.rs)',
+    );
+  }
   const op: CreateIndexOp = {
     create_index: name,
     table,
@@ -468,8 +493,8 @@ export function sortedWithIncludeIndex(
 /**
  * Create a full-text search index on a single field with a tokenizer.
  *
- * This is a **strict-by-default** typed constructor: it produces a valid
- * `CreateIndexOp` directly with no validation needed.
+ * This is a **strict-by-default** typed constructor: it validates that
+ * `field` is non-empty, then produces a valid `CreateIndexOp` directly.
  *
  * @param name Index name
  * @param table Table name
@@ -488,6 +513,12 @@ export function ftsIndex(
     if_not_exists?: boolean;
   },
 ): CreateIndexOp {
+  if (field.length === 0) {
+    throw new Error(
+      'ftsIndex: CREATE INDEX requires at least one field ' +
+        '(server rejects an empty fields list for all index types — see admin_table_index.rs)',
+    );
+  }
   const op: CreateIndexOp = {
     create_index: name,
     table,
@@ -506,8 +537,8 @@ export function ftsIndex(
 /**
  * Create a functional (derived) index on a single field.
  *
- * This is a **strict-by-default** typed constructor: it produces a valid
- * `CreateIndexOp` directly with no validation needed.
+ * This is a **strict-by-default** typed constructor: it validates that
+ * `field` is non-empty, then produces a valid `CreateIndexOp` directly.
  *
  * @param name Index name
  * @param table Table name
@@ -526,6 +557,12 @@ export function functionalIndex(
     if_not_exists?: boolean;
   },
 ): CreateIndexOp {
+  if (field.length === 0) {
+    throw new Error(
+      'functionalIndex: CREATE INDEX requires at least one field ' +
+        '(server rejects an empty fields list for all index types — see admin_table_index.rs)',
+    );
+  }
   const op: CreateIndexOp = {
     create_index: name,
     table,
