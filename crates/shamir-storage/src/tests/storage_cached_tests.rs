@@ -1,6 +1,6 @@
 #![allow(deprecated)]
 
-use crate::error::DbResult;
+use crate::error::{DbError, DbResult};
 use crate::storage_cached::CachedStore;
 use crate::storage_in_memory::InMemoryStore;
 use crate::tests::types_tests::collect_stream;
@@ -972,4 +972,129 @@ async fn test_async_mode_many_writes_same_key_land_in_order() {
             "inner must reflect the LAST logical remove"
         );
     }
+}
+
+// ============================================================================
+// #1082: flush() surfaces background write/remove failures (previously
+// silently lost — the caller had no way to distinguish a failed background
+// write from a successful one, since flush() always returned Ok(())).
+// ============================================================================
+
+/// A `Store` wrapper whose `set`/`remove` always fail, simulating a backing
+/// store that goes unavailable. `get`/`iter_stream`/`scan_prefix_stream`
+/// delegate normally so `CachedStore::new_async`'s initial load still works.
+struct FailingStore {
+    inner: Arc<dyn Store>,
+}
+
+#[async_trait]
+impl Store for FailingStore {
+    async fn insert(&self, value: Bytes) -> DbResult<RecordKey> {
+        self.inner.insert(value).await
+    }
+
+    async fn set(&self, _key: RecordKey, _value: Bytes) -> DbResult<bool> {
+        Err(DbError::Storage("simulated backing-store failure".into()))
+    }
+
+    async fn get(&self, key: RecordKey) -> DbResult<Bytes> {
+        self.inner.get(key).await
+    }
+
+    async fn remove(&self, _key: RecordKey) -> DbResult<bool> {
+        Err(DbError::Storage("simulated backing-store failure".into()))
+    }
+
+    fn iter_stream(
+        &self,
+        batch_size: usize,
+    ) -> Pin<Box<dyn Stream<Item = Result<Vec<(RecordKey, Bytes)>, crate::error::DbError>> + Send>>
+    {
+        self.inner.iter_stream(batch_size)
+    }
+
+    fn scan_prefix_stream(
+        &self,
+        prefix: Bytes,
+        batch_size: usize,
+    ) -> Pin<Box<dyn Stream<Item = Result<Vec<(RecordKey, Bytes)>, crate::error::DbError>> + Send>>
+    {
+        self.inner.scan_prefix_stream(prefix, batch_size)
+    }
+}
+
+/// A background `set` failure must surface as an `Err` from the NEXT
+/// `flush()` call — not be silently swallowed into an `Ok(())`. The cache
+/// itself still holds the value (write-behind semantics unchanged); only
+/// the durability signal changes.
+#[tokio::test]
+async fn test_async_flush_surfaces_background_set_failure() {
+    let plain_inner = Arc::new(InMemoryStore::new()) as Arc<dyn Store>;
+    let failing_inner = Arc::new(FailingStore { inner: plain_inner }) as Arc<dyn Store>;
+    let cached = CachedStore::new_async(failing_inner).await.unwrap();
+
+    let key = RecordKey::from_slice(b"will-fail");
+    // The synchronous part of `set` (cache upsert + enqueue) succeeds —
+    // only the background write to `inner` fails.
+    cached
+        .set(key.clone(), Bytes::from_static(b"v"))
+        .await
+        .unwrap();
+
+    // Cache already has the value (write-behind: visible immediately).
+    assert!(cached.cache().peek_with(&key, |_, _| ()).is_some());
+
+    let flush_result = cached.flush().await;
+    assert!(
+        flush_result.is_err(),
+        "flush() must report the background write failure, not silently succeed"
+    );
+
+    // The error is reported exactly once: a second flush() with no new
+    // writes since must succeed (nothing pending, nothing to report).
+    cached
+        .flush()
+        .await
+        .expect("error must be cleared after being reported once");
+}
+
+/// Same as above, for the `remove` path.
+#[tokio::test]
+async fn test_async_flush_surfaces_background_remove_failure() {
+    let plain_inner = Arc::new(InMemoryStore::new()) as Arc<dyn Store>;
+    let failing_inner = Arc::new(FailingStore { inner: plain_inner }) as Arc<dyn Store>;
+    let cached = CachedStore::new_async(failing_inner).await.unwrap();
+
+    let key = RecordKey::from_slice(b"remove-will-fail");
+    cached.remove(key).await.unwrap();
+
+    let flush_result = cached.flush().await;
+    assert!(
+        flush_result.is_err(),
+        "flush() must report the background remove failure, not silently succeed"
+    );
+}
+
+/// The `Store::flush` trait-dispatch override (reached through `Arc<dyn
+/// Store>`, the shape every engine call site actually holds) must ALSO
+/// surface the background failure, not just the inherent `CachedStore::flush`.
+#[tokio::test]
+async fn test_async_flush_surfaces_background_failure_via_dyn_store() {
+    let plain_inner = Arc::new(InMemoryStore::new()) as Arc<dyn Store>;
+    let failing_inner = Arc::new(FailingStore { inner: plain_inner }) as Arc<dyn Store>;
+    let cached_concrete = Arc::new(CachedStore::new_async(failing_inner).await.unwrap());
+    let cached_dyn: Arc<dyn Store> = cached_concrete.clone();
+
+    cached_dyn
+        .set(
+            RecordKey::from_slice(b"dyn-will-fail"),
+            Bytes::from_static(b"v"),
+        )
+        .await
+        .unwrap();
+
+    assert!(
+        cached_dyn.flush().await.is_err(),
+        "Store::flush via dyn dispatch must also surface the background failure"
+    );
 }

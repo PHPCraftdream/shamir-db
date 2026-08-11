@@ -1,5 +1,6 @@
 use super::types::{RecordKey, Store};
 use crate::error::{DbError, DbResult};
+use arc_swap::ArcSwapOption;
 use async_stream::stream;
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -8,7 +9,7 @@ use scc::TreeIndex;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, Notify};
 
 // ============================================================================
 // WriteMode - write strategy for CachedStore
@@ -68,17 +69,23 @@ async fn run_async_write_worker(
     mut rx: mpsc::UnboundedReceiver<CacheWriteJob>,
     inner: Arc<dyn Store>,
     pending: Arc<AtomicUsize>,
+    last_error: Arc<ArcSwapOption<String>>,
+    notify: Arc<Notify>,
 ) {
     while let Some(job) = rx.recv().await {
         match job {
             CacheWriteJob::Set { key, value } => {
                 // §B8: WriteMode::Async is fire-and-forget by design,
-                // but a swallowed `Err` silently loses durability. Log
-                // so an operator gets a signal under sustained
-                // backing-store failure; the cache already holds the
-                // value so subsequent reads still succeed.
+                // but a swallowed `Err` used to silently lose
+                // durability from the CALLER's perspective. Log (for
+                // an operator watching logs under sustained backing-
+                // store failure) AND record into `last_error` so the
+                // next `flush()` call surfaces it as an `Err` instead
+                // of a silent `Ok(())` — the cache already holds the
+                // value so subsequent reads still succeed either way.
                 if let Err(e) = inner.set(key, value).await {
                     log::error!("storage_cached async write to backing store failed: {}", e);
+                    last_error.store(Some(Arc::new(e.to_string())));
                 }
             }
             CacheWriteJob::Remove { key } => {
@@ -87,10 +94,15 @@ async fn run_async_write_worker(
                         "storage_cached async remove from backing store failed: {}",
                         e
                     );
+                    last_error.store(Some(Arc::new(e.to_string())));
                 }
             }
         }
         pending.fetch_sub(1, Ordering::Relaxed);
+        // Wake every task parked in `wait_for_async_writes` so it can
+        // recheck `pending == 0` — see that function for why a plain
+        // `yield_now` busy-poll was replaced with this.
+        notify.notify_waiters();
     }
 }
 
@@ -184,6 +196,15 @@ pub struct CachedStore {
     /// backing store observes writes to the same key in submission
     /// order. `None` for `WriteMode::Sync` (writes are inline, no worker).
     async_write_tx: Option<mpsc::UnboundedSender<CacheWriteJob>>,
+    /// Most recent background write/remove failure (`WriteMode::Async`
+    /// only), consumed and cleared by `flush()`. Always `None` for
+    /// `WriteMode::Sync` (writes are inline and their errors already
+    /// propagate through the call's own `Result`).
+    write_error: Arc<ArcSwapOption<String>>,
+    /// Woken by `run_async_write_worker` after every job — lets
+    /// `wait_for_async_writes` park instead of busy-polling
+    /// `pending_writes` with `yield_now`.
+    write_notify: Arc<Notify>,
 }
 
 impl CachedStore {
@@ -205,6 +226,8 @@ impl CachedStore {
         }
 
         let pending_writes = Arc::new(AtomicUsize::new(0));
+        let write_error: Arc<ArcSwapOption<String>> = Arc::new(ArcSwapOption::from(None));
+        let write_notify = Arc::new(Notify::new());
 
         // Only Async mode needs the background write worker; Sync writes
         // stay fully inline (await at the call site), so no channel/task
@@ -215,6 +238,8 @@ impl CachedStore {
                 rx,
                 inner.clone(),
                 pending_writes.clone(),
+                write_error.clone(),
+                write_notify.clone(),
             ));
             Some(tx)
         } else {
@@ -228,6 +253,8 @@ impl CachedStore {
             pending_writes,
             size,
             async_write_tx,
+            write_error,
+            write_notify,
         })
     }
 
@@ -300,11 +327,34 @@ impl CachedStore {
             return Ok(());
         }
 
-        // Wait for pending writes to complete
-        while self.pending_writes.load(Ordering::Relaxed) > 0 {
-            tokio::task::yield_now().await;
+        self.wait_for_async_writes().await
+    }
+
+    /// Park until every job the background write worker has already
+    /// dequeued has finished (`pending_writes == 0`), then surface the
+    /// most recent background write/remove failure, if any, as an `Err`
+    /// — and clear it, so a failure is reported exactly once, to the
+    /// next `flush()` call after it happened.
+    ///
+    /// Uses `Notify`'s "create the `Notified` future before re-checking
+    /// the condition" pattern (see `tokio::sync::Notify`'s own docs for
+    /// this exact shape) instead of a `yield_now` busy-poll: the
+    /// background worker calls `notify_waiters()` after every job, so a
+    /// waiter here is woken promptly rather than repeatedly re-scheduled
+    /// by the runtime to just recheck an atomic. No-op (immediate
+    /// return) for `WriteMode::Sync`, where `pending_writes` is always 0.
+    async fn wait_for_async_writes(&self) -> DbResult<()> {
+        loop {
+            let notified = self.write_notify.notified();
+            if self.pending_writes.load(Ordering::Relaxed) == 0 {
+                break;
+            }
+            notified.await;
         }
 
+        if let Some(msg) = self.write_error.swap(None) {
+            return Err(DbError::Storage((*msg).clone()));
+        }
         Ok(())
     }
 
@@ -614,12 +664,10 @@ impl Store for CachedStore {
     /// the default no-op and async-mode writes would not become
     /// durable on a `flush()` callsite.
     async fn flush(&self) -> DbResult<()> {
-        // Wait for the in-flight background `set`/`remove` tasks
-        // (only present in `WriteMode::Async`). For `Sync` mode
-        // pending_writes is always 0 and the loop body never runs.
-        while self.pending_writes.load(Ordering::Relaxed) > 0 {
-            tokio::task::yield_now().await;
-        }
+        // Wait for the in-flight background `set`/`remove` tasks (only
+        // present in `WriteMode::Async`; no-op for `Sync`) and surface
+        // any background write failure — see `wait_for_async_writes`.
+        self.wait_for_async_writes().await?;
         // Now ensure the inner store's own buffered state lands.
         self.inner.flush().await
     }
