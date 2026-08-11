@@ -17,6 +17,7 @@ use shamir_db::shamir_db::SystemStoreConfig;
 use shamir_db::ShamirDb;
 
 use crate::config::Config;
+use crate::tables_registry::TablesRegistry;
 
 /// Wrapper for `IndexHealth` that includes the resolved index name
 /// for JSON serialization.
@@ -108,7 +109,7 @@ pub struct DoctorArgs {
 /// Combined report for a single table: verify results, optional repair results.
 /// (Internal struct, not directly serialized — see `TableReportJson` for JSON.)
 #[derive(Debug, Clone)]
-struct TableReport {
+pub struct TableReport {
     /// Database name.
     pub db: String,
     /// Repository name.
@@ -121,6 +122,9 @@ struct TableReport {
     pub repair: Option<RepairReport>,
     /// Whether the table is healthy after this run.
     pub healthy: bool,
+    /// Resolved index names for this table (`name_interned` → human-readable).
+    /// Embedded so the report is self-contained for JSON conversion and tests.
+    pub resolved_index_names: TFxMap<u64, String>,
 }
 
 /// JSON-serializable table report with resolved index names.
@@ -136,7 +140,8 @@ struct TableReportJson {
 }
 
 impl TableReportJson {
-    fn from_report(report: &TableReport, name_map: &TFxMap<u64, String>) -> Self {
+    fn from_report(report: &TableReport) -> Self {
+        let name_map = &report.resolved_index_names;
         Self {
             db: report.db.clone(),
             repo: report.repo.clone(),
@@ -151,7 +156,7 @@ impl TableReportJson {
 /// Aggregate report for all tables scanned. (Internal struct, see
 /// `DoctorReportJson` for JSON.)
 #[derive(Debug, Clone)]
-struct DoctorReport {
+pub struct DoctorReport {
     /// Per-table reports.
     pub tables: Vec<TableReport>,
     /// Overall health (true if every table is healthy).
@@ -162,6 +167,30 @@ struct DoctorReport {
     pub unhealthy_before: usize,
     /// Total tables repaired (if `--apply` was used).
     pub repaired: usize,
+}
+
+impl DoctorReport {
+    /// Serialize to a JSON string with resolved index names.
+    /// Exposed so tests can validate the JSON structure without capturing
+    /// stdout (no established stdout-capture pattern exists in this crate).
+    pub fn to_json(&self, pretty: bool) -> anyhow::Result<String> {
+        let json_report = DoctorReportJson {
+            tables: self
+                .tables
+                .iter()
+                .map(TableReportJson::from_report)
+                .collect(),
+            healthy: self.healthy,
+            total_tables: self.total_tables,
+            unhealthy_before: self.unhealthy_before,
+            repaired: self.repaired,
+        };
+        if pretty {
+            Ok(serde_json::to_string_pretty(&json_report)?)
+        } else {
+            Ok(serde_json::to_string(&json_report)?)
+        }
+    }
 }
 
 /// JSON-serializable aggregate report with resolved index names.
@@ -175,8 +204,13 @@ struct DoctorReportJson {
 }
 
 /// Run the command: scan tables (or filtered subset), verify (and optionally
-/// repair), print report, and exit with appropriate code.
-pub async fn run(config: &Config, args: &DoctorArgs) -> anyhow::Result<()> {
+/// repair), print report, and return the aggregate [`DoctorReport`].
+///
+/// Returns `Err` (non-zero exit via `main`'s `Termination`) when any table is
+/// unhealthy or when an explicit `--db`/`--repo`/`--table` filter matches
+/// zero tables — the latter is fail-loud because the operator asked for a
+/// specific table and got silence.
+pub async fn run(config: &Config, args: &DoctorArgs) -> anyhow::Result<DoctorReport> {
     let meta_path = config.data_dir.join("shamir_db_meta.redb");
 
     // redb is single-writer: retry briefly before failing with a clear
@@ -207,9 +241,33 @@ pub async fn run(config: &Config, args: &DoctorArgs) -> anyhow::Result<()> {
         }
     };
 
+    // Replay the wire-tables registry: re-register every table that a wire
+    // client created in a previous boot so its data file is re-attached to
+    // the in-memory `RepoInstance`. Without this step the table exists on
+    // disk but doctor cannot see it (mirrors server_launcher.rs boot path).
+    let tables_registry =
+        TablesRegistry::open(&config.data_dir).context("open wire_tables registry")?;
+    {
+        let snap = tables_registry.snapshot();
+        for (db_name, repo_name, table_name) in snap.iter_entries() {
+            if let Some(db) = shamir.get_db(db_name) {
+                if !db.has_table(repo_name, table_name) {
+                    if let Err(e) = db.create_table(repo_name, table_name) {
+                        tracing::warn!(
+                            db = db_name,
+                            repo = repo_name,
+                            table = table_name,
+                            ?e,
+                            "tables_registry replay: create_table failed"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
     // Collect all matching tables.
     let mut table_reports: Vec<TableReport> = Vec::new();
-    let mut index_name_maps: Vec<TFxMap<u64, String>> = Vec::new();
 
     for db_name in shamir.list_dbs() {
         if let Some(ref filter_db) = args.db {
@@ -287,20 +345,33 @@ pub async fn run(config: &Config, args: &DoctorArgs) -> anyhow::Result<()> {
                     verify: verify_report,
                     repair: repair_report,
                     healthy: final_healthy,
+                    resolved_index_names: index_name_map,
                 });
-
-                index_name_maps.push(index_name_map);
             }
         }
     }
 
+    // No tables matched. An explicit filter matching nothing is an error
+    // (the operator asked for a specific table and got silence); a
+    // genuinely empty database with no filter is not.
     if table_reports.is_empty() {
         if args.db.is_some() || args.repo.is_some() || args.table.is_some() {
             eprintln!("No tables match the given filters.");
-        } else {
-            eprintln!("No tables found in the database.");
+            return Err(anyhow!(
+                "doctor: no tables match the given filters (db={:?}, repo={:?}, table={:?})",
+                args.db,
+                args.repo,
+                args.table
+            ));
         }
-        return Ok(());
+        eprintln!("No tables found in the database.");
+        return Ok(DoctorReport {
+            tables: Vec::new(),
+            healthy: true,
+            total_tables: 0,
+            unhealthy_before: 0,
+            repaired: 0,
+        });
     }
 
     // Build aggregate report.
@@ -311,47 +382,34 @@ pub async fn run(config: &Config, args: &DoctorArgs) -> anyhow::Result<()> {
     let repaired = table_reports.iter().filter(|r| r.repair.is_some()).count();
     let healthy = table_reports.iter().all(|r| r.healthy);
 
+    let total_tables = table_reports.len();
+    let report = DoctorReport {
+        tables: table_reports,
+        healthy,
+        total_tables,
+        unhealthy_before,
+        repaired,
+    };
+
     // Output.
     if args.json || args.pretty {
-        // Convert to JSON-serializable format with resolved names.
-        let json_report = DoctorReportJson {
-            tables: table_reports
-                .iter()
-                .zip(index_name_maps.iter())
-                .map(|(table_report, name_map)| {
-                    TableReportJson::from_report(table_report, name_map)
-                })
-                .collect(),
-            healthy,
-            total_tables: table_reports.len(),
-            unhealthy_before,
-            repaired,
-        };
-
-        let json = if args.pretty {
-            serde_json::to_string_pretty(&json_report)?
-        } else {
-            serde_json::to_string(&json_report)?
-        };
+        let json = report.to_json(args.pretty)?;
         println!("{}", json);
     } else {
         // Human-readable text output.
-        let report = DoctorReport {
-            healthy,
-            total_tables: table_reports.len(),
-            unhealthy_before,
-            repaired,
-            tables: table_reports,
-        };
-        print_human_report(&report, &index_name_maps);
+        print_human_report(&report);
     }
 
-    // Exit with non-zero if any table is unhealthy.
+    // Propagate as `Err` so `main`'s `Termination` handler runs destructors
+    // (Fjall/redb handles, background flush tasks) before the process exits —
+    // unlike `std::process::exit` which skips them entirely.
     if !healthy {
-        std::process::exit(1);
+        return Err(anyhow!(
+            "doctor: {unhealthy_before} of {total_tables} table(s) unhealthy"
+        ));
     }
 
-    Ok(())
+    Ok(report)
 }
 
 /// Resolve index names from `name_interned` values to human-readable strings
@@ -393,11 +451,12 @@ async fn resolve_index_names(
 }
 
 /// Print a human-readable text report.
-fn print_human_report(report: &DoctorReport, index_name_maps: &[TFxMap<u64, String>]) {
+fn print_human_report(report: &DoctorReport) {
     println!("Doctor Report — {} table(s) scanned", report.total_tables);
     println!();
 
-    for (table_report, name_map) in report.tables.iter().zip(index_name_maps.iter()) {
+    for table_report in &report.tables {
+        let name_map = &table_report.resolved_index_names;
         println!(
             "{}.{}.{}:",
             table_report.db, table_report.repo, table_report.table
