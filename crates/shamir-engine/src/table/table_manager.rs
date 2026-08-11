@@ -816,6 +816,27 @@ impl TableManager {
             crate::index2::persistence::save_legacy_index_version(&mgr.info_store).await?;
         }
 
+        // #1068: catch up the DDL op-log FIFO retention sweep at open time.
+        // The throttled trigger in `ddl_op_log::write_op_status` lives behind
+        // an in-memory `AtomicU64` that resets on every restart, so a table
+        // that was mid-way through its throttle window at crash time would
+        // otherwise not get swept again until `DDL_OP_LOG_EVICTION_CHECK_INTERVAL`
+        // more terminal writes accumulate. Mirrors the other periodic
+        // maintenance sweeps run at open (e.g. the legacy-index rebuild
+        // above) — not itself a crash-recovery path, just a good moment to
+        // catch up. Failure is logged, not fatal: an unswept log is a
+        // capacity/observability concern, not a correctness one, and must
+        // not block the table from opening.
+        if let Err(e) =
+            crate::table::ddl_op_log::maybe_evict_terminal_records(&mgr.info_store).await
+        {
+            log::error!(
+                "#1068: DDL op-log eviction catch-up sweep at table open failed for table \
+                 '{}': {e}",
+                mgr.name
+            );
+        }
+
         Ok(mgr)
     }
 

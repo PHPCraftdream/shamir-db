@@ -71,6 +71,17 @@ pub struct VerifyReport {
     /// explicitly (rename or drop one of the colliding indexes). Folds into
     /// [`is_healthy`](Self::is_healthy)'s AND-chain.
     pub cross_family_name_collisions: Vec<String>,
+    /// #1068: current count of terminal (Succeeded/Failed/
+    /// SucceededViaCrashRecovery) records in this table's DDL op-status log
+    /// (`ddl_op:` keyspace in `info_store`). Purely observational — the FIFO
+    /// retention sweep (`ddl_op_log::maybe_evict_terminal_records`) keeps
+    /// this bounded near `DDL_OP_LOG_CAP` on its own; this field exists so
+    /// an operator running `verify()` can see the log is actually being
+    /// kept in check rather than inferring it indirectly from `log::info!`
+    /// output. Does not fold into [`is_healthy`](Self::is_healthy) — an
+    /// over-cap count between sweeps is expected, transient behavior, not
+    /// an integrity fault.
+    pub ddl_op_log_terminal_record_count: u64,
     pub elapsed_ms: u64,
 }
 
@@ -361,6 +372,12 @@ impl TableManager {
         // why this is surfaced, not auto-repaired.
         let cross_family_name_collisions = self.check_cross_family_name_collisions().await;
 
+        // #1068: observability fact — how many terminal DDL op-status
+        // records this table's log currently holds. Read-only; the FIFO
+        // retention sweep is what actually keeps this bounded.
+        let ddl_op_log_terminal_record_count =
+            crate::table::ddl_op_log::count_terminal_records(&self.info_store).await?;
+
         Ok(VerifyReport {
             records_in_data,
             counter_value,
@@ -371,6 +388,7 @@ impl TableManager {
             index2_backends,
             index2_registry_consistency,
             cross_family_name_collisions,
+            ddl_op_log_terminal_record_count,
             elapsed_ms: start.elapsed().as_millis() as u64,
         })
     }
