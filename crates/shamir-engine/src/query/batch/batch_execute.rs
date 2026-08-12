@@ -3,6 +3,7 @@ use std::time::Instant;
 use crate::query::batch::batch_validate::{validate_filter_depth, validate_tables};
 use crate::query::batch::execution_deadline::ExecutionDeadline;
 use crate::query::batch::executor_traits::{AdminExecutor, FunctionInvoker, TableResolver};
+use crate::query::batch::op_watchdog::register_op_watchdog;
 use crate::query::batch::query_runner::{
     build_resolved_refs, execute_single_impl, resolve_skip, skipped_query_result, QueryRunner,
 };
@@ -393,6 +394,7 @@ pub(super) async fn execute_plan_impl(
             }
 
             let op_started = Instant::now();
+            let _guard = register_op_watchdog(alias);
             let result = execute_single_impl(
                 alias,
                 entry,
@@ -519,6 +521,7 @@ pub(super) async fn execute_plan_tx_impl(
                 deadline,
             };
             let op_started = Instant::now();
+            let _guard = register_op_watchdog(alias);
             let result = runner.run(alias, entry, &resolved_refs).await?;
             warn_if_op_slow(alias, op_started.elapsed());
             all_results.insert(alias.clone(), result);

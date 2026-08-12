@@ -145,6 +145,7 @@ mod fk_actions;
 mod fk_on_update;
 mod fk_restrict;
 mod interactive_tx;
+mod op_watchdog;
 mod param_subst;
 mod query_runner;
 mod query_value_serializer;

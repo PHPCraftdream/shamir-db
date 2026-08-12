@@ -18,3 +18,4 @@ mod query_value_serializer_tests;
 mod reference_tests;
 mod sub_batch_tests;
 mod subscribe_guard_tests;
+mod watchdog_tests;
