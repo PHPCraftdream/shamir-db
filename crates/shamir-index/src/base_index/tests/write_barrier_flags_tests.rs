@@ -26,7 +26,7 @@ fn independent_bits_do_not_clobber_each_other() {
     w.set(SORTED_INDEX_CREATE);
     assert_eq!(
         w.raw(),
-        UNIQUE_INDEX_EXISTS | INDEX2_CREATE | SORTED_INDEX_CREATE
+        (UNIQUE_INDEX_EXISTS | INDEX2_CREATE | SORTED_INDEX_CREATE) as u16
     );
 
     // Clearing one bit must not disturb the others.
@@ -57,22 +57,43 @@ fn with_unique_index_exists_preseeds_bit_zero() {
 }
 
 #[test]
+fn with_regular_and_unique_index_exists_preseeds_both_bits() {
+    let w = WriteBarrierFlags::with_regular_and_unique_index_exists(true, true);
+    assert!(w.is_set(REGULAR_INDEX_EXISTS));
+    assert!(w.is_set(UNIQUE_INDEX_EXISTS));
+    assert!(w.any_set());
+
+    let w2 = WriteBarrierFlags::with_regular_and_unique_index_exists(false, true);
+    assert!(!w2.is_set(REGULAR_INDEX_EXISTS));
+    assert!(w2.is_set(UNIQUE_INDEX_EXISTS));
+
+    let w3 = WriteBarrierFlags::with_regular_and_unique_index_exists(true, false);
+    assert!(w3.is_set(REGULAR_INDEX_EXISTS));
+    assert!(!w3.is_set(UNIQUE_INDEX_EXISTS));
+
+    let w4 = WriteBarrierFlags::with_regular_and_unique_index_exists(false, false);
+    assert!(!w4.is_set(REGULAR_INDEX_EXISTS));
+    assert!(!w4.is_set(UNIQUE_INDEX_EXISTS));
+    assert!(!w4.any_set());
+}
+
+#[test]
 fn clone_shares_the_same_underlying_word() {
     let a = WriteBarrierFlags::new();
     let b = a.clone();
     a.set(UNIQUE_INDEX_EXISTS);
     assert!(
         b.is_set(UNIQUE_INDEX_EXISTS),
-        "clone must observe the same Arc<AtomicU8>"
+        "clone must observe the same Arc<AtomicU16>"
     );
 }
 
 #[test]
-fn all_six_bits_fit_in_one_byte_with_room_to_spare() {
+fn all_seven_bits_fit_in_two_bytes_with_room_to_spare() {
     // Sanity check on the bit-packing budget claim in the module doc:
-    // 6 bits used out of 8 available in AtomicU8, no overlap (if any pair
-    // of the six constants aliased the same bit, `count_ones()` would be
-    // less than 6 despite OR-ing all six together).
-    assert_eq!(ALL_BITS.count_ones(), 6);
-    assert_eq!(ALL_BITS, 0b0011_1111);
+    // 7 bits used out of 16 available in AtomicU16, no overlap (if any pair
+    // of the seven constants aliased the same bit, `count_ones()` would be
+    // less than 7 despite OR-ing all seven together).
+    assert_eq!(ALL_BITS.count_ones(), 7);
+    assert_eq!(ALL_BITS, 0b0100_0000 | 0b0011_1111);
 }

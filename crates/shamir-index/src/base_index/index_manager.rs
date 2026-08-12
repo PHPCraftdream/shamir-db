@@ -20,7 +20,9 @@ use crate::base_index::index_keys::{
     build_index_key, build_index_key_from_record, build_posting_key,
 };
 use crate::base_index::index_record_key::IndexRecordKey;
-use crate::base_index::write_barrier_flags::{WriteBarrierFlags, UNIQUE_INDEX_EXISTS};
+use crate::base_index::write_barrier_flags::{
+    WriteBarrierFlags, REGULAR_INDEX_EXISTS, UNIQUE_INDEX_EXISTS,
+};
 use crate::write_ops::IndexWriteOp;
 use crate::IndexState;
 use bytes::Bytes;
@@ -34,7 +36,7 @@ use shamir_types::types::common::THasher;
 use shamir_types::types::record_id::RecordId;
 use shamir_types::types::value::InnerValue;
 use std::collections::{BTreeMap, BTreeSet};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -150,17 +152,16 @@ pub struct IndexManager {
     /// Метаданные уникальных индексов
     pub(super) indexes_unique: Arc<IndexInfo>,
 
-    /// Атомарный флаг: есть ли хоть один обычный индекс
-    /// Arc позволяет всем клонам видеть одно и то же состояние
-    pub(super) has_indexes: Arc<AtomicBool>,
-    /// F-69 (#896, P0): the [`UNIQUE_INDEX_EXISTS`] bit of the SAME packed
-    /// word `TableManager` (`shamir-engine`) shares as the single atomic
-    /// backing `needs_write_barrier()`. Replaces the former standalone
-    /// `has_indexes_unique: Arc<AtomicBool>` (which was loaded `Relaxed`,
-    /// the exact torn-read bug this task closes — see
-    /// `write_barrier_flags.rs`'s module doc for the full writeup). This
-    /// manager is the exclusive write authority for this bit; `TableManager`
-    /// clones the same `Arc<AtomicU8>` and owns the other five bits.
+    /// F-69 (#896, P0): the packed word `TableManager` (`shamir-engine`)
+    /// shares as the single atomic backing `needs_write_barrier()`. Replaces
+    /// the former standalone `has_indexes: Arc<AtomicBool>` (written
+    /// `Release`, read `Relaxed` — no happens-before edge; see #1102 brief)
+    /// and `has_indexes_unique: Arc<AtomicBool>` (loaded `Relaxed`, the
+    /// torn-read bug F-69 closes). This manager is the exclusive write
+    /// authority for bits 0 (`UNIQUE_INDEX_EXISTS`) and 6 (`REGULAR_INDEX_EXISTS`);
+    /// `TableManager` clones the same `Arc<AtomicU16>` and owns bits 1-5. The
+    /// module doc for `write_barrier_flags.rs` explains why bits 3 and 4 are
+    /// "CREATE in flight" flags, distinct from the EXISTS flags.
     pub(super) write_barrier_flags: WriteBarrierFlags,
 
     /// **Opt G** — in-memory cache for posting lists. Keys are the
@@ -408,6 +409,18 @@ pub struct IndexManager {
     /// already serialized by `unique_write_lock`/`drain_writers` and would
     /// gain nothing from one.
     pub(super) reader_gate: crate::reader_drain_gate::ReaderDrainGate,
+    /// #1102 test-only deterministic pause point: fires in all four regular
+    /// index CREATE paths strictly AFTER the `REGULAR_INDEX_EXISTS` flag is
+    /// set and BEFORE the generation is bumped — the specific ordering this
+    /// task's writer-side fix establishes. Mirrors the #1098 unique-index
+    /// pause-seam shape (see `index_manager_unique.rs`'s `PostFlagSetPreGenBumpHook`).
+    /// A regression test can park a CREATE here, drive a concurrent tx's
+    /// generation-then-flag reads while parked, then resume — proving the
+    /// writer's flag-then-gen order is what makes the reader's gen-then-checks
+    /// order actually sufficient. NOT `#[cfg(test)]`-gated — cross-crate test
+    /// consumer. `None` on every real path.
+    pub(super) post_flag_set_pre_gen_bump_hook:
+        Arc<arc_swap::ArcSwapOption<crate::base_index::backfill_pause_hook::BackfillPauseHook>>,
 }
 
 impl Clone for IndexManager {
@@ -417,7 +430,6 @@ impl Clone for IndexManager {
             info_store: Arc::clone(&self.info_store),
             indexes: Arc::clone(&self.indexes),
             indexes_unique: Arc::clone(&self.indexes_unique),
-            has_indexes: Arc::clone(&self.has_indexes),
             write_barrier_flags: self.write_barrier_flags.clone(),
             posting_cache: Arc::clone(&self.posting_cache),
             create_index_backfill_hook: Arc::clone(&self.create_index_backfill_hook),
@@ -437,7 +449,28 @@ impl Clone for IndexManager {
                 &self.recover_renames_between_entries_hook,
             ),
             reader_gate: self.reader_gate.clone(),
+            post_flag_set_pre_gen_bump_hook: Arc::clone(&self.post_flag_set_pre_gen_bump_hook),
         }
+    }
+}
+
+// ── #1102 test-only pause seam for regular index CREATE ───────────────────
+//
+// Mirrors the #1098 unique-index pause-seam shape in `index_manager_unique.rs`.
+// Fires in all four regular index CREATE paths strictly AFTER the
+// `REGULAR_INDEX_EXISTS` flag is set and BEFORE the generation is bumped —
+// the specific ordering this task's writer-side fix establishes. A test can
+// park a CREATE here, drive a concurrent tx's generation-then-flag reads while
+// parked, then resume — proving the writer's flag-then-gen order is what makes
+// the reader's gen-then-checks order actually sufficient.
+//
+// NOT `#[cfg(test)]`-gated — the hook field is public-test-visible for cross-
+// crate test consumption (same rationale as `create_index_backfill_hook`).
+async fn fire_post_flag_set_pre_gen_bump_test_hook(
+    hook: &arc_swap::ArcSwapOption<crate::base_index::backfill_pause_hook::BackfillPauseHook>,
+) {
+    if let Some(hook) = hook.load_full() {
+        hook.wait_at_window().await;
     }
 }
 
@@ -500,8 +533,8 @@ impl IndexManager {
                 // above. For the UNIQUE family a silent `IndexInfo::new()`
                 // substitution is worse than data loss — it zeroes
                 // `has_indexes_unique_flag`, which flips
-                // `WriteBarrierFlags::with_unique_index_exists(false)`, so
-                // every writer skips unique validation and accepts
+                // `WriteBarrierFlags::with_regular_and_unique_index_exists(false, false)`,
+                // so every writer skips unique validation and accepts
                 // duplicates into a column the schema still treats as
                 // unique; the NEXT persist then writes the empty set back to
                 // disk, making the loss permanent. Propagate the error.
@@ -525,7 +558,6 @@ impl IndexManager {
             info_store,
             indexes: Arc::new(indexes),
             indexes_unique: Arc::new(indexes_unique),
-            has_indexes: Arc::new(AtomicBool::new(has_indexes_flag)),
             // F-69 (#896): standalone construction gets its own fresh packed
             // word (no `TableManager` exists yet to share it with — callers
             // that DO need the shared word, i.e. `TableManager::create`,
@@ -534,8 +566,10 @@ impl IndexManager {
             // this manager adopting an externally-supplied `Arc`. This keeps
             // every standalone/test/bench caller of `IndexManager::new`
             // (dozens of call sites across `shamir-index` and
-            // `shamir-engine`) working unchanged.
-            write_barrier_flags: WriteBarrierFlags::with_unique_index_exists(
+            // `shamir-engine`) working unchanged. #1102: the packed word now
+            // also carries `REGULAR_INDEX_EXISTS` (bit 6).
+            write_barrier_flags: WriteBarrierFlags::with_regular_and_unique_index_exists(
+                has_indexes_flag,
                 has_indexes_unique_flag,
             ),
             posting_cache: Arc::new(DashMap::with_capacity_and_hasher(
@@ -557,6 +591,7 @@ impl IndexManager {
             rename_mid_pause_hook: Arc::new(arc_swap::ArcSwapOption::empty()),
             recover_renames_between_entries_hook: Arc::new(arc_swap::ArcSwapOption::empty()),
             reader_gate: crate::reader_drain_gate::ReaderDrainGate::new(),
+            post_flag_set_pre_gen_bump_hook: Arc::new(arc_swap::ArcSwapOption::empty()),
         };
 
         // P0-3 (#959): resume any in-progress DROP INDEX operations that were
@@ -702,8 +737,10 @@ impl IndexManager {
 
     /// Синхронизирует атомарные флаги с реальным состоянием индексов.
     fn sync_flags(&self) {
-        self.has_indexes
-            .store(self.indexes.is_enabled(), Ordering::Release);
+        // #1102: sync both REGULAR_INDEX_EXISTS and UNIQUE_INDEX_EXISTS bits
+        // from their respective IndexInfo state to the packed word.
+        self.write_barrier_flags
+            .set_to(REGULAR_INDEX_EXISTS, self.indexes.is_enabled());
         self.write_barrier_flags
             .set_to(UNIQUE_INDEX_EXISTS, self.indexes_unique.is_enabled());
     }
@@ -1272,8 +1309,10 @@ impl IndexManager {
             self.sweep_index_postings(false, name_interned).await?;
         }
         if regular_changed {
-            self.has_indexes
-                .store(self.indexes.is_enabled(), Ordering::Release);
+            // #1102: update REGULAR_INDEX_EXISTS to match the new IndexInfo state
+            // (may be true if other indexes remain, false if this was the last one).
+            self.write_barrier_flags
+                .set_to(REGULAR_INDEX_EXISTS, self.indexes.is_enabled());
             self.save_index_info().await?;
         }
 
@@ -1321,10 +1360,15 @@ impl IndexManager {
 
     /// Проверяет, есть ли хоть один обычный индекс.
     ///
-    /// Использует атомарное чтение, поэтому очень быстро.
-    /// Не требует захвата блокировки.
+    /// #1102: reads the shared [`REGULAR_INDEX_EXISTS`] bit of the packed
+    /// [`write_barrier_flags`] word (`SeqCst`), closing the ordering gap
+    /// that let a row commit with no posting under a concurrently-created
+    /// regular index (the former standalone `has_indexes: Arc<AtomicBool>`
+    /// was written `Release` but read `Relaxed` — no happens-before edge).
+    /// This mirrors `has_unique_indexes()`'s shape; both are now `SeqCst`
+    /// on the same packed word, guaranteeing consistent ordering semantics.
     pub fn has_indexes(&self) -> bool {
-        self.has_indexes.load(Ordering::Relaxed)
+        self.write_barrier_flags.is_set(REGULAR_INDEX_EXISTS)
     }
 
     /// Проверяет, есть ли хоть один уникальный индекс.
@@ -1418,8 +1462,14 @@ impl IndexManager {
         // ── Phase 1: register the definition FIRST ──────────────────────────
         // (Same concurrency rationale as `create_index_from_records`.)
         self.indexes.add_index(index_def);
+        // #1102: set REGULAR_INDEX_EXISTS BEFORE bumping generation (mirrors
+        // #1098's fix for UNIQUE_INDEX_EXISTS). See `create_index_from_records`
+        // for the full ordering argument.
+        self.write_barrier_flags.set(REGULAR_INDEX_EXISTS);
+        // #1102 test-only pause seam: fires strictly AFTER the flag set above
+        // and BEFORE the generation bump below. No-op in every non-test build.
+        fire_post_flag_set_pre_gen_bump_test_hook(&self.post_flag_set_pre_gen_bump_hook).await;
         self.bump_generation(); // P0-2 (#958): gen gate for commit-time rederive
-        self.has_indexes.store(true, Ordering::Release);
         self.save_index_info().await?;
 
         // ── Phase 2: incremental backfill, batch-by-batch ───────────────────
@@ -1599,8 +1649,20 @@ impl IndexManager {
         // registered (but possibly under-populated), still-planner-invisible
         // index that the doctor `repair()` pass can top up on request.
         self.indexes.add_index(index_def);
+        // #1102: set REGULAR_INDEX EXISTS BEFORE bumping generation (mirrors
+        // #1098's fix for UNIQUE_INDEX_EXISTS). The `set` is `SeqCst` (via
+        // `write_barrier_flags.rs`), same as bit 0; the generation bump's
+        // `fetch_add` is `AcqRel`. A reader that observes the NEW generation
+        // via an `Acquire` load is guaranteed — by that synchronizes-with edge
+        // plus program order on the single writer thread — to also observe
+        // this flag set.
+        self.write_barrier_flags.set(REGULAR_INDEX_EXISTS);
+        // #1102 test-only pause seam: fires strictly AFTER the flag set above
+        // and BEFORE the generation bump below — see
+        // `fire_post_flag_set_pre_gen_bump_test_hook`'s doc. No-op in every
+        // non-test build.
+        fire_post_flag_set_pre_gen_bump_test_hook(&self.post_flag_set_pre_gen_bump_hook).await;
         self.bump_generation(); // P0-2 (#958): gen gate for commit-time rederive
-        self.has_indexes.store(true, Ordering::Release);
         self.save_index_info().await?;
 
         // ── Phase 2: backfill postings from the snapshot ────────────────────
@@ -1789,8 +1851,14 @@ impl IndexManager {
         // ── Phase 1: register the definition FIRST, at Building ────────────
         // (Identical to `create_index_from_records` — see that method's doc.)
         self.indexes.add_index(index_def);
+        // #1102: set REGULAR_INDEX_EXISTS BEFORE bumping generation (mirrors
+        // #1098's fix for UNIQUE_INDEX_EXISTS). See `create_index_from_records`
+        // for the full ordering argument.
+        self.write_barrier_flags.set(REGULAR_INDEX_EXISTS);
+        // #1102 test-only pause seam: fires strictly AFTER the flag set above
+        // and BEFORE the generation bump below. No-op in every non-test build.
+        fire_post_flag_set_pre_gen_bump_test_hook(&self.post_flag_set_pre_gen_bump_hook).await;
         self.bump_generation(); // P0-2 (#958): gen gate for commit-time rederive
-        self.has_indexes.store(true, Ordering::Release);
         self.save_index_info().await?;
 
         // ── Phase 2: stream + batch-write postings (F-78 body) ──────────────
@@ -1932,8 +2000,14 @@ impl IndexManager {
         // Phase 1: register the definition FIRST, at Building
         // (Identical sequence to create_index_from_records Phase 1)
         self.indexes.add_index(index_def);
+        // #1102: set REGULAR_INDEX_EXISTS BEFORE bumping generation (mirrors
+        // #1098's fix for UNIQUE_INDEX_EXISTS). See `create_index_from_records`
+        // for the full ordering argument.
+        self.write_barrier_flags.set(REGULAR_INDEX_EXISTS);
+        // #1102 test-only pause seam: fires strictly AFTER the flag set above
+        // and BEFORE the generation bump below. No-op in every non-test build.
+        fire_post_flag_set_pre_gen_bump_test_hook(&self.post_flag_set_pre_gen_bump_hook).await;
         self.bump_generation();
-        self.has_indexes.store(true, Ordering::Release);
         self.save_index_info().await?;
         Ok(())
     }
@@ -2163,9 +2237,11 @@ impl IndexManager {
         // FIRST (see the method doc). The RCU swap publishes a Vec without
         // this definition atomically.
         let was_removed = self.indexes.remove_index(name_interned);
+        // #1102: update REGULAR_INDEX_EXISTS to match the new IndexInfo state
+        // (may be true if other indexes remain, false if this was the last one).
+        self.write_barrier_flags
+            .set_to(REGULAR_INDEX_EXISTS, self.indexes.is_enabled());
         self.bump_generation(); // P0-2 (#958): gen gate for commit-time rederive
-        self.has_indexes
-            .store(self.indexes.is_enabled(), Ordering::Release);
 
         // F-76 test seam: park here (definition already retired, postings not
         // yet swept) if a test installed a pause hook. With the fix, a

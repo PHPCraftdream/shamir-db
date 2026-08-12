@@ -14,9 +14,9 @@ use super::helpers::{create_manager, create_test_value};
 use crate::base_index::index_definition::IndexDefinition;
 use crate::base_index::index_info_item::IndexInfoItem;
 use crate::base_index::index_keys::{build_index_key_from_record, build_posting_key};
+use crate::base_index::write_barrier_flags::REGULAR_INDEX_EXISTS;
 use shamir_types::types::record_id::RecordId;
 use shamir_types::types::value::InnerValue;
-use std::sync::atomic::Ordering;
 
 // ============================================================================
 // Plain CREATE INDEX — register-first closes the lost-write window
@@ -75,7 +75,8 @@ async fn create_index_register_first_indexes_concurrent_write() {
     //    does first now) — including the has_indexes flag, which the live
     //    write-hook checks as a fast-path gate.
     manager.indexes.add_index(index_def.clone());
-    manager.has_indexes.store(true, Ordering::Release);
+    // #1102: set REGULAR_INDEX_EXISTS bit (replaces has_indexes.store())
+    manager.write_barrier_flags.set(REGULAR_INDEX_EXISTS);
     manager.save_index_info().await.unwrap();
 
     // 2. A "concurrent" write lands NOW — the hook sees the registered def.
