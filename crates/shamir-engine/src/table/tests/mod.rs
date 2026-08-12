@@ -61,6 +61,7 @@ pub mod p1066_index2_rename_durability_tests;
 pub mod p1067_ddl_op_id_recovery_tests;
 pub mod p1087_phase_b_a_tests;
 pub mod p1088_phase_c_d_tests;
+pub mod p1098_gen_read_order_tests;
 pub mod p967_ddl_structured_error_tests;
 pub mod p997_hash_rename_durability_tests;
 pub mod persistence_tests;

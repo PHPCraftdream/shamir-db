@@ -16,6 +16,55 @@ pub(super) struct StagedMutation {
     pub(super) counter_delta: i64,
 }
 
+// ── #1098 test-only pause seam ──────────────────────────────────────────
+//
+// Mirrors `pre_commit.rs`'s `TEST_POST_PRELOCK_PRE_MATERIALIZE_HOOK`
+// (F-48b, #867): a `#[cfg(test)]` `OnceLock<Arc<Hook>>` global, zero cost
+// when unset. Fires in `insert_tx` strictly AFTER the (fixed, #1098)
+// generation-capture block and BEFORE the `has_unique_indexes()`-gated
+// validation/guard-recording block — i.e. textually BETWEEN the two
+// reads whose relative order #1098 fixed. A test can install the hook,
+// spawn an `insert_tx` call, busy-poll `reached` (no sleeps, matching
+// this codebase's established pattern for these seams), drive a real
+// `CREATE UNIQUE INDEX` to completion while the tx is parked, then
+// `resume` it — deterministically reproducing the exact interleaving
+// window #1098 closes, without relying on timing luck.
+#[cfg(test)]
+#[derive(Debug)]
+pub(crate) struct PostGenCapturePreUniqueCheckHook {
+    pub(crate) reached: std::sync::atomic::AtomicUsize,
+    pub(crate) resume: tokio::sync::Notify,
+    pub(crate) armed: std::sync::atomic::AtomicBool,
+}
+
+#[cfg(test)]
+pub(crate) static TEST_POST_GEN_CAPTURE_PRE_UNIQUE_CHECK_HOOK: std::sync::OnceLock<
+    std::sync::Arc<PostGenCapturePreUniqueCheckHook>,
+> = std::sync::OnceLock::new();
+
+/// Parks on [`TEST_POST_GEN_CAPTURE_PRE_UNIQUE_CHECK_HOOK`] if a test
+/// installed one; a true no-op otherwise. One-shot (CAS true→false) so
+/// only the FIRST caller to reach this seam actually parks.
+async fn fire_post_gen_capture_pre_unique_check_test_hook() {
+    #[cfg(test)]
+    if let Some(hook) = TEST_POST_GEN_CAPTURE_PRE_UNIQUE_CHECK_HOOK.get() {
+        hook.reached
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let should_pause = hook
+            .armed
+            .compare_exchange(
+                true,
+                false,
+                std::sync::atomic::Ordering::AcqRel,
+                std::sync::atomic::Ordering::Acquire,
+            )
+            .is_ok();
+        if should_pause {
+            hook.resume.notified().await;
+        }
+    }
+}
+
 /// #1096: which unique keys THIS transaction has released-and-not-reclaimed
 /// as of the CURRENT staging point — the exact same `live`/`released`
 /// walk `pre_commit.rs`'s Step 1 uses, scoped to just `table_token` and
@@ -512,6 +561,19 @@ impl TableManager {
         self.acquire_pessimistic_write_lock(RecordKey::from_slice(rid.as_bytes()), tx)
             .await?;
 
+        // P0-2 (#958) / TOCTOU fix (2b): capture generations BEFORE any
+        // `all_backends()` / `iter()` snapshot (see `insert_tx`'s comment).
+        let token = self.table_token();
+        let index2_gen = self.index2_registry().generation();
+        let sorted_gen = self.sorted_indexes.generation();
+        let base_index_gen = self.index_manager.generation();
+
+        // #1098 test-only pause seam: fires strictly AFTER the generation
+        // capture above and BEFORE the unique-check block below — see
+        // `fire_post_gen_capture_pre_unique_check_test_hook`'s doc. No-op
+        // in every non-test build.
+        fire_post_gen_capture_pre_unique_check_test_hook().await;
+
         // HIGH-6: stage-time unique validation (read-only against
         // committed state). Optimistic fast-reject for the common
         // single-writer duplicate; the tx-concurrent case is settled by
@@ -551,21 +613,6 @@ impl TableManager {
 
         // L9 fast-path: skip index planning entirely when the table has
         // no indexes. The `has_any_index()` check is O(1).
-        //
-        // P0-2 (#958) / TOCTOU fix (2b): capture ALL three generation counters
-        // BEFORE any `all_backends()` / `iter()` snapshot. Reading generation
-        // FIRST (Acquire) then snapshotting guarantees (via Release-Acquire
-        // on each manager's generation atomic, combined with each writer's
-        // publish-before-bump ordering) that any backend/def published before
-        // the gen load is visible in the snapshot, and any published after the
-        // gen load but before the snapshot is double-planned (idempotent,
-        // harmless). The OLD order (snapshot → gen capture) had a TOCTOU
-        // window where gen was bumped but the backend wasn't yet visible in
-        // `by_id`, causing the commit-time gate to skip re-derivation entirely.
-        let token = self.table_token();
-        let index2_gen = self.index2_registry().generation();
-        let sorted_gen = self.sorted_indexes.generation();
-        let base_index_gen = self.index_manager.generation();
 
         let mut index_ops = Vec::new();
         if self.has_any_index() {
@@ -630,6 +677,13 @@ impl TableManager {
         if values.is_empty() {
             return Ok(Vec::new());
         }
+
+        // P0-2 (#958) / TOCTOU fix (2b): capture generations BEFORE any
+        // `all_backends()` / `iter()` snapshot (see `insert_tx`'s comment).
+        let token = self.table_token();
+        let index2_gen = self.index2_registry().generation();
+        let sorted_gen = self.sorted_indexes.generation();
+        let base_index_gen = self.index_manager.generation();
 
         // 1. Batch-validate unique indexes. Mirrors `insert_many`:
         //    persisted check + batch-local seen set (so two rows in
@@ -706,14 +760,6 @@ impl TableManager {
         // 4–5. Index planning — skipped entirely when the table has no
         //    indexes (L9 fast-path). The `has_any_index()` check is O(1)
         //    (atomic loads + `is_empty` on lock-free maps).
-        //
-        //    P0-2 (#958) / TOCTOU fix (2b): capture generations BEFORE the
-        //    `all_backends()` snapshot below (see `insert_tx`'s comment for
-        //    the full Release-Acquire ordering proof).
-        let token = self.table_token();
-        let index2_gen = self.index2_registry().generation();
-        let sorted_gen = self.sorted_indexes.generation();
-        let base_index_gen = self.index_manager.generation();
         let mut index_ops: Vec<shamir_tx::IndexWriteOp> = Vec::new();
         if self.has_any_index() {
             // 4. Take the index2 backend snapshot ONCE, then drive both
@@ -839,6 +885,13 @@ impl TableManager {
             .collect::<Result<_, _>>()
             .map_err(|e| shamir_storage::error::DbError::Codec(format!("RecordView: {e}")))?;
 
+        // P0-2 (#958) / TOCTOU fix (2b): capture generations BEFORE the
+        // `all_backends()` snapshot below.
+        let token = self.table_token();
+        let index2_gen = self.index2_registry().generation();
+        let sorted_gen = self.sorted_indexes.generation();
+        let base_index_gen = self.index_manager.generation();
+
         // 1. Batch-validate unique indexes — same shape as `insert_tx_many`
         //    but driven through the lens (`&views[i]` as `&impl RecordRef`).
         //
@@ -911,13 +964,6 @@ impl TableManager {
         // 4–5. Index planning — skipped entirely when the table has no
         //    indexes (L9 fast-path). The `has_any_index()` check is O(1)
         //    (atomic loads + `is_empty` on lock-free maps).
-        //
-        //    P0-2 (#958) / TOCTOU fix (2b): capture generations BEFORE the
-        //    `all_backends()` snapshot below.
-        let token = self.table_token();
-        let index2_gen = self.index2_registry().generation();
-        let sorted_gen = self.sorted_indexes.generation();
-        let base_index_gen = self.index_manager.generation();
         let mut index_ops: Vec<shamir_tx::IndexWriteOp> = Vec::new();
         if self.has_any_index() {
             // 4. Take the index2 backend snapshot ONCE, then drive both
@@ -1023,6 +1069,13 @@ impl TableManager {
         self.acquire_pessimistic_write_lock(RecordKey::from_slice(id.as_bytes()), tx)
             .await?;
 
+        // P0-2 (#958) / TOCTOU fix (2b): capture generations BEFORE any
+        // `all_backends()` / `iter()` snapshot (see `insert_tx`'s comment).
+        let token = self.table_token();
+        let index2_gen = self.index2_registry().generation();
+        let sorted_gen = self.sorted_indexes.generation();
+        let base_index_gen = self.index_manager.generation();
+
         // HIGH-6: stage-time unique validation (read-only). For an
         // existing record this excludes the record itself; for a fresh
         // insert it behaves like create-validation.
@@ -1074,13 +1127,6 @@ impl TableManager {
         let bytes = value.to_bytes().map_err(|e| {
             shamir_storage::error::DbError::Codec(format!("Failed to serialize InnerValue: {}", e))
         })?;
-
-        // P0-2 (#958) / TOCTOU fix (2b): capture generations BEFORE any
-        // `all_backends()` / `iter()` snapshot (see `insert_tx`'s comment).
-        let token = self.table_token();
-        let index2_gen = self.index2_registry().generation();
-        let sorted_gen = self.sorted_indexes.generation();
-        let base_index_gen = self.index_manager.generation();
 
         let tx_id = Some(tx.tx_id);
         let (mut index_ops, counter_delta) = match &old {
