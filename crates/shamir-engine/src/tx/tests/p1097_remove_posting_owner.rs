@@ -176,6 +176,100 @@ async fn stale_remove_posting_correctly_preserves_live_claim() {
     );
 }
 
+/// #1097 follow-up - found by a review of the #1097 fix itself: a stale
+/// `RemovePosting` must not just be ignored for `live`/`released` tracking,
+/// it must be RETRACTED from `tx.index_write_set` entirely, or it still
+/// reaches Phase 5c and deletes the genuine owner's posting there. This is
+/// the SAME reproduction as `stale_remove_posting_correctly_preserves_live_claim`
+/// minus the final `INSERT C` step -- one statement shorter, no collision at
+/// all, commit succeeds, but without the retraction fix the unique index
+/// silently ends up with NO posting for "y" even though D's row holds it.
+#[tokio::test]
+async fn stale_remove_posting_is_not_applied_at_commit() {
+    let repo = make_repo();
+    repo.add_table(TableConfig::new("t"));
+    let tbl = repo.get_table("t").await.unwrap();
+    tbl.create_unique_index("by_email", &["email"])
+        .await
+        .unwrap();
+    let email_id = key_id(&tbl, "by_email").await;
+    let email_field = key_id(&tbl, "email").await;
+
+    // tx0: INSERT R{email:"y"}, INSERT D{email:"q"}; COMMIT
+    let (mut tx0, _g0) = repo.begin_tx(IsolationLevel::Snapshot).await.unwrap();
+    let rid_r = tbl
+        .insert_tx(&record_with_str(email_field, "y"), Some(&mut tx0))
+        .await
+        .expect("tx0 INSERT R must succeed");
+    let rid_d = tbl
+        .insert_tx(&record_with_str(email_field, "q"), Some(&mut tx0))
+        .await
+        .expect("tx0 INSERT D must succeed");
+    repo.commit_tx(tx0).await.expect("tx0 commit must succeed");
+
+    // tx2: BEGIN (snapshot before the next line commits)
+    let (mut tx2, _g2) = repo.begin_tx(IsolationLevel::Snapshot).await.unwrap();
+
+    // tx1: DELETE R; COMMIT -- "y" now durably free
+    let (mut tx1, _g1) = repo.begin_tx(IsolationLevel::Snapshot).await.unwrap();
+    tbl.delete_tx(rid_r, Some(&mut tx1))
+        .await
+        .expect("tx1 DELETE R must succeed");
+    repo.commit_tx(tx1).await.expect("tx1 commit must succeed");
+
+    // tx2: UPDATE D SET email="y" -- D claims "y" (live["y"] = D)
+    let d_updated = record_with_str(email_field, "y");
+    tbl.update_tx(rid_d, &d_updated, Some(&mut tx2))
+        .await
+        .expect("tx2 UPDATE D must succeed - durable 'y' is free");
+
+    // tx2: DELETE R -- stale plan (R already durably gone), planned against
+    // tx2's snapshot which still believed R owned "y". No third record
+    // involved this time -- no collision is possible, so commit must
+    // succeed. The question is whether the stale RemovePosting("y", owner=R)
+    // survives into the applied op stream and deletes D's genuine posting.
+    tbl.delete_tx(rid_r, Some(&mut tx2))
+        .await
+        .expect("tx2 DELETE R must stage successfully");
+
+    // tx2: COMMIT -- must succeed, there is no genuine conflict here.
+    repo.commit_tx(tx2)
+        .await
+        .expect("tx2 commit must succeed - no genuine conflict in this scenario");
+
+    // D's row must show email "y".
+    let d_value = tbl.get(rid_d).await.unwrap();
+    let email_key = InternerKey::new(email_field);
+    let d_email = match &d_value {
+        InnerValue::Map(m) => m.get(&email_key).and_then(|v| match v {
+            InnerValue::Str(s) => Some(s.as_str()),
+            _ => None,
+        }),
+        _ => None,
+    };
+    assert_eq!(
+        d_email,
+        Some("y"),
+        "D's email must be 'y' after tx2 commits"
+    );
+
+    // The unique index MUST still have a posting for "y" pointing at D --
+    // without retracting the stale RemovePosting, Phase 5c applies it AFTER
+    // D's genuine SetPosting (same op-stream order as staged), leaving no
+    // posting for "y" at all despite D's row holding that value.
+    let owner_y_final = tbl
+        .index_manager()
+        .lookup_by_unique_index(email_id, &[InnerValue::Str("y".into())])
+        .await
+        .unwrap();
+    assert_eq!(
+        owner_y_final,
+        Some(rid_d),
+        "the unique index must still have D's posting for 'y' -- a stale \
+         RemovePosting must not silently delete a live owner's posting"
+    );
+}
+
 /// #1097 - A legitimate release-then-reclaim case must still succeed:
 /// A single record X moves off a unique key then back onto it in the same tx.
 #[tokio::test]

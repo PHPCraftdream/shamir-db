@@ -26,12 +26,21 @@ pub(super) struct StagedMutation {
 /// ALSO cross-check the durable owner against this tx's own data write set
 /// (found by `@oh` review: this set alone is a uniqueness-bypass hazard
 /// under `Snapshot` isolation's stale-read possibility).
+///
+/// #1097 follow-up (found by a review of the #1097 fix itself): mirrors
+/// `pre_commit.rs`'s Step 1 owner-aware `RemovePosting` handling — a
+/// `RemovePosting` planned against a record that no longer holds the key
+/// (per THIS walk's own `live` tracking so far) must not mark the key
+/// released, or a later caller could wrongly treat a still-live key as free.
+/// Without this, this function's doc claim of being "the exact same walk"
+/// as `pre_commit.rs`'s Step 1 was false — the two copies had diverged.
 pub(crate) fn released_unique_keys_in_tx(
     tx: &shamir_tx::TxContext,
     table_token: u64,
 ) -> shamir_collections::TFxSet<Vec<u8>> {
     use shamir_tx::{IndexFamily, IndexWriteOp};
 
+    let mut live: shamir_collections::TFxMap<Vec<u8>, RecordId> = shamir_collections::new_fx_map();
     let mut released: shamir_collections::TFxSet<Vec<u8>> = shamir_collections::new_fx_set();
     for (tt, op) in &tx.index_write_set {
         if *tt != table_token {
@@ -39,14 +48,31 @@ pub(crate) fn released_unique_keys_in_tx(
         }
         match op {
             IndexWriteOp::SetPosting {
-                key, provenance, ..
+                key,
+                value,
+                provenance,
             } if provenance.family == IndexFamily::Unique => {
+                let owner = RecordId::try_from_bytes(value).unwrap_or_default();
+                live.insert(key.to_vec(), owner);
                 released.remove(key.as_ref());
             }
             IndexWriteOp::RemovePosting {
-                key, provenance, ..
+                key,
+                provenance,
+                owner,
             } if provenance.family == IndexFamily::Unique => {
-                released.insert(key.to_vec());
+                let removing_owner = owner.map(RecordId);
+                let current_owner = live.get(key.as_ref()).copied();
+                if current_owner.is_none()
+                    || removing_owner.is_none()
+                    || current_owner == removing_owner
+                {
+                    live.remove(key.as_ref());
+                    released.insert(key.to_vec());
+                }
+                // else: stale removal (owner mismatch against this walk's
+                // own live tracking) -- the key's real current owner within
+                // this tx is preserved, so it must not be marked released.
             }
             _ => {}
         }

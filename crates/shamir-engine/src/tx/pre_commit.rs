@@ -659,7 +659,26 @@ pub(super) async fn pre_commit_prelock(
     let mut live: TFxMap<(u64, bytes::Bytes), RecordId> = TFxMap::default();
     let mut released: TFxSet<(u64, bytes::Bytes)> = TFxSet::default();
     let mut ever_released: TFxSet<(u64, bytes::Bytes)> = TFxSet::default();
-    for (table_token, op) in &tx.index_write_set {
+    // #1097 follow-up (found by an `@oh` review of the #1097 fix itself):
+    // a `RemovePosting` this walk classifies as STALE (planned against a
+    // record that no longer holds the key, per the match logic below) must
+    // not just be ignored for `live`/`released` bookkeeping — it is still
+    // physically present in `tx.index_write_set` and would otherwise reach
+    // Phase 5c's `apply_index_ops_at_commit` unchanged, which applies EVERY
+    // op in staging order with last-write-wins semantics. Left in place, a
+    // stale removal ordered AFTER the genuine owner's `SetPosting` for the
+    // same key deletes that owner's posting from `info_store` at commit —
+    // the record's DATA row still carries the value, but the unique index
+    // has no posting for it at all, silently freeing the key for an
+    // unrelated future INSERT (the exact index/data divergence #1097 exists
+    // to prevent, reachable one statement shorter than the original
+    // reproduction, without ever needing a colliding third record). Indices
+    // of stale ops are collected here and the ops themselves retracted from
+    // `tx.index_write_set` below, before Phase 4's WAL write — mirroring
+    // `retract_stale_provenance_ops`'s established retraction pattern in
+    // this same file.
+    let mut stale_remove_indices: TFxSet<usize> = TFxSet::default();
+    for (idx, (table_token, op)) in tx.index_write_set.iter().enumerate() {
         match op {
             IndexWriteOp::SetPosting {
                 key,
@@ -701,7 +720,8 @@ pub(super) async fn pre_commit_prelock(
                 // above) — treat it as a stale no-op: do not clear `live`,
                 // do not mark the key released, so the key's real current
                 // owner within this tx is preserved and Step 2 validates
-                // against it correctly.
+                // against it correctly. Also retract the op itself (see the
+                // comment above this loop) so it never reaches Phase 5c.
                 let removing_owner = owner.map(RecordId);
                 let current_owner = live.get(&k).copied();
                 if current_owner.is_none()
@@ -711,10 +731,20 @@ pub(super) async fn pre_commit_prelock(
                     live.remove(&k);
                     released.insert(k.clone());
                     ever_released.insert(k);
+                } else {
+                    stale_remove_indices.insert(idx);
                 }
             }
             _ => {}
         }
+    }
+    if !stale_remove_indices.is_empty() {
+        let mut idx = 0usize;
+        tx.index_write_set.retain(|_| {
+            let keep = !stale_remove_indices.contains(&idx);
+            idx += 1;
+            keep
+        });
     }
 
     // Step 2 — Durable-state (cross-tx) check. Iterate tx.unique_guards to
