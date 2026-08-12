@@ -80,6 +80,10 @@ harness = false
 name = "create_index_streaming"
 harness = false
 
+[[bench]]
+name = "reader_drain_gate"
+harness = false
+
 [lib]
 doctest = false
 
