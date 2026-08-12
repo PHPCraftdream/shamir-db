@@ -1,12 +1,18 @@
 //! Bench for #1099: O(N²) scaling in transactional UPDATEs with unique indexes.
 //!
 //! Measures the cost of `update_tx_bytes` when called PER ROW on tables WITH
-//! a unique index. The O(N²) shape comes from `touched_records_in_tx` walking
-//! `tx.write_set[table]` from scratch on each row.
+//! a unique index. Before the fix, the O(N²) shape came from
+//! `touched_records_in_tx` walking `tx.write_set[table]` from scratch on
+//! each row; that function has since been deleted and replaced with an
+//! on-demand `is_record_touched` probe (an O(1) check called only when a
+//! durable conflict is actually found).
 //!
-//! After the fix (replacing pre-built set with on-demand probe), scaling should
-//! be near-linear (4× for 4× rows, not ~12×).
-#![allow(clippy::single_element_loop)]
+//! Scaling is near-linear (4× for 4× rows, not ~8-12×) for this bench's
+//! specific workload (the UPDATE leaves the unique column unchanged, so
+//! `released_unique_keys_in_tx` — deliberately left O(N)-per-call, out of
+//! this task's scope — stays O(1) throughout). A workload that DOES
+//! release-and-reclaim a unique key on every row would still show O(N²)
+//! from that half.
 
 use std::sync::Arc;
 

@@ -475,8 +475,9 @@ async fn insert_tx_many_after_delete_reclaim_succeeds() {
 
 /// #1096 follow-up (found by `@oh` review): a stale-snapshot release plan
 /// must NOT be tolerated when a CONCURRENT tx has already reclaimed the
-/// durable key for an unrelated record. Without the `touched_records_in_tx`
-/// cross-check, `released_unique_keys_in_tx` alone would incorrectly treat
+/// durable key for an unrelated record. Without the `is_record_touched`
+/// cross-check (#1099: an on-demand probe, formerly a pre-built
+/// `touched_records_in_tx` set), `released_unique_keys_in_tx` alone would incorrectly treat
 /// "this tx once planned a RemovePosting for this key" as sufficient,
 /// silently admitting two live records for the same unique value.
 ///

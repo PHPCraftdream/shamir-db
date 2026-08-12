@@ -71,8 +71,10 @@ async fn fire_post_gen_capture_pre_unique_check_test_hook() {
 /// producing a set instead of aborting on conflict.
 ///
 /// Only a *necessary*, not sufficient, condition for tolerating a durable
-/// conflict — see [`touched_records_in_tx`]'s doc for why the caller must
-/// ALSO cross-check the durable owner against this tx's own data write set
+/// conflict — the caller must ALSO cross-check the durable owner against
+/// this tx's own data write set, via the `is_record_touched` probe each
+/// call site builds inline (an O(1) `tx.write_set.get(&table_token)
+/// .is_some_and(|s| s.staged_op(rid.as_bytes()).is_some())` check, #1099)
 /// (found by `@oh` review: this set alone is a uniqueness-bypass hazard
 /// under `Snapshot` isolation's stale-read possibility).
 ///
@@ -1090,10 +1092,11 @@ impl TableManager {
         // `@oh` review (dbc6299e follow-up): gate behind `has_unique_indexes()`
         // like `insert_tx_many`/`insert_tx_many_bytes` already do — computing
         // `released` unconditionally makes every UPDATE on a table with NO unique
-        // indexes pay an O(|tx.index_write_set|) walk for nothing. The on-demand
-        // `is_record_touched` probe eliminates the O(N²) cost on the wire UPDATE
-        // path (`update_tx_bytes`, called per-row) by avoiding an O(N) set build
-        // for every row.
+        // indexes pay an O(|tx.index_write_set|) walk for nothing. This is
+        // `update_tx`, the direct (non-per-row) API; the on-demand
+        // `is_record_touched` probe (#1099) is what eliminates the O(N²) cost
+        // on `update_tx_bytes`'s wire path (called per-row) by avoiding an
+        // O(N) set build for every row there.
         if self.index_manager.has_unique_indexes() {
             let released = released_unique_keys_in_tx(tx, self.table_token());
             let table_token = self.table_token();
