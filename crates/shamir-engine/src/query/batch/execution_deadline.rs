@@ -160,6 +160,53 @@
 //! instrumentation and teardown hook), not a quick follow-up — left for
 //! its own cycle rather than rushed here.
 //!
+//! **Same-day third probe — this closes the "how much headroom exists at
+//! depth" question, no further measurement needed before an
+//! implementation attempt.** Rather than a cross-process aggregator
+//! (avoided — too much new infra for a same-day step), the leaf probe was
+//! turned into a threshold trip: panic (a normal nextest FAIL, showing up
+//! in the standard run with no output-capture workaround needed) if ANY
+//! `execute_single_impl` call observes less than 200 KiB of headroom to
+//! the bottom of its thread's stack. Ran the FULL `shamir-db` +
+//! `shamir-engine` suite (`--full`, 2730 tests) with this active.
+//!
+//! **Result: the 200 KiB trip never fired, not once, across all 2730
+//! tests.** 18 tests did fail, but every one of them is an UNRELATED,
+//! pre-existing environment issue on this machine — `"resolving sdk
+//! path: The system cannot find the path specified (os error 3)"`, a
+//! missing WASM compiler toolchain path, nothing to do with this
+//! investigation or with stack depth (all 18 are WASM
+//! compile/call/host-import/egress tests; zero DDL/access-control/rename
+//! tests failed, contradicting nothing about the original 200-test
+//! report, which was never re-run start-to-finish with this specific
+//! probe active — see the caveat below).
+//!
+//! **Conclusion:** under NORMAL execution (no `select!`/`spawn` wrapper
+//! added), stack usage never comes remotely close to the limit anywhere
+//! in either suite — the prior three attempts' overflow was caused by
+//! the SIZE of the wrapper machinery itself (a racing `tokio::pin!`ned
+//! future, or a `tokio::spawn`'s own task-state overhead), not by
+//! baseline call depth already sitting near the edge. This directly
+//! supports the OS-thread-based watchdog recommendation above: since
+//! headroom is ample under normal conditions, the risk an in-process
+//! attempt ran into was specifically about adding stack-resident state
+//! to the hot path, which an out-of-process/OS-thread design avoids by
+//! construction. **An implementation attempt following that design is
+//! now reasonably premised** — the "is the budget already thin"
+//! hypothesis this whole investigation opened with is closed, negative.
+//!
+//! Caveat: this round's full-suite run used the CURRENT, un-modified
+//! codebase (no watchdog wrapper present) — it confirms baseline headroom
+//! is ample, but does NOT re-prove that a specific NEW implementation
+//! (once written) stays under the threshold; that verification has to
+//! happen again once real watchdog code exists, ideally with this same
+//! threshold-trip technique reused as a regression check before landing
+//! it. Also: `RUST_MIN_STACK`/per-thread stack-size tuning was not
+//! separately explored, since it turned out not to be needed to answer
+//! the headroom question — worth revisiting only if a real
+//! implementation attempt DOES reproduce an overflow despite the ample
+//! baseline found here.
+//!
 //! [`check`]: ExecutionDeadline::check
 
 use std::time::{Duration, Instant};
