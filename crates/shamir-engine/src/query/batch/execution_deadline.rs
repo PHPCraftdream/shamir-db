@@ -97,6 +97,38 @@
 //! rather than another in-runtime `tokio::spawn`/`select!` variant. See
 //! task #1094 for the tracked follow-up.
 //!
+//! **2026-08-12 headroom measurement (task #1094, first investigation
+//! step):** a throwaway `#[test]`/`#[tokio::test]` pair calling Win32
+//! `GetCurrentThreadStackLimits` was run through the SAME `nextest`
+//! harness that reproduced the original failures (deleted after use, not
+//! committed). Result, measured immediately at the top of the test
+//! function on both a plain nextest-spawned test thread and a
+//! `#[tokio::test(flavor = "multi_thread")]` worker thread: total reserve
+//! = 2,097,152 bytes (2 MiB, Rust's `std::thread` default) on both, with
+//! ~2,090,000+ bytes (99.8%+) still free at that measurement point. **This
+//! rules out "the OS/runtime hands these threads a thin stack" as the
+//! cause** — the starting allocation is the normal, generous 2 MiB
+//! default, not something already constrained by test-harness
+//! configuration.
+//!
+//! This redirects the open question: the crash isn't from a small total
+//! budget, it's from how much of that 2 MiB is ALREADY consumed by the
+//! time execution reaches deep inside one of the ~200 failing DDL/RI/FK
+//! tests' call chains — plausibly large, un-`Box`-ed `async fn` state
+//! machines stacked many frames deep through the query planner →
+//! evaluator → storage-op layers, leaving little margin before any
+//! wrapper is added, however small. **Not yet measured:** actual
+//! remaining headroom AT the deep point where the previous three attempts
+//! crashed (would require temporary instrumentation inside the batch
+//! execution path itself, not just at a test's entry frame) — this is the
+//! next concrete step before attempting an implementation, in-process or
+//! not. An OS-thread-based watchdog (this doc's existing recommendation)
+//! sidesteps the question entirely for the watchdog's OWN stack, but does
+//! NOT by itself explain or fix why the async call graph's stack is
+//! already this close to its limit — that root cause is still open and
+//! worth understanding before shipping any fix, in case it points at a
+//! genuine (unrelated) call-depth regression worth its own investigation.
+//!
 //! [`check`]: ExecutionDeadline::check
 
 use std::time::{Duration, Instant};
