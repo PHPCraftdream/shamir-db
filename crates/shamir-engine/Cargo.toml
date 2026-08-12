@@ -265,6 +265,10 @@ harness = false
 name = "f80_writer_drain_overhead"
 harness = false
 
+[[bench]]
+name = "p1099_touched_probe"
+harness = false
+
 [lib]
 # Doctests are banned project-wide (slow: recompile-per-example). Examples
 # live as illustration; behavioural coverage is in unit/integration tests.
