@@ -749,3 +749,87 @@ async fn tx_update_reclaims_a_key_released_by_delete_succeeds() {
         .unwrap();
     assert_eq!(owner, Some(rid_c), "C must now own the reclaimed value 'x'");
 }
+
+/// #1096 follow-up (found by a third `@oh` review): no test previously
+/// asserted a genuine (non-released) `DuplicateKey` rejection out of an
+/// UPDATE path — `update_tx`'s `Some(old_val)` branch
+/// (`validate_unique_for_update_with_released`) had zero coverage for its
+/// non-tolerance branch, so a bug that wrongly tolerated ANY durable
+/// conflict on that path would have gone undetected by this module.
+#[tokio::test]
+async fn tx_update_to_a_durably_owned_unreleased_key_still_rejects() {
+    let repo = make_repo();
+    repo.add_table(TableConfig::new("t"));
+    let tbl = repo.get_table("t").await.unwrap();
+    tbl.create_unique_index("by_email", &["email"])
+        .await
+        .unwrap();
+    let email_field = key_id(&tbl, "email").await;
+
+    let (mut tx1, _g1) = repo.begin_tx(IsolationLevel::Snapshot).await.unwrap();
+    let _rid_a = tbl
+        .insert_tx(&record_with_str(email_field, "x"), Some(&mut tx1))
+        .await
+        .expect("INSERT A must succeed");
+    let rid_d = tbl
+        .insert_tx(&record_with_str(email_field, "other"), Some(&mut tx1))
+        .await
+        .expect("INSERT D must succeed");
+    repo.commit_tx(tx1).await.expect("commit must succeed");
+
+    // tx2: UPDATE D SET email="x" — "x" is durably owned by A, and tx2
+    // never released it (no DELETE/UPDATE-off of A in this tx) — a
+    // genuine conflict that must still reject.
+    let (mut tx2, _g2) = repo.begin_tx(IsolationLevel::Snapshot).await.unwrap();
+    let result = tbl
+        .update_tx(rid_d, &record_with_str(email_field, "x"), Some(&mut tx2))
+        .await;
+    assert!(
+        matches!(result, Err(shamir_storage::error::DbError::DuplicateKey(_))),
+        "UPDATE D to a durably-owned, never-released key must reject; got {:?}",
+        result
+    );
+}
+
+/// Same scenario as
+/// [`tx_update_to_a_durably_owned_unreleased_key_still_rejects`], but
+/// exercised through `update_tx_bytes` — the wire UPDATE path
+/// `execute_update_tx` actually calls, and the one call site the third
+/// `@oh` review found had zero exercise anywhere in this module.
+#[tokio::test]
+async fn update_tx_bytes_to_a_durably_owned_unreleased_key_still_rejects() {
+    let repo = make_repo();
+    repo.add_table(TableConfig::new("t"));
+    let tbl = repo.get_table("t").await.unwrap();
+    tbl.create_unique_index("by_email", &["email"])
+        .await
+        .unwrap();
+    let email_field = key_id(&tbl, "email").await;
+
+    let (mut tx1, _g1) = repo.begin_tx(IsolationLevel::Snapshot).await.unwrap();
+    let _rid_a = tbl
+        .insert_tx(&record_with_str(email_field, "x"), Some(&mut tx1))
+        .await
+        .expect("INSERT A must succeed");
+    let rid_d = tbl
+        .insert_tx(&record_with_str(email_field, "other"), Some(&mut tx1))
+        .await
+        .expect("INSERT D must succeed");
+    repo.commit_tx(tx1).await.expect("commit must succeed");
+
+    let (mut tx2, _g2) = repo.begin_tx(IsolationLevel::Snapshot).await.unwrap();
+    let old_bytes = record_with_str(email_field, "other")
+        .to_bytes()
+        .expect("encode succeeds");
+    let new_bytes = record_with_str(email_field, "x")
+        .to_bytes()
+        .expect("encode succeeds");
+    let result = tbl
+        .update_tx_bytes(rid_d, &old_bytes, new_bytes, &mut tx2)
+        .await;
+    assert!(
+        matches!(result, Err(shamir_storage::error::DbError::DuplicateKey(_))),
+        "update_tx_bytes to a durably-owned, never-released key must reject; got {:?}",
+        result
+    );
+}
