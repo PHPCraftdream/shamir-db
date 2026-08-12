@@ -495,11 +495,17 @@ impl TableManager {
         // earlier in this same tx (via DELETE or UPDATE-off), in which case
         // it's safe to reclaim. `touched` closes the stale-snapshot
         // bypass — see `touched_records_in_tx`'s doc.
-        let released = released_unique_keys_in_tx(tx, self.table_token());
-        let touched = touched_records_in_tx(tx, self.table_token());
-        self.index_manager
-            .validate_unique_for_create_with_released(value, &released, &touched)
-            .await?;
+        //
+        // `@oh` review (dbc6299e follow-up): gate behind `has_unique_indexes()`
+        // — the walks themselves cost O(tx) regardless of the early-return
+        // inside `validate_unique_for_create_with_released`.
+        if self.index_manager.has_unique_indexes() {
+            let released = released_unique_keys_in_tx(tx, self.table_token());
+            let touched = touched_records_in_tx(tx, self.table_token());
+            self.index_manager
+                .validate_unique_for_create_with_released(value, &released, &touched)
+                .await?;
+        }
 
         // Record a UniqueGuard per unique key this value claims, so
         // commit_tx Phase 2.6 re-validates it under commit_lock (closes
@@ -1000,7 +1006,15 @@ impl TableManager {
         // `validate_unique_for_update`'s old->new diff; or the reclaim, via
         // the `None` upsert-into-fresh-id branch), so both need the same
         // released-key + touched-record treatment `insert_tx` has.
-        {
+        //
+        // `@oh` review (dbc6299e follow-up): gate behind `has_unique_indexes()`
+        // like `insert_tx_many`/`insert_tx_many_bytes` already do — computing
+        // `released`/`touched` unconditionally makes every UPDATE on a
+        // table with NO unique indexes pay an O(|tx.index_write_set| +
+        // |tx.write_set[table]|) walk for nothing, and on the wire UPDATE
+        // path (`update_tx_bytes`, called per-row) that's O(N²) over an
+        // N-row transactional UPDATE.
+        if self.index_manager.has_unique_indexes() {
             let released = released_unique_keys_in_tx(tx, self.table_token());
             let touched = touched_records_in_tx(tx, self.table_token());
             match &old {
@@ -1132,13 +1146,20 @@ impl TableManager {
                     // released-key + touched-record treatment `update_tx`
                     // has (see `touched_records_in_tx`'s doc for why both
                     // are required, not just the released-key set).
-                    let released = released_unique_keys_in_tx(tx, self.table_token());
-                    let touched = touched_records_in_tx(tx, self.table_token());
-                    self.index_manager
-                        .validate_unique_for_update_with_released(
-                            &id, &old_view, &new_view, &released, &touched,
-                        )
-                        .await?;
+                    //
+                    // Gated behind `has_unique_indexes()` (2nd `@oh` review,
+                    // dbc6299e follow-up): this fn is called PER ROW on the
+                    // wire UPDATE path — an unconditional walk here is
+                    // O(N²) over an N-row transactional UPDATE.
+                    if self.index_manager.has_unique_indexes() {
+                        let released = released_unique_keys_in_tx(tx, self.table_token());
+                        let touched = touched_records_in_tx(tx, self.table_token());
+                        self.index_manager
+                            .validate_unique_for_update_with_released(
+                                &id, &old_view, &new_view, &released, &touched,
+                            )
+                            .await?;
+                    }
 
                     // UniqueGuards for commit-time re-validation.
                     for index_key in self.index_manager.unique_keys_for(&new_view) {
@@ -1182,13 +1203,17 @@ impl TableManager {
                         ))
                     })?;
 
-                    let released = released_unique_keys_in_tx(tx, self.table_token());
-                    let touched = touched_records_in_tx(tx, self.table_token());
-                    self.index_manager
-                        .validate_unique_for_update_with_released(
-                            &id, &old_tree, &new_tree, &released, &touched,
-                        )
-                        .await?;
+                    // Gated behind `has_unique_indexes()` for the same
+                    // O(N²) reason as the map-lens branch above.
+                    if self.index_manager.has_unique_indexes() {
+                        let released = released_unique_keys_in_tx(tx, self.table_token());
+                        let touched = touched_records_in_tx(tx, self.table_token());
+                        self.index_manager
+                            .validate_unique_for_update_with_released(
+                                &id, &old_tree, &new_tree, &released, &touched,
+                            )
+                            .await?;
+                    }
                     for index_key in self.index_manager.unique_keys_for(&new_tree) {
                         tx.record_unique_guard(shamir_tx::UniqueGuard {
                             table_token: self.table_token(),
