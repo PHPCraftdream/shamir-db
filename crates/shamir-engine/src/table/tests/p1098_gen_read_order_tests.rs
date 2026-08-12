@@ -20,26 +20,42 @@
 //! duplicate under the brand-new unique index — exactly the class of corruption
 //! `P0-2 (#958)` was written to close.
 //!
-//! ## The fix
+//! ## The fix — TWO changes, both required
 //!
-//! Move the generation-capture block to run BEFORE the `has_unique_indexes()`-
-//! gated validation block in all four affected call sites, matching the
-//! already-correct ordering in `update_tx_bytes`. This guarantees:
+//! A round-2 `@oh` review found the reader-side reorder alone does NOT close
+//! the race: `create_unique_index_from_records`/`drop_unique_index` publish
+//! `bump_generation()` BEFORE `write_barrier_flags.set/set_to(UNIQUE_INDEX_EXISTS)`
+//! — two independent atomics with no combined ordering guarantee between
+//! them. Even with generation captured first on the reader side, a reader
+//! could still observe the NEW generation while the flag store hadn't landed
+//! yet, reopening the same hole one level down.
 //!
-//! - If gen is captured before `bump_generation()`: `stage_gen < mgr.generation()`
-//!   at commit → re-derivation runs → fresh `UniqueGuard` recorded.
-//! - If gen is captured after `bump_generation()` AND after the flag set:
-//!   the reader sees and validates against the new index from the start.
-//! - The "gen captured post-bump while flag/def reads still see pre-flag-set"
-//!   window is structurally impossible.
+//! 1. **Reader side** (`table_manager_tx_ops.rs`): move the generation-capture
+//!    block to run BEFORE the `has_unique_indexes()`-gated validation block in
+//!    all four affected call sites, matching the already-correct ordering in
+//!    `update_tx_bytes`.
+//! 2. **Writer side** (`index_manager_unique.rs`): publish the flag BEFORE
+//!    bumping generation, not after, in both `create_unique_index_from_records`
+//!    and `drop_unique_index`.
+//!
+//! Together these close the window: `bump_generation`'s `fetch_add` is
+//! `AcqRel`, so a reader that observes the NEW generation via an `Acquire`
+//! load is guaranteed — by that synchronizes-with edge plus program order on
+//! the single writer thread — to also observe every write the writer made
+//! BEFORE the bump, including the (now earlier) flag store. Reader-side
+//! reorder alone is necessary but not sufficient; writer-side reorder alone
+//! (without the reader capturing gen first) is also not sufficient — both are
+//! required.
 //!
 //! ## What this file proves
 //!
-//! These unit tests verify the structural ordering invariant at each call site:
-//! the generation must be captured BEFORE any unique-index-related checks run.
-//! This is a light-weight unit-level check. A genuine concurrency-level
-//! reproduction, deterministic via a test-only pause seam, is below --
-//! see `p1098_gen_captured_before_seam_closes_race_with_concurrent_create_unique_index`.
+//! Most tests here verify the structural ordering invariant at each call
+//! site (generation capture happens early, normal operation still works) —
+//! light-weight unit-level checks, not proofs of the race being closed on
+//! their own. The one test that DOES deterministically reproduce and close
+//! the actual race, exercising BOTH the reader-side and writer-side fixes
+//! together, is `p1098_gen_captured_before_seam_closes_race_with_concurrent_create_unique_index`
+//! below.
 
 use std::sync::Arc;
 

@@ -561,8 +561,30 @@ impl TableManager {
         self.acquire_pessimistic_write_lock(RecordKey::from_slice(rid.as_bytes()), tx)
             .await?;
 
-        // P0-2 (#958) / TOCTOU fix (2b): capture generations BEFORE any
-        // `all_backends()` / `iter()` snapshot (see `insert_tx`'s comment).
+        // P0-2 (#958) / TOCTOU fix (2b): capture ALL three generation counters
+        // BEFORE any `all_backends()` / `iter()` snapshot, and — #1098 — BEFORE
+        // the `has_unique_indexes()`-gated validation/guard-recording block
+        // below. Reading generation FIRST (Acquire) then snapshotting
+        // guarantees (via Release-Acquire on each manager's generation
+        // atomic, combined with each writer's publish-before-bump ordering —
+        // `create_unique_index_from_records`/`drop_unique_index` set/clear
+        // `UNIQUE_INDEX_EXISTS` BEFORE bumping generation, #1098 round 2) that
+        // any backend/def published before the gen load is visible in the
+        // snapshot AND in the later `has_unique_indexes()`/`unique_keys_for`
+        // reads, and any published after the gen load but before those later
+        // reads is double-planned (idempotent, harmless) or caught by the
+        // commit-time `stage_gen != mgr.generation()` rederive gate. The OLD
+        // order (checks/snapshot → gen capture, #1098) had a TOCTOU window
+        // where a concurrent `CREATE UNIQUE INDEX` could bump generation
+        // between the checks (seeing the old, no-index state) and the gen
+        // capture (seeing the already-bumped value) — the commit-time gate
+        // then saw no change and skipped re-derivation, silently admitting a
+        // duplicate. #1098 round 2 ALSO required fixing the writer's own
+        // publish order (flag-then-gen, not gen-then-flag) — with the flag
+        // published second, a reader that observes the new generation is
+        // guaranteed by the resulting happens-before edge to also observe
+        // the flag; the reader-side reorder alone was necessary but not
+        // sufficient.
         let token = self.table_token();
         let index2_gen = self.index2_registry().generation();
         let sorted_gen = self.sorted_indexes.generation();

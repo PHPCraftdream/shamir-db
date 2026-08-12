@@ -23,6 +23,55 @@ fn unique_provenance(def: &IndexDefinition) -> Provenance {
     def.provenance(IndexFamily::Unique)
 }
 
+// ── #1098 round-2 test-only pause seam ──────────────────────────────────
+//
+// Mirrors `shamir-engine`'s `table_manager_tx_ops::PostGenCapturePreUniqueCheckHook`
+// pattern (itself mirroring `pre_commit.rs`'s `PostPrelockPreMaterializeHook`):
+// a `#[cfg(test)]` `OnceLock<Arc<Hook>>` global, zero cost when unset. Fires
+// in `create_unique_index_from_records` strictly AFTER the flag is set and
+// BEFORE the generation is bumped — the specific ordering #1098 round 2's
+// writer-side fix establishes. A test can park a CREATE here, drive a
+// concurrent tx's `insert_tx` to completion while parked (its generation
+// capture sees the OLD, pre-bump value; its LATER `has_unique_indexes()`
+// read sees the ALREADY-set flag — both safe, by design), then resume —
+// proving the writer's flag-then-gen order is what makes the reader's
+// gen-then-checks order actually sufficient.
+#[cfg(test)]
+#[derive(Debug)]
+pub(crate) struct PostFlagSetPreGenBumpHook {
+    pub(crate) reached: std::sync::atomic::AtomicUsize,
+    pub(crate) resume: tokio::sync::Notify,
+    pub(crate) armed: std::sync::atomic::AtomicBool,
+}
+
+#[cfg(test)]
+pub(crate) static TEST_POST_FLAG_SET_PRE_GEN_BUMP_HOOK: std::sync::OnceLock<
+    std::sync::Arc<PostFlagSetPreGenBumpHook>,
+> = std::sync::OnceLock::new();
+
+/// Parks on [`TEST_POST_FLAG_SET_PRE_GEN_BUMP_HOOK`] if a test installed
+/// one; a true no-op otherwise. One-shot (CAS true→false) so only the
+/// FIRST caller to reach this seam actually parks.
+async fn fire_post_flag_set_pre_gen_bump_test_hook() {
+    #[cfg(test)]
+    if let Some(hook) = TEST_POST_FLAG_SET_PRE_GEN_BUMP_HOOK.get() {
+        hook.reached
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let should_pause = hook
+            .armed
+            .compare_exchange(
+                true,
+                false,
+                std::sync::atomic::Ordering::AcqRel,
+                std::sync::atomic::Ordering::Acquire,
+            )
+            .is_ok();
+        if should_pause {
+            hook.resume.notified().await;
+        }
+    }
+}
+
 impl IndexManager {
     // ============================================================================
     // UNIQUE INDEXES - Validation (BEFORE write)
@@ -644,16 +693,39 @@ impl IndexManager {
         }
 
         self.indexes_unique.add_index(index_def);
-        self.bump_generation(); // P0-2 (#958): gen gate for commit-time rederive
-                                // F-69 (#896): SeqCst set on the shared packed word — see
-                                // `write_barrier_flags.rs`'s module doc for why this bit's ordering
-                                // must match the rest of the write-barrier predicate.
+        // #1098 round-2 review: the flag MUST be set BEFORE the generation
+        // is bumped, not after. `bump_generation`'s `fetch_add` is `AcqRel`
+        // (`index_manager.rs`), so a reader that observes the NEW
+        // generation via an `Acquire` load is guaranteed (by that
+        // synchronizes-with edge, plus program order on this single
+        // writer) to also observe every write this thread made BEFORE the
+        // bump — including this flag set. With the flag set AFTER the
+        // bump (the pre-#1098-round-2 order), a reader could observe the
+        // new generation while the flag store hadn't landed yet, silently
+        // reopening the exact race #1098's reader-side reorder (`gen`
+        // captured before the `has_unique_indexes()` check) was meant to
+        // close: the reader's `has_unique_indexes()` read could still see
+        // `false` even though its OWN generation capture already reflects
+        // this CREATE, defeating the commit-time `stage_gen != mgr.generation()`
+        // rederive gate. F-69 (#896): still SeqCst, still the single
+        // locked-instruction cost class the `write_barrier_flags.rs`
+        // module doc describes — only the ORDER relative to
+        // `bump_generation` changed, not the atomicity of the flag set
+        // itself.
         self.write_barrier_flags.set(UNIQUE_INDEX_EXISTS);
-        // P1-2 (#967): the posting entries are ALREADY durably written by the
-        // `set_many` above. If THIS definition persist fails, the postings are
-        // orphaned — on restart, no definition loads but postings remain.
-        // NOTE: Cannot write DdlOpState::Failed here because this layer
-        // (IndexManagerUnique) does not have op_id in scope.
+
+        // #1098 round-2 test-only pause seam: fires strictly AFTER the flag
+        // set above and BEFORE the generation bump below — see
+        // `fire_post_flag_set_pre_gen_bump_test_hook`'s doc. No-op in every
+        // non-test build.
+        fire_post_flag_set_pre_gen_bump_test_hook().await;
+
+        self.bump_generation(); // P0-2 (#958): gen gate for commit-time rederive
+                                // P1-2 (#967): the posting entries are ALREADY durably written by the
+                                // `set_many` above. If THIS definition persist fails, the postings are
+                                // orphaned — on restart, no definition loads but postings remain.
+                                // NOTE: Cannot write DdlOpState::Failed here because this layer
+                                // (IndexManagerUnique) does not have op_id in scope.
         self.save_index_info_unique().await.map_err(|e| {
             shamir_storage::error::DbError::Internal(format!(
                 "CREATE UNIQUE INDEX '{name_interned}': the index posting \
@@ -714,10 +786,18 @@ impl IndexManager {
         // without this definition atomically; the shared write-barrier bit is
         // cleared so writers stop maintaining it).
         let was_removed = self.indexes_unique.remove_index(name_interned);
-        self.bump_generation(); // P0-2 (#958): gen gate for commit-time rederive
-                                // F-69 (#896): SeqCst set/clear on the shared packed word.
+        // #1098 round-2 review: flag BEFORE generation bump, mirroring the
+        // fix in `create_unique_index_from_records` — see that call site's
+        // comment for the full happens-before argument. Here a wrong order
+        // is lower severity (a reader that captures the new generation
+        // before observing the cleared flag would over-validate against a
+        // since-dropped index, a spurious `UniqueViolation`, not a silent
+        // duplicate) but the invariant should stay uniform across both
+        // publish sites. F-69 (#896): still SeqCst set/clear on the shared
+        // packed word.
         self.write_barrier_flags
             .set_to(UNIQUE_INDEX_EXISTS, self.indexes_unique.is_enabled());
+        self.bump_generation(); // P0-2 (#958): gen gate for commit-time rederive
 
         // F-76 test seam (shared with the regular-hash drop hook). Park here
         // (definition already retired, postings not yet swept) if a test

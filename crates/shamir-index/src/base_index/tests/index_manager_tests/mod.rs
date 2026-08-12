@@ -8,5 +8,6 @@ pub mod f72_publish_then_persist_tests;
 pub mod f78_streaming_equivalence_tests;
 pub mod helpers;
 pub mod p1058_in_flight_build_registry_tests;
+pub mod p1098_writer_order_tests;
 pub mod type_tests;
 pub mod unique_tests;
