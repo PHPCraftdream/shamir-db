@@ -19,13 +19,13 @@
 //!
 //! # The fix
 //!
-//! `WriteBarrierFlags` is ONE `Arc<AtomicU8>` — six gate bits packed into a
+//! `WriteBarrierFlags` is ONE `Arc<AtomicU16>` — seven gate bits packed into a
 //! single word. `needs_write_barrier()` becomes exactly one `SeqCst` load
 //! (`flags.load(Ordering::SeqCst) != 0`) instead of six. A single atomic load
 //! can never be torn regardless of memory ordering, so the whole compound
 //! condition is now a genuine point-in-time snapshot, and F-56's `SeqCst`
 //! total-order proof (see `writer_drain_barrier.rs`) now covers the FULL
-//! six-condition predicate instead of five-sixths of it.
+//! seven-condition predicate instead of five-sixths of it.
 //!
 //! # Ownership — why this type lives in `shamir-index`, not `shamir-engine`
 //!
@@ -43,7 +43,7 @@
 //! direction. Instead, `IndexManager` owns and constructs the packed word
 //! (bit 0 is its exclusive write authority, flipped via this type's own
 //! [`set`](WriteBarrierFlags::set)/[`set_to`](WriteBarrierFlags::set_to)),
-//! and exposes an `Arc<AtomicU8>` clone via
+//! and exposes an `Arc<AtomicU16>` clone via
 //! [`IndexManager::write_barrier_flags`](super::index_manager::IndexManager::write_barrier_flags).
 //! `TableManager` takes that SAME `Arc` at construction time and uses bits
 //! 1-5 for its own five DDL-intent conditions (via the SAME
@@ -93,11 +93,12 @@
 //!   collapse from 2 loads to 1 by folding. The single-atomic win this task
 //!   targets is fully realized by packing the six gate bits alone.
 //!
-//! This is an explicit, scoped decision: six gate bits in one atomic, the
-//! writer-drain counter stays a distinct atomic with its existing
-//! `fetch_add`/`fetch_sub` cost profile, unchanged.
+//! This is an explicit, scoped decision: seven gate bits in one atomic (now
+//! expanded to `AtomicU16` to accommodate the seventh bit), the writer-drain
+//! counter stays a distinct atomic with its existing `fetch_add`/`fetch_sub`
+//! cost profile, unchanged.
 
-use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::atomic::{AtomicU16, Ordering};
 use std::sync::Arc;
 
 /// Bit 0 — at least one base_index unique index is registered on this table.
@@ -132,32 +133,44 @@ pub const UNIQUE_INDEX_CREATE: u8 = 1 << 4;
 /// `TableManager`, formerly `sorted_index_create_barrier`.
 pub const SORTED_INDEX_CREATE: u8 = 1 << 5;
 
+/// Bit 6 — #1102: at least one base_index regular (non-unique) hash index
+/// is registered on this table. Exclusive write authority:
+/// [`IndexManager`](super::index_manager::IndexManager)
+/// (the four `create_index*` paths and `drop_index`). Replaces the former
+/// standalone `has_indexes: Arc<AtomicBool>` (written `Release`, read
+/// `Relaxed` — no happens-before edge; see #1102 brief). Folding into this
+/// packed word gives it the same `SeqCst` ordering as bit 0, closing the
+/// ordering gap that let a row commit with no posting under a concurrently-
+/// created regular index.
+pub const REGULAR_INDEX_EXISTS: u8 = 1 << 6;
+
 /// Every bit this word packs — used only for `debug_assert!`-style sanity
 /// checks (no production code should need to mask against this directly).
 #[cfg(test)]
-pub const ALL_BITS: u8 = UNIQUE_INDEX_EXISTS
+pub const ALL_BITS: u16 = (UNIQUE_INDEX_EXISTS
     | INDEX2_CREATE
     | SCHEMA_ACTIVATION
     | REGULAR_INDEX_CREATE
     | UNIQUE_INDEX_CREATE
-    | SORTED_INDEX_CREATE;
+    | SORTED_INDEX_CREATE
+    | REGULAR_INDEX_EXISTS) as u16;
 
 /// The single packed atomic backing the whole write-barrier predicate.
 ///
-/// Cheap to clone (`Arc<AtomicU8>` clone — one refcount bump); every clone
+/// Cheap to clone (`Arc<AtomicU16>` clone — one refcount bump); every clone
 /// observes the SAME underlying byte, mirroring how the six flags it
 /// replaces were each independently `Arc`-shared across `TableManager`
 /// clones before this merge.
 #[derive(Debug, Clone)]
 pub struct WriteBarrierFlags {
-    bits: Arc<AtomicU8>,
+    bits: Arc<AtomicU16>,
 }
 
 impl WriteBarrierFlags {
     /// New word with every bit clear (no unique index, no DDL in flight).
     pub fn new() -> Self {
         Self {
-            bits: Arc::new(AtomicU8::new(0)),
+            bits: Arc::new(AtomicU16::new(0)),
         }
     }
 
@@ -167,6 +180,24 @@ impl WriteBarrierFlags {
     /// store).
     pub fn with_unique_index_exists(initial_unique: bool) -> Self {
         let word = Self::new();
+        if initial_unique {
+            word.set(UNIQUE_INDEX_EXISTS);
+        }
+        word
+    }
+
+    /// #1102: construct with [`REGULAR_INDEX_EXISTS`] pre-set to `initial_regular`
+    /// and [`UNIQUE_INDEX_EXISTS`] pre-set to `initial_unique` (used by
+    /// `IndexManager::new` when loading a table that already has registered
+    /// indexes).
+    pub fn with_regular_and_unique_index_exists(
+        initial_regular: bool,
+        initial_unique: bool,
+    ) -> Self {
+        let word = Self::new();
+        if initial_regular {
+            word.set(REGULAR_INDEX_EXISTS);
+        }
         if initial_unique {
             word.set(UNIQUE_INDEX_EXISTS);
         }
@@ -189,7 +220,7 @@ impl WriteBarrierFlags {
     /// replaces.
     #[inline]
     pub fn set(&self, bit: u8) {
-        self.bits.fetch_or(bit, Ordering::SeqCst);
+        self.bits.fetch_or(bit as u16, Ordering::SeqCst);
     }
 
     /// Clear `bit`. `SeqCst` `fetch_and` with the bit's complement — a
@@ -197,7 +228,7 @@ impl WriteBarrierFlags {
     /// `AtomicBool::store(false)` this replaces.
     #[inline]
     pub fn clear(&self, bit: u8) {
-        self.bits.fetch_and(!bit, Ordering::SeqCst);
+        self.bits.fetch_and(!(bit as u16), Ordering::SeqCst);
     }
 
     /// Set `bit` to `on` (true → set, false → clear). Convenience for
@@ -218,12 +249,12 @@ impl WriteBarrierFlags {
     /// word, closing the ordering gap the F-69 bug report identified).
     #[inline]
     pub fn is_set(&self, bit: u8) -> bool {
-        (self.bits.load(Ordering::SeqCst) & bit) != 0
+        (self.bits.load(Ordering::SeqCst) & (bit as u16)) != 0
     }
 
     /// Raw snapshot of the whole byte — test-only introspection.
     #[cfg(test)]
-    pub fn raw(&self) -> u8 {
+    pub fn raw(&self) -> u16 {
         self.bits.load(Ordering::SeqCst)
     }
 }
