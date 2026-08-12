@@ -132,11 +132,10 @@ impl IndexManager {
     /// error if the conflicting index_key is present in `released_in_tx`
     /// **AND** the durable owner currently holding that key
     /// (`existing_id`) is itself a record this SAME transaction has staged
-    /// a write (Set or Remove) for, per `touched_records_in_tx` — the
-    /// caller (`insert_tx`) has already determined, by walking its own
-    /// `tx.index_write_set`, that this key was released by a `RemovePosting`
-    /// somewhere in this tx, and by consulting `tx.write_set`, that the
-    /// durable owner is a record this tx genuinely mutated.
+    /// a write (Set or Remove) for, per `is_record_touched` — the caller
+    /// provides a closure that answers "is this specific record ID touched
+    /// by this tx?" on demand, avoiding the O(N) cost of materializing a full
+    /// set of all touched records before any check even runs.
     ///
     /// #1096 follow-up (found by `@oh` review): checking `released_in_tx`
     /// alone is NOT sufficient and is a genuine uniqueness-bypass hazard.
@@ -152,14 +151,24 @@ impl IndexManager {
     /// Cross-checking that the CURRENT durable owner (`existing_id`) is a
     /// record THIS tx has touched closes that hole: if a concurrent tx won
     /// the race, `existing_id` is a record this tx never staged a write
-    /// for, so `touched_records_in_tx` correctly rejects the tolerance and
-    /// this call falls through to `DuplicateKey`.
-    pub async fn validate_unique_for_create_with_released(
+    /// for, so `is_record_touched` correctly rejects the tolerance and this
+    /// call falls through to `DuplicateKey`.
+    ///
+    /// The on-demand closure pattern mirrors the O(1) probe in
+    /// `pre_commit.rs` Step 2: `tx.write_set.get(&table_token).is_some_and(|s|
+    /// s.staged_op(candidate_id.as_bytes()).is_some())`. The closure is only
+    /// called when a durable conflict is found (after `check_unique_key`
+    /// returns `Some(existing_id)`), which is rare per-row — no O(N) set
+    /// build is needed when there are no conflicts.
+    pub async fn validate_unique_for_create_with_released<F>(
         &self,
         value: &(impl RecordRef + ?Sized),
         released_in_tx: &shamir_collections::TFxSet<Vec<u8>>,
-        touched_records_in_tx: &shamir_collections::TFxSet<[u8; 16]>,
-    ) -> DbResult<()> {
+        is_record_touched: F,
+    ) -> DbResult<()>
+    where
+        F: Fn(&RecordId) -> bool,
+    {
         if !self.has_unique_indexes() {
             return Ok(());
         }
@@ -171,7 +180,7 @@ impl IndexManager {
                 let index_key = irk.to_bytes();
                 if let Some(existing_id) = self.check_unique_key(&index_key).await? {
                     if released_in_tx.contains(index_key.as_ref())
-                        && touched_records_in_tx.contains(existing_id.as_bytes())
+                        && is_record_touched(&existing_id)
                     {
                         continue; // released earlier in this same tx — safe to reclaim
                     }
@@ -247,14 +256,24 @@ impl IndexManager {
     /// #1096 follow-up: an UPDATE can also be the reclaiming half of a
     /// release-then-reclaim pair (`tx: DELETE A{email:"x"}; UPDATE C SET
     /// email="x"`), not just an INSERT — this method closes that call site.
-    pub async fn validate_unique_for_update_with_released(
+    ///
+    /// The on-demand closure pattern mirrors the O(1) probe in
+    /// `pre_commit.rs` Step 2 and `validate_unique_for_create_with_released`:
+    /// `tx.write_set.get(&table_token).is_some_and(|s|
+    /// s.staged_op(candidate_id.as_bytes()).is_some())`. The closure is only
+    /// called when a durable conflict is found (after `check_unique_key`
+    /// returns `Some(existing_id)`), which is rare per-row.
+    pub async fn validate_unique_for_update_with_released<F>(
         &self,
         record_id: &RecordId,
         old_value: &(impl RecordRef + ?Sized),
         new_value: &(impl RecordRef + ?Sized),
         released_in_tx: &shamir_collections::TFxSet<Vec<u8>>,
-        touched_records_in_tx: &shamir_collections::TFxSet<[u8; 16]>,
-    ) -> DbResult<()> {
+        is_record_touched: F,
+    ) -> DbResult<()>
+    where
+        F: Fn(&RecordId) -> bool,
+    {
         if !self.has_unique_indexes() {
             return Ok(());
         }
@@ -281,7 +300,7 @@ impl IndexManager {
                         continue;
                     }
                     if released_in_tx.contains(index_key.as_ref())
-                        && touched_records_in_tx.contains(existing_id.as_bytes())
+                        && is_record_touched(&existing_id)
                     {
                         continue; // released earlier in this same tx — safe to reclaim
                     }

@@ -129,44 +129,6 @@ pub(crate) fn released_unique_keys_in_tx(
     released
 }
 
-/// #1096 follow-up (found by `@oh` review): the 16-byte id of every record
-/// THIS transaction has staged a write (Set or Remove) for on `table_token`,
-/// per `tx.write_set`'s `StagingStore`. Paired with
-/// [`released_unique_keys_in_tx`], this closes a genuine uniqueness-bypass
-/// hole: `released_unique_keys_in_tx` alone only proves "this tx planned to
-/// release this exact key" — it says nothing about whether that plan is
-/// still valid by the time the check runs. Under `Snapshot` isolation
-/// (documented last-writer-wins, no write-write conflict detection — see
-/// `pre_commit.rs`'s `claim_write_set`), this tx's release plan was built
-/// against a possibly-STALE snapshot: a concurrently-committed tx may have
-/// already reclaimed the durable key for an unrelated record between this
-/// tx's snapshot and the check running. Requiring the CURRENT durable owner
-/// to be a record this tx itself touched rules that out — a record this tx
-/// never wrote is never in this set, so a stale-snapshot race correctly
-/// falls through to `DuplicateKey`/`UniqueViolation` instead of silently
-/// creating two live records for the same unique value.
-///
-/// `RecordKey::from_slice(rid.as_bytes())` is the established layout every
-/// data-level staged op in this file uses (see `insert_tx`/`update_tx`/
-/// `delete_tx`'s `KvOp::Set`/`KvOp::Remove` construction) — so a plain
-/// 16-byte equality check against `RecordId::as_bytes()` is exact, no
-/// `RecordKey` round-trip needed.
-pub(crate) fn touched_records_in_tx(
-    tx: &shamir_tx::TxContext,
-    table_token: u64,
-) -> shamir_collections::TFxSet<[u8; 16]> {
-    let mut touched: shamir_collections::TFxSet<[u8; 16]> = shamir_collections::new_fx_set();
-    if let Some(staging) = tx.write_set.get(&table_token) {
-        for key in staging.keys() {
-            let bytes = key.as_slice();
-            if let Ok(id) = <[u8; 16]>::try_from(bytes) {
-                touched.insert(id);
-            }
-        }
-    }
-    touched
-}
-
 impl TableManager {
     /// Apply a staged mutation to the TxContext.
     pub(super) async fn stage_mutation(
@@ -603,17 +565,22 @@ impl TableManager {
         //
         // #1096: tx-aware — check if a conflicting durable key was released
         // earlier in this same tx (via DELETE or UPDATE-off), in which case
-        // it's safe to reclaim. `touched` closes the stale-snapshot
-        // bypass — see `touched_records_in_tx`'s doc.
+        // it's safe to reclaim. The on-demand `is_record_touched` probe closes
+        // the stale-snapshot bypass — see `validate_unique_for_create_with_released`'s doc.
         //
         // `@oh` review (dbc6299e follow-up): gate behind `has_unique_indexes()`
         // — the walks themselves cost O(tx) regardless of the early-return
         // inside `validate_unique_for_create_with_released`.
         if self.index_manager.has_unique_indexes() {
             let released = released_unique_keys_in_tx(tx, self.table_token());
-            let touched = touched_records_in_tx(tx, self.table_token());
+            let table_token = self.table_token();
+            let is_record_touched = |rid: &shamir_types::types::record_id::RecordId| -> bool {
+                tx.write_set
+                    .get(&table_token)
+                    .is_some_and(|s| s.staged_op(rid.as_bytes()).is_some())
+            };
             self.index_manager
-                .validate_unique_for_create_with_released(value, &released, &touched)
+                .validate_unique_for_create_with_released(value, &released, is_record_touched)
                 .await?;
         }
 
@@ -713,14 +680,20 @@ impl TableManager {
         //    later one rather than silently overwriting).
         //
         // #1096: tx-aware — also check for keys released by earlier
-        // staged ops (DELETE or UPDATE-off) in the same tx.
+        //    staged ops (DELETE or UPDATE-off) in the same tx. The on-demand
+        //    `is_record_touched` probe closes the stale-snapshot bypass.
         if self.index_manager.has_unique_indexes() {
             let mut batch_seen: TFxSet<(u64, Vec<u8>)> = TFxSet::default();
             let released = released_unique_keys_in_tx(tx, self.table_token());
-            let touched = touched_records_in_tx(tx, self.table_token());
+            let table_token = self.table_token();
+            let is_record_touched = |rid: &shamir_types::types::record_id::RecordId| -> bool {
+                tx.write_set
+                    .get(&table_token)
+                    .is_some_and(|s| s.staged_op(rid.as_bytes()).is_some())
+            };
             for (i, v) in values.iter().enumerate() {
                 self.index_manager
-                    .validate_unique_for_create_with_released(v, &released, &touched)
+                    .validate_unique_for_create_with_released(v, &released, &is_record_touched)
                     .await?;
                 for def in self.index_manager.iter_unique_indexes() {
                     if let Some(vs) = crate::index::index_keys::extract_index_leaves(v, &def.paths)
@@ -921,15 +894,20 @@ impl TableManager {
         // `execute_insert_tx`/`execute_set_tx` actually call for every
         // wire INSERT/UPSERT (see the F-1 comment on `insert_tx_many_bytes`'s
         // index2-planning loop below) — it must get the SAME tx-aware
-        // released-key treatment `insert_tx`/`insert_tx_many` have, not just
-        // the direct-API paths unit tests exercise.
+        // released-key + touched-record treatment `insert_tx`/`insert_tx_many` have.
+        // The on-demand `is_record_touched` probe closes the stale-snapshot bypass.
         if self.index_manager.has_unique_indexes() {
             let mut batch_seen: TFxSet<(u64, Vec<u8>)> = TFxSet::default();
             let released = released_unique_keys_in_tx(tx, self.table_token());
-            let touched = touched_records_in_tx(tx, self.table_token());
+            let table_token = self.table_token();
+            let is_record_touched = |rid: &shamir_types::types::record_id::RecordId| -> bool {
+                tx.write_set
+                    .get(&table_token)
+                    .is_some_and(|s| s.staged_op(rid.as_bytes()).is_some())
+            };
             for (i, view) in views.iter().enumerate() {
                 self.index_manager
-                    .validate_unique_for_create_with_released(view, &released, &touched)
+                    .validate_unique_for_create_with_released(view, &released, &is_record_touched)
                     .await?;
                 for def in self.index_manager.iter_unique_indexes() {
                     if let Some(vs) =
@@ -1106,29 +1084,43 @@ impl TableManager {
         // be either half of a release-then-reclaim pair (the release, via
         // `validate_unique_for_update`'s old->new diff; or the reclaim, via
         // the `None` upsert-into-fresh-id branch), so both need the same
-        // released-key + touched-record treatment `insert_tx` has.
+        // released-key + touched-record treatment `insert_tx` has. The on-demand
+        // `is_record_touched` probe closes the stale-snapshot bypass.
         //
         // `@oh` review (dbc6299e follow-up): gate behind `has_unique_indexes()`
         // like `insert_tx_many`/`insert_tx_many_bytes` already do — computing
-        // `released`/`touched` unconditionally makes every UPDATE on a
-        // table with NO unique indexes pay an O(|tx.index_write_set| +
-        // |tx.write_set[table]|) walk for nothing, and on the wire UPDATE
-        // path (`update_tx_bytes`, called per-row) that's O(N²) over an
-        // N-row transactional UPDATE.
+        // `released` unconditionally makes every UPDATE on a table with NO unique
+        // indexes pay an O(|tx.index_write_set|) walk for nothing. The on-demand
+        // `is_record_touched` probe eliminates the O(N²) cost on the wire UPDATE
+        // path (`update_tx_bytes`, called per-row) by avoiding an O(N) set build
+        // for every row.
         if self.index_manager.has_unique_indexes() {
             let released = released_unique_keys_in_tx(tx, self.table_token());
-            let touched = touched_records_in_tx(tx, self.table_token());
+            let table_token = self.table_token();
+            let is_record_touched = |rid: &shamir_types::types::record_id::RecordId| -> bool {
+                tx.write_set
+                    .get(&table_token)
+                    .is_some_and(|s| s.staged_op(rid.as_bytes()).is_some())
+            };
             match &old {
                 Some(old_val) => {
                     self.index_manager
                         .validate_unique_for_update_with_released(
-                            &id, old_val, value, &released, &touched,
+                            &id,
+                            old_val,
+                            value,
+                            &released,
+                            &is_record_touched,
                         )
                         .await?
                 }
                 None => {
                     self.index_manager
-                        .validate_unique_for_create_with_released(value, &released, &touched)
+                        .validate_unique_for_create_with_released(
+                            value,
+                            &released,
+                            &is_record_touched,
+                        )
                         .await?
                 }
             }
@@ -1238,19 +1230,32 @@ impl TableManager {
                     // this is the wire path `execute_update_tx` calls for
                     // every transactional UPDATE, so it needs the same
                     // released-key + touched-record treatment `update_tx`
-                    // has (see `touched_records_in_tx`'s doc for why both
-                    // are required, not just the released-key set).
+                    // has (see `validate_unique_for_create_with_released`'s doc
+                    // for why both are required, not just the released-key set).
+                    // The on-demand `is_record_touched` probe eliminates the O(N²)
+                    // cost by avoiding an O(N) set build for every row.
                     //
                     // Gated behind `has_unique_indexes()` (2nd `@oh` review,
                     // dbc6299e follow-up): this fn is called PER ROW on the
-                    // wire UPDATE path — an unconditional walk here is
-                    // O(N²) over an N-row transactional UPDATE.
+                    // wire UPDATE path — computing `released` unconditionally
+                    // makes every UPDATE on a table with NO unique indexes pay
+                    // an O(|tx.index_write_set|) walk for nothing.
                     if self.index_manager.has_unique_indexes() {
                         let released = released_unique_keys_in_tx(tx, self.table_token());
-                        let touched = touched_records_in_tx(tx, self.table_token());
+                        let table_token = self.table_token();
+                        let is_record_touched =
+                            |rid: &shamir_types::types::record_id::RecordId| -> bool {
+                                tx.write_set
+                                    .get(&table_token)
+                                    .is_some_and(|s| s.staged_op(rid.as_bytes()).is_some())
+                            };
                         self.index_manager
                             .validate_unique_for_update_with_released(
-                                &id, &old_view, &new_view, &released, &touched,
+                                &id,
+                                &old_view,
+                                &new_view,
+                                &released,
+                                &is_record_touched,
                             )
                             .await?;
                     }
@@ -1298,13 +1303,28 @@ impl TableManager {
                     })?;
 
                     // Gated behind `has_unique_indexes()` for the same
-                    // O(N²) reason as the map-lens branch above.
+                    // reason as the map-lens branch above — computing
+                    // `released` unconditionally makes every UPDATE on a
+                    // table with NO unique indexes pay an O(|tx.index_write_set|)
+                    // walk for nothing. The on-demand `is_record_touched` probe
+                    // eliminates the O(N²) cost by avoiding an O(N) set build
+                    // for every row.
                     if self.index_manager.has_unique_indexes() {
                         let released = released_unique_keys_in_tx(tx, self.table_token());
-                        let touched = touched_records_in_tx(tx, self.table_token());
+                        let table_token = self.table_token();
+                        let is_record_touched =
+                            |rid: &shamir_types::types::record_id::RecordId| -> bool {
+                                tx.write_set
+                                    .get(&table_token)
+                                    .is_some_and(|s| s.staged_op(rid.as_bytes()).is_some())
+                            };
                         self.index_manager
                             .validate_unique_for_update_with_released(
-                                &id, &old_tree, &new_tree, &released, &touched,
+                                &id,
+                                &old_tree,
+                                &new_tree,
+                                &released,
+                                &is_record_touched,
                             )
                             .await?;
                     }
