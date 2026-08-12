@@ -721,11 +721,12 @@ impl IndexManager {
         fire_post_flag_set_pre_gen_bump_test_hook().await;
 
         self.bump_generation(); // P0-2 (#958): gen gate for commit-time rederive
-                                // P1-2 (#967): the posting entries are ALREADY durably written by the
-                                // `set_many` above. If THIS definition persist fails, the postings are
-                                // orphaned — on restart, no definition loads but postings remain.
-                                // NOTE: Cannot write DdlOpState::Failed here because this layer
-                                // (IndexManagerUnique) does not have op_id in scope.
+
+        // P1-2 (#967): the posting entries are ALREADY durably written by the
+        // `set_many` above. If THIS definition persist fails, the postings are
+        // orphaned — on restart, no definition loads but postings remain.
+        // NOTE: Cannot write DdlOpState::Failed here because this layer
+        // (IndexManagerUnique) does not have op_id in scope.
         self.save_index_info_unique().await.map_err(|e| {
             shamir_storage::error::DbError::Internal(format!(
                 "CREATE UNIQUE INDEX '{name_interned}': the index posting \

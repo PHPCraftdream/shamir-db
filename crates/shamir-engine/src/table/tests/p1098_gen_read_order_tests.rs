@@ -322,8 +322,8 @@ async fn p1098_all_four_call_sites_follow_correct_ordering_pattern() {
 /// B{email:"x"}` tx is parked exactly at the #1098 seam — strictly AFTER
 /// its own generation capture, strictly BEFORE its `has_unique_indexes()`-
 /// gated validation. While parked, `CREATE UNIQUE INDEX` runs to
-/// completion (backfills A's posting, bumps generation, then sets
-/// `UNIQUE_INDEX_EXISTS`). The parked tx is then released and must reject
+/// completion (backfills A's posting, sets `UNIQUE_INDEX_EXISTS`, then
+/// bumps generation — round 2's writer-side order). The parked tx is then released and must reject
 /// `B` as a duplicate of `A` — proving the #1098 fix's read order (gen
 /// captured BEFORE the unique check) actually closes the race, not just
 /// "doesn't crash".
@@ -391,8 +391,8 @@ async fn p1098_gen_captured_before_seam_closes_race_with_concurrent_create_uniqu
     // While the tx is parked (its generation already captured), run a
     // real CREATE UNIQUE INDEX to completion: backfills A's posting for
     // "x" (the only existing record — no duplicate, succeeds), then
-    // publishes generation-bump-then-flag-set. Both have landed by the
-    // time this returns.
+    // publishes flag-then-generation-bump (round 2's writer-side order).
+    // Both have landed by the time this returns.
     tbl.create_unique_index("by_email", &["email"])
         .await
         .expect("CREATE UNIQUE INDEX must succeed — only A exists so far");
