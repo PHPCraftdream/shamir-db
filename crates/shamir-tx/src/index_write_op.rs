@@ -104,6 +104,14 @@ pub enum IndexWriteOp {
         key: Bytes,
         /// See [`SetPosting::provenance`].
         provenance: Provenance,
+        /// R0-C (#1097): the 16-byte id of the record this removal was
+        /// planned against, when known. Only populated by base_index
+        /// UNIQUE planners (`index_manager_unique.rs`'s
+        /// `plan_record_updated_unique` / `plan_record_deleted_unique`) —
+        /// the only family `pre_commit.rs`'s Step 1 walk uses this for.
+        /// `None` for every other family (regular hash / sorted / index2),
+        /// which never populate or read it.
+        owner: Option<[u8; 16]>,
     },
     /// Bump FtsRankedBackend's in-memory BM25 stats (doc_count +
     /// sum_doc_len). `sign` is +1 for insert, -1 for delete.

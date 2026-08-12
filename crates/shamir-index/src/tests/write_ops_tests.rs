@@ -95,6 +95,7 @@ async fn apply_remove_posting_removes_from_store() {
     let ops = vec![IndexWriteOp::RemovePosting {
         key: Bytes::from_static(b"k"),
         provenance: Default::default(),
+        owner: None,
     }];
     apply_index_ops(&ops, &store, &backend).await.unwrap();
     assert!(store.get(Bytes::from_static(b"k").into()).await.is_err());
@@ -175,6 +176,7 @@ async fn apply_mixed_ops_in_order() {
         IndexWriteOp::RemovePosting {
             key: Bytes::from_static(b"a"),
             provenance: Default::default(),
+            owner: None,
         },
         IndexWriteOp::BumpFtsStats {
             doc_len: 7,

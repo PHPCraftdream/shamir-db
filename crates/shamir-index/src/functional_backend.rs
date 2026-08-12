@@ -227,6 +227,7 @@ impl IndexBackend for FunctionalBackend {
                 IndexWriteOp::RemovePosting {
                     key: Bytes::from(old_key),
                     provenance,
+                    owner: None,
                 },
                 IndexWriteOp::SetPosting {
                     key: Bytes::from(new_key),
@@ -254,6 +255,7 @@ impl IndexBackend for FunctionalBackend {
         Ok(vec![IndexWriteOp::RemovePosting {
             key: Bytes::from(key),
             provenance: crate::write_ops::index2_provenance(&self.descriptor),
+            owner: None,
         }])
     }
 

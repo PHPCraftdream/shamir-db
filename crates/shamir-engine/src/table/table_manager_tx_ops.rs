@@ -43,9 +43,9 @@ pub(crate) fn released_unique_keys_in_tx(
             } if provenance.family == IndexFamily::Unique => {
                 released.remove(key.as_ref());
             }
-            IndexWriteOp::RemovePosting { key, provenance }
-                if provenance.family == IndexFamily::Unique =>
-            {
+            IndexWriteOp::RemovePosting {
+                key, provenance, ..
+            } if provenance.family == IndexFamily::Unique => {
                 released.insert(key.to_vec());
             }
             _ => {}

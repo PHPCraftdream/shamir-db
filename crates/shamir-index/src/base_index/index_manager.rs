@@ -2541,6 +2541,7 @@ impl IndexManager {
                         ops.push(IndexWriteOp::RemovePosting {
                             key: posting_key,
                             provenance,
+                            owner: None,
                         });
                     }
                     (Some(ok), Some(nk)) => {
@@ -2551,6 +2552,7 @@ impl IndexManager {
                             ops.push(IndexWriteOp::RemovePosting {
                                 key: old_posting_key,
                                 provenance,
+                                owner: None,
                             });
 
                             let new_posting_key = build_posting_key(&new_bytes, record_id);
@@ -2621,6 +2623,7 @@ impl IndexManager {
                     ops.push(IndexWriteOp::RemovePosting {
                         key: posting_key,
                         provenance: regular_provenance(&def),
+                        owner: None,
                     });
                 }
             }

@@ -548,6 +548,7 @@ fn build_footprint_projects_index_set_postings_only() {
         IndexWriteOp::RemovePosting {
             key: Bytes::from_static(b"K_DEL"),
             provenance: Default::default(),
+            owner: None,
         },
     ));
     tx.index_write_set.push((

@@ -953,6 +953,7 @@ impl IndexManager {
                     ops.push(IndexWriteOp::RemovePosting {
                         key: ok.to_bytes(),
                         provenance,
+                        owner: Some(*record_id.as_bytes()),
                     });
                 }
                 (Some(ok), Some(nk)) => {
@@ -962,6 +963,7 @@ impl IndexManager {
                         ops.push(IndexWriteOp::RemovePosting {
                             key: old_bytes,
                             provenance,
+                            owner: Some(*record_id.as_bytes()),
                         });
                         ops.push(IndexWriteOp::SetPosting {
                             key: new_bytes,
@@ -980,7 +982,7 @@ impl IndexManager {
     /// Mirrors [`on_record_deleted_unique`] as a planner.
     pub async fn plan_record_deleted_unique(
         &self,
-        _record_id: &RecordId,
+        record_id: &RecordId,
         old_value: &(impl RecordRef + ?Sized),
     ) -> DbResult<Vec<IndexWriteOp>> {
         if !self.has_unique_indexes() {
@@ -994,6 +996,7 @@ impl IndexManager {
                 ops.push(IndexWriteOp::RemovePosting {
                     key: irk.to_bytes(),
                     provenance: unique_provenance(&def),
+                    owner: Some(*record_id.as_bytes()),
                 });
             }
         }

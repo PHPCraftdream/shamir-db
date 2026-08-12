@@ -165,6 +165,7 @@ impl IndexBackend for FtsBackend {
             ops.push(IndexWriteOp::RemovePosting {
                 key: Bytes::from(key),
                 provenance,
+                owner: None,
             });
         }
         // Add tokens that appeared.
@@ -192,6 +193,7 @@ impl IndexBackend for FtsBackend {
             ops.push(IndexWriteOp::RemovePosting {
                 key: Bytes::from(key),
                 provenance,
+                owner: None,
             });
         }
         Ok(ops)

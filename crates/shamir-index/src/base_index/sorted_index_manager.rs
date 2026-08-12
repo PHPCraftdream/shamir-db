@@ -1780,7 +1780,11 @@ impl SortedIndexManager {
             if key_changed {
                 if let Some(ref ov) = old_enc {
                     let key = self.build_entry_key(def.name_interned, ov, record_id);
-                    ops.push(IndexWriteOp::RemovePosting { key, provenance });
+                    ops.push(IndexWriteOp::RemovePosting {
+                        key,
+                        provenance,
+                        owner: None,
+                    });
                 }
                 if let Some(ref nv) = new_enc {
                     let key = self.build_entry_key(def.name_interned, nv, record_id);
@@ -1828,6 +1832,7 @@ impl SortedIndexManager {
                 ops.push(IndexWriteOp::RemovePosting {
                     key,
                     provenance: def.provenance(),
+                    owner: None,
                 });
             }
         }

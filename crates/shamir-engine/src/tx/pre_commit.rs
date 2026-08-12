@@ -682,13 +682,36 @@ pub(super) async fn pre_commit_prelock(
                 live.insert(k.clone(), owner);
                 released.remove(&k);
             }
-            IndexWriteOp::RemovePosting { key, provenance }
-                if provenance.family == IndexFamily::Unique =>
-            {
+            IndexWriteOp::RemovePosting {
+                key,
+                provenance,
+                owner,
+            } if provenance.family == IndexFamily::Unique => {
                 let k = (*table_token, key.clone());
-                live.remove(&k);
-                released.insert(k.clone());
-                ever_released.insert(k);
+                // #1097: only clear the live claim when this op's declared
+                // owner actually matches the record `live` currently
+                // attributes the key to (or there IS no current live owner
+                // to protect, or the op didn't declare an owner at all —
+                // the unconditional pre-#1097 behavior, kept as a safe
+                // fallback for any future non-unique-family construction
+                // site that might reach here). A MISMATCH means this
+                // removal was planned against a record that no longer
+                // holds the key per this tx's own walk so far (built
+                // against a stale snapshot — see this file's #1097 doc
+                // above) — treat it as a stale no-op: do not clear `live`,
+                // do not mark the key released, so the key's real current
+                // owner within this tx is preserved and Step 2 validates
+                // against it correctly.
+                let removing_owner = owner.map(RecordId);
+                let current_owner = live.get(&k).copied();
+                if current_owner.is_none()
+                    || removing_owner.is_none()
+                    || current_owner == removing_owner
+                {
+                    live.remove(&k);
+                    released.insert(k.clone());
+                    ever_released.insert(k);
+                }
             }
             _ => {}
         }

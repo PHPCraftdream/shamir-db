@@ -203,6 +203,7 @@ impl IndexBackend for FtsRankedBackend {
             ops.push(IndexWriteOp::RemovePosting {
                 key: Bytes::from(key),
                 provenance,
+                owner: None,
             });
         }
         // Add/update all tokens in new (tf or doc_len may have changed).
@@ -245,6 +246,7 @@ impl IndexBackend for FtsRankedBackend {
             ops.push(IndexWriteOp::RemovePosting {
                 key: Bytes::from(key),
                 provenance,
+                owner: None,
             });
         }
         if doc_len > 0 {
