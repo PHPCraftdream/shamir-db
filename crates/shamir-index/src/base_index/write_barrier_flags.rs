@@ -3,16 +3,15 @@
 //! # The bug this closes
 //!
 //! Before this module existed, `TableManager::needs_write_barrier()`
-//! (`shamir-engine`) OR'd together SIX independent loads: five `AtomicBool`s
-//! owned by `TableManager` itself (all `SeqCst`) plus
-//! `IndexManager::has_unique_indexes()` (`shamir-index`), whose backing
-//! `AtomicBool` was loaded `Relaxed`. Six separate loads are NOT a single
-//! atomic snapshot — the compound condition could observe a torn read across
-//! a genuine state transition, and the one `Relaxed` operand additionally
-//! broke the `SeqCst` total-order argument F-56 (#882) proved for the
-//! `WriterDrainBarrier` protocol (see `writer_drain_barrier.rs` in
-//! `shamir-engine`, which this module's doc extends rather than
-//! contradicts). A writer racing a concurrent `create_unique_index_locked`
+//! (`shamir-engine`) OR'd together SEVEN independent loads: two `Arc<AtomicBool>`
+//! bits owned by `IndexManager` (one `SeqCst`, one `Release`/`Relaxed`) plus
+//! five DDL-intent `AtomicBool`s owned by `TableManager` itself (all `SeqCst`).
+//! Seven separate loads are NOT a single atomic snapshot — the compound
+//! condition could observe a torn read across a genuine state transition, and the
+//! one `Relaxed` operand additionally broke the `SeqCst` total-order argument
+//! F-56 (#882) proved for the `WriterDrainBarrier` protocol (see
+//! `writer_drain_barrier.rs` in `shamir-engine`, which this module's doc extends
+//! rather than contradicts). A writer racing a concurrent `create_unique_index_locked`
 //! could read the whole predicate as `false` on the fast path while the
 //! unique index was in the middle of going live, letting a duplicate value
 //! slip past the constraint.
@@ -21,11 +20,11 @@
 //!
 //! `WriteBarrierFlags` is ONE `Arc<AtomicU16>` — seven gate bits packed into a
 //! single word. `needs_write_barrier()` becomes exactly one `SeqCst` load
-//! (`flags.load(Ordering::SeqCst) != 0`) instead of six. A single atomic load
+//! (`flags.load(Ordering::SeqCst) != 0`) instead of seven. A single atomic load
 //! can never be torn regardless of memory ordering, so the whole compound
 //! condition is now a genuine point-in-time snapshot, and F-56's `SeqCst`
 //! total-order proof (see `writer_drain_barrier.rs`) now covers the FULL
-//! seven-condition predicate instead of five-sixths of it.
+//! seven-condition predicate.
 //!
 //! # Ownership — why this type lives in `shamir-index`, not `shamir-engine`
 //!
@@ -58,9 +57,9 @@
 //! Every bit-set/bit-clear/full-word-load in this module is `SeqCst`,
 //! preserving the ordering every individual flag already had before this
 //! merge (none was weakened). `SeqCst` bitwise RMW
-//! (`fetch_or`/`fetch_and`) on a shared byte is a single locked instruction,
-//! same cost class as the `AtomicBool::store` each bit used to get — merging
-//! six bits into one byte does not introduce a CAS loop (contrast with
+//! (`fetch_or`/`fetch_and`) on a shared word is a single locked
+//! instruction, same cost class as the `AtomicBool::store` each bit used to get — merging
+//! seven bits into one word does not introduce a CAS loop (contrast with
 //! folding a counter in, discussed below).
 //!
 //! # Why the `active` writer counter is NOT folded into this word
@@ -78,7 +77,7 @@
 //!   — exactly the degradation `writer_drain_barrier.rs`'s "Cost" section
 //!   documents `enter_writer` as NOT having today. The counter is the
 //!   HOTTEST path in this whole barrier (every fast-path writer bumps it
-//!   twice, enter + drop); the six gate bits are DDL-only (rare). Keeping
+//!   twice, enter + drop); the five barrier bits are DDL-only (rare). Keeping
 //!   them apart avoids taxing the hot path to shrink an already-rare one.
 //! - Realistic concurrent-writer ceilings on one table are unbounded in
 //!   principle (no connection/session cap enforces a hard ceiling on
@@ -91,12 +90,13 @@
 //!   `needs_write_barrier()` never reads `active` in the first place (only
 //!   `enter_writer`/`drain` do); there is no shared call site that would
 //!   collapse from 2 loads to 1 by folding. The single-atomic win this task
-//!   targets is fully realized by packing the six gate bits alone.
+//!   targets is fully realized by packing the SEVEN gate bits alone.
 //!
-//! This is an explicit, scoped decision: seven gate bits in one atomic (now
-//! expanded to `AtomicU16` to accommodate the seventh bit), the writer-drain
-//! counter stays a distinct atomic with its existing `fetch_add`/`fetch_sub`
-//! cost profile, unchanged.
+//! This is an explicit, scoped decision: seven gate bits in one atomic (six
+//! participate in the barrier predicate via `BARRIER_BITS`;
+//! [`REGULAR_INDEX_EXISTS`] is excluded because it is a steady-state flag,
+//! not a DDL-in-flight condition), the writer-drain counter stays a distinct
+//! atomic with its existing `fetch_add`/`fetch_sub` cost profile, unchanged.
 
 use std::sync::atomic::{AtomicU16, Ordering};
 use std::sync::Arc;
@@ -155,6 +155,18 @@ pub const ALL_BITS: u16 = (UNIQUE_INDEX_EXISTS
     | SORTED_INDEX_CREATE
     | REGULAR_INDEX_EXISTS) as u16;
 
+/// Only the bits that participate in `needs_write_barrier()`'s predicate.
+/// Excludes [`REGULAR_INDEX_EXISTS`] (bit 6) because it is a steady-state
+/// existence flag, not a transient DDL-in-flight condition — a table with
+/// ONLY a regular index and zero other barrier conditions MUST keep the
+/// lock-free fast path (see Finding 1 in #1102 round 2 brief).
+pub const BARRIER_BITS: u16 = (UNIQUE_INDEX_EXISTS
+    | INDEX2_CREATE
+    | SCHEMA_ACTIVATION
+    | REGULAR_INDEX_CREATE
+    | UNIQUE_INDEX_CREATE
+    | SORTED_INDEX_CREATE) as u16;
+
 /// The single packed atomic backing the whole write-barrier predicate.
 ///
 /// Cheap to clone (`Arc<AtomicU16>` clone — one refcount bump); every clone
@@ -172,18 +184,6 @@ impl WriteBarrierFlags {
         Self {
             bits: Arc::new(AtomicU16::new(0)),
         }
-    }
-
-    /// Construct with [`UNIQUE_INDEX_EXISTS`] pre-set to `initial_unique`
-    /// (used by `IndexManager::new` when loading a table that already has a
-    /// registered unique index — mirrors the old `sync_flags` initial
-    /// store).
-    pub fn with_unique_index_exists(initial_unique: bool) -> Self {
-        let word = Self::new();
-        if initial_unique {
-            word.set(UNIQUE_INDEX_EXISTS);
-        }
-        word
     }
 
     /// #1102: construct with [`REGULAR_INDEX_EXISTS`] pre-set to `initial_regular`
@@ -204,14 +204,18 @@ impl WriteBarrierFlags {
         word
     }
 
-    /// The whole compound write-barrier predicate: `true` iff ANY bit is
-    /// set. Exactly ONE atomic load — see the module doc for why this
+    /// The whole compound write-barrier predicate: `true` iff ANY barrier bit
+    /// is set. Exactly ONE atomic load — see the module doc for why this
     /// closes the F-69 torn-read bug. `SeqCst`: preserves F-56's total-order
     /// argument (see `writer_drain_barrier.rs`), which every individual bit
     /// already required before this merge.
+    ///
+    /// Note: this masks against [`BARRIER_BITS`], excluding [`REGULAR_INDEX_EXISTS`]
+    /// (bit 6) which is a steady-state existence flag rather than a DDL-in-flight
+    /// condition. A table with ONLY a regular index must keep the lock-free fast path.
     #[inline]
     pub fn any_set(&self) -> bool {
-        self.bits.load(Ordering::SeqCst) != 0
+        (self.bits.load(Ordering::SeqCst) & BARRIER_BITS) != 0
     }
 
     /// Set `bit` (one of the module-level `*_INDEX_*`/`*_CREATE`/
@@ -252,7 +256,7 @@ impl WriteBarrierFlags {
         (self.bits.load(Ordering::SeqCst) & (bit as u16)) != 0
     }
 
-    /// Raw snapshot of the whole byte — test-only introspection.
+    /// Raw snapshot of the whole word — test-only introspection.
     #[cfg(test)]
     pub fn raw(&self) -> u16 {
         self.bits.load(Ordering::SeqCst)

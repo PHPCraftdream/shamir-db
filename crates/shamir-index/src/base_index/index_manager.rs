@@ -1309,6 +1309,10 @@ impl IndexManager {
             self.sweep_index_postings(false, name_interned).await?;
         }
         if regular_changed {
+            // NOTE: This is the ONLY site that bumps generation BEFORE setting
+            // REGULAR_INDEX_EXISTS (reverse of the CREATE order). This is safe because
+            // it runs at open-time during IndexManager::new, single-threaded, before
+            // the manager is published/shared — no concurrent reader can race this.
             // #1102: update REGULAR_INDEX_EXISTS to match the new IndexInfo state
             // (may be true if other indexes remain, false if this was the last one).
             self.write_barrier_flags
@@ -1405,9 +1409,9 @@ impl IndexManager {
         self.generation.fetch_add(1, Ordering::AcqRel);
     }
 
-    /// F-69 (#896): expose the shared packed write-barrier word so
+    /// F-69 (#896, P0): expose the shared packed write-barrier word so
     /// `TableManager` (`shamir-engine`) can fold its own five DDL-intent
-    /// bits into the SAME `Arc<AtomicU8>` this manager uses for
+    /// bits into the SAME `Arc<AtomicU16>` this manager uses for
     /// [`UNIQUE_INDEX_EXISTS`] — the shape that makes
     /// `needs_write_barrier()` a single atomic load across both crates'
     /// halves of the predicate. See `write_barrier_flags.rs`'s module doc
@@ -1649,7 +1653,7 @@ impl IndexManager {
         // registered (but possibly under-populated), still-planner-invisible
         // index that the doctor `repair()` pass can top up on request.
         self.indexes.add_index(index_def);
-        // #1102: set REGULAR_INDEX EXISTS BEFORE bumping generation (mirrors
+        // #1102: set REGULAR_INDEX_EXISTS BEFORE bumping generation (mirrors
         // #1098's fix for UNIQUE_INDEX_EXISTS). The `set` is `SeqCst` (via
         // `write_barrier_flags.rs`), same as bit 0; the generation bump's
         // `fetch_add` is `AcqRel`. A reader that observes the NEW generation

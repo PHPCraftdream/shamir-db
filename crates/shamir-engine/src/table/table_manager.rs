@@ -50,12 +50,11 @@ pub struct TableManager {
     /// F-69 (#896, P0): the SINGLE packed atomic backing the whole
     /// write-barrier predicate — see
     /// [`write_barrier_flags`](crate::index::write_barrier_flags) for the
-    /// full rationale (why one `Arc<AtomicU8>` replaces what used to be six
-    /// independent atomics: five `AtomicBool`s here plus
-    /// `IndexManager::has_unique_indexes()`'s own flag).
+    /// full rationale (why one `Arc<AtomicU16>` replaces what used to be seven
+    /// independent atomics: two from `IndexManager` plus five DDL-intent flags here).
     ///
-    /// This is the SAME `Arc<AtomicU8>` [`IndexManager`] uses for its
-    /// `UNIQUE_INDEX_EXISTS` bit — obtained via
+    /// This is the SAME `Arc<AtomicU16>` [`IndexManager`] uses for its
+    /// `UNIQUE_INDEX_EXISTS` and `REGULAR_INDEX_EXISTS` bits — obtained via
     /// [`IndexManager::write_barrier_flags`] at construction time and
     /// stored here so `TableManager` can fold its own five DDL-intent bits
     /// into the identical word:
@@ -105,8 +104,12 @@ pub struct TableManager {
     ///   double-posted. Set/cleared by [`WriteBarrierGuard`] (F-70, #897).
     ///
     /// Every bit-set/clear is `SeqCst` (F-56's total-order argument, now
-    /// covering the FULL six-condition predicate — see
+    /// covering the full barrier predicate — see
     /// [`writer_drain_barrier`]'s module doc, updated by this task).
+    ///
+    /// Note: `REGULAR_INDEX_EXISTS` (owned by `IndexManager`) is excluded from
+    /// the barrier predicate via `BARRIER_BITS` — a table with ONLY a regular
+    /// index keeps the lock-free fast path (see #1102 round 2 brief for why).
     pub(super) write_barrier_flags: crate::index::write_barrier_flags::WriteBarrierFlags,
     /// F-95 (#957, P0) — per-table DDL admission mutex. Serializes
     /// concurrent DDL operations that would share the same write-barrier
@@ -1359,14 +1362,19 @@ impl TableManager {
     ///   `create_sorted_index_with_include` (F-57) snapshot→backfill→register
     ///   sequence is currently in flight.
     ///
+    /// Note: a table with ONLY a regular (non-unique) hash index and zero
+    /// other barrier conditions keeps the lock-free fast path. The
+    /// `REGULAR_INDEX_EXISTS` steady-state flag is excluded from the barrier
+    /// predicate via `BARRIER_BITS` (see #1102 round 2 brief for why this is
+    /// necessary).
+    ///
     /// F-69 (#896, P0): this is now EXACTLY ONE atomic load —
-    /// `write_barrier_flags.any_set()` — instead of six independent loads
-    /// (five `AtomicBool`s here plus `IndexManager::has_unique_indexes()`'s
-    /// own, previously-`Relaxed`, flag). A single atomic load can never be
-    /// torn regardless of memory ordering, so the six-condition compound is
-    /// now a genuine point-in-time snapshot; see
-    /// `crate::index::write_barrier_flags`'s module doc for the full
-    /// before/after writeup and why this fixes a real duplicate-past-unique-
+    /// `write_barrier_flags.any_set()` — instead of seven independent loads
+    /// (two from `IndexManager` plus five DDL-intent flags here). A single
+    /// atomic load can never be torn regardless of memory ordering, so the
+    /// compound predicate is now a genuine point-in-time snapshot; see
+    /// `shamir_index::base_index::write_barrier_flags`'s module doc for the
+    /// full before/after writeup and why this fixes a real duplicate-past-unique-
     /// constraint race. The load is `SeqCst` (F-56, #882): it is the writer
     /// half of a cross-atomic dependency with the `active` drain counter — a
     /// writer that reads `false` must have its prior `active.fetch_add`
@@ -1374,8 +1382,7 @@ impl TableManager {
     /// `SeqCst`). Only a single `SeqCst` total order across both atomics can
     /// carry that edge — `Release`/`Acquire` alone cannot (see
     /// [`writer_drain_barrier`]'s memory-model proof, which this task
-    /// extends to state it now covers the FULL six-condition predicate).
-    /// Tables with none of these conditions keep the lock-free fast path.
+    /// extends to state it now covers the full predicate).
     ///
     /// Consulted by the non-tx writer methods in `table_manager_crud.rs`
     /// (`insert`/`insert_many_returning_version`/`delete_returning_version`/

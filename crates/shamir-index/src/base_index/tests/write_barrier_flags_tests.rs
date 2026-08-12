@@ -48,11 +48,11 @@ fn set_to_toggles_both_directions() {
 
 #[test]
 fn with_unique_index_exists_preseeds_bit_zero() {
-    let w = WriteBarrierFlags::with_unique_index_exists(true);
+    let w = WriteBarrierFlags::with_regular_and_unique_index_exists(false, true);
     assert!(w.is_set(UNIQUE_INDEX_EXISTS));
     assert!(w.any_set());
 
-    let w2 = WriteBarrierFlags::with_unique_index_exists(false);
+    let w2 = WriteBarrierFlags::with_regular_and_unique_index_exists(false, false);
     assert!(!w2.any_set());
 }
 
@@ -70,6 +70,8 @@ fn with_regular_and_unique_index_exists_preseeds_both_bits() {
     let w3 = WriteBarrierFlags::with_regular_and_unique_index_exists(true, false);
     assert!(w3.is_set(REGULAR_INDEX_EXISTS));
     assert!(!w3.is_set(UNIQUE_INDEX_EXISTS));
+    // REGULAR_INDEX_EXISTS is excluded from BARRIER_BITS, so any_set() is false
+    assert!(!w3.any_set());
 
     let w4 = WriteBarrierFlags::with_regular_and_unique_index_exists(false, false);
     assert!(!w4.is_set(REGULAR_INDEX_EXISTS));

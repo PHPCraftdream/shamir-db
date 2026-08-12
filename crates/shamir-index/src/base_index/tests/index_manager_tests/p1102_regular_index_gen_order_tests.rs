@@ -24,6 +24,7 @@ use super::helpers::{create_manager, create_test_value};
 use crate::base_index::backfill_pause_hook::BackfillPauseHook;
 use crate::base_index::index_definition::IndexDefinition;
 use crate::base_index::index_info_item::IndexInfoItem;
+use crate::base_index::write_barrier_flags::{BARRIER_BITS, REGULAR_INDEX_EXISTS};
 use shamir_storage::types::RecordKey;
 use shamir_types::types::record_id::RecordId;
 use shamir_types::types::value::InnerValue;
@@ -97,5 +98,61 @@ async fn p1102_writer_flag_before_gen_bump_is_visible_to_a_reader_parked_mid_cre
         stage_gen < final_gen,
         "generation captured while parked at the seam must predate the \
          final, post-bump generation (stage_gen={stage_gen}, final_gen={final_gen})"
+    );
+}
+
+/// #1102 round 2 — regression test: REGULAR_INDEX_EXISTS is excluded from
+/// `any_set()` (the write-barrier predicate).
+///
+/// A table with ONLY a regular index and zero other barrier conditions MUST
+/// keep the lock-free fast path. This test proves `any_set()` returns `false`
+/// even though `is_set(REGULAR_INDEX_EXISTS)` returns `true`.
+#[tokio::test]
+async fn p1102_round2_regular_index_exists_excluded_from_barrier_predicate() {
+    let (data_store, _info_store, manager) = create_manager();
+
+    // Durable record A exists BEFORE any regular index.
+    let value_a = create_test_value(&[(1, InnerValue::Str("x".to_string()))]);
+    let rid_a = RecordId::new();
+    data_store
+        .set(
+            RecordKey::from_slice(rid_a.as_bytes()),
+            value_a.to_bytes().unwrap(),
+        )
+        .await
+        .unwrap();
+
+    // Create a regular index.
+    let index_def = IndexDefinition::new(2001, vec![IndexInfoItem::new(vec![1])]);
+    manager.create_index(index_def).await.unwrap();
+
+    // The flag must be set.
+    let flags = manager.write_barrier_flags();
+    assert!(
+        flags.is_set(REGULAR_INDEX_EXISTS),
+        "REGULAR_INDEX_EXISTS must be set after CREATE INDEX completes"
+    );
+
+    // BUT `any_set()` (the barrier predicate) must return FALSE because
+    // REGULAR_INDEX_EXISTS is excluded via BARRIER_BITS.
+    assert!(
+        !flags.any_set(),
+        "any_set() must return false with ONLY a regular index (no DDL in flight, \
+         no unique index) — proving REGULAR_INDEX_EXISTS is correctly excluded"
+    );
+
+    // Verify that raw & BARRIER_BITS != 0 matches any_set() behavior.
+    let raw = flags.raw();
+    assert_eq!(
+        (raw & BARRIER_BITS) != 0,
+        flags.any_set(),
+        "any_set() must match (raw & BARRIER_BITS) != 0"
+    );
+
+    // Sanity: the raw value actually has the REGULAR_INDEX_EXISTS bit set.
+    assert_eq!(
+        raw & (REGULAR_INDEX_EXISTS as u16),
+        REGULAR_INDEX_EXISTS as u16,
+        "raw value must have REGULAR_INDEX_EXISTS bit set"
     );
 }
