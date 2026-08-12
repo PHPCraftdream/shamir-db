@@ -268,6 +268,19 @@ async fn stale_remove_posting_is_not_applied_at_commit() {
         "the unique index must still have D's posting for 'y' -- a stale \
          RemovePosting must not silently delete a live owner's posting"
     );
+
+    // D's OLD key "q" must be genuinely free -- the over-retraction
+    // direction (dropping a legitimate removal) would leave it dangling.
+    let owner_q_final = tbl
+        .index_manager()
+        .lookup_by_unique_index(email_id, &[InnerValue::Str("q".into())])
+        .await
+        .unwrap();
+    assert!(
+        owner_q_final.is_none(),
+        "D's old key 'q' must be free after tx2 commits -- its genuine \
+         RemovePosting must not have been over-retracted"
+    );
 }
 
 /// #1097 - A legitimate release-then-reclaim case must still succeed:
@@ -347,6 +360,20 @@ async fn legit_release_then_reclaim_succeeds() {
         "X must own 'a' after tx2 commits"
     );
 
+    // The intermediate key "b" must be genuinely free -- over-retraction
+    // (dropping the "a"->"b" removal because it thinks it's stale) would
+    // leave a dangling posting for "b" pointing at X.
+    let owner_b_final = tbl
+        .index_manager()
+        .lookup_by_unique_index(email_id, &[InnerValue::Str("b".into())])
+        .await
+        .unwrap();
+    assert!(
+        owner_b_final.is_none(),
+        "intermediate key 'b' must be free -- its removal must not have \
+         been over-retracted"
+    );
+
     // Verify X's data is correct
     let x_value = tbl.get(rid_x).await.unwrap();
     let name_key = InternerKey::new(name_field);
@@ -398,4 +425,84 @@ async fn genuine_double_claim_still_rejects() {
         "commit must abort with UniqueViolation for genuine intra-tx double-claim; got {:?}",
         commit_result
     );
+}
+
+/// #1097 round 3 - found by a second `@oh` review: a bare `DELETE` with no
+/// companion `SetPosting` in the same tx has NO `live` claim to compare its
+/// `RemovePosting`'s owner against (`current_owner.is_none()`), so it needs
+/// a durable-state check, not just the intra-tx `live` comparison. Without
+/// it, a stale bare DELETE could silently delete a concurrently-reclaiming
+/// record's genuine posting with zero validation: `delete_tx` records no
+/// `UniqueGuard` (so Step 2 never looks at the key) and there is nothing in
+/// `live` to collide with (so Step 1's collision check never fires either).
+#[tokio::test]
+async fn stale_bare_delete_does_not_clobber_a_concurrently_reclaimed_posting() {
+    let repo = make_repo();
+    repo.add_table(TableConfig::new("t"));
+    let tbl = repo.get_table("t").await.unwrap();
+    tbl.create_unique_index("by_email", &["email"])
+        .await
+        .unwrap();
+    let email_id = key_id(&tbl, "by_email").await;
+    let email_field = key_id(&tbl, "email").await;
+
+    // tx0: INSERT A{email:"x"}; COMMIT
+    let (mut tx0, _g0) = repo.begin_tx(IsolationLevel::Snapshot).await.unwrap();
+    let rid_a = tbl
+        .insert_tx(&record_with_str(email_field, "x"), Some(&mut tx0))
+        .await
+        .expect("tx0 INSERT A must succeed");
+    repo.commit_tx(tx0).await.expect("tx0 commit must succeed");
+
+    // tx2: BEGIN (snapshot before the next block commits)
+    let (mut tx2, _g2) = repo.begin_tx(IsolationLevel::Snapshot).await.unwrap();
+
+    // tx1: DELETE A; INSERT B{email:"x"}; COMMIT -- durable "x" now owned by B
+    let (mut tx1, _g1) = repo.begin_tx(IsolationLevel::Snapshot).await.unwrap();
+    tbl.delete_tx(rid_a, Some(&mut tx1))
+        .await
+        .expect("tx1 DELETE A must succeed");
+    let rid_b = tbl
+        .insert_tx(&record_with_str(email_field, "x"), Some(&mut tx1))
+        .await
+        .expect("tx1 INSERT B must succeed");
+    repo.commit_tx(tx1).await.expect("tx1 commit must succeed");
+
+    // tx2: DELETE A -- a bare delete, no other op in this tx. Planned
+    // against tx2's stale snapshot, which still believes A owns "x".
+    tbl.delete_tx(rid_a, Some(&mut tx2))
+        .await
+        .expect("tx2 DELETE A must stage successfully");
+
+    // tx2: COMMIT -- must succeed, there is no genuine conflict: A's own
+    // row deletion is independent of B's unrelated posting.
+    repo.commit_tx(tx2)
+        .await
+        .expect("tx2 commit must succeed - no genuine conflict in this scenario");
+
+    // B's posting for "x" must survive -- the stale RemovePosting must have
+    // been retracted rather than applied against B's genuine posting.
+    let owner_x_final = tbl
+        .index_manager()
+        .lookup_by_unique_index(email_id, &[InnerValue::Str("x".into())])
+        .await
+        .unwrap();
+    assert_eq!(
+        owner_x_final,
+        Some(rid_b),
+        "B's posting for 'x' must survive a stale bare DELETE planned \
+         against an unrelated, already-deleted record's stale snapshot"
+    );
+
+    // B's data row must be unaffected.
+    let b_value = tbl.get(rid_b).await.unwrap();
+    let email_key = InternerKey::new(email_field);
+    let b_email = match &b_value {
+        InnerValue::Map(m) => m.get(&email_key).and_then(|v| match v {
+            InnerValue::Str(s) => Some(s.as_str()),
+            _ => None,
+        }),
+        _ => None,
+    };
+    assert_eq!(b_email, Some("x"), "B's email must still be 'x'");
 }

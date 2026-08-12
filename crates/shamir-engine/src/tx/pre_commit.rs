@@ -678,6 +678,23 @@ pub(super) async fn pre_commit_prelock(
     // `retract_stale_provenance_ops`'s established retraction pattern in
     // this same file.
     let mut stale_remove_indices: TFxSet<usize> = TFxSet::default();
+    // #1097 round 3 (found by a second `@oh` review): a `RemovePosting` with
+    // NO in-tx `live` claim to compare against (`current_owner.is_none()`)
+    // cannot be judged stale-or-not by the sync walk above at all — that is
+    // exactly the shape of a bare `DELETE` with no companion `SetPosting` in
+    // the same tx. Such an op previously executed unconditionally, with zero
+    // validation: `delete_tx` records no `UniqueGuard` (Step 2 below never
+    // even looks at the key), and there is nothing in `live` to collide
+    // with. A `DELETE` planned against a stale snapshot could therefore
+    // silently delete a DIFFERENT, concurrently-reclaiming record's genuine
+    // durable posting — the same index/data divergence #1097 exists to
+    // prevent, one more shape of it. Each such candidate is resolved against
+    // the CURRENT DURABLE posting value below, under the same
+    // `unique_write_lock` protection Step 2's own durable reads already
+    // rely on (held since Phase 2.5, before this walk runs) — a mismatch
+    // means this op's plan is stale relative to durable state and it is
+    // retracted exactly like an intra-tx-stale op above.
+    let mut unverified_removes: Vec<(usize, u64, bytes::Bytes, RecordId)> = Vec::new();
     for (idx, (table_token, op)) in tx.index_write_set.iter().enumerate() {
         match op {
             IndexWriteOp::SetPosting {
@@ -709,25 +726,30 @@ pub(super) async fn pre_commit_prelock(
                 let k = (*table_token, key.clone());
                 // #1097: only clear the live claim when this op's declared
                 // owner actually matches the record `live` currently
-                // attributes the key to (or there IS no current live owner
-                // to protect, or the op didn't declare an owner at all —
-                // the unconditional pre-#1097 behavior, kept as a safe
-                // fallback for any future non-unique-family construction
-                // site that might reach here). A MISMATCH means this
-                // removal was planned against a record that no longer
-                // holds the key per this tx's own walk so far (built
-                // against a stale snapshot — see this file's #1097 doc
-                // above) — treat it as a stale no-op: do not clear `live`,
-                // do not mark the key released, so the key's real current
-                // owner within this tx is preserved and Step 2 validates
-                // against it correctly. Also retract the op itself (see the
-                // comment above this loop) so it never reaches Phase 5c.
+                // attributes the key to. A MISMATCH means this removal was
+                // planned against a record that no longer holds the key per
+                // this tx's own walk so far (built against a stale snapshot
+                // — see this file's #1097 doc above) — treat it as a stale
+                // no-op: do not clear `live`, do not mark the key released,
+                // so the key's real current owner within this tx is
+                // preserved and Step 2 validates against it correctly. Also
+                // retract the op itself (see the comment above this loop)
+                // so it never reaches Phase 5c.
                 let removing_owner = owner.map(RecordId);
                 let current_owner = live.get(&k).copied();
-                if current_owner.is_none()
-                    || removing_owner.is_none()
-                    || current_owner == removing_owner
-                {
+                if let (None, Some(declared_owner)) = (current_owner, removing_owner) {
+                    // No in-tx claim to judge this against — defer to the
+                    // durable-state check below rather than assuming the
+                    // plan is still valid (see the comment above this loop).
+                    unverified_removes.push((idx, *table_token, key.clone(), declared_owner));
+                    live.remove(&k);
+                    released.insert(k.clone());
+                    ever_released.insert(k);
+                } else if removing_owner.is_none() || current_owner == removing_owner {
+                    // The op didn't declare an owner (the unconditional
+                    // pre-#1097 fallback, kept for any future non-unique
+                    // construction site that might reach here) or its
+                    // declared owner matches the current live claim.
                     live.remove(&k);
                     released.insert(k.clone());
                     ever_released.insert(k);
@@ -736,6 +758,38 @@ pub(super) async fn pre_commit_prelock(
                 }
             }
             _ => {}
+        }
+    }
+    for (idx, table_token, key, declared_owner) in &unverified_removes {
+        let Some(tbl) = repo.table_by_token(*table_token).await? else {
+            continue;
+        };
+        match tbl.info_store().get(key.clone().into()).await {
+            Ok(existing) => {
+                if RecordId::try_from_bytes(&existing) != Some(*declared_owner) {
+                    // The durable posting is free, or durably owned by a
+                    // DIFFERENT record than this removal was planned
+                    // against (a concurrent tx reclaimed it after this tx's
+                    // snapshot was taken) — this removal's plan is stale;
+                    // retract it and undo its provisional released/
+                    // ever_released marking above so a later op in this
+                    // same tx cannot be misled by it either.
+                    stale_remove_indices.insert(*idx);
+                    let k = (*table_token, key.clone());
+                    if !live.contains_key(&k) {
+                        released.remove(&k);
+                        ever_released.remove(&k);
+                    }
+                }
+                // Else: durable owner matches — this removal is genuine,
+                // keep it (it will correctly clear the durable owner's
+                // posting at Phase 5c).
+            }
+            Err(DbError::NotFound(_)) => {
+                // Already free durably — applying the removal again is a
+                // harmless no-op at the storage layer; no retraction needed.
+            }
+            Err(e) => return Err(TxError::Storage(e)),
         }
     }
     if !stale_remove_indices.is_empty() {
