@@ -129,6 +129,37 @@
 //! worth understanding before shipping any fix, in case it points at a
 //! genuine (unrelated) call-depth regression worth its own investigation.
 //!
+//! **Same-day follow-up:** temporarily instrumented `execute_single_impl`
+//! (`query_runner.rs`, one of the two call sites all three prior attempts
+//! wrapped) with the same headroom probe, called on EVERY invocation
+//! (i.e. at whatever depth each op's own execution naturally reaches),
+//! and ran ONE representative DDL test (`access_ddl::chmod_then_enforced`,
+//! `shamir-db` integration suite — the same test family that overflowed
+//! under all three prior watchdog attempts) in complete isolation. It
+//! passed cleanly — no overflow from adding the probe at that depth for
+//! this test. `eprintln!` output is swallowed by `nextest` for passing
+//! tests (no flag in this repo's `test.sh` wrapper surfaces it without
+//! forcing a failure), so no exact number was captured this round, only
+//! the binary pass/fail signal. Reverted immediately after (no diff
+//! survives from this step).
+//!
+//! **Conclusion so far:** the crash is not universal to "any op executing
+//! at any depth" — at least one representative, non-recursive DDL test
+//! tolerates a probe-sized addition fine. The prior 200-test failure set
+//! is therefore either (a) specific to particular call shapes not
+//! exercised by this one test, or (b) sensitive to a LARGER addition than
+//! a single stack query (the three prior attempts each added a `select!`/
+//! `spawn` wrapper's state, not just a leaf-level probe call). **Next
+//! step, not yet done:** a global `AtomicUsize` "minimum headroom seen"
+//! tracker (via `fetch_min`, updated on every `execute_single_impl` call)
+//! dumped once at process exit (or via a custom test-harness hook), run
+//! across the FULL `shamir-db` + `shamir-engine` suite that originally
+//! failed — a single targeted test in isolation cannot rule out a
+//! depth-specific crash a broader run would hit. This is real
+//! infrastructure work (needs a clean, temporary, whole-suite-scoped
+//! instrumentation and teardown hook), not a quick follow-up — left for
+//! its own cycle rather than rushed here.
+//!
 //! [`check`]: ExecutionDeadline::check
 
 use std::time::{Duration, Instant};
