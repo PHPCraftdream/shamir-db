@@ -422,23 +422,21 @@ from another instance as its own justification.
    records a genuine, reproducible data-loss race a prior fully-lock-free
    attempt hit — read it before proposing a lock-free replacement here.
 
-**NOT covered by the above — hot-by-call-frequency, tracked migration
-candidates, not permanent exceptions:**
+**Investigated and closed — confirmed negligible:**
 `shamir-wal/src/segment_set.rs`'s `SegmentSet::inner` (taken on every
-`append_batch` — the WAL group-commit append path). Currently argues LOW
-actual contention despite HIGH call frequency (single-writer model, the
-group-commit leader is the sole appender) — that argument is real but is a
-*contention* defense, not a *frequency* one, and the "banned in hot paths"
-rule bans by frequency. Treat as **known, tracked debt** (see #1090's
-follow-up), not as a fourth sanctioned category — do not cite it as
-precedent for a new hot-path `std::sync::Mutex`. A 2026-08-11 measurement
-(`wal_append` bench, `bench_scale_tool`) found per-op latency genuinely
-rising with concurrency at 64 concurrent appenders — but the SAME rise
-appears in the `mem` sink scenario, which never touches `SegmentSet` at
-all, so the growth is not yet attributable specifically to this lock (more
-likely `WalGroupCommit.pending`'s mutex + leader-election coordination) —
-a migration attempt needs to isolate `SegmentSet`'s own contribution
-first, not rewrite blind.
+`append_batch` — the WAL group-commit append path). Previously tracked as
+known debt (high call frequency, sanctioned only by a theoretical
+single-writer argument). **Investigated via #1095 (2026-08-13)**: isolated
+measurement (`benches/segment_set_lock.rs`) calls `SegmentSet::append_batch`
+directly from N concurrent tasks, bypassing `WalGroupCommit`'s leader election
+entirely. Results show per-append latency IMPROVING 5× with concurrency
+(n_1: 99µs → n_64: 19.7µs per op) — the lock's own amortized cost drops under
+contention, and the observed latency rise in `wal_append` (n_1 → n_64:
+3.8–5.8× growth across mem/file_buffered) is fully explained by `WalGroupCommit`
+coordination (leader-election CAS + `pending` lock + `Notify`), NOT this mutex.
+The architectural single-writer claim holds: only the group-commit leader ever
+acquires the lock, so production contention is structurally zero. No migration
+warranted — removed from tracked debt.
 
 `shamir-connect/src/server/session.rs`'s `Session::post_auth_bucket` was
 migrated off `std::sync::Mutex` (#1090, 2026-08-11) to two independent
