@@ -1876,6 +1876,22 @@ async fn rederive_stale_value_ops_post_stage(
         return Ok(());
     }
 
+    // #1107: Repo-global staleness gate — if nothing in the repo has committed
+    // since this tx opened, NO staged row's snapshot value can be stale.
+    // One atomic Acquire load. Conservative: a commit on a DIFFERENT table
+    // still defeats the fast path (false positive), but never wrong (no false
+    // negatives). This is acceptable because the common case is a quiet repo,
+    // and a repo-global signal is the only cheap signal available (per-table
+    // commit watermarks do not exist).
+    let gate = repo.tx_gate().await?;
+    if gate.last_committed() == tx.snapshot_version {
+        log::debug!(
+            "rederive_stale_value_ops_post_stage: fast-path skip (repo quiet, snapshot_version={})",
+            tx.snapshot_version
+        );
+        return Ok(());
+    }
+
     let stage_gens: Vec<(u64, u64)> = tx
         .base_index_stage_gens
         .iter()
