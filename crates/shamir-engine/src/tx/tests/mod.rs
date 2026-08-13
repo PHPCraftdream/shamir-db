@@ -20,6 +20,7 @@ pub mod non_tx_mvcc_routing_tests;
 pub mod oracle_stress_tests;
 pub mod p1096_tx_aware_unique_check;
 pub mod p1097_remove_posting_owner;
+pub mod p1100_stale_snapshot_delete_posting;
 pub mod pessimistic_lock_tests;
 pub mod pessimistic_lost_update_tests;
 pub mod predicate_range_tests;

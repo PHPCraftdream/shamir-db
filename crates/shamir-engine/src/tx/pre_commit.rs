@@ -572,6 +572,15 @@ pub(super) async fn pre_commit_prelock(
     // families — and is left in its original position.
     rederive_base_index_ops_post_stage(tx, repo).await?;
 
+    // #1100: Re-derive posting ops for records whose value changed concurrently.
+    // This closes the gap where DELETE/UPDATE planned from a stale snapshot
+    // never removes the record's CURRENT posting.
+    log::debug!(
+        "rederive_stale_value_ops_post_stage: starting, base_index_stage_gens.len()={}",
+        tx.base_index_stage_gens.len()
+    );
+    rederive_stale_value_ops_post_stage(tx, repo).await?;
+
     // Phase 2.6: authoritative unique re-validation under per-table
     // unique_write_lock (held since Phase 2.5).
     //
@@ -1791,6 +1800,306 @@ async fn rederive_base_index_ops_post_stage(
             shamir_tx::IndexFamily::Unique,
             &live_unique,
         );
+    }
+
+    Ok(())
+}
+
+/// #1100 — Re-derive posting ops for records whose value changed concurrently
+///
+/// This function closes the gap where a DELETE or UPDATE transaction plans index
+/// removal operations based on its own snapshot view of a record, rather than
+/// the record's ACTUAL current durable value. If another concurrent transaction
+/// updated the record's indexed fields after this transaction's snapshot was taken,
+/// the planner computed the removal key from the OLD value (seen in the snapshot),
+/// not the ACTUAL current value. This means the correct removal op was never
+/// generated at all, leaving a dangling posting.
+///
+/// The approach:
+/// 1. For each staged Remove operation (DELETE): re-plan removal ops based on the
+///    CURRENT durable value, then append any ops that weren't already staged.
+/// 2. For each staged Set operation (UPDATE): re-plan the FULL diff (Remove + Set)
+///    based on the CURRENT durable value as the "old" half of the diff, then
+///    append all resulting ops (deduplicating against staged base_index ops to
+///    avoid duplicates, since base_index ops don't include instance_epoch).
+///
+/// This mirrors `rederive_base_index_ops_post_stage` but is triggered by VALUE changes
+/// (detected by comparing planned ops), not DEFINITION changes (detected by generation).
+async fn rederive_stale_value_ops_post_stage(
+    tx: &mut TxContext,
+    repo: &RepoInstance,
+) -> Result<(), TxError> {
+    // Skip if no base_index tables were touched (zero-cost on common path)
+    if tx.base_index_stage_gens.is_empty() {
+        return Ok(());
+    }
+
+    let stage_gens: Vec<(u64, u64)> = tx
+        .base_index_stage_gens
+        .iter()
+        .map(|(t, g)| (*t, *g))
+        .collect();
+
+    for (table_token, _stage_gen) in stage_gens {
+        let Some(tbl) = repo.table_by_token_if_live(table_token).await else {
+            continue;
+        };
+        let mgr = tbl.index_manager_ref();
+
+        // Collect staged ops for this table
+        let staged_ops: Vec<KvOp> = match tx.write_set.get(&table_token) {
+            Some(staging) => staging.snapshot_ops(),
+            None => continue,
+        };
+
+        let mut appended: Vec<(u64, IndexWriteOp)> = Vec::new();
+
+        for kvop in staged_ops {
+            match kvop {
+                KvOp::Remove(k) => {
+                    // DELETE case: re-plan removal ops based on CURRENT durable value
+                    let rid = RecordId::try_from_bytes(&k).ok_or_else(|| {
+                        TxError::Storage(DbError::Internal(format!(
+                            "rederive_stale_value_ops: malformed staged key \
+                             (table_token={table_token}, {} bytes) — expected a \
+                             16-byte RecordId",
+                            k.len()
+                        )))
+                    })?;
+
+                    // Build a map from rid to set of posting_keys for already-staged RemovePosting ops
+                    // for this table, so we can detect which ones are missing
+                    let mut staged_removals_by_rid: TFxMap<RecordId, TFxSet<bytes::Bytes>> =
+                        TFxMap::default();
+                    for (_, op) in tx.index_write_set.iter().filter(|(t, _)| *t == table_token) {
+                        if let IndexWriteOp::RemovePosting {
+                            key,
+                            owner: Some(owner_bytes),
+                            ..
+                        } = op
+                        {
+                            if let Some(rid) = RecordId::try_from_bytes(owner_bytes) {
+                                staged_removals_by_rid
+                                    .entry(rid)
+                                    .or_default()
+                                    .insert(key.clone());
+                            }
+                        }
+                    }
+
+                    // Read the CURRENT MVCC-visible value (bypasses tx snapshot)
+                    if let Some(current_bytes) = tbl.read_one_tx_bytes(rid, None).await? {
+                        log::debug!(
+                            "rederive_stale_value_ops: DELETE rid={:?}, current_bytes.len()={}",
+                            rid,
+                            current_bytes.len()
+                        );
+
+                        // Decode the current durable value
+                        let current_rec = InnerValue::from_bytes(&current_bytes).map_err(|e| {
+                            TxError::Storage(DbError::Codec(format!(
+                                "rederive_stale_value_ops: current record decode failed \
+                                 (table_token={table_token}, rid={rid:?}): {e}"
+                            )))
+                        })?;
+
+                        // Re-plan removal ops for the CURRENT value
+                        let current_removals = mgr
+                            .plan_record_deleted(&rid, &current_rec)
+                            .await
+                            .map_err(|e| {
+                                TxError::Storage(DbError::Internal(format!(
+                                    "rederive_stale_value_ops: plan_record_deleted failed: {e}"
+                                )))
+                            })?;
+
+                        let current_unique_removals = mgr
+                            .plan_record_deleted_unique(&rid, &current_rec)
+                            .await
+                            .map_err(|e| {
+                                TxError::Storage(DbError::Internal(format!(
+                                    "rederive_stale_value_ops: plan_record_deleted_unique failed: {e}"
+                                )))
+                            })?;
+
+                        log::debug!(
+                            "rederive_stale_value_ops: DELETE rid={:?}, current_removals.len()={}, current_unique_removals.len()={}",
+                            rid,
+                            current_removals.len(),
+                            current_unique_removals.len()
+                        );
+
+                        // Append any ops that weren't already staged
+                        for op in current_removals
+                            .into_iter()
+                            .chain(current_unique_removals.into_iter())
+                        {
+                            if let IndexWriteOp::RemovePosting {
+                                ref key,
+                                owner: Some(ref owner_bytes),
+                                ..
+                            } = op
+                            {
+                                if let Some(rid) = RecordId::try_from_bytes(owner_bytes.as_slice())
+                                {
+                                    let is_staged = staged_removals_by_rid
+                                        .get(&rid)
+                                        .map(|keys| keys.contains(key))
+                                        .unwrap_or(false);
+                                    if !is_staged {
+                                        log::debug!(
+                                            "rederive_stale_value_ops: appending missing RemovePosting \
+                                             for DELETE (table_token={}, rid={:?}, key={:?})",
+                                            table_token,
+                                            rid,
+                                            key
+                                        );
+                                        appended.push((table_token, op));
+                                    } else {
+                                        log::debug!(
+                                            "rederive_stale_value_ops: RemovePosting already staged \
+                                             for DELETE (table_token={}, rid={:?}, key={:?})",
+                                            table_token,
+                                            rid,
+                                            key
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    // If current value is None, the record was deleted concurrently —
+                    // nothing to re-derive for this DELETE (it's already gone).
+                }
+                KvOp::Set(k, v) => {
+                    // UPDATE case: re-plan removal ops based on CURRENT durable value
+                    let rid = RecordId::try_from_bytes(&k).ok_or_else(|| {
+                        TxError::Storage(DbError::Internal(format!(
+                            "rederive_stale_value_ops: malformed staged key \
+                             (table_token={table_token}, {} bytes) — expected a \
+                             16-byte RecordId",
+                            k.len()
+                        )))
+                    })?;
+
+                    // Read the CURRENT MVCC-visible value (the ACTUAL old value)
+                    if let Some(old_bytes) = tbl.read_one_tx_bytes(rid, None).await? {
+                        // Decode the current durable value
+                        let old_rec = InnerValue::from_bytes(&old_bytes).map_err(|e| {
+                            TxError::Storage(DbError::Codec(format!(
+                                "rederive_stale_value_ops: old record decode failed \
+                                 (table_token={table_token}, rid={rid:?}): {e}"
+                            )))
+                        })?;
+
+                        // Decode the new value (what the tx is setting)
+                        let new_rec = InnerValue::from_bytes(&v).map_err(|e| {
+                            TxError::Storage(DbError::Codec(format!(
+                                "rederive_stale_value_ops: new record decode failed \
+                                 (table_token={table_token}, rid={rid:?}): {e}"
+                            )))
+                        })?;
+
+                        // Re-plan update ops using the CURRENT old value
+                        // This generates both RemovePosting (for fields that changed)
+                        // and SetPosting (for the new values), which is correct even when
+                        // the record's actual current value differs from what the tx's snapshot saw.
+                        let updated_ops = mgr
+                            .plan_record_updated(&rid, &old_rec, &new_rec)
+                            .await
+                            .map_err(|e| {
+                            TxError::Storage(DbError::Internal(format!(
+                                "rederive_stale_value_ops: plan_record_updated failed: {e}"
+                            )))
+                        })?;
+
+                        let updated_unique_ops = mgr
+                            .plan_record_updated_unique(&rid, &old_rec, &new_rec)
+                            .await
+                            .map_err(|e| {
+                                TxError::Storage(DbError::Internal(format!(
+                                    "rederive_stale_value_ops: plan_record_updated_unique failed: {e}"
+                                )))
+                            })?;
+
+                        // Append ALL re-planned ops (both Remove and Set)
+                        // This correctly handles the case where concurrent changes
+                        // mean the staged ops are based on stale data.
+                        log::debug!(
+                            "rederive_stale_value_ops: UPDATE rid={:?}, appending {} regular + {} unique ops based on CURRENT value",
+                            rid,
+                            updated_ops.len(),
+                            updated_unique_ops.len()
+                        );
+                        for op in updated_ops
+                            .into_iter()
+                            .chain(updated_unique_ops.into_iter())
+                        {
+                            // Extract the index key for deduplication
+                            let index_key = match &op {
+                                IndexWriteOp::RemovePosting { key, .. } => key.clone(),
+                                IndexWriteOp::SetPosting { key, .. } => key.clone(),
+                                _ => continue,
+                            };
+
+                            // Check if an op with this key was already staged for base_index
+                            // (Regular or Unique families)
+                            let is_staged = tx
+                                .index_write_set
+                                .iter()
+                                .filter(|(t, _)| *t == table_token)
+                                .any(|(_, staged_op)| {
+                                    let family = match staged_op {
+                                        IndexWriteOp::SetPosting { provenance, .. }
+                                        | IndexWriteOp::RemovePosting { provenance, .. }
+                                        | IndexWriteOp::BumpFtsStats { provenance, .. } => {
+                                            provenance.family
+                                        }
+                                    };
+                                    if family == IndexFamily::Regular
+                                        || family == IndexFamily::Unique
+                                    {
+                                        match staged_op {
+                                            IndexWriteOp::RemovePosting {
+                                                key: staged_key, ..
+                                            }
+                                            | IndexWriteOp::SetPosting {
+                                                key: staged_key, ..
+                                            } => staged_key == &index_key,
+                                            _ => false,
+                                        }
+                                    } else {
+                                        false
+                                    }
+                                });
+
+                            if !is_staged {
+                                log::debug!(
+                                    "rederive_stale_value_ops: appending op for UPDATE (table_token={}, rid={:?}, op={:?})",
+                                    table_token,
+                                    rid,
+                                    op
+                                );
+                                appended.push((table_token, op));
+                            } else {
+                                log::debug!(
+                                    "rederive_stale_value_ops: op already staged for UPDATE (table_token={}, rid={:?}, key={:?})",
+                                    table_token,
+                                    rid,
+                                    index_key
+                                );
+                            }
+                        }
+                    }
+                    // If old value is None, this is actually an insert — no removal ops needed
+                }
+            }
+        }
+
+        // Append the re-derived ops
+        if !appended.is_empty() {
+            tx.index_write_set.extend(appended);
+        }
     }
 
     Ok(())
