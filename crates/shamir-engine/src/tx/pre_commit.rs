@@ -824,12 +824,20 @@ pub(super) async fn pre_commit_prelock(
             continue; // already durable-checked this key
         }
 
+        // #1101: Keys in `released` require a durable check too — if the tx
+        // planned to release a key but a concurrently-committed tx already
+        // claimed that key for an unrelated record, this tx's stale Set+Remove
+        // pair would clobber that unrelated posting at Phase 5c. The check below
+        // validates that the durable state is consistent with the tx's plan.
         let owner = if let Some(&final_owner) = live.get(&key) {
-            final_owner
+            Some(final_owner)
         } else if released.contains(&key) {
-            continue; // key vacated by this tx — no claim to validate
+            // Key vacated by this tx's own ops. No owner to compare against
+            // below, but we still need to check that nothing else durably
+            // claimed it (see the durable check below).
+            None
         } else {
-            g.owner // self-write: no index op, guard's owner is authoritative
+            Some(g.owner) // self-write: no index op, guard's owner is authoritative
         };
 
         // Durable-state check against committed storage (unchanged in spirit
@@ -854,6 +862,14 @@ pub(super) async fn pre_commit_prelock(
         // is never in its own write set, so a stale-snapshot race correctly
         // falls through to `UniqueViolation` below instead of silently
         // admitting two live records for the same unique value.
+        //
+        // #1101: The `released.contains(&key)` case previously skipped this
+        // check entirely with `continue`. The fix is to perform the check with
+        // `owner = None`: we require that the durable key is either NotFound
+        // (genuinely free — the net-release's RemovePosting will be a no-op)
+        // OR owned by a record this tx has staged a write for (touched). If
+        // neither holds, an unrelated tx durably claimed the key and we must
+        // abort to avoid clobbering that posting.
         if let Some(tbl) = repo.table_by_token(g.table_token).await? {
             match tbl.info_store().get(g.index_key.clone().into()).await {
                 Ok(existing) => {
@@ -863,14 +879,40 @@ pub(super) async fn pre_commit_prelock(
                                 .get(&g.table_token)
                                 .is_some_and(|s| s.staged_op(existing_id.as_bytes()).is_some())
                         });
-                    if existing.as_ref() != owner.as_bytes().as_slice() && !released_and_touched {
-                        repo.tx_metrics().on_tx_aborted_unique();
-                        return Err(TxError::UniqueViolation {
-                            key: g.index_key.clone(),
-                        });
+                    // For keys this tx still owns (owner is Some), compare the
+                    // durable owner against the expected owner. For released keys
+                    // (owner is None), just check the released_and_touched
+                    // tolerance — a concurrent claim is only OK if this tx touched
+                    // that record.
+                    match owner {
+                        None => {
+                            // Released key: abort if a concurrent tx durably claimed
+                            // it for an untouched record.
+                            if !released_and_touched {
+                                repo.tx_metrics().on_tx_aborted_unique();
+                                return Err(TxError::UniqueViolation {
+                                    key: g.index_key.clone(),
+                                });
+                            }
+                        }
+                        Some(expected_owner) => {
+                            if existing.as_ref() != expected_owner.as_bytes().as_slice()
+                                && !released_and_touched
+                            {
+                                repo.tx_metrics().on_tx_aborted_unique();
+                                return Err(TxError::UniqueViolation {
+                                    key: g.index_key.clone(),
+                                });
+                            }
+                        }
                     }
                 }
-                Err(DbError::NotFound(_)) => {} // key free → OK
+                Err(DbError::NotFound(_)) => {
+                    // Key is durably free. This is always OK:
+                    // - For owned keys: our claim is uncontended.
+                    // - For released keys: the RemovePosting will be a no-op
+                    //   (key is already free).
+                }
                 Err(e) => return Err(TxError::Storage(e)),
             }
         }
