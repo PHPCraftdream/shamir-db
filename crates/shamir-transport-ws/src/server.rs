@@ -84,6 +84,7 @@ where
     // 64 MiB of buffering before the 4 KiB pre-auth logical check.
     let ws = tokio_tungstenite::accept_hdr_async_with_config(
         stream,
+        #[allow(clippy::result_large_err)] // Err type is tungstenite's Callback trait contract
         |req: &Request, resp: Response| {
             // Spec §2: native endpoint expects path `/shamir/v1`.
             if req.uri().path() != "/shamir/v1" {
@@ -118,6 +119,7 @@ where
     // NEW-1: same buffering cap as the native path (see `server_ws_config`).
     let ws = tokio_tungstenite::accept_hdr_async_with_config(
         stream,
+        #[allow(clippy::result_large_err)] // Err type is tungstenite's Callback trait contract
         move |req: &Request, resp: Response| {
             if req.uri().path() != "/shamir/v1/browser" {
                 let mut err = ErrorResponse::new(Some("wrong path for browser endpoint".into()));

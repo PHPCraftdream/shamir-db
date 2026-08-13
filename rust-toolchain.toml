@@ -12,5 +12,5 @@
 # commit, then bump the matching `dtolnay/rust-toolchain@<version>` refs in
 # .github/workflows/ci.yml.
 [toolchain]
-channel = "1.93.0"
+channel = "1.94.0"
 components = ["rustfmt", "clippy"]
