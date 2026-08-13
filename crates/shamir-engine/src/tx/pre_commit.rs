@@ -1928,18 +1928,44 @@ async fn rederive_stale_value_ops_post_stage(
     // pairing being the sole cross-thread ordering channel between the gate and
     // `assign_next_version`) skipping re-derivation is sound. □
     //
-    // Contrast with the BUGGY `last_committed()`-based gate (#1107, round 1):
-    // `last_committed` only advances at Phase 6 (after 5a/5c writes), so the
-    // false-negative window was the entire Phase 5a/5c→Phase 6 span — a writer
-    // could have ALREADY landed MVCC-visible data while `last_committed` still
-    // read as unchanged. Gating on the allocation high-water mark instead moves
-    // the checkpoint to BEFORE any writes happen, closing that window. (Round 1
-    // of THIS task's own delivery repeated the same class of error one level
-    // down: it kept the writer's `fetch_add` at `Relaxed` while claiming the
+    // Relationship to the PRIOR `last_committed()`-based gate (#1107, round 1)
+    // — corrected understanding (#1110 round 2, after the required pause-seam
+    // reproduction could not be built — see that task's follow-up notes):
+    // `last_committed()`'s only DOCUMENTED advance point is Phase 6
+    // (`version_guard.commit()`), which would put the false-negative window
+    // at the entire Phase 5a/5c→Phase 6 span. But for any table backed by an
+    // attached `MvccStore` (the tested/common case — `mvcc_store/mvcc_history.rs`'s
+    // `apply_committed_visible`, called from Phase 5a's `apply_data_batch`),
+    // `last_committed_version` is ALSO published EAGERLY at Phase 5a itself,
+    // via a direct `gate.publish_committed_max(commit_version)` call — that
+    // file's own comment states this is intentionally "safe to call
+    // redundantly" alongside Phase 6's publish. Empirically (a deterministic
+    // pause-seam parked strictly between Phase 5c and Phase 6, then removed
+    // once this was understood — see git history) this means the specific
+    // interleaving originally described does NOT reproduce for MvccStore-backed
+    // tables: `last_committed` is already correct by the time a concurrent
+    // reader's gate check runs.
+    //
+    // The version-allocation-based gate here is STILL the right primitive to
+    // use, for two independent reasons, not because the original interleaving
+    // was confirmed: (1) allocation strictly precedes ANY write in every
+    // commit path (Phase 3, before Phase 4's WAL write and Phase 5's data/index
+    // writes), so gating on it doesn't depend on which of possibly-several
+    // publish call sites a given write path happens to route through — the
+    // `base.transact` fallback path (tables with no `MvccStore` attached,
+    // `commit_phases.rs::apply_data_batch`'s `None` arm) has NO equivalent
+    // early-publish call, so for THAT path the original Phase-6-only window
+    // may still be real (not separately confirmed here — tracked as an open
+    // question, not asserted as a live bug); (2) it is a simpler, single-fact
+    // invariant ("nothing has started writing since I opened") vs. relying on
+    // exactly when a given write path happens to publish. Round 1 of THIS
+    // task's own delivery repeated a DIFFERENT class of error one level down:
+    // it kept the writer's `fetch_add` at `Relaxed` while claiming the
     // `Acquire` reader synchronized with it — a `Relaxed` store cannot
-    // synchronize-with anything, so that claim was false. Both the writer
-    // (`AcqRel`) and reader (`Acquire`) sides must use a genuine Release/Acquire
-    // pairing for this proof to hold — see `assign_next_version`'s doc.)
+    // synchronize-with anything, so that claim was false regardless of the
+    // above. Both the writer (`AcqRel`) and reader (`Acquire`) sides must use
+    // a genuine Release/Acquire pairing for this proof to hold — see
+    // `assign_next_version`'s doc.
     let gate = repo.tx_gate().await?;
     if gate.version_allocation_high_water_mark() <= tx.snapshot_version {
         log::debug!(
