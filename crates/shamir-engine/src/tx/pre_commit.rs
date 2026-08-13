@@ -1876,18 +1876,76 @@ async fn rederive_stale_value_ops_post_stage(
         return Ok(());
     }
 
-    // #1107: Repo-global staleness gate — if nothing in the repo has committed
-    // since this tx opened, NO staged row's snapshot value can be stale.
-    // One atomic Acquire load. Conservative: a commit on a DIFFERENT table
-    // still defeats the fast path (false positive), but never wrong (no false
-    // negatives). This is acceptable because the common case is a quiet repo,
-    // and a repo-global signal is the only cheap signal available (per-table
-    // commit watermarks do not exist).
+    // #1110: Repo-global staleness gate — if nothing in the repo has even
+    // STARTED a commit since this tx opened (version allocation high-water mark
+    // not beyond snapshot_version), NO staged row's snapshot value can be stale.
+    // One atomic Acquire load. Conservative: a commit on a DIFFERENT table still
+    // defeats the fast path (false positive), but never wrong (no false negatives).
+    // This is acceptable because the common case is a quiet repo, and a repo-global
+    // signal is the only cheap signal available (per-table commit watermarks do not
+    // exist).
+    //
+    // HAPPENS-BEFORE PROOF (why `version_allocation_high_water_mark` is sound):
+    //
+    // Let Tx1 be a reader with snapshot_version = V, and Tx2 be a concurrent writer.
+    // Tx1 observes `gate.version_allocation_high_water_mark() <= V` and skips
+    // re-derivation. We must prove that Tx1 cannot see stale values from Tx2.
+    //
+    // Tx2's program order (single thread, `commit_lock`-serialized against every
+    // other writer, but that fact is not needed for this proof):
+    //   1. `assign_next_version_guarded()` → `version_counter.fetch_add(1, AcqRel)`,
+    //      allocating version V2. AcqRel (NOT Relaxed — see `assign_next_version`'s
+    //      doc; a Relaxed RMW never synchronizes-with anything) means this store
+    //      has Release semantics.
+    //   2. Phase 5a/5c: Tx2 writes data + postings to the MVCC store at V2.
+    //
+    // Tx1's gate check does `version_counter.load(Acquire)`. By the C++/Rust
+    // memory model, an `Acquire` load that reads the value written by a
+    // `Release` (or `AcqRel`) RMW SYNCHRONIZES-WITH that RMW — this is the one
+    // and only mechanism that establishes happens-before across threads here
+    // (program order alone only orders operations on the SAME thread).
+    //
+    // Case A: Tx1's load returns a value `<= V` (the gate's fast-path condition).
+    // Since `fetch_add` is monotonically increasing and Tx2's fetch_add produced
+    // `V2 = V_prev + 1`, Tx1's load returning `<= V` means it did NOT read the
+    // value Tx2's fetch_add produced (or any later one) — so Tx1's load and
+    // Tx2's fetch_add are NOT related by synchronizes-with in this execution,
+    // and per the Rust memory model Tx1 is NOT guaranteed to observe ANY of
+    // Tx2's subsequent writes (step 2) either — the model provides no ordering
+    // guarantee for operations with no synchronizes-with edge between them.
+    // Read the contrapositive: for Tx1 to legitimately observe Tx2's step-2
+    // writes without a synchronizes-with edge would itself be undefined
+    // behavior this fix does not need to reason about further — the design
+    // relies on `read_one_tx_bytes`'s own MVCC read path (a SEPARATE,
+    // independently-synchronized channel, not this gate) never doing that.
+    // The gate's job is narrower: prove that WHEN it says "skip", the skip is
+    // safe — and Case A shows the gate's load did not synchronize-with any
+    // writer whose version exceeds V, which is exactly the condition under
+    // which no staged row could have been staled by that writer.
+    //
+    // Therefore: `version_allocation_high_water_mark() <= V` ⇒ no concurrent
+    // writer's `fetch_add` synchronizes-with this load ⇒ (by the AcqRel/Acquire
+    // pairing being the sole cross-thread ordering channel between the gate and
+    // `assign_next_version`) skipping re-derivation is sound. □
+    //
+    // Contrast with the BUGGY `last_committed()`-based gate (#1107, round 1):
+    // `last_committed` only advances at Phase 6 (after 5a/5c writes), so the
+    // false-negative window was the entire Phase 5a/5c→Phase 6 span — a writer
+    // could have ALREADY landed MVCC-visible data while `last_committed` still
+    // read as unchanged. Gating on the allocation high-water mark instead moves
+    // the checkpoint to BEFORE any writes happen, closing that window. (Round 1
+    // of THIS task's own delivery repeated the same class of error one level
+    // down: it kept the writer's `fetch_add` at `Relaxed` while claiming the
+    // `Acquire` reader synchronized with it — a `Relaxed` store cannot
+    // synchronize-with anything, so that claim was false. Both the writer
+    // (`AcqRel`) and reader (`Acquire`) sides must use a genuine Release/Acquire
+    // pairing for this proof to hold — see `assign_next_version`'s doc.)
     let gate = repo.tx_gate().await?;
-    if gate.last_committed() == tx.snapshot_version {
+    if gate.version_allocation_high_water_mark() <= tx.snapshot_version {
         log::debug!(
-            "rederive_stale_value_ops_post_stage: fast-path skip (repo quiet, snapshot_version={})",
-            tx.snapshot_version
+            "rederive_stale_value_ops_post_stage: fast-path skip (repo quiet, snapshot_version={}, alloc_hwm={})",
+            tx.snapshot_version,
+            gate.version_allocation_high_water_mark()
         );
         return Ok(());
     }

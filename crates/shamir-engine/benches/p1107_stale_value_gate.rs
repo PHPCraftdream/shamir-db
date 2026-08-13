@@ -4,13 +4,19 @@
 //! that never skipped the per-row MVCC read + re-plan work on the common path (quiet repo).
 //!
 //! After fix: Added a repo-global staleness gate that skips the per-row work when
-//! `gate.last_committed() == tx.snapshot_version` (nothing committed since tx opened).
+//! `gate.version_allocation_high_water_mark() <= tx.snapshot_version` (nothing has even
+//! started committing since tx opened).
 //!
 //! This bench measures commit latency on a table with indexes when NO concurrent
 //! tx is modifying it. The gate should short-circuit, avoiding per-row MVCC reads.
 //!
-//! Expected before fix: High latency (O(N) per-row MVCC reads).
-//! Expected after fix: Low latency (single atomic load gate).
+//! Expected before fix: High latency (O(N) per-row MVCC reads + O(N²) dedup scans).
+//! Expected after fix: Low latency (single atomic load gate, per-row work skipped entirely).
+//!
+//! IMPORTANT: The bench MUST update an INDEXED field to actually exercise the code path
+//! being measured. The original version updated "score" (not indexed), so it never triggered
+//! the O(N²) dedup loops this gate exists to bound — the benefit was unobservable by construction.
+//! This fixed version updates "email" (indexed by idx_email) to actually exercise the path.
 //!
 //! Note: The gate is repo-global (conservative), so a concurrent commit on a DIFFERENT
 //! table defeats the fast path. This bench measures the common case: a quiet repo.
@@ -56,7 +62,11 @@ fn main() {
     // The common path: NO concurrent tx committed since this tx opened.
     // The gate should short-circuit, avoiding per-row MVCC reads.
     //
-    // Before fix (#1107): Per-row MVCC reads + O(N²) dedup scans.
+    // IMPORTANT: We UPDATE the "email" field (indexed by idx_email), NOT "score" (unindexed).
+    // Updating an indexed field triggers the O(N²) dedup loops this gate exists to bound.
+    // The original version updated "score", which never exercised this path by construction.
+    //
+    // Before fix (#1107): Per-row MVCC reads + O(N²) dedup scans on the indexed field.
     // After fix: Single atomic load gate, per-row work skipped entirely.
 
     for &n in &[400usize, 800usize, 1600usize] {
@@ -120,8 +130,10 @@ fn main() {
                 };
 
                 // Build the update request (timed)
+                // CRITICAL: Update "email" (INDEXED by idx_email), NOT "score" (unindexed)
+                // This actually exercises the O(N²) dedup loops this gate exists to bound
                 let update_values = mpack!({
-                    "score": @(QueryValue::from(999)),
+                    "email": @(QueryValue::from(format!("updated_{}@example.com", 999))),
                 });
 
                 let mut update_queries = new_map();
@@ -130,9 +142,9 @@ fn main() {
                     QueryEntry {
                         op: BatchOp::Update(shamir_query_types::write::UpdateOp {
                             update: TableRef::new("users"),
-                            where_clause: Some(shamir_engine::query::filter::Filter::Gt {
-                                field: vec!["score".to_string()],
-                                value: shamir_engine::query::filter::FilterValue::Int(-1),
+                            where_clause: Some(shamir_engine::query::filter::Filter::Gte {
+                                field: vec!["id".to_string()],
+                                value: shamir_engine::query::filter::FilterValue::Int(0),
                             }),
                             set: update_values,
                             select: None,

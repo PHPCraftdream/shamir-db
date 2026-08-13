@@ -328,6 +328,41 @@ impl RepoTxGate {
         self.last_committed_version.load(Ordering::Acquire)
     }
 
+    /// Current version allocation high-water mark — the next version that
+    /// will be allocated by [`assign_next_version_guarded`](Self::assign_next_version_guarded).
+    ///
+    /// This counter is incremented BEFORE any commit-phase writes happen
+    /// (both tx-commit and non-tx paths), so a snapshot opened at version `V`
+    /// can safely conclude "no writer has even STARTED a commit since I opened"
+    /// when observing `version_allocation_high_water_mark() <= V`. This is
+    /// strictly stronger than `last_committed()`, which only advances AFTER
+    /// Phase 6 (post-5a/5c data+index writes) and thus has a false-negative
+    /// window where concurrent writes are MVCC-visible but not yet published.
+    ///
+    /// Happens-before argument (the reader's half — see
+    /// [`assign_next_version`](Self::assign_next_version) for the writer's
+    /// half, which uses `AcqRel`, not `Relaxed`; a `Relaxed` store never
+    /// synchronizes-with any load regardless of that load's own ordering,
+    /// so both halves of the pair must be strengthened together):
+    ///
+    /// This `Acquire` load synchronizes-with the `AcqRel` `fetch_add` in
+    /// `assign_next_version`. By definition of `synchronizes-with`, if this
+    /// load observes a value `fetch_add` produced (i.e. `counter <= V`
+    /// means no concurrent writer's `fetch_add` has run since this snapshot
+    /// was taken), every memory operation SEQUENCED-BEFORE that concurrent
+    /// writer's `fetch_add` on ITS thread — which includes nothing yet,
+    /// since `fetch_add` runs at the very start of the commit pipeline,
+    /// strictly before Phase 5a/5c's data/index writes — is guaranteed
+    /// NOT yet visible to this reader either. Equivalently: any write this
+    /// reader COULD observe from a concurrent committer implies that
+    /// committer's `fetch_add` already happened-before this load (program
+    /// order on the writer's thread + release sequence), which this
+    /// `Acquire` load would then observe as `counter > V` — so `counter <=
+    /// V` soundly rules out every such write.
+    pub fn version_allocation_high_water_mark(&self) -> u64 {
+        self.version_counter.load(Ordering::Acquire)
+    }
+
     /// cancel-safe: yes — the `entry_sync` calls in `bump_refcount`
     /// (formerly `entry_async`; switched to the synchronous accessor to
     /// close the same-class whole-runtime deadlock hazard fixed for the
@@ -504,8 +539,18 @@ impl RepoTxGate {
     }
 
     /// Allocate the next MVCC version. Called under `commit_lock`.
+    ///
+    /// `AcqRel` (not `Relaxed`, #1110 round 2): `version_allocation_high_water_mark`'s
+    /// `Acquire` load must synchronize-with this RMW's store half for the
+    /// staleness gate's happens-before argument to hold. A `Relaxed` store
+    /// never participates in a synchronizes-with relationship with any
+    /// `Acquire` load of the same atomic, regardless of that load's
+    /// ordering — "Acquire on the reader" alone buys nothing without a
+    /// matching `Release` (or `AcqRel`) on the writer. This was the exact
+    /// gap in this task's own round-1 delivery: the doc comment there
+    /// claimed the pairing was sound while the store stayed `Relaxed`.
     pub fn assign_next_version(&self) -> u64 {
-        self.version_counter.fetch_add(1, Ordering::Relaxed) + 1
+        self.version_counter.fetch_add(1, Ordering::AcqRel) + 1
     }
 
     /// Allocate the next MVCC version and return a RAII [`VersionGuard`]
