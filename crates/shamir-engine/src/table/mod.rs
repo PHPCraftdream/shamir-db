@@ -31,7 +31,7 @@ mod table_manager_streaming;
 mod table_manager_tx_ops;
 
 #[cfg(test)]
-pub(crate) use table_manager_tx_ops::released_unique_keys_in_tx;
+pub(crate) use table_manager_tx_ops::refresh_released_unique_cache;
 mod table_manager_validators;
 mod tx_scan_overlay;
 mod write_exec;

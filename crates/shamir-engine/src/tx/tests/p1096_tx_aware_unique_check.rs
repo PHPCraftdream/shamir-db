@@ -374,8 +374,9 @@ async fn released_unique_keys_in_tx_walks_correctly() {
     // - "y" is released (by DELETE B in step 6)
     // - "z" is live (owned by C)
 
-    // Call the helper to verify released keys
-    let released = crate::table::released_unique_keys_in_tx(&mut tx, token);
+    // Refresh the cache and borrow the released set
+    crate::table::refresh_released_unique_cache(&mut tx, token);
+    let released = &tx.released_unique_cache[&token].released;
 
     // Build the expected index keys for "x" and "y"
     let index_mgr = tbl.index_manager();

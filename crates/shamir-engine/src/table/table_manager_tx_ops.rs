@@ -65,21 +65,9 @@ async fn fire_post_gen_capture_pre_unique_check_test_hook() {
     }
 }
 
-/// #1096: which unique keys THIS transaction has released-and-not-reclaimed
-/// as of the CURRENT staging point — the exact same `live`/`released`
-/// walk `pre_commit.rs`'s Step 1 uses, scoped to just `table_token` and
-/// producing a set instead of aborting on conflict.
+/// #1096: refresh `tx.released_unique_cache` for `table_token` (incremental).
 ///
-/// Only a *necessary*, not sufficient, condition for tolerating a durable
-/// conflict — the caller must ALSO cross-check the durable owner against
-/// this tx's own data write set, via the `is_record_touched` probe each
-/// call site builds inline (an O(1) `tx.write_set.get(&table_token)
-/// .is_some_and(|s| s.staged_op(rid.as_bytes()).is_some())` check, #1099)
-/// (found by `@oh` review: this set alone is a uniqueness-bypass hazard
-/// under `Snapshot` isolation's stale-read possibility).
-///
-/// #1097 follow-up (found by a review of the #1097 fix itself): mirrors
-/// `pre_commit.rs`'s Step 1 owner-aware `RemovePosting` handling — a
+/// Mirrors `pre_commit.rs`'s Step 1 owner-aware `RemovePosting` handling — a
 /// `RemovePosting` planned against a record that no longer holds the key
 /// (per THIS walk's own `live` tracking so far) must not mark the key
 /// released, or a later caller could wrongly treat a still-live key as free.
@@ -98,10 +86,11 @@ async fn fire_post_gen_capture_pre_unique_check_test_hook() {
 /// sequence of N stage-time calls against a tx whose `index_write_set` ends
 /// at length M therefore costs `O(M)` total, not `O(N * M)` — closing the
 /// residual O(N^2) `#1099` left in place (see this crate's `#1108` prompt).
-pub(crate) fn released_unique_keys_in_tx(
-    tx: &mut shamir_tx::TxContext,
-    table_token: u64,
-) -> shamir_collections::TFxSet<Vec<u8>> {
+///
+/// #1111: This function ONLY refreshes the cache; callers MUST then borrow
+/// `&tx.released_unique_cache[&table_token].released` directly. This avoids
+/// the O(N²) clone that a single combined `&mut -> TFxSet` pattern would force.
+pub(crate) fn refresh_released_unique_cache(tx: &mut shamir_tx::TxContext, table_token: u64) {
     use shamir_tx::{IndexFamily, IndexWriteOp};
 
     let total_len = tx.index_write_set.len();
@@ -146,7 +135,7 @@ pub(crate) fn released_unique_keys_in_tx(
         }
         cache.walked_len = total_len;
     }
-    cache.released.clone()
+    // No return: caller borrows &cache.released directly after refresh.
 }
 
 impl TableManager {
@@ -592,7 +581,8 @@ impl TableManager {
         // — the walks themselves cost O(tx) regardless of the early-return
         // inside `validate_unique_for_create_with_released`.
         if self.index_manager.has_unique_indexes() {
-            let released = released_unique_keys_in_tx(tx, self.table_token());
+            refresh_released_unique_cache(tx, self.table_token());
+            let released = &tx.released_unique_cache[&self.table_token()].released;
             let table_token = self.table_token();
             let is_record_touched = |rid: &shamir_types::types::record_id::RecordId| -> bool {
                 tx.write_set
@@ -600,7 +590,7 @@ impl TableManager {
                     .is_some_and(|s| s.staged_op(rid.as_bytes()).is_some())
             };
             self.index_manager
-                .validate_unique_for_create_with_released(value, &released, is_record_touched)
+                .validate_unique_for_create_with_released(value, released, is_record_touched)
                 .await?;
         }
 
@@ -704,7 +694,8 @@ impl TableManager {
         //    `is_record_touched` probe closes the stale-snapshot bypass.
         if self.index_manager.has_unique_indexes() {
             let mut batch_seen: TFxSet<(u64, Vec<u8>)> = TFxSet::default();
-            let released = released_unique_keys_in_tx(tx, self.table_token());
+            refresh_released_unique_cache(tx, self.table_token());
+            let released = &tx.released_unique_cache[&self.table_token()].released;
             let table_token = self.table_token();
             let is_record_touched = |rid: &shamir_types::types::record_id::RecordId| -> bool {
                 tx.write_set
@@ -713,7 +704,7 @@ impl TableManager {
             };
             for (i, v) in values.iter().enumerate() {
                 self.index_manager
-                    .validate_unique_for_create_with_released(v, &released, &is_record_touched)
+                    .validate_unique_for_create_with_released(v, released, &is_record_touched)
                     .await?;
                 for def in self.index_manager.iter_unique_indexes() {
                     if let Some(vs) = crate::index::index_keys::extract_index_leaves(v, &def.paths)
@@ -918,7 +909,8 @@ impl TableManager {
         // The on-demand `is_record_touched` probe closes the stale-snapshot bypass.
         if self.index_manager.has_unique_indexes() {
             let mut batch_seen: TFxSet<(u64, Vec<u8>)> = TFxSet::default();
-            let released = released_unique_keys_in_tx(tx, self.table_token());
+            refresh_released_unique_cache(tx, self.table_token());
+            let released = &tx.released_unique_cache[&self.table_token()].released;
             let table_token = self.table_token();
             let is_record_touched = |rid: &shamir_types::types::record_id::RecordId| -> bool {
                 tx.write_set
@@ -927,7 +919,7 @@ impl TableManager {
             };
             for (i, view) in views.iter().enumerate() {
                 self.index_manager
-                    .validate_unique_for_create_with_released(view, &released, &is_record_touched)
+                    .validate_unique_for_create_with_released(view, released, &is_record_touched)
                     .await?;
                 for def in self.index_manager.iter_unique_indexes() {
                     if let Some(vs) =
@@ -1116,7 +1108,8 @@ impl TableManager {
         // on `update_tx_bytes`'s wire path (called per-row) by avoiding an
         // O(N) set build for every row there.
         if self.index_manager.has_unique_indexes() {
-            let released = released_unique_keys_in_tx(tx, self.table_token());
+            refresh_released_unique_cache(tx, self.table_token());
+            let released = &tx.released_unique_cache[&self.table_token()].released;
             let table_token = self.table_token();
             let is_record_touched = |rid: &shamir_types::types::record_id::RecordId| -> bool {
                 tx.write_set
@@ -1130,7 +1123,7 @@ impl TableManager {
                             &id,
                             old_val,
                             value,
-                            &released,
+                            released,
                             &is_record_touched,
                         )
                         .await?
@@ -1139,7 +1132,7 @@ impl TableManager {
                     self.index_manager
                         .validate_unique_for_create_with_released(
                             value,
-                            &released,
+                            released,
                             &is_record_touched,
                         )
                         .await?
@@ -1262,7 +1255,8 @@ impl TableManager {
                     // makes every UPDATE on a table with NO unique indexes pay
                     // an O(|tx.index_write_set|) walk for nothing.
                     if self.index_manager.has_unique_indexes() {
-                        let released = released_unique_keys_in_tx(tx, self.table_token());
+                        refresh_released_unique_cache(tx, self.table_token());
+                        let released = &tx.released_unique_cache[&self.table_token()].released;
                         let table_token = self.table_token();
                         let is_record_touched =
                             |rid: &shamir_types::types::record_id::RecordId| -> bool {
@@ -1275,7 +1269,7 @@ impl TableManager {
                                 &id,
                                 &old_view,
                                 &new_view,
-                                &released,
+                                released,
                                 &is_record_touched,
                             )
                             .await?;
@@ -1331,7 +1325,8 @@ impl TableManager {
                     // eliminates the O(N²) cost by avoiding an O(N) set build
                     // for every row.
                     if self.index_manager.has_unique_indexes() {
-                        let released = released_unique_keys_in_tx(tx, self.table_token());
+                        refresh_released_unique_cache(tx, self.table_token());
+                        let released = &tx.released_unique_cache[&self.table_token()].released;
                         let table_token = self.table_token();
                         let is_record_touched =
                             |rid: &shamir_types::types::record_id::RecordId| -> bool {
@@ -1344,7 +1339,7 @@ impl TableManager {
                                 &id,
                                 &old_tree,
                                 &new_tree,
-                                &released,
+                                released,
                                 &is_record_touched,
                             )
                             .await?;
