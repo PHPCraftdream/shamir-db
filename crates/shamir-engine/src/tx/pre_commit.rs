@@ -1976,37 +1976,65 @@ async fn rederive_stale_value_ops_post_stage(
                             .into_iter()
                             .chain(current_unique_removals.into_iter())
                         {
-                            if let IndexWriteOp::RemovePosting {
-                                ref key,
-                                owner: Some(ref owner_bytes),
-                                ..
-                            } = op
-                            {
-                                if let Some(rid) = RecordId::try_from_bytes(owner_bytes.as_slice())
-                                {
-                                    let is_staged = staged_removals_by_rid
-                                        .get(&rid)
-                                        .map(|keys| keys.contains(key))
-                                        .unwrap_or(false);
-                                    if !is_staged {
-                                        log::debug!(
-                                            "rederive_stale_value_ops: appending missing RemovePosting \
-                                             for DELETE (table_token={}, rid={:?}, key={:?})",
-                                            table_token,
-                                            rid,
-                                            key
-                                        );
-                                        appended.push((table_token, op));
+                            // Bug B fix: handle both owner:Some (unique) and owner:None (regular)
+                            let is_staged = match &op {
+                                IndexWriteOp::RemovePosting {
+                                    ref key,
+                                    owner,
+                                    provenance,
+                                } => {
+                                    if provenance.family == IndexFamily::Regular {
+                                        // For regular indexes: posting_key = index_key || record_id
+                                        // The posting key itself uniquely identifies this record's claim
+                                        tx.index_write_set
+                                            .iter()
+                                            .filter(|(t, _)| *t == table_token)
+                                            .any(|(_, staged_op)| {
+                                                matches!(
+                                                    staged_op,
+                                                    IndexWriteOp::RemovePosting {
+                                                        key: staged_key,
+                                                        provenance: staged_prov,
+                                                        ..
+                                                    } if staged_key == key && staged_prov.family == IndexFamily::Regular
+                                                )
+                                            })
                                     } else {
-                                        log::debug!(
-                                            "rederive_stale_value_ops: RemovePosting already staged \
-                                             for DELETE (table_token={}, rid={:?}, key={:?})",
-                                            table_token,
-                                            rid,
-                                            key
-                                        );
+                                        // For unique indexes: dedup by (key, owner)
+                                        if let Some(ref owner_bytes) = owner {
+                                            if let Some(rid) =
+                                                RecordId::try_from_bytes(owner_bytes.as_slice())
+                                            {
+                                                staged_removals_by_rid
+                                                    .get(&rid)
+                                                    .map(|keys| keys.contains(key))
+                                                    .unwrap_or(false)
+                                            } else {
+                                                false
+                                            }
+                                        } else {
+                                            false
+                                        }
                                     }
                                 }
+                                _ => continue,
+                            };
+
+                            if !is_staged {
+                                log::debug!(
+                                    "rederive_stale_value_ops: appending missing RemovePosting \
+                                     for DELETE (table_token={}, op={:?})",
+                                    table_token,
+                                    op
+                                );
+                                appended.push((table_token, op));
+                            } else {
+                                log::debug!(
+                                    "rederive_stale_value_ops: RemovePosting already staged \
+                                     for DELETE (table_token={}, op={:?})",
+                                    table_token,
+                                    op
+                                );
                             }
                         }
                     }
@@ -2077,15 +2105,7 @@ async fn rederive_stale_value_ops_post_stage(
                             .into_iter()
                             .chain(updated_unique_ops.into_iter())
                         {
-                            // Extract the index key for deduplication
-                            let index_key = match &op {
-                                IndexWriteOp::RemovePosting { key, .. } => key.clone(),
-                                IndexWriteOp::SetPosting { key, .. } => key.clone(),
-                                _ => continue,
-                            };
-
-                            // Check if an op with this key was already staged for base_index
-                            // (Regular or Unique families)
+                            // Bug A fix: make dedup owner-aware and kind-aware for unique indexes
                             let is_staged = tx
                                 .index_write_set
                                 .iter()
@@ -2098,16 +2118,80 @@ async fn rederive_stale_value_ops_post_stage(
                                             provenance.family
                                         }
                                     };
-                                    if family == IndexFamily::Regular
-                                        || family == IndexFamily::Unique
-                                    {
-                                        match staged_op {
-                                            IndexWriteOp::RemovePosting {
-                                                key: staged_key, ..
+
+                                    if family == IndexFamily::Regular {
+                                        // For regular indexes: dedup by posting key (already contains record_id)
+                                        match (&op, staged_op) {
+                                            (
+                                                IndexWriteOp::RemovePosting {
+                                                    key,
+                                                    provenance: prov,
+                                                    ..
+                                                },
+                                                IndexWriteOp::RemovePosting {
+                                                    key: staged_key,
+                                                    provenance: staged_prov,
+                                                    ..
+                                                },
+                                            )
+                                            | (
+                                                IndexWriteOp::SetPosting {
+                                                    key,
+                                                    provenance: prov,
+                                                    ..
+                                                },
+                                                IndexWriteOp::SetPosting {
+                                                    key: staged_key,
+                                                    provenance: staged_prov,
+                                                    ..
+                                                },
+                                            ) => {
+                                                staged_key == key
+                                                    && staged_prov.family == IndexFamily::Regular
+                                                    && prov.family == IndexFamily::Regular
                                             }
-                                            | IndexWriteOp::SetPosting {
-                                                key: staged_key, ..
-                                            } => staged_key == &index_key,
+                                            _ => false,
+                                        }
+                                    } else if family == IndexFamily::Unique {
+                                        // For unique indexes: dedup by (key, owner) for RemovePosting,
+                                        // and by (key, value) for SetPosting (value is record_id)
+                                        match (&op, staged_op) {
+                                            (
+                                                IndexWriteOp::RemovePosting {
+                                                    key,
+                                                    owner: Some(owner_bytes),
+                                                    provenance: prov,
+                                                    ..
+                                                },
+                                                IndexWriteOp::RemovePosting {
+                                                    key: staged_key,
+                                                    owner: Some(staged_owner_bytes),
+                                                    provenance: staged_prov,
+                                                    ..
+                                                },
+                                            ) => {
+                                                staged_key == key
+                                                    && staged_owner_bytes == owner_bytes
+                                                    && staged_prov.family == IndexFamily::Unique
+                                                    && prov.family == IndexFamily::Unique
+                                            }
+                                            (
+                                                IndexWriteOp::SetPosting {
+                                                    key,
+                                                    value,
+                                                    provenance: prov,
+                                                },
+                                                IndexWriteOp::SetPosting {
+                                                    key: staged_key,
+                                                    value: staged_value,
+                                                    provenance: staged_prov,
+                                                },
+                                            ) => {
+                                                staged_key == key
+                                                    && staged_value == value
+                                                    && staged_prov.family == IndexFamily::Unique
+                                                    && prov.family == IndexFamily::Unique
+                                            }
                                             _ => false,
                                         }
                                     } else {
@@ -2125,10 +2209,10 @@ async fn rederive_stale_value_ops_post_stage(
                                 appended.push((table_token, op));
                             } else {
                                 log::debug!(
-                                    "rederive_stale_value_ops: op already staged for UPDATE (table_token={}, rid={:?}, key={:?})",
+                                    "rederive_stale_value_ops: op already staged for UPDATE (table_token={}, rid={:?}, op={:?})",
                                     table_token,
                                     rid,
-                                    index_key
+                                    op
                                 );
                             }
                         }

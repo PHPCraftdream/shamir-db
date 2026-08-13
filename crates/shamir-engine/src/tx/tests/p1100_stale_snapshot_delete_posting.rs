@@ -386,3 +386,286 @@ async fn update_without_concurrent_change_works() {
         .unwrap();
     assert_eq!(owner_y, Some(rid_r), "After update, R must own 'y'");
 }
+
+/// Bug A test: unique-family UPDATE dedup is owner-blind
+///
+/// Scenario from the issue brief:
+/// tx0: INSERT Y{email:"k"}; INSERT Z{email:"m"}; COMMIT
+/// tx2: BEGIN                                    // snapshot: Y{email:"k"}, Z{email:"m"}
+/// tx1: DELETE Y; UPDATE Z SET email="k"; COMMIT   // durable after tx1: "k"->Z, "m" free
+/// tx2: DELETE Y;                                  // stale -> stages RemovePosting("k", owner=Y)
+///      UPDATE Z SET name="n";                     // tx2's stale snapshot of Z still has email:"m",
+///                                                 // so the staged UPDATE op for Z carries no unique
+///                                                 // removal/set for "k" or "m" at all
+///      COMMIT
+///
+/// Expected once tx2 commits: "k" is free (Z's ACTUAL email is "m", Y no longer exists).
+/// Bug: The re-derived RemovePosting("k", owner=Z) is silently dropped because it collides
+/// by key alone with the already-staged RemovePosting("k", owner=Y).
+#[tokio::test]
+async fn unique_update_dedup_owner_blind() {
+    let repo = make_repo();
+    repo.add_table(TableConfig::new("t"));
+    let tbl = repo.get_table("t").await.unwrap();
+    tbl.create_unique_index("by_email", &["email"])
+        .await
+        .unwrap();
+    let email_id = key_id(&tbl, "by_email").await;
+    let email_field = key_id(&tbl, "email").await;
+    let name_field = key_id(&tbl, "name").await;
+
+    // tx0: INSERT Y{email:"k"}; INSERT Z{email:"m"}; COMMIT
+    let (mut tx0, _g0) = repo.begin_tx(IsolationLevel::Snapshot).await.unwrap();
+    let rid_y = tbl
+        .insert_tx(&record_with_str(email_field, "k"), Some(&mut tx0))
+        .await
+        .expect("tx0 INSERT Y must succeed");
+    let rid_z = tbl
+        .insert_tx(&record_with_str(email_field, "m"), Some(&mut tx0))
+        .await
+        .expect("tx0 INSERT Z must succeed");
+    repo.commit_tx(tx0).await.expect("tx0 commit must succeed");
+
+    // Verify initial state: Y owns "k", Z owns "m"
+    let owner_k = tbl
+        .index_manager()
+        .lookup_by_unique_index(email_id, &[InnerValue::Str("k".into())])
+        .await
+        .unwrap();
+    assert_eq!(owner_k, Some(rid_y), "Y must own 'k' after tx0 commits");
+
+    let owner_m = tbl
+        .index_manager()
+        .lookup_by_unique_index(email_id, &[InnerValue::Str("m".into())])
+        .await
+        .unwrap();
+    assert_eq!(owner_m, Some(rid_z), "Z must own 'm' after tx0 commits");
+
+    // tx2: BEGIN (snapshot taken here, sees Y{email:"k"}, Z{email:"m"})
+    let (mut tx2, _g2) = repo.begin_tx(IsolationLevel::Snapshot).await.unwrap();
+
+    // tx1: DELETE Y; UPDATE Z SET email="k"; COMMIT
+    let (mut tx1, _g1) = repo.begin_tx(IsolationLevel::Snapshot).await.unwrap();
+    tbl.delete_tx(rid_y, Some(&mut tx1))
+        .await
+        .expect("tx1 DELETE Y must succeed");
+    let z_updated = record_with_str(email_field, "k");
+    tbl.update_tx(rid_z, &z_updated, Some(&mut tx1))
+        .await
+        .expect("tx1 UPDATE Z must succeed");
+    repo.commit_tx(tx1).await.expect("tx1 commit must succeed");
+
+    // Verify state after tx1: "k" -> Z, "m" free, Y deleted
+    let owner_k_after_tx1 = tbl
+        .index_manager()
+        .lookup_by_unique_index(email_id, &[InnerValue::Str("k".into())])
+        .await
+        .unwrap();
+    assert_eq!(owner_k_after_tx1, Some(rid_z), "After tx1, Z must own 'k'");
+
+    let owner_m_after_tx1 = tbl
+        .index_manager()
+        .lookup_by_unique_index(email_id, &[InnerValue::Str("m".into())])
+        .await
+        .unwrap();
+    assert!(owner_m_after_tx1.is_none(), "After tx1, 'm' must be free");
+
+    let y_exists = tbl.get(rid_y).await;
+    assert!(y_exists.is_err(), "Y must not exist after tx1 deletes it");
+
+    // tx2: DELETE Y (stale plan - from snapshot which still believes Y owns "k")
+    tbl.delete_tx(rid_y, Some(&mut tx2))
+        .await
+        .expect("tx2 DELETE Y must stage successfully");
+
+    // tx2: UPDATE Z SET name="n" (from stale snapshot, Z still has email:"m")
+    // tx2's staged value is {email:"m", name:"n"}
+    // but ACTUAL current value is {email:"k", name:"alice"}
+    // Email is unchanged from tx2's perspective ("m" -> "m"), so NO index ops are staged
+    let z_updated_tx2 = record_with_two_str(email_field, "m", name_field, "n");
+    tbl.update_tx(rid_z, &z_updated_tx2, Some(&mut tx2))
+        .await
+        .expect("tx2 UPDATE Z must stage successfully");
+
+    // tx2: COMMIT
+    repo.commit_tx(tx2).await.expect("tx2 commit must succeed");
+
+    // After tx2 commits, under Snapshot isolation, tx2's value wins
+    // Data: Z has {email:"m", name:"n"} (tx2 overwrites tx1's email change)
+    let z_value = tbl.get(rid_z).await.unwrap();
+    let name_key = InternerKey::new(name_field);
+    let email_key = InternerKey::new(email_field);
+    let z_name = match &z_value {
+        InnerValue::Map(m) => m.get(&name_key).and_then(|v| match v {
+            InnerValue::Str(s) => Some(s.as_str()),
+            _ => None,
+        }),
+        _ => None,
+    };
+    let z_email = match &z_value {
+        InnerValue::Map(m) => m.get(&email_key).and_then(|v| match v {
+            InnerValue::Str(s) => Some(s.as_str()),
+            _ => None,
+        }),
+        _ => None,
+    };
+
+    assert_eq!(z_name, Some("n"), "Z must have name='n' after tx2");
+    assert_eq!(z_email, Some("m"), "Z must have email='m' after tx2");
+
+    // Index must be consistent with data: email="m" should point to Z
+    let owner_m_final = tbl
+        .index_manager()
+        .lookup_by_unique_index(email_id, &[InnerValue::Str("m".into())])
+        .await
+        .unwrap();
+    assert_eq!(
+        owner_m_final,
+        Some(rid_z),
+        "Z must own 'm' in the unique index (data has email='m')"
+    );
+
+    // The "k" posting (from tx1) should be removed by the re-derive fix
+    // Bug A: the re-derived RemovePosting("k", owner=Z) was silently dropped
+    // because it collided by key alone with the staged RemovePosting("k", owner=Y)
+    let owner_k_final = tbl
+        .index_manager()
+        .lookup_by_unique_index(email_id, &[InnerValue::Str("k".into())])
+        .await
+        .unwrap();
+    assert!(
+        owner_k_final.is_none(),
+        "'k' must be free - stale posting from tx1 must be removed; got owner={:?}",
+        owner_k_final
+    );
+
+    // Verify we can insert a new record with email="k"
+    let (mut tx3, _g3) = repo.begin_tx(IsolationLevel::Snapshot).await.unwrap();
+    let w_insert_result = tbl
+        .insert_tx(&record_with_str(email_field, "k"), Some(&mut tx3))
+        .await;
+    repo.commit_tx(tx3).await.expect("tx3 commit must succeed");
+
+    assert!(
+        w_insert_result.is_ok(),
+        "INSERT with email='k' must succeed - 'k' should be free"
+    );
+}
+
+/// Bug B test: regular-index (non-unique) DELETE from stale snapshot never removes CURRENT posting
+///
+/// Same shape as #1100's ORIGINAL brief, but with create_index instead of create_unique_index:
+/// tx0: INSERT R{email:"y"}; COMMIT
+/// tx2: BEGIN
+/// tx1: UPDATE R SET email="z"; COMMIT
+/// tx2: DELETE R; COMMIT
+///
+/// After tx2 commits, a regular-index lookup on "z" still returns R's (now-deleted) record id
+/// - a dangling regular-index posting.
+///
+/// Bug: The DELETE branch's append filter only handles owner:Some(...) (unique indexes),
+/// but regular indexes always have owner:None, so every regular-index removal is silently discarded.
+#[tokio::test]
+async fn regular_index_delete_from_stale_snapshot() {
+    let repo = make_repo();
+    repo.add_table(TableConfig::new("t"));
+    let tbl = repo.get_table("t").await.unwrap();
+    tbl.create_index("by_email", &["email"]).await.unwrap();
+    let email_index = key_id(&tbl, "by_email").await;
+    let email_field = key_id(&tbl, "email").await;
+
+    // tx0: INSERT R{email:"y"}; COMMIT
+    let (mut tx0, _g0) = repo.begin_tx(IsolationLevel::Snapshot).await.unwrap();
+    let rid_r = tbl
+        .insert_tx(&record_with_str(email_field, "y"), Some(&mut tx0))
+        .await
+        .expect("tx0 INSERT R must succeed");
+    repo.commit_tx(tx0).await.expect("tx0 commit must succeed");
+
+    // tx2: BEGIN (snapshot taken here, sees R{email:"y"})
+    let (mut tx2, _g2) = repo.begin_tx(IsolationLevel::Snapshot).await.unwrap();
+
+    // tx1: UPDATE R SET email="z"; COMMIT
+    let (mut tx1, _g1) = repo.begin_tx(IsolationLevel::Snapshot).await.unwrap();
+    let r_updated = record_with_str(email_field, "z");
+    tbl.update_tx(rid_r, &r_updated, Some(&mut tx1))
+        .await
+        .expect("tx1 UPDATE R must succeed");
+    repo.commit_tx(tx1).await.expect("tx1 commit must succeed");
+
+    // Verify state after tx1: R owns "z", "y" free
+    let z_results = tbl
+        .index_manager()
+        .lookup_by_index(email_index, &[InnerValue::Str("z".into())])
+        .await
+        .unwrap();
+    assert!(
+        z_results
+            .as_ref()
+            .map(|ids| ids.contains(&rid_r))
+            .unwrap_or(false),
+        "After tx1, R must be in the 'z' index lookup"
+    );
+
+    let y_results = tbl
+        .index_manager()
+        .lookup_by_index(email_index, &[InnerValue::Str("y".into())])
+        .await
+        .unwrap();
+    assert!(
+        !y_results
+            .as_ref()
+            .map(|ids| ids.contains(&rid_r))
+            .unwrap_or(false),
+        "After tx1, R must NOT be in the 'y' index lookup"
+    );
+
+    // tx2: DELETE R (stale plan - from snapshot which still believes R owns "y")
+    // tx2 stages RemovePosting for "y" based on its stale snapshot
+    tbl.delete_tx(rid_r, Some(&mut tx2))
+        .await
+        .expect("tx2 DELETE R must stage successfully");
+
+    // tx2: COMMIT
+    repo.commit_tx(tx2)
+        .await
+        .expect("tx2 commit must succeed - no visible conflict at commit time");
+
+    // Verify R is deleted
+    let r_exists = tbl.get(rid_r).await;
+    assert!(r_exists.is_err(), "R must not exist after tx2 deletes it");
+
+    // The regular-index posting for "z" should be removed by the re-derive fix
+    // Bug B: regular-index removals are silently discarded (owner: None)
+    let z_results_final = tbl
+        .index_manager()
+        .lookup_by_index(email_index, &[InnerValue::Str("z".into())])
+        .await
+        .unwrap();
+    assert!(
+        !z_results_final.as_ref().map(|ids| ids.contains(&rid_r)).unwrap_or(false),
+        "After R is deleted, R must NOT be in the 'z' index lookup - dangling posting must be removed"
+    );
+
+    // Verify we can insert a new record with email="z" without conflict
+    let (mut tx3, _g3) = repo.begin_tx(IsolationLevel::Snapshot).await.unwrap();
+    let rid_w = tbl
+        .insert_tx(&record_with_str(email_field, "z"), Some(&mut tx3))
+        .await
+        .expect("INSERT with email='z' must succeed");
+    repo.commit_tx(tx3).await.expect("tx3 commit must succeed");
+
+    // Verify W is in the "z" index
+    let z_results_new = tbl
+        .index_manager()
+        .lookup_by_index(email_index, &[InnerValue::Str("z".into())])
+        .await
+        .unwrap();
+    assert!(
+        z_results_new
+            .as_ref()
+            .map(|ids| ids.contains(&rid_w))
+            .unwrap_or(false),
+        "After insert, W must be in the 'z' index lookup"
+    );
+}
