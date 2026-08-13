@@ -3533,6 +3533,7 @@ dependencies = [
  "futures",
  "hnsw_rs",
  "log",
+ "loom",
  "num-bigint",
  "rmp-serde",
  "rust-stemmers",

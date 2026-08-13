@@ -63,6 +63,13 @@ rust_decimal = { version = "1.40.0", features = ["serde"] }
 num-bigint = { version = "0.4", features = ["serde"] }
 shamir-bench-utils = { path = "../shamir-bench-utils", features = ["peak_mem"] }
 bench-scale-tool = { workspace = true, features = ["async"] }
+# F-1103 (#1103): concurrency model checker for the `ReaderDrainGate` primitive.
+# Used ONLY under `cfg(loom)` (the `#[cfg(loom)]` module in
+# `reader_drain_gate.rs` is compiled away from every normal build, so the
+# loom tests never run under `./scripts/test.sh`). It IS compiled once for the
+# package's test target (cached thereafter) — see the module doc for the exact
+# opt-in command and its (honestly-scoped) coverage.
+loom = "0.7"
 
 [[bench]]
 name = "sq8_hot_path"
@@ -86,6 +93,15 @@ harness = false
 
 [lib]
 doctest = false
+
+[features]
+# F-1103 (#1103): enables the loom model-checker module in
+# `reader_drain_gate.rs`. The `build.rs` emits `cfg(loom)` ONLY for this
+# crate when this feature is on (NOT via a global rustflag), so the heavy
+# dependency tree stays out of its own loom code paths. Run with:
+#   cargo test -p shamir-index --features loom --lib \
+#       reader_drain_gate::loom_model
+loom = []
 
 [lints]
 workspace = true
