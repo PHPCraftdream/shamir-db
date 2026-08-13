@@ -85,50 +85,68 @@ async fn fire_post_gen_capture_pre_unique_check_test_hook() {
 /// released, or a later caller could wrongly treat a still-live key as free.
 /// Without this, this function's doc claim of being "the exact same walk"
 /// as `pre_commit.rs`'s Step 1 was false — the two copies had diverged.
+///
+/// #1108: incrementally maintained, NOT a full re-walk of
+/// `tx.index_write_set` on every call. `tx.released_unique_cache` caches, per
+/// `table_token`, the `live`/`released` state as of some prefix length
+/// (`ReleasedUniqueCache::walked_len`) of `tx.index_write_set`. Since that Vec
+/// is append-only during staging (nothing removes/reorders entries until
+/// `pre_commit.rs` runs at commit time, strictly after every staging call
+/// this function serves), each call only folds in the NEW suffix
+/// `[walked_len..]` — exactly the same per-op match arms as before, just
+/// applied once per op ever instead of once per op per call. A caller
+/// sequence of N stage-time calls against a tx whose `index_write_set` ends
+/// at length M therefore costs `O(M)` total, not `O(N * M)` — closing the
+/// residual O(N^2) `#1099` left in place (see this crate's `#1108` prompt).
 pub(crate) fn released_unique_keys_in_tx(
-    tx: &shamir_tx::TxContext,
+    tx: &mut shamir_tx::TxContext,
     table_token: u64,
 ) -> shamir_collections::TFxSet<Vec<u8>> {
     use shamir_tx::{IndexFamily, IndexWriteOp};
 
-    let mut live: shamir_collections::TFxMap<Vec<u8>, RecordId> = shamir_collections::new_fx_map();
-    let mut released: shamir_collections::TFxSet<Vec<u8>> = shamir_collections::new_fx_set();
-    for (tt, op) in &tx.index_write_set {
-        if *tt != table_token {
-            continue;
-        }
-        match op {
-            IndexWriteOp::SetPosting {
-                key,
-                value,
-                provenance,
-            } if provenance.family == IndexFamily::Unique => {
-                let owner = RecordId::try_from_bytes(value).unwrap_or_default();
-                live.insert(key.to_vec(), owner);
-                released.remove(key.as_ref());
+    let total_len = tx.index_write_set.len();
+    let cache = tx.released_unique_cache.entry(table_token).or_default();
+
+    if cache.walked_len < total_len {
+        for (tt, op) in &tx.index_write_set[cache.walked_len..total_len] {
+            if *tt != table_token {
+                continue;
             }
-            IndexWriteOp::RemovePosting {
-                key,
-                provenance,
-                owner,
-            } if provenance.family == IndexFamily::Unique => {
-                let removing_owner = owner.map(RecordId);
-                let current_owner = live.get(key.as_ref()).copied();
-                if current_owner.is_none()
-                    || removing_owner.is_none()
-                    || current_owner == removing_owner
-                {
-                    live.remove(key.as_ref());
-                    released.insert(key.to_vec());
+            match op {
+                IndexWriteOp::SetPosting {
+                    key,
+                    value,
+                    provenance,
+                } if provenance.family == IndexFamily::Unique => {
+                    let owner = RecordId::try_from_bytes(value).unwrap_or_default();
+                    cache.live.insert(key.to_vec(), owner);
+                    cache.released.remove(key.as_ref());
                 }
-                // else: stale removal (owner mismatch against this walk's
-                // own live tracking) -- the key's real current owner within
-                // this tx is preserved, so it must not be marked released.
+                IndexWriteOp::RemovePosting {
+                    key,
+                    provenance,
+                    owner,
+                } if provenance.family == IndexFamily::Unique => {
+                    let removing_owner = owner.map(RecordId);
+                    let current_owner = cache.live.get(key.as_ref()).copied();
+                    if current_owner.is_none()
+                        || removing_owner.is_none()
+                        || current_owner == removing_owner
+                    {
+                        cache.live.remove(key.as_ref());
+                        cache.released.insert(key.to_vec());
+                    }
+                    // else: stale removal (owner mismatch against this walk's
+                    // own live tracking) -- the key's real current owner
+                    // within this tx is preserved, so it must not be marked
+                    // released.
+                }
+                _ => {}
             }
-            _ => {}
         }
+        cache.walked_len = total_len;
     }
-    released
+    cache.released.clone()
 }
 
 impl TableManager {

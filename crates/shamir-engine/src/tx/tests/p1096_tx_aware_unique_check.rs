@@ -375,7 +375,7 @@ async fn released_unique_keys_in_tx_walks_correctly() {
     // - "z" is live (owned by C)
 
     // Call the helper to verify released keys
-    let released = crate::table::released_unique_keys_in_tx(&tx, token);
+    let released = crate::table::released_unique_keys_in_tx(&mut tx, token);
 
     // Build the expected index keys for "x" and "y"
     let index_mgr = tbl.index_manager();

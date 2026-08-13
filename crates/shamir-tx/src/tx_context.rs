@@ -74,6 +74,31 @@ pub struct UniqueGuard {
     pub owner: RecordId,
 }
 
+/// #1108: incrementally-maintained live/released bookkeeping for ONE table's
+/// unique-family postings, mirroring `shamir-engine`'s
+/// `released_unique_keys_in_tx` walk (which itself mirrors
+/// `pre_commit.rs`'s Step 1 owner-aware `RemovePosting` handling — see that
+/// function's doc for the exact semantics this must preserve).
+///
+/// `walked_len` is the length of `TxContext::index_write_set` (the single
+/// Vec shared across every table) as of the last fold — since that Vec is
+/// APPEND-ONLY during staging (nothing removes/reorders entries until
+/// `pre_commit.rs` runs at commit time, strictly after all staging is done),
+/// re-folding only needs to walk the NEW suffix `[walked_len..]` on each
+/// call, filtering by this cache's own `table_token` exactly like the old
+/// full walk did. This makes the total work across N staging calls on the
+/// same tx `O(final |index_write_set|)` instead of `O(N * |index_write_set|)`.
+#[derive(Debug, Default, Clone)]
+pub struct ReleasedUniqueCache {
+    /// (index_key → current owner) as of `walked_len` entries folded in.
+    pub live: TFxMap<Vec<u8>, RecordId>,
+    /// Keys vacated by a `RemovePosting` and not yet reclaimed.
+    pub released: TFxSet<Vec<u8>>,
+    /// How many entries of `index_write_set` have been folded into `live`/
+    /// `released` so far (global index, not per-table).
+    pub walked_len: usize,
+}
+
 /// Per-transaction state bundle.
 ///
 /// Holds all mutable state accumulated during a transaction:
@@ -85,6 +110,8 @@ pub struct UniqueGuard {
 /// - **interner_overlay** — new `(key_name → id)` mappings for this tx.
 /// - **counter_deltas** — per-table row-count adjustments.
 /// - **read_set** — SSI read tracking `(table_id, key) → version_seen`.
+/// - **released_unique_cache** — per-table incremental live/released
+///   unique-posting bookkeeping (#1108), keyed by table_token.
 ///
 /// Drop = RAII rollback: all staged state is simply lost, no I/O.
 pub struct TxContext {
@@ -359,6 +386,14 @@ pub struct TxContext {
     /// `RecordKey`-keyed, so recording / releasing a lock passes the key
     /// straight through with no `Bytes` round-trip.
     pub locked_keys: scc::HashMap<(u64, shamir_storage::types::RecordKey), (), THasher>,
+
+    /// #1108: per-table incremental live/released unique-posting cache — see
+    /// [`ReleasedUniqueCache`]'s doc. Populated/refreshed on demand by
+    /// `shamir-engine`'s `released_unique_keys_in_tx` (the only reader/
+    /// writer of this field); empty for txs that never call it (e.g. no
+    /// unique indexes touched — the `has_unique_indexes()` gate at every
+    /// call site keeps this a zero-overhead field otherwise).
+    pub released_unique_cache: TFxMap<u64, ReleasedUniqueCache>,
 }
 
 impl TxContext {
@@ -400,6 +435,7 @@ impl TxContext {
             wound_notify: Arc::new(tokio::sync::Notify::new()),
             implicit: false,
             locked_keys: scc::HashMap::with_hasher(THasher::default()),
+            released_unique_cache: TFxMap::default(),
         }
     }
 

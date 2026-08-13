@@ -273,6 +273,10 @@ harness = false
 name = "p1107_stale_value_gate"
 harness = false
 
+[[bench]]
+name = "p1108_released_unique_growth"
+harness = false
+
 [lib]
 # Doctests are banned project-wide (slow: recompile-per-example). Examples
 # live as illustration; behavioural coverage is in unit/integration tests.
