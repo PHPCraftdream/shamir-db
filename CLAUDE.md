@@ -426,17 +426,43 @@ from another instance as its own justification.
 `shamir-wal/src/segment_set.rs`'s `SegmentSet::inner` (taken on every
 `append_batch` — the WAL group-commit append path). Previously tracked as
 known debt (high call frequency, sanctioned only by a theoretical
-single-writer argument). **Investigated via #1095 (2026-08-13)**: isolated
-measurement (`benches/segment_set_lock.rs`) calls `SegmentSet::append_batch`
-directly from N concurrent tasks, bypassing `WalGroupCommit`'s leader election
-entirely. Results show per-append latency IMPROVING 5× with concurrency
-(n_1: 99µs → n_64: 19.7µs per op) — the lock's own amortized cost drops under
-contention, and the observed latency rise in `wal_append` (n_1 → n_64:
-3.8–5.8× growth across mem/file_buffered) is fully explained by `WalGroupCommit`
-coordination (leader-election CAS + `pending` lock + `Notify`), NOT this mutex.
-The architectural single-writer claim holds: only the group-commit leader ever
-acquires the lock, so production contention is structurally zero. No migration
-warranted — removed from tracked debt.
+single-writer argument). **Investigated via #1095 (2026-08-13), methodology
+corrected via #1109 (2026-08-13):** #1095's original `raw_append/n_*`
+scenario (`benches/segment_set_lock.rs`) spawns N tasks that each call
+`append_batch` **once** and joins them, timing the whole fan-out-and-join
+round trip as one iteration; dividing that by N (as the original write-up
+did, reading "n_1: 99µs → n_64: 19.7µs per op" as the lock getting 5× cheaper
+under contention) is a measurement artifact, not a property of the lock — a
+mutex acquisition cannot get cheaper as contention rises, only pay more wait
+time or stay flat; the falling curve was fixed one-shot `tokio::spawn`/join
+overhead amortized over more real work at higher N, not the lock improving.
+#1109 added a second scenario, `sustained_append/n_*`, where each of the N
+tasks performs 2,000 SEQUENTIAL `append_batch` calls in a loop before the
+one join, so spawn/join overhead is paid once per task and amortized over
+2,000× more real acquisitions; the harness's own `ns/op` for this scenario
+must still be divided by `N * 2000` by hand (see the bench file's doc
+comment) to read true per-append cost. Three independent runs gave a
+consistent shape: n_1 ≈ 48–51µs, n_4/16/64 ≈ 12.5–15.7µs, i.e. flat across
+4→16→64 (no rise, within run-to-run noise) with a real, understood gap at
+n_1 vs. n≥4 — code inspection traced this to `WalSegment::append_batch`'s
+`write_all` running via `spawn_blocking` under its OWN separate
+`file: Mutex` (not `SegmentSet::inner`, which this bench's numbers mostly do
+NOT isolate: `SegmentSet::inner`'s own critical section is just
+`Arc::clone(&g.active)`, held for the pointer-clone only); at n_1 that
+blocking write is fully serial, while at n≥4 multiple `spawn_blocking`
+threads overlap their disk writes, which is an I/O-queueing-depth effect,
+not a mutex-contention effect. Net: the corrected bench does not show
+`SegmentSet::inner` degrading under contention (the end-to-end path stays
+flat 4→64), but it also does not, by itself, prove the mutex specifically is
+cheap — that is established instead by direct inspection (its critical
+section is one `Arc::clone`) plus the PRE-EXISTING architectural
+single-writer argument, which is the actual load-bearing reason this stays
+closed: only the group-commit leader, elected via a single `AtomicBool` CAS
+in `WalGroupCommit`, ever calls into `SegmentSet` in production, so
+production contention on this lock is structurally zero regardless of what
+any artificial multi-caller bench shows. No migration warranted — remains
+removed from tracked debt, on the architectural argument, not the disproven
+"5× cheaper under contention" reading.
 
 `shamir-connect/src/server/session.rs`'s `Session::post_auth_bucket` was
 migrated off `std::sync::Mutex` (#1090, 2026-08-11) to two independent
