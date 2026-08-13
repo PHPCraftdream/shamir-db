@@ -43,6 +43,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
+#[cfg(test)]
+use std::sync::atomic::AtomicUsize;
+
 use scc::HashMap;
 
 use shamir_collections::THasher;
@@ -63,6 +66,10 @@ pub(crate) static REGISTRY: OnceLock<Arc<HashMap<u64, RegistryEntry, THasher>>> 
 
 /// Next unique op-id. `AtomicU64` for lock-free allocation.
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
+
+/// Test-only counter to verify only one watchdog thread is spawned.
+#[cfg(test)]
+pub(crate) static THREAD_SPAWN_COUNT: AtomicUsize = AtomicUsize::new(0);
 
 /// Watchdog thread handle. `OnceLock` ensures we spawn exactly one thread.
 static WATCHDOG_THREAD: OnceLock<std::thread::JoinHandle<()>> = OnceLock::new();
@@ -90,55 +97,58 @@ impl Drop for OpGuard {
 
 /// Initialize the watchdog thread (lazy, called on first registration).
 fn init_watchdog() {
-    let registry = REGISTRY.get_or_init(|| Arc::new(HashMap::with_hasher(THasher::default())));
-    let registry_for_thread = Arc::clone(registry);
+    WATCHDOG_THREAD.get_or_init(|| {
+        // Test-only: increment spawn counter to verify thread creation.
+        #[cfg(test)]
+        THREAD_SPAWN_COUNT.fetch_add(1, Ordering::SeqCst);
 
-    let handle = std::thread::spawn(move || {
-        loop {
-            std::thread::sleep(WATCHDOG_POLL_INTERVAL);
+        let registry = REGISTRY.get_or_init(|| Arc::new(HashMap::with_hasher(THasher::default())));
+        let registry_for_thread = Arc::clone(registry);
 
-            let now = Instant::now();
+        std::thread::spawn(move || {
+            loop {
+                std::thread::sleep(WATCHDOG_POLL_INTERVAL);
 
-            // Scan the registry and log warnings for stuck ops.
-            // Use a Vec to collect IDs to update, then do a second pass.
-            let mut ids_to_update: Vec<u64> = Vec::new();
+                let now = Instant::now();
 
-            registry_for_thread
-                .iter_sync(|id, (alias, started_at, already_warned)| {
-                    let elapsed = now.duration_since(*started_at);
+                // Scan the registry and log warnings for stuck ops.
+                // Use a Vec to collect IDs to update, then do a second pass.
+                let mut ids_to_update: Vec<u64> = Vec::new();
 
-                    if elapsed > WATCHDOG_WARN_THRESHOLD && !*already_warned {
-                        log::warn!(
-                            "batch op '{alias}' still running after {elapsed:?} (exceeds the {WATCHDOG_WARN_THRESHOLD:?} slow-op watchdog threshold)"
-                        );
-                        ids_to_update.push(*id);
-                    }
+                registry_for_thread
+                    .iter_sync(|id, (alias, started_at, already_warned)| {
+                        let elapsed = now.duration_since(*started_at);
 
-                    true // Continue iteration
-                });
+                        if elapsed > WATCHDOG_WARN_THRESHOLD && !*already_warned {
+                            log::warn!(
+                                "batch op '{alias}' still running after {elapsed:?} (exceeds the {WATCHDOG_WARN_THRESHOLD:?} slow-op watchdog threshold)"
+                            );
+                            ids_to_update.push(*id);
+                        }
 
-            // Update the already_warned flag for ops we warned about.
-            for id in ids_to_update {
-                // Use read_sync to check if the entry still exists, then update if needed.
-                let mut update = false;
-                let _ = registry_for_thread.read_sync(&id, |_, entry| {
-                    update = !entry.2;
-                });
-
-                if update {
-                    // Try to update the entry with already_warned = true.
-                    // This is a best-effort CAS-like update.
-                    let _ = registry_for_thread.update_sync(&id, |_, entry| {
-                        entry.2 = true;
-                        true
+                        true // Continue iteration
                     });
+
+                // Update the already_warned flag for ops we warned about.
+                for id in ids_to_update {
+                    // Use read_sync to check if the entry still exists, then update if needed.
+                    let mut update = false;
+                    let _ = registry_for_thread.read_sync(&id, |_, entry| {
+                        update = !entry.2;
+                    });
+
+                    if update {
+                        // Try to update the entry with already_warned = true.
+                        // This is a best-effort CAS-like update.
+                        let _ = registry_for_thread.update_sync(&id, |_, entry| {
+                            entry.2 = true;
+                            true
+                        });
+                    }
                 }
             }
-        }
+        })
     });
-
-    // Ignore the result if another thread beat us to initialization.
-    let _ = WATCHDOG_THREAD.set(handle);
 }
 
 /// Register an op as starting, returning a guard that removes it on drop.

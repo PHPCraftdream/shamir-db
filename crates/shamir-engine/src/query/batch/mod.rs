@@ -169,6 +169,10 @@ pub use shamir_query_types::batch::{
 #[cfg(test)]
 pub(crate) use query_runner::execute_batch_with_permissions;
 
+// Test-only export for watchdog thread-leak regression test (#1105).
+#[cfg(test)]
+pub(crate) use op_watchdog::{register_op_watchdog, REGISTRY, THREAD_SPAWN_COUNT};
+
 // F-40: expose the two FK fail-closed hooks (and the op-kind enum
 // `implicit_tx_isolation_for_fk_parent` takes) so the fail-closed test
 // suite (`tests/fk_fail_closed_tests.rs`) can drive them directly with an

@@ -160,7 +160,52 @@ async fn setup_resolver() -> TestResolver {
 mod tests {
     use super::*;
 
-    use crate::query::batch::op_watchdog::{register_op_watchdog, REGISTRY};
+    use crate::query::batch::{register_op_watchdog, REGISTRY, THREAD_SPAWN_COUNT};
+
+    // ============================================================================
+    // Thread leak regression tests (#1105)
+    // ============================================================================
+
+    /// Regression test for #1105: verify that multiple `register_op_watchdog`
+    /// calls within the same process spawn exactly ONE watchdog thread, not N.
+    ///
+    /// The buggy code (before fix) spawned a new OS thread on EVERY call to
+    /// `init_watchdog()` because `std::thread::spawn` ran before the
+    /// `OnceLock::set` dedup. The fixed code uses `OnceLock::get_or_init` to
+    /// guarantee the spawn closure runs at most once.
+    ///
+    /// This test MUST fail on the buggy code (counter > 1) and pass after the
+    /// fix (counter == 1).
+    #[test]
+    fn watchdog_spawn_count_regression_test() {
+        // Reset the counter for clean test state.
+        // Note: we don't have a public reset API for the static counters,
+        // but since this test runs in its own process (nextest isolation),
+        // we start from zero.
+
+        // Simulate the production usage pattern: register multiple ops in rapid succession.
+        // Each call triggers `init_watchdog()`, but only the first should spawn a thread.
+        let guards: Vec<_> = (0..100)
+            .map(|i| register_op_watchdog(&format!("op_{}", i)))
+            .collect();
+
+        // Drop the guards to clean up registry entries.
+        drop(guards);
+
+        // Wait a moment for any cleanup to complete.
+        std::thread::sleep(Duration::from_millis(100));
+
+        // Verify: exactly ONE thread was spawned, not 100.
+        // The counter is incremented inside the `get_or_init` closure,
+        // which is guaranteed by `OnceLock` to run at most once.
+        let spawn_count = THREAD_SPAWN_COUNT.load(std::sync::atomic::Ordering::SeqCst);
+        assert_eq!(
+            spawn_count, 1,
+            "Expected exactly ONE watchdog thread to be spawned after 100 registration calls, got {}. \
+             If this fails, the thread leak bug (#1105) is NOT fixed.",
+            spawn_count
+        );
+    }
 
     // ============================================================================
     // Bookkeeping tests (from round 1)
