@@ -161,15 +161,21 @@ module.exports = async function ({ client, fixtures, test, assert, assertEq, ass
     });
     assertEq(drop1.results.d.records[0].existed, true);
 
-    // Step 2: re-drop WITHOUT if_exists. The table still exists, so the
-    // server resolves the table but finds no matching index → silently
-    // returns existed:false (does NOT error — see admin_table_index.rs
-    // ~line 508-520: drop_index returns Ok(false), not an error).
-    const drop2 = await client.execute(dbName, {
-      id: 'drop2',
-      queries: { d: hmac.drop_index_op(client, dbName, 'main', 't', 'to_drop') },
-    });
-    assertEq(drop2.results.d.records[0].existed, false);
+    // Step 2: re-drop WITHOUT if_exists. The table still exists but no
+    // index of that name remains in any family → the server errors
+    // (#1078 — fix if_exists asymmetry vs DROP TABLE — see
+    // admin_table_index.rs handle_drop_index: "no index exists in any
+    // family — if_exists is false ... this is a hard error, mirroring
+    // DROP TABLE's semantics").
+    await assertThrows(
+      () =>
+        client.execute(dbName, {
+          id: 'drop2',
+          queries: { d: hmac.drop_index_op(client, dbName, 'main', 't', 'to_drop') },
+        }),
+      (e) => /index_not_found/.test(e.message || ''),
+      'expected index_not_found error'
+    );
 
     // Step 3: re-drop WITH if_exists:true — clean no-op, existed:false.
     const drop3 = await client.execute(dbName, {
