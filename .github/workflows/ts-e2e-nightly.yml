@@ -61,7 +61,7 @@ jobs:
     name: ts client e2e (shamir-client-ts)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
       - uses: dtolnay/rust-toolchain@d0befba8b9ddf874327619e84c39b094edd58b66  # 1.94.0
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32  # v2
       # Produce the release binary `e2e-harness.ts`'s `serverBinPath()` falls
@@ -123,7 +123,7 @@ jobs:
     name: node napi e2e (tests/e2e)
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
       - uses: dtolnay/rust-toolchain@d0befba8b9ddf874327619e84c39b094edd58b66  # 1.94.0
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32  # v2
       # No `cache: npm` here (unlike the `ts-e2e` job above): F-68 cluster B
