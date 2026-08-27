@@ -1,0 +1,54 @@
+# shamir-wal -- Security & crypto boundary
+
+## Summary
+
+`shamir-wal` has **no authentication, HMAC/SCRAM/TLS, or secret-handling surface** (grep confirms: zero crypto deps in `Cargo.toml`, zero `unsafe` blocks, no secret comparisons — hence no timing side-channels). Its entire security-relevant surface is the **recovery-time untrusted-input boundary**: replay of on-disk segment files (`WalSegment::replay_inner` / `repair_torn_tail` frame walkers), envelope decode (`WalEntryV2::decode`, bincode 1.x), sidecar decode (`segment_meta`), and key parse (`WalActiveKey::parse`). Integrity rests solely on **unkeyed CRC32** — adequate against torn writes/bit-rot, transparent to any adversary who can write to the data directory. Parsing is mostly defensive (length checks before slicing, magic/version rejection with direct unit tests), with two robustness gaps: silent truncation of mid-file corruption on the active segment, and length-arithmetic/allocator behavior that assumes a trusted data directory — an assumption the crate never states.
+
+## Findings
+
+### 1. `repair_torn_tail` silently and irreversibly truncates on a mid-file CRC mismatch in the ACTIVE segment
+- **File:line:** `crates/shamir-wal/src/wal_segment.rs:391-393` (break on CRC mismatch), `:402-411` (`set_len(pos)` truncation); the read-side twin at `:546-570`
+- **Severity:** medium
+- **Issue:** The self-heal loop treats a *complete-frame CRC mismatch* identically to a *torn trailing frame*: break + truncate the file back to the last good boundary (`set_len(pos)`), with only a `log::warn`. But a full frame with a bad CRC is bit-rot (or tampering), not a crash tail — this is exactly the distinction the crate itself draws for sealed segments (audit §1.8, `replay_sealed` makes it a loud operator-facing `Err`, with a dedicated regression test `sealed_segment_crc_failure_is_loud_error`). The active segment's open-time path instead **destroys data silently**: every entry after the corrupt byte — including `Synced`-acked, power-loss-durable commits — is deleted from disk with no error surfaced to `SegmentSet::open`'s caller.
+- **Failure scenario:** Bit-rot (failing disk sector) flips one byte in frame 3 of a 500-frame active segment. On next open, `repair_torn_tail` truncates 497 durable frames; the database opens "successfully" and the data is gone permanently — no `Err`, no operator decision, contradicting the crate's own §1.8 philosophy that corrupt-but-complete frames are corruption, not crash tails.
+- **Suggested fix:** In `repair_torn_tail`, only truncate when the damage is genuinely a TAIL condition (`frame_end > buf.len()` — bytes run out mid-frame). A complete frame whose CRC fails should return a loud error (mirroring `replay_sealed`) or, at minimum, only stop replay without mutating the file — leaving the intact prefix replayable and the corruption operator-visible. Add a regression test for the mid-file-CRC-mismatch case (current tests cover only a genuine partial tail and the clean no-op: `wal_segment_poison_tests.rs:48,124`).
+
+### 2. bincode 1.x decodes recovery data with no allocation bounds — small crafted/corrupt frame can OOM the process
+- **File:line:** `crates/shamir-wal/src/wal_entry_v2.rs:240,251` (`bincode::deserialize`); `crates/shamir-wal/Cargo.toml:12` (`bincode = "1.3.3"`); amplified by unbounded `read_to_end` at `wal_segment.rs:527-529,370-374`
+- **Severity:** low
+- **Issue:** bincode 1.x is documented as targeting *trusted* input: collection/`ByteBuf` length prefixes are read as raw `u64`s and used to size allocations before the reader validates that many bytes exist. A frame passes the CRC gate and reaches `WalEntryV2::decode` with an inner length field claiming ~2^60 elements/bytes → huge speculative allocation → abort/OOM at recovery from a ~40-byte file. Separately, `replay_inner`/`repair_torn_tail` `read_to_end` the whole segment file into RAM with no size cap — a legitimately-bounded segment is the rotation threshold (`max_bytes`), but nothing at open validates that a `.wal` file on disk respects it.
+- **Failure scenario:** Corrupt or planted WAL file with a forged (CRC32 is unkeyed — trivially recomputed) bincode body containing `ops`/`body` with a `u64` length of `0x0100_0000_0000_0000`. Recovery attempts a multi-exabyte `Vec` allocation and the process aborts — a DoS on database open. The same holds for an accidentally giant segment (e.g. after a rotation bug) that `read_to_end` swallows whole.
+- **Suggested fix:** Bound the trust: (a) cap per-frame `len` against a max-entry-size tunable before slicing/decoding; (b) prefer a deserializer with a recursion/byte limit on this boundary (bincode 2 `with_limit`, or postcard) — the envelope already carries a version byte so a bounded decode path can be gated on it; (c) check file `metadata().len()` against a segment-size bound before `read_to_end`. A small `cargo-fuzz` target over `WalEntryV2::decode` + the frame walker would lock this boundary in cheaply.
+
+### 3. Unauthenticated WAL replay is an injection surface; the "data directory is trusted" assumption is implicit and undocumented
+- **File:line:** `crates/shamir-wal/src/segment_set.rs:74-77,100-104,128-129` (`parse_seg_seq` accepts any numeric `.wal`; highest seq becomes the append tail); `crates/shamir-wal/src/wal_entry_v2.rs:49-110` (replayed `Put`/`Delete`/`InternerOverlayMerge`/`CounterDelta` ops); `crates/shamir-wal/src/segment_set.rs:470-477` (truncation trusts sidecar/filename-derived `max_version`)
+- **Severity:** low
+- **Issue:** Recovery replays whatever `NNNNNNNN.wal` files exist in the directory — there is no manifest, seq-contiguity check, or per-entry MAC binding entries to the repo. `WalOpV2::Put.body` is *arbitrary bytes replayed verbatim into data_store*; a planted or edited segment (payload + recomputed CRC32 — the sole integrity check, and unkeyed) silently injects, deletes, or rewrites records, and a forged `.meta` sidecar can drive `truncate_below` to delete segments whose data is *not* yet durable in history. This is sound **iff** the data directory is writable only by the DB's own OS user — but that trust boundary is nowhere stated in the crate or module docs, and CLAUDE.md's Fx-hash pillar already leans on the same "we don't accept untrusted inputs here" assumption without connecting it to the WAL.
+- **Failure scenario:** Multi-user host or shared/network-mounted WAL directory (NFS, container volume shared between services): any principal with write access to the directory owns the database's post-crash state — silent record injection/erasure with zero tamper evidence.
+- **Suggested fix:** Document the threat boundary explicitly in `lib.rs` / `segment_set.rs` ("WAL files are trusted input; directory permissions are the security boundary"). If WAL storage is ever exposed to weaker trust (shared volumes, backups restored from untrusted sources), add a keyed checksum (e.g. HMAC-SHA256 over each frame, keyed by a per-repo secret held outside the WAL dir) — naturally done at the already-planned WAL format-version bump.
+
+### 4. Frame-length arithmetic can wrap on 32-bit targets → panic on crafted 4-byte header
+- **File:line:** `crates/shamir-wal/src/wal_segment.rs:532-539` (`replay_inner`) and `:377-384` (`repair_torn_tail`)
+- **Severity:** low
+- **Issue:** `let len = u32::from_le_bytes(..) as usize; let frame_end = pos + 4 + len + 4;` — on a target where `usize == u32`, a header of `0xFFFF_FFFF` wraps `frame_end` to a small value, the `frame_end > buf.len()` guard passes, and `&buf[pos + 4..pos + 4 + len]` panics (`slice index starts at 4 but ends at 3`). Untrusted on-disk input causing a library panic violates the CLAUDE.md error rule ("avoid `panic!` outside invariant violations"). Not reachable on the production 64-bit targets (`pos` ≤ file size, `len` ≤ 4 GiB, no `usize` wrap) — hence low — but the crate is a library and the walker runs on raw file bytes.
+- **Failure scenario:** 32-bit build opens a segment whose first 4 bytes are `FF FF FF FF`: recovery panics instead of returning `Err`/stopping at the torn tail.
+- **Suggested fix:** Compute with checked/saturating arithmetic (`pos.checked_add(4 + 4).and_then(|x| x.checked_add(len))`) and treat overflow as a torn tail (`break`). The fuzz target from finding 2 would catch this class permanently.
+
+### 5. A single CRC-valid-but-undecodable frame aborts the entire recovery (version skew == corruption)
+- **File:line:** `crates/shamir-wal/src/wal_segment.rs:572` (`out.push(WalEntryV2::decode(payload)?)` — the `?` aborts the whole `SegmentSet::replay`)
+- **Severity:** nit
+- **Issue:** Fail-closed on undecodable data is the right instinct (and loudly so), but the error conflates corruption with **version skew**: an entry written by a newer build (same envelope version byte, evolved bincode schema) makes the entire database unopenable after a downgrade, with an `Internal` error that doesn't name the skew. The envelope exists precisely to dispatch migrations (`wal_entry_v2.rs:20-23`) yet an in-version schema change has no distinct signal.
+- **Suggested fix:** Distinguish decode-failure kinds (unsupported/foreign payload vs. truncation) in the error, and consider bumping `WAL_V2_VERSION` on any in-body schema change as a documented rule so skew is at least self-identifying.
+
+### 6. Error strings embed absolute filesystem paths
+- **File:line:** e.g. `crates/shamir-wal/src/wal_segment.rs:155,201-204,519-523,556-563`; `segment_set.rs:92,512`
+- **Severity:** nit
+- **Issue:** `DbError::Storage(format!("... {path:?} ..."))` bakes server-side absolute paths into error text. Whether this crosses the network depends on how `shamir-server`/`shamir-connect` map `DbError` onto wire responses (out of this crate's view); if any path reaches a client, it discloses host directory layout.
+- **Suggested fix:** Keep paths in `tracing`/`log` output; return path-free (or basename-only) messages in the `DbError` variants that can reach callers outside the process.
+
+## Positive observations (for balance)
+
+- `segment_meta::decode` (`segment_meta.rs:138-155`) is exemplary untrusted-input parsing: exact-length check → magic → version → CRC, all before any field extraction; no panic path; every rejection branch unit-tested.
+- `WalActiveKey::parse` (`active_key.rs:49-56`) validates length + prefix before slicing; `WalEntryV2::decode` rejects short/bad-magic/unknown-version with direct tests (`wal_entry_v2_tests.rs:69-87`).
+- The sealed-vs-active and startup-vs-live `PermissionDenied`/CRC distinctions (`replay_sealed*`, `replay_at_startup`, audit §1.8/§2.4) show deliberate, tested untrusted-input hardening — finding 1 is the one place the same rigor was not carried through.
+- No `unsafe`, no secret-dependent branching, no injection into command/SQL-style interpreters anywhere in the crate.

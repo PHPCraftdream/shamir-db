@@ -1,0 +1,9 @@
+# shamir-collections — Concurrency & lock-free invariants
+
+## Summary
+
+Reviewed in full: `crates/shamir-collections/Cargo.toml` and `src/lib.rs` (64 lines) — these are the crate's only files; there is no `tests/`, `benches/`, or submodule tree. The crate is a pure type-alias/constructor leaf over `IndexMap` and std collections: it contains zero locks (no `std::sync::Mutex`/`RwLock`, no `parking_lot` — neither imported nor present in `[dependencies]`, which lists only `indexmap` and `rustc-hash`), zero `.await`s, and zero `scc`/`dashmap` usages, so none of the lens failure modes (hot-path lock, lock across `.await`, O(N) `scc::*::len()` without ack) can occur. Against the five pillars it is actively compliant rather than merely silent: `THasher = BuildHasherDefault<FxHasher>` pins every exported structure at the type level (`TMap`/`TSet`/`TFxMap`/`TFxSet` hard-code `THasher` as the hasher parameter, so `RandomState` is unreachable through this API) and at every constructor (`with_hasher(THasher::default())` / `with_capacity_and_hasher` — the explicitly-hashed forms clippy.toml whitelists), while all helpers are O(1)/O(capacity) preallocations with no hidden O(N) work. Two notes checked and cleared: (a) the crate-level `#![allow(clippy::disallowed_types)]` (`lib.rs:9`) is not a lint-masking violation — `clippy.toml` (lines 39–40) documents it verbatim as "The ONE sanctioned allow-site" for the banned std collection types, because those raw types appear only inside aliases that immediately inject `THasher`; (b) the absence of `scc`/`DashMap` convenience constructors from the Fx-hashing home crate is consistent with its documented design intent ("dependency-light leaf … guest-facing"), not a pillar gap. No tests exist under the crate, but there is no concurrency surface here whose behavior would need testing; general test-organization judgment is a sibling reviewer's theme.
+
+## Findings
+
+No findings for this theme.
