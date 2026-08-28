@@ -82,6 +82,114 @@ pub fn make_test_config(temp: &TempDir, addr: &str) -> Config {
     }
 }
 
+/// Local-IPC listener address for `kind: unix` test configs. On Unix, a
+/// socket path inside `temp`. On Windows, a Named Pipe name — unique per
+/// call via `temp`'s own randomly-generated directory name (there is no
+/// filesystem meaning to a pipe name on Windows, so `temp` is reused
+/// purely as a source of per-test uniqueness, not a real path).
+pub fn ipc_test_addr(temp: &TempDir) -> String {
+    #[cfg(unix)]
+    {
+        temp.path()
+            .join("shamir-test.sock")
+            .to_string_lossy()
+            .into_owned()
+    }
+    #[cfg(windows)]
+    {
+        let tag = temp
+            .path()
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("shamir-test");
+        format!(r"\\.\pipe\{tag}")
+    }
+}
+
+/// Build a minimal single-`kind: unix`-listener `Config` rooted at `temp`.
+pub fn make_ipc_test_config(temp: &TempDir, addr: &str) -> Config {
+    Config {
+        listeners: vec![ListenerConfig {
+            kind: ListenerKind::Unix,
+            addr: addr.to_string(),
+            profile: ProfileKind::Plain,
+            path: None,
+            kdf_override: None,
+            browser_origin_allowlist: vec![],
+        }],
+        ..make_test_config(temp, "127.0.0.1:0")
+    }
+}
+
+/// Spawn a fresh server with a single `kind: unix` local-IPC listener and
+/// an `admin` superuser bootstrapped to `password`. Returns the
+/// [`ServerHandle`] whose `first_ipc_path()` exposes the bound socket
+/// path / pipe name.
+///
+/// The caller owns `temp` and must keep it alive for the duration of
+/// the test — dropping it deletes the data dir (and, on Unix, the socket
+/// file) out from under the running server.
+pub async fn spawn_ipc_with_password(
+    temp: &TempDir,
+    admin_password: &[u8],
+    addr: &str,
+) -> ServerHandle {
+    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+    let config = make_ipc_test_config(temp, addr);
+    let bootstrap = BootstrapMode::Password {
+        username: "admin".into(),
+        password: Zeroizing::new(admin_password.to_vec()),
+    };
+    ServerLauncher { config, bootstrap }
+        .launch()
+        .await
+        .expect("launcher boot")
+}
+
+/// Build a minimal single-TCP-listener `Config` with `profile: plain`
+/// (no TLS, `binding_mode = 0x00`) rooted at `temp`. Per TRANSPORT_TCP
+/// §2.2, `Config::validate` only accepts a `plain` profile on a loopback
+/// `addr` — pass e.g. `"127.0.0.1:0"`.
+pub fn make_plain_test_config(temp: &TempDir, addr: &str) -> Config {
+    Config {
+        listeners: vec![ListenerConfig {
+            kind: ListenerKind::Tcp,
+            addr: addr.to_string(),
+            profile: ProfileKind::Plain,
+            path: None,
+            kdf_override: None,
+            browser_origin_allowlist: vec![],
+        }],
+        ..make_test_config(temp, addr)
+    }
+}
+
+/// Spawn a fresh server with a single `profile: plain` TCP listener and
+/// an `admin` superuser bootstrapped to `password`. Returns the
+/// [`ServerHandle`] whose `first_tls_exporter_addr()` exposes the bound
+/// port (the name is generic despite this listener being plain — it just
+/// returns the first bound address).
+///
+/// The caller owns `temp` and must keep it alive for the duration of
+/// the test — dropping it deletes the data dir out from under the
+/// running server.
+pub async fn spawn_plain_with_password(
+    temp: &TempDir,
+    admin_password: &[u8],
+    addr: &str,
+) -> ServerHandle {
+    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+    let config = make_plain_test_config(temp, addr);
+    let bootstrap = BootstrapMode::Password {
+        username: "admin".into(),
+        password: Zeroizing::new(admin_password.to_vec()),
+    };
+    ServerLauncher { config, bootstrap }
+        .launch()
+        .await
+        .expect("launcher boot")
+}
+
 /// Spawn a fresh server with an `admin` superuser bootstrapped to
 /// `password`. Returns the [`ServerHandle`] handle whose
 /// `first_tls_exporter_addr()` exposes the bound port.

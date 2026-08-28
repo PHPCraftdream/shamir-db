@@ -1,0 +1,42 @@
+[package]
+name = "shamir-transport-ipc"
+version = "0.1.0-alpha.1"
+publish = false
+edition = "2021"
+description = "ShamirDB local-IPC transport binding — Unix domain sockets (POSIX) / Windows Named Pipes behind one platform-agnostic API."
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/PHPCraftdream/shamir-db"
+
+[dependencies]
+# Async runtime — `net` covers both `tokio::net::UnixListener` (unix) and
+# `tokio::net::windows::named_pipe` (windows); `full` matches the convention
+# already used by `shamir-transport-tcp`.
+tokio = { version = "1", features = ["full"] }
+
+# Errors
+thiserror = "2.0"
+
+[target.'cfg(windows)'.dependencies]
+# Raw Win32 SECURITY_ATTRIBUTES / SDDL construction for owner-only named-pipe
+# ACLs — tokio's `ServerOptions::create_with_security_attributes_raw` accepts
+# only a raw pointer, no safe builder. Version pinned to the one already
+# resolved elsewhere in the workspace's dependency graph (see Cargo.lock) so
+# this doesn't introduce a second distinct `windows-sys` version.
+windows-sys = { version = "0.60", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Security_Authorization",
+    "Win32_System_Memory",
+    "Win32_System_Threading",
+] }
+
+[dev-dependencies]
+tempfile = "3"
+
+[lib]
+# Doctests are banned project-wide (slow: recompile-per-example). Examples
+# live as illustration; behavioural coverage is in unit/integration tests.
+doctest = false
+
+[lints]
+workspace = true

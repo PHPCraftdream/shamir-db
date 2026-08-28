@@ -38,7 +38,7 @@ mod wire_frames;
 #[cfg(test)]
 mod tests;
 
-pub use client::{Client, ConnectOptions, ResumeOptions};
+pub use client::{Client, ConnectLocalOptions, ConnectOptions, ResumeOptions};
 pub use cursor_stream::CursorStream;
 pub use error::ClientError;
 pub use interner_cache::{FieldMap, InternerCacheRegistry};

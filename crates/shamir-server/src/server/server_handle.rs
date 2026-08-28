@@ -29,9 +29,16 @@ pub struct ReplSupervisorTask {
 /// Owner of the runtime state of a launched server.
 pub struct ServerHandle {
     /// Addresses the server actually bound, in the same order as
-    /// `config.listeners`. `None` entries correspond to skipped listeners
-    /// (WS / plain are not yet supported by this MVP boot path).
+    /// `config.listeners`. `None` entries correspond to either a skipped
+    /// listener (an unsupported `(kind, profile)` combination — see the
+    /// `AcceptPath` match in `server_launcher.rs`) OR a `kind: unix`
+    /// listener, which has no `SocketAddr` to report — see
+    /// [`Self::bound_ipc_paths`] for that case.
     pub bound_addrs: Vec<Option<SocketAddr>>,
+    /// Companion to [`Self::bound_addrs`], same length/order: `Some(path)`
+    /// for every `kind: unix` listener (the filesystem path / pipe name it
+    /// bound to), `None` for every other listener.
+    pub bound_ipc_paths: Vec<Option<String>>,
     /// Per-listener accept-loop join handles.
     pub(super) listener_tasks: Vec<JoinHandle<()>>,
     /// Background task scheduler.
@@ -158,6 +165,14 @@ impl ServerHandle {
     /// integration tests that just want "where do I connect?".
     pub fn first_tls_exporter_addr(&self) -> Option<SocketAddr> {
         self.bound_addrs.iter().filter_map(|a| *a).next()
+    }
+
+    /// Returns the first bound local-IPC path (Unix socket path / Windows
+    /// pipe name) — the `bound_ipc_paths` analogue of
+    /// [`Self::first_tls_exporter_addr`], for tests that just want "where
+    /// do I connect for the `kind: unix` listener?".
+    pub fn first_ipc_path(&self) -> Option<&str> {
+        self.bound_ipc_paths.iter().find_map(|p| p.as_deref())
     }
 
     /// Whether the experimental online storage-migration API

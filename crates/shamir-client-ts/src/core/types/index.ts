@@ -37,7 +37,7 @@ export type {
   ExplainPlan,
 } from './query.js';
 
-export type { ConnectOptions, ResumeOptions } from './connection.js';
+export type { ConnectOptions, ConnectLocalOptions, ResumeOptions } from './connection.js';
 
 export type {
   WireValue,

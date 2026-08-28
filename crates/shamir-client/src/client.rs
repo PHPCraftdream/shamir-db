@@ -11,19 +11,23 @@
 
 use std::cell::RefCell;
 use std::net::SocketAddr;
+use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
+use std::task::{Context, Poll};
 
 use rustls::crypto::aws_lc_rs::default_provider;
 use rustls::pki_types::ServerName;
 use shamir_collections::TFxMap;
-use tokio::io::{split, AsyncWriteExt, WriteHalf};
+use tokio::io::{split, AsyncWrite, AsyncWriteExt, WriteHalf};
 use tokio::net::TcpStream;
 use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
 use tokio_rustls::client::TlsStream;
 use tokio_rustls::TlsConnector;
 use zeroize::Zeroizing;
+
+use shamir_transport_ipc::IpcClientStream;
 
 use shamir_connect::client::handshake::{HandshakeBuilder, ServerAuthOk, ServerChallenge};
 use shamir_connect::common::envelope::{ErrorEnvelope, RequestEnvelope, ResponseEnvelope};
@@ -104,6 +108,75 @@ pub struct ResumeOptions {
     pub pinned_hash: [u8; 32],
 }
 
+/// Connection parameters for [`Client::connect_local`] — local IPC
+/// transport (Unix domain socket / Windows Named Pipe), spec
+/// TRANSPORT_UNIX.md. No TLS, no `server_name`/CA — the OS-level access
+/// boundary (file permissions / DACL, enforced by `shamir-transport-ipc`
+/// on the SERVER side) replaces transport encryption; the Ed25519 identity
+/// TOFU-pin dance still applies exactly as it does for [`ConnectOptions`],
+/// since that is layered on SCRAM, not on TLS.
+pub struct ConnectLocalOptions {
+    /// Local endpoint — a filesystem path (Unix) or a Named Pipe name
+    /// (Windows, e.g. `\\.\pipe\shamir-db`). Callers don't branch on OS:
+    /// `shamir_transport_ipc::connect` resolves the same string
+    /// platform-appropriately.
+    pub addr: String,
+    /// Username (raw — will be NFC + UsernameCaseMapped normalised).
+    pub username: String,
+    /// Plaintext password. Zeroized after handshake completes.
+    pub password: Zeroizing<Vec<u8>>,
+    /// Trust-on-first-use — see [`ConnectOptions::accept_new_host`].
+    pub accept_new_host: bool,
+    /// Pre-pinned `SHA256(server_ed25519_pub_key)` — see
+    /// [`ConnectOptions::trusted_pin`].
+    pub trusted_pin: Option<[u8; 32]>,
+    /// Deadline for establishing the underlying IPC connection — see
+    /// [`ConnectOptions::connect_timeout`].
+    pub connect_timeout: Option<std::time::Duration>,
+    /// Deadline for a single request/response round-trip — see
+    /// [`ConnectOptions::request_timeout`].
+    pub request_timeout: Option<std::time::Duration>,
+}
+
+/// [`Client`]'s write half, over whichever transport it connected with.
+/// `Client` itself stays a single concrete type regardless of transport —
+/// only this enum (and the analogous, but unnamed, generic `R` in
+/// `reader_task`) varies. `AsyncWrite` is implemented by delegation to
+/// the active variant; every existing call site (`write_frame(&mut
+/// *guard, ...)`, `AsyncWriteExt::shutdown(&mut *guard)`) is already
+/// generic over `W: AsyncWrite`, so none of them needed to change.
+pub(crate) enum WriteSink {
+    Tls(WriteHalf<TlsStream<TcpStream>>),
+    Ipc(WriteHalf<IpcClientStream>),
+}
+
+impl AsyncWrite for WriteSink {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<std::io::Result<usize>> {
+        match self.get_mut() {
+            WriteSink::Tls(w) => Pin::new(w).poll_write(cx, buf),
+            WriteSink::Ipc(w) => Pin::new(w).poll_write(cx, buf),
+        }
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        match self.get_mut() {
+            WriteSink::Tls(w) => Pin::new(w).poll_flush(cx),
+            WriteSink::Ipc(w) => Pin::new(w).poll_flush(cx),
+        }
+    }
+
+    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        match self.get_mut() {
+            WriteSink::Tls(w) => Pin::new(w).poll_shutdown(cx),
+            WriteSink::Ipc(w) => Pin::new(w).poll_shutdown(cx),
+        }
+    }
+}
+
 /// Result of a demux decode: either a response payload or a transport-level
 /// error string, both tagged with the correlation id.
 enum DemuxResult {
@@ -149,6 +222,22 @@ pub(crate) async fn connect_tcp(
     match timeout {
         None => Ok(TcpStream::connect(addr).await?),
         Some(d) => match tokio::time::timeout(d, TcpStream::connect(addr)).await {
+            Ok(res) => Ok(res?),
+            Err(_elapsed) => Err(ClientError::ConnectTimeout(d)),
+        },
+    }
+}
+
+/// Establish the underlying local-IPC connection (Unix domain socket /
+/// Windows Named Pipe), optionally bounded by a connect deadline. Mirrors
+/// [`connect_tcp`] — see its docs for the `timeout` semantics.
+pub(crate) async fn connect_ipc(
+    addr: &str,
+    timeout: Option<std::time::Duration>,
+) -> Result<IpcClientStream, ClientError> {
+    match timeout {
+        None => Ok(shamir_transport_ipc::connect(addr).await?),
+        Some(d) => match tokio::time::timeout(d, shamir_transport_ipc::connect(addr)).await {
             Ok(res) => Ok(res?),
             Err(_elapsed) => Err(ClientError::ConnectTimeout(d)),
         },
@@ -338,7 +427,7 @@ pub(crate) async fn reader_task<R>(
 /// **before** writing to the socket (avoiding a race with a very fast server),
 /// then awaits its own channel independently.
 pub struct Client {
-    write: tokio::sync::Mutex<WriteHalf<TlsStream<TcpStream>>>,
+    write: tokio::sync::Mutex<WriteSink>,
     session_id: [u8; 32],
     pinned_hash: [u8; 32],
     expires_at_ns: u64,
@@ -557,7 +646,192 @@ impl Client {
         ));
 
         Ok(Self {
-            write: tokio::sync::Mutex::new(w),
+            write: tokio::sync::Mutex::new(WriteSink::Tls(w)),
+            session_id: success.session_id,
+            pinned_hash,
+            expires_at_ns: success.expires_at_ns,
+            resumption_ticket: resumption_ticket.map(Zeroizing::new),
+            resumption_expires_at_ns,
+            next_request_id: AtomicU32::new(1),
+            pending,
+            subscriptions,
+            early_buffer,
+            closed,
+            reader_handle: Some(reader_handle),
+            interner_cache: Arc::new(InternerCacheRegistry::new()),
+            server_query_version: AtomicU8::new(ok_wire.server_query_version),
+            request_timeout: opts.request_timeout,
+        })
+    }
+
+    /// Run the full IPC→SCRAM handshake (no TLS) over a local Unix domain
+    /// socket / Windows Named Pipe and return a ready client. Mirrors
+    /// [`Client::connect`] step for step — same SCRAM flow, same
+    /// `auth_ok`/resumption-ticket/TOFU-pin handling — only the transport
+    /// setup and the `transport_kind`/`binding_mode` fed to
+    /// `HandshakeBuilder` differ (spec TRANSPORT_UNIX.md: `binding_mode =
+    /// 0x00`, zeroed channel binding — no `.tls_exporter(...)` call needed,
+    /// the builder's default is already all-zeros).
+    pub async fn connect_local(opts: ConnectLocalOptions) -> Result<Self, ClientError> {
+        let username = NormalizedUsername::from_raw(&opts.username)
+            .map_err(|e| ClientError::InvalidUsername(e.to_string()))?;
+
+        // ---- IPC connect (no TLS) ----
+        let stream = connect_ipc(&opts.addr, opts.connect_timeout).await?;
+
+        // ---- SCRAM ----
+        let mut hb = HandshakeBuilder::new(username, TransportKind::Unix, BindingMode::None);
+        hb = match opts.trusted_pin {
+            Some(pin) => hb.pinned_hash(pin),
+            None => hb.accept_new_host(opts.accept_new_host),
+        };
+        let mut hs = hb
+            .build()
+            .map_err(|e| ClientError::Handshake(e.to_string()))?;
+
+        let (mut r, mut w) = split(stream);
+
+        // Step 1: auth_init
+        let init = hs.auth_init();
+        let init_wire = WireAuthInit {
+            user: init.user,
+            client_nonce: init.client_nonce.to_vec(),
+            binding_mode: init.binding_mode,
+            version: init.version,
+        };
+        write_frame(&mut w, &rmp_serde::to_vec(&init_wire)?)
+            .await
+            .map_err(|e| ClientError::Transport(format!("send auth_init: {e}")))?;
+
+        // Step 2: challenge
+        let ch_bytes = read_frame(&mut r, MAX_FRAME_SIZE_DEFAULT)
+            .await
+            .map_err(|e| ClientError::Transport(format!("read challenge: {e}")))?;
+        let ch_wire: WireChallenge = rmp_serde::from_slice(&ch_bytes)?;
+        let salt: [u8; 16] = ch_wire
+            .salt
+            .as_slice()
+            .try_into()
+            .map_err(|_| ClientError::Protocol(format!("salt size {}", ch_wire.salt.len())))?;
+        let server_nonce: [u8; 32] = ch_wire.server_nonce.as_slice().try_into().map_err(|_| {
+            ClientError::Protocol(format!("server_nonce size {}", ch_wire.server_nonce.len()))
+        })?;
+        let challenge = ServerChallenge {
+            salt,
+            kdf_params: KdfParams {
+                memory_kb: ch_wire.memory_kb,
+                time: ch_wire.time,
+                parallelism: ch_wire.parallelism,
+                argon2_version: ch_wire.argon2_version,
+            },
+            server_nonce,
+        };
+
+        // Step 3: derive proof (Argon2id — spawn_blocking, see `connect`).
+        let mut password_buf = Zeroizing::new(opts.password.to_vec());
+        let challenge_clone = challenge.clone();
+        let (hs_ret, result) = tokio::task::spawn_blocking(move || {
+            let res = hs.process_challenge(&challenge_clone, &mut password_buf);
+            (hs, res)
+        })
+        .await
+        .map_err(|e| ClientError::Handshake(format!("Argon2 spawn_blocking: {e}")))?;
+        hs = hs_ret;
+        let (proof, derived, auth_message) =
+            result.map_err(|e| ClientError::Handshake(e.to_string()))?;
+
+        // Step 4: send proof
+        let proof_wire = WireClientProof {
+            client_proof: proof.to_vec(),
+        };
+        write_frame(&mut w, &rmp_serde::to_vec(&proof_wire)?)
+            .await
+            .map_err(|e| ClientError::Transport(format!("send proof: {e}")))?;
+
+        // Step 5: auth_ok
+        let ok_bytes = read_frame(&mut r, MAX_FRAME_SIZE_DEFAULT)
+            .await
+            .map_err(|e| ClientError::Transport(format!("read auth_ok: {e}")))?;
+        let ok_wire: WireAuthOk = rmp_serde::from_slice(&ok_bytes)?;
+
+        let server_signature: [u8; 32] = ok_wire
+            .server_signature
+            .as_slice()
+            .try_into()
+            .map_err(|_| ClientError::Protocol("server_signature size".into()))?;
+        let server_pub_key: [u8; 32] = ok_wire
+            .server_pub_key
+            .as_slice()
+            .try_into()
+            .map_err(|_| ClientError::Protocol("server_pub_key size".into()))?;
+        let identity_sig: [u8; 64] = ok_wire
+            .identity_sig
+            .as_slice()
+            .try_into()
+            .map_err(|_| ClientError::Protocol("identity_sig size".into()))?;
+        let session_id: [u8; 32] = ok_wire
+            .session_id
+            .as_slice()
+            .try_into()
+            .map_err(|_| ClientError::Protocol("session_id size".into()))?;
+
+        let resumption_ticket = if ok_wire.resumption_ticket.is_empty() {
+            None
+        } else {
+            Some(ok_wire.resumption_ticket.clone())
+        };
+        let resumption_expires_at_ns = if ok_wire.resumption_expires_at_ns > 0 {
+            Some(ok_wire.resumption_expires_at_ns)
+        } else {
+            None
+        };
+
+        let auth_ok = ServerAuthOk {
+            server_signature,
+            server_pub_key,
+            identity_sig,
+            session_id,
+            expires_at_ns: ok_wire.expires_at_ns,
+            resumption_ticket: resumption_ticket.clone(),
+            resumption_expires_at_ns,
+            rotation_in_progress: None,
+            kdf_upgrade_required: None,
+        };
+
+        let pin_capture: Arc<StdMutex<Option<[u8; 32]>>> =
+            Arc::new(StdMutex::new(opts.trusted_pin));
+        let pin_for_cb = pin_capture.clone();
+
+        let success = hs
+            .process_auth_ok(&auth_ok, &derived, &auth_message, |pin| {
+                let mut guard = pin_for_cb
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                *guard = Some(*pin);
+            })
+            .map_err(|e| ClientError::Handshake(e.to_string()))?;
+
+        let pinned_hash = pin_capture
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .expect("either trusted_pin pre-set or TOFU callback fired");
+
+        // ---- Spawn background reader ----
+        let pending: PendingMap = Arc::new(StdMutex::new(TFxMap::default()));
+        let subscriptions: SubscriptionMap = Arc::new(StdMutex::new(TFxMap::default()));
+        let early_buffer: EarlyBuffer = Arc::new(StdMutex::new(TFxMap::default()));
+        let closed = Arc::new(AtomicBool::new(false));
+
+        let reader_handle = tokio::spawn(reader_task(
+            r,
+            pending.clone(),
+            closed.clone(),
+            subscriptions.clone(),
+            early_buffer.clone(),
+        ));
+
+        Ok(Self {
+            write: tokio::sync::Mutex::new(WriteSink::Ipc(w)),
             session_id: success.session_id,
             pinned_hash,
             expires_at_ns: success.expires_at_ns,
@@ -658,7 +932,7 @@ impl Client {
         ));
 
         Ok(Self {
-            write: tokio::sync::Mutex::new(w),
+            write: tokio::sync::Mutex::new(WriteSink::Tls(w)),
             session_id,
             pinned_hash: opts.pinned_hash,
             expires_at_ns: ok_wire.expires_at_ns,

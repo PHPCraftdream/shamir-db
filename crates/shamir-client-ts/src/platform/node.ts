@@ -5,9 +5,17 @@
  *   - node:crypto   → hmacSha256 / sha256 / randomBytes / timingSafeEqual
  *   - argon2-browser → argon2id (works in Node via WASM)
  *   - ws            → openSocket
+ *
+ * `openIpcSocket` (below `NodePlatform`) is a Node-only ADDITION to this
+ * file, not part of the `Platform` interface — local IPC (Unix domain
+ * socket / Windows Named Pipe) has no browser equivalent at all, so it
+ * can't be a `Platform` method the way `openSocket` is. It is consumed
+ * directly by `core/client.ts`'s `connectLocal`, and only ever imported
+ * from `src/index.ts` (the Node entry point) — never from `src/browser.ts`.
  */
 
 import { createHash, createHmac, timingSafeEqual, randomBytes } from 'node:crypto';
+import { createConnection, type Socket as NetSocket } from 'node:net';
 import WebSocket from 'ws';
 import argon2 from 'argon2-browser';
 import type { Platform, Socket, Argon2Params } from '../core/platform.js';
@@ -125,4 +133,108 @@ export const NodePlatform: Platform = {
       ws.once('error', onError);
     });
   },
+
+  openIpcSocket,
 };
+
+/**
+ * `Socket` adapter over a raw `node:net` connection (Unix domain socket on
+ * POSIX, Windows Named Pipe when `path` is a `\\.\pipe\...` name — Node's
+ * `net` module dispatches to the right OS primitive itself; no separate
+ * package or branch needed here).
+ *
+ * Unlike WebSocket (message-framed — one `onMessage` call already equals
+ * one complete application message), a raw `net.Socket` is an unbounded
+ * byte stream: `'data'` events can deliver a partial frame, multiple
+ * frames, or a frame split across two events. This class buffers and
+ * re-assembles `[u32_be length][payload]` records itself and delivers the
+ * FULL record (length prefix included) per `onMessage` call — matching
+ * exactly what `core/framing.ts`'s `WsFramer.onBinary` already expects
+ * (it re-parses/validates that same 4-byte prefix). `WsFramer` itself
+ * needs zero changes to work over this socket.
+ */
+export class NodeIpcSocket implements Socket {
+  private readonly socket: NetSocket;
+  private readonly messageHandlers: Array<(data: Uint8Array) => void> = [];
+  private closeHandlers: Array<(err?: Error) => void> = [];
+  private closeFired = false;
+  private buffer: Buffer = Buffer.alloc(0);
+
+  constructor(socket: NetSocket) {
+    this.socket = socket;
+    socket.on('data', (chunk: Buffer) => {
+      this.buffer = this.buffer.length === 0 ? chunk : Buffer.concat([this.buffer, chunk]);
+      this.drainFrames();
+    });
+    socket.on('close', () => {
+      if (this.closeFired) return;
+      this.closeFired = true;
+      for (const h of this.closeHandlers) h(undefined);
+    });
+    socket.on('error', (err: Error) => {
+      if (this.closeFired) return;
+      this.closeFired = true;
+      for (const h of this.closeHandlers) h(err);
+    });
+  }
+
+  /** Extract every complete `[u32_be length][payload]` record currently
+   * buffered, delivering each (length prefix included) to the message
+   * handlers, and leave any trailing partial record in `this.buffer` for
+   * the next `'data'` event. */
+  private drainFrames(): void {
+    for (;;) {
+      if (this.buffer.length < 4) return;
+      const declared = this.buffer.readUInt32BE(0);
+      const total = 4 + declared;
+      if (this.buffer.length < total) return;
+      // `new Uint8Array(typedArray)` copies — the slice below aliases
+      // `this.buffer`'s backing store, which is about to be reassigned.
+      const frame = new Uint8Array(this.buffer.subarray(0, total));
+      this.buffer = this.buffer.subarray(total);
+      for (const h of this.messageHandlers) h(frame);
+    }
+  }
+
+  send(data: Uint8Array): void {
+    this.socket.write(data);
+  }
+
+  onMessage(handler: (data: Uint8Array) => void): void {
+    this.messageHandlers.push(handler);
+  }
+
+  onClose(handler: (err?: Error) => void): void {
+    this.closeHandlers.push(handler);
+  }
+
+  close(): Promise<void> {
+    return new Promise((resolve) => {
+      if (this.socket.destroyed) {
+        resolve();
+        return;
+      }
+      this.socket.once('close', () => resolve());
+      this.socket.end();
+    });
+  }
+}
+
+/**
+ * Open a local-IPC connection: `path` is a filesystem path on POSIX or a
+ * `\\.\pipe\name` Named Pipe name on Windows — same call, no branching by
+ * the caller. Node-only; there is no browser equivalent (see the module
+ * doc comment above).
+ */
+export async function openIpcSocket(path: string): Promise<Socket> {
+  return new Promise((resolve, reject) => {
+    const socket = createConnection({ path }, () => {
+      socket.off('error', onError);
+      resolve(new NodeIpcSocket(socket));
+    });
+    const onError = (err: Error) => {
+      reject(err);
+    };
+    socket.once('error', onError);
+  });
+}

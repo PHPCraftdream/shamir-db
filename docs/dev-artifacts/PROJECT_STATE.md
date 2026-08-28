@@ -280,7 +280,7 @@ design doc (#201). The ladder:
 4. **P2P / gossip → chat.**
 
 Pull-on-demand parallels (by real need, not ahead): browser-WASM client, QUIC/
-UDP/Unix transports, auth v1.1+ / PQ identity, vectors/FTS hardening, backup/
+UDP transports, auth v1.1+ / PQ identity, vectors/FTS hardening, backup/
 restore tooling, non-blocking batched namespaced logging.
 
 **Large directions** (per [`roadmap/`](roadmap/)):
@@ -292,13 +292,14 @@ restore tooling, non-blocking batched namespaced logging.
 | Covering index (Opt O) | ✅ **shipped** |
 | Level-3 pessimistic locking | ✅ **shipped** |
 | TypeScript client | ✅ **shipped** |
+| Local IPC transport (Unix domain socket / Windows Named Pipe) | ✅ **shipped** ([`guide-docs/client-server-protocol-spec/TRANSPORT_UNIX.md`](guide-docs/client-server-protocol-spec/TRANSPORT_UNIX.md)) |
 | P2P / interconnected (chat — the "I") | Movement C — ladder above; live subscriptions design in [`roadmap/PLAN.md`](roadmap/PLAN.md) |
 | Replication / sharding / backup tooling | [`roadmap/PLAN.md`](roadmap/PLAN.md) (replication), [`roadmap/ROADMAP.md`](roadmap/ROADMAP.md) |
 | Query language: **OQL is final — no textual/SQL frontend, ever** | [`roadmap/PLAN.md`](roadmap/PLAN.md), [`roadmap/TRANSACTIONS.md`](roadmap/TRANSACTIONS.md) |
 | Browser WASM client (Argon2id in a Web Worker) | [`roadmap/BROWSER_WASM_PLAN.md`](roadmap/BROWSER_WASM_PLAN.md) |
 | Vectors / embeddings hardening | [`roadmap/EMBEDDINGS_AND_VECTORS.md`](roadmap/EMBEDDINGS_AND_VECTORS.md) |
 | Full-text search hardening | [`roadmap/FULL_TEXT_SEARCH.md`](roadmap/FULL_TEXT_SEARCH.md) |
-| Transports: QUIC, UDP, Unix socket | [`roadmap/ROADMAP.md`](roadmap/ROADMAP.md) |
+| Transports: QUIC, UDP | [`roadmap/ROADMAP.md`](roadmap/ROADMAP.md) |
 | Auth v1.1+ (HIBP, WebAuthn 2FA, DPoP); PQ identity (Ed25519+ML-DSA) | [`roadmap/ROADMAP.md`](roadmap/ROADMAP.md) |
 | Production hardening / server plan | [`roadmap/PRODUCTION_HARDENING_ROADMAP.md`](roadmap/PRODUCTION_HARDENING_ROADMAP.md), [`roadmap/PRODUCTION_SERVER_PLAN.md`](roadmap/PRODUCTION_SERVER_PLAN.md) |
 

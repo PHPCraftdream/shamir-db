@@ -63,4 +63,15 @@ export interface Platform {
     url: string,
     opts: { rejectUnauthorized?: boolean; origin?: string },
   ): Promise<Socket>;
+  /**
+   * Open a local-IPC connection (Unix domain socket / Windows Named Pipe,
+   * spec TRANSPORT_UNIX.md) to `path`. OPTIONAL — there is no browser
+   * equivalent (a browser sandbox has no filesystem/pipe access), so
+   * `BrowserPlatform` does not implement this. `ShamirClient.connectLocal`
+   * throws a clear error if called against a `Platform` lacking it, rather
+   * than the core module importing `node:net` itself (which would break
+   * the "no Node/browser-specific imports in core/" rule this file's own
+   * doc comment states).
+   */
+  openIpcSocket?(path: string): Promise<Socket>;
 }

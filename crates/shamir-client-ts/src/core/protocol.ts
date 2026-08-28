@@ -13,6 +13,7 @@ import {
   computeClientProof,
   verifyServerSignature,
   ARGON2_VERSION_13,
+  TRANSPORT_KIND_WS,
   BINDING_MODE_TLS_NO_EXPORT,
   SUPPORTED_VERSION,
   type KdfParams,
@@ -95,12 +96,21 @@ export interface HandshakeResult {
 /**
  * Run the 4-message SCRAM-Argon2id handshake over `framer`.
  * Throws on any validation or crypto failure.
+ *
+ * `transportKind`/`bindingMode` default to the WebSocket/browser path
+ * (`TRANSPORT_KIND_WS`/`BINDING_MODE_TLS_NO_EXPORT`) — every existing
+ * caller (native WS `connect`/`resume`, every test) relies on that default
+ * and needed no change when `connectLocal` (local IPC, spec
+ * TRANSPORT_UNIX.md) started passing `TRANSPORT_KIND_UNIX`/
+ * `BINDING_MODE_NONE` explicitly instead.
  */
 export async function runHandshake(
   platform: Platform,
   framer: WsFramer,
   username: string,
   password: string,
+  transportKind: number = TRANSPORT_KIND_WS,
+  bindingMode: number = BINDING_MODE_TLS_NO_EXPORT,
 ): Promise<HandshakeResult> {
   // Server normalises the username (PRECIS UsernameCaseMapped + NFC).
   // We send the NFC form so the two byte strings agree for ASCII usernames.
@@ -112,7 +122,7 @@ export async function runHandshake(
     encode({
       user: normalizedUser,
       client_nonce: clientNonce,
-      binding_mode: BINDING_MODE_TLS_NO_EXPORT,
+      binding_mode: bindingMode,
       version: SUPPORTED_VERSION,
     }),
   );
@@ -154,6 +164,8 @@ export async function runHandshake(
     serverNonce,
     salt,
     kdf,
+    transportKind,
+    bindingMode,
   });
   const { clientProof, serverKey } = await computeClientProof(
     platform,

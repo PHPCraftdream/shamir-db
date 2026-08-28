@@ -10,6 +10,7 @@ license = "MIT OR Apache-2.0"
 shamir-connect      = { path = "../shamir-connect" }
 shamir-collections  = { path = "../shamir-collections" }
 shamir-transport-tcp = { path = "../shamir-transport-tcp" }
+shamir-transport-ipc = { path = "../shamir-transport-ipc" }
 shamir-query-types  = { path = "../shamir-query-types" }
 shamir-query-builder = { path = "../shamir-query-builder" }
 shamir-types        = { path = "../shamir-types" }

@@ -29,6 +29,7 @@ use shamir_db::engine::repo::{BoxRepoFactory, RepoConfig};
 use shamir_db::shamir_db::SystemStoreConfig;
 use shamir_db::ShamirDb;
 
+use shamir_transport_ipc::IpcListener;
 use shamir_transport_tcp::listener::{
     bind_validated as bind_tcp, ListenerProfile as TcpListenerProfile,
 };
@@ -616,6 +617,11 @@ impl ServerLauncher {
         //     once and every accept loop observes the cancel on its next
         //     `select!` poll.
         let mut bound_addrs: Vec<Option<SocketAddr>> = Vec::with_capacity(config.listeners.len());
+        // Companion to `bound_addrs`, same length/order — `kind: unix`
+        // listeners have no `SocketAddr` to report (see the early-return
+        // branch below), so they get `None` in `bound_addrs` and `Some(path)`
+        // here instead. Every other listener kind pushes `None` here.
+        let mut bound_ipc_paths: Vec<Option<String>> = Vec::with_capacity(config.listeners.len());
         let mut listener_tasks: Vec<JoinHandle<()>> = Vec::new();
 
         // Connection-level security knobs from config (slow-loris timeout, etc.)
@@ -630,6 +636,47 @@ impl ServerLauncher {
             PerIpLimiter::new(config.security.connection.max_active_connections_per_ip);
 
         for l in &config.listeners {
+            // Local IPC (`kind: unix`) addresses a filesystem path / pipe
+            // name, not a `SocketAddr` — handled entirely on its own path,
+            // separate from the TCP/WS SocketAddr-based dispatch below
+            // (`Config::validate` already rejected any other `l.kind` +
+            // `l.addr` combination that wouldn't make sense here).
+            if l.kind == ListenerKind::Unix {
+                let listener = IpcListener::bind(&l.addr)
+                    .await
+                    .map_err(|e| BootError::Bind(format!("unix {}: {e}", l.addr)))?;
+                tracing::info!(path = %l.addr, kind = ?l.kind, profile = ?l.profile, "listener bound");
+                let ctx = build_ctx(
+                    &identity,
+                    identity_seed,
+                    &secrets,
+                    kdf_for_bootstrap,
+                    &session_store,
+                    &user_dir,
+                    lockout.clone(),
+                    rate_limit.clone(),
+                    &argon2_sem,
+                    &audit_writer,
+                    &resume_config,
+                    &handler,
+                    BindingMode::None,
+                    TransportKind::Unix,
+                    l.kdf_override.as_ref().map(kdf_from_config),
+                    auth_init_timeout,
+                    &meta,
+                );
+                let token = shutdown_token.clone();
+                let limiter = conn_limiter.clone();
+                let per_ip = per_ip_limiter.clone();
+                listener_tasks.push(tokio::spawn(accept_loop_ipc(
+                    listener, ctx, token, limiter, per_ip,
+                )));
+                bound_addrs.push(None);
+                bound_ipc_paths.push(Some(l.addr.clone()));
+                continue;
+            }
+            bound_ipc_paths.push(None);
+
             let addr: SocketAddr = match l.addr.parse() {
                 Ok(a) => a,
                 Err(e) => {
@@ -641,15 +688,16 @@ impl ServerLauncher {
             };
 
             // Resolve the right (transport, binding_mode) tuple for this
-            // listener. Plain (binding_mode = 0x00) is still routed through
-            // the TLS code path for now — a follow-up will add a true
-            // plain-tcp accept loop for loopback debugging.
+            // listener.
             let (transport_kind, binding_mode, accept_path) = match (l.kind, l.profile) {
                 (ListenerKind::Tcp, ProfileKind::TlsExporter) => (
                     TransportKind::Tcp,
                     BindingMode::TlsExporter,
                     AcceptPath::TcpTlsExporter,
                 ),
+                (ListenerKind::Tcp, ProfileKind::Plain) => {
+                    (TransportKind::Tcp, BindingMode::None, AcceptPath::TcpPlain)
+                }
                 (ListenerKind::Ws, ProfileKind::TlsExporter) => (
                     TransportKind::WebSocket,
                     BindingMode::TlsExporter,
@@ -710,6 +758,42 @@ impl ServerLauncher {
                     let per_ip = per_ip_limiter.clone();
                     listener_tasks.push(tokio::spawn(accept_loop_tcp(
                         listener, acceptor, ctx, token, limiter, per_ip,
+                    )));
+                    local_addr
+                }
+                AcceptPath::TcpPlain => {
+                    let listener = bind_tcp(addr, TcpListenerProfile::Plain)
+                        .await
+                        .map_err(|e| BootError::Bind(format!("tcp {addr}: {e}")))?;
+                    let local_addr = listener
+                        .local_addr()
+                        .map_err(|e| BootError::Bind(format!("local_addr: {e}")))?;
+                    tracing::info!(local_addr = %local_addr, kind = ?l.kind, profile = ?l.profile, "listener bound");
+                    let ctx = build_ctx(
+                        &identity,
+                        identity_seed,
+                        &secrets,
+                        kdf_for_bootstrap,
+                        &session_store,
+                        &user_dir,
+                        lockout.clone(),
+                        rate_limit.clone(),
+                        &argon2_sem,
+                        &audit_writer,
+                        &resume_config,
+                        &handler,
+                        binding_mode,
+                        transport_kind,
+                        l.kdf_override.as_ref().map(kdf_from_config),
+                        auth_init_timeout,
+                        &meta,
+                    );
+                    let token = shutdown_token.clone();
+
+                    let limiter = conn_limiter.clone();
+                    let per_ip = per_ip_limiter.clone();
+                    listener_tasks.push(tokio::spawn(accept_loop_plain(
+                        listener, ctx, token, limiter, per_ip,
                     )));
                     local_addr
                 }
@@ -884,6 +968,7 @@ impl ServerLauncher {
 
         Ok(ServerHandle {
             bound_addrs,
+            bound_ipc_paths,
             listener_tasks,
             scheduler,
             audit_appender,
@@ -911,6 +996,11 @@ impl ServerLauncher {
 enum AcceptPath {
     /// `kind=tcp + profile=tls_exporter`: native binding_mode 0x01.
     TcpTlsExporter,
+    /// `kind=tcp + profile=plain`: no TLS, binding_mode 0x00. Config
+    /// validation (`Config::validate`) already restricts this to loopback
+    /// addresses; `bind_tcp`'s own `ListenerProfile::Plain` policy check is
+    /// a second, defense-in-depth enforcement of the same rule at bind time.
+    TcpPlain,
     /// `kind=ws + profile=tls_exporter`: native WSS, binding_mode 0x01.
     WsNative,
     /// `kind=ws + profile=tls_no_export`: browser WSS, binding_mode 0x02
@@ -1073,6 +1163,148 @@ async fn accept_loop_tcp(
                     let exporter = extract_tls_exporter(&tls).unwrap_or([0u8; 32]);
                     let framer = TcpFramer::new(tls);
                     handle_connection(ctx, peer_addr, framer, exporter).await;
+                });
+            }
+        }
+    }
+}
+
+/// Plain (no TLS) TCP accept loop — `binding_mode = None`, channel binding
+/// is always `[0u8; 32]` (spec TRANSPORT_TCP §4: `tcp+plain` always carries
+/// zeroed `tls_exporter_or_zeros`). `bind_tcp`'s `ListenerProfile::Plain`
+/// policy (loopback-only) already gated the bind itself before this loop
+/// starts; `Config::validate` gates it a second time at config-load time.
+/// No TLS handshake step, so no handshake-timeout wrapper is needed here —
+/// `handle_connection` already bounds the first-frame (`auth_init`) read by
+/// `ctx.auth_init_timeout`.
+async fn accept_loop_plain(
+    listener: TcpListener,
+    ctx: Arc<ConnectionContext>,
+    shutdown: tokio_util::sync::CancellationToken,
+    limiter: ConnLimiter,
+    per_ip: PerIpLimiter,
+) {
+    loop {
+        tokio::select! {
+            biased;
+            _ = shutdown.cancelled() => {
+                tracing::debug!("accept_loop_plain: shutdown cancelled, exiting");
+                break;
+            }
+            res = listener.accept() => {
+                let (tcp, peer_addr) = match res {
+                    Ok(v) => v,
+                    Err(e) => {
+                        tracing::warn!(?e, "tcp accept failed; sleeping briefly");
+                        tokio::time::sleep(shamir_tunables::instance_defaults::SERVER_POLL_INTERVAL).await;
+                        continue;
+                    }
+                };
+                let guard = match limiter.try_acquire() {
+                    Some(g) => g,
+                    None => {
+                        tracing::debug!(
+                            ?peer_addr,
+                            active = limiter.active(),
+                            cap = limiter.cap(),
+                            "max_active_connections reached, refusing",
+                        );
+                        continue;
+                    }
+                };
+                let per_ip_guard = match per_ip.try_acquire(peer_addr.ip()) {
+                    Some(g) => g,
+                    None => {
+                        tracing::debug!(
+                            ip = %peer_addr.ip(),
+                            active = per_ip.active(peer_addr.ip()),
+                            cap = per_ip.cap(),
+                            "max_active_connections_per_ip reached, refusing",
+                        );
+                        continue;
+                    }
+                };
+                let ctx = ctx.clone();
+                tokio::spawn(async move {
+                    let _guard = guard; // keep alive for the lifetime of this task
+                    let _per_ip_guard = per_ip_guard;
+                    let framer = TcpFramer::new(tcp);
+                    handle_connection(ctx, peer_addr, framer, [0u8; 32]).await;
+                });
+            }
+        }
+    }
+}
+
+/// Loopback placeholder `peer_addr` for local-IPC connections — a Unix
+/// socket / Named Pipe has no real peer IP, but `handle_connection` keys
+/// its per-subnet rate-limit / lockout state off `peer_addr.ip()`.
+/// Consequence (accepted for this transport): every simultaneous local-IPC
+/// connection shares ONE per-IP `ConnLimiter`/`PerIpLimiter` bucket rather
+/// than getting per-peer isolation — reasonable given they are inherently
+/// same-host and already gated by the OS-level access boundary (spec
+/// TRANSPORT_UNIX.md §5), not something that needs per-peer distinction.
+const IPC_PEER_ADDR: SocketAddr =
+    SocketAddr::new(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST), 0);
+
+/// Local-IPC (Unix domain socket / Windows Named Pipe) accept loop.
+/// `binding_mode = None`, channel binding always `[0u8; 32]` — same
+/// wire-level semantics as [`accept_loop_plain`], just over
+/// `shamir_transport_ipc::IpcStream` instead of a bare `TcpStream`. No TLS
+/// handshake, so (as with `accept_loop_plain`) no extra handshake-timeout
+/// wrapper is needed — `handle_connection` already bounds the first-frame
+/// read by `ctx.auth_init_timeout`.
+async fn accept_loop_ipc(
+    mut listener: IpcListener,
+    ctx: Arc<ConnectionContext>,
+    shutdown: tokio_util::sync::CancellationToken,
+    limiter: ConnLimiter,
+    per_ip: PerIpLimiter,
+) {
+    loop {
+        tokio::select! {
+            biased;
+            _ = shutdown.cancelled() => {
+                tracing::debug!("accept_loop_ipc: shutdown cancelled, exiting");
+                break;
+            }
+            res = listener.accept() => {
+                let stream = match res {
+                    Ok(v) => v,
+                    Err(e) => {
+                        tracing::warn!(?e, "ipc accept failed; sleeping briefly");
+                        tokio::time::sleep(shamir_tunables::instance_defaults::SERVER_POLL_INTERVAL).await;
+                        continue;
+                    }
+                };
+                let guard = match limiter.try_acquire() {
+                    Some(g) => g,
+                    None => {
+                        tracing::debug!(
+                            active = limiter.active(),
+                            cap = limiter.cap(),
+                            "max_active_connections reached, refusing (ipc)",
+                        );
+                        continue;
+                    }
+                };
+                let per_ip_guard = match per_ip.try_acquire(IPC_PEER_ADDR.ip()) {
+                    Some(g) => g,
+                    None => {
+                        tracing::debug!(
+                            active = per_ip.active(IPC_PEER_ADDR.ip()),
+                            cap = per_ip.cap(),
+                            "max_active_connections_per_ip reached, refusing (ipc)",
+                        );
+                        continue;
+                    }
+                };
+                let ctx = ctx.clone();
+                tokio::spawn(async move {
+                    let _guard = guard; // keep alive for the lifetime of this task
+                    let _per_ip_guard = per_ip_guard;
+                    let framer = TcpFramer::new(stream);
+                    handle_connection(ctx, IPC_PEER_ADDR, framer, [0u8; 32]).await;
                 });
             }
         }

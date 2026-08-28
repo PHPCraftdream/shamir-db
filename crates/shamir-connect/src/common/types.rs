@@ -33,6 +33,12 @@ pub enum TransportKind {
     Tcp = 0x01,
     /// WebSocket transport (spec TRANSPORT_WS.md).
     WebSocket = 0x02,
+    /// Local IPC transport — Unix domain socket or Windows Named Pipe (spec
+    /// TRANSPORT_UNIX.md). One wire value for both OS primitives: the
+    /// wire-level handshake behavior is identical (`binding_mode = 0x00`,
+    /// zeroed channel binding); which OS primitive is in play is a
+    /// deployment detail, not a protocol concept.
+    Unix = 0x03,
 }
 
 impl TransportKind {
@@ -46,6 +52,7 @@ impl TransportKind {
         match byte {
             0x01 => Ok(Self::Tcp),
             0x02 => Ok(Self::WebSocket),
+            0x03 => Ok(Self::Unix),
             _ => Err(Error::InvalidInput("unknown transport_kind")),
         }
     }

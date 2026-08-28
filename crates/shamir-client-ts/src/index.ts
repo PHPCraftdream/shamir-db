@@ -7,7 +7,11 @@
 
 import { ShamirClient } from './core/client.js';
 import { NodePlatform } from './platform/node.js';
-import type { ConnectOptions, ResumeOptions } from './core/types/index.js';
+import type {
+  ConnectOptions,
+  ConnectLocalOptions,
+  ResumeOptions,
+} from './core/types/index.js';
 
 /**
  * Open an authenticated ShamirDB connection from Node.js.
@@ -15,6 +19,19 @@ import type { ConnectOptions, ResumeOptions } from './core/types/index.js';
  */
 export async function connect(opts: ConnectOptions): Promise<ShamirClient> {
   return ShamirClient.connect(NodePlatform, opts);
+}
+
+/**
+ * Open an authenticated ShamirDB connection over local IPC (Unix domain
+ * socket / Windows Named Pipe, spec TRANSPORT_UNIX.md) from Node.js. No
+ * TLS — the OS-level access boundary (file permissions / DACL, enforced
+ * server-side) stands in for transport encryption. Node-only: NOT exported
+ * from `browser.ts` — a browser sandbox has no filesystem/pipe access.
+ */
+export async function connectLocal(
+  opts: ConnectLocalOptions,
+): Promise<ShamirClient> {
+  return ShamirClient.connectLocal(NodePlatform, opts);
 }
 
 /**
@@ -45,7 +62,7 @@ export { SubscriptionRouter } from './core/subscription-router.js';
 export type { SubscriptionEvent } from './core/subscription-router.js';
 export { SubscriptionHandle } from './core/subscription-handle.js';
 export { CursorIterator } from './core/cursor-iterator.js';
-export type { ResumeOptions };
+export type { ResumeOptions, ConnectLocalOptions };
 export type { Db, Tx } from './core/db.js';
 
 // Builders: per-domain namespace objects (filter / select / write / ddl /

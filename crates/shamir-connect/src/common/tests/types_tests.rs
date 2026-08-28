@@ -4,7 +4,11 @@ use crate::common::types::{BindingMode, TransportKind};
 
 #[test]
 fn transport_kind_round_trip_known_values() {
-    for kind in [TransportKind::Tcp, TransportKind::WebSocket] {
+    for kind in [
+        TransportKind::Tcp,
+        TransportKind::WebSocket,
+        TransportKind::Unix,
+    ] {
         let byte = kind.as_u8();
         let parsed = TransportKind::from_u8(byte).unwrap();
         assert_eq!(parsed, kind);
@@ -13,7 +17,7 @@ fn transport_kind_round_trip_known_values() {
 
 #[test]
 fn transport_kind_rejects_unknown_values() {
-    for byte in [0x00u8, 0x03, 0x10, 0xff] {
+    for byte in [0x00u8, 0x04, 0x10, 0xff] {
         assert!(
             TransportKind::from_u8(byte).is_err(),
             "byte 0x{:02x} should reject",

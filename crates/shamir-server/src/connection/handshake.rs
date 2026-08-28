@@ -52,6 +52,7 @@ fn audit_emit(
         match ctx.transport_kind {
             TransportKind::Tcp => "tcp",
             TransportKind::WebSocket => "ws",
+            TransportKind::Unix => "unix",
         },
         user,
         format!("{:?}", subnet),

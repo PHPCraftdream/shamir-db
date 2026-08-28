@@ -16,7 +16,7 @@
 - `0.0.0.0` или `::` (any-bind) → **NEVER allowed**, server fails старт
 - Клиент явно `?plain=1` в URI
 
-**Embedded mode рекомендация:** Unix domain socket (path-based file permissions = auth boundary) предпочтительнее plain TCP. Future: dedicated `TRANSPORT_UNIX.md`.
+**Embedded mode рекомендация:** Unix domain socket / Windows Named Pipe (path-based file permissions = auth boundary) предпочтительнее plain TCP. См. [`TRANSPORT_UNIX.md`](TRANSPORT_UNIX.md).
 
 ## 2. Framing
 

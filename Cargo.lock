@@ -3364,6 +3364,7 @@ dependencies = [
  "shamir-query-builder",
  "shamir-query-types",
  "shamir-server",
+ "shamir-transport-ipc",
  "shamir-transport-tcp",
  "shamir-types",
  "tempfile",
@@ -3681,6 +3682,7 @@ dependencies = [
  "shamir-db",
  "shamir-query-builder",
  "shamir-query-types",
+ "shamir-transport-ipc",
  "shamir-transport-tcp",
  "shamir-transport-ws",
  "shamir-tunables",
@@ -3727,6 +3729,16 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
+]
+
+[[package]]
+name = "shamir-transport-ipc"
+version = "0.1.0-alpha.1"
+dependencies = [
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]

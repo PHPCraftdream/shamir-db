@@ -21,6 +21,8 @@ import {
   buildAuthMessage,
   ARGON2_VERSION_13,
   BINDING_MODE_TLS_NO_EXPORT,
+  BINDING_MODE_NONE,
+  TRANSPORT_KIND_UNIX,
   SUPPORTED_VERSION,
 } from '../scram.js';
 
@@ -237,12 +239,16 @@ function computeServerSignature(
   salt: Uint8Array,
   kdf: typeof KDF,
   serverNonce: Uint8Array,
+  transportKind?: number,
+  bindingMode?: number,
 ): Uint8Array {
   const normalizedUser = username.normalize('NFC');
   const authMessage = buildAuthMessage(normalizedUser, clientNonce, {
     serverNonce,
     salt,
     kdf,
+    transportKind,
+    bindingMode,
   });
   // Our fake platform's argon2id is synchronous under the hood (the Platform
   // interface marks it async, but the impl returns immediately). Call it
@@ -394,6 +400,105 @@ describe('runHandshake (unit, fake WsFramer + fake Platform)', () => {
     const result = await runHandshake(runPlatform, framer, USERNAME, PASSWORD);
     expect(result.serverQueryVersion).toBe(2);
     expect(result.sessionId).toEqual(sessionId);
+  });
+
+  // ─── transportKind/bindingMode parameterization (local-IPC support) ────
+  //
+  // `connectLocal` calls `runHandshake` with `TRANSPORT_KIND_UNIX` /
+  // `BINDING_MODE_NONE` instead of the WS-path defaults. These two tests
+  // prove the plumbing actually has an effect end to end: (1) the wire
+  // `auth_init.binding_mode` reflects the passed-in value, and (2) the
+  // `auth_message` the client builds internally (and therefore the
+  // server-signature verification) is genuinely different for the two
+  // parameter sets — a wrong default silently ignoring the params would
+  // make BOTH of these pass trivially, which is why each asserts something
+  // that would fail if the parameters were dropped on the floor.
+
+  it('sends binding_mode=NONE in auth_init when called with UNIX transport params', async () => {
+    const platform = makeFakePlatform();
+    const socket = new FakeSocket();
+    const framer = new WsFramer(socket);
+
+    const expectedClientNonce = platform.randomBytes(32);
+    const runPlatform = makeFakePlatform();
+    const serverSig = computeServerSignature(
+      runPlatform,
+      USERNAME,
+      PASSWORD,
+      expectedClientNonce,
+      SALT,
+      KDF,
+      SERVER_NONCE,
+      TRANSPORT_KIND_UNIX,
+      BINDING_MODE_NONE,
+    );
+
+    const sessionId = new Uint8Array(32).fill(0x07);
+    const serverPubKey = new Uint8Array(32).fill(0x08);
+    const expiresAtNs = BigInt('1111111111111111111');
+
+    socket.pushFrame(challengeFrame());
+    socket.pushFrame(
+      encode([serverSig, serverPubKey, new Uint8Array(64), sessionId, expiresAtNs]),
+    );
+
+    const result = await runHandshake(
+      runPlatform,
+      framer,
+      USERNAME,
+      PASSWORD,
+      TRANSPORT_KIND_UNIX,
+      BINDING_MODE_NONE,
+    );
+    expect(result.sessionId).toEqual(sessionId);
+
+    const sentInit = readAuthInit(socket);
+    expect(sentInit.binding_mode).toBe(BINDING_MODE_NONE);
+    expect(sentInit.binding_mode).not.toBe(BINDING_MODE_TLS_NO_EXPORT);
+  });
+
+  it('rejects a server_signature computed with the WS defaults when the handshake ran with UNIX params', async () => {
+    const platform = makeFakePlatform();
+    const socket = new FakeSocket();
+    const framer = new WsFramer(socket);
+
+    const expectedClientNonce = platform.randomBytes(32);
+    const runPlatform = makeFakePlatform();
+    // Deliberately compute the signature WITHOUT transportKind/bindingMode
+    // (falls back to TRANSPORT_KIND_WS/BINDING_MODE_TLS_NO_EXPORT) while
+    // running the handshake WITH the UNIX params below — the auth_message
+    // bytes differ, so signature verification must fail.
+    const wrongServerSig = computeServerSignature(
+      runPlatform,
+      USERNAME,
+      PASSWORD,
+      expectedClientNonce,
+      SALT,
+      KDF,
+      SERVER_NONCE,
+    );
+
+    socket.pushFrame(challengeFrame());
+    socket.pushFrame(
+      encode([
+        wrongServerSig,
+        new Uint8Array(32).fill(0x09),
+        new Uint8Array(64),
+        new Uint8Array(32).fill(0x0a),
+        BigInt('1111111111111111111'),
+      ]),
+    );
+
+    await expect(
+      runHandshake(
+        runPlatform,
+        framer,
+        USERNAME,
+        PASSWORD,
+        TRANSPORT_KIND_UNIX,
+        BINDING_MODE_NONE,
+      ),
+    ).rejects.toThrow(/server signature verification failed/);
   });
 
   it('happy path: surfaces resumption ticket + expires when present', async () => {

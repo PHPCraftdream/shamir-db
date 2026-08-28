@@ -18,13 +18,13 @@
                   │  + Ed25519 + channel binding    │
                   └──────────────┬──────────────────┘
                                  │
-              ┌──────────────────┼──────────────────┐
-              │                  │                  │
-        ┌─────▼─────┐      ┌─────▼─────┐     ┌──────▼──────┐
-        │   TCP     │      │  WS (wss) │     │  Admin UI   │
-        │ (TLS|plain│      │ native +  │     │ static +    │
-        │ loopback) │      │ browser   │     │ Bearer REST │
-        └───────────┘      └───────────┘     └─────────────┘
+              ┌──────────────────┼──────────────────┬──────────────────┐
+              │                  │                  │                  │
+        ┌─────▼─────┐      ┌─────▼─────┐     ┌──────▼──────┐    ┌──────▼──────┐
+        │   TCP     │      │  WS (wss) │     │  Admin UI   │    │ Unix/Pipe   │
+        │ (TLS|plain│      │ native +  │     │ static +    │    │ local IPC   │
+        │ loopback) │      │ browser   │     │ Bearer REST │    │             │
+        └───────────┘      └───────────┘     └─────────────┘    └─────────────┘
 ```
 
 ## Документы
@@ -42,6 +42,7 @@
 ### Transport bindings
 - **[TRANSPORT_TCP.md](TRANSPORT_TCP.md)** — TCP (TLS или plain loopback).
 - **[TRANSPORT_WS.md](TRANSPORT_WS.md)** — WebSocket (wss; native + browser endpoints).
+- **[TRANSPORT_UNIX.md](TRANSPORT_UNIX.md)** — local IPC (Unix domain socket / Windows Named Pipe).
 - **[ADMIN_UI_HOSTING.md](ADMIN_UI_HOSTING.md)** — static admin UI + Bearer REST.
 
 ### Clients

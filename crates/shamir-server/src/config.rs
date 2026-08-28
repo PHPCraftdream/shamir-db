@@ -571,6 +571,16 @@ pub enum ListenerKind {
     Tcp,
     /// WebSocket-over-TLS (`wss://`).
     Ws,
+    /// Local IPC — Unix domain socket (POSIX) or Windows Named Pipe,
+    /// behind `shamir-transport-ipc`'s unified `IpcListener` (spec
+    /// TRANSPORT_UNIX.md). `addr` is a filesystem path (Unix) or pipe name
+    /// (Windows), NOT a `SocketAddr` — see `Config::validate` and
+    /// `server_launcher.rs`'s listener-spawn loop, both of which branch on
+    /// `kind` before attempting a `SocketAddr` parse. Always
+    /// `profile: plain` (`binding_mode = 0x00`) — there is no TLS
+    /// distinction for local IPC (TRANSPORT_UNIX.md §5: OS-level
+    /// permissions/DACL are the access boundary instead).
+    Unix,
 }
 
 /// Listener security profile / `binding_mode` selector.
@@ -756,7 +766,28 @@ impl Config {
 
 /// Validate a single [`ListenerConfig`] against its profile's invariants.
 fn validate_listener(idx: usize, l: &ListenerConfig) -> Result<(), ConfigError> {
-    // 1. Parse the address.
+    // 1. `kind: unix` addresses a filesystem path / pipe name, not a
+    //    `SocketAddr` — validated on its own branch, entirely separate
+    //    from the TCP/WS `SocketAddr` + loopback/origin checks below.
+    if l.kind == ListenerKind::Unix {
+        if l.addr.trim().is_empty() {
+            return Err(ConfigError::Validation(format!(
+                "listeners[{idx}] kind=unix requires a non-empty `addr` \
+                 (filesystem path on Unix, pipe name on Windows)"
+            )));
+        }
+        if l.profile != ProfileKind::Plain {
+            return Err(ConfigError::Validation(format!(
+                "listeners[{idx}] kind=unix requires profile=plain (spec \
+                 TRANSPORT_UNIX.md — no TLS distinction for local IPC); \
+                 got {:?}",
+                l.profile
+            )));
+        }
+        return Ok(());
+    }
+
+    // 2. Parse the address.
     let addr: SocketAddr = l.addr.parse().map_err(|e| {
         ConfigError::Validation(format!(
             "listeners[{idx}].addr `{}` is not a valid socket address: {e}",
@@ -764,7 +795,7 @@ fn validate_listener(idx: usize, l: &ListenerConfig) -> Result<(), ConfigError> 
         ))
     })?;
 
-    // 2. WebSocket: path required and must start with `/`.
+    // 3. WebSocket: path required and must start with `/`.
     match l.kind {
         ListenerKind::Ws => {
             let path = l.path.as_deref().ok_or_else(|| {
@@ -782,9 +813,10 @@ fn validate_listener(idx: usize, l: &ListenerConfig) -> Result<(), ConfigError> 
             // path is ignored for TCP — but we don't reject Some(_), so
             // operators can keep one shared template if they like.
         }
+        ListenerKind::Unix => unreachable!("handled by the early return above"),
     }
 
-    // 3. Plain profile: loopback only.
+    // 4. Plain profile: loopback only.
     if l.profile == ProfileKind::Plain && !is_loopback_ip(addr.ip()) {
         return Err(ConfigError::Validation(format!(
             "listeners[{idx}] profile=plain requires a loopback address \
@@ -793,7 +825,7 @@ fn validate_listener(idx: usize, l: &ListenerConfig) -> Result<(), ConfigError> 
         )));
     }
 
-    // 4. Browser endpoint: must have a non-empty Origin allowlist.
+    // 5. Browser endpoint: must have a non-empty Origin allowlist.
     if l.kind == ListenerKind::Ws
         && l.profile == ProfileKind::TlsNoExport
         && l.browser_origin_allowlist.is_empty()

@@ -8,7 +8,7 @@
  */
 
 import type { Platform } from './platform.js';
-import type { ConnectOptions, ResumeOptions } from './types/index.js';
+import type { ConnectOptions, ConnectLocalOptions, ResumeOptions } from './types/index.js';
 import {
   DEFAULT_REQUEST_TIMEOUT_MS,
   DEFAULT_CONNECT_TIMEOUT_MS,
@@ -39,7 +39,9 @@ import {
   buildAuthMessageCp,
   computeClientProof,
   TRANSPORT_KIND_WS,
+  TRANSPORT_KIND_UNIX,
   BINDING_MODE_TLS_NO_EXPORT,
+  BINDING_MODE_NONE,
 } from './scram.js';
 import type { KdfParams } from './scram.js';
 import { signCanonical, canonicalCreateScramUser } from './hmac.js';
@@ -208,6 +210,68 @@ export class ShamirClient {
         framer,
         opts.username,
         opts.password,
+      );
+      return new ShamirClient(
+        platform,
+        framer,
+        sessionId,
+        serverPubKey,
+        expiresAtNs,
+        resumptionTicket,
+        resumptionExpiresAtNs,
+        serverQueryVersion,
+        opts.requestTimeoutMs,
+        opts.username.normalize('NFC'),
+      );
+    } catch (e) {
+      await framer.close();
+      throw e;
+    }
+  }
+
+  /**
+   * Open a local-IPC connection (Unix domain socket / Windows Named Pipe,
+   * spec TRANSPORT_UNIX.md), run the SCRAM handshake, and return an
+   * authenticated client. Mirrors {@link ShamirClient.connect} exactly
+   * except: no TLS setup, and `transportKind`/`bindingMode` fed to
+   * `runHandshake` are `TRANSPORT_KIND_UNIX`/`BINDING_MODE_NONE` instead of
+   * the WS/browser defaults.
+   *
+   * Node-only — `platform.openIpcSocket` is optional on {@link Platform}
+   * precisely because there is no browser implementation; this throws
+   * immediately (before touching the network) if the platform lacks it.
+   */
+  static async connectLocal(
+    platform: Platform,
+    opts: ConnectLocalOptions,
+  ): Promise<ShamirClient> {
+    if (!platform.openIpcSocket) {
+      throw new Error(
+        'connectLocal: this Platform does not implement openIpcSocket ' +
+          '(local IPC has no browser equivalent — Node only)',
+      );
+    }
+    const socket = await withConnectTimeout(
+      platform.openIpcSocket(opts.addr),
+      opts.connectTimeoutMs ?? DEFAULT_CONNECT_TIMEOUT_MS,
+    );
+    const framer = new WsFramer(socket);
+
+    try {
+      const {
+        sessionId,
+        serverPubKey,
+        expiresAtNs,
+        resumptionTicket,
+        resumptionExpiresAtNs,
+        serverQueryVersion,
+      } = await runHandshake(
+        platform,
+        framer,
+        opts.username,
+        opts.password,
+        TRANSPORT_KIND_UNIX,
+        BINDING_MODE_NONE,
       );
       return new ShamirClient(
         platform,

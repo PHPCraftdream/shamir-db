@@ -38,7 +38,7 @@ Future features beyond v1 spec. Не нормативные, не binding обе
 
 - **TRANSPORT_QUIC.md** — QUIC native binding. Переиспользует AUTH_PROTOCOL без изменений.
 - **TRANSPORT_UDP.md** — UDP datagram binding (для embedded sensors / WireGuard-style overlay). Mandatory L1 (HMAC) per packet.
-- **Unix socket transport** — file permissions = auth boundary, no SCRAM needed (отдельный mode).
+- ~~Unix socket transport~~ — ✅ **shipped**, см. [`../../guide-docs/client-server-protocol-spec/TRANSPORT_UNIX.md`](../../guide-docs/client-server-protocol-spec/TRANSPORT_UNIX.md). Реализовано как SCRAM + ticket resume (не "no SCRAM" как планировалось изначально в этой строке) — OS-level file permissions / DACL ограничивают, кто может дойти до auth_init, SCRAM всё ещё аутентифицирует конкретного DB-пользователя после этого. Покрывает Unix domain socket И Windows Named Pipe одним wire-значением `transport_kind`.
 
 ### v2 (несовместимо)
 

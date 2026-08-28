@@ -5,7 +5,9 @@
 //! `ktav::from_str`, then asserts on either the populated struct or
 //! the [`ConfigError::Validation`] message.
 
-use shamir_server::config::{Config, ConfigError, KdfConfig, ListenerKind, ProfileKind};
+use shamir_server::config::{
+    Config, ConfigError, KdfConfig, ListenerConfig, ListenerKind, ProfileKind,
+};
 
 // ---------- helper: build a minimal valid base config string ----------
 
@@ -113,6 +115,11 @@ listeners: [
             https://staging.example.com
         ]
     }
+    {
+        kind: unix
+        addr: /run/shamir/shamir-db.sock
+        profile: plain
+    }
 ]
 
 tls: {
@@ -123,7 +130,7 @@ tls: {
     let cfg: Config = ktav::from_str(src).expect("parse ok");
     cfg.validate().expect("validate ok");
 
-    assert_eq!(cfg.listeners.len(), 4);
+    assert_eq!(cfg.listeners.len(), 5);
 
     // Listener 0: native TCP+TLS exporter on public addr.
     assert_eq!(cfg.listeners[0].kind, ListenerKind::Tcp);
@@ -144,6 +151,11 @@ tls: {
     assert_eq!(cfg.listeners[3].profile, ProfileKind::TlsNoExport);
     assert_eq!(cfg.listeners[3].path.as_deref(), Some("/shamir/v1/browser"));
     assert_eq!(cfg.listeners[3].browser_origin_allowlist.len(), 2);
+
+    // Listener 4: local IPC (Unix socket path / Windows pipe name).
+    assert_eq!(cfg.listeners[4].kind, ListenerKind::Unix);
+    assert_eq!(cfg.listeners[4].profile, ProfileKind::Plain);
+    assert_eq!(cfg.listeners[4].addr, "/run/shamir/shamir-db.sock");
 }
 
 #[test]
@@ -481,5 +493,67 @@ tls: {
     assert!(
         msg.contains("not-an-addr") || msg.contains("socket address"),
         "expected message to mention bad addr, got: {msg}"
+    );
+}
+
+#[test]
+fn rejects_unix_listener_with_empty_addr() {
+    // Built directly (not round-tripped through ktav text) — an empty
+    // string as a ktav scalar has no unambiguous quoted-literal syntax to
+    // rely on here; constructing the struct in Rust isolates this test to
+    // exactly the `validate_listener` branch under test.
+    let mut cfg: Config = ktav::from_str(minimal_tcp_tls()).expect("parse ok");
+    cfg.listeners = vec![ListenerConfig {
+        kind: ListenerKind::Unix,
+        addr: String::new(),
+        profile: ProfileKind::Plain,
+        path: None,
+        kdf_override: None,
+        browser_origin_allowlist: vec![],
+    }];
+    let err = cfg.validate().expect_err("must reject empty unix addr");
+    assert!(matches!(err, ConfigError::Validation(_)), "got {err:?}");
+    let msg = format!("{err}");
+    assert!(
+        msg.contains("non-empty"),
+        "expected message to mention non-empty addr requirement, got: {msg}"
+    );
+}
+
+#[test]
+fn rejects_unix_listener_with_non_plain_profile() {
+    // TRANSPORT_UNIX.md: local IPC has no TLS distinction — always plain.
+    let src = "\
+data_dir: /var/lib/shamir-db
+
+kdf_defaults: {
+    memory_kb: 131072
+    time: 4
+    parallelism: 1
+    argon2_version: 19
+}
+
+listeners: [
+    {
+        kind: unix
+        addr: /run/shamir/shamir-db.sock
+        profile: tls_exporter
+    }
+]
+
+tls: {
+    cert_path: /var/lib/shamir-db/cert.pem
+    key_path: /var/lib/shamir-db/key.pem
+}
+";
+    let cfg: Config = ktav::from_str(src).expect("parse ok");
+    let err = cfg
+        .validate()
+        .expect_err("must reject kind=unix with a non-plain profile");
+    assert!(matches!(err, ConfigError::Validation(_)), "got {err:?}");
+    let msg = format!("{err}");
+    assert!(
+        msg.contains("profile=plain"),
+        "expected message to mention the plain-profile requirement, got: {msg}"
     );
 }

@@ -21,8 +21,16 @@ const CHGPW_V1 = new TextEncoder().encode('SHAMIR-CHGPW-v1');
 export const ARGON2_VERSION_13 = 0x13;
 /** Transport tag for the WebSocket path (TransportKind::Ws). */
 export const TRANSPORT_KIND_WS = 0x02;
+/** Transport tag for the local-IPC path (TransportKind::Unix — spec
+ * TRANSPORT_UNIX.md; one wire value covers both Unix domain socket and
+ * Windows Named Pipe). */
+export const TRANSPORT_KIND_UNIX = 0x03;
 /** Binding mode for the browser path (BindingMode::TlsNoExport). */
 export const BINDING_MODE_TLS_NO_EXPORT = 0x02;
+/** Binding mode for local IPC — no TLS at all (BindingMode::None). Same
+ * value the native `tcp+plain` profile uses; `tls_exporter_or_zeros` is
+ * always 32 zero bytes for this mode. */
+export const BINDING_MODE_NONE = 0x00;
 /** Supported protocol version (ProtocolVersion::V1). */
 export const SUPPORTED_VERSION = 0x01;
 
