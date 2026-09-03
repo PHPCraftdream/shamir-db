@@ -17,6 +17,7 @@ pub mod core;
 pub mod macros;
 pub mod record_view;
 pub mod secret;
+pub mod time;
 pub mod types;
 
 #[cfg(test)]

@@ -58,6 +58,68 @@ pub fn validate_keys_resolve_interner(
     validate_keys_resolve(view, rev.as_slice())
 }
 
+/// Recursively collect every map-key `InternerKey` id in `view` into `out`
+/// (`id -> ()`), mirroring [`validate_keys_resolve`]'s traversal exactly
+/// (top-level fields, `RecordValue::Map` nested, `RecordValue::Arr`
+/// elements) — but without any interner reverse-lookup: this assumes the
+/// ids are already known-valid, i.e. call it AFTER
+/// [`validate_keys_resolve_interner`] has succeeded for `view`.
+///
+/// #1205: the S-write id-keyed insert path (pre-interned client bytes)
+/// uses this to capture referenced ids for `pre_commit_prelock`'s A8 scan
+/// without paying a second full `InnerValue` decode — this is the SAME
+/// zero-copy `RecordView` lens the security-spine validation above already
+/// walks unconditionally, just also recording ids instead of only checking
+/// them.
+// hasher-generic boundary: caller supplies the hasher (THasher at every call site)
+#[allow(clippy::disallowed_types)]
+pub fn collect_referenced_ids_from_view<S: std::hash::BuildHasher>(
+    view: &RecordView<'_>,
+    out: &mut std::collections::HashMap<u64, (), S>,
+) {
+    for (key, rv) in view.fields() {
+        out.insert(key.id(), ());
+        collect_record_value_ids(&rv, out);
+    }
+}
+
+// hasher-generic boundary: caller supplies the hasher (THasher at every call site)
+#[allow(clippy::disallowed_types)]
+fn collect_record_value_ids<S: std::hash::BuildHasher>(
+    rv: &RecordValue<'_>,
+    out: &mut std::collections::HashMap<u64, (), S>,
+) {
+    match rv {
+        RecordValue::Map(nested) => collect_referenced_ids_from_view(nested, out),
+        RecordValue::Arr(seq) => collect_seq_ids(seq, out),
+        // Scalar variants: no keys.
+        RecordValue::Null
+        | RecordValue::Bool(_)
+        | RecordValue::Int(_)
+        | RecordValue::F64(_)
+        | RecordValue::Str(_)
+        | RecordValue::Bin(_) => {}
+    }
+}
+
+/// Walk a [`RawSeq`] and recurse into any `Map` elements it contains,
+/// collecting ids. Mirrors [`check_seq_keys`]'s traversal.
+// hasher-generic boundary: caller supplies the hasher (THasher at every call site)
+#[allow(clippy::disallowed_types)]
+fn collect_seq_ids<S: std::hash::BuildHasher>(
+    seq: &RawSeq<'_>,
+    out: &mut std::collections::HashMap<u64, (), S>,
+) {
+    for elem in seq.iter() {
+        match elem {
+            RecordValue::Map(nested) => collect_referenced_ids_from_view(&nested, out),
+            RecordValue::Arr(inner_seq) => collect_seq_ids(&inner_seq, out),
+            // Scalars in a list: no keys.
+            _ => {}
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Internal helpers
 // ---------------------------------------------------------------------------

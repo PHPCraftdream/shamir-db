@@ -13,7 +13,9 @@ pub use messagepack::{
     query_value_to_storage_bytes_into,
 };
 pub use projection::record_view_to_id_msgpack;
-pub use validate_keys::{validate_keys_resolve, validate_keys_resolve_interner};
+pub use validate_keys::{
+    collect_referenced_ids_from_view, validate_keys_resolve, validate_keys_resolve_interner,
+};
 
 #[cfg(test)]
 pub mod tests;
