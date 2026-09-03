@@ -32,7 +32,10 @@
 
 use std::sync::Arc;
 
-use shamir_db::engine::{tx::ApplyOutcome, ChangelogEvent};
+use shamir_db::engine::{
+    tx::{ApplyOutcome, ApplyPolicy},
+    ChangelogEvent,
+};
 use shamir_db::ShamirDb;
 use shamir_query_types::wire::repl::ReplResponse;
 use tokio_util::sync::CancellationToken;
@@ -331,7 +334,15 @@ pub async fn run_follower_loop(
         }
 
         for ev in &events {
-            match repo_instance.apply_replicated(ev, bookmark).await {
+            // #1199: `ApplyPolicy::Trusted` reproduces pre-#1199 behavior
+            // byte-for-byte. Wiring a real opt-in `ValidatePayload` knob
+            // through server config (`FollowerLoopConfig`/ktav) is deferred
+            // — see `docs/dev-artifacts/roadmap/REPLICATION.md` §4.4 for
+            // what's implemented vs. deferred and why.
+            match repo_instance
+                .apply_replicated(ev, bookmark, ApplyPolicy::Trusted)
+                .await
+            {
                 Ok(ApplyOutcome::Applied { .. }) => {
                     // Advance the durable bookmark to the LEADER commit
                     // version (not the follower-local version). This is the

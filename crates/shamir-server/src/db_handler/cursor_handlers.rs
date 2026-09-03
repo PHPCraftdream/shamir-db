@@ -351,7 +351,7 @@ async fn enforce_page_budget(
 
 /// Build the `FilterContext` a cursor's `FetchNext` reads through — mirrors
 /// the non-tx bare-single-read shape `query_runner.rs` builds (empty
-/// `resolved_refs`/`params`, actor injected).
+/// `resolved_refs`/`params`).
 ///
 /// Scope note: this uses `FilterContext::new`'s default scalar resolver
 /// (`ScalarResolver::builtins_only()`) rather than the per-DB resolver with
@@ -364,11 +364,10 @@ async fn enforce_page_budget(
 /// necessary in practice.
 async fn build_filter_context<'a>(
     table: &'a TableManager,
-    actor: shamir_db::access::Actor,
     resolved_refs: &'a TMap<String, shamir_db::query::read::QueryResult>,
 ) -> Result<FilterContext<'a>, BatchError> {
     let interner = table.interner().get().await.map_err(wrap_engine_err)?;
-    Ok(FilterContext::new(interner, resolved_refs).with_actor(actor))
+    Ok(FilterContext::new(interner, resolved_refs))
 }
 
 /// Build the INCLUSIVE boundary filter `field >= seek_key` (ASC) /
@@ -1261,7 +1260,7 @@ impl ShamirDbHandler {
         }
 
         let empty_refs: TMap<String, shamir_db::query::read::QueryResult> = new_map();
-        let ctx = match build_filter_context(&table, actor.clone(), &empty_refs).await {
+        let ctx = match build_filter_context(&table, &empty_refs).await {
             Ok(c) => c,
             Err(e) => return error_response(&e),
         };
@@ -1784,7 +1783,7 @@ impl ShamirDbHandler {
         };
 
         let empty_refs: TMap<String, shamir_db::query::read::QueryResult> = new_map();
-        let ctx = match build_filter_context(&table, actor, &empty_refs).await {
+        let ctx = match build_filter_context(&table, &empty_refs).await {
             Ok(c) => c,
             Err(e) => return error_response(&e),
         };
