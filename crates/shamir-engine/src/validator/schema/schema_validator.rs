@@ -6,6 +6,7 @@
 
 use async_trait::async_trait;
 use shamir_query_types::filter::FilterValue;
+use smallvec::SmallVec;
 
 use crate::query::TableRef;
 use crate::validator::encode::Validation;
@@ -15,6 +16,7 @@ use crate::validator::record_validator::{RecordValidator, ValidatorCtx};
 use shamir_types::types::value::QueryValue;
 
 use super::field_rule::FieldRule;
+use super::one_of_set::OneOfSet;
 
 /// Declarative schema validator.
 ///
@@ -26,12 +28,22 @@ use super::field_rule::FieldRule;
 pub struct SchemaValidator {
     /// Compiled field rules.
     pub rules: Vec<FieldRule>,
+    /// Precomputed `one_of` membership sets, index-aligned with `rules`
+    /// (`one_of_sets[i]` corresponds to `rules[i]`) — built once here instead
+    /// of re-scanning the raw `Vec<QueryValue>` per record (audit group 25 /
+    /// defect 2). `None` at an index means that rule has no (or an empty)
+    /// `one_of` constraint.
+    one_of_sets: Vec<Option<OneOfSet>>,
 }
 
 impl SchemaValidator {
     /// Create a new schema validator from a list of field rules.
     pub fn new(rules: Vec<FieldRule>) -> Self {
-        Self { rules }
+        let one_of_sets = rules
+            .iter()
+            .map(|r| OneOfSet::build(r.constraints.one_of.as_deref()))
+            .collect();
+        Self { rules, one_of_sets }
     }
 
     /// Collect all foreign-key references declared in the rules.
@@ -126,8 +138,13 @@ impl RecordValidator for SchemaValidator {
 
         let mut v = Validation::accept();
 
-        for rule in &self.rules {
-            let path_refs: Vec<&str> = rule.path.iter().map(String::as_str).collect();
+        for (idx, rule) in self.rules.iter().enumerate() {
+            // SmallVec avoids the heap allocation `Vec<&str>` paid on every
+            // rule/record for the common short-path case (audit group 25 /
+            // defect 3); 4 inline segments covers the overwhelming majority
+            // of field paths without spilling.
+            let path_refs: SmallVec<[&str; 4]> = rule.path.iter().map(String::as_str).collect();
+            let one_of_set = self.one_of_sets[idx].as_ref();
 
             match fields.present(&path_refs) {
                 // Field absent.
@@ -147,7 +164,7 @@ impl RecordValidator for SchemaValidator {
                 }
                 // Field present with a value — run type + constraint checks.
                 Some(_) => {
-                    rule.check_extended(fields, &path_refs, Some(ctx), &mut v);
+                    rule.check_extended(fields, &path_refs, Some(ctx), one_of_set, &mut v);
 
                     // Phase C2 — foreign_key existence check (async DB read).
                     // Runs whenever ctx.db() is Some AND a cross-table resolver

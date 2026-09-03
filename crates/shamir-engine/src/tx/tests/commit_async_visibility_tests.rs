@@ -33,7 +33,10 @@ use crate::repo::repo_instance::RepoInstance;
 use crate::repo::repo_types::BoxRepo;
 use crate::table::table_manager::table_token_for;
 use crate::table::TableConfig;
-use crate::tx::commit_phases::FAIL_PHASE_5C_TX_ID;
+use crate::tx::commit_phases::{
+    FAIL_PHASE_5A_TRANSIENT_REMAINING, FAIL_PHASE_5A_TRANSIENT_TX_ID, FAIL_PHASE_5C_TX_ID,
+    MATERIALIZE_ATTEMPTS,
+};
 use crate::tx::tx_outcome::MaterializationState;
 
 fn make_repo() -> RepoInstance {
@@ -246,6 +249,72 @@ async fn async_commit_background_failure_is_recovered() {
         .await
         .expect("recovery must materialize the deferred index posting");
     assert_eq!(recovered, posting_val);
+}
+
+/// Serialises the arm → commit → reset window of
+/// [`async_commit_data_phase_recovers_after_transient_retry`] against any
+/// future second armer of `FAIL_PHASE_5A_TRANSIENT_*` (today it's the sole
+/// user, but the guard is cheap future-proofing, mirroring
+/// `PHASE_5A_INJECT_LOCK` in `commit_phase5_defer_tests`).
+static TRANSIENT_INJECT_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+/// P2 perf fix regression (audit 4.7): `apply_data_phase` used to pass
+/// `ops.clone()` into the `retry_materialize` closure; the fix makes
+/// `apply_data_batch` take `&[KvOp]` so the common (attached-table/MVCC)
+/// path clones nothing at all. This proves the bounded retry still WORKS
+/// — not just defers — with the borrowed slice: `apply_data_batch` is
+/// injected to fail the first `MATERIALIZE_ATTEMPTS - 1` calls for this tx
+/// (exhausting every attempt but the last), then the final attempt goes
+/// through for real and must apply the SAME borrowed data correctly.
+#[tokio::test(flavor = "current_thread")]
+async fn async_commit_data_phase_recovers_after_transient_retry() {
+    const TX_ID: u64 = ASYNC_INJECT_TX_ID + 3;
+    let repo = make_repo();
+    repo.add_table(TableConfig::new("t"));
+    let tbl = repo.get_table("t").await.unwrap();
+    let token = table_token_for("t");
+
+    let rid = RecordId::new();
+    let body = InnerValue::Str("async-transient-retry-recovered".into())
+        .to_bytes()
+        .unwrap();
+    let mut staging = StagingStore::new(Arc::clone(tbl.data_store()));
+    staging.set(rid.to_bytes().into(), body);
+
+    let mut tx = TxContext::new(TxId::new(TX_ID), 0, 0, IsolationLevel::Snapshot);
+    tx.write_set.insert(token, staging);
+    tx.set_visibility(CommitVisibility::AsyncIndex);
+
+    let inject_guard = TRANSIENT_INJECT_LOCK.lock().await;
+    FAIL_PHASE_5A_TRANSIENT_TX_ID.store(TX_ID, Ordering::SeqCst);
+    // Fail every attempt except the last one `retry_materialize` allows.
+    FAIL_PHASE_5A_TRANSIENT_REMAINING.store(MATERIALIZE_ATTEMPTS - 1, Ordering::SeqCst);
+
+    let outcome = repo.commit_tx(tx).await.expect("commit must not abort");
+
+    FAIL_PHASE_5A_TRANSIENT_TX_ID.store(0, Ordering::SeqCst);
+    FAIL_PHASE_5A_TRANSIENT_REMAINING.store(0, Ordering::SeqCst);
+    drop(inject_guard);
+
+    // The retry recovered inline (last attempt succeeded) — this must be
+    // `Complete`, NOT `Deferred`: a regression that silently dropped or
+    // corrupted the borrowed `ops` on the successful attempt would either
+    // fail every attempt (Deferred) or apply the wrong bytes below.
+    assert_eq!(
+        outcome.materialization,
+        MaterializationState::Complete,
+        "a transient Phase 5a failure that clears within MATERIALIZE_ATTEMPTS must recover, \
+         not defer"
+    );
+
+    let observed = tbl
+        .get(rid)
+        .await
+        .expect("data must be materialized once the retry succeeds");
+    assert!(
+        matches!(observed, InnerValue::Str(ref s) if s == "async-transient-retry-recovered"),
+        "the exact staged bytes must land once the borrowed-ops retry succeeds, got {observed:?}"
+    );
 }
 
 /// (d) Default (sync) mode is byte-identical: no background handle is

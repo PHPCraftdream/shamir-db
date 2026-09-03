@@ -25,7 +25,8 @@ use std::sync::Arc;
 
 use bench_scale_tool::Harness;
 use shamir_engine::query::batch::{
-    execute_batch, BatchOp, BatchRequest, QueryEntry, ResultEncoding, TableResolver,
+    execute_batch as execute_batch_raw, AccessGate, AdminExecutor, Authorized, BatchError, BatchOp,
+    BatchRequest, BatchResponse, FunctionInvoker, QueryEntry, ResultEncoding, TableResolver,
 };
 use shamir_engine::repo::{BoxRepo, RepoInstance};
 use shamir_engine::table::{TableConfig, TableManager};
@@ -33,10 +34,45 @@ use shamir_query_types::write::InsertOp;
 use shamir_query_types::TableRef;
 use shamir_storage::error::DbResult;
 use shamir_storage::storage_in_memory::InMemoryRepo;
-use shamir_types::access::Actor;
+use shamir_tx::IsolationLevel;
+use shamir_types::access::{AccessError, Action, Actor, ResourcePath};
+use shamir_types::core::interner::{InternerKey, TouchInd};
 use shamir_types::mpack;
-use shamir_types::types::common::new_map;
-use shamir_types::types::value::QueryValue;
+use shamir_types::types::common::{new_map, new_map_wc};
+
+/// Bench-only always-allow [`AccessGate`] (#1199): this bench measures
+/// execution mechanics, not the authorization seam, so the bypass is an
+/// explicit, named choice rather than a silent default.
+struct BenchAllowAll;
+
+#[async_trait::async_trait]
+impl AccessGate for BenchAllowAll {
+    async fn check(
+        &self,
+        _actor: &Actor,
+        _path: &ResourcePath,
+        _action: Action,
+    ) -> Result<(), AccessError> {
+        Ok(())
+    }
+}
+
+/// Pre-#1199 call shape, preserved for this bench: mints an [`Authorized`]
+/// token via [`BenchAllowAll`] and calls the real `execute_batch`.
+async fn execute_batch(
+    request: &BatchRequest,
+    resolver: &dyn TableResolver,
+    admin: Option<&dyn AdminExecutor>,
+    invoker: Option<&dyn FunctionInvoker>,
+    actor: Actor,
+    db_name: &str,
+) -> Result<BatchResponse, BatchError> {
+    let auth = Authorized::authorize(request, actor, db_name, &BenchAllowAll)
+        .await
+        .expect("BenchAllowAll never denies");
+    execute_batch_raw(auth, resolver, admin, invoker).await
+}
+use shamir_types::types::value::{InnerValue, QueryValue};
 
 struct Resolver {
     repo: RepoInstance,
@@ -50,6 +86,19 @@ impl TableResolver for Resolver {
     async fn resolve_repo(&self, _repo_name: &str) -> DbResult<RepoInstance> {
         Ok(self.repo.clone())
     }
+}
+
+async fn key_id(tbl: &TableManager, name: &str) -> u64 {
+    let interner = tbl.interner().get().await.unwrap();
+    match interner.touch_ind(name).unwrap() {
+        TouchInd::Exists(k) | TouchInd::New(k) => k.id(),
+    }
+}
+
+fn record_with_email(email_key: u64, email: &str) -> InnerValue {
+    let mut m = new_map_wc(1);
+    m.insert(InternerKey::new(email_key), InnerValue::Str(email.into()));
+    InnerValue::Map(m)
 }
 
 fn main() {
@@ -196,6 +245,81 @@ fn main() {
                 )
                 .await
                 .unwrap();
+            },
+        );
+    }
+
+    // P1 fix (group 6, cross-crate rush review 2026-08-14): `tx_update_dirty_repo/n_*`
+    // forces the gate OPEN (a concurrent non-tx write commits between this
+    // tx's BEGIN and its staged updates, advancing
+    // `gate.version_allocation_high_water_mark()` past `tx.snapshot_version`
+    // — see `pre_commit.rs`'s gate check) so the timed commit actually runs
+    // `rederive_stale_value_ops_post_stage`'s per-row re-planning loop over
+    // all N staged rows, unlike `tx_update_quiet_repo/n_*` above (which the
+    // #1107/#1110 gate always short-circuits before touching this loop at
+    // all). Before the P1 fix, that loop rebuilt `staged_removals_by_rid`
+    // from scratch and linearly `.any()`-rescanned `tx.index_write_set` once
+    // PER re-planned op — O(N²·K) total for N staged rows. After the fix,
+    // the dedup caches are built once per table and looked up in O(1), so
+    // total per-commit work should scale close to O(N) — the harness's
+    // `ns/op` here should stay roughly flat/near-linear across N instead of
+    // growing superlinearly.
+    for &n in &[100usize, 200usize, 400usize] {
+        h.bench_batched_async(
+            &format!("tx_update_dirty_repo/n_{n}"),
+            move || async move {
+                // FRESH instance per iteration (no shared state across bench iterations)
+                let repo = Arc::new(InMemoryRepo::new());
+                let instance =
+                    RepoInstance::new("bench".into(), BoxRepo::InMemory(repo), Vec::new());
+                instance.add_table(TableConfig::new("users".to_string()));
+                let tbl = instance.get_table("users").await.unwrap();
+                tbl.create_index("idx_email", &["email"]).await.unwrap();
+                let email_key = key_id(&tbl, "email").await;
+
+                // Insert N rows (setup, not timed).
+                let mut rids = Vec::with_capacity(n);
+                for i in 0..n {
+                    let rid = tbl
+                        .insert(&record_with_email(
+                            email_key,
+                            &format!("user_{i}@example.com"),
+                        ))
+                        .await
+                        .unwrap();
+                    rids.push(rid);
+                }
+
+                // Open the tx whose COMMIT is timed (snapshot taken now).
+                let (mut tx, guard) = instance.begin_tx(IsolationLevel::Snapshot).await.unwrap();
+
+                // Force the slow path: a concurrent non-tx write on this table
+                // commits AFTER this tx's snapshot was taken, so the gate does
+                // NOT short-circuit at commit time.
+                tbl.insert(&record_with_email(email_key, "concurrent@example.com"))
+                    .await
+                    .unwrap();
+
+                // Stage an UPDATE of every row's indexed "email" field
+                // (untimed setup) — this is what makes
+                // `rederive_stale_value_ops_post_stage` re-plan N rows.
+                for (i, &rid) in rids.iter().enumerate() {
+                    tbl.update_tx(
+                        rid,
+                        &record_with_email(email_key, &format!("updated_{i}@example.com")),
+                        Some(&mut tx),
+                    )
+                    .await
+                    .unwrap();
+                }
+
+                (instance, tx, guard)
+            },
+            |(instance, tx, guard)| async move {
+                // Commit (timed): runs `rederive_stale_value_ops_post_stage`'s
+                // slow path over all N staged rows.
+                instance.commit_tx(tx).await.unwrap();
+                drop(guard);
             },
         );
     }

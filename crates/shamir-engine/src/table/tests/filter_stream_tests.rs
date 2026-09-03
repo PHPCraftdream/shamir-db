@@ -1,11 +1,11 @@
 //! Integration tests for TableManager::filter_stream.
 //!
-//! Each test: filter (built via mpack!) → compile → filter_stream over real table → check results.
+//! Each test: filter (built via `shamir_query_builder::filter`) → compile →
+//! filter_stream over real table → check results.
 
 #![allow(deprecated)] // test-only stream collectors (collect_filter_stream) are deprecated by design
 
 use crate::db_instance::db_instance::DbInstance;
-use crate::query::common::filter_from_value;
 use crate::query::filter::eval_context::FilterContext;
 use crate::query::read::{QueryRecord, QueryResult};
 use crate::repo::repo_types::BoxRepoFactory;
@@ -13,6 +13,8 @@ use crate::repo::RepoConfig;
 use crate::table::tests::stream_utils::collect_filter_stream;
 use crate::table::tests::test_helpers::query_value_to_inner_tracked;
 use crate::table::TableConfig;
+use shamir_query_builder::filter::{and, eq, gt, gte, in_, lt, lte, ne, not, not_in, or};
+use shamir_query_builder::val::qref;
 use shamir_types::mpack;
 use shamir_types::types::common::new_map;
 
@@ -77,8 +79,7 @@ async fn test_filter_stream_eq_status_active() {
     let interner = table.interner().get().await.unwrap();
     let ctx = FilterContext::new(interner, &refs);
 
-    let filter =
-        filter_from_value(&mpack!({"op": "eq", "field": "status", "value": "active"})).unwrap();
+    let filter = eq("status", "active");
     let results = collect_filter_stream(table.filter_stream(100, &filter, &ctx).await.unwrap())
         .await
         .unwrap();
@@ -95,8 +96,7 @@ async fn test_filter_stream_eq_no_match() {
     let interner = table.interner().get().await.unwrap();
     let ctx = FilterContext::new(interner, &refs);
 
-    let filter =
-        filter_from_value(&mpack!({"op": "eq", "field": "status", "value": "banned"})).unwrap();
+    let filter = eq("status", "banned");
     let results = collect_filter_stream(table.filter_stream(100, &filter, &ctx).await.unwrap())
         .await
         .unwrap();
@@ -115,7 +115,7 @@ async fn test_filter_stream_gt_age() {
     let interner = table.interner().get().await.unwrap();
     let ctx = FilterContext::new(interner, &refs);
 
-    let filter = filter_from_value(&mpack!({"op": "gt", "field": "age", "value": 28})).unwrap();
+    let filter = gt("age", 28);
     let results = collect_filter_stream(table.filter_stream(100, &filter, &ctx).await.unwrap())
         .await
         .unwrap();
@@ -133,7 +133,7 @@ async fn test_filter_stream_lte_age() {
     let interner = table.interner().get().await.unwrap();
     let ctx = FilterContext::new(interner, &refs);
 
-    let filter = filter_from_value(&mpack!({"op": "lte", "field": "age", "value": 25})).unwrap();
+    let filter = lte("age", 25);
     let results = collect_filter_stream(table.filter_stream(100, &filter, &ctx).await.unwrap())
         .await
         .unwrap();
@@ -155,14 +155,7 @@ async fn test_filter_stream_and() {
     let interner = table.interner().get().await.unwrap();
     let ctx = FilterContext::new(interner, &refs);
 
-    let filter = filter_from_value(&mpack!({
-        "op": "and",
-        "filters": [
-            {"op": "eq", "field": "status", "value": "active"},
-            {"op": "gte", "field": "score", "value": 60}
-        ]
-    }))
-    .unwrap();
+    let filter = and([eq("status", "active"), gte("score", 60)]);
     let results = collect_filter_stream(table.filter_stream(100, &filter, &ctx).await.unwrap())
         .await
         .unwrap();
@@ -184,14 +177,7 @@ async fn test_filter_stream_or() {
     let interner = table.interner().get().await.unwrap();
     let ctx = FilterContext::new(interner, &refs);
 
-    let filter = filter_from_value(&mpack!({
-        "op": "or",
-        "filters": [
-            {"op": "eq", "field": "status", "value": "deleted"},
-            {"op": "gt", "field": "age", "value": 34}
-        ]
-    }))
-    .unwrap();
+    let filter = or([eq("status", "deleted"), gt("age", 34)]);
     let results = collect_filter_stream(table.filter_stream(100, &filter, &ctx).await.unwrap())
         .await
         .unwrap();
@@ -213,11 +199,7 @@ async fn test_filter_stream_not() {
     let interner = table.interner().get().await.unwrap();
     let ctx = FilterContext::new(interner, &refs);
 
-    let filter = filter_from_value(&mpack!({
-        "op": "not",
-        "filter": {"op": "eq", "field": "status", "value": "active"}
-    }))
-    .unwrap();
+    let filter = not(eq("status", "active"));
     let results = collect_filter_stream(table.filter_stream(100, &filter, &ctx).await.unwrap())
         .await
         .unwrap();
@@ -239,8 +221,7 @@ async fn test_filter_stream_ne() {
     let interner = table.interner().get().await.unwrap();
     let ctx = FilterContext::new(interner, &refs);
 
-    let filter =
-        filter_from_value(&mpack!({"op": "ne", "field": "status", "value": "active"})).unwrap();
+    let filter = ne("status", "active");
     let results = collect_filter_stream(table.filter_stream(100, &filter, &ctx).await.unwrap())
         .await
         .unwrap();
@@ -263,20 +244,10 @@ async fn test_filter_stream_nested_and_or() {
     let ctx = FilterContext::new(interner, &refs);
 
     // (status == "active" AND score >= 60) OR (status == "inactive")
-    let filter = filter_from_value(&mpack!({
-        "op": "or",
-        "filters": [
-            {
-                "op": "and",
-                "filters": [
-                    {"op": "eq", "field": "status", "value": "active"},
-                    {"op": "gte", "field": "score", "value": 60}
-                ]
-            },
-            {"op": "eq", "field": "status", "value": "inactive"}
-        ]
-    }))
-    .unwrap();
+    let filter = or([
+        and([eq("status", "active"), gte("score", 60)]),
+        eq("status", "inactive"),
+    ]);
     let results = collect_filter_stream(table.filter_stream(100, &filter, &ctx).await.unwrap())
         .await
         .unwrap();
@@ -301,23 +272,10 @@ async fn test_filter_stream_triple_nesting() {
     // NOT ( (status == "deleted") OR (status == "inactive" AND score < 90) )
     // Excluded: Eve(deleted), Carol(inactive, score 80 < 90)
     // Remaining: Alice, Bob, Dave
-    let filter = filter_from_value(&mpack!({
-        "op": "not",
-        "filter": {
-            "op": "or",
-            "filters": [
-                {"op": "eq", "field": "status", "value": "deleted"},
-                {
-                    "op": "and",
-                    "filters": [
-                        {"op": "eq", "field": "status", "value": "inactive"},
-                        {"op": "lt", "field": "score", "value": 90}
-                    ]
-                }
-            ]
-        }
-    }))
-    .unwrap();
+    let filter = not(or([
+        eq("status", "deleted"),
+        and([eq("status", "inactive"), lt("score", 90)]),
+    ]));
     let results = collect_filter_stream(table.filter_stream(100, &filter, &ctx).await.unwrap())
         .await
         .unwrap();
@@ -338,8 +296,7 @@ async fn test_filter_stream_small_batches() {
     let interner = table.interner().get().await.unwrap();
     let ctx = FilterContext::new(interner, &refs);
 
-    let filter =
-        filter_from_value(&mpack!({"op": "eq", "field": "status", "value": "active"})).unwrap();
+    let filter = eq("status", "active");
     // batch_size=2 forces multiple iterations over 5 records
     let results = collect_filter_stream(table.filter_stream(2, &filter, &ctx).await.unwrap())
         .await
@@ -369,12 +326,7 @@ async fn test_filter_stream_with_query_ref() {
     let ctx = FilterContext::new(interner, &refs);
 
     // score >= $query("@threshold[0].min_score")
-    let filter = filter_from_value(&mpack!({
-        "op": "gte",
-        "field": "score",
-        "value": {"$query": "@threshold[0].min_score"}
-    }))
-    .unwrap();
+    let filter = gte("score", qref("threshold", "[0].min_score"));
     let results = collect_filter_stream(table.filter_stream(100, &filter, &ctx).await.unwrap())
         .await
         .unwrap();
@@ -397,7 +349,7 @@ async fn test_filter_stream_all_excluded() {
     let ctx = FilterContext::new(interner, &refs);
 
     // age > 100 — nobody
-    let filter = filter_from_value(&mpack!({"op": "gt", "field": "age", "value": 100})).unwrap();
+    let filter = gt("age", 100);
     let results = collect_filter_stream(table.filter_stream(100, &filter, &ctx).await.unwrap())
         .await
         .unwrap();
@@ -417,7 +369,7 @@ async fn test_filter_stream_all_match() {
     let ctx = FilterContext::new(interner, &refs);
 
     // age > 0 — everyone
-    let filter = filter_from_value(&mpack!({"op": "gt", "field": "age", "value": 0})).unwrap();
+    let filter = gt("age", 0);
     let results = collect_filter_stream(table.filter_stream(100, &filter, &ctx).await.unwrap())
         .await
         .unwrap();
@@ -450,14 +402,10 @@ async fn test_filter_stream_query_ref_in_and() {
     let ctx = FilterContext::new(interner, &refs);
 
     // age >= @config[0].min_age AND score >= @scoring[0].cutoff
-    let filter = filter_from_value(&mpack!({
-        "op": "and",
-        "filters": [
-            {"op": "gte", "field": "age", "value": {"$query": "@config[0].min_age"}},
-            {"op": "gte", "field": "score", "value": {"$query": "@scoring[0].cutoff"}}
-        ]
-    }))
-    .unwrap();
+    let filter = and([
+        gte("age", qref("config", "[0].min_age")),
+        gte("score", qref("scoring", "[0].cutoff")),
+    ]);
     let results = collect_filter_stream(table.filter_stream(100, &filter, &ctx).await.unwrap())
         .await
         .unwrap();
@@ -484,14 +432,10 @@ async fn test_filter_stream_query_ref_in_or_with_literal() {
     let ctx = FilterContext::new(interner, &refs);
 
     // (score >= @vip_list[0].score_threshold) OR (status == "deleted")
-    let filter = filter_from_value(&mpack!({
-        "op": "or",
-        "filters": [
-            {"op": "gte", "field": "score", "value": {"$query": "@vip_list[0].score_threshold"}},
-            {"op": "eq", "field": "status", "value": "deleted"}
-        ]
-    }))
-    .unwrap();
+    let filter = or([
+        gte("score", qref("vip_list", "[0].score_threshold")),
+        eq("status", "deleted"),
+    ]);
     let results = collect_filter_stream(table.filter_stream(100, &filter, &ctx).await.unwrap())
         .await
         .unwrap();
@@ -518,11 +462,7 @@ async fn test_filter_stream_not_query_ref() {
 
     // NOT (age > @limits[0].max_age)
     // age > 30 is only Carol(35), so NOT gives everyone except Carol
-    let filter = filter_from_value(&mpack!({
-        "op": "not",
-        "filter": {"op": "gt", "field": "age", "value": {"$query": "@limits[0].max_age"}}
-    }))
-    .unwrap();
+    let filter = not(gt("age", qref("limits", "[0].max_age")));
     let results = collect_filter_stream(table.filter_stream(100, &filter, &ctx).await.unwrap())
         .await
         .unwrap();
@@ -558,33 +498,16 @@ async fn test_filter_stream_deep_nesting_with_multiple_query_refs() {
     //     NOT(score < 90)                          -- score >= 90
     //   ]
     // ]
-    let filter = filter_from_value(&mpack!({
-        "op": "and",
-        "filters": [
-            {
-                "op": "eq",
-                "field": "status",
-                "value": {"$query": "@status_config[0].allowed"}
-            },
-            {
-                "op": "or",
-                "filters": [
-                    {
-                        "op": "and",
-                        "filters": [
-                            {"op": "gte", "field": "age", "value": {"$query": "@age_range[0].min"}},
-                            {"op": "lte", "field": "age", "value": {"$query": "@age_range[0].max"}}
-                        ]
-                    },
-                    {
-                        "op": "not",
-                        "filter": {"op": "lt", "field": "score", "value": 90}
-                    }
-                ]
-            }
-        ]
-    }))
-    .unwrap();
+    let filter = and([
+        eq("status", qref("status_config", "[0].allowed")),
+        or([
+            and([
+                gte("age", qref("age_range", "[0].min")),
+                lte("age", qref("age_range", "[0].max")),
+            ]),
+            not(lt("score", 90)),
+        ]),
+    ]);
     let results = collect_filter_stream(table.filter_stream(100, &filter, &ctx).await.unwrap())
         .await
         .unwrap();
@@ -609,12 +532,7 @@ async fn test_filter_stream_query_ref_missing_graceful() {
     let ctx = FilterContext::new(interner, &refs);
 
     // age >= @nonexistent[0].value — should not match anything (unresolvable ref)
-    let filter = filter_from_value(&mpack!({
-        "op": "gte",
-        "field": "age",
-        "value": {"$query": "@nonexistent[0].value"}
-    }))
-    .unwrap();
+    let filter = gte("age", qref("nonexistent", "[0].value"));
     let results = collect_filter_stream(table.filter_stream(100, &filter, &ctx).await.unwrap())
         .await
         .unwrap();
@@ -641,15 +559,11 @@ async fn test_filter_stream_mixed_query_ref_field_ref_literal() {
     //   status != "deleted",            -- literal
     //   age > 23                        -- literal
     // ]
-    let filter = filter_from_value(&mpack!({
-        "op": "and",
-        "filters": [
-            {"op": "gte", "field": "score", "value": {"$query": "@bonus[0].threshold"}},
-            {"op": "ne", "field": "status", "value": "deleted"},
-            {"op": "gt", "field": "age", "value": 23}
-        ]
-    }))
-    .unwrap();
+    let filter = and([
+        gte("score", qref("bonus", "[0].threshold")),
+        ne("status", "deleted"),
+        gt("age", 23),
+    ]);
     let results = collect_filter_stream(table.filter_stream(100, &filter, &ctx).await.unwrap())
         .await
         .unwrap();
@@ -673,12 +587,7 @@ async fn test_filter_stream_in_literals() {
     let interner = table.interner().get().await.unwrap();
     let ctx = FilterContext::new(interner, &refs);
 
-    let filter = filter_from_value(&mpack!({
-        "op": "in",
-        "field": "status",
-        "values": ["active", "inactive"]
-    }))
-    .unwrap();
+    let filter = in_("status", ["active", "inactive"]);
     let results = collect_filter_stream(table.filter_stream(100, &filter, &ctx).await.unwrap())
         .await
         .unwrap();
@@ -696,12 +605,7 @@ async fn test_filter_stream_not_in_literals() {
     let interner = table.interner().get().await.unwrap();
     let ctx = FilterContext::new(interner, &refs);
 
-    let filter = filter_from_value(&mpack!({
-        "op": "not_in",
-        "field": "status",
-        "values": ["deleted", "inactive"]
-    }))
-    .unwrap();
+    let filter = not_in("status", ["deleted", "inactive"]);
     let results = collect_filter_stream(table.filter_stream(100, &filter, &ctx).await.unwrap())
         .await
         .unwrap();
@@ -734,12 +638,7 @@ async fn test_filter_stream_in_query_ref_column() {
     let ctx = FilterContext::new(interner, &refs);
 
     // status IN @whitelist[].status
-    let filter = filter_from_value(&mpack!({
-        "op": "in",
-        "field": "status",
-        "values": {"$query": "@whitelist[].status"}
-    }))
-    .unwrap();
+    let filter = in_("status", [qref("whitelist", "[].status")]);
     let results = collect_filter_stream(table.filter_stream(100, &filter, &ctx).await.unwrap())
         .await
         .unwrap();
@@ -768,12 +667,7 @@ async fn test_filter_stream_not_in_query_ref_column() {
     let ctx = FilterContext::new(interner, &refs);
 
     // score NOT IN @exclude_scores[].val
-    let filter = filter_from_value(&mpack!({
-        "op": "not_in",
-        "field": "score",
-        "values": {"$query": "@exclude_scores[].val"}
-    }))
-    .unwrap();
+    let filter = not_in("score", [qref("exclude_scores", "[].val")]);
     let results = collect_filter_stream(table.filter_stream(100, &filter, &ctx).await.unwrap())
         .await
         .unwrap();
@@ -814,14 +708,10 @@ async fn test_filter_stream_in_query_ref_nested_and() {
     //   status IN @allowed_statuses[].s,
     //   score >= @min_scores[0].threshold
     // ]
-    let filter = filter_from_value(&mpack!({
-        "op": "and",
-        "filters": [
-            {"op": "in", "field": "status", "values": {"$query": "@allowed_statuses[].s"}},
-            {"op": "gte", "field": "score", "value": {"$query": "@min_scores[0].threshold"}}
-        ]
-    }))
-    .unwrap();
+    let filter = and([
+        in_("status", [qref("allowed_statuses", "[].s")]),
+        gte("score", qref("min_scores", "[0].threshold")),
+    ]);
     let results = collect_filter_stream(table.filter_stream(100, &filter, &ctx).await.unwrap())
         .await
         .unwrap();
@@ -857,14 +747,7 @@ async fn test_filter_stream_not_in_query_ref_with_or() {
     // NOT IN branch: Alice, Bob, Carol
     // score > 90 branch: Alice
     // Union: Alice, Bob, Carol
-    let filter = filter_from_value(&mpack!({
-        "op": "or",
-        "filters": [
-            {"op": "not_in", "field": "name", "values": {"$query": "@blacklist[].n"}},
-            {"op": "gt", "field": "score", "value": 90}
-        ]
-    }))
-    .unwrap();
+    let filter = or([not_in("name", [qref("blacklist", "[].n")]), gt("score", 90)]);
     let results = collect_filter_stream(table.filter_stream(100, &filter, &ctx).await.unwrap())
         .await
         .unwrap();

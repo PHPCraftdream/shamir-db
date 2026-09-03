@@ -21,7 +21,7 @@ use shamir_types::core::interner::Interner;
 use shamir_types::mpack;
 use shamir_types::types::value::QueryValue;
 
-use crate::query::batch::execute_batch;
+use crate::query::batch::execute_batch_unchecked as execute_batch;
 use crate::query::batch::param_subst::{resolve_write_value, WriteValueError};
 use crate::query::filter::FilterContext;
 

@@ -8,6 +8,18 @@
 //! derivation); the follower is an executor of the decided result, not a
 //! re-decider. See `docs/dev-artifacts/roadmap/REPLICATION.md` §4.1 / §4.
 //!
+//! ## Trust precondition (#1199)
+//!
+//! This module performs **no validator/schema/DAC/integrity check** on
+//! `event.changes` — the raw bytes are trusted verbatim. The entire
+//! security of this path rests on the replication TRANSPORT already
+//! having authenticated the sender as a legitimate leader/upstream before
+//! this function is ever called — a precondition owned by sibling crates
+//! (`shamir-connect`, `shamir-transport-tcp`/`-ws`, `shamir-server`'s
+//! replication supervisor), not by this crate. See
+//! `docs/dev-artifacts/roadmap/REPLICATION.md` §4.4 for the full threat
+//! model and what is/isn't implemented against it.
+//!
 //! ## Versions — local, not leader's
 //!
 //! Per the R1-a task brief (which refines §4.1's "version = source"), the
@@ -87,6 +99,8 @@ use std::sync::Arc;
 use shamir_storage::error::{DbError, DbResult};
 use shamir_storage::types::{KvOp, Store};
 use shamir_tx::{ChangeOp, ChangelogEvent};
+use shamir_types::record_view::RecordView;
+use shamir_types::types::value::InnerValue;
 
 use crate::repo::RepoInstance;
 use crate::table::table_manager::table_token_for;
@@ -104,6 +118,36 @@ pub enum ApplyOutcome {
     Skipped,
 }
 
+/// Follower-side trust policy for [`apply_replicated`] (#1199). See
+/// `docs/dev-artifacts/roadmap/REPLICATION.md` §4.4 for the full threat
+/// model this addresses — and does NOT address.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ApplyPolicy {
+    /// Trust `event.changes` verbatim — no decode check. Byte-identical to
+    /// pre-#1199 behavior; the default, so every existing caller is
+    /// unaffected.
+    #[default]
+    Trusted,
+    /// Decode-validate every `Put`'s record bytes BEFORE allocating a
+    /// version or touching the store: the same two-step decode
+    /// `table/read_exec.rs` uses to classify corrupt records
+    /// ([`RecordView::new`], falling back to [`InnerValue::from_bytes`] for
+    /// legacy-encoded rows). Rejects the WHOLE event (`Err`, no version
+    /// consumed — re-delivery retries identically) if any `Put` payload
+    /// decodes as neither.
+    ///
+    /// This does NOT re-run schema/validator/DAC checks against the
+    /// decoded record — see REPLICATION.md §4.4 for why that is explicitly
+    /// out of scope here (no actor-authorization signal survives the wire,
+    /// and schema/validator registries live in `shamir-db`, a crate this
+    /// one cannot depend on). It only closes the "structurally garbage
+    /// bytes get forwarded verbatim" gap — a decode failure here would
+    /// otherwise surface later as a `corrupt_records` entry on some
+    /// unrelated future read, or propagate silently to a downstream
+    /// chain-replica via `reproject_for_downstream`.
+    ValidatePayload,
+}
+
 /// Idempotently apply one leader-originated [`ChangelogEvent`] to the
 /// follower's local repo as a trusted raw write.
 ///
@@ -116,6 +160,9 @@ pub enum ApplyOutcome {
 /// comparison and short-circuits to [`ApplyOutcome::Skipped`] without
 /// touching the store.
 ///
+/// `policy` selects the trust model — see [`ApplyPolicy`]'s doc. Passing
+/// [`ApplyPolicy::Trusted`] reproduces the pre-#1199 behavior exactly.
+///
 /// Returns [`ApplyOutcome::Applied`] with the follower-local commit
 /// version on success. A `Skipped` outcome is returned BEFORE any version
 /// is allocated (a skip consumes no version), so the gate floor is
@@ -125,6 +172,7 @@ pub async fn apply_replicated(
     repo: &RepoInstance,
     event: &ChangelogEvent,
     applied_watermark: u64,
+    policy: ApplyPolicy,
 ) -> DbResult<ApplyOutcome> {
     // V4 §4 idempotency: O(1) watermark check, no per-record scan. A
     // re-delivered event (at-most-once transport with redelivery) is a
@@ -132,6 +180,30 @@ pub async fn apply_replicated(
     // last applied version is also a skip.
     if event.commit_version <= applied_watermark {
         return Ok(ApplyOutcome::Skipped);
+    }
+
+    // #1199 ApplyPolicy::ValidatePayload: decode every `Put`'s record bytes
+    // BEFORE allocating a version or touching the store. A rejection here
+    // consumes no version (identical to the `Skipped` contract above) —
+    // re-delivery retries the same event unchanged. See `ApplyPolicy`'s doc
+    // for exactly what this does and does not check.
+    if policy == ApplyPolicy::ValidatePayload {
+        for change in &event.changes {
+            if !matches!(change.op, ChangeOp::Put) {
+                continue;
+            }
+            let Some(value) = change.value.as_ref() else {
+                continue; // handled as a hard error by the apply loop below
+            };
+            let decodes = RecordView::new(value).is_ok() || InnerValue::from_bytes(value).is_ok();
+            if !decodes {
+                return Err(DbError::Validation(format!(
+                    "apply_replicated: leader_v {} tx {} table '{}' key {:?} carries \
+                     an undecodable record payload under ApplyPolicy::ValidatePayload",
+                    event.commit_version, event.tx_id, change.table, change.key
+                )));
+            }
+        }
     }
 
     let gate = repo.tx_gate().await?;
@@ -204,8 +276,31 @@ pub async fn apply_replicated(
         // `get_table` is a no-op when the context already exists (OnceCell).
         // NotFound = the table is not configured on this follower (dropped /
         // never created) — fall through to the base-store branch, which warns
-        // and skips.
-        let _ = repo.get_table(&table_name).await;
+        // and skips. Any OTHER error (store I/O failure, corrupt on-disk
+        // index metadata, etc.) is a REAL attach failure: falling through to
+        // the base-store branch anyway would silently take the non-MVCC
+        // write path the attach exists to prevent, and — because the caller
+        // only advances its replication bookmark after a successful `Ok`
+        // return — swallowing it here would let the bookmark advance past an
+        // event that was never actually applied through MVCC, so a retry
+        // could never repair it. Propagate instead: the version_guard's
+        // `Drop` (no `.commit()` was called) marks it `Aborted`, and the
+        // caller must not advance its watermark on this `Err`.
+        match repo.get_table(&table_name).await {
+            Ok(_) | Err(DbError::NotFound(_)) => {}
+            Err(e) => {
+                log::error!(
+                    "apply_replicated: forced MVCC attach for table '{}' failed with a \
+                     non-NotFound error (event leader_v {} tx {}): {e}; aborting apply so \
+                     the caller does NOT advance its replication watermark — retry will \
+                     re-attempt the attach",
+                    table_name,
+                    event.commit_version,
+                    event.tx_id
+                );
+                return Err(e);
+            }
+        }
         // Resolve the MvccStore the SAME way `apply_data_batch` /
         // `replay_v2_op` do: look up the per-table entry the
         // `RepoInstance` registers when the `TableManager` is

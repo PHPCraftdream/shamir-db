@@ -4,9 +4,11 @@
 //! equality / In / And index scans, sorted-index range planning, and the
 //! ORDER BY + LIMIT K fast-path eligibility check.
 
+use crate::index2::backend::{FtsMode, IndexQuery};
 use crate::query::filter::eval::{filter_value_to_inner, intern_field_path};
 use crate::query::filter::{Filter, FilterValue};
 use crate::query::read::{exec, ReadQuery};
+use shamir_index::vector::SearchOpts;
 use shamir_storage::error::DbError;
 use shamir_types::core::interner::Interner;
 use shamir_types::core::sort_codec;
@@ -35,9 +37,6 @@ impl TableManager {
         filter: &Filter,
         interner: &shamir_types::core::interner::Interner,
     ) -> Option<crate::index2::backend::IndexResult> {
-        use crate::index2::backend::{FtsMode, IndexQuery};
-        use crate::query::filter::eval::intern_field_path;
-
         if self.index2_registry().is_empty() {
             return None;
         }
@@ -75,7 +74,6 @@ impl TableManager {
                 ef_search,
                 oversample,
             } => {
-                use shamir_index::vector::SearchOpts;
                 let interned = intern_field_path(field, interner)?;
                 // P0-3a (#1038): if the vector backend is being dropped, fall back to None
                 // (caller will try other index types or full scan).

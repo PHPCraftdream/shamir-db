@@ -279,7 +279,7 @@ impl TableManager {
         // 3. Build ViewFields lens (zero-copy over raw msgpack bytes) for the
         //    old record.  No full de-intern — native validators probe by name
         //    lazily; WASM materialises internally via to_query_value().
-        let old_fields = old_view.map(|view| ViewFields { view, interner });
+        let old_fields = old_view.map(|view| ViewFields::new(view, interner));
         let new_fields = new_record.map(|qv| OwnedFields { qv });
 
         let new_dyn: Option<&dyn crate::validator::record_fields::RecordFields> = new_fields
@@ -313,8 +313,6 @@ impl TableManager {
         new: Option<&dyn crate::validator::record_fields::RecordFields>,
         old: Option<&dyn crate::validator::record_fields::RecordFields>,
     ) -> Result<(), crate::validator::ValidatorFailure> {
-        use crate::validator::ValidatorFailure;
-
         // Sort by priority ascending, stable tie-break by id.
         let mut sorted = applicable.to_vec();
         sorted.sort_by(|a, b| {

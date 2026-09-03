@@ -399,6 +399,84 @@ async fn latest_path_unchanged() {
     let _ = mvcc; // silence unused warning on mvcc binding
 }
 
+/// P2 perf fix: `read_history` fetches every matched record's timeline via
+/// `history_of_many` (vectorized) instead of one sequential `history_of`
+/// await per record. This test proves the vectorized path returns results
+/// IDENTICAL to what per-record sequential fetching would: three matched
+/// records sharing one filter value, with DIFFERENT history depths —
+/// including the edge case of a record with only its initial write (a
+/// single-entry timeline, i.e. "no additional history") alongside records
+/// with a genuine multi-version timeline. A batching mistake (wrong
+/// record's history returned, one record silently dropped, one record's
+/// timeline duplicated) would corrupt the total row count or the exact
+/// (version, value) set asserted below — `_version` is a single global
+/// monotonic counter shared by every record in this table, so every
+/// returned row's version is unique across the whole result and directly
+/// identifies which write produced it.
+#[tokio::test]
+async fn history_multiple_matched_records_none_dropped_or_duplicated() {
+    let (tbl, mvcc) = make_mvcc_table().await;
+    intern_fields(&tbl).await;
+
+    let interner = tbl.interner().get().await.unwrap();
+    let name_key = interner.touch_ind("name").unwrap().into_key();
+    let n_key = interner.touch_ind("n").unwrap().into_key();
+    tbl.interner().persist().await.unwrap();
+
+    // All three records share name="group" (all match the WHERE clause).
+    // v1: id_a, n=10 — a SINGLE write, no additional history (edge case).
+    let _id_a = insert_first(&tbl, &build_record(&name_key, &n_key, "group", 10)).await;
+    // v2,3,4: id_b, n=1,2,3 — a genuine multi-version timeline.
+    let id_b = insert_first(&tbl, &build_record(&name_key, &n_key, "group", 1)).await;
+    overwrite(&mvcc, id_b, &build_record(&name_key, &n_key, "group", 2)).await;
+    overwrite(&mvcc, id_b, &build_record(&name_key, &n_key, "group", 3)).await;
+    // v5,6: id_c, n=100,200 — another multi-version timeline.
+    let id_c = insert_first(&tbl, &build_record(&name_key, &n_key, "group", 100)).await;
+    overwrite(&mvcc, id_c, &build_record(&name_key, &n_key, "group", 200)).await;
+
+    let interner = tbl.interner().get().await.unwrap();
+    let refs = new_map();
+    let ctx = FilterContext::new(interner, &refs);
+
+    let q = history_query(
+        "group",
+        Temporal::History {
+            from: None,
+            to: None,
+            limit: None,
+            order: OrderDirection::Asc,
+        },
+    );
+    let result = tbl.read(&q, &ctx).await.unwrap();
+
+    assert_eq!(
+        result.records.len(),
+        6,
+        "1 (id_a) + 3 (id_b) + 2 (id_c) = 6 timeline rows total — none \
+         dropped or duplicated"
+    );
+
+    let mut got: Vec<(u64, i64)> = result
+        .records
+        .iter()
+        .map(|r| {
+            (
+                r.get_value_u64("_version").unwrap(),
+                r.get_value_i64("n").unwrap(),
+            )
+        })
+        .collect();
+    got.sort_by_key(|(v, _)| *v);
+
+    assert_eq!(
+        got,
+        vec![(1, 10), (2, 1), (3, 2), (4, 3), (5, 100), (6, 200)],
+        "every matched record's full timeline is present and correctly \
+         attributed — identical to what sequential per-record history_of \
+         calls would have produced"
+    );
+}
+
 /// A non-MVCC table (no MvccStore attached) rejects History with a
 /// clear error.
 #[tokio::test]

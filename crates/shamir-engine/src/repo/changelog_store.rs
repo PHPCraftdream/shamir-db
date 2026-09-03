@@ -10,7 +10,6 @@ use std::sync::Arc;
 
 use bytes::Bytes;
 use futures::StreamExt;
-use shamir_storage::types::RecordKey;
 use shamir_storage::types::Store;
 
 /// Per-repo durable changelog journal backed by a `Store`.
@@ -35,22 +34,35 @@ impl shamir_tx::ChangelogStore for StoreChangelog {
     }
 
     async fn range_from(&self, from_key: Bytes, limit: usize) -> Result<Vec<Bytes>, String> {
-        // Read all keys >= from_key ascending. Disk B-tree backends seek;
-        // the in-memory backend filters a full scan. We sort defensively so
-        // the order is numeric regardless of the backend's iteration order,
-        // then truncate to `limit`.
+        // `Store::iter_stream` is a workspace-wide MUST-ascending contract
+        // (`shamir-storage/src/types.rs` doc on `iter_stream`), and every
+        // `iter_range_stream` this crate can be handed upholds it too: the
+        // TreeIndex-backed seek in storage_in_memory.rs / storage_cached.rs,
+        // fjall's native B-tree range in storage_fjall.rs, and the sorted
+        // overlay merge in storage_membuffer.rs. `ChangelogStore::range_from`
+        // itself documents "ascending" as part of its contract
+        // (`shamir-tx/src/changefeed.rs`). So the first `limit` values off
+        // the stream already ARE the answer — stop as soon as we have them
+        // instead of draining and sorting the whole journal tail.
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
         let batch = limit.clamp(1, 1024);
         let mut stream = self.store.iter_range_stream(Some(from_key), None, batch);
 
-        // `RecordKey` keys — the stream now yields them; only values are
-        // returned, keys are used solely for the defensive numeric sort.
-        let mut pairs: Vec<(RecordKey, Bytes)> = Vec::new();
-        while let Some(chunk) = stream.next().await {
+        let mut values: Vec<Bytes> = Vec::with_capacity(limit);
+        while values.len() < limit {
+            let Some(chunk) = stream.next().await else {
+                break;
+            };
             let chunk = chunk.map_err(|e| format!("changelog store range: {e}"))?;
-            pairs.extend(chunk);
+            for (_, v) in chunk {
+                values.push(v);
+                if values.len() >= limit {
+                    break;
+                }
+            }
         }
-        pairs.sort_by(|a, b| a.0.as_ref().cmp(b.0.as_ref()));
-        pairs.truncate(limit);
-        Ok(pairs.into_iter().map(|(_, v)| v).collect())
+        Ok(values)
     }
 }

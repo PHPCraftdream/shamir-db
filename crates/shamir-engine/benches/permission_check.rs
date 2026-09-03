@@ -8,6 +8,13 @@
 //! Migrated to the fixed-iteration harness (`bench_scale_tool`): setup
 //! (roles, `SessionPermissions`, target resources) is built ONCE outside
 //! the timed closure — plan 1 (shared setup).
+//!
+//! `SessionPermissions` is test-only scaffolding gated behind
+//! `cfg(any(test, feature = "test-util"))` (it is NOT the live DAC access
+//! model — see `shamir_engine::query::auth` module docs), so this bench
+//! (a separate, non-test compilation unit) must be run with the feature
+//! enabled:
+//!   cargo bench -p shamir-engine --bench permission_check --features test-util
 
 use std::hint::black_box;
 

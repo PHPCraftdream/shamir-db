@@ -12,6 +12,7 @@ use shamir_types::types::common::{new_dash_map_wc, TDashMap, THasher};
 use shamir_types::types::value::InnerValue;
 use std::collections::BTreeSet;
 use std::future::Future;
+use std::hash::{Hash, Hasher};
 use std::pin::Pin;
 use std::sync::Arc;
 use tokio::sync::OnceCell;
@@ -396,7 +397,36 @@ impl RepoInstance {
         let mvcc = Arc::new(shamir_tx::MvccStore::new(history_store, Arc::clone(&gate)));
 
         let token = table_token_for(table_name);
-        let _ = self.per_table_mvcc.insert_sync(token, Arc::clone(&mvcc));
+        // A13 follow-up: `insert_sync` returns `Err` when the token is
+        // ALREADY present — e.g. a `remove_table(name)` racing this cold
+        // init can let a second `create_table_context` run concurrently
+        // (see `remove_table`'s own A13 doc comment). Silently discarding
+        // that `Err` (the old behavior) leaves the STALE old `MvccStore`
+        // wired into the commit pipeline forever while this freshly-built
+        // `TableManager` reads through its own (orphaned) `mvcc` handle — a
+        // split-brain where committed transactions silently vanish. Fail
+        // the table open outright instead: a lost race here means the
+        // caller's `OnceCell::get_or_try_init` leaves the cell empty and a
+        // retry re-attempts the attach cleanly.
+        if self
+            .per_table_mvcc
+            .insert_sync(token, Arc::clone(&mvcc))
+            .is_err()
+        {
+            log::error!(
+                "create_table_context: per_table_mvcc already has an entry for \
+                 table '{table_name}' (token {token}) — refusing to attach a second \
+                 MvccStore, which would leave a stale store wired into the commit \
+                 pipeline while this TableManager reads through a fresh one (A13 \
+                 split-brain). Failing the table open; retry will re-attempt the \
+                 attach."
+            );
+            return Err(DbError::Internal(format!(
+                "create_table_context: per_table_mvcc attach collision for table \
+                 '{table_name}' (token {token}) — a stale MvccStore entry is still \
+                 registered"
+            )));
+        }
 
         // L14: when an MvccStore is attached, ALL data reads and writes are
         // routed through the version log (`history`), never through `__data__`.
@@ -921,12 +951,16 @@ impl RepoInstance {
     /// bookmark). The method performs an O(1) comparison and short-
     /// circuits to [`ApplyOutcome::Skipped`] without touching the store
     /// when `event.commit_version <= applied_watermark`.
+    ///
+    /// `policy` selects the trust model (#1199) — see
+    /// [`crate::tx::ApplyPolicy`]'s doc.
     pub async fn apply_replicated(
         &self,
         event: &shamir_tx::ChangelogEvent,
         applied_watermark: u64,
+        policy: crate::tx::ApplyPolicy,
     ) -> DbResult<crate::tx::ApplyOutcome> {
-        crate::tx::apply_replicated(self, event, applied_watermark).await
+        crate::tx::apply_replicated(self, event, applied_watermark, policy).await
     }
 
     /// R1-b — read the durable per-(db,repo) follower replication bookmark.
@@ -1699,7 +1733,6 @@ impl RepoInstance {
 /// Stage 4: `DefaultHasher(name)` placeholder.
 /// Stage 5: real repo-level interner ID.
 pub fn repo_token(name: &str) -> u64 {
-    use std::hash::{Hash, Hasher};
     let mut h = std::collections::hash_map::DefaultHasher::new();
     name.hash(&mut h);
     h.finish()

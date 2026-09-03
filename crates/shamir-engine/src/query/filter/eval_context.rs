@@ -1,12 +1,13 @@
 //! FilterContext — evaluation context for filter callbacks.
 
+use std::sync::OnceLock;
+
 use shamir_funclib::scalar_resolver::ScalarResolver;
-use shamir_types::access::Actor;
 use shamir_types::core::interner::Interner;
 use shamir_types::types::common::TMap;
 use shamir_types::types::value::QueryValue;
 
-use super::cond_cache::CondCache;
+use super::cond_cache::{new_local_cond_cache, CondCache, LocalCondCache};
 use super::field_path_cache::FieldPathCache;
 use super::query_ref_cache::QueryRefCache;
 use crate::query::read::QueryResult;
@@ -15,8 +16,21 @@ use crate::query::read::QueryResult;
 ///
 /// Contains the interner for resolving field paths,
 /// a map of resolved query results for QueryRef support,
-/// the [`Actor`] that initiated the operation, and the scalar function
-/// resolver used to evaluate `FilterValue::FnCall` nodes.
+/// and the scalar function resolver used to evaluate `FilterValue::FnCall`
+/// nodes.
+///
+/// **No `actor` field, deliberately (#1199).** A prior `actor: Actor`
+/// field defaulted to `Actor::System` in [`new`](Self::new) and was set via
+/// a `with_actor` builder — but nothing in filter evaluation ever READ it
+/// (verified: no `ctx.actor` reference anywhere in `query/filter/`,
+/// `query/read/`, or `shamir-funclib`), so it was a pure write-only
+/// landmine: any future feature that reads it (row-level security keyed
+/// on actor, a `current_user()` scalar) would silently see `Actor::System`
+/// on every call site that forgot to set it explicitly. Removing the field
+/// entirely (rather than keeping the default) closes that class of bug
+/// structurally — there is nothing left to forget. If/when a real reader
+/// is added, thread `actor: Actor` through as a REQUIRED parameter of
+/// [`new`](Self::new), not a builder-default.
 ///
 /// `params` is the injected sub-batch parameter scope — populated when
 /// this context belongs to a nested `BatchOp::Batch` execution. At the
@@ -25,7 +39,6 @@ use crate::query::read::QueryResult;
 pub struct FilterContext<'a> {
     pub interner: &'a Interner,
     pub resolved_refs: &'a TMap<String, QueryResult>,
-    pub actor: Actor,
     /// Scalar function resolver for `FnCall` dispatch. Defaults to
     /// built-ins only ([`ScalarResolver::builtins_only`]); a per-DB
     /// resolver with user scalars is injected via [`with_scalars`](Self::with_scalars).
@@ -34,12 +47,13 @@ pub struct FilterContext<'a> {
     /// top level; populated by the recursive sub-batch executor (P3).
     pub params: &'a TMap<String, QueryValue>,
     /// Optional pre-compiled `$cond` condition cache (#643). Defaults to
-    /// `None` — every EXISTING caller (WHERE, `when`, `for_each`'s `over`,
-    /// write-value resolution) is completely unaffected: `resolve_filter_query`
-    /// falls back to `compile_filter` on every `Cond` evaluation exactly as
-    /// before. Only callers that build a [`CondCache`] once (e.g.
-    /// `SelectProjection::new`) and inject it via
-    /// [`with_cond_cache`](Self::with_cond_cache) skip the per-row recompile.
+    /// `None` — callers that never opt in (WHERE, `when`, `for_each`'s
+    /// `over`, write-value resolution) fall back to `local_cond_cache`
+    /// below (group 13 Defect 1), not to an unconditional recompile. Only
+    /// callers that build a [`CondCache`] once (e.g. `SelectProjection::new`)
+    /// and inject it via [`with_cond_cache`](Self::with_cond_cache) skip
+    /// `local_cond_cache`'s per-lookup content-hash cost too, trading it for
+    /// an eager, address-independent prescan.
     pub cond_cache: Option<&'a CondCache>,
     /// Optional pre-interned `FieldRef` path cache (F1). Defaults to `None`
     /// — every EXISTING caller (WHERE, `when`, `for_each`'s `over`,
@@ -63,12 +77,35 @@ pub struct FilterContext<'a> {
     /// `resolved_refs`, which is not available at prescan time — unlike
     /// F1's eagerly-populated `FieldPathCache`).
     pub query_ref_cache: Option<&'a QueryRefCache>,
+    /// Lazily-populated fallback `$cond` cache (group 13 Defect 1). Unlike
+    /// `cond_cache` above (an eagerly pre-scanned, externally-owned cache
+    /// only `SelectProjection::new` opts into today), this cache is owned
+    /// BY the context itself, starts empty, and is populated on demand by
+    /// `resolve_filter_query`'s `Cond` arm the first time it evaluates a
+    /// given `$cond` against THIS context — then reused for every
+    /// subsequent evaluation sharing this context (e.g. every row of one
+    /// WHERE/HAVING scan, since the caller builds one `FilterContext` per
+    /// query/op and reuses it across the whole row loop). This closes the
+    /// gap `cond_cache` left open: WHERE, `when`, `for_each`'s `over`, and
+    /// write-value resolution never call `with_cond_cache`, so before this
+    /// field existed they recompiled `cond.condition` (e.g. re-running
+    /// `Regex::new`) on every single evaluation.
+    ///
+    /// `LocalCondCache` (`scc::HashMap`), not `RefCell<CondCache>`: several
+    /// batch-executor futures capture `&FilterContext` across an `.await`
+    /// and are boxed as `Pin<Box<dyn Future<..> + Send>>`, which requires
+    /// `FilterContext: Sync` (`&T: Send` needs `T: Sync`) —
+    /// `std::cell::RefCell` is unconditionally `!Sync` and broke that bound
+    /// the first time this was tried; `scc::HashMap` gives the same
+    /// interior mutability while staying `Sync`. See `cond_cache.rs`'s
+    /// `LocalCondCache` doc for the full story, and this module's tests for
+    /// the reuse-across-rows proof.
+    pub(crate) local_cond_cache: LocalCondCache,
 }
 
 /// A permanently empty params map, shared across all top-level contexts
 /// so `FilterContext::new` never allocates.
 fn empty_params() -> &'static TMap<String, QueryValue> {
-    use std::sync::OnceLock;
     static EMPTY: OnceLock<TMap<String, QueryValue>> = OnceLock::new();
     EMPTY.get_or_init(shamir_types::types::common::new_map)
 }
@@ -84,19 +121,13 @@ impl<'a> FilterContext<'a> {
         Self {
             interner,
             resolved_refs,
-            actor: Actor::System,
             scalars: builtins_only_resolver(),
             params: empty_params(),
             cond_cache: None,
             field_path_cache: None,
             query_ref_cache: None,
+            local_cond_cache: new_local_cond_cache(),
         }
-    }
-
-    /// Builder: set the actor that initiated this operation.
-    pub fn with_actor(mut self, actor: Actor) -> Self {
-        self.actor = actor;
-        self
     }
 
     /// Builder: inject a per-DB scalar resolver with user-registered scalars.

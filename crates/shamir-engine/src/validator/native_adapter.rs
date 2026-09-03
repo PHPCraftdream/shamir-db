@@ -53,6 +53,19 @@ impl ShamirFunction for NativeValidatorAdapter {
         };
 
         let result = (self.validator)(record, old_ref, ctx);
+
+        // Accept path: skip the Map-encode round trip entirely.
+        // `decode_validation_result` already fast-paths `QueryValue::Null` as
+        // "valid, empty errors, stop=false" (decode.rs) — returning `Null`
+        // directly here avoids allocating `{ "errors": [], "stop": false }`
+        // on every accepting invocation just to decode it straight back into
+        // the same empty outcome. A `stop == true` accept (no errors, but the
+        // validator still requests early-stop) must NOT take this shortcut:
+        // `Null` decodes to `stop = false`, which would silently drop that
+        // request.
+        if result.is_ok() && !result.stop {
+            return Ok(QueryValue::Null);
+        }
         Ok(validation_to_query_value(&result))
     }
 }

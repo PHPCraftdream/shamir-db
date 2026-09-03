@@ -4,10 +4,11 @@ use serde::{Deserialize, Serialize};
 use shamir_storage::error::{DbError, DbResult};
 use shamir_storage::types::{RecordKey, Store};
 use shamir_tunables::store_defaults::MAINT_SCAN_BATCH;
+use shamir_types::time::unix_nanos;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
-use super::shadow_log::{MigrationShadowLog, ShadowOp};
+use super::shadow_log::{MigrationShadowLog, ShadowEntry, ShadowOp};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum MigrationPhase {
@@ -56,10 +57,7 @@ impl MigrationState {
         dst_engine: String,
         dst_path: Option<String>,
     ) -> Self {
-        let started_at_ns = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos() as u64)
-            .unwrap_or(0);
+        let started_at_ns = unix_nanos();
         Self {
             id,
             phase: MigrationPhase::ShadowStarted,
@@ -74,6 +72,20 @@ impl MigrationState {
             records_copied: 0,
         }
     }
+}
+
+/// Outcome of a bounded [`MigrationCoordinator::drain_until_caught_up`] run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DrainCatchUpResult {
+    /// Total shadow-log entries applied across every pass.
+    pub total_applied: u64,
+    /// Lag remaining when the call returned. `<= max_lag` means the
+    /// caller's target was reached; a value above `max_lag` once `passes
+    /// == DRAIN_PASS_CAP` means sustained writes outran drain throughput
+    /// — the caller should retry, back off, or surface "still catching up".
+    pub residual_lag: u64,
+    /// Number of drain passes actually performed (always <= `DRAIN_PASS_CAP`).
+    pub passes: usize,
 }
 
 pub struct MigrationCoordinator {
@@ -104,6 +116,15 @@ impl MigrationCoordinator {
 }
 
 impl MigrationCoordinator {
+    /// Max drain passes attempted per `drain_until_caught_up` call. Guards
+    /// against livelock: under sustained source writes that outrun drain
+    /// throughput, `shadow_lag()` may never fall to `max_lag` and looping
+    /// on `applied > 0` alone would spin forever. Once the budget is
+    /// spent, the caller gets back the residual lag instead. Mirrors
+    /// `TableManager::CATCHUP_ITERATION_CAP`'s local-const pattern — no
+    /// `shamir-tunables` precedent for this cap yet.
+    pub(crate) const DRAIN_PASS_CAP: usize = 32;
+
     pub fn new(
         state: MigrationState,
         shadow_log: Arc<MigrationShadowLog>,
@@ -195,6 +216,40 @@ impl MigrationCoordinator {
         Ok(copied)
     }
 
+    /// Apply a batch of shadow-log entries to `dst_data`, grouping
+    /// `Put`s into one `set_many` and `Delete`s into one `remove_many` —
+    /// mirrors `run_snapshot`'s existing batched write path instead of
+    /// each entry paying its own per-op round-trip + `value.clone()`.
+    /// Returns `entries.len()` (every entry is applied; `set`/`remove`
+    /// on a store never surface a per-key "not found" error — a missing
+    /// key on `remove` just yields `false`, see `Store::remove`).
+    async fn apply_shadow_entries(&self, entries: &[ShadowEntry]) -> DbResult<u64> {
+        if entries.is_empty() {
+            return Ok(0);
+        }
+        let mut puts: Vec<(RecordKey, Bytes)> = Vec::new();
+        let mut deletes: Vec<RecordKey> = Vec::new();
+        for entry in entries {
+            match &entry.op {
+                ShadowOp::Put { record_id, value } => {
+                    let key = RecordKey::from(record_id.as_bytes().to_vec());
+                    puts.push((key, Bytes::from(value.clone())));
+                }
+                ShadowOp::Delete { record_id } => {
+                    let key = RecordKey::from(record_id.as_bytes().to_vec());
+                    deletes.push(key);
+                }
+            }
+        }
+        if !puts.is_empty() {
+            self.dst_data.set_many(puts).await?;
+        }
+        if !deletes.is_empty() {
+            self.dst_data.remove_many(deletes).await?;
+        }
+        Ok(entries.len() as u64)
+    }
+
     pub async fn drain_shadow_log(&self) -> DbResult<u64> {
         let start_lsn = {
             let s = self.state.lock().await;
@@ -208,25 +263,7 @@ impl MigrationCoordinator {
         };
 
         let entries = self.shadow_log.read_from(start_lsn).await?;
-        let mut applied = 0u64;
-        for entry in &entries {
-            match &entry.op {
-                ShadowOp::Put { record_id, value } => {
-                    let key = RecordKey::from(record_id.as_bytes().to_vec());
-                    self.dst_data.set(key, Bytes::from(value.clone())).await?;
-                }
-                ShadowOp::Delete { record_id } => {
-                    let key = RecordKey::from(record_id.as_bytes().to_vec());
-                    // NotFound is benign — record already absent on dst;
-                    // other errors propagate.
-                    match self.dst_data.remove(key).await {
-                        Ok(_) | Err(DbError::NotFound(_)) => {}
-                        Err(e) => return Err(e),
-                    }
-                }
-            }
-            applied += 1;
-        }
+        let applied = self.apply_shadow_entries(&entries).await?;
 
         if let Some(last) = entries.last() {
             self.state.lock().await.last_lsn_applied = last.lsn;
@@ -244,19 +281,24 @@ impl MigrationCoordinator {
         current.saturating_sub(last_applied.max(snapshot_lsn))
     }
 
-    pub async fn drain_until_caught_up(&self, max_lag: u64) -> DbResult<u64> {
+    pub async fn drain_until_caught_up(&self, max_lag: u64) -> DbResult<DrainCatchUpResult> {
         let mut total = 0u64;
-        loop {
+        let mut passes = 0usize;
+        let mut lag = self.shadow_lag().await;
+        while lag > max_lag && passes < Self::DRAIN_PASS_CAP {
             let applied = self.drain_shadow_log().await?;
             total += applied;
-            if self.shadow_lag().await <= max_lag {
-                break;
-            }
+            passes += 1;
+            lag = self.shadow_lag().await;
             if applied == 0 {
                 break;
             }
         }
-        Ok(total)
+        Ok(DrainCatchUpResult {
+            total_applied: total,
+            residual_lag: lag,
+            passes,
+        })
     }
 
     pub async fn mark_cutover_ready(&self) -> DbResult<()> {
@@ -284,27 +326,20 @@ impl MigrationCoordinator {
 
         let start_lsn = self.state.lock().await.last_lsn_applied + 1;
         let entries = self.shadow_log.read_from(start_lsn).await?;
-        let mut applied = 0u64;
-        for entry in &entries {
-            match &entry.op {
-                ShadowOp::Put { record_id, value } => {
-                    let key = RecordKey::from(record_id.as_bytes().to_vec());
-                    self.dst_data.set(key, Bytes::from(value.clone())).await?;
-                }
-                ShadowOp::Delete { record_id } => {
-                    let key = RecordKey::from(record_id.as_bytes().to_vec());
-                    match self.dst_data.remove(key).await {
-                        Ok(_) | Err(DbError::NotFound(_)) => {}
-                        Err(e) => return Err(e),
-                    }
-                }
-            }
-            applied += 1;
-        }
+        let applied = self.apply_shadow_entries(&entries).await?;
         if let Some(last) = entries.last() {
             self.state.lock().await.last_lsn_applied = last.lsn;
         }
 
+        // Purge before flipping to Committed (mirrors `rollback`'s
+        // purge-then-flip order): if purge fails, the migration stays in
+        // CutoverReady and a retried `final_drain_and_commit` picks up
+        // from the already-advanced `last_lsn_applied` (no entries to
+        // re-apply) and just retries the purge. A committed migration has
+        // no further use for its shadow log — crash recovery replays
+        // forward from the committed dst, not from this log — so leaving
+        // it on disk forever is pure leaked storage.
+        self.shadow_log.purge().await?;
         self.state.lock().await.phase = MigrationPhase::Committed;
         Ok(applied)
     }

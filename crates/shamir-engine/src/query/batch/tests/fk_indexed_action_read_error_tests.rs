@@ -65,6 +65,7 @@
 //! target site's verbatim, already-site-specific string — proving THIS
 //! site failed, not merely that something did.
 
+use bytes::Bytes;
 use futures::StreamExt;
 use shamir_query_builder::batch::Batch;
 use shamir_query_builder::filter;
@@ -77,7 +78,7 @@ use shamir_types::types::record_id::RecordId;
 use std::sync::Arc;
 
 use crate::db_instance::db_instance::DbInstance;
-use crate::query::batch::execute_batch;
+use crate::query::batch::execute_batch_unchecked as execute_batch;
 use crate::query::batch::TableResolver;
 use crate::query::TableRef;
 use crate::repo::repo_types::BoxRepoFactory;
@@ -588,5 +589,59 @@ async fn cascade_grandchild_ref_field_collection_propagates_read_error() {
     assert!(
         message.contains("grandchild ref_field collection re-read failed"),
         "expected the site-3-specific error message, got: {message}"
+    );
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Site 3 — decode-corrupt twin. Companion to
+// `cascade_grandchild_ref_field_collection_propagates_read_error` above
+// (which proves the READ-error path via `arm`/one-shot `Err` injection).
+// This proves the DECODE-error twin this task adds: the read SUCCEEDS
+// (`Ok(Some(bytes))`) but the bytes are undecodable by BOTH
+// `RecordView::new` and `InnerValue::from_bytes` — previously
+// `plan_cascade_for_ids`'s grandchild ref_field collection loop silently
+// dropped such a row's value from the grandchild discovery set and
+// returned success anyway; after the fix it aborts with
+// `Err(DbError::Codec)`.
+//
+// Substituting corrupt bytes ONLY for the `read_one_tx_bytes` re-read (via
+// `arm_corrupt`, NOT `arm_failure_for_all_rows`'s blanket per-row `arm`) is
+// essential: the EARLIER `list_stream_tx`-based scan that classifies `b`'s
+// row as a cascade candidate in the first place uses the real (valid)
+// stored bytes and is untouched by this injector — a row already
+// undecodable at classification time would never become a cascade
+// candidate to begin with (see the module doc above on why "arm every row"
+// is unsound for a shared read site), so corrupting it any earlier would
+// prove nothing about THIS specific re-read.
+// ═══════════════════════════════════════════════════════════════════════════
+
+#[tokio::test]
+async fn cascade_grandchild_ref_field_collection_fails_closed_on_decode_corrupt_row() {
+    let resolver = setup_grandchild_cascade_chain().await;
+
+    let b_table = resolver.db.get_table("default", "b").await.unwrap();
+    let b_token = b_table.table_token();
+    let b_id = {
+        let stream = b_table.list_stream(64);
+        futures::pin_mut!(stream);
+        let batch = stream.next().await.unwrap().unwrap();
+        batch[0].0
+    };
+
+    let hook =
+        TEST_READ_ONE_TX_BYTES_FAILURE.get_or_init(|| Arc::new(ReadOneTxBytesFailHook::default()));
+    hook.arm_corrupt(b_token, b_id, Bytes::from_static(b"\xc4"));
+
+    let result = delete_a(&resolver).await;
+
+    let err = result.expect_err(
+        "a decode-corrupt row re-read during grandchild ref_field collection \
+         (site 3) must abort the whole delete (Err), not silently drop the \
+         row's value from the grandchild discovery set and return success",
+    );
+    let message = err.to_string();
+    assert!(
+        message.contains("grandchild ref_field decode failed"),
+        "expected the site-3-decode-specific error message, got: {message}"
     );
 }

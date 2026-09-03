@@ -9,8 +9,7 @@ use shamir_types::record_view::RecordRef;
 use shamir_types::types::value::{InnerValue, QueryValue, Value};
 use smallvec::SmallVec;
 
-use super::compile::compile_filter;
-use super::cond_cache::cond_cache_get;
+use super::cond_cache::{compile_cond_cached, cond_cache_get};
 use super::eval_context::FilterContext;
 use super::filter_node::CompactPath;
 use super::numeric_cmp::cmp_i64_f64;
@@ -286,28 +285,36 @@ pub fn resolve_filter_query(
             // `prescan_field_path_cache`, e.g. `SelectProjection::new`) —
             // avoids re-allocating a `Vec<u64>` and re-issuing one
             // `Interner::get_ind` (DashMap shard lookup) PER SEGMENT, PER
-            // record. The cache key is pointer identity of THIS `FieldRef`
-            // node (`fv as *const FilterValue as usize`), which stays stable
-            // for the lifetime of a `SelectProjection`-owned tree — see
-            // `field_path_cache.rs`'s safety comment. When
+            // record. The cache key is the CONTENT of THIS `FieldRef` node
+            // (its `path`, via `field_ref_key`) — see
+            // `field_path_cache.rs`'s doc comment. When
             // `ctx.field_path_cache` is `None` (every caller that hasn't
             // opted in: WHERE, `when`, `for_each`'s `over`, write-value
             // resolution), behavior is IDENTICAL to before this cache
             // existed.
-            let ipath: SmallVec<[InternerKey; 4]> = match ctx
+            // F-21 group: on a cache hit, pass the cached path SLICE straight
+            // to `materialize_at` instead of cloning it into a fresh
+            // `SmallVec` per row — the whole point of caching the interned
+            // path is defeated if every hit still re-allocates a copy of it.
+            let owned_ipath;
+            let ipath: &[InternerKey] = match ctx
                 .field_path_cache
-                .and_then(|c| c.get(&(fv as *const FilterValue as usize)))
+                .and_then(|c| c.get(&super::field_path_cache::field_ref_key(fv)))
             {
-                Some(cached) => cached.clone(),
+                Some(cached) => cached.as_slice(),
                 None => {
                     let keys = intern_field_path(path, ctx.interner)?;
-                    keys.iter().map(|&id| InternerKey::new(id)).collect()
+                    owned_ipath = keys
+                        .iter()
+                        .map(|&id| InternerKey::new(id))
+                        .collect::<SmallVec<[InternerKey; 4]>>();
+                    owned_ipath.as_slice()
                 }
             };
             // Single lens→QueryValue boundary (replaces the old lens→InnerValue
             // materialization). NOT a net-new round-trip — see fn doc.
             record
-                .materialize_at(&ipath)
+                .materialize_at(ipath)
                 .and_then(|iv| inner_value_to_query_value(&iv, ctx.interner).ok())
         }
         FilterValue::QueryRef { alias, path } => {
@@ -327,10 +334,9 @@ pub fn resolve_filter_query(
             // RESERVE an empty `OnceLock` slot, not fill it. This is the same
             // shape `In`'s `ref_column_sets` (`filter_node.rs`) already uses.
             //
-            // The cache key is pointer identity of THIS `QueryRef` node
-            // (`fv as *const FilterValue as usize`), which stays stable for
-            // the lifetime of a `SelectProjection`-owned tree — see
-            // `query_ref_cache.rs`'s safety comment. When
+            // The cache key is the CONTENT of THIS `QueryRef` node (its
+            // `alias`/`path`, via `query_ref_key`) — see
+            // `query_ref_cache.rs`'s doc comment. When
             // `ctx.query_ref_cache` is `None` (every caller that hasn't
             // opted in: WHERE, `when`, `for_each`'s `over`, write-value
             // resolution), behavior is IDENTICAL to before this cache
@@ -342,7 +348,7 @@ pub fn resolve_filter_query(
             // see `query_ref_cache.rs`'s "What this caches" honesty section.
             if let Some(cell) = ctx
                 .query_ref_cache
-                .and_then(|c| c.get(&(fv as *const FilterValue as usize)))
+                .and_then(|c| c.get(&super::query_ref_cache::query_ref_key(fv)))
             {
                 return cell
                     .get_or_init(|| {
@@ -390,16 +396,24 @@ pub fn resolve_filter_query(
         FilterValue::Cond { cond } => {
             // #643: check the pre-compiled cache first (populated once by
             // `prescan_cond_cache`, e.g. `SelectProjection::new`) — avoids
-            // re-walking/re-interning `cond.condition` on every record. When
-            // `ctx.cond_cache` is `None` (every caller that hasn't opted in:
-            // WHERE, `when`, `for_each`'s `over`, write-value resolution),
-            // behavior is IDENTICAL to before this cache existed.
-            let cached = ctx
+            // re-walking/re-interning `cond.condition` on every record.
+            //
+            // Group 13 Defect 1: when `ctx.cond_cache` is `None` (every
+            // caller that hasn't opted into the eager prescan — WHERE,
+            // `when`, `for_each`'s `over`, write-value resolution), fall
+            // back to `ctx.local_cond_cache` (see `eval_context.rs`'s doc)
+            // instead of recompiling `cond.condition` unconditionally: the
+            // first evaluation against this `FilterContext` compiles and
+            // caches it, every later evaluation sharing the same context
+            // (e.g. every row of one WHERE/HAVING scan) reuses the
+            // compiled `FilterNode`.
+            let matched = match ctx
                 .cond_cache
-                .and_then(|c| cond_cache_get(c, &cond.condition));
-            let matched = match cached {
+                .and_then(|c| cond_cache_get(c, &cond.condition))
+            {
                 Some(node) => node.matches(record, ctx),
-                None => compile_filter(&cond.condition, ctx.interner).matches(record, ctx),
+                None => compile_cond_cached(&ctx.local_cond_cache, &cond.condition, ctx.interner)
+                    .matches(record, ctx),
             };
             if matched {
                 resolve_filter_query(&cond.then, record, ctx)

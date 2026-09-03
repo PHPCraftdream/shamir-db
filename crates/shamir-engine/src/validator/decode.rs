@@ -17,6 +17,8 @@ pub enum ValidatorDecodeError {
     NonStringCode,
     #[error("\"field\" value is not a list of strings or null")]
     BadFieldType,
+    #[error("\"stop\" value is not a bool")]
+    BadStopType,
 }
 
 /// Decode a validator's `QueryValue` return into a `ValidationOutcome`
@@ -59,7 +61,7 @@ pub fn decode_validation_result(v: &QueryValue) -> Result<ValidationOutcome, Val
             let stop = match map.get("stop") {
                 Some(QueryValue::Bool(b)) => *b,
                 None => false,
-                _ => false, // non-bool "stop" treated as default false
+                Some(_) => return Err(ValidatorDecodeError::BadStopType),
             };
 
             Ok(ValidationOutcome { errors, stop })

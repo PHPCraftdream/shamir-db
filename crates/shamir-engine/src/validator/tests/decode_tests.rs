@@ -118,6 +118,25 @@ fn map_with_errors_and_stop_true() {
     assert!(out.stop);
 }
 
+// ----- malformed: non-bool stop ----------------------------------------------
+
+#[test]
+fn malformed_non_bool_stop() {
+    let v = qmap(vec![
+        (
+            "errors",
+            QueryValue::List(vec![QueryValue::Str("fatal".into())]),
+        ),
+        ("stop", QueryValue::Str("true".into())),
+    ]);
+
+    let err = decode_validation_result(&v).unwrap_err();
+    assert!(
+        matches!(err, ValidatorDecodeError::BadStopType),
+        "expected BadStopType, got: {err}"
+    );
+}
+
 // ----- map { errors } (stop defaults false) ---------------------------------
 
 #[test]

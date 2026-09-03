@@ -13,13 +13,17 @@
 //! `persisted_high_water()` — not just the ids it happened to be the first
 //! to create.
 
+use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use bytes::Bytes;
+use shamir_query_builder::write;
 use shamir_storage::storage_in_memory::{InMemoryRepo, InMemoryStore};
 use shamir_storage::types::Store;
 use shamir_tx::{IsolationLevel, StagingStore, TxContext, TxId};
+use shamir_types::access::Actor;
 use shamir_types::core::interner::InternerKey;
+use shamir_types::mpack;
 use shamir_types::types::common::TMap;
 use shamir_types::types::value::InnerValue;
 
@@ -198,4 +202,88 @@ async fn a8_no_spurious_delta_for_persisted_ids() {
         "no spurious delta for already-persisted id; got: {:?}",
         entry.interner_delta
     );
+}
+
+/// #1205 regression: the stage-time id capture `execute_insert_tx` performs
+/// (via `TableManager::mark_staged_ids_captured` / the `intern_fn` hook in
+/// `write_exec.rs`) must find EVERY `InternerKey` id referenced by a staged
+/// record — including ids nested inside a sub-document AND inside a list of
+/// sub-documents — not just top-level field names.
+///
+/// Proof shape: insert one record with a nested map (`address`) and a list
+/// of maps (`tags`), then compare the SET of ids `execute_insert_tx`
+/// captured into `tx.referenced_interner_ids` against the SET the OLD
+/// brute-force approach would find by fully decoding the actual staged
+/// bytes (`InnerValue::from_bytes` + `collect_referenced_ids` — the exact
+/// pre-#1205 A8 scan). A stage-time capture that only walked top-level keys
+/// (a plausible regression) would omit "city"/"zip"/"label" and fail this
+/// equality — a pure "commit still succeeds" test would not catch that.
+#[tokio::test]
+async fn a8_stage_time_capture_matches_full_decode_for_nested_value() {
+    let repo = make_repo();
+    repo.add_table(TableConfig::new("items"));
+    let tbl = repo.get_table("items").await.unwrap();
+    let mut tx = TxContext::new(TxId::new(50), 0, 0, IsolationLevel::Snapshot);
+    // C5 (implicit batch): intern straight into BASE instead of the tx
+    // overlay, so the captured ids resolve immediately via the table's own
+    // interner below without needing a full commit to merge the overlay.
+    tx.set_implicit(true);
+
+    let op = write::insert("items")
+        .rows([mpack!({
+            "name": "alice",
+            "address": { "city": "nyc", "zip": "10001" },
+            "tags": [ { "label": "vip" }, { "label": "gold" } ],
+        })])
+        .build();
+
+    tbl.execute_insert_tx(&op, &mut tx, false, None, &Actor::System)
+        .await
+        .expect("insert must stage successfully");
+
+    let token = table_token_for("items");
+    let staging = tx.write_set.get(&token).expect("table must be staged");
+    assert!(
+        staging.referenced_ids_captured(),
+        "execute_insert_tx must mark this table's StagingStore as A8-covered"
+    );
+
+    // Ground truth: the OLD (pre-#1205) A8 approach — decode every staged
+    // value's actual bytes and walk the tree for referenced ids.
+    let mut brute_force: shamir_collections::TFxMap<u64, ()> = shamir_collections::new_fx_map();
+    for bytes in staging.iter_set_bytes() {
+        let value = InnerValue::from_bytes(bytes).expect("staged bytes must decode");
+        shamir_tx::collect_referenced_ids(&value, &mut brute_force);
+    }
+
+    let captured: BTreeSet<u64> = tx.referenced_interner_ids.keys().copied().collect();
+    let expected: BTreeSet<u64> = brute_force.keys().copied().collect();
+    assert_eq!(
+        captured, expected,
+        "stage-time captured ids must exactly match the old full-decode ids, \
+         including ids nested inside a sub-document and inside a list of \
+         sub-documents"
+    );
+
+    // Sanity: resolve every expected id back to its name and confirm the
+    // nested/list field names are genuinely present — otherwise the
+    // equality above would pass trivially on two empty (or top-level-only)
+    // sets and this test would not actually catch an incomplete capture.
+    let interner = tbl.interner().get().await.unwrap();
+    let mut names: BTreeSet<String> = expected
+        .iter()
+        .filter_map(|id| {
+            interner
+                .get_str(&InternerKey::new(*id))
+                .map(|s| s.to_string())
+        })
+        .collect();
+    for expected_name in ["name", "address", "city", "zip", "tags", "label"] {
+        assert!(
+            names.remove(expected_name),
+            "expected field name '{expected_name}' missing from captured ids \
+             (resolved names: {:?})",
+            names
+        );
+    }
 }

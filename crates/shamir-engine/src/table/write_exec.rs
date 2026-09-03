@@ -182,6 +182,15 @@ impl TableManager {
         // every name genuinely NEW to the base interner this insert. Drained
         // into `tx.interner_deltas` after the immutable-borrow block ends.
         let new_base_keys: RefCell<Vec<(String, u64)>> = RefCell::new(Vec::new());
+        // #1205: every `InternerKey` id `intern_fn` returns, captured at the
+        // SAME per-unique-key granularity as `cache` (a key repeated across
+        // the batch is captured once, on its first/cache-miss occurrence —
+        // the target is a SET of referenced ids, so later cache-hit
+        // occurrences of the same key would add nothing new). Drained into
+        // `tx.referenced_interner_ids` after the block ends, so
+        // `pre_commit_prelock`'s A8 scan doesn't have to re-decode `staged`
+        // to rediscover the same ids.
+        let referenced_ids: RefCell<Vec<u64>> = RefCell::new(Vec::with_capacity(op.values.len()));
         // W2d-cutover: build storage Bytes directly via the byte-identical
         // encoder `query_value_to_storage_bytes` (no InnerValue tree).
         let staged: Vec<bytes::Bytes> = {
@@ -218,6 +227,7 @@ impl TableManager {
                 } else {
                     base_intern_fn(key)?
                 };
+                referenced_ids.borrow_mut().push(ik.id());
                 cache.borrow_mut().insert(key.to_string(), ik.clone());
                 Ok(ik)
             };
@@ -266,6 +276,13 @@ impl TableManager {
         if !new_base_keys.is_empty() {
             tx.interner_deltas.extend(new_base_keys);
         }
+        // #1205: fold this batch's captured ids into the tx-wide set now —
+        // `insert_tx_many_bytes` below marks the table's `StagingStore` as
+        // captured, which only amortizes A8's scan if the ids are already
+        // sitting in `tx.referenced_interner_ids` by the time it runs.
+        for id in referenced_ids.into_inner() {
+            tx.referenced_interner_ids.insert(id, ());
+        }
 
         // S3: run validators on each record before staging.
         // tx path: resolve keys through the tx overlay so brand-new field
@@ -290,6 +307,12 @@ impl TableManager {
         // bytes and drives every index/unique/vector planner through the
         // zero-copy lens. No InnerValue tree is built on the insert path.
         let values_ids: Vec<RecordId> = self.insert_tx_many_bytes(&staged, tx).await?;
+        // #1205: `staged`'s referenced ids were captured above into
+        // `tx.referenced_interner_ids` — tell A8 it can skip decoding this
+        // table's staged bytes.
+        if !staged.is_empty() {
+            self.mark_staged_ids_captured(tx);
+        }
 
         // S-write id-keyed branch: accept pre-encoded id-msgpack records
         // from `op.records_idmsgpack`. For each record:
@@ -347,6 +370,13 @@ impl TableManager {
                         "execute_insert_tx (id-keyed): unresolved interner key — {e}"
                     ))
                 })?;
+                // 2b (#1205): capture referenced ids for A8 off the SAME
+                // zero-copy `RecordView` lens step 2 just validated with —
+                // no extra decode, just also recording ids this time.
+                shamir_types::codecs::interned::collect_referenced_ids_from_view(
+                    &view,
+                    &mut tx.referenced_interner_ids,
+                );
                 // 3. Validators — only decode when validators are actually bound.
                 if has_validators {
                     let qv = record_view_to_query_value(&view, interner)?;
@@ -363,7 +393,14 @@ impl TableManager {
                 }
                 idmsgpack_staged.push(Bytes::copy_from_slice(buf.as_ref()));
             }
-            self.insert_tx_many_bytes(&idmsgpack_staged, tx).await?
+            let ids = self.insert_tx_many_bytes(&idmsgpack_staged, tx).await?;
+            // #1205: ids captured above (step 2b) into
+            // `tx.referenced_interner_ids` — safe to mark this table's
+            // staging as A8-covered.
+            if !idmsgpack_staged.is_empty() {
+                self.mark_staged_ids_captured(tx);
+            }
+            ids
         };
 
         // Merge IDs: values first, then id-keyed (deterministic ordering).
@@ -439,6 +476,11 @@ impl TableManager {
     ) -> DbResult<WriteResult> {
         let start = Instant::now();
         let batch_size = 1000;
+        // Table name is immutable for the whole call — hash it ONCE and
+        // reuse the `u64` everywhere below, instead of `self.table_token()`
+        // (a fresh SipHash-style hash over the name on every call) re-hashing
+        // per matched row in the loop further down.
+        let table_token = self.table_token();
         let interner = self.interner().get().await?;
 
         // Resolve inline `$fn` computed fields, then apply server-side
@@ -478,6 +520,14 @@ impl TableManager {
                 ))
             }
         };
+        // #1205: `set_map` is the ONLY new content every matched row's
+        // `merge_storage_bytes` call below patches onto its own old bytes —
+        // capture its referenced ids ONCE here (already an in-memory tree,
+        // no extra decode) instead of `pre_commit_prelock`'s A8 scan
+        // re-decoding every merged row's full bytes. The old-bytes portion
+        // of each merge needs no capture: those ids were already covered by
+        // A8 at THEIR OWN original staging time.
+        shamir_tx::collect_referenced_ids(&set_inner, &mut tx.referenced_interner_ids);
 
         // Collect matched records as raw storage bytes — no InnerValue tree
         // decode on the hot scan path. The index-via-index arm returns
@@ -577,7 +627,7 @@ impl TableManager {
         // on the tx having ANY staged rows for this table BEFORE compiling
         // the filter — a tx that never wrote this table pays nothing beyond
         // the `write_set.get(token)` probe.
-        if tx.write_set.contains_key(&self.table_token()) {
+        if tx.write_set.contains_key(&table_token) {
             let already: shamir_collections::TSet<RecordId> =
                 matched.iter().map(|(id, _)| *id).collect();
             let residual_callback = op
@@ -596,12 +646,8 @@ impl TableManager {
                     },
                 }
             };
-            let staged_extra = super::tx_scan_overlay::staged_only_matches(
-                Some(tx),
-                self.table_token(),
-                &already,
-                keep,
-            );
+            let staged_extra =
+                super::tx_scan_overlay::staged_only_matches(Some(tx), table_token, &already, keep);
             matched.extend(staged_extra);
         }
 
@@ -663,8 +709,8 @@ impl TableManager {
             // committed → cascade-result delta, instead of double-counting).
             let effective_old_bytes: Bytes = match tx
                 .write_set
-                .get(&self.table_token())
-                .and_then(|staging| staging.staged_op(id.to_bytes().as_ref()))
+                .get(&table_token)
+                .and_then(|staging| staging.staged_op(id.as_bytes()))
             {
                 Some(shamir_tx::staging_store::StagedKind::Set(staged_bytes)) => {
                     // This tx already staged a value here (read-your-own-
@@ -751,7 +797,9 @@ impl TableManager {
                     reuse_old_qv = Some(old_qv);
                 }
 
-                self.update_tx_bytes(*id, &effective_old_bytes, new_bytes.clone(), &mut *tx)
+                // #1205: `new_bytes`'s new content is `set_map`, whose ids
+                // were captured once above, before this row loop.
+                self.update_tx_bytes(*id, &effective_old_bytes, new_bytes.clone(), &mut *tx, true)
                     .await?;
                 affected += 1;
             }
@@ -1140,7 +1188,7 @@ impl TableManager {
         //   * `new_bytes_fresh` — INSERT-branch bytes: the resolved value
         //     encoded directly via the tree-free storage encoder (same call
         //     `execute_insert_tx` makes).
-        let (set_map, new_bytes_fresh) = {
+        let (set_map, new_bytes_fresh, new_inner) = {
             let layered = make_layered_interner(interner, tx);
             let intern_fn = intern_via_layered(&layered);
 
@@ -1158,8 +1206,15 @@ impl TableManager {
             let new_bytes_fresh = query_value_to_storage_bytes(&resolved_value, &intern_fn)
                 .map_err(|e| shamir_storage::error::DbError::Codec(e.to_string()))?;
 
-            (set_map, new_bytes_fresh)
+            (set_map, new_bytes_fresh, new_inner)
         };
+        // #1205: `new_inner` (built above, `layered`'s borrow of `tx` now
+        // ended) is byte-identical to what `new_bytes_fresh` encodes AND is
+        // the source `set_map` was cloned from — capturing its ids ONCE
+        // here covers both the MERGE branch (`set_map` patched onto old
+        // bytes below) and the INSERT branch (`new_bytes_fresh` staged
+        // as-is), no extra decode needed.
+        shamir_tx::collect_referenced_ids(&new_inner, &mut tx.referenced_interner_ids);
 
         // Check whether any Upsert validators are registered BEFORE the
         // merge/insert branch, mirroring `execute_update_tx`'s
@@ -1255,7 +1310,9 @@ impl TableManager {
 
                 // Stage the merged bytes + index ops through the zero-copy
                 // lens path (no InnerValue tree decode, no value.to_bytes()).
-                self.update_tx_bytes(id, &old_bytes, new_bytes, &mut *tx)
+                // #1205: `new_bytes`'s new content (`set_map`) had its ids
+                // captured above, before this branch.
+                self.update_tx_bytes(id, &old_bytes, new_bytes, &mut *tx, true)
                     .await?;
             }
 
@@ -1314,6 +1371,9 @@ impl TableManager {
             let ids = self
                 .insert_tx_many_bytes(std::slice::from_ref(&new_bytes_fresh), tx)
                 .await?;
+            // #1205: `new_bytes_fresh`'s ids were captured above (same
+            // `new_inner` tree `set_map` was cloned from).
+            self.mark_staged_ids_captured(tx);
             let id = ids.into_iter().next().ok_or_else(|| {
                 shamir_storage::error::DbError::Internal(
                     "execute_set_tx: insert_tx_many_bytes returned no id".to_string(),

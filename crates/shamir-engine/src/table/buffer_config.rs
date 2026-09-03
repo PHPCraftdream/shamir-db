@@ -7,7 +7,7 @@
 //! hot-reload-style to the store stack via
 //! `Store::apply_buffer_config`.
 
-use crate::meta::MetaKey;
+use crate::meta::{MetaEnvelope, MetaError, MetaKey};
 use std::sync::Arc;
 
 use bytes::Bytes;
@@ -22,16 +22,26 @@ fn buffer_config_key() -> RecordKey {
     RecordKey::from_slice(MetaKey::BufferConfig.as_record_id().as_bytes())
 }
 
+fn convert(err: MetaError) -> DbError {
+    DbError::Codec(format!("buffer_config codec: {err}"))
+}
+
 /// Read the persisted buffer config for the table whose
 /// `info_store` is given. Returns `None` if no DDL has set one
 /// (caller should fall back to whatever default came from the
 /// factory).
+///
+/// The value is wrapped in [`MetaEnvelope`] (magic + version +
+/// timestamp). This is a breaking change from the pre-existing
+/// raw-bincode format: a blob written before this fix (or by a
+/// future incompatible `MemBufferConfig` shape) fails closed here
+/// with a coded [`DbError::Codec`] rather than being silently
+/// misparsed or panicking.
 pub async fn load(info_store: &Arc<dyn Store>) -> DbResult<Option<MemBufferConfig>> {
     let key = buffer_config_key();
     match info_store.get(key).await {
         Ok(bytes) => {
-            let cfg: MemBufferConfig = bincode::deserialize(&bytes)
-                .map_err(|e| DbError::Codec(format!("buffer_config decode: {e}")))?;
+            let cfg: MemBufferConfig = MetaEnvelope::open(&bytes).map_err(convert)?;
             Ok(Some(cfg))
         }
         Err(DbError::NotFound(_)) => Ok(None),
@@ -44,8 +54,8 @@ pub async fn load(info_store: &Arc<dyn Store>) -> DbResult<Option<MemBufferConfi
 /// responsible for invoking `Store::apply_buffer_config` on data
 /// and info stores if hot-reload is desired.
 pub async fn save(info_store: &Arc<dyn Store>, cfg: &MemBufferConfig) -> DbResult<()> {
-    let bytes = bincode::serialize(cfg)
-        .map_err(|e| DbError::Codec(format!("buffer_config encode: {e}")))?;
+    let envelope = MetaEnvelope::new(cfg.clone());
+    let bytes = envelope.encode().map_err(convert)?;
     info_store
         .set(buffer_config_key(), Bytes::from(bytes))
         .await?;

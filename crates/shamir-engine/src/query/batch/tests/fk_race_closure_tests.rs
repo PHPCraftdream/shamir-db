@@ -68,7 +68,7 @@ use shamir_types::types::record_id::RecordId;
 use smallvec::smallvec;
 
 use crate::db_instance::db_instance::DbInstance;
-use crate::query::batch::execute_batch;
+use crate::query::batch::execute_batch_unchecked as execute_batch;
 use crate::query::batch::TableResolver;
 use crate::query::TableRef;
 use crate::repo::repo_types::BoxRepoFactory;

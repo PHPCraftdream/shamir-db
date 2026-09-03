@@ -1,8 +1,7 @@
 //! Tests for read query types
 
-mod exec_tests;
-mod pagination_tests;
-mod parser_tests;
-mod query_tests;
-mod qv_postprocess_tests;
+pub mod exec_tests;
+pub mod hashable_query_value_tests;
+pub mod pagination_tests;
+pub mod qv_postprocess_tests;
 pub mod select_projection_tests;

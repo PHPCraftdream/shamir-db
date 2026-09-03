@@ -54,6 +54,18 @@
 //!    the captured `Arc`; since `invalidate()` already replaced that `Arc`
 //!    by the time the CAS runs, the CAS loses, the stale result is dropped,
 //!    and the build retries against the fresh state.
+//! 5. **`concurrent_invalidate_storm_converges_after_bounded_retries`** (#1200)
+//!    -- the CAS-loss retry loop's `tokio::task::yield_now().await` (added so
+//!    a continuous `invalidate()` storm cooperates with the executor between
+//!    attempts instead of hot-looping) doesn't change the loop's termination
+//!    or correctness: forces FIVE consecutive CAS losses (via the same
+//!    post-scan/pre-publish seam test 4 uses, re-armed before each release)
+//!    and asserts the call still converges -- terminates within a timeout,
+//!    publishes exactly the LAST attempt's data, pays exactly one build
+//!    invocation per forced loss plus the final winner, and leaves the cache
+//!    genuinely warm afterward. A bounded, deterministic proof the retry path
+//!    is exercised and correct -- not a starvation reproduction, which would
+//!    be flaky by nature.
 
 use std::convert::Infallible;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -181,7 +193,7 @@ async fn build_paused_then_invalidate_never_publishes_stale_snapshot() {
 
     let published = handle.await.unwrap();
     assert_eq!(
-        published,
+        published.to_vec(),
         vec![new_entry()],
         "a build whose scan raced a concurrent invalidate must NOT publish its \
          stale snapshot — get_or_build_by_parent must drop it and rebuild fresh \
@@ -284,8 +296,8 @@ async fn two_concurrent_misses_run_at_most_one_real_scan() {
          (single-flight build_lock); the second miss's post-lock re-check finds \
          the first's already-warm result"
     );
-    assert_eq!(r1, vec![new_entry()]);
-    assert_eq!(r2, vec![new_entry()]);
+    assert_eq!(r1.to_vec(), vec![new_entry()]);
+    assert_eq!(r2.to_vec(), vec![new_entry()]);
 }
 
 // ============================================================================
@@ -317,7 +329,7 @@ async fn invalidate_then_single_get_returns_fresh_data() {
             .await
             .unwrap()
     };
-    assert_eq!(first, vec![versioned_entry(1)]);
+    assert_eq!(first.to_vec(), vec![versioned_entry(1)]);
 
     // Simulate a DDL change: flip the "schema" the scan reads, then invalidate.
     schema_version.store(2, Ordering::SeqCst);
@@ -341,7 +353,7 @@ async fn invalidate_then_single_get_returns_fresh_data() {
             .unwrap()
     };
     assert_eq!(
-        second,
+        second.to_vec(),
         vec![versioned_entry(2)],
         "invalidate() followed by get_or_build_by_parent must return fresh \
          post-invalidate data, not the stale pre-invalidate snapshot"
@@ -452,7 +464,7 @@ async fn concurrent_invalidate_strictly_between_gencheck_and_publish_never_over_
     // the stale invocation-1 result gets published unconditionally here —
     // this assertion is what catches that.
     assert_eq!(
-        published,
+        published.to_vec(),
         vec![new_entry()],
         "a build whose publish raced a concurrent invalidate() completing \
          strictly between its post-scan check and its own publish must NEVER \
@@ -484,6 +496,124 @@ async fn concurrent_invalidate_strictly_between_gencheck_and_publish_never_over_
     assert_eq!(
         next, published,
         "the next call must serve the same fresh post-invalidate snapshot"
+    );
+    assert_eq!(
+        build_calls.load(Ordering::SeqCst),
+        calls_before_next,
+        "the next call must hit the warm cache (no rebuild)"
+    );
+}
+
+// ============================================================================
+// 5. #1200 -- the CAS-loss retry loop's `tokio::task::yield_now().await`
+//    (inserted between a lost CAS and the next retry attempt so a continuous
+//    `invalidate()` storm cooperates with the executor instead of hot-looping)
+//    must not change the loop's termination/correctness. This forces FIVE
+//    consecutive CAS losses via the same post-scan/pre-publish seam test 4
+//    uses, re-arming it before each release so the NEXT retry also parks at
+//    the same seam, then lets the sixth attempt through uncontested. A
+//    bounded, deterministic exercise of the retry path -- not a starvation
+//    reproduction (which would be flaky by nature).
+// ============================================================================
+
+#[tokio::test]
+async fn concurrent_invalidate_storm_converges_after_bounded_retries() {
+    const FORCED_LOSSES: usize = 5;
+
+    let cache = Arc::new(FkReverseCache::new());
+    let build_calls = Arc::new(AtomicUsize::new(0));
+
+    let hook = Arc::new(PostGenCheckPrePublishHook {
+        reached: AtomicUsize::new(0),
+        resume: Notify::new(),
+        armed: std::sync::atomic::AtomicBool::new(true),
+    });
+    TEST_POST_GENCHECK_PRE_PUBLISH_HOOK
+        .set(Arc::clone(&hook))
+        .expect("hook must not already be installed in this test process");
+
+    // Build closure: invocation `n` returns `versioned_entry(n)` -- a
+    // distinct value per attempt, so the final published result unambiguously
+    // identifies which invocation actually won the publish.
+    let build = {
+        let build_calls = Arc::clone(&build_calls);
+        move || {
+            let build_calls = Arc::clone(&build_calls);
+            async move {
+                let n = build_calls.fetch_add(1, Ordering::SeqCst);
+                Ok::<_, Infallible>(vec![tagged(versioned_entry(n))])
+            }
+        }
+    };
+
+    let cache_for_task = Arc::clone(&cache);
+    let handle = tokio::spawn(async move {
+        cache_for_task
+            .get_or_build_by_parent("parent", build)
+            .await
+            .unwrap()
+    });
+
+    // Force FORCED_LOSSES CAS losses: for each of the first FORCED_LOSSES
+    // arrivals at the post-scan/pre-publish seam, fire invalidate() (making
+    // that attempt's captured Arc stale) and re-arm the hook so the retry
+    // this release triggers also parks at the same seam.
+    for round in 1..=FORCED_LOSSES {
+        while hook.reached.load(Ordering::SeqCst) < round {
+            tokio::task::yield_now().await;
+        }
+        cache.invalidate();
+        hook.armed.store(true, Ordering::SeqCst);
+        hook.resume.notify_one();
+    }
+
+    // The (FORCED_LOSSES + 1)-th arrival: release it WITHOUT a further
+    // invalidate() or re-arm, so its CAS wins against an uncontested state
+    // and the loop terminates.
+    while hook.reached.load(Ordering::SeqCst) < FORCED_LOSSES + 1 {
+        tokio::task::yield_now().await;
+    }
+    hook.resume.notify_one();
+
+    let published = tokio::time::timeout(std::time::Duration::from_secs(5), handle)
+        .await
+        .expect(
+            "get_or_build_by_parent must terminate/converge after a bounded \
+             number of forced CAS losses, not spin forever",
+        )
+        .unwrap();
+
+    // Exactly one build invocation per forced retry, plus the final winner.
+    assert_eq!(
+        build_calls.load(Ordering::SeqCst),
+        FORCED_LOSSES + 1,
+        "expected exactly one build invocation per forced CAS loss plus the \
+         final winning attempt"
+    );
+
+    // The published result must be the LAST invocation's data -- the one
+    // that won its CAS once every prior attempt had been forced stale.
+    assert_eq!(published.to_vec(), vec![versioned_entry(FORCED_LOSSES)]);
+
+    // The cache is now genuinely warm: a further call hits it without
+    // triggering another build.
+    let calls_before_next = build_calls.load(Ordering::SeqCst);
+    let next = cache
+        .get_or_build_by_parent("parent", {
+            let build_calls = Arc::clone(&build_calls);
+            move || {
+                let build_calls = Arc::clone(&build_calls);
+                async move {
+                    build_calls.fetch_add(1, Ordering::SeqCst);
+                    Ok::<_, Infallible>(vec![tagged(old_entry())])
+                }
+            }
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        next, published,
+        "the next call must serve the same converged snapshot"
     );
     assert_eq!(
         build_calls.load(Ordering::SeqCst),

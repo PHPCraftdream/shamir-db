@@ -37,7 +37,7 @@
 use bytes::Bytes;
 use futures::StreamExt;
 use shamir_storage::error::{DbError, DbResult};
-use shamir_types::record_view::{RecordRef, RecordView};
+use shamir_types::record_view::{RecordRef, RecordView, ScalarRef};
 use shamir_types::types::record_id::RecordId;
 use shamir_types::types::value::{InnerValue, QueryValue};
 
@@ -70,16 +70,19 @@ fn qv_scalar_to_inner(qv: &QueryValue) -> Option<InnerValue> {
 ///
 /// Uses `RecordView` scalar probing (zero-copy) when possible; falls back
 /// to `InnerValue` field traversal for non-map records.
+///
+/// Returns `Err(DbError::Codec)` when the record is genuinely corrupt (see
+/// [`record_field_matches_by_id`]).
 fn record_field_matches(
     record_bytes: &[u8],
     field: &str,
     value: &QueryValue,
     interner: &shamir_types::core::interner::Interner,
-) -> bool {
+) -> DbResult<bool> {
     if let Some(field_id) = interner.get_ind(field) {
         return record_field_matches_by_id(record_bytes, &field_id, value);
     }
-    false
+    Ok(false)
 }
 
 /// Check whether a decoded record's field (by pre-resolved [`InternerKey`])
@@ -88,33 +91,40 @@ fn record_field_matches(
 /// Factored out of [`record_field_matches`] so the staged-probe path can
 /// resolve the field id through the tx-layered interner and reuse the same
 /// matching logic.
+///
+/// Returns `Ok(false)` when the record decodes fine but the field is absent
+/// — a legitimate "this row doesn't have that field" outcome, not
+/// corruption. Returns `Err(DbError::Codec)` only when BOTH decode attempts
+/// (`RecordView`, then `InnerValue`) fail on the raw bytes: a genuinely
+/// corrupt row must fail the unique/FK check closed, not be silently
+/// treated as "no match" — the decode-error twin of the F-65/#891
+/// read-error fail-closed fix (see `fk_indexed_action_read_error_tests.rs`).
 fn record_field_matches_by_id(
     record_bytes: &[u8],
     field_id: &shamir_types::core::interner::InternerKey,
     value: &QueryValue,
-) -> bool {
+) -> DbResult<bool> {
     let path = std::slice::from_ref(field_id);
     // Try zero-copy RecordView lens first.
     if let Ok(view) = RecordView::new(record_bytes) {
-        if let Some(actual) = view.scalar_at(path) {
-            return scalar_ref_matches_query_value(&actual, value);
-        }
+        return Ok(view
+            .scalar_at(path)
+            .is_some_and(|actual| scalar_ref_matches_query_value(&actual, value)));
     }
     // Fallback: decode InnerValue tree (non-map records).
-    if let Ok(tree) = InnerValue::from_bytes(Bytes::copy_from_slice(record_bytes)) {
-        if let Some(actual) = tree.scalar_at(path) {
-            return scalar_ref_matches_query_value(&actual, value);
-        }
+    match InnerValue::from_bytes(Bytes::copy_from_slice(record_bytes)) {
+        Ok(tree) => Ok(tree
+            .scalar_at(path)
+            .is_some_and(|actual| scalar_ref_matches_query_value(&actual, value))),
+        Err(e) => Err(DbError::Codec(format!(
+            "ValidatorDb::record_field_matches_by_id: record decode failed \
+             (RecordView and InnerValue both failed): {e}"
+        ))),
     }
-    false
 }
 
 /// Compare a `ScalarRef` against a `QueryValue` for equality.
-fn scalar_ref_matches_query_value(
-    actual: &shamir_types::record_view::ScalarRef<'_>,
-    value: &QueryValue,
-) -> bool {
-    use shamir_types::record_view::ScalarRef;
+fn scalar_ref_matches_query_value(actual: &ScalarRef<'_>, value: &QueryValue) -> bool {
     match (actual, value) {
         (ScalarRef::Null, QueryValue::Null) => true,
         (ScalarRef::Bool(a), QueryValue::Bool(b)) => a == b,
@@ -248,12 +258,37 @@ impl<'a> ValidatorDb<'a> {
                         // into the target table (this tx, not yet committed) is
                         // never in the index (indexing happens at commit), so go
                         // straight to the staged-overlay probe.
-                        return Ok(self.staged_field_matches(
-                            target.table_token(),
-                            &field_id,
-                            value,
-                        ));
+                        return self.staged_field_matches(target.table_token(), &field_id, value);
                     }
+                } else {
+                    // Audit group 25 / defect 1: no single-field index covers
+                    // this FK's referenced field on the parent table, so the
+                    // scan below is O(parent_rows). `exists_in_table` runs
+                    // once PER CHILD ROW from `SchemaValidator::validate`'s
+                    // per-record FK check, so an M-row batch write against
+                    // this table pays O(M × parent_rows) in total.
+                    //
+                    // Not fixed here as a semi-join (batching every child
+                    // row's value into ONE parent-table pass): that requires
+                    // a batch-scoped cache threaded through the per-record
+                    // validator invocation loop in `write_exec.rs`
+                    // (`execute_insert_tx`/`execute_update_tx`), which is a
+                    // cross-cutting change to the transactional write path
+                    // (FG-2/FG-3/FG-7/SSI/CAS invariants live there) — too
+                    // large a blast radius for this fix. Nor is it fixed as
+                    // a hard DDL-time refusal (mirroring the `unique` ⟹
+                    // single-field-index invariant `validate_unique_indexes`
+                    // enforces): that gate lives in `shamir-db`
+                    // (`admin_schema.rs`), outside this crate. Surfacing the
+                    // hazard here at least makes it actionable instead of a
+                    // silent perf cliff.
+                    log::warn!(
+                        "ValidatorDb::exists_in_table: FK check on field {field:?} \
+                         has no single-field index on the referenced table — \
+                         falling back to a full table scan per child row \
+                         (O(batch_size * parent_rows) for a multi-row write). \
+                         Add a single-field index on {field:?} to avoid this."
+                    );
                 }
             }
         }
@@ -276,7 +311,7 @@ impl<'a> ValidatorDb<'a> {
                         })?
                     }
                 };
-                if record_field_matches(bytes.as_ref(), field, value, interner) {
+                if record_field_matches(bytes.as_ref(), field, value, interner)? {
                     return Ok(true);
                 }
             }
@@ -289,7 +324,7 @@ impl<'a> ValidatorDb<'a> {
         // TARGET table's token, not `self_table`'s — this is the key
         // difference from `exists_in_self`'s self-table staged probe.
         if let Some(field_id) = interner.get_ind(field) {
-            if self.staged_field_matches(target.table_token(), &field_id, value) {
+            if self.staged_field_matches(target.table_token(), &field_id, value)? {
                 return Ok(true);
             }
         }
@@ -305,16 +340,25 @@ impl<'a> ValidatorDb<'a> {
         target_token: u64,
         field_id: &shamir_types::core::interner::InternerKey,
         value: &QueryValue,
-    ) -> bool {
+    ) -> DbResult<bool> {
         let Some(staging) = self.tx.write_set.get(&target_token) else {
-            return false;
+            return Ok(false);
         };
-        staging.snapshot_ops().into_iter().any(|op| match op {
-            shamir_storage::types::KvOp::Set(_, ref bytes) => {
-                record_field_matches_by_id(bytes.as_ref(), field_id, value)
+        // P1 perf fix: this probe runs once PER RECORD validated (called from
+        // `exists_in_table`, itself invoked per row in a batch insert against a
+        // table with a unique/FK rule). `snapshot_ops()` would materialize a
+        // fresh `Vec<KvOp>` on every call, turning an O(staged) allocation into
+        // O(staged²) total work across the batch. `iter_ops()` scans the staging
+        // map lazily and lets the loop short-circuit on the first match without
+        // materializing the rest.
+        for op in staging.iter_ops() {
+            if let shamir_storage::types::KvOp::Set(_, ref bytes) = op {
+                if record_field_matches_by_id(bytes.as_ref(), field_id, value)? {
+                    return Ok(true);
+                }
             }
-            shamir_storage::types::KvOp::Remove(_) => false,
-        })
+        }
+        Ok(false)
     }
 
     // ── Unique probe (self-table) ───────────────────────────────────────
@@ -398,7 +442,7 @@ impl<'a> ValidatorDb<'a> {
                         })?
                     }
                 };
-                if record_field_matches(bytes.as_ref(), field, value, interner) {
+                if record_field_matches(bytes.as_ref(), field, value, interner)? {
                     return Ok(true);
                 }
             }
@@ -424,7 +468,10 @@ impl<'a> ValidatorDb<'a> {
             // a single scc read — cheap and non-blocking.
             if let Some(field_id_raw) = layered.get_id(field).await {
                 let field_key = shamir_types::core::interner::InternerKey::new(field_id_raw);
-                for op in staging.snapshot_ops() {
+                // P1 perf fix: `exists_in_self` runs once per record validated in a
+                // batch insert — `iter_ops()` avoids materializing a fresh `Vec<KvOp>`
+                // on every call (see `staged_field_matches` above for the same fix).
+                for op in staging.iter_ops() {
                     if let shamir_storage::types::KvOp::Set(ref key, ref bytes) = op {
                         // Exclude the record being updated (by key, which
                         // encodes the RecordId).
@@ -433,7 +480,7 @@ impl<'a> ValidatorDb<'a> {
                                 continue;
                             }
                         }
-                        if record_field_matches_by_id(bytes.as_ref(), &field_key, value) {
+                        if record_field_matches_by_id(bytes.as_ref(), &field_key, value)? {
                             return Ok(true);
                         }
                     }

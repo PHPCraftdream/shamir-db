@@ -54,7 +54,7 @@
 //! Same as delete: the plan is resolved before the mutation calls, and the
 //! child mutations are applied **inside** the same implicit/explicit tx as
 //! the parent update so the commit is atomic.  As of F-28 Step 2, the plan's
-//! row-level probes (`collect_parent_values`, `child_has_reference`) read via
+//! row-level probes (`collect_parent_values`, `any_child_references`) read via
 //! `TableManager::list_stream_tx(Some(tx), ..)` — the calling transaction's
 //! own snapshot-plus-staged-writes view — instead of committed-only state.
 //! This closes the **in-tx** read-your-own-writes gap (D1): an old parent
@@ -89,6 +89,7 @@
 
 use bytes::Bytes;
 use futures::StreamExt;
+use std::collections::BTreeSet;
 
 use shamir_query_types::admin::FkAction;
 use shamir_query_types::batch::BatchError;
@@ -101,6 +102,7 @@ use shamir_types::types::value::{InnerValue, QueryValue};
 use crate::query::batch::TableResolver;
 use crate::query::filter::{compile_filter, FilterContext, FilterNode};
 use crate::query::TableRef;
+use crate::repo::build_reverse_fk_entries;
 use crate::table::record_cow::RecordCow;
 use crate::table::TableManager;
 
@@ -184,19 +186,15 @@ pub(crate) async fn plan_fk_on_update(
         });
     }
 
-    // 1. Discover reverse-FK references with on_update != NoAction.
-    let on_update_refs = discover_on_update_refs(resolver, parent_table_ref).await?;
-    if on_update_refs.is_empty() {
-        return Ok(FkUpdatePlan {
-            mutations: Vec::new(),
-        });
-    }
-
-    // 2. No-op gate: intersect set-fields with parent ref_fields.
-    let relevant_refs: Vec<&OnUpdateRef> = on_update_refs
-        .iter()
-        .filter(|r| set_fields.contains_key(&r.parent_ref_field))
-        .collect();
+    // 1 + 2. Discover reverse-FK references with on_update != NoAction
+    //    (routed through the repo's cached reverse-FK map, mirroring the
+    //    delete path's `discover_action_refs` — #1181), with the cheap
+    //    set-fields ∩ ref-fields intersection applied as the FIRST predicate
+    //    inside the same filter pass, before the `on_update` check or the
+    //    `OnUpdateRef` allocation (3 owned `String` clones): a no-op update
+    //    (its `op.set` fields matching none of this parent's ref_fields)
+    //    never pays for either. See `discover_on_update_refs`'s doc.
+    let relevant_refs = discover_on_update_refs(resolver, parent_table_ref, &set_fields).await?;
     if relevant_refs.is_empty() {
         return Ok(FkUpdatePlan {
             mutations: Vec::new(),
@@ -291,7 +289,15 @@ pub(crate) async fn plan_fk_on_update(
         // this child.  Skip pairs where old == new (no actual change → no
         // fan-out for that row, and no restrict trigger).
         let mut probes: Vec<(&QueryValue, &QueryValue, FkAction, &str)> = Vec::new();
-        let mut restrict_fields: Vec<(&QueryValue, &str)> = Vec::new();
+        // Grouped by child_field and deduped per field — see
+        // `any_child_references`'s doc: this collapses what used to be one
+        // full child-table scan PER (old-value, child_field) pair into one
+        // scan per DISTINCT child_field, testing every row against the
+        // whole set of old values for that field.
+        let mut restrict_fields: shamir_collections::TFxMap<
+            &str,
+            shamir_collections::TFxSet<&QueryValue>,
+        > = shamir_collections::TFxMap::default();
         for r in &refs {
             let new = match new_values.get(r.parent_ref_field.as_str()) {
                 Some(v) => v,
@@ -307,7 +313,12 @@ pub(crate) async fn plan_fk_on_update(
                     continue;
                 }
                 match r.action {
-                    FkAction::Restrict => restrict_fields.push((old, r.child_field.as_str())),
+                    FkAction::Restrict => {
+                        restrict_fields
+                            .entry(r.child_field.as_str())
+                            .or_default()
+                            .insert(old);
+                    }
                     FkAction::Cascade | FkAction::SetNull => {
                         probes.push((old, new, r.action, r.child_field.as_str()));
                     }
@@ -331,11 +342,14 @@ pub(crate) async fn plan_fk_on_update(
                     code: Some("fk_on_update".to_string()),
                 })?;
 
-        // 5a. RESTRICT — if any child row references an old value being
-        //     changed, reject immediately (no partial application).
+        // 5a. RESTRICT — one pass per distinct child_field, testing every
+        //     child row against the whole deduped old-value set for that
+        //     field; reject immediately on the first match (no partial
+        //     application).
         if !restrict_fields.is_empty() {
-            for (old, child_field) in &restrict_fields {
-                let exists = child_has_reference(&child_table, child_field, old, tx)
+            for (&child_field, old_values) in &restrict_fields {
+                let values: Vec<&QueryValue> = old_values.iter().copied().collect();
+                let exists = any_child_references(&child_table, child_field, &values, tx)
                     .await
                     .map_err(|e| BatchError::QueryError {
                         alias: alias.to_string(),
@@ -409,7 +423,7 @@ pub(crate) async fn plan_fk_on_update(
 
         // F-40b (RI barrier): record this child-table scan at ENTRY,
         // regardless of isolation — same recording as
-        // `fk_restrict.rs::child_has_reference`, closing the
+        // `fk_restrict.rs::any_child_references`, closing the
         // cross-transaction race for the explicit-Snapshot parent UPDATE
         // path (CASCADE / SET NULL fan-out).
         //
@@ -419,7 +433,7 @@ pub(crate) async fn plan_fk_on_update(
         // short-circuits the scan or the `list_stream_tx` fallback runs.
         tx.record_ri_barrier(child_table.table_token());
 
-        // F-53c: index fast-path (mirrors `child_has_reference`'s index
+        // F-53c: index fast-path (mirrors `any_child_references`'s index
         // lookup for RESTRICT, and `fk_actions::index_candidate_ids` for the
         // delete path). When every probe's FK field resolves to a BASE
         // interner id with a single-field index AND the current tx has no
@@ -485,7 +499,7 @@ pub(crate) async fn plan_fk_on_update(
             // reflected). `list_stream_tx` also records the Serializable
             // `TableScan` predicate at construction time — the RI-barrier
             // token recorded at ENTRY above is the path-agnostic safety net
-            // (exactly as in `child_has_reference`).
+            // (exactly as in `any_child_references`).
             let batch_size = 1000;
             let stream = child_table.list_stream_tx(Some(tx), batch_size);
             futures::pin_mut!(stream);
@@ -607,8 +621,11 @@ async fn update_child_field(
         }
     })?;
 
+    // #1205: `replace_field` only overwrites an existing key's value (no
+    // new map keys) — not captured at this call site regardless, so leave
+    // A8's decode fallback in effect (`ids_captured = false`).
     table
-        .update_tx_bytes(id, &old_bytes, new_bytes, tx)
+        .update_tx_bytes(id, &old_bytes, new_bytes, tx, false)
         .await
         .map_err(|e| BatchError::QueryError {
             alias: alias.to_string(),
@@ -674,8 +691,11 @@ async fn set_child_field_null(
         }
     })?;
 
+    // #1205: same as above — `replace_field` overwrites an existing key's
+    // value only, but this call site doesn't capture ids, so leave A8's
+    // decode fallback in effect (`ids_captured = false`).
     table
-        .update_tx_bytes(id, &old_bytes, new_bytes, tx)
+        .update_tx_bytes(id, &old_bytes, new_bytes, tx, false)
         .await
         .map_err(|e| BatchError::QueryError {
             alias: alias.to_string(),
@@ -730,10 +750,28 @@ async fn field_is_nullable(table: &TableManager, field: &str) -> bool {
 // ── Discovery ────────────────────────────────────────────────────────────────
 
 /// Discover all child tables in the repo that have a FK pointing at
-/// `parent_table` with `on_update != NoAction`.
+/// `parent_table` with `on_update != NoAction`, already narrowed to the
+/// references relevant to THIS update's `set_fields`.
+///
+/// (#1181): reads through the repo's cached reverse-FK map
+/// (`RepoInstance::fk_reverse_cache`) instead of re-running the O(tables)
+/// `repo.list_table_names()` + `collect_fk_refs()` scan on every UPDATE —
+/// mirrors `fk_actions::discover_action_refs` / `fk_restrict::discover_restrict_refs`,
+/// sharing the SAME cache (and the same underlying scan): a cache miss (never
+/// built, or invalidated by a schema mutation since the last build) pays that
+/// scan exactly once and seeds every parent table's entry in the repo, not
+/// just this one. The cache carries every `on_update` action; this filters
+/// for what the UPDATE path needs.
+///
+/// The set-fields membership check (`set_fields.contains_key`) is applied as
+/// the FIRST predicate in the filter chain, before the `on_update` check and
+/// before allocating an owned [`OnUpdateRef`] (three `String` clones) — for
+/// the common no-op update (touching no FK-referenced field), every cached
+/// entry is rejected by this cheap local-map lookup alone.
 pub(crate) async fn discover_on_update_refs(
     resolver: &dyn TableResolver,
     parent_table_ref: &TableRef,
+    set_fields: &shamir_collections::TFxMap<String, QueryValue>,
 ) -> Result<Vec<OnUpdateRef>, BatchError> {
     let repo = resolver
         .resolve_repo(&parent_table_ref.repo)
@@ -744,71 +782,68 @@ pub(crate) async fn discover_on_update_refs(
             code: Some("fk_on_update".to_string()),
         })?;
 
-    let table_names = repo.list_table_names();
-    let mut refs = Vec::new();
+    let repo_name = parent_table_ref.repo.clone();
+    let all_for_parent = repo
+        .fk_reverse_cache()
+        .get_or_build_by_parent(&parent_table_ref.table, || {
+            // F-36: `Fn` (re-callable) build closure so a
+            // generation-mismatched scan can retry under the same
+            // single-flight lock. Clone `repo_name` per call.
+            let repo_name = repo_name.clone();
+            async move { build_reverse_fk_entries(resolver, &repo_name).await }
+        })
+        .await
+        .map_err(|e| BatchError::QueryError {
+            alias: String::new(),
+            message: format!("fk_on_update: reverse-FK scan failed: {e}"),
+            code: Some("fk_on_update".to_string()),
+        })?;
 
-    for name in &table_names {
-        let child_ref = TableRef::with_repo(&parent_table_ref.repo, name);
-        // F-55 (#881): a resolve failure on any single child table aborts
-        // the WHOLE repo-wide scan instead of silently treating that table
-        // as "declares no foreign keys". Mirrors the `resolve_repo` error
-        // mapping a few lines above; uses `map_err` (not bare `?`) because
-        // this function returns `BatchError`, not `DbResult`.
-        let child_table =
-            resolver
-                .resolve(&child_ref)
-                .await
-                .map_err(|e| BatchError::QueryError {
-                    alias: String::new(),
-                    message: format!("fk_on_update: resolve({name}): {e}"),
-                    code: Some("fk_on_update".to_string()),
-                })?;
-
-        for (field_path, fk) in child_table.collect_fk_refs() {
-            if fk.ref_table != parent_table_ref.table {
-                continue;
-            }
-            if fk.on_update != FkAction::NoAction {
-                refs.push(OnUpdateRef {
-                    child_table: name.clone(),
-                    child_field: field_path.join("."),
-                    parent_ref_field: fk.ref_field.clone(),
-                    action: fk.on_update,
-                });
-            }
-        }
-    }
-
-    Ok(refs)
+    Ok(all_for_parent
+        .iter()
+        .filter(|e| set_fields.contains_key(&e.parent_ref_field))
+        .filter(|e| e.on_update != FkAction::NoAction)
+        .map(|e| OnUpdateRef {
+            child_table: e.child_table.clone(),
+            child_field: e.child_field.clone(),
+            parent_ref_field: e.parent_ref_field.clone(),
+            action: e.on_update,
+        })
+        .collect())
 }
 
 // ── Scan helpers (mirrors fk_restrict.rs / fk_actions.rs) ────────────────────
 
 /// Scan the parent table for rows matching `where_clause` and extract the
-/// values of the given `ref_fields`.
+/// DISTINCT values of the given `ref_fields`.
 ///
 /// `None` for `where_clause` means match-all (mirrors `execute_update_tx`'s
 /// treatment of an absent WHERE).
 ///
-/// Returns a map: `field_name -> Vec<QueryValue>` (the set of distinct values
-/// from the matched rows).
+/// Returns a map: `field_name -> TFxSet<QueryValue>` — deduped, so that many
+/// matched parent rows sharing the same ref_field value collapse to one
+/// downstream probe instead of one per row (previously this pushed every
+/// matched row's value into a `Vec`, including duplicates, despite the doc
+/// claiming "distinct values").
 async fn collect_parent_values(
     table: &TableManager,
     where_clause: Option<&Filter>,
     ctx: &FilterContext<'_>,
     ref_fields: &[&str],
     tx: &shamir_tx::TxContext,
-) -> shamir_storage::error::DbResult<shamir_collections::TFxMap<String, Vec<QueryValue>>> {
+) -> shamir_storage::error::DbResult<
+    shamir_collections::TFxMap<String, shamir_collections::TFxSet<QueryValue>>,
+> {
     let interner = table.interner().get().await?;
     let callback = where_clause
         .map(|f| compile_filter(f, interner))
         .unwrap_or(FilterNode::True);
     let batch_size = 1000;
 
-    let mut result: shamir_collections::TFxMap<String, Vec<QueryValue>> =
+    let mut result: shamir_collections::TFxMap<String, shamir_collections::TFxSet<QueryValue>> =
         shamir_collections::TFxMap::default();
     for &field in ref_fields {
-        result.insert(field.to_string(), Vec::new());
+        result.insert(field.to_string(), shamir_collections::TFxSet::default());
     }
 
     // F-28 Step 2: resolve each ref_field's id through the tx-layered
@@ -842,11 +877,13 @@ async fn collect_parent_values(
                 if let Some(&field_id) = field_ids.get(field) {
                     let key = shamir_types::core::interner::InternerKey::new(field_id);
                     let path = std::slice::from_ref(&key);
-                    if let Ok(view) = RecordView::new(&bytes) {
-                        if let Some(scalar) = view.scalar_at(path) {
-                            let qv = scalar_ref_to_qv(scalar);
-                            result.get_mut(field).unwrap().push(qv);
-                        }
+                    // Decode-corrupt row: fail closed instead of silently
+                    // dropping this row's value from the RESTRICT/CASCADE/
+                    // SET NULL candidate set (decode-error twin of the
+                    // F-65/#891 read-error fix — see
+                    // `extract_ref_field_value`'s doc).
+                    if let Some(qv) = extract_ref_field_value(&bytes, path)? {
+                        result.get_mut(field).unwrap().insert(qv);
                     }
                 }
             }
@@ -856,20 +893,60 @@ async fn collect_parent_values(
     Ok(result)
 }
 
-/// Check whether any row in `child_table` has `field == value`.
+/// Decode a row's bytes (`RecordView`, falling back to `InnerValue` for
+/// non-map records — same two-step decode `record_field_matches_by_id`
+/// uses) and extract the scalar at `path` as an owned `QueryValue`.
 ///
-/// Mirrors `fk_restrict::child_has_reference`: index-fast / scan-fallback,
+/// Returns `Ok(None)` when the record decodes fine but the field is absent
+/// at `path` — a legitimate "this row doesn't have that field" outcome, not
+/// corruption. Returns `Err(DbError::Codec)` only when BOTH decode attempts
+/// fail on the raw bytes: a genuinely corrupt parent row must abort the
+/// scan, not be silently dropped from the candidate value set — the
+/// decode-error twin of the F-65/#891 read-error fail-closed fix (see
+/// `fk_indexed_action_read_error_tests.rs`).
+fn extract_ref_field_value(
+    bytes: &Bytes,
+    path: &[shamir_types::core::interner::InternerKey],
+) -> shamir_storage::error::DbResult<Option<QueryValue>> {
+    if let Ok(view) = RecordView::new(bytes) {
+        return Ok(view.scalar_at(path).map(scalar_ref_to_qv));
+    }
+    match InnerValue::from_bytes(bytes.clone()) {
+        Ok(tree) => Ok(tree.scalar_at(path).map(scalar_ref_to_qv)),
+        Err(e) => Err(shamir_storage::error::DbError::Codec(format!(
+            "fk_on_update: parent row decode failed (RecordView and InnerValue \
+             both failed): {e}"
+        ))),
+    }
+}
+
+/// Check whether any row in `child_table` has `field` equal to ANY member of
+/// `values` — a single pass over the child table testing the whole (deduped)
+/// old-value set for one FK field.
+///
+/// Replaces the previous per-value `child_has_reference`, which was called
+/// once PER (old-value, child_field) pair from the RESTRICT branch above
+/// and, whenever the field lacked a supporting index, ran a full
+/// `list_stream_tx` scan of the child table EVERY time — O(distinct values ×
+/// child-table size) instead of O(child-table size). The per-value INDEXED
+/// lookup path is unchanged in shape (one `lookup_by_index` call per value —
+/// already O(log n) each, not the fan-out this fixes); only the no-index
+/// fallback collapses to exactly one scan, and each scanned row is decoded
+/// exactly once and tested against every value instead of being
+/// independently re-scanned-and-decoded once per value.
+///
+/// Mirrors `fk_restrict::any_child_references`: index-fast / scan-fallback,
 /// PLUS (F-28 Step 2) a staged-overlay probe on the index fast-path's empty
 /// result, since a staged-but-not-yet-committed insert/update is never
 /// reflected in the index (indexing happens at commit).
-async fn child_has_reference(
+async fn any_child_references(
     table: &TableManager,
     field: &str,
-    value: &QueryValue,
+    values: &[&QueryValue],
     tx: &shamir_tx::TxContext,
 ) -> shamir_storage::error::DbResult<bool> {
     // F-40b (RI barrier): record this child-table scan REGARDLESS of
-    // isolation — mirrors `fk_restrict.rs::child_has_reference`'s recording
+    // isolation — mirrors `fk_restrict.rs::any_child_references`'s recording
     // at function entry, before the index fast-path, so an EXPLICIT
     // `Snapshot`-isolation parent UPDATE (which never populates
     // `predicate_set`) still gets a commit-time re-check (`pre_commit.rs`
@@ -884,46 +961,68 @@ async fn child_has_reference(
     // (base, then this tx's `interner_overlay`) — a field first interned
     // EARLIER IN THE SAME tx only exists in the overlay until commit; a
     // base-only lookup would silently miss it. Mirrors
-    // `fk_restrict::child_has_reference`.
+    // `fk_restrict::any_child_references`.
     let field_id = resolve_field_id_layered(interner, tx, field).await;
 
-    // Fast path: single-field index lookup (only meaningful for a base id).
-    if let Some(inner_value) = qv_scalar_to_inner(value) {
-        if let Some(base_field_id) = interner.get_ind(field) {
-            let field_path = [base_field_id.id()];
-            if let Some(idx_name) = table.find_single_field_index(&field_path) {
+    // Fast path: one `lookup_by_index` call per value (only meaningful for a
+    // base id). Falls through to the single full-scan fallback below the
+    // moment ANY value can't be resolved via the index — matching the old
+    // per-value function's per-call behavior exactly.
+    if let Some(base_field_id) = interner.get_ind(field) {
+        let field_path = [base_field_id.id()];
+        if let Some(idx_name) = table.find_single_field_index(&field_path) {
+            let mut index_conclusive = true;
+            for &value in values {
+                let Some(inner_value) = qv_scalar_to_inner(value) else {
+                    index_conclusive = false;
+                    break;
+                };
                 // P0-3a (#1011): `None` = DROP in its drain→sweep window — the
                 // index is momentarily unusable, so fall through to the full
                 // scan below instead of treating it as "no match" (which would
                 // wrongly let a FK-referencing child row pass the check).
-                if let Some(ids) = table
+                match table
                     .index_manager_ref()
                     .lookup_by_index(idx_name, std::slice::from_ref(&inner_value))
                     .await?
                 {
-                    if !ids.is_empty() {
-                        return Ok(true);
+                    Some(ids) => {
+                        if !ids.is_empty() {
+                            return Ok(true);
+                        }
+                        // Index says no match — authoritative for the COMMITTED
+                        // store, but cannot rule out a same-tx staged insert/update.
+                        if let Some(field_id) = field_id {
+                            let key = shamir_types::core::interner::InternerKey::new(field_id);
+                            if staged_field_matches(tx, table.table_token(), &key, value) {
+                                return Ok(true);
+                            }
+                        }
                     }
-                    // Index says no match — authoritative for the COMMITTED
-                    // store, but cannot rule out a same-tx staged insert/update.
-                    if let Some(field_id) = field_id {
-                        let key = shamir_types::core::interner::InternerKey::new(field_id);
-                        return Ok(staged_field_matches(tx, table.table_token(), &key, value));
+                    None => {
+                        index_conclusive = false;
+                        break;
                     }
-                    return Ok(false);
                 }
             }
+            if index_conclusive {
+                return Ok(false);
+            }
+            // else: fall through to the full scan for correctness (it
+            // harmlessly re-checks any value already ruled out via index).
         }
     }
 
-    // Fallback: full scan with field match. Tx-aware: overlays this tx's own
+    // Fallback: ONE full scan with field match against the WHOLE `values`
+    // set — each row is decoded exactly once and tested against every
+    // value, instead of once per value. Tx-aware: overlays this tx's own
     // staged writes (read-your-own-writes, closing D1 for this probe).
     //
     // F-28 Step 5 (memo §2.4): construct `list_stream_tx` UNCONDITIONALLY —
     // it records the Serializable `TableScan` predicate synchronously at
     // construction time (before this line returns), regardless of whether
     // `field_id` resolved. See the identical fix + rationale in
-    // `fk_restrict.rs::child_has_reference`.
+    // `fk_restrict.rs::any_child_references`.
     let batch_size = 1000;
     let stream = table.list_stream_tx(Some(tx), batch_size);
     let Some(field_id) = field_id else {
@@ -935,7 +1034,7 @@ async fn child_has_reference(
         let batch = batch_result?;
         for (_, cow) in batch {
             let bytes: Bytes = cow_to_bytes(cow)?;
-            if record_field_matches_by_id(bytes.as_ref(), &key, value) {
+            if record_field_matches_any_by_id(bytes.as_ref(), &key, values) {
                 return Ok(true);
             }
         }
@@ -971,7 +1070,11 @@ fn staged_field_matches(
     let Some(staging) = tx.write_set.get(&target_token) else {
         return false;
     };
-    staging.snapshot_ops().into_iter().any(|op| match op {
+    // P1 perf fix: called once PER RECORD in a batch FK on-update check —
+    // `iter_ops()` avoids materializing a fresh `Vec<KvOp>` on every call
+    // (`snapshot_ops()` would make this O(staged²) across the batch) and lets
+    // `.any()` short-circuit on the first match.
+    staging.iter_ops().any(|op| match op {
         shamir_storage::types::KvOp::Set(_, ref bytes) => {
             record_field_matches_by_id(bytes.as_ref(), field_id, value)
         }
@@ -1033,6 +1136,61 @@ fn record_field_matches_by_id(
     false
 }
 
+/// Like [`record_field_matches_by_id`], but tests a SINGLE decoded row
+/// against every member of `values` — the row is decoded exactly once
+/// regardless of how many values are probed, closing the redundant
+/// per-probe re-decode `any_child_references`'s old per-value shape caused.
+fn record_field_matches_any_by_id(
+    record_bytes: &[u8],
+    field_id: &shamir_types::core::interner::InternerKey,
+    values: &[&QueryValue],
+) -> bool {
+    let path = std::slice::from_ref(field_id);
+    if let Ok(view) = RecordView::new(record_bytes) {
+        if let Some(actual) = view.scalar_at(path) {
+            return values.iter().any(|v| scalar_ref_matches_qv(&actual, v));
+        }
+    }
+    if let Ok(tree) = InnerValue::from_bytes(Bytes::copy_from_slice(record_bytes)) {
+        if let Some(actual) = tree.scalar_at(path) {
+            return values.iter().any(|v| scalar_ref_matches_qv(&actual, v));
+        }
+    }
+    false
+}
+
+/// Row decoded once for testing against multiple probes — see `decode_row`.
+enum DecodedRow<'a> {
+    View(RecordView<'a>),
+    Tree(InnerValue),
+}
+
+impl DecodedRow<'_> {
+    fn scalar_at(
+        &self,
+        path: &[shamir_types::core::interner::InternerKey],
+    ) -> Option<ScalarRef<'_>> {
+        match self {
+            DecodedRow::View(v) => v.scalar_at(path),
+            DecodedRow::Tree(t) => t.scalar_at(path),
+        }
+    }
+}
+
+/// Decode `bytes` once via `RecordView`, falling back to `InnerValue` for
+/// non-map records — shared across every probe tested against the SAME row
+/// (closes the redundant per-probe re-decode `record_field_matches_by_id`
+/// caused when invoked once per probe for one row in `classify_row_update`).
+fn decode_row(bytes: &[u8]) -> Option<DecodedRow<'_>> {
+    if let Ok(view) = RecordView::new(bytes) {
+        return Some(DecodedRow::View(view));
+    }
+    if let Ok(tree) = InnerValue::from_bytes(Bytes::copy_from_slice(bytes)) {
+        return Some(DecodedRow::Tree(tree));
+    }
+    None
+}
+
 /// F-53c: per-row fan-out resolution shared by the index fast-path and the
 /// `list_stream_tx` scan fallback in `plan_fk_on_update`. Mutates `mutations`
 /// exactly as the original inline loop did: the UPDATE path is PER-FIELD (a
@@ -1048,13 +1206,26 @@ fn classify_row_update(
     child_table: &TableManager,
     mutations: &mut Vec<PendingMutation>,
 ) {
+    // Decode the row ONCE regardless of how many probes it's tested
+    // against — `record_field_matches_by_id` previously re-decoded these
+    // SAME bytes from scratch on every probe iteration below.
+    let Some(row) = decode_row(bytes) else {
+        // Corrupt row: every probe below would already have failed its own
+        // decode identically, so "no match for this row" is the same
+        // outcome as before.
+        return;
+    };
     // For this row, apply EVERY matching probe.  A field is a single FK with
     // a single action, and a row's field value can equal at most one `old`
     // value, so at most one probe per field matches a given row — there is
     // no per-field Cascade/SetNull conflict to resolve.
     for (old, new, action, field, field_id) in resolved_probes {
         let key = shamir_types::core::interner::InternerKey::new(*field_id);
-        if !record_field_matches_by_id(bytes, &key, old) {
+        let path = std::slice::from_ref(&key);
+        let matches = row
+            .scalar_at(path)
+            .is_some_and(|actual| scalar_ref_matches_qv(&actual, old));
+        if !matches {
             continue;
         }
         match action {
@@ -1089,7 +1260,6 @@ async fn index_candidate_ids(
     interner: &shamir_types::core::interner::Interner,
     probes: &[(&str, &QueryValue)],
 ) -> shamir_storage::error::DbResult<Option<Vec<RecordId>>> {
-    use std::collections::BTreeSet;
     let mut all: BTreeSet<RecordId> = BTreeSet::new();
     for (field, value) in probes {
         let inner = match qv_scalar_to_inner(value) {

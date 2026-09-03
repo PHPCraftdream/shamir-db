@@ -3,6 +3,7 @@ use shamir_collections::TSet;
 use super::filter_node::{CompareOp, FilterNode};
 use super::fts::like_pattern_to_regex;
 use super::resolve::{filter_value_to_query, intern_field_path, intern_field_path_compact};
+use crate::index2::expr::IndexExpr;
 use crate::query::filter::{Filter, FilterValue};
 use regex::Regex;
 use shamir_query_types::filter::ValueCompareOp;
@@ -193,7 +194,6 @@ pub(super) fn build_index_expr(
     _expr_args: Option<&[FilterValue]>,
     interner: &Interner,
 ) -> Option<crate::index2::expr::IndexExpr> {
-    use crate::index2::expr::IndexExpr;
     let path = intern_field_path(field, interner)?;
     let base = IndexExpr::Field(path);
     Some(match expr_op {

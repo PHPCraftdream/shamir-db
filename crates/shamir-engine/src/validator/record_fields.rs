@@ -17,7 +17,8 @@
 //!   already produced by INSERT/UPDATE resolved_values). Direct string key
 //!   lookup; no interner needed.
 
-use shamir_types::core::interner::Interner;
+use arc_swap::ArcSwapOption;
+use shamir_types::core::interner::{Interner, InternerKey};
 use shamir_types::record_view::{Kind, RecordRef, RecordView, ScalarRef};
 use shamir_types::types::value::{InnerValue, QueryValue};
 
@@ -71,6 +72,21 @@ pub trait RecordFields: Send + Sync {
 
 // ── ViewFields ────────────────────────────────────────────────────────────────
 
+/// Single-slot memo of the most recently resolved field path → interner ids.
+///
+/// A single field is typically probed 2-4 times per record within one
+/// `FieldRule::check`/`check_extended` pass (type check, constraint check,
+/// one_of/FK/unique materialize — see [`ViewFields::resolve_path`]), each
+/// probe re-walking the interner for the SAME path. Content-keyed (the raw
+/// path segments, not an address) so a coincidental allocator address reuse
+/// across probes can never resolve the wrong field — see
+/// `crate::query::filter::field_path_cache` for the concrete hazard an
+/// address-keyed cache caused elsewhere in this codebase.
+struct PathCache {
+    path: Vec<Box<str>>,
+    ids: Vec<InternerKey>,
+}
+
 /// [`RecordFields`] backed by a zero-copy [`RecordView`] lens.
 ///
 /// Name → interned-id resolution is **lazy and point-wise** via
@@ -81,16 +97,56 @@ pub struct ViewFields<'a> {
     pub view: &'a RecordView<'a>,
     /// The repo interner (base-only — DELETE path, all field names in base).
     pub interner: &'a Interner,
+    /// Memoizes the last successfully resolved path (see [`PathCache`]).
+    /// `ArcSwapOption` (lock-free) keeps `ViewFields` `Sync` — required
+    /// since `&dyn RecordFields` crosses `.await` points on the validator
+    /// path. A `ViewFields` is constructed fresh per record (see
+    /// `table_manager_validators.rs::run_validators_view`), so this cache
+    /// never outlives the record it was built for.
+    path_cache: ArcSwapOption<PathCache>,
 }
 
 impl<'a> ViewFields<'a> {
+    /// Construct a lens over `view`, resolving field names through `interner`.
+    pub fn new(view: &'a RecordView<'a>, interner: &'a Interner) -> Self {
+        Self {
+            view,
+            interner,
+            path_cache: ArcSwapOption::empty(),
+        }
+    }
+
     /// Resolve a string path to an interned-id path, returning `None` if any
     /// segment is unknown to the interner.
-    fn resolve_path(
-        &self,
-        path: &[&str],
-    ) -> Option<Vec<shamir_types::core::interner::InternerKey>> {
-        path.iter().map(|seg| self.interner.get_ind(*seg)).collect()
+    ///
+    /// Memoizes the single most recently resolved path (see [`PathCache`])
+    /// so the repeated probes `FieldRule::check`/`check_extended` makes for
+    /// ONE field don't each re-walk the interner from scratch. A cache miss
+    /// (different path, or first probe) falls through to the full
+    /// `get_ind` walk and refreshes the slot; a resolution failure (unknown
+    /// segment) is not cached — `Option::collect`'s short-circuit already
+    /// makes that path cheap.
+    fn resolve_path(&self, path: &[&str]) -> Option<Vec<InternerKey>> {
+        if let Some(cached) = self.path_cache.load().as_deref() {
+            if cached.path.len() == path.len()
+                && cached
+                    .path
+                    .iter()
+                    .zip(path.iter())
+                    .all(|(cached_seg, seg)| cached_seg.as_ref() == *seg)
+            {
+                return Some(cached.ids.clone());
+            }
+        }
+
+        let ids: Option<Vec<InternerKey>> =
+            path.iter().map(|seg| self.interner.get_ind(*seg)).collect();
+        let ids = ids?;
+        self.path_cache.store(Some(std::sync::Arc::new(PathCache {
+            path: path.iter().map(|seg| Box::from(*seg)).collect(),
+            ids: ids.clone(),
+        })));
+        Some(ids)
     }
 }
 

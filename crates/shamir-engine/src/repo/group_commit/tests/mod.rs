@@ -1,4 +1,3 @@
-#[cfg(test)]
-mod group_commit_tests;
-#[cfg(test)]
-mod leader_cancel_tests;
+pub mod group_commit_tests;
+pub mod leader_cancel_tests;
+pub mod panicking_flush_tests;

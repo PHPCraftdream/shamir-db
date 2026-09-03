@@ -5,6 +5,7 @@
 
 use std::time::Instant;
 
+use futures::future::join_all;
 use futures::StreamExt;
 
 use crate::query::filter::eval::{compile_filter, FilterNode};
@@ -477,9 +478,12 @@ impl TableManager {
         }
 
         // Row shape: (record_id, version, ts, value_bytes).
+        // CR-C3-adjacent (mirrors `read_as_of`'s `get_at_many` vectorization):
+        // fetch every matched record's timeline via `history_of_many` instead
+        // of one sequential `history_of` await per record.
         let mut rows: Vec<(RecordId, u64, Option<u64>, bytes::Bytes)> = Vec::new();
-        for id in &matched_ids {
-            let timeline = mvcc.history_of(id.as_bytes()).await?;
+        let timelines = history_of_many(mvcc, &matched_ids).await?;
+        for (id, timeline) in matched_ids.iter().zip(timelines) {
             for entry in timeline {
                 if in_range(entry.version, entry.ts_millis, from, to) {
                     rows.push((*id, entry.version, entry.ts_millis, entry.value));
@@ -567,4 +571,41 @@ impl TableManager {
         )
         .with_corrupt_records(corrupt))
     }
+}
+
+/// Vectorized sibling of [`shamir_tx::MvccStore::history_of`] for callers
+/// that need the full version timeline of MANY record ids (`read_history`'s
+/// matched-record set). Mirrors `MvccStore::get_at_many`'s vectorization
+/// shape — chunked at `FULL_SCAN_BATCH`, the same page size `read_as_of`
+/// already batches `get_at_many` at — but `history_of` has no native
+/// multi-key store primitive to collapse into (each key's version range
+/// lives at a different, non-adjacent physical location, unlike
+/// `get_at_many`'s single-version point lookups, which DO collapse into one
+/// `history.get_many` call): dispatching each chunk's `history_of` calls
+/// CONCURRENTLY (mirrors the `join_all` pattern already used for per-table
+/// fan-out in `tx::materialize`) is the achievable win here, overlapping N
+/// per-record round-trips (each itself a range-scan stream plus a
+/// `lookup_ts` await per archived version) instead of serializing them.
+///
+/// Results are returned in the SAME order as `ids`. `join_all` preserves
+/// input order in its output, and results are drained in that same order
+/// with `?` — so the FIRST id (in input order) whose lookup failed is the
+/// one whose error propagates, matching the previous sequential loop's
+/// error-selection exactly, even though the lookups themselves ran
+/// concurrently.
+async fn history_of_many(
+    mvcc: &shamir_tx::MvccStore,
+    ids: &[RecordId],
+) -> DbResult<Vec<Vec<shamir_tx::VersionEntry>>> {
+    if ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut out = Vec::with_capacity(ids.len());
+    for chunk in ids.chunks(FULL_SCAN_BATCH) {
+        let futs = chunk.iter().map(|id| mvcc.history_of(id.as_bytes()));
+        for result in join_all(futs).await {
+            out.push(result?);
+        }
+    }
+    Ok(out)
 }

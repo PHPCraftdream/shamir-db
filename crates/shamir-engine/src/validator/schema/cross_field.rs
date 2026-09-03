@@ -5,9 +5,13 @@
 //! by-name via [`RecordFields`](crate::validator::record_fields::RecordFields)
 //! — no interning ids leak into user-facing code.
 
+use std::cmp::Ordering;
+
 use shamir_types::record_view::ScalarRef;
 
 use crate::validator::record_fields::RecordFields;
+
+use CompareOp::*;
 
 /// Binary comparison operator between two scalar fields.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -34,7 +38,6 @@ impl CompareOp {
     /// A `None` result means the check cannot decide and the caller should
     /// record a `compare_type_mismatch` error rather than silently accept.
     pub fn eval_scalar(self, lhs: ScalarRef<'_>, rhs: ScalarRef<'_>) -> Option<bool> {
-        use CompareOp::*;
         // Ordering via partial_cmp on ScalarRef is not provided; we compute
         // the ordering inline for the comparable families (Null/Bool/Int/F64
         // cross Int/F64/Str/Bin).  Cross-family (e.g. Str vs Int) → None.
@@ -115,7 +118,6 @@ pub enum CrossFieldResult {
 /// Null==Null, Bool<Bool, Int/Int (and cross Int/F64), F64/F64, Str/Str.
 /// Returns `None` for any other pair (Bin, cross-type Str vs Int, etc.).
 fn scalar_ordering(a: ScalarRef<'_>, b: ScalarRef<'_>) -> Option<std::cmp::Ordering> {
-    use std::cmp::Ordering;
     match (a, b) {
         (ScalarRef::Null, ScalarRef::Null) => Some(Ordering::Equal),
         (ScalarRef::Bool(x), ScalarRef::Bool(y)) => Some(x.cmp(&y)),

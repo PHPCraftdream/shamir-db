@@ -14,13 +14,15 @@
 //! converted **once** to `QueryValue` and never round-tripped back.
 
 use std::cmp::Ordering;
+use std::hash::{Hash, Hasher};
 use std::sync::{Arc, OnceLock};
 
+use indexmap::Equivalent;
 use regex::Regex;
 use shamir_collections::TSet;
 use shamir_types::codecs::interned::inner_value_to_query_value;
 use shamir_types::core::interner::InternerKey;
-use shamir_types::record_view::{scalar_ref_cmp_qv, RecordRef, ScalarRef};
+use shamir_types::record_view::{scalar_ref_cmp_qv, Kind, RecordRef, ScalarRef};
 use shamir_types::types::value::QueryValue;
 use smallvec::SmallVec;
 
@@ -95,9 +97,71 @@ fn set_contains_coercing(set: &TSet<QueryValue>, sr: ScalarRef<'_>) -> bool {
         }
         ScalarRef::Null => set.contains(&QueryValue::Null),
         ScalarRef::Bool(b) => set.contains(&QueryValue::Bool(b)),
-        ScalarRef::Str(s) => set.contains(&QueryValue::Str(s.to_string())),
-        ScalarRef::Bin(b) => set.contains(&QueryValue::Bin(b.to_vec())),
+        // F-21 group: probe via a borrowed key (`StrProbe`/`BinProbe`)
+        // instead of allocating an owned `QueryValue::Str(String)` /
+        // `QueryValue::Bin(Vec<u8>)` per row just to hash+compare it once —
+        // this was the one allocating arm left in an otherwise zero-copy
+        // `scalar_at`-based probe.
+        ScalarRef::Str(s) => set.contains(&StrProbe(s)),
+        ScalarRef::Bin(b) => set.contains(&BinProbe(b)),
     }
+}
+
+/// Zero-alloc probe key for `TSet<QueryValue>::contains` — hashes and
+/// compares identically to `QueryValue::Str(String)` without ever
+/// allocating an owned `String`/`QueryValue` per probe.
+///
+/// Correctness of the hash match: `Value::hash`'s `Str` arm hashes the
+/// variant's discriminant followed by the `String`'s content; `String`'s
+/// `Hash` impl delegates byte-for-byte to `str::hash`, so hashing the SAME
+/// discriminant + the same bytes via a borrowed `&str` here (instead of an
+/// owned `String`) produces an identical digest under the set's `FxHasher`.
+struct StrProbe<'a>(&'a str);
+
+impl Hash for StrProbe<'_> {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        str_discriminant().hash(state);
+        self.0.hash(state);
+    }
+}
+
+impl Equivalent<QueryValue> for StrProbe<'_> {
+    fn equivalent(&self, key: &QueryValue) -> bool {
+        matches!(key, QueryValue::Str(s) if s.as_str() == self.0)
+    }
+}
+
+/// Zero-alloc probe key for `TSet<QueryValue>::contains` — the `Bin`
+/// sibling of [`StrProbe`]. `Vec<u8>`'s `Hash` impl delegates to `[u8]`'s,
+/// so hashing the same bytes via a borrowed `&[u8]` matches exactly.
+struct BinProbe<'a>(&'a [u8]);
+
+impl Hash for BinProbe<'_> {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        bin_discriminant().hash(state);
+        self.0.hash(state);
+    }
+}
+
+impl Equivalent<QueryValue> for BinProbe<'_> {
+    fn equivalent(&self, key: &QueryValue) -> bool {
+        matches!(key, QueryValue::Bin(b) if b.as_slice() == self.0)
+    }
+}
+
+/// `QueryValue::Str`'s enum discriminant. Building `QueryValue::Str(String::new())`
+/// is heap-alloc-free (`String::new()` never allocates) — this is a stack-only
+/// tag extraction, not a per-probe allocation.
+#[inline]
+fn str_discriminant() -> std::mem::Discriminant<QueryValue> {
+    std::mem::discriminant(&QueryValue::Str(String::new()))
+}
+
+/// `QueryValue::Bin`'s enum discriminant — see [`str_discriminant`].
+/// `Vec::new()` never allocates.
+#[inline]
+fn bin_discriminant() -> std::mem::Discriminant<QueryValue> {
+    std::mem::discriminant(&QueryValue::Bin(Vec::new()))
 }
 
 /// If `f` has an exact `i64` equivalent (`cmp_i64_f64(n, f) ==
@@ -183,36 +247,101 @@ fn set_contains_coercing_qv(set: &TSet<QueryValue>, qv: &QueryValue) -> bool {
     }
 }
 
-/// Coercing `swap_remove` for `ContainsAllSet`'s scratch set.
+/// Coercing `get_index_of` for `ContainsAllSet`'s bitmask scan.
 ///
-/// Mirrors [`set_contains_coercing_qv`] but actually REMOVES whichever
-/// coercion-equivalent representation is present in the set (so `remaining`
-/// shrinks correctly — the O(field_len) early-exit and the final "all
-/// required values found" check both depend on `remaining` shrinking).
+/// Mirrors [`set_contains_coercing_qv`] but returns the INDEX of whichever
+/// coercion-equivalent representation is present (`values` is a `TSet`, i.e.
+/// an `IndexSet` — `get_index_of` is an O(1) lookup, no clone/removal of the
+/// set itself). This replaces the old `swap_remove_coercing_qv`, which
+/// mutated a per-record `values.clone()` — cloning every required
+/// `QueryValue` (including any owned `String`/`Vec<u8>` payload) on EVERY
+/// row just to track which ones had been found so far.
 #[inline]
-fn swap_remove_coercing_qv(set: &mut TSet<QueryValue>, qv: &QueryValue) -> bool {
+fn index_of_coercing_qv(set: &TSet<QueryValue>, qv: &QueryValue) -> Option<usize> {
     match qv {
         QueryValue::Int(n) => {
-            if set.swap_remove(qv) {
-                return true;
+            if let Some(i) = set.get_index_of(qv) {
+                return Some(i);
             }
             let f = *n as f64;
             if cmp_i64_f64(*n, f) == Some(Ordering::Equal) {
-                set.swap_remove(&QueryValue::F64(f))
+                set.get_index_of(&QueryValue::F64(f))
             } else {
-                false
+                None
             }
         }
         QueryValue::F64(f) => {
-            if set.swap_remove(qv) {
-                true
-            } else if let Some(n) = f.is_finite().then(|| exact_i64_equal_to_f64(*f)).flatten() {
-                set.swap_remove(&QueryValue::Int(n))
-            } else {
-                false
+            if let Some(i) = set.get_index_of(qv) {
+                return Some(i);
+            }
+            if f.is_finite() {
+                if let Some(n) = exact_i64_equal_to_f64(*f) {
+                    return set.get_index_of(&QueryValue::Int(n));
+                }
+            }
+            None
+        }
+        _ => set.get_index_of(qv),
+    }
+}
+
+/// `$contains_all` membership scan for `ContainsAllSet` — dispatches on the
+/// field's container kind, then tracks "found" required values via a
+/// bitmask keyed by INDEX into `values` (see [`contains_all_scan`]) instead
+/// of cloning the whole required-values set per record.
+#[inline]
+fn contains_all_set_match(field_qv: &QueryValue, values: &TSet<QueryValue>) -> bool {
+    match field_qv {
+        QueryValue::List(list) => contains_all_scan(list.iter(), values),
+        QueryValue::Set(set) => contains_all_scan(set.iter(), values),
+        _ => false,
+    }
+}
+
+/// Single pass over `field_items`, marking each required value in `values`
+/// found via a bitmask instead of `swap_remove`-ing it out of a per-record
+/// clone. `values.len() <= 64` (the overwhelming common case) uses a `u64`
+/// bitmask — zero heap allocation, mirroring `FilterNode::FtsMatch`'s
+/// AND-mode bitmask a few arms up. Larger sets fall back to a `Vec<bool>`,
+/// still far cheaper than cloning N owned `QueryValue`s every row.
+///
+/// An empty `values` set is vacuously satisfied (mirrors the old
+/// `remaining.is_empty()` check starting true when `values` was empty).
+fn contains_all_scan<'a>(
+    field_items: impl Iterator<Item = &'a QueryValue>,
+    values: &TSet<QueryValue>,
+) -> bool {
+    let n = values.len();
+    if n == 0 {
+        return true;
+    }
+    if n <= 64 {
+        let target: u64 = if n == 64 { u64::MAX } else { (1u64 << n) - 1 };
+        let mut seen: u64 = 0;
+        for item in field_items {
+            if let Some(idx) = index_of_coercing_qv(values, item) {
+                seen |= 1u64 << idx;
+                if seen == target {
+                    return true;
+                }
             }
         }
-        _ => set.swap_remove(qv),
+        seen == target
+    } else {
+        let mut seen = vec![false; n];
+        let mut remaining = n;
+        for item in field_items {
+            if let Some(idx) = index_of_coercing_qv(values, item) {
+                if !seen[idx] {
+                    seen[idx] = true;
+                    remaining -= 1;
+                    if remaining == 0 {
+                        return true;
+                    }
+                }
+            }
+        }
+        remaining == 0
     }
 }
 
@@ -635,7 +764,7 @@ impl FilterNode {
                         // `InSet`/`ContainsAnySet`/`ContainsAllSet` (all-
                         // literals fast-paths) now use the same coercion
                         // via `set_contains_coercing_qv` /
-                        // `swap_remove_coercing_qv`, closing the gap this
+                        // `index_of_coercing_qv`, closing the gap this
                         // comment previously acknowledged as a known
                         // pre-existing difference.
                         if let Some(set) = &col_sets[i] {
@@ -672,16 +801,6 @@ impl FilterNode {
                 value,
                 pre_resolved,
             } => {
-                let field_owned = match record.materialize_at(field_path) {
-                    Some(v) => v,
-                    None => return false,
-                };
-                // Convert the materialised container once to QueryValue; the
-                // membership scan then compares name-keyed to name-keyed.
-                let field_qv = match inner_value_to_query_value(&field_owned, ctx.interner) {
-                    Ok(qv) => qv,
-                    Err(_) => return false,
-                };
                 let owned_rhs;
                 let filter_val: &QueryValue = if let Some(pre) = pre_resolved {
                     pre
@@ -692,14 +811,37 @@ impl FilterNode {
                     };
                     &owned_rhs
                 };
+
+                // F-21 group: fast path — the field is a bare string leaf
+                // (the common `$contains` shape). Borrow via `str_at` (the
+                // same zero-copy path `Like`/`Regex` already use) instead of
+                // `materialize_at` (an owned `InnerValue` clone) +
+                // `inner_value_to_query_value` (a second conversion pass).
+                if let Some(s) = record.str_at(field_path) {
+                    return match filter_val {
+                        QueryValue::Str(sub) => s.contains(sub.as_str()),
+                        _ => false,
+                    };
+                }
+
+                // Slow path: only a List/Set CONTAINER can still match
+                // (`$contains` on a container checks membership). Everything
+                // else at this point — absent, Null, a non-string scalar,
+                // Dec/Big — is a definite non-match, so skip the
+                // materialize entirely rather than pay for it just to fall
+                // through to `_ => false` below.
+                if !matches!(record.present_kind_at(field_path), Some(Kind::Container)) {
+                    return false;
+                }
+                let field_owned = match record.materialize_at(field_path) {
+                    Some(v) => v,
+                    None => return false,
+                };
+                let field_qv = match inner_value_to_query_value(&field_owned, ctx.interner) {
+                    Ok(qv) => qv,
+                    Err(_) => return false,
+                };
                 match &field_qv {
-                    QueryValue::Str(s) => {
-                        if let QueryValue::Str(sub) = filter_val {
-                            s.contains(sub.as_str())
-                        } else {
-                            false
-                        }
-                    }
                     QueryValue::List(list) => list
                         .iter()
                         .any(|item| compare_values(item, filter_val) == Some(Ordering::Equal)),
@@ -799,34 +941,12 @@ impl FilterNode {
                 // already gets this right via per-value membership, so the two
                 // must agree).
                 //
-                // Single pass over the field list with a scratch set of
-                // not-yet-found required values preserves the documented
-                // O(field_len) cost: each field element is one O(1) hash probe
-                // (`swap_remove`), and we short-circuit the instant the last
-                // required value is located. The only allocation is the cloned
-                // scratch set, bounded by `values.len()`.
-                let mut remaining = values.clone();
-                match &field_qv {
-                    QueryValue::List(list) => {
-                        for item in list.iter() {
-                            if swap_remove_coercing_qv(&mut remaining, item) && remaining.is_empty()
-                            {
-                                return true;
-                            }
-                        }
-                        remaining.is_empty()
-                    }
-                    QueryValue::Set(set) => {
-                        for item in set.iter() {
-                            if swap_remove_coercing_qv(&mut remaining, item) && remaining.is_empty()
-                            {
-                                return true;
-                            }
-                        }
-                        remaining.is_empty()
-                    }
-                    _ => false,
-                }
+                // F-21 group: `contains_all_set_match` tracks "found" required
+                // values via an INDEX-based bitmask (see `contains_all_scan`)
+                // instead of the old per-record `values.clone()` + swap_remove
+                // — cloning re-allocated and re-copied every owned
+                // `String`/`Vec<u8>` in the required-values set on EVERY row.
+                contains_all_set_match(&field_qv, values)
             }
 
             FilterNode::Between {

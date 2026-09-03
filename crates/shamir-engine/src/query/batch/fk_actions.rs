@@ -56,6 +56,7 @@
 
 use bytes::Bytes;
 use futures::StreamExt;
+use std::collections::BTreeSet;
 
 use shamir_query_types::admin::FkAction;
 use shamir_query_types::batch::BatchError;
@@ -621,10 +622,16 @@ async fn plan_cascade_for_ids(
             code: Some("fk_actions".to_string()),
         })?;
 
-    let mut parent_values: shamir_collections::TFxMap<String, Vec<QueryValue>> =
-        shamir_collections::TFxMap::default();
+    // Deduped (`TFxSet`, not `Vec`): several cascaded rows can share the
+    // same ref_field value, and a duplicated value would otherwise turn
+    // into a duplicated probe fed to `classify_row` for every grandchild row
+    // scanned below.
+    let mut parent_values: shamir_collections::TFxMap<
+        String,
+        shamir_collections::TFxSet<QueryValue>,
+    > = shamir_collections::TFxMap::default();
     for f in &parent_ref_fields {
-        parent_values.insert(f.to_string(), Vec::new());
+        parent_values.insert(f.to_string(), shamir_collections::TFxSet::default());
     }
 
     // F-28 Step 2: resolve each ref_field's id through the tx-layered
@@ -658,11 +665,18 @@ async fn plan_cascade_for_ids(
             if let Some(&field_id) = field_ids.get(field) {
                 let key = shamir_types::core::interner::InternerKey::new(field_id);
                 let path = std::slice::from_ref(&key);
-                if let Ok(view) = RecordView::new(&bytes) {
-                    if let Some(scalar) = view.scalar_at(path) {
-                        let qv = scalar_ref_to_qv(scalar);
-                        parent_values.get_mut(field).unwrap().push(qv);
-                    }
+                // Decode-corrupt cascaded row: fail closed instead of
+                // silently dropping this row's value from the grandchild
+                // discovery set (decode-error twin of the F-65/#891
+                // read-error fix — see `extract_ref_field_value`'s doc).
+                let qv =
+                    extract_ref_field_value(&bytes, path).map_err(|e| BatchError::QueryError {
+                        alias: alias.to_string(),
+                        message: format!("fk_actions: grandchild ref_field decode failed: {e}"),
+                        code: Some("fk_actions".to_string()),
+                    })?;
+                if let Some(qv) = qv {
+                    parent_values.get_mut(field).unwrap().insert(qv);
                 }
             }
         }
@@ -971,8 +985,11 @@ async fn set_child_field_null(
             code: Some("fk_actions".to_string()),
         })?;
 
+    // #1205: `new_bytes` nulls out an existing field id (not captured at
+    // this call site) — leave A8's decode fallback in effect for this
+    // table (`ids_captured = false`).
     table
-        .update_tx_bytes(id, &old_bytes, new_bytes, tx)
+        .update_tx_bytes(id, &old_bytes, new_bytes, tx, false)
         .await
         .map_err(|e| BatchError::QueryError {
             alias: alias.to_string(),
@@ -1068,7 +1085,7 @@ async fn discover_action_refs(
 
     let is_self_ref_table = &parent_table_ref.table;
     Ok(all_for_parent
-        .into_iter()
+        .iter()
         .filter(|e| {
             if !(e.on_delete == FkAction::Cascade || e.on_delete == FkAction::SetNull) {
                 return false;
@@ -1084,28 +1101,35 @@ async fn discover_action_refs(
             let is_self_ref = &e.child_table == is_self_ref_table;
             !(is_self_ref && e.on_delete == FkAction::Cascade)
         })
+        .cloned()
         .collect())
 }
 
 // ── Scan helpers (mirrors fk_restrict.rs) ────────────────────────────────────
 
 /// Scan the parent table for rows matching `where_clause` and extract the
-/// values of the given `ref_fields`.
+/// DISTINCT values of the given `ref_fields`.
+///
+/// Returns a map: `field_name -> TFxSet<QueryValue>` — deduped, so that many
+/// matched parent rows sharing the same ref_field value collapse to one
+/// downstream probe fed to `classify_row` instead of one per row.
 async fn collect_parent_values(
     table: &TableManager,
     where_clause: &Filter,
     ctx: &FilterContext<'_>,
     ref_fields: &[&str],
     tx: &shamir_tx::TxContext,
-) -> shamir_storage::error::DbResult<shamir_collections::TFxMap<String, Vec<QueryValue>>> {
+) -> shamir_storage::error::DbResult<
+    shamir_collections::TFxMap<String, shamir_collections::TFxSet<QueryValue>>,
+> {
     let interner = table.interner().get().await?;
     let callback = compile_filter(where_clause, interner);
     let batch_size = 1000;
 
-    let mut result: shamir_collections::TFxMap<String, Vec<QueryValue>> =
+    let mut result: shamir_collections::TFxMap<String, shamir_collections::TFxSet<QueryValue>> =
         shamir_collections::TFxMap::default();
     for &field in ref_fields {
-        result.insert(field.to_string(), Vec::new());
+        result.insert(field.to_string(), shamir_collections::TFxSet::default());
     }
 
     // F-28 Step 2: resolve each ref_field's id through the tx-layered
@@ -1139,11 +1163,12 @@ async fn collect_parent_values(
                 if let Some(&field_id) = field_ids.get(field) {
                     let key = shamir_types::core::interner::InternerKey::new(field_id);
                     let path = std::slice::from_ref(&key);
-                    if let Ok(view) = RecordView::new(&bytes) {
-                        if let Some(scalar) = view.scalar_at(path) {
-                            let qv = scalar_ref_to_qv(scalar);
-                            result.get_mut(field).unwrap().push(qv);
-                        }
+                    // Decode-corrupt row: fail closed instead of silently
+                    // dropping this row's value from the CASCADE/SET NULL
+                    // candidate set (decode-error twin of the F-65/#891
+                    // read-error fix — see `extract_ref_field_value`'s doc).
+                    if let Some(qv) = extract_ref_field_value(&bytes, path)? {
+                        result.get_mut(field).unwrap().insert(qv);
                     }
                 }
             }
@@ -1151,6 +1176,32 @@ async fn collect_parent_values(
     }
 
     Ok(result)
+}
+
+/// Decode a row's bytes (`RecordView`, falling back to `InnerValue` for
+/// non-map records — same two-step decode `record_field_matches_by_id`
+/// uses) and extract the scalar at `path` as an owned `QueryValue`.
+///
+/// Returns `Ok(None)` when the record decodes fine but the field is absent
+/// at `path` — a legitimate "this row doesn't have that field" outcome, not
+/// corruption. Returns `Err(DbError::Codec)` only when BOTH decode attempts
+/// fail on the raw bytes: a genuinely corrupt row must abort the cascade
+/// scan, not be silently dropped from the candidate value set — the
+/// decode-error twin of the F-65/#891 read-error fail-closed fix (see
+/// `fk_indexed_action_read_error_tests.rs`).
+fn extract_ref_field_value(
+    bytes: &Bytes,
+    path: &[shamir_types::core::interner::InternerKey],
+) -> shamir_storage::error::DbResult<Option<QueryValue>> {
+    if let Ok(view) = RecordView::new(bytes) {
+        return Ok(view.scalar_at(path).map(scalar_ref_to_qv));
+    }
+    match InnerValue::from_bytes(bytes.clone()) {
+        Ok(tree) => Ok(tree.scalar_at(path).map(scalar_ref_to_qv)),
+        Err(e) => Err(shamir_storage::error::DbError::Codec(format!(
+            "fk_actions: row decode failed (RecordView and InnerValue both failed): {e}"
+        ))),
+    }
 }
 
 fn cow_to_bytes(cow: RecordCow) -> shamir_storage::error::DbResult<Bytes> {
@@ -1183,29 +1234,36 @@ fn scalar_ref_matches_qv(actual: &ScalarRef<'_>, value: &QueryValue) -> bool {
     scalar_ref_cmp_qv(*actual, value) == Some(std::cmp::Ordering::Equal)
 }
 
-/// Like `record_field_matches_qv`, but keyed by an already-resolved
-/// `InternerKey` instead of a field name. Used when matching against rows
-/// that may be tx-overlay-sourced (`list_stream_tx`), where the field id must
-/// be resolved via [`resolve_field_id_layered`] rather than a plain base-only
-/// `interner.get_ind` (a field name first interned earlier in the SAME tx
-/// only exists in `tx.interner_overlay`, not yet in base).
-fn record_field_matches_by_id(
-    record_bytes: &[u8],
-    field_id: &shamir_types::core::interner::InternerKey,
-    value: &QueryValue,
-) -> bool {
-    let path = std::slice::from_ref(field_id);
-    if let Ok(view) = RecordView::new(record_bytes) {
-        if let Some(actual) = view.scalar_at(path) {
-            return scalar_ref_matches_qv(&actual, value);
+/// Row decoded once for testing against multiple probes — see `decode_row`.
+enum DecodedRow<'a> {
+    View(RecordView<'a>),
+    Tree(InnerValue),
+}
+
+impl DecodedRow<'_> {
+    fn scalar_at(
+        &self,
+        path: &[shamir_types::core::interner::InternerKey],
+    ) -> Option<ScalarRef<'_>> {
+        match self {
+            DecodedRow::View(v) => v.scalar_at(path),
+            DecodedRow::Tree(t) => t.scalar_at(path),
         }
     }
-    if let Ok(tree) = InnerValue::from_bytes(Bytes::copy_from_slice(record_bytes)) {
-        if let Some(actual) = tree.scalar_at(path) {
-            return scalar_ref_matches_qv(&actual, value);
-        }
+}
+
+/// Decode `bytes` once via `RecordView`, falling back to `InnerValue` for
+/// non-map records — shared across every probe tested against the SAME row
+/// (closes the redundant per-probe re-decode `classify_row` used to do by
+/// calling a by-value decode helper once per probe for one row).
+fn decode_row(bytes: &[u8]) -> Option<DecodedRow<'_>> {
+    if let Ok(view) = RecordView::new(bytes) {
+        return Some(DecodedRow::View(view));
     }
-    false
+    if let Ok(tree) = InnerValue::from_bytes(Bytes::copy_from_slice(bytes)) {
+        return Some(DecodedRow::Tree(tree));
+    }
+    None
 }
 
 /// F-53c: per-row action resolution shared by the index fast-path and the
@@ -1222,13 +1280,26 @@ fn classify_row(
     cascade_ids: &mut Vec<RecordId>,
     setnull_ids: &mut Vec<(RecordId, String)>,
 ) {
+    // Decode the row ONCE regardless of how many probes it's tested
+    // against — the previous by-value helper re-decoded these SAME bytes
+    // from scratch on every probe iteration below.
+    let Some(row) = decode_row(bytes) else {
+        // Corrupt row: every probe below would already have failed its own
+        // decode identically, so "no match for this row" is the same
+        // outcome as before.
+        return;
+    };
     // Check each probe against this row.  Cascade dominates SetNull
     // (a deleted row can't be nulled).
     let mut row_action: Option<FkAction> = None;
     let mut row_setnull_field: Option<String> = None;
     for (field_id, value, action, field_name) in resolved_probes {
         let key = shamir_types::core::interner::InternerKey::new(*field_id);
-        if record_field_matches_by_id(bytes, &key, value) {
+        let path = std::slice::from_ref(&key);
+        let matches = row
+            .scalar_at(path)
+            .is_some_and(|actual| scalar_ref_matches_qv(&actual, value));
+        if matches {
             match action {
                 FkAction::Cascade => {
                     row_action = Some(FkAction::Cascade);
@@ -1281,7 +1352,6 @@ async fn index_candidate_ids(
     interner: &shamir_types::core::interner::Interner,
     probes: &[(&str, &QueryValue)],
 ) -> shamir_storage::error::DbResult<Option<Vec<RecordId>>> {
-    use std::collections::BTreeSet;
     let mut all: BTreeSet<RecordId> = BTreeSet::new();
     for (field, value) in probes {
         let inner = match qv_scalar_to_inner(value) {

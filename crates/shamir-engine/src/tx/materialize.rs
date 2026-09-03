@@ -77,15 +77,13 @@ pub(super) async fn materialize(
     let data_futs: Vec<_> = data_batches
         .into_iter()
         .map(|(table_id, base, ops)| async move {
+            // P2 perf fix (audit 4.7): `apply_data_batch` now takes `&[KvOp]`
+            // — the MVCC arm only reads it, so no clone is needed here at
+            // all (the batch's own owned `ops` outlives the whole retry
+            // loop; only the rare non-MVCC arm clones, internally, on its
+            // own cold path).
             let res = retry_materialize(MATERIALIZE_ATTEMPTS, || {
-                apply_data_batch(
-                    repo,
-                    table_id,
-                    base.clone(),
-                    ops.clone(),
-                    commit_version,
-                    tx_id,
-                )
+                apply_data_batch(repo, table_id, base.clone(), &ops, commit_version, tx_id)
             })
             .await;
             (table_id, res)

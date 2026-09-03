@@ -3,6 +3,7 @@ use shamir_storage::error::DbResult;
 use shamir_types::types::record_id::RecordId;
 
 use super::table_manager::TableManager;
+use crate::index::sorted_index_manager::SortedIndexDefinition;
 
 impl TableManager {
     /// Register a new sorted (B-tree-by-value) index over a single
@@ -45,8 +46,6 @@ impl TableManager {
         field_path: &[&str],
         included_fields: Vec<Vec<String>>,
     ) -> DbResult<()> {
-        use crate::index::sorted_index_manager::SortedIndexDefinition;
-
         let interner = self.interner.get().await?;
         let name_interned = interner
             .touch_ind(index_name)

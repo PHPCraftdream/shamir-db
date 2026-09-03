@@ -30,7 +30,7 @@ use crate::db_instance::db_instance::DbInstance;
 use crate::query::batch::query_runner::{
     effective_max_iterations, ABSOLUTE_MAX_FOR_EACH_ITERATIONS,
 };
-use crate::query::batch::{execute_batch, BatchError, TableResolver};
+use crate::query::batch::{execute_batch_unchecked as execute_batch, BatchError, TableResolver};
 use crate::query::TableRef;
 use crate::repo::repo_types::BoxRepoFactory;
 use crate::repo::{RepoConfig, RepoInstance};

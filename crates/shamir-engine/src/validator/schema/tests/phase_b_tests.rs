@@ -30,7 +30,7 @@ fn check_extended_no_ctx(rule: &FieldRule, qv: &QueryValue) -> Validation {
     let fields = OwnedFields { qv };
     let path_refs: Vec<&str> = rule.path.iter().map(String::as_str).collect();
     let mut v = Validation::accept();
-    rule.check_extended(&fields, &path_refs, None, &mut v);
+    rule.check_extended(&fields, &path_refs, None, None, &mut v);
     v
 }
 
@@ -49,7 +49,7 @@ fn check_extended_with_resolver(
     let ctx =
         crate::validator::record_validator::ValidatorCtx::with_scalars(&actor, &interner, resolver);
     let mut v = Validation::accept();
-    rule.check_extended(&fields, &path_refs, Some(&ctx), &mut v);
+    rule.check_extended(&fields, &path_refs, Some(&ctx), None, &mut v);
     v
 }
 

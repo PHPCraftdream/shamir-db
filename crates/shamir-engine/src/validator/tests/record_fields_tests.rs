@@ -69,10 +69,7 @@ fn view_fields_scalar_matches_scalar_at() {
     let (iv, interner) = build_test_record();
     let bytes = iv.to_bytes().unwrap();
     let view = RecordView::new(&bytes).unwrap();
-    let vf = ViewFields {
-        view: &view,
-        interner: &interner,
-    };
+    let vf = ViewFields::new(&view, &interner);
 
     // Top-level int
     assert_eq!(vf.scalar(&["age"]), Some(ScalarRef::Int(30)));
@@ -95,10 +92,7 @@ fn view_fields_str_returns_string_value() {
     let (iv, interner) = build_test_record();
     let bytes = iv.to_bytes().unwrap();
     let view = RecordView::new(&bytes).unwrap();
-    let vf = ViewFields {
-        view: &view,
-        interner: &interner,
-    };
+    let vf = ViewFields::new(&view, &interner);
 
     assert_eq!(vf.str(&["name"]), Some("alice"));
     // Non-string field returns None from str().
@@ -110,10 +104,7 @@ fn view_fields_present_classifies_correctly() {
     let (iv, interner) = build_test_record();
     let bytes = iv.to_bytes().unwrap();
     let view = RecordView::new(&bytes).unwrap();
-    let vf = ViewFields {
-        view: &view,
-        interner: &interner,
-    };
+    let vf = ViewFields::new(&view, &interner);
 
     assert_eq!(vf.present(&["age"]), Some(Kind::Scalar));
     assert_eq!(vf.present(&["name"]), Some(Kind::Scalar));
@@ -126,10 +117,7 @@ fn view_fields_materialize_returns_subtree() {
     let (iv, interner) = build_test_record();
     let bytes = iv.to_bytes().unwrap();
     let view = RecordView::new(&bytes).unwrap();
-    let vf = ViewFields {
-        view: &view,
-        interner: &interner,
-    };
+    let vf = ViewFields::new(&view, &interner);
 
     // Scalar materialise.
     assert_eq!(vf.materialize(&["age"]), Some(InnerValue::Int(30)));
@@ -143,10 +131,7 @@ fn view_fields_absent_returns_none() {
     let (iv, interner) = build_test_record();
     let bytes = iv.to_bytes().unwrap();
     let view = RecordView::new(&bytes).unwrap();
-    let vf = ViewFields {
-        view: &view,
-        interner: &interner,
-    };
+    let vf = ViewFields::new(&view, &interner);
 
     assert_eq!(vf.scalar(&["no_such_field"]), None);
     assert_eq!(vf.str(&["no_such_field"]), None);
@@ -154,6 +139,101 @@ fn view_fields_absent_returns_none() {
     assert_eq!(vf.materialize(&["no_such_field"]), None);
     // Nested absent path.
     assert_eq!(vf.scalar(&["nested", "no_such"]), None);
+}
+
+// ── ViewFields path-cache regression tests (audit group 25 / defect 3) ────
+//
+// `ViewFields::resolve_path` memoizes the last resolved path so the several
+// probes `FieldRule::check`/`check_extended` makes for ONE field within a
+// single record don't each re-walk the interner. These tests lock down that
+// the memo never resolves to the WRONG field — the exact failure mode a
+// caching mistake (e.g. an address-keyed or unconditionally-reused slot)
+// would produce.
+
+#[test]
+fn view_fields_repeated_probe_same_path_is_consistent() {
+    // Probing the SAME path many times in a row (mirrors `FieldRule::check`
+    // probing one field 2-4 times per record) must keep returning the same,
+    // correct value — not just on the first (cache-populating) call.
+    let (iv, interner) = build_test_record();
+    let bytes = iv.to_bytes().unwrap();
+    let view = RecordView::new(&bytes).unwrap();
+    let vf = ViewFields::new(&view, &interner);
+
+    for _ in 0..5 {
+        assert_eq!(vf.scalar(&["age"]), Some(ScalarRef::Int(30)));
+    }
+    for _ in 0..5 {
+        assert_eq!(vf.scalar(&["nested", "x"]), Some(ScalarRef::Int(7)));
+    }
+}
+
+#[test]
+fn view_fields_alternating_paths_resolve_correctly() {
+    // Alternate between two DIFFERENT paths on the SAME `ViewFields`
+    // instance — a single-slot memo must fully refresh on every path change,
+    // never silently apply the previous path's resolved ids to the new
+    // path's segments.
+    let (iv, interner) = build_test_record();
+    let bytes = iv.to_bytes().unwrap();
+    let view = RecordView::new(&bytes).unwrap();
+    let vf = ViewFields::new(&view, &interner);
+
+    for _ in 0..3 {
+        assert_eq!(vf.scalar(&["age"]), Some(ScalarRef::Int(30)));
+        assert_eq!(vf.scalar(&["name"]), Some(ScalarRef::Str("alice")));
+        assert_eq!(vf.scalar(&["nested", "x"]), Some(ScalarRef::Int(7)));
+        // A same-length, different-content path must not be confused with
+        // `["nested", "x"]` by a naive length-only cache key.
+        assert_eq!(vf.scalar(&["list"]), None); // list is a container, not a scalar
+        assert_eq!(
+            vf.materialize(&["list"]),
+            Some(InnerValue::List(vec![
+                InnerValue::Int(1),
+                InnerValue::Int(2),
+            ]))
+        );
+    }
+}
+
+#[test]
+fn view_fields_two_instances_do_not_leak_cache() {
+    // Two independently-built records/interners assign DIFFERENT interner
+    // ids to the same field name ("age") because interner_b interns THREE
+    // filler names before "age" while interner_a's `build_test_record`
+    // interns only ONE field ("name") first — a different prior-field
+    // count guarantees a different id (interner ids are assigned by
+    // insertion order). Resolving "age" on one `ViewFields` must never
+    // leak into the other.
+    let (iv_a, interner_a) = build_test_record();
+    let bytes_a = iv_a.to_bytes().unwrap();
+    let view_a = RecordView::new(&bytes_a).unwrap();
+    let vf_a = ViewFields::new(&view_a, &interner_a);
+
+    let interner_b = Interner::default();
+    let _ = ik(&interner_b, "zzz_filler_1");
+    let _ = ik(&interner_b, "zzz_filler_2");
+    let _ = ik(&interner_b, "zzz_filler_3");
+    let k_age_b = ik(&interner_b, "age");
+    let mut root_b = new_map_wc(1);
+    root_b.insert(k_age_b, InnerValue::Int(99));
+    let iv_b = InnerValue::Map(root_b);
+    let bytes_b = iv_b.to_bytes().unwrap();
+    let view_b = RecordView::new(&bytes_b).unwrap();
+    let vf_b = ViewFields::new(&view_b, &interner_b);
+
+    assert_ne!(
+        interner_a.get_ind("age").unwrap(),
+        interner_b.get_ind("age").unwrap(),
+        "test setup requires diverging ids for the same field name"
+    );
+
+    // Probe A, then B, then A again — B's resolution must not corrupt A's
+    // cached (or freshly re-resolved) entry, and vice versa.
+    assert_eq!(vf_a.scalar(&["age"]), Some(ScalarRef::Int(30)));
+    assert_eq!(vf_b.scalar(&["age"]), Some(ScalarRef::Int(99)));
+    assert_eq!(vf_a.scalar(&["age"]), Some(ScalarRef::Int(30)));
+    assert_eq!(vf_b.scalar(&["age"]), Some(ScalarRef::Int(99)));
 }
 
 // ── OwnedFields tests ───────────────────────────────────────────────────

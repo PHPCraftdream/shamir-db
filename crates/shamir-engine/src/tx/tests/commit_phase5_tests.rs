@@ -597,3 +597,136 @@ async fn failed_pre_publish_delta_append_is_deferred() {
     // on builds where the get() is compiled out.
     let _ = rid;
 }
+
+/// `vector_index_op` for a second, differently-named table/index — used to
+/// prove the per-token borrow in `apply_vector_delta_phase`/`promote_vectors`
+/// resolves each table's OWN staged embedding, not a stale/mixed-up slice
+/// left over from another token's iteration.
+fn vector_index_op_2() -> CreateIndexOp {
+    CreateIndexOp {
+        create_index: "vec_idx2".into(),
+        table: "vecs2".into(),
+        fields: vec![vec!["embedding".into()]],
+        unique: false,
+        sorted: false,
+        repo: "main".into(),
+        index_type: Some("vector".into()),
+        fts_tokenizer: None,
+        fts_language: None,
+        functional_op: None,
+        functional_args: None,
+        vector_dim: Some(3),
+        vector_metric: Some("cosine".into()),
+        vector_quantization: None,
+        include: Vec::new(),
+        if_not_exists: false,
+    }
+}
+
+/// P2 perf fix regression (audit 4.26): staged vector embedding payloads
+/// used to be deep-cloned into an owned batch once in
+/// `apply_vector_delta_phase` and again in `promote_vectors`; the fix
+/// borrows straight out of `tx.staged_vectors` in both, keyed per table
+/// token. A tx that stages DIFFERENT vectors into TWO tables exercises the
+/// per-token borrow on each loop iteration: if the borrow ever resolved to
+/// the wrong token (or a stale slice), one table's committed vector would
+/// end up wrong or missing. Also exercises that mutating
+/// `tx.async_prefix_failed` after the `retry_materialize` call in
+/// `apply_vector_delta_phase` does not conflict with (or corrupt) the
+/// short-lived borrow taken for that same iteration.
+#[tokio::test]
+#[serial]
+async fn committed_tx_multi_table_hnsw_vectors_each_searchable() {
+    let repo = make_repo();
+    repo.add_table(TableConfig::new("vecs"));
+    repo.add_table(TableConfig::new("vecs2"));
+    let tbl1 = repo.get_table("vecs").await.unwrap();
+    let tbl2 = repo.get_table("vecs2").await.unwrap();
+    tbl1.create_index_v2(&vector_index_op()).await.unwrap();
+    tbl2.create_index_v2(&vector_index_op_2()).await.unwrap();
+
+    let emb1_id = field_id(&tbl1, "embedding").await;
+    let emb2_id = field_id(&tbl2, "embedding").await;
+    let name1_id = field_id(&tbl1, "vec_idx").await;
+    let name2_id = field_id(&tbl2, "vec_idx2").await;
+    let backend1 = tbl1
+        .index2_registry()
+        .get_by_name(name1_id)
+        .await
+        .expect("vec_idx must be registered");
+    let backend2 = tbl2
+        .index2_registry()
+        .get_by_name(name2_id)
+        .await
+        .expect("vec_idx2 must be registered");
+
+    let (mut tx, guard) = repo.begin_tx(IsolationLevel::Snapshot).await.unwrap();
+    let rid1 = tbl1
+        .insert_tx(&vec_record(emb1_id, &[1.0, 0.0, 0.0]), Some(&mut tx))
+        .await
+        .unwrap();
+    let rid2 = tbl2
+        .insert_tx(&vec_record(emb2_id, &[0.0, 1.0, 0.0]), Some(&mut tx))
+        .await
+        .unwrap();
+
+    repo.commit_tx(tx).await.unwrap();
+    drop(guard);
+
+    // Poll each table's backend independently (same rationale as
+    // `committed_tx_hnsw_vector_searchable`: the promote's underlying
+    // adapter insert may finish asynchronously).
+    async fn poll_for(
+        backend: &std::sync::Arc<dyn crate::index2::backend::IndexBackend>,
+        query_vec: Vec<f32>,
+        rid: shamir_types::types::record_id::RecordId,
+    ) -> bool {
+        for _ in 0..200 {
+            let res = backend
+                .lookup(IndexQuery::Vector {
+                    vec: query_vec.clone(),
+                    k: 10,
+                    opts: crate::index2::vector::SearchOpts::default(),
+                })
+                .await
+                .unwrap();
+            if let IndexResult::Ranked(hits) = res {
+                if hits.iter().any(|(r, _)| *r == rid) {
+                    return true;
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        false
+    }
+
+    assert!(
+        poll_for(&backend1, vec![1.0, 0.0, 0.0], rid1).await,
+        "table 1's own staged vector must be promoted and searchable — a \
+         mixed-up per-token borrow would land the WRONG table's embedding \
+         (or none) here"
+    );
+    assert!(
+        poll_for(&backend2, vec![0.0, 1.0, 0.0], rid2).await,
+        "table 2's own staged vector must be promoted and searchable — a \
+         mixed-up per-token borrow would land the WRONG table's embedding \
+         (or none) here"
+    );
+
+    // Cross-check: table 1's backend must NOT surface table 2's vector and
+    // vice versa (would indicate the borrow crossed tokens).
+    let cross1 = backend1
+        .lookup(IndexQuery::Vector {
+            vec: vec![0.0, 1.0, 0.0],
+            k: 10,
+            opts: crate::index2::vector::SearchOpts::default(),
+        })
+        .await
+        .unwrap();
+    if let IndexResult::Ranked(hits) = cross1 {
+        assert!(
+            !hits.iter().any(|(r, _)| *r == rid2),
+            "table 1's backend must never see table 2's rid"
+        );
+    }
+}

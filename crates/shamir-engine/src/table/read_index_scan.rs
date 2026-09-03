@@ -13,6 +13,7 @@ use crate::query::filter::eval::{compile_filter, FilterNode};
 use crate::query::filter::eval_context::FilterContext;
 use crate::query::filter::Filter;
 use crate::query::read::{exec, QueryRecord, QueryResult, QueryStats, ReadQuery, SelectItem};
+use shamir_query_types::read::OrderDirection;
 use shamir_storage::error::{DbError, DbResult};
 use shamir_types::core::interner::{Interner, InternerKey};
 use shamir_types::types::common::{new_map, new_set};
@@ -409,8 +410,6 @@ impl TableManager {
         direction: shamir_query_types::read::OrderDirection,
         start: Instant,
     ) -> DbResult<QueryResult> {
-        use shamir_query_types::read::OrderDirection;
-
         let want = skip.checked_add(take).ok_or_else(|| {
             shamir_storage::error::DbError::Validation("LIMIT + OFFSET overflow".to_string())
         })?;
@@ -505,8 +504,6 @@ impl TableManager {
         direction: shamir_query_types::read::OrderDirection,
         start: Instant,
     ) -> DbResult<QueryResult> {
-        use shamir_query_types::read::OrderDirection;
-
         // Audit 1.2: walk the sorted index in value order, dropping the
         // boundary rows (value == seek) inline and stopping after `limit`
         // survivors — O(limit + |rows == seek|) per page instead of the

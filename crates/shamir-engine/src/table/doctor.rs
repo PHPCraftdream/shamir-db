@@ -180,6 +180,21 @@ pub struct RepairReport {
 impl TableManager {
     /// Run a read-only consistency audit. Never modifies state.
     pub async fn verify(&self) -> DbResult<VerifyReport> {
+        // Task group 10 (panic-safety audit) test-only seams: a call counter
+        // (bumped unconditionally, even on the panic path below) and a
+        // deterministic panic injection point — see `verify_call_count` /
+        // `verify_panic_hook`'s field docs on `TableManager`.
+        #[cfg(test)]
+        self.verify_call_count
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        #[cfg(test)]
+        if self
+            .verify_panic_hook
+            .load(std::sync::atomic::Ordering::SeqCst)
+        {
+            panic!("injected panic: verify_panic_hook armed (group-10 regression test)");
+        }
+
         let start = Instant::now();
 
         let counter_value = self.count().await? as u64;
@@ -596,16 +611,39 @@ impl TableManager {
                 .await?;
         }
 
-        // Use the shared seam helper: routes attached→log / unattached→data_store.
+        // Regular indexes: rebuild via the STREAMING path — one `list_stream`
+        // pass per index definition instead of materializing the whole table
+        // once into `all_records` and cloning it per def (up to D+1 full-table
+        // copies in RAM simultaneously for D regular index defs). Mirrors
+        // `create_index`'s own streaming backfill
+        // (`table_manager_index_mgmt.rs`'s `create_index_from_stream` call):
+        // Phase 1 there registers at `Building` and activates the live write
+        // hook BEFORE the scan starts, and the write barrier held across this
+        // whole `repair()` already serializes concurrent writers — so
+        // streaming introduces no new lost-write window versus the old
+        // clone-based rebuild.
+        for def in regular_defs.iter() {
+            let stream = self.list_stream(FULL_SCAN_BATCH).map(|batch| {
+                batch.and_then(|rows| {
+                    rows.into_iter()
+                        .map(|(id, cow)| cow.into_inner().map(|v| (id, v)))
+                        .collect()
+                })
+            });
+            self.index_manager_ref()
+                .create_index_from_stream(def.clone(), stream)
+                .await?;
+        }
+
+        // Unique indexes: keep the clone-based rebuild for now — streaming
+        // the unique family is deferred (see this fix's audit backlog entry;
+        // uniqueness validation during backfill needs its own design pass,
+        // out of scope here). Use the shared seam helper: routes
+        // attached→log / unattached→data_store.
         let all_records: Vec<(
             shamir_types::types::record_id::RecordId,
             shamir_types::types::value::InnerValue,
         )> = self.collect_all_current_records().await?;
-        for def in regular_defs.iter() {
-            self.index_manager_ref()
-                .create_index_from_records(def.clone(), all_records.clone())
-                .await?;
-        }
         for def in unique_defs.iter() {
             self.index_manager_ref()
                 .create_unique_index_from_records(def.clone(), all_records.clone())
@@ -713,11 +751,18 @@ impl TableManager {
             }
         }
         if index2_healed > 0 {
-            let _ = crate::index2::persistence::save_index2_metadata(
+            if let Err(e) = crate::index2::persistence::save_index2_metadata(
                 &self.index2_registry,
                 &self.info_store,
             )
-            .await;
+            .await
+            {
+                log::warn!(
+                    "repair: failed to persist index2 metadata after healing {index2_healed} \
+                     backend(s): {e}; on-disk state stays stale, forcing a redundant \
+                     re-backfill on the next reopen (correct but wasteful)"
+                );
+            }
         }
 
         Ok(RepairReport {

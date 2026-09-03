@@ -97,7 +97,19 @@ impl InFlightCreateSet {
     /// `?`) is covered by the guard's `Drop`.
     #[must_use]
     pub fn enter(&self, name_interned: u64) -> InFlightCreateGuard {
-        *self.ids.lock().unwrap().entry(name_interned).or_insert(0) += 1;
+        // Poison-tolerant: a panic while another holder held this lock must
+        // not cascade into a panic here too (`degraded_index_count()` reads
+        // `contains()` on the health-gauge path — see module doc). The
+        // guarded state (a refcount map) has no invariant that a torn
+        // update could violate beyond a possibly-stale count, which is
+        // already tolerated by design (see module doc on identity vs.
+        // scalar tracking).
+        *self
+            .ids
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .entry(name_interned)
+            .or_insert(0) += 1;
         InFlightCreateGuard {
             ids: Arc::clone(&self.ids),
             name_interned,
@@ -110,7 +122,13 @@ impl InFlightCreateSet {
     /// subtraction, so this can only ever affect the SPECIFIC identity
     /// checked, never an unrelated index. Plain mutex lookup — no store I/O.
     pub fn contains(&self, name_interned: u64) -> bool {
-        self.ids.lock().unwrap().contains_key(&name_interned)
+        // Poison-tolerant (see `enter`'s comment): this is the
+        // `degraded_index_count()` read path — a poisoned lock must not
+        // panic the health gauge.
+        self.ids
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .contains_key(&name_interned)
     }
 }
 
@@ -140,12 +158,34 @@ pub struct InFlightCreateGuard {
 
 impl Drop for InFlightCreateGuard {
     fn drop(&mut self) {
-        let mut ids = self.ids.lock().unwrap();
+        // Poison-tolerant (see `enter`'s comment): a `Drop` running during
+        // unwind must not itself panic (that would abort the process).
+        let mut ids = self
+            .ids
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         if let Some(count) = ids.get_mut(&self.name_interned) {
             *count -= 1;
             if *count == 0 {
                 ids.remove(&self.name_interned);
             }
         }
+    }
+}
+
+#[cfg(test)]
+impl InFlightCreateSet {
+    /// Test-only: poison the underlying mutex by panicking while it is
+    /// held, so a test can prove `enter`/`contains`/`Drop` all tolerate a
+    /// poisoned lock instead of propagating the poison panic. Actual test
+    /// cases live under `table/tests/` per this crate's test-organisation
+    /// convention; this is just the fixture they call.
+    pub(crate) fn poison_for_test(&self) {
+        let ids = Arc::clone(&self.ids);
+        let _ = std::thread::spawn(move || {
+            let _guard = ids.lock().unwrap();
+            panic!("intentional poison for test");
+        })
+        .join();
     }
 }

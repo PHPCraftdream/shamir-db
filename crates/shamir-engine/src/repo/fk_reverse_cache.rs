@@ -156,8 +156,15 @@ pub struct TaggedReverseFkEntry {
 }
 
 /// Parent table name → its reverse-FK entries (every child table that
-/// references it, across all `on_delete` actions).
-type ParentIndex = shamir_collections::TFxMap<String, Vec<ReverseFkEntry>>;
+/// references it, across all `on_delete`/`on_update` actions).
+///
+/// (#1181) Value is `Arc<[ReverseFkEntry]>`, not `Vec<ReverseFkEntry>`: a
+/// warm-cache hit in [`FkReverseCache::lookup_by_parent`] is then a pointer
+/// (refcount) clone instead of a deep clone of every entry's owned `String`
+/// fields — shared by all three discovery callers (`fk_restrict.rs`,
+/// `fk_actions.rs`, `fk_on_update.rs`), each of which already re-filters this
+/// same slice down to the handful of entries it cares about.
+type ParentIndex = shamir_collections::TFxMap<String, Arc<[ReverseFkEntry]>>;
 
 /// Child table name → set of distinct parent table names it references.
 /// The O(1) "is table X an FK child" role flag F-28 Step 5 needs.
@@ -305,11 +312,31 @@ impl FkReverseCache {
     ///
     /// `build` is `Fn` (not `FnOnce`) precisely so that a rare CAS-loss retry
     /// can call it again.
+    ///
+    /// # #1200 — bounded cooperation on CAS-loss retry
+    ///
+    /// A CAS loss loops back and re-runs `build` under a continuous
+    /// `invalidate()` storm this could in principle retry indefinitely while
+    /// still holding `build_lock`, starving every concurrent waiter (in
+    /// practice bounded today: `invalidate()` is only called from rare DDL
+    /// paths, not a live incident). Rather than turn this into a bounded,
+    /// fallible retry — which would require a "retry budget exceeded" error
+    /// value of the caller-supplied, unconstrained generic type `E`, with no
+    /// bound (e.g. `From<...>`) to construct one from inside this method,
+    /// forcing a signature change (and a new error variant every one of the
+    /// 4 existing call sites and their fail-closed test suites would have to
+    /// thread through) for a scenario that is not a live incident — each
+    /// retry yields once via [`tokio::task::yield_now`] before re-capturing
+    /// state and re-running `build`. This keeps the function's existing
+    /// error contract (`Err` only ever means "the build closure itself
+    /// failed") intact while giving the executor a chance to run other
+    /// ready tasks (including whatever's driving a competing `invalidate`)
+    /// between attempts instead of immediately re-entering `build().await`.
     pub async fn get_or_build_by_parent<F, Fut, E>(
         &self,
         parent_table: &str,
         build: F,
-    ) -> Result<Vec<ReverseFkEntry>, E>
+    ) -> Result<Arc<[ReverseFkEntry]>, E>
     where
         F: Fn() -> Fut,
         Fut: std::future::Future<Output = Result<Vec<TaggedReverseFkEntry>, E>>,
@@ -351,7 +378,10 @@ impl FkReverseCache {
             }
             // CAS lost: some other writer (an `invalidate`, or in principle
             // another builder) already published a newer state since we
-            // captured `captured`. Loop and rebuild against the new state.
+            // captured `captured`. Yield once (#1200) before looping so the
+            // executor can run other ready tasks between retries, then
+            // rebuild against the new state.
+            tokio::task::yield_now().await;
         }
     }
 
@@ -416,14 +446,14 @@ impl FkReverseCache {
         }
     }
 
-    fn lookup_by_parent(&self, parent_table: &str) -> Option<Vec<ReverseFkEntry>> {
+    fn lookup_by_parent(&self, parent_table: &str) -> Option<Arc<[ReverseFkEntry]>> {
         let guard = self.state.load();
         guard.cache.as_ref().map(|cache| {
             cache
                 .by_parent
                 .get(parent_table)
                 .cloned()
-                .unwrap_or_default()
+                .unwrap_or_else(|| Arc::from(Vec::new()))
         })
     }
 
@@ -444,7 +474,11 @@ impl FkReverseCache {
         captured: &Arc<VersionedState>,
         all_entries: Vec<TaggedReverseFkEntry>,
     ) -> bool {
-        let mut by_parent: ParentIndex = shamir_collections::TFxMap::default();
+        // Accumulated as `Vec` (push-friendly) and converted to the cache's
+        // `Arc<[ReverseFkEntry]>` storage shape once, below — `ParentIndex`
+        // itself can't `.push()` into an `Arc<[T]>` slice.
+        let mut by_parent_vecs: shamir_collections::TFxMap<String, Vec<ReverseFkEntry>> =
+            shamir_collections::TFxMap::default();
         let mut by_child: ChildIndex = shamir_collections::TFxMap::default();
 
         for tagged in all_entries {
@@ -452,11 +486,16 @@ impl FkReverseCache {
                 .entry(tagged.entry.child_table.clone())
                 .or_default()
                 .insert(tagged.parent_table.clone());
-            by_parent
+            by_parent_vecs
                 .entry(tagged.parent_table)
                 .or_default()
                 .push(tagged.entry);
         }
+
+        let by_parent: ParentIndex = by_parent_vecs
+            .into_iter()
+            .map(|(parent, entries)| (parent, Arc::from(entries)))
+            .collect();
 
         let new_state = Arc::new(VersionedState {
             generation: captured.generation + 1,

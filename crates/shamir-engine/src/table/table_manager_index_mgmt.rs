@@ -5,13 +5,21 @@ use std::sync::Arc;
 use futures::StreamExt;
 use shamir_query_types::read::{DdlOpKind, DdlOpState, DdlOpStatus};
 use shamir_storage::error::DbResult;
-use shamir_types::core::interner::TouchInd;
+use shamir_types::core::interner::{InternerKey, TouchInd};
+use shamir_types::time::unix_millis;
 use shamir_types::types::record_id::RecordId;
 use shamir_types::types::value::InnerValue;
 
 use super::table_manager::TableManager;
 use crate::index::index_definition::IndexDefinition;
 use crate::index::index_info_item::IndexInfoItem;
+use crate::index2::backend::IndexBackend;
+use crate::index2::descriptor::IndexDescriptor;
+use crate::index2::kind::{
+    FunctionalConfig, IndexKind, VectorBackendRef, VectorConfig, VectorMetric, VectorQuantization,
+};
+use shamir_index::base_index::index_keys::{build_index_key_from_record, build_posting_key};
+use smallvec::SmallVec;
 
 /// Result structure for #1088 Phase C/D: the SnapshotGuard and pin version
 /// must be returned from Phase B+A and kept alive through Phase C/D.
@@ -34,11 +42,6 @@ impl TableManager {
         &self,
         op: &shamir_query_types::admin::CreateIndexOp,
     ) -> DbResult<()> {
-        use crate::index2::backend::IndexBackend;
-        use crate::index2::descriptor::IndexDescriptor;
-        use crate::index2::kind::*;
-        use smallvec::SmallVec;
-
         let index_type = op.index_type.as_deref().unwrap_or("btree");
         if index_type == "btree" {
             let paths: Vec<String> = op.fields.iter().map(|segs| segs.join(".")).collect();
@@ -1130,10 +1133,7 @@ impl TableManager {
                     index_name: name.to_string(),
                 },
                 state: shamir_query_types::read::DdlOpState::Succeeded {
-                    completed_at: std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .unwrap()
-                        .as_millis() as u64,
+                    completed_at: unix_millis(),
                 },
             };
             // Do not swallow status-write errors — log loudly.
@@ -1210,11 +1210,7 @@ impl TableManager {
                             index_name: name.clone(),
                         },
                         state: DdlOpState::SucceededViaCrashRecovery {
-                            completed_at_restart: std::time::SystemTime::now()
-                                .duration_since(std::time::UNIX_EPOCH)
-                                .unwrap()
-                                .as_millis()
-                                as u64,
+                            completed_at_restart: unix_millis(),
                         },
                     };
                     if let Err(e) =
@@ -1258,11 +1254,7 @@ impl TableManager {
                             index_name: name.clone(),
                         },
                         state: DdlOpState::SucceededViaCrashRecovery {
-                            completed_at_restart: std::time::SystemTime::now()
-                                .duration_since(std::time::UNIX_EPOCH)
-                                .unwrap()
-                                .as_millis()
-                                as u64,
+                            completed_at_restart: unix_millis(),
                         },
                     };
                     if let Err(e) =
@@ -1362,10 +1354,7 @@ impl TableManager {
                         index_name: name.clone(),
                     },
                     state: DdlOpState::SucceededViaCrashRecovery {
-                        completed_at_restart: std::time::SystemTime::now()
-                            .duration_since(std::time::UNIX_EPOCH)
-                            .unwrap()
-                            .as_millis() as u64,
+                        completed_at_restart: unix_millis(),
                     },
                 };
                 // Defect 2 (#1069): Do not swallow status-write errors — log loudly.
@@ -1383,14 +1372,16 @@ impl TableManager {
             }
         }
 
-        // Clear the entire tombstone (write empty Vec; the load path
-        // treats empty-vec and NotFound identically).
-        let empty = bincode::serialize(&Vec::<(u32, String, Option<String>)>::new())
-            .map_err(|e| shamir_storage::error::DbError::Codec(e.to_string()))?;
-        let key = shamir_types::types::record_id::RecordId::system("_m.idx.drop").to_bytes();
-        self.info_store
-            .set(key.into(), bytes::Bytes::from(empty))
-            .await?;
+        // #1204: clear every recovered entry through the shared
+        // `clear_from_dropping_index2` fn instead of hand-rolling a raw
+        // `bincode::serialize` write of an empty Vec. The two write paths
+        // (this recovery-clear and the normal `drop_index2` clear) must
+        // agree on the wire format — see `persistence.rs`'s
+        // `INDEX2_DROP_TOMBSTONE_VERSION` doc for why a second, bespoke
+        // encoder here would silently diverge from it.
+        for &(id, _, _) in &dropping {
+            crate::index2::persistence::clear_from_dropping_index2(id, &self.info_store).await?;
+        }
 
         log::info!(
             "P0-3b (#988): recovery complete — {} index2 DROP(s) finalized",
@@ -1565,10 +1556,7 @@ impl TableManager {
                         new_name: new_name.clone(),
                     },
                     state: DdlOpState::SucceededViaCrashRecovery {
-                        completed_at_restart: std::time::SystemTime::now()
-                            .duration_since(std::time::UNIX_EPOCH)
-                            .unwrap()
-                            .as_millis() as u64,
+                        completed_at_restart: unix_millis(),
                     },
                 };
                 // Do not swallow status-write errors — log loudly.
@@ -1760,11 +1748,7 @@ impl TableManager {
                                 new_name: entry.new_name.clone(),
                             },
                             state: DdlOpState::SucceededViaCrashRecovery {
-                                completed_at_restart: std::time::SystemTime::now()
-                                    .duration_since(std::time::UNIX_EPOCH)
-                                    .unwrap()
-                                    .as_millis()
-                                    as u64,
+                                completed_at_restart: unix_millis(),
                             },
                         };
                         // Defect 2 (#1069): Do not swallow status-write errors — log loudly.
@@ -1853,11 +1837,7 @@ impl TableManager {
                                 new_name: entry.new_name.clone(),
                             },
                             state: DdlOpState::SucceededViaCrashRecovery {
-                                completed_at_restart: std::time::SystemTime::now()
-                                    .duration_since(std::time::UNIX_EPOCH)
-                                    .unwrap()
-                                    .as_millis()
-                                    as u64,
+                                completed_at_restart: unix_millis(),
                             },
                         };
                         // Defect 2 (#1069): Do not swallow status-write errors — log loudly.
@@ -2269,10 +2249,7 @@ impl TableManager {
                         new_name: new_name.to_string(),
                     },
                     state: shamir_query_types::read::DdlOpState::Succeeded {
-                        completed_at: std::time::SystemTime::now()
-                            .duration_since(std::time::UNIX_EPOCH)
-                            .unwrap()
-                            .as_millis() as u64,
+                        completed_at: unix_millis(),
                     },
                 };
                 // Do not swallow status-write errors — log loudly.
@@ -2430,10 +2407,7 @@ impl TableManager {
                         new_name: new_name.to_string(),
                     },
                     state: shamir_query_types::read::DdlOpState::Succeeded {
-                        completed_at: std::time::SystemTime::now()
-                            .duration_since(std::time::UNIX_EPOCH)
-                            .unwrap()
-                            .as_millis() as u64,
+                        completed_at: unix_millis(),
                     },
                 };
                 // Do not swallow status-write errors — log loudly.
@@ -2631,10 +2605,7 @@ impl TableManager {
                         new_name: new_name.to_string(),
                     },
                     state: shamir_query_types::read::DdlOpState::Succeeded {
-                        completed_at: std::time::SystemTime::now()
-                            .duration_since(std::time::UNIX_EPOCH)
-                            .unwrap()
-                            .as_millis() as u64,
+                        completed_at: unix_millis(),
                     },
                 };
                 // Do not swallow status-write errors — log loudly.
@@ -2707,8 +2678,6 @@ impl TableManager {
         index_def: crate::index::index_definition::IndexDefinition,
         batch_size: usize,
     ) -> DbResult<Option<PhaseBAResult>> {
-        use futures::StreamExt;
-
         let name_interned = index_def.name_interned;
 
         // ── Phase B: micro-barrier (raise → drain → lock) ──────────────────────
@@ -2798,9 +2767,6 @@ impl TableManager {
                 batch
                     .into_iter()
                     .map(|(key_bytes, value_bytes)| {
-                        use shamir_types::types::record_id::RecordId;
-                        use shamir_types::types::value::InnerValue;
-
                         let record_id = RecordId::try_from_bytes(&key_bytes).ok_or_else(|| {
                             shamir_storage::error::DbError::Internal(
                                 "Failed to parse RecordId from key".to_string(),
@@ -2821,11 +2787,6 @@ impl TableManager {
 
         // ── Backfill: batch-write postings (same pattern as create_index_from_stream Phase 2) ──
         let mut count = 0usize;
-
-        // Use helpers from index_manager for building posting keys.
-        use shamir_index::base_index::index_keys::{
-            build_index_key_from_record, build_posting_key,
-        };
 
         let backfill_start = std::time::Instant::now();
         let mut last_progress_log = std::time::Instant::now();
@@ -3041,7 +3002,6 @@ fn resolve_index_paths(
     interner: &shamir_types::core::interner::Interner,
     paths: &[IndexInfoItem],
 ) -> Vec<String> {
-    use shamir_types::core::interner::InternerKey;
     paths
         .iter()
         .map(|item| {

@@ -8,7 +8,8 @@ use shamir_query_types::filter::Filter;
 use shamir_types::access::Actor;
 
 use crate::query::batch::{
-    commit_interactive_tx, execute_batch, execute_in_open_tx, open_interactive_tx, BatchError,
+    commit_interactive_tx, execute_batch_unchecked as execute_batch,
+    execute_in_open_tx_unchecked as execute_in_open_tx, open_interactive_tx, BatchError,
 };
 
 use super::common::TxTestResolver;

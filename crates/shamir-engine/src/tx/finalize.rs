@@ -18,17 +18,27 @@
 //!
 //! ## Why `commit_tx_inner_legacy_async` is NOT a caller
 //!
-//! The AsyncIndex path diverges on three semantically load-bearing axes:
-//!  1. Its SSI footprint (`record_commit_writes`) runs AFTER
-//!     `version_guard.commit()` (and AFTER the inline `apply_data_phase`
-//!     published the overlay), whereas the sync paths record the footprint
-//!     BEFORE `materialize` publishes. Unifying would change the
-//!     footprint-vs-publish ordering invariant on one of the paths.
-//!  2. It emits the changefeed on the caller thread BEFORE spawning the
+//! The AsyncIndex path diverges on two semantically load-bearing axes:
+//!  1. It emits the changefeed on the caller thread BEFORE spawning the
 //!     background materialize tail; the sync paths emit AFTER `materialize`.
-//!  3. Its tail (index → markers → promote) runs in a spawned background
+//!  2. Its tail (index → markers → promote) runs in a spawned background
 //!     task and returns a `BackgroundCommitHandle`; the sync paths run
 //!     inline and return `background: None`.
+//!
+//! A THIRD axis previously claimed here — that this path's SSI footprint
+//! (`record_commit_writes`) runs AFTER `version_guard.commit()` — is FALSE
+//! for the current code (F-28/S3-C corrected it): `commit_tx_inner_legacy_async`
+//! records the footprint BEFORE `version_guard.commit()` (see commit.rs's own
+//! F-28/S3-C comment there), same as the sync paths' Phase 6-bis
+//! (`materialize.rs`) and `commit_tx_lockfree`'s own `record_commit_writes`
+//! call. The order matters everywhere it appears: `VersionGuard::commit()`
+//! synchronously advances `last_committed_version` with no `.await` in
+//! between, so recording the footprint AFTER it would let a concurrent
+//! Serializable validator observe this tx's version as already-visible with
+//! no footprint recorded yet — a missed phantom conflict. Recording first
+//! closes that window. It is now a SHARED invariant across all three commit
+//! paths, not a divergence — the two axes above are what still justify
+//! keeping this tail separate.
 //!
 //! Folding these into one function would require boolean flags + branch
 //! divergence — a leaky abstraction, not a clean seam. The honest shared

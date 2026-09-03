@@ -10,6 +10,7 @@ use super::record_validator::RecordValidator;
 use shamir_types::types::common::THasher;
 use shamir_types::types::record_id::RecordId;
 use std::collections::BTreeSet;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 /// Error type for validator registry operations.
@@ -36,8 +37,15 @@ pub struct ValidatorRegistry {
     by_id: scc::HashMap<RecordId, Arc<dyn RecordValidator>, THasher>,
     /// Unique-name → id reverse index.
     name_to_id: scc::HashMap<String, RecordId, THasher>,
+    /// Id → name reverse index (mirror of `name_to_id`), kept in lock-step so
+    /// `remove`/`name_for_id` are O(1) instead of scanning `name_to_id`.
+    id_to_name: scc::HashMap<RecordId, String, THasher>,
     /// Tables each validator is bound to (canonical `"db/repo/table"` keys).
     bound_in: scc::HashMap<RecordId, BTreeSet<String>, THasher>,
+    /// O(1) cardinality mirror of `by_id`, updated at every `register`/
+    /// `remove` (see CLAUDE.md's `Drainer::window_depth` pattern — scc's
+    /// `len()`/`is_empty()` are O(N) bucket walks, banned on hot paths).
+    count: AtomicUsize,
 }
 
 impl ValidatorRegistry {
@@ -46,7 +54,9 @@ impl ValidatorRegistry {
         Self {
             by_id: scc::HashMap::with_hasher(THasher::default()),
             name_to_id: scc::HashMap::with_hasher(THasher::default()),
+            id_to_name: scc::HashMap::with_hasher(THasher::default()),
             bound_in: scc::HashMap::with_hasher(THasher::default()),
+            count: AtomicUsize::new(0),
         }
     }
 
@@ -74,6 +84,15 @@ impl ValidatorRegistry {
             let _ = self.name_to_id.remove_sync(&name);
             return Err(ValidatorRegistryError::AlreadyExists(name));
         }
+        // Keep the id→name reverse index in lock-step with name_to_id/by_id.
+        // The id was absent from by_id an instant ago (insert_sync above just
+        // succeeded), so id_to_name cannot already hold it.
+        let inserted = self.id_to_name.insert_sync(id, name);
+        debug_assert!(
+            inserted.is_ok(),
+            "id_to_name invariant violated: id already reverse-mapped"
+        );
+        self.count.fetch_add(1, Ordering::Relaxed);
         Ok(())
     }
 
@@ -118,7 +137,10 @@ impl ValidatorRegistry {
             .map_err(|(_, id)| {
                 let _ = self.name_to_id.insert_sync(from.to_string(), id);
                 ValidatorRegistryError::AlreadyExists(to.to_string())
-            })
+            })?;
+        // Keep id_to_name in lock-step with the now-committed rename.
+        let _ = self.id_to_name.update_sync(&id, |_, v| *v = to.to_string());
+        Ok(())
     }
 
     /// Remove a validator by id. The caller must check `is_bound` beforehand;
@@ -127,20 +149,14 @@ impl ValidatorRegistry {
     /// Returns `true` if the validator existed.
     pub fn remove(&self, id: &RecordId) -> bool {
         let existed = self.by_id.remove_sync(id).is_some();
-        // Remove the name → id entry. We need to scan because we don't have
-        // the name here, but the map is small (validators are few).
-        let mut name_key: Option<String> = None;
-        self.name_to_id.iter_sync(|k, v| {
-            if v == id {
-                name_key = Some(k.clone());
-                return false;
-            }
-            true
-        });
-        if let Some(k) = name_key {
-            let _ = self.name_to_id.remove_sync(&k);
+        // O(1) via the id→name reverse index instead of scanning name_to_id.
+        if let Some((_, name)) = self.id_to_name.remove_sync(id) {
+            let _ = self.name_to_id.remove_sync(&name);
         }
         let _ = self.bound_in.remove_sync(id);
+        if existed {
+            self.count.fetch_sub(1, Ordering::Relaxed);
+        }
         existed
     }
 
@@ -159,13 +175,23 @@ impl ValidatorRegistry {
     }
 
     /// Record a binding between a validator and a table.
+    ///
+    /// `entry_sync(..).or_default()` is a single scc critical section: it
+    /// atomically fetches the existing entry or creates one, returning a
+    /// live handle we mutate in place — unlike a separate
+    /// check-then-insert-else pair, no other caller can observe (or race)
+    /// the vacant→occupied transition between the lookup and the mutation.
     pub fn add_binding(&self, id: &RecordId, table: impl Into<String>) {
         let table = table.into();
-        let _ = self.bound_in.entry_sync(*id).and_modify(|set| {
-            set.insert(table.clone());
-        });
-        // If the entry did not exist, insert a fresh set.
-        let _ = self.bound_in.insert_sync(*id, BTreeSet::from([table])).ok();
+        // `OccupiedEntry` has its own inherent `insert` (replaces the whole
+        // entry value) that shadows `BTreeSet::insert` via method
+        // resolution — `get_mut()` forces the borrow so `.insert(table)`
+        // resolves to the set, not the entry.
+        self.bound_in
+            .entry_sync(*id)
+            .or_default()
+            .get_mut()
+            .insert(table);
     }
 
     /// Remove a binding between a validator and a table.
@@ -206,15 +232,7 @@ impl ValidatorRegistry {
 
     /// Resolve a `RecordId` back to its name (reverse of `id_for_name`).
     pub fn name_for_id(&self, id: &RecordId) -> Option<String> {
-        let mut found: Option<String> = None;
-        self.name_to_id.iter_sync(|name, vid| {
-            if vid == id && found.is_none() {
-                found = Some(name.clone());
-                return false;
-            }
-            true
-        });
-        found
+        self.id_to_name.read_sync(id, |_, v| v.clone())
     }
 
     /// Snapshot of all registered validators as `(id, name)` pairs.
@@ -227,15 +245,14 @@ impl ValidatorRegistry {
         out
     }
 
-    /// Number of registered validators.
-    #[allow(clippy::disallowed_methods)] // O(N) ack: cardinality accessor, off hot path
+    /// Number of registered validators. O(1) via the `count` mirror.
     pub fn len(&self) -> usize {
-        self.by_id.len()
+        self.count.load(Ordering::Relaxed)
     }
 
-    /// Whether the registry is empty.
+    /// Whether the registry is empty. O(1) via the `count` mirror.
     pub fn is_empty(&self) -> bool {
-        self.by_id.is_empty()
+        self.count.load(Ordering::Relaxed) == 0
     }
 }
 

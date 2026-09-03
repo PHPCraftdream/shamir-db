@@ -59,9 +59,18 @@ impl DbInstance {
 
     /// Get a table from a specific repository
     pub async fn get_table(&self, repo_name: &str, table_name: &str) -> DbResult<TableManager> {
+        // Clone the `RepoInstance` out and DROP the DashMap shard guard
+        // BEFORE the delegated `.await` — same guard-across-await hazard
+        // (and fix) as `RepoInstance::get_table` (repo/repo_instance.rs)
+        // and `DbInstance::get_repo` below. A cold `get_table` runs
+        // `TableManager::create` (store opens, index loads, possible
+        // repair) under this call; holding the shard's synchronous
+        // `RwLock` guard across it would block any concurrent
+        // `add_repo`/`remove_repo`/`rename_repo` on the same shard.
         let repo_manager = self
             .repos
             .get(repo_name)
+            .map(|r| r.clone())
             .ok_or_else(|| DbError::NotFound(format!("Repository '{}' not found", repo_name)))?;
 
         repo_manager.get_table(table_name).await
@@ -176,9 +185,13 @@ impl DbInstance {
         index_name: &str,
         paths: &[&str],
     ) -> DbResult<()> {
+        // Drop the shard guard before the `.await` — see `get_table`'s
+        // comment above. `create_index` runs an entire online backfill
+        // under this call.
         let repo = self
             .repos
             .get(repo_name)
+            .map(|r| r.clone())
             .ok_or_else(|| DbError::NotFound(format!("Repository '{}' not found", repo_name)))?;
         repo.create_index(table_name, index_name, paths).await
     }
@@ -191,9 +204,13 @@ impl DbInstance {
         index_name: &str,
         paths: &[&str],
     ) -> DbResult<()> {
+        // Drop the shard guard before the `.await` — see `get_table`'s
+        // comment above. `create_unique_index` runs an entire online
+        // backfill under this call.
         let repo = self
             .repos
             .get(repo_name)
+            .map(|r| r.clone())
             .ok_or_else(|| DbError::NotFound(format!("Repository '{}' not found", repo_name)))?;
         repo.create_unique_index(table_name, index_name, paths)
             .await
@@ -206,9 +223,13 @@ impl DbInstance {
         table_name: &str,
         index_name: &str,
     ) -> DbResult<bool> {
+        // Drop the shard guard before the `.await` — see `get_table`'s
+        // comment above. `drop_index` runs an entire online backfill
+        // (rebuild of dependent state) under this call.
         let repo = self
             .repos
             .get(repo_name)
+            .map(|r| r.clone())
             .ok_or_else(|| DbError::NotFound(format!("Repository '{}' not found", repo_name)))?;
         repo.drop_index(table_name, index_name).await
     }
@@ -220,9 +241,12 @@ impl DbInstance {
         table_name: &str,
         index_name: &str,
     ) -> DbResult<bool> {
+        // Drop the shard guard before the `.await` — see `get_table`'s
+        // comment above.
         let repo = self
             .repos
             .get(repo_name)
+            .map(|r| r.clone())
             .ok_or_else(|| DbError::NotFound(format!("Repository '{}' not found", repo_name)))?;
         repo.drop_unique_index(table_name, index_name).await
     }
@@ -234,9 +258,12 @@ impl DbInstance {
         table_name: &str,
         index_name: &str,
     ) -> DbResult<bool> {
+        // Drop the shard guard before the `.await` — see `get_table`'s
+        // comment above.
         let repo = self
             .repos
             .get(repo_name)
+            .map(|r| r.clone())
             .ok_or_else(|| DbError::NotFound(format!("Repository '{}' not found", repo_name)))?;
         repo.index_exists(table_name, index_name).await
     }
@@ -248,9 +275,12 @@ impl DbInstance {
         table_name: &str,
         index_name: &str,
     ) -> DbResult<bool> {
+        // Drop the shard guard before the `.await` — see `get_table`'s
+        // comment above.
         let repo = self
             .repos
             .get(repo_name)
+            .map(|r| r.clone())
             .ok_or_else(|| DbError::NotFound(format!("Repository '{}' not found", repo_name)))?;
         repo.unique_index_exists(table_name, index_name).await
     }
@@ -263,9 +293,12 @@ impl DbInstance {
         index_name: &str,
         values: &[InnerValue],
     ) -> DbResult<BTreeSet<shamir_types::types::record_id::RecordId>> {
+        // Drop the shard guard before the `.await` — see `get_table`'s
+        // comment above.
         let repo = self
             .repos
             .get(repo_name)
+            .map(|r| r.clone())
             .ok_or_else(|| DbError::NotFound(format!("Repository '{}' not found", repo_name)))?;
         repo.lookup_by_index(table_name, index_name, values).await
     }

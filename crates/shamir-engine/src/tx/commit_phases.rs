@@ -4,6 +4,9 @@ use shamir_storage::error::DbError;
 use shamir_tunables::instance_defaults::INTERNER_CHECKPOINT_INTERVAL;
 use shamir_tx::{IndexWriteOp, TxContext};
 
+use crate::meta::recovery_marker::{
+    load_last_committed, save_last_committed, save_next_tx_id_snapshot,
+};
 use crate::repo::RepoInstance;
 use crate::tx::tx_outcome::MaterializationState;
 
@@ -42,6 +45,25 @@ pub(crate) static FAIL_PHASE_5A_TX_ID: std::sync::atomic::AtomicU64 =
 #[cfg(test)]
 pub(crate) static FAIL_PHASE_5A_TABLE_TOKEN: std::sync::atomic::AtomicU64 =
     std::sync::atomic::AtomicU64::new(0);
+
+/// Test-only injection (P2 perf fix regression, audit 4.7): unlike
+/// [`FAIL_PHASE_5A_TX_ID`] (fails EVERY attempt, proving deferral), this
+/// pair fails exactly [`FAIL_PHASE_5A_TRANSIENT_REMAINING`] attempts for
+/// the matching tx and then lets the real call through — so a test can
+/// prove the bounded retry in [`retry_materialize`] genuinely RECOVERS
+/// (not just defers) once `apply_data_batch` no longer needs an upfront
+/// `ops.clone()`: the SAME borrowed `&[KvOp]` must still be applied
+/// correctly on the attempt that finally succeeds.
+#[cfg(test)]
+pub(crate) static FAIL_PHASE_5A_TRANSIENT_TX_ID: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
+/// Remaining-failures counter for [`FAIL_PHASE_5A_TRANSIENT_TX_ID`]. Each
+/// matching call to `apply_data_batch` decrements this and fails while it
+/// is `> 0`; once it reaches `0` the call goes through for real.
+#[cfg(test)]
+pub(crate) static FAIL_PHASE_5A_TRANSIENT_REMAINING: std::sync::atomic::AtomicU32 =
+    std::sync::atomic::AtomicU32::new(0);
 
 /// Test-only injection: when set to a non-zero tx_id, the post-lock HNSW
 /// promote (Phase 5d, `apply_vector_graph_batch`) returns a synthetic error
@@ -143,14 +165,7 @@ pub(crate) async fn apply_data_phase(tx: &mut TxContext, repo: &RepoInstance, co
     let data_batches = collect_data_batches(tx);
     for (table_id, base, ops) in data_batches {
         if let Err(e) = retry_materialize(MATERIALIZE_ATTEMPTS, || {
-            apply_data_batch(
-                repo,
-                table_id,
-                base.clone(),
-                ops.clone(),
-                commit_version,
-                tx_id,
-            )
+            apply_data_batch(repo, table_id, base.clone(), &ops, commit_version, tx_id)
         })
         .await
         {
@@ -234,13 +249,22 @@ pub(crate) async fn apply_vector_delta_phase(
 
     // Tables with staged vector INSERTS. `staged_vectors` survives Phase 5a
     // (which drained only `tx.write_set`), so the slices are intact here.
-    let insert_batches = tx
+    //
+    // P2 perf fix (audit 4.26): only the table TOKENS are collected up
+    // front (cheap, `u64`s). The embedding payloads themselves are
+    // borrowed straight out of `tx.staged_vectors` inside the loop below
+    // instead of being deep-cloned into an owned batch — `tx.staged_vectors`
+    // itself is never mutated on this path (only `tx.async_prefix_failed`
+    // is), so the borrow is scoped to just the `retry_materialize` call and
+    // is released before that flag is set, closing the only borrow-checker
+    // conflict this restructuring could hit.
+    let insert_tokens: Vec<u64> = tx
         .staged_vectors
         .iter()
         .filter(|(_, v)| !v.is_empty())
-        .map(|(t, v)| (*t, v.clone()))
-        .collect::<Vec<_>>();
-    for (token, vecs) in insert_batches {
+        .map(|(t, _)| *t)
+        .collect();
+    for token in insert_tokens {
         // This table's staged vector deletes ride the SAME delta chunk as
         // the inserts (gap#1: a replace = delete old + insert new on the
         // same rid). `append_vector_delta` writes both `DeltaOp::Upsert`
@@ -250,11 +274,12 @@ pub(crate) async fn apply_vector_delta_phase(
             .staged_vector_deletes_for(token)
             .map(|s| s.to_vec())
             .unwrap_or_default();
-        if let Err(e) = retry_materialize(MATERIALIZE_ATTEMPTS, || {
-            apply_vector_delta_batch(repo, token, &vecs, &deleted, tx_id)
+        let result = retry_materialize(MATERIALIZE_ATTEMPTS, || {
+            let vecs = tx.staged_vectors_for(token).unwrap_or(&[]);
+            apply_vector_delta_batch(repo, token, vecs, &deleted, tx_id)
         })
-        .await
-        {
+        .await;
+        if let Err(e) = result {
             log::warn!(
                 "commit_tx Phase 5d (delta-append, pre-publish) failed for tx {tx_id} \
                  commit_version {_commit_version} table {token}: {e}; tx will be reported \
@@ -342,16 +367,23 @@ pub(crate) async fn materialize_async_tail(
     drop(drain_guards);
 
     // Phase 6.5: persist recovery markers.
-    if let Ok(gate) = repo.tx_gate().await {
-        if let Err(e) = persist_markers(repo, gate.as_ref(), commit_version).await {
+    match repo.tx_gate().await {
+        Ok(gate) => {
+            if let Err(e) = persist_markers(repo, gate.as_ref(), commit_version).await {
+                log::warn!(
+                    "commit_tx (async) Phase 6.5 (recovery markers) failed for tx {tx_id} \
+                     commit_version {commit_version}: {e}; deferring to recovery"
+                );
+                ok = false;
+            }
+        }
+        Err(e) => {
             log::warn!(
-                "commit_tx (async) Phase 6.5 (recovery markers) failed for tx {tx_id} \
-                 commit_version {commit_version}: {e}; deferring to recovery"
+                "commit_tx (async) Phase 6.5 (recovery markers) could not acquire tx_gate for \
+                 tx {tx_id} commit_version {commit_version}: {e}; deferring to recovery"
             );
             ok = false;
         }
-    } else {
-        ok = false;
     }
 
     // A5 + Stage I: capture the max interner id across the tx's per-repo
@@ -450,13 +482,20 @@ pub(crate) async fn promote_vectors(tx: &TxContext, repo: &RepoInstance, commit_
     // (`tx.staged_vectors`), keyed by table token. `apply_staged_vectors`
     // is a no-op for every backend except `VectorBackend`. Phase 5a only
     // drained `tx.write_set`, so `tx.staged_vectors` is intact here.
-    let vector_batches = tx
+    //
+    // P2 perf fix (audit 4.26): borrow the embedding payloads straight out
+    // of `tx.staged_vectors` instead of deep-cloning them a second time
+    // (they were already cloned once in `apply_vector_delta_phase` — see
+    // its own matching fix). `tx` is a plain shared reference here and
+    // `staged_vectors` is never mutated by this function, so there is no
+    // borrow-checker conflict to work around, unlike the delta-phase side.
+    let vector_tokens: Vec<u64> = tx
         .staged_vectors
         .iter()
         .filter(|(_, v)| !v.is_empty())
-        .map(|(t, v)| (*t, v.clone()))
-        .collect::<Vec<_>>();
-    for (token, vecs) in vector_batches {
+        .map(|(t, _)| *t)
+        .collect();
+    for token in vector_tokens {
         // gap#1: gather this table's staged vector deletes so they ride
         // the SAME commit-ack promote pass as the inserts. A replace
         // (delete old + insert new on the same rid) lands BOTH here: the
@@ -473,8 +512,9 @@ pub(crate) async fn promote_vectors(tx: &TxContext, repo: &RepoInstance, commit_
             .staged_vector_deletes_for(token)
             .map(|s| s.to_vec())
             .unwrap_or_default();
+        let vecs = tx.staged_vectors_for(token).unwrap_or(&[]);
         if let Err(e) = retry_materialize(MATERIALIZE_ATTEMPTS, || {
-            apply_vector_graph_batch(repo, token, &vecs, &deleted, tx_id)
+            apply_vector_graph_batch(repo, token, vecs, &deleted, tx_id)
         })
         .await
         {
@@ -547,11 +587,21 @@ pub(crate) fn collect_data_batches(
 
 /// Apply one table's data ops (Phase 5a). Routes through MvccStore when
 /// the table is registered in `per_table_mvcc`, else `base.transact`.
+///
+/// P2 perf fix (audit 4.7): takes `&[KvOp]`, not an owned `Vec`. The MVCC
+/// arm (`apply_committed_visible`) only ever reads the slice, so the
+/// common (attached-table) path needs zero clone at all — callers used to
+/// pay a full deep-copy of the per-table op batch (record bodies
+/// included) on EVERY commit, purely to satisfy this signature, when the
+/// clone was almost never actually needed. Only the rare non-MVCC arm
+/// (`base.transact`) needs ownership, since `Store::transact` takes
+/// `Vec<KvOp>` by its trait signature — that clone is confined to that
+/// cold path and paid only there.
 pub(crate) async fn apply_data_batch(
     repo: &RepoInstance,
     table_id: u64,
     base: std::sync::Arc<dyn shamir_storage::types::Store>,
-    ops: Vec<shamir_storage::types::KvOp>,
+    ops: &[shamir_storage::types::KvOp],
     commit_version: u64,
     _tx_id: u64,
 ) -> Result<(), DbError> {
@@ -570,6 +620,29 @@ pub(crate) async fn apply_data_batch(
             return Err(DbError::Internal(format!(
                 "injected Phase 5a (data) failure for tx {_tx_id} table {table_id}"
             )));
+        }
+    }
+
+    // Test-only failure injection (P2 perf fix regression, audit 4.7): fail
+    // exactly `FAIL_PHASE_5A_TRANSIENT_REMAINING` attempts for the matching
+    // tx, then let the call through for real — proves `retry_materialize`
+    // recovers (not just defers) with the borrowed `&[KvOp]` signature.
+    #[cfg(test)]
+    {
+        use std::sync::atomic::Ordering::SeqCst;
+        if _tx_id != 0 && FAIL_PHASE_5A_TRANSIENT_TX_ID.load(SeqCst) == _tx_id {
+            let decremented = FAIL_PHASE_5A_TRANSIENT_REMAINING.fetch_update(SeqCst, SeqCst, |r| {
+                if r > 0 {
+                    Some(r - 1)
+                } else {
+                    None
+                }
+            });
+            if decremented.is_ok() {
+                return Err(DbError::Internal(format!(
+                    "injected TRANSIENT Phase 5a (data) failure for tx {_tx_id} table {table_id}"
+                )));
+            }
         }
     }
 
@@ -600,14 +673,16 @@ pub(crate) async fn apply_data_batch(
         // holds the single RAM copy of the value until the drainer makes it
         // durable. Crash before drain ⇒ inflight WAL ⇒ recovery replays.
         Some(mvcc) => {
-            mvcc.apply_committed_visible(&ops, commit_version);
+            mvcc.apply_committed_visible(ops, commit_version);
             Ok(())
         }
         // Non-MVCC tables (system / test) have NO overlay and are NOT drained
         // — they have no version-log. Keep the direct durable write inline:
         // this is the rare unattached-table path, and its data is replayed
-        // from the WAL on recovery exactly as before the cutover.
-        None => base.transact(ops).await,
+        // from the WAL on recovery exactly as before the cutover. `transact`
+        // needs ownership (`Store::transact(Vec<KvOp>)`); the clone is paid
+        // ONLY on this cold, unattached-table path.
+        None => base.transact(ops.to_vec()).await,
     }
 }
 
@@ -886,9 +961,6 @@ pub(crate) async fn persist_markers(
     gate: &shamir_tx::RepoTxGate,
     _commit_version: u64,
 ) -> Result<(), DbError> {
-    use crate::meta::recovery_marker::{
-        load_last_committed, save_last_committed, save_next_tx_id_snapshot,
-    };
     let info_store = repo.tx_info_store().await?;
     // Write the monotonic max, not the raw commit_version — see the §1.7
     // doc above. `gate.last_committed()` is >= this tx's commit_version at

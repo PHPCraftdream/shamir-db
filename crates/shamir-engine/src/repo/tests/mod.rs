@@ -1,16 +1,12 @@
-#[cfg(test)]
-mod box_repo_tests;
-#[cfg(all(test, feature = "fjall"))]
-mod hybrid_repo_tests;
-#[cfg(all(test, feature = "fjall"))]
-mod hybrid_table_open_tests;
-#[cfg(test)]
-mod per_table_mvcc_token_names_deadlock_tests;
-#[cfg(test)]
-mod repl_bookmark_tests;
-#[cfg(test)]
-mod repo_config_tests;
-#[cfg(test)]
-mod repo_instance_tests;
-#[cfg(test)]
-mod repo_tx_accessors_tests;
+pub mod box_repo_tests;
+pub mod changelog_store_tests;
+#[cfg(feature = "fjall")]
+pub mod hybrid_repo_tests;
+#[cfg(feature = "fjall")]
+pub mod hybrid_table_open_tests;
+pub mod per_table_mvcc_attach_collision_tests;
+pub mod per_table_mvcc_token_names_deadlock_tests;
+pub mod repl_bookmark_tests;
+pub mod repo_config_tests;
+pub mod repo_instance_tests;
+pub mod repo_tx_accessors_tests;

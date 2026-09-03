@@ -6,7 +6,7 @@ use shamir_query_types::filter::{Filter, FilterValue};
 use shamir_query_types::TableRef;
 
 use crate::db_instance::db_instance::DbInstance;
-use crate::query::batch::{execute_batch, BatchError, TableResolver};
+use crate::query::batch::{execute_batch_unchecked as execute_batch, BatchError, TableResolver};
 use crate::repo::repo_types::BoxRepoFactory;
 use crate::repo::RepoConfig;
 use crate::table::{TableConfig, TableManager};

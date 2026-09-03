@@ -39,6 +39,15 @@ use crate::query::filter::Filter;
 // storage bytes cannot reach its `Err` branch — that is why a dedicated seam is
 // the cleanest deterministic way to exercise the `Err` path here.
 //
+// Task-group-2 (2026-09, shamir-engine review) extension: the same injector
+// also gates [`TableManager::read_one_tx`] (this file) and
+// [`TableManager::get`] (`table_manager_crud.rs`) — the write-path pre-reads
+// behind `delete`/`set`/`update_tx` — so a test can force any of those three
+// call sites' pre-read to fail with a genuine `Err(DbError::Storage)` and
+// assert the write fails closed instead of silently treating the row as
+// absent (the F-65 defect class, applied to the three sites F-65 itself
+// didn't cover).
+//
 // `std::sync::Mutex` is used (not a lock-free map) because this is a test-only,
 // cold, zero-contention path behind a `OnceLock::get()` that is `None` for every
 // non-test build — the lock-free-first rule applies to hot paths, not to this.
@@ -50,10 +59,23 @@ pub(crate) static TEST_READ_ONE_TX_BYTES_FAILURE: std::sync::OnceLock<
 
 /// Test-only one-shot failure injector for [`TableManager::read_one_tx_bytes`].
 /// See [`TEST_READ_ONE_TX_BYTES_FAILURE`]'s doc for the rationale.
+///
+/// Also carries a sibling CORRUPT-bytes injector (added alongside the
+/// decode-error fail-closed fix for `fk_actions.rs` / `fk_on_update.rs` /
+/// `fk_restrict.rs`'s `RecordView::new`-then-`InnerValue::from_bytes` decode
+/// idiom): a WHERE-filtered scan (`collect_parent_values`) can never see a
+/// genuinely undecodable row reach its own decode step, because the SAME
+/// row already failed the upstream filter-decode gate — but
+/// `plan_cascade_for_ids`'s grandchild ref-field collection loop re-reads an
+/// ALREADY-classified cascade candidate via `read_one_tx_bytes` with no such
+/// gate, so substituting undecodable bytes for exactly that second read
+/// (while the earlier classifying scan still sees the real, valid bytes)
+/// deterministically exercises its fail-closed `Err(DbError::Codec)` path.
 #[cfg(test)]
 #[derive(Debug, Default)]
 pub(crate) struct ReadOneTxBytesFailHook {
     inner: std::sync::Mutex<Vec<(u64, RecordId)>>,
+    corrupt: std::sync::Mutex<Vec<(u64, RecordId, Bytes)>>,
 }
 
 #[cfg(test)]
@@ -64,8 +86,10 @@ impl ReadOneTxBytesFailHook {
     }
 
     /// Returns `Some(Err)` if `(table_token, id)` is armed, consuming the arm
-    /// (one-shot); `None` otherwise.
-    fn take_injected(&self, table_token: u64, id: RecordId) -> Option<DbError> {
+    /// (one-shot); `None` otherwise. `pub(crate)` (not module-private): reused
+    /// by `TableManager::get` (`table_manager_crud.rs`) in addition to
+    /// `read_one_tx` / `read_one_tx_bytes` (this file).
+    pub(crate) fn take_injected(&self, table_token: u64, id: RecordId) -> Option<DbError> {
         let mut guard = self.inner.lock().unwrap();
         let pos = guard
             .iter()
@@ -74,6 +98,24 @@ impl ReadOneTxBytesFailHook {
         Some(DbError::Storage(format!(
             "F-65 injected read_one_tx_bytes failure (table_token={table_token}, id={id:?})"
         )))
+    }
+
+    /// Arm a one-shot CORRUPT-bytes substitution for the next
+    /// `read_one_tx_bytes(table_token, id)`: instead of the real stored
+    /// value, the call returns `Ok(Some(bytes))` with the given
+    /// (deliberately undecodable) bytes.
+    pub(crate) fn arm_corrupt(&self, table_token: u64, id: RecordId, bytes: Bytes) {
+        self.corrupt.lock().unwrap().push((table_token, id, bytes));
+    }
+
+    /// Returns `Some(bytes)` if a corrupt substitution is armed for
+    /// `(table_token, id)`, consuming the arm (one-shot); `None` otherwise.
+    fn take_corrupt(&self, table_token: u64, id: RecordId) -> Option<Bytes> {
+        let mut guard = self.corrupt.lock().unwrap();
+        let pos = guard
+            .iter()
+            .position(|(tt, rid, _)| *tt == table_token && *rid == id)?;
+        Some(guard.swap_remove(pos).2)
     }
 }
 
@@ -513,6 +555,17 @@ impl TableManager {
         id: RecordId,
         tx: Option<&shamir_tx::TxContext>,
     ) -> DbResult<InnerValue> {
+        // Task-group-2 test-only fault injection: reuses the F-65 seam (see
+        // [`TEST_READ_ONE_TX_BYTES_FAILURE`]'s doc) so a test can force
+        // `update_tx`'s pre-read to fail with a genuine `Err` instead of
+        // reading, proving it fails closed rather than treating the row as
+        // absent. One-shot per `(table_token, id)`.
+        #[cfg(test)]
+        if let Some(hook) = TEST_READ_ONE_TX_BYTES_FAILURE.get() {
+            if let Some(err) = hook.take_injected(self.table_token(), id) {
+                return Err(err);
+            }
+        }
         if let Some(tx) = tx {
             let key = id.to_bytes();
             // Level-3: acquire a Shared lock on the key before reading.
@@ -644,6 +697,9 @@ impl TableManager {
         if let Some(hook) = TEST_READ_ONE_TX_BYTES_FAILURE.get() {
             if let Some(err) = hook.take_injected(self.table_token(), id) {
                 return Err(err);
+            }
+            if let Some(bytes) = hook.take_corrupt(self.table_token(), id) {
+                return Ok(Some(bytes));
             }
         }
         if let Some(tx) = tx {

@@ -6,7 +6,7 @@ use shamir_query_builder::write;
 use shamir_query_builder::write::doc;
 use shamir_types::access::Actor;
 
-use crate::query::batch::execute_batch;
+use crate::query::batch::execute_batch_unchecked as execute_batch;
 
 use super::common::setup_resolver;
 
@@ -46,6 +46,49 @@ async fn test_single_read_query() {
     assert_eq!(resp.results.len(), 1);
     assert_eq!(resp.results["users"].records.len(), 2);
     assert!(!resp.execution_plan.is_empty());
+}
+
+// ============================================================================
+// Read query honors builder-supplied pagination (canonical wire path)
+// ============================================================================
+//
+// F-group-5 (#1078 task group 5): the crate used to carry a second,
+// hand-written `query_from_value` parser (deleted) that read pagination from
+// an untagged top-level `"limit"` key instead of the tagged `pagination`
+// object this canonical path (`BatchOp::Read` -> `qv_to::<ReadQuery>`)
+// produces. Fed a builder-shaped query, that dead parser silently dropped
+// `.limit(n)` and returned the whole table. This test pins the canonical
+// path's actual (correct) behavior so that invariant has real coverage.
+
+#[tokio::test]
+async fn test_read_query_limit_bounds_results() {
+    let resolver = setup_resolver().await;
+
+    let mut b = Batch::new();
+    b.id(1);
+    let mut insert = write::insert("users");
+    for i in 0..5 {
+        insert = insert.row(doc().set("name", format!("user{i}")));
+    }
+    b.insert("insert", insert);
+    let insert_req = b.build();
+    let resp = execute_batch(&insert_req, &resolver, None, None, Actor::System, "test")
+        .await
+        .unwrap();
+    assert_eq!(resp.results["insert"].records.len(), 5);
+
+    let mut b = Batch::new();
+    b.id(1);
+    b.query("read", Query::from("users").limit(2));
+    let req = b.build();
+
+    let resp = execute_batch(&req, &resolver, None, None, Actor::System, "test")
+        .await
+        .unwrap();
+
+    // A `.limit(2)` query over 5 rows must return exactly 2 — not the
+    // whole table.
+    assert_eq!(resp.results["read"].records.len(), 2);
 }
 
 // ============================================================================

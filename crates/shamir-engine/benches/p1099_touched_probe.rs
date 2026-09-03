@@ -20,7 +20,8 @@ use std::sync::Arc;
 
 use bench_scale_tool::Harness;
 use shamir_engine::query::batch::{
-    execute_batch, BatchOp, BatchRequest, QueryEntry, ResultEncoding, TableResolver,
+    execute_batch as execute_batch_raw, AccessGate, AdminExecutor, Authorized, BatchError, BatchOp,
+    BatchRequest, BatchResponse, FunctionInvoker, QueryEntry, ResultEncoding, TableResolver,
 };
 use shamir_engine::query::filter::{Filter, FilterValue};
 use shamir_engine::repo::{BoxRepo, RepoInstance};
@@ -29,9 +30,42 @@ use shamir_query_types::write::{InsertOp, UpdateOp};
 use shamir_query_types::TableRef;
 use shamir_storage::error::DbResult;
 use shamir_storage::storage_in_memory::InMemoryRepo;
-use shamir_types::access::Actor;
+use shamir_types::access::{AccessError, Action, Actor, ResourcePath};
 use shamir_types::mpack;
 use shamir_types::types::common::new_map;
+
+/// Bench-only always-allow [`AccessGate`] (#1199): this bench measures
+/// execution mechanics, not the authorization seam, so the bypass is an
+/// explicit, named choice rather than a silent default.
+struct BenchAllowAll;
+
+#[async_trait::async_trait]
+impl AccessGate for BenchAllowAll {
+    async fn check(
+        &self,
+        _actor: &Actor,
+        _path: &ResourcePath,
+        _action: Action,
+    ) -> Result<(), AccessError> {
+        Ok(())
+    }
+}
+
+/// Pre-#1199 call shape, preserved for this bench: mints an [`Authorized`]
+/// token via [`BenchAllowAll`] and calls the real `execute_batch`.
+async fn execute_batch(
+    request: &BatchRequest,
+    resolver: &dyn TableResolver,
+    admin: Option<&dyn AdminExecutor>,
+    invoker: Option<&dyn FunctionInvoker>,
+    actor: Actor,
+    db_name: &str,
+) -> Result<BatchResponse, BatchError> {
+    let auth = Authorized::authorize(request, actor, db_name, &BenchAllowAll)
+        .await
+        .expect("BenchAllowAll never denies");
+    execute_batch_raw(auth, resolver, admin, invoker).await
+}
 use shamir_types::types::value::QueryValue;
 
 struct Resolver {

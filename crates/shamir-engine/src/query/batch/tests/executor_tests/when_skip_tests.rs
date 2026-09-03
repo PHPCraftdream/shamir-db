@@ -13,7 +13,7 @@ use shamir_query_builder::write::doc;
 use shamir_query_types::filter::{Filter, FilterValue, FnCall, ValueCompareOp};
 use shamir_types::access::Actor;
 
-use crate::query::batch::execute_batch;
+use crate::query::batch::execute_batch_unchecked as execute_batch;
 
 use super::common::{setup_resolver, setup_resolver_with_scalars, TxTestResolver};
 

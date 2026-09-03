@@ -116,9 +116,16 @@ DTO-типы (`ReadQuery`, `Select`, `SelectItem`, `AggFunc`, `AggregateField`,
 
 | Файл | Описание |
 |------|----------|
-| `mod.rs` | Re-exports DTO + `query_from_value` + `exec::*` |
-| `parser.rs` | `query_from_value()` — парсинг `QueryValue` → `ReadQuery` |
+| `mod.rs` | Re-exports DTO + `exec::*` |
 | `exec.rs` | Пайплайн выполнения: `apply_select`, `apply_group_by`, `apply_order_by`, `apply_pagination`, `apply_distinct`, `SelectProjection` |
+
+Парсинг `QueryValue` → `ReadQuery` идёт через serde (`BatchOp::Read` →
+`qv_to::<ReadQuery>` в `shamir-query-types::batch::batch_op`) — единственная
+грамматика на wire. Ранее существовавший второй, рукописный парсер
+(`query_from_value` / `query::common::parser`) читал другой, устаревший
+диалект (top-level `"limit"` вместо тегированного `pagination`, без
+`temporal`/`with_version`/`explain`, без keyset `After`) и был удалён
+(F-group-5, #1078).
 
 ## Индексы
 

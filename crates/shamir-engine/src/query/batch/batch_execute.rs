@@ -1,12 +1,17 @@
 use std::time::Instant;
 
-use crate::query::batch::batch_validate::{validate_filter_depth, validate_tables};
+use crate::query::batch::authorized::Authorized;
+use crate::query::batch::batch_validate::{
+    validate_filter_depth, validate_filter_patterns, validate_tables,
+};
 use crate::query::batch::execution_deadline::ExecutionDeadline;
 use crate::query::batch::executor_traits::{AdminExecutor, FunctionInvoker, TableResolver};
 use crate::query::batch::op_watchdog::register_op_watchdog;
 use crate::query::batch::query_runner::{
     build_resolved_refs, execute_single_impl, resolve_skip, skipped_query_result, QueryRunner,
 };
+#[cfg(test)]
+use crate::query::batch::BatchOp;
 use crate::query::batch::{BatchError, BatchPlan, BatchRequest, BatchResponse, QueryEntry};
 use crate::query::read::QueryResult;
 use shamir_collections::TFxSet;
@@ -76,14 +81,18 @@ fn warn_if_op_slow(alias: &str, elapsed: std::time::Duration) {
 /// A client-supplied `max_execution_time_secs: 0` is treated as the
 /// smallest valid budget (1 second), NOT as "no timeout" — see
 /// [`ExecutionDeadline::from_budget_secs`].
+///
+/// Takes an [`Authorized`] token, not a raw `&BatchRequest` + `Actor` pair
+/// (#1199) — the token can only be minted by [`Authorized::authorize`],
+/// which runs the real access-control check first. See `authorized.rs`'s
+/// module doc for the full rationale.
 pub async fn execute_batch(
-    request: &BatchRequest,
+    auth: Authorized<'_>,
     resolver: &dyn TableResolver,
     admin: Option<&dyn AdminExecutor>,
     invoker: Option<&dyn FunctionInvoker>,
-    actor: Actor,
-    db_name: &str,
 ) -> Result<BatchResponse, BatchError> {
+    let (request, actor, db_name) = auth.into_parts();
     let deadline = ExecutionDeadline::from_budget_secs(request.limits.max_execution_time_secs);
     execute_batch_impl(
         request,
@@ -97,6 +106,119 @@ pub async fn execute_batch(
         deadline,
     )
     .await
+}
+
+/// Test-only convenience: calls [`execute_batch`] via
+/// [`Authorized::unchecked`] (no access-control check), preserving the
+/// PRE-#1199 call shape (`&BatchRequest` + `Actor` + `db_name`) so the
+/// large body of existing engine unit tests that exercise execution
+/// mechanics — not authorization — didn't all need a structural rewrite.
+/// Real (non-test) callers MUST go through `Authorized::authorize` with a
+/// real [`crate::query::batch::AccessGate`] — this function does not
+/// exist outside `#[cfg(test)]` builds.
+#[cfg(test)]
+pub(crate) async fn execute_batch_unchecked(
+    request: &BatchRequest,
+    resolver: &dyn TableResolver,
+    admin: Option<&dyn AdminExecutor>,
+    invoker: Option<&dyn FunctionInvoker>,
+    actor: Actor,
+    db_name: &str,
+) -> Result<BatchResponse, BatchError> {
+    let auth = Authorized::unchecked(request, actor, db_name);
+    execute_batch(auth, resolver, admin, invoker).await
+}
+
+/// Plan + validate a batch body's queries — [`BatchPlanner::plan`] plus the
+/// `validate_tables`/`validate_filter_depth` preamble every
+/// [`execute_batch_impl`] call used to run inline.
+///
+/// This is a pure function of `request.queries`/`request.limits`/
+/// `request.transactional` — neither validation pass (nor the cross-repo
+/// guard below) ever inspects a bound `$param` VALUE, only the query SHAPE
+/// (table refs, filter ASTs, `$query`/`after` edges). That means a caller
+/// that re-executes the SAME body shape many times with only the bound
+/// values differing — the canonical case being `ForEach`'s per-iteration
+/// recursion in `query_runner.rs` — can call this ONCE before the loop and
+/// reuse the resulting [`BatchPlan`] across every iteration, instead of
+/// paying a full re-plan + async table-resolution re-validation on every
+/// single pass (see that module's `ForEach` handling for the loop that does
+/// exactly this).
+///
+/// Split out of `execute_batch_impl` so the single-call path (`ForEach`'s
+/// sibling `BatchOp::Batch`, and the top-level [`execute_batch`] entry)
+/// keeps its exact prior behavior unchanged — it simply calls this once,
+/// same as before.
+pub(super) async fn plan_and_validate_batch(
+    request: &BatchRequest,
+    resolver: &dyn TableResolver,
+) -> Result<BatchPlan, BatchError> {
+    // 4.C: cross-repo guard for transactional batches.
+    if request.transactional {
+        let repos = shamir_query_types::batch::distinct_repos(&request.queries);
+        if repos.len() > 1 {
+            let mut repos: Vec<String> = repos.into_iter().collect();
+            repos.sort();
+            return Err(BatchError::CrossRepoNotSupported { repos });
+        }
+    }
+
+    // 1. Plan
+    let plan = shamir_query_types::batch::BatchPlanner::plan(&request.queries, &request.limits)?;
+
+    // 2. Validate: all referenced tables exist (skip admin ops)
+    validate_tables(&request.queries, resolver).await?;
+
+    // 2b. Validate: filter nesting depth (DoS guard)
+    validate_filter_depth(&request.queries)?;
+
+    // 2c. Validate: filter pattern length cap + Regex/Like validity
+    // (DoS guard / silent-full-table-match guard)
+    validate_filter_patterns(&request.queries)?;
+
+    Ok(plan)
+}
+
+/// Durability step shared by [`execute_batch_impl`] and
+/// [`execute_planned_batch_impl`]: if `request.durability == "synced"`,
+/// flush every distinct repo the batch touched so the write survives an
+/// immediate hard crash. No-op otherwise.
+async fn flush_if_synced_durability(
+    request: &BatchRequest,
+    resolver: &dyn TableResolver,
+    db_name: &str,
+) -> Result<(), BatchError> {
+    if request.durability.as_deref() != Some("synced") {
+        return Ok(());
+    }
+    let repos = shamir_query_types::batch::distinct_repos(&request.queries);
+    for repo_name in repos {
+        let repo = resolver
+            .resolve_repo(&repo_name)
+            .await
+            .map_err(|e| BatchError::QueryError {
+                alias: String::new(),
+                message: format!("resolve_repo({}): {}", repo_name, e),
+                code: None,
+            })?;
+        repo.synced_flush()
+            .await
+            .map_err(|e| BatchError::QueryError {
+                alias: String::new(),
+                message: format!("synced flush {}/{}: {}", db_name, repo_name, e),
+                code: None,
+            })?;
+        // Belt-and-suspenders: also fsync the file WAL spine so the
+        // committed entries reach level 3 (the WAL is the source of
+        // truth; data-store flush above is derived). No-op for
+        // in-memory repos.
+        repo.sync_wal().await.map_err(|e| BatchError::QueryError {
+            alias: String::new(),
+            message: format!("synced wal {}/{}: {}", db_name, repo_name, e),
+            code: None,
+        })?;
+    }
+    Ok(())
 }
 
 /// Internal entry point that carries the sub-batch recursion state.
@@ -142,27 +264,7 @@ pub(super) fn execute_batch_impl<'a>(
         // already elapsed.
         deadline.check()?;
 
-        // 4.C: cross-repo guard for transactional batches.
-        if request.transactional {
-            let repos = shamir_query_types::batch::distinct_repos(&request.queries);
-            if repos.len() > 1 {
-                let mut repos: Vec<String> = repos.into_iter().collect();
-                repos.sort();
-                return Err(BatchError::CrossRepoNotSupported { repos });
-            }
-        }
-
-        // 1. Plan
-        let plan =
-            shamir_query_types::batch::BatchPlanner::plan(&request.queries, &request.limits)?;
-
-        // 2. Validate: all referenced tables exist (skip admin ops)
-        validate_tables(&request.queries, resolver).await?;
-
-        // 2b. Validate: filter nesting depth (DoS guard)
-        validate_filter_depth(&request.queries)?;
-
-        let mut plan = plan;
+        let mut plan = plan_and_validate_batch(request, resolver).await?;
 
         // 3. Execute — branch on transactional.
         let (all_results, tx_info) = if request.transactional {
@@ -201,34 +303,7 @@ pub(super) fn execute_batch_impl<'a>(
         // 3.5. Durability: if `synced`, flush every distinct repo the batch
         // touched before building the response so the write survives an
         // immediate hard crash.
-        if request.durability.as_deref() == Some("synced") {
-            let repos = shamir_query_types::batch::distinct_repos(&request.queries);
-            for repo_name in repos {
-                let repo = resolver.resolve_repo(&repo_name).await.map_err(|e| {
-                    BatchError::QueryError {
-                        alias: String::new(),
-                        message: format!("resolve_repo({}): {}", repo_name, e),
-                        code: None,
-                    }
-                })?;
-                repo.synced_flush()
-                    .await
-                    .map_err(|e| BatchError::QueryError {
-                        alias: String::new(),
-                        message: format!("synced flush {}/{}: {}", db_name, repo_name, e),
-                        code: None,
-                    })?;
-                // Belt-and-suspenders: also fsync the file WAL spine so the
-                // committed entries reach level 3 (the WAL is the source of
-                // truth; data-store flush above is derived). No-op for
-                // in-memory repos.
-                repo.sync_wal().await.map_err(|e| BatchError::QueryError {
-                    alias: String::new(),
-                    message: format!("synced wal {}/{}: {}", db_name, repo_name, e),
-                    code: None,
-                })?;
-            }
-        }
+        flush_if_synced_durability(request, resolver, db_name).await?;
 
         // 4. Filter results for response
         let results = filter_results(all_results, request);
@@ -246,6 +321,90 @@ pub(super) fn execute_batch_impl<'a>(
             // execute_as post-processing); the engine layer leaves this empty.
             interner_delta: Default::default(),
         })
+    }) // end Box::pin
+}
+
+/// Boxed future type for [`execute_planned_batch_impl`] — factored into its
+/// own alias (mirroring `query_runner.rs`'s `NestedTxBodyFuture`) so the
+/// return type doesn't trip clippy's `type_complexity` lint.
+type PlannedBatchResultFuture<'a> = std::pin::Pin<
+    Box<
+        dyn std::future::Future<Output = Result<TMap<String, QueryResult>, BatchError>> + Send + 'a,
+    >,
+>;
+
+/// Execute an ALREADY-planned-and-validated batch body and return its
+/// filtered per-alias results.
+///
+/// Companion to [`execute_batch_impl`] for a caller that computed `plan`
+/// once via [`plan_and_validate_batch`] and wants to reuse it across many
+/// executions of the byte-identical body shape — the only such caller
+/// today is `ForEach`'s per-iteration recursion (non-tx arm) in
+/// `query_runner.rs`, which now plans/validates the loop body ONCE before
+/// the loop instead of once per iteration.
+///
+/// Returns just the filtered results map, not a full [`BatchResponse`] —
+/// the plan/timing/id metadata `BatchResponse` otherwise carries is never
+/// consumed by a `ForEach` iteration's caller (only `.results` is).
+#[allow(clippy::too_many_arguments)]
+pub(super) fn execute_planned_batch_impl<'a>(
+    request: &'a BatchRequest,
+    plan: &'a mut BatchPlan,
+    resolver: &'a dyn TableResolver,
+    admin: Option<&'a dyn AdminExecutor>,
+    invoker: Option<&'a dyn FunctionInvoker>,
+    actor: Actor,
+    db_name: &'a str,
+    depth: usize,
+    params: &'a TMap<String, QueryValue>,
+    deadline: ExecutionDeadline,
+) -> PlannedBatchResultFuture<'a> {
+    Box::pin(async move {
+        // #666 checkpoint — mirrors `execute_batch_impl`'s pre-plan check.
+        // The plan/validation itself already ran once, before the loop;
+        // the deadline still gets a fresh look before this iteration's
+        // real execution work.
+        deadline.check()?;
+
+        // 3. Execute — branch on transactional.
+        let (all_results, _tx_info) = if request.transactional {
+            execute_transactional_impl(
+                request,
+                plan,
+                resolver,
+                admin,
+                invoker,
+                &actor,
+                db_name,
+                depth,
+                params,
+                request.result_encoding,
+                deadline,
+            )
+            .await?
+        } else {
+            let r = execute_plan_impl(
+                plan,
+                &request.queries,
+                resolver,
+                admin,
+                invoker,
+                &actor,
+                db_name,
+                depth,
+                params,
+                request.result_encoding,
+                deadline,
+            )
+            .await?;
+            (r, None)
+        };
+
+        // 3.5. Durability: same as `execute_batch_impl`.
+        flush_if_synced_durability(request, resolver, db_name).await?;
+
+        // 4. Filter results for response
+        Ok(filter_results(all_results, request))
     }) // end Box::pin
 }
 
@@ -288,7 +447,8 @@ pub async fn execute_batch_with_permissions(
             apply_row_filter(&mut entry.op, rf);
         }
     }
-    execute_batch(&request, resolver, admin, None, Actor::System, db_name).await
+    let auth = Authorized::unchecked(&request, Actor::System, db_name);
+    execute_batch(auth, resolver, admin, None).await
 }
 
 /// AND a row-level-security filter into a data op's WHERE clause.
@@ -296,7 +456,6 @@ pub async fn execute_batch_with_permissions(
 /// (Insert/Set row-match validation is a separate follow-up).
 #[cfg(test)]
 fn apply_row_filter(op: &mut crate::query::batch::BatchOp, rf: crate::query::filter::Filter) {
-    use crate::query::batch::BatchOp;
     match op {
         BatchOp::Read(q) => q.r#where = Some(and_combine(q.r#where.take(), rf)),
         BatchOp::Update(u) => u.where_clause = Some(and_combine(u.where_clause.take(), rf)),
@@ -385,7 +544,6 @@ pub(super) async fn execute_plan_impl(
                 &all_results,
                 deps,
                 &resolved_refs,
-                actor,
                 params,
                 resolver.scalar_resolver(),
             ) {
@@ -500,7 +658,6 @@ pub(super) async fn execute_plan_tx_impl(
                 &all_results,
                 deps,
                 &resolved_refs,
-                actor,
                 params,
                 resolver.scalar_resolver(),
             ) {

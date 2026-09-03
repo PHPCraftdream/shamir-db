@@ -21,7 +21,8 @@ use shamir_types::mpack;
 use shamir_types::types::common::new_map;
 
 use crate::query::batch::{
-    execute_in_open_tx, open_interactive_tx, ExecutionDeadline, QueryRunner,
+    execute_in_open_tx_unchecked as execute_in_open_tx, open_interactive_tx, ExecutionDeadline,
+    QueryRunner,
 };
 use crate::query::TableRef;
 use crate::repo::repo_types::BoxRepoFactory;
@@ -188,7 +189,7 @@ async fn call_in_transactional_batch_rejected() {
     };
 
     // Execute through the batch entry point (execute_batch).
-    let result = crate::query::batch::execute_batch(
+    let result = crate::query::batch::execute_batch_unchecked(
         &req,
         &resolver,
         None, // no admin
@@ -237,7 +238,7 @@ async fn call_in_non_tx_batch_unaffected() {
     // Non-transactional batch containing a Call op.
     let req = call_batch();
 
-    let result = crate::query::batch::execute_batch(
+    let result = crate::query::batch::execute_batch_unchecked(
         &req,
         &resolver,
         None, // no admin

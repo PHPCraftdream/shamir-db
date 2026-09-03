@@ -120,8 +120,13 @@ async fn build_reverse_fk_entries_returns_err_on_resolve_failure() {
 async fn discover_on_update_refs_returns_err_on_resolve_failure() {
     let resolver = setup_poison_resolver().await;
     let parent_ref = TableRef::with_repo("default", "parent");
+    // Empty set_fields: the resolve failure happens inside the cache's build
+    // closure (`build_reverse_fk_entries`), before any set-fields filtering,
+    // so its content is irrelevant to this test.
+    let set_fields: shamir_collections::TFxMap<String, shamir_types::types::value::QueryValue> =
+        shamir_collections::TFxMap::default();
 
-    let result = discover_on_update_refs(&resolver, &parent_ref).await;
+    let result = discover_on_update_refs(&resolver, &parent_ref, &set_fields).await;
 
     assert!(
         result.is_err(),

@@ -12,9 +12,9 @@
 //! (`CondCache`) already removed for `FieldRef`/`Cond`, BUT the mechanism is
 //! structurally DIFFERENT from F1: see [`QueryRefCache`]'s doc comment.
 //!
-//! This module provides an opt-in cache keyed by the raw pointer address of
-//! the `QueryRef` node itself. Callers that build a `QueryRefCache` once
-//! (e.g. `SelectProjection::new`) and thread it through
+//! This module provides an opt-in cache keyed by the *content* of the
+//! `QueryRef` node itself (see [`query_ref_key`]). Callers that build a
+//! `QueryRefCache` once (e.g. `SelectProjection::new`) and thread it through
 //! `FilterContext::query_ref_cache` skip the per-row path re-parse + target
 //! re-walk on every record after the first; callers that never populate
 //! `query_ref_cache` (the overwhelming majority — WHERE, `when`, `for_each`'s
@@ -29,9 +29,10 @@ use shamir_types::types::value::QueryValue;
 
 use crate::query::filter::{Filter, FilterValue};
 
-/// Pointer-keyed cache mapping a `QueryRef` node (by raw address of the
-/// enclosing `FilterValue`) to a lazily-populated cell holding the resolved
-/// `Option<QueryValue>` for the CURRENT scan.
+/// Content-keyed cache mapping a `QueryRef` node (by its full `Debug`
+/// representation, i.e. its `alias`/`path`, via [`query_ref_key`]) to a
+/// lazily-populated cell holding the resolved `Option<QueryValue>` for the
+/// CURRENT scan.
 ///
 /// # Why this is LAZY, not eager (the structural difference from F1)
 ///
@@ -69,19 +70,16 @@ use crate::query::filter::{Filter, FilterValue};
 /// final `QueryValue::clone` remains; the per-row parsing + navigation is
 /// gone.
 ///
-/// # Safety / validity invariant
+/// # Why content, not raw address (Defect 2 / group 13 fix)
 ///
-/// The pointer key (`fv as *const FilterValue as usize`) is SAFE and stable
-/// ONLY because the cache is built once from an owned, never-cloned-per-row
-/// `FilterValue` tree (see [`prescan_query_ref_cache`], called once at
-/// query-compile time, e.g. `SelectProjection::new`): the `FilterValue` tree
-/// this cache was built from must outlive the cache and must never be
-/// cloned/moved after construction — pointer identity is the cache key. If
-/// the tree were cloned, the clone's `QueryRef` nodes would live at different
-/// addresses and the cache would silently miss (falling back to per-row
-/// resolution, which is correct but uncached — a soft failure, not a
-/// memory-safety one, since the key is only ever used to look up an entry,
-/// never dereferenced).
+/// This used to be keyed on the raw pointer address of the enclosing
+/// `FilterValue` (`fv as *const FilterValue as usize`), sound only as long
+/// as the cache never outlives the exact allocation it was built from — an
+/// invariant the type system never enforced. See `cond_cache.rs`'s doc
+/// comment for the full address-reuse hazard this class of bug shares. The
+/// key is now [`format!("{:?}", fv)`] (its `alias`/`path`): two `QueryRef`
+/// nodes collide in this map if and only if they reference the same
+/// alias/path, regardless of memory address.
 ///
 /// # Per-scan freshness
 ///
@@ -91,8 +89,16 @@ use crate::query::filter::{Filter, FilterValue};
 /// `resolved_refs` differs per scan. The `OnceLock` cells start empty for
 /// each fresh scan, so the first row repopulates them against that scan's
 /// own `resolved_refs`. `SelectProjection` owns its cache as a plain field
-/// built in `new()`, guaranteeing one fresh cache per projection lifetime.
-pub type QueryRefCache = TMap<usize, OnceLock<Option<QueryValue>>>;
+/// built in `new()`, guaranteeing one fresh cache per projection lifetime —
+/// content-keying does not change this: two DIFFERENT `SelectProjection`s
+/// never share a cache instance regardless of key type.
+pub type QueryRefCache = TMap<String, OnceLock<Option<QueryValue>>>;
+
+/// Compute the content-derived cache key for a `QueryRef` node.
+#[inline]
+pub(super) fn query_ref_key(fv: &FilterValue) -> String {
+    format!("{fv:?}")
+}
 
 /// Recursively walk a `FilterValue` tree, RESERVING an empty cache slot for
 /// every nested `QueryRef` node (at ANY nesting depth — inside `FnCall`
@@ -126,13 +132,12 @@ pub fn prescan_query_ref_cache(fv: &FilterValue, cache: &mut QueryRefCache) {
         FilterValue::QueryRef { .. } => {
             // Reserve a slot — an EMPTY `OnceLock`, no value yet. The value
             // is filled lazily on the first row via `get_or_init` (see
-            // `resolve.rs`'s `QueryRef` arm). The key is the enclosing node's
-            // pointer identity (NOT the inline `alias`/`path` fields) — same
-            // invariant `FieldPathCache`/`CondCache` document: the tree this
-            // cache was built from must outlive the cache and never be
-            // cloned/moved after construction. `or_default()` constructs an
-            // empty `OnceLock` (its `Default` impl) — zero-cost.
-            cache.entry(fv as *const FilterValue as usize).or_default();
+            // `resolve.rs`'s `QueryRef` arm). The key is the enclosing
+            // node's CONTENT (its `alias`/`path`, via `query_ref_key`), not
+            // its address — see this module's doc comment. `or_default()`
+            // constructs an empty `OnceLock` (its `Default` impl) —
+            // zero-cost.
+            cache.entry(query_ref_key(fv)).or_default();
         }
         FilterValue::Array(items) => {
             for item in items {

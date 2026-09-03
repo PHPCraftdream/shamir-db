@@ -19,7 +19,6 @@ use shamir_storage::storage_in_memory::InMemoryStore;
 use shamir_storage::types::{RecordKey, Store};
 use shamir_types::core::interner::{InternerKey, TouchInd};
 use shamir_types::types::common::new_map_wc;
-use shamir_types::types::record_id::RecordId;
 use shamir_types::types::value::InnerValue;
 
 use crate::index2::persistence;
@@ -105,20 +104,26 @@ async fn sweep_postings_direct(info_store: &Arc<dyn Store>, id: u32) {
 
 /// Write a tombstone directly into info_store, simulating the persisted state
 /// after `add_to_dropping_index2` but before the sweep/persist completes.
+///
+/// #1204: routed through the real `add_to_dropping_index2` so this fixture
+/// always matches whatever wire format that function actually writes,
+/// instead of hand-rolling a raw `bincode::serialize` of a bare `Vec<u32>`
+/// (a shape `add_to_dropping_index2` has not written since #1051, and which
+/// would no longer decode at all once #1204's version-byte envelope landed).
 async fn seed_tombstone(info_store: &Arc<dyn Store>, ids: &[u32]) {
-    let key = RecordId::system("_m.idx.drop").to_bytes();
-    let bytes = bincode::serialize(ids).unwrap();
-    info_store.set(key.into(), bytes.into()).await.unwrap();
+    for &id in ids {
+        persistence::add_to_dropping_index2(id, String::new(), None, info_store)
+            .await
+            .unwrap();
+    }
 }
 
-/// Read back the persisted tombstone (empty vec if absent).
-async fn load_tombstone(info_store: &Arc<dyn Store>) -> Vec<u32> {
-    let key = RecordId::system("_m.idx.drop").to_bytes();
-    match info_store.get(key.into()).await {
-        Ok(bytes) if bytes.is_empty() => Vec::new(),
-        Ok(bytes) => bincode::deserialize(&bytes).unwrap(),
-        Err(_) => Vec::new(),
-    }
+/// Read back the persisted tombstone (empty vec if absent). #1204: routed
+/// through the real `load_dropping_index2` rather than a local raw
+/// `bincode::deserialize::<Vec<u32>>`, which stopped matching the on-disk
+/// shape after #1051 (and again after #1204's version-byte envelope).
+async fn load_tombstone(info_store: &Arc<dyn Store>) -> Vec<(u32, String, Option<String>)> {
+    persistence::load_dropping_index2(info_store).await.unwrap()
 }
 
 /// Create a table with a functional index + data, persist the interner, then

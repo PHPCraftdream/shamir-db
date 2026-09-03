@@ -2,11 +2,13 @@ use bytes::Bytes;
 use shamir_collections::TFxSet;
 use shamir_storage::error::DbResult;
 use shamir_storage::types::{KvOp, RecordKey};
+use shamir_tx::{IndexFamily, IndexWriteOp};
 use shamir_types::record_view::{RecordRef, RecordView};
 use shamir_types::types::record_id::RecordId;
 use shamir_types::types::value::InnerValue;
 
 use super::table_manager::TableManager;
+use crate::index::index_definition::IndexDefinition;
 
 /// Bundled mutation effect for one record. Built by *_tx methods,
 /// applied by `stage_mutation` to a TxContext.
@@ -91,8 +93,6 @@ async fn fire_post_gen_capture_pre_unique_check_test_hook() {
 /// `&tx.released_unique_cache[&table_token].released` directly. This avoids
 /// the O(N²) clone that a single combined `&mut -> TFxSet` pattern would force.
 pub(crate) fn refresh_released_unique_cache(tx: &mut shamir_tx::TxContext, table_token: u64) {
-    use shamir_tx::{IndexFamily, IndexWriteOp};
-
     let total_len = tx.index_write_set.len();
     let cache = tx.released_unique_cache.entry(table_token).or_default();
 
@@ -139,6 +139,24 @@ pub(crate) fn refresh_released_unique_cache(tx: &mut shamir_tx::TxContext, table
 }
 
 impl TableManager {
+    /// #1205 (A8 amortization): mark this table's `StagingStore` as having
+    /// every `Set` staged so far had its referenced `InternerKey` ids
+    /// already captured into `tx.referenced_interner_ids`, so
+    /// `pre_commit_prelock`'s A8 scan can skip its decode-based fallback
+    /// for this table.
+    ///
+    /// Callers MUST have genuinely captured those ids (via
+    /// `shamir_tx::collect_referenced_ids` on an in-memory tree, or by
+    /// recording ids as an interning closure ran) immediately before
+    /// calling this — see `StagingStore::mark_referenced_ids_captured`'s
+    /// contract. A no-op if this table has no staging entry (nothing was
+    /// staged, e.g. an empty batch).
+    pub(super) fn mark_staged_ids_captured(&self, tx: &mut shamir_tx::TxContext) {
+        if let Some(staging) = tx.write_set.get_mut(&self.table_token()) {
+            staging.mark_referenced_ids_captured();
+        }
+    }
+
     /// Apply a staged mutation to the TxContext.
     pub(super) async fn stage_mutation(
         &self,
@@ -693,6 +711,15 @@ impl TableManager {
         //    staged ops (DELETE or UPDATE-off) in the same tx. The on-demand
         //    `is_record_touched` probe closes the stale-snapshot bypass.
         if self.index_manager.has_unique_indexes() {
+            // Snapshot unique-index defs ONCE per batch — stable for the
+            // duration of insert_tx_many (mutated only by DDL, which cannot
+            // run concurrently with this call). Mirrors the non-tx
+            // `insert_many_returning_version` hoist (`table_manager_crud.rs`)
+            // — this was previously re-collected (DashMap-iter + N×
+            // `IndexDefinition::clone`) on EVERY row via
+            // `iter_unique_indexes()` inside the loop below.
+            let unique_defs: Vec<IndexDefinition> =
+                self.index_manager.iter_unique_indexes().collect();
             let mut batch_seen: TFxSet<(u64, Vec<u8>)> = TFxSet::default();
             refresh_released_unique_cache(tx, self.table_token());
             let released = &tx.released_unique_cache[&self.table_token()].released;
@@ -706,7 +733,7 @@ impl TableManager {
                 self.index_manager
                     .validate_unique_for_create_with_released(v, released, &is_record_touched)
                     .await?;
-                for def in self.index_manager.iter_unique_indexes() {
+                for def in &unique_defs {
                     if let Some(vs) = crate::index::index_keys::extract_index_leaves(v, &def.paths)
                     {
                         let key = bincode::serialize(&vs)
@@ -908,6 +935,10 @@ impl TableManager {
         // released-key + touched-record treatment `insert_tx`/`insert_tx_many` have.
         // The on-demand `is_record_touched` probe closes the stale-snapshot bypass.
         if self.index_manager.has_unique_indexes() {
+            // Snapshot unique-index defs ONCE per batch — see
+            // `insert_tx_many`'s identical hoist for the full rationale.
+            let unique_defs: Vec<IndexDefinition> =
+                self.index_manager.iter_unique_indexes().collect();
             let mut batch_seen: TFxSet<(u64, Vec<u8>)> = TFxSet::default();
             refresh_released_unique_cache(tx, self.table_token());
             let released = &tx.released_unique_cache[&self.table_token()].released;
@@ -921,7 +952,7 @@ impl TableManager {
                 self.index_manager
                     .validate_unique_for_create_with_released(view, released, &is_record_touched)
                     .await?;
-                for def in self.index_manager.iter_unique_indexes() {
+                for def in &unique_defs {
                     if let Some(vs) =
                         crate::index::index_keys::extract_index_leaves(view, &def.paths)
                     {
@@ -1213,12 +1244,27 @@ impl TableManager {
     ///
     /// The record MUST already exist (this is an update, not an upsert);
     /// `old_bytes` is the committed storage bytes the caller matched.
+    ///
+    /// `ids_captured` (#1205): pass `true` only when the caller already
+    /// captured every `InternerKey` id `new_bytes` references (as a map
+    /// key, recursively) into `tx.referenced_interner_ids` BEFORE calling
+    /// this — e.g. `execute_update_tx`/`execute_set_tx` capture from the
+    /// `set_map`/`new_inner` tree they built `new_bytes` from. Callers that
+    /// build `new_bytes` some other way (FK cascade actions in
+    /// `query/batch/fk_actions.rs` / `fk_on_update.rs`) pass `false`, which
+    /// leaves this table on `pre_commit_prelock`'s A8 decode fallback —
+    /// always correct, just not free. This is a PER-CALL flag, not
+    /// per-table: this table's `StagingStore` tracks the ids-captured state
+    /// across CALLS (a later `false` call downgrades it back), so mixed
+    /// captured/uncaptured updates to the same table within one tx are
+    /// still handled correctly regardless of call order.
     pub(crate) async fn update_tx_bytes(
         &self,
         id: RecordId,
         old_bytes: &Bytes,
         new_bytes: Bytes,
         tx: &mut shamir_tx::TxContext,
+        ids_captured: bool,
     ) -> DbResult<()> {
         // Level-3: acquire an Exclusive lock on the key before staging.
         self.acquire_pessimistic_write_lock(RecordKey::from_slice(id.as_bytes()), tx)
@@ -1374,6 +1420,10 @@ impl TableManager {
             tx,
         )
         .await?;
+        // #1205: see this fn's doc for the `ids_captured` contract.
+        if ids_captured {
+            self.mark_staged_ids_captured(tx);
+        }
 
         // F-50 (#869) + F-50 Step 2 (#870) + P0-2 (#958): capture the index2 /
         // sorted / base_index generation (values read ABOVE, before the stage-time

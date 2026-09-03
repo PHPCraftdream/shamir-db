@@ -17,6 +17,7 @@ pub mod filter_node;
 pub mod fts;
 pub mod index_range;
 pub(crate) mod numeric_cmp;
+pub mod pattern_guard;
 pub mod query_ref_cache;
 pub mod resolve;
 
@@ -27,6 +28,7 @@ pub use eval_context::FilterContext;
 pub use field_path_cache::{prescan_field_path_cache, FieldPathCache};
 pub use filter_node::{CompareOp, FilterNode};
 pub use index_range::predicate_to_index_range;
+pub use pattern_guard::{check_filter_patterns, MAX_FILTER_PATTERN_LENGTH};
 pub use query_ref_cache::{prescan_query_ref_cache, QueryRefCache};
 pub use resolve::{
     compare_values, filter_value_to_inner, filter_value_to_query, intern_field_path, resolve_field,

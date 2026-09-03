@@ -8,6 +8,12 @@ use std::time::Instant;
 
 use futures::StreamExt;
 
+use crate::index2::backend::{IndexQuery, IndexResult};
+use crate::index2::vector::hnsw_adapter::{
+    CO_FILTER_MAX_SELECTIVITY, MAX_TOPK, PRE_FILTER_MAX_CANDIDATES,
+};
+use crate::index2::vector::vector_backend::VectorBackend;
+use crate::index2::vector::{SearchOpts, VectorAdapter as _};
 use crate::query::filter::eval::{compile_filter, intern_field_path, FilterNode};
 use crate::query::filter::eval_context::FilterContext;
 use crate::query::read::{
@@ -1714,10 +1720,6 @@ impl TableManager {
         tx: Option<&shamir_tx::TxContext>,
         start: Instant,
     ) -> DbResult<QueryResult> {
-        use crate::index2::backend::{IndexQuery, IndexResult};
-        use crate::index2::vector::hnsw_adapter::MAX_TOPK;
-        use crate::index2::vector::SearchOpts;
-
         // Resolve the vector backend by field path + "vector" kind.
         let field_path = crate::query::filter::eval::intern_field_path(&fvq.field, interner);
         let lease_result = match &field_path {
@@ -1771,12 +1773,6 @@ impl TableManager {
         // get a candidate RID set. If successful, pick pre-filter or co-filter
         // based on cardinality; otherwise fall through to post-filter (V3.1).
         if let Some(ref residual) = fvq.residual {
-            use crate::index2::vector::hnsw_adapter::{
-                CO_FILTER_MAX_SELECTIVITY, PRE_FILTER_MAX_CANDIDATES,
-            };
-            use crate::index2::vector::vector_backend::VectorBackend;
-            use crate::index2::vector::VectorAdapter as _;
-
             // Attempt to resolve candidate RIDs from secondary index (btree/functional).
             // IMPORTANT (C1): only enter fast-path when the index FULLY covers the
             // residual predicate. A partial cover (superset of matching RIDs) would

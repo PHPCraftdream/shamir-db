@@ -9,6 +9,7 @@ pub mod cross_field;
 pub mod field_rule;
 pub mod foreign_key;
 pub mod format;
+mod one_of_set;
 pub mod rule_builder;
 pub mod schema_validator;
 pub mod type_tag;

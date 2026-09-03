@@ -3,8 +3,9 @@
 //! Executes a BatchPlan stage by stage, passing results between
 //! dependent queries via FilterContext::resolved_refs.
 
-use crate::query::batch::batch_execute::{execute_batch_impl, execute_plan_tx_impl};
-use crate::query::batch::batch_validate::{validate_filter_depth, validate_tables};
+use crate::query::batch::batch_execute::{
+    execute_batch_impl, execute_plan_tx_impl, execute_planned_batch_impl, plan_and_validate_batch,
+};
 use crate::query::batch::execution_deadline::ExecutionDeadline;
 use crate::query::batch::executor_traits::{AdminExecutor, FunctionInvoker, TableResolver};
 use crate::query::batch::{BatchError, BatchOp, QueryEntry};
@@ -119,7 +120,6 @@ pub(super) fn resolve_skip(
     all_results: &TMap<String, QueryResult>,
     provenance: Option<&TMap<String, shamir_query_types::batch::EdgeKind>>,
     resolved_refs: &TMap<String, QueryResult>,
-    actor: &Actor,
     params: &TMap<String, QueryValue>,
     scalars: ScalarResolver,
 ) -> bool {
@@ -150,7 +150,6 @@ pub(super) fn resolve_skip(
     // since no field ever actually resolves against a real record.
     let scratch = shamir_types::core::interner::Interner::new();
     let ctx = FilterContext::new(&scratch, resolved_refs)
-        .with_actor(actor.clone())
         .with_scalars(scalars)
         .with_params(params);
     let node = crate::query::filter::compile_filter(filter, &scratch);
@@ -164,13 +163,22 @@ pub(super) fn resolve_skip(
 /// `tx`, instead of each write silently committing independently via
 /// `execute_batch_impl`'s non-transactional (implicit-per-op-tx) path (#661).
 ///
-/// This replicates the setup steps `execute_batch_impl` performs internally
-/// (plan via `BatchPlanner::plan`, `validate_tables`, `validate_filter_depth`)
-/// and then drives the plan directly through [`execute_plan_tx_impl`],
-/// reusing `tx` — so a failure anywhere in the nested body propagates as an
-/// `Err` out of the SAME `TxContext` the outer `execute_transactional_impl`
-/// already knows how to roll back on `Err` (RAII: the tx is dropped without
-/// commit), with zero changes needed to that commit/abort logic.
+/// `plan` is the body's ALREADY-BUILT [`BatchPlan`](shamir_query_types::batch::BatchPlan)
+/// — the caller ran [`plan_and_validate_batch`] (`BatchPlanner::plan` +
+/// `validate_tables` + `validate_filter_depth`) beforehand. For a single
+/// `BatchOp::Batch` recursion the caller does this once, immediately before
+/// calling here (byte-identical to the old inline behavior). For `ForEach`,
+/// the caller does this ONCE before the iteration loop and reuses the same
+/// `plan` across every iteration — the body's shape never changes between
+/// iterations, only the bound `$param` values do, so re-planning/
+/// re-validating per iteration was pure redundant work (see the `ForEach`
+/// handling below).
+///
+/// Drives the plan directly through [`execute_plan_tx_impl`], reusing `tx`
+/// — so a failure anywhere in the nested body propagates as an `Err` out of
+/// the SAME `TxContext` the outer `execute_transactional_impl` already
+/// knows how to roll back on `Err` (RAII: the tx is dropped without commit),
+/// with zero changes needed to that commit/abort logic.
 ///
 /// Returns the per-alias results map (the same shape `BatchResponse::results`
 /// carries), which callers wrap into the outer `QueryResult.value` exactly
@@ -191,6 +199,7 @@ type NestedTxBodyFuture<'a> = std::pin::Pin<
 #[allow(clippy::too_many_arguments)]
 fn run_nested_body_in_outer_tx<'a>(
     body: &'a crate::query::batch::BatchRequest,
+    plan: &'a mut shamir_query_types::batch::BatchPlan,
     resolver: &'a dyn TableResolver,
     admin: Option<&'a dyn AdminExecutor>,
     invoker: Option<&'a dyn FunctionInvoker>,
@@ -207,12 +216,8 @@ fn run_nested_body_in_outer_tx<'a>(
         // of `execute_batch_impl` for the non-tx recursion path.
         deadline.check()?;
 
-        let mut plan = shamir_query_types::batch::BatchPlanner::plan(&body.queries, &body.limits)?;
-        validate_tables(&body.queries, resolver).await?;
-        validate_filter_depth(&body.queries)?;
-
         execute_plan_tx_impl(
-            &mut plan,
+            plan,
             &body.queries,
             resolver,
             admin,
@@ -607,7 +612,6 @@ impl<'a> QueryRunner<'a> {
             // be literals or $query refs (not FieldRefs). Use a scratch interner.
             let scratch = shamir_types::core::interner::Interner::new();
             let bind_ctx = FilterContext::new(&scratch, resolved_refs)
-                .with_actor(self.actor.clone())
                 .with_scalars(self.resolver.scalar_resolver())
                 .with_params(self.params);
             let mut resolved_params: TMap<String, QueryValue> = new_map();
@@ -663,29 +667,36 @@ impl<'a> QueryRunner<'a> {
             // `execute_transactional_impl`'s `Err` arm re-raise it as the
             // top-level outcome, identical to a timeout detected at any
             // outer checkpoint.
+            let wrap_sub_batch_err = |e: BatchError| match e {
+                timeout @ BatchError::ExecutionTimedOut { .. } => timeout,
+                e => BatchError::QueryError {
+                    alias: alias.to_string(),
+                    message: format!("sub-batch '{}' failed: {}", alias, e),
+                    code: e.code().map(str::to_owned),
+                },
+            };
             let inner_results = match self.tx.as_deref_mut() {
-                Some(tx) => run_nested_body_in_outer_tx(
-                    &sub.batch,
-                    self.resolver,
-                    self.admin,
-                    self.invoker,
-                    &self.actor,
-                    self.db_name,
-                    tx,
-                    self.depth + 1,
-                    &resolved_params,
-                    self.result_encoding,
-                    self.deadline,
-                )
-                .await
-                .map_err(|e| match e {
-                    timeout @ BatchError::ExecutionTimedOut { .. } => timeout,
-                    e => BatchError::QueryError {
-                        alias: alias.to_string(),
-                        message: format!("sub-batch '{}' failed: {}", alias, e),
-                        code: e.code().map(str::to_owned),
-                    },
-                })?,
+                Some(tx) => {
+                    let mut plan = plan_and_validate_batch(&sub.batch, self.resolver)
+                        .await
+                        .map_err(wrap_sub_batch_err)?;
+                    run_nested_body_in_outer_tx(
+                        &sub.batch,
+                        &mut plan,
+                        self.resolver,
+                        self.admin,
+                        self.invoker,
+                        &self.actor,
+                        self.db_name,
+                        tx,
+                        self.depth + 1,
+                        &resolved_params,
+                        self.result_encoding,
+                        self.deadline,
+                    )
+                    .await
+                    .map_err(wrap_sub_batch_err)?
+                }
                 None => {
                     execute_batch_impl(
                         &sub.batch,
@@ -765,7 +776,6 @@ impl<'a> QueryRunner<'a> {
             let dummy_record = InnerValue::Null;
             let scratch = shamir_types::core::interner::Interner::new();
             let over_ctx = FilterContext::new(&scratch, resolved_refs)
-                .with_actor(self.actor.clone())
                 .with_scalars(self.resolver.scalar_resolver())
                 .with_params(self.params);
 
@@ -842,6 +852,35 @@ impl<'a> QueryRunner<'a> {
                 });
             }
 
+            // Plan + validate the loop body ONCE, before iterating (P2 perf
+            // fix — see `TASK_GROUPS.md` group 22). The body's SHAPE
+            // (queries, table refs, filter ASTs) is byte-identical across
+            // every iteration; only the bound `$param` value differs per
+            // pass (injected below via `resolved_params`). Re-running
+            // `BatchPlanner::plan` + `validate_tables` (async table
+            // resolution) + `validate_filter_depth` on EVERY iteration was
+            // pure redundant work whenever the body validates successfully
+            // — an N-iteration loop used to pay N times the plan/validate
+            // cost of ONE. Neither pass ever inspects a bound value, only
+            // the query shape — see `plan_and_validate_batch`'s doc comment
+            // for why hoisting it out of the loop is sound. `plan` is then
+            // reused (via a fresh `&mut` reborrow) by every iteration below.
+            self.deadline.check()?;
+            let wrap_for_each_body_err = |e: BatchError| match e {
+                timeout @ BatchError::ExecutionTimedOut { .. } => timeout,
+                e => BatchError::QueryError {
+                    alias: alias.to_string(),
+                    message: format!(
+                        "for_each '{}': loop body failed to plan/validate: {}",
+                        alias, e
+                    ),
+                    code: e.code().map(str::to_owned),
+                },
+            };
+            let mut plan = plan_and_validate_batch(&fe.batch, self.resolver)
+                .await
+                .map_err(wrap_for_each_body_err)?;
+
             let mut iterations: Vec<QueryValue> = Vec::with_capacity(elements.len());
             for element in elements {
                 // #666 checkpoint: once per iteration, BEFORE recursing into
@@ -888,6 +927,7 @@ impl<'a> QueryRunner<'a> {
                 let inner_results = match self.tx.as_deref_mut() {
                     Some(tx) => run_nested_body_in_outer_tx(
                         &fe.batch,
+                        &mut plan,
                         self.resolver,
                         self.admin,
                         self.invoker,
@@ -908,29 +948,27 @@ impl<'a> QueryRunner<'a> {
                             code: e.code().map(str::to_owned),
                         },
                     })?,
-                    None => {
-                        execute_batch_impl(
-                            &fe.batch,
-                            self.resolver,
-                            self.admin,
-                            self.invoker,
-                            self.actor.clone(),
-                            self.db_name,
-                            self.depth + 1,
-                            &resolved_params,
-                            self.deadline,
-                        )
-                        .await
-                        .map_err(|e| match e {
-                            timeout @ BatchError::ExecutionTimedOut { .. } => timeout,
-                            e => BatchError::QueryError {
-                                alias: alias.to_string(),
-                                message: format!("for_each '{}' iteration failed: {}", alias, e),
-                                code: e.code().map(str::to_owned),
-                            },
-                        })?
-                        .results
-                    }
+                    None => execute_planned_batch_impl(
+                        &fe.batch,
+                        &mut plan,
+                        self.resolver,
+                        self.admin,
+                        self.invoker,
+                        self.actor.clone(),
+                        self.db_name,
+                        self.depth + 1,
+                        &resolved_params,
+                        self.deadline,
+                    )
+                    .await
+                    .map_err(|e| match e {
+                        timeout @ BatchError::ExecutionTimedOut { .. } => timeout,
+                        e => BatchError::QueryError {
+                            alias: alias.to_string(),
+                            message: format!("for_each '{}' iteration failed: {}", alias, e),
+                            code: e.code().map(str::to_owned),
+                        },
+                    })?,
                 };
 
                 // Same per-iteration value shape a single sub-batch already
@@ -1064,7 +1102,6 @@ impl<'a> QueryRunner<'a> {
             })?;
 
         let ctx = FilterContext::new(interner, resolved_refs)
-            .with_actor(self.actor.clone())
             .with_scalars(self.resolver.scalar_resolver())
             .with_params(self.params);
 
@@ -1853,11 +1890,3 @@ fn find_unsupported_subscription_filter(filter: &Filter) -> Option<&'static str>
         Filter::ValueCompare { .. } => Some("value_compare"),
     }
 }
-
-// Re-export public items used outside this module
-pub use crate::query::batch::batch_execute::execute_batch;
-#[cfg(test)]
-pub use crate::query::batch::batch_execute::execute_batch_with_permissions;
-pub use crate::query::batch::interactive_tx::{
-    commit_interactive_tx, execute_in_open_tx, open_interactive_tx,
-};

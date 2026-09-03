@@ -298,3 +298,55 @@ async fn save_overwrites_previous_config() {
     assert_eq!(loaded.max_bytes, 64 * 1024 * 1024);
     assert_eq!(loaded.ttl_ms, None);
 }
+
+// ---- MetaEnvelope versioning: fail-closed, not silent misparse/panic ----
+
+/// Mirrors `buffer_config::buffer_config_key` — `buffer_config_key` itself
+/// is private to the `buffer_config` module, so these tests rebuild the same
+/// key from the public `MetaKey` API to write raw bytes directly.
+fn raw_buffer_config_key() -> shamir_storage::types::RecordKey {
+    shamir_storage::types::RecordKey::from_slice(
+        crate::meta::MetaKey::BufferConfig.as_record_id().as_bytes(),
+    )
+}
+
+#[tokio::test]
+async fn load_fails_closed_on_envelope_version_mismatch() {
+    let repo = InMemoryRepo::new();
+    let info_store: Arc<dyn Store> = repo.store_get("info").await.unwrap();
+
+    let mut env = crate::meta::MetaEnvelope::new(cfg());
+    env.version = 999;
+    let bytes = bincode::serialize(&env).unwrap();
+    info_store
+        .set(raw_buffer_config_key(), bytes::Bytes::from(bytes))
+        .await
+        .unwrap();
+
+    let err = load(&info_store).await.unwrap_err();
+    assert!(
+        matches!(err, shamir_storage::error::DbError::Codec(_)),
+        "expected a coded Codec error on unrecognized envelope version, got {err:?}"
+    );
+}
+
+#[tokio::test]
+async fn load_fails_closed_on_pre_envelope_raw_bincode_blob() {
+    // Proves the explicit breaking-change decision: a blob written by the
+    // OLD raw-bincode writer (pre-MetaEnvelope) is no longer silently
+    // misparsed as the current shape — it fails closed with a coded error.
+    let repo = InMemoryRepo::new();
+    let info_store: Arc<dyn Store> = repo.store_get("info").await.unwrap();
+
+    let raw = bincode::serialize(&cfg()).unwrap();
+    info_store
+        .set(raw_buffer_config_key(), bytes::Bytes::from(raw))
+        .await
+        .unwrap();
+
+    let err = load(&info_store).await.unwrap_err();
+    assert!(
+        matches!(err, shamir_storage::error::DbError::Codec(_)),
+        "expected a coded Codec error on a pre-envelope raw blob, got {err:?}"
+    );
+}

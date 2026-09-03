@@ -41,7 +41,6 @@ use std::cmp::Ordering;
 
 use super::filter_node::{CompareOp, FilterNode};
 use super::numeric_cmp::{cmp_i64_f64, cmp_u64_f64};
-use crate::query::filter::FilterValue;
 use shamir_types::core::interner::InternerKey;
 use shamir_types::types::value::QueryValue;
 
@@ -442,18 +441,27 @@ fn decode_scalar_at(bytes: &[u8], pos: usize) -> Option<(RawScalar<'_>, usize)> 
 
 // ── scalar comparison ─────────────────────────────────────────────────────────
 
-/// Compare a `RawScalar` decoded from msgpack bytes against a `FilterValue`
-/// literal.  Returns `None` for type mismatches or unsupported shapes.
-fn compare_raw_to_filter(raw: &RawScalar<'_>, fv: &FilterValue) -> Option<Ordering> {
-    match (raw, fv) {
-        (RawScalar::Nil, FilterValue::Null) => Some(Ordering::Equal),
+/// Compare a `RawScalar` decoded from msgpack bytes against a pre-resolved
+/// `QueryValue` literal.  Returns `None` for type mismatches or unsupported
+/// shapes.
+///
+/// F-21 group: compares directly against the `Compare` node's
+/// `pre_resolved: Option<QueryValue>` — no owned `FilterValue` is
+/// materialised per record. This module's own doc comment (top of file)
+/// claims a "zero-alloc raw cursor" contract; the previous
+/// `compare_raw_to_filter(&RawScalar, &FilterValue)` violated it by cloning
+/// a `FilterValue::String`/`Binary` (via `query_value_to_filter_value_lit`)
+/// on every row just to compare it once.
+fn compare_raw_to_qv(raw: &RawScalar<'_>, qv: &QueryValue) -> Option<Ordering> {
+    match (raw, qv) {
+        (RawScalar::Nil, QueryValue::Null) => Some(Ordering::Equal),
         // null vs non-null: not clearly ordered → fall back
-        (_, FilterValue::Null) => None,
+        (_, QueryValue::Null) => None,
 
-        (RawScalar::Bool(a), FilterValue::Bool(b)) => a.partial_cmp(b),
+        (RawScalar::Bool(a), QueryValue::Bool(b)) => a.partial_cmp(b),
 
         // Int (positive) vs Int
-        (RawScalar::U64(a), FilterValue::Int(b)) => {
+        (RawScalar::U64(a), QueryValue::Int(b)) => {
             if *b < 0 {
                 Some(Ordering::Greater) // a is non-negative, b is negative
             } else {
@@ -461,32 +469,34 @@ fn compare_raw_to_filter(raw: &RawScalar<'_>, fv: &FilterValue) -> Option<Orderi
             }
         }
         // Int (signed) vs Int
-        (RawScalar::I64(a), FilterValue::Int(b)) => a.partial_cmp(b),
+        (RawScalar::I64(a), QueryValue::Int(b)) => a.partial_cmp(b),
 
         // Float vs Float
-        (RawScalar::F64(a), FilterValue::Float(b)) => a.partial_cmp(b),
-        (RawScalar::F32(a), FilterValue::Float(b)) => (*a as f64).partial_cmp(b),
+        (RawScalar::F64(a), QueryValue::F64(b)) => a.partial_cmp(b),
+        (RawScalar::F32(a), QueryValue::F64(b)) => (*a as f64).partial_cmp(b),
         // Int (signed) vs Float — F-2 (#791): exact via the shared
         // `numeric_cmp::cmp_i64_f64` (bounds-check + floor/fract), NOT the
         // lossy `*a as f64` cast this replaced, which could round a large
         // `i64` to a DIFFERENT `f64` than what's actually stored.
-        (RawScalar::I64(a), FilterValue::Float(b)) => cmp_i64_f64(*a, *b),
+        (RawScalar::I64(a), QueryValue::F64(b)) => cmp_i64_f64(*a, *b),
         // Int (unsigned) vs Float — F-2 (#791): same exactness fix, via the
         // `u64`-bounded sibling `cmp_u64_f64`.
-        (RawScalar::U64(a), FilterValue::Float(b)) => cmp_u64_f64(*a, *b),
+        (RawScalar::U64(a), QueryValue::F64(b)) => cmp_u64_f64(*a, *b),
         // Float vs Int (widening) — F-2 (#791): exact via `cmp_i64_f64`,
         // reversed since `cmp_i64_f64(i, f)` orders `i` vs `f`, but here the
         // float is the LHS.
-        (RawScalar::F64(a), FilterValue::Int(b)) => cmp_i64_f64(*b, *a).map(Ordering::reverse),
-        (RawScalar::F32(a), FilterValue::Int(b)) => (*a as f64).partial_cmp(&(*b as f64)),
+        (RawScalar::F64(a), QueryValue::Int(b)) => cmp_i64_f64(*b, *a).map(Ordering::reverse),
+        (RawScalar::F32(a), QueryValue::Int(b)) => (*a as f64).partial_cmp(&(*b as f64)),
 
         // Str vs Str — compare as bytes (UTF-8 is byte-ordered correctly for Ord)
-        (RawScalar::Str(a), FilterValue::String(b)) => Some((*a).cmp(b.as_bytes())),
+        (RawScalar::Str(a), QueryValue::Str(b)) => Some((*a).cmp(b.as_bytes())),
 
         // Bin vs Bin
-        (RawScalar::Bin(a), FilterValue::Binary(b)) => Some((*a).cmp(b.as_slice())),
+        (RawScalar::Bin(a), QueryValue::Bin(b)) => Some((*a).cmp(b.as_slice())),
 
-        // Mismatch / unsupported → fall back to full decode
+        // Mismatch / unsupported (incl. Dec/Big/List/Set/Map, which
+        // `pre_resolved` never actually holds — see `filter_value_to_query`)
+        // → fall back to full decode.
         _ => None,
     }
 }
@@ -520,23 +530,18 @@ fn eval_node_raw(node: &FilterNode, bytes: &[u8]) -> Option<bool> {
         // ── Compare ──────────────────────────────────────────────────────────
         FilterNode::Compare {
             field_path,
-            value,
             pre_resolved,
             op,
+            ..
         } => {
-            let fv_lit: FilterValue = if let Some(pre) = pre_resolved {
-                query_value_to_filter_value_lit(pre)?
-            } else {
-                match value {
-                    FilterValue::Null
-                    | FilterValue::Bool(_)
-                    | FilterValue::Int(_)
-                    | FilterValue::Float(_)
-                    | FilterValue::String(_)
-                    | FilterValue::Binary(_) => value.clone(),
-                    _ => return None, // dynamic FieldRef / Param / etc.
-                }
-            };
+            // F-21 group: `pre_resolved` is `Some` exactly when the node's
+            // `value` is a literal (see `resolve::filter_value_to_query`) —
+            // the ONLY shape this raw-bytes pre-filter supports; a dynamic
+            // `value` (FieldRef/Param/...) leaves `pre_resolved` `None` and
+            // falls through to the full-decode path, same as before. Compare
+            // directly against the borrowed `QueryValue` — no owned
+            // `FilterValue` is built per record.
+            let qv: &QueryValue = pre_resolved.as_ref()?;
 
             match find_field_pos(bytes, field_path) {
                 None => {
@@ -551,7 +556,7 @@ fn eval_node_raw(node: &FilterNode, bytes: &[u8]) -> Option<bool> {
                     if matches!(scalar, RawScalar::Other) {
                         return None; // composite value → full decode
                     }
-                    let ord = compare_raw_to_filter(&scalar, &fv_lit)?;
+                    let ord = compare_raw_to_qv(&scalar, qv)?;
                     Some(apply_op(ord, *op))
                 }
             }
@@ -641,27 +646,5 @@ impl FilterNode {
     pub fn matches_msgpack_bytes(&self, bytes: &[u8]) -> Option<bool> {
         // Zero-alloc raw-cursor path: no rmpv tree is allocated.
         eval_node_raw(self, bytes)
-    }
-}
-
-// ── helpers ───────────────────────────────────────────────────────────────────
-
-/// Convert a pre-resolved `QueryValue` literal into a `FilterValue` literal
-/// for the scalar comparison helper.  Non-scalar variants return `None`.
-///
-/// C6 (#80): operates on the name-keyed `QueryValue` produced by
-/// `compile.rs` (`filter_value_to_query`) — `pre_resolved` is now
-/// `Option<QueryValue>`.
-fn query_value_to_filter_value_lit(v: &QueryValue) -> Option<FilterValue> {
-    use shamir_types::types::value::QueryValue as Qv;
-    match v {
-        Qv::Null => Some(FilterValue::Null),
-        Qv::Bool(b) => Some(FilterValue::Bool(*b)),
-        Qv::Int(i) => Some(FilterValue::Int(*i)),
-        Qv::F64(f) => Some(FilterValue::Float(*f)),
-        Qv::Str(s) => Some(FilterValue::String(s.clone())),
-        Qv::Bin(b) => Some(FilterValue::Binary(b.clone())),
-        // Dec, Big, List, Set, Map — fall back to full decode
-        _ => None,
     }
 }

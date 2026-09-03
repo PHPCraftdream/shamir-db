@@ -8,14 +8,15 @@
 //! condition compilation (one layer up) via `CondCache`, and this module
 //! mirrors that mechanism.
 //!
-//! This module provides an opt-in cache keyed by the raw pointer address of
-//! the `FieldRef` node itself. Callers that build a `FieldPathCache` once
-//! (e.g. `SelectProjection::new`) and thread it through
-//! `FilterContext::field_path_cache` get pre-interned `SmallVec<InternerKey>`
-//! paths for every `FieldRef` in the tree; callers that never populate
-//! `field_path_cache` (the overwhelming majority — WHERE, `when`,
-//! `for_each`'s `over`, write-value resolution) are completely unaffected —
-//! `resolve_filter_query` falls back to `intern_field_path` exactly as before.
+//! This module provides an opt-in cache keyed by the *content* of the
+//! `FieldRef` node itself (see [`field_ref_key`]). Callers that build a
+//! `FieldPathCache` once (e.g. `SelectProjection::new`) and thread it
+//! through `FilterContext::field_path_cache` get pre-interned
+//! `SmallVec<InternerKey>` paths for every `FieldRef` in the tree; callers
+//! that never populate `field_path_cache` (the overwhelming majority —
+//! WHERE, `when`, `for_each`'s `over`, write-value resolution) are
+//! completely unaffected — `resolve_filter_query` falls back to
+//! `intern_field_path` exactly as before.
 
 use shamir_types::core::interner::{Interner, InternerKey};
 use shamir_types::types::common::TMap;
@@ -24,24 +25,28 @@ use smallvec::SmallVec;
 use super::resolve::intern_field_path;
 use crate::query::filter::{Filter, FilterValue};
 
-/// Pointer-keyed cache mapping a `FieldRef` node (by raw address of the
-/// enclosing `FilterValue`) to its pre-interned `SmallVec<[InternerKey; 4]>`
-/// path.
+/// Content-keyed cache mapping a `FieldRef` node (by its full `Debug`
+/// representation, i.e. its `path`) to its pre-interned
+/// `SmallVec<[InternerKey; 4]>` path.
 ///
-/// # Safety / validity invariant
+/// # Why content, not raw address (Defect 2 / group 13 fix)
 ///
-/// The pointer key (`fv as *const FilterValue as usize`) is SAFE and stable
-/// ONLY because the cache is built once from an owned, never-cloned-per-row
-/// `FilterValue` tree (see [`prescan_field_path_cache`], called once at
-/// query-compile time, e.g. `SelectProjection::new`): the `FilterValue` tree
-/// this cache was built from must outlive the cache and must never be
-/// cloned/moved after construction — pointer identity is the cache key. If
-/// the tree were cloned, the clone's `FieldRef` nodes would live at different
-/// addresses and the cache would silently miss (falling back to
-/// `intern_field_path`, which is correct but uncached — a soft failure, not a
-/// memory-safety one, since the key is only ever used to look up an entry,
-/// never dereferenced).
-pub type FieldPathCache = TMap<usize, SmallVec<[InternerKey; 4]>>;
+/// This used to be keyed on the raw pointer address of the enclosing
+/// `FilterValue` (`fv as *const FilterValue as usize`), sound only as long
+/// as the cache never outlives the exact allocation it was built from — an
+/// invariant the type system never enforced. See `cond_cache.rs`'s doc
+/// comment for the full address-reuse hazard this class of bug shares. The
+/// key is now [`format!("{:?}", fv)`]: two `FieldRef` nodes collide in this
+/// map if and only if they reference the same `path`, regardless of memory
+/// address. As a side effect, two independently-allocated `FieldRef { path
+/// }` nodes with the same path now correctly share one cache entry.
+pub type FieldPathCache = TMap<String, SmallVec<[InternerKey; 4]>>;
+
+/// Compute the content-derived cache key for a `FieldRef` node.
+#[inline]
+pub(super) fn field_ref_key(fv: &FilterValue) -> String {
+    format!("{fv:?}")
+}
 
 /// Recursively walk a `FilterValue` tree, interning and caching every
 /// nested `FieldRef`'s `path` (at ANY nesting depth — inside `FnCall` args,
@@ -73,19 +78,16 @@ pub fn prescan_field_path_cache(fv: &FilterValue, interner: &Interner, cache: &m
         | FilterValue::Param { .. } => {}
         FilterValue::FieldRef { path } => {
             // Intern ONCE at prescan time. The key is the enclosing node's
-            // pointer identity (NOT the inline `path` field) — simpler, and
-            // relies on the exact same invariant `CondCache` documents: the
-            // tree this cache was built from must outlive the cache and never
-            // be cloned/moved after construction. `entry().or_insert()` (not
-            // `or_insert_with`) is used because `intern_field_path` may
-            // return `None`, in which case the insert must be skipped
-            // entirely — `or_insert_with` can't express that skip.
+            // CONTENT (its `path`, via `field_ref_key`'s `Debug` format),
+            // not its address — see this module's doc comment.
+            // `entry().or_insert()` (not `or_insert_with`) is used because
+            // `intern_field_path` may return `None`, in which case the
+            // insert must be skipped entirely — `or_insert_with` can't
+            // express that skip.
             if let Some(keys) = intern_field_path(path, interner) {
                 let ipath: SmallVec<[InternerKey; 4]> =
                     keys.iter().map(|&id| InternerKey::new(id)).collect();
-                cache
-                    .entry(fv as *const FilterValue as usize)
-                    .or_insert(ipath);
+                cache.entry(field_ref_key(fv)).or_insert(ipath);
             }
         }
         FilterValue::Array(items) => {

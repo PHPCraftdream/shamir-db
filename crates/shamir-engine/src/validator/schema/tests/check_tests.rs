@@ -26,7 +26,7 @@ fn check_rule(rule: &FieldRule, qv: &QueryValue) -> Validation {
     let fields = OwnedFields { qv };
     let path_refs: Vec<&str> = rule.path.iter().map(String::as_str).collect();
     let mut v = Validation::accept();
-    rule.check(&fields, &path_refs, &mut v);
+    rule.check(&fields, &path_refs, None, &mut v);
     v
 }
 

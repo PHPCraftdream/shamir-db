@@ -7,45 +7,112 @@
 //! SAME `Cond` node, exactly like the top-level WHERE filter (already
 //! compiled once outside the per-row loop).
 //!
-//! This module provides an opt-in cache keyed by the raw pointer address of
-//! the boxed `Filter` AST. Callers that build a `CondCache` once (e.g.
-//! `SelectProjection::new`) and thread it through `FilterContext::cond_cache`
-//! get pre-compiled `FilterNode`s for every `$cond` in the tree; callers that
-//! never populate `cond_cache` (the overwhelming majority — WHERE, `when`,
-//! `for_each`'s `over`, write-value resolution) are completely unaffected —
-//! `resolve_filter_query` falls back to `compile_filter` exactly as before.
+//! This module provides an opt-in cache keyed by the *content* of the
+//! boxed `Filter` AST (see [`cond_key`]). Callers that build a `CondCache`
+//! once (e.g. `SelectProjection::new`) and thread it through
+//! `FilterContext::cond_cache` get pre-compiled `FilterNode`s for every
+//! `$cond` in the tree; callers that never populate `cond_cache` fall back
+//! to `FilterContext`'s own lazily-populated `local_cond_cache` (see
+//! `resolve.rs`'s `Cond` arm and [`compile_cond_cached`]), which covers
+//! WHERE, `when`, `for_each`'s `over`, and write-value resolution without
+//! requiring any of those callers to pre-scan a tree up front.
 
 use std::sync::Arc;
 
 use shamir_types::core::interner::Interner;
-use shamir_types::types::common::TMap;
+use shamir_types::types::common::{THasher, TMap};
 
 use super::compile::compile_filter;
 use super::filter_node::FilterNode;
 use crate::query::filter::{Filter, FilterValue};
 
-/// Pointer-keyed cache mapping a `$cond`'s `condition: Box<Filter>` (by raw
-/// address) to its pre-compiled `FilterNode`.
+/// Content-keyed cache mapping a `$cond`'s `condition: Box<Filter>` to its
+/// pre-compiled `FilterNode`.
 ///
-/// # Safety / validity invariant
+/// # Why content, not raw address (group 13 Defect 2 fix)
 ///
-/// The pointer key (`&*cond.condition as *const Filter as usize`) is SAFE
-/// and stable ONLY because the cache is built once from an owned,
-/// never-cloned-per-row `FilterValue` tree (see [`prescan_cond_cache`],
-/// called once at query-compile time, e.g. `SelectProjection::new`): the
-/// `FilterValue` tree this cache was built from must outlive the cache and
-/// must never be cloned/moved after construction — pointer identity is the
-/// cache key. If the tree were cloned, the clone's `Cond` nodes would live
-/// at different addresses and the cache would silently miss (falling back
-/// to `compile_filter`, which is correct but uncached — a soft failure, not
-/// a memory-safety one, since the key is only ever used to look up an
-/// entry, never dereferenced).
-pub type CondCache = TMap<usize, Arc<FilterNode>>;
+/// This cache used to be keyed on the raw pointer address of the boxed
+/// `Filter` (`&*cond.condition as *const Filter as usize`). That is sound
+/// ONLY as long as the cache never outlives the exact allocation it was
+/// built from — but nothing in the type system enforced that. A `CondCache`
+/// built from a `Filter` tree that is later dropped, followed by an
+/// UNRELATED, semantically different `Filter` tree happening to be
+/// allocated at the same (now-reused) address, would silently serve the
+/// FIRST query's stale compiled predicate for the SECOND query — a wrong
+/// answer, not merely a missed optimization. The key is now
+/// [`format!("{:?}", condition)`] (the `Filter`'s full recursive `Debug`
+/// representation): two conditions collide in this map if and only if they
+/// are equal in content, regardless of where either lives in memory or
+/// whether one was freed and reallocated over. This trades a per-lookup
+/// `Debug`-format allocation for the address-reuse hazard being eliminated
+/// outright — a good trade given the thing being cached (e.g. a compiled
+/// `Regex`) is far more expensive to rebuild than a string format. As a
+/// side effect, two independently-allocated but textually identical
+/// conditions now correctly share one cache entry (they used to silently
+/// miss each other under raw-address keying).
+pub type CondCache = TMap<String, Arc<FilterNode>>;
 
-/// Compute the pointer-identity cache key for a `Cond`'s condition.
+/// Compute the content-derived cache key for a `Cond`'s condition.
 #[inline]
-fn cond_key(condition: &Filter) -> usize {
-    condition as *const Filter as usize
+fn cond_key(condition: &Filter) -> String {
+    format!("{condition:?}")
+}
+
+/// `Sync`-safe fallback cache backing `FilterContext::local_cond_cache`
+/// (group 13 Defect 1). Deliberately a DIFFERENT type from [`CondCache`]
+/// (which stays a plain `TMap`, fine for its own single-threaded
+/// build-once-then-read-only usage in `SelectProjection`): this one is
+/// mutated through a SHARED `&FilterContext` reference, and `FilterContext`
+/// must stay `Sync` because several batch-executor futures capture
+/// `&FilterContext` across an `.await` and are boxed as
+/// `Pin<Box<dyn Future<..> + Send>>` (`&T: Send` requires `T: Sync`).
+/// `std::cell::RefCell` — the first thing tried here — is unconditionally
+/// `!Sync` and broke that bound; `scc::HashMap` is this crate's standard
+/// lock-free concurrent map (see CLAUDE.md's concurrency-primitive table)
+/// and provides the same interior mutability without it.
+pub(crate) type LocalCondCache = scc::HashMap<String, Arc<FilterNode>, THasher>;
+
+/// Build an empty [`LocalCondCache`].
+pub(crate) fn new_local_cond_cache() -> LocalCondCache {
+    scc::HashMap::with_hasher(THasher::default())
+}
+
+/// Compile `condition` and cache it in `local_cache`, reusing an existing
+/// entry when one is already present. Fallback path (group 13 Defect 1)
+/// for callers that have NOT pre-scanned a static tree into an
+/// explicit [`CondCache`] via [`prescan_cond_cache`] (WHERE, `when`,
+/// `for_each`, write-value resolution): the FIRST evaluation of a given
+/// `$cond` against one `FilterContext` compiles and caches it via this
+/// function; every later evaluation of a content-identical condition
+/// sharing that SAME context (e.g. every row of one WHERE-clause scan)
+/// reuses the compiled `FilterNode` — see `resolve.rs`'s `Cond` arm, which
+/// calls this only when `ctx.cond_cache` is `None`.
+///
+/// Uses the same content-derived key as [`cond_cache_get`], so — unlike the
+/// pointer-keyed design this replaced — it is sound regardless of where
+/// `condition` lives in memory or how long `local_cache` outlives it.
+pub(crate) fn compile_cond_cached(
+    local_cache: &LocalCondCache,
+    condition: &Filter,
+    interner: &Interner,
+) -> Arc<FilterNode> {
+    let key = cond_key(condition);
+    if let Some(node) = local_cache.read_sync(&key, |_, v| Arc::clone(v)) {
+        return node;
+    }
+    let node = Arc::new(compile_filter(condition, interner));
+    match local_cache.insert_sync(key, Arc::clone(&node)) {
+        Ok(()) => node,
+        // Lost a race with a concurrent insert for the SAME key (defensive
+        // only — a `FilterContext` is built fresh per query/op and never
+        // shared across concurrently-executing threads in practice, see
+        // its own doc comment). Use the winner's entry so every caller
+        // observes ONE canonical compiled node instead of two equal-but-
+        // distinct `Arc` allocations.
+        Err((key, _attempted)) => local_cache
+            .read_sync(&key, |_, v| Arc::clone(v))
+            .unwrap_or(node),
+    }
 }
 
 /// Recursively walk a `FilterValue` tree, compiling and caching every
@@ -157,9 +224,8 @@ fn prescan_filter(filter: &Filter, interner: &Interner, cache: &mut CondCache) {
     }
 }
 
-/// Look up a compiled `FilterNode` for a `Cond`'s condition by pointer
-/// identity. Returns `None` on a cache miss (caller falls back to
-/// `compile_filter`).
+/// Look up a compiled `FilterNode` for a `Cond`'s condition by content.
+/// Returns `None` on a cache miss (caller falls back to `compile_filter`).
 #[inline]
 pub fn cond_cache_get<'a>(cache: &'a CondCache, condition: &Filter) -> Option<&'a Arc<FilterNode>> {
     cache.get(&cond_key(condition))

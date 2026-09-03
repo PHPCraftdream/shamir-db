@@ -7,7 +7,7 @@ use shamir_query_builder::write::doc;
 use shamir_types::access::Actor;
 use shamir_types::types::value::QueryValue;
 
-use crate::query::batch::execute_batch;
+use crate::query::batch::execute_batch_unchecked as execute_batch;
 
 use super::common::setup_resolver;
 

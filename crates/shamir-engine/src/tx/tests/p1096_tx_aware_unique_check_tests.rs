@@ -827,7 +827,7 @@ async fn update_tx_bytes_to_a_durably_owned_unreleased_key_still_rejects() {
         .to_bytes()
         .expect("encode succeeds");
     let result = tbl
-        .update_tx_bytes(rid_d, &old_bytes, new_bytes, &mut tx2)
+        .update_tx_bytes(rid_d, &old_bytes, new_bytes, &mut tx2, false)
         .await;
     assert!(
         matches!(result, Err(shamir_storage::error::DbError::DuplicateKey(_))),
@@ -894,7 +894,7 @@ async fn update_tx_bytes_after_delete_reclaim_succeeds() {
     let new_bytes = record_with_str(email_field, "x")
         .to_bytes()
         .expect("encode succeeds");
-    tbl.update_tx_bytes(rid_d, &old_bytes, new_bytes, &mut tx2)
+    tbl.update_tx_bytes(rid_d, &old_bytes, new_bytes, &mut tx2, false)
         .await
         .expect("update_tx_bytes must succeed - key 'x' was released by DELETE A");
 
@@ -999,7 +999,7 @@ async fn stale_snapshot_release_does_not_bypass_a_concurrent_reclaim_via_update_
         .to_bytes()
         .expect("encode succeeds");
     let update_d = tbl
-        .update_tx_bytes(rid_d, &old_bytes, new_bytes, &mut tx2)
+        .update_tx_bytes(rid_d, &old_bytes, new_bytes, &mut tx2, false)
         .await;
     assert!(
         matches!(

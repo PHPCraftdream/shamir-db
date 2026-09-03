@@ -159,16 +159,6 @@ impl SessionPermissions {
             return None;
         }
 
-        // Check if any Allow permission without a filter covers this action+resource
-        // (means unrestricted access at that level).
-        for (rf_action, rf_resource, _) in &self.row_filters {
-            if rf_action.matches(action) && rf_resource.covers(resource) {
-                // This entry came from a permission with no filter — unrestricted
-                // (merge_row_filters only keeps entries that collapsed to no filter
-                //  or have a concrete filter). We need a different approach.
-            }
-        }
-
         // Collect all matching filters from the raw merged list
         let mut filters = Vec::new();
         let mut has_unrestricted = false;
@@ -233,27 +223,16 @@ impl SessionPermissions {
     /// Extract action and resource from a BatchOp.
     fn extract_action_resource(op: &BatchOp, db_name: &str) -> (Action, Resource) {
         match op {
-            // Data operations — use table_ref
-            BatchOp::Read(_) => {
-                let resource = table_ref_to_resource(op.table_ref().unwrap(), db_name);
-                (Action::Read, resource)
-            }
-            BatchOp::Insert(_) => {
-                let resource = table_ref_to_resource(op.table_ref().unwrap(), db_name);
-                (Action::Insert, resource)
-            }
-            BatchOp::Update(_) => {
-                let resource = table_ref_to_resource(op.table_ref().unwrap(), db_name);
-                (Action::Update, resource)
-            }
-            BatchOp::Delete(_) => {
-                let resource = table_ref_to_resource(op.table_ref().unwrap(), db_name);
-                (Action::Delete, resource)
-            }
-            BatchOp::Set(_) => {
-                let resource = table_ref_to_resource(op.table_ref().unwrap(), db_name);
-                (Action::Update, resource)
-            }
+            // Data operations — use table_ref. All five variants are
+            // guaranteed by `BatchOp::table_ref()` (shamir-query-types) to
+            // return `Some`; see `data_op_action_resource` for how a
+            // violation of that (never-asserted-there) invariant is
+            // handled instead of panicking.
+            BatchOp::Read(_) => Self::data_op_action_resource(op, db_name, Action::Read),
+            BatchOp::Insert(_) => Self::data_op_action_resource(op, db_name, Action::Insert),
+            BatchOp::Update(_) => Self::data_op_action_resource(op, db_name, Action::Update),
+            BatchOp::Delete(_) => Self::data_op_action_resource(op, db_name, Action::Delete),
+            BatchOp::Set(_) => Self::data_op_action_resource(op, db_name, Action::Update),
 
             // DDL — Create/Drop
             BatchOp::CreateDb(op) => (
@@ -563,6 +542,48 @@ impl SessionPermissions {
             | BatchOp::ListSubscriptions(_)
             | BatchOp::ReplicationStatus(_) => (Action::Read, Resource::Global),
         }
+    }
+
+    /// Resolve `(action, resource)` for a data op (Read/Insert/Update/
+    /// Delete/Set) via its `table_ref()`.
+    ///
+    /// Invariant: `BatchOp::table_ref()` (defined in a different match
+    /// statement, in `shamir-query-types`) always returns `Some` for these
+    /// five variants — but nothing enforces the two match statements stay
+    /// in sync. `debug_assert!` catches drift immediately in dev/test
+    /// builds; a release build (debug-assertions off) instead degrades to
+    /// [`Self::deny_by_default`] rather than panicking on a bare
+    /// `.unwrap()`.
+    fn data_op_action_resource(op: &BatchOp, db_name: &str, action: Action) -> (Action, Resource) {
+        match op.table_ref() {
+            Some(tref) => (action, table_ref_to_resource(tref, db_name)),
+            None => {
+                debug_assert!(
+                    false,
+                    "invariant violated: BatchOp::table_ref() returned None \
+                     for a data op variant ({op:?}) that extract_action_resource \
+                     expects to always carry one — table_ref() and this match \
+                     arm list have drifted out of sync"
+                );
+                Self::deny_by_default(action)
+            }
+        }
+    }
+
+    /// Deny-by-default fallback `(action, resource)` for an invariant
+    /// violation in [`Self::data_op_action_resource`]. `Resource::Global`
+    /// is only `covers()`-matched by a decision that is ITSELF
+    /// `Resource::Global` (see `Resource::covers`), so this denies every
+    /// ordinary Table/Repo/Database-scoped grant and only a genuinely
+    /// global-privileged role retains access — a safe fail-closed default.
+    ///
+    /// Kept as its own panic-free function (rather than inlined in the
+    /// `debug_assert!` branch above) so the fallback VALUE is directly
+    /// regression-testable independent of `cfg!(debug_assertions)`.
+    /// `pub(crate)` (not private) purely so `query::auth::tests` — a
+    /// sibling module of `session`, not a descendant — can call it.
+    pub(crate) fn deny_by_default(action: Action) -> (Action, Resource) {
+        (action, Resource::Global)
     }
 }
 

@@ -40,7 +40,10 @@ use std::sync::Arc;
 
 use bench_scale_tool::Harness;
 use shamir_engine::db_instance::db_instance::DbInstance;
-use shamir_engine::query::batch::{execute_batch, TableResolver};
+use shamir_engine::query::batch::{
+    execute_batch as execute_batch_raw, AccessGate, AdminExecutor, Authorized, BatchError,
+    BatchRequest, BatchResponse, FunctionInvoker, TableResolver,
+};
 use shamir_engine::query::TableRef;
 use shamir_engine::repo::{BoxRepoFactory, RepoConfig, RepoInstance};
 use shamir_engine::table::{TableConfig, TableManager};
@@ -55,12 +58,45 @@ use shamir_query_builder::filter;
 use shamir_query_builder::write;
 use shamir_query_builder::write::doc;
 use shamir_query_types::admin::FkAction;
-use shamir_types::access::Actor;
+use shamir_types::access::{AccessError, Action, Actor, ResourcePath};
 use shamir_types::core::interner::TouchInd;
 use shamir_types::types::common::new_map_wc;
 use shamir_types::types::record_id::RecordId;
 use shamir_types::types::value::InnerValue;
 use smallvec::smallvec;
+
+/// Bench-only always-allow [`AccessGate`] (#1199): this bench measures
+/// execution mechanics, not the authorization seam, so the bypass is an
+/// explicit, named choice rather than a silent default.
+struct BenchAllowAll;
+
+#[async_trait::async_trait]
+impl AccessGate for BenchAllowAll {
+    async fn check(
+        &self,
+        _actor: &Actor,
+        _path: &ResourcePath,
+        _action: Action,
+    ) -> Result<(), AccessError> {
+        Ok(())
+    }
+}
+
+/// Pre-#1199 call shape, preserved for this bench: mints an [`Authorized`]
+/// token via [`BenchAllowAll`] and calls the real `execute_batch`.
+async fn execute_batch(
+    request: &BatchRequest,
+    resolver: &dyn TableResolver,
+    admin: Option<&dyn AdminExecutor>,
+    invoker: Option<&dyn FunctionInvoker>,
+    actor: Actor,
+    db_name: &str,
+) -> Result<BatchResponse, BatchError> {
+    let auth = Authorized::authorize(request, actor, db_name, &BenchAllowAll)
+        .await
+        .expect("BenchAllowAll never denies");
+    execute_batch_raw(auth, resolver, admin, invoker).await
+}
 
 /// Child-table sizes. The bench's point is to watch the scan-path cost grow
 /// roughly linearly with N while the index-fast-path cost stays ~flat (tied

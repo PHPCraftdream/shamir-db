@@ -63,8 +63,7 @@ pub(super) fn overlay_rows_for_tx(
         return Vec::new();
     };
     let mut rows: Vec<(RecordId, StagedRowOverlay)> = staging
-        .snapshot_ops()
-        .into_iter()
+        .iter_ops()
         .filter_map(|op| match op {
             shamir_storage::types::KvOp::Set(k, v) => {
                 RecordId::try_from_bytes(k.as_slice()).map(|id| (id, StagedRowOverlay::Set(v)))
@@ -153,7 +152,7 @@ where
         return Vec::new();
     };
     let mut out = Vec::new();
-    for op in staging.snapshot_ops() {
+    for op in staging.iter_ops() {
         if let shamir_storage::types::KvOp::Set(k, v) = op {
             let Some(id) = RecordId::try_from_bytes(k.as_slice()) else {
                 continue;

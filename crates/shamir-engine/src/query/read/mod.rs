@@ -9,14 +9,12 @@ pub mod aggregate;
 pub mod exec;
 pub(crate) mod hashable_query_value;
 pub mod order;
-mod parser;
 pub mod select_projection;
 
 // Re-export DTOs from the shared types crate.
 pub use aggregate::{apply_aggregate_all, apply_group_by};
 pub use exec::{apply_distinct_qv, apply_pagination, apply_select_value, has_aggregates};
 pub use order::apply_order_by_qv;
-pub use parser::query_from_value;
 pub use shamir_query_types::read::{
     AggFunc, AggregateField, At, CorruptRecordRef, DdlOpKind, DdlOpState, DdlOpStatus, ExplainPlan,
     GroupBy, NullsOrder, OrderBy, OrderByItem, OrderDirection, Pagination, PaginationInfo,

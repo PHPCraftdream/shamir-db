@@ -1,20 +1,46 @@
-//! Tests for Filter parsing from QueryValue
+//! Tests for Filter/FilterValue's canonical wire format (`QueryValue` <-> msgpack <-> typed enum).
 //!
-//! All tests construct QueryValue directly via mpack! and pass to the parsers.
+//! This file used to route through the hand-written `filter_from_value` /
+//! `filter_value_from_value` parser (`query::common::parser`, deleted —
+//! F-group-5, #1078): a duplicate, divergent re-implementation of what
+//! `Filter`'s `#[serde(tag = "op", rename_all = "snake_case")]` and
+//! `FilterValue`'s `$ref`/`$fn`/`$expr`/`$cond`/`$query` tags already do via
+//! serde. These tests now go through the same `rmp_serde` round-trip the
+//! production wire path uses (`qv_to::<T>` in
+//! `shamir-query-types::batch::batch_op`; `FilterValue::from(QueryValue)`'s
+//! Tier 2 fallback) — this file's subject IS the wire format, so a raw
+//! `QueryValue` round-trip is the correct test shape (documented
+//! serde-round-trip exception to the builder-only rule), not a builder.
+//!
+//! Note: the canonical wire shape for `$ref` is always an ARRAY of path
+//! segments (`{"$ref": ["a", "b"]}`), never a dot-joined string — the old
+//! hand-parser's dot-string leniency was part of the dead dialect and is not
+//! reproduced here.
 
-use crate::query::common::{filter_from_value, filter_value_from_value};
 use crate::query::filter::{Filter, FilterExprOp, FilterValue};
 use shamir_types::mpack;
 use shamir_types::types::value::QueryValue;
 
+/// Deserialize a `Filter` from its canonical `QueryValue` wire shape via the
+/// same msgpack round-trip the production wire path uses.
+fn filter_from_qv(value: &QueryValue) -> Filter {
+    let bytes = rmp_serde::to_vec_named(value).expect("serialize QueryValue");
+    rmp_serde::from_slice(&bytes).expect("deserialize Filter")
+}
+
+/// Deserialize a `FilterValue` from its canonical `QueryValue` wire shape.
+fn filter_value_from_qv(value: &QueryValue) -> FilterValue {
+    let bytes = rmp_serde::to_vec_named(value).expect("serialize QueryValue");
+    rmp_serde::from_slice(&bytes).expect("deserialize FilterValue")
+}
+
 #[test]
 fn test_filter_eq_string() {
-    let filter = filter_from_value(&mpack!({
+    let filter = filter_from_qv(&mpack!({
         "op": "eq",
         "field": "status",
         "value": "active"
-    }))
-    .unwrap();
+    }));
     assert!(matches!(
         filter,
         Filter::Eq { field, value }
@@ -24,12 +50,11 @@ fn test_filter_eq_string() {
 
 #[test]
 fn test_filter_eq_integer() {
-    let filter = filter_from_value(&mpack!({
+    let filter = filter_from_qv(&mpack!({
         "op": "eq",
         "field": "count",
         "value": 42
-    }))
-    .unwrap();
+    }));
     assert!(matches!(
         filter,
         Filter::Eq { field, value }
@@ -39,12 +64,11 @@ fn test_filter_eq_integer() {
 
 #[test]
 fn test_filter_eq_boolean() {
-    let filter = filter_from_value(&mpack!({
+    let filter = filter_from_qv(&mpack!({
         "op": "eq",
         "field": "active",
         "value": true
-    }))
-    .unwrap();
+    }));
     assert!(matches!(
         filter,
         Filter::Eq { field, value }
@@ -54,12 +78,11 @@ fn test_filter_eq_boolean() {
 
 #[test]
 fn test_filter_eq_null() {
-    let filter = filter_from_value(&mpack!({
+    let filter = filter_from_qv(&mpack!({
         "op": "eq",
         "field": "deleted_at",
         "value": null
-    }))
-    .unwrap();
+    }));
     assert!(matches!(
         filter,
         Filter::Eq { field, value }
@@ -69,12 +92,11 @@ fn test_filter_eq_null() {
 
 #[test]
 fn test_filter_ne() {
-    let filter = filter_from_value(&mpack!({
+    let filter = filter_from_qv(&mpack!({
         "op": "ne",
         "field": "status",
         "value": "deleted"
-    }))
-    .unwrap();
+    }));
     assert!(matches!(
         filter,
         Filter::Ne { field, value }
@@ -84,12 +106,11 @@ fn test_filter_ne() {
 
 #[test]
 fn test_filter_gt() {
-    let filter = filter_from_value(&mpack!({
+    let filter = filter_from_qv(&mpack!({
         "op": "gt",
         "field": "age",
         "value": 18
-    }))
-    .unwrap();
+    }));
     assert!(matches!(
         filter,
         Filter::Gt { field, value }
@@ -99,12 +120,11 @@ fn test_filter_gt() {
 
 #[test]
 fn test_filter_gte() {
-    let filter = filter_from_value(&mpack!({
+    let filter = filter_from_qv(&mpack!({
         "op": "gte",
         "field": "salary",
         "value": 50000
-    }))
-    .unwrap();
+    }));
     assert!(matches!(
         filter,
         Filter::Gte { field, value }
@@ -114,12 +134,11 @@ fn test_filter_gte() {
 
 #[test]
 fn test_filter_lt() {
-    let filter = filter_from_value(&mpack!({
+    let filter = filter_from_qv(&mpack!({
         "op": "lt",
         "field": "age",
         "value": 65
-    }))
-    .unwrap();
+    }));
     assert!(matches!(
         filter,
         Filter::Lt { field, value }
@@ -129,12 +148,11 @@ fn test_filter_lt() {
 
 #[test]
 fn test_filter_lte() {
-    let filter = filter_from_value(&mpack!({
+    let filter = filter_from_qv(&mpack!({
         "op": "lte",
         "field": "stock",
         "value": 100
-    }))
-    .unwrap();
+    }));
     assert!(matches!(
         filter,
         Filter::Lte { field, value }
@@ -144,41 +162,38 @@ fn test_filter_lte() {
 
 #[test]
 fn test_filter_and() {
-    let filter = filter_from_value(&mpack!({
+    let filter = filter_from_qv(&mpack!({
         "op": "and",
         "filters": [
             { "op": "eq", "field": "status", "value": "active" },
             { "op": "gt", "field": "age", "value": 18 }
         ]
-    }))
-    .unwrap();
+    }));
     assert!(matches!(filter, Filter::And { filters } if filters.len() == 2));
 }
 
 #[test]
 fn test_filter_or() {
-    let filter = filter_from_value(&mpack!({
+    let filter = filter_from_qv(&mpack!({
         "op": "or",
         "filters": [
             { "op": "eq", "field": "role", "value": "admin" },
             { "op": "eq", "field": "role", "value": "moderator" }
         ]
-    }))
-    .unwrap();
+    }));
     assert!(matches!(filter, Filter::Or { filters } if filters.len() == 2));
 }
 
 #[test]
 fn test_filter_not() {
-    let filter = filter_from_value(&mpack!({
+    let filter = filter_from_qv(&mpack!({
         "op": "not",
         "filter": {
             "op": "eq",
             "field": "status",
             "value": "deleted"
         }
-    }))
-    .unwrap();
+    }));
     match filter {
         Filter::Not { filter: inner } => {
             assert!(matches!(*inner, Filter::Eq { .. }));
@@ -189,21 +204,19 @@ fn test_filter_not() {
 
 #[test]
 fn test_filter_is_null() {
-    let filter = filter_from_value(&mpack!({
+    let filter = filter_from_qv(&mpack!({
         "op": "is_null",
         "field": "deleted_at"
-    }))
-    .unwrap();
+    }));
     assert!(matches!(filter, Filter::IsNull { field } if field == vec!["deleted_at".to_string()]));
 }
 
 #[test]
 fn test_filter_is_not_null() {
-    let filter = filter_from_value(&mpack!({
+    let filter = filter_from_qv(&mpack!({
         "op": "is_not_null",
         "field": "email_verified_at"
-    }))
-    .unwrap();
+    }));
     assert!(
         matches!(filter, Filter::IsNotNull { field } if field == vec!["email_verified_at".to_string()])
     );
@@ -211,7 +224,7 @@ fn test_filter_is_not_null() {
 
 #[test]
 fn test_nested_logical_and_or() {
-    let filter = filter_from_value(&mpack!({
+    let filter = filter_from_qv(&mpack!({
         "op": "and",
         "filters": [
             {
@@ -223,14 +236,13 @@ fn test_nested_logical_and_or() {
             },
             { "op": "eq", "field": "active", "value": true }
         ]
-    }))
-    .unwrap();
+    }));
     assert!(matches!(filter, Filter::And { filters } if filters.len() == 2));
 }
 
 #[test]
 fn test_nested_logical_three_levels() {
-    let filter = filter_from_value(&mpack!({
+    let filter = filter_from_qv(&mpack!({
         "op": "and",
         "filters": [
             {
@@ -249,14 +261,13 @@ fn test_nested_logical_three_levels() {
                 ]
             }
         ]
-    }))
-    .unwrap();
+    }));
     assert!(matches!(filter, Filter::And { filters } if filters.len() == 3));
 }
 
 #[test]
 fn test_not_with_or() {
-    let filter = filter_from_value(&mpack!({
+    let filter = filter_from_qv(&mpack!({
         "op": "not",
         "filter": {
             "op": "or",
@@ -265,8 +276,7 @@ fn test_not_with_or() {
                 { "op": "eq", "field": "status", "value": "deleted" }
             ]
         }
-    }))
-    .unwrap();
+    }));
     match filter {
         Filter::Not { filter: inner } => {
             assert!(matches!(*inner, Filter::Or { .. }));
@@ -278,33 +288,33 @@ fn test_not_with_or() {
 #[test]
 fn test_filter_value_types() {
     // String
-    let v = filter_value_from_value(&QueryValue::Str("hello".to_string())).unwrap();
+    let v = filter_value_from_qv(&QueryValue::Str("hello".to_string()));
     assert!(matches!(v, FilterValue::String(s) if s == "hello"));
 
     // Integer
-    let v = filter_value_from_value(&QueryValue::Int(42)).unwrap();
+    let v = filter_value_from_qv(&QueryValue::Int(42));
     assert!(matches!(v, FilterValue::Int(42)));
 
     // Float
-    let v = filter_value_from_value(&QueryValue::F64(19.99)).unwrap();
+    let v = filter_value_from_qv(&QueryValue::F64(19.99));
     assert!(matches!(v, FilterValue::Float(f) if f == 19.99));
 
     // Boolean
-    let v = filter_value_from_value(&QueryValue::Bool(true)).unwrap();
+    let v = filter_value_from_qv(&QueryValue::Bool(true));
     assert!(matches!(v, FilterValue::Bool(true)));
 
     // Null
-    let v = filter_value_from_value(&QueryValue::Null).unwrap();
+    let v = filter_value_from_qv(&QueryValue::Null);
     assert!(matches!(v, FilterValue::Null));
 
     // Array
-    let v = filter_value_from_value(&mpack!([1, 2, 3])).unwrap();
+    let v = filter_value_from_qv(&mpack!([1, 2, 3]));
     assert!(matches!(v, FilterValue::Array(arr) if arr.len() == 3));
 }
 
 #[test]
 fn test_complex_permission_check() {
-    let filter = filter_from_value(&mpack!({
+    let filter = filter_from_qv(&mpack!({
         "op": "and",
         "filters": [
             {
@@ -322,8 +332,7 @@ fn test_complex_permission_check() {
             },
             { "op": "gt", "field": "trust_level", "value": 5 }
         ]
-    }))
-    .unwrap();
+    }));
     assert!(matches!(filter, Filter::And { filters } if filters.len() == 2));
 }
 
@@ -333,7 +342,7 @@ fn test_complex_permission_check() {
 
 #[test]
 fn test_filter_value_field_ref() {
-    let v = filter_value_from_value(&mpack!({ "$ref": "address.city" })).unwrap();
+    let v = filter_value_from_qv(&mpack!({ "$ref": ["address", "city"] }));
     assert!(
         matches!(v, FilterValue::FieldRef { path } if path == vec!["address".to_string(), "city".to_string()])
     );
@@ -341,7 +350,7 @@ fn test_filter_value_field_ref() {
 
 #[test]
 fn test_filter_value_field_ref_nested() {
-    let v = filter_value_from_value(&mpack!({ "$ref": "user.profile.bio" })).unwrap();
+    let v = filter_value_from_qv(&mpack!({ "$ref": ["user", "profile", "bio"] }));
     assert!(
         matches!(v, FilterValue::FieldRef { path } if path == vec!["user".to_string(), "profile".to_string(), "bio".to_string()])
     );
@@ -349,12 +358,11 @@ fn test_filter_value_field_ref_nested() {
 
 #[test]
 fn test_filter_eq_with_field_ref() {
-    let filter = filter_from_value(&mpack!({
+    let filter = filter_from_qv(&mpack!({
         "op": "eq",
         "field": "billing_city",
-        "value": { "$ref": "address.city" }
-    }))
-    .unwrap();
+        "value": { "$ref": ["address", "city"] }
+    }));
     match filter {
         Filter::Eq { field, value } => {
             assert_eq!(field, vec!["billing_city".to_string()]);
@@ -368,12 +376,11 @@ fn test_filter_eq_with_field_ref() {
 
 #[test]
 fn test_filter_gt_with_field_ref() {
-    let filter = filter_from_value(&mpack!({
+    let filter = filter_from_qv(&mpack!({
         "op": "gt",
         "field": "end_date",
-        "value": { "$ref": "start_date" }
-    }))
-    .unwrap();
+        "value": { "$ref": ["start_date"] }
+    }));
     match filter {
         Filter::Gt { field, value } => {
             assert_eq!(field, vec!["end_date".to_string()]);
@@ -387,25 +394,23 @@ fn test_filter_gt_with_field_ref() {
 
 #[test]
 fn test_filter_with_mixed_values() {
-    let filter = filter_from_value(&mpack!({
+    let filter = filter_from_qv(&mpack!({
         "op": "and",
         "filters": [
             { "op": "eq", "field": "status", "value": "active" },
-            { "op": "gte", "field": "salary", "value": { "$ref": "min_salary" } }
+            { "op": "gte", "field": "salary", "value": { "$ref": ["min_salary"] } }
         ]
-    }))
-    .unwrap();
+    }));
     assert!(matches!(filter, Filter::And { filters } if filters.len() == 2));
 }
 
 #[test]
 fn test_filter_value_array_with_field_refs() {
-    let v = filter_value_from_value(&mpack!([
-        { "$ref": "user.id" },
+    let v = filter_value_from_qv(&mpack!([
+        { "$ref": ["user", "id"] },
         42,
         "literal"
-    ]))
-    .unwrap();
+    ]));
     match v {
         FilterValue::Array(arr) => {
             assert_eq!(arr.len(), 3);
@@ -433,7 +438,7 @@ fn test_field_ref_helper() {
 
 #[test]
 fn test_fn_call_simple() {
-    let v = filter_value_from_value(&mpack!({ "$fn": "NOW" })).unwrap();
+    let v = filter_value_from_qv(&mpack!({ "$fn": "NOW" }));
     match v {
         FilterValue::FnCall { call } => {
             assert_eq!(call.name(), "NOW");
@@ -445,13 +450,12 @@ fn test_fn_call_simple() {
 
 #[test]
 fn test_fn_call_complex_with_args() {
-    let v = filter_value_from_value(&mpack!({
+    let v = filter_value_from_qv(&mpack!({
         "$fn": {
             "name": "COALESCE",
             "args": [null, "default"]
         }
-    }))
-    .unwrap();
+    }));
     match v {
         FilterValue::FnCall { call } => {
             assert_eq!(call.name(), "COALESCE");
@@ -463,12 +467,11 @@ fn test_fn_call_complex_with_args() {
 
 #[test]
 fn test_fn_call_in_filter() {
-    let filter = filter_from_value(&mpack!({
+    let filter = filter_from_qv(&mpack!({
         "op": "gte",
         "field": "created_at",
         "value": { "$fn": "NOW" }
-    }))
-    .unwrap();
+    }));
     match filter {
         Filter::Gte { field, value } => {
             assert_eq!(field, vec!["created_at".to_string()]);
@@ -484,8 +487,7 @@ fn test_fn_call_in_filter() {
 
 #[test]
 fn test_expr_add() {
-    let v =
-        filter_value_from_value(&mpack!({ "$expr": { "op": "add", "args": [10, 20] } })).unwrap();
+    let v = filter_value_from_qv(&mpack!({ "$expr": { "op": "add", "args": [10, 20] } }));
     match v {
         FilterValue::Expr { expr } => {
             assert!(matches!(expr.op, FilterExprOp::Add));
@@ -497,13 +499,12 @@ fn test_expr_add() {
 
 #[test]
 fn test_expr_mul_with_field_ref() {
-    let v = filter_value_from_value(&mpack!({
+    let v = filter_value_from_qv(&mpack!({
         "$expr": {
             "op": "mul",
-            "args": [{ "$ref": "price" }, 1.1]
+            "args": [{ "$ref": ["price"] }, 1.1]
         }
-    }))
-    .unwrap();
+    }));
     match v {
         FilterValue::Expr { expr } => {
             assert!(matches!(expr.op, FilterExprOp::Mul));
@@ -515,13 +516,12 @@ fn test_expr_mul_with_field_ref() {
 
 #[test]
 fn test_expr_concat() {
-    let v = filter_value_from_value(&mpack!({
+    let v = filter_value_from_qv(&mpack!({
         "$expr": {
             "op": "concat",
-            "args": [{ "$ref": "first" }, " ", { "$ref": "last" }]
+            "args": [{ "$ref": ["first"] }, " ", { "$ref": ["last"] }]
         }
-    }))
-    .unwrap();
+    }));
     match v {
         FilterValue::Expr { expr } => {
             assert!(matches!(expr.op, FilterExprOp::Concat));
@@ -533,17 +533,16 @@ fn test_expr_concat() {
 
 #[test]
 fn test_expr_in_filter() {
-    let filter = filter_from_value(&mpack!({
+    let filter = filter_from_qv(&mpack!({
         "op": "gt",
         "field": "total",
         "value": {
             "$expr": {
                 "op": "mul",
-                "args": [{ "$ref": "price" }, { "$ref": "quantity" }]
+                "args": [{ "$ref": ["price"] }, { "$ref": ["quantity"] }]
             }
         }
-    }))
-    .unwrap();
+    }));
     match filter {
         Filter::Gt { field, value } => {
             assert_eq!(field, vec!["total".to_string()]);
@@ -559,14 +558,13 @@ fn test_expr_in_filter() {
 
 #[test]
 fn test_cond_simple() {
-    let v = filter_value_from_value(&mpack!({
+    let v = filter_value_from_qv(&mpack!({
         "$cond": {
             "if": { "op": "eq", "field": "active", "value": true },
             "then": "yes",
             "else": "no"
         }
-    }))
-    .unwrap();
+    }));
     match v {
         FilterValue::Cond { cond } => {
             assert!(matches!(*cond.condition, Filter::Eq { .. }));
@@ -579,14 +577,13 @@ fn test_cond_simple() {
 
 #[test]
 fn test_cond_with_expr_in_branches() {
-    let v = filter_value_from_value(&mpack!({
+    let v = filter_value_from_qv(&mpack!({
         "$cond": {
             "if": { "op": "gte", "field": "score", "value": 100 },
-            "then": { "$expr": { "op": "mul", "args": [{ "$ref": "score" }, 2] } },
-            "else": { "$ref": "score" }
+            "then": { "$expr": { "op": "mul", "args": [{ "$ref": ["score"] }, 2] } },
+            "else": { "$ref": ["score"] }
         }
-    }))
-    .unwrap();
+    }));
     match v {
         FilterValue::Cond { cond } => {
             assert!(matches!(*cond.condition, Filter::Gte { .. }));
@@ -599,7 +596,7 @@ fn test_cond_with_expr_in_branches() {
 
 #[test]
 fn test_cond_nested() {
-    let v = filter_value_from_value(&mpack!({
+    let v = filter_value_from_qv(&mpack!({
         "$cond": {
             "if": { "op": "gte", "field": "score", "value": 100 },
             "then": "vip",
@@ -611,8 +608,7 @@ fn test_cond_nested() {
                 }
             }
         }
-    }))
-    .unwrap();
+    }));
     match v {
         FilterValue::Cond { cond } => {
             assert!(matches!(*cond.condition, Filter::Gte { .. }));
@@ -625,7 +621,7 @@ fn test_cond_nested() {
 
 #[test]
 fn test_cond_in_filter() {
-    let filter = filter_from_value(&mpack!({
+    let filter = filter_from_qv(&mpack!({
         "op": "eq",
         "field": "tier",
         "value": {
@@ -635,8 +631,7 @@ fn test_cond_in_filter() {
                 "else": "regular"
             }
         }
-    }))
-    .unwrap();
+    }));
     match filter {
         Filter::Eq { field, value } => {
             assert_eq!(field, vec!["tier".to_string()]);

@@ -87,7 +87,26 @@ impl TableManager {
     }
 
     pub(super) async fn index2_on_insert(&self, rid: &RecordId, rec: &InnerValue) -> DbResult<()> {
-        for backend in self.index2_registry.all_backends().await {
+        let backends = self.index2_registry.all_backends().await;
+        self.index2_on_insert_with_backends(&backends, rid, rec)
+            .await
+    }
+
+    /// Batched sibling of [`index2_on_insert`](Self::index2_on_insert) —
+    /// takes a pre-fetched backend snapshot instead of calling
+    /// `all_backends()` itself. Lets a per-record loop hoist the
+    /// `all_backends()` walk (an `scc::HashMap` iteration) ABOVE the loop
+    /// and reuse the same list for every record, instead of re-walking the
+    /// registry once per record for a backend set that cannot change
+    /// mid-batch (no DDL can mutate the index2 registry concurrently with
+    /// an in-flight batch insert on the same table).
+    async fn index2_on_insert_with_backends(
+        &self,
+        backends: &[std::sync::Arc<dyn crate::index2::backend::IndexBackend>],
+        rid: &RecordId,
+        rec: &InnerValue,
+    ) -> DbResult<()> {
+        for backend in backends {
             let ops = backend.plan_insert(*rid, rec).await.map_err(Self::io_err)?;
             crate::index2::apply_index_ops(&ops, &self.info_store, backend.as_ref())
                 .await
@@ -370,8 +389,15 @@ impl TableManager {
         self.sorted_indexes
             .on_records_created_batch(pairs_iter(), batch_version)
             .await?;
+        // Hoist the `all_backends()` walk out of the per-record loop below —
+        // see `index2_on_insert_with_backends`'s doc: the backend set is
+        // stable for the duration of this batch, so re-walking the registry
+        // once per record (O(records × backends)) is pure waste versus
+        // walking it once and reusing the list (O(backends)).
+        let index2_backends = self.index2_registry.all_backends().await;
         for (id, value) in pairs_iter() {
-            self.index2_on_insert(id, value).await?;
+            self.index2_on_insert_with_backends(&index2_backends, id, value)
+                .await?;
         }
 
         // 5. Bump the watchdog. Every AUTO_VERIFY_EVERY_N_WRITES

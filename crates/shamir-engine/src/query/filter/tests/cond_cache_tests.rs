@@ -1,19 +1,28 @@
 //! Test coverage for `CondCache`'s cache-hit path (#665 — #643 gap).
 //!
-//! #643 added a pointer-keyed cache (`CondCache`) mapping a `$cond`'s
-//! `condition: Box<Filter>` (by raw address) to its pre-compiled
-//! `FilterNode`, so `resolve_filter_query`'s `FilterValue::Cond` arm can
-//! reuse a compiled node across many records instead of recompiling
-//! `cond.condition` on every row. Before this file, ZERO test exercised any
-//! of `prescan_cond_cache`, `cond_cache_get`, or — most importantly — the
+//! #643 added a cache (`CondCache`) mapping a `$cond`'s
+//! `condition: Box<Filter>` to its pre-compiled `FilterNode`, so
+//! `resolve_filter_query`'s `FilterValue::Cond` arm can reuse a compiled
+//! node across many records instead of recompiling `cond.condition` on
+//! every row. Before this file, ZERO test exercised any of
+//! `prescan_cond_cache`, `cond_cache_get`, or — most importantly — the
 //! actual cache-HIT branch inside `resolve_filter_query` (`Some(node) =>
 //! node.matches(record, ctx)`). This is exactly the class of gap a
 //! performance optimization can hide: the cache could silently freeze a
 //! `$cond`'s answer to whichever record happened to populate it, and
 //! nothing would catch it, because nothing exercised the hit path at all.
 //!
+//! Group 13 Defect 2 fix: the cache key was originally the raw pointer
+//! address of `cond.condition` — sound only as long as the cache never
+//! outlives the exact allocation it was built from, an invariant nothing
+//! enforced. It is now derived from `condition`'s CONTENT (see
+//! `cond_cache.rs`'s doc comment), which closes the address-reuse hazard
+//! outright: a dropped-and-reallocated `Filter` tree can never cause a
+//! stale compiled predicate to leak into an unrelated query's evaluation.
+//!
 //! Part A (tests 1-4): direct unit tests for `prescan_cond_cache` /
-//! `cond_cache_get`'s structural/pointer-identity behaviour.
+//! `cond_cache_get`'s structural/content-identity behaviour, including the
+//! Defect 2 regression proofs (tests 2 and 2b).
 //! Part B (tests 5-7): the decisive tests proving the cache-HIT path
 //! re-evaluates `node.matches(record, ctx)` per call rather than baking in
 //! a frozen answer at cache-population time.
@@ -76,9 +85,8 @@ fn prescan_populates_simple_cond() {
     let mut cache: CondCache = new_map();
     prescan_cond_cache(&fv, &interner, &mut cache);
 
-    // Destructure the SAME owned tree the cache was built from — pointer
-    // identity is the cache key, so looking up via a cloned/rebuilt `Cond`
-    // would (correctly) miss. See `CondCache`'s doc comment.
+    // Destructure the SAME owned tree the cache was built from and look up
+    // via its content-derived key. See `CondCache`'s doc comment.
     let inner_cond = as_cond(&fv);
     assert!(
         cond_cache_get(&cache, &inner_cond.condition).is_some(),
@@ -86,14 +94,21 @@ fn prescan_populates_simple_cond() {
     );
 }
 
-/// Test 2: `cond_cache_get`'s pointer-identity miss path: two INDEPENDENT `Cond`s
-/// (distinct `Box<Filter>` allocations, distinct addresses). Only the first
-/// is prescanned; looking up the second's condition must miss.
+/// Test 2 (group 13 Defect 2 regression): two INDEPENDENT `Cond`s with
+/// IDENTICAL content (distinct `Box<Filter>` allocations, distinct
+/// addresses) now correctly HIT — the key is derived from content, not
+/// address. This is the direct proof that the fix closes the address-reuse
+/// hazard: under the OLD pointer-identity design, a `Filter` tree dropped
+/// and a semantically identical (or different) tree reallocated at the same
+/// freed address could never be told apart from "genuinely the same tree"
+/// by the cache; now, content alone decides — a dropped tree's freed
+/// address is irrelevant to whatever gets cached against a NEW tree
+/// allocated there.
 #[test]
-fn cond_cache_get_misses_unregistered_condition() {
+fn cond_cache_get_hits_structurally_identical_condition_from_a_different_allocation() {
     let interner = Interner::new();
     let first = make_score_cond();
-    let second = make_score_cond(); // structurally identical, but a DIFFERENT allocation
+    let second = make_score_cond(); // identical content, DIFFERENT allocation
 
     let fv_first = FilterValue::Cond {
         cond: Box::new(first),
@@ -102,19 +117,91 @@ fn cond_cache_get_misses_unregistered_condition() {
     let mut cache: CondCache = new_map();
     prescan_cond_cache(&fv_first, &interner, &mut cache);
 
-    // `second` was never prescanned — its condition lives at a different
-    // address than `fv_first`'s, so pointer-identity lookup must miss.
+    // `second` was never itself prescanned, but its content is identical to
+    // `fv_first`'s condition — content-keying makes this a HIT.
     assert!(
-        cond_cache_get(&cache, &second.condition).is_none(),
-        "cond_cache_get must miss for a condition that was never prescanned \
-         (distinct pointer, even if structurally identical)"
+        cond_cache_get(&cache, &second.condition).is_some(),
+        "cond_cache_get must HIT for a condition with IDENTICAL content, even \
+         from an entirely separate allocation — the key is derived from \
+         content, not address"
+    );
+}
+
+/// Test 2b (Defect 2, the negative case): a genuinely DIFFERENT condition
+/// (different field/threshold) that was never prescanned must still miss —
+/// content-keying doesn't mean "always hit", it means the address is
+/// irrelevant to the (correct) hit/miss decision.
+#[test]
+fn cond_cache_get_misses_a_genuinely_different_condition() {
+    let interner = Interner::new();
+    let first = make_score_cond(); // score > 50
+
+    let fv_first = FilterValue::Cond {
+        cond: Box::new(first),
+    };
+
+    let mut cache: CondCache = new_map();
+    prescan_cond_cache(&fv_first, &interner, &mut cache);
+
+    let different = Cond::new(
+        Filter::Lt {
+            field: vec!["age".to_string()],
+            value: FilterValue::Int(18),
+        },
+        FilterValue::String("minor".to_string()),
+        FilterValue::String("adult".to_string()),
+    );
+
+    assert!(
+        cond_cache_get(&cache, &different.condition).is_none(),
+        "cond_cache_get must miss for a genuinely different condition that \
+         was never prescanned"
+    );
+}
+
+/// Test 2c (Defect 2, drop-and-reallocate): the FIRST `Filter` tree is
+/// fully dropped (its `Box<Filter>` freed) before a SECOND, semantically
+/// DIFFERENT tree is built and looked up. This is the literal scenario the
+/// review flagged: if the allocator happened to reuse the freed address for
+/// the new tree, a pointer-keyed cache could have silently served the
+/// FIRST tree's stale compiled predicate for the SECOND tree's condition.
+/// This test cannot force real address reuse portably, but it doesn't need
+/// to: the content-derived key makes the allocator's behavior irrelevant —
+/// the assertion holds regardless of where either tree happens to live.
+#[test]
+fn cond_cache_never_collides_across_dropped_and_reallocated_trees() {
+    let interner = Interner::new();
+    let mut cache: CondCache = new_map();
+
+    {
+        let first = make_score_cond(); // score > 50
+        let fv_first = FilterValue::Cond {
+            cond: Box::new(first),
+        };
+        prescan_cond_cache(&fv_first, &interner, &mut cache);
+        assert_eq!(cache.len(), 1);
+    } // fv_first (and its Box<Filter>) is dropped here — allocation freed.
+
+    let different = Cond::new(
+        Filter::Lt {
+            field: vec!["age".to_string()],
+            value: FilterValue::Int(18),
+        },
+        FilterValue::String("minor".to_string()),
+        FilterValue::String("adult".to_string()),
+    );
+
+    assert!(
+        cond_cache_get(&cache, &different.condition).is_none(),
+        "a genuinely different condition must MISS even if its allocation \
+         happens to reuse a freed address — content, not address, decides \
+         the cache key"
     );
 }
 
 /// Extract the innermost nested `Cond`'s `condition` reference back out of a
-/// `FilterValue::Cond` wrapper, for pointer-identity lookup after prescan.
-/// Avoids raw pointers/`unsafe` — just destructures the same owned tree the
-/// cache was built from.
+/// `FilterValue::Cond` wrapper, for `cond_cache_get` lookup after prescan.
+/// Just destructures the same owned tree the cache was built from.
 fn as_cond(fv: &FilterValue) -> &Cond {
     match fv {
         FilterValue::Cond { cond } => cond,
@@ -329,7 +416,7 @@ fn prescan_recurses_into_all_documented_shapes() {
 
 /// Test 4: Repeated `prescan_cond_cache` calls on the SAME `FilterValue` tree into
 /// the SAME cache are idempotent: still exactly one entry for that
-/// condition's pointer, and `cond_cache_get` still resolves it correctly.
+/// condition's content key, and `cond_cache_get` still resolves it correctly.
 /// Guards the `or_insert_with` idempotency the doc comment implies but never
 /// tests.
 #[test]
@@ -354,7 +441,7 @@ fn repeated_prescan_of_same_condition_is_idempotent() {
     );
 
     // The FilterValue::Cond { cond } destructures back out to inspect
-    // the address that was originally cached.
+    // the condition that was originally cached.
     let FilterValue::Cond { cond } = &fv else {
         unreachable!()
     };

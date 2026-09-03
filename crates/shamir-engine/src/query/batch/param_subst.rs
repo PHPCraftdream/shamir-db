@@ -142,14 +142,16 @@ pub(super) fn contains_param_ref(value: &QueryValue) -> bool {
 const DUMMY_RECORD: InnerValue = InnerValue::Null;
 
 /// Error detail for a write-value marker that failed to resolve.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, thiserror::Error)]
 pub(super) enum WriteValueError {
     /// `$param '<name>'` is not bound in this sub-batch (unchanged from the
     /// pre-existing `$param`-only behavior).
+    #[error("$param '{0}' is not bound in this sub-batch")]
     UnboundParam(String),
     /// A `$query`/`$fn`/`$cond`/`$expr` marker failed to resolve (malformed
     /// payload, unknown alias/function, etc). Carries a human-readable
     /// description of the offending marker for the error message.
+    #[error("{0}")]
     MalformedMarker(String),
 }
 

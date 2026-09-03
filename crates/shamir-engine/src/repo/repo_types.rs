@@ -15,6 +15,8 @@ use shamir_storage::storage_membuffer::{MemBufferConfig, MemBufferStore};
 #[cfg(feature = "fjall")]
 use shamir_storage::storage_mirrored::{is_durable_table_config, MirroredStore};
 
+#[cfg(feature = "fjall")]
+use shamir_collections::TFxSet;
 use shamir_storage::types::{Repo, Store};
 #[cfg(feature = "fjall")]
 use shamir_types::types::common::THasher;
@@ -203,13 +205,33 @@ impl HybridRepoComposite {
     }
 
     async fn stores_list_routed(&self) -> DbResult<Vec<String>> {
-        let mut names: Vec<String> = self.mem.stores_list().await?;
-        for disk_name in self.disk.stores_list().await? {
-            if !names.contains(&disk_name) {
+        let mem_names = self.mem.stores_list().await?;
+        let disk_names = self.disk.stores_list().await?;
+        Ok(Self::merge_store_names(mem_names, disk_names))
+    }
+
+    /// Merges `disk_names` into `names`, skipping any `disk_names` entry
+    /// already present in the (growing) result. Same de-dup semantics as
+    /// the linear-scan `!names.contains(&disk_name)` check this replaces,
+    /// but O(1) amortized per disk name via a `TFxSet` built once up
+    /// front, instead of an O(names) scan per disk name (O(names × stores)
+    /// overall — schema-sized, so it grows with the number of
+    /// tables/stores in the repo). `pub(crate)` so `crate::repo::tests`
+    /// can unit-test the merge logic directly against edge cases (empty
+    /// input, duplicate disk names, disk names already in `names`)
+    /// without needing to coax genuine duplicates out of a real
+    /// `FjallRepo::stores_list()`.
+    pub(crate) fn merge_store_names(
+        mut names: Vec<String>,
+        disk_names: Vec<String>,
+    ) -> Vec<String> {
+        let mut seen: TFxSet<String> = names.iter().cloned().collect();
+        for disk_name in disk_names {
+            if seen.insert(disk_name.clone()) {
                 names.push(disk_name);
             }
         }
-        Ok(names)
+        names
     }
 }
 

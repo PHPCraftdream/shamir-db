@@ -8,8 +8,10 @@
 
 use std::sync::Arc;
 
+use bytes::Bytes;
+use shamir_storage::error::DbError;
 use shamir_storage::storage_in_memory::InMemoryRepo;
-use shamir_storage::types::Store;
+use shamir_storage::types::{Repo, Store};
 use shamir_tx::{IsolationLevel, TxContext, TxId};
 use shamir_types::access::Actor;
 use shamir_types::types::record_id::RecordId;
@@ -17,7 +19,7 @@ use shamir_types::types::value::InnerValue;
 
 use crate::repo::{BoxRepo, RepoInstance};
 use crate::table::TableConfig;
-use crate::tx::{apply_replicated, ApplyOutcome};
+use crate::tx::{apply_replicated, ApplyOutcome, ApplyPolicy};
 
 /// Build an in-memory follower repo with one configured table `items`.
 fn follower_repo() -> RepoInstance {
@@ -81,7 +83,9 @@ async fn put_convergence() {
 
     let event = put_event("hello", rid(1), 1);
 
-    let outcome = apply_replicated(&follower, &event, 0).await.unwrap();
+    let outcome = apply_replicated(&follower, &event, 0, ApplyPolicy::Trusted)
+        .await
+        .unwrap();
     let local_v = match outcome {
         ApplyOutcome::Applied { local_version } => local_version,
         other => panic!("expected Applied, got {other:?}"),
@@ -107,13 +111,17 @@ async fn delete_convergence() {
     let put_ev = put_event("tmp", rid(7), 1);
     let del_ev = delete_event(rid(7), 2);
 
-    let _ = apply_replicated(&follower, &put_ev, 0).await.unwrap();
+    let _ = apply_replicated(&follower, &put_ev, 0, ApplyPolicy::Trusted)
+        .await
+        .unwrap();
     // Confirm Put landed first.
     let got = follower_tbl.get(rid(7)).await.unwrap();
     assert!(matches!(got, InnerValue::Str(ref s) if s == "tmp"));
 
     // Apply Delete — watermark is 1 (Put's leader version).
-    let outcome = apply_replicated(&follower, &del_ev, 1).await.unwrap();
+    let outcome = apply_replicated(&follower, &del_ev, 1, ApplyPolicy::Trusted)
+        .await
+        .unwrap();
     assert!(matches!(outcome, ApplyOutcome::Applied { .. }));
 
     // Record is now absent.
@@ -136,7 +144,9 @@ async fn idempotent_reapply_is_skip() {
     let event = put_event("v3", rid(3), 5);
 
     // First apply at watermark 0 → Applied.
-    let first = apply_replicated(&follower, &event, 0).await.unwrap();
+    let first = apply_replicated(&follower, &event, 0, ApplyPolicy::Trusted)
+        .await
+        .unwrap();
     assert!(matches!(first, ApplyOutcome::Applied { .. }));
 
     // Capture the follower's gate floor after the first apply.
@@ -145,7 +155,9 @@ async fn idempotent_reapply_is_skip() {
 
     // Second apply with watermark = event.commit_version (5) → Skipped, no
     // version consumed, no state change.
-    let second = apply_replicated(&follower, &event, 5).await.unwrap();
+    let second = apply_replicated(&follower, &event, 5, ApplyPolicy::Trusted)
+        .await
+        .unwrap();
     assert_eq!(second, ApplyOutcome::Skipped);
 
     // No new version allocated.
@@ -171,7 +183,9 @@ async fn watermark_ordering() {
     {
         let follower = follower_repo();
         let follower_tbl = follower.get_table("items").await.unwrap();
-        let outcome = apply_replicated(&follower, &event, 3).await.unwrap();
+        let outcome = apply_replicated(&follower, &event, 3, ApplyPolicy::Trusted)
+            .await
+            .unwrap();
         assert!(matches!(outcome, ApplyOutcome::Applied { .. }));
         let got = follower_tbl.get(rid(9)).await.unwrap();
         assert!(matches!(got, InnerValue::Str(ref s) if s == "ord"));
@@ -181,7 +195,9 @@ async fn watermark_ordering() {
     {
         let follower = follower_repo();
         let _ = follower.get_table("items").await.unwrap();
-        let outcome = apply_replicated(&follower, &event, 5).await.unwrap();
+        let outcome = apply_replicated(&follower, &event, 5, ApplyPolicy::Trusted)
+            .await
+            .unwrap();
         assert_eq!(outcome, ApplyOutcome::Skipped);
     }
 
@@ -189,7 +205,9 @@ async fn watermark_ordering() {
     {
         let follower = follower_repo();
         let follower_tbl = follower.get_table("items").await.unwrap();
-        let outcome = apply_replicated(&follower, &event, 4).await.unwrap();
+        let outcome = apply_replicated(&follower, &event, 4, ApplyPolicy::Trusted)
+            .await
+            .unwrap();
         assert!(matches!(outcome, ApplyOutcome::Applied { .. }));
         let got = follower_tbl.get(rid(9)).await.unwrap();
         assert!(matches!(got, InnerValue::Str(ref s) if s == "ord"));
@@ -213,7 +231,9 @@ async fn downstream_changefeed_reemit() {
 
     let event = put_event("chain", rid(11), 7);
 
-    let outcome = apply_replicated(&follower, &event, 0).await.unwrap();
+    let outcome = apply_replicated(&follower, &event, 0, ApplyPolicy::Trusted)
+        .await
+        .unwrap();
     let local_v = match outcome {
         ApplyOutcome::Applied { local_version } => local_version,
         other => panic!("expected Applied, got {other:?}"),
@@ -258,7 +278,9 @@ async fn apply_before_any_read_is_mvcc_visible() {
     // Apply FIRST — the follower has never read `items`, so its MvccStore
     // is not yet attached at the top of apply_replicated.
     let event = put_event("fresh", rid(3), 1);
-    let outcome = apply_replicated(&follower, &event, 0).await.unwrap();
+    let outcome = apply_replicated(&follower, &event, 0, ApplyPolicy::Trusted)
+        .await
+        .unwrap();
     assert!(
         matches!(outcome, ApplyOutcome::Applied { .. }),
         "apply on a fresh follower should succeed"
@@ -308,7 +330,9 @@ async fn a12_success_path_completion_watermark_advances_past_replicated_version(
     // Step 1 — apply_replicated allocates local_version = 1 (N) and (post-fix)
     // marks it `Materialized` in `completion` via the VersionGuard's `commit()`.
     let event = put_event("a12-ok", rid(21), 1);
-    let outcome = apply_replicated(&follower, &event, 0).await.unwrap();
+    let outcome = apply_replicated(&follower, &event, 0, ApplyPolicy::Trusted)
+        .await
+        .unwrap();
     let n = match outcome {
         ApplyOutcome::Applied { local_version } => local_version,
         other => panic!("expected Applied, got {other:?}"),
@@ -394,7 +418,7 @@ async fn a12_failure_path_version_marked_aborted_in_completion_tracker() {
         }],
     };
 
-    let err = apply_replicated(&follower, &bad_event, 0).await;
+    let err = apply_replicated(&follower, &bad_event, 0, ApplyPolicy::Trusted).await;
     assert!(err.is_err(), "Put with no value must fail; got {err:?}");
 
     // The burned version (N = 1) MUST be terminally marked `Aborted` in the
@@ -441,7 +465,9 @@ async fn a12_regression_success_path_preserves_data_changefeed_and_durable() {
     let mut rx = follower.subscribe_changelog().await.unwrap();
 
     let event = put_event("regress", rid(41), 3);
-    let outcome = apply_replicated(&follower, &event, 0).await.unwrap();
+    let outcome = apply_replicated(&follower, &event, 0, ApplyPolicy::Trusted)
+        .await
+        .unwrap();
     let n = match outcome {
         ApplyOutcome::Applied { local_version } => local_version,
         other => panic!("expected Applied, got {other:?}"),
@@ -471,4 +497,170 @@ async fn a12_regression_success_path_preserves_data_changefeed_and_durable() {
     );
     assert_eq!(gate.durable_watermark(), n);
     assert_eq!(gate.last_committed(), n);
+}
+
+// ── Group 16, Defect 2 — non-NotFound attach failure must not be swallowed ──
+
+/// Build a follower repo with `items` configured but its `__info__items`
+/// store pre-corrupted at the exact key `IndexManager::new` reads FIRST on
+/// table open (`RecordId::system("indexes")`). `IndexInfo::decode_bytes` on
+/// garbage bytes there fails with a genuine `DbError::Codec` — a real,
+/// non-`NotFound` attach failure reachable through `get_table` /
+/// `create_table_context` with no `BoxRepo`/`Repo` fault-injection rewrite
+/// needed (`BoxRepo` is a closed enum; corrupting on-disk-shaped content
+/// through the public `Store` API is the established, reusable seam — see
+/// `IndexManager::new`'s F-83 corruption policy in
+/// `shamir-index/src/base_index/index_manager.rs`).
+///
+/// Returns the follower AND the raw backing `InMemoryRepo` so the test can
+/// inspect `__data__items` directly afterward — `items` can never be opened
+/// through the normal `TableManager` path given the corruption, so a raw
+/// store read is the only way to prove no write landed.
+async fn follower_repo_with_corrupt_items_info() -> (RepoInstance, Arc<InMemoryRepo>) {
+    let mem = Arc::new(InMemoryRepo::new());
+    let info_store = mem.store_get("__info__items").await.unwrap();
+    info_store
+        .set(
+            RecordId::system("indexes").to_bytes().into(),
+            Bytes::from_static(b"not valid index metadata"),
+        )
+        .await
+        .unwrap();
+    let follower = RepoInstance::new(
+        "follower".into(),
+        BoxRepo::InMemory(Arc::clone(&mem)),
+        vec![TableConfig::new("items")],
+    );
+    (follower, mem)
+}
+
+/// Regression: `apply_replicated` forces the per-table MVCC attach via
+/// `repo.get_table(&table_name)` and, before the fix, discarded EVERY error
+/// from that call (`let _ = repo.get_table(&table_name).await;`) — not just
+/// the expected "table not configured yet" `NotFound` case.
+///
+/// The corruption this test injects fails `TableManager::create` (via
+/// `IndexManager::new`) AFTER `create_table_context` has already registered
+/// the freshly-built `MvccStore` in `per_table_mvcc` (see
+/// `repo_instance.rs::create_table_context`'s ordering — the `insert_sync`
+/// attach happens before the `TableManager::create` call that fails here).
+/// So pre-fix, discarding the `get_table` error did NOT fall through to the
+/// `base.transact` branch as the general case would — it found that
+/// ORPHANED `MvccStore` entry via `per_table_mvcc().read_sync` and wrote the
+/// replicated record straight into it via `apply_committed_ops`, then ran
+/// the full success tail (`mark_durable` / `persist_markers` / downstream
+/// changefeed re-emit) and returned `Ok(ApplyOutcome::Applied)` — even
+/// though `items` can never actually be opened for reads again. Since the
+/// caller (`follower_loop`) only advances the durable replication bookmark
+/// after `Ok(ApplyOutcome::Applied)`, it would advance the bookmark past an
+/// event whose data is now stranded in an unreachable store, and no retry
+/// could ever repair the divergence.
+///
+/// Post-fix: the non-`NotFound` error propagates immediately — before the
+/// `per_table_mvcc` lookup is even reached — so neither the orphaned-mvcc
+/// write nor the finalize tail (`version_guard.commit()`, `mark_durable`,
+/// `persist_markers`, downstream changefeed re-emit) ever runs.
+///
+/// Note: the allocated `local_version` IS still terminally marked `Aborted`
+/// in the gate's completion/durable trackers via the `VersionGuard`'s
+/// `Drop` (the same A12 mechanism `a12_failure_path_version_marked_aborted_in_completion_tracker`
+/// exercises for a different failure) — that is a DELIBERATE, unrelated
+/// contiguous-watermark bookkeeping guarantee, not evidence the write went
+/// through. The absence of a downstream changefeed re-emit is what actually
+/// distinguishes "the finalize tail ran" from "it didn't".
+#[tokio::test]
+async fn get_table_attach_failure_is_not_swallowed() {
+    let (follower, mem) = follower_repo_with_corrupt_items_info().await;
+    // Subscribe BEFORE the failing apply so a (wrongly) re-emitted
+    // downstream event would be observable via `try_recv()` afterward.
+    let mut rx = follower.subscribe_changelog().await.unwrap();
+
+    let event = put_event("should-not-land", rid(50), 1);
+
+    let err = apply_replicated(&follower, &event, 0, ApplyPolicy::Trusted)
+        .await
+        .expect_err("a genuine non-NotFound attach failure must propagate, not be swallowed");
+    assert!(
+        !matches!(err, DbError::NotFound(_)),
+        "expected a genuine attach failure (Codec/Internal), got NotFound: {err:?}"
+    );
+
+    // The finalize tail must NOT have run: no downstream changefeed
+    // re-emit. `try_recv` is deterministic here (no other task can have
+    // produced on this broadcast channel by the time `apply_replicated`
+    // has already returned).
+    assert!(
+        matches!(
+            rx.try_recv(),
+            Err(tokio::sync::broadcast::error::TryRecvError::Empty)
+        ),
+        "the finalize tail (downstream changefeed re-emit) must not run when \
+         the forced attach genuinely failed"
+    );
+
+    // Orthogonal confirmation: the direct `base.transact` fallback (the
+    // OTHER branch a swallowed error could have taken, in the general case
+    // where no orphaned `per_table_mvcc` entry exists) must not have run
+    // either — `items` can never open through the normal path given the
+    // corruption, so read the raw `__data__items` store directly.
+    let raw_data_store = mem.store_get("__data__items").await.unwrap();
+    let raw_get = raw_data_store.get(rid(50).to_bytes().into()).await;
+    assert!(
+        matches!(raw_get, Err(DbError::NotFound(_))),
+        "no write should have landed via the base-store fallback: {raw_get:?}"
+    );
+}
+
+/// #1199 — `ApplyPolicy::ValidatePayload` rejects a `Put` whose `value`
+/// bytes decode as neither `RecordView` nor `InnerValue`, and consumes NO
+/// version doing so — unlike the `Trusted`-policy failure in
+/// `a12_failure_path_version_marked_aborted_in_completion_tracker` above
+/// (where the watermark DOES advance, because that failure is discovered
+/// AFTER `assign_next_version_guarded`). The identical event, re-applied
+/// under `Trusted`, is accepted verbatim — proving the two policies
+/// genuinely diverge in observable behavior, not just in name.
+#[tokio::test]
+async fn validate_payload_rejects_undecodable_put_and_consumes_no_version() {
+    let follower = follower_repo();
+    let _ = follower.get_table("items").await.unwrap();
+    let gate = follower.tx_gate().await.unwrap();
+    assert_eq!(gate.completion().watermark(), 0);
+
+    // 0xC1 is msgpack's permanently reserved/never-used marker byte — both
+    // `RecordView::new` (top-level map-header read) and `InnerValue::from_bytes`
+    // (full `rmp_serde` decode) error on it deterministically.
+    let garbage_event = shamir_tx::ChangelogEvent {
+        repo: "leader".into(),
+        commit_version: 1,
+        tx_id: 1,
+        actor: Actor::User(42),
+        timestamp_ns: 0,
+        changes: vec![shamir_tx::RecordChange {
+            table: "items".into(),
+            key: rid(50).to_bytes(),
+            op: shamir_tx::ChangeOp::Put,
+            value: Some(vec![0xC1u8].into()),
+        }],
+    };
+
+    let err = apply_replicated(&follower, &garbage_event, 0, ApplyPolicy::ValidatePayload).await;
+    assert!(
+        err.is_err(),
+        "an undecodable Put payload must be rejected under ValidatePayload; got {err:?}"
+    );
+    assert_eq!(
+        gate.completion().watermark(),
+        0,
+        "a ValidatePayload rejection must consume NO version — the decode \
+         check runs before assign_next_version_guarded"
+    );
+
+    // Same event, Trusted policy: applied verbatim (no decode check).
+    let outcome = apply_replicated(&follower, &garbage_event, 0, ApplyPolicy::Trusted)
+        .await
+        .unwrap();
+    assert!(
+        matches!(outcome, ApplyOutcome::Applied { .. }),
+        "Trusted must apply the same garbage bytes verbatim; got {outcome:?}"
+    );
 }

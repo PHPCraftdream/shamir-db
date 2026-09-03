@@ -45,7 +45,8 @@ use smallvec::smallvec;
 use crate::db_instance::db_instance::DbInstance;
 use crate::query::batch::TableResolver;
 use crate::query::batch::{
-    commit_interactive_tx, execute_batch, execute_in_open_tx, open_interactive_tx,
+    commit_interactive_tx, execute_batch_unchecked as execute_batch,
+    execute_in_open_tx_unchecked as execute_in_open_tx, open_interactive_tx,
 };
 use crate::query::TableRef;
 use crate::repo::repo_types::BoxRepoFactory;

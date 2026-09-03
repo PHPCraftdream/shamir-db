@@ -1,4 +1,8 @@
+use std::hash::{Hash, Hasher};
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
+
+use futures::FutureExt;
 
 use super::buffer_config;
 use super::interner_manager::InternerManager;
@@ -7,13 +11,13 @@ use super::record_counter::RecordCounter;
 use super::table::Table;
 use crate::index::index_manager::IndexManager;
 use crate::index::sorted_index_manager::SortedIndexManager;
+use crate::index2::kind::{StemLanguage, TokenizerKind};
 use shamir_storage::error::DbResult;
 use shamir_storage::types::Store;
 
 /// Compute the deterministic token for a table name.
 /// Same hash as `TableManager::table_token` (instance method).
 pub fn table_token_for(name: &str) -> u64 {
-    use std::hash::{Hash, Hasher};
     let mut h = std::collections::hash_map::DefaultHasher::new();
     name.hash(&mut h);
     h.finish()
@@ -322,6 +326,23 @@ pub struct TableManager {
     #[cfg(test)]
     pub(super) phase_d_pause_hook:
         Arc<arc_swap::ArcSwapOption<super::index2_backfill_hook::BackfillPauseHook>>,
+    /// Task group 10 (panic-safety audit) test-only deterministic panic
+    /// injection point for `verify()`. When set, `verify()` panics
+    /// immediately instead of running its normal audit — used to prove that
+    /// `bump_write_counter`'s spawned background-verify task still clears
+    /// `verify_running` when `verify()` panics instead of returning `Err`
+    /// (see [`install_verify_panic_hook`](Self::install_verify_panic_hook)).
+    /// `false` in every non-test build and by default in tests — zero cost
+    /// on the real verify path.
+    #[cfg(test)]
+    pub(super) verify_panic_hook: Arc<std::sync::atomic::AtomicBool>,
+    /// Task group 10 test-only counter: bumped at the top of every
+    /// `verify()` call (panicking or not). Lets a regression test prove a
+    /// SECOND `bump_write_counter`-triggered verify actually ran (rather
+    /// than being silently skipped because `verify_running` was left
+    /// stranded `true` by a prior panicking verify).
+    #[cfg(test)]
+    pub(super) verify_call_count: Arc<std::sync::atomic::AtomicUsize>,
 }
 
 /// Bundle wiring the non-tx write path to the SSI commit-write log.
@@ -335,6 +356,19 @@ pub struct TableManager {
 #[derive(Clone)]
 pub(super) struct NonTxChangefeed {
     pub(super) gate: Arc<shamir_tx::RepoTxGate>,
+}
+
+/// Extract a human-readable message from a caught panic payload. Panics
+/// raised via `panic!("...")` / `.expect("...")` carry `&str` or `String`;
+/// anything else (a custom payload type) falls back to a fixed label.
+fn panic_payload_message(payload: &(dyn std::any::Any + Send)) -> String {
+    if let Some(s) = payload.downcast_ref::<&str>() {
+        (*s).to_string()
+    } else if let Some(s) = payload.downcast_ref::<String>() {
+        s.clone()
+    } else {
+        "non-string panic payload".to_string()
+    }
 }
 
 /// How often the background watchdog runs a `verify` pass.
@@ -410,6 +444,10 @@ impl Clone for TableManager {
             phase_c_pause_hook: Arc::clone(&self.phase_c_pause_hook),
             #[cfg(test)]
             phase_d_pause_hook: Arc::clone(&self.phase_d_pause_hook),
+            #[cfg(test)]
+            verify_panic_hook: Arc::clone(&self.verify_panic_hook),
+            #[cfg(test)]
+            verify_call_count: Arc::clone(&self.verify_call_count),
         }
     }
 }
@@ -568,6 +606,10 @@ impl TableManager {
             phase_c_pause_hook: Arc::new(arc_swap::ArcSwapOption::empty()),
             #[cfg(test)]
             phase_d_pause_hook: Arc::new(arc_swap::ArcSwapOption::empty()),
+            #[cfg(test)]
+            verify_panic_hook: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            #[cfg(test)]
+            verify_call_count: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         };
 
         // Resolve covering-index included_fields string paths to interned ids.
@@ -700,11 +742,18 @@ impl TableManager {
             // `save_index2_metadata` would leave `Building` on disk and force
             // a redundant re-backfill on the NEXT reopen (correct but wasteful).
             if !recovered_building_ids.is_empty() {
-                let _ = crate::index2::persistence::save_index2_metadata(
+                if let Err(e) = crate::index2::persistence::save_index2_metadata(
                     &mgr.index2_registry,
                     &mgr.info_store,
                 )
-                .await;
+                .await
+                {
+                    log::warn!(
+                        "recovery: failed to re-persist index2 metadata after Building→Ready \
+                         flip: {e}; on-disk state stays Building, forcing a redundant \
+                         re-backfill on the next reopen (correct but wasteful)"
+                    );
+                }
             }
         }
 
@@ -922,6 +971,10 @@ impl TableManager {
             phase_c_pause_hook: Arc::new(arc_swap::ArcSwapOption::empty()),
             #[cfg(test)]
             phase_d_pause_hook: Arc::new(arc_swap::ArcSwapOption::empty()),
+            #[cfg(test)]
+            verify_panic_hook: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            #[cfg(test)]
+            verify_call_count: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         }
     }
 
@@ -932,7 +985,6 @@ impl TableManager {
     /// the caller, does NOT auto-repair (user calls `repair()`
     /// when ready).
     pub fn bump_write_counter(&self, n: u64) {
-        use std::sync::atomic::Ordering;
         if n == 0 {
             return;
         }
@@ -952,7 +1004,32 @@ impl TableManager {
         }
         let self_clone = self.clone();
         tokio::spawn(async move {
-            let result = self_clone.verify().await;
+            // Panic-safety (task group 10 / audit finding 1.4, 6.6, 7.1): a
+            // panic inside `verify()` must not strand `verify_running = true`
+            // forever — that would permanently disable this table's
+            // background consistency watchdog with no signal to anyone.
+            // `catch_unwind` converts a panic into an `Err` so the
+            // unconditional `verify_running.store(false, ..)` below always
+            // runs, exactly like an ordinary `verify()` error. The wrapping
+            // `async { .. }` block ensures both invoking `verify()` and
+            // polling its future are covered by the same `catch_unwind`.
+            let result: DbResult<crate::table::doctor::VerifyReport> =
+                match std::panic::AssertUnwindSafe(async { self_clone.verify().await })
+                    .catch_unwind()
+                    .await
+                {
+                    Ok(inner) => inner,
+                    Err(payload) => {
+                        let msg = panic_payload_message(&payload);
+                        log::error!(
+                            "Background verify on '{}' panicked: {msg}",
+                            self_clone.name(),
+                        );
+                        Err(shamir_storage::error::DbError::Internal(format!(
+                            "background verify panicked: {msg}"
+                        )))
+                    }
+                };
             match result {
                 Ok(report) => {
                     if !report.is_healthy() {
@@ -972,8 +1049,34 @@ impl TableManager {
     /// Whether a background verify is currently in flight. Test-
     /// support accessor; users normally don't care.
     pub fn is_background_verify_running(&self) -> bool {
-        use std::sync::atomic::Ordering;
         self.verify_running.load(Ordering::Acquire)
+    }
+
+    /// Test-only: arm the deterministic panic-injection seam so the next
+    /// `verify()` call panics instead of running its normal audit — see the
+    /// `verify_panic_hook` field doc.
+    #[cfg(test)]
+    pub fn install_verify_panic_hook(&self) {
+        self.verify_panic_hook
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// Test-only: disarm the panic-injection seam installed by
+    /// [`install_verify_panic_hook`](Self::install_verify_panic_hook) so the
+    /// next `verify()` call runs its normal audit again.
+    #[cfg(test)]
+    pub fn clear_verify_panic_hook(&self) {
+        self.verify_panic_hook
+            .store(false, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// Test-only: number of times `verify()` has been entered (panicking or
+    /// not) since this `TableManager` was created. See `verify_call_count`'s
+    /// field doc.
+    #[cfg(test)]
+    pub fn verify_call_count(&self) -> usize {
+        self.verify_call_count
+            .load(std::sync::atomic::Ordering::SeqCst)
     }
 
     /// Public read-only access to the inner `Table` — used by
@@ -1579,8 +1682,6 @@ impl Drop for WriteBarrierGuard {
 ///   - `"stemmed_<lang>"` → `Full { <lang>, stopwords=true, stem=true }`
 ///     (falls back to `Whitespace` if the language suffix is unknown)
 pub(crate) fn fts_tokenizer_from_dsl(spec: Option<&str>) -> crate::index2::kind::TokenizerKind {
-    use crate::index2::kind::{StemLanguage, TokenizerKind};
-
     match spec {
         Some("unicode") => TokenizerKind::Unicode,
         Some("ngram") => TokenizerKind::Ngram { n: 3 },

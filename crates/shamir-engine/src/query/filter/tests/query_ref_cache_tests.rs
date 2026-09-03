@@ -10,7 +10,7 @@
 //! (via `OnceLock::get_or_init`), mirroring `In`'s `ref_column_sets`
 //! pattern (`filter_node.rs`).
 //!
-//! Part A (test 1): structural / pointer-identity / recursion coverage for
+//! Part A (test 1): structural / content-identity / recursion coverage for
 //! `prescan_query_ref_cache`.
 //! Part B (test 2): the F2-SPECIFIC lazy-population proof — the `OnceLock`
 //! is empty before the first `resolve_filter_query` call and populated after.
@@ -33,7 +33,9 @@ use shamir_types::types::value::QueryValue;
 
 use crate::query::filter::eval::resolve_filter_query;
 use crate::query::filter::eval_context::FilterContext;
-use crate::query::filter::query_ref_cache::{prescan_query_ref_cache, QueryRefCache};
+use crate::query::filter::query_ref_cache::{
+    prescan_query_ref_cache, query_ref_key, QueryRefCache,
+};
 use crate::query::filter::{Cond, Filter, FilterValue, FnCall};
 use crate::query::read::select_projection::SelectProjection;
 use crate::query::read::{QueryRecord, QueryResult, Select, SelectItem};
@@ -59,11 +61,12 @@ fn refs_of(key: &str, qr: QueryResult) -> TMap<String, QueryResult> {
     m
 }
 
-/// Extract the pointer-identity key for a `FilterValue` reference, matching
-/// the key `prescan_query_ref_cache` inserts (`fv as *const FilterValue as
-/// usize`). Avoids raw pointers/`unsafe` in the test body.
-fn fv_ref_addr(fv: &FilterValue) -> usize {
-    fv as *const FilterValue as usize
+/// Compute the SAME content-derived key `prescan_query_ref_cache` inserts
+/// (`query_ref_key`, group 13 Defect 2 fix). Named `fv_ref_addr` for
+/// minimal diff against the pre-fix test bodies below — it no longer
+/// returns an address, just the cache's actual `String` key.
+fn fv_ref_addr(fv: &FilterValue) -> String {
+    query_ref_key(fv)
 }
 
 /// A trivially-empty record (the `QueryRef` arm never reads the record, so
@@ -252,9 +255,9 @@ fn cached_and_uncached_query_ref_identical_across_two_scans() {
     let interner = Interner::new();
     let rec = null_record();
 
-    // The SAME owned QueryRef node is reused across both scans (pointer
-    // identity is the cache key) — a fresh clone per scan would defeat the
-    // pointer-identity check.
+    // The SAME owned QueryRef node is reused across both scans for clarity
+    // (a fresh, content-identical clone per scan would work identically
+    // now that the cache is content-keyed — see group 13 Defect 2 fix).
     let fv = FilterValue::query_ref("q");
 
     // ── Scan A: resolved_refs["q"] = Call result value Int(42) ─────────

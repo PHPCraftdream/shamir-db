@@ -4,7 +4,7 @@ use shamir_query_builder::batch::Batch;
 use shamir_query_builder::query::Query;
 
 use crate::db_instance::db_instance::DbInstance;
-use crate::query::batch::{execute_batch, BatchError, TableResolver};
+use crate::query::batch::{execute_batch_unchecked as execute_batch, BatchError, TableResolver};
 use crate::query::TableRef;
 use crate::repo::repo_types::BoxRepoFactory;
 use crate::repo::RepoConfig;

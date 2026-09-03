@@ -18,7 +18,7 @@ use shamir_types::types::common::new_map;
 use shamir_types::types::value::QueryValue;
 
 use crate::db_instance::db_instance::DbInstance;
-use crate::query::batch::{execute_batch, TableResolver};
+use crate::query::batch::{execute_batch_unchecked as execute_batch, TableResolver};
 use crate::query::TableRef;
 use crate::repo::repo_types::BoxRepoFactory;
 use crate::repo::{RepoConfig, RepoInstance};
@@ -602,7 +602,7 @@ async fn sub_batch_partial_writes_roll_back_on_later_top_level_failure() {
             .await
             .unwrap();
 
-    let result = crate::query::batch::execute_in_open_tx(
+    let result = crate::query::batch::execute_in_open_tx_unchecked(
         &outer_req,
         &resolver,
         None,
@@ -664,7 +664,7 @@ async fn sub_batch_partial_writes_roll_back_on_later_top_level_failure() {
 
 #[tokio::test]
 async fn tx_in_tx_rejected() {
-    use crate::query::batch::execute_in_open_tx;
+    use crate::query::batch::execute_in_open_tx_unchecked as execute_in_open_tx;
     use crate::query::batch::open_interactive_tx;
 
     let factory = BoxRepoFactory::in_memory();

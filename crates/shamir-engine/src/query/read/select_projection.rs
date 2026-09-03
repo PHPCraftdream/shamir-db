@@ -39,9 +39,10 @@ pub struct SelectProjection {
     /// `Cond` nodes. `project_value` threads this into the per-record
     /// `FilterContext` so `resolve_filter_query`'s `Cond` arm reuses the
     /// compiled `FilterNode` instead of recompiling `cond.condition` on
-    /// every record. `SelectProjection` is built once per query and
-    /// `funcs`/this cache are never cloned — the pointer-identity cache key
-    /// stays valid for the projection's whole lifetime.
+    /// every record. The cache key is derived from `cond.condition`'s
+    /// content (see `cond_cache.rs`'s doc), so it stays correct regardless
+    /// of `funcs`'s address — `SelectProjection` is still built once per
+    /// query and this cache is scoped to its lifetime.
     pub(super) funcs_cond_cache: CondCache,
     /// Pre-interned `FieldRef` path cache (F1) — populated once in `new()`
     /// by pre-scanning the same `funcs` tree for nested `FieldRef` nodes
@@ -49,9 +50,8 @@ pub struct SelectProjection {
     /// this into the per-record `FilterContext` so `resolve_filter_query`'s
     /// `FieldRef` arm reuses the interned `SmallVec<InternerKey>` instead
     /// of re-allocating a `Vec<u64>` + re-issuing a per-segment `Interner::
-    /// get_ind` lookup on every record. Same lifetime invariant as
-    /// `funcs_cond_cache`: `funcs` is never cloned/moved after `new()`, so
-    /// the pointer-identity cache key stays valid.
+    /// get_ind` lookup on every record. Content-keyed like
+    /// `funcs_cond_cache` (see `field_path_cache.rs`'s doc).
     pub(super) funcs_field_path_cache: FieldPathCache,
     /// Lazily-populated `$query`/`QueryRef` resolution cache (F2) — slots
     /// RESERVED once in `new()` by pre-scanning the same `funcs` tree for
@@ -64,9 +64,8 @@ pub struct SelectProjection {
     /// into the per-record `FilterContext` so `resolve_filter_query`'s
     /// `QueryRef` arm reuses the cached `Option<QueryValue>` instead of
     /// re-parsing the path string + re-walking the referenced `QueryResult`
-    /// on every record. Same lifetime invariant as `funcs_cond_cache`:
-    /// `funcs` is never cloned/moved after `new()`, so the pointer-identity
-    /// cache key stays valid.
+    /// on every record. Content-keyed like `funcs_cond_cache` (see
+    /// `query_ref_cache.rs`'s doc).
     pub(super) funcs_query_ref_cache: QueryRefCache,
     /// Scalar resolver (user + builtin layers) for `$fn` projections.
     /// Stored once in `new()`, cloned per-record into the `FilterContext`

@@ -16,6 +16,7 @@ use crate::validator::record_validator::ValidatorCtx;
 use super::constraints::{Constraints, Num};
 use super::cross_field::CrossFieldResult;
 use super::format::FormatKind;
+use super::one_of_set::OneOfSet;
 use super::type_tag::TypeTag;
 
 /// A single declarative field rule.
@@ -56,7 +57,31 @@ impl FieldRule {
     /// This method runs the Phase A pure checks only.  Phase B checks
     /// (scalar-bridge / format / cross-field) are layered by
     /// [`check_extended`](Self::check_extended).
-    pub fn check(&self, fields: &dyn RecordFields, path: &[&str], v: &mut Validation) {
+    ///
+    /// `one_of_set` is the precomputed membership set for this rule's
+    /// `constraints.one_of` (audit group 25 / defect 2), built once by
+    /// [`SchemaValidator::new`](super::schema_validator::SchemaValidator::new)
+    /// and threaded down from [`check_extended`](Self::check_extended).
+    /// `None` falls back to the original per-call linear scan — callers
+    /// that bypass `SchemaValidator` (direct `FieldRule::check` in tests)
+    /// stay correct, just without the amortized-set speedup.
+    ///
+    /// `pub(crate)` (narrowed from `pub` alongside `check_extended` when
+    /// `one_of_set: Option<&OneOfSet>` was added) — `OneOfSet` itself is
+    /// `pub(crate)`, and a `pub` method may not expose a less-visible type
+    /// in its signature (`private_interfaces`, denied via `-D warnings`).
+    /// Production consumers use `SchemaValidator::validate` via the
+    /// `RecordValidator` trait; a downstream crate's test harness that needs
+    /// to call this directly (bypassing the async `validate` boundary) must
+    /// go through [`check_for_test`](Self::check_for_test) instead, which
+    /// keeps `OneOfSet` out of the public surface.
+    pub(crate) fn check(
+        &self,
+        fields: &dyn RecordFields,
+        path: &[&str],
+        one_of_set: Option<&OneOfSet>,
+        v: &mut Validation,
+    ) {
         // ── Type assertion ──────────────────────────────────────────────
         if !self.type_matches(fields, path) {
             v.field_error(self.path.clone(), "type_mismatch");
@@ -78,7 +103,20 @@ impl FieldRule {
         }
 
         // one_of applies to any type (it compares materialised values).
-        self.check_one_of(fields, path, v);
+        self.check_one_of(fields, path, one_of_set, v);
+    }
+
+    /// Public test-only entry point for a downstream crate's test harness
+    /// that needs to run [`check`](Self::check) directly, bypassing the
+    /// async `SchemaValidator::validate`/`RecordValidator` boundary (e.g. a
+    /// sync `NativeRecordValidator` closure). Always runs the original
+    /// per-call linear `one_of` scan (`one_of_set: None`) — such callers
+    /// never had access to `SchemaValidator`'s precomputed `OneOfSet`
+    /// (`pub(crate)`) to begin with, so this is not a behavior regression
+    /// for them, only a missed amortization.
+    #[cfg(any(test, feature = "test-util"))]
+    pub fn check_for_test(&self, fields: &dyn RecordFields, path: &[&str], v: &mut Validation) {
+        self.check(fields, path, None, v);
     }
 
     // ── Type matching ───────────────────────────────────────────────────
@@ -261,7 +299,39 @@ impl FieldRule {
 
     // ── one_of ──────────────────────────────────────────────────────────
 
-    fn check_one_of(&self, fields: &dyn RecordFields, path: &[&str], v: &mut Validation) {
+    fn check_one_of(
+        &self,
+        fields: &dyn RecordFields,
+        path: &[&str],
+        one_of_set: Option<&OneOfSet>,
+        v: &mut Validation,
+    ) {
+        if let Some(set) = one_of_set {
+            // Fast path (audit group 25 / defect 2): O(1) hash-set probe
+            // with a BORROWED scalar — no `materialize_as_qv` allocation.
+            if let Some(sr) = fields.scalar(path) {
+                if !set.contains_scalar(sr) {
+                    v.field_error(self.path.clone(), "not_in_enum");
+                }
+                return;
+            }
+            // Non-scalar (container / Dec / Big) — fall back to materialize.
+            match fields.materialize(path) {
+                Some(iv) => {
+                    if !set.contains_materialized(&inner_to_qv(iv)) {
+                        v.field_error(self.path.clone(), "not_in_enum");
+                    }
+                }
+                None => {
+                    v.field_error(self.path.clone(), "not_in_enum");
+                }
+            }
+            return;
+        }
+
+        // Fallback: no precomputed set supplied (a caller that bypasses
+        // `SchemaValidator`, e.g. a direct `FieldRule::check` unit test) —
+        // original linear scan over the raw `Vec<QueryValue>`.
         let allowed = match &self.constraints.one_of {
             Some(vals) if !vals.is_empty() => vals,
             _ => return,
@@ -324,15 +394,18 @@ impl FieldRule {
     /// `ctx` carries the optional [`ScalarResolver`] — when `None`,
     /// scalar-bridge rules are silently skipped (they do not panic).  Format
     /// and cross-field checks are pure and always run when configured.
-    pub fn check_extended(
+    ///
+    /// `pub(crate)` — see [`check`](Self::check)'s doc for why.
+    pub(crate) fn check_extended(
         &self,
         fields: &dyn RecordFields,
         path: &[&str],
         ctx: Option<&ValidatorCtx<'_>>,
+        one_of_set: Option<&OneOfSet>,
         v: &mut Validation,
     ) {
         // Phase A pure checks.
-        self.check(fields, path, v);
+        self.check(fields, path, one_of_set, v);
 
         // Phase B — format (pure, no ctx needed).
         if let Some(fmt) = self.constraints.format {

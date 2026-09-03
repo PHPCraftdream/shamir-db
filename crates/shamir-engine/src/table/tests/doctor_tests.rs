@@ -145,6 +145,98 @@ async fn repair_heals_orphan_index_entry() {
     );
 }
 
+/// P2 group 26, defect 1: `repair()`'s regular-index rebuild now streams
+/// per-def via `list_stream` + `create_index_from_stream` instead of
+/// cloning the whole materialized table once per index definition (the old
+/// path held up to D+1 full-table copies in RAM simultaneously). This test
+/// uses TWO regular index defs (so the per-def streaming loop actually
+/// iterates more than once, each pass re-scanning the table independently)
+/// and enough records to cross the `FULL_SCAN_BATCH` (1000) boundary, so
+/// the streaming rebuild also spans multiple batches — proving the switch
+/// still produces byte-identical, fully-correct postings for every def.
+#[tokio::test]
+async fn repair_streams_multiple_regular_indexes_correctly() {
+    let repo_config = RepoConfig {
+        name: "default".to_string(),
+        factory: BoxRepoFactory::in_memory(),
+        tables: vec![TableConfig::new("multi_regular")],
+    };
+    let db = DbInstance::with_repos(vec![repo_config]).await.unwrap();
+    let table = db.get_table("default", "multi_regular").await.unwrap();
+
+    table.create_index("by_city", &["city"]).await.unwrap();
+    table.create_index("by_status", &["status"]).await.unwrap();
+    table.create_unique_index("by_id", &["id"]).await.unwrap();
+
+    let interner = table.interner().get().await.unwrap();
+    const N: usize = 1200;
+    for i in 0..N {
+        let mut m = new_map();
+        m.insert("id".to_string(), QueryValue::Str(format!("u{:05}", i)));
+        m.insert(
+            "city".to_string(),
+            QueryValue::Str(format!("city_{}", i % 5)),
+        );
+        m.insert(
+            "status".to_string(),
+            QueryValue::Str(format!("status_{}", i % 3)),
+        );
+        let user = QueryValue::Map(m);
+        let (inner_val, new_keys) = query_value_to_inner_tracked(&user, interner).unwrap();
+        if !new_keys.is_empty() {
+            table.interner().save_new_keys(&new_keys).await.unwrap();
+        }
+        table.insert(&inner_val).await.unwrap();
+    }
+
+    // Corrupt BOTH regular indexes with a bogus posting so repair() has
+    // real rebuild work to do on each def, not just a no-op verify pass.
+    let info_store = info_store_of(&table);
+    let regular_defs: Vec<_> = table.index_manager_ref().iter_indexes().collect();
+    assert_eq!(regular_defs.len(), 2, "expected both by_city and by_status");
+    for def in &regular_defs {
+        let key = IndexRecordKey::new(false, def.name_interned).to_bytes();
+        let fake = shamir_types::types::record_id::RecordId::new();
+        let mut posting_key = key.to_vec();
+        posting_key.extend_from_slice(fake.as_bytes());
+        info_store
+            .set(bytes::Bytes::from(posting_key).into(), bytes::Bytes::new())
+            .await
+            .unwrap();
+    }
+
+    assert!(
+        !table.verify().await.unwrap().is_healthy(),
+        "both regular indexes were corrupted, verify must catch it"
+    );
+
+    let report = table.repair().await.unwrap();
+    assert_eq!(report.records_scanned, N as u64);
+
+    let after = table.verify().await.unwrap();
+    assert!(
+        after.is_healthy(),
+        "streaming rebuild must restore consistency: {:?}",
+        after
+    );
+    assert_eq!(
+        after.regular_indexes.len(),
+        2,
+        "both regular indexes must still be reported"
+    );
+    for ih in &after.regular_indexes {
+        assert_eq!(
+            ih.expected_entries, ih.actual_entries,
+            "regular index {}: streaming rebuild produced expected {} != actual {}",
+            ih.name_interned, ih.expected_entries, ih.actual_entries
+        );
+        assert_eq!(
+            ih.expected_entries, N as u64,
+            "one posting per record expected for a single-field index"
+        );
+    }
+}
+
 #[tokio::test]
 async fn repair_heals_drifted_counter() {
     let (table, _repo) = seeded(15).await;

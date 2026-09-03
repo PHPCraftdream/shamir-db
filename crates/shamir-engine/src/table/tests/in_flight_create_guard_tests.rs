@@ -56,3 +56,24 @@ fn concurrent_same_id_guards_are_refcounted() {
     drop(g2);
     assert!(!s.contains(42));
 }
+
+/// A poisoned mutex must not cascade into a panic on `enter`/`contains`/
+/// `Drop` — a poisoned lock here would otherwise take down the
+/// `degraded_index_count()` health-gauge read path with it (see module
+/// doc). Poison the lock via a helper thread that panics while holding
+/// it, then prove the set still behaves sanely afterwards.
+#[test]
+fn tolerates_poisoned_mutex() {
+    let s = InFlightCreateSet::new();
+    s.poison_for_test();
+
+    assert!(!s.contains(99), "poisoned lock must not panic on read");
+
+    let g = s.enter(99);
+    assert!(
+        s.contains(99),
+        "poisoned lock must not block subsequent use"
+    );
+    drop(g);
+    assert!(!s.contains(99), "drop must still clean up after poisoning");
+}

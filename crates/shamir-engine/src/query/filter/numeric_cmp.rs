@@ -4,7 +4,7 @@
 //! `Int`/`U64` vs `F64` comparison across every fast path in this crate:
 //! the general evaluator (`resolve::compare_values`), ORDER BY
 //! (`read::order::QvSortKey`), the bytes-level pre-filter
-//! (`eval_bytes::compare_raw_to_filter`), `IN`/`NOT IN` set membership
+//! (`eval_bytes::compare_raw_to_qv`), `IN`/`NOT IN` set membership
 //! (`filter_node::set_contains_coercing`), and MIN/MAX aggregation
 //! (`read::aggregate::OwnedScalar::cmp_scalar`).
 //!

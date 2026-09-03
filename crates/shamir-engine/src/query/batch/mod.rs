@@ -137,6 +137,7 @@
 //! }
 //! ```
 
+mod authorized;
 mod batch_execute;
 mod batch_validate;
 mod execution_deadline;
@@ -154,11 +155,12 @@ mod query_value_serializer;
 // DTOs, the topological planner, and the `$query` reference parser are
 // all pure-data and live in `shamir-query-types::batch` — re-exported
 // here so callers keep using `shamir_db::query::batch::*` paths.
+pub use authorized::{AccessGate, Authorized};
+pub use batch_execute::execute_batch;
 pub use execution_deadline::ExecutionDeadline;
 pub use executor_traits::{AdminExecutor, FunctionInvoker, TableResolver};
-pub use query_runner::{
-    commit_interactive_tx, execute_batch, execute_in_open_tx, open_interactive_tx, QueryRunner,
-};
+pub use interactive_tx::{commit_interactive_tx, execute_in_open_tx, open_interactive_tx};
+pub use query_runner::QueryRunner;
 pub use shamir_query_types::batch::{
     collect_required_access, BatchError, BatchLimits, BatchOp, BatchPlan, BatchPlanner,
     BatchRequest, BatchResponse, InternerDelta, QueryEntry, QueryPath, QueryReference,
@@ -166,12 +168,18 @@ pub use shamir_query_types::batch::{
 };
 
 // Retained for engine-level unit tests; not accessible outside test builds.
+// `execute_batch_unchecked`/`execute_in_open_tx_unchecked` (#1199) preserve
+// the pre-token call shape for tests that exercise execution mechanics, not
+// authorization — see their doc comments in `batch_execute.rs`/`interactive_tx.rs`.
 #[cfg(test)]
-pub(crate) use query_runner::execute_batch_with_permissions;
+pub(crate) use batch_execute::{execute_batch_unchecked, execute_batch_with_permissions};
+#[cfg(test)]
+pub(crate) use interactive_tx::execute_in_open_tx_unchecked;
 
 // Test-only export for watchdog thread-leak regression test (#1105).
+// `IN_ITER_SYNC` additionally supports the #1200 lock-scope regression test.
 #[cfg(test)]
-pub(crate) use op_watchdog::{register_op_watchdog, REGISTRY, THREAD_SPAWN_COUNT};
+pub(crate) use op_watchdog::{register_op_watchdog, IN_ITER_SYNC, REGISTRY, THREAD_SPAWN_COUNT};
 
 // F-40: expose the two FK fail-closed hooks (and the op-kind enum
 // `implicit_tx_isolation_for_fk_parent` takes) so the fail-closed test

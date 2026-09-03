@@ -348,9 +348,9 @@ pub(super) async fn pre_commit_prelock(
         // persisted high-water mark so Phase 7 WAL truncation can proceed.
         // Graceful shutdown flushes the repo interner once.
 
-        // A8: scan staged bytes (now base-id-referencing after the remap
-        // above) for any interner id ABOVE `persisted_high_water()` that
-        // is not already covered by `tx.interner_deltas`. Each such id was
+        // A8: check every interner id referenced by this tx's staged record
+        // bodies for coverage — any id ABOVE `persisted_high_water()` that is
+        // not already covered by `tx.interner_deltas`. Each such id was
         // created in base by some tx (possibly this one, possibly another
         // that aborted before WAL) and is NOT yet durably recorded in the
         // chunk store — so THIS committer's WAL must carry `(name, id)`
@@ -358,15 +358,40 @@ pub(super) async fn pre_commit_prelock(
         // records undecodable. `touch_with_id` (recovery replay) is
         // idempotent, so redundant inclusion across multiple committers'
         // deltas is harmless.
+        //
+        // #1205: `tx.referenced_interner_ids` is captured AT STAGE TIME by
+        // every `TableManager` insert/update call site (see its doc comment
+        // in `tx_context.rs`), so the common case below no longer re-decodes
+        // every staged value's msgpack bytes — that used to cost 2-3 full
+        // decode passes per commit on a large batch. A captured id that was
+        // still overlay-scoped at stage time (a brand-new field name,
+        // remapped to a real base id by Phase 1 above) is harmless here even
+        // though it no longer matches the final base id: overlay ids sit far
+        // above any real `hwm`, so `get_str` below returns `None` for it and
+        // the entry is skipped — the corresponding real base id is
+        // unconditionally already in `tx.interner_deltas` via
+        // `commit_interner_overlay`'s own delta output, so `existing`
+        // already covers it regardless.
+        //
+        // Fallback: a table whose `StagingStore` was populated outside the
+        // instrumented `TableManager` paths (`referenced_ids_captured() ==
+        // false` — e.g. a low-level test or future raw-apply path) still
+        // gets the old decode-based scan, scoped to just that table's bytes,
+        // so A8's correctness never depends on every staging call site
+        // remembering to capture ids.
         let hwm = repo_interner.persisted_high_water() as u64;
         // Cheap dedup: build a set of ids already covered by this tx's delta.
         let mut existing: shamir_collections::TFxSet<u64> = shamir_collections::new_fx_set();
         existing.extend(tx.interner_deltas.iter().map(|(_, id)| *id));
-        let mut referenced: shamir_collections::TFxMap<u64, ()> = shamir_collections::new_fx_map();
+        let mut fallback_ids: shamir_collections::TFxMap<u64, ()> =
+            shamir_collections::new_fx_map();
         for staging in tx.write_set.values() {
+            if staging.referenced_ids_captured() {
+                continue;
+            }
             for bytes in staging.iter_set_bytes() {
                 if let Ok(value) = InnerValue::from_bytes(bytes) {
-                    shamir_tx::collect_referenced_ids(&value, &mut referenced);
+                    shamir_tx::collect_referenced_ids(&value, &mut fallback_ids);
                 }
                 // A decode failure here is a pre-existing corruption
                 // (staged bytes are always valid msgpack by construction);
@@ -375,17 +400,26 @@ pub(super) async fn pre_commit_prelock(
                 // malformed bytes.
             }
         }
-        for (&id, ()) in referenced.iter() {
+        // Collect into an owned `Vec` first — `tx.interner_deltas` is
+        // mutated inside the loop below, which would otherwise conflict
+        // with a borrow of `tx.referenced_interner_ids` held across it.
+        let all_ids: Vec<u64> = tx
+            .referenced_interner_ids
+            .keys()
+            .copied()
+            .chain(fallback_ids.into_keys())
+            .collect();
+        for id in all_ids {
             if id > hwm && !existing.contains(&id) {
                 if let Some(name) = base_interner.get_str(&InternerKey::new(id)) {
                     tx.interner_deltas.push((name.to_string(), id));
                     existing.insert(id);
                 }
                 // If `get_str` returns None the id is not in the base
-                // interner's reverse map — this should not happen for a
-                // base id referenced by remapped bytes, but defensively
-                // skip rather than panic: an unresolvable id is a separate
-                // (already-lost) problem, not something this pass can fix.
+                // interner's reverse map — either a stale overlay id (see
+                // above) or, for a genuine base id, a defensive skip: an
+                // unresolvable id is a separate (already-lost) problem, not
+                // something this pass can fix.
             }
         }
     }
@@ -1148,8 +1182,12 @@ async fn rederive_index2_ops_post_stage(
             // check (the old shape) is precisely how index2 never retracted
             // stale ops for a DROP'd backend.
             let new_backends = reg.backends_newer_than(stage_gen).await;
-            // Collect the staged ops for this table into an owned Vec so no borrow
-            // of `tx.write_set` is held across the per-record async planning below.
+            // Collect the staged ops for this table into an owned Vec: the
+            // per-record ADD loop below calls `tx.stage_vector`/
+            // `tx.stage_vector_delete` (`&mut self` on the whole `TxContext`),
+            // which cannot coexist with a live borrow into `tx.write_set` —
+            // an owned snapshot is required here, unlike the sorted-index
+            // loop below (which takes no `&mut tx` and can iterate lazily).
             // Retraction (below) does not need this — only the per-record ADD
             // loop does — so an empty `new_backends` still runs retraction
             // even if there happen to be no staged ops for this table.
@@ -1410,14 +1448,20 @@ async fn rederive_index2_ops_post_stage(
             // unreachable. If that invariant ever changes, this needs the
             // same `Vec::new()` treatment as index2 to avoid silently
             // leaving stale sorted ops unretracted.
-            let staged_ops: Vec<KvOp> = match tx.write_set.get(&table_token) {
-                Some(staging) => staging.snapshot_ops(),
-                None => continue,
+            // P1 perf fix: borrow-iterate staged ops for this table instead
+            // of collecting into an owned `Vec<KvOp>` — unlike the index2
+            // half above, this loop takes no `&mut tx` (the two `tx`
+            // mutations, `tx.index_write_set.extend` and
+            // `retract_stale_provenance_ops(tx, ..)`, happen after the loop
+            // below), so holding the `staging` borrow across the per-record
+            // async planning here is sound.
+            let Some(staging) = tx.write_set.get(&table_token) else {
+                continue;
             };
             let data_store = tbl.data_store().clone();
 
             let mut appended: Vec<(u64, IndexWriteOp)> = Vec::new();
-            for kvop in staged_ops {
+            for kvop in staging.iter_ops() {
                 match kvop {
                     KvOp::Set(k, v) => {
                         // F-73: same invariant-violation treatment as the index2
@@ -1652,9 +1696,11 @@ async fn rederive_base_index_ops_post_stage(
             continue;
         }
 
-        // Collect staged ops for this table into an owned Vec (same pattern
-        // as the index2/sorted halves — no borrow of tx held across the
-        // per-record async planning below).
+        // Collect staged ops for this table into an owned Vec: the
+        // per-record loop below calls `tx.record_unique_guard` (`&mut self`
+        // on the whole `TxContext`), which cannot coexist with a live
+        // borrow into `tx.write_set` — unlike the sorted-index half above,
+        // which takes no `&mut tx` and can iterate lazily via `iter_ops()`.
         //
         // F-7 (2026-08-06): unlike the index2 half above (which uses
         // `Vec::new()` here so retraction below still runs even with no
@@ -1988,15 +2034,50 @@ async fn rederive_stale_value_ops_post_stage(
         };
         let mgr = tbl.index_manager_ref();
 
-        // Collect staged ops for this table
-        let staged_ops: Vec<KvOp> = match tx.write_set.get(&table_token) {
-            Some(staging) => staging.snapshot_ops(),
-            None => continue,
+        // P1 perf fix: borrow-iterate staged ops for this table instead of
+        // collecting into an owned `Vec<KvOp>` — this loop only ever READS
+        // `tx.index_write_set` (a disjoint field from `tx.write_set`), never
+        // mutates `tx` until after the loop (the `tx.index_write_set.extend`
+        // below), so holding the `staging` borrow across the per-record async
+        // planning here is sound and avoids an O(staged) allocation that would
+        // otherwise be paid once per table regardless of staged-set size.
+        let Some(staging) = tx.write_set.get(&table_token) else {
+            continue;
         };
 
         let mut appended: Vec<(u64, IndexWriteOp)> = Vec::new();
 
-        for kvop in staged_ops {
+        // P1 perf fix (O(N²·K) → O(N·K)): the dedup lookups below used to be
+        // rebuilt from scratch (`staged_removals_by_rid`) or linearly rescanned
+        // (`.any()`) once PER re-planned op — i.e. once per staged Remove/Set
+        // for this table. The gate above fires under ANY concurrent write
+        // traffic, so a bulk DELETE/UPDATE of N indexed rows paid O(N²·K) work
+        // here inside the locked pre-commit validate phase — the same class
+        // #1099/#1108/#1111 already fixed next door in `released_unique_cache`.
+        // Build every lookup structure ONCE per table, before the per-record
+        // loop, and keep them updated as `appended` grows (`record_staged_op`)
+        // so a later op in the SAME table's loop also sees ops derived earlier
+        // in this same pass, not just what was already in `tx.index_write_set`
+        // before this function started.
+        let mut staged_removals_by_rid: TFxMap<RecordId, TFxSet<bytes::Bytes>> = TFxMap::default();
+        let mut staged_regular_remove_keys: TFxSet<bytes::Bytes> = TFxSet::default();
+        let mut staged_regular_set_keys: TFxSet<bytes::Bytes> = TFxSet::default();
+        let mut staged_unique_remove_by_key_owner: TFxSet<(bytes::Bytes, [u8; 16])> =
+            TFxSet::default();
+        let mut staged_unique_set_by_key_value: TFxSet<(bytes::Bytes, bytes::Bytes)> =
+            TFxSet::default();
+        for (_, op) in tx.index_write_set.iter().filter(|(t, _)| *t == table_token) {
+            record_staged_op(
+                op,
+                &mut staged_removals_by_rid,
+                &mut staged_regular_remove_keys,
+                &mut staged_regular_set_keys,
+                &mut staged_unique_remove_by_key_owner,
+                &mut staged_unique_set_by_key_value,
+            );
+        }
+
+        for kvop in staging.iter_ops() {
             match kvop {
                 KvOp::Remove(k) => {
                     // DELETE case: re-plan removal ops based on CURRENT durable value
@@ -2008,26 +2089,6 @@ async fn rederive_stale_value_ops_post_stage(
                             k.len()
                         )))
                     })?;
-
-                    // Build a map from rid to set of posting_keys for already-staged RemovePosting ops
-                    // for this table, so we can detect which ones are missing
-                    let mut staged_removals_by_rid: TFxMap<RecordId, TFxSet<bytes::Bytes>> =
-                        TFxMap::default();
-                    for (_, op) in tx.index_write_set.iter().filter(|(t, _)| *t == table_token) {
-                        if let IndexWriteOp::RemovePosting {
-                            key,
-                            owner: Some(owner_bytes),
-                            ..
-                        } = op
-                        {
-                            if let Some(rid) = RecordId::try_from_bytes(owner_bytes) {
-                                staged_removals_by_rid
-                                    .entry(rid)
-                                    .or_default()
-                                    .insert(key.clone());
-                            }
-                        }
-                    }
 
                     // Read the CURRENT MVCC-visible value (bypasses tx snapshot)
                     if let Some(current_bytes) = tbl.read_one_tx_bytes(rid, None).await? {
@@ -2077,6 +2138,8 @@ async fn rederive_stale_value_ops_post_stage(
                             .chain(current_unique_removals.into_iter())
                         {
                             // Bug B fix: handle both owner:Some (unique) and owner:None (regular)
+                            // P1 perf fix: O(1) lookup against the precomputed cache instead of
+                            // a linear `.any()` rescan of `tx.index_write_set` per op.
                             let is_staged = match &op {
                                 IndexWriteOp::RemovePosting {
                                     ref key,
@@ -2086,19 +2149,7 @@ async fn rederive_stale_value_ops_post_stage(
                                     if provenance.family == IndexFamily::Regular {
                                         // For regular indexes: posting_key = index_key || record_id
                                         // The posting key itself uniquely identifies this record's claim
-                                        tx.index_write_set
-                                            .iter()
-                                            .filter(|(t, _)| *t == table_token)
-                                            .any(|(_, staged_op)| {
-                                                matches!(
-                                                    staged_op,
-                                                    IndexWriteOp::RemovePosting {
-                                                        key: staged_key,
-                                                        provenance: staged_prov,
-                                                        ..
-                                                    } if staged_key == key && staged_prov.family == IndexFamily::Regular
-                                                )
-                                            })
+                                        staged_regular_remove_keys.contains(key)
                                     } else {
                                         // For unique indexes: dedup by (key, owner)
                                         if let Some(ref owner_bytes) = owner {
@@ -2126,6 +2177,14 @@ async fn rederive_stale_value_ops_post_stage(
                                      for DELETE (table_token={}, op={:?})",
                                     table_token,
                                     op
+                                );
+                                record_staged_op(
+                                    &op,
+                                    &mut staged_removals_by_rid,
+                                    &mut staged_regular_remove_keys,
+                                    &mut staged_regular_set_keys,
+                                    &mut staged_unique_remove_by_key_owner,
+                                    &mut staged_unique_set_by_key_value,
                                 );
                                 appended.push((table_token, op));
                             } else {
@@ -2206,98 +2265,40 @@ async fn rederive_stale_value_ops_post_stage(
                             .chain(updated_unique_ops.into_iter())
                         {
                             // Bug A fix: make dedup owner-aware and kind-aware for unique indexes
-                            let is_staged = tx
-                                .index_write_set
-                                .iter()
-                                .filter(|(t, _)| *t == table_token)
-                                .any(|(_, staged_op)| {
-                                    let family = match staged_op {
-                                        IndexWriteOp::SetPosting { provenance, .. }
-                                        | IndexWriteOp::RemovePosting { provenance, .. }
-                                        | IndexWriteOp::BumpFtsStats { provenance, .. } => {
-                                            provenance.family
-                                        }
-                                    };
-
-                                    if family == IndexFamily::Regular {
-                                        // For regular indexes: dedup by posting key (already contains record_id)
-                                        match (&op, staged_op) {
-                                            (
-                                                IndexWriteOp::RemovePosting {
-                                                    key,
-                                                    provenance: prov,
-                                                    ..
-                                                },
-                                                IndexWriteOp::RemovePosting {
-                                                    key: staged_key,
-                                                    provenance: staged_prov,
-                                                    ..
-                                                },
-                                            )
-                                            | (
-                                                IndexWriteOp::SetPosting {
-                                                    key,
-                                                    provenance: prov,
-                                                    ..
-                                                },
-                                                IndexWriteOp::SetPosting {
-                                                    key: staged_key,
-                                                    provenance: staged_prov,
-                                                    ..
-                                                },
-                                            ) => {
-                                                staged_key == key
-                                                    && staged_prov.family == IndexFamily::Regular
-                                                    && prov.family == IndexFamily::Regular
-                                            }
-                                            _ => false,
-                                        }
-                                    } else if family == IndexFamily::Unique {
-                                        // For unique indexes: dedup by (key, owner) for RemovePosting,
-                                        // and by (key, value) for SetPosting (value is record_id)
-                                        match (&op, staged_op) {
-                                            (
-                                                IndexWriteOp::RemovePosting {
-                                                    key,
-                                                    owner: Some(owner_bytes),
-                                                    provenance: prov,
-                                                    ..
-                                                },
-                                                IndexWriteOp::RemovePosting {
-                                                    key: staged_key,
-                                                    owner: Some(staged_owner_bytes),
-                                                    provenance: staged_prov,
-                                                    ..
-                                                },
-                                            ) => {
-                                                staged_key == key
-                                                    && staged_owner_bytes == owner_bytes
-                                                    && staged_prov.family == IndexFamily::Unique
-                                                    && prov.family == IndexFamily::Unique
-                                            }
-                                            (
-                                                IndexWriteOp::SetPosting {
-                                                    key,
-                                                    value,
-                                                    provenance: prov,
-                                                },
-                                                IndexWriteOp::SetPosting {
-                                                    key: staged_key,
-                                                    value: staged_value,
-                                                    provenance: staged_prov,
-                                                },
-                                            ) => {
-                                                staged_key == key
-                                                    && staged_value == value
-                                                    && staged_prov.family == IndexFamily::Unique
-                                                    && prov.family == IndexFamily::Unique
-                                            }
-                                            _ => false,
-                                        }
-                                    } else {
-                                        false
-                                    }
-                                });
+                            // P1 perf fix: O(1) lookups against the precomputed caches instead of
+                            // a linear `.any()` rescan of `tx.index_write_set` per op. Each arm
+                            // below searches exactly the same (family, op-kind)-bucketed subset the
+                            // original nested match reduced to — see this function's precompute
+                            // block for how the caches are populated.
+                            let is_staged = match &op {
+                                IndexWriteOp::RemovePosting {
+                                    key,
+                                    owner: Some(owner_bytes),
+                                    provenance,
+                                } if provenance.family == IndexFamily::Unique => {
+                                    staged_unique_remove_by_key_owner
+                                        .contains(&(key.clone(), *owner_bytes))
+                                }
+                                IndexWriteOp::RemovePosting {
+                                    key, provenance, ..
+                                } if provenance.family == IndexFamily::Regular => {
+                                    staged_regular_remove_keys.contains(key)
+                                }
+                                IndexWriteOp::SetPosting {
+                                    key, provenance, ..
+                                } if provenance.family == IndexFamily::Regular => {
+                                    staged_regular_set_keys.contains(key)
+                                }
+                                IndexWriteOp::SetPosting {
+                                    key,
+                                    value,
+                                    provenance,
+                                } if provenance.family == IndexFamily::Unique => {
+                                    staged_unique_set_by_key_value
+                                        .contains(&(key.clone(), value.clone()))
+                                }
+                                _ => false,
+                            };
 
                             if !is_staged {
                                 log::debug!(
@@ -2305,6 +2306,14 @@ async fn rederive_stale_value_ops_post_stage(
                                     table_token,
                                     rid,
                                     op
+                                );
+                                record_staged_op(
+                                    &op,
+                                    &mut staged_removals_by_rid,
+                                    &mut staged_regular_remove_keys,
+                                    &mut staged_regular_set_keys,
+                                    &mut staged_unique_remove_by_key_owner,
+                                    &mut staged_unique_set_by_key_value,
                                 );
                                 appended.push((table_token, op));
                             } else {
@@ -2329,6 +2338,56 @@ async fn rederive_stale_value_ops_post_stage(
     }
 
     Ok(())
+}
+
+/// P1 perf fix: incrementally maintains the O(1) staged-op lookup caches used
+/// by [`rederive_stale_value_ops_post_stage`]'s DELETE/UPDATE dedup checks —
+/// see that function's precompute block. Called once per PRE-EXISTING entry
+/// in `tx.index_write_set` (build pass, once per table) and once per NEWLY
+/// appended op (as `appended` grows during the per-record loop), so a later
+/// op in the same table's pass also sees ops derived earlier in this same
+/// pass, not just what was already staged before this function started.
+fn record_staged_op(
+    op: &IndexWriteOp,
+    staged_removals_by_rid: &mut TFxMap<RecordId, TFxSet<bytes::Bytes>>,
+    staged_regular_remove_keys: &mut TFxSet<bytes::Bytes>,
+    staged_regular_set_keys: &mut TFxSet<bytes::Bytes>,
+    staged_unique_remove_by_key_owner: &mut TFxSet<(bytes::Bytes, [u8; 16])>,
+    staged_unique_set_by_key_value: &mut TFxSet<(bytes::Bytes, bytes::Bytes)>,
+) {
+    match op {
+        IndexWriteOp::RemovePosting {
+            key,
+            owner,
+            provenance,
+        } => {
+            if provenance.family == IndexFamily::Regular {
+                staged_regular_remove_keys.insert(key.clone());
+            } else if provenance.family == IndexFamily::Unique {
+                if let Some(owner_bytes) = owner {
+                    staged_unique_remove_by_key_owner.insert((key.clone(), *owner_bytes));
+                    if let Some(rid) = RecordId::try_from_bytes(owner_bytes) {
+                        staged_removals_by_rid
+                            .entry(rid)
+                            .or_default()
+                            .insert(key.clone());
+                    }
+                }
+            }
+        }
+        IndexWriteOp::SetPosting {
+            key,
+            value,
+            provenance,
+        } => {
+            if provenance.family == IndexFamily::Regular {
+                staged_regular_set_keys.insert(key.clone());
+            } else if provenance.family == IndexFamily::Unique {
+                staged_unique_set_by_key_value.insert((key.clone(), value.clone()));
+            }
+        }
+        IndexWriteOp::BumpFtsStats { .. } => {}
+    }
 }
 
 /// Outcome of [`pre_commit_locked_validate`]: the assigned commit version,

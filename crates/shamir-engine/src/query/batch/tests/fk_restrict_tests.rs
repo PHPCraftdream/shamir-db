@@ -17,7 +17,7 @@ use shamir_types::types::value::QueryValue;
 use smallvec::smallvec;
 
 use crate::db_instance::db_instance::DbInstance;
-use crate::query::batch::execute_batch;
+use crate::query::batch::execute_batch_unchecked as execute_batch;
 use crate::query::batch::TableResolver;
 use crate::query::TableRef;
 use crate::repo::repo_types::BoxRepoFactory;
@@ -609,5 +609,111 @@ async fn self_referential_restrict_allows_delete_when_no_subordinates() {
     assert!(
         resp.results.contains_key("del"),
         "self-ref restrict should allow delete when no subordinates"
+    );
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Defect 1 (fan-out collapse) — a deduped single-pass child scan must still
+// catch a match on ANY of several distinct matched parent values, not just
+// the first/last one iterated. `check_fk_restrict` used to call
+// `child_has_reference` once PER (un-deduped) parent value, each doing its
+// own full child-table scan; the fix collapses this to one scan per child
+// table testing every row against the whole deduped value set via
+// `any_child_references`. This test deletes THREE parent rows in one batch
+// where only the MIDDLE one (by insertion order) still has a referencing
+// child — a regression here would most plausibly manifest as only the
+// first-or-last deduped value being checked.
+// ═══════════════════════════════════════════════════════════════════════════════
+
+#[tokio::test]
+async fn restrict_blocks_on_middle_value_among_several_deduped_parents() {
+    let resolver = setup_fk_test(FkAction::Restrict).await;
+
+    // Three parent rows, none sharing a ref_field value.
+    for (id, name) in [(10, "P10"), (20, "P20"), (30, "P30")] {
+        let mut b = Batch::new();
+        b.id(id);
+        b.insert(
+            "ins",
+            write::insert("parent").row(doc().set("id", id).set("name", name)),
+        );
+        execute_batch(&b.build(), &resolver, None, None, Actor::System, "test")
+            .await
+            .unwrap();
+    }
+
+    // TWO children both reference the MIDDLE parent value (20) — proves
+    // multiple child rows referencing the same deduped value are also
+    // correctly detected, not just the first one scanned. Parents 10 and 30
+    // have no referencing children at all.
+    for (cid, label) in [(200, "c200a"), (201, "c200b")] {
+        let mut b = Batch::new();
+        b.id(cid + 1000);
+        b.insert(
+            "ins",
+            write::insert("child").row(doc().set("parent_id", 20).set("label", label)),
+        );
+        execute_batch(&b.build(), &resolver, None, None, Actor::System, "test")
+            .await
+            .unwrap();
+    }
+
+    // Delete all three parents in ONE batch op (matches all 3 distinct
+    // ref_field values in a single scan) → must be rejected because of the
+    // still-referenced middle value (20).
+    let mut b = Batch::new();
+    b.id(999);
+    b.try_delete(
+        "del_parents",
+        write::delete("parent").where_(filter::in_("id", [10_i64, 20, 30])),
+    )
+    .unwrap();
+    let resp = execute_batch(&b.build(), &resolver, None, None, Actor::System, "test").await;
+
+    match resp {
+        Err(e) => {
+            let msg = format!("{e:?}");
+            assert!(
+                msg.contains("fk_restrict"),
+                "expected fk_restrict error for the still-referenced middle \
+                 value, got: {msg}"
+            );
+        }
+        Ok(_) => panic!(
+            "expected fk_restrict rejection (parent 20 still has 2 \
+             referencing children) — got success, which means the deduped \
+             single-pass scan silently missed a non-first/last value"
+        ),
+    }
+
+    // Now delete BOTH children of parent 20, then retry the same 3-parent
+    // delete → must succeed. This closes the loop: the fix neither
+    // under-detects (previous assertion) NOR over-restricts (this one) once
+    // every matched value is genuinely unreferenced.
+    let mut b = Batch::new();
+    b.id(1000);
+    b.try_delete(
+        "del_children",
+        write::delete("child").where_(filter::eq("parent_id", 20_i64)),
+    )
+    .unwrap();
+    execute_batch(&b.build(), &resolver, None, None, Actor::System, "test")
+        .await
+        .unwrap();
+
+    let mut b = Batch::new();
+    b.id(1001);
+    b.try_delete(
+        "del_parents_retry",
+        write::delete("parent").where_(filter::in_("id", [10_i64, 20, 30])),
+    )
+    .unwrap();
+    let resp = execute_batch(&b.build(), &resolver, None, None, Actor::System, "test")
+        .await
+        .unwrap();
+    assert!(
+        resp.results.contains_key("del_parents_retry"),
+        "all three parents should delete cleanly once no children reference \
+         any of them"
     );
 }

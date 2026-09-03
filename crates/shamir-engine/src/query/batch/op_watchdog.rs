@@ -44,7 +44,7 @@ use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
 #[cfg(test)]
-use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::{AtomicBool, AtomicUsize};
 
 use scc::HashMap;
 
@@ -70,6 +70,16 @@ static NEXT_ID: AtomicU64 = AtomicU64::new(1);
 /// Test-only counter to verify only one watchdog thread is spawned.
 #[cfg(test)]
 pub(crate) static THREAD_SPAWN_COUNT: AtomicUsize = AtomicUsize::new(0);
+
+/// Test-only spy flag (#1200): `true` for the exact duration of the
+/// `iter_sync` scan below (which holds `scc`'s per-bucket lock while
+/// visiting entries), `false` otherwise — including during the log-emission
+/// pass. A test's `log::Log` impl can assert this is `false` whenever it
+/// observes a "still running" record, proving the watchdog never does log
+/// I/O while a bucket lock the batch-op hot path (`register_op_watchdog`/
+/// `OpGuard::drop`) contends on is held.
+#[cfg(test)]
+pub(crate) static IN_ITER_SYNC: AtomicBool = AtomicBool::new(false);
 
 /// Watchdog thread handle. `OnceLock` ensures we spawn exactly one thread.
 static WATCHDOG_THREAD: OnceLock<std::thread::JoinHandle<()>> = OnceLock::new();
@@ -111,23 +121,43 @@ fn init_watchdog() {
 
                 let now = Instant::now();
 
-                // Scan the registry and log warnings for stuck ops.
-                // Use a Vec to collect IDs to update, then do a second pass.
-                let mut ids_to_update: Vec<u64> = Vec::new();
+                // Scan the registry and collect stuck ops — NO log I/O in
+                // this closure (#1200): `iter_sync` holds `scc`'s per-bucket
+                // lock while visiting entries, and that same lock is
+                // contended by `register_op_watchdog`/`OpGuard::drop` on the
+                // batch-op hot path. Doing synchronous `log::warn!` I/O here
+                // would hold that lock for the duration of the log call.
+                // Collect (id, alias, elapsed) triples during iteration and
+                // emit the warnings in a second pass, after the lock is
+                // released — same "collect during iteration, act after"
+                // shape as the pre-existing `ids_to_update` pass below.
+                let mut to_warn: Vec<(u64, String, Duration)> = Vec::new();
+
+                #[cfg(test)]
+                IN_ITER_SYNC.store(true, Ordering::SeqCst);
 
                 registry_for_thread
                     .iter_sync(|id, (alias, started_at, already_warned)| {
                         let elapsed = now.duration_since(*started_at);
 
                         if elapsed > WATCHDOG_WARN_THRESHOLD && !*already_warned {
-                            log::warn!(
-                                "batch op '{alias}' still running after {elapsed:?} (exceeds the {WATCHDOG_WARN_THRESHOLD:?} slow-op watchdog threshold)"
-                            );
-                            ids_to_update.push(*id);
+                            to_warn.push((*id, alias.clone(), elapsed));
                         }
 
                         true // Continue iteration
                     });
+
+                #[cfg(test)]
+                IN_ITER_SYNC.store(false, Ordering::SeqCst);
+
+                // Emit the warnings now that `iter_sync` has returned and
+                // released every bucket lock it held.
+                let ids_to_update: Vec<u64> = to_warn.iter().map(|(id, _, _)| *id).collect();
+                for (_, alias, elapsed) in &to_warn {
+                    log::warn!(
+                        "batch op '{alias}' still running after {elapsed:?} (exceeds the {WATCHDOG_WARN_THRESHOLD:?} slow-op watchdog threshold)"
+                    );
+                }
 
                 // Update the already_warned flag for ops we warned about.
                 for id in ids_to_update {

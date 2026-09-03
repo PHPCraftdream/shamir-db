@@ -96,6 +96,22 @@ use tokio::sync::Notify;
 use crate::repo::RepoInstance;
 use crate::tx::materialize::interner_delta_safe_to_truncate;
 
+/// Test-only injection: when set to a non-zero `table_id`, the Phase B
+/// index-posting batch write for that table returns a synthetic error
+/// instead of calling `Store::transact`, so the "a batch failure surfaces
+/// and blocks only the affected table" contract can be exercised
+/// deterministically. `InMemoryStore` (the backend the unit tests use)
+/// never fails `set`/`remove`/the default `transact`, so there is no
+/// natural way to trigger this path from the public API.
+///
+/// Mirrors `recovery.rs`'s `FAIL_HISTORY_SEED_TX_ID` pattern, keyed here by
+/// `table_id` instead of `txn_id` (this batch's own grouping key). Reset to
+/// 0 between tests to avoid cross-test bleed. `#[cfg(debug_assertions)]` so
+/// a `--release` build pays zero cost — the static is absent and the load
+/// branch is elided.
+#[cfg(debug_assertions)]
+pub(crate) static FAIL_INDEX_BATCH_TABLE_ID: AtomicU64 = AtomicU64::new(0);
+
 /// Repo-level single-owner drainer.
 ///
 /// Holds a [`Notify`] so a producer (the commit path, in P1d-2b) can wake
@@ -386,6 +402,17 @@ impl Drainer {
         // Per-table batch: table_id -> Vec<(commit_version, Vec<KvOp>)>,
         // preserving ascending-v order within each table for LWW.
         let mut table_batches: TFxMap<u64, Vec<(u64, Vec<KvOp>)>> = TFxMap::default();
+        // Per-table batch of index postings (IndexPut/IndexDel), flattened
+        // into one ascending-order `Vec<KvOp>` per table (NOT grouped by
+        // commit_version like `table_batches` above — `info_store` is a
+        // plain last-write-wins KV store, not a versioned history, so one
+        // flat ordered Vec per table reproduces exactly what the old
+        // immediate per-op `replay_v2_op` application would have done, as
+        // long as ops are pushed in the same entry/op iteration order).
+        // Only postings whose `table_id_interned != 0` (the common case —
+        // `wal_ops_from_tx` never emits the `0` broadcast marker) are
+        // batched here; broadcast postings still replay immediately below.
+        let mut index_batches: TFxMap<u64, Vec<KvOp>> = TFxMap::default();
         // Per-entry: which table_ids does this entry touch (for Phase C gating).
         let mut entry_tables: Vec<(u64 /* commit_version */, Vec<u64> /* table_ids */)> =
             Vec::with_capacity(window_entries.len());
@@ -412,14 +439,45 @@ impl Drainer {
                 }
             }
 
-            // Replay non-MVCC ops (IndexPut/IndexDel/InternerOverlayMerge/
-            // CounterDelta) — these go through `replay_v2_op` which handles
-            // non-data routing. Data ops (Put/Delete) for MVCC tables are
-            // accumulated below instead of going through replay_v2_op.
+            // Route ops that are NOT batched through `replay_v2_op`
+            // immediately: broadcast IndexPut/IndexDel (table_id_interned
+            // == 0 — never emitted by `wal_ops_from_tx` today, a defensive
+            // legacy fallback only), InternerOverlayMerge, and
+            // CounterDelta. Per-table IndexPut/IndexDel (the common case)
+            // are instead accumulated into `index_batches` below — this was
+            // previously one awaited `info_store().set`/`remove` call PLUS
+            // one `table_by_token` resolve PER POSTING; now it is ONE
+            // resolve + ONE `Store::transact` per table per drain pass,
+            // mirroring the existing Put/Delete data-op batching. Data ops
+            // (Put/Delete) are handled by the second loop below, unchanged.
+            let mut this_entry_index_tables: Vec<u64> = Vec::new();
             for op in &entry.ops {
                 match op {
                     WalOpV2::Put { .. } | WalOpV2::Delete { .. } => {
                         // Data ops: handled below via batch accumulation.
+                    }
+                    WalOpV2::IndexPut {
+                        table_id_interned,
+                        key,
+                        value,
+                        ..
+                    } if *table_id_interned != 0 => {
+                        this_entry_index_tables.push(*table_id_interned);
+                        index_batches
+                            .entry(*table_id_interned)
+                            .or_default()
+                            .push(KvOp::Set(key.clone().into(), value.clone()));
+                    }
+                    WalOpV2::IndexDel {
+                        table_id_interned,
+                        key,
+                        ..
+                    } if *table_id_interned != 0 => {
+                        this_entry_index_tables.push(*table_id_interned);
+                        index_batches
+                            .entry(*table_id_interned)
+                            .or_default()
+                            .push(KvOp::Remove(key.clone().into()));
                     }
                     _ => {
                         if let Err(e) = crate::tx::recovery::replay_v2_op(op, repo).await {
@@ -440,7 +498,7 @@ impl Drainer {
             }
 
             // Accumulate data ops (Put/Delete) grouped by table_id.
-            let mut this_entry_tables: Vec<u64> = Vec::new();
+            let mut this_entry_tables: Vec<u64> = this_entry_index_tables;
             let mut by_table: TFxMap<u64, Vec<KvOp>> = TFxMap::default();
             for op in &entry.ops {
                 let (table_id, kvop) = match op {
@@ -513,10 +571,162 @@ impl Drainer {
                     );
                     failed_tables.insert(*table_id);
                 }
+                continue;
             }
-            // No MvccStore for this table_id — the table is unattached (system/
-            // test); data ops were already handled by replay_v2_op in Phase A
-            // (which skips Put/Delete for MVCC tables). Nothing to do here.
+
+            // BUG FIX (group 1, 2026-08-14 review): `per_table_mvcc` has no
+            // entry for this table_id. Phase A does NOT handle Put/Delete for
+            // ANY table — it unconditionally skips them and accumulates them
+            // here instead (see the loop above). This branch used to be a
+            // silent no-op while Phase C finalized the entry anyway
+            // (`mark_durable` + `wal.commit`), permanently discarding the
+            // write. Two causes reach here: (a) a genuinely non-MVCC table
+            // (no production path builds one today — see TASK_GROUPS.md
+            // group 1 spot-check note 1), or (b) `RepoInstance::remove_table`
+            // concurrently evicted the `per_table_mvcc` entry (DROP TABLE
+            // racing an undrained commit) while this entry's ops were still
+            // in the drain window.
+            //
+            // Mirror cold recovery instead (`recovery.rs`'s `replay_v2_op` /
+            // `seed_version_cache_for_entry`): resolve the table by token —
+            // if it (or an MvccStore attached to it in the meantime) still
+            // exists, write straight to its raw `data_store` (idempotent:
+            // re-applying an already-landed Set/Remove is a no-op), so warm
+            // drain and cold recovery converge. If the token no longer
+            // resolves at all, the table was genuinely dropped: its data is
+            // moot (the same disposition `drop_table` gives an orphaned
+            // `__data__` store), so skipping is correct — not a silent loss.
+            match repo.table_by_token(*table_id).await {
+                Ok(Some(tbl)) => {
+                    if let Some(mvcc) = tbl.mvcc_store() {
+                        // Race: the table was attached to `per_table_mvcc`
+                        // between the read_sync above and this lookup. Route
+                        // through the same history write as the primary
+                        // branch above.
+                        if let Err(e) = mvcc.write_committed_batch_to_history(pass).await {
+                            log::warn!(
+                                "drain_step: batch history write for table {} \
+                                 (resolved via table_by_token) failed: {e}; \
+                                 entries touching this table will not be \
+                                 finalized",
+                                table_id
+                            );
+                            failed_tables.insert(*table_id);
+                        }
+                    } else {
+                        // Genuinely unattached: no version log, write the
+                        // raw data ops directly (best-effort — attempt every
+                        // op, capture the first error, mirroring the
+                        // first-err pattern used throughout this crate).
+                        let mut first_err: Option<DbError> = None;
+                        for (_v, ops) in pass {
+                            for op in ops {
+                                let res = match op {
+                                    KvOp::Set(key, body) => {
+                                        tbl.data_store().set(key.clone(), body.clone()).await
+                                    }
+                                    KvOp::Remove(key) => tbl.data_store().remove(key.clone()).await,
+                                };
+                                if let Err(e) = res {
+                                    if first_err.is_none() {
+                                        first_err = Some(e);
+                                    }
+                                }
+                            }
+                        }
+                        if let Some(e) = first_err {
+                            log::warn!(
+                                "drain_step: unattached-table data write for \
+                                 table {} failed: {e}; entries touching this \
+                                 table will not be finalized",
+                                table_id
+                            );
+                            failed_tables.insert(*table_id);
+                        }
+                    }
+                }
+                Ok(None) => {
+                    log::debug!(
+                        "drain_step: table {} no longer resolves (dropped); \
+                         data ops for this token are moot, skipping",
+                        table_id
+                    );
+                }
+                Err(e) => {
+                    log::warn!(
+                        "drain_step: table_by_token({}) failed while resolving \
+                         an unattached-table data batch: {e}; entries touching \
+                         this table will not be finalized",
+                        table_id
+                    );
+                    failed_tables.insert(*table_id);
+                }
+            }
+        }
+
+        // ================================================================
+        // Phase B (index postings): per-table ONE `Store::transact` for
+        // every table's accumulated IndexPut/IndexDel ops — was previously
+        // one awaited `info_store().set`/`remove` PLUS one `table_by_token`
+        // resolve PER POSTING (`recovery.rs`'s `replay_v2_op`); an
+        // index-heavy drain window paid E*T awaits instead of T.
+        // ================================================================
+
+        for (table_id, ops) in index_batches {
+            match repo.table_by_token(table_id).await {
+                Ok(Some(tbl)) => {
+                    let batch_len = ops.len();
+                    // Test-only injection (see `FAIL_INDEX_BATCH_TABLE_ID`'s
+                    // doc): simulate a persistent index-batch-write failure
+                    // for one table so the "failure surfaces and blocks only
+                    // that table" contract can be exercised deterministically
+                    // — `InMemoryStore.transact` never fails on its own.
+                    #[cfg(debug_assertions)]
+                    let inject_fail = {
+                        let armed = FAIL_INDEX_BATCH_TABLE_ID.load(Ordering::SeqCst);
+                        armed != 0 && armed == table_id
+                    };
+                    #[cfg(not(debug_assertions))]
+                    let inject_fail = false;
+
+                    let write_result = if inject_fail {
+                        Err(DbError::Internal(format!(
+                            "injected index-batch failure for table {table_id} \
+                             (test fault vector)"
+                        )))
+                    } else {
+                        tbl.info_store().transact(ops).await
+                    };
+
+                    if let Err(e) = write_result {
+                        log::warn!(
+                            "drain_step: batch index-posting write for table {} \
+                             ({} posting op(s)) failed: {e}; entries touching \
+                             this table will not be finalized",
+                            table_id,
+                            batch_len
+                        );
+                        failed_tables.insert(table_id);
+                    }
+                }
+                Ok(None) => {
+                    log::debug!(
+                        "drain_step: table {} no longer resolves (dropped) while \
+                         resolving a batched index-posting write; postings for \
+                         this token are moot, skipping",
+                        table_id
+                    );
+                }
+                Err(e) => {
+                    log::warn!(
+                        "drain_step: table_by_token({}) failed while resolving a \
+                         batched index-posting write: {e}; entries touching this \
+                         table will not be finalized",
+                        table_id
+                    );
+                    failed_tables.insert(table_id);
+                }
+            }
         }
 
         // ================================================================

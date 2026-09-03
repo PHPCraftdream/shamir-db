@@ -169,6 +169,11 @@ harness = false
 [[bench]]
 name = "permission_check"
 harness = false
+# SessionPermissions (test-only RBAC scaffolding) is gated behind
+# `cfg(any(test, feature = "test-util"))` — this bench is a separate,
+# non-test compilation unit, so it needs the feature explicitly:
+#   cargo bench -p shamir-engine --bench permission_check --features test-util
+required-features = ["test-util"]
 
 [[bench]]
 name = "membuffer_pump"

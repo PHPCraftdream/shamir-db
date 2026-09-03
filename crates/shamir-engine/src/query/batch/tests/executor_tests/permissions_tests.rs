@@ -7,7 +7,9 @@ use shamir_query_builder::write::doc;
 use shamir_types::access::Actor;
 
 use crate::query::auth::{Action, Effect, Permission, Resource, Role, SessionPermissions};
-use crate::query::batch::{execute_batch, execute_batch_with_permissions};
+use crate::query::batch::{
+    execute_batch_unchecked as execute_batch, execute_batch_with_permissions,
+};
 
 use super::common::setup_resolver;
 

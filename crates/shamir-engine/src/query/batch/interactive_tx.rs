@@ -1,9 +1,15 @@
 use std::time::Instant;
 
+use crate::query::batch::authorized::Authorized;
 use crate::query::batch::batch_execute::{execute_plan_tx, filter_results};
-use crate::query::batch::batch_validate::{validate_filter_depth, validate_tables};
+use crate::query::batch::batch_validate::{
+    validate_filter_depth, validate_filter_patterns, validate_tables,
+};
 use crate::query::batch::executor_traits::{AdminExecutor, FunctionInvoker, TableResolver};
-use crate::query::batch::{BatchError, BatchRequest, BatchResponse};
+#[cfg(test)]
+use crate::query::batch::BatchRequest;
+use crate::query::batch::{BatchError, BatchResponse};
+#[cfg(test)]
 use shamir_types::access::Actor;
 
 // ===========================================================================
@@ -66,15 +72,18 @@ pub async fn open_interactive_tx(
 /// transaction's lifetime". A per-session idle/total-duration timeout for
 /// interactive transactions, if ever needed, is a separate, larger feature
 /// (different lifecycle contract, out of scope for this fix).
+///
+/// Takes an [`Authorized`] token, not a raw `&BatchRequest` + `Actor` pair
+/// (#1199) — see [`execute_batch`]'s doc and `authorized.rs`'s module doc.
 pub async fn execute_in_open_tx(
-    request: &BatchRequest,
+    auth: Authorized<'_>,
     resolver: &dyn TableResolver,
     admin: Option<&dyn AdminExecutor>,
     invoker: Option<&dyn FunctionInvoker>,
-    actor: &Actor,
-    db_name: &str,
     tx: &mut shamir_tx::TxContext,
 ) -> Result<BatchResponse, BatchError> {
+    let (request, actor, db_name) = auth.into_parts();
+    let actor = &actor;
     let start = Instant::now();
 
     // Single-repo guard (mirrors `execute_batch`). The handle pins exactly
@@ -93,6 +102,7 @@ pub async fn execute_in_open_tx(
     // path previously skipped the filter-nesting-depth DoS guard, letting an
     // interactive-tx client submit arbitrarily deeply nested filters.
     validate_filter_depth(&request.queries)?;
+    validate_filter_patterns(&request.queries)?;
 
     let all_results = execute_plan_tx(
         &mut plan,
@@ -120,6 +130,24 @@ pub async fn execute_in_open_tx(
         // Ambient interner deltas are attached server-side (shamir-db); empty here.
         interner_delta: Default::default(),
     })
+}
+
+/// Test-only convenience: calls [`execute_in_open_tx`] via
+/// [`Authorized::unchecked`] (no access-control check), preserving the
+/// PRE-#1199 call shape. See [`super::batch_execute::execute_batch_unchecked`]'s
+/// doc for why this exists — same rationale, tx-aware variant.
+#[cfg(test)]
+pub(crate) async fn execute_in_open_tx_unchecked(
+    request: &BatchRequest,
+    resolver: &dyn TableResolver,
+    admin: Option<&dyn AdminExecutor>,
+    invoker: Option<&dyn FunctionInvoker>,
+    actor: &Actor,
+    db_name: &str,
+    tx: &mut shamir_tx::TxContext,
+) -> Result<BatchResponse, BatchError> {
+    let auth = Authorized::unchecked(request, actor.clone(), db_name);
+    execute_in_open_tx(auth, resolver, admin, invoker, tx).await
 }
 
 /// COMMIT an interactive tx: run the full Phase-A commit pipeline.

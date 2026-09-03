@@ -5,13 +5,14 @@
 //! used to call `intern_field_path(path, ctx.interner)` on EVERY record
 //! (one `Vec<u64>` alloc + one `Interner::get_ind` `DashMap` lookup per
 //! path segment, per row), even though `path` is static per query. This
-//! cache keys the pre-interned `SmallVec<[InternerKey; 4]>` by pointer
-//! identity of the `FieldRef` node itself, so callers that pre-scan a
-//! static `FilterValue` tree once (`SelectProjection::new`) skip the
-//! per-row re-interning entirely.
+//! cache keys the pre-interned `SmallVec<[InternerKey; 4]>` by the CONTENT
+//! of the `FieldRef` node itself (its `path`, via `field_ref_key` —
+//! group 13 Defect 2 fix, replacing the original pointer-identity key), so
+//! callers that pre-scan a static `FilterValue` tree once
+//! (`SelectProjection::new`) skip the per-row re-interning entirely.
 //!
 //! Part A (tests 1-3): direct unit tests for `prescan_field_path_cache`'s
-//! structural / pointer-identity behaviour.
+//! structural / content-identity behaviour.
 //! Part B (tests 4-5): the DECISIVE tests proving the cache-HIT path and
 //! the cache-MISS path (`field_path_cache: None`) produce IDENTICAL
 //! results for the same `SELECT $fn($ref)`-shaped query — the brief's
@@ -29,7 +30,9 @@ use shamir_types::types::value::{InnerValue, QueryValue};
 
 use crate::query::filter::eval::resolve_filter_query;
 use crate::query::filter::eval_context::FilterContext;
-use crate::query::filter::field_path_cache::{prescan_field_path_cache, FieldPathCache};
+use crate::query::filter::field_path_cache::{
+    field_ref_key, prescan_field_path_cache, FieldPathCache,
+};
 use crate::query::filter::{Cond, Filter, FilterValue, FnCall};
 use crate::query::read::select_projection::SelectProjection;
 use crate::query::read::{QueryResult, Select, SelectItem};
@@ -72,35 +75,56 @@ fn prescan_populates_simple_field_ref() {
     let mut cache: FieldPathCache = new_map();
     prescan_field_path_cache(&fv, &interner, &mut cache);
 
-    // Destructure the SAME owned tree the cache was built from — pointer
-    // identity is the cache key, so looking up via a cloned/rebuilt `FieldRef`
-    // would (correctly) miss. See `FieldPathCache`'s doc comment.
+    // Look up via the SAME content-derived key `prescan_field_path_cache`
+    // inserted — see `FieldPathCache`'s doc comment.
     assert!(
         cache.get(&(fv_ref_addr(&fv))).is_some(),
         "prescan_field_path_cache must populate the cache for the FieldRef's node"
     );
 }
 
-/// Test 2: pointer-identity miss path: two INDEPENDENT `FieldRef`s
-/// (distinct allocations, distinct addresses). Only the first is
-/// prescanned; looking up the second's node must miss.
+/// Test 2 (group 13 Defect 2 regression): two INDEPENDENT `FieldRef`
+/// allocations with the SAME `path` now correctly HIT — the key is derived
+/// from content, not address. Under the old pointer-identity design this
+/// pair would have missed each other (see `cond_cache_tests.rs`'s analogous
+/// test for the full rationale: an address-reuse hazard, not just a missed
+/// optimization).
 #[test]
-fn cache_misses_unregistered_field_ref_node() {
+fn cache_hits_structurally_identical_field_ref_from_a_different_allocation() {
     let interner = Interner::new();
     interner.touch_ind("name").unwrap();
 
     let first = FilterValue::field_ref("name");
-    let second = FilterValue::field_ref("name"); // structurally identical, DIFFERENT allocation
+    let second = FilterValue::field_ref("name"); // identical content, DIFFERENT allocation
 
     let mut cache: FieldPathCache = new_map();
     prescan_field_path_cache(&first, &interner, &mut cache);
 
-    // `second` was never prescanned — its node lives at a different address
-    // than `first`'s, so pointer-identity lookup must miss.
     assert!(
-        cache.get(&(fv_ref_addr(&second))).is_none(),
-        "cache must miss for a FieldRef node that was never prescanned \
-         (distinct pointer, even if structurally identical)"
+        cache.get(&(fv_ref_addr(&second))).is_some(),
+        "cache must HIT for a FieldRef node with IDENTICAL content, even from \
+         an entirely separate allocation — the key is derived from content"
+    );
+}
+
+/// Test 2b: a genuinely DIFFERENT `FieldRef` (different `path`) that was
+/// never prescanned must still miss.
+#[test]
+fn cache_misses_a_genuinely_different_field_ref_node() {
+    let interner = Interner::new();
+    interner.touch_ind("name").unwrap();
+    interner.touch_ind("age").unwrap();
+
+    let first = FilterValue::field_ref("name");
+    let different = FilterValue::field_ref("age");
+
+    let mut cache: FieldPathCache = new_map();
+    prescan_field_path_cache(&first, &interner, &mut cache);
+
+    assert!(
+        cache.get(&(fv_ref_addr(&different))).is_none(),
+        "cache must miss for a FieldRef with genuinely different content \
+         (different path) that was never prescanned"
     );
 }
 
@@ -231,11 +255,12 @@ fn prescan_recurses_into_all_documented_shapes() {
     }
 }
 
-/// Extract the pointer-identity key for a `FilterValue` reference, matching
-/// the key `prescan_field_path_cache` inserts (`fv as *const FilterValue as
-/// usize`). Avoids raw pointers/`unsafe` in the test body.
-fn fv_ref_addr(fv: &FilterValue) -> usize {
-    fv as *const FilterValue as usize
+/// Compute the SAME content-derived key `prescan_field_path_cache` inserts
+/// (`field_ref_key`, group 13 Defect 2 fix). Named `fv_ref_addr` for
+/// minimal diff against the pre-fix test bodies below — it no longer
+/// returns an address, just the cache's actual `String` key.
+fn fv_ref_addr(fv: &FilterValue) -> String {
+    field_ref_key(fv)
 }
 
 // ---------------------------------------------------------------------
@@ -259,9 +284,10 @@ fn cached_and_uncached_field_ref_produce_identical_results() {
     let interner = Interner::new();
     interner.touch_ind("name").unwrap();
 
-    // Build the SAME FnCall projection node ONCE. It must be reused for both
-    // paths (pointer identity is the cache key) — a fresh clone for path (b)
-    // would defeat the test (both would be misses).
+    // Build the SAME FnCall projection node ONCE and reuse it for both
+    // paths — path (b) intentionally builds an uncached `FilterContext`
+    // rather than a second cache, so a fresh clone would still be a valid
+    // (if redundant) way to exercise the miss/fallback branch.
     let fv = FilterValue::FnCall {
         call: FnCall::complex("strings/upper", vec![FilterValue::field_ref("name")]),
     };

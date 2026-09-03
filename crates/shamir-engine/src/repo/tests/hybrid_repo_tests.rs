@@ -225,3 +225,145 @@ async fn unrecognized_store_name_trips_debug_assert_in_debug_profile() {
     let repo = build_hybrid(temp_dir.path()).await;
     let _ = repo.store_get("__unknown_future_store__").await;
 }
+
+// ============================================================================
+// 6. `stores_list_routed`'s `TFxSet`-flattened merge (perf nit, P2 group 26):
+//    `HybridRepoComposite::merge_store_names` must be BYTE-IDENTICAL to the
+//    original O(names × stores) `!names.contains(&disk_name)` linear-scan
+//    merge it replaced, across every edge case — including duplicate disk
+//    names, which are impractical to coax out of a real
+//    `FjallRepo::stores_list()`, hence testing the extracted pure merge fn
+//    directly rather than only through the full `Repo::stores_list` trait
+//    call.
+// ============================================================================
+
+/// The ORIGINAL O(names × stores) merge algorithm (`repo_types.rs`, pre-fix),
+/// kept here only as the oracle these tests check the new
+/// `TFxSet`-flattened `merge_store_names` against.
+fn old_merge_oracle(mut names: Vec<String>, disk_names: Vec<String>) -> Vec<String> {
+    for disk_name in disk_names {
+        if !names.contains(&disk_name) {
+            names.push(disk_name);
+        }
+    }
+    names
+}
+
+#[test]
+fn merge_store_names_matches_oracle_both_empty() {
+    let names: Vec<String> = Vec::new();
+    let disk_names: Vec<String> = Vec::new();
+    assert_eq!(
+        crate::repo::repo_types::HybridRepoComposite::merge_store_names(
+            names.clone(),
+            disk_names.clone()
+        ),
+        old_merge_oracle(names, disk_names)
+    );
+}
+
+#[test]
+fn merge_store_names_matches_oracle_empty_mem_names() {
+    let names: Vec<String> = Vec::new();
+    let disk_names: Vec<String> = vec!["__info__users".into(), "__interner__".into()];
+    let result = crate::repo::repo_types::HybridRepoComposite::merge_store_names(
+        names.clone(),
+        disk_names.clone(),
+    );
+    assert_eq!(result, old_merge_oracle(names, disk_names));
+    assert_eq!(
+        result,
+        vec!["__info__users".to_string(), "__interner__".to_string()]
+    );
+}
+
+#[test]
+fn merge_store_names_matches_oracle_disjoint_names() {
+    let names: Vec<String> = vec!["__history__users".into(), "__data__users".into()];
+    let disk_names: Vec<String> = vec!["__info__users".into(), "__interner__".into()];
+    assert_eq!(
+        crate::repo::repo_types::HybridRepoComposite::merge_store_names(
+            names.clone(),
+            disk_names.clone()
+        ),
+        old_merge_oracle(names, disk_names)
+    );
+}
+
+#[test]
+fn merge_store_names_matches_oracle_disk_name_already_in_mem_names() {
+    // A disk name that duplicates an existing mem name must NOT be
+    // appended a second time.
+    let names: Vec<String> = vec!["__info__users".into(), "__tx__".into()];
+    let disk_names: Vec<String> = vec!["__info__users".into(), "__interner__".into()];
+    let result = crate::repo::repo_types::HybridRepoComposite::merge_store_names(
+        names.clone(),
+        disk_names.clone(),
+    );
+    assert_eq!(result, old_merge_oracle(names, disk_names));
+    assert_eq!(
+        result,
+        vec![
+            "__info__users".to_string(),
+            "__tx__".to_string(),
+            "__interner__".to_string(),
+        ]
+    );
+}
+
+#[test]
+fn merge_store_names_matches_oracle_duplicate_disk_names() {
+    // `disk_names` itself contains the SAME name twice — only the first
+    // occurrence must be appended; the second is a no-op, matching the
+    // original growing-Vec linear-scan's behavior (the first push makes
+    // `names.contains` true for the second occurrence).
+    let names: Vec<String> = vec!["__changelog__".into()];
+    let disk_names: Vec<String> = vec![
+        "__info__users".into(),
+        "__info__users".into(),
+        "__interner__".into(),
+    ];
+    let result = crate::repo::repo_types::HybridRepoComposite::merge_store_names(
+        names.clone(),
+        disk_names.clone(),
+    );
+    assert_eq!(result, old_merge_oracle(names, disk_names));
+    assert_eq!(
+        result,
+        vec![
+            "__changelog__".to_string(),
+            "__info__users".to_string(),
+            "__interner__".to_string(),
+        ]
+    );
+}
+
+/// End-to-end sanity check through the real `Repo::stores_list` trait
+/// method (not just the extracted pure fn) — proves the flattened merge is
+/// actually wired into `stores_list_routed` and reachable via a live
+/// `BoxRepo::Hybrid`, including a name present ONLY on the disk tier
+/// (`__info__`/`__interner__`) that `stores_list` must surface even though
+/// no `mem` store of that name was ever created.
+#[tokio::test]
+async fn stores_list_surfaces_disk_only_names_via_hybrid_repo() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let repo = build_hybrid(temp_dir.path()).await;
+
+    // Only touches the mem tier.
+    let _ = repo.store_get("__data__users").await.unwrap();
+    // Only touches the disk tier (mirrored) — never registered in `mem`.
+    let _ = repo.store_get("__info__users").await.unwrap();
+
+    let names = repo.stores_list().await.unwrap();
+    assert!(names.contains(&"__data__users".to_string()));
+    assert!(names.contains(&"__info__users".to_string()));
+    // No duplicates.
+    let mut sorted = names.clone();
+    sorted.sort();
+    sorted.dedup();
+    assert_eq!(
+        sorted.len(),
+        names.len(),
+        "stores_list must not duplicate names: {names:?}"
+    );
+}

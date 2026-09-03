@@ -177,19 +177,27 @@ pub async fn replay_v2_op(op: &WalOpV2, repo: &RepoInstance) -> DbResult<()> {
             // for_entry` first-err pattern already used in this crate.
             let mut first_err: Option<DbError> = None;
             for name in repo.list_table_names() {
-                if let Ok(tbl) = repo.get_table(&name).await {
-                    if let Err(e) = tbl
-                        .info_store()
-                        .set(key.clone().into(), value.clone())
-                        .await
-                    {
-                        log::warn!(
-                            "replay_v2_op broadcast IndexPut: info_store.set failed for \
-                             table {name}: {e}"
-                        );
-                        if first_err.is_none() {
-                            first_err = Some(e);
+                match repo.get_table(&name).await {
+                    Ok(tbl) => {
+                        if let Err(e) = tbl
+                            .info_store()
+                            .set(key.clone().into(), value.clone())
+                            .await
+                        {
+                            log::warn!(
+                                "replay_v2_op broadcast IndexPut: info_store.set failed for \
+                                 table {name}: {e}"
+                            );
+                            if first_err.is_none() {
+                                first_err = Some(e);
+                            }
                         }
+                    }
+                    Err(e) => {
+                        log::warn!(
+                            "replay_v2_op broadcast IndexPut: get_table failed for \
+                             table {name}: {e}; skipping this table"
+                        );
                     }
                 }
             }
@@ -228,10 +236,16 @@ pub async fn replay_v2_op(op: &WalOpV2, repo: &RepoInstance) -> DbResult<()> {
             // NotFound is the expected norm and benign — but a genuine I/O
             // error on any table propagates.
             for name in repo.list_table_names() {
-                if let Ok(tbl) = repo.get_table(&name).await {
-                    match tbl.info_store().remove(key.clone().into()).await {
+                match repo.get_table(&name).await {
+                    Ok(tbl) => match tbl.info_store().remove(key.clone().into()).await {
                         Ok(_) | Err(DbError::NotFound(_)) => {}
                         Err(e) => return Err(e),
+                    },
+                    Err(e) => {
+                        log::warn!(
+                            "replay_v2_op broadcast IndexDel: get_table failed for \
+                             table {name}: {e}; skipping this table"
+                        );
                     }
                 }
             }

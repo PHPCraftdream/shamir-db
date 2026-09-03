@@ -179,6 +179,74 @@ async fn one_of_via_schema() {
     assert_eq!(v.errors[0].code, "not_in_enum");
 }
 
+// ── Audit group 25 / defect 2: precomputed `one_of` set ──────────────────
+//
+// `SchemaValidator::new` precomputes a `TFxSet`-backed membership set from
+// `constraints.one_of` instead of re-scanning the raw `Vec<QueryValue>` per
+// record. These tests exercise that path through the REAL `SchemaValidator`
+// (not the raw `FieldRule::check` fallback covered by `check_tests.rs`),
+// with a LARGE allowed-list, to prove membership stays correct after the
+// switch — not just that it's faster.
+
+fn one_of_rule(path: &str, allowed: Vec<QueryValue>) -> FieldRule {
+    FieldRule {
+        path: vec![path.to_string()],
+        ty: TypeTag::String,
+        constraints: Constraints {
+            one_of: Some(allowed),
+            ..Default::default()
+        },
+        keyset_safe: false,
+    }
+}
+
+fn large_status_list() -> Vec<QueryValue> {
+    (0..1000)
+        .map(|i| QueryValue::Str(format!("status_{i}")))
+        .collect()
+}
+
+#[tokio::test]
+async fn one_of_large_list_accepts_present_value() {
+    let rules = vec![one_of_rule("status", large_status_list())];
+    // A value present near the END of the list — a naive re-check would
+    // still find it, but this also exercises the precomputed set's full
+    // population (not just an early-list value that a broken partial build
+    // could accidentally still contain).
+    let qv = fields_from(vec![("status", QueryValue::Str("status_999".into()))]);
+    let v = run_schema(rules, Some(&qv)).await;
+    assert!(
+        v.is_ok(),
+        "status_999 is in the allowed list: {:?}",
+        v.errors
+    );
+}
+
+#[tokio::test]
+async fn one_of_large_list_rejects_absent_value() {
+    let rules = vec![one_of_rule("status", large_status_list())];
+    let qv = fields_from(vec![("status", QueryValue::Str("status_9999".into()))]);
+    let v = run_schema(rules, Some(&qv)).await;
+    assert_eq!(v.errors[0].code, "not_in_enum");
+}
+
+#[tokio::test]
+async fn one_of_empty_list_accepts_any_value() {
+    // An empty `one_of` list is treated as "no constraint" — mirrors the
+    // pre-existing `FieldRule::check_one_of` behaviour for `Some(vals) if
+    // vals.is_empty()`. `OneOfSet::build` must return `None` here so
+    // `SchemaValidator` falls back to the same no-op skip, not an
+    // always-reject empty set.
+    let rules = vec![one_of_rule("status", vec![])];
+    let qv = fields_from(vec![("status", QueryValue::Str("anything".into()))]);
+    let v = run_schema(rules, Some(&qv)).await;
+    assert!(
+        v.is_ok(),
+        "empty one_of list must not reject: {:?}",
+        v.errors
+    );
+}
+
 #[tokio::test]
 async fn full_schema_accept() {
     let rules = vec![

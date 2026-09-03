@@ -11,7 +11,10 @@ use crate::tx::commit_phases::{
     promote_vectors,
 };
 use crate::tx::finalize::finalize_sync_post_publish;
-use crate::tx::pre_commit::{pre_commit_locked, pre_commit_prelock, PreCommit, PreLockResult};
+use crate::tx::materialize::materialize;
+use crate::tx::pre_commit::{
+    pre_commit_locked, pre_commit_locked_validate, pre_commit_prelock, PreCommit, PreLockResult,
+};
 use crate::tx::tx_outcome::{BackgroundCommitHandle, MaterializationState, TxOutcome};
 
 const DEFAULT_MAX_TX_LIFETIME: std::time::Duration = std::time::Duration::from_secs(300); // 5 min
@@ -340,7 +343,7 @@ pub async fn wal_ops_from_tx(tx: &TxContext) -> Vec<WalOpV2> {
     // self-contained: recovery can replay tx data writes without
     // needing the (still-staged) StagingStore around.
     for (table_id, staging) in &tx.write_set {
-        for kv_op in staging.snapshot_ops() {
+        for kv_op in staging.iter_ops() {
             match kv_op {
                 shamir_storage::types::KvOp::Set(k, v) => {
                     if let Some(rid) = shamir_types::types::record_id::RecordId::try_from_bytes(&k)
@@ -586,8 +589,26 @@ async fn commit_tx_inner(mut tx: TxContext, repo: &RepoInstance) -> Result<TxOut
         });
     }
 
-    let gate = repo.tx_gate().await?;
-    let wal = repo.repo_wal().await?;
+    // Group 15 (2026-08-14 review, SUMMARY.md 6.2): both resolutions can
+    // hit REAL I/O on first touch (`repo_wal()` does `create_dir_all` +
+    // `SegmentSet::open`) — mirror every other early-exit path in this
+    // function and release Level-3 locks before propagating the error, so
+    // a Pessimistic tx never leaks `locked_keys` when its commit happens
+    // to be the repo's first WAL touch.
+    let gate = match repo.tx_gate().await {
+        Ok(g) => g,
+        Err(e) => {
+            release_pessimistic_locks(&tx, repo).await;
+            return Err(e.into());
+        }
+    };
+    let wal = match repo.repo_wal().await {
+        Ok(w) => w,
+        Err(e) => {
+            release_pessimistic_locks(&tx, repo).await;
+            return Err(e.into());
+        }
+    };
 
     // === PRE-LOCK SECTION (concurrent across committers) ===
     //
@@ -829,9 +850,6 @@ async fn commit_tx_lockfree(
     gate: &shamir_tx::RepoTxGate,
     wal: &shamir_tx::RepoWalManager,
 ) -> Result<TxOutcome, TxError> {
-    use crate::tx::materialize::materialize;
-    use crate::tx::pre_commit::pre_commit_locked_validate;
-
     // CRIT-4 (#438): Serializable txs must serialize the validate→publish
     // window. The lock-free path relies on per-table `uwl_guards` for
     // serialization, but those are acquired ONLY for tables with unique
