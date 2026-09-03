@@ -269,6 +269,85 @@ error code) — проверка в dispatch'е до executor'а. Admin-ops уп
 сознательно НЕ в R1 (клиент получает адрес лидера в ошибке и идёт сам;
 прозрачный прокси — QOL-кандидат R2+).
 
+### 4.4 Модель доверия payload'у apply-пути (threat model, #1199)
+
+**`apply_replicated`** (`crates/shamir-engine/src/tx/apply_replicated.rs`,
+уже реализовано в рамках R1-a) применяет `event.changes` как **TRUSTED raw
+write**: НИКАКИХ validator/schema/DAC/integrity-проверок над содержимым
+`RecordChange.value` не выполняется — байты идут напрямую в MVCC
+version-log (`MvccStore::apply_committed_ops`) или в базовый store для
+неприсоединённых таблиц. Это осознанное архитектурное решение (см. module
+doc `apply_replicated.rs` строки 1–83): follower — исполнитель уже
+решённого лидером результата, а не пересчитывающий его валидатор.
+
+**Явная precondition, которую этот модуль НЕ проверяет сам и полагается,
+что её обеспечивают сиблинг-крейты:** вся безопасность apply-пути держится
+на том, что байты `ChangelogEvent` пришли по УЖЕ АУТЕНТИФИЦИРОВАННОМУ и
+целостному транспортному соединению от легитимного leader/upstream-узла —
+TLS 1.3 + SCRAM-Argon2id + Ed25519 identity (§2.3) и серверный аккаунт с
+grants, прошедший `authorize_access` на стороне ОТДАЮЩЕГО (§5.4). Это
+ответственность `shamir-connect` / `shamir-transport-tcp` /
+`shamir-transport-ws` (установка и аутентификация соединения) и
+`shamir-server`'s replication supervisor (какое соединение вообще
+допускается до чтения changefeed) — НЕ `shamir-engine`, который в принципе
+не видит транспортный уровень и не может независимо проверить, что событие
+действительно пришло от заявленного отправителя.
+
+**Failure scenario, если precondition нарушена:** неаутентифицированный
+replication-эндпоинт, скомпрометированный upstream, либо
+скомпрометированное промежуточное звено цепочки (события ре-эмитятся
+дальше вниз по цепочке через `reproject_for_downstream` БЕЗ повторной
+проверки) может протащить произвольные/испорченные байты записи; follower
+применит их без вопросов и будет раздавать как валидные данные своим
+собственным клиентам и дальше по цепочке репликации.
+
+**Что реализовано / что отложено (#1199, P2):**
+- **Реализовано:** явная документация precondition (этот подраздел) +
+  doc-комментарий в `apply_replicated.rs`, указывающий сюда; и минимальный
+  opt-in **`ApplyPolicy`** (`apply_replicated.rs`) с двумя вариантами:
+  - `ApplyPolicy::Trusted` (default, byte-identical к пред-#1199 поведению)
+    — не проверяет ничего, ровно как описано выше.
+  - `ApplyPolicy::ValidatePayload` — ДО выделения версии (отклонение не
+    расходует версию, идентично контракту `Skipped`) декодирует каждый
+    `Put`'а `value` тем же двухшаговым декодером, которым
+    `table/read_exec.rs` классифицирует `corrupt_records`
+    (`RecordView::new`, затем fallback на `InnerValue::from_bytes` для
+    legacy-кодированных строк); событие с payload'ом, не декодирующимся
+    НИ ОДНИМ из двух способов, отклоняется целиком (`Err`, без частичного
+    применения). Это НЕ re-run schema/validator/DAC — только "байты вообще
+    похожи на запись, а не на мусор".
+  - Вызов на стороне `shamir-server`'s `follower_loop.rs` сегодня жёстко
+    передаёт `ApplyPolicy::Trusted` — реальный opt-in конфиг-флаг (через
+    `FollowerLoopConfig`/ktav) НЕ подключён в этой задаче (см. "отложено"
+    ниже).
+- **Отложено (не в скоупе #1199):**
+  1. Подключение `ApplyPolicy::ValidatePayload` к реальному
+     конфигурационному флагу оператора (ktav/`FollowerLoopConfig`) — сам
+     механизм в движке готов и протестирован
+     (`tx/tests/apply_replicated_tests.rs::validate_payload_rejects_undecodable_put_and_consumes_no_version`),
+     но никто в `shamir-server` сегодня его не включает.
+  2. Полноценный re-run schema/validator/DAC на follower при приёме —
+     НЕ реализован. Обоснование: DAC на follower бессмысленен (actor в
+     событии — leader-asserted provenance для истории/аудита, НИКОГДА не
+     вход авторизации на follower — у follower нет независимого способа
+     проверить, что именно ЭТОТ actor реально инициировал операцию на
+     лидере, кроме доверия самому транспорту, что и так уже требуется);
+     integrity-подпись против скомпрометированного лидера бессмысленна
+     (лидер, будучи скомпрометирован, подпишет что угодно — транзит уже
+     защищён TLS §2.3); schema/WASM-validator re-run требует interner
+     (дыра G1, ещё не закрыта) и validator-registry, которые живут в
+     `shamir-db` — крейте ВЫШЕ `shamir-engine` по графу зависимостей,
+     недоступном отсюда без структурной инверсии, аналогичной §1199's
+     `AccessGate`. См.
+     `docs/dev-artifacts/audits/2026-08-14-cross-crate-rush-review/shamir-engine/security-crypto.md`
+     находка #4 для исходного описания.
+  Deployments, которым нужен нулевой trust к содержимому потока сверх
+  структурной декодируемости, могут уже сегодня передать
+  `ApplyPolicy::ValidatePayload` напрямую (минуя `follower_loop.rs`'s
+  текущий hardcode) через `RepoInstance::apply_replicated`; полный нулевой
+  trust к транспорту как таковому по-прежнему опирается исключительно на
+  аутентификацию соединения (§5.4).
+
 ---
 
 ## 5. Внутренний протокол (поверх shamir-connect)
