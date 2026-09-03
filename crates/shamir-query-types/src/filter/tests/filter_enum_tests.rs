@@ -1,5 +1,5 @@
-use crate::filter::filter_enum::{check_filter_depth, Filter};
-use crate::filter::FilterValue;
+use crate::filter::filter_enum::{check_filter_depth, Filter, MAX_FILTER_DEPTH};
+use crate::filter::{Cond, FilterValue};
 
 fn roundtrip_filter(f: &Filter) -> Filter {
     let bytes = rmp_serde::to_vec_named(f).unwrap();
@@ -223,6 +223,58 @@ fn deep_filter_rejected_by_depth_check() {
     }
     let result = check_filter_depth(&f);
     assert!(result.is_err(), "deeply nested filter should be rejected");
+}
+
+/// #<group-12>: `check_filter_depth` used to walk only `And`/`Or`/`Not` —
+/// a filter shallow at the `Filter` level (a single `Eq`, depth 1) could
+/// smuggle unbounded nesting through its VALUE (`FilterValue::Array`
+/// chains, `$cond`, `$expr`, `$fn` args) and sail through untouched, later
+/// blowing the stack inside `compile_filter`/`resolve_filter_query`. This
+/// asserts the combined Filter+FilterValue walk now bounds the VALUE side
+/// too.
+#[test]
+fn deep_filter_value_array_rejected_by_depth_check() {
+    let mut value = FilterValue::Int(0);
+    for _ in 0..(MAX_FILTER_DEPTH + 10) {
+        value = FilterValue::Array(vec![value]);
+    }
+    let f = Filter::Eq {
+        field: vec!["id".into()],
+        value,
+    };
+    assert!(
+        check_filter_depth(&f).is_err(),
+        "an Eq filter (Filter-level depth 1) whose VALUE is nested far past \
+         MAX_FILTER_DEPTH must still be rejected"
+    );
+}
+
+/// Same mechanism as above, via a `$cond` chain nested in `then` — `$cond`'s
+/// `condition` is itself a `Filter`, so this also exercises the
+/// Value→Filter edge of the combined walk.
+#[test]
+fn deep_cond_chain_in_filter_value_rejected_by_depth_check() {
+    let mut value = FilterValue::Int(0);
+    for _ in 0..(MAX_FILTER_DEPTH + 10) {
+        value = FilterValue::Cond {
+            cond: Box::new(Cond::new(
+                Filter::IsNotNull {
+                    field: vec!["x".into()],
+                },
+                value,
+                FilterValue::Null,
+            )),
+        };
+    }
+    let f = Filter::Eq {
+        field: vec!["id".into()],
+        value,
+    };
+    assert!(
+        check_filter_depth(&f).is_err(),
+        "a deeply nested $cond chain smuggled through an Eq's VALUE must \
+         still be rejected"
+    );
 }
 
 #[test]

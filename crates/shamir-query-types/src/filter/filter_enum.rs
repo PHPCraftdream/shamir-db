@@ -213,28 +213,147 @@ pub enum ValueCompareOp {
     Lte,
 }
 
+/// One entry of the combined `Filter`/`FilterValue` depth-walk stack (see
+/// [`check_filter_depth`]).
+enum DepthNode<'a> {
+    Filter(&'a Filter),
+    Value(&'a FilterValue),
+}
+
 /// Validate that a filter tree does not exceed `MAX_FILTER_DEPTH`.
-/// Uses an explicit stack (iterative, no unbounded recursion).
-/// Returns `Ok(())` if the tree is within bounds.
+///
+/// Walks BOTH the `Filter` (`And`/`Or`/`Not`) nesting AND every embedded
+/// `FilterValue` subtree that a comparison/membership operator's value(s)
+/// may carry (`$cond`/`$expr`/`$fn` args, `Array` elements, `$cond`'s own
+/// nested `condition: Filter`). A filter that is shallow at the `And`/`Or`/
+/// `Not` level can otherwise smuggle an unbounded compile/resolve recursion
+/// via a deeply nested VALUE — e.g. a depth-1 `Eq` whose `value` is a
+/// 100k-deep `$cond`/`Array` chain — which used to sail through this check
+/// and then blow the stack (process abort, not a catchable `Err`) inside
+/// `compile_filter`/`resolve_filter_query` at query-execution time.
+///
+/// Uses an explicit heap-allocated stack (iterative, no unbounded
+/// recursion) so the checker itself cannot stack-overflow on the very
+/// input it exists to reject. Returns `Ok(())` if the tree is within
+/// bounds.
 pub fn check_filter_depth(filter: &Filter) -> Result<(), String> {
-    let mut stack: Vec<(&Filter, usize)> = vec![(filter, 1)];
+    let mut stack: Vec<(DepthNode<'_>, usize)> = vec![(DepthNode::Filter(filter), 1)];
     while let Some((current, depth)) = stack.pop() {
         if depth > MAX_FILTER_DEPTH {
             return Err(format!("filter nesting depth exceeds {}", MAX_FILTER_DEPTH));
         }
         match current {
-            Filter::And { filters } | Filter::Or { filters } => {
-                for f in filters {
-                    stack.push((f, depth + 1));
-                }
-            }
-            Filter::Not { filter } => {
-                stack.push((filter, depth + 1));
-            }
-            _ => {}
+            DepthNode::Filter(f) => push_filter_children(f, depth, &mut stack),
+            DepthNode::Value(v) => push_value_children(v, depth, &mut stack),
         }
     }
     Ok(())
+}
+
+/// Push `filter`'s immediate `Filter`/`FilterValue` children (at `depth +
+/// 1`) onto the depth-walk stack. Mirrors `shamir-engine`'s
+/// `compile_filter`/`resolve_filter_query` dispatch shape so every node
+/// those functions can recurse into is also visited here.
+fn push_filter_children<'a>(
+    filter: &'a Filter,
+    depth: usize,
+    stack: &mut Vec<(DepthNode<'a>, usize)>,
+) {
+    match filter {
+        Filter::And { filters } | Filter::Or { filters } => {
+            for f in filters {
+                stack.push((DepthNode::Filter(f), depth + 1));
+            }
+        }
+        Filter::Not { filter } => {
+            stack.push((DepthNode::Filter(filter), depth + 1));
+        }
+        Filter::Eq { value, .. }
+        | Filter::Ne { value, .. }
+        | Filter::Gt { value, .. }
+        | Filter::Gte { value, .. }
+        | Filter::Lt { value, .. }
+        | Filter::Lte { value, .. }
+        | Filter::FieldEq { value, .. }
+        | Filter::Contains { value, .. } => {
+            stack.push((DepthNode::Value(value), depth + 1));
+        }
+        Filter::In { values, .. }
+        | Filter::NotIn { values, .. }
+        | Filter::ContainsAny { values, .. }
+        | Filter::ContainsAll { values, .. } => {
+            for v in values {
+                stack.push((DepthNode::Value(v), depth + 1));
+            }
+        }
+        Filter::Between { from, to, .. } => {
+            stack.push((DepthNode::Value(from), depth + 1));
+            stack.push((DepthNode::Value(to), depth + 1));
+        }
+        Filter::ValueCompare { left, right, .. } => {
+            stack.push((DepthNode::Value(left), depth + 1));
+            stack.push((DepthNode::Value(right), depth + 1));
+        }
+        Filter::Computed {
+            expr_args, value, ..
+        } => {
+            if let Some(args) = expr_args {
+                for a in args {
+                    stack.push((DepthNode::Value(a), depth + 1));
+                }
+            }
+            stack.push((DepthNode::Value(value), depth + 1));
+        }
+        Filter::Like { .. }
+        | Filter::ILike { .. }
+        | Filter::Regex { .. }
+        | Filter::IsNull { .. }
+        | Filter::IsNotNull { .. }
+        | Filter::Exists { .. }
+        | Filter::NotExists { .. }
+        | Filter::Fts { .. }
+        | Filter::VectorSimilarity { .. } => {}
+    }
+}
+
+/// Push `value`'s immediate `FilterValue`/`Filter` children (at `depth +
+/// 1`) onto the depth-walk stack.
+fn push_value_children<'a>(
+    value: &'a FilterValue,
+    depth: usize,
+    stack: &mut Vec<(DepthNode<'a>, usize)>,
+) {
+    match value {
+        FilterValue::Array(items) => {
+            for item in items {
+                stack.push((DepthNode::Value(item), depth + 1));
+            }
+        }
+        FilterValue::FnCall { call } => {
+            for arg in call.args() {
+                stack.push((DepthNode::Value(arg), depth + 1));
+            }
+        }
+        FilterValue::Expr { expr } => {
+            for arg in &expr.args {
+                stack.push((DepthNode::Value(arg), depth + 1));
+            }
+        }
+        FilterValue::Cond { cond } => {
+            stack.push((DepthNode::Filter(cond.condition.as_ref()), depth + 1));
+            stack.push((DepthNode::Value(&cond.then), depth + 1));
+            stack.push((DepthNode::Value(&cond.or_else), depth + 1));
+        }
+        FilterValue::Null
+        | FilterValue::Bool(_)
+        | FilterValue::Int(_)
+        | FilterValue::Float(_)
+        | FilterValue::String(_)
+        | FilterValue::Binary(_)
+        | FilterValue::FieldRef { .. }
+        | FilterValue::QueryRef { .. }
+        | FilterValue::Param { .. } => {}
+    }
 }
 
 fn default_fts_mode() -> String {
