@@ -308,6 +308,125 @@ pub async fn legacy_indexes_need_rebuild(
 // 1. Use the id for registry operations (remove_by_id, sweep)
 // 2. Use the name to write the correct DdlOpStatus
 // 3. Use the op_id to ensure clients can poll the exact operation they triggered
+//
+// #1204: the blob is now version-tagged: `[INDEX2_DROP_TOMBSTONE_VERSION |
+// bincode(Vec<(u32, String, Option<String>)>)]`, mirroring
+// `base_index::ddl_op_log::DDL_OP_LOG_VERSION`'s version-byte-prefix pattern
+// (fail closed on an unrecognized version byte, no silent misparse as the
+// current shape). See `decode_dropping_index2`'s doc for why the version
+// byte value (0x81, NOT 0x01) and the decode tier order were both chosen
+// deliberately, and for the explicit backward-compat decision (pre-#1051
+// bare `Vec<u32>` support dropped; pre-#1204 unversioned tuple-vec support
+// kept) reached for #1204.
+
+/// Version byte for the index2 DROP tombstone envelope (#1204).
+///
+/// Deliberately **0x81** (high bit set), NOT a small value like
+/// `base_index::ddl_op_log::DDL_OP_LOG_VERSION`'s `0x01`. `bincode`'s fixint
+/// `u64` length prefix puts the vector's element COUNT in the first
+/// (LE) byte, so an unversioned `bincode(Vec<..>)` blob with exactly one
+/// entry — the single most common non-empty on-disk state for this key —
+/// serializes with a leading byte of `0x01` (proven by
+/// `p1204_version_byte_does_not_collide_with_legacy_len_1_first_byte`).
+/// `ddl_op_log`'s key was "born versioned" (no unversioned data ever
+/// existed under it), so `0x01` is safe there; this key is NOT — a low
+/// version byte here would risk misreading a genuine one-entry legacy
+/// tombstone as a (garbage) versioned payload. `0x81` cannot collide with a
+/// legacy length-prefix byte unless >= 129 index2 DROPs are simultaneously
+/// in flight against one table, which cannot happen: every entry reaches
+/// `add_to_dropping_index2` only under that table's serialized DDL
+/// admission path.
+const INDEX2_DROP_TOMBSTONE_VERSION: u8 = 0x81;
+
+/// Strict (reject-trailing-bytes) `bincode` decode of the tombstone entry
+/// list. `bincode::deserialize`'s top-level convenience function defaults
+/// to ALLOWING trailing bytes, which this key cannot afford: the
+/// version-byte disambiguation in `decode_dropping_index2` relies on a
+/// structurally-invalid decode attempt failing outright rather than
+/// silently succeeding against a truncated prefix of the wrong shape.
+fn strict_decode_dropping_entries(
+    bytes: &[u8],
+) -> Result<Vec<(u32, String, Option<String>)>, bincode::Error> {
+    use bincode::Options;
+    bincode::DefaultOptions::new()
+        .with_fixint_encoding()
+        .reject_trailing_bytes()
+        .deserialize(bytes)
+}
+
+/// Encode the index2 DROP tombstone as
+/// `[INDEX2_DROP_TOMBSTONE_VERSION | bincode(entries)]`.
+fn encode_dropping_index2(
+    entries: &[(u32, String, Option<String>)],
+) -> Result<Bytes, shamir_storage::error::DbError> {
+    let body = bincode::serialize(entries).map_err(|e| {
+        shamir_storage::error::DbError::Codec(format!("system:_m.idx.drop encode failed: {e}"))
+    })?;
+    let mut bytes = Vec::with_capacity(1 + body.len());
+    bytes.push(INDEX2_DROP_TOMBSTONE_VERSION);
+    bytes.extend_from_slice(&body);
+    Ok(Bytes::from(bytes))
+}
+
+/// Decode the index2 DROP tombstone blob. An empty byte string decodes to
+/// an empty `Vec` ("no in-progress drops" — an absent key is handled by the
+/// caller before this is reached).
+///
+/// #1204 decode strategy / explicit backward-compat decision:
+///   1. `[INDEX2_DROP_TOMBSTONE_VERSION | bincode(entries)]` — the current
+///      versioned format. Decoded strictly; a payload decode failure here
+///      is a genuine reported error, with NO further fallback attempted
+///      (falling through to tier 2 on a payload error would defeat the
+///      point of having a version byte at all).
+///   2. Otherwise: tried as the LEGACY, unversioned
+///      `bincode(Vec<(u32, String, Option<String>)>)` blob — the exact
+///      format every `add_to_dropping_index2`/`clear_from_dropping_index2`
+///      call wrote between #1051 and #1204. **Deliberately kept**: this is
+///      not a rare crash-window artifact — `clear_from_dropping_index2`
+///      never deletes the key, so EVERY table that has ever completed one
+///      index2 DROP has this exact unversioned empty-vec blob durably on
+///      disk today. Dropping this fallback would fail `TableManager::create`
+///      (table open, via `recover_index2_drops`) outright for every such
+///      table on the next restart.
+///   3. The bare pre-#1051 `Vec<u32>` shape (no name/op_id) is
+///      **intentionally NOT supported** as of #1204 (previously handled by
+///      a second fallback tier here). That shape could only be produced by
+///      a process that crashed mid-DROP on a pre-#1051 binary (before
+///      2026-08-09) and has never been reopened since — any reopen on a
+///      #1051-or-later binary already recovers and rewrites this key in the
+///      current shape. Bytes in that shape now fail closed with
+///      `DbError::Codec` (they are structurally too short to parse as tier
+///      2's tuple shape for any non-trivial entry count, so this is a clean
+///      error, not a silent misparse) rather than being silently
+///      resurrected with a synthesized empty name / `op_id: None`. See
+///      `p1051_old_format_index2_drop_tombstone_now_errors` for the
+///      before/after.
+fn decode_dropping_index2(
+    bytes: &[u8],
+) -> Result<Vec<(u32, String, Option<String>)>, shamir_storage::error::DbError> {
+    if bytes.is_empty() {
+        return Ok(Vec::new());
+    }
+    if bytes[0] == INDEX2_DROP_TOMBSTONE_VERSION {
+        return strict_decode_dropping_entries(&bytes[1..]).map_err(|e| {
+            shamir_storage::error::DbError::Codec(format!(
+                "system:_m.idx.drop: versioned ({INDEX2_DROP_TOMBSTONE_VERSION:#04x}) \
+                 payload decode failed: {e}"
+            ))
+        });
+    }
+    // Legacy tier: pre-#1204 unversioned Vec<(u32, String, Option<String>)>.
+    strict_decode_dropping_entries(bytes).map_err(|e| {
+        shamir_storage::error::DbError::Codec(format!(
+            "system:_m.idx.drop: first byte {:#04x} is not the current version \
+             ({INDEX2_DROP_TOMBSTONE_VERSION:#04x}) and the blob does not decode as the \
+             legacy unversioned Vec<(u32,String,Option<String>)> shape either \
+             (genuine corruption, an unsupported future format, or a pre-#1051 \
+             bare Vec<u32> blob — the latter is no longer supported as of #1204): {e}",
+            bytes[0]
+        ))
+    })
+}
 
 /// System key for the index2 DROP tombstone (`Vec<(u32, String, Option<String>)>` of id + name + op_id).
 fn meta_key_indexes_drop() -> RecordId {
@@ -318,37 +437,14 @@ fn meta_key_indexes_drop() -> RecordId {
 /// key is absent (`NotFound`) or contains an empty vec — both mean "no
 /// in-progress drops". Mirrors #972's `load_dropping_sorted`.
 ///
-/// #1051 backward compatibility: tries to deserialize as `Vec<(u32, String, Option<String>)>`
-/// first (new format with name and op_id). If that fails, falls back to `Vec<u32>` (old format
-/// without name/op_id), treating all entries as having empty name and `op_id = None`.
+/// See [`decode_dropping_index2`] for the #1204 version-byte decode
+/// strategy and the explicit backward-compat decision it documents.
 pub async fn load_dropping_index2(
     info_store: &Arc<dyn Store>,
 ) -> Result<Vec<(u32, String, Option<String>)>, shamir_storage::error::DbError> {
     let key = meta_key_indexes_drop().to_bytes();
     match info_store.get(key.into()).await {
-        Ok(bytes) => {
-            if bytes.is_empty() {
-                return Ok(Vec::new());
-            }
-            // Try new format first: Vec<(u32, String, Option<String>)>
-            match bincode::deserialize::<Vec<(u32, String, Option<String>)>>(&bytes) {
-                Ok(new_format) => Ok(new_format),
-                Err(_) => {
-                    // Fall back to old format: Vec<u32> (pre-#1051)
-                    let old_format: Vec<u32> = bincode::deserialize(&bytes).map_err(|e| {
-                        shamir_storage::error::DbError::Codec(format!(
-                            "system:_m.idx.drop decode failed: {e}"
-                        ))
-                    })?;
-                    // Convert to new format with empty name and op_id = None
-                    // (we can't recover the name in this case, so status writes will be skipped)
-                    Ok(old_format
-                        .into_iter()
-                        .map(|id| (id, String::new(), None))
-                        .collect())
-                }
-            }
-        }
+        Ok(bytes) => decode_dropping_index2(&bytes),
         Err(shamir_storage::error::DbError::NotFound(_)) => Ok(Vec::new()),
         Err(e) => Err(e),
     }
@@ -366,6 +462,8 @@ pub async fn load_dropping_index2(
 /// #1051: accepts `name` and `op_id` minted at dispatch time. `op_id = None` means
 /// the caller does not have an op_id (e.g., a non-DDL path), and the tombstone entry
 /// will have `op_id = None` (backward compatible with pre-#1051 format).
+///
+/// #1204: writes the version-tagged envelope (see [`encode_dropping_index2`]).
 pub async fn add_to_dropping_index2(
     id: u32,
     name: String,
@@ -377,9 +475,8 @@ pub async fn add_to_dropping_index2(
         current.push((id, name, op_id));
     }
     let key = meta_key_indexes_drop().to_bytes();
-    let bytes = bincode::serialize(&current)
-        .map_err(|e| shamir_storage::error::DbError::Codec(e.to_string()))?;
-    info_store.set(key.into(), Bytes::from(bytes)).await?;
+    let bytes = encode_dropping_index2(&current)?;
+    info_store.set(key.into(), bytes).await?;
     Ok(())
 }
 
@@ -387,6 +484,12 @@ pub async fn add_to_dropping_index2(
 /// set, removes the id, and writes it back. MUST be called AFTER
 /// `save_index2_metadata` (the reduced metadata must be durable first).
 /// Mirrors #972's `clear_from_dropping_sorted`.
+///
+/// #1204: writes the version-tagged envelope (see [`encode_dropping_index2`]),
+/// same as [`add_to_dropping_index2`] — both write paths (and the
+/// recovery-clear loop in `shamir-engine`'s `recover_index2_drops`, which
+/// now calls this fn directly instead of hand-rolling a raw write) must
+/// agree on the wire format.
 pub async fn clear_from_dropping_index2(
     id: u32,
     info_store: &Arc<dyn Store>,
@@ -394,9 +497,8 @@ pub async fn clear_from_dropping_index2(
     let mut current = load_dropping_index2(info_store).await?;
     current.retain(|&(existing_id, _, _)| existing_id != id);
     let key = meta_key_indexes_drop().to_bytes();
-    let bytes = bincode::serialize(&current)
-        .map_err(|e| shamir_storage::error::DbError::Codec(e.to_string()))?;
-    info_store.set(key.into(), Bytes::from(bytes)).await?;
+    let bytes = encode_dropping_index2(&current)?;
+    info_store.set(key.into(), bytes).await?;
     Ok(())
 }
 

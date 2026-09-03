@@ -1,8 +1,8 @@
 use crate::descriptor::IndexDescriptor;
 use crate::kind::{FunctionalConfig, IndexKind, TokenizerKind};
 use crate::persistence::{
-    add_to_dropping_index2, legacy_indexes_need_rebuild, load_dropping_index2,
-    load_index2_metadata, load_legacy_index_version, save_index2_metadata,
+    add_to_dropping_index2, clear_from_dropping_index2, legacy_indexes_need_rebuild,
+    load_dropping_index2, load_index2_metadata, load_legacy_index_version, save_index2_metadata,
     save_legacy_index_version, PersistedIndexes, LEGACY_INDEX_FORMAT_VERSION,
 };
 use crate::MetaEnvelope;
@@ -148,11 +148,17 @@ async fn legacy_rebuild_when_old_version() {
 // #1051 — index2 DROP tombstone backward compatibility
 // ============================================================================
 
-/// #1051: a pre-#1051 index2 DROP tombstone (bare `Vec<u32>`, no name/op_id
-/// fields) must still load correctly, with every entry given an empty name
-/// and `op_id: None`.
+/// #1204 DELIBERATE BACK-COMPAT BREAK (see `decode_dropping_index2`'s doc
+/// for the full reasoning): the pre-#1051 bare `Vec<u32>` tombstone shape
+/// (no name/op_id fields) is no longer decoded. This inverts what this test
+/// asserted pre-#1204 — a bare `Vec<u32>` blob used to be silently
+/// resurrected with a synthesized empty name / `op_id: None`; it must now
+/// fail closed with `DbError::Codec`. Rationale: that shape could only be
+/// produced by a process that crashed mid-DROP on a pre-#1051 binary
+/// (before 2026-08-09) and has never been reopened since — any reopen on a
+/// #1051-or-later binary already recovers and rewrites this key.
 #[tokio::test]
-async fn p1051_old_format_index2_drop_tombstone_decodes_with_empty_name_and_none_op_id() {
+async fn p1051_old_format_index2_drop_tombstone_now_errors() {
     let store: Arc<dyn Store> = Arc::new(InMemoryStore::new());
 
     let old_format: Vec<u32> = vec![10, 20];
@@ -160,11 +166,33 @@ async fn p1051_old_format_index2_drop_tombstone_decodes_with_empty_name_and_none
     let bytes = bincode::serialize(&old_format).unwrap();
     store.set(key.into(), Bytes::from(bytes)).await.unwrap();
 
-    let loaded = load_dropping_index2(&store).await.unwrap();
-    assert_eq!(
-        loaded,
-        vec![(10, String::new(), None), (20, String::new(), None)],
-        "old-format Vec<u32> tombstone must decode with empty name and op_id: None"
+    let result = load_dropping_index2(&store).await;
+    assert!(
+        result.is_err(),
+        "pre-#1051 bare Vec<u32> tombstone must now fail closed \
+         (#1204 deliberately dropped this fallback), got: {:?}",
+        result
+    );
+}
+
+/// #1204: a single-entry pre-#1051 `Vec<u32>` tombstone must ALSO fail
+/// closed, not just the two-entry case above — structurally it's too short
+/// to parse as the current tuple shape (only 4 bytes remain after the
+/// length prefix; one tuple entry needs at least 13).
+#[tokio::test]
+async fn p1051_old_format_single_entry_index2_drop_tombstone_now_errors() {
+    let store: Arc<dyn Store> = Arc::new(InMemoryStore::new());
+
+    let old_format: Vec<u32> = vec![7];
+    let key = RecordId::system("_m.idx.drop").to_bytes();
+    let bytes = bincode::serialize(&old_format).unwrap();
+    store.set(key.into(), Bytes::from(bytes)).await.unwrap();
+
+    let result = load_dropping_index2(&store).await;
+    assert!(
+        result.is_err(),
+        "single-entry pre-#1051 tombstone must fail closed too, got: {:?}",
+        result
     );
 }
 
@@ -191,4 +219,133 @@ async fn p1051_new_format_index2_drop_tombstone_round_trips_name_and_op_id() {
         ],
         "new-format tombstone must round-trip name and op_id exactly"
     );
+}
+
+// ============================================================================
+// #1204 — index2 DROP tombstone version-byte envelope
+// ============================================================================
+
+/// #1204: `add_to_dropping_index2` writes the version-tagged envelope — the
+/// first on-disk byte is `0x81`, not a raw bincode length prefix.
+#[tokio::test]
+async fn p1204_write_path_carries_version_byte() {
+    let store: Arc<dyn Store> = Arc::new(InMemoryStore::new());
+    add_to_dropping_index2(1, "idx".to_string(), None, &store)
+        .await
+        .unwrap();
+
+    let key = RecordId::system("_m.idx.drop").to_bytes();
+    let bytes = store.get(key.into()).await.unwrap();
+    assert_eq!(
+        bytes[0], 0x81,
+        "on-disk tombstone must start with the #1204 version byte"
+    );
+}
+
+/// #1204: round-trips through the real add/load/clear path, with the
+/// version envelope in place end to end.
+#[tokio::test]
+async fn p1204_round_trip_versioned_envelope() {
+    let store: Arc<dyn Store> = Arc::new(InMemoryStore::new());
+    let op_id = RecordId::new();
+    add_to_dropping_index2(42, "vec_idx".to_string(), Some(op_id.to_string()), &store)
+        .await
+        .unwrap();
+    add_to_dropping_index2(43, "fts_idx".to_string(), None, &store)
+        .await
+        .unwrap();
+
+    let loaded = load_dropping_index2(&store).await.unwrap();
+    assert_eq!(
+        loaded,
+        vec![
+            (42, "vec_idx".to_string(), Some(op_id.to_string())),
+            (43, "fts_idx".to_string(), None),
+        ]
+    );
+
+    clear_from_dropping_index2(42, &store).await.unwrap();
+    let loaded = load_dropping_index2(&store).await.unwrap();
+    assert_eq!(loaded, vec![(43, "fts_idx".to_string(), None)]);
+}
+
+/// #1204: an unrecognized version byte must fail closed with a decode
+/// error, never silently misinterpreted as the current shape.
+#[tokio::test]
+async fn p1204_unrecognized_version_byte_fails_closed() {
+    let store: Arc<dyn Store> = Arc::new(InMemoryStore::new());
+    let key = RecordId::system("_m.idx.drop").to_bytes();
+    // 0x82 looks like a versioned envelope (high bit set) but is not the
+    // current version (0x81) — must not be decoded as if it were, and must
+    // not fall through to the legacy tier either.
+    let mut bytes = vec![0x82u8];
+    bytes.extend_from_slice(
+        &bincode::serialize(&Vec::<(u32, String, Option<String>)>::new()).unwrap(),
+    );
+    store.set(key.into(), Bytes::from(bytes)).await.unwrap();
+
+    let result = load_dropping_index2(&store).await;
+    assert!(
+        result.is_err(),
+        "unrecognized version byte must fail closed, got: {:?}",
+        result
+    );
+}
+
+/// #1204 verdict B: a pre-#1204 UNVERSIONED tombstone — the exact shape
+/// every `add_to_dropping_index2` wrote between #1051 and #1204 — must
+/// still decode correctly. This is deliberately kept (unlike the pre-#1051
+/// `Vec<u32>` shape above): dropping it would fail `TableManager::create`
+/// on every database that has ever completed one index2 DROP, since
+/// `clear_from_dropping_index2` never deletes the key.
+#[tokio::test]
+async fn p1204_legacy_unversioned_tuple_tombstone_still_decodes() {
+    let store: Arc<dyn Store> = Arc::new(InMemoryStore::new());
+    let op_id = RecordId::new();
+    let legacy: Vec<(u32, String, Option<String>)> = vec![
+        (1, "lower_name".to_string(), Some(op_id.to_string())),
+        (2, "upper_name".to_string(), None),
+    ];
+    let key = RecordId::system("_m.idx.drop").to_bytes();
+    let bytes = bincode::serialize(&legacy).unwrap();
+    store.set(key.into(), Bytes::from(bytes)).await.unwrap();
+
+    let loaded = load_dropping_index2(&store).await.unwrap();
+    assert_eq!(loaded, legacy);
+}
+
+/// #1204: the legacy-tuple steady-state empty blob — what
+/// `clear_from_dropping_index2` wrote pre-#1204, and what every already-
+/// completed index2 DROP leaves on disk forever — must decode to an empty
+/// Vec, not error.
+#[tokio::test]
+async fn p1204_legacy_unversioned_empty_tombstone_decodes_to_empty() {
+    let store: Arc<dyn Store> = Arc::new(InMemoryStore::new());
+    let key = RecordId::system("_m.idx.drop").to_bytes();
+    let bytes = bincode::serialize(&Vec::<(u32, String, Option<String>)>::new()).unwrap();
+    store.set(key.into(), Bytes::from(bytes)).await.unwrap();
+
+    let loaded = load_dropping_index2(&store).await.unwrap();
+    assert!(loaded.is_empty());
+}
+
+/// #1204: proves the `0x81` version byte choice does NOT collide with a
+/// genuine one-entry legacy tombstone's first byte (`0x01` — the low byte
+/// of bincode's `u64` length-1 prefix). The legacy blob must decode via the
+/// legacy tier, not be misread as a (garbage) versioned payload.
+#[tokio::test]
+async fn p1204_version_byte_does_not_collide_with_legacy_len_1_first_byte() {
+    let store: Arc<dyn Store> = Arc::new(InMemoryStore::new());
+    let legacy: Vec<(u32, String, Option<String>)> = vec![(99, String::new(), None)];
+    let bytes = bincode::serialize(&legacy).unwrap();
+    assert_eq!(
+        bytes[0], 0x01,
+        "precondition: a one-entry legacy tuple-vec's first byte is 0x01"
+    );
+
+    let key = RecordId::system("_m.idx.drop").to_bytes();
+    store.set(key.into(), Bytes::from(bytes)).await.unwrap();
+
+    let loaded = load_dropping_index2(&store).await.unwrap();
+    assert_eq!(loaded, legacy);
 }
