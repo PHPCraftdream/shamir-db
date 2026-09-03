@@ -1,9 +1,7 @@
 //! `impl ShamirDb { execute, execute_as }`.
 
-use crate::access::{Action, Actor, ResourcePath};
-use crate::query::batch::{
-    collect_required_access, execute_batch, BatchError, BatchRequest, BatchResponse,
-};
+use crate::access::Actor;
+use crate::query::batch::{execute_batch, Authorized, BatchError, BatchRequest, BatchResponse};
 
 use super::super::shamir_db::ShamirDb;
 use super::admin_dispatch::ShamirAdminExecutor;
@@ -26,46 +24,25 @@ impl ShamirDb {
     /// This is the principal-aware entry point called by the server with the
     /// authenticated session's actor. The convenience [`execute`] delegates
     /// here with `Actor::System` (admin bypass) for backward compatibility.
+    ///
+    /// Authorization (DB visibility + every op's `required_access`,
+    /// recursively through nested `Batch`/`ForEach` bodies — see
+    /// `Authorized::authorize`'s doc) now happens INSIDE the type-level
+    /// seam (#1199): `self` is passed as the [`crate::query::batch::AccessGate`],
+    /// and `execute_batch` structurally cannot run without the resulting
+    /// [`Authorized`] token.
     pub async fn execute_as(
         &self,
         actor: Actor,
         db_name: &str,
         request: &BatchRequest,
     ) -> Result<BatchResponse, BatchError> {
-        self.authorize_access(
-            &actor,
-            &ResourcePath::Database {
-                db: db_name.to_string(),
-            },
-            Action::Read,
-        )
-        .await
-        .map_err(|e| BatchError::query_coded("", "access_denied", e.to_string()))?;
+        let auth = Authorized::authorize(request, actor, db_name, self).await?;
         let db = self.get_db(db_name).ok_or_else(|| BatchError::QueryError {
             alias: String::new(),
             message: format!("Database '{}' not found", db_name),
             code: None,
         })?;
-
-        // Per-op authorization: each data op is checked against its TARGET
-        // table (admin/DDL ops carry no table_ref and are authorized in
-        // execute_admin). authorize_access traverses the db/store ancestors,
-        // so the table path covers the whole chain. System bypasses.
-        //
-        // `collect_required_access` recursively walks the WHOLE query tree,
-        // including nested `Batch`/`ForEach` bodies at any depth — a flat,
-        // one-level walk over `request.queries.values()` would see `None`
-        // for `Batch`/`ForEach` (they have no `table_ref()`) and silently
-        // skip authorizing whatever tables their nested body actually
-        // touches, letting an actor bypass a forbidden table's ACL by
-        // wrapping the op in a top-level `Batch`/`ForEach` (the #660-class
-        // bug, but for authorization). See `collect_required_access`'s doc
-        // comment (mirrors `distinct_repos`'s recursive-walk precedent).
-        for (action, path) in collect_required_access(&request.queries, db_name) {
-            self.authorize_access(&actor, &path, action)
-                .await
-                .map_err(|e| BatchError::query_coded("", "access_denied", e.to_string()))?;
-        }
 
         let resolver = DbTableResolver {
             db: db.clone(),
@@ -74,22 +51,14 @@ impl ShamirDb {
         let admin = ShamirAdminExecutor {
             shamir: self.clone(),
             db_name: db_name.to_string(),
-            actor: actor.clone(),
+            actor: auth.actor().clone(),
         };
 
         let invoker = ShamirFunctionInvoker {
             shamir: self.clone(),
             db_name: db_name.to_string(),
         };
-        let mut response = execute_batch(
-            request,
-            &resolver,
-            Some(&admin),
-            Some(&invoker),
-            actor,
-            db_name,
-        )
-        .await?;
+        let mut response = execute_batch(auth, &resolver, Some(&admin), Some(&invoker)).await?;
 
         // Ambient interner epoch-delta sync (Stage 5-wire Part A): attach the
         // server's per-repo delta for each epoch the client advertised. `db`

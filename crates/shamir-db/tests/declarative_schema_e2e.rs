@@ -101,7 +101,7 @@ fn sync_schema_check(schema: &SchemaValidator, new: Option<&dyn RecordFields>) -
                 v.field_error(rule.path.clone(), "null_not_allowed");
             }
             Some(_) => {
-                rule.check(fields, &path_refs, &mut v);
+                rule.check_for_test(fields, &path_refs, &mut v);
             }
         }
     }

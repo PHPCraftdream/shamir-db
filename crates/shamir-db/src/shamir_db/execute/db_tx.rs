@@ -13,11 +13,9 @@
 
 use crate::access::{Action, Actor, ResourcePath};
 use crate::query::batch::{
-    collect_required_access, commit_interactive_tx, execute_in_open_tx, open_interactive_tx,
-    BatchError, BatchRequest, BatchResponse, TransactionInfo,
+    commit_interactive_tx, execute_in_open_tx, open_interactive_tx, Authorized, BatchError,
+    BatchRequest, BatchResponse, TransactionInfo,
 };
-
-use rustc_hash::FxHashMap;
 
 use super::super::shamir_db::ShamirDb;
 use super::admin_dispatch::ShamirAdminExecutor;
@@ -110,6 +108,14 @@ impl ShamirDb {
     }
 
     /// EXECUTE with an explicit [`Actor`].
+    ///
+    /// Authorization (DB visibility + every op's `required_access`,
+    /// recursively through nested `Batch`/`ForEach` bodies, deduplicated —
+    /// mirrors the inline ACL cache this function used to keep by hand)
+    /// now happens INSIDE the type-level seam (#1199): `self` is passed as
+    /// the [`crate::query::batch::AccessGate`], and `execute_in_open_tx`
+    /// structurally cannot run without the resulting [`Authorized`] token.
+    /// See `Authorized::authorize`'s doc.
     pub async fn tx_execute_as(
         &self,
         actor: Actor,
@@ -117,55 +123,7 @@ impl ShamirDb {
         request: &BatchRequest,
         tx: &mut crate::engine::tx::TxContext,
     ) -> Result<BatchResponse, BatchError> {
-        self.authorize_access(
-            &actor,
-            &ResourcePath::Database {
-                db: db_name.to_string(),
-            },
-            Action::Read,
-        )
-        .await
-        .map_err(|e| BatchError::query_coded("", "access_denied", e.to_string()))?;
-
-        // Per-op DML authorization (mirrors execute_as).
-        //
-        // `collect_required_access` recursively walks the WHOLE query tree,
-        // including nested `Batch`/`ForEach` bodies at any depth — a flat,
-        // one-level walk over `request.queries.values()` would see `None`
-        // for `Batch`/`ForEach` (they have no `table_ref()`) and silently
-        // skip authorizing whatever tables their nested body actually
-        // touches, letting an actor bypass a forbidden table's ACL by
-        // wrapping the op in a top-level `Batch`/`ForEach` (the #660-class
-        // bug, but for authorization). See `collect_required_access`'s doc
-        // comment (mirrors `distinct_repos`'s recursive-walk precedent).
-        //
-        // ACL inline cache: within a single tx_execute_as call every
-        // (path, action) pair resolves to the same answer — the actor,
-        // the ACL tree, and the requested resource do not change between
-        // ops. The first call pays the full async traversal; subsequent
-        // calls for the same key hit a HashMap and cost ~50 ns. The cache
-        // is stack-local and dropped at function exit (no cross-call sharing).
-        // It stays correct over the recursively-collected list — it's keyed
-        // on `(ResourcePath, Action)`, unrelated to how the list was gathered.
-        let mut acl_cache: FxHashMap<(ResourcePath, Action), bool> = FxHashMap::default();
-        for (action, path) in collect_required_access(&request.queries, db_name) {
-            let key = (path.clone(), action);
-            let allowed = if let Some(&cached) = acl_cache.get(&key) {
-                cached
-            } else {
-                let ok = self.authorize_access(&actor, &path, action).await.is_ok();
-                acl_cache.insert(key, ok);
-                ok
-            };
-            if !allowed {
-                return Err(BatchError::query_coded(
-                    "",
-                    "access_denied",
-                    format!("access denied: {:?} on {:?}", action, path),
-                ));
-            }
-        }
-
+        let auth = Authorized::authorize(request, actor, db_name, self).await?;
         let db = self.get_db(db_name).ok_or_else(|| BatchError::QueryError {
             alias: String::new(),
             message: format!("Database '{}' not found", db_name),
@@ -178,22 +136,13 @@ impl ShamirDb {
         let admin = ShamirAdminExecutor {
             shamir: self.clone(),
             db_name: db_name.to_string(),
-            actor: actor.clone(),
+            actor: auth.actor().clone(),
         };
         let invoker = ShamirFunctionInvoker {
             shamir: self.clone(),
             db_name: db_name.to_string(),
         };
-        execute_in_open_tx(
-            request,
-            &resolver,
-            Some(&admin),
-            Some(&invoker),
-            &actor,
-            db_name,
-            tx,
-        )
-        .await
+        execute_in_open_tx(auth, &resolver, Some(&admin), Some(&invoker), tx).await
     }
 
     /// COMMIT: run the Phase-A commit pipeline on a parked interactive tx and

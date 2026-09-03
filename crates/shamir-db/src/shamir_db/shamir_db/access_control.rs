@@ -11,6 +11,7 @@ use crate::access::{
     permits, trace_access, AccessError, Action, Actor, Mode, ResourceMeta, ResourcePath,
     OWNER_SYSTEM,
 };
+use crate::query::batch::AccessGate;
 use crate::{DbError, DbResult};
 
 use super::ShamirDb;
@@ -1188,6 +1189,24 @@ impl ShamirDb {
         result.insert("principals".to_string(), QueryValue::Map(principals));
 
         Ok(QueryValue::Map(result))
+    }
+}
+
+/// Wires `ShamirDb` into the engine's type-level authorization seam
+/// (#1199, `shamir-engine/src/query/batch/authorized.rs`). `execute_as`/
+/// `tx_execute_as` pass `self` as the [`AccessGate`] to
+/// `Authorized::authorize`; this impl is the ONLY code that turns an
+/// `AccessGate::check` call into a real ACL-tree lookup — every other
+/// consumer of the trait sees only the abstract contract.
+#[async_trait::async_trait]
+impl AccessGate for ShamirDb {
+    async fn check(
+        &self,
+        actor: &Actor,
+        path: &ResourcePath,
+        action: Action,
+    ) -> Result<(), AccessError> {
+        self.authorize_access(actor, path, action).await
     }
 }
 
