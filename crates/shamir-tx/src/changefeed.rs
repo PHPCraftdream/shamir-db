@@ -433,8 +433,8 @@ pub fn version_key(commit_version: u64) -> Bytes {
 ///
 /// Must be called on the commit-path BEFORE `write_set` is drained
 /// (Phase 5a `collect_data_batches` consumes it), so the staged values are
-/// still present. Reads each per-table `StagingStore` via `snapshot_ops`
-/// (the same alloc the WAL already pays) and resolves the human-readable
+/// still present. Reads each per-table `StagingStore` via `iter_ops`
+/// (borrowed, no intermediate `Vec<KvOp>`) and resolves the human-readable
 /// table name from `tx.table_tokens`.
 ///
 /// Returns `None` when the tx staged no data writes — an empty footprint
@@ -456,7 +456,7 @@ pub fn project_event(
             .get(token)
             .cloned()
             .unwrap_or_else(|| format!("token:{token}"));
-        for kv in staging.snapshot_ops() {
+        for kv in staging.iter_ops() {
             match kv {
                 shamir_storage::types::KvOp::Set(key, value) => changes.push(RecordChange {
                     table: table.clone(),

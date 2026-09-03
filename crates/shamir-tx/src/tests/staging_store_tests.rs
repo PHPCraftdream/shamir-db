@@ -238,3 +238,113 @@ async fn snapshot_ops_does_not_consume() {
     assert_eq!(snapshot2.len(), 2, "snapshot_ops must NOT consume");
     assert_eq!(staging.len(), 2);
 }
+
+#[tokio::test]
+async fn iter_ops_yields_same_content_as_snapshot_ops() {
+    // `iter_ops()` must be a drop-in, non-materializing replacement for
+    // `snapshot_ops()`: same items, same order, no consumption.
+    let base: Arc<dyn Store> = Arc::new(InMemoryStore::new());
+    let mut staging = StagingStore::new(base);
+    staging.set(
+        RecordKey::from(Bytes::from_static(b"k1")),
+        Bytes::from_static(b"v1"),
+    );
+    staging.remove(RecordKey::from(Bytes::from_static(b"k2")));
+
+    let via_snapshot: Vec<KvOp> = staging.snapshot_ops();
+    let via_iter: Vec<KvOp> = staging.iter_ops().collect();
+    assert_eq!(via_snapshot.len(), via_iter.len());
+    for (a, b) in via_snapshot.iter().zip(via_iter.iter()) {
+        match (a, b) {
+            (KvOp::Set(ka, va), KvOp::Set(kb, vb)) => {
+                assert_eq!(ka.as_ref(), kb.as_ref());
+                assert_eq!(va, vb);
+            }
+            (KvOp::Remove(ka), KvOp::Remove(kb)) => assert_eq!(ka.as_ref(), kb.as_ref()),
+            _ => panic!("snapshot_ops and iter_ops disagree on op kind: {a:?} vs {b:?}"),
+        }
+    }
+    // iter_ops must not consume either — staging is still fully intact.
+    assert_eq!(staging.len(), 2);
+}
+
+/// P1 perf regression (task-group 7, shamir-engine cross-crate review):
+/// `ValidatorDb::staged_field_matches` / `fk_restrict::staged_field_matches` /
+/// `fk_on_update::staged_field_matches` call this staging probe once PER
+/// RECORD validated in a batch insert against a table with a unique/FK rule.
+/// Before the fix, every one of those calls went through
+/// `staging.snapshot_ops().into_iter().any(...)`: `snapshot_ops()`'s
+/// `.collect()` unconditionally materializes a fresh `Vec<KvOp>` covering
+/// the ENTIRE staged set BEFORE `.any()` gets to scan (and possibly
+/// short-circuit) it — so even a match sitting at position 0 still pays the
+/// full O(staged) allocation cost. Summed across M probes against a
+/// growing staged set, that is O(M²) allocation work.
+///
+/// This test stages a "conflicting" record FIRST (the realistic case: a
+/// batch insert repeatedly violating a unique constraint against an
+/// earlier row in the SAME batch), then simulates M probes — one per
+/// inserted record — using both the OLD call shape (`snapshot_ops()`) and
+/// the NEW one (`iter_ops()`), counting how many items each actually
+/// visits/materializes in total across the M calls. It fails on the
+/// pre-fix code (no `iter_ops` method exists to call — the API this test
+/// exercises did not exist before this fix) and, more importantly, proves
+/// the NEW call shape's total visited-item count stays LINEAR in M while
+/// the OLD shape's total materialized-item count is exactly the quadratic
+/// sum `Σ_{i=1}^{M} i`.
+#[tokio::test]
+async fn staged_probe_scales_linearly_not_quadratically_with_early_match() {
+    let m: usize = 500;
+    let base: Arc<dyn Store> = Arc::new(InMemoryStore::new());
+    let mut staging = StagingStore::new(base);
+
+    // The conflicting record every probe below must find.
+    staging.set(
+        RecordKey::from(Bytes::from_static(b"k_conflict")),
+        Bytes::from_static(b"MATCH"),
+    );
+
+    let mut old_total_materialized = 0usize;
+    let mut new_total_visited = 0usize;
+
+    for i in 0..m {
+        // OLD call-site shape: `staging.snapshot_ops().into_iter().any(...)`.
+        // The `.len()` of the unconditionally-materialized Vec stands in for
+        // the allocation/copy work `.collect()` pays regardless of where
+        // (or whether) a match is found.
+        old_total_materialized += staging.snapshot_ops().len();
+
+        // NEW call-site shape: `staging.iter_ops().any(...)` — lazy, so
+        // `.any()` stops at the first match instead of forcing a full pass.
+        let mut visited_this_call = 0usize;
+        let found = staging.iter_ops().any(|op| {
+            visited_this_call += 1;
+            matches!(op, KvOp::Set(_, ref v) if v.as_ref() == b"MATCH")
+        });
+        assert!(found, "conflicting record must be found on probe {i}");
+        new_total_visited += visited_this_call;
+
+        // Grow the staged set as a real batch insert would (this record's
+        // own, non-conflicting, staged row) before the next probe.
+        staging.set(
+            RecordKey::from(Bytes::from(format!("k{i}"))),
+            Bytes::from_static(b"NOMATCH"),
+        );
+    }
+
+    let expected_quadratic = m * (m + 1) / 2; // Σ_{i=1}^{m} i
+    assert_eq!(
+        old_total_materialized, expected_quadratic,
+        "snapshot_ops()-based probe must unconditionally materialize the \
+         full staged set on every call — this IS the O(M²) allocation defect"
+    );
+    assert_eq!(
+        new_total_visited, m,
+        "iter_ops().any() must short-circuit on the first (matching) item \
+         every time, keeping total visited work linear in M"
+    );
+    assert!(
+        old_total_materialized > new_total_visited * (m / 10),
+        "expected the old pattern's total materialized work ({old_total_materialized}) \
+         to dwarf the new pattern's linear total ({new_total_visited}) for M={m}"
+    );
+}

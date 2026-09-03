@@ -257,6 +257,31 @@ pub struct TxContext {
     /// interner, so all deltas target it.
     pub interner_deltas: Vec<(String, u64)>,
 
+    /// #1205 (A8 amortization): `InternerKey` ids referenced (as map keys,
+    /// recursively) by this tx's staged record bodies, captured AT STAGE
+    /// TIME by the wire write paths in `write_exec.rs`
+    /// (`execute_insert_tx`/`execute_update_tx`/`execute_set_tx`) —
+    /// mirroring the traversal
+    /// [`shamir_tx::collect_referenced_ids`](crate::collect_referenced_ids)
+    /// performs, but folded into the encode/tree-build that already happens
+    /// there (an interning closure invoked per map key while streaming
+    /// `QueryValue` straight to storage bytes, or an already-built
+    /// `InnerValue`/`Map` tree) instead of paying a separate decode pass.
+    ///
+    /// `pre_commit_prelock`'s A8 scan used to re-decode every staged value
+    /// (`InnerValue::from_bytes` per row) purely to rebuild this same set —
+    /// 2-3 full decode passes per commit on a large batch. Consuming this
+    /// pre-captured set instead amortizes that to near-zero FOR TABLES
+    /// staged via the above paths — see
+    /// `StagingStore::referenced_ids_captured` for the per-table flag that
+    /// gates this: any table staged via a path that does NOT populate this
+    /// field (e.g. the tree-API `insert_tx`/`insert_tx_many`/`update_tx`,
+    /// used only by tests/benches, or an FK-cascade action in
+    /// `query/batch/fk_actions.rs`/`fk_on_update.rs`) stays correct via
+    /// `pre_commit_prelock`'s decode-based fallback, scoped to just that
+    /// table's bytes.
+    pub referenced_interner_ids: TFxMap<u64, ()>,
+
     /// Optional version provider for SSI read-set validation.
     /// When `None`, commit_tx Phase 2 falls back to a stub provider
     /// `|_, _| 0` that trivially passes — Snapshot and Serializable
@@ -422,6 +447,7 @@ impl TxContext {
             cas_set: scc::HashMap::with_hasher(THasher::default()),
             table_tokens: TFxMap::default(),
             interner_deltas: Vec::new(),
+            referenced_interner_ids: TFxMap::default(),
             version_provider: None,
             started_at: std::time::Instant::now(),
             unique_guards: Vec::new(),

@@ -79,6 +79,19 @@ pub enum StagedKind {
 pub struct StagingStore {
     base: Arc<dyn Store>,
     writes: TMap<RecordKey, StagedOp>,
+    /// #1205 (A8 amortization): `true` once every `Set` staged into this
+    /// store came from a `TableManager` write path that captured its
+    /// `InternerKey` ids into `TxContext::referenced_interner_ids` at stage
+    /// time (see that field's doc comment). `pre_commit_prelock`'s A8 scan
+    /// trusts this flag to skip its decode-based fallback for this table.
+    ///
+    /// Starts `false` — a `StagingStore` populated directly (low-level
+    /// tests, or any future raw-apply path that bypasses `TableManager`'s
+    /// insert/update methods) is conservatively treated as uncaptured until
+    /// [`mark_referenced_ids_captured`](Self::mark_referenced_ids_captured)
+    /// proves otherwise, so A8's correctness never depends on every staging
+    /// call site remembering to opt in.
+    referenced_ids_captured: bool,
 }
 
 impl StagingStore {
@@ -86,7 +99,30 @@ impl StagingStore {
         Self {
             base,
             writes: shamir_collections::new_map(),
+            referenced_ids_captured: false,
         }
+    }
+
+    /// Opt back in: mark this store's MOST RECENT `set`/`set_many` call as
+    /// having had its `InternerKey` ids captured (by the caller) into
+    /// `TxContext::referenced_interner_ids`.
+    ///
+    /// Must be called IMMEDIATELY after the `set`/`set_many` it vouches
+    /// for — any staging call in between (this store has no other mutator
+    /// per the single-writer-per-tx invariant) would silently reset the
+    /// flag back to `false` first. Any call site that does NOT call this
+    /// leaves A8 on its decode fallback for the whole table, which is
+    /// always correct, just not free — so this must only be called when
+    /// the caller is certain it captured every id.
+    pub fn mark_referenced_ids_captured(&mut self) {
+        self.referenced_ids_captured = true;
+    }
+
+    /// Whether every `Set` staged so far into this store had its
+    /// referenced `InternerKey` ids captured at stage time (see
+    /// [`mark_referenced_ids_captured`](Self::mark_referenced_ids_captured)).
+    pub fn referenced_ids_captured(&self) -> bool {
+        self.referenced_ids_captured
     }
 
     /// Borrow the base store this staging buffer wraps.
@@ -132,17 +168,30 @@ impl StagingStore {
     }
 
     /// Stage a set (creates or overwrites).
+    ///
+    /// #1205: resets [`referenced_ids_captured`](Self::referenced_ids_captured)
+    /// to `false` — this plain path does not know whether the caller
+    /// captured `v`'s referenced ids. A caller that DID capture them calls
+    /// [`mark_referenced_ids_captured`](Self::mark_referenced_ids_captured)
+    /// immediately afterward to opt back in; any staging call that skips
+    /// that (a raw/uninstrumented caller, or a later plain `set`/`set_many`
+    /// on the same store) conservatively lands A8 back on its decode
+    /// fallback for the whole table.
     pub fn set(&mut self, k: RecordKey, v: Bytes) {
         self.writes.insert(k, StagedOp::Set(StagedRow(v)));
+        self.referenced_ids_captured = false;
     }
 
     /// Stage multiple sets in a single synchronous pass — no `.await` per key.
     ///
-    /// Equivalent to calling `set(k, v)` for each `(k, v)` in `items`.
+    /// Equivalent to calling `set(k, v)` for each `(k, v)` in `items`,
+    /// including the [`referenced_ids_captured`](Self::referenced_ids_captured)
+    /// reset — see `set`'s doc.
     pub fn set_many(&mut self, items: impl IntoIterator<Item = (RecordKey, Bytes)>) {
         for (k, v) in items {
             self.writes.insert(k, StagedOp::Set(StagedRow(v)));
         }
+        self.referenced_ids_captured = false;
     }
 
     /// Stage a remove.
@@ -169,14 +218,44 @@ impl StagingStore {
     /// is irrelevant because the borrow rules already provide the
     /// safety the old "must be called under commit_lock" comment
     /// claimed the lock provided.
+    ///
+    /// # When to prefer [`iter_ops`](Self::iter_ops)
+    ///
+    /// This materializes a fresh `Vec<KvOp>` on every call — `O(staged)`
+    /// allocation + copy, paid in full even if the caller only wants to
+    /// scan for a single match. A caller invoked once per staged-op set
+    /// (Phase 4 WAL emission, changefeed projection) pays this once, which
+    /// is fine. A caller invoked once PER RECORD being validated against
+    /// the SAME staged set (e.g. a unique/FK probe run once per row of a
+    /// batch insert) turns this `O(staged)` allocation into `O(staged²)`
+    /// total work across the batch — use `iter_ops()` there instead, which
+    /// yields lazily straight from the underlying map with no `Vec`
+    /// allocation and lets `.any()`/`.find()` short-circuit without first
+    /// materializing every staged op.
     pub fn snapshot_ops(&self) -> Vec<KvOp> {
-        self.writes
-            .iter()
-            .map(|(k, v)| match v {
-                StagedOp::Set(row) => KvOp::Set(k.clone(), row.as_bytes()),
-                StagedOp::Remove => KvOp::Remove(k.clone()),
-            })
-            .collect()
+        self.iter_ops().collect()
+    }
+
+    /// Borrowed, non-materializing iteration over all staged ops.
+    ///
+    /// Same logical content as [`snapshot_ops`](Self::snapshot_ops) (every
+    /// staged key projected to a `KvOp`), but yields lazily from the
+    /// underlying map instead of eagerly collecting into a `Vec`. `KvOp`'s
+    /// payload types (`RecordKey`/`Bytes`) are cheap refcounted clones, so
+    /// each yielded item still pays a per-item clone — what this avoids is
+    /// the `Vec` allocation/copy and, critically, forcing every staged op
+    /// to be visited before a short-circuiting caller (`.any()`, `.find()`)
+    /// can return.
+    ///
+    /// Prefer this over `snapshot_ops()` for any probe invoked repeatedly
+    /// against the same staging set (e.g. once per record validated in a
+    /// batch) — see the perf note on `snapshot_ops` for why that pattern is
+    /// quadratic when it collects a fresh `Vec` on every call.
+    pub fn iter_ops(&self) -> impl Iterator<Item = KvOp> + '_ {
+        self.writes.iter().map(|(k, v)| match v {
+            StagedOp::Set(row) => KvOp::Set(k.clone(), row.as_bytes()),
+            StagedOp::Remove => KvOp::Remove(k.clone()),
+        })
     }
 
     /// Drain all staged writes into a `Vec<KvOp>` suitable for
@@ -218,22 +297,23 @@ impl StagingStore {
         self.writes.is_empty()
     }
 
+    /// Iterate keys staged in this store (without cloning the values).
+    pub fn keys(&self) -> impl Iterator<Item = &RecordKey> {
+        self.writes.keys()
+    }
+
     /// Iterate the bytes of every staged `Set` op (borrowed, no clone).
     ///
-    /// A8 fix: `pre_commit_prelock` uses this after the overlay→base remap
-    /// pass to scan every staged value for `InternerKey` ids referenced
-    /// above `persisted_high_water()`, so it can record `(name, id)` pairs
-    /// this tx did NOT create but whose records reference.
+    /// #1205: `pre_commit_prelock`'s A8 scan uses this ONLY as a fallback
+    /// for a table whose [`referenced_ids_captured`](Self::referenced_ids_captured)
+    /// is `false` — i.e. bytes staged outside the instrumented
+    /// `TableManager` write paths. The common case (every table staged via
+    /// `TableManager` insert/update) never calls this.
     pub fn iter_set_bytes(&self) -> impl Iterator<Item = &Bytes> {
         self.writes.values().filter_map(|op| match op {
             StagedOp::Set(row) => Some(&row.0),
             StagedOp::Remove => None,
         })
-    }
-
-    /// Iterate keys staged in this store (without cloning the values).
-    pub fn keys(&self) -> impl Iterator<Item = &RecordKey> {
-        self.writes.keys()
     }
 
     /// cancel-safe: NO — iterates staged keys then transforms each.
