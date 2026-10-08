@@ -1,19 +1,21 @@
-<!-- revalidation:2026-10-08 source:92ad58266bf57ddea1fa3c8a47affba1a3a9a096 -->
-# shamir-sdk — api-wire-protocol revalidation
+<!-- revalidation:2026-10-08 cycle:independent-2 source:e3765c935fc71655ee1ec0160cf180607935d89b -->
+# shamir-sdk — api-wire-protocol independent revalidation (cycle 2)
 
-Source snapshot: `92ad58266bf57ddea1fa3c8a47affba1a3a9a096`. Revalidated 2026-10-08 by read-only XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run; no source fix is part of this update. Test registration/assertions are evidence of an oracle, not proof of a passing run.
+Frozen source snapshot: `e3765c935fc71655ee1ec0160cf180607935d89b`. Independently revalidated 2026-10-08 by a fresh XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run. Source-fixed means the specified mechanism was already removed at this snapshot; this cycle implements no source fix.
 
-This section is authoritative for current status. Original titles/IDs are retained for traceability; a refuted title is not a current assertion. The collapsed historical report below is superseded, including its counts, severity, scenarios and fix instructions. Plan IDs preserve historical numbering, not a current release mandate. [Workspace methodology and status definitions](../SUMMARY.md#status-definitions).
+This section is authoritative for current decisions. Existing IDs and allegation titles are retained for traceability; a refuted title is not a current assertion. Prior-cycle decisions were rechecked, not used as proof. The first cycle is available in repository history at this snapshot. The original historical body below remains preserved once and is superseded, including its counts, severities and recipes. [Workspace scope and status definitions](../SUMMARY.md#status-definitions).
 
-Raw-filter semantics, empty-map get, unversioned ABI, duplicate-header loss, and error classification remain open. The blanket Dec/Big no-match claim has positive Big counter-evidence.
+Unrelated external edits began in dependency/toolchain/CI metadata during collection; additional Rust-source edits appeared afterward. They were left untouched. Evidence and decisions are tied to the frozen commit, not those later changes or an installed toolchain. “Current” below means current at that snapshot; no re-audit of the modified working tree is implied.
+
+Raw-filter misselection and header multiplicity loss are reachable current issues. Error conflation remains. The unversioned alpha ABI is documented unsupported-upgrade design, and pre-review Big support refutes the partial-fix narrative.
 
 ## Current claim decisions
 
 | Claim decisions | Open | Source-fixed | Partial | Refuted | Unverified | N/A |
 |---:|---:|---:|---:|---:|---:|---:|
-| 10 | 8 | 0 | 1 | 0 | 0 | 1 |
+| 10 | 6 | 0 | 0 | 1 | 0 | 3 |
 
-These are decisions on report claims, including repeated roots, bundled observations and non-findings—not a unique-bug census. Closed/N/A rows have no current risk; unverified risk is provisional. Pure style and unmeasured optimization claims do not establish runtime impact.
+These are duplicate-inclusive report decisions, not a unique-bug census. Pure style or structural optimization does not establish a runtime incident; unverified impact remains provisional.
 
 <a id="review-1"></a>
 
@@ -21,11 +23,13 @@ These are decisions on report claims, including repeated roots, bundled observat
 
 Status: `confirmed-open`. Current risk: `medium`.
 
-Raw Value entrypoints and examples remain without the required rationale. Gateway conversion still maps List/nested Map and other unsupported QueryValue variants to Null and uses unpaginated equality filtering. Direct SDK Dec/Big variants do not exist; they reach this path as strings.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-sdk/src/db.rs:5](../../../../../crates/shamir-sdk/src/db.rs#L5); [crates/shamir-sdk/src/db.rs:79](../../../../../crates/shamir-sdk/src/db.rs#L79); [crates/shamir-sdk/src/db.rs:98](../../../../../crates/shamir-sdk/src/db.rs#L98); [crates/shamir-db/src/shamir_db/shamir_db/db_gateway.rs:41](../../../../../crates/shamir-db/src/shamir_db/shamir_db/db_gateway.rs#L41); [crates/shamir-db/src/shamir_db/shamir_db/db_gateway.rs:236](../../../../../crates/shamir-db/src/shamir_db/shamir_db/db_gateway.rs#L236); [crates/shamir-sdk/src/value.rs:27](../../../../../crates/shamir-sdk/src/value.rs#L27).
+SDK List/nested Map key values become equality-to-Null, allowing wrong-row/no-row results. The missing builder rationale is style-only; SDK has no direct Dec/Big/Set variants.
 
-Grouping/duplicate: `SUMMARY.md#5.1`. This row is not another independent defect.
+Evidence: [crates/shamir-sdk/src/db.rs:79](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-sdk/src/db.rs#L79); [crates/shamir-db/src/shamir_db/shamir_db/db_gateway.rs:51](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/shamir_db/db_gateway.rs#L51); [crates/shamir-sdk/src/value.rs:27](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-sdk/src/value.rs#L27).
+
+Grouping/duplicate: [SUMMARY.md#5.1](SUMMARY.md#review-5-1). This is not an additional independent defect.
 
 <a id="review-2"></a>
 
@@ -33,11 +37,13 @@ Grouping/duplicate: `SUMMARY.md#5.1`. This row is not another independent defect
 
 Status: `confirmed-open`. Current risk: `medium`.
 
-SDK forwards an empty key unchanged; gateway key_to_filter returns None and get selects records.first. No rejection or SDK warning exists. execute_as uses the effective actor, so wrong-row selection is not independently an ACL or cross-actor bypass.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-sdk/src/db.rs:79](../../../../../crates/shamir-sdk/src/db.rs#L79); [crates/shamir-db/src/shamir_db/shamir_db/db_gateway.rs:65](../../../../../crates/shamir-db/src/shamir_db/shamir_db/db_gateway.rs#L65); [crates/shamir-db/src/shamir_db/shamir_db/db_gateway.rs:146](../../../../../crates/shamir-db/src/shamir_db/shamir_db/db_gateway.rs#L146); [crates/shamir-db/src/shamir_db/shamir_db/db_gateway.rs:155](../../../../../crates/shamir-db/src/shamir_db/shamir_db/db_gateway.rs#L155).
+Empty map becomes no predicate and get selects records.first. This is not a stable primary-key lookup or automatic ACL bypass; execute_as still uses the effective actor.
 
-Grouping/duplicate: `SUMMARY.md#5.2`. This row is not another independent defect.
+Evidence: [crates/shamir-db/src/shamir_db/shamir_db/db_gateway.rs:65](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/shamir_db/db_gateway.rs#L65); [crates/shamir-db/src/shamir_db/shamir_db/db_gateway.rs:146](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/shamir_db/db_gateway.rs#L146); [crates/shamir-db/src/shamir_db/shamir_db/db_gateway.rs:155](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/shamir_db/db_gateway.rs#L155).
+
+Grouping/duplicate: [SUMMARY.md#5.2](SUMMARY.md#review-5-2). This is not an additional independent defect.
 
 <a id="review-3"></a>
 
@@ -45,23 +51,27 @@ Grouping/duplicate: `SUMMARY.md#5.2`. This row is not another independent defect
 
 Status: `confirmed-open`. Current risk: `medium`.
 
-Fallback decoders and decode_params empty-map fallback remain. Query/get/call can return plausible wrong values; insert and HTTP reject fallback Null but lose the underlying decode cause. Public Table::get returns Option, not Result.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-sdk/src/host_imports.rs:97](../../../../../crates/shamir-sdk/src/host_imports.rs#L97); [crates/shamir-sdk/src/host_imports.rs:183](../../../../../crates/shamir-sdk/src/host_imports.rs#L183); [crates/shamir-sdk/src/__rt.rs:11](../../../../../crates/shamir-sdk/src/__rt.rs#L11); [crates/shamir-sdk/src/db.rs:89](../../../../../crates/shamir-sdk/src/db.rs#L89); [crates/shamir-sdk/src/http.rs:27](../../../../../crates/shamir-sdk/src/http.rs#L27).
+Malformed nonzero responses become absent/Null/empty query success. Insert/HTTP reject fallback Null but lose the source; Table::get has no Result channel.
 
-Grouping/duplicate: `SUMMARY.md#6.1`. This row is not another independent defect.
+Evidence: [crates/shamir-sdk/src/host_imports.rs:146](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-sdk/src/host_imports.rs#L146); [crates/shamir-sdk/src/host_imports.rs:183](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-sdk/src/host_imports.rs#L183); [crates/shamir-sdk/src/db.rs:79](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-sdk/src/db.rs#L79).
+
+Grouping/duplicate: [SUMMARY.md#6.1](SUMMARY.md#review-6-1). This is not an additional independent defect.
 
 <a id="review-4"></a>
 
 ### Claim 4 — No wire-format versioning or capability negotiation on `Db::execute` (or the guest ABI)
 
-Status: `confirmed-open`. Current risk: `medium`.
+Status: `not-applicable`. Current risk: `—`.
 
-Db::execute still sends bare named MessagePack BatchRequest, gateway decodes it directly, and import names carry no version. BatchRequest optional/default fields allow silent omission semantics. Stored WASM survives host upgrades; no explicit SDK compatibility handshake was found.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-sdk/src/db.rs:139](../../../../../crates/shamir-sdk/src/db.rs#L139); [crates/shamir-db/src/shamir_db/shamir_db/db_gateway.rs:285](../../../../../crates/shamir-db/src/shamir_db/shamir_db/db_gateway.rs#L285); [crates/shamir-query-types/src/batch/batch_request.rs:94](../../../../../crates/shamir-query-types/src/batch/batch_request.rs#L94); [crates/shamir-sdk/src/host_imports.rs:29](../../../../../crates/shamir-sdk/src/host_imports.rs#L29); [crates/shamir-db/src/shamir_db/shamir_db/function_management.rs:212](../../../../../crates/shamir-db/src/shamir_db/shamir_db/function_management.rs#L212).
+Bare DTOs and unversioned imports are present, but cross-alpha public/wire/WASM compatibility and in-place upgrades are explicitly unsupported. The hypothetical later rename is prospective compatibility risk.
 
-Grouping/duplicate: `SUMMARY.md#5.4`. This row is not another independent defect.
+Evidence: [crates/shamir-sdk/src/db.rs:140](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-sdk/src/db.rs#L140); [crates/shamir-query-types/src/batch/batch_request.rs:94](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-query-types/src/batch/batch_request.rs#L94); [README.md:33](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/README.md#L33); [CHANGELOG.md:13](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/CHANGELOG.md#L13).
+
+Grouping/duplicate: [SUMMARY.md#5.4](SUMMARY.md#review-5-4). This is not an additional independent defect.
 
 <a id="review-5"></a>
 
@@ -69,11 +79,13 @@ Grouping/duplicate: `SUMMARY.md#5.4`. This row is not another independent defect
 
 Status: `confirmed-open`. Current risk: `medium`.
 
-SDK still emits duplicate-capable headers as a map; host QueryValue map decoding and response encoding collapse identical keys. The host accepts list-of-pairs requests, but SDK does not use that alternative. Local malformed-envelope tests remain absent; workspace HTTP e2e coverage exists.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-sdk/src/http.rs:80](../../../../../crates/shamir-sdk/src/http.rs#L80); [crates/shamir-sdk/src/http.rs:108](../../../../../crates/shamir-sdk/src/http.rs#L108); [crates/shamir-types/src/types/value.rs:212](../../../../../crates/shamir-types/src/types/value.rs#L212); [crates/shamir-wasm-host/src/wasm/host_http.rs:47](../../../../../crates/shamir-wasm-host/src/wasm/host_http.rs#L47); [crates/shamir-wasm-host/src/wasm/host_http.rs:88](../../../../../crates/shamir-wasm-host/src/wasm/host_http.rs#L88); [crates/shamir-db/tests/functions_lifecycle.rs:762](../../../../../crates/shamir-db/tests/functions_lifecycle.rs#L762).
+SDK header maps and host response insertion lose identical-key multiplicity; indexmap 2.14.0 confirms last-value replacement. Workspace e2e exists but lacks duplicate/malformed oracles.
 
-Grouping/duplicate: `SUMMARY.md#5.5`. This row is not another independent defect.
+Evidence: [crates/shamir-sdk/src/http.rs:108](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-sdk/src/http.rs#L108); [crates/shamir-wasm-host/src/wasm/host_http.rs:89](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-wasm-host/src/wasm/host_http.rs#L89); [Cargo.lock:1782](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/Cargo.lock#L1782); [crates/shamir-db/tests/functions_lifecycle.rs:873](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/tests/functions_lifecycle.rs#L873).
+
+Grouping/duplicate: [SUMMARY.md#5.5](SUMMARY.md#review-5-5). This is not an additional independent defect.
 
 <a id="review-6"></a>
 
@@ -81,68 +93,77 @@ Grouping/duplicate: `SUMMARY.md#5.5`. This row is not another independent defect
 
 Status: `confirmed-open`. Current risk: `low`.
 
-Error remains a message-only struct with Error::user as its sole constructor; execute encode/empty-response/decode failures use it. Callers cannot inspect a structured kind. thiserror preference alone is style, while missing categories are the API issue.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-sdk/src/error.rs:7](../../../../../crates/shamir-sdk/src/error.rs#L7); [crates/shamir-sdk/src/error.rs:13](../../../../../crates/shamir-sdk/src/error.rs#L13); [crates/shamir-sdk/src/db.rs:141](../../../../../crates/shamir-sdk/src/db.rs#L141); [crates/shamir-sdk/src/db.rs:147](../../../../../crates/shamir-sdk/src/db.rs#L147).
+SDK errors expose only messages and protocol failures use the user constructor. No structured category/source is preserved for caller branching.
 
-Grouping/duplicate: `SUMMARY.md#6.2`. This row is not another independent defect.
+Evidence: [crates/shamir-sdk/src/error.rs:7](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-sdk/src/error.rs#L7); [crates/shamir-sdk/src/db.rs:147](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-sdk/src/db.rs#L147).
+
+Grouping/duplicate: [SUMMARY.md#6.2](SUMMARY.md#review-6-2). This is not an additional independent defect.
 
 <a id="review-7"></a>
 
 ### Claim 7 — `pub mod __rt` contradicts its own "not part of the public SDK surface" doc
 
-Status: `confirmed-open`. Current risk: `nit`.
+Status: `not-applicable`. Current risk: `—`.
 
-__rt is still public and rustdoc-visible without doc(hidden); generated consumer code requires that public path. The internal-use documentation is not itself inconsistent with public implementation visibility, but hiding/support-policy clarification remains useful.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-sdk/src/lib.rs:18](../../../../../crates/shamir-sdk/src/lib.rs#L18); [crates/shamir-sdk/src/__rt.rs:3](../../../../../crates/shamir-sdk/src/__rt.rs#L3); [crates/shamir-sdk-macros/src/lib.rs:259](../../../../../crates/shamir-sdk-macros/src/lib.rs#L259).
+Public visibility is required by consumer expansion and documentation already identifies unsupported internal helpers. doc(hidden) is optional display policy, not a visibility or support-contract fix.
 
-Grouping/duplicate: `SUMMARY.md#5.7`. This row is not another independent defect.
+Evidence: [crates/shamir-sdk/src/lib.rs:18](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-sdk/src/lib.rs#L18); [crates/shamir-sdk/src/__rt.rs:3](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-sdk/src/__rt.rs#L3); [crates/shamir-sdk-macros/src/lib.rs:259](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-sdk-macros/src/lib.rs#L259).
+
+Grouping/duplicate: [SUMMARY.md#5.7](SUMMARY.md#review-5-7). This is not an additional independent defect.
 
 <a id="review-8"></a>
 
 ### Claim 8 — Dec/Big down-level to `Str` on the wire -- guests get silent no-matches when re-filtering on those fields
 
-Status: `partially-fixed`. Current risk: `low`.
+Status: `refuted`. Current risk: `—`.
 
-Big/String equality is supported by compare_values and the present-but-nonscalar field fallback, with wired regression tests. This mechanism predates the report. Dec/String still lacks a comparator; actual failure depends on retaining typed Dec rather than stored Str. Blanket permanent no-match is false.
+Prior-cycle decision: `partially-fixed`.
 
-Evidence: [crates/shamir-sdk/src/value.rs:10](../../../../../crates/shamir-sdk/src/value.rs#L10); [crates/shamir-engine/src/query/filter/resolve.rs:201](../../../../../crates/shamir-engine/src/query/filter/resolve.rs#L201); [crates/shamir-engine/src/query/filter/filter_node.rs:596](../../../../../crates/shamir-engine/src/query/filter/filter_node.rs#L596); [crates/shamir-engine/src/query/filter/tests/eval_tests/u64_big_filter_match_tests.rs:189](../../../../../crates/shamir-engine/src/query/filter/tests/eval_tests/u64_big_filter_match_tests.rs#L189); [crates/shamir-engine/src/query/filter/tests/eval_tests/mod.rs:20](../../../../../crates/shamir-engine/src/query/filter/tests/eval_tests/mod.rs#L20).
+530f200c already implemented Big/String comparison and typed-leaf materialization before this report. Registered positive and mismatch oracles use actual filter execution. Typed Dec/String remains conditional; ordinary stored strings match. No later partial fix occurred.
 
-Grouping/duplicate: `SUMMARY.md#5.8`. This row is not another independent defect.
+Evidence: [crates/shamir-engine/src/query/filter/resolve.rs:201](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-engine/src/query/filter/resolve.rs#L201); [crates/shamir-engine/src/query/filter/filter_node.rs:596](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-engine/src/query/filter/filter_node.rs#L596); [crates/shamir-engine/src/query/filter/tests/eval_tests/u64_big_filter_match_tests.rs:189](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-engine/src/query/filter/tests/eval_tests/u64_big_filter_match_tests.rs#L189); [crates/shamir-engine/src/query/filter/tests/eval_tests/mod.rs:20](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-engine/src/query/filter/tests/eval_tests/mod.rs#L20).
+
+Grouping/duplicate: [SUMMARY.md#5.8](SUMMARY.md#review-5-8). This is not an additional independent defect.
 
 <a id="review-9"></a>
 
-### Claim 9 — Guest ABI passes pointers as signed `i32`; host rejects addresses >= 2 GiB
+### Claim 9 — Guest ABI passes pointers as signed `i32`; host rejects addresses &gt;= 2 GiB
 
 Status: `confirmed-open`. Current risk: `nit`.
 
-Guest pointer casts and host negative-pointer rejection remain. This is a real large-memory ABI restriction, but default 64 MiB resource limits make it inapplicable to ordinary production instances.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-sdk/src/host_imports.rs:63](../../../../../crates/shamir-sdk/src/host_imports.rs#L63); [crates/shamir-wasm-host/src/wasm/wasm_function.rs:302](../../../../../crates/shamir-wasm-host/src/wasm/wasm_function.rs#L302); [crates/shamir-wasm-host/src/wasm/wasm_engine.rs:234](../../../../../crates/shamir-wasm-host/src/wasm/wasm_engine.rs#L234).
+Host rejects high-bit addresses; default 64 MiB Stores cannot reach them. Not every import on a large memory necessarily fails—only ranges using rejected addresses.
 
-Grouping/duplicate: `SUMMARY.md#5.9`. This row is not another independent defect.
+Evidence: [crates/shamir-sdk/src/host_imports.rs:63](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-sdk/src/host_imports.rs#L63); [crates/shamir-wasm-host/src/wasm/wasm_function.rs:302](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-wasm-host/src/wasm/wasm_function.rs#L302); [crates/shamir-wasm-host/src/wasm/wasm_engine.rs:234](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-wasm-host/src/wasm/wasm_engine.rs#L234).
+
+Grouping/duplicate: [SUMMARY.md#5.9](SUMMARY.md#review-5-9). This is not an additional independent defect.
 
 <a id="review-summary"></a>
 
 ### Claim Summary — Value mirror and Validation ABI are pinned by conformance tests
 
-Status: `not-applicable`. Current risk: —.
+Status: `not-applicable`. Current risk: `—`.
 
-Registered tests check representative shared-variant byte identity and Validation shapes/host QueryValue decoding. Validation tests do not invoke the engine decoder directly; source inspection confirms matching errors/stop/field conventions. This is finite coverage, not exhaustive wire conformance.
+Prior-cycle decision: `not-applicable`.
 
-Evidence: [crates/shamir-sdk/src/tests/value_tests.rs:14](../../../../../crates/shamir-sdk/src/tests/value_tests.rs#L14); [crates/shamir-sdk/src/tests/validation_tests.rs:181](../../../../../crates/shamir-sdk/src/tests/validation_tests.rs#L181); [crates/shamir-sdk/src/tests/validation_tests.rs:238](../../../../../crates/shamir-sdk/src/tests/validation_tests.rs#L238); [crates/shamir-engine/src/validator/decode.rs:49](../../../../../crates/shamir-engine/src/validator/decode.rs#L49); [crates/shamir-engine/src/validator/decode.rs:102](../../../../../crates/shamir-engine/src/validator/decode.rs#L102).
+Representative byte identity and validator shapes are registered; engine decoder source agrees. SDK tests never call that decoder, and recognized-prefix maps contradict exhaustive Value mirroring.
 
-## Corrections and qualified non-findings
+Evidence: [crates/shamir-sdk/src/tests/value_tests.rs:14](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-sdk/src/tests/value_tests.rs#L14); [crates/shamir-sdk/src/tests/validation_tests.rs:238](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-sdk/src/tests/validation_tests.rs#L238); [crates/shamir-engine/src/validator/decode.rs:102](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-engine/src/validator/decode.rs#L102); [crates/shamir-types/src/types/value.rs:214](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-types/src/types/value.rs#L214).
 
-- Downgrade builder-rule style nonconformance from runtime High; unsupported composite-to-Null conversion supplies the actual correctness concern.
-- The SDK already documents scalar=id and map keys; the omissions are empty-map behavior, unsupported-value handling, and builder rationale.
-- Empty-map get chooses the first authorized query result, not a stable primary-key row or automatically an unauthorized tenant row.
-- Duplicate collapse concerns identical string keys; HTTP field-name case-insensitivity needs a separately defined policy.
-- Workspace HTTP e2e tests disprove no tests anywhere, but do not pin malformed envelopes or duplicate headers.
-- Big/String comparison support in 530f200c predates this review. Do not describe the Big correction as newly implemented.
-- The current FilterValue enum has no Decimal literal variant; routing through the builder does not automatically provide a typed decimal predicate.
-- doc(hidden) does not change Rust visibility or independently establish semver exemption.
+## Evidence and recipe corrections
+
+- The project already publishes an explicit alpha compatibility disclaimer; no-versioning is not a current guaranteed-upgrade defect.
+- Big counter-evidence predates the review and must be classified as refutation, not source-fixed or partially-fixed.
+- FilterValue has no Decimal literal variant; using the builder alone does not create typed Decimal predicates.
+- get is an equality-filter query followed by first(), not validated primary-key lookup. Empty/unsupported components need separate rejection or clear documented policy.
+- Identical-key duplicate collapse is proven by published indexmap-2.14.0.crate src/map.rs::insert_full; case-insensitive HTTP name policy is separate.
+- A new Result envelope needs explicit discrimination from previously valid Value::List results; it cannot be inferred from list shape alone.
+- doc(hidden) neither changes visibility nor overrides the already documented alpha support policy.
 
 ---
 

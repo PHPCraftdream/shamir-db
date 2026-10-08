@@ -1,11 +1,13 @@
-<!-- revalidation:2026-10-08 source:92ad58266bf57ddea1fa3c8a47affba1a3a9a096 -->
-# shamir-query-builder-macros — security-crypto revalidation
+<!-- revalidation:2026-10-08 cycle:independent-2 source:e3765c935fc71655ee1ec0160cf180607935d89b -->
+# shamir-query-builder-macros — security-crypto independent revalidation (cycle 2)
 
-Source snapshot: `92ad58266bf57ddea1fa3c8a47affba1a3a9a096`. Revalidated 2026-10-08 by read-only XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run; no source fix is part of this update. Test registration/assertions are evidence of an oracle, not proof of a passing run.
+Frozen source snapshot: `e3765c935fc71655ee1ec0160cf180607935d89b`. Independently revalidated 2026-10-08 by a fresh XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run. Source-fixed means the specified mechanism was already removed at this snapshot; this cycle implements no source fix.
 
-This section is authoritative for current status. Original titles/IDs are retained for traceability; a refuted title is not a current assertion. The collapsed historical report below is superseded, including its counts, severity, scenarios and fix instructions. Plan IDs preserve historical numbering, not a current release mandate. [Workspace methodology and status definitions](../SUMMARY.md#status-definitions).
+This section is authoritative for current decisions. Existing IDs and allegation titles are retained for traceability; a refuted title is not a current assertion. Prior-cycle decisions were rechecked, not used as proof. The first cycle is available in repository history at this snapshot. The original historical body below remains preserved once and is superseded, including its counts, severities and recipes. [Workspace scope and status definitions](../SUMMARY.md#status-definitions).
 
-No own-crate crypto, unsafe, secrets or authentication implementation exists. Typed/whitelisted lowering avoids query-text injection. Remaining repository selection and bulk-update issues are developer-facing footguns, not demonstrated authorization bypasses.
+Unrelated external edits began in dependency/toolchain/CI metadata during collection; additional Rust-source edits appeared afterward. They were left untouched. Evidence and decisions are tied to the frozen commit, not those later changes or an installed toolchain. “Current” below means current at that snapshot; no re-audit of the modified working tree is implied.
+
+The boundary is authored compile-time Rust, not hostile runtime query text. Typed lowering and authorization counter-evidence support the qualified non-findings; optional bulk UPDATE is intentional.
 
 ## Current claim decisions
 
@@ -13,11 +15,7 @@ No own-crate crypto, unsafe, secrets or authentication implementation exists. Ty
 |---:|---:|---:|---:|---:|---:|---:|
 | 3 | 2 | 0 | 0 | 0 | 0 | 1 |
 
-These are decisions on report claims, including repeated roots, bundled observations and non-findings—not a unique-bug census. Closed/N/A rows have no current risk; unverified risk is provisional. Pure style and unmeasured optimization claims do not establish runtime impact.
-
-## Parent acceptance refinements
-
-- Do not count deliberately supported bulk update as a broken authorization or validation guarantee.
+These are duplicate-inclusive report decisions, not a unique-bug census. Pure style or structural optimization does not establish a runtime incident; unverified impact remains provisional.
 
 <a id="review-1"></a>
 
@@ -25,23 +23,25 @@ These are decisions on report claims, including repeated roots, bundled observat
 
 Status: `confirmed-open`. Current risk: `low`.
 
-The emitted repository is still main and reaches the invocation context. Execution still authorizes function access and carries an actor into the database gateway. Wrong default context can affect authorized developer-authored calls; the macro does not itself confer cross-repository permission.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-query-builder-macros/src/query_parse.rs:917](../../../../../crates/shamir-query-builder-macros/src/query_parse.rs#L917); [crates/shamir-db/src/shamir_db/execute/function_invoker.rs:47](../../../../../crates/shamir-db/src/shamir_db/execute/function_invoker.rs#L47); [crates/shamir-db/src/shamir_db/shamir_db/function_management.rs:711](../../../../../crates/shamir-db/src/shamir_db/shamir_db/function_management.rs#L711); [crates/shamir-db/src/shamir_db/shamir_db/function_management.rs:732](../../../../../crates/shamir-db/src/shamir_db/shamir_db/function_management.rs#L732).
+Main reaches invocation context, but function Execute authorization and effective-actor gateway access remain. Cross-repository effects depend on the authorized procedure's behavior and grants. Batch::call_in_repo avoids the limitation.
 
-Grouping/duplicate: `SUMMARY.md#1.2`. This row is not another independent defect.
+Evidence: [crates/shamir-query-builder-macros/src/query_parse.rs:917](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-query-builder-macros/src/query_parse.rs#L917); [crates/shamir-db/src/shamir_db/execute/function_invoker.rs:47](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/execute/function_invoker.rs#L47); [crates/shamir-db/src/shamir_db/shamir_db/function_management.rs:711](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/shamir_db/function_management.rs#L711); [crates/shamir-db/src/shamir_db/shamir_db/function_management.rs:732](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/shamir_db/function_management.rs#L732).
+
+Grouping/duplicate: [correctness-tdd.md#2](correctness-tdd.md#review-2). This is not an additional independent defect.
 
 <a id="review-2"></a>
 
 ### Claim 2 — `q!(update ...)` without `where` generates an unguarded bulk update (`delete` is guarded -- asymmetry)
 
-Status: `not-applicable`. Current risk: —.
+Status: `not-applicable`. Current risk: `—`.
 
-WHERE-optional bulk update is explicitly documented, accepted by a registered consumer test, and authorized at execution. An accidental omission is a developer footgun, but this is not an input-validation or authorization defect under the current contract. Requiring an all opt-in is a product/API change, not an outstanding mandatory fix.
+Prior-cycle decision: `not-applicable`.
 
-Evidence: [crates/shamir-query-builder-macros/src/lib.rs:87](../../../../../crates/shamir-query-builder-macros/src/lib.rs#L87); [crates/shamir-query-builder-macros/src/query_parse.rs:614](../../../../../crates/shamir-query-builder-macros/src/query_parse.rs#L614); [crates/shamir-query-builder/src/write/update.rs:105](../../../../../crates/shamir-query-builder/src/write/update.rs#L105); [crates/shamir-query-builder/src/macros/tests/q_macro_tests.rs:522](../../../../../crates/shamir-query-builder/src/macros/tests/q_macro_tests.rs#L522); [crates/shamir-engine/src/table/write_exec.rs:603](../../../../../crates/shamir-engine/src/table/write_exec.rs#L603).
+WHERE-optional UPDATE is explicit, registered and supported by the builder. Server-facing execute_as authorizes the request before execution. Requiring WHERE/all would intentionally change the API, not fix a violated current guarantee.
 
-Grouping/duplicate: `SUMMARY.md#3.2`. This row is not another independent defect.
+Evidence: [crates/shamir-query-builder-macros/src/lib.rs:87](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-query-builder-macros/src/lib.rs#L87); [crates/shamir-query-builder-macros/src/query_parse.rs:614](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-query-builder-macros/src/query_parse.rs#L614); [crates/shamir-query-builder/src/write/update.rs:105](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-query-builder/src/write/update.rs#L105); [crates/shamir-query-builder/src/macros/tests/q_macro_tests.rs:522](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-query-builder/src/macros/tests/q_macro_tests.rs#L522); [crates/shamir-db/src/shamir_db/execute/db_execute.rs:40](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/execute/db_execute.rs#L40); [crates/shamir-engine/src/table/write_exec.rs:603](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-engine/src/table/write_exec.rs#L603).
 
 <a id="review-3"></a>
 
@@ -49,18 +49,20 @@ Grouping/duplicate: `SUMMARY.md#3.2`. This row is not another independent defect
 
 Status: `confirmed-open`. Current risk: `low`.
 
-Unknown-name and wrong-arity rejection remain untested. However, existing registered tests already cover all 17 accepted predicates and dotted field outputs against builder wire shapes; the report's assertion that neither half has any pin is false. No runtime hostile-token ingress is established.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-query-builder-macros/src/filter_lower.rs:137](../../../../../crates/shamir-query-builder-macros/src/filter_lower.rs#L137); [crates/shamir-query-builder-macros/src/filter_lower.rs:299](../../../../../crates/shamir-query-builder-macros/src/filter_lower.rs#L299); [crates/shamir-query-builder/src/macros/tests/filter_macro_tests.rs:194](../../../../../crates/shamir-query-builder/src/macros/tests/filter_macro_tests.rs#L194); [crates/shamir-query-builder/src/macros/tests/filter_macro_tests.rs:301](../../../../../crates/shamir-query-builder/src/macros/tests/filter_macro_tests.rs#L301); [crates/shamir-query-builder/src/macros/tests/filter_macro_tests.rs:383](../../../../../crates/shamir-query-builder/src/macros/tests/filter_macro_tests.rs#L383); [crates/shamir-query-builder/src/macros/tests/mod.rs:2](../../../../../crates/shamir-query-builder/src/macros/tests/mod.rs#L2).
+Unknown-name/wrong-arity rejection lacks pins. All 17 accepted names and dotted outputs already have registered differential tests. This is DSL-confinement coverage, not a security boundary against an author who can supply arbitrary Rust RHS code.
 
-Grouping/duplicate: `SUMMARY.md#6.1`. This row is not another independent defect.
+Evidence: [crates/shamir-query-builder-macros/src/filter_lower.rs:299](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-query-builder-macros/src/filter_lower.rs#L299); [crates/shamir-query-builder/src/macros/tests/filter_macro_tests.rs:194](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-query-builder/src/macros/tests/filter_macro_tests.rs#L194); [crates/shamir-query-builder/src/macros/tests/filter_macro_tests.rs:301](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-query-builder/src/macros/tests/filter_macro_tests.rs#L301); [crates/shamir-query-builder/src/macros/tests/filter_macro_tests.rs:383](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-query-builder/src/macros/tests/filter_macro_tests.rs#L383); [crates/shamir-query-builder/src/macros/tests/mod.rs:2](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-query-builder/src/macros/tests/mod.rs#L2).
 
-## Corrections and qualified non-findings
+Grouping/duplicate: [correctness-tdd.md#3](correctness-tdd.md#review-3). This is not an additional independent defect.
 
-- The threat model is developer-authored compile-time Rust. Whitelisting is DSL confinement, not protection against arbitrary code execution by an already-untrusted Rust author; RHS expressions are deliberately emitted verbatim.
-- The typed-AST/no-query-text-splicing guarantee holds. Not every argument uses Into<FilterValue>: patterns and FTS text use Into<String>, and vector arguments use their concrete builder types.
-- Serde default_repo applies during deserialization. Omitting repo from the existing Rust CallOp struct literal would fail compilation; use a constructor that owns the default.
-- Requiring WHERE or adding an explicit all keyword for update is a product/API decision and would change currently documented and tested behavior.
+## Evidence and recipe corrections
+
+- No query-text splicing is supported; no arbitrary-code-execution confinement is promised against a Rust source author.
+- Not every predicate argument is Into&lt;FilterValue&gt;: patterns/text use Into&lt;String&gt;, vectors use Vec&lt;f32&gt; and k uses u32.
+- Stored-procedure macro integration tests use native replacement functions and convenience execute with System. They exercise DTO-to-invoker behavior, not an authenticated WASM repository-isolation witness.
+- Keep explicit bulk UPDATE out of mandatory security-remediation counts.
 
 ---
 

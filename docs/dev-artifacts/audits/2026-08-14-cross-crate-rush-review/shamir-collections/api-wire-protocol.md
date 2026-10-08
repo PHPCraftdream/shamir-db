@@ -1,19 +1,21 @@
-<!-- revalidation:2026-10-08 source:92ad58266bf57ddea1fa3c8a47affba1a3a9a096 -->
-# shamir-collections — api-wire-protocol revalidation
+<!-- revalidation:2026-10-08 cycle:independent-2 source:e3765c935fc71655ee1ec0160cf180607935d89b -->
+# shamir-collections — api-wire-protocol independent revalidation (cycle 2)
 
-Source snapshot: `92ad58266bf57ddea1fa3c8a47affba1a3a9a096`. Revalidated 2026-10-08 by read-only XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run; no source fix is part of this update. Test registration/assertions are evidence of an oracle, not proof of a passing run.
+Frozen source snapshot: `e3765c935fc71655ee1ec0160cf180607935d89b`. Independently revalidated 2026-10-08 by a fresh XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run. Source-fixed means the specified mechanism was already removed at this snapshot; this cycle implements no source fix.
 
-This section is authoritative for current status. Original titles/IDs are retained for traceability; a refuted title is not a current assertion. The collapsed historical report below is superseded, including its counts, severity, scenarios and fix instructions. Plan IDs preserve historical numbering, not a current release mandate. [Workspace methodology and status definitions](../SUMMARY.md#status-definitions).
+This section is authoritative for current decisions. Existing IDs and allegation titles are retained for traceability; a refuted title is not a current assertion. Prior-cycle decisions were rechecked, not used as proof. The first cycle is available in repository history at this snapshot. The original historical body below remains preserved once and is superseded, including its counts, severities and recipes. [Workspace scope and status definitions](../SUMMARY.md#status-definitions).
 
-All six interface observations remain materially present. Several explanations and proposed tests need correction: custom-hasher aliases cannot use TMap::with_capacity as claimed, order-sensitive tests need explicit iteration assertions, and duplicate rejection must precede coalescing.
+Unrelated external edits began in dependency/toolchain/CI metadata during collection; additional Rust-source edits appeared afterward. They were left untouched. Evidence and decisions are tied to the frozen commit, not those later changes or an installed toolchain. “Current” below means current at that snapshot; no re-audit of the modified working tree is implied.
+
+The collection surface is complete and serde delegates to pinned IndexMap behavior. Its public documentation is sparse; several other observations are optional API preferences rather than functional defects.
 
 ## Current claim decisions
 
 | Claim decisions | Open | Source-fixed | Partial | Refuted | Unverified | N/A |
 |---:|---:|---:|---:|---:|---:|---:|
-| 6 | 6 | 0 | 0 | 0 | 0 | 0 |
+| 6 | 3 | 0 | 0 | 0 | 0 | 3 |
 
-These are decisions on report claims, including repeated roots, bundled observations and non-findings—not a unique-bug census. Closed/N/A rows have no current risk; unverified risk is provisional. Pure style and unmeasured optimization claims do not establish runtime impact.
+These are duplicate-inclusive report decisions, not a unique-bug census. Pure style or structural optimization does not establish a runtime incident; unverified impact remains provisional.
 
 <a id="review-1"></a>
 
@@ -21,9 +23,11 @@ These are decisions on report claims, including repeated roots, bundled observat
 
 Status: `confirmed-open`. Current risk: `medium`.
 
-The leaf still provides no serde/order/duplicate contract. BatchRequest queries and interner_epochs and SubBatchOp bind remain derived TMap fields. Pinned IndexMap's visitor inserts entries and therefore retains the first position while replacing duplicate values; planning uses decoded alias order.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-collections/src/lib.rs:1](../../../../../crates/shamir-collections/src/lib.rs#L1); [crates/shamir-collections/Cargo.toml:10](../../../../../crates/shamir-collections/Cargo.toml#L10); [crates/shamir-query-types/src/batch/batch_request.rs:40](../../../../../crates/shamir-query-types/src/batch/batch_request.rs#L40); [crates/shamir-query-types/src/batch/batch_request.rs:87](../../../../../crates/shamir-query-types/src/batch/batch_request.rs#L87); [crates/shamir-query-types/src/batch/batch_request.rs:109](../../../../../crates/shamir-query-types/src/batch/batch_request.rs#L109); [crates/shamir-query-types/src/batch/sub_batch_op.rs:15](../../../../../crates/shamir-query-types/src/batch/sub_batch_op.rs#L15); [crates/shamir-query-types/src/batch/planner.rs:164](../../../../../crates/shamir-query-types/src/batch/planner.rs#L164); [crates/shamir-query-types/src/batch/planner.rs:841](../../../../../crates/shamir-query-types/src/batch/planner.rs#L841).
+No leaf serde/duplicate contract exists. A decoded map containing alias a twice retains one position and the later operation; the planner cannot recover multiplicity. Reordering independent aliases changes stage tie order, not enforced dependency edges. A discriminating duplicate oracle must consume raw duplicate-bearing input before coalescing; order tests must compare key sequences. Pinned source: https://docs.rs/crate/indexmap/2.14.0/source/src/serde.rs.
+
+Evidence: [crates/shamir-collections/src/lib.rs:1](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-collections/src/lib.rs#L1); [crates/shamir-collections/Cargo.toml:10](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-collections/Cargo.toml#L10); [crates/shamir-query-types/src/batch/batch_request.rs:87](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-query-types/src/batch/batch_request.rs#L87); [crates/shamir-query-types/src/batch/sub_batch_op.rs:15](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-query-types/src/batch/sub_batch_op.rs#L15); [crates/shamir-query-types/src/batch/planner.rs:164](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-query-types/src/batch/planner.rs#L164); [crates/shamir-query-types/src/batch/planner.rs:841](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-query-types/src/batch/planner.rs#L841).
 
 <a id="review-2"></a>
 
@@ -31,68 +35,74 @@ Evidence: [crates/shamir-collections/src/lib.rs:1](../../../../../crates/shamir-
 
 Status: `confirmed-open`. Current risk: `low`.
 
-THasher and all eight constructor functions still lack rustdoc; the _wc names and disabled doctests remain. This is discoverability debt without a demonstrated functional failure.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-collections/src/lib.rs:17](../../../../../crates/shamir-collections/src/lib.rs#L17); [crates/shamir-collections/src/lib.rs:25](../../../../../crates/shamir-collections/src/lib.rs#L25); [crates/shamir-collections/src/lib.rs:61](../../../../../crates/shamir-collections/src/lib.rs#L61); [crates/shamir-collections/Cargo.toml:16](../../../../../crates/shamir-collections/Cargo.toml#L16).
+THasher and eight constructors still lack rustdoc. Naming readability is subjective; disabled doctests follow documented project policy, rather than constituting a separate defect. Public API documentation remains actionable.
+
+Evidence: [crates/shamir-collections/src/lib.rs:17](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-collections/src/lib.rs#L17); [crates/shamir-collections/src/lib.rs:25](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-collections/src/lib.rs#L25); [crates/shamir-collections/Cargo.toml:16](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-collections/Cargo.toml#L16); [crates/shamir-types/Cargo.toml:75](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-types/Cargo.toml#L75); [crates/shamir-query-types/Cargo.toml:52](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-query-types/Cargo.toml#L52).
 
 <a id="review-3"></a>
 
 ### Claim 3 — Constructor surface is partially redundant and inconsistently adopted
 
-Status: `confirmed-open`. Current risk: `low`.
+Status: `not-applicable`. Current risk: `—`.
 
-Free constructors, Default and explicit with_capacity_and_hasher construction coexist without a declared canonical idiom. Empty constructors overlap Default, but the alleged TMap::with_capacity equivalence is false: pinned IndexMap defines that method only for its default-hasher specialization.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-collections/src/lib.rs:25](../../../../../crates/shamir-collections/src/lib.rs#L25); [crates/shamir-collections/src/lib.rs:30](../../../../../crates/shamir-collections/src/lib.rs#L30); [Cargo.lock:1783](../../../../../Cargo.lock#L1783); [crates/shamir-query-builder/src/batch/batch.rs:56](../../../../../crates/shamir-query-builder/src/batch/batch.rs#L56); [crates/shamir-query-types/src/batch/tests/planner_tests.rs:53](../../../../../crates/shamir-query-types/src/batch/tests/planner_tests.rs#L53); [crates/shamir-types/src/record_view/lens.rs:1064](../../../../../crates/shamir-types/src/record_view/lens.rs#L1064); [crates/shamir-engine/src/query/read/aggregate.rs:925](../../../../../crates/shamir-engine/src/query/read/aggregate.rs#L925).
+Empty helpers overlap Default and callers use multiple valid idioms. No contract requires one canonical spelling. Capacity helpers are useful: IndexMap 2.14.0 exposes with_capacity only on its default-hasher specialization, not TMap. This is optional ergonomics, not a runtime defect. Source: https://docs.rs/crate/indexmap/2.14.0/source/src/map.rs. Parent status consistency: this describes an explicitly sanctioned or optional design/maintenance choice without a violated current contract, so it is not a mandatory defect.
+
+Evidence: [crates/shamir-collections/src/lib.rs:25](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-collections/src/lib.rs#L25); [crates/shamir-collections/src/lib.rs:30](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-collections/src/lib.rs#L30); [crates/shamir-query-builder/src/batch/batch.rs:56](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-query-builder/src/batch/batch.rs#L56); [crates/shamir-types/src/record_view/lens.rs:1064](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-types/src/record_view/lens.rs#L1064); [crates/shamir-engine/src/query/read/aggregate.rs:925](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-engine/src/query/read/aggregate.rs#L925).
 
 <a id="review-4"></a>
 
 ### Claim 4 — Half the API missing from the shared façade re-export
 
-Status: `confirmed-open`. Current risk: `low`.
+Status: `not-applicable`. Current risk: `—`.
 
-common.rs still re-exports seven ordered-family items and omits six Fx-family items, producing split imports. The collections crate already exports all thirteen items; ownership of any façade change is shamir-types, not a missing collections export.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-types/src/types/common.rs:5](../../../../../crates/shamir-types/src/types/common.rs#L5); [crates/shamir-types/src/record_view/lens.rs:33](../../../../../crates/shamir-types/src/record_view/lens.rs#L33); [crates/shamir-types/src/record_view/lens.rs:34](../../../../../crates/shamir-types/src/record_view/lens.rs#L34); [crates/shamir-collections/src/lib.rs:43](../../../../../crates/shamir-collections/src/lib.rs#L43); [crates/shamir-collections/src/lib.rs:61](../../../../../crates/shamir-collections/src/lib.rs#L61).
+common.rs re-exports seven ordered-family items and omits six Fx-family items. Collections already exports all thirteen, and direct re-exports cannot independently change their hasher. Completing or retiring the façade is an optional shamir-types API decision. Parent status consistency: this describes an explicitly sanctioned or optional design/maintenance choice without a violated current contract, so it is not a mandatory defect.
+
+Evidence: [crates/shamir-types/src/types/common.rs:5](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-types/src/types/common.rs#L5); [crates/shamir-types/src/record_view/lens.rs:33](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-types/src/record_view/lens.rs#L33); [crates/shamir-collections/src/lib.rs:43](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-collections/src/lib.rs#L43); [crates/shamir-collections/src/lib.rs:61](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-collections/src/lib.rs#L61).
 
 <a id="review-5"></a>
 
 ### Claim 5 — Crate-wide `#![allow(clippy::disallowed_types)]` without justification comment
 
-Status: `confirmed-open`. Current risk: `nit`.
+Status: `not-applicable`. Current risk: `—`.
 
-The allow still lacks a local justification comment. Its purpose is explicitly documented in clippy.toml, so it is sanctioned rather than a present lint-policy violation.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-collections/src/lib.rs:9](../../../../../crates/shamir-collections/src/lib.rs#L9); [clippy.toml:39](../../../../../clippy.toml#L39).
+The local explanation remains absent, while clippy.toml provides an explicit sanction. Narrowing suppression is optional containment; no present forbidden-builder use was found. Parent status consistency: this describes an explicitly sanctioned or optional design/maintenance choice without a violated current contract, so it is not a mandatory defect.
 
-Grouping/duplicate: `security-crypto.md#2`. This row is not another independent defect.
+Evidence: [crates/shamir-collections/src/lib.rs:9](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-collections/src/lib.rs#L9); [clippy.toml:39](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/clippy.toml#L39).
+
+Grouping/duplicate: [security-crypto.md#2](security-crypto.md#review-2). This is not an additional independent defect.
 
 <a id="review-6"></a>
 
 ### Claim 6 — Zero in-crate tests, including no serde/ordering pinning test
 
-Status: `confirmed-open`. Current risk: `low`.
+Status: `confirmed-open`. Current risk: `medium`.
 
-No local tests or registration were added. Reachable downstream round-trip tests exercise maps but generally assert map equality, which cannot detect entry reordering; they do not replace constructor/hasher/removal/duplicate guards.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-collections/src/lib.rs:63](../../../../../crates/shamir-collections/src/lib.rs#L63); [crates/shamir-collections/Cargo.toml:16](../../../../../crates/shamir-collections/Cargo.toml#L16); [crates/shamir-query-types/src/batch/mod.rs:46](../../../../../crates/shamir-query-types/src/batch/mod.rs#L46); [crates/shamir-query-types/src/batch/tests/mod.rs:3](../../../../../crates/shamir-query-types/src/batch/tests/mod.rs#L3); [crates/shamir-query-types/src/batch/tests/batch_types_tests.rs:687](../../../../../crates/shamir-query-types/src/batch/tests/batch_types_tests.rs#L687).
+No local test target or module exists. Registered downstream serde roundtrips assert equality and field presence, not explicit entry order or builder identity; they do not establish duplicate rejection.
 
-Grouping/duplicate: `correctness-tdd.md#1`. This row is not another independent defect.
+Evidence: [crates/shamir-collections/src/lib.rs:63](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-collections/src/lib.rs#L63); [crates/shamir-query-types/src/batch/mod.rs:46](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-query-types/src/batch/mod.rs#L46); [crates/shamir-query-types/src/batch/tests/mod.rs:3](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-query-types/src/batch/tests/mod.rs#L3); [crates/shamir-query-types/src/batch/tests/batch_types_tests.rs:687](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-query-types/src/batch/tests/batch_types_tests.rs#L687).
 
-## Corrections and qualified non-findings
+Grouping/duplicate: [correctness-tdd.md#1](correctness-tdd.md#review-1). This is not an additional independent defect.
 
-- The old batch/batch.rs citation has moved to batch/batch_request.rs; bind is a SubBatchOp field, not a top-level BatchRequest field.
-- TMap serializes as a map; TSet serializes as a sequence. Their duplicate semantics should not be described as identical map last-value-wins behavior.
-- Rejecting duplicate aliases upstream after IndexMap decoding is too late: multiplicity has been lost. Rejection requires a validating deserialization visitor or another representation before coalescing.
-- Wire reordering changes independent-query tie-breaking; dependency edges remain enforced. Use explicit after/data-flow edges for required execution dependencies.
-- Lack of cross-language canonicalization does not prevent checksums over transmitted bytes. AUTH_PROTOCOL.md:904 explicitly leaves map ordering unrestricted and separately defines authentication canonical bytes.
-- Vec<(K,V)> would change the protocol representation; it is an option requiring compatibility analysis, not an automatic documentation-only fix.
-- Do not recommend replacing _wc constructors with TMap::with_capacity; use with_capacity_and_hasher when constructing the custom-hasher aliases directly.
-- The aggregate.rs example already constructs with new_map_wc; it bypasses the alias in its type annotation, not the constructor.
-- There are thirteen public items, not twelve. Direct pub use re-exports preserve the same types and cannot independently swap their hasher.
-- Deterministic insertion-order iteration is not a hasher-identity oracle. Round-trip order tests must compare iterated keys/entries, not only map equality.
-- The separate Eq nit remains open; Hash must stay imported.
-- The query-construction non-finding remains valid: this leaf assembles no queries, JSON, filters or wire operations.
+## Evidence and recipe corrections
+
+- The documented project-wide doctest policy is positive counter-evidence to an unexplained-disablement allegation. Keep behavioral examples in registered unit/integration tests unless that policy changes.
+- A Vec-of-pairs DTO changes the wire shape and typed API. Do not prescribe it as a documentation-only fix.
+- Duplicate rejection must precede IndexMap coalescing. Documenting last-wins is different from guaranteeing unique input aliases.
+- TSet serializes as a sequence and deduplicates elements, not as a last-value-wins map.
+- The aggregate example already uses new_map_wc; only its type annotation bypasses TMap.
+- Canonical construction and complete façade imports are preferences absent a violated contract; their severity is reduced to nit.
+- Query-building compliance remains supported: this leaf constructs no queries.
+- Parent acceptance classifies the purely optional constructor/façade/lint-containment proposals as N/A, consistently with other modules. Their source facts are retained; no source fix is claimed.
 
 ---
 

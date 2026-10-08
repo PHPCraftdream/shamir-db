@@ -1,29 +1,33 @@
-<!-- revalidation:2026-10-08 source:92ad58266bf57ddea1fa3c8a47affba1a3a9a096 -->
-# shamir-tx — api-wire-protocol revalidation
+<!-- revalidation:2026-10-08 cycle:independent-2 source:e3765c935fc71655ee1ec0160cf180607935d89b -->
+# shamir-tx — api-wire-protocol independent revalidation (cycle 2)
 
-Source snapshot: `92ad58266bf57ddea1fa3c8a47affba1a3a9a096`. Revalidated 2026-10-08 by read-only XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run; no source fix is part of this update. Test registration/assertions are evidence of an oracle, not proof of a passing run.
+Frozen source snapshot: `e3765c935fc71655ee1ec0160cf180607935d89b`. Independently revalidated 2026-10-08 by a fresh XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run. Source-fixed means the specified mechanism was already removed at this snapshot; this cycle implements no source fix.
 
-This section is authoritative for current status. Original titles/IDs are retained for traceability; a refuted title is not a current assertion. The collapsed historical report below is superseded, including its counts, severity, scenarios and fix instructions. Plan IDs preserve historical numbering, not a current release mandate. [Workspace methodology and status definitions](../SUMMARY.md#status-definitions).
+This section is authoritative for current decisions. Existing IDs and allegation titles are retained for traceability; a refuted title is not a current assertion. Prior-cycle decisions were rechecked, not used as proof. The first cycle is available in repository history at this snapshot. The original historical body below remains preserved once and is superseded, including its counts, severities and recipes. [Workspace scope and status definitions](../SUMMARY.md#status-definitions).
 
-Journal error signaling and format identification remain weak. Several proposed safeguards assume dense commit versions or access to journal keys that the current API does not provide.
+Unrelated external edits began in dependency/toolchain/CI metadata during collection; additional Rust-source edits appeared afterward. They were left untouched. Evidence and decisions are tied to the frozen commit, not those later changes or an installed toolchain. “Current” below means current at that snapshot; no re-audit of the modified working tree is implied.
+
+Journal error signaling remains defective. Exact pinned codec inspection resolves permissive byte decoding and positional struct serialization. Several API-shape recommendations are optional rather than defects.
 
 ## Current claim decisions
 
 | Claim decisions | Open | Source-fixed | Partial | Refuted | Unverified | N/A |
 |---:|---:|---:|---:|---:|---:|---:|
-| 12 | 10 | 0 | 0 | 0 | 1 | 1 |
+| 12 | 8 | 0 | 0 | 0 | 0 | 4 |
 
-These are decisions on report claims, including repeated roots, bundled observations and non-findings—not a unique-bug census. Closed/N/A rows have no current risk; unverified risk is provisional. Pure style and unmeasured optimization claims do not establish runtime impact.
+These are duplicate-inclusive report decisions, not a unique-bug census. Pure style or structural optimization does not establish a runtime incident; unverified impact remains provisional.
 
 <a id="review-1"></a>
 
 ### Claim 1 — Durable journal events have no schema/version envelope; decode failures are silently skipped
 
-Status: `confirmed-open`. Current risk: `high`.
+Status: `confirmed-open`. Current risk: `medium`.
 
-The durable payload is a bare ChangelogEvent and decoding errors only warn. Schema-change compatibility examples are unverified; silent omission after a decode failure is directly established.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-tx/src/changefeed.rs:87](../../../../../crates/shamir-tx/src/changefeed.rs#L87); [crates/shamir-tx/src/changefeed.rs:409](../../../../../crates/shamir-tx/src/changefeed.rs#L409); [crates/shamir-tx/src/changefeed.rs:543](../../../../../crates/shamir-tx/src/changefeed.rs#L543).
+An undecodable stored event is omitted without an error/gap result. No explicit format envelope exists, but absence alone is prospective compatibility debt. Exact rmp-serde 1.3.1 to_vec encodes structs positionally as arrays, so ordinary field renaming does not change those bytes. Published source: https://docs.rs/crate/rmp-serde/1.3.1/source/src/encode.rs
+
+Evidence: [crates/shamir-tx/src/changefeed.rs:87](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-tx/src/changefeed.rs#L87); [crates/shamir-tx/src/changefeed.rs:409](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-tx/src/changefeed.rs#L409); [crates/shamir-tx/src/changefeed.rs:543](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-tx/src/changefeed.rs#L543); [Cargo.lock:2949](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/Cargo.lock#L2949).
 
 <a id="review-2"></a>
 
@@ -31,9 +35,11 @@ Evidence: [crates/shamir-tx/src/changefeed.rs:87](../../../../../crates/shamir-t
 
 Status: `confirmed-open`. Current risk: `low`.
 
-The local test only pins 0x80 and constants remain duplicated. Current layouts match, and registered engine round-trip tests provide additional cross-crate coverage, contradicting inevitable silent test-suite success.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-tx/src/predicate_set.rs:164](../../../../../crates/shamir-tx/src/predicate_set.rs#L164); [crates/shamir-tx/src/tests/predicate_set_tests.rs:195](../../../../../crates/shamir-tx/src/tests/predicate_set_tests.rs#L195); [crates/shamir-index/src/base_index/sorted_index_definition.rs:29](../../../../../crates/shamir-index/src/base_index/sorted_index_definition.rs#L29); [crates/shamir-index/src/base_index/sorted_index_manager.rs:2670](../../../../../crates/shamir-index/src/base_index/sorted_index_manager.rs#L2670); [crates/shamir-engine/src/tx/tests/predicate_range_tests.rs:236](../../../../../crates/shamir-engine/src/tx/tests/predicate_range_tests.rs#L236); [crates/shamir-engine/src/tx/tests/mod.rs:28](../../../../../crates/shamir-engine/src/tx/tests/mod.rs#L28).
+The named tx test pins only local 0x80. Current index layouts agree, and registered engine tests combine actual manager-generated bounds with key_in_interval. This is drift risk, not a present mismatch or inevitable silent suite success.
+
+Evidence: [crates/shamir-tx/src/predicate_set.rs:164](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-tx/src/predicate_set.rs#L164); [crates/shamir-tx/src/tests/predicate_set_tests.rs:195](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-tx/src/tests/predicate_set_tests.rs#L195); [crates/shamir-index/src/base_index/sorted_index_definition.rs:29](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-index/src/base_index/sorted_index_definition.rs#L29); [crates/shamir-engine/src/tx/tests/predicate_range_tests.rs:236](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-engine/src/tx/tests/predicate_range_tests.rs#L236).
 
 <a id="review-3"></a>
 
@@ -41,9 +47,11 @@ Evidence: [crates/shamir-tx/src/predicate_set.rs:164](../../../../../crates/sham
 
 Status: `confirmed-open`. Current risk: `medium`.
 
-The overflow marker resets in new and is not persisted. Lost emitted events remain undetectable after restart, but numeric version discontinuities are not sufficient evidence of lost events.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-tx/src/changefeed.rs:246](../../../../../crates/shamir-tx/src/changefeed.rs#L246); [crates/shamir-tx/src/changefeed.rs:416](../../../../../crates/shamir-tx/src/changefeed.rs#L416); [crates/shamir-tx/src/changefeed.rs:479](../../../../../crates/shamir-tx/src/changefeed.rs#L479); [crates/shamir-tx/src/mvcc_store/mod.rs:883](../../../../../crates/shamir-tx/src/mvcc_store/mod.rs#L883); [crates/shamir-tx/src/version_guard.rs:107](../../../../../crates/shamir-tx/src/version_guard.rs#L107).
+Overflow evidence resets on construction and is not durable. Restart can therefore erase known event-loss evidence. Commit versions legitimately skip aborted, index-only, or per-record batch allocations; dense-version checking is not a valid repair. Crash-tail loss itself is explicitly documented as a trade-off.
+
+Evidence: [crates/shamir-tx/src/changefeed.rs:30](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-tx/src/changefeed.rs#L30); [crates/shamir-tx/src/changefeed.rs:246](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-tx/src/changefeed.rs#L246); [crates/shamir-tx/src/changefeed.rs:479](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-tx/src/changefeed.rs#L479); [crates/shamir-tx/src/mvcc_store/mod.rs:883](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-tx/src/mvcc_store/mod.rs#L883).
 
 <a id="review-4"></a>
 
@@ -51,31 +59,37 @@ Evidence: [crates/shamir-tx/src/changefeed.rs:246](../../../../../crates/shamir-
 
 Status: `confirmed-open`. Current risk: `medium`.
 
-Store failure returns empty events with gap_at None; decode failures disappear from the result. Engine wraps that result in Ok, preserving the ambiguity.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-tx/src/changefeed.rs:397](../../../../../crates/shamir-tx/src/changefeed.rs#L397); [crates/shamir-tx/src/changefeed.rs:411](../../../../../crates/shamir-tx/src/changefeed.rs#L411); [crates/shamir-engine/src/repo/repo_instance.rs:1245](../../../../../crates/shamir-engine/src/repo/repo_instance.rs#L1245).
+range_from failure returns empty events and gap_at None, even bypassing an existing gap marker. Decoder failures are omitted. RepoInstance wraps this value in Ok, so production callers retain the ambiguity.
+
+Evidence: [crates/shamir-tx/src/changefeed.rs:397](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-tx/src/changefeed.rs#L397); [crates/shamir-tx/src/changefeed.rs:411](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-tx/src/changefeed.rs#L411); [crates/shamir-engine/src/repo/repo_instance.rs:1245](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-engine/src/repo/repo_instance.rs#L1245).
 
 <a id="review-5"></a>
 
 ### Claim 5 — read_from re-demands the store the constructor already consumed; no same-store guarantee
 
-Status: `confirmed-open`. Current risk: `low`.
+Status: `not-applicable`. Current risk: `—`.
 
-Self does not retain the store, so public callers can read another store. Production ChangefeedHandle retains and supplies the same Arc, preventing the alleged current wiring error.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-tx/src/changefeed.rs:249](../../../../../crates/shamir-tx/src/changefeed.rs#L249); [crates/shamir-tx/src/changefeed.rs:392](../../../../../crates/shamir-tx/src/changefeed.rs#L392); [crates/shamir-engine/src/repo/repo_instance.rs:1211](../../../../../crates/shamir-engine/src/repo/repo_instance.rs#L1211); [crates/shamir-engine/src/repo/repo_instance.rs:1245](../../../../../crates/shamir-engine/src/repo/repo_instance.rs#L1245).
+The explicit store parameter makes choosing the intended store the caller's responsibility, and production retains/supplies the same Arc. Retaining it inside Self is sensible ergonomics, but no supported-call defect or required identity guarantee was established.
+
+Evidence: [crates/shamir-tx/src/changefeed.rs:392](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-tx/src/changefeed.rs#L392); [crates/shamir-engine/src/repo/repo_instance.rs:1211](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-engine/src/repo/repo_instance.rs#L1211); [crates/shamir-engine/src/repo/repo_instance.rs:1245](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-engine/src/repo/repo_instance.rs#L1245).
 
 <a id="review-6"></a>
 
-### Claim 6 — Stringly-typed Result<_, String> across the public API
+### Claim 6 — Stringly-typed Result&lt;_, String&gt; across the public API
 
 Status: `confirmed-open`. Current risk: `low`.
 
-Trait, retention, and remap boundaries still use String errors; the declared thiserror dependency has no use in this crate.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-tx/src/changefeed.rs:154](../../../../../crates/shamir-tx/src/changefeed.rs#L154); [crates/shamir-tx/src/mvcc_store/retention.rs:60](../../../../../crates/shamir-tx/src/mvcc_store/retention.rs#L60); [crates/shamir-tx/src/staging_store.rs:329](../../../../../crates/shamir-tx/src/staging_store.rs#L329); [crates/shamir-tx/src/tx_context.rs:942](../../../../../crates/shamir-tx/src/tx_context.rs#L942); [crates/shamir-tx/Cargo.toml:23](../../../../../crates/shamir-tx/Cargo.toml#L23).
+The identified public trait, retention, staging, and remap boundaries still use String. Typed errors would improve discrimination; they are not prerequisites for exposing read failures through Result.
 
-Grouping/duplicate: `error-handling-lifecycle.md#4`. This row is not another independent defect.
+Evidence: [crates/shamir-tx/src/changefeed.rs:154](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-tx/src/changefeed.rs#L154); [crates/shamir-tx/src/mvcc_store/retention.rs:60](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-tx/src/mvcc_store/retention.rs#L60); [crates/shamir-tx/src/tx_context.rs:942](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-tx/src/tx_context.rs#L942).
+
+Grouping/duplicate: [error-handling-lifecycle.md#4](error-handling-lifecycle.md#review-4). This is not an additional independent defect.
 
 <a id="review-7"></a>
 
@@ -83,9 +97,11 @@ Grouping/duplicate: `error-handling-lifecycle.md#4`. This row is not another ind
 
 Status: `confirmed-open`. Current risk: `low`.
 
-Write entry points accept empty values and reads interpret them as deletion. Record encoders are nonempty; this is an undocumented/reusable raw-Bytes API boundary, not a demonstrated record-write failure.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-tx/src/mvcc_store/mod.rs:766](../../../../../crates/shamir-tx/src/mvcc_store/mod.rs#L766); [crates/shamir-tx/src/mvcc_store/mod.rs:724](../../../../../crates/shamir-tx/src/mvcc_store/mod.rs#L724); [crates/shamir-tx/src/mvcc_store/mod.rs:1058](../../../../../crates/shamir-tx/src/mvcc_store/mod.rs#L1058); [crates/shamir-tx/src/mvcc_store/mvcc_history.rs:470](../../../../../crates/shamir-tx/src/mvcc_store/mvcc_history.rs#L470).
+Raw setters accept empty Bytes while reads interpret empty payloads as deletion. Actual record encoders produce nonempty MessagePack, so this is a reusable raw API contract gap, not a demonstrated ordinary record-write failure. A debug assertion alone cannot enforce a release-input restriction.
+
+Evidence: [crates/shamir-tx/src/mvcc_store/mod.rs:766](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-tx/src/mvcc_store/mod.rs#L766); [crates/shamir-tx/src/mvcc_store/mod.rs:724](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-tx/src/mvcc_store/mod.rs#L724); [crates/shamir-tx/src/mvcc_store/mvcc_history.rs:470](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-tx/src/mvcc_store/mvcc_history.rs#L470).
 
 <a id="review-8"></a>
 
@@ -93,11 +109,13 @@ Evidence: [crates/shamir-tx/src/mvcc_store/mod.rs:766](../../../../../crates/sha
 
 Status: `confirmed-open`. Current risk: `nit`.
 
-Documentation and restricted generators remain inaccurate. Encoding/decoding is suffix-length based and round-trips arbitrary key bytes; fixed-width key grouping, not exclusion of 0xFF, is the useful safety property.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-tx/src/version_codec.rs:20](../../../../../crates/shamir-tx/src/version_codec.rs#L20); [crates/shamir-tx/src/version_codec.rs:57](../../../../../crates/shamir-tx/src/version_codec.rs#L57); [crates/shamir-tx/src/tests/version_codec_tests.rs:65](../../../../../crates/shamir-tx/src/tests/version_codec_tests.rs#L65); [crates/shamir-types/src/types/record_id.rs:46](../../../../../crates/shamir-types/src/types/record_id.rs#L46).
+The documentation and 0xFF-excluding generators are inaccurate. The suffix-length decoder round-trips embedded separators; grouping safety comes from key shape and exact orig checks. The tests do not justify the stated probabilistic invariant.
 
-Grouping/duplicate: `security-crypto.md#3`. This row is not another independent defect.
+Evidence: [crates/shamir-tx/src/version_codec.rs:20](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-tx/src/version_codec.rs#L20); [crates/shamir-tx/src/version_codec.rs:57](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-tx/src/version_codec.rs#L57); [crates/shamir-tx/src/tests/version_codec_tests.rs:65](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-tx/src/tests/version_codec_tests.rs#L65).
+
+Grouping/duplicate: [security-crypto.md#3](security-crypto.md#review-3). This is not an additional independent defect.
 
 <a id="review-9"></a>
 
@@ -105,48 +123,57 @@ Grouping/duplicate: `security-crypto.md#3`. This row is not another independent 
 
 Status: `confirmed-open`. Current risk: `low`.
 
-RepoWalManager and RepoTxGate accept zero seeds and can allocate zero. Normal construction defaults to one; project_event also intentionally maps implicit transactions to external ID zero.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-tx/src/repo_wal_manager.rs:30](../../../../../crates/shamir-tx/src/repo_wal_manager.rs#L30); [crates/shamir-tx/src/repo_wal_manager.rs:39](../../../../../crates/shamir-tx/src/repo_wal_manager.rs#L39); [crates/shamir-tx/src/repo_tx_gate.rs:294](../../../../../crates/shamir-tx/src/repo_tx_gate.rs#L294); [crates/shamir-tx/src/changefeed.rs:494](../../../../../crates/shamir-tx/src/changefeed.rs#L494); [crates/shamir-engine/src/repo/repo_instance.rs:775](../../../../../crates/shamir-engine/src/repo/repo_instance.rs#L775).
+Public zero seeds allocate zero, colliding with the external non-tx sentinel. Normal construction defaults to one; implicit transactions intentionally project external ID zero. This is allocator-contract hardening, not evidence that normal recovery currently emits a zero explicit ID.
+
+Evidence: [crates/shamir-tx/src/repo_wal_manager.rs:30](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-tx/src/repo_wal_manager.rs#L30); [crates/shamir-tx/src/repo_tx_gate.rs:294](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-tx/src/repo_tx_gate.rs#L294); [crates/shamir-tx/src/changefeed.rs:494](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-tx/src/changefeed.rs#L494); [crates/shamir-engine/src/repo/repo_instance.rs:775](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-engine/src/repo/repo_instance.rs#L775).
 
 <a id="review-10"></a>
 
 ### Claim 10 — Dead public group-commit API remains in the exported surface
 
-Status: `confirmed-open`. Current risk: `nit`.
+Status: `not-applicable`. Current risk: `—`.
 
-PendingCommit and both queue accessors remain public with no callers. Their dead-scaffolding status is now explicitly documented; reducing the surface remains optional hygiene.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-tx/src/lib.rs:69](../../../../../crates/shamir-tx/src/lib.rs#L69); [crates/shamir-tx/src/repo_tx_gate.rs:742](../../../../../crates/shamir-tx/src/repo_tx_gate.rs#L742); [crates/shamir-tx/src/repo_tx_gate.rs:752](../../../../../crates/shamir-tx/src/repo_tx_gate.rs#L752).
+Exports and unused accessors exist, but current policy explicitly sanctions this scaffolding and no live caller exists. Hiding/removing public API is optional cleanup, not an established defect, and can break downstream source compatibility.
+
+Evidence: [crates/shamir-tx/src/lib.rs:69](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-tx/src/lib.rs#L69); [crates/shamir-tx/src/repo_tx_gate.rs:742](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-tx/src/repo_tx_gate.rs#L742); [CLAUDE.md:389](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/CLAUDE.md#L389).
 
 <a id="review-11"></a>
 
 ### Claim 11 — serde_bytes_compat deserializer accepts sequences, not just byte arrays
 
-Status: `unverified`. Current risk: `nit` (provisional; not a confirmed defect).
+Status: `not-applicable`. Current risk: `—`.
 
-serialize_bytes versus Vec<u8>::deserialize is confirmed, but exact bin/array acceptance was not verified against pinned rmp-serde. No canonical-bin-only contract establishes a defect merely from accepting another encoding.
+Prior-cycle decision: `unverified`.
 
-Evidence: [crates/shamir-tx/src/changefeed.rs:108](../../../../../crates/shamir-tx/src/changefeed.rs#L108); [crates/shamir-tx/src/changefeed.rs:112](../../../../../crates/shamir-tx/src/changefeed.rs#L112); [Cargo.lock:2949](../../../../../Cargo.lock#L2949); [crates/shamir-tx/src/changefeed/tests/changefeed_tests.rs:233](../../../../../crates/shamir-tx/src/changefeed/tests/changefeed_tests.rs#L233).
+Exact rmp-serde 1.3.1 deserialize_seq calls any_inner(false): arrays invoke visit_seq and bin is converted to a byte sequence; serde 1.0.228 Vec&lt;u8&gt; accepts both. This resolves implementation uncertainty but no canonical-bin-only contract makes acceptance defective. Source: https://docs.rs/crate/rmp-serde/1.3.1/source/src/decode.rs
+
+Evidence: [crates/shamir-tx/src/changefeed.rs:108](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-tx/src/changefeed.rs#L108); [crates/shamir-tx/src/changefeed.rs:112](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-tx/src/changefeed.rs#L112); [Cargo.lock:2949](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/Cargo.lock#L2949).
 
 <a id="review-positive-notes"></a>
 
 ### Claim Positive notes — Builder-only rule, isolation wire names, physical codecs and journal round-trip tests
 
-Status: `not-applicable`. Current risk: —.
+Status: `not-applicable`. Current risk: `—`.
 
-No query-construction JSON surface was found. Wire-name, codec and journal assertions are registered; they verify their selected domains, not arbitrary schema evolution or malformed inputs.
+Prior-cycle decision: `not-applicable`.
 
-Evidence: [crates/shamir-tx/src/tests/mod.rs:11](../../../../../crates/shamir-tx/src/tests/mod.rs#L11); [crates/shamir-tx/src/tests/types_tests.rs:23](../../../../../crates/shamir-tx/src/tests/types_tests.rs#L23); [crates/shamir-tx/src/tests/version_codec_tests.rs:73](../../../../../crates/shamir-tx/src/tests/version_codec_tests.rs#L73); [crates/shamir-tx/src/changefeed.rs:657](../../../../../crates/shamir-tx/src/changefeed.rs#L657); [crates/shamir-tx/src/changefeed/tests/changefeed_tests.rs:233](../../../../../crates/shamir-tx/src/changefeed/tests/changefeed_tests.rs#L233); [crates/shamir-tx/src/mvcc_store/mod.rs:68](../../../../../crates/shamir-tx/src/mvcc_store/mod.rs#L68).
+No query-construction JSON surface was found; wire names, BE journal keys, and selected codec/journal round trips are asserted in registered suites. Same-schema round trips do not prove evolution compatibility or corruption signaling.
 
-## Corrections and qualified non-findings
+Evidence: [crates/shamir-tx/src/tests/types_tests.rs:23](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-tx/src/tests/types_tests.rs#L23); [crates/shamir-tx/src/tests/version_codec_tests.rs:73](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-tx/src/tests/version_codec_tests.rs#L73); [crates/shamir-tx/src/changefeed/tests/changefeed_tests.rs:233](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-tx/src/changefeed/tests/changefeed_tests.rs#L233); [crates/shamir-tx/src/changefeed.rs:657](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-tx/src/changefeed.rs#L657).
 
-- ChangelogStore::range_from returns values only. The allegedly always-available corrupt entry key has already been discarded; returning keys or a separate integrity marker requires an API change.
-- Commit versions are sparse: aborted allocations, index/counter-only transactions and multi-record non-tx batches legitimately omit event versions. A simple consecutive-version check would produce false gaps and cannot detect missing terminal tails.
-- Bare to_vec does not establish that field renaming changes the encoded layout. Specific upgrade/rollback failure examples require pinned serializer and schema compatibility evidence.
-- SORTED_TAG now lives in shamir-index, not the historical engine implementation location. Engine round-trip tests do combine manager-generated bounds with tx predicate checking.
-- Rejecting key[len-9] == 0xFF is unnecessary for codec round-trip correctness and can reject legitimate fixed-width RecordIds.
-- A deserialize_byte_buf visitor alone is not proof of bin-only acceptance; deserializer behavior must be checked.
+## Evidence and recipe corrections
+
+- Claim 1 is Medium for demonstrated stored-input omission; absent envelope is prospective compatibility debt, not independently a High exploit.
+- Pinned rmp-serde 1.3.1 uses positional struct arrays for to_vec: ordinary field renames do not change that layout.
+- Claim 11's acceptance is now verified, but is not applicable as a defect without a canonical-bin-only contract.
+- deserialize_byte_buf also dispatches through deserialize_any in the pinned codec; a strict visitor must explicitly reject unwanted visit_seq forms rather than rely on the method name.
+- The optional value adapter serializes Some(value.as_ref()), which is a slice serialization path, not the key adapter's serialize_bytes call.
+- Claims 5 and 10 are optional API maintenance recommendations, not defects in supported current use.
+- range_from discards physical keys; a key-derived corrupt-entry marker requires changing that seam. Numeric version continuity cannot establish sparse event completeness.
 
 ---
 

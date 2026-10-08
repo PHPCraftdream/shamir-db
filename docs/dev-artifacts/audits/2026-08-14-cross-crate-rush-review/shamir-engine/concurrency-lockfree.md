@@ -1,11 +1,13 @@
-<!-- revalidation:2026-10-08 source:92ad58266bf57ddea1fa3c8a47affba1a3a9a096 -->
-# shamir-engine — concurrency-lockfree revalidation
+<!-- revalidation:2026-10-08 cycle:independent-2 source:e3765c935fc71655ee1ec0160cf180607935d89b -->
+# shamir-engine — concurrency-lockfree independent revalidation (cycle 2)
 
-Source snapshot: `92ad58266bf57ddea1fa3c8a47affba1a3a9a096`. Revalidated 2026-10-08 by read-only XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run; no source fix is part of this update. Test registration/assertions are evidence of an oracle, not proof of a passing run.
+Frozen source snapshot: `e3765c935fc71655ee1ec0160cf180607935d89b`. Independently revalidated 2026-10-08 by a fresh XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run. Source-fixed means the specified mechanism was already removed at this snapshot; this cycle implements no source fix.
 
-This section is authoritative for current status. Original titles/IDs are retained for traceability; a refuted title is not a current assertion. The collapsed historical report below is superseded, including its counts, severity, scenarios and fix instructions. Plan IDs preserve historical numbering, not a current release mandate. [Workspace methodology and status definitions](../SUMMARY.md#status-definitions).
+This section is authoritative for current decisions. Existing IDs and allegation titles are retained for traceability; a refuted title is not a current assertion. Prior-cycle decisions were rechecked, not used as proof. The first cycle is available in repository history at this snapshot. The original historical body below remains preserved once and is superseded, including its counts, severities and recipes. [Workspace scope and status definitions](../SUMMARY.md#status-definitions).
 
-The guard, binding, counter and watchdog findings are repaired. FK-cache retry now yields but remains unbounded under invalidation.
+Unrelated external edits began in dependency/toolchain/CI metadata during collection; additional Rust-source edits appeared afterward. They were left untouched. Evidence and decisions are tied to the frozen commit, not those later changes or an installed toolchain. “Current” below means current at that snapshot; no re-audit of the modified working tree is implied.
+
+Guard lifetime, atomic binding mutation, counter persistence and watchdog logging repairs are supported. FK rebuild starvation remains conditional on sustained privileged invalidation; the loom model is not a production-ordering mutation oracle.
 
 ## Current claim decisions
 
@@ -13,57 +15,67 @@ The guard, binding, counter and watchdog findings are repaired. FK-cache retry n
 |---:|---:|---:|---:|---:|---:|---:|
 | 12 | 0 | 5 | 1 | 0 | 1 | 5 |
 
-These are decisions on report claims, including repeated roots, bundled observations and non-findings—not a unique-bug census. Closed/N/A rows have no current risk; unverified risk is provisional. Pure style and unmeasured optimization claims do not establish runtime impact.
+These are duplicate-inclusive report decisions, not a unique-bug census. Pure style or structural optimization does not establish a runtime incident; unverified impact remains provisional.
 
 <a id="review-1"></a>
 
 ### Claim 1 — DashMap shard read-guard held across await in DbInstance accessors
 
-Status: `fixed`. Current risk: —.
+Status: `fixed`. Current risk: `—`.
 
-All eight awaited accessors clone RepoInstance before awaiting, ending the shard guard's lifetime at the lookup statement.
+Prior-cycle decision: `fixed`.
 
-Evidence: [crates/shamir-engine/src/db_instance/db_instance.rs:70](../../../../../crates/shamir-engine/src/db_instance/db_instance.rs#L70); [crates/shamir-engine/src/db_instance/db_instance.rs:191](../../../../../crates/shamir-engine/src/db_instance/db_instance.rs#L191); [crates/shamir-engine/src/db_instance/db_instance.rs:298](../../../../../crates/shamir-engine/src/db_instance/db_instance.rs#L298).
+All eight asynchronous routes clone RepoInstance before awaiting. The registered hammer exercises get_table, not every index route or a deterministic parked-reader interleaving.
+
+Evidence: [crates/shamir-engine/src/db_instance/db_instance.rs:73](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-engine/src/db_instance/db_instance.rs#L73); [crates/shamir-engine/src/db_instance/db_instance.rs:301](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-engine/src/db_instance/db_instance.rs#L301); [crates/shamir-engine/src/db_instance/tests/db_instance_guard_across_await_tests.rs:109](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-engine/src/db_instance/tests/db_instance_guard_across_await_tests.rs#L109).
 
 <a id="review-2"></a>
 
 ### Claim 2 — ValidatorRegistry::add_binding — check-then-act lost update on a lock-free map
 
-Status: `fixed`. Current risk: —.
+Status: `fixed`. Current risk: `—`.
 
-One entry_sync/or_default/get_mut operation inserts into the existing set without a separate losing insert.
+Prior-cycle decision: `fixed`.
 
-Evidence: [crates/shamir-engine/src/validator/registry.rs:190](../../../../../crates/shamir-engine/src/validator/registry.rs#L190); [crates/shamir-engine/src/validator/tests/registry_tests.rs:43](../../../../../crates/shamir-engine/src/validator/tests/registry_tests.rs#L43); [crates/shamir-engine/src/validator/tests/mod.rs:8](../../../../../crates/shamir-engine/src/validator/tests/mod.rs#L8).
+One entry_sync occupied handle mutates the set. Exact scc 3.8.4 retains the bucket writer throughout this operation; the registered race test checks both bindings. Published source: https://docs.rs/crate/scc/3.8.4/source/src/hash_map.rs.
+
+Evidence: [Cargo.lock:3123](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/Cargo.lock#L3123); [crates/shamir-engine/src/validator/registry.rs:190](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-engine/src/validator/registry.rs#L190); [crates/shamir-engine/src/validator/tests/registry_tests.rs:43](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-engine/src/validator/tests/registry_tests.rs#L43).
 
 <a id="review-3"></a>
 
 ### Claim 3 — RecordCounter — dirty flag clobbered by concurrent increment during set/persist awaits
 
-Status: `fixed`. Current risk: —.
+Status: `fixed`. Current risk: `—`.
 
-No independent dirty flag remains. set/persist record only their written count; later cache divergence causes another persist.
+Prior-cycle decision: `fixed`.
 
-Evidence: [crates/shamir-engine/src/table/record_counter.rs:103](../../../../../crates/shamir-engine/src/table/record_counter.rs#L103); [crates/shamir-engine/src/table/record_counter.rs:169](../../../../../crates/shamir-engine/src/table/record_counter.rs#L169); [crates/shamir-engine/src/table/tests/record_counter_tests.rs:374](../../../../../crates/shamir-engine/src/table/tests/record_counter_tests.rs#L374).
+No independent dirty flag remains. cache versus the exact written value preserves a subsequent flush obligation after concurrent increments.
+
+Evidence: [crates/shamir-engine/src/table/record_counter.rs:103](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-engine/src/table/record_counter.rs#L103); [crates/shamir-engine/src/table/record_counter.rs:169](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-engine/src/table/record_counter.rs#L169); [crates/shamir-engine/src/table/tests/record_counter_tests.rs:337](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-engine/src/table/tests/record_counter_tests.rs#L337).
 
 <a id="review-4"></a>
 
 ### Claim 4 — Watchdog thread runs log::warn! inside iter_sync
 
-Status: `fixed`. Current risk: —.
+Status: `fixed`. Current risk: `—`.
 
-The iterator collects warning data; log calls run after iter_sync returns.
+Prior-cycle decision: `fixed`.
 
-Evidence: [crates/shamir-engine/src/query/batch/op_watchdog.rs:139](../../../../../crates/shamir-engine/src/query/batch/op_watchdog.rs#L139); [crates/shamir-engine/src/query/batch/op_watchdog.rs:156](../../../../../crates/shamir-engine/src/query/batch/op_watchdog.rs#L156).
+iter_sync only collects warning data; logger calls occur after iteration has released readers.
+
+Evidence: [crates/shamir-engine/src/query/batch/op_watchdog.rs:139](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-engine/src/query/batch/op_watchdog.rs#L139); [crates/shamir-engine/src/query/batch/op_watchdog.rs:156](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-engine/src/query/batch/op_watchdog.rs#L156).
 
 <a id="review-5"></a>
 
 ### Claim 5 — MigrationCoordinator::drain_until_caught_up — unbounded catch-up loop under sustained writes
 
-Status: `fixed`. Current risk: —.
+Status: `fixed`. Current risk: `—`.
 
-The loop has a 32-pass cap and returns residual lag. Its admin caller currently ignores that residual result.
+Prior-cycle decision: `fixed`.
 
-Evidence: [crates/shamir-engine/src/migration/coordinator.rs:126](../../../../../crates/shamir-engine/src/migration/coordinator.rs#L126); [crates/shamir-engine/src/migration/coordinator.rs:288](../../../../../crates/shamir-engine/src/migration/coordinator.rs#L288); [crates/shamir-db/src/shamir_db/execute/admin_migration.rs:178](../../../../../crates/shamir-db/src/shamir_db/execute/admin_migration.rs#L178).
+The loop caps passes at 32 and returns residual_lag. The caller's ignored residual and unsafe final drain are distinct remaining obligations.
+
+Evidence: [crates/shamir-engine/src/migration/coordinator.rs:288](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-engine/src/migration/coordinator.rs#L288); [crates/shamir-engine/src/migration/coordinator.rs:297](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-engine/src/migration/coordinator.rs#L297); [crates/shamir-db/src/shamir_db/execute/admin_migration.rs:178](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/execute/admin_migration.rs#L178).
 
 <a id="review-6"></a>
 
@@ -71,75 +83,90 @@ Evidence: [crates/shamir-engine/src/migration/coordinator.rs:126](../../../../..
 
 Status: `partially-fixed`. Current risk: `nit`.
 
-CAS losses now yield cooperatively, but retries remain unlimited and build_lock remains held; continuous invalidation can still starve waiters.
+Prior-cycle decision: `partially-fixed`.
 
-Evidence: [crates/shamir-engine/src/repo/fk_reverse_cache.rs:354](../../../../../crates/shamir-engine/src/repo/fk_reverse_cache.rs#L354); [crates/shamir-engine/src/repo/fk_reverse_cache.rs:369](../../../../../crates/shamir-engine/src/repo/fk_reverse_cache.rs#L369); [crates/shamir-engine/src/repo/fk_reverse_cache.rs:384](../../../../../crates/shamir-engine/src/repo/fk_reverse_cache.rs#L384).
+CAS losses yield but rebuild retries remain unlimited under build_lock. A privileged invalidation before each publish can starve waiters; no ordinary workload incidence is established.
+
+Evidence: [crates/shamir-engine/src/repo/fk_reverse_cache.rs:354](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-engine/src/repo/fk_reverse_cache.rs#L354); [crates/shamir-engine/src/repo/fk_reverse_cache.rs:369](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-engine/src/repo/fk_reverse_cache.rs#L369); [crates/shamir-engine/src/repo/fk_reverse_cache.rs:384](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-engine/src/repo/fk_reverse_cache.rs#L384).
 
 <a id="review-positive-conformance-notes-lock-inventory"></a>
 
 ### Claim Positive conformance notes/Lock inventory — Only sanctioned explicit synchronous mutexes
 
-Status: `not-applicable`. Current risk: —.
+Status: `not-applicable`. Current risk: `—`.
 
-Explicit synchronous mutex fields remain DDL-only or test-gated. This does not make DashMap or scc operations structurally lock-free.
+Prior-cycle decision: `not-applicable`.
 
-Evidence: [crates/shamir-engine/src/table/in_flight_create_guard.rs:79](../../../../../crates/shamir-engine/src/table/in_flight_create_guard.rs#L79); [crates/shamir-engine/src/tx/pre_commit.rs:1037](../../../../../crates/shamir-engine/src/tx/pre_commit.rs#L1037); [crates/shamir-engine/src/table/table_manager_streaming.rs:77](../../../../../crates/shamir-engine/src/table/table_manager_streaming.rs#L77).
+The inspected explicit synchronous fields are DDL guards or test hooks; underlying concurrent maps still contain synchronization.
+
+Evidence: [crates/shamir-engine/src/table/in_flight_create_guard.rs:79](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-engine/src/table/in_flight_create_guard.rs#L79); [crates/shamir-engine/src/tx/pre_commit.rs:1037](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-engine/src/tx/pre_commit.rs#L1037); [crates/shamir-engine/src/table/table_manager_streaming.rs:77](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-engine/src/table/table_manager_streaming.rs#L77).
 
 <a id="review-positive-conformance-notes-lock-ordering"></a>
 
 ### Claim Positive conformance notes/Lock ordering — Canonical token ordering and DDL drain-before-lock protocol
 
-Status: `not-applicable`. Current risk: —.
+Status: `not-applicable`. Current risk: `—`.
 
-Sorted/deduplicated table tokens and the centralized barrier protocol remain present; this is source conformance, not executed concurrency proof.
+Prior-cycle decision: `not-applicable`.
 
-Evidence: [crates/shamir-engine/src/tx/pre_commit.rs:527](../../../../../crates/shamir-engine/src/tx/pre_commit.rs#L527); [crates/shamir-engine/src/table/writer_drain_barrier.rs:74](../../../../../crates/shamir-engine/src/table/writer_drain_barrier.rs#L74).
+Commit tokens are sorted/deduplicated; DDL centralizes admission, intent, drain and then write-lock acquisition.
+
+Evidence: [crates/shamir-engine/src/tx/pre_commit.rs:532](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-engine/src/tx/pre_commit.rs#L532); [crates/shamir-engine/src/table/table_manager.rs:1322](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-engine/src/table/table_manager.rs#L1322); [crates/shamir-engine/src/table/table_manager.rs:1332](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-engine/src/table/table_manager.rs#L1332).
 
 <a id="review-positive-conformance-notes-memory-model"></a>
 
 ### Claim Positive conformance notes/Memory model — SeqCst proof and loom coverage
 
-Status: `unverified`. Current risk: —.
+Status: `unverified`. Current risk: `—`.
 
-The proof, packed flag and opt-in model exist. The model samples drain-return state but explicitly does not distinguish production atomic orderings; external loom behavior was not verified.
+Prior-cycle decision: `unverified`.
 
-Evidence: [crates/shamir-engine/src/table/writer_drain_barrier.rs:448](../../../../../crates/shamir-engine/src/table/writer_drain_barrier.rs#L448); [crates/shamir-engine/src/table/writer_drain_barrier.rs:550](../../../../../crates/shamir-engine/src/table/writer_drain_barrier.rs#L550); [crates/shamir-engine/build.rs:12](../../../../../crates/shamir-engine/build.rs#L12).
+Source carries the SeqCst protocol and return-time assertion. Exact loom 0.7.2 disables seq_cst access synchronization; modeling fences prevent this copied model from detecting production-order weakening. Published source: https://docs.rs/crate/loom/0.7.2/source/src/rt/thread.rs.
+
+Evidence: [Cargo.lock:2001](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/Cargo.lock#L2001); [crates/shamir-engine/src/table/writer_drain_barrier.rs:448](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-engine/src/table/writer_drain_barrier.rs#L448); [crates/shamir-engine/src/table/writer_drain_barrier.rs:550](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-engine/src/table/writer_drain_barrier.rs#L550); [crates/shamir-engine/build.rs:12](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-engine/build.rs#L12).
 
 <a id="review-positive-conformance-notes-scc-len-discipline"></a>
 
 ### Claim Positive conformance notes/scc len() discipline — Annotated traversals and atomic cardinality mirrors
 
-Status: `not-applicable`. Current risk: —.
+Status: `not-applicable`. Current risk: `—`.
 
-The relevant remaining traversals are annotated/test-only; validator len/is_empty now use an atomic mirror.
+Prior-cycle decision: `not-applicable`.
 
-Evidence: [crates/shamir-engine/src/tx/drainer.rs:260](../../../../../crates/shamir-engine/src/tx/drainer.rs#L260); [crates/shamir-engine/src/validator/registry.rs:249](../../../../../crates/shamir-engine/src/validator/registry.rs#L249); [crates/shamir-engine/src/tx/commit.rs:306](../../../../../crates/shamir-engine/src/tx/commit.rs#L306).
+Assigned traversal sites are acknowledged and registry accessors use an atomic. This does not prove multi-map registry mutation is atomic.
+
+Evidence: [crates/shamir-engine/src/tx/drainer.rs:260](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-engine/src/tx/drainer.rs#L260); [crates/shamir-engine/src/validator/registry.rs:249](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-engine/src/validator/registry.rs#L249); [crates/shamir-engine/src/validator/registry.rs:254](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-engine/src/validator/registry.rs#L254).
 
 <a id="review-positive-conformance-notes-fx-hash-pillar"></a>
 
 ### Claim Positive conformance notes/Fx-hash pillar — THasher-backed concurrent collections
 
-Status: `not-applicable`. Current risk: —.
+Status: `not-applicable`. Current risk: `—`.
 
-Reviewed registries retain THasher, including the new local condition cache; no production RandomState/default HashMap construction was found.
+Prior-cycle decision: `not-applicable`.
 
-Evidence: [crates/shamir-engine/src/db_instance/db_instance.rs:29](../../../../../crates/shamir-engine/src/db_instance/db_instance.rs#L29); [crates/shamir-engine/src/validator/registry.rs:55](../../../../../crates/shamir-engine/src/validator/registry.rs#L55); [crates/shamir-engine/src/query/filter/cond_cache.rs:77](../../../../../crates/shamir-engine/src/query/filter/cond_cache.rs#L77).
+Reviewed registry constructors use THasher, including the condition-cache addition; this is scoped inventory rather than collision-resistance assurance.
+
+Evidence: [crates/shamir-engine/src/db_instance/db_instance.rs:29](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-engine/src/db_instance/db_instance.rs#L29); [crates/shamir-engine/src/validator/registry.rs:55](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-engine/src/validator/registry.rs#L55); [crates/shamir-engine/src/query/filter/cond_cache.rs:77](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-engine/src/query/filter/cond_cache.rs#L77).
 
 <a id="review-positive-conformance-notes-o-x-0"></a>
 
 ### Claim Positive conformance notes/O(x→0) — Batch snapshots and coalesced history writes
 
-Status: `not-applicable`. Current risk: —.
+Status: `not-applicable`. Current risk: `—`.
 
-These specific hoists/coalescing mechanisms remain present; they do not establish constant-time behavior throughout the crate.
+Prior-cycle decision: `not-applicable`.
 
-Evidence: [crates/shamir-engine/src/table/table_manager_tx_ops.rs:804](../../../../../crates/shamir-engine/src/table/table_manager_tx_ops.rs#L804); [crates/shamir-engine/src/tx/drainer.rs:566](../../../../../crates/shamir-engine/src/tx/drainer.rs#L566).
+The named hoists/coalescing exist; residual staged probes and value comparisons still scale with their inputs.
 
-## Corrections and qualified non-findings
+Evidence: [crates/shamir-engine/src/table/table_manager_tx_ops.rs:721](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-engine/src/table/table_manager_tx_ops.rs#L721); [crates/shamir-engine/src/tx/drainer.rs:566](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-engine/src/tx/drainer.rs#L566).
 
-- The DbInstance regression is a registered concurrent hammer, not a deterministic scheduler proof, and does not separately exercise all seven index routes.
-- Yielding on CAS loss improves cooperation; it does not bound completion or release the single-flight lock.
-- Distinguish the repository's approved concurrency primitives from a literal lock-free progress guarantee.
+## Evidence and recipe corrections
+
+- DashMap 6.1.0 uses a custom synchronous RawRwLock via lock_api/parking machinery, not std::sync::RwLock. The guard-across-await hazard remains valid independently of that misdescription.
+- Exact scc 3.8.4 HashMap::len sums bucket counts, including linked arrays; is_empty short-circuits bucket inspection. Neither is universally O(1), but the repository's iter().count description is not this pinned implementation.
+- A bounded FK rebuild recipe needs an explicit error contract; generic E currently represents only builder failures. Releasing build_lock or returning an empty cache on exhaustion would weaken existing semantics.
+- The loom feature is opt-in and absent from the ordinary default test selection. Its structural model does not invoke the production barrier implementation.
 
 ---
 

@@ -1,11 +1,13 @@
-<!-- revalidation:2026-10-08 source:92ad58266bf57ddea1fa3c8a47affba1a3a9a096 -->
-# shamir-query-types — performance-hotpath revalidation
+<!-- revalidation:2026-10-08 cycle:independent-2 source:e3765c935fc71655ee1ec0160cf180607935d89b -->
+# shamir-query-types — performance-hotpath independent revalidation (cycle 2)
 
-Source snapshot: `92ad58266bf57ddea1fa3c8a47affba1a3a9a096`. Revalidated 2026-10-08 by read-only XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run; no source fix is part of this update. Test registration/assertions are evidence of an oracle, not proof of a passing run.
+Frozen source snapshot: `e3765c935fc71655ee1ec0160cf180607935d89b`. Independently revalidated 2026-10-08 by a fresh XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run. Source-fixed means the specified mechanism was already removed at this snapshot; this cycle implements no source fix.
 
-This section is authoritative for current status. Original titles/IDs are retained for traceability; a refuted title is not a current assertion. The collapsed historical report below is superseded, including its counts, severity, scenarios and fix instructions. Plan IDs preserve historical numbering, not a current release mandate. [Workspace methodology and status definitions](../SUMMARY.md#status-definitions).
+This section is authoritative for current decisions. Existing IDs and allegation titles are retained for traceability; a refuted title is not a current assertion. Prior-cycle decisions were rechecked, not used as proof. The first cycle is available in repository history at this snapshot. The original historical body below remains preserved once and is superseded, including its counts, severities and recipes. [Workspace scope and status definitions](../SUMMARY.md#status-definitions).
 
-Codec passes, row sorting, scalar-accessor cloning, and planner allocations are structurally confirmed, but latency/multiplier estimates are not measured. Neighbor remediation removed per-iteration replanning and deduplicates authorization checks. The operand-depth omission is fixed.
+Unrelated external edits began in dependency/toolchain/CI metadata during collection; additional Rust-source edits appeared afterward. They were left untouched. Evidence and decisions are tied to the frozen commit, not those later changes or an installed toolchain. “Current” below means current at that snapshot; no re-audit of the modified working tree is implied.
+
+The reported allocation/traversal mechanisms are present. Their runtime importance is unmeasured, so medium/high latency conclusions are unsupported. Plan hoisting and authorization deduplication remove specific historical multipliers without removing all collection costs.
 
 ## Current claim decisions
 
@@ -13,41 +15,45 @@ Codec passes, row sorting, scalar-accessor cloning, and planner allocations are 
 |---:|---:|---:|---:|---:|---:|---:|
 | 10 | 8 | 1 | 1 | 0 | 0 | 0 |
 
-These are decisions on report claims, including repeated roots, bundled observations and non-findings—not a unique-bug census. Closed/N/A rows have no current risk; unverified risk is provisional. Pure style and unmeasured optimization claims do not establish runtime impact.
+These are duplicate-inclusive report decisions, not a unique-bug census. Pure style or structural optimization does not establish a runtime incident; unverified impact remains provisional.
 
 <a id="review-1"></a>
 
 ### Claim 1 — `BatchOp::deserialize` — triple codec round-trip + key clones + linear dispatch chain per op
 
-Status: `confirmed-open`. Current risk: `medium`.
+Status: `confirmed-open`. Current risk: `low`.
 
-QueryValue buffering, key String clones, full re-encode, and typed re-decode remain. Discriminator probes repeatedly scan cloned keys. The only registered crate bench still measures planning, not decoding. This proves allocation/traversal costs, not High latency or the numerical workload estimates.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-query-types/src/batch/batch_op.rs:262](../../../../../crates/shamir-query-types/src/batch/batch_op.rs#L262); [crates/shamir-query-types/src/batch/batch_op.rs:266](../../../../../crates/shamir-query-types/src/batch/batch_op.rs#L266); [crates/shamir-query-types/src/batch/batch_op.rs:277](../../../../../crates/shamir-query-types/src/batch/batch_op.rs#L277); [crates/shamir-query-types/src/batch/batch_op.rs:287](../../../../../crates/shamir-query-types/src/batch/batch_op.rs#L287); [crates/shamir-query-types/Cargo.toml:47](../../../../../crates/shamir-query-types/Cargo.toml#L47).
+QueryValue buffering, key cloning, re-encoding and typed decoding occur per op. The first stage may consume buffered serde Content rather than raw bytes, so triple codec round-trip is imprecise. Only planner benchmarking is registered; workload byte/latency estimates were not measured.
+
+Evidence: [crates/shamir-query-types/src/batch/batch_op.rs:262](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-query-types/src/batch/batch_op.rs#L262); [crates/shamir-query-types/src/batch/batch_op.rs:266](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-query-types/src/batch/batch_op.rs#L266); [crates/shamir-query-types/src/batch/batch_op.rs:277](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-query-types/src/batch/batch_op.rs#L277); [crates/shamir-query-types/Cargo.toml:47](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-query-types/Cargo.toml#L47).
 
 <a id="review-2"></a>
 
 ### Claim 2 — `InsertedRecord::serialize` — per-record `Vec` collect + sort + base58, contradicting the "allocation-free" module claim
 
-Status: `confirmed-open`. Current risk: `medium`.
+Status: `confirmed-open`. Current risk: `low`.
 
-Map serialization still allocates a pairs Vec and sorts O(F log F); present ids also create base58 strings. No cached sorted order exists. The zero-intermediate-map construction claim is narrower than allocation-free serialization; replication fan-out multipliers were not traced.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-query-types/src/write/inserted_record.rs:1](../../../../../crates/shamir-query-types/src/write/inserted_record.rs#L1); [crates/shamir-query-types/src/write/inserted_record.rs:32](../../../../../crates/shamir-query-types/src/write/inserted_record.rs#L32); [crates/shamir-query-types/src/write/inserted_record.rs:39](../../../../../crates/shamir-query-types/src/write/inserted_record.rs#L39); [crates/shamir-query-types/src/write/inserted_record.rs:40](../../../../../crates/shamir-query-types/src/write/inserted_record.rs#L40).
+Each nonempty map serialization collects references into a Vec and sorts them; present ids allocate rendered text. This contradicts a broad allocation-free reading, not the narrower no-intermediate-map construction guarantee. Replication fanout serialization multipliers were not traced.
+
+Evidence: [crates/shamir-query-types/src/write/inserted_record.rs:1](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-query-types/src/write/inserted_record.rs#L1); [crates/shamir-query-types/src/write/inserted_record.rs:11](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-query-types/src/write/inserted_record.rs#L11); [crates/shamir-query-types/src/write/inserted_record.rs:32](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-query-types/src/write/inserted_record.rs#L32); [crates/shamir-query-types/src/write/inserted_record.rs:39](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-query-types/src/write/inserted_record.rs#L39).
 
 <a id="review-3"></a>
 
 ### Claim 3 — Filter depth guard does not cover `FilterValue::Cond` nesting — unbounded deserialize-time recursion
 
-Status: `fixed`. Current risk: —.
+Status: `fixed`. Current risk: `—`.
 
-The combined iterative Filter/FilterValue depth checker now covers Cond conditions and branches with registered Array/Cond regressions. The separate unlimited-codec claim is refuted by pinned rmp-serde 1.3.1's container counter, not a later fix. Neither result establishes stack safety at every permitted codec depth on every target.
+Prior-cycle decision: `fixed`.
 
-Evidence: [crates/shamir-query-types/src/filter/filter_enum.rs:321](../../../../../crates/shamir-query-types/src/filter/filter_enum.rs#L321); [crates/shamir-query-types/src/filter/filter_enum.rs:342](../../../../../crates/shamir-query-types/src/filter/filter_enum.rs#L342); [crates/shamir-query-types/src/filter/tests/filter_enum_tests.rs:256](../../../../../crates/shamir-query-types/src/filter/tests/filter_enum_tests.rs#L256); [Cargo.lock:2949](../../../../../Cargo.lock#L2949).
+The combined iterative checker now traverses Cond, Expr, FnCall and Array operands. The separate unlimited-decoder half was already false under rmp-serde 1.3.1, not fixed by this traversal change.
 
-Pinned dependency evidence: [rmp-serde 1.3.1, src/decode.rs:294](https://docs.rs/crate/rmp-serde/1.3.1/source/src/decode.rs); [rmp-serde 1.3.1, src/decode.rs:566](https://docs.rs/crate/rmp-serde/1.3.1/source/src/decode.rs).
+Evidence: [crates/shamir-query-types/src/filter/filter_enum.rs:321](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-query-types/src/filter/filter_enum.rs#L321); [crates/shamir-query-types/src/filter/filter_enum.rs:342](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-query-types/src/filter/filter_enum.rs#L342); [crates/shamir-query-types/src/filter/tests/filter_enum_tests.rs:256](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-query-types/src/filter/tests/filter_enum_tests.rs#L256); [Cargo.lock:2949](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/Cargo.lock#L2949).
 
-Grouping/duplicate: `security-crypto.md#1,#3`. This row is not another independent defect.
+Grouping/duplicate: [security-crypto.md#3](security-crypto.md#review-3). This is not an additional independent defect.
 
 <a id="review-4"></a>
 
@@ -55,19 +61,23 @@ Grouping/duplicate: `security-crypto.md#1,#3`. This row is not another independe
 
 Status: `confirmed-open`. Current risk: `low`.
 
-The 13-variant untagged enum and ordered trial decoding remain. Cached serde confirms buffering/trials. Failed map-shaped trial count varies by selected variant, from zero preceding marker variants for FieldRef to five for Param; no sevenfold latency claim is proven.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-query-types/src/filter/filter_value.rs:9](../../../../../crates/shamir-query-types/src/filter/filter_value.rs#L9); [crates/shamir-query-types/src/filter/filter_value.rs:48](../../../../../crates/shamir-query-types/src/filter/filter_value.rs#L48); [crates/shamir-query-types/src/filter/filter_value.rs:77](../../../../../crates/shamir-query-types/src/filter/filter_value.rs#L77); [Cargo.lock:3233](../../../../../Cargo.lock#L3233).
+serde_derive 1.0.228 generates ContentVisitor buffering followed by ordered ContentRefDeserializer attempts. There are thirteen variants, but zero preceding map-shaped marker variants for FieldRef and five for Param. A universal six failed map trials or sevenfold latency is unsupported. [Pinned derivation](https://docs.rs/crate/serde_derive/1.0.228/source/src/de/enum_untagged.rs).
+
+Evidence: [crates/shamir-query-types/src/filter/filter_value.rs:9](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-query-types/src/filter/filter_value.rs#L9); [crates/shamir-query-types/src/filter/filter_value.rs:48](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-query-types/src/filter/filter_value.rs#L48); [crates/shamir-query-types/src/filter/filter_value.rs:77](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-query-types/src/filter/filter_value.rs#L77); [Cargo.lock:3233](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/Cargo.lock#L3233).
 
 <a id="review-5"></a>
 
 ### Claim 5 — `QueryRecord::get_value_{i64,u64,bool}` — deep-clones the whole `Inserted` record per scalar lookup
 
-Status: `confirmed-open`. Current risk: `medium`.
+Status: `confirmed-open`. Current risk: `low`.
 
-All three Inserted scalar accessor arms still call get_value_owned, which calls as_value and clones all fields before cloning the selected value. The string accessor already borrows directly. The O(record-size) per lookup mechanism is unchanged.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-query-types/src/read/query_record.rs:192](../../../../../crates/shamir-query-types/src/read/query_record.rs#L192); [crates/shamir-query-types/src/read/query_record.rs:218](../../../../../crates/shamir-query-types/src/read/query_record.rs#L218); [crates/shamir-query-types/src/read/query_record.rs:246](../../../../../crates/shamir-query-types/src/read/query_record.rs#L246); [crates/shamir-query-types/src/read/query_record.rs:261](../../../../../crates/shamir-query-types/src/read/query_record.rs#L261); [crates/shamir-query-types/src/read/query_record.rs:277](../../../../../crates/shamir-query-types/src/read/query_record.rs#L277).
+i64/u64/bool Inserted arms call get_value_owned; that path clones the entire fields tree through as_value, then clones the chosen value. Direct borrowing as already used by get_value_str preserves semantics. Production hot-call frequency was not established.
+
+Evidence: [crates/shamir-query-types/src/read/query_record.rs:192](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-query-types/src/read/query_record.rs#L192); [crates/shamir-query-types/src/read/query_record.rs:218](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-query-types/src/read/query_record.rs#L218); [crates/shamir-query-types/src/read/query_record.rs:238](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-query-types/src/read/query_record.rs#L238); [crates/shamir-query-types/src/read/query_record.rs:246](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-query-types/src/read/query_record.rs#L246); [crates/shamir-query-types/src/read/query_record.rs:277](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-query-types/src/read/query_record.rs#L277).
 
 <a id="review-6"></a>
 
@@ -75,9 +85,11 @@ Evidence: [crates/shamir-query-types/src/read/query_record.rs:192](../../../../.
 
 Status: `confirmed-open`. Current risk: `low`.
 
-Redundant aliases/alias_order collections, provenance/dependency clones, and deps[k] lookups remain. The engine now plans each ForEach body once before its loop, so the report's per-iteration replanning multiplier is stale.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-query-types/src/batch/planner.rs:163](../../../../../crates/shamir-query-types/src/batch/planner.rs#L163); [crates/shamir-query-types/src/batch/planner.rs:226](../../../../../crates/shamir-query-types/src/batch/planner.rs#L226); [crates/shamir-query-types/src/batch/planner.rs:816](../../../../../crates/shamir-query-types/src/batch/planner.rs#L816); [crates/shamir-engine/src/query/batch/query_runner.rs:882](../../../../../crates/shamir-engine/src/query/batch/query_runner.rs#L882).
+aliases duplicates query keys; alias_order, dependency/provenance maps and stages own additional strings. The current ForEach path plans once, and registered resolver-count tests discriminate reintroduced per-iteration validation. Draining provenance would be unsafe if it destroys the required edge metadata.
+
+Evidence: [crates/shamir-query-types/src/batch/planner.rs:163](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-query-types/src/batch/planner.rs#L163); [crates/shamir-query-types/src/batch/planner.rs:226](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-query-types/src/batch/planner.rs#L226); [crates/shamir-query-types/src/batch/planner.rs:816](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-query-types/src/batch/planner.rs#L816); [crates/shamir-engine/src/query/batch/query_runner.rs:882](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-engine/src/query/batch/query_runner.rs#L882); [crates/shamir-engine/src/query/batch/tests/for_each_tests.rs:1960](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-engine/src/query/batch/tests/for_each_tests.rs#L1960).
 
 <a id="review-7"></a>
 
@@ -85,9 +97,11 @@ Evidence: [crates/shamir-query-types/src/batch/planner.rs:163](../../../../../cr
 
 Status: `partially-fixed`. Current risk: `low`.
 
-Separate recursive walkers and duplicate result/path allocations remain. Authorized::authorize now deduplicates requirements before gate.check, refuting repeated authorization-check cost. Three passes alone are linear; repeated nested-level scans are O(ND), not inherently quadratic at fixed depth.
+Prior-cycle decision: `partially-fixed`.
 
-Evidence: [crates/shamir-query-types/src/batch/batch_op.rs:764](../../../../../crates/shamir-query-types/src/batch/batch_op.rs#L764); [crates/shamir-query-types/src/batch/query_entry.rs:102](../../../../../crates/shamir-query-types/src/batch/query_entry.rs#L102); [crates/shamir-query-types/src/batch/query_entry.rs:140](../../../../../crates/shamir-query-types/src/batch/query_entry.rs#L140); [crates/shamir-engine/src/query/batch/authorized.rs:102](../../../../../crates/shamir-engine/src/query/batch/authorized.rs#L102).
+is_write, repo collection and access collection remain separate; is_write can short-circuit and is not always a full walk. Authorized::authorize deduplicates gate checks, while temporary paths/clones remain. Fixed-depth passes are linear, not inherently quadratic.
+
+Evidence: [crates/shamir-query-types/src/batch/batch_op.rs:764](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-query-types/src/batch/batch_op.rs#L764); [crates/shamir-query-types/src/batch/query_entry.rs:102](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-query-types/src/batch/query_entry.rs#L102); [crates/shamir-query-types/src/batch/query_entry.rs:140](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-query-types/src/batch/query_entry.rs#L140); [crates/shamir-engine/src/query/batch/authorized.rs:102](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-engine/src/query/batch/authorized.rs#L102).
 
 <a id="review-8"></a>
 
@@ -95,9 +109,11 @@ Evidence: [crates/shamir-query-types/src/batch/batch_op.rs:764](../../../../../c
 
 Status: `confirmed-open`. Current risk: `low`.
 
-When limit and after_id match, After equality still encodes both key tuples into newly allocated buffers. No production cache-key hot-path caller or measured latency was established.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-query-types/src/read/limit.rs:123](../../../../../crates/shamir-query-types/src/read/limit.rs#L123); [crates/shamir-query-types/src/read/limit.rs:130](../../../../../crates/shamir-query-types/src/read/limit.rs#L130).
+After matching limit and after_id, both tuples are encoded into buffers. No hot production equality workflow was found. A structural replacement must implement wire equivalence, not ordinary Value equality; otherwise current documented semantics change.
+
+Evidence: [crates/shamir-query-types/src/read/limit.rs:84](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-query-types/src/read/limit.rs#L84); [crates/shamir-query-types/src/read/limit.rs:123](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-query-types/src/read/limit.rs#L123); [crates/shamir-query-types/src/read/limit.rs:130](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-query-types/src/read/limit.rs#L130); [crates/shamir-types/src/types/value.rs:287](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-types/src/types/value.rs#L287).
 
 <a id="review-9"></a>
 
@@ -105,9 +121,11 @@ Evidence: [crates/shamir-query-types/src/read/limit.rs:123](../../../../../crate
 
 Status: `confirmed-open`. Current risk: `low`.
 
-Recognized marker maps still undergo to_vec_named/from_slice to reuse FilterValue extraction. The codec work remains, but ForEach body planning is now hoisted outside the iteration loop.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-query-types/src/batch/planner.rs:392](../../../../../crates/shamir-query-types/src/batch/planner.rs#L392); [crates/shamir-query-types/src/batch/planner.rs:395](../../../../../crates/shamir-query-types/src/batch/planner.rs#L395); [crates/shamir-engine/src/query/batch/query_runner.rs:882](../../../../../crates/shamir-engine/src/query/batch/query_runner.rs#L882).
+Recognized one/two-key marker maps still encode/decode to reuse FilterValue extraction. This preserves shared semantics but costs traversals/allocations. Current ForEach hoisting removes per-iteration planning; direct replacement must retain malformed-marker fallback and Cond validation.
+
+Evidence: [crates/shamir-query-types/src/batch/planner.rs:382](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-query-types/src/batch/planner.rs#L382); [crates/shamir-query-types/src/batch/planner.rs:392](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-query-types/src/batch/planner.rs#L392); [crates/shamir-query-types/src/batch/planner.rs:424](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-query-types/src/batch/planner.rs#L424); [crates/shamir-engine/src/query/batch/query_runner.rs:882](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-engine/src/query/batch/query_runner.rs#L882).
 
 <a id="review-10"></a>
 
@@ -115,18 +133,20 @@ Evidence: [crates/shamir-query-types/src/batch/planner.rs:392](../../../../../cr
 
 Status: `confirmed-open`. Current risk: `nit`.
 
-TableRef::new and default_repo helpers still allocate owned default strings. This is a source-confirmed construction cost, with no demonstrated throughput significance.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-query-types/src/table_ref.rs:21](../../../../../crates/shamir-query-types/src/table_ref.rs#L21); [crates/shamir-query-types/src/call/mod.rs:13](../../../../../crates/shamir-query-types/src/call/mod.rs#L13); [crates/shamir-query-types/src/admin/types/table_ops.rs:9](../../../../../crates/shamir-query-types/src/admin/types/table_ops.rs#L9); [crates/shamir-query-types/src/admin/types/index_ops.rs:9](../../../../../crates/shamir-query-types/src/admin/types/index_ops.rs#L9).
+TableRef/default_repo helpers build owned Strings. No measured construction bottleneck establishes benefit from Cow/interning, and those replacements affect public field ownership and mutable use.
 
-## Corrections and qualified non-findings
+Evidence: [crates/shamir-query-types/src/table_ref.rs:14](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-query-types/src/table_ref.rs#L14); [crates/shamir-query-types/src/table_ref.rs:21](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-query-types/src/table_ref.rs#L21); [crates/shamir-query-types/src/call/mod.rs:13](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-query-types/src/call/mod.rs#L13); [crates/shamir-query-types/src/admin/types/index_ops.rs:9](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-query-types/src/admin/types/index_ops.rs#L9).
 
-- Keep structural cost evidence separate from unmeasured latency, allocation-count estimates, and replication subscriber multipliers.
-- ForEach body plan/validation is now performed once before iteration, not up to max_iterations times.
-- Authorization consumers now deduplicate requirements before checking permissions.
-- Three tree walks are not by themselves O(N²); fixed-depth repeated scans remain linear in N with a depth factor.
-- Untagged marker trial counts depend on variant position; a universal approximately six failed map trials or sevenfold cost is not supported.
-- Planner nesting remains bounded recursion, despite its iterative-worklist comments.
+## Evidence and recipe corrections
+
+- Keep source-confirmed work at qualified Low/nit severity absent measurements; do not label structural allocation counts as proven latency incidents.
+- The first BatchOp buffering traversal may read already buffered serde Content, not perform another raw MessagePack decode.
+- Cached sorted permutations require invalidation because InsertedRecord.fields is publicly mutable; construction-only ordering is not enforced by the type.
+- Draining provenance must not remove BatchPlan.edge_provenance; Rc&lt;str&gt; proposals must account for async Send/Sync consumers.
+- A custom marker dispatcher must preserve strict binary/string/array semantics, large-integer normalization and ambiguous-marker policy.
+- The ForEach count tests catch repeated table validation, not independently every planner invocation. No tests were executed.
 
 ---
 

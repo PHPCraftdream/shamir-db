@@ -1,19 +1,21 @@
-<!-- revalidation:2026-10-08 source:92ad58266bf57ddea1fa3c8a47affba1a3a9a096 -->
-# shamir-client — correctness-tdd revalidation
+<!-- revalidation:2026-10-08 cycle:independent-2 source:e3765c935fc71655ee1ec0160cf180607935d89b -->
+# shamir-client — correctness-tdd independent revalidation (cycle 2)
 
-Source snapshot: `92ad58266bf57ddea1fa3c8a47affba1a3a9a096`. Revalidated 2026-10-08 by read-only XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run; no source fix is part of this update. Test registration/assertions are evidence of an oracle, not proof of a passing run.
+Frozen source snapshot: `e3765c935fc71655ee1ec0160cf180607935d89b`. Independently revalidated 2026-10-08 by a fresh XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run. Source-fixed means the specified mechanism was already removed at this snapshot; this cycle implements no source fix.
 
-This section is authoritative for current status. Original titles/IDs are retained for traceability; a refuted title is not a current assertion. The collapsed historical report below is superseded, including its counts, severity, scenarios and fix instructions. Plan IDs preserve historical numbering, not a current release mandate. [Workspace methodology and status definitions](../SUMMARY.md#status-definitions).
+This section is authoritative for current decisions. Existing IDs and allegation titles are retained for traceability; a refuted title is not a current assertion. Prior-cycle decisions were rechecked, not used as proof. The first cycle is available in repository history at this snapshot. The original historical body below remains preserved once and is superseded, including its counts, severities and recipes. [Workspace scope and status definitions](../SUMMARY.md#status-definitions).
 
-The principal lifecycle, reference-detection, dump, and multi-repo defects remain open. The atomic debug-overflow allegation is false; several coverage claims need qualification.
+Unrelated external edits began in dependency/toolchain/CI metadata during collection; additional Rust-source edits appeared afterward. They were left untouched. Evidence and decisions are tied to the frozen commit, not those later changes or an installed toolchain. “Current” below means current at that snapshot; no re-audit of the modified working tree is implied.
+
+The behavioral seams are materially uncovered despite useful registered demux and cursor tests. Most correctness roots remain; the overflow panic is false and private close bookkeeping is not a current user-visible defect.
 
 ## Current claim decisions
 
 | Claim decisions | Open | Source-fixed | Partial | Refuted | Unverified | N/A |
 |---:|---:|---:|---:|---:|---:|---:|
-| 14 | 13 | 0 | 0 | 1 | 0 | 0 |
+| 14 | 12 | 0 | 0 | 1 | 0 | 1 |
 
-These are decisions on report claims, including repeated roots, bundled observations and non-findings—not a unique-bug census. Closed/N/A rows have no current risk; unverified risk is provisional. Pure style and unmeasured optimization claims do not establish runtime impact.
+These are duplicate-inclusive report decisions, not a unique-bug census. Pure style or structural optimization does not establish a runtime incident; unverified impact remains provisional.
 
 <a id="review-1"></a>
 
@@ -21,11 +23,13 @@ These are decisions on report claims, including repeated roots, bundled observat
 
 Status: `confirmed-open`. Current risk: `high`.
 
-Reader exit drains only pending requests. Handles retain the sender registry; after queued pushes drain, recv remains pending.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-client/src/client.rs:407](../../../../../crates/shamir-client/src/client.rs#L407); [crates/shamir-client/src/subscription.rs:36](../../../../../crates/shamir-client/src/subscription.rs#L36); [crates/shamir-client/src/subscription.rs:54](../../../../../crates/shamir-client/src/subscription.rs#L54).
+Reader exit does not release registry senders, and handles retain the registry after Client destruction. Assert next returns None after buffered items, not just successful push receipt.
 
-Grouping/duplicate: `SUMMARY.md#1.1`. This row is not another independent defect.
+Evidence: [crates/shamir-client/src/client.rs:407](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-client/src/client.rs#L407); [crates/shamir-client/src/subscription.rs:36](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-client/src/subscription.rs#L36).
+
+Grouping/duplicate: [SUMMARY.md#1.1](SUMMARY.md#review-1-1). This is not an additional independent defect.
 
 <a id="review-2"></a>
 
@@ -33,11 +37,13 @@ Grouping/duplicate: `SUMMARY.md#1.1`. This row is not another independent defect
 
 Status: `confirmed-open`. Current risk: `high`.
 
-The walk ignores entry.when and ForEach. IdBytes intermediates remain opaque to engine reference resolution; existing tests do not cover these combinations.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-client/src/interner_cache_ops.rs:513](../../../../../crates/shamir-client/src/interner_cache_ops.rs#L513); [crates/shamir-engine/src/query/batch/query_runner.rs:136](../../../../../crates/shamir-engine/src/query/batch/query_runner.rs#L136); [crates/shamir-engine/src/query/batch/query_runner.rs:758](../../../../../crates/shamir-engine/src/query/batch/query_runner.rs#L758); [crates/shamir-query-types/src/read/query_record.rs:195](../../../../../crates/shamir-query-types/src/read/query_record.rs#L195).
+Both carriers bypass the guard and can select Id encoding for dependent reads. IdBytes field access is opaque; ordinary execute e2e does not exercise this smart-path choice.
 
-Grouping/duplicate: `SUMMARY.md#1.2`. This row is not another independent defect.
+Evidence: [crates/shamir-client/src/interner_cache_ops.rs:513](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-client/src/interner_cache_ops.rs#L513); [crates/shamir-engine/src/query/batch/query_runner.rs:758](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-engine/src/query/batch/query_runner.rs#L758); [crates/shamir-query-types/src/read/query_record.rs:195](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-query-types/src/read/query_record.rs#L195).
+
+Grouping/duplicate: [SUMMARY.md#1.2](SUMMARY.md#review-1-2). This is not an additional independent defect.
 
 <a id="review-3"></a>
 
@@ -45,11 +51,13 @@ Grouping/duplicate: `SUMMARY.md#1.2`. This row is not another independent defect
 
 Status: `confirmed-open`. Current risk: `high`.
 
-Accept-any-cert TLS precedes ticket disclosure; resume validates only session-id length and stores the supplied pin without authentication.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-client/src/client.rs:866](../../../../../crates/shamir-client/src/client.rs#L866); [crates/shamir-client/src/client.rs:890](../../../../../crates/shamir-client/src/client.rs#L890); [crates/shamir-client/src/client.rs:937](../../../../../crates/shamir-client/src/client.rs#L937); [crates/shamir-client/src/wire_frames.rs:51](../../../../../crates/shamir-client/src/wire_frames.rs#L51).
+Ticket transmission follows unauthenticated TLS; only session-ID length is checked before the caller's pin is stored. Wrong-identity rejection after disclosure alone is not a sufficient oracle.
 
-Grouping/duplicate: `SUMMARY.md#3.1`. This row is not another independent defect.
+Evidence: [crates/shamir-client/src/client.rs:866](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-client/src/client.rs#L866); [crates/shamir-client/src/client.rs:895](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-client/src/client.rs#L895); [crates/shamir-client/src/client.rs:937](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-client/src/client.rs#L937).
+
+Grouping/duplicate: [SUMMARY.md#3.1](SUMMARY.md#review-3-1). This is not an additional independent defect.
 
 <a id="review-4"></a>
 
@@ -57,11 +65,13 @@ Grouping/duplicate: `SUMMARY.md#3.1`. This row is not another independent defect
 
 Status: `confirmed-open`. Current risk: `medium`.
 
-Registry lookup/insertion and early-buffer append/removal remain separate critical sections, permitting stranded pushes and flush-versus-direct-send reordering.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-client/src/client.rs:330](../../../../../crates/shamir-client/src/client.rs#L330); [crates/shamir-client/src/client.rs:349](../../../../../crates/shamir-client/src/client.rs#L349); [crates/shamir-client/src/client.rs:998](../../../../../crates/shamir-client/src/client.rs#L998).
+A missed lookup can append after registration flush; a direct newer frame can also overtake older buffered frames. The existing test observes one buffer insertion only.
 
-Grouping/duplicate: `SUMMARY.md#1.3`. This row is not another independent defect.
+Evidence: [crates/shamir-client/src/client.rs:330](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-client/src/client.rs#L330); [crates/shamir-client/src/client.rs:349](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-client/src/client.rs#L349); [crates/shamir-client/src/client.rs:998](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-client/src/client.rs#L998).
+
+Grouping/duplicate: [SUMMARY.md#1.3](SUMMARY.md#review-1-3). This is not an additional independent defect.
 
 <a id="review-5"></a>
 
@@ -69,11 +79,13 @@ Grouping/duplicate: `SUMMARY.md#1.3`. This row is not another independent defect
 
 Status: `confirmed-open`. Current risk: `medium`.
 
-Both error branches resolve unit; get_or_init therefore initializes populated. Subsequent calls skip the closure and return success.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-client/src/interner_cache_ops.rs:191](../../../../../crates/shamir-client/src/interner_cache_ops.rs#L191); [crates/shamir-client/src/interner_cache_ops.rs:211](../../../../../crates/shamir-client/src/interner_cache_ops.rs#L211); [crates/shamir-client/src/interner_cache.rs:175](../../../../../crates/shamir-client/src/interner_cache.rs#L175).
+Both error branches resolve unit, so get_or_init sets populated and later calls skip. A cold failure/unpopulated/retry test is absent; the warm test cannot establish dump population.
 
-Grouping/duplicate: `SUMMARY.md#1.4`. This row is not another independent defect.
+Evidence: [crates/shamir-client/src/interner_cache_ops.rs:199](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-client/src/interner_cache_ops.rs#L199); [crates/shamir-client/src/interner_cache.rs:175](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-client/src/interner_cache.rs#L175); [crates/shamir-client/src/tests/interner_cache_tests.rs:194](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-client/src/tests/interner_cache_tests.rs#L194).
+
+Grouping/duplicate: [SUMMARY.md#1.4](SUMMARY.md#review-1-4). This is not an additional independent defect.
 
 <a id="review-6"></a>
 
@@ -81,11 +93,13 @@ Grouping/duplicate: `SUMMARY.md#1.4`. This row is not another independent defect
 
 Status: `confirmed-open`. Current risk: `medium`.
 
-Results discard alias-to-repo provenance and probe every candidate map. Overlapping repo-local IDs can resolve successfully using another repo's names.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-client/src/interner_cache_ops.rs:638](../../../../../crates/shamir-client/src/interner_cache_ops.rs#L638); [crates/shamir-client/src/interner_cache_ops.rs:702](../../../../../crates/shamir-client/src/interner_cache_ops.rs#L702); [crates/shamir-client/src/interner_cache_ops.rs:728](../../../../../crates/shamir-client/src/interner_cache_ops.rs#L728).
+Overlapping repo-local IDs can resolve successfully through the wrong first candidate. A two-repo fixture with deliberately different names for the same IDs discriminates the defect.
 
-Grouping/duplicate: `SUMMARY.md#1.5`. This row is not another independent defect.
+Evidence: [crates/shamir-client/src/interner_cache_ops.rs:638](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-client/src/interner_cache_ops.rs#L638); [crates/shamir-client/src/interner_cache_ops.rs:728](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-client/src/interner_cache_ops.rs#L728).
+
+Grouping/duplicate: [SUMMARY.md#1.5](SUMMARY.md#review-1-5). This is not an additional independent defect.
 
 <a id="review-7"></a>
 
@@ -93,11 +107,13 @@ Grouping/duplicate: `SUMMARY.md#1.5`. This row is not another independent defect
 
 Status: `confirmed-open`. Current risk: `low`.
 
-The registered test constructs standalone atomics, never Client. V2 integration tests can early-return when version plumbing regresses.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-client/src/tests/wire_version_tests.rs:135](../../../../../crates/shamir-client/src/tests/wire_version_tests.rs#L135); [crates/shamir-client/src/tests/v2_passthrough_tests.rs:154](../../../../../crates/shamir-client/src/tests/v2_passthrough_tests.rs#L154); [crates/shamir-client/src/tests/mod.rs:9](../../../../../crates/shamir-client/src/tests/mod.rs#L9).
+The body never calls Client; real v2 tests skip on a regressed getter. A positive handshake/getter assertion is needed.
 
-Grouping/duplicate: `SUMMARY.md#1.6`. This row is not another independent defect.
+Evidence: [crates/shamir-client/src/tests/wire_version_tests.rs:135](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-client/src/tests/wire_version_tests.rs#L135); [crates/shamir-client/src/tests/v2_passthrough_tests.rs:154](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-client/src/tests/v2_passthrough_tests.rs#L154).
+
+Grouping/duplicate: [SUMMARY.md#1.6](SUMMARY.md#review-1-6). This is not an additional independent defect.
 
 <a id="review-8"></a>
 
@@ -105,11 +121,13 @@ Grouping/duplicate: `SUMMARY.md#1.6`. This row is not another independent defect
 
 Status: `confirmed-open`. Current risk: `low`.
 
-The special-case arm is unreachable: roundtrip converts DbResponse::Error into Err(Db) before the method matches. No client test calls the method.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-client/src/client.rs:1207](../../../../../crates/shamir-client/src/client.rs#L1207); [crates/shamir-client/src/client.rs:1293](../../../../../crates/shamir-client/src/client.rs#L1293); [crates/shamir-client/src/tests/mod.rs:1](../../../../../crates/shamir-client/src/tests/mod.rs#L1).
+No client test calls the method, and the special error arm is unreachable after roundtrip conversion. Actual unsupported responses already expose Db.code.
 
-Grouping/duplicate: `SUMMARY.md#1.7`. This row is not another independent defect.
+Evidence: [crates/shamir-client/src/client.rs:1207](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-client/src/client.rs#L1207); [crates/shamir-client/src/client.rs:1293](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-client/src/client.rs#L1293).
+
+Grouping/duplicate: [SUMMARY.md#1.7](SUMMARY.md#review-1-7). This is not an additional independent defect.
 
 <a id="review-9"></a>
 
@@ -117,11 +135,13 @@ Grouping/duplicate: `SUMMARY.md#1.7`. This row is not another independent defect
 
 Status: `confirmed-open`. Current risk: `low`.
 
-Registration overwrites by sub_id; the stale handle's unconditional Drop removal deletes the replacement sender.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-client/src/client.rs:1000](../../../../../crates/shamir-client/src/client.rs#L1000); [crates/shamir-client/src/subscription.rs:59](../../../../../crates/shamir-client/src/subscription.rs#L59).
+Stale handle Drop removes the current sender by ID. Test registration twice followed by dropping only the old handle and delivery to the new one.
 
-Grouping/duplicate: `SUMMARY.md#1.8`. This row is not another independent defect.
+Evidence: [crates/shamir-client/src/client.rs:1000](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-client/src/client.rs#L1000); [crates/shamir-client/src/subscription.rs:59](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-client/src/subscription.rs#L59).
+
+Grouping/duplicate: [SUMMARY.md#1.8](SUMMARY.md#review-1-8). This is not an additional independent defect.
 
 <a id="review-10"></a>
 
@@ -129,11 +149,13 @@ Grouping/duplicate: `SUMMARY.md#1.8`. This row is not another independent defect
 
 Status: `confirmed-open`. Current risk: `low`.
 
-Collection omits sets, while storage encoding recursively interns maps inside sets. Cold nested keys can fail despite pre-touch.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-client/src/interner_cache_ops.rs:468](../../../../../crates/shamir-client/src/interner_cache_ops.rs#L468); [crates/shamir-client/src/interner_cache_ops.rs:499](../../../../../crates/shamir-client/src/interner_cache_ops.rs#L499); [crates/shamir-types/src/codecs/interned/messagepack.rs:965](../../../../../crates/shamir-types/src/codecs/interned/messagepack.rs#L965).
+The serializer recursively interns maps inside sets while collection only traverses maps/lists. A cold nested key produces an encode error.
 
-Grouping/duplicate: `SUMMARY.md#1.9`. This row is not another independent defect.
+Evidence: [crates/shamir-client/src/interner_cache_ops.rs:468](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-client/src/interner_cache_ops.rs#L468); [crates/shamir-types/src/codecs/interned/messagepack.rs:965](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-types/src/codecs/interned/messagepack.rs#L965).
+
+Grouping/duplicate: [SUMMARY.md#1.9](SUMMARY.md#review-1-9). This is not an additional independent defect.
 
 <a id="review-11"></a>
 
@@ -141,11 +163,13 @@ Grouping/duplicate: `SUMMARY.md#1.9`. This row is not another independent defect
 
 Status: `confirmed-open`. Current risk: `low`.
 
-Client-local tests still lack full resume, subscribe_push flushing, Client close/Drop reader-liveness, and when/ForEach smart-path coverage.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-client/src/tests/mod.rs:1](../../../../../crates/shamir-client/src/tests/mod.rs#L1); [crates/shamir-client/src/tests/resume_wire_tests.rs:1](../../../../../crates/shamir-client/src/tests/resume_wire_tests.rs#L1); [crates/shamir-client/src/tests/demux_tests.rs:314](../../../../../crates/shamir-client/src/tests/demux_tests.rs#L314); [crates/shamir-client/tests/batch_when_e2e.rs:219](../../../../../crates/shamir-client/tests/batch_when_e2e.rs#L219).
+Client-local resume, public flush, close/Drop reader liveness and smart when/ForEach combinations lack discriminating registered tests. External happy resume coverage is not absent.
 
-Grouping/duplicate: `SUMMARY.md#1.10`. This row is not another independent defect.
+Evidence: [crates/shamir-client/src/tests/mod.rs:1](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-client/src/tests/mod.rs#L1); [crates/shamir-client/src/tests/resume_wire_tests.rs:1](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-client/src/tests/resume_wire_tests.rs#L1); [crates/shamir-server/tests/duplex_e2e.rs:208](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-server/tests/duplex_e2e.rs#L208).
+
+Grouping/duplicate: [SUMMARY.md#1.10](SUMMARY.md#review-1-10). This is not an additional independent defect.
 
 <a id="review-12"></a>
 
@@ -153,45 +177,49 @@ Grouping/duplicate: `SUMMARY.md#1.10`. This row is not another independent defec
 
 Status: `confirmed-open`. Current risk: `nit`.
 
-Both TCP timeout tests assume externally dependent SYN behavior. Fast refusal/unreachability invalidates their expected timeout outcomes.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-client/src/tests/timeout_tests.rs:26](../../../../../crates/shamir-client/src/tests/timeout_tests.rs#L26); [crates/shamir-client/src/tests/timeout_tests.rs:37](../../../../../crates/shamir-client/src/tests/timeout_tests.rs#L37); [crates/shamir-client/src/tests/timeout_tests.rs:67](../../../../../crates/shamir-client/src/tests/timeout_tests.rs#L67).
+Private routing is environment-dependent for both tests; an immediate I/O error contradicts the expected timer outcomes. Use a controlled establishment future rather than an already connected silent socket.
 
-Grouping/duplicate: `SUMMARY.md#1.11`. This row is not another independent defect.
+Evidence: [crates/shamir-client/src/tests/timeout_tests.rs:26](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-client/src/tests/timeout_tests.rs#L26); [crates/shamir-client/src/tests/timeout_tests.rs:67](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-client/src/tests/timeout_tests.rs#L67).
+
+Grouping/duplicate: [SUMMARY.md#1.11](SUMMARY.md#review-1-11). This is not an additional independent defect.
 
 <a id="review-13"></a>
 
 ### Claim 13 — `close()` never sets the `closed` flag though `ConnectionClosed`'s doc lists "explicit close()" as a trigger
 
-Status: `confirmed-open`. Current risk: `nit`.
+Status: `not-applicable`. Current risk: `—`.
 
-Close aborts the reader and shuts down writing without updating closed. Consuming self makes this mainly bookkeeping/documentation inconsistency.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-client/src/client.rs:1306](../../../../../crates/shamir-client/src/client.rs#L1306); [crates/shamir-client/src/error.rs:41](../../../../../crates/shamir-client/src/error.rs#L41).
+Consuming self removes the public observation path. A flag store is optional bookkeeping; it would not fix subscription closure or abort-tail cleanup.
 
-Grouping/duplicate: `SUMMARY.md#1.12`. This row is not another independent defect.
+Evidence: [crates/shamir-client/src/client.rs:1306](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-client/src/client.rs#L1306).
+
+Grouping/duplicate: [SUMMARY.md#1.12](SUMMARY.md#review-1-12). This is not an additional independent defect.
 
 <a id="review-14"></a>
 
 ### Claim 14 — `next_request_id` u32 `fetch_add` overflow panics in debug builds
 
-Status: `refuted`. Current risk: —.
+Status: `refuted`. Current risk: `—`.
 
-AtomicU32::fetch_add has wrapping arithmetic in debug and release. The separate outstanding-rid collision risk remains, but this panic mechanism does not.
+Prior-cycle decision: `refuted`.
 
-Evidence: [crates/shamir-client/src/client.rs:1259](../../../../../crates/shamir-client/src/client.rs#L1259); [crates/shamir-client/src/client.rs:1271](../../../../../crates/shamir-client/src/client.rs#L1271).
+Pinned Rust specifies wrapping atomic addition independently of debug checks. Collision/replacement is a separate mechanism, not evidence of this panic.
 
-Grouping/duplicate: `SUMMARY.md#1.13`. This row is not another independent defect.
+Evidence: [crates/shamir-client/src/client.rs:1259](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-client/src/client.rs#L1259); [rust-toolchain.toml:21](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/rust-toolchain.toml#L21).
 
-## Corrections and qualified non-findings
+Grouping/duplicate: [SUMMARY.md#1.13](SUMMARY.md#review-1-13). This is not an additional independent defect.
 
-- No standalone Fix Plan or TASK_GROUPS is present; suggested fixes are evaluated through the finding rows and SUMMARY Fix Plan.
-- Correctness #7 is a coverage weakness, not a demonstrated medium-severity runtime defect.
-- For correctness #2, scanning entry.when is insufficient unless filter_has_refs also handles Filter::ValueCompare.left/right.
-- An accepted-but-silent loopback listener cannot test connect_tcp's TCP-establishment timeout; use a controllable pending connect abstraction.
-- The dump test starts with an already warm cache and cannot prove an actual dump populated it: crates/shamir-client/src/tests/interner_cache_tests.rs:194.
-- The alleged cold-cache refresh test is masked by ambient delta merging before de-interning: crates/shamir-client/src/client.rs:1077 and crates/shamir-db/src/shamir_db/execute/ambient_interner.rs:30.
-- A signed resume_ok received after ticket transmission would not prevent ticket theft; authenticate before disclosing the ticket.
+## Evidence and recipe corrections
+
+- The engine zero-row Id-encoding test characterizes an existing constraint; it is not a positive client reference-correctness oracle.
+- Adding when scanning without ValueCompare operands leaves the canonical guard broken.
+- Warm dump, same-client refresh, ambient-masked cold refresh and generic v2 roundtrip tests do not prove their advertised internal production seams.
+- The numeric-name test's assigned ID not equaling 42 is fixture-specific. The general contract is server-assigned identity, which may legitimately equal 42.
+- Cursor close and mid-error cancel tests do have discriminating same-ID probes for their admin fixture; this does not imply every cleanup path is bounded.
 
 ---
 

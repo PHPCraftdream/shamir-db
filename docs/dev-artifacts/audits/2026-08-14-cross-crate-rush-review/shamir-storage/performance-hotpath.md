@@ -1,11 +1,13 @@
-<!-- revalidation:2026-10-08 source:92ad58266bf57ddea1fa3c8a47affba1a3a9a096 -->
-# shamir-storage — performance-hotpath revalidation
+<!-- revalidation:2026-10-08 cycle:independent-2 source:e3765c935fc71655ee1ec0160cf180607935d89b -->
+# shamir-storage — performance-hotpath independent revalidation (cycle 2)
 
-Source snapshot: `92ad58266bf57ddea1fa3c8a47affba1a3a9a096`. Revalidated 2026-10-08 by read-only XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run; no source fix is part of this update. Test registration/assertions are evidence of an oracle, not proof of a passing run.
+Frozen source snapshot: `e3765c935fc71655ee1ec0160cf180607935d89b`. Independently revalidated 2026-10-08 by a fresh XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run. Source-fixed means the specified mechanism was already removed at this snapshot; this cycle implements no source fix.
 
-This section is authoritative for current status. Original titles/IDs are retained for traceability; a refuted title is not a current assertion. The collapsed historical report below is superseded, including its counts, severity, scenarios and fix instructions. Plan IDs preserve historical numbering, not a current release mandate. [Workspace methodology and status definitions](../SUMMARY.md#status-definitions).
+This section is authoritative for current decisions. Existing IDs and allegation titles are retained for traceability; a refuted title is not a current assertion. Prior-cycle decisions were rechecked, not used as proof. The first cycle is available in repository history at this snapshot. The original historical body below remains preserved once and is superseded, including its counts, severities and recipes. [Workspace scope and status definitions](../SUMMARY.md#status-definitions).
 
-All seven implementation shapes remain. The scan costs and unbounded queue are statically established; original timing, doubled-payload, and exact-reallocation assertions need correction.
+Unrelated external edits began in dependency/toolchain/CI metadata during collection; additional Rust-source edits appeared afterward. They were left untouched. Evidence and decisions are tied to the frozen commit, not those later changes or an installed toolchain. “Current” below means current at that snapshot; no re-audit of the modified working tree is implied.
+
+Traversal, front-drain, snapshot and queue costs are established statically. Native reverse API support is verified, but exact timing, payload doubling, fixed crash windows and production load bounds remain unsupported.
 
 ## Current claim decisions
 
@@ -13,7 +15,7 @@ All seven implementation shapes remain. The scan costs and unbounded queue are s
 |---:|---:|---:|---:|---:|---:|---:|
 | 9 | 7 | 0 | 0 | 0 | 0 | 2 |
 
-These are decisions on report claims, including repeated roots, bundled observations and non-findings—not a unique-bug census. Closed/N/A rows have no current risk; unverified risk is provisional. Pure style and unmeasured optimization claims do not establish runtime impact.
+These are duplicate-inclusive report decisions, not a unique-bug census. Pure style or structural optimization does not establish a runtime incident; unverified impact remains provisional.
 
 <a id="review-1"></a>
 
@@ -21,9 +23,11 @@ These are decisions on report claims, including repeated roots, bundled observat
 
 Status: `confirmed-open`. Current risk: `medium`.
 
-The default collects every forward batch before yielding. InMemory and Cached inherit it; Mirrored delegates to its primary. Sorted lookup_max requests batch size 1, establishing a real early-exit caller that still pays whole-range collection.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-storage/src/types.rs:376](../../../../../crates/shamir-storage/src/types.rs#L376); [crates/shamir-storage/src/types.rs:397](../../../../../crates/shamir-storage/src/types.rs#L397); [crates/shamir-storage/src/storage_mirrored.rs:431](../../../../../crates/shamir-storage/src/storage_mirrored.rs#L431); [crates/shamir-index/src/base_index/sorted_index_manager.rs:2174](../../../../../crates/shamir-index/src/base_index/sorted_index_manager.rs#L2174).
+InMemory/Cached inherit default collection; Mirrored delegates to primary. lookup_max asks for one result but collection precedes it. scc 3.8.4 supports native reversed ranges; repeated front drains additionally shift remaining entries.
+
+Evidence: [crates/shamir-storage/src/types.rs:397](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-storage/src/types.rs#L397); [crates/shamir-storage/src/storage_mirrored.rs:431](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-storage/src/storage_mirrored.rs#L431); [crates/shamir-index/src/base_index/sorted_index_manager.rs:2174](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-index/src/base_index/sorted_index_manager.rs#L2174); [Cargo.lock:3123](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/Cargo.lock#L3123).
 
 <a id="review-2"></a>
 
@@ -31,9 +35,11 @@ Evidence: [crates/shamir-storage/src/types.rs:376](../../../../../crates/shamir-
 
 Status: `confirmed-open`. Current risk: `medium`.
 
-Collection happens synchronously when constructing the stream, not merely before its first yield. Result-vector memory and cloning are O(N)/O(matches); Bytes clones share payloads. InMemory tests check outputs/batching, not work performed before the first pull.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-storage/src/storage_in_memory.rs:153](../../../../../crates/shamir-storage/src/storage_in_memory.rs#L153); [crates/shamir-storage/src/storage_in_memory.rs:158](../../../../../crates/shamir-storage/src/storage_in_memory.rs#L158); [crates/shamir-storage/src/storage_in_memory.rs:240](../../../../../crates/shamir-storage/src/storage_in_memory.rs#L240); [crates/shamir-storage/src/storage_in_memory.rs:246](../../../../../crates/shamir-storage/src/storage_in_memory.rs#L246); [crates/shamir-storage/src/tests/storage_in_memory_tests.rs:100](../../../../../crates/shamir-storage/src/tests/storage_in_memory_tests.rs#L100); [crates/shamir-storage/src/tests/storage_in_memory_tests.rs:235](../../../../../crates/shamir-storage/src/tests/storage_in_memory_tests.rs#L235).
+All matching handles are cloned at stream construction, even if never polled; batches then drain the vector front. Tests assert outputs rather than construction work. Bytes clones share payload allocations.
+
+Evidence: [crates/shamir-storage/src/storage_in_memory.rs:153](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-storage/src/storage_in_memory.rs#L153); [crates/shamir-storage/src/storage_in_memory.rs:240](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-storage/src/storage_in_memory.rs#L240); [crates/shamir-storage/src/tests/storage_in_memory_tests.rs:235](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-storage/src/tests/storage_in_memory_tests.rs#L235).
 
 <a id="review-3"></a>
 
@@ -41,9 +47,11 @@ Evidence: [crates/shamir-storage/src/storage_in_memory.rs:153](../../../../../cr
 
 Status: `confirmed-open`. Current risk: `medium`.
 
-Every nonempty transact calls drain_all, whose passes use usize::MAX snapshots. Work and transient entry vectors scale with all dirty entries rather than touched keys. Reducing scope must preserve ordering against background drains, not just cleanup comparisons.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-storage/src/storage_membuffer.rs:1037](../../../../../crates/shamir-storage/src/storage_membuffer.rs#L1037); [crates/shamir-storage/src/storage_membuffer.rs:600](../../../../../crates/shamir-storage/src/storage_membuffer.rs#L600); [crates/shamir-storage/src/storage_membuffer.rs:612](../../../../../crates/shamir-storage/src/storage_membuffer.rs#L612); [crates/shamir-storage/src/storage_membuffer.rs:504](../../../../../crates/shamir-storage/src/storage_membuffer.rs#L504).
+Nonempty transact invokes drain_all and usize::MAX snapshots regardless of touched keys. Both work and temporary handles scale with dirty size. Removing the drain without fencing older snapshots permits stale backing writes.
+
+Evidence: [crates/shamir-storage/src/storage_membuffer.rs:1037](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-storage/src/storage_membuffer.rs#L1037); [crates/shamir-storage/src/storage_membuffer.rs:600](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-storage/src/storage_membuffer.rs#L600).
 
 <a id="review-4"></a>
 
@@ -51,9 +59,11 @@ Evidence: [crates/shamir-storage/src/storage_membuffer.rs:1037](../../../../../c
 
 Status: `confirmed-open`. Current risk: `medium`.
 
-The unbounded channel has no admission cap or high-watermark action. Queued jobs retain keys and Bytes payload handles/history until one worker drains them. Payload bytes are not necessarily duplicated between queue and cache.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-storage/src/storage_cached.rs:55](../../../../../crates/shamir-storage/src/storage_cached.rs#L55); [crates/shamir-storage/src/storage_cached.rs:242](../../../../../crates/shamir-storage/src/storage_cached.rs#L242); [crates/shamir-storage/src/storage_cached.rs:446](../../../../../crates/shamir-storage/src/storage_cached.rs#L446); [crates/shamir-storage/src/storage_cached.rs:450](../../../../../crates/shamir-storage/src/storage_cached.rs#L450).
+Unbounded admission retains queued historical values when producer rate exceeds one worker's service rate. Queue/cache clones generally share current payloads; older queued versions nevertheless keep memory alive.
+
+Evidence: [crates/shamir-storage/src/storage_cached.rs:242](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-storage/src/storage_cached.rs#L242); [crates/shamir-storage/src/storage_cached.rs:450](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-storage/src/storage_cached.rs#L450).
 
 <a id="review-5"></a>
 
@@ -61,9 +71,11 @@ Evidence: [crates/shamir-storage/src/storage_cached.rs:55](../../../../../crates
 
 Status: `confirmed-open`. Current risk: `medium`.
 
-default_range_filter consumes until stream exhaustion despite ascending order and an exceeded upper bound. CachedStore inherits it. 'Forever' means the remaining finite stream, not an established infinite loop.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-storage/src/types.rs:354](../../../../../crates/shamir-storage/src/types.rs#L354); [crates/shamir-storage/src/types.rs:426](../../../../../crates/shamir-storage/src/types.rs#L426); [crates/shamir-storage/src/types.rs:436](../../../../../crates/shamir-storage/src/types.rs#L436); [crates/shamir-storage/src/storage_cached.rs:517](../../../../../crates/shamir-storage/src/storage_cached.rs#L517).
+The default keeps pulling ascending batches after k&gt;end; Cached inherits it. This is finite excess traversal for finite input, not a demonstrated infinite loop.
+
+Evidence: [crates/shamir-storage/src/types.rs:426](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-storage/src/types.rs#L426); [crates/shamir-storage/src/types.rs:436](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-storage/src/types.rs#L436).
 
 <a id="review-6"></a>
 
@@ -71,11 +83,13 @@ Evidence: [crates/shamir-storage/src/types.rs:354](../../../../../crates/shamir-
 
 Status: `confirmed-open`. Current risk: `medium`.
 
-SyncSender::send remains inside async submit. Saturation can block runtime threads; neither the numeric fan-out example nor resulting latency was measured.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-storage/src/storage_fjall.rs:92](../../../../../crates/shamir-storage/src/storage_fjall.rs#L92); [crates/shamir-storage/src/storage_fjall.rs:199](../../../../../crates/shamir-storage/src/storage_fjall.rs#L199).
+Synchronous send can block executing runtime workers; task count is not the number of simultaneously blocked threads. No numeric latency or production fan-out threshold was measured.
 
-Grouping/duplicate: `concurrency-lockfree.md#4`. This row is not another independent defect.
+Evidence: [crates/shamir-storage/src/storage_fjall.rs:199](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-storage/src/storage_fjall.rs#L199).
+
+Grouping/duplicate: [concurrency-lockfree.md#4](concurrency-lockfree.md#review-4). This is not an additional independent defect.
 
 <a id="review-7"></a>
 
@@ -83,38 +97,42 @@ Grouping/duplicate: `concurrency-lockfree.md#4`. This row is not another indepen
 
 Status: `confirmed-open`. Current risk: `nit`.
 
-get_many still clones its miss-key vector, and Fjall forward/prefix scans still allocate initial capacity 256 independently of batch size. Larger batches can require multiple growth steps, not necessarily one.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-storage/src/storage_membuffer.rs:1245](../../../../../crates/shamir-storage/src/storage_membuffer.rs#L1245); [crates/shamir-storage/src/storage_fjall.rs:617](../../../../../crates/shamir-storage/src/storage_fjall.rs#L617); [crates/shamir-storage/src/storage_fjall.rs:682](../../../../../crates/shamir-storage/src/storage_fjall.rs#L682).
+Miss-key vector cloning and initial capacity 256 remain. Larger batches may grow repeatedly; no exact allocation count or speed benefit is established.
+
+Evidence: [crates/shamir-storage/src/storage_membuffer.rs:1245](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-storage/src/storage_membuffer.rs#L1245); [crates/shamir-storage/src/storage_fjall.rs:617](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-storage/src/storage_fjall.rs#L617); [crates/shamir-storage/src/storage_fjall.rs:682](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-storage/src/storage_fjall.rs#L682).
 
 <a id="review-nf-fjall-lookups"></a>
 
 ### Claim NF-fjall-lookups — Fjall set/remove existence probes and flag-free fast paths
 
-Status: `not-applicable`. Current risk: —.
+Status: `not-applicable`. Current risk: `—`.
 
-Flag-bearing paths perform contains_key before mutation; no-flag overrides omit it. Their performance benefit and prior benchmark adjudication are not independently measured here.
+Prior-cycle decision: `not-applicable`.
 
-Evidence: [crates/shamir-storage/src/storage_fjall.rs:377](../../../../../crates/shamir-storage/src/storage_fjall.rs#L377); [crates/shamir-storage/src/storage_fjall.rs:394](../../../../../crates/shamir-storage/src/storage_fjall.rs#L394); [crates/shamir-storage/src/storage_fjall.rs:565](../../../../../crates/shamir-storage/src/storage_fjall.rs#L565); [crates/shamir-storage/src/storage_fjall.rs:585](../../../../../crates/shamir-storage/src/storage_fjall.rs#L585).
+Flag-bearing set/remove probe; no-flag overrides omit probes. This proves lookup removal, not halved complete write cost or a new benchmark adjudication.
+
+Evidence: [crates/shamir-storage/src/storage_fjall.rs:377](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-storage/src/storage_fjall.rs#L377); [crates/shamir-storage/src/storage_fjall.rs:394](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-storage/src/storage_fjall.rs#L394); [crates/shamir-storage/src/storage_fjall.rs:585](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-storage/src/storage_fjall.rs#L585).
 
 <a id="review-nf-dirty-retention"></a>
 
 ### Claim NF-dirty-retention — Dirty values intentionally survive moka eviction; flusher bounds growth under healthy I/O
 
-Status: `not-applicable`. Current risk: —.
+Status: `not-applicable`. Current risk: `—`.
 
-Values are independently retained in dirty and removed only after successful backing writes plus matching cleanup. This establishes eviction retention, not a hard dirty-memory bound or proof producers cannot outpace the flusher.
+Prior-cycle decision: `not-applicable`.
 
-Evidence: [crates/shamir-storage/src/storage_membuffer.rs:143](../../../../../crates/shamir-storage/src/storage_membuffer.rs#L143); [crates/shamir-storage/src/storage_membuffer.rs:527](../../../../../crates/shamir-storage/src/storage_membuffer.rs#L527); [crates/shamir-storage/src/storage_membuffer.rs:554](../../../../../crates/shamir-storage/src/storage_membuffer.rs#L554).
+Separate dirty values survive moka eviction and matched cleanup follows backing success. Healthy I/O alone does not bound producer backlog; max_entries is explicitly ignored, and concurrent drain application remains unordered.
 
-## Corrections and qualified non-findings
+Evidence: [crates/shamir-storage/src/storage_membuffer.rs:143](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-storage/src/storage_membuffer.rs#L143); [crates/shamir-storage/src/storage_membuffer.rs:233](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-storage/src/storage_membuffer.rs#L233); [crates/shamir-storage/src/storage_membuffer.rs:527](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-storage/src/storage_membuffer.rs#L527).
 
-- Normalize scan severity to medium absent measured production scale; the resource-cost mechanisms remain proven.
-- Repeated Vec::drain of front batches also shifts the remaining tail; do not describe full consumption as necessarily linear.
-- scc 3.8.4 Range::DoubleEndedIterator support is unverified; do not prescribe that API as confirmed.
-- Queue/cache Bytes clones usually share payload allocations, though queued older versions still retain memory.
-- Only executing runtime workers can be simultaneously blocked; the 4096-task example cannot imply 3072 simultaneously blocked runtime threads.
-- The registered Cached early-termination test checks the first batch and drop, but does not count traversal/cloning and therefore cannot by itself prove laziness.
+## Evidence and recipe corrections
+
+- Native reverse ranges are available in exact scc 3.8.4: https://docs.rs/crate/scc/3.8.4/source/src/tree_index.rs. Keep Guards local and use exclusive reverse cursor bounds.
+- Full consumption of repeatedly front-drained vectors is not necessarily linear; incremental re-seeking also changes traversal cost and concurrent snapshot semantics, so 'total work unchanged' is too broad.
+- Fjall get_many uses one spawn_blocking closure but performs independent Keyspace::get calls; it is not one transactional snapshot read.
+- The notify-driven flusher can run earlier than the idle interval, yet neither the interval nor weighted moka capacity proves a maximum acknowledgment-to-durability delay or total dirty-memory cap.
 
 ---
 

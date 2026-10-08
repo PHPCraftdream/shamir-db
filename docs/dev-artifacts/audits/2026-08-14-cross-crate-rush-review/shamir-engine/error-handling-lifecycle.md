@@ -1,11 +1,13 @@
-<!-- revalidation:2026-10-08 source:92ad58266bf57ddea1fa3c8a47affba1a3a9a096 -->
-# shamir-engine — error-handling-lifecycle revalidation
+<!-- revalidation:2026-10-08 cycle:independent-2 source:e3765c935fc71655ee1ec0160cf180607935d89b -->
+# shamir-engine — error-handling-lifecycle independent revalidation (cycle 2)
 
-Source snapshot: `92ad58266bf57ddea1fa3c8a47affba1a3a9a096`. Revalidated 2026-10-08 by read-only XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run; no source fix is part of this update. Test registration/assertions are evidence of an oracle, not proof of a passing run.
+Frozen source snapshot: `e3765c935fc71655ee1ec0160cf180607935d89b`. Independently revalidated 2026-10-08 by a fresh XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run. Source-fixed means the specified mechanism was already removed at this snapshot; this cycle implements no source fix.
 
-This section is authoritative for current status. Original titles/IDs are retained for traceability; a refuted title is not a current assertion. The collapsed historical report below is superseded, including its counts, severity, scenarios and fix instructions. Plan IDs preserve historical numbering, not a current release mandate. [Workspace methodology and status definitions](../SUMMARY.md#status-definitions).
+This section is authoritative for current decisions. Existing IDs and allegation titles are retained for traceability; a refuted title is not a current assertion. Prior-cycle decisions were rechecked, not used as proof. The first cycle is available in repository history at this snapshot. The original historical body below remains preserved once and is superseded, including its counts, severities and recipes. [Workspace scope and status definitions](../SUMMARY.md#status-definitions).
 
-Pre-read swallowing remains open. Counter initialization and commit-entry cleanup are fixed; FK corruption handling and attach retry lifecycle remain incomplete.
+Unrelated external edits began in dependency/toolchain/CI metadata during collection; additional Rust-source edits appeared afterward. They were left untouched. Evidence and decisions are tied to the frozen commit, not those later changes or an installed toolchain. “Current” below means current at that snapshot; no re-audit of the modified working tree is implied.
+
+The named commit-entry, counter-init, panic and logging repairs are present. Pre-read swallowing, malformed-body RI handling and failed-attach rollback remain. Blanket lifecycle and ignored-result assurances are unsupported.
 
 ## Current claim decisions
 
@@ -13,7 +15,7 @@ Pre-read swallowing remains open. Counter initialization and commit-entry cleanu
 |---:|---:|---:|---:|---:|---:|---:|
 | 16 | 1 | 9 | 2 | 1 | 2 | 1 |
 
-These are decisions on report claims, including repeated roots, bundled observations and non-findings—not a unique-bug census. Closed/N/A rows have no current risk; unverified risk is provisional. Pure style and unmeasured optimization claims do not establish runtime impact.
+These are duplicate-inclusive report decisions, not a unique-bug census. Pure style or structural optimization does not establish a runtime incident; unverified impact remains provisional.
 
 <a id="review-1"></a>
 
@@ -21,29 +23,35 @@ These are decisions on report claims, including repeated roots, bundled observat
 
 Status: `confirmed-open`. Current risk: `high`.
 
-delete/set/update_tx still use .ok(); existing rows can be mistaken for absent after storage or codec failure.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-engine/src/table/table_manager_crud.rs:457](../../../../../crates/shamir-engine/src/table/table_manager_crud.rs#L457); [crates/shamir-engine/src/table/table_manager_crud.rs:537](../../../../../crates/shamir-engine/src/table/table_manager_crud.rs#L537); [crates/shamir-engine/src/table/table_manager_tx_ops.rs:1106](../../../../../crates/shamir-engine/src/table/table_manager_tx_ops.rs#L1106).
+delete/set/update_tx convert genuine errors to absence. With an existing row, they skip deletion or stage create-shaped postings and +1 counters; busy-repo replanning is not guaranteed. Public low-level API reachability is established.
+
+Evidence: [crates/shamir-engine/src/table/table_manager_crud.rs:457](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-engine/src/table/table_manager_crud.rs#L457); [crates/shamir-engine/src/table/table_manager_crud.rs:537](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-engine/src/table/table_manager_crud.rs#L537); [crates/shamir-engine/src/table/table_manager_tx_ops.rs:1106](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-engine/src/table/table_manager_tx_ops.rs#L1106); [crates/shamir-engine/src/table/table_manager_tx_ops.rs:1191](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-engine/src/table/table_manager_tx_ops.rs#L1191).
 
 <a id="review-2"></a>
 
 ### Claim 2 — Commit-entry ? on tx_gate/repo_wal bypasses pessimistic-lock release
 
-Status: `fixed`. Current risk: —.
+Status: `fixed`. Current risk: `—`.
 
-Both resolutions have explicit error arms releasing locks. The registered WAL-init-failure test checks a subsequent transaction can acquire the same key.
+Prior-cycle decision: `fixed`.
 
-Evidence: [crates/shamir-engine/src/tx/commit.rs:598](../../../../../crates/shamir-engine/src/tx/commit.rs#L598); [crates/shamir-engine/src/tx/commit.rs:605](../../../../../crates/shamir-engine/src/tx/commit.rs#L605); [crates/shamir-engine/src/tx/tests/commit_wal_init_failure_lock_release_tests.rs:90](../../../../../crates/shamir-engine/src/tx/tests/commit_wal_init_failure_lock_release_tests.rs#L90).
+Both gate/WAL failures explicitly release locks. The registered default-feature fixture causes real WAL initialization failure and checks same-key acquisition plus the unchanged original value.
+
+Evidence: [crates/shamir-engine/src/tx/commit.rs:598](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-engine/src/tx/commit.rs#L598); [crates/shamir-engine/src/tx/commit.rs:605](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-engine/src/tx/commit.rs#L605); [crates/shamir-engine/src/tx/tests/commit_wal_init_failure_lock_release_tests.rs:90](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-engine/src/tx/tests/commit_wal_init_failure_lock_release_tests.rs#L90).
 
 <a id="review-3"></a>
 
 ### Claim 3 — RecordCounter lazy init swallows read/decode errors and silently zeroes durable count
 
-Status: `fixed`. Current risk: —.
+Status: `fixed`. Current risk: `—`.
 
-get_or_try_init maps only NotFound to zero; storage/decode errors propagate without initializing. Registered tests inspect unchanged backing bytes.
+Prior-cycle decision: `fixed`.
 
-Evidence: [crates/shamir-engine/src/table/record_counter.rs:198](../../../../../crates/shamir-engine/src/table/record_counter.rs#L198); [crates/shamir-engine/src/table/record_counter.rs:208](../../../../../crates/shamir-engine/src/table/record_counter.rs#L208); [crates/shamir-engine/src/table/tests/record_counter_tests.rs:279](../../../../../crates/shamir-engine/src/table/tests/record_counter_tests.rs#L279).
+Only NotFound initializes zero; I/O and decode errors escape get_or_try_init. Registered fixtures inspect unchanged durable backing bytes.
+
+Evidence: [crates/shamir-engine/src/table/record_counter.rs:200](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-engine/src/table/record_counter.rs#L200); [crates/shamir-engine/src/table/record_counter.rs:208](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-engine/src/table/record_counter.rs#L208); [crates/shamir-engine/src/table/tests/record_counter_tests.rs:279](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-engine/src/table/tests/record_counter_tests.rs#L279).
 
 <a id="review-4"></a>
 
@@ -51,49 +59,59 @@ Evidence: [crates/shamir-engine/src/table/record_counter.rs:198](../../../../../
 
 Status: `partially-fixed`. Current risk: `medium`.
 
-Extraction now errors when both decoders reject. Header-valid malformed maps still become absent scalars, and filter_matches can discard corrupt rows before extraction.
+Prior-cycle decision: `partially-fixed`.
 
-Evidence: [crates/shamir-engine/src/query/batch/fk_restrict.rs:307](../../../../../crates/shamir-engine/src/query/batch/fk_restrict.rs#L307); [crates/shamir-engine/src/query/batch/fk_restrict.rs:525](../../../../../crates/shamir-engine/src/query/batch/fk_restrict.rs#L525); [crates/shamir-engine/src/validator/validator_db.rs:109](../../../../../crates/shamir-engine/src/validator/validator_db.rs#L109); [crates/shamir-types/src/record_view/lens.rs:814](../../../../../crates/shamir-types/src/record_view/lens.rs#L814).
+Both-decoder failures now error in extraction, but a lone 0x81 map header succeeds as a view and malformed field access becomes None. Prefilters/classifiers can also return nonmatch before extraction.
+
+Evidence: [crates/shamir-engine/src/query/batch/fk_restrict.rs:307](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-engine/src/query/batch/fk_restrict.rs#L307); [crates/shamir-engine/src/query/batch/fk_restrict.rs:525](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-engine/src/query/batch/fk_restrict.rs#L525); [crates/shamir-engine/src/query/batch/fk_actions.rs:1286](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-engine/src/query/batch/fk_actions.rs#L1286); [crates/shamir-types/src/record_view/lens.rs:814](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-types/src/record_view/lens.rs#L814).
 
 <a id="review-5"></a>
 
 ### Claim 5 — per_table_mvcc attach discards the split-brain error signal
 
-Status: `fixed`. Current risk: —.
+Status: `fixed`. Current risk: `—`.
 
-Occupied-token insertion now logs and returns Internal instead of silently attaching another store. Cleanup after later initialization failure remains a separate regression.
+Prior-cycle decision: `fixed`.
 
-Evidence: [crates/shamir-engine/src/repo/repo_instance.rs:411](../../../../../crates/shamir-engine/src/repo/repo_instance.rs#L411); [crates/shamir-engine/src/repo/tests/per_table_mvcc_attach_collision_tests.rs:74](../../../../../crates/shamir-engine/src/repo/tests/per_table_mvcc_attach_collision_tests.rs#L74).
+An occupied token logs and returns Internal, leaving the existing Arc untouched. Later initialization failure still lacks rollback, a separate lifecycle regression.
+
+Evidence: [crates/shamir-engine/src/repo/repo_instance.rs:411](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-engine/src/repo/repo_instance.rs#L411); [crates/shamir-engine/src/repo/tests/per_table_mvcc_attach_collision_tests.rs:74](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-engine/src/repo/tests/per_table_mvcc_attach_collision_tests.rs#L74).
 
 <a id="review-6"></a>
 
 ### Claim 6 — Background verify never clears its single-flight latch if the task panics
 
-Status: `fixed`. Current risk: —.
+Status: `fixed`. Current risk: `—`.
 
-verify is caught and the latch cleared after error handling. The accompanying panic regression file is present but unregistered.
+Prior-cycle decision: `fixed`.
 
-Evidence: [crates/shamir-engine/src/table/table_manager.rs:1017](../../../../../crates/shamir-engine/src/table/table_manager.rs#L1017); [crates/shamir-engine/src/table/table_manager.rs:1045](../../../../../crates/shamir-engine/src/table/table_manager.rs#L1045); [crates/shamir-engine/src/table/tests/mod.rs:1](../../../../../crates/shamir-engine/src/table/tests/mod.rs#L1).
+verify invocation/polling is caught and verify_running is cleared on the ordinary unwind-error path. Its regression file remains unregistered.
+
+Evidence: [crates/shamir-engine/src/table/table_manager.rs:1017](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-engine/src/table/table_manager.rs#L1017); [crates/shamir-engine/src/table/table_manager.rs:1045](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-engine/src/table/table_manager.rs#L1045); [crates/shamir-engine/src/table/tests/mod.rs:1](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-engine/src/table/tests/mod.rs#L1).
 
 <a id="review-7"></a>
 
 ### Claim 7 — Silent best-effort operations drop errors without logging
 
-Status: `fixed`. Current risk: —.
+Status: `fixed`. Current risk: `—`.
 
-Assigned metadata-save, replay-attach and recovery-marker acquisition failures now emit warnings explaining accepted consequences.
+Prior-cycle decision: `fixed`.
 
-Evidence: [crates/shamir-engine/src/table/table_manager.rs:751](../../../../../crates/shamir-engine/src/table/table_manager.rs#L751); [crates/shamir-engine/src/table/doctor.rs:760](../../../../../crates/shamir-engine/src/table/doctor.rs#L760); [crates/shamir-engine/src/tx/recovery.rs:198](../../../../../crates/shamir-engine/src/tx/recovery.rs#L198); [crates/shamir-engine/src/tx/commit_phases.rs:382](../../../../../crates/shamir-engine/src/tx/commit_phases.rs#L382).
+Assigned metadata-save, replay-open and marker-gate failures now log accepted consequences; best-effort continuation is not converted into transactional success proof.
+
+Evidence: [crates/shamir-engine/src/table/table_manager.rs:751](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-engine/src/table/table_manager.rs#L751); [crates/shamir-engine/src/table/doctor.rs:760](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-engine/src/table/doctor.rs#L760); [crates/shamir-engine/src/tx/recovery.rs:198](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-engine/src/tx/recovery.rs#L198); [crates/shamir-engine/src/tx/commit_phases.rs:382](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-engine/src/tx/commit_phases.rs#L382).
 
 <a id="review-8"></a>
 
 ### Claim 8 — apply_replicated conflates attach failure with unattached table
 
-Status: `fixed`. Current risk: —.
+Status: `fixed`. Current risk: `—`.
 
-Only NotFound may continue; other attachment errors return Err before applying the event or advancing the caller's bookmark.
+Prior-cycle decision: `fixed`.
 
-Evidence: [crates/shamir-engine/src/tx/apply_replicated.rs:289](../../../../../crates/shamir-engine/src/tx/apply_replicated.rs#L289); [crates/shamir-engine/src/tx/tests/apply_replicated_tests.rs:572](../../../../../crates/shamir-engine/src/tx/tests/apply_replicated_tests.rs#L572).
+Non-NotFound attachment failures return before apply/finalization. Registered assertions check no downstream event and no raw fallback write, rather than confusing aborted version advancement with success.
+
+Evidence: [crates/shamir-engine/src/tx/apply_replicated.rs:289](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-engine/src/tx/apply_replicated.rs#L289); [crates/shamir-engine/src/tx/tests/apply_replicated_tests.rs:572](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-engine/src/tx/tests/apply_replicated_tests.rs#L572).
 
 <a id="review-9"></a>
 
@@ -101,86 +119,103 @@ Evidence: [crates/shamir-engine/src/tx/apply_replicated.rs:289](../../../../../c
 
 Status: `partially-fixed`. Current risk: `low`.
 
-Commit-entry, counter and one FK-corruption regression are registered. Pre-read tests are unregistered; remaining corruption variants are not covered by the added malformed-header fixture.
+Prior-cycle decision: `partially-fixed`.
 
-Evidence: [crates/shamir-engine/src/tx/tests/mod.rs:10](../../../../../crates/shamir-engine/src/tx/tests/mod.rs#L10); [crates/shamir-engine/src/table/tests/mod.rs:74](../../../../../crates/shamir-engine/src/table/tests/mod.rs#L74); [crates/shamir-engine/src/query/batch/tests/fk_indexed_action_read_error_tests.rs:633](../../../../../crates/shamir-engine/src/query/batch/tests/fk_indexed_action_read_error_tests.rs#L633); [crates/shamir-engine/src/table/tests/mod.rs:1](../../../../../crates/shamir-engine/src/table/tests/mod.rs#L1).
+Several named regressions are registered, but pre-read/verify files are not. The FK fixture uses truncated non-map bytes, not a valid map header with a malformed body.
+
+Evidence: [crates/shamir-engine/src/tx/tests/mod.rs:10](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-engine/src/tx/tests/mod.rs#L10); [crates/shamir-engine/src/table/tests/mod.rs:74](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-engine/src/table/tests/mod.rs#L74); [crates/shamir-engine/src/query/batch/tests/fk_indexed_action_read_error_tests.rs:633](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-engine/src/query/batch/tests/fk_indexed_action_read_error_tests.rs#L633); [crates/shamir-engine/src/table/tests/mod.rs:1](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-engine/src/table/tests/mod.rs#L1).
 
 <a id="review-10-1"></a>
 
 ### Claim 10.1 — SystemTime::now().duration_since(UNIX_EPOCH).unwrap repeated ten times
 
-Status: `fixed`. Current risk: —.
+Status: `fixed`. Current risk: `—`.
 
-Assigned call sites use shared unix_millis, whose pre-epoch case returns zero.
+Prior-cycle decision: `fixed`.
 
-Evidence: [crates/shamir-engine/src/table/table_manager_index_mgmt.rs:1136](../../../../../crates/shamir-engine/src/table/table_manager_index_mgmt.rs#L1136); [crates/shamir-types/src/time.rs:14](../../../../../crates/shamir-types/src/time.rs#L14).
+All assigned DDL sites use unix_millis, whose pre-epoch duration error maps to zero.
+
+Evidence: [crates/shamir-engine/src/table/table_manager_index_mgmt.rs:1136](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-engine/src/table/table_manager_index_mgmt.rs#L1136); [crates/shamir-types/src/time.rs:14](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-types/src/time.rs#L14).
 
 <a id="review-10-2"></a>
 
 ### Claim 10.2 — ids.lock().unwrap poisoning cascade
 
-Status: `fixed`. Current risk: —.
+Status: `fixed`. Current risk: `—`.
 
-Production guard operations recover the poisoned mutex's structurally valid map.
+Prior-cycle decision: `fixed`.
 
-Evidence: [crates/shamir-engine/src/table/in_flight_create_guard.rs:110](../../../../../crates/shamir-engine/src/table/in_flight_create_guard.rs#L110); [crates/shamir-engine/src/table/in_flight_create_guard.rs:130](../../../../../crates/shamir-engine/src/table/in_flight_create_guard.rs#L130); [crates/shamir-engine/src/table/in_flight_create_guard.rs:166](../../../../../crates/shamir-engine/src/table/in_flight_create_guard.rs#L166).
+Production enter/contains/drop recover the structurally valid map from poison rather than panicking on lock acquisition.
+
+Evidence: [crates/shamir-engine/src/table/in_flight_create_guard.rs:110](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-engine/src/table/in_flight_create_guard.rs#L110); [crates/shamir-engine/src/table/in_flight_create_guard.rs:130](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-engine/src/table/in_flight_create_guard.rs#L130); [crates/shamir-engine/src/table/in_flight_create_guard.rs:166](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-engine/src/table/in_flight_create_guard.rs#L166).
 
 <a id="review-10-3"></a>
 
 ### Claim 10.3 — QueryParseError/WriteValueError lack thiserror
 
-Status: `fixed`. Current risk: —.
+Status: `fixed`. Current risk: `—`.
 
-QueryParseError disappeared with the legacy parser; WriteValueError now derives thiserror::Error.
+Prior-cycle decision: `fixed`.
 
-Evidence: [crates/shamir-engine/src/query/mod.rs:1](../../../../../crates/shamir-engine/src/query/mod.rs#L1); [crates/shamir-engine/src/query/batch/param_subst.rs:145](../../../../../crates/shamir-engine/src/query/batch/param_subst.rs#L145).
+The legacy parse error is removed and WriteValueError derives thiserror; this is convention conformance, not a runtime correction.
+
+Evidence: [crates/shamir-engine/src/query/mod.rs:1](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-engine/src/query/mod.rs#L1); [crates/shamir-engine/src/query/batch/param_subst.rs:145](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-engine/src/query/batch/param_subst.rs#L145).
 
 <a id="review-verified-non-issues-unwrap-invariants"></a>
 
 ### Claim Verified non-issues/unwrap invariants — Every remaining production unwrap/expect is structurally guarded
 
-Status: `unverified`. Current risk: —.
+Status: `unverified`. Current risk: `—`.
 
-Several cited guards remain visible, but the universal claim exceeds this finding-scoped review and no compiler/test verification was allowed.
+Prior-cycle decision: `unverified`.
 
-Evidence: [crates/shamir-engine/src/query/auth/session.rs:184](../../../../../crates/shamir-engine/src/query/auth/session.rs#L184).
+Inspected enum/top-k/peek guards support particular sites; a finding-scoped source review does not establish the universal assertion.
+
+Evidence: [crates/shamir-engine/src/query/auth/session.rs:184](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-engine/src/query/auth/session.rs#L184); [crates/shamir-engine/src/table/read_exec.rs:1062](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-engine/src/table/read_exec.rs#L1062).
 
 <a id="review-verified-non-issues-scc-ignored-results"></a>
 
 ### Claim Verified non-issues/scc ignored results — Ignored scc results are idempotent or benign by contract
 
-Status: `unverified`. Current risk: —.
+Status: `unverified`. Current risk: `—`.
 
-Specific idempotent sites do not establish this blanket property; the attach collision previously cited as benign required explicit handling.
+Prior-cycle decision: `unverified`.
 
-Evidence: [crates/shamir-engine/src/repo/repo_instance.rs:411](../../../../../crates/shamir-engine/src/repo/repo_instance.rs#L411); [crates/shamir-engine/src/validator/registry.rs:90](../../../../../crates/shamir-engine/src/validator/registry.rs#L90).
+Specific idempotent cases do not prove the blanket claim. New registry reverse-map publication is independently non-atomic with removal.
+
+Evidence: [crates/shamir-engine/src/repo/repo_instance.rs:411](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-engine/src/repo/repo_instance.rs#L411); [crates/shamir-engine/src/validator/registry.rs:90](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-engine/src/validator/registry.rs#L90); [crates/shamir-engine/src/validator/registry.rs:150](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-engine/src/validator/registry.rs#L150).
 
 <a id="review-verified-non-issues-resource-lifecycles"></a>
 
 ### Claim Verified non-issues/resource lifecycles — Resource lifecycles are sound and documented
 
-Status: `refuted`. Current risk: —.
+Status: `refuted`. Current risk: `—`.
 
-Successful MVCC registration precedes fallible table/interner initialization without rollback; later retries fail on the orphan registration.
+Prior-cycle decision: `refuted`.
 
-Evidence: [crates/shamir-engine/src/repo/repo_instance.rs:413](../../../../../crates/shamir-engine/src/repo/repo_instance.rs#L413); [crates/shamir-engine/src/repo/repo_instance.rs:442](../../../../../crates/shamir-engine/src/repo/repo_instance.rs#L442); [crates/shamir-engine/src/repo/repo_instance.rs:447](../../../../../crates/shamir-engine/src/repo/repo_instance.rs#L447).
+A registered MVCC handle survives later table/interner initialization failure and causes retry collision; sound RAII elsewhere cannot rescue this universal statement.
+
+Evidence: [crates/shamir-engine/src/repo/repo_instance.rs:413](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-engine/src/repo/repo_instance.rs#L413); [crates/shamir-engine/src/repo/repo_instance.rs:442](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-engine/src/repo/repo_instance.rs#L442); [crates/shamir-engine/src/repo/repo_instance.rs:447](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-engine/src/repo/repo_instance.rs#L447).
 
 <a id="review-verified-non-issues-test-only-hooks"></a>
 
 ### Claim Verified non-issues/test-only hooks — Failure-injection synchronous locks are test-only
 
-Status: `not-applicable`. Current risk: —.
+Status: `not-applicable`. Current risk: `—`.
 
-The inspected failure-injection lock types and their hooks remain test-gated.
+Prior-cycle decision: `not-applicable`.
 
-Evidence: [crates/shamir-engine/src/tx/pre_commit.rs:1037](../../../../../crates/shamir-engine/src/tx/pre_commit.rs#L1037); [crates/shamir-engine/src/table/table_manager_streaming.rs:77](../../../../../crates/shamir-engine/src/table/table_manager_streaming.rs#L77).
+The inspected synchronous injection fields remain cfg(test)-gated; this does not cover every debug-assertion fault seam.
 
-## Corrections and qualified non-findings
+Evidence: [crates/shamir-engine/src/tx/pre_commit.rs:1037](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-engine/src/tx/pre_commit.rs#L1037); [crates/shamir-engine/src/table/table_manager_streaming.rs:77](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-engine/src/table/table_manager_streaming.rs#L77).
 
-- Presence of a new test file is not registration: write_path_preread_fail_closed_tests.rs and verify_panic_safety_tests.rs are absent from the table test manifest.
-- The pre-read file's get-hook claim is false: TableManager::get does not consult the injector; read_one_tx does.
-- The FK added fixture uses a non-map/truncated header and does not detect malformed map bodies accepted by RecordView::new.
-- Attach-collision detection is repaired, but the comment promising a clean automatic retry is false after later initialization errors.
+## Evidence and recipe corrections
+
+- The pre-read corruption scenario is supported at the public low-level surface; normal QueryRunner writes use transactional byte paths. Do not label it an established ordinary network request exploit.
+- RecordView::new is header validation, not full decoding. Falling back only when construction fails cannot enforce fail-closed body parsing.
+- The attach-collision test clears the old entry manually. It does not prove automatic cleanup after a newly successful registration followed by initialization failure.
+- catch_unwind handles ordinary unwinding panics in the protected future, not panic=abort, arbitrary logger panics, runtime destruction or all cancellation paths.
+- The WAL-init fixture unconditionally names the fjall factory and is appropriate to default features. No no-default-features compilation claim is established.
 
 ---
 

@@ -1,11 +1,13 @@
-<!-- revalidation:2026-10-08 source:92ad58266bf57ddea1fa3c8a47affba1a3a9a096 -->
-# shamir-storage — style-claude-md revalidation
+<!-- revalidation:2026-10-08 cycle:independent-2 source:e3765c935fc71655ee1ec0160cf180607935d89b -->
+# shamir-storage — style-claude-md independent revalidation (cycle 2)
 
-Source snapshot: `92ad58266bf57ddea1fa3c8a47affba1a3a9a096`. Revalidated 2026-10-08 by read-only XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run; no source fix is part of this update. Test registration/assertions are evidence of an oracle, not proof of a passing run.
+Frozen source snapshot: `e3765c935fc71655ee1ec0160cf180607935d89b`. Independently revalidated 2026-10-08 by a fresh XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run. Source-fixed means the specified mechanism was already removed at this snapshot; this cycle implements no source fix.
 
-This section is authoritative for current status. Original titles/IDs are retained for traceability; a refuted title is not a current assertion. The collapsed historical report below is superseded, including its counts, severity, scenarios and fix instructions. Plan IDs preserve historical numbering, not a current release mandate. [Workspace methodology and status definitions](../SUMMARY.md#status-definitions).
+This section is authoritative for current decisions. Existing IDs and allegation titles are retained for traceability; a refuted title is not a current assertion. Prior-cycle decisions were rechecked, not used as proof. The first cycle is available in repository history at this snapshot. The original historical body below remains preserved once and is superseded, including its counts, severities and recipes. [Workspace scope and status definitions](../SUMMARY.md#status-definitions).
 
-The listed layout/import/documentation issues remain. They are low/nit maintenance findings, not runtime medium defects; test-tree wiring is valid.
+Unrelated external edits began in dependency/toolchain/CI metadata during collection; additional Rust-source edits appeared afterward. They were left untouched. Evidence and decisions are tied to the frozen commit, not those later changes or an installed toolchain. “Current” below means current at that snapshot; no re-audit of the modified working tree is implied.
+
+The external test trees are registered correctly. Remaining imports, stale comments and alias/topic organization are low/nit maintenance issues, not runtime failures or missing compiler reachability.
 
 ## Current claim decisions
 
@@ -13,7 +15,7 @@ The listed layout/import/documentation issues remain. They are low/nit maintenan
 |---:|---:|---:|---:|---:|---:|---:|
 | 8 | 7 | 0 | 0 | 0 | 0 | 1 |
 
-These are decisions on report claims, including repeated roots, bundled observations and non-findings—not a unique-bug census. Closed/N/A rows have no current risk; unverified risk is provisional. Pure style and unmeasured optimization claims do not establish runtime impact.
+These are duplicate-inclusive report decisions, not a unique-bug census. Pure style or structural optimization does not establish a runtime incident; unverified impact remains provisional.
 
 <a id="review-1"></a>
 
@@ -21,9 +23,11 @@ These are decisions on report claims, including repeated roots, bundled observat
 
 Status: `confirmed-open`. Current risk: `nit`.
 
-All thirteen identified function-local imports remain; module-header imports in nested fixture modules are separate and valid. This is structural policy nonconformance without demonstrated runtime impact.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-storage/src/types.rs:395](../../../../../crates/shamir-storage/src/types.rs#L395); [crates/shamir-storage/src/types.rs:424](../../../../../crates/shamir-storage/src/types.rs#L424); [crates/shamir-storage/src/types.rs:489](../../../../../crates/shamir-storage/src/types.rs#L489); [crates/shamir-storage/src/storage_cached.rs:218](../../../../../crates/shamir-storage/src/storage_cached.rs#L218); [crates/shamir-storage/src/storage_cached.rs:307](../../../../../crates/shamir-storage/src/storage_cached.rs#L307); [crates/shamir-storage/src/storage_fjall.rs:451](../../../../../crates/shamir-storage/src/storage_fjall.rs#L451); [crates/shamir-storage/src/storage_fjall.rs:610](../../../../../crates/shamir-storage/src/storage_fjall.rs#L610); [crates/shamir-storage/src/storage_fjall.rs:673](../../../../../crates/shamir-storage/src/storage_fjall.rs#L673); [crates/shamir-storage/src/tests/storage_membuffer_tests.rs:426](../../../../../crates/shamir-storage/src/tests/storage_membuffer_tests.rs#L426); [crates/shamir-storage/src/tests/storage_cached_tests.rs:321](../../../../../crates/shamir-storage/src/tests/storage_cached_tests.rs#L321); [crates/shamir-storage/src/tests/storage_in_memory_tests.rs:264](../../../../../crates/shamir-storage/src/tests/storage_in_memory_tests.rs#L264); [crates/shamir-storage/src/tests/storage_mirrored_tests.rs:1289](../../../../../crates/shamir-storage/src/tests/storage_mirrored_tests.rs#L1289); [crates/shamir-storage/src/key_bytes/tests/hash_consistency_tests.rs:52](../../../../../crates/shamir-storage/src/key_bytes/tests/hash_consistency_tests.rs#L52).
+All thirteen cited function-body imports remain. Nested fixture module-header imports are valid and separate; no runtime impact follows from placement.
+
+Evidence: [crates/shamir-storage/src/types.rs:395](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-storage/src/types.rs#L395); [crates/shamir-storage/src/storage_cached.rs:218](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-storage/src/storage_cached.rs#L218); [crates/shamir-storage/src/storage_fjall.rs:451](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-storage/src/storage_fjall.rs#L451); [crates/shamir-storage/src/key_bytes/tests/hash_consistency_tests.rs:52](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-storage/src/key_bytes/tests/hash_consistency_tests.rs#L52).
 
 <a id="review-2"></a>
 
@@ -31,9 +35,11 @@ Evidence: [crates/shamir-storage/src/types.rs:395](../../../../../crates/shamir-
 
 Status: `confirmed-open`. Current risk: `low`.
 
-The header still describes an unflipped alias despite RecordKey = KeyBytes. This is misleading production-type documentation, not itself a runtime medium.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-storage/src/key_bytes.rs:7](../../../../../crates/shamir-storage/src/key_bytes.rs#L7); [crates/shamir-storage/src/types.rs:9](../../../../../crates/shamir-storage/src/types.rs#L9).
+Header's unflipped/unused statement contradicts RecordKey=KeyBytes. This can mislead maintainers about load-bearing serde and representation behavior, but is not itself runtime corruption.
+
+Evidence: [crates/shamir-storage/src/key_bytes.rs:7](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-storage/src/key_bytes.rs#L7); [crates/shamir-storage/src/types.rs:9](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-storage/src/types.rs#L9).
 
 <a id="review-3"></a>
 
@@ -41,9 +47,11 @@ Evidence: [crates/shamir-storage/src/key_bytes.rs:7](../../../../../crates/shami
 
 Status: `confirmed-open`. Current risk: `nit`.
 
-All three empty ending banners remain, while external test modules are registered.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-storage/src/storage_in_memory.rs:260](../../../../../crates/shamir-storage/src/storage_in_memory.rs#L260); [crates/shamir-storage/src/storage_cached.rs:719](../../../../../crates/shamir-storage/src/storage_cached.rs#L719); [crates/shamir-storage/src/storage_fjall.rs:726](../../../../../crates/shamir-storage/src/storage_fjall.rs#L726); [crates/shamir-storage/src/tests/mod.rs:3](../../../../../crates/shamir-storage/src/tests/mod.rs#L3).
+Three implementation files end with empty Tests banners; actual suites are externally registered. Removing banners is optional cleanup, not coverage repair.
+
+Evidence: [crates/shamir-storage/src/storage_in_memory.rs:260](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-storage/src/storage_in_memory.rs#L260); [crates/shamir-storage/src/storage_cached.rs:719](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-storage/src/storage_cached.rs#L719); [crates/shamir-storage/src/storage_fjall.rs:726](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-storage/src/storage_fjall.rs#L726).
 
 <a id="review-4"></a>
 
@@ -51,9 +59,11 @@ Evidence: [crates/shamir-storage/src/storage_in_memory.rs:260](../../../../../cr
 
 Status: `confirmed-open`. Current risk: `nit`.
 
-Both local aliases still duplicate the crate-visible canonical alias. Internal code could already import it; public alias exposure is an optional external naming improvement, not required to implement the trait.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-storage/src/types.rs:11](../../../../../crates/shamir-storage/src/types.rs#L11); [crates/shamir-storage/src/storage_membuffer.rs:628](../../../../../crates/shamir-storage/src/storage_membuffer.rs#L628); [crates/shamir-storage/src/tests/types_tests.rs:12](../../../../../crates/shamir-storage/src/tests/types_tests.rs#L12); [crates/shamir-storage/src/storage_mirrored.rs:33](../../../../../crates/shamir-storage/src/storage_mirrored.rs#L33).
+MemBuffer and shared-test aliases duplicate the crate-visible canonical type while Mirrored imports it. Sharing improves maintenance; privacy does not prevent expanded public-trait implementations.
+
+Evidence: [crates/shamir-storage/src/types.rs:11](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-storage/src/types.rs#L11); [crates/shamir-storage/src/storage_membuffer.rs:628](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-storage/src/storage_membuffer.rs#L628); [crates/shamir-storage/src/tests/types_tests.rs:12](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-storage/src/tests/types_tests.rs#L12).
 
 <a id="review-5"></a>
 
@@ -61,11 +71,13 @@ Evidence: [crates/shamir-storage/src/types.rs:11](../../../../../crates/shamir-s
 
 Status: `confirmed-open`. Current risk: `low`.
 
-Only the three original backends invoke the registered helper. Dedicated Mirrored batch tests exist but do not replace all helper assertions.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-storage/src/tests/types_tests.rs:38](../../../../../crates/shamir-storage/src/tests/types_tests.rs#L38); [crates/shamir-storage/src/tests/storage_mirrored_tests.rs:168](../../../../../crates/shamir-storage/src/tests/storage_mirrored_tests.rs#L168); [crates/shamir-storage/src/tests/mod.rs:3](../../../../../crates/shamir-storage/src/tests/mod.rs#L3).
+Only three backend callers invoke the helper. Mirrored's dedicated batch test is registered and useful, but does not replace every common assertion.
 
-Grouping/duplicate: `correctness-tdd.md#5`. This row is not another independent defect.
+Evidence: [crates/shamir-storage/src/tests/types_tests.rs:38](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-storage/src/tests/types_tests.rs#L38); [crates/shamir-storage/src/tests/storage_mirrored_tests.rs:168](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-storage/src/tests/storage_mirrored_tests.rs#L168).
+
+Grouping/duplicate: [correctness-tdd.md#5](correctness-tdd.md#review-5). This is not an additional independent defect.
 
 <a id="review-6"></a>
 
@@ -73,9 +85,11 @@ Grouping/duplicate: `correctness-tdd.md#5`. This row is not another independent 
 
 Status: `confirmed-open`. Current risk: `nit`.
 
-The three fixture submodules remain in the same registered test file. This is topic-file granularity debt, not forbidden inline tests inside implementation files.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-storage/src/tests/storage_membuffer_tests.rs:728](../../../../../crates/shamir-storage/src/tests/storage_membuffer_tests.rs#L728); [crates/shamir-storage/src/tests/storage_membuffer_tests.rs:867](../../../../../crates/shamir-storage/src/tests/storage_membuffer_tests.rs#L867); [crates/shamir-storage/src/tests/storage_membuffer_tests.rs:974](../../../../../crates/shamir-storage/src/tests/storage_membuffer_tests.rs#L974); [crates/shamir-storage/src/tests/mod.rs:5](../../../../../crates/shamir-storage/src/tests/mod.rs#L5).
+audit_2_3, clear_race_535 and batch_insert_republish_535 remain nested in an external test file. They are reachable; splitting follows topic-file organization, not the implementation-inline-test prohibition.
+
+Evidence: [crates/shamir-storage/src/tests/storage_membuffer_tests.rs:728](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-storage/src/tests/storage_membuffer_tests.rs#L728); [crates/shamir-storage/src/tests/storage_membuffer_tests.rs:867](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-storage/src/tests/storage_membuffer_tests.rs#L867); [crates/shamir-storage/src/tests/storage_membuffer_tests.rs:974](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-storage/src/tests/storage_membuffer_tests.rs#L974).
 
 <a id="review-7"></a>
 
@@ -83,25 +97,29 @@ Evidence: [crates/shamir-storage/src/tests/storage_membuffer_tests.rs:728](../..
 
 Status: `confirmed-open`. Current risk: `nit`.
 
-scan_prefix_stream still references iter_stream at approximately line 323, although that method starts at 596.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-storage/src/storage_fjall.rs:655](../../../../../crates/shamir-storage/src/storage_fjall.rs#L655); [crates/shamir-storage/src/storage_fjall.rs:596](../../../../../crates/shamir-storage/src/storage_fjall.rs#L596).
+Prefix-scan comment still points to approximately line 323 although iter_stream begins at 596; method naming would avoid this maintenance drift.
+
+Evidence: [crates/shamir-storage/src/storage_fjall.rs:655](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-storage/src/storage_fjall.rs#L655); [crates/shamir-storage/src/storage_fjall.rs:596](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-storage/src/storage_fjall.rs#L596).
 
 <a id="review-nf-structure"></a>
 
 ### Claim NF-structure — Manifest-only mod.rs files, external test wiring, closely coupled exports, and thiserror
 
-Status: `not-applicable`. Current risk: —.
+Status: `not-applicable`. Current risk: `—`.
 
-The manifests contain declarations only; lib/key_bytes wire external test trees, Fjall tests are feature-gated, and implementation files do not embed test bodies. Repo/Store/helper groupings are closely coupled, and DbError uses thiserror.
+Prior-cycle decision: `not-applicable`.
 
-Evidence: [crates/shamir-storage/src/tests/mod.rs:1](../../../../../crates/shamir-storage/src/tests/mod.rs#L1); [crates/shamir-storage/src/tests/mod.rs:8](../../../../../crates/shamir-storage/src/tests/mod.rs#L8); [crates/shamir-storage/src/key_bytes/tests/mod.rs:5](../../../../../crates/shamir-storage/src/key_bytes/tests/mod.rs#L5); [crates/shamir-storage/src/lib.rs:29](../../../../../crates/shamir-storage/src/lib.rs#L29); [crates/shamir-storage/src/key_bytes.rs:315](../../../../../crates/shamir-storage/src/key_bytes.rs#L315); [crates/shamir-storage/src/error.rs:6](../../../../../crates/shamir-storage/src/error.rs#L6).
+Both test manifests contain declarations, roots wire them under cfg(test), Fjall tests are gated, and DbError derives thiserror. Closely coupled Repo/Store/helper groups satisfy the stated export grouping exception.
 
-## Corrections and qualified non-findings
+Evidence: [crates/shamir-storage/src/tests/mod.rs:1](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-storage/src/tests/mod.rs#L1); [crates/shamir-storage/src/key_bytes/tests/mod.rs:5](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-storage/src/key_bytes/tests/mod.rs#L5); [crates/shamir-storage/src/lib.rs:32](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-storage/src/lib.rs#L32); [crates/shamir-storage/src/error.rs:6](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-storage/src/error.rs#L6).
 
-- Downgrade import placement, ending banners, and alias duplication to nit; stale production-type documentation is low.
-- Do not imply private-alias naming prevents external Store implementations.
-- Nested modules inside an external test file are registered and reachable; splitting them is organizational, not a coverage fix.
+## Evidence and recipe corrections
+
+- Mechanical style cleanup has no measured runtime benefit and is not a release-critical medium defect.
+- A public RecordStream alias is an ergonomic choice, not a prerequisite for external Store implementations.
+- Relocating nested fixtures must preserve module registration, cfg gates and production-seam behavior; file splitting alone cannot improve an invalid oracle.
 
 ---
 

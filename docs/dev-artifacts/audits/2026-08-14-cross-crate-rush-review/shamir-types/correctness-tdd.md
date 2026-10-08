@@ -1,11 +1,13 @@
-<!-- revalidation:2026-10-08 source:92ad58266bf57ddea1fa3c8a47affba1a3a9a096 -->
-# shamir-types — correctness-tdd revalidation
+<!-- revalidation:2026-10-08 cycle:independent-2 source:e3765c935fc71655ee1ec0160cf180607935d89b -->
+# shamir-types — correctness-tdd independent revalidation (cycle 2)
 
-Source snapshot: `92ad58266bf57ddea1fa3c8a47affba1a3a9a096`. Revalidated 2026-10-08 by read-only XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run; no source fix is part of this update. Test registration/assertions are evidence of an oracle, not proof of a passing run.
+Frozen source snapshot: `e3765c935fc71655ee1ec0160cf180607935d89b`. Independently revalidated 2026-10-08 by a fresh XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run. Source-fixed means the specified mechanism was already removed at this snapshot; this cycle implements no source fix.
 
-This section is authoritative for current status. Original titles/IDs are retained for traceability; a refuted title is not a current assertion. The collapsed historical report below is superseded, including its counts, severity, scenarios and fix instructions. Plan IDs preserve historical numbering, not a current release mandate. [Workspace methodology and status definitions](../SUMMARY.md#status-definitions).
+This section is authoritative for current decisions. Existing IDs and allegation titles are retained for traceability; a refuted title is not a current assertion. Prior-cycle decisions were rechecked, not used as proof. The first cycle is available in repository history at this snapshot. The original historical body below remains preserved once and is superseded, including its counts, severities and recipes. [Workspace scope and status definitions](../SUMMARY.md#status-definitions).
 
-Signed-zero hashing, container materialization, epoch-adjacent classification, and macro parsing defects remain. Coverage claims need correction: upstream tests exercise scalar HAVING, owner escalation, and WasmCompiler permissions. for_each_field is quadratic but has no current engine caller.
+Unrelated external edits began in dependency/toolchain/CI metadata during collection; additional Rust-source edits appeared afterward. They were left untouched. Evidence and decisions are tied to the frozen commit, not those later changes or an installed toolchain. “Current” below means current at that snapshot; no re-audit of the modified working tree is implied.
+
+Signed-zero hashing and HavingView materialization have concrete witnesses. Existing upstream tests refute workspace-wide absence claims; their pre-existing presence must not be presented as newly completed fixes.
 
 ## Current claim decisions
 
@@ -13,7 +15,7 @@ Signed-zero hashing, container materialization, epoch-adjacent classification, a
 |---:|---:|---:|---:|---:|---:|---:|
 | 10 | 9 | 0 | 1 | 0 | 0 | 0 |
 
-These are decisions on report claims, including repeated roots, bundled observations and non-findings—not a unique-bug census. Closed/N/A rows have no current risk; unverified risk is provisional. Pure style and unmeasured optimization claims do not establish runtime impact.
+These are duplicate-inclusive report decisions, not a unique-bug census. Pure style or structural optimization does not establish a runtime incident; unverified impact remains provisional.
 
 <a id="review-1"></a>
 
@@ -21,9 +23,11 @@ These are decisions on report claims, including repeated roots, bundled observat
 
 Status: `confirmed-open`. Current risk: `high`.
 
-PartialEq equates both zeros; Hash canonicalizes NaN only and hashes unequal zero bit patterns. The registered regression still asserts unequal hashes instead of testing equal-key membership/deduplication.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-types/src/types/value.rs:293](../../../../../crates/shamir-types/src/types/value.rs#L293); [crates/shamir-types/src/types/value.rs:697](../../../../../crates/shamir-types/src/types/value.rs#L697); [crates/shamir-types/src/types/tests/value_tests.rs:525](../../../../../crates/shamir-types/src/types/tests/value_tests.rs#L525); [crates/shamir-types/src/types/tests/mod.rs:8](../../../../../crates/shamir-types/src/types/tests/mod.rs#L8).
+PartialEq equates ±0 while Hash retains distinct bits. test_f64_neg_zero_hash asserts inequality; the needed oracle requires equal hashes and dedup/lookup agreement.
+
+Evidence: [crates/shamir-types/src/types/value.rs:293](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-types/src/types/value.rs#L293); [crates/shamir-types/src/types/value.rs:709](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-types/src/types/value.rs#L709); [crates/shamir-types/src/types/tests/value_tests.rs:525](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-types/src/types/tests/value_tests.rs#L525).
 
 <a id="review-2"></a>
 
@@ -31,19 +35,23 @@ Evidence: [crates/shamir-types/src/types/value.rs:293](../../../../../crates/sha
 
 Status: `confirmed-open`. Current risk: `medium`.
 
-The implementation still wraps container-to-Null conversion in Some, contradicting both its comment and the trait's owned-subtree contract. Contains' container fallback consequently receives Null and returns false; None would also return false there, so the original claimed difference between those two representations is not established for that caller.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-types/src/record_view/record_ref.rs:87](../../../../../crates/shamir-types/src/record_view/record_ref.rs#L87); [crates/shamir-types/src/record_view/record_ref.rs:535](../../../../../crates/shamir-types/src/record_view/record_ref.rs#L535); [crates/shamir-types/src/record_view/record_ref.rs:580](../../../../../crates/shamir-types/src/record_view/record_ref.rs#L580); [crates/shamir-engine/src/query/filter/filter_node.rs:836](../../../../../crates/shamir-engine/src/query/filter/filter_node.rs#L836).
+A known container field returns Some(Null), violating subtree materialization and the local comment. Contains sees false under either Null or None, so that particular distinction is not the witness.
+
+Evidence: [crates/shamir-types/src/record_view/record_ref.rs:87](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-types/src/record_view/record_ref.rs#L87); [crates/shamir-types/src/record_view/record_ref.rs:538](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-types/src/record_view/record_ref.rs#L538); [crates/shamir-types/src/record_view/record_ref.rs:580](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-types/src/record_view/record_ref.rs#L580).
 
 <a id="review-3"></a>
 
 ### Claim 3 — `RecordId::is_system()` misclassifies real records created within ~71 minutes after CUSTOM_EPOCH; the comment asserts this cannot happen
 
-Status: `confirmed-open`. Current risk: `medium`.
+Status: `confirmed-open`. Current risk: `low`.
 
-Both timestamp constructors produce four leading zero bytes for relative times 0 through 2^32-1 microseconds; is_system accepts that prefix. Pre-epoch signed subtraction instead produces negative values, not zero. No production is_system caller was found; current misuse is an API risk, not demonstrated authorization bypass.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-types/src/types/record_id.rs:45](../../../../../crates/shamir-types/src/types/record_id.rs#L45); [crates/shamir-types/src/types/record_id.rs:67](../../../../../crates/shamir-types/src/types/record_id.rs#L67); [crates/shamir-types/src/types/record_id.rs:107](../../../../../crates/shamir-types/src/types/record_id.rs#L107); [crates/shamir-types/src/types/tests/record_id_tests.rs:131](../../../../../crates/shamir-types/src/types/tests/record_id_tests.rs#L131).
+Both constructors have a zero prefix for relative times 0 through 2^32-1; pre-epoch negatives do not. No live production classification caller was found, limiting current impact to API/doc correctness.
+
+Evidence: [crates/shamir-types/src/types/record_id.rs:45](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-types/src/types/record_id.rs#L45); [crates/shamir-types/src/types/record_id.rs:67](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-types/src/types/record_id.rs#L67); [crates/shamir-types/src/types/record_id.rs:108](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-types/src/types/record_id.rs#L108).
 
 <a id="review-4"></a>
 
@@ -51,9 +59,11 @@ Evidence: [crates/shamir-types/src/types/record_id.rs:45](../../../../../crates/
 
 Status: `confirmed-open`. Current risk: `low`.
 
-No shamir-types test constructs HavingView or targets its container, nested-path, or unknown-key behavior. However, registered engine HAVING tests call apply_group_by, which constructs HavingView; blanket workspace-wide zero coverage is false.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-types/src/record_view/tests/mod.rs:9](../../../../../crates/shamir-types/src/record_view/tests/mod.rs#L9); [crates/shamir-engine/src/query/read/tests/qv_postprocess_tests.rs:745](../../../../../crates/shamir-engine/src/query/read/tests/qv_postprocess_tests.rs#L745); [crates/shamir-engine/src/query/read/tests/exec_tests.rs:323](../../../../../crates/shamir-engine/src/query/read/tests/exec_tests.rs#L323); [crates/shamir-engine/src/query/read/aggregate.rs:1308](../../../../../crates/shamir-engine/src/query/read/aggregate.rs#L1308); [crates/shamir-engine/src/query/read/tests/mod.rs:6](../../../../../crates/shamir-engine/src/query/read/tests/mod.rs#L6).
+No types test directly constructs HavingView or covers its container/nested/unknown-key cases. Registered engine HAVING tests exercise scalar behavior and discriminate omission of filtering.
+
+Evidence: [crates/shamir-types/src/record_view/tests/mod.rs:9](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-types/src/record_view/tests/mod.rs#L9); [crates/shamir-engine/src/query/read/tests/qv_postprocess_tests.rs:745](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-engine/src/query/read/tests/qv_postprocess_tests.rs#L745); [crates/shamir-engine/src/query/read/aggregate.rs:1308](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-engine/src/query/read/aggregate.rs#L1308).
 
 <a id="review-5"></a>
 
@@ -61,11 +71,13 @@ Evidence: [crates/shamir-types/src/record_view/tests/mod.rs:9](../../../../../cr
 
 Status: `confirmed-open`. Current risk: `low`.
 
-Every iterated field invokes materialize_at, restarting value_bytes_at at offset zero. Quadratic scanning is source-proven; current engine source has no for_each_field call, so the alleged current SELECT * regression is unsupported.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-types/src/record_view/record_ref.rs:338](../../../../../crates/shamir-types/src/record_view/record_ref.rs#L338); [crates/shamir-types/src/record_view/lens.rs:1139](../../../../../crates/shamir-types/src/record_view/lens.rs#L1139); [crates/shamir-types/src/record_view/tests/record_ref_tests.rs:969](../../../../../crates/shamir-types/src/record_view/tests/record_ref_tests.rs#L969).
+The repeated zero-offset scan is structural; semantic parity tests cannot detect its complexity, and current engine code does not call this method.
 
-Grouping/duplicate: `performance-hotpath.md:2`. This row is not another independent defect.
+Evidence: [crates/shamir-types/src/record_view/record_ref.rs:338](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-types/src/record_view/record_ref.rs#L338); [crates/shamir-types/src/record_view/lens.rs:1139](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-types/src/record_view/lens.rs#L1139).
+
+Grouping/duplicate: [performance-hotpath.md#2](performance-hotpath.md#review-2). This is not an additional independent defect.
 
 <a id="review-6"></a>
 
@@ -73,9 +85,11 @@ Grouping/duplicate: `performance-hotpath.md:2`. This row is not another independ
 
 Status: `confirmed-open`. Current risk: `low`.
 
-Object scalar arms consume one token tree and have no unary-minus value arm; array accumulation forwards the complete negative token sequence. Existing negative tests are top-level, not negative object values. Arbitrary expressions require the documented @ escape; that broader restriction is intentional.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-types/src/macros/mpack.rs:94](../../../../../crates/shamir-types/src/macros/mpack.rs#L94); [crates/shamir-types/src/macros/mpack.rs:137](../../../../../crates/shamir-types/src/macros/mpack.rs#L137); [crates/shamir-types/src/macros/mpack.rs:249](../../../../../crates/shamir-types/src/macros/mpack.rs#L249); [crates/shamir-types/src/macros/tests/mpack_tests.rs:33](../../../../../crates/shamir-types/src/macros/tests/mpack_tests.rs#L33).
+Object arms lack unary-minus literal handling, unlike top-level/array expansion. Existing negative scalar tests cannot discriminate that missing object rule; arbitrary expressions remain intentionally @-only.
+
+Evidence: [crates/shamir-types/src/macros/mpack.rs:94](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-types/src/macros/mpack.rs#L94); [crates/shamir-types/src/macros/mpack.rs:249](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-types/src/macros/mpack.rs#L249); [crates/shamir-types/src/macros/tests/mpack_tests.rs:33](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-types/src/macros/tests/mpack_tests.rs#L33).
 
 <a id="review-7"></a>
 
@@ -83,9 +97,11 @@ Evidence: [crates/shamir-types/src/macros/mpack.rs:94](../../../../../crates/sha
 
 Status: `partially-fixed`. Current risk: `low`.
 
-Direct types tests remain absent for these five symbols. Upstream registered tests discriminate missing versus explicit System ownership and WasmCompiler permission changes. generation is an allocation high-water mark, not a counter incremented on every successful touch: existing-name touches and touch_with_id filling lower-id holes can leave it unchanged. Username-hash tests would not prove collision resistance; into_inner handoff remains untested.
+Prior-cycle decision: `partially-fixed`.
 
-Evidence: [crates/shamir-types/src/core/interner/interner.rs:157](../../../../../crates/shamir-types/src/core/interner/interner.rs#L157); [crates/shamir-types/src/core/interner/interner.rs:303](../../../../../crates/shamir-types/src/core/interner/interner.rs#L303); [crates/shamir-types/src/core/interner/interner.rs:449](../../../../../crates/shamir-types/src/core/interner/interner.rs#L449); [crates/shamir-types/src/tests/secret_tests.rs:1](../../../../../crates/shamir-types/src/tests/secret_tests.rs#L1); [crates/shamir-db/src/shamir_db/tests/enforcement_tests.rs:714](../../../../../crates/shamir-db/src/shamir_db/tests/enforcement_tests.rs#L714); [crates/shamir-db/src/shamir_db/tests/enforcement_tests.rs:762](../../../../../crates/shamir-db/src/shamir_db/tests/enforcement_tests.rs#L762); [crates/shamir-db/src/shamir_db/tests/wasm_compiler_permission_tests.rs:65](../../../../../crates/shamir-db/src/shamir_db/tests/wasm_compiler_permission_tests.rs#L65); [crates/shamir-db/src/shamir_db/tests/mod.rs:26](../../../../../crates/shamir-db/src/shamir_db/tests/mod.rs#L26).
+Pre-existing owner absence versus explicit System tests and compiler permission controls are meaningful. Direct generation/into_inner tests remain absent; username-hash fixture distinctness would not prove collision resistance.
+
+Evidence: [crates/shamir-db/src/shamir_db/tests/enforcement_tests.rs:714](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/tests/enforcement_tests.rs#L714); [crates/shamir-db/src/shamir_db/tests/enforcement_tests.rs:762](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/tests/enforcement_tests.rs#L762); [crates/shamir-db/src/shamir_db/tests/wasm_compiler_permission_tests.rs:97](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/tests/wasm_compiler_permission_tests.rs#L97); [crates/shamir-types/src/tests/secret_tests.rs:1](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-types/src/tests/secret_tests.rs#L1).
 
 <a id="review-8"></a>
 
@@ -93,9 +109,11 @@ Evidence: [crates/shamir-types/src/core/interner/interner.rs:157](../../../../..
 
 Status: `confirmed-open`. Current risk: `low`.
 
-A failed OnceLock::set is still guarded only by debug_assert, while the forward mapping remains inserted. The public cross-API interleaving can cause permanent divergence. Deployment reachability is conditional; touch_with_id also has a live drainer caller, so describing all callers as startup recovery is inaccurate.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-types/src/core/interner/interner.rs:169](../../../../../crates/shamir-types/src/core/interner/interner.rs#L169); [crates/shamir-types/src/core/interner/interner.rs:223](../../../../../crates/shamir-types/src/core/interner/interner.rs#L223); [crates/shamir-types/src/core/interner/interner.rs:449](../../../../../crates/shamir-types/src/core/interner/interner.rs#L449); [crates/shamir-engine/src/tx/drainer.rs:1116](../../../../../crates/shamir-engine/src/tx/drainer.rs#L1116).
+A touch_ind reservation can lose its reverse slot to touch_with_id before current_id is advanced there; release keeps the inconsistent forward entry. Sequential recovery tests do not catch this interleaving.
+
+Evidence: [crates/shamir-types/src/core/interner/interner.rs:157](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-types/src/core/interner/interner.rs#L157); [crates/shamir-types/src/core/interner/interner.rs:223](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-types/src/core/interner/interner.rs#L223); [crates/shamir-types/src/core/interner/interner.rs:449](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-types/src/core/interner/interner.rs#L449).
 
 <a id="review-9"></a>
 
@@ -103,9 +121,11 @@ Evidence: [crates/shamir-types/src/core/interner/interner.rs:169](../../../../..
 
 Status: `confirmed-open`. Current risk: `nit`.
 
-The assertion compares two calls to the same timestamp encoder and cannot distinguish a consistently wrong timestamp layout. Separate layout and uniqueness assertions provide real coverage; the whole test is not vacuous.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-types/src/types/tests/record_id_tests.rs:107](../../../../../crates/shamir-types/src/types/tests/record_id_tests.rs#L107); [crates/shamir-types/src/types/tests/record_id_tests.rs:114](../../../../../crates/shamir-types/src/types/tests/record_id_tests.rs#L114); [crates/shamir-types/src/types/tests/record_id_tests.rs:135](../../../../../crates/shamir-types/src/types/tests/record_id_tests.rs#L135).
+The self-comparison misses a consistently wrong prefix; separate explicit expected-byte layout and uniqueness assertions remain discriminating.
+
+Evidence: [crates/shamir-types/src/types/tests/record_id_tests.rs:107](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-types/src/types/tests/record_id_tests.rs#L107); [crates/shamir-types/src/types/tests/record_id_tests.rs:135](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-types/src/types/tests/record_id_tests.rs#L135).
 
 <a id="review-10"></a>
 
@@ -113,18 +133,20 @@ Evidence: [crates/shamir-types/src/types/tests/record_id_tests.rs:107](../../../
 
 Status: `confirmed-open`. Current risk: `nit`.
 
-Both error enums remain; bincode examples contain stale paths and repeated derive text; PathNotFound has no production constructor; read_str_len still uses NonBinKey. Corrections: examples are unfenced prose, not executable doctests, and public string convenience methods discard the private NonBinKey error into None.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-types/src/codecs/basic/bincode.rs:8](../../../../../crates/shamir-types/src/codecs/basic/bincode.rs#L8); [crates/shamir-types/src/codecs/basic/bincode.rs:26](../../../../../crates/shamir-types/src/codecs/basic/bincode.rs#L26); [crates/shamir-types/src/codecs/error.rs:4](../../../../../crates/shamir-types/src/codecs/error.rs#L4); [crates/shamir-types/src/types/value_error.rs:21](../../../../../crates/shamir-types/src/types/value_error.rs#L21); [crates/shamir-types/src/types/tests/value_api_tests.rs:265](../../../../../crates/shamir-types/src/types/tests/value_api_tests.rs#L265); [crates/shamir-types/src/record_view/lens.rs:196](../../../../../crates/shamir-types/src/record_view/lens.rs#L196).
+Duplicate error naming, stale unfenced examples, unused production PathNotFound, and NonBinKey string errors remain. Public convenience helpers discard the latter; enabling doctests does not execute unfenced prose.
 
-## Corrections and qualified non-findings
+Evidence: [crates/shamir-types/src/codecs/basic/bincode.rs:26](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-types/src/codecs/basic/bincode.rs#L26); [crates/shamir-types/src/types/value_error.rs:21](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-types/src/types/value_error.rs#L21); [crates/shamir-types/src/record_view/lens.rs:196](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-types/src/record_view/lens.rs#L196).
 
-- The signed-zero fix must change the incorrect assertion, not necessarily delete its test.
-- Signed i64::saturating_sub saturates only on integer overflow. Ordinary pre-epoch timestamps encode negatively; SUMMARY's purported source verification of clamping to zero is wrong.
-- HavingView::new looks up existing ids with get_ind; it does not intern row keys. Unknown keys are omitted from its index.
-- Returning None for existing containers would match the local comment but still not satisfy RecordRef's documented subtree-materialization contract; choose semantics against actual consumers.
-- The cited upstream owner and WasmCompiler tests already existed before the review; their presence is not evidence of a later fix.
-- Registered parity, merge, and depth tests have meaningful assertions, but their existence does not prove the universal malformed-input or byte-parity guarantees.
+## Evidence and recipe corrections
+
+- The signed-zero test should be corrected, not necessarily deleted.
+- Returning None for containers only matches the local HavingView comment; it still fails the generic subtree contract.
+- HavingView construction uses get_ind and does not intern unknown row keys; nested paths are explicitly unsupported there.
+- The garbage-bytes no-panic test starts with a nonmap byte and therefore exercises constructor rejection, not malformed map iteration or index allocation.
+- The depth test probes well beyond the cap; it does not establish exact boundary agreement among the 128-capped lens/custom decoder and default rmp-serde decoding.
+- Coverage partiality records already-existing controls, not a post-audit source fix. Generation's actual cache-completeness failure warrants a behavioral oracle.
 
 ---
 

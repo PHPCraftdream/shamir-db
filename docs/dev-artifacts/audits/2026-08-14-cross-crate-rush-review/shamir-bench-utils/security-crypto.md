@@ -1,11 +1,13 @@
-<!-- revalidation:2026-10-08 source:92ad58266bf57ddea1fa3c8a47affba1a3a9a096 -->
-# shamir-bench-utils — security-crypto revalidation
+<!-- revalidation:2026-10-08 cycle:independent-2 source:e3765c935fc71655ee1ec0160cf180607935d89b -->
+# shamir-bench-utils — security-crypto independent revalidation (cycle 2)
 
-Source snapshot: `92ad58266bf57ddea1fa3c8a47affba1a3a9a096`. Revalidated 2026-10-08 by read-only XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run; no source fix is part of this update. Test registration/assertions are evidence of an oracle, not proof of a passing run.
+Frozen source snapshot: `e3765c935fc71655ee1ec0160cf180607935d89b`. Independently revalidated 2026-10-08 by a fresh XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run. Source-fixed means the specified mechanism was already removed at this snapshot; this cycle implements no source fix.
 
-This section is authoritative for current status. Original titles/IDs are retained for traceability; a refuted title is not a current assertion. The collapsed historical report below is superseded, including its counts, severity, scenarios and fix instructions. Plan IDs preserve historical numbering, not a current release mandate. [Workspace methodology and status definitions](../SUMMARY.md#status-definitions).
+This section is authoritative for current decisions. Existing IDs and allegation titles are retained for traceability; a refuted title is not a current assertion. Prior-cycle decisions were rechecked, not used as proof. The first cycle is available in repository history at this snapshot. The original historical body below remains preserved once and is superseded, including its counts, severities and recipes. [Workspace scope and status definitions](../SUMMARY.md#status-definitions).
 
-No production crypto or remote-input vulnerability is established. The allocator remains a low-severity, process-wide development-tooling side effect.
+Unrelated external edits began in dependency/toolchain/CI metadata during collection; additional Rust-source edits appeared afterward. They were left untouched. Evidence and decisions are tied to the frozen commit, not those later changes or an installed toolchain. “Current” below means current at that snapshot; no re-audit of the modified working tree is implied.
+
+No crypto, secret, or remote-input mechanism is present in own source. The allocator issue is current development-tooling scope; extrapolation to all production configurations or dependency memory safety would exceed the evidence.
 
 ## Current claim decisions
 
@@ -13,7 +15,7 @@ No production crypto or remote-input vulnerability is established. The allocator
 |---:|---:|---:|---:|---:|---:|---:|
 | 1 | 1 | 0 | 0 | 0 | 0 | 0 |
 
-These are decisions on report claims, including repeated roots, bundled observations and non-findings—not a unique-bug census. Closed/N/A rows have no current risk; unverified risk is provisional. Pure style and unmeasured optimization claims do not establish runtime impact.
+These are duplicate-inclusive report decisions, not a unique-bug census. Pure style or structural optimization does not establish a runtime incident; unverified impact remains provisional.
 
 <a id="review-1"></a>
 
@@ -21,19 +23,20 @@ These are decisions on report claims, including repeated roots, bundled observat
 
 Status: `confirmed-open`. Current risk: `low`.
 
-Enabling peak_mem still places a global allocator in the library. Both current dependency edges are dev-only, but linked fixture-only benches inherit the allocator too. No existing production dependency edge or secret-handling use was found.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-bench-utils/src/peak_mem.rs:39](../../../../../crates/shamir-bench-utils/src/peak_mem.rs#L39); [crates/shamir-engine/Cargo.toml:107](../../../../../crates/shamir-engine/Cargo.toml#L107); [crates/shamir-index/Cargo.toml:64](../../../../../crates/shamir-index/Cargo.toml#L64); [crates/shamir-engine/benches/filtered_vector_search.rs:25](../../../../../crates/shamir-engine/benches/filtered_vector_search.rs#L25).
+The allocator is declared in the library and enabled through current dev dependencies, including linked fixture-only benches. No normal production dependency or secret-related use was found. A future regular edge is a prospective configuration risk, not an existing exploit.
 
-Grouping/duplicate: `SUMMARY.md#5.1`. This row is not another independent defect.
+Evidence: [crates/shamir-bench-utils/src/peak_mem.rs:39](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-bench-utils/src/peak_mem.rs#L39); [crates/shamir-engine/Cargo.toml:107](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-engine/Cargo.toml#L107); [crates/shamir-index/Cargo.toml:64](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-index/Cargo.toml#L64); [crates/shamir-engine/benches/filtered_vector_search.rs:25](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-engine/benches/filtered_vector_search.rs#L25).
 
-## Corrections and qualified non-findings
+Grouping/duplicate: [api-wire-protocol.md#1](api-wire-protocol.md#review-1). This is not an additional independent defect.
 
-- Own src contains no unsafe/static mut, auth/HMAC/SCRAM/TLS, file/network/process/environment operations, or secret material; this does not audit dependency implementations.
-- Lcg is explicitly non-cryptographic and has only fixture uses. Current ordinary production dependency paths do not include this crate; that is a current graph fact, not an architectural prohibition on future regular dependencies.
-- The checksummed peak_alloc 0.3.0 lockfile pin is confirmed at Cargo.lock:2396; pinning is not evidence of dependency behavioral or memory-safety guarantees.
-- A bench-local allocator macro/snippet is only a design option: measurement helpers must access that same allocator's counters.
-- No compiler diagnostic number or quantitative allocator-overhead claim was verified.
+## Evidence and recipe corrections
+
+- The own-source no-unsafe/no-secret result is supported, but peak_alloc itself implements unsafe GlobalAlloc methods; dependency safety is a separate obligation.
+- Current dev-only edges exclude this helper from ordinary production dependency paths, not every possible future or explicitly shipped example configuration.
+- No duplicate-allocator diagnostic number or numerical overhead was verified.
+- A bench-local declaration can retain shared peak_alloc counters, but a replacement allocator design must make helpers read the allocator actually installed in that binary.
 
 ---
 

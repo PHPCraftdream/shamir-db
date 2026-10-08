@@ -1,43 +1,49 @@
-<!-- revalidation:2026-10-08 source:92ad58266bf57ddea1fa3c8a47affba1a3a9a096 -->
-# shamir-sdk — style-claude-md revalidation
+<!-- revalidation:2026-10-08 cycle:independent-2 source:e3765c935fc71655ee1ec0160cf180607935d89b -->
+# shamir-sdk — style-claude-md independent revalidation (cycle 2)
 
-Source snapshot: `92ad58266bf57ddea1fa3c8a47affba1a3a9a096`. Revalidated 2026-10-08 by read-only XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run; no source fix is part of this update. Test registration/assertions are evidence of an oracle, not proof of a passing run.
+Frozen source snapshot: `e3765c935fc71655ee1ec0160cf180607935d89b`. Independently revalidated 2026-10-08 by a fresh XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run. Source-fixed means the specified mechanism was already removed at this snapshot; this cycle implements no source fix.
 
-This section is authoritative for current status. Original titles/IDs are retained for traceability; a refuted title is not a current assertion. The collapsed historical report below is superseded, including its counts, severity, scenarios and fix instructions. Plan IDs preserve historical numbering, not a current release mandate. [Workspace methodology and status definitions](../SUMMARY.md#status-definitions).
+This section is authoritative for current decisions. Existing IDs and allegation titles are retained for traceability; a refuted title is not a current assertion. Prior-cycle decisions were rechecked, not used as proof. The first cycle is available in repository history at this snapshot. The original historical body below remains preserved once and is superseded, including its counts, severities and recipes. [Workspace scope and status definitions](../SUMMARY.md#status-definitions).
 
-The 17 function-body imports and documentation hygiene issues remain. They are convention/documentation matters, not independent high-severity runtime defects.
+Unrelated external edits began in dependency/toolchain/CI metadata during collection; additional Rust-source edits appeared afterward. They were left untouched. Evidence and decisions are tied to the frozen commit, not those later changes or an installed toolchain. “Current” below means current at that snapshot; no re-audit of the modified working tree is implied.
+
+Structural test organization is sound. Seventeen body imports, obsolete runtime comments, and the stale test path remain nits. Publicly reachable macro support is already documented internal and is not a semantic contradiction.
 
 ## Current claim decisions
 
 | Claim decisions | Open | Source-fixed | Partial | Refuted | Unverified | N/A |
 |---:|---:|---:|---:|---:|---:|---:|
-| 5 | 4 | 0 | 0 | 0 | 0 | 1 |
+| 5 | 3 | 0 | 0 | 0 | 0 | 2 |
 
-These are decisions on report claims, including repeated roots, bundled observations and non-findings—not a unique-bug census. Closed/N/A rows have no current risk; unverified risk is provisional. Pure style and unmeasured optimization claims do not establish runtime impact.
+These are duplicate-inclusive report decisions, not a unique-bug census. Pure style or structural optimization does not establish a runtime incident; unverified impact remains provisional.
 
 <a id="review-1"></a>
 
 ### Claim 1 — Function-body `use` imports in `src/tests/` violate the "Imports at the top" rule
 
-Status: `confirmed-open`. Current risk: `low`.
+Status: `confirmed-open`. Current risk: `nit`.
 
-All 17 cited imports remain: 15 in value_tests and two in validation_tests. No documented collision/cfg exception justifies these local imports. This is a style-only issue with no runtime failure mechanism.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-sdk/src/tests/value_tests.rs:146](../../../../../crates/shamir-sdk/src/tests/value_tests.rs#L146); [crates/shamir-sdk/src/tests/value_tests.rs:279](../../../../../crates/shamir-sdk/src/tests/value_tests.rs#L279); [crates/shamir-sdk/src/tests/value_tests.rs:401](../../../../../crates/shamir-sdk/src/tests/value_tests.rs#L401); [crates/shamir-sdk/src/tests/validation_tests.rs:239](../../../../../crates/shamir-sdk/src/tests/validation_tests.rs#L239); [crates/shamir-sdk/src/tests/validation_tests.rs:305](../../../../../crates/shamir-sdk/src/tests/validation_tests.rs#L305).
+Fifteen value-test and two validation-test imports remain without collision/cfg exceptions. No runtime failure mechanism follows.
 
-Grouping/duplicate: `SUMMARY.md#7.1`. This row is not another independent defect.
+Evidence: [CLAUDE.md:617](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/CLAUDE.md#L617); [crates/shamir-sdk/src/tests/value_tests.rs:146](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-sdk/src/tests/value_tests.rs#L146); [crates/shamir-sdk/src/tests/validation_tests.rs:305](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-sdk/src/tests/validation_tests.rs#L305).
+
+Grouping/duplicate: [SUMMARY.md#7.1](SUMMARY.md#review-7-1). This is not an additional independent defect.
 
 <a id="review-2"></a>
 
 ### Claim 2 — Stale slice-jargon comments in `__rt::block_on` misdescribe what the SDK supports
 
-Status: `confirmed-open`. Current risk: `low`.
+Status: `confirmed-open`. Current risk: `nit`.
 
-The pure-functions-only and future-slice-4 comments are unchanged despite all four macro kinds using block_on and host imports already existing. The accurate invariant is guest-side synchronous imports, not that every author-written future must be Ready.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-sdk/src/__rt.rs:34](../../../../../crates/shamir-sdk/src/__rt.rs#L34); [crates/shamir-sdk/src/__rt.rs:54](../../../../../crates/shamir-sdk/src/__rt.rs#L54); [crates/shamir-sdk-macros/src/lib.rs:144](../../../../../crates/shamir-sdk-macros/src/lib.rs#L144); [crates/shamir-sdk-macros/src/lib.rs:391](../../../../../crates/shamir-sdk-macros/src/lib.rs#L391).
+Pure-only and future-import claims are obsolete. All wrappers use the driver; synchronous imports do not guarantee Ready for arbitrary authored futures.
 
-Grouping/duplicate: `SUMMARY.md#2.1`. This row is not another independent defect.
+Evidence: [crates/shamir-sdk/src/__rt.rs:34](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-sdk/src/__rt.rs#L34); [crates/shamir-sdk/src/__rt.rs:54](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-sdk/src/__rt.rs#L54); [crates/shamir-sdk-macros/src/lib.rs:391](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-sdk-macros/src/lib.rs#L391).
+
+Grouping/duplicate: [SUMMARY.md#2.1](SUMMARY.md#review-2-1). This is not an additional independent defect.
 
 <a id="review-3"></a>
 
@@ -45,39 +51,47 @@ Grouping/duplicate: `SUMMARY.md#2.1`. This row is not another independent defect
 
 Status: `confirmed-open`. Current risk: `nit`.
 
-The doc still points to tests/value_tests.rs; conformance tests are registered from src/tests/value_tests.rs.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-sdk/src/value.rs:9](../../../../../crates/shamir-sdk/src/value.rs#L9); [crates/shamir-sdk/src/tests/mod.rs:2](../../../../../crates/shamir-sdk/src/tests/mod.rs#L2); [crates/shamir-sdk/src/tests/value_tests.rs:14](../../../../../crates/shamir-sdk/src/tests/value_tests.rs#L14).
+The stated crate-root path is absent; the existing registered module lives under src/tests.
 
-Grouping/duplicate: `SUMMARY.md#7.3`. This row is not another independent defect.
+Evidence: [crates/shamir-sdk/src/value.rs:9](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-sdk/src/value.rs#L9); [crates/shamir-sdk/src/tests/mod.rs:2](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-sdk/src/tests/mod.rs#L2).
+
+Grouping/duplicate: [SUMMARY.md#7.3](SUMMARY.md#review-7-3). This is not an additional independent defect.
 
 <a id="review-4"></a>
 
 ### Claim 4 — `__rt` doc claims "not part of the public SDK surface" while the module is fully `pub` with no `#[doc(hidden)]`
 
-Status: `confirmed-open`. Current risk: `nit`.
+Status: `not-applicable`. Current risk: `—`.
 
-Public visibility and missing doc(hidden) remain. Macro-generated consumer code needs the public path; clarify unsupported direct use and support policy rather than asserting that public implementation visibility itself contradicts internal API intent.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-sdk/src/lib.rs:18](../../../../../crates/shamir-sdk/src/lib.rs#L18); [crates/shamir-sdk/src/__rt.rs:3](../../../../../crates/shamir-sdk/src/__rt.rs#L3); [crates/shamir-sdk-macros/src/lib.rs:259](../../../../../crates/shamir-sdk-macros/src/lib.rs#L259).
+External generated code requires visibility, and the module already states it is outside the SDK surface. doc(hidden) is optional rustdoc hygiene, not proof of privacy or semver exemption.
 
-Grouping/duplicate: `SUMMARY.md#5.7`. This row is not another independent defect.
+Evidence: [crates/shamir-sdk/src/lib.rs:18](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-sdk/src/lib.rs#L18); [crates/shamir-sdk/src/__rt.rs:3](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-sdk/src/__rt.rs#L3); [crates/shamir-sdk-macros/src/lib.rs:259](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-sdk-macros/src/lib.rs#L259).
+
+Grouping/duplicate: [SUMMARY.md#5.7](SUMMARY.md#review-5-7). This is not an additional independent defect.
 
 <a id="review-summary"></a>
 
 ### Claim Summary — Strong structural conformance: manifest-only tests, header imports, and closely-coupled public types
 
-Status: `not-applicable`. Current risk: —.
+Status: `not-applicable`. Current risk: `—`.
 
-The cited non-finding remains supported: tests/mod.rs is a manifest, lib.rs wires tests, no inline test modules exist, implementation imports are at file/module headers, and paired API types are closely coupled. Test-body imports are the separately identified exception.
+Prior-cycle decision: `not-applicable`.
 
-Evidence: [crates/shamir-sdk/src/tests/mod.rs:1](../../../../../crates/shamir-sdk/src/tests/mod.rs#L1); [crates/shamir-sdk/src/lib.rs:62](../../../../../crates/shamir-sdk/src/lib.rs#L62); [crates/shamir-sdk/src/host_imports.rs:23](../../../../../crates/shamir-sdk/src/host_imports.rs#L23); [crates/shamir-sdk/src/context.rs:58](../../../../../crates/shamir-sdk/src/context.rs#L58); [crates/shamir-sdk/src/http.rs:51](../../../../../crates/shamir-sdk/src/http.rs#L51).
+tests/mod.rs is a manifest, lib.rs registers it, tests are not embedded inline, implementation imports sit at module headers, and paired public types are closely coupled.
 
-## Corrections and qualified non-findings
+Evidence: [crates/shamir-sdk/src/tests/mod.rs:1](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-sdk/src/tests/mod.rs#L1); [crates/shamir-sdk/src/lib.rs:62](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-sdk/src/lib.rs#L62); [crates/shamir-sdk/src/host_imports.rs:23](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-sdk/src/host_imports.rs#L23); [crates/shamir-sdk/src/context.rs:58](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-sdk/src/context.rs#L58).
 
-- The proposed replacement comment must not claim all bodies are necessarily Ready or that a spin itself proves a programming bug; supported execution policy needs explicit documentation.
-- doc(hidden) hides generated-support APIs from normal rustdoc but does not make them private or automatically semver-exempt.
-- Preserve style-only severity and separation from substantive runtime changes.
+## Evidence and recipe corrections
+
+- Use nit severity for convention-only imports/comments rather than suggesting runtime Low impact.
+- There are 17 import statements, but the historical new_map/new_set subtotal of 11 is inaccurate: six new_map and three new_set statements account for nine.
+- A replacement runtime comment must describe an explicit supported-future policy, not assert that synchronous imports make every body Ready.
+- Private type_name placement is compatible with the closely-coupled helper rule.
+- Public macro-support visibility and internal support documentation are compatible; adding doc(hidden) is optional presentation cleanup.
 
 ---
 

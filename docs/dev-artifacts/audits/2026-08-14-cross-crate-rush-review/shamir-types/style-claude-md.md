@@ -1,11 +1,13 @@
-<!-- revalidation:2026-10-08 source:92ad58266bf57ddea1fa3c8a47affba1a3a9a096 -->
-# shamir-types — style-claude-md revalidation
+<!-- revalidation:2026-10-08 cycle:independent-2 source:e3765c935fc71655ee1ec0160cf180607935d89b -->
+# shamir-types — style-claude-md independent revalidation (cycle 2)
 
-Source snapshot: `92ad58266bf57ddea1fa3c8a47affba1a3a9a096`. Revalidated 2026-10-08 by read-only XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run; no source fix is part of this update. Test registration/assertions are evidence of an oracle, not proof of a passing run.
+Frozen source snapshot: `e3765c935fc71655ee1ec0160cf180607935d89b`. Independently revalidated 2026-10-08 by a fresh XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run. Source-fixed means the specified mechanism was already removed at this snapshot; this cycle implements no source fix.
 
-This section is authoritative for current status. Original titles/IDs are retained for traceability; a refuted title is not a current assertion. The collapsed historical report below is superseded, including its counts, severity, scenarios and fix instructions. Plan IDs preserve historical numbering, not a current release mandate. [Workspace methodology and status definitions](../SUMMARY.md#status-definitions).
+This section is authoritative for current decisions. Existing IDs and allegation titles are retained for traceability; a refuted title is not a current assertion. Prior-cycle decisions were rechecked, not used as proof. The first cycle is available in repository history at this snapshot. The original historical body below remains preserved once and is superseded, including its counts, severities and recipes. [Workspace scope and status definitions](../SUMMARY.md#status-definitions).
 
-The access mega-file, duplicate manual error type, and local imports remain. These are low/nit maintainability issues. The test-wrapper rule violation is refuted: wrappers are inside test files, and more than one file uses that shape.
+Unrelated external edits began in dependency/toolchain/CI metadata during collection; additional Rust-source edits appeared afterward. They were left untouched. Evidence and decisions are tied to the frozen commit, not those later changes or an installed toolchain. “Current” below means current at that snapshot; no re-audit of the modified working tree is implied.
+
+The file/export and import conventions have genuine low/nit deviations. Test-file wrappers and private manifest declarations are valid registered layouts, not missing test registration.
 
 ## Current claim decisions
 
@@ -13,7 +15,7 @@ The access mega-file, duplicate manual error type, and local imports remain. The
 |---:|---:|---:|---:|---:|---:|---:|
 | 7 | 5 | 0 | 0 | 1 | 0 | 1 |
 
-These are decisions on report claims, including repeated roots, bundled observations and non-findings—not a unique-bug census. Closed/N/A rows have no current risk; unverified risk is provisional. Pure style and unmeasured optimization claims do not establish runtime impact.
+These are duplicate-inclusive report decisions, not a unique-bug census. Pure style or structural optimization does not establish a runtime incident; unverified impact remains provisional.
 
 <a id="review-1"></a>
 
@@ -21,9 +23,11 @@ These are decisions on report claims, including repeated roots, bundled observat
 
 Status: `confirmed-open`. Current risk: `low`.
 
-The file still groups identity, modes, resource paths, metadata, and policy exports. A split can improve compliance with the one-primary-export convention, but there is no runtime failure or severity-Medium mechanism.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-types/src/access.rs:22](../../../../../crates/shamir-types/src/access.rs#L22); [crates/shamir-types/src/access.rs:121](../../../../../crates/shamir-types/src/access.rs#L121); [crates/shamir-types/src/access.rs:197](../../../../../crates/shamir-types/src/access.rs#L197); [crates/shamir-types/src/access.rs:371](../../../../../crates/shamir-types/src/access.rs#L371); [crates/shamir-types/src/access.rs:702](../../../../../crates/shamir-types/src/access.rs#L702); [CLAUDE.md:542](../../../../../CLAUDE.md#L542).
+Identity, modes, metadata, addressing, and policy share one implementation file despite the one-primary-export convention. Splitting is maintainability work, not a runtime remedy.
+
+Evidence: [crates/shamir-types/src/access.rs:121](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-types/src/access.rs#L121); [crates/shamir-types/src/access.rs:197](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-types/src/access.rs#L197); [crates/shamir-types/src/access.rs:371](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-types/src/access.rs#L371); [CLAUDE.md:542](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/CLAUDE.md#L542).
 
 <a id="review-2"></a>
 
@@ -31,11 +35,13 @@ Evidence: [crates/shamir-types/src/access.rs:22](../../../../../crates/shamir-ty
 
 Status: `confirmed-open`. Current risk: `low`.
 
-Both error enums and the manual bincode Display/Error implementations remain; thiserror policy and API naming debt remain.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-types/src/codecs/basic/bincode.rs:8](../../../../../crates/shamir-types/src/codecs/basic/bincode.rs#L8); [crates/shamir-types/src/codecs/basic/bincode.rs:14](../../../../../crates/shamir-types/src/codecs/basic/bincode.rs#L14); [crates/shamir-types/src/codecs/error.rs:4](../../../../../crates/shamir-types/src/codecs/error.rs#L4).
+Bincode's public manual Display/Error enum remains distinct from the canonical thiserror enum, contrary to the project error convention.
 
-Grouping/duplicate: `error-handling-lifecycle.md:2`. This row is not another independent defect.
+Evidence: [crates/shamir-types/src/codecs/basic/bincode.rs:8](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-types/src/codecs/basic/bincode.rs#L8); [crates/shamir-types/src/codecs/error.rs:4](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-types/src/codecs/error.rs#L4).
+
+Grouping/duplicate: [error-handling-lifecycle.md#2](error-handling-lifecycle.md#review-2). This is not an additional independent defect.
 
 <a id="review-3"></a>
 
@@ -43,19 +49,23 @@ Grouping/duplicate: `error-handling-lifecycle.md:2`. This row is not another ind
 
 Status: `confirmed-open`. Current risk: `nit`.
 
-Two local Entry imports remain, and SeedableRng remains local to thread_local initialization. Entry imports plainly qualify as header-hoisting cleanup; the macro-contained import is stylistic and should be assessed against the documented macro-body exception, not treated as a runtime defect.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-types/src/core/interner/interner.rs:161](../../../../../crates/shamir-types/src/core/interner/interner.rs#L161); [crates/shamir-types/src/core/interner/interner.rs:349](../../../../../crates/shamir-types/src/core/interner/interner.rs#L349); [crates/shamir-types/src/types/record_id.rs:85](../../../../../crates/shamir-types/src/types/record_id.rs#L85); [CLAUDE.md:657](../../../../../CLAUDE.md#L657).
+Two Entry imports and the SeedableRng initializer import remain local. No collision or target-only validity is shown; being macro input alone is not the documented exception.
+
+Evidence: [crates/shamir-types/src/core/interner/interner.rs:161](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-types/src/core/interner/interner.rs#L161); [crates/shamir-types/src/core/interner/interner.rs:349](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-types/src/core/interner/interner.rs#L349); [crates/shamir-types/src/types/record_id.rs:85](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-types/src/types/record_id.rs#L85).
 
 <a id="review-4"></a>
 
 ### Claim 4 — `types/tests/value_tests.rs` retains the legacy inline `#[cfg(test)] mod tests { ... }` wrapper shape
 
-Status: `refuted`. Current risk: —.
+Status: `refuted`. Current risk: `—`.
 
-The wrapper exists inside a dedicated tests file, whereas the rule forbids embedding such tests inside implementation files. record_id_tests.rs also uses a wrapper, refuting the lone-file claim. Flattening remains optional cosmetic cleanup; deprecation allowance is appropriate for UserValue-focused tests.
+Prior-cycle decision: `refuted`.
 
-Evidence: [crates/shamir-types/src/types/tests/value_tests.rs:1](../../../../../crates/shamir-types/src/types/tests/value_tests.rs#L1); [crates/shamir-types/src/types/tests/record_id_tests.rs:1](../../../../../crates/shamir-types/src/types/tests/record_id_tests.rs#L1); [crates/shamir-types/src/types/tests/mod.rs:8](../../../../../crates/shamir-types/src/types/tests/mod.rs#L8); [CLAUDE.md:621](../../../../../CLAUDE.md#L621).
+The wrapper is inside a dedicated tests file, outside the implementation-file prohibition. RecordId tests also use one, refuting the claimed lone-file shape.
+
+Evidence: [crates/shamir-types/src/types/tests/value_tests.rs:1](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-types/src/types/tests/value_tests.rs#L1); [crates/shamir-types/src/types/tests/record_id_tests.rs:1](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-types/src/types/tests/record_id_tests.rs#L1).
 
 <a id="review-5"></a>
 
@@ -63,9 +73,11 @@ Evidence: [crates/shamir-types/src/types/tests/value_tests.rs:1](../../../../../
 
 Status: `confirmed-open`. Current risk: `nit`.
 
-The cited function-local imports still exist, including duplicated RecordView imports in merge tests. These are import-convention cleanup, not runtime risk.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-types/src/tests/access_tests.rs:265](../../../../../crates/shamir-types/src/tests/access_tests.rs#L265); [crates/shamir-types/src/core/interner/tests/interner_tests.rs:534](../../../../../crates/shamir-types/src/core/interner/tests/interner_tests.rs#L534); [crates/shamir-types/src/core/interner/tests/interner_tests.rs:804](../../../../../crates/shamir-types/src/core/interner/tests/interner_tests.rs#L804); [crates/shamir-types/src/codecs/interned/tests/messagepack_tests.rs:667](../../../../../crates/shamir-types/src/codecs/interned/tests/messagepack_tests.rs#L667); [crates/shamir-types/src/codecs/interned/tests/storage_bytes_tests.rs:438](../../../../../crates/shamir-types/src/codecs/interned/tests/storage_bytes_tests.rs#L438); [crates/shamir-types/src/codecs/interned/tests/merge_storage_bytes_tests.rs:296](../../../../../crates/shamir-types/src/codecs/interned/tests/merge_storage_bytes_tests.rs#L296); [crates/shamir-types/src/codecs/interned/tests/merge_storage_bytes_tests.rs:318](../../../../../crates/shamir-types/src/codecs/interned/tests/merge_storage_bytes_tests.rs#L318); [crates/shamir-types/src/record_view/tests/scalar_ref_cmp_tests.rs:193](../../../../../crates/shamir-types/src/record_view/tests/scalar_ref_cmp_tests.rs#L193); [crates/shamir-types/src/macros/tests/mpack_tests.rs:332](../../../../../crates/shamir-types/src/macros/tests/mpack_tests.rs#L332).
+The cited imports remain inside test functions, including repeated RecordView imports in adjacent merge tests; their scope does not fit the stated exceptions.
+
+Evidence: [crates/shamir-types/src/tests/access_tests.rs:265](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-types/src/tests/access_tests.rs#L265); [crates/shamir-types/src/core/interner/tests/interner_tests.rs:804](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-types/src/core/interner/tests/interner_tests.rs#L804); [crates/shamir-types/src/codecs/interned/tests/merge_storage_bytes_tests.rs:296](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-types/src/codecs/interned/tests/merge_storage_bytes_tests.rs#L296); [crates/shamir-types/src/codecs/interned/tests/merge_storage_bytes_tests.rs:318](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-types/src/codecs/interned/tests/merge_storage_bytes_tests.rs#L318).
 
 <a id="review-6"></a>
 
@@ -73,26 +85,30 @@ Evidence: [crates/shamir-types/src/tests/access_tests.rs:265](../../../../../cra
 
 Status: `confirmed-open`. Current risk: `nit`.
 
-The implementation file still ends with an empty Tests divider; actual tests are registered in core/tests.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-types/src/core/sort_codec.rs:152](../../../../../crates/shamir-types/src/core/sort_codec.rs#L152); [crates/shamir-types/src/core/tests/mod.rs:1](../../../../../crates/shamir-types/src/core/tests/mod.rs#L1).
+The trailing implementation-file banner has no body; actual topic tests are registered separately.
+
+Evidence: [crates/shamir-types/src/core/sort_codec.rs:152](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-types/src/core/sort_codec.rs#L152); [crates/shamir-types/src/core/tests/mod.rs:1](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-types/src/core/tests/mod.rs#L1).
 
 <a id="review-7"></a>
 
 ### Claim 7 — Inconsistent test-manifest visibility across `tests/mod.rs` files
 
-Status: `not-applicable`. Current risk: —.
+Status: `not-applicable`. Current risk: `—`.
 
-Mixed pub/private module declarations remain, but the policy's example does not require uniform visibility. Registered private modules run normally under the parent test gate; no functional or structural-registration defect follows.
+Prior-cycle decision: `not-applicable`.
 
-Evidence: [crates/shamir-types/src/tests/mod.rs:1](../../../../../crates/shamir-types/src/tests/mod.rs#L1); [crates/shamir-types/src/types/tests/mod.rs:8](../../../../../crates/shamir-types/src/types/tests/mod.rs#L8); [crates/shamir-types/src/record_view/tests/mod.rs:9](../../../../../crates/shamir-types/src/record_view/tests/mod.rs#L9); [crates/shamir-types/src/core/interner/mod.rs:14](../../../../../crates/shamir-types/src/core/interner/mod.rs#L14).
+The manifests use mixed visibility but all selected test modules are registered under cfg(test). The example is not a mandatory pub/private policy.
 
-## Corrections and qualified non-findings
+Evidence: [crates/shamir-types/src/types/tests/mod.rs:8](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-types/src/types/tests/mod.rs#L8); [crates/shamir-types/src/record_view/tests/mod.rs:9](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-types/src/record_view/tests/mod.rs#L9); [crates/shamir-types/src/core/interner/tests/mod.rs:2](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-types/src/core/interner/tests/mod.rs#L2).
 
-- Module manifests remain declaration/reexport-only, topic tests are reachable through cfg(test), and no implementation-file inline test body was found.
-- The review's fixed count of 21 test-file groups is stale; do not preserve it as a current inventory.
-- Style cleanup must remain separate from substantive fixes and must not inherit runtime High/Medium severity automatically.
-- The claimed sole nested test wrapper and the claimed ban applying to tests-directory files are both incorrect.
+## Evidence and recipe corrections
+
+- Do not interpret declaration-only manifests as requiring identical visibility or eliminating harmless test-file wrapper modules.
+- The fixed historical test-file count is not a current inventory; root and topic registration, rather than file counts, establish reachability.
+- Macro containment is not automatically an imports-at-top exception: the documented exception depends on hoisting being invalid or misleading.
+- Preserve public reexports and serialized definitions during optional file splitting; keep style work separate from semantic fixes.
 
 ---
 

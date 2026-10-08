@@ -1,11 +1,13 @@
-<!-- revalidation:2026-10-08 source:92ad58266bf57ddea1fa3c8a47affba1a3a9a096 -->
-# shamir-server — concurrency-lockfree revalidation
+<!-- revalidation:2026-10-08 cycle:independent-2 source:e3765c935fc71655ee1ec0160cf180607935d89b -->
+# shamir-server — concurrency-lockfree independent revalidation (cycle 2)
 
-Source snapshot: `92ad58266bf57ddea1fa3c8a47affba1a3a9a096`. Revalidated 2026-10-08 by read-only XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run; no source fix is part of this update. Test registration/assertions are evidence of an oracle, not proof of a passing run.
+Frozen source snapshot: `e3765c935fc71655ee1ec0160cf180607935d89b`. Independently revalidated 2026-10-08 by a fresh XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run. Source-fixed means the specified mechanism was already removed at this snapshot; this cycle implements no source fix.
 
-This section is authoritative for current status. Original titles/IDs are retained for traceability; a refuted title is not a current assertion. The collapsed historical report below is superseded, including its counts, severity, scenarios and fix instructions. Plan IDs preserve historical numbering, not a current release mandate. [Workspace methodology and status definitions](../SUMMARY.md#status-definitions).
+This section is authoritative for current decisions. Existing IDs and allegation titles are retained for traceability; a refuted title is not a current assertion. Prior-cycle decisions were rechecked, not used as proof. The first cycle is available in repository history at this snapshot. The original historical body below remains preserved once and is superseded, including its counts, severities and recipes. [Workspace scope and status definitions](../SUMMARY.md#status-definitions).
 
-Several narrow observations are valid, but the universal lock-free/admin-only characterization is inaccurate. The recorded log-mask lost-update race remains present.
+Unrelated external edits began in dependency/toolchain/CI metadata during collection; additional Rust-source edits appeared afterward. They were left untouched. Evidence and decisions are tied to the frozen commit, not those later changes or an installed toolchain. “Current” below means current at that snapshot; no re-audit of the modified working tree is implied.
+
+The namespace update race remains. The sharded/bucket-lock counter-evidence is stronger than the current report: exact scc source also contradicts universal lock-free entry access.
 
 ## Current claim decisions
 
@@ -13,27 +15,31 @@ Several narrow observations are valid, but the universal lock-free/admin-only ch
 |---:|---:|---:|---:|---:|---:|---:|
 | 6 | 1 | 0 | 0 | 1 | 1 | 3 |
 
-These are decisions on report claims, including repeated roots, bundled observations and non-findings—not a unique-bug census. Closed/N/A rows have no current risk; unverified risk is provisional. Pure style and unmeasured optimization claims do not establish runtime impact.
+These are duplicate-inclusive report decisions, not a unique-bug census. Pure style or structural optimization does not establish a runtime incident; unverified impact remains provisional.
 
 <a id="review-summary"></a>
 
 ### Claim Summary — All hot structures are lock-free; mutexes are exclusively admin/DDL/boot frequency
 
-Status: `refuted`. Current risk: —.
+Status: `refuted`. Current risk: `—`.
 
-DashMap paths explicitly hold shard locks, interactive transactions hold an async mutex across engine awaits, and audit appender mutexes serve authentication events. These are not all admin/boot paths. Whether pinned scc internals satisfy stronger lock-free claims was not verified.
+Prior-cycle decision: `refuted`.
 
-Evidence: [crates/shamir-server/src/cursor_registry.rs:418](../../../../../crates/shamir-server/src/cursor_registry.rs#L418); [crates/shamir-server/src/conn_limiter.rs:233](../../../../../crates/shamir-server/src/conn_limiter.rs#L233); [crates/shamir-server/src/db_handler/tx_handlers.rs:165](../../../../../crates/shamir-server/src/db_handler/tx_handlers.rs#L165); [crates/shamir-server/src/audit_appender.rs:691](../../../../../crates/shamir-server/src/audit_appender.rs#L691); [crates/shamir-server/src/connection/handshake.rs:50](../../../../../crates/shamir-server/src/connection/handshake.rs#L50); [Cargo.lock:3123](../../../../../Cargo.lock#L3123).
+Audit appender locks process authentication events; DashMap takes shard locks; interactive transactions take async mutexes. Exact scc 3.8.4 published src/hash_map.rs explicitly uses bucket read/write locks for entry access, not universally lock-free operations.
+
+Evidence: [crates/shamir-server/src/audit_appender.rs:691](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-server/src/audit_appender.rs#L691); [crates/shamir-server/src/conn_limiter.rs:238](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-server/src/conn_limiter.rs#L238); [crates/shamir-server/src/db_handler/tx_handlers.rs:165](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-server/src/db_handler/tx_handlers.rs#L165); [Cargo.lock:3123](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/Cargo.lock#L3123).
 
 <a id="review-notes-tables-registry"></a>
 
 ### Claim Notes/tables_registry — TablesRegistry mutex covers DDL-only synchronous persistence
 
-Status: `not-applicable`. Current risk: —.
+Status: `not-applicable`. Current risk: `—`.
 
-add/remove synchronously lock, mutate and write_atomic without an await. This is a DDL persistence path, not evidence of a new per-record hot-path violation.
+Prior-cycle decision: `not-applicable`.
 
-Evidence: [crates/shamir-server/src/tables_registry.rs:139](../../../../../crates/shamir-server/src/tables_registry.rs#L139); [crates/shamir-server/src/tables_registry.rs:148](../../../../../crates/shamir-server/src/tables_registry.rs#L148); [crates/shamir-server/src/tables_registry.rs:159](../../../../../crates/shamir-server/src/tables_registry.rs#L159).
+The inspected add/remove callers persist table lifecycle changes. Their mutex covers synchronous serialization/write/rename, with no await. That supports the narrow frequency/locking observation, not a durability or zero-worker-interference guarantee.
+
+Evidence: [crates/shamir-server/src/tables_registry.rs:139](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-server/src/tables_registry.rs#L139); [crates/shamir-server/src/tables_registry.rs:159](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-server/src/tables_registry.rs#L159); [crates/shamir-server/src/db_handler/handler.rs:675](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-server/src/db_handler/handler.rs#L675).
 
 <a id="review-notes-set-namespace-level"></a>
 
@@ -41,45 +47,54 @@ Evidence: [crates/shamir-server/src/tables_registry.rs:139](../../../../../crate
 
 Status: `confirmed-open`. Current risk: `low`.
 
-Both callers can load the same mask, independently clone/update it, then store; the later store loses the other's update. Operator-facing frequency limits impact but does not make the race correct. SIGHUP reload instead replaces the whole mask.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-server/src/logging.rs:168](../../../../../crates/shamir-server/src/logging.rs#L168); [crates/shamir-server/src/logging.rs:171](../../../../../crates/shamir-server/src/logging.rs#L171); [crates/shamir-server/src/logging.rs:377](../../../../../crates/shamir-server/src/logging.rs#L377).
+Two callers can load mask M, independently add different overrides, then store M+A and M+B; the later store loses the other update. ArcSwap protects publication, not this compound read-modify-write. SIGHUP reload deliberately replaces the mask and is not this setter.
+
+Evidence: [crates/shamir-server/src/logging.rs:168](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-server/src/logging.rs#L168); [crates/shamir-server/src/logging.rs:171](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-server/src/logging.rs#L171); [crates/shamir-server/src/logging.rs:377](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-server/src/logging.rs#L377).
 
 <a id="review-notes-active-count"></a>
 
 ### Claim Notes/active_count — Supervisor len() is explicitly acknowledged off-hot-path telemetry
 
-Status: `not-applicable`. Current risk: —.
+Status: `not-applicable`. Current risk: `—`.
 
-The allow annotation and O(N) acknowledgement remain. The returned value counts registered subscriptions, not necessarily live tasks.
+Prior-cycle decision: `not-applicable`.
 
-Evidence: [crates/shamir-server/src/replication/supervisor.rs:176](../../../../../crates/shamir-server/src/replication/supervisor.rs#L176); [crates/shamir-server/src/replication/supervisor.rs:178](../../../../../crates/shamir-server/src/replication/supervisor.rs#L178); [crates/shamir-server/src/replication/supervisor.rs:183](../../../../../crates/shamir-server/src/replication/supervisor.rs#L183).
+The allow annotation and scan acknowledgement exist. The count measures registry entries, not live follower tasks. scc 3.8.4 HashMap::len scans bucket counts rather than iterating every entry.
+
+Evidence: [crates/shamir-server/src/replication/supervisor.rs:176](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-server/src/replication/supervisor.rs#L176); [crates/shamir-server/src/replication/supervisor.rs:178](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-server/src/replication/supervisor.rs#L178); [Cargo.lock:3123](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/Cargo.lock#L3123).
 
 <a id="review-notes-by-session-len"></a>
 
 ### Claim Notes/by_session_len — Cursor by_session_len is test-only
 
-Status: `not-applicable`. Current risk: —.
+Status: `not-applicable`. Current risk: `—`.
 
-The DashMap cardinality probe remains cfg(test)-gated; production callers use the per-session atomic count.
+Prior-cycle decision: `not-applicable`.
 
-Evidence: [crates/shamir-server/src/cursor_registry.rs:705](../../../../../crates/shamir-server/src/cursor_registry.rs#L705); [crates/shamir-server/src/cursor_registry.rs:707](../../../../../crates/shamir-server/src/cursor_registry.rs#L707).
+The helper is cfg(test)-gated and checks actual map cardinality. Production per-session admission uses the atomic counter.
+
+Evidence: [crates/shamir-server/src/cursor_registry.rs:705](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-server/src/cursor_registry.rs#L705); [crates/shamir-server/src/cursor_registry.rs:415](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-server/src/cursor_registry.rs#L415).
 
 <a id="review-summary-no-lock-across-await"></a>
 
 ### Claim Summary/no-lock-across-await — No lock-across-await violations or unacknowledged hot-path scc len() calls
 
-Status: `unverified`. Current risk: —.
+Status: `unverified`. Current risk: `—`.
 
-The inspected len() exception is acknowledged and visible async mutex sites are documented, but a crate-wide universal absence claim requires more than the assigned-claim inspection. The production source is shared across multiple pull-stream tasks, so its single-task contention rationale is not universally established.
+Prior-cycle decision: `unverified`.
 
-Evidence: [crates/shamir-server/src/replication/prod_factory.rs:79](../../../../../crates/shamir-server/src/replication/prod_factory.rs#L79); [crates/shamir-server/src/replication/prod_factory.rs:102](../../../../../crates/shamir-server/src/replication/prod_factory.rs#L102); [crates/shamir-server/src/replication/supervisor.rs:271](../../../../../crates/shamir-server/src/replication/supervisor.rs#L271); [crates/shamir-server/src/replication/supervisor.rs:275](../../../../../crates/shamir-server/src/replication/supervisor.rs#L275).
+Inspected async mutex sites intentionally span awaits and the cited len exception is acknowledged. A universal absence claim is not proved. In particular, a subscription shares one source among multiple pull-stream tasks, contradicting both source wrappers' single-task/uncontended rationale.
 
-## Corrections and qualified non-findings
+Evidence: [crates/shamir-server/src/replication/supervisor.rs:271](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-server/src/replication/supervisor.rs#L271); [crates/shamir-server/src/replication/supervisor.rs:282](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-server/src/replication/supervisor.rs#L282); [crates/shamir-server/src/replication/prod_factory.rs:102](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-server/src/replication/prod_factory.rs#L102); [crates/shamir-server/src/replication/wire_source.rs:67](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-server/src/replication/wire_source.rs#L67).
 
-- Distinguish lock-free snapshot/counter operations from sharded locking and sanctioned async serialization.
-- Do not describe audit-appender locking as exclusively admin/DDL/boot frequency.
-- The acknowledged namespace lost-update race is a real low-impact operator-state defect, even though the original report declined to count it.
+## Evidence and recipe corrections
+
+- scc 3.8.4 was available in the cached published archive. Its HashMap entry operations use bucket read/write locks; the earlier dependency-unavailability limitation is obsolete.
+- The root description that every scc len is iter().count() is inaccurate: HashMap sums bucket lengths across current/old arrays, while TreeIndex counts its iterator.
+- WireReplSource serializes full pull awaits for multiple profile streams; 'single-tasked, uncontended' is not universally true.
+- TablesRegistry's rename observation does not independently establish crash durability; write_atomic uses flush, not an explicit file/directory sync.
 
 ---
 

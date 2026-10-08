@@ -1,11 +1,13 @@
-<!-- revalidation:2026-10-08 source:92ad58266bf57ddea1fa3c8a47affba1a3a9a096 -->
-# shamir-index — security-crypto revalidation
+<!-- revalidation:2026-10-08 cycle:independent-2 source:e3765c935fc71655ee1ec0160cf180607935d89b -->
+# shamir-index — security-crypto independent revalidation (cycle 2)
 
-Source snapshot: `92ad58266bf57ddea1fa3c8a47affba1a3a9a096`. Revalidated 2026-10-08 by read-only XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run; no source fix is part of this update. Test registration/assertions are evidence of an oracle, not proof of a passing run.
+Frozen source snapshot: `e3765c935fc71655ee1ec0160cf180607935d89b`. Independently revalidated 2026-10-08 by a fresh XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run. Source-fixed means the specified mechanism was already removed at this snapshot; this cycle implements no source fix.
 
-This section is authoritative for current status. Original titles/IDs are retained for traceability; a refuted title is not a current assertion. The collapsed historical report below is superseded, including its counts, severity, scenarios and fix instructions. Plan IDs preserve historical numbering, not a current release mandate. [Workspace methodology and status definitions](../SUMMARY.md#status-definitions).
+This section is authoritative for current decisions. Existing IDs and allegation titles are retained for traceability; a refuted title is not a current assertion. Prior-cycle decisions were rechecked, not used as proof. The first cycle is available in repository history at this snapshot. The original historical body below remains preserved once and is superseded, including its counts, severities and recipes. [Workspace scope and status definitions](../SUMMARY.md#status-definitions).
 
-Hash identity and dispatch-boundary risks remain, with privilege-qualified reachability. Plain serialization and unsanitized snapshot names are confirmed. Cheap collision construction and NEON UB are not proven by repository evidence.
+Unrelated external edits began in dependency/toolchain/CI metadata during collection; additional Rust-source edits appeared afterward. They were left untouched. Evidence and decisions are tied to the frozen commit, not those later changes or an installed toolchain. “Current” below means current at that snapshot; no re-audit of the modified working tree is implied.
+
+Hash-only identities and scalar dispatch remain privilege-qualified integrity risks. Exact locked FxHasher semantics now provide a full dual-hash numeric collision witness. Plain serialization and path joins are confirmed; NEON UB remains unverified.
 
 ## Current claim decisions
 
@@ -13,7 +15,7 @@ Hash identity and dispatch-boundary risks remain, with privilege-qualified reach
 |---:|---:|---:|---:|---:|---:|---:|
 | 8 | 6 | 0 | 0 | 1 | 1 | 0 |
 
-These are decisions on report claims, including repeated roots, bundled observations and non-findings—not a unique-bug census. Closed/N/A rows have no current risk; unverified risk is provisional. Pure style and unmeasured optimization claims do not establish runtime impact.
+These are duplicate-inclusive report decisions, not a unique-bug census. Pure style or structural optimization does not establish a runtime incident; unverified impact remains provisional.
 
 <a id="review-1"></a>
 
@@ -21,9 +23,11 @@ These are decisions on report claims, including repeated roots, bundled observat
 
 Status: `confirmed-open`. Current risk: `medium`.
 
-Both public-seeded streams remain non-keyed; unique postings contain only RecordId and hits are not value-verified. Integrity risk conditional on a full-pair collision is confirmed; cheap simultaneous collision construction is unverified.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-index/src/base_index/index_keys.rs:191](../../../../../crates/shamir-index/src/base_index/index_keys.rs#L191); [crates/shamir-index/src/base_index/index_manager_unique.rs:384](../../../../../crates/shamir-index/src/base_index/index_manager_unique.rs#L384); [crates/shamir-index/src/base_index/index_manager_unique.rs:440](../../../../../crates/shamir-index/src/base_index/index_manager_unique.rs#L440); [docs/guide-docs/architecture/ARCHITECTURE.md:354](../../../../../docs/guide-docs/architecture/ARCHITECTURE.md#L354).
+Exact rustc-hash 2.1.2 uses H←(H+x)K. On 64-bit, two Int leaves emit tag,x,tag,y. Tuples (0,0) and (t,signed(-tK² mod 2^64)) collide for both public-seeded streams because their suffix difference is tK³-tK³, independent of seed. Unique postings store only RecordId and reject a hit without value comparison. This needs an existing composite numeric index and write permission, not auth bypass. Published source: https://docs.rs/crate/rustc-hash/2.1.2/source/src/lib.rs; signed dispatch is confirmed by [Rust 1.94 Hash source](https://raw.githubusercontent.com/rust-lang/rust/1.94.0/library/core/src/hash/mod.rs). No experiment was run.
+
+Evidence: [crates/shamir-index/src/base_index/index_keys.rs:72](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-index/src/base_index/index_keys.rs#L72); [crates/shamir-index/src/base_index/index_keys.rs:191](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-index/src/base_index/index_keys.rs#L191); [crates/shamir-index/src/base_index/index_manager_unique.rs:384](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-index/src/base_index/index_manager_unique.rs#L384); [crates/shamir-index/src/base_index/index_manager_unique.rs:440](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-index/src/base_index/index_manager_unique.rs#L440); [Cargo.lock:3007](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/Cargo.lock#L3007).
 
 <a id="review-2"></a>
 
@@ -31,9 +35,11 @@ Evidence: [crates/shamir-index/src/base_index/index_keys.rs:191](../../../../../
 
 Status: `confirmed-open`. Current risk: `medium`.
 
-Tokens remain identified solely by an unkeyed u64 hash; postings do not preserve text for collision verification. Document writers can influence inputs. Collision-driven poisoning is conditional, not a demonstrated authentication or tenant-isolation bypass.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-index/src/tokenizer.rs:462](../../../../../crates/shamir-index/src/tokenizer.rs#L462); [crates/shamir-index/src/fts_ranked_backend.rs:88](../../../../../crates/shamir-index/src/fts_ranked_backend.rs#L88); [crates/shamir-index/src/fts_ranked_backend.rs:123](../../../../../crates/shamir-index/src/fts_ranked_backend.rs#L123); [crates/shamir-engine/src/table/read_planner.rs:56](../../../../../crates/shamir-engine/src/table/read_planner.rs#L56).
+Token text becomes one unkeyed u64 and postings preserve no verification text. A colliding token shares membership/ranking identity; document writers influence inputs. Exact rustc-hash 2.1.2 source confirms non-cryptographic semantics, but the numeric dual-hash witness does not prove a chosen-token collision under tokenizer restrictions. Published source: https://docs.rs/crate/rustc-hash/2.1.2/source/src/lib.rs.
+
+Evidence: [crates/shamir-index/src/tokenizer.rs:462](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-index/src/tokenizer.rs#L462); [crates/shamir-index/src/fts_ranked_backend.rs:88](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-index/src/fts_ranked_backend.rs#L88); [crates/shamir-index/src/fts_ranked_backend.rs:123](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-index/src/fts_ranked_backend.rs#L123); [Cargo.lock:3007](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/Cargo.lock#L3007).
 
 <a id="review-3"></a>
 
@@ -41,9 +47,11 @@ Evidence: [crates/shamir-index/src/tokenizer.rs:462](../../../../../crates/shami
 
 Status: `confirmed-open`. Current risk: `medium`.
 
-Evaluation still uses unrestricted resolver.call without is_indexable. Normal engine DDL checks trust; bypass requires persisted metadata manipulation, direct library construction, or host scalar replacement—not arbitrary remote closure installation.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-index/src/expr.rs:178](../../../../../crates/shamir-index/src/expr.rs#L178); [crates/shamir-funclib/src/scalar_resolver.rs:110](../../../../../crates/shamir-funclib/src/scalar_resolver.rs#L110); [crates/shamir-engine/src/table/table_manager_index_mgmt.rs:262](../../../../../crates/shamir-engine/src/table/table_manager_index_mgmt.rs#L262); [crates/shamir-index/src/functional_backend.rs:303](../../../../../crates/shamir-index/src/functional_backend.rs#L303).
+expr calls unrestricted resolver.call, whose user-first resolution can dispatch an unvouched replacement. Normal engine DDL checks is_indexable. Bypass requires host replacement, direct library construction, or persisted metadata manipulation; no arbitrary remote closure installation is shown. Check and invoke the same entry with existing arity rules.
+
+Evidence: [crates/shamir-index/src/expr.rs:178](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-index/src/expr.rs#L178); [crates/shamir-funclib/src/scalar_resolver.rs:110](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-funclib/src/scalar_resolver.rs#L110); [crates/shamir-engine/src/table/table_manager_index_mgmt.rs:262](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-engine/src/table/table_manager_index_mgmt.rs#L262); [crates/shamir-index/src/functional_backend.rs:303](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-index/src/functional_backend.rs#L303).
 
 <a id="review-4"></a>
 
@@ -51,9 +59,11 @@ Evidence: [crates/shamir-index/src/expr.rs:178](../../../../../crates/shamir-ind
 
 Status: `confirmed-open`. Current risk: `low`.
 
-SecretString serialization remains pass-through, and External descriptors can be persisted through the library API. Shipped engine CREATE constructs InProcessHnsw; at-rest confidentiality is explicitly delegated to operator encryption.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-index/src/kind.rs:195](../../../../../crates/shamir-index/src/kind.rs#L195); [crates/shamir-types/src/secret.rs:54](../../../../../crates/shamir-types/src/secret.rs#L54); [crates/shamir-index/src/persistence.rs:97](../../../../../crates/shamir-index/src/persistence.rs#L97); [crates/shamir-engine/src/table/table_manager_index_mgmt.rs:348](../../../../../crates/shamir-engine/src/table/table_manager_index_mgmt.rs#L348); [docs/guide-docs/security/data-protection.md:68](../../../../../docs/guide-docs/security/data-protection.md#L68).
+SecretString serialization is pass-through and External descriptors can be persisted through library APIs. The inspected engine handler constructs InProcessHnsw, and encrypted data/backup volumes are the explicit deployment obligation. This is credential-carrier hardening, not demonstrated remote secret disclosure.
+
+Evidence: [crates/shamir-index/src/kind.rs:195](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-index/src/kind.rs#L195); [crates/shamir-types/src/secret.rs:54](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-types/src/secret.rs#L54); [crates/shamir-index/src/persistence.rs:97](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-index/src/persistence.rs#L97); [docs/guide-docs/security/data-protection.md:68](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/docs/guide-docs/security/data-protection.md#L68).
 
 <a id="review-5"></a>
 
@@ -61,9 +71,11 @@ Evidence: [crates/shamir-index/src/kind.rs:195](../../../../../crates/shamir-ind
 
 Status: `confirmed-open`. Current risk: `low`.
 
-Persisted names still feed path joins and create/truncate calls without validation. Exploitation requires metadata-write capability and a writable destination; CRC32 is corruption detection, not an attacker-authentication boundary.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-index/src/vector/snapshot.rs:907](../../../../../crates/shamir-index/src/vector/snapshot.rs#L907); [crates/shamir-index/src/vector/snapshot.rs:912](../../../../../crates/shamir-index/src/vector/snapshot.rs#L912); [crates/shamir-index/src/vector/snapshot.rs:983](../../../../../crates/shamir-index/src/vector/snapshot.rs#L983); [crates/shamir-index/src/vector/snapshot.rs:989](../../../../../crates/shamir-index/src/vector/snapshot.rs#L989).
+Manifest basename/qbasename feed path joins followed by File::create without validation. A metadata writer can select a writable destination with the appended .hnsw.graph/.hnsw.data suffix. CRC32 does not authenticate such an attacker, and no arbitrary remote metadata-write route is established.
+
+Evidence: [crates/shamir-index/src/vector/snapshot.rs:907](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-index/src/vector/snapshot.rs#L907); [crates/shamir-index/src/vector/snapshot.rs:912](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-index/src/vector/snapshot.rs#L912); [crates/shamir-index/src/vector/snapshot.rs:983](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-index/src/vector/snapshot.rs#L983); [crates/shamir-index/src/vector/snapshot.rs:989](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-index/src/vector/snapshot.rs#L989).
 
 <a id="review-6"></a>
 
@@ -71,42 +83,47 @@ Evidence: [crates/shamir-index/src/vector/snapshot.rs:907](../../../../../crates
 
 Status: `confirmed-open`. Current risk: `low`.
 
-Tokenization allocates O(text length) grams without an index-local budget. Posting planning deduplicates by token hash, so one op per gram is false for repeated grams. Network framing bounds individual remote requests.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-index/src/tokenizer.rs:152](../../../../../crates/shamir-index/src/tokenizer.rs#L152); [crates/shamir-index/src/fts_ranked_backend.rs:84](../../../../../crates/shamir-index/src/fts_ranked_backend.rs#L84); [crates/shamir-index/src/fts_ranked_backend.rs:169](../../../../../crates/shamir-index/src/fts_ranked_backend.rs#L169); [crates/shamir-connect/src/common/types.rs:111](../../../../../crates/shamir-connect/src/common/types.rs#L111).
+A long alphanumeric run allocates a gram vector and one owned string per emitted gram. Frequency planning deduplicates repeated hashes, so one posting per gram is false. Remote frames impose an outer bound; direct library inputs lack this index-local budget. Silent truncation would change search completeness.
+
+Evidence: [crates/shamir-index/src/tokenizer.rs:152](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-index/src/tokenizer.rs#L152); [crates/shamir-index/src/tokenizer.rs:164](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-index/src/tokenizer.rs#L164); [crates/shamir-index/src/fts_ranked_backend.rs:84](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-index/src/fts_ranked_backend.rs#L84); [crates/shamir-connect/src/common/types.rs:111](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-connect/src/common/types.rs#L111).
 
 <a id="review-7"></a>
 
 ### Claim 7 — NEON kernels read `u32` through `*const u8`-derived pointers — aligned-load safety contract violated (aarch64 only, untested on CI)
 
-Status: `unverified`. Current risk: `nit` (provisional; not a confirmed defect).
+Status: `unverified`. Current risk: `nit`.
 
-The casts and lane loads remain, with four-byte bounds established. Pointer casting alone does not prove UB; the alleged intrinsic alignment requirement lacks a cited toolchain-specific contract or experimental proof.
+Prior-cycle decision: `unverified`.
 
-Evidence: [crates/shamir-index/src/vector/simd.rs:920](../../../../../crates/shamir-index/src/vector/simd.rs#L920); [crates/shamir-index/src/vector/simd.rs:932](../../../../../crates/shamir-index/src/vector/simd.rs#L932); [crates/shamir-index/src/vector/simd.rs:1101](../../../../../crates/shamir-index/src/vector/simd.rs#L1101); [crates/shamir-index/src/vector/simd.rs:1250](../../../../../crates/shamir-index/src/vector/simd.rs#L1250).
+The u8-derived u32 casts and lane loads exist, and chunk bounds cover four bytes. The exact Rust 1.94 intrinsic alignment contract was not resolved; available primary intrinsic documentation does not explicitly supply the claimed requirement. Pointer casting alone is not proof of UB. Do not substitute another compiler version or execute a reproduction.
+
+Evidence: [crates/shamir-index/src/vector/simd.rs:920](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-index/src/vector/simd.rs#L920); [crates/shamir-index/src/vector/simd.rs:932](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-index/src/vector/simd.rs#L932); [crates/shamir-index/src/vector/simd.rs:1101](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-index/src/vector/simd.rs#L1101); [crates/shamir-index/src/vector/simd.rs:1250](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-index/src/vector/simd.rs#L1250); [rust-toolchain.toml:15](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/rust-toolchain.toml#L15).
 
 <a id="review-8"></a>
 
 ### Claim 8 — `unreachable!` on a data-derived `IndexKind::Btree` descriptor panics at table open
 
-Status: `refuted`. Current risk: —.
+Status: `refuted`. Current risk: `—`.
 
-TableManager's persisted-descriptor loop explicitly skips Btree before calling the builder. Direct misuse of the public builder can panic, but the alleged persisted table-open crash path is positively excluded.
+Prior-cycle decision: `refuted`.
 
-Evidence: [crates/shamir-engine/src/table/table_manager.rs:661](../../../../../crates/shamir-engine/src/table/table_manager.rs#L661); [crates/shamir-engine/src/table/table_manager.rs:665](../../../../../crates/shamir-engine/src/table/table_manager.rs#L665); [crates/shamir-index/src/build_backend.rs:66](../../../../../crates/shamir-index/src/build_backend.rs#L66).
+Persisted table-open descriptors are filtered for Btree before builder dispatch. Direct unsupported calls still panic, but the alleged hostile-blob boot path is positively excluded by pre-existing caller code.
 
-Grouping/duplicate: `error-handling-lifecycle.md#5`. This row is not another independent defect.
+Evidence: [crates/shamir-engine/src/table/table_manager.rs:661](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-engine/src/table/table_manager.rs#L661); [crates/shamir-index/src/build_backend.rs:66](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-index/src/build_backend.rs#L66).
 
-## Corrections and qualified non-findings
+Grouping/duplicate: [error-handling-lifecycle.md#5](error-handling-lifecycle.md#review-5). This is not an additional independent defect.
 
-- Do not describe dual-FxHash attacks as cheap or trivial without a collision construction for pinned rustc-hash 2.1.2 and the actual typed input encoding.
-- Hash collision integrity risks do not establish cross-table, authorization, or tenant-isolation bypass.
-- External credentials are plaintext at the serialization layer, but external-service CREATE is not exposed by the inspected engine handler and encrypted storage/backups are the documented deployment contract.
-- A checksum does not protect manifests from a metadata-writing attacker; path validation remains necessary regardless of checksum choice.
-- N-gram doc_len is cast to u32, not saturated, and repeated grams do not each create separate posting operations.
-- Confirmed clean scope: executable unsafe blocks are confined to vector/simd.rs; PostingKeyRef decoding is bounds-checked. Committed vector query/batch dimensions and limits are checked, but staged merge dimensions are not universally checked.
-- Malformed chunk checksum handling is present; this does not prove all decodable sidecar metadata fails closed.
-- No secret-comparison timing claim is needed for distance/hash calculations. SecretString Debug redaction and drop zeroization are source-visible, not protection for serialized copies.
+## Evidence and recipe corrections
+
+- Replace the historical multiply-XOR description with the exact locked polynomial implementation. Constant-work simultaneous collisions are proven for the typed numeric witness, not for every arbitrary string/token scenario.
+- No hash finding establishes tenant isolation or authorization bypass; scope is records reachable under the caller's existing privileges.
+- Widening token identity requires changing the Vec&lt;u64&gt; query/token API and migrating persisted postings, not only extending posting value_bytes.
+- A keyed hash requires a durable, consistently replicated key and format migration; a per-process random key would make persisted lookups incompatible.
+- CRC cannot defend against a metadata-writing attacker. Path confinement is independently required.
+- Replacing four-byte lane loads with vld1_u8 can overread unless the loop is restructured for eight readable bytes.
+- The broad atomic-batch assurance holds for HNSW's override, not the VectorAdapter default inherited by BruteForce.
 
 ---
 

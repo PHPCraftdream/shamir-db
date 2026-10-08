@@ -1,11 +1,13 @@
-<!-- revalidation:2026-10-08 source:92ad58266bf57ddea1fa3c8a47affba1a3a9a096 -->
-# shamir-transport-tcp — performance-hotpath revalidation
+<!-- revalidation:2026-10-08 cycle:independent-2 source:e3765c935fc71655ee1ec0160cf180607935d89b -->
+# shamir-transport-tcp — performance-hotpath independent revalidation (cycle 2)
 
-Source snapshot: `92ad58266bf57ddea1fa3c8a47affba1a3a9a096`. Revalidated 2026-10-08 by read-only XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run; no source fix is part of this update. Test registration/assertions are evidence of an oracle, not proof of a passing run.
+Frozen source snapshot: `e3765c935fc71655ee1ec0160cf180607935d89b`. Independently revalidated 2026-10-08 by a fresh XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run. Source-fixed means the specified mechanism was already removed at this snapshot; this cycle implements no source fix.
 
-This section is authoritative for current status. Original titles/IDs are retained for traceability; a refuted title is not a current assertion. The collapsed historical report below is superseded, including its counts, severity, scenarios and fix instructions. Plan IDs preserve historical numbering, not a current release mandate. [Workspace methodology and status definitions](../SUMMARY.md#status-definitions).
+This section is authoritative for current decisions. Existing IDs and allegation titles are retained for traceability; a refuted title is not a current assertion. Prior-cycle decisions were rechecked, not used as proof. The first cycle is available in repository history at this snapshot. The original historical body below remains preserved once and is superseded, including its counts, severities and recipes. [Workspace scope and status definitions](../SUMMARY.md#status-definitions).
 
-Upfront allocation, persistent client buffer capacity and allocating client writes remain source-proven. The claimed universal syscall ratio, RSS totals and server lifetime retention require correction or measurement.
+Unrelated external edits began in dependency/toolchain/CI metadata during collection; additional Rust-source edits appeared afterward. They were left untouched. Evidence and decisions are tied to the frozen commit, not those later changes or an installed toolchain. “Current” below means current at that snapshot; no re-audit of the modified working tree is implied.
+
+Allocation and retained-capacity mechanisms are visible, but documented pooling is intentional and costs are unmeasured. Server request ownership differs from the historical pooled-loop scenario.
 
 ## Current claim decisions
 
@@ -13,7 +15,7 @@ Upfront allocation, persistent client buffer capacity and allocating client writ
 |---:|---:|---:|---:|---:|---:|---:|
 | 4 | 3 | 0 | 0 | 0 | 1 | 0 |
 
-These are decisions on report claims, including repeated roots, bundled observations and non-findings—not a unique-bug census. Closed/N/A rows have no current risk; unverified risk is provisional. Pure style and unmeasured optimization claims do not establish runtime impact.
+These are duplicate-inclusive report decisions, not a unique-bug census. Pure style or structural optimization does not establish a runtime incident; unverified impact remains provisional.
 
 <a id="review-1"></a>
 
@@ -21,35 +23,41 @@ These are decisions on report claims, including repeated roots, bundled observat
 
 Status: `confirmed-open`. Current risk: `medium`.
 
-Both readers allocate/reserve the accepted declared length before reading payload bytes. Production unauthenticated reads are capped at 4 KiB; 16 MiB allocation is post-authentication and subject to connection limits and an idle deadline. Reserved capacity is not a measured RSS total.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-transport-tcp/src/framing.rs:67](../../../../../crates/shamir-transport-tcp/src/framing.rs#L67); [crates/shamir-transport-tcp/src/framing.rs:124](../../../../../crates/shamir-transport-tcp/src/framing.rs#L124); [crates/shamir-server/src/connection/handshake.rs:714](../../../../../crates/shamir-server/src/connection/handshake.rs#L714); [crates/shamir-server/src/connection/request_loop.rs:280](../../../../../crates/shamir-server/src/connection/request_loop.rs#L280); [crates/shamir-server/src/connection/request_loop.rs:297](../../../../../crates/shamir-server/src/connection/request_loop.rs#L297).
+Accepted lengths allocate upfront. Server pre-auth reads are 4 KiB and data reads are authenticated and deadline/count bounded; the Rust client's pre-auth reads instead allow 16 MiB. No resident-memory total is established.
 
-Grouping/duplicate: `SUMMARY.md#4.1`. This row is not another independent defect.
+Evidence: [crates/shamir-transport-tcp/src/framing.rs:67](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-transport-tcp/src/framing.rs#L67); [crates/shamir-transport-tcp/src/framing.rs:124](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-transport-tcp/src/framing.rs#L124); [crates/shamir-server/src/connection/handshake.rs:717](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-server/src/connection/handshake.rs#L717); [crates/shamir-client/src/client.rs:511](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-client/src/client.rs#L511).
+
+Grouping/duplicate: [SUMMARY.md#4.1](SUMMARY.md#review-4-1). This is not an additional independent defect.
 
 <a id="review-2"></a>
 
 ### Claim 2 — Pooled scratch buffers grow monotonically to the frame high-water mark; the documented `shrink_to_fit` mitigation is implemented by nobody
 
-Status: `confirmed-open`. Current risk: `medium`.
+Status: `confirmed-open`. Current risk: `low`.
 
-Pooled helpers retain capacity without shrinking, and the client reader keeps one buffer for its task lifetime. The server request loop instead allocates a fresh request buffer and writes separately owned prereserved replies, refuting the stated universal 32 MiB server lifetime-retention example.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-transport-tcp/src/framing.rs:89](../../../../../crates/shamir-transport-tcp/src/framing.rs#L89); [crates/shamir-transport-tcp/src/framing.rs:199](../../../../../crates/shamir-transport-tcp/src/framing.rs#L199); [crates/shamir-client/src/client.rs:312](../../../../../crates/shamir-client/src/client.rs#L312); [crates/shamir-server/src/connection/request_loop.rs:278](../../../../../crates/shamir-server/src/connection/request_loop.rs#L278); [crates/shamir-server/src/connection/request_loop.rs:310](../../../../../crates/shamir-server/src/connection/request_loop.rs#L310); [crates/shamir-server/src/connection/request_loop.rs:198](../../../../../crates/shamir-server/src/connection/request_loop.rs#L198).
+Client retention is explicit and matches monotonic-capacity documentation. Server requests use fresh owned buffers and replies are separately owned. Automatic reclamation is an optional policy change, not a currently promised guarantee.
 
-Grouping/duplicate: `SUMMARY.md#4.2`. This row is not another independent defect.
+Evidence: [crates/shamir-transport-tcp/src/framing.rs:89](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-transport-tcp/src/framing.rs#L89); [crates/shamir-client/src/client.rs:307](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-client/src/client.rs#L307); [crates/shamir-server/src/connection/request_loop.rs:278](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-server/src/connection/request_loop.rs#L278); [crates/shamir-server/src/connection/request_loop.rs:198](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-server/src/connection/request_loop.rs#L198).
+
+Grouping/duplicate: [SUMMARY.md#4.2](SUMMARY.md#review-4-2). This is not an additional independent defect.
 
 <a id="review-3"></a>
 
 ### Claim 3 — Two `read_exact` calls per frame: extra read round-trip on unbuffered plain-TCP streams
 
-Status: `unverified`. Current risk: `low` (provisional; not a confirmed defect).
+Status: `unverified`. Current risk: `low`.
 
-Separate header/payload read operations and missing BufReader guidance are confirmed. A universal syscall count, approximately doubled syscall overhead and measurable latency impact are not established by source inspection or supplied measurements.
+Prior-cycle decision: `unverified`.
 
-Evidence: [crates/shamir-transport-tcp/src/framing.rs:50](../../../../../crates/shamir-transport-tcp/src/framing.rs#L50); [crates/shamir-transport-tcp/src/framing.rs:68](../../../../../crates/shamir-transport-tcp/src/framing.rs#L68); [crates/shamir-transport-tcp/src/framing.rs:104](../../../../../crates/shamir-transport-tcp/src/framing.rs#L104); [crates/shamir-transport-tcp/src/framing.rs:129](../../../../../crates/shamir-transport-tcp/src/framing.rs#L129).
+Two read stages are real. Their syscall ratio and latency effect remain platform/transport dependent and unmeasured; tokio-rustls 0.26.4 consumes buffered plaintext.
 
-Grouping/duplicate: `SUMMARY.md#4.3`. This row is not another independent defect.
+Evidence: [crates/shamir-transport-tcp/src/framing.rs:50](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-transport-tcp/src/framing.rs#L50); [crates/shamir-transport-tcp/src/framing.rs:68](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-transport-tcp/src/framing.rs#L68); [Cargo.lock:4223](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/Cargo.lock#L4223).
+
+Grouping/duplicate: [SUMMARY.md#4.3](SUMMARY.md#review-4-3). This is not an additional independent defect.
 
 <a id="review-4"></a>
 
@@ -57,21 +65,21 @@ Grouping/duplicate: `SUMMARY.md#4.3`. This row is not another independent defect
 
 Status: `confirmed-open`. Current risk: `low`.
 
-Client roundtrip still calls allocating write_frame per request. That helper allocates a combined prefix/payload Vec and copies the payload. No latency or allocator-contention improvement has been measured here.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-client/src/client.rs:1278](../../../../../crates/shamir-client/src/client.rs#L1278); [crates/shamir-transport-tcp/src/framing.rs:160](../../../../../crates/shamir-transport-tcp/src/framing.rs#L160); [crates/shamir-transport-tcp/src/framing.rs:162](../../../../../crates/shamir-transport-tcp/src/framing.rs#L162).
+Client roundtrip uses write_frame and adds a Vec allocation/copy after serialization. Performance payoff from migration is not measured.
 
-Grouping/duplicate: `SUMMARY.md#4.4`. This row is not another independent defect.
+Evidence: [crates/shamir-client/src/client.rs:1278](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-client/src/client.rs#L1278); [crates/shamir-transport-tcp/src/framing.rs:160](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-transport-tcp/src/framing.rs#L160).
 
-## Corrections and qualified non-findings
+Grouping/duplicate: [SUMMARY.md#4.4](SUMMARY.md#review-4-4). This is not an additional independent defect.
 
-- 16 GiB resident from 4 KiB of headers is not source-proven: reservation, physical residency and allocator/OS behavior differ. The server also enforces pre-authentication 4 KiB limits and connection/read deadlines.
-- Server request buffers are not pooled across requests; do not claim its per-request reads are allocation-free or its read/write scratch universally persists for the connection lifetime.
-- Capacity-reuse tests exist, but they do not test large-growth reclamation. The existing read test explicitly requires unchanged capacity for small frames at crates/shamir-transport-tcp/tests/framing.rs:116.
-- The clear-before-reserve ordering and constant-size prereserved validation are source-supported; negligible latency is not a measurement.
-- Wire-equivalence tests compare decoded payloads, not underlying write-call counts or TLS-record counts; one write_all may perform multiple underlying writes.
-- The benchmark uses the mandated harness, but pooled scratch is recreated in each setup at crates/shamir-transport-tcp/benches/framing.rs:63, despite comments claiming cross-iteration reuse. It does not prove persistent-buffer steady-state behavior.
-- Miri execution and soundness are not established by tests named Miri-safe.
+## Evidence and recipe corrections
+
+- The pooled benchmark creates fresh scratch in each setup; it does not measure retaining one buffer across iterations.
+- Its largest listed round-trip size is 1 MiB, not the documented 16 MiB ceiling.
+- The echo fixture's pooled read loop is not the production concurrent server loop; do not transfer its allocation-free or approximately halved allocator-pressure claims.
+- A single write_all can produce multiple underlying writes and TLS records. Payload-equivalence assertions are not record-count measurements.
+- Capacity reclamation changes the explicitly documented monotonic-capacity behavior; make the policy deliberate and preferably opt-in.
 
 ---
 

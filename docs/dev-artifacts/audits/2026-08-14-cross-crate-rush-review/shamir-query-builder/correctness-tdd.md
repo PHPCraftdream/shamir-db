@@ -1,11 +1,13 @@
-<!-- revalidation:2026-10-08 source:92ad58266bf57ddea1fa3c8a47affba1a3a9a096 -->
-# shamir-query-builder — correctness-tdd revalidation
+<!-- revalidation:2026-10-08 cycle:independent-2 source:e3765c935fc71655ee1ec0160cf180607935d89b -->
+# shamir-query-builder — correctness-tdd independent revalidation (cycle 2)
 
-Source snapshot: `92ad58266bf57ddea1fa3c8a47affba1a3a9a096`. Revalidated 2026-10-08 by read-only XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run; no source fix is part of this update. Test registration/assertions are evidence of an oracle, not proof of a passing run.
+Frozen source snapshot: `e3765c935fc71655ee1ec0160cf180607935d89b`. Independently revalidated 2026-10-08 by a fresh XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run. Source-fixed means the specified mechanism was already removed at this snapshot; this cycle implements no source fix.
 
-This section is authoritative for current status. Original titles/IDs are retained for traceability; a refuted title is not a current assertion. The collapsed historical report below is superseded, including its counts, severity, scenarios and fix instructions. Plan IDs preserve historical numbering, not a current release mandate. [Workspace methodology and status definitions](../SUMMARY.md#status-definitions).
+This section is authoritative for current decisions. Existing IDs and allegation titles are retained for traceability; a refuted title is not a current assertion. Prior-cycle decisions were rechecked, not used as proof. The first cycle is available in repository history at this snapshot. The original historical body below remains preserved once and is superseded, including its counts, severities and recipes. [Workspace scope and status definitions](../SUMMARY.md#status-definitions).
 
-Nested-scope and marker validation defects remain open, as do silent alias-state loss and several validation gaps. The zero-case switch concern is a coverage gap, not an ambiguous current truth value. Public codec-panic reachability is unverified.
+Unrelated external edits began in dependency/toolchain/CI metadata during collection; additional Rust-source edits appeared afterward. They were left untouched. Evidence and decisions are tied to the frozen commit, not those later changes or an installed toolchain. “Current” below means current at that snapshot; no re-audit of the modified working tree is implied.
+
+Source confirms scoped-validation false positives and silent alias-state loss. Existing tests cover selected DTO/error branches, not these witnesses or production SELECT/HAVING reference behavior.
 
 ## Current claim decisions
 
@@ -13,21 +15,19 @@ Nested-scope and marker validation defects remain open, as do silent alias-state
 |---:|---:|---:|---:|---:|---:|---:|
 | 8 | 8 | 0 | 0 | 0 | 0 | 0 |
 
-These are decisions on report claims, including repeated roots, bundled observations and non-findings—not a unique-bug census. Closed/N/A rows have no current risk; unverified risk is provisional. Pure style and unmeasured optimization claims do not establish runtime impact.
-
-## Parent acceptance refinements
-
-- Parent dependency inspection supplies the previously missing deep-owned-value / decode-budget counterexample; no runtime test was executed.
+These are duplicate-inclusive report decisions, not a unique-bug census. Pure style or structural optimization does not establish a runtime incident; unverified impact remains provisional.
 
 <a id="review-1"></a>
 
 ### Claim 1 — `Batch::try_build` falsely rejects `sub_batch`/`for_each` entries whose inner batch has internal `$query` dependencies
 
-Status: `confirmed-open`. Current risk: `high`.
+Status: `confirmed-open`. Current risk: `medium`.
 
-Batch and ForEach still enter the whole-op msgpack fallback, so inner references are checked against outer aliases. The planner collects only bind/over dependencies and the executor plans inner bodies separately. Registered nested-builder tests do not call try_build.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-query-builder/src/batch/batch.rs:912](../../../../../crates/shamir-query-builder/src/batch/batch.rs#L912); [crates/shamir-query-builder/src/batch/batch.rs:1313](../../../../../crates/shamir-query-builder/src/batch/batch.rs#L1313); [crates/shamir-query-types/src/batch/planner.rs:308](../../../../../crates/shamir-query-types/src/batch/planner.rs#L308); [crates/shamir-engine/src/query/batch/query_runner.rs:680](../../../../../crates/shamir-engine/src/query/batch/query_runner.rs#L680); [crates/shamir-engine/src/query/batch/query_runner.rs:880](../../../../../crates/shamir-engine/src/query/batch/query_runner.rs#L880); [crates/shamir-query-builder/src/batch/tests/mod.rs:5](../../../../../crates/shamir-query-builder/src/batch/tests/mod.rs#L5); [crates/shamir-query-builder/src/batch/tests/sub_batch_tests.rs:17](../../../../../crates/shamir-query-builder/src/batch/tests/sub_batch_tests.rs#L17); [crates/shamir-query-builder/src/batch/tests/for_each_tests.rs:18](../../../../../crates/shamir-query-builder/src/batch/tests/for_each_tests.rs#L18).
+Inner a→b references in an outer proc entry are collected by fallback and rejected as unknown outer a; alias coincidence can instead mask the mismatch. Nested tests only build DTOs. A discriminating oracle accepts valid inner references while rejecting unknown outer bind/over references. SDK execution uses build, so high production-wide impact is not established.
+
+Evidence: [crates/shamir-query-builder/src/batch/batch.rs:912](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-query-builder/src/batch/batch.rs#L912); [crates/shamir-query-builder/src/batch/batch.rs:1333](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-query-builder/src/batch/batch.rs#L1333); [crates/shamir-query-types/src/batch/planner.rs:308](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-query-types/src/batch/planner.rs#L308); [crates/shamir-engine/src/query/batch/query_runner.rs:680](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-engine/src/query/batch/query_runner.rs#L680); [crates/shamir-query-builder/src/batch/tests/sub_batch_tests.rs:17](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-query-builder/src/batch/tests/sub_batch_tests.rs#L17); [crates/shamir-sdk/src/db.rs:139](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-sdk/src/db.rs#L139).
 
 <a id="review-2"></a>
 
@@ -35,9 +35,11 @@ Evidence: [crates/shamir-query-builder/src/batch/batch.rs:912](../../../../../cr
 
 Status: `confirmed-open`. Current risk: `medium`.
 
-Both missing-target lookups still return success without recording anything; try_build cannot recover discarded intent. Alias replacement also resets guards/edges. A foreign handle with an existing local alias instead mutates that local entry, because handles have no ownership identity. Existing tests exercise recorded invalid references, not lookup misses or replacement.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-query-builder/src/batch/batch.rs:1003](../../../../../crates/shamir-query-builder/src/batch/batch.rs#L1003); [crates/shamir-query-builder/src/batch/batch.rs:1025](../../../../../crates/shamir-query-builder/src/batch/batch.rs#L1025); [crates/shamir-query-builder/src/batch/batch.rs:1096](../../../../../crates/shamir-query-builder/src/batch/batch.rs#L1096); [crates/shamir-query-builder/src/batch/handle.rs:11](../../../../../crates/shamir-query-builder/src/batch/handle.rs#L11); [crates/shamir-query-builder/src/batch/tests/after_tests.rs:64](../../../../../crates/shamir-query-builder/src/batch/tests/after_tests.rs#L64); [crates/shamir-query-builder/src/batch/tests/when_tests.rs:81](../../../../../crates/shamir-query-builder/src/batch/tests/when_tests.rs#L81).
+Passing a foreign missing dependent alias records nothing and returns self; try_build cannot diagnose discarded intent. A foreign equal alias mutates the local entry. Tests inject bad references into existing entries, which does not exercise lookup misses. Replacement is a separate mechanism.
+
+Evidence: [crates/shamir-query-builder/src/batch/batch.rs:1003](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-query-builder/src/batch/batch.rs#L1003); [crates/shamir-query-builder/src/batch/batch.rs:1025](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-query-builder/src/batch/batch.rs#L1025); [crates/shamir-query-builder/src/batch/handle.rs:11](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-query-builder/src/batch/handle.rs#L11); [crates/shamir-query-builder/src/batch/tests/after_tests.rs:64](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-query-builder/src/batch/tests/after_tests.rs#L64).
 
 <a id="review-3"></a>
 
@@ -45,9 +47,11 @@ Evidence: [crates/shamir-query-builder/src/batch/batch.rs:1003](../../../../../c
 
 Status: `confirmed-open`. Current risk: `medium`.
 
-The builder still collects every string-valued $query key regardless of sibling keys. The planner recognizes exact marker shapes before typed decoding, so a literal map containing $query plus another ordinary key is not an alias dependency there.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-query-builder/src/batch/batch.rs:1122](../../../../../crates/shamir-query-builder/src/batch/batch.rs#L1122); [crates/shamir-query-types/src/batch/planner.rs:385](../../../../../crates/shamir-query-types/src/batch/planner.rs#L385).
+A write-value map containing $query='@missing' plus an ordinary sibling is literal to planner recognition but yields UnknownAlias in the builder. The oracle must distinguish exact markers from literal maps and retain recursive recognition inside genuine expression markers.
+
+Evidence: [crates/shamir-query-builder/src/batch/batch.rs:1122](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-query-builder/src/batch/batch.rs#L1122); [crates/shamir-query-types/src/batch/planner.rs:385](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-query-types/src/batch/planner.rs#L385).
 
 <a id="review-4"></a>
 
@@ -55,9 +59,11 @@ Evidence: [crates/shamir-query-builder/src/batch/batch.rs:1122](../../../../../c
 
 Status: `confirmed-open`. Current risk: `low`.
 
-Validation still ends without examining return_only. The executor retains only requested result keys, so an unknown name silently removes results rather than producing the local alias error.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-query-builder/src/batch/batch.rs:124](../../../../../crates/shamir-query-builder/src/batch/batch.rs#L124); [crates/shamir-query-builder/src/batch/batch.rs:912](../../../../../crates/shamir-query-builder/src/batch/batch.rs#L912); [crates/shamir-engine/src/query/batch/batch_execute.rs:868](../../../../../crates/shamir-engine/src/query/batch/batch_execute.rs#L868).
+return_only(['typo']) is copied without membership validation; executor retention can return an empty map. This is a missing local diagnostic, not a breach of a documented exhaustive-validation API. Explicitly selecting a silent alias is valid.
+
+Evidence: [crates/shamir-query-builder/src/batch/batch.rs:124](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-query-builder/src/batch/batch.rs#L124); [crates/shamir-query-builder/src/batch/batch.rs:912](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-query-builder/src/batch/batch.rs#L912); [crates/shamir-engine/src/query/batch/batch_execute.rs:868](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-engine/src/query/batch/batch_execute.rs#L868).
 
 <a id="review-5"></a>
 
@@ -65,9 +71,11 @@ Evidence: [crates/shamir-query-builder/src/batch/batch.rs:124](../../../../../cr
 
 Status: `confirmed-open`. Current risk: `low`.
 
-The emitted shape and missing zero-case regression remain. Current execution is source-determined: Or uses iterator any, so empty Or is false and the default's Not is true. Existing switch tests cover AST construction, not this boundary's execution.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-query-builder/src/batch/batch.rs:1077](../../../../../crates/shamir-query-builder/src/batch/batch.rs#L1077); [crates/shamir-engine/src/query/filter/filter_node.rs:664](../../../../../crates/shamir-engine/src/query/filter/filter_node.rs#L664); [crates/shamir-query-builder/src/batch/tests/when_tests.rs:154](../../../../../crates/shamir-query-builder/src/batch/tests/when_tests.rs#L154); [crates/shamir-query-builder/src/batch/tests/when_tests.rs:254](../../../../../crates/shamir-query-builder/src/batch/tests/when_tests.rs#L254).
+Zero cases emit Not(Or([])); engine any([]) is false, so default runs. The remaining issue is coverage, not ambiguous current semantics. Existing switch tests assert constructed guards and do not exercise this boundary through execution.
+
+Evidence: [crates/shamir-query-builder/src/batch/batch.rs:1077](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-query-builder/src/batch/batch.rs#L1077); [crates/shamir-engine/src/query/filter/filter_node.rs:664](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-engine/src/query/filter/filter_node.rs#L664); [crates/shamir-query-builder/src/batch/tests/when_tests.rs:154](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-query-builder/src/batch/tests/when_tests.rs#L154).
 
 <a id="review-6"></a>
 
@@ -75,9 +83,13 @@ Evidence: [crates/shamir-query-builder/src/batch/batch.rs:1077](../../../../../c
 
 Status: `confirmed-open`. Current risk: `low`.
 
-BindValidator accepts any u16 priority, although the execution-side management API rejects values outside 1000..=9999. ReplScopeBuilder still accepts table without repo, contrary to both builder and DTO contracts. Neither builder offers the proposed validation.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-query-builder/src/ddl/validator.rs:162](../../../../../crates/shamir-query-builder/src/ddl/validator.rs#L162); [crates/shamir-db/src/shamir_db/shamir_db/validator_management.rs:477](../../../../../crates/shamir-db/src/shamir_db/shamir_db/validator_management.rs#L477); [crates/shamir-query-builder/src/ddl/replication.rs:49](../../../../../crates/shamir-query-builder/src/ddl/replication.rs#L49); [crates/shamir-query-builder/src/ddl/replication.rs:56](../../../../../crates/shamir-query-builder/src/ddl/replication.rs#L56); [crates/shamir-query-types/src/admin/types/repl_ops.rs:64](../../../../../crates/shamir-query-types/src/admin/types/repl_ops.rs#L64).
+priority(0) survives local construction despite server range rejection. repl_scope('db').table('t') produces a DTO contrary to its required repo/table relationship. Opt-in validation would improve feedback; these witnesses do not prove server authorization bypass.
+
+Evidence: [crates/shamir-query-builder/src/ddl/validator.rs:162](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-query-builder/src/ddl/validator.rs#L162); [crates/shamir-db/src/shamir_db/shamir_db/validator_management.rs:477](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/shamir_db/validator_management.rs#L477); [crates/shamir-query-builder/src/ddl/replication.rs:49](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-query-builder/src/ddl/replication.rs#L49); [crates/shamir-query-types/src/admin/types/repl_ops.rs:64](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-query-types/src/admin/types/repl_ops.rs#L64).
+
+Grouping/duplicate: [error-handling-lifecycle.md#3](error-handling-lifecycle.md#review-3). This is not an additional independent defect.
 
 <a id="review-7"></a>
 
@@ -85,13 +97,13 @@ Evidence: [crates/shamir-query-builder/src/ddl/validator.rs:162](../../../../../
 
 Status: `confirmed-open`. Current risk: `medium`.
 
-The parent can now identify a constructible codec failure without executing it: owned Array/Map values can be nested beyond rmp-serde 1.3.1's default 1024-container decode budget. Serialization has no active depth counter; decoding those bytes returns DepthLimitExceeded, and the public helper's expect converts that Result to panic. This is a programmatic deep-input API defect, not proof of a normal network request or a measured target stack threshold; existing network decoder bounds do not cap locally built values.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-query-builder/src/batch/batch.rs:878](../../../../../crates/shamir-query-builder/src/batch/batch.rs#L878); [crates/shamir-query-builder/src/write/doc.rs:47](../../../../../crates/shamir-query-builder/src/write/doc.rs#L47); [Cargo.lock:2949](../../../../../Cargo.lock#L2949).
+A deeply nested List supplied through id reaches QueryValue decoding after encoding; exact rmp-serde 1.3.1's active decode budget can fail and the helper expects success. Ordinary roundtrip tests have no deep failure oracle. This is local API reachability, not a demonstrated network exploit.
 
-Pinned dependency evidence: [rmp-serde 1.3.1, src/decode.rs:294](https://docs.rs/crate/rmp-serde/1.3.1/source/src/decode.rs); [rmp-serde 1.3.1, src/decode.rs:566](https://docs.rs/crate/rmp-serde/1.3.1/source/src/decode.rs); [rmp-serde 1.3.1, src/encode.rs:147](https://docs.rs/crate/rmp-serde/1.3.1/source/src/encode.rs).
+Evidence: [crates/shamir-query-builder/src/batch/batch.rs:81](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-query-builder/src/batch/batch.rs#L81); [crates/shamir-query-builder/src/batch/batch.rs:878](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-query-builder/src/batch/batch.rs#L878); [crates/shamir-types/src/types/value.rs:77](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-types/src/types/value.rs#L77); [Cargo.lock:2949](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/Cargo.lock#L2949).
 
-Grouping/duplicate: `error-handling-lifecycle.md#1`. This row is not another independent defect.
+Grouping/duplicate: [error-handling-lifecycle.md#1](error-handling-lifecycle.md#review-1). This is not an additional independent defect.
 
 <a id="review-8"></a>
 
@@ -99,17 +111,20 @@ Grouping/duplicate: `error-handling-lifecycle.md#1`. This row is not another ind
 
 Status: `confirmed-open`. Current risk: `nit`.
 
-The leaf comment still names nonexistent val::query_ref, and the fallible-write comment still describes panicking IntoBatchOp implementations that were removed from Update/Upsert/Delete builders.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-query-builder/src/filter/leaf.rs:83](../../../../../crates/shamir-query-builder/src/filter/leaf.rs#L83); [crates/shamir-query-builder/src/val/filter_value.rs:166](../../../../../crates/shamir-query-builder/src/val/filter_value.rs#L166); [crates/shamir-query-builder/src/batch/batch.rs:248](../../../../../crates/shamir-query-builder/src/batch/batch.rs#L248); [crates/shamir-query-builder/src/batch/into_batch_op.rs:41](../../../../../crates/shamir-query-builder/src/batch/into_batch_op.rs#L41); [crates/shamir-query-builder/src/batch/try_into_batch_op.rs:29](../../../../../crates/shamir-query-builder/src/batch/try_into_batch_op.rs#L29).
+The implementation comment names absent query_ref; fallible-write commentary describes removed panicking IntoBatchOp implementations. Current constructors are qref/qref_all and the affected builders use TryIntoBatchOp.
 
-## Corrections and qualified non-findings
+Evidence: [crates/shamir-query-builder/src/filter/leaf.rs:83](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-query-builder/src/filter/leaf.rs#L83); [crates/shamir-query-builder/src/batch/batch.rs:248](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-query-builder/src/batch/batch.rs#L248); [crates/shamir-query-builder/src/batch/try_into_batch_op.rs:29](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-query-builder/src/batch/try_into_batch_op.rs#L29).
 
-- The wired lit_u64 boundary, alias-error, SELECT-function-argument, HAVING, and switch-shape assertions support the stated structural coverage. They do not establish successful runtime execution or measured performance.
-- Cursor tests are registered through cursor/tests.rs, not a tests/ manifest directory; the blanket layout guarantee is inaccurate.
-- The switch tests use field-based guards and assert constructed trees; they do not demonstrate valid record-less when execution.
-- SerializationFailed has only a directly constructed Display test. That does not demonstrate codec failure propagation, and its comment claiming failure is impossible today is not independently proven.
-- Correctness finding 2 combines two mechanisms: lookup-miss no-ops and duplicate-alias overwrites. Track both separately when assessing closure.
+Grouping/duplicate: [SUMMARY.md#7.6](SUMMARY.md#review-7-6). This is not an additional independent defect.
+
+## Evidence and recipe corrections
+
+- Downgrade the nested-scope finding from high to medium: opt-in validation rejects legitimate requests, while inspected SDK execution bypasses try_build; data loss or broad deployed failure was not established.
+- The introductory 'codec-panic reachability is unverified' sentence conflicts with the later parent refinement. Exact published rmp-serde code independently supports the deep-owned-input mechanism.
+- A debug_assert-only mutator recipe leaves release builds silently discarding intent. Membership validation alone also misses equal-alias foreign handles; ownership semantics must be decided explicitly.
+- Near-exhaustive branch coverage is not end-to-end feature proof. SELECT/HAVING alias-error tests exercise builder walking, not production data availability; positive try_* helper tests compare the same path twice.
 
 ---
 

@@ -1,19 +1,21 @@
-<!-- revalidation:2026-10-08 source:92ad58266bf57ddea1fa3c8a47affba1a3a9a096 -->
-# shamir-funclib — api-wire-protocol revalidation
+<!-- revalidation:2026-10-08 cycle:independent-2 source:e3765c935fc71655ee1ec0160cf180607935d89b -->
+# shamir-funclib — api-wire-protocol independent revalidation (cycle 2)
 
-Source snapshot: `92ad58266bf57ddea1fa3c8a47affba1a3a9a096`. Revalidated 2026-10-08 by read-only XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run; no source fix is part of this update. Test registration/assertions are evidence of an oracle, not proof of a passing run.
+Frozen source snapshot: `e3765c935fc71655ee1ec0160cf180607935d89b`. Independently revalidated 2026-10-08 by a fresh XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run. Source-fixed means the specified mechanism was already removed at this snapshot; this cycle implements no source fix.
 
-This section is authoritative for current status. Original titles/IDs are retained for traceability; a refuted title is not a current assertion. The collapsed historical report below is superseded, including its counts, severity, scenarios and fix instructions. Plan IDs preserve historical numbering, not a current release mandate. [Workspace methodology and status definitions](../SUMMARY.md#status-definitions).
+This section is authoritative for current decisions. Existing IDs and allegation titles are retained for traceability; a refuted title is not a current assertion. Prior-cycle decisions were rechecked, not used as proof. The first cycle is available in repository history at this snapshot. The original historical body below remains preserved once and is superseded, including its counts, severities and recipes. [Workspace scope and status definitions](../SUMMARY.md#status-definitions).
 
-Public ABI and production folder names remain coherent, but docs, error vocabulary, canonical-format contract, and conversion edges remain unresolved. Several findings are documentation/API ergonomics rather than runtime security defects.
+Unrelated external edits began in dependency/toolchain/CI metadata during collection; additional Rust-source edits appeared afterward. They were left untouched. Evidence and decisions are tied to the frozen commit, not those later changes or an installed toolchain. “Current” below means current at that snapshot; no re-audit of the modified working tree is implied.
+
+Qualified dispatch and arity handling are coherent. Allocation, float-boundary and canonical-documentation defects remain; separately documented navigation semantics and the intentional code-only error shape are not repair obligations.
 
 ## Current claim decisions
 
 | Claim decisions | Open | Source-fixed | Partial | Refuted | Unverified | N/A |
 |---:|---:|---:|---:|---:|---:|---:|
-| 9 | 9 | 0 | 0 | 0 | 0 | 0 |
+| 9 | 7 | 0 | 0 | 0 | 0 | 2 |
 
-These are decisions on report claims, including repeated roots, bundled observations and non-findings—not a unique-bug census. Closed/N/A rows have no current risk; unverified risk is provisional. Pure style and unmeasured optimization claims do not establish runtime impact.
+These are duplicate-inclusive report decisions, not a unique-bug census. Pure style or structural optimization does not establish a runtime incident; unverified impact remains provisional.
 
 <a id="review-1"></a>
 
@@ -21,11 +23,13 @@ These are decisions on report claims, including repeated roots, bundled observat
 
 Status: `confirmed-open`. Current risk: `high`.
 
-All cited scalar functions remain registered and uncapped. Evaluated query/computed-write expressions reach allocation directly. The one-argument field-rule bridge cannot invoke all members of this family; builtin registry exposure alone is not direct WASM reachability proof.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-funclib/src/lib.rs:53](../../../../../crates/shamir-funclib/src/lib.rs#L53); [crates/shamir-funclib/src/lib.rs:60](../../../../../crates/shamir-funclib/src/lib.rs#L60); [crates/shamir-funclib/src/gen.rs:75](../../../../../crates/shamir-funclib/src/gen.rs#L75); [crates/shamir-funclib/src/strings.rs:237](../../../../../crates/shamir-funclib/src/strings.rs#L237); [crates/shamir-engine/src/table/write_helpers.rs:314](../../../../../crates/shamir-engine/src/table/write_helpers.rs#L314); [crates/shamir-engine/src/validator/schema/field_rule.rs:476](../../../../../crates/shamir-engine/src/validator/schema/field_rule.rs#L476).
+Positive i64 lengths reach allocations without checked byte ceilings. Authorized evaluated expressions can amplify a small input into allocation failure; a safe regression must assert rejection before allocation.
 
-Grouping/duplicate: `error-handling-lifecycle.md#2`. This row is not another independent defect.
+Evidence: [crates/shamir-funclib/src/gen.rs:75](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-funclib/src/gen.rs#L75); [crates/shamir-funclib/src/strings.rs:237](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-funclib/src/strings.rs#L237); [crates/shamir-funclib/src/strings.rs:406](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-funclib/src/strings.rs#L406); [crates/shamir-engine/src/query/filter/resolve.rs:374](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-engine/src/query/filter/resolve.rs#L374).
+
+Grouping/duplicate: [error-handling-lifecycle.md#2](error-handling-lifecycle.md#review-2). This is not an additional independent defect.
 
 <a id="review-2"></a>
 
@@ -33,9 +37,11 @@ Grouping/duplicate: `error-handling-lifecycle.md#2`. This row is not another ind
 
 Status: `confirmed-open`. Current risk: `low`.
 
-Keys are still sorted by rmp-serde encoding, whose length prefix makes b sort before aa; docs still assert raw-name ordering. canonical_bytes still has no format-version prefix. Existing tests establish insertion-order invariance and selected Dec/Big roundtrips, not cross-language byte vectors or migration. No actual format change or persisted-hash migration failure was demonstrated.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-funclib/src/canonical.rs:28](../../../../../crates/shamir-funclib/src/canonical.rs#L28); [crates/shamir-funclib/src/canonical.rs:161](../../../../../crates/shamir-funclib/src/canonical.rs#L161); [crates/shamir-funclib/src/canonical.rs:187](../../../../../crates/shamir-funclib/src/canonical.rs#L187); [crates/shamir-funclib/src/canonical.rs:203](../../../../../crates/shamir-funclib/src/canonical.rs#L203); [crates/shamir-types/src/types/value.rs:72](../../../../../crates/shamir-types/src/types/value.rs#L72); [Cargo.lock:2949](../../../../../Cargo.lock#L2949).
+Published rmp-serde 1.3.1/rmp 0.8.15 source confirms length-tagged key bytes, so b precedes aa. The format remains unversioned; migration failure is prospective, not demonstrated. Freeze existing bytes before considering changes.
+
+Evidence: [crates/shamir-funclib/src/canonical.rs:28](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-funclib/src/canonical.rs#L28); [crates/shamir-funclib/src/canonical.rs:161](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-funclib/src/canonical.rs#L161); [crates/shamir-funclib/src/canonical.rs:187](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-funclib/src/canonical.rs#L187); [Cargo.lock:2940](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/Cargo.lock#L2940); [Cargo.lock:2949](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/Cargo.lock#L2949).
 
 <a id="review-3"></a>
 
@@ -43,11 +49,13 @@ Evidence: [crates/shamir-funclib/src/canonical.rs:28](../../../../../crates/sham
 
 Status: `confirmed-open`. Current risk: `low`.
 
-ScalarError remains an arbitrary String with no common catalog; regex invalid-pattern synonyms remain and tests pin both. cast_failed versus extractor out_of_range and the documented broad parse code are not intrinsically erroneous. No frontend localization implementation was located to prove the claimed concrete UX failure.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-funclib/src/registry.rs:20](../../../../../crates/shamir-funclib/src/registry.rs#L20); [crates/shamir-funclib/src/strings.rs:427](../../../../../crates/shamir-funclib/src/strings.rs#L427); [crates/shamir-funclib/src/validate.rs:342](../../../../../crates/shamir-funclib/src/validate.rs#L342); [crates/shamir-funclib/src/datetime.rs:19](../../../../../crates/shamir-funclib/src/datetime.rs#L19).
+Arbitrary String codes and bad_regex/bad_pattern coexist without a builtin catalog. This is contract-maintenance debt, not proven frontend failure; both spellings are already documented/tested and cannot safely be merged silently.
 
-Grouping/duplicate: `error-handling-lifecycle.md#6`. This row is not another independent defect.
+Evidence: [crates/shamir-funclib/src/registry.rs:20](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-funclib/src/registry.rs#L20); [crates/shamir-funclib/src/strings.rs:427](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-funclib/src/strings.rs#L427); [crates/shamir-funclib/src/validate.rs:342](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-funclib/src/validate.rs#L342).
+
+Grouping/duplicate: [error-handling-lifecycle.md#6](error-handling-lifecycle.md#review-6). This is not an additional independent defect.
 
 <a id="review-4"></a>
 
@@ -55,19 +63,23 @@ Grouping/duplicate: `error-handling-lifecycle.md#6`. This row is not another ind
 
 Status: `confirmed-open`. Current risk: `low`.
 
-Eleven headers still omit production qualification and the crate front door still says stubs. Direct category registration genuinely accepts plain names, so those behavioral tests are valid API tests, not tests of nonexistent APIs. Production-name wiring remains sample-covered rather than comprehensively covered.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-funclib/src/math.rs:4](../../../../../crates/shamir-funclib/src/math.rs#L4); [crates/shamir-funclib/src/lib.rs:12](../../../../../crates/shamir-funclib/src/lib.rs#L12); [crates/shamir-funclib/src/lib.rs:51](../../../../../crates/shamir-funclib/src/lib.rs#L51); [crates/shamir-funclib/src/registry.rs:126](../../../../../crates/shamir-funclib/src/registry.rs#L126); [crates/shamir-funclib/src/tests/register_builtins_tests.rs:24](../../../../../crates/shamir-funclib/src/tests/register_builtins_tests.rs#L24); [crates/shamir-query-types/src/read/select.rs:102](../../../../../crates/shamir-query-types/src/read/select.rs#L102).
+Eleven headers omit the production-prefix layer and lib still calls implemented categories stubs. Direct category registration genuinely supports plain names; preserve those tests and supplement qualified dispatch coverage.
+
+Evidence: [crates/shamir-funclib/src/lib.rs:12](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-funclib/src/lib.rs#L12); [crates/shamir-funclib/src/lib.rs:51](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-funclib/src/lib.rs#L51); [crates/shamir-funclib/src/registry.rs:129](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-funclib/src/registry.rs#L129); [crates/shamir-funclib/src/tests/register_builtins_tests.rs:24](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-funclib/src/tests/register_builtins_tests.rs#L24).
 
 <a id="review-5"></a>
 
 ### Claim 5 — Same public name `get_path` in two folders with opposite miss semantics
 
-Status: `confirmed-open`. Current risk: `nit`.
+Status: `not-applicable`. Current risk: `—`.
 
-The distinct miss and accepted-step semantics remain. Each module already documents its own behavior and tests it; there is no contract requiring these differently qualified functions to agree. What remains is optional cross-reference/disambiguation, not a proven algorithmic defect. Filter .ok() still turns object errors into unresolved values.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-funclib/src/object.rs:10](../../../../../crates/shamir-funclib/src/object.rs#L10); [crates/shamir-funclib/src/object.rs:94](../../../../../crates/shamir-funclib/src/object.rs#L94); [crates/shamir-funclib/src/value_nav.rs:11](../../../../../crates/shamir-funclib/src/value_nav.rs#L11); [crates/shamir-funclib/src/value_nav.rs:120](../../../../../crates/shamir-funclib/src/value_nav.rs#L120); [crates/shamir-engine/src/query/filter/resolve.rs:374](../../../../../crates/shamir-engine/src/query/filter/resolve.rs#L374).
+These are different qualified APIs with explicitly documented and tested contracts: object errors on misses; value_nav returns Null and supports list indexing. No shared-semantics guarantee requires alignment or renaming.
+
+Evidence: [crates/shamir-funclib/src/object.rs:10](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-funclib/src/object.rs#L10); [crates/shamir-funclib/src/value_nav.rs:11](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-funclib/src/value_nav.rs#L11); [crates/shamir-funclib/src/tests/object_tests.rs:101](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-funclib/src/tests/object_tests.rs#L101); [crates/shamir-funclib/src/tests/value_nav_tests.rs:57](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-funclib/src/tests/value_nav_tests.rs#L57).
 
 <a id="review-6"></a>
 
@@ -75,9 +87,11 @@ Evidence: [crates/shamir-funclib/src/object.rs:10](../../../../../crates/shamir-
 
 Status: `confirmed-open`. Current risk: `low`.
 
-FnEntry metadata remains public and builtin FnEntry::pure entries remain unvouched despite indexability claims. The engine still checks is_indexable. A native embedder setting fields explicitly is already the trusted authority; privacy does not prove semantic purity or close an untrusted wire bypass. Specialized lower/upper/trim/length indexes are a separate supported path.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-funclib/src/registry.rs:54](../../../../../crates/shamir-funclib/src/registry.rs#L54); [crates/shamir-funclib/src/registry.rs:79](../../../../../crates/shamir-funclib/src/registry.rs#L79); [crates/shamir-funclib/src/arrays.rs:28](../../../../../crates/shamir-funclib/src/arrays.rs#L28); [crates/shamir-funclib/src/cast.rs:18](../../../../../crates/shamir-funclib/src/cast.rs#L18); [crates/shamir-engine/src/table/table_manager_index_mgmt.rs:249](../../../../../crates/shamir-engine/src/table/table_manager_index_mgmt.rs#L249); [crates/shamir-engine/src/table/table_manager_index_mgmt.rs:262](../../../../../crates/shamir-engine/src/table/table_manager_index_mgmt.rs#L262).
+Builtin pure entries remain unvouched although several headers claim indexability. Engine checks all eligibility flags. A native struct literal is still explicit trusted-embedder action, not an untrusted bypass; field privacy is optional.
+
+Evidence: [crates/shamir-funclib/src/registry.rs:79](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-funclib/src/registry.rs#L79); [crates/shamir-funclib/src/registry.rs:102](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-funclib/src/registry.rs#L102); [crates/shamir-funclib/src/arrays.rs:28](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-funclib/src/arrays.rs#L28); [crates/shamir-engine/src/table/table_manager_index_mgmt.rs:262](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-engine/src/table/table_manager_index_mgmt.rs#L262).
 
 <a id="review-7"></a>
 
@@ -85,21 +99,25 @@ Evidence: [crates/shamir-funclib/src/registry.rs:54](../../../../../crates/shami
 
 Status: `confirmed-open`. Current risk: `low`.
 
-Both range predicates retain the inclusive rounded upper bound, so F64(2^63) still saturates instead of failing. Big-to-Int tests do not cover this separate F64 edge.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-funclib/src/registry.rs:218](../../../../../crates/shamir-funclib/src/registry.rs#L218); [crates/shamir-funclib/src/cast.rs:121](../../../../../crates/shamir-funclib/src/cast.rs#L121); [crates/shamir-funclib/src/cast/tests/cast_tests.rs:219](../../../../../crates/shamir-funclib/src/cast/tests/cast_tests.rs#L219).
+F64(2^63) satisfies the rounded inclusive bound and casts to i64::MAX instead of the documented error. Both extractor and cast need an exclusive upper bound and a direct boundary oracle.
 
-Grouping/duplicate: `correctness-tdd.md#3`. This row is not another independent defect.
+Evidence: [crates/shamir-funclib/src/registry.rs:218](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-funclib/src/registry.rs#L218); [crates/shamir-funclib/src/cast.rs:121](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-funclib/src/cast.rs#L121).
+
+Grouping/duplicate: [correctness-tdd.md#3](correctness-tdd.md#review-3). This is not an additional independent defect.
 
 <a id="review-8"></a>
 
 ### Claim 8 — `ScalarError` has no structured detail slot
 
-Status: `confirmed-open`. Current risk: `nit`.
+Status: `not-applicable`. Current risk: `—`.
 
-The error still contains only code: String. Machine-safe detail is absent, but the documented code-only contract is intentional; adding detail is an API enhancement rather than correction of a demonstrated failure.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-funclib/src/registry.rs:17](../../../../../crates/shamir-funclib/src/registry.rs#L17); [crates/shamir-funclib/src/registry.rs:20](../../../../../crates/shamir-funclib/src/registry.rs#L20).
+code-only errors are the explicit public contract. Adding argument/type detail is an optional API extension and can break struct-literal consumers; absence of detail is not a conformance defect.
+
+Evidence: [crates/shamir-funclib/src/registry.rs:8](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-funclib/src/registry.rs#L8); [crates/shamir-funclib/src/registry.rs:17](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-funclib/src/registry.rs#L17); [crates/shamir-funclib/src/registry.rs:20](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-funclib/src/registry.rs#L20).
 
 <a id="review-9"></a>
 
@@ -107,20 +125,19 @@ Evidence: [crates/shamir-funclib/src/registry.rs:17](../../../../../crates/shami
 
 Status: `confirmed-open`. Current risk: `nit`.
 
-IndexMap insertion still overwrites, but the scalar register doc still does not state last-wins, unlike AggRegistry. No overwrite log or collision test is present. Logging is optional and could add noise to intentional replacement.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-funclib/src/registry.rs:126](../../../../../crates/shamir-funclib/src/registry.rs#L126); [crates/shamir-funclib/src/registry.rs:135](../../../../../crates/shamir-funclib/src/registry.rs#L135); [crates/shamir-funclib/src/agg.rs:72](../../../../../crates/shamir-funclib/src/agg.rs#L72).
+Scalar registration overwrites but does not document duplicate policy, unlike aggregate registration. Its container is Fx-backed std::HashMap, not the report's IndexMap. A duplicate-call oracle would pin last-wins; logging is optional.
 
-## Corrections and qualified non-findings
+Evidence: [crates/shamir-funclib/src/registry.rs:126](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-funclib/src/registry.rs#L126); [crates/shamir-funclib/src/registry.rs:135](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-funclib/src/registry.rs#L135); [crates/shamir-funclib/src/agg.rs:72](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-funclib/src/agg.rs#L72); [crates/shamir-collections/src/lib.rs:43](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-collections/src/lib.rs#L43).
 
-- No separate Fix Plan exists; recommendations are assessed in the finding rows and SUMMARY plan.
-- Builder-only compliance is supported: serde_json use constructs/inspects values and codec tests, not database queries; the registered benchmark uses bench_scale_tool.
-- Do not silently change canonical key sorting or add a prefix to the existing format: either document/freeze current bytes or define an explicit versioned migration and compatibility contract.
-- Canonical content equivalence intentionally aliases Dec/Big with their serialized strings and normalizes float zeros/NaNs. The phrase 'any change to data changes the hash' is not literal typed-value injectivity.
-- The located native CAS validator is in an integration test. Claims of automatic hashing on every production sequenced write are unsupported.
-- Do not merge stable machine codes merely because they describe related conditions; assess backward compatibility and retain the extractor/conversion distinction where intentional.
-- The published-vector literals, selected canonical roundtrip tests, and aggregate empty-input tests are reachable, but their presence is not proof that every module has its own tests directory or that all contracts are exhaustively tested.
-- All source filenames should be prefixed with crates/shamir-funclib; the extra crates/shamir-db prefix in the original date finding is erroneous.
+## Evidence and recipe corrections
+
+- Treat get_path alignment and ScalarError detail as optional design, not open defects.
+- Do not change canonical sorting or prepend a version to existing hashes without explicit compatibility handling.
+- ScalarRegistry uses TFxMap/std::HashMap; only TMap value objects use IndexMap.
+- The encode lossless-safe-variant assurance misses non-finite floats and recognized typed map-key prefixes.
+- Canonical generic _prev_hash exclusion is narrower than its public docs: numeric interned keys are not recognized.
 
 ---
 

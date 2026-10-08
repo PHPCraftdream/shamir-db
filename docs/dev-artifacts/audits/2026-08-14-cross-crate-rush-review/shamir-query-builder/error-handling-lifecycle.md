@@ -1,11 +1,13 @@
-<!-- revalidation:2026-10-08 source:92ad58266bf57ddea1fa3c8a47affba1a3a9a096 -->
-# shamir-query-builder — error-handling-lifecycle revalidation
+<!-- revalidation:2026-10-08 cycle:independent-2 source:e3765c935fc71655ee1ec0160cf180607935d89b -->
+# shamir-query-builder — error-handling-lifecycle independent revalidation (cycle 2)
 
-Source snapshot: `92ad58266bf57ddea1fa3c8a47affba1a3a9a096`. Revalidated 2026-10-08 by read-only XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run; no source fix is part of this update. Test registration/assertions are evidence of an oracle, not proof of a passing run.
+Frozen source snapshot: `e3765c935fc71655ee1ec0160cf180607935d89b`. Independently revalidated 2026-10-08 by a fresh XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run. Source-fixed means the specified mechanism was already removed at this snapshot; this cycle implements no source fix.
 
-This section is authoritative for current status. Original titles/IDs are retained for traceability; a refuted title is not a current assertion. The collapsed historical report below is superseded, including its counts, severity, scenarios and fix instructions. Plan IDs preserve historical numbering, not a current release mandate. [Workspace methodology and status definitions](../SUMMARY.md#status-definitions).
+This section is authoritative for current decisions. Existing IDs and allegation titles are retained for traceability; a refuted title is not a current assertion. Prior-cycle decisions were rechecked, not used as proof. The first cycle is available in repository history at this snapshot. The original historical body below remains preserved once and is superseded, including its counts, severities and recipes. [Workspace scope and status definitions](../SUMMARY.md#status-definitions).
 
-Silent mutator loss and documented DDL validation gaps remain. Hand-written error implementations remain convention debt. Public expects are present, but the reports do not establish a current codec-error trigger. Guarded CreateIndex unwraps satisfy the invariant exception.
+Unrelated external edits began in dependency/toolchain/CI metadata during collection; additional Rust-source edits appeared afterward. They were left untouched. Evidence and decisions are tied to the frozen commit, not those later changes or an installed toolchain. “Current” below means current at that snapshot; no re-audit of the modified working tree is implied.
+
+The public expect paths have concrete deep-owned-input failure mechanisms. Existing typed errors and guarded CreateIndex unwraps are source-supported, but broad no-panic and positive-test-equivalence assurances are not.
 
 ## Current claim decisions
 
@@ -13,11 +15,7 @@ Silent mutator loss and documented DDL validation gaps remain. Hand-written erro
 |---:|---:|---:|---:|---:|---:|---:|
 | 6 | 5 | 0 | 0 | 0 | 0 | 1 |
 
-These are decisions on report claims, including repeated roots, bundled observations and non-findings—not a unique-bug census. Closed/N/A rows have no current risk; unverified risk is provisional. Pure style and unmeasured optimization claims do not establish runtime impact.
-
-## Parent acceptance refinements
-
-- Parent dependency inspection supplies the previously missing deep-owned-value / decode-budget counterexample; no runtime test was executed.
+These are duplicate-inclusive report decisions, not a unique-bug census. Pure style or structural optimization does not establish a runtime incident; unverified impact remains provisional.
 
 <a id="review-1"></a>
 
@@ -25,11 +23,11 @@ These are decisions on report claims, including repeated roots, bundled observat
 
 Status: `confirmed-open`. Current risk: `medium`.
 
-The parent can now identify a constructible codec failure without executing it: owned Array/Map values can be nested beyond rmp-serde 1.3.1's default 1024-container decode budget. Serialization has no active depth counter; decoding those bytes returns DepthLimitExceeded, and the public helper's expect converts that Result to panic. This is a programmatic deep-input API defect, not proof of a normal network request or a measured target stack threshold; existing network decoder bounds do not cap locally built values.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-query-builder/src/batch/batch.rs:872](../../../../../crates/shamir-query-builder/src/batch/batch.rs#L872); [crates/shamir-query-builder/src/batch/batch.rs:878](../../../../../crates/shamir-query-builder/src/batch/batch.rs#L878); [crates/shamir-query-builder/src/batch/build_error.rs:29](../../../../../crates/shamir-query-builder/src/batch/build_error.rs#L29); [crates/shamir-types/src/types/value.rs:71](../../../../../crates/shamir-types/src/types/value.rs#L71); [crates/shamir-query-builder/src/batch/tests/batch_tests.rs:417](../../../../../crates/shamir-query-builder/src/batch/tests/batch_tests.rs#L417); [Cargo.lock:2949](../../../../../Cargo.lock#L2949).
+Batch.id accepts arbitrary owned QueryValue lists. A chain beyond the active rmp-serde 1.3.1 array/map budget is serializable without an encoder depth check but fails decoding and reaches expect. Published archive inspection supports this without claiming a measured stack threshold or network reachability.
 
-Pinned dependency evidence: [rmp-serde 1.3.1, src/decode.rs:294](https://docs.rs/crate/rmp-serde/1.3.1/source/src/decode.rs); [rmp-serde 1.3.1, src/decode.rs:566](https://docs.rs/crate/rmp-serde/1.3.1/source/src/decode.rs); [rmp-serde 1.3.1, src/encode.rs:147](https://docs.rs/crate/rmp-serde/1.3.1/source/src/encode.rs).
+Evidence: [crates/shamir-query-builder/src/batch/batch.rs:81](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-query-builder/src/batch/batch.rs#L81); [crates/shamir-query-builder/src/batch/batch.rs:878](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-query-builder/src/batch/batch.rs#L878); [crates/shamir-types/src/types/value.rs:77](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-types/src/types/value.rs#L77); [crates/shamir-types/src/types/value.rs:281](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-types/src/types/value.rs#L281); [Cargo.lock:2949](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/Cargo.lock#L2949).
 
 <a id="review-2"></a>
 
@@ -37,11 +35,13 @@ Pinned dependency evidence: [rmp-serde 1.3.1, src/decode.rs:294](https://docs.rs
 
 Status: `confirmed-open`. Current risk: `medium`.
 
-The absent-target branches still silently return self. Existing negative tests insert invalid references into existing entries and therefore cannot detect this lost-intent path.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-query-builder/src/batch/batch.rs:1003](../../../../../crates/shamir-query-builder/src/batch/batch.rs#L1003); [crates/shamir-query-builder/src/batch/batch.rs:1025](../../../../../crates/shamir-query-builder/src/batch/batch.rs#L1025); [crates/shamir-query-builder/src/batch/tests/after_tests.rs:64](../../../../../crates/shamir-query-builder/src/batch/tests/after_tests.rs#L64); [crates/shamir-query-builder/src/batch/tests/when_tests.rs:81](../../../../../crates/shamir-query-builder/src/batch/tests/when_tests.rs#L81).
+Lookup misses record neither mutation nor error. Tests checking invalid after/when references on existing operations do not catch this path. Fallible mutation must diagnose the target before losing intent.
 
-Grouping/duplicate: `correctness-tdd.md#2`. This row is not another independent defect.
+Evidence: [crates/shamir-query-builder/src/batch/batch.rs:1003](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-query-builder/src/batch/batch.rs#L1003); [crates/shamir-query-builder/src/batch/batch.rs:1025](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-query-builder/src/batch/batch.rs#L1025); [crates/shamir-query-builder/src/batch/tests/after_tests.rs:64](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-query-builder/src/batch/tests/after_tests.rs#L64).
+
+Grouping/duplicate: [correctness-tdd.md#2](correctness-tdd.md#review-2). This is not an additional independent defect.
 
 <a id="review-3"></a>
 
@@ -49,9 +49,11 @@ Grouping/duplicate: `correctness-tdd.md#2`. This row is not another independent 
 
 Status: `confirmed-open`. Current risk: `low`.
 
-CreateFunction/CreateValidator still finalize without implementation; conditional HMAC, priority range, and empty FieldBuilder type are unchecked locally. Server function/validator handlers reject missing implementation, and validator management rejects priority. These are local feedback/contract gaps, not evidence that server checks disappeared.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-query-builder/src/ddl/function.rs:95](../../../../../crates/shamir-query-builder/src/ddl/function.rs#L95); [crates/shamir-query-builder/src/ddl/validator.rs:48](../../../../../crates/shamir-query-builder/src/ddl/validator.rs#L48); [crates/shamir-query-builder/src/ddl/validator.rs:162](../../../../../crates/shamir-query-builder/src/ddl/validator.rs#L162); [crates/shamir-query-builder/src/ddl/schema.rs:377](../../../../../crates/shamir-query-builder/src/ddl/schema.rs#L377); [crates/shamir-query-builder/src/write/builder_error.rs:20](../../../../../crates/shamir-query-builder/src/write/builder_error.rs#L20); [crates/shamir-query-builder/src/batch/try_into_batch_op.rs:29](../../../../../crates/shamir-query-builder/src/batch/try_into_batch_op.rs#L29); [crates/shamir-db/src/shamir_db/execute/admin_function.rs:90](../../../../../crates/shamir-db/src/shamir_db/execute/admin_function.rs#L90); [crates/shamir-db/src/shamir_db/execute/admin_validator.rs:68](../../../../../crates/shamir-db/src/shamir_db/execute/admin_validator.rs#L68); [crates/shamir-db/src/shamir_db/shamir_db/validator_management.rs:477](../../../../../crates/shamir-db/src/shamir_db/shamir_db/validator_management.rs#L477).
+Missing function/validator implementation, conditional HMAC, out-of-range priority, empty field type and table-without-repo survive construction. Server implementation/priority checks provide counter-evidence to remote acceptance claims. These are distinct local feedback obligations, not one security defect.
+
+Evidence: [crates/shamir-query-builder/src/ddl/function.rs:95](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-query-builder/src/ddl/function.rs#L95); [crates/shamir-query-builder/src/ddl/validator.rs:48](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-query-builder/src/ddl/validator.rs#L48); [crates/shamir-query-builder/src/ddl/validator.rs:162](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-query-builder/src/ddl/validator.rs#L162); [crates/shamir-query-builder/src/ddl/schema.rs:377](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-query-builder/src/ddl/schema.rs#L377); [crates/shamir-query-builder/src/ddl/replication.rs:56](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-query-builder/src/ddl/replication.rs#L56); [crates/shamir-db/src/shamir_db/execute/admin_function.rs:90](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/execute/admin_function.rs#L90); [crates/shamir-db/src/shamir_db/execute/admin_validator.rs:68](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/execute/admin_validator.rs#L68).
 
 <a id="review-4"></a>
 
@@ -59,40 +61,44 @@ Evidence: [crates/shamir-query-builder/src/ddl/function.rs:95](../../../../../cr
 
 Status: `confirmed-open`. Current risk: `low`.
 
-All five still use manual Display/Error implementations and the crate has no thiserror dependency. Matches are exhaustive, and ResponseError preserves source(), so this is structural maintenance debt without an identified behavioral error.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [CLAUDE.md](../../../../../CLAUDE.md); [crates/shamir-query-builder/Cargo.toml:15](../../../../../crates/shamir-query-builder/Cargo.toml#L15); [crates/shamir-query-builder/src/batch/build_error.rs:45](../../../../../crates/shamir-query-builder/src/batch/build_error.rs#L45); [crates/shamir-query-builder/src/write/builder_error.rs:45](../../../../../crates/shamir-query-builder/src/write/builder_error.rs#L45); [crates/shamir-query-builder/src/query/query_build_error.rs:40](../../../../../crates/shamir-query-builder/src/query/query_build_error.rs#L40); [crates/shamir-query-builder/src/ddl/create_index_build_error.rs:131](../../../../../crates/shamir-query-builder/src/ddl/create_index_build_error.rs#L131); [crates/shamir-query-builder/src/response/batch_response_ext.rs:39](../../../../../crates/shamir-query-builder/src/response/batch_response_ext.rs#L39).
+The five exhaustive manual implementations remain contrary to the thiserror convention; ResponseError correctly exposes source. Missing future match arms already fail compilation. This is maintenance policy debt, not an identified error-handling failure.
+
+Evidence: [AGENTS.md:167](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/AGENTS.md#L167); [crates/shamir-query-builder/src/batch/build_error.rs:45](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-query-builder/src/batch/build_error.rs#L45); [crates/shamir-query-builder/src/write/builder_error.rs:45](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-query-builder/src/write/builder_error.rs#L45); [crates/shamir-query-builder/src/query/query_build_error.rs:40](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-query-builder/src/query/query_build_error.rs#L40); [crates/shamir-query-builder/src/ddl/create_index_build_error.rs:131](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-query-builder/src/ddl/create_index_build_error.rs#L131); [crates/shamir-query-builder/src/response/batch_response_ext.rs:39](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-query-builder/src/response/batch_response_ext.rs#L39).
 
 <a id="review-5"></a>
 
-### Claim 5 — `Doc::set` `.expect()`s the `FilterValue` -> `QueryValue` msgpack round-trip in a public setter
+### Claim 5 — `Doc::set` `.expect()`s the `FilterValue` -&gt; `QueryValue` msgpack round-trip in a public setter
 
 Status: `confirmed-open`. Current risk: `medium`.
 
-The parent can now identify a constructible codec failure without executing it: owned Array/Map values can be nested beyond rmp-serde 1.3.1's default 1024-container decode budget. Serialization has no active depth counter; decoding those bytes returns DepthLimitExceeded, and the public helper's expect converts that Result to panic. This is a programmatic deep-input API defect, not proof of a normal network request or a measured target stack threshold; existing network decoder bounds do not cap locally built values.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-query-builder/src/write/doc.rs:47](../../../../../crates/shamir-query-builder/src/write/doc.rs#L47); [crates/shamir-query-types/src/filter/filter_value.rs:322](../../../../../crates/shamir-query-types/src/filter/filter_value.rs#L322); [crates/shamir-types/src/types/value.rs:71](../../../../../crates/shamir-types/src/types/value.rs#L71); [Cargo.lock:2949](../../../../../Cargo.lock#L2949).
+FilterValue::Array can be locally nested beyond the exact codec's active QueryValue decoder budget. Encoding succeeds absent resource exhaustion, decode returns DepthLimitExceeded, and the setter expects success. Literal fast-path conversion would remove this particular codec failure but must address its own recursion and expression fallback.
 
-Pinned dependency evidence: [rmp-serde 1.3.1, src/decode.rs:294](https://docs.rs/crate/rmp-serde/1.3.1/source/src/decode.rs); [rmp-serde 1.3.1, src/decode.rs:566](https://docs.rs/crate/rmp-serde/1.3.1/source/src/decode.rs); [rmp-serde 1.3.1, src/encode.rs:147](https://docs.rs/crate/rmp-serde/1.3.1/source/src/encode.rs).
+Evidence: [crates/shamir-query-builder/src/write/doc.rs:43](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-query-builder/src/write/doc.rs#L43); [crates/shamir-query-types/src/filter/filter_value.rs:45](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-query-types/src/filter/filter_value.rs#L45); [crates/shamir-types/src/types/value.rs:187](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-types/src/types/value.rs#L187); [Cargo.lock:2949](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/Cargo.lock#L2949).
 
 <a id="review-6"></a>
 
 ### Claim 6 — Guarded `unwrap()`/`expect()` cluster in `TryFrom<&CreateIndex>` is sound but could be total
 
-Status: `not-applicable`. Current risk: —.
+Status: `not-applicable`. Current risk: `—`.
 
-Positive guards still establish Some index type, positive vector dimension, and exactly one sorted field before these unwraps. They satisfy the documented programmer-invariant exception. Collapsing the double expect remains optional cosmetic work, not an outstanding runtime defect.
+Prior-cycle decision: `not-applicable`.
 
-Evidence: [crates/shamir-query-builder/src/ddl/create_index.rs:759](../../../../../crates/shamir-query-builder/src/ddl/create_index.rs#L759); [crates/shamir-query-builder/src/ddl/create_index.rs:782](../../../../../crates/shamir-query-builder/src/ddl/create_index.rs#L782); [crates/shamir-query-builder/src/ddl/create_index.rs:826](../../../../../crates/shamir-query-builder/src/ddl/create_index.rs#L826); [crates/shamir-query-builder/src/ddl/create_index.rs:838](../../../../../crates/shamir-query-builder/src/ddl/create_index.rs#L838); [crates/shamir-query-builder/src/ddl/create_index.rs:862](../../../../../crates/shamir-query-builder/src/ddl/create_index.rs#L862); [crates/shamir-query-builder/src/ddl/tests/index_spec_tests.rs:161](../../../../../crates/shamir-query-builder/src/ddl/tests/index_spec_tests.rs#L161).
+non_btree proves Some before type unwraps; the vector check proves Some and nonzero dimension; the sorted check proves one field. No mutation occurs between guards and accesses. Tests reject omitted/zero dimensions through the actual conversion.
 
-## Corrections and qualified non-findings
+Evidence: [crates/shamir-query-builder/src/ddl/create_index.rs:759](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-query-builder/src/ddl/create_index.rs#L759); [crates/shamir-query-builder/src/ddl/create_index.rs:782](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-query-builder/src/ddl/create_index.rs#L782); [crates/shamir-query-builder/src/ddl/create_index.rs:826](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-query-builder/src/ddl/create_index.rs#L826); [crates/shamir-query-builder/src/ddl/create_index.rs:838](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-query-builder/src/ddl/create_index.rs#L838); [crates/shamir-query-builder/src/ddl/tests/index_spec_tests.rs:161](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-query-builder/src/ddl/tests/index_spec_tests.rs#L161).
 
-- No owned files, sockets, tasks, or locks requiring error-path cleanup were identified. Secret-bearing DTOs nevertheless have transitive Drop behavior; 'no Drop glue/resources at all' is too broad.
-- BuilderError's six variants, QueryBuildError's three, ResponseError's three, and index validation paths have reachable assertions. ConflictingBuilderState coverage also resides in integration tests/create_index_typed.rs, not exclusively src/*/tests/.
-- SerializationFailed's constructed Display test does not exercise propagation. Source proves ?-based propagation in the fallback only; it does not justify a blanket no-panic claim for recursive processing.
-- The original near-exhaustive error coverage excludes the unregistered-handle and overwrite paths, zero-case switch boundary, and proposed DDL validation errors.
-- Non-finite f64 is directly serialized by QueryValue; map keys in QueryValue are Strings. Do not reuse these as established encode-failure examples.
-- A thiserror migration and invariant unwrap cleanup should not be represented as runtime reliability fixes absent a concrete behavioral mechanism.
+## Evidence and recipe corrections
+
+- The overview's absence-of-trigger wording is stale relative to both the parent refinement and independent exact-archive inspection.
+- SerializationFailed has a constructed Display test, not a propagation regression. A deep Call parameter exercises fallback decode failure; replacing map_err/? with expect would distinguish correct propagation.
+- The positive try_* helper only compares repeated try executions. Its introductory promise of byte-identical non-try equivalence is unsupported.
+- Making helpers fallible is meaningful; doc(hidden) alone changes neither accessibility nor panic behavior. cfg(test) removal would break sibling-crate test callers that link the ordinary library.
+- Adding debug_assert or leaving doc! to expect does not close release/library panic exposure. Preserve encode/decode phases and avoid converting errors in the wrong direction.
+- No files/sockets/tasks require local cleanup, but secret-bearing transitive Drop obligations exist. Plaintext lifecycle cannot be dismissed as 'no resources'.
 
 ---
 

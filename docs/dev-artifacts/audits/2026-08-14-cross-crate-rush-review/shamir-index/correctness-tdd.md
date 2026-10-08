@@ -1,19 +1,21 @@
-<!-- revalidation:2026-10-08 source:92ad58266bf57ddea1fa3c8a47affba1a3a9a096 -->
-# shamir-index — correctness-tdd revalidation
+<!-- revalidation:2026-10-08 cycle:independent-2 source:e3765c935fc71655ee1ec0160cf180607935d89b -->
+# shamir-index — correctness-tdd independent revalidation (cycle 2)
 
-Source snapshot: `92ad58266bf57ddea1fa3c8a47affba1a3a9a096`. Revalidated 2026-10-08 by read-only XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run; no source fix is part of this update. Test registration/assertions are evidence of an oracle, not proof of a passing run.
+Frozen source snapshot: `e3765c935fc71655ee1ec0160cf180607935d89b`. Independently revalidated 2026-10-08 by a fresh XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run. Source-fixed means the specified mechanism was already removed at this snapshot; this cycle implements no source fix.
 
-This section is authoritative for current status. Original titles/IDs are retained for traceability; a refuted title is not a current assertion. The collapsed historical report below is superseded, including its counts, severity, scenarios and fix instructions. Plan IDs preserve historical numbering, not a current release mandate. [Workspace methodology and status definitions](../SUMMARY.md#status-definitions).
+This section is authoritative for current decisions. Existing IDs and allegation titles are retained for traceability; a refuted title is not a current assertion. Prior-cycle decisions were rechecked, not used as proof. The first cycle is available in repository history at this snapshot. The original historical body below remains preserved once and is superseded, including its counts, severities and recipes. [Workspace scope and status definitions](../SUMMARY.md#status-definitions).
 
-Most value-level defects remain open. The sorted-range allegation is refuted, and the hypothetical future in-memory-op loss is not a current defect. Existing registered tests miss the principal failing boundaries.
+Unrelated external edits began in dependency/toolchain/CI metadata during collection; additional Rust-source edits appeared afterward. They were left untouched. Evidence and decisions are tied to the frozen commit, not those later changes or an installed toolchain. “Current” below means current at that snapshot; no re-audit of the modified working tree is implied.
+
+Unsupported-leaf hashing, Unicode folding, replay acceptance, stats accounting, cache publication, and staged dimensions remain concrete defects. Existing tests miss the discriminating boundaries. Dot counterexamples violate the public normalization contract.
 
 ## Current claim decisions
 
 | Claim decisions | Open | Source-fixed | Partial | Refuted | Unverified | N/A |
 |---:|---:|---:|---:|---:|---:|---:|
-| 14 | 12 | 0 | 0 | 1 | 0 | 1 |
+| 14 | 11 | 0 | 0 | 1 | 0 | 2 |
 
-These are decisions on report claims, including repeated roots, bundled observations and non-findings—not a unique-bug census. Closed/N/A rows have no current risk; unverified risk is provisional. Pure style and unmeasured optimization claims do not establish runtime impact.
+These are duplicate-inclusive report decisions, not a unique-bug census. Pure style or structural optimization does not establish a runtime incident; unverified impact remains provisional.
 
 <a id="review-1"></a>
 
@@ -21,9 +23,11 @@ These are decisions on report claims, including repeated roots, bundled observat
 
 Status: `confirmed-open`. Current risk: `high`.
 
-The catch-all hashes only 255; Dec, Big, Bin, and Set content is omitted. Point lookup trusts the resulting hash. Registered functional tests do not exercise these computed leaves.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-index/src/functional_backend.rs:138](../../../../../crates/shamir-index/src/functional_backend.rs#L138); [crates/shamir-index/src/functional_backend.rs:173](../../../../../crates/shamir-index/src/functional_backend.rs#L173); [crates/shamir-types/src/types/value.rs:34](../../../../../crates/shamir-types/src/types/value.rs#L34); [crates/shamir-index/src/tests/mod.rs:8](../../../../../crates/shamir-index/src/tests/mod.rs#L8).
+A Field expression over any unsupported leaf hashes only 255 in both passes. Different values share postings and direct lookup returns all matching hashes; engine treats index2 answers as complete. Current functional tests use string/int-derived paths. The lower(decimal) example is invalid because Lower type-errors to Null.
+
+Evidence: [crates/shamir-index/src/functional_backend.rs:138](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-index/src/functional_backend.rs#L138); [crates/shamir-index/src/functional_backend.rs:173](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-index/src/functional_backend.rs#L173); [crates/shamir-engine/src/table/read_exec.rs:462](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-engine/src/table/read_exec.rs#L462); [crates/shamir-index/src/tests/functional_backend_tests.rs:73](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-index/src/tests/functional_backend_tests.rs#L73).
 
 <a id="review-2"></a>
 
@@ -31,9 +35,11 @@ Evidence: [crates/shamir-index/src/functional_backend.rs:138](../../../../../cra
 
 Status: `confirmed-open`. Current risk: `high`.
 
-Both borrowed-token predicates inspect ASCII bytes and preserve non-ASCII uppercase words. FullTokenizer has lowercase Russian tests, but neither affected tokenizer has the required uppercase/lowercase equivalence oracle.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-index/src/tokenizer.rs:55](../../../../../crates/shamir-index/src/tokenizer.rs#L55); [crates/shamir-index/src/tokenizer.rs:277](../../../../../crates/shamir-index/src/tokenizer.rs#L277); [crates/shamir-index/src/tests/tokenizer_tests.rs:70](../../../../../crates/shamir-index/src/tests/tokenizer_tests.rs#L70); [crates/shamir-index/src/tests/tokenizer_tests.rs:89](../../../../../crates/shamir-index/src/tests/tokenizer_tests.rs#L89).
+Москва contains no ASCII alphabetic uppercase bytes and remains borrowed, unlike москва. Full uses the same predicate before stemming/stopword filtering. Lowercase Russian tests exist but do not compare affected uppercase/lowercase inputs.
+
+Evidence: [crates/shamir-index/src/tokenizer.rs:55](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-index/src/tokenizer.rs#L55); [crates/shamir-index/src/tokenizer.rs:277](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-index/src/tokenizer.rs#L277); [crates/shamir-index/src/tests/tokenizer_tests.rs:70](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-index/src/tests/tokenizer_tests.rs#L70).
 
 <a id="review-3"></a>
 
@@ -41,9 +47,11 @@ Evidence: [crates/shamir-index/src/tokenizer.rs:55](../../../../../crates/shamir
 
 Status: `confirmed-open`. Current risk: `high`.
 
-Replay errors still only warn; restore succeeds with an incomplete adapter. Later snapshots serialize that adapter and prune deltas below their watermark, without re-deriving missing vectors.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-index/src/vector/vector_backend.rs:683](../../../../../crates/shamir-index/src/vector/vector_backend.rs#L683); [crates/shamir-index/src/vector/vector_backend.rs:919](../../../../../crates/shamir-index/src/vector/vector_backend.rs#L919); [crates/shamir-index/src/vector/snapshot.rs:1314](../../../../../crates/shamir-index/src/vector/snapshot.rs#L1314).
+A decode/read/upsert failure stops replay, but restore returns Ok with partial graph state. A subsequent snapshot can prune its missing recovery record. The oracle needs the failing delta path, exact recovered membership, then another flip/restart; chunk-corruption tests exercise a different dispatch.
+
+Evidence: [crates/shamir-index/src/vector/vector_backend.rs:683](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-index/src/vector/vector_backend.rs#L683); [crates/shamir-index/src/vector/snapshot.rs:1251](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-index/src/vector/snapshot.rs#L1251); [crates/shamir-index/src/vector/snapshot.rs:1314](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-index/src/vector/snapshot.rs#L1314).
 
 <a id="review-4"></a>
 
@@ -51,9 +59,11 @@ Evidence: [crates/shamir-index/src/vector/vector_backend.rs:683](../../../../../
 
 Status: `confirmed-open`. Current risk: `medium`.
 
-Update emits both bumps even for zero-token sides, unlike insert/delete. Rebuild also accumulates without resetting. Registered tests have no plan_update case and manually reset counters before rebuild.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-index/src/fts_ranked_backend.rs:223](../../../../../crates/shamir-index/src/fts_ranked_backend.rs#L223); [crates/shamir-index/src/fts_ranked_backend.rs:382](../../../../../crates/shamir-index/src/fts_ranked_backend.rs#L382); [crates/shamir-index/src/tests/fts_ranked_backend_tests.rs:215](../../../../../crates/shamir-index/src/tests/fts_ranked_backend_tests.rs#L215).
+An empty document was never counted, yet update emits -old and +new unconditionally, so empty→nonempty fails to add a document and the reverse fails to remove one. Rebuild does not replace counters. The registered rebuild test explicitly zeroes them first, and no affected plan_update oracle exists.
+
+Evidence: [crates/shamir-index/src/fts_ranked_backend.rs:223](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-index/src/fts_ranked_backend.rs#L223); [crates/shamir-index/src/fts_ranked_backend.rs:382](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-index/src/fts_ranked_backend.rs#L382); [crates/shamir-index/src/tests/fts_ranked_backend_tests.rs:215](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-index/src/tests/fts_ranked_backend_tests.rs#L215).
 
 <a id="review-5"></a>
 
@@ -61,9 +71,11 @@ Evidence: [crates/shamir-index/src/fts_ranked_backend.rs:223](../../../../../cra
 
 Status: `confirmed-open`. Current risk: `medium`.
 
-Scan results are inserted without publication/version validation; commit invalidates independently after storage apply. ReaderDrainGate excludes DROP, not ordinary writes. The existing pause hook is before scanning, not between scan and insertion.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-index/src/base_index/index_manager.rs:2835](../../../../../crates/shamir-index/src/base_index/index_manager.rs#L2835); [crates/shamir-index/src/base_index/index_manager.rs:2847](../../../../../crates/shamir-index/src/base_index/index_manager.rs#L2847); [crates/shamir-index/src/base_index/index_manager.rs:2879](../../../../../crates/shamir-index/src/base_index/index_manager.rs#L2879); [crates/shamir-engine/src/tx/commit_phases.rs:769](../../../../../crates/shamir-engine/src/tx/commit_phases.rs#L769).
+Reader completes an old store scan, writer applies and invalidates, then reader inserts the old slice. ReaderDrainGate only coordinates DROP. Existing hook parks before scanning, so it does not force the necessary post-scan/pre-publication boundary.
+
+Evidence: [crates/shamir-index/src/base_index/index_manager.rs:2835](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-index/src/base_index/index_manager.rs#L2835); [crates/shamir-index/src/base_index/index_manager.rs:2847](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-index/src/base_index/index_manager.rs#L2847); [crates/shamir-index/src/base_index/index_manager.rs:2879](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-index/src/base_index/index_manager.rs#L2879); [crates/shamir-engine/src/tx/commit_phases.rs:769](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-engine/src/tx/commit_phases.rs#L769).
 
 <a id="review-6"></a>
 
@@ -71,11 +83,13 @@ Evidence: [crates/shamir-index/src/base_index/index_manager.rs:2835](../../../..
 
 Status: `confirmed-open`. Current risk: `medium`.
 
-Vector drop_all remains a no-op; recovery sweeps only the binary descriptor-id posting prefix. Neither path removes the string-keyed snapshot/delta namespace. Normal ids are monotonic; resurrection requires explicit id reuse.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-index/src/vector/vector_backend.rs:739](../../../../../crates/shamir-index/src/vector/vector_backend.rs#L739); [crates/shamir-index/src/persistence.rs:633](../../../../../crates/shamir-index/src/persistence.rs#L633); [crates/shamir-index/src/vector/snapshot.rs:151](../../../../../crates/shamir-index/src/vector/snapshot.rs#L151).
+drop_all is a no-op and recovery removes only the compact binary-id prefix, not __vec_snap__&lt;id&gt;. records. Ordinary IDs are monotonic, so resurrection is not a normal DROP consequence. Cleanup must also drain detached writers.
 
-Grouping/duplicate: `error-handling-lifecycle.md#3`. This row is not another independent defect.
+Evidence: [crates/shamir-index/src/vector/vector_backend.rs:739](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-index/src/vector/vector_backend.rs#L739); [crates/shamir-index/src/persistence.rs:633](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-index/src/persistence.rs#L633).
+
+Grouping/duplicate: [error-handling-lifecycle.md#3](error-handling-lifecycle.md#review-3). This is not an additional independent defect.
 
 <a id="review-7"></a>
 
@@ -83,9 +97,11 @@ Grouping/duplicate: `error-handling-lifecycle.md#3`. This row is not another ind
 
 Status: `confirmed-open`. Current risk: `medium`.
 
-staged_vector returns extraction without dimension validation. Both general merge loops score unchecked staged slices; SIMD asserts dimensions in debug and truncates in release. Existing merge tests use valid dimensions.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-index/src/vector/vector_backend.rs:451](../../../../../crates/shamir-index/src/vector/vector_backend.rs#L451); [crates/shamir-index/src/vector/hnsw_adapter.rs:2952](../../../../../crates/shamir-index/src/vector/hnsw_adapter.rs#L2952); [crates/shamir-index/src/vector/brute_force.rs:309](../../../../../crates/shamir-index/src/vector/brute_force.rs#L309); [crates/shamir-index/src/vector/simd.rs:105](../../../../../crates/shamir-index/src/vector/simd.rs#L105); [crates/shamir-index/src/vector/tests/hnsw_adapter_tests.rs:376](../../../../../crates/shamir-index/src/vector/tests/hnsw_adapter_tests.rs#L376).
+Numeric extraction stages any length; HNSW and BruteForce merge slices without checks. Kernels assert in debug and use minimum length in release. Valid-dimension merge tests cannot discriminate this defect; stage a wrong-length row and query before commit.
+
+Evidence: [crates/shamir-index/src/vector/vector_backend.rs:451](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-index/src/vector/vector_backend.rs#L451); [crates/shamir-index/src/vector/hnsw_adapter.rs:2952](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-index/src/vector/hnsw_adapter.rs#L2952); [crates/shamir-index/src/vector/brute_force.rs:309](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-index/src/vector/brute_force.rs#L309); [crates/shamir-index/src/vector/simd.rs:105](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-index/src/vector/simd.rs#L105).
 
 <a id="review-8"></a>
 
@@ -93,11 +109,13 @@ Evidence: [crates/shamir-index/src/vector/vector_backend.rs:451](../../../../../
 
 Status: `confirmed-open`. Current risk: `medium`.
 
-The builder still hardcodes m=16 and ef_construction=200; compaction build_config does likewise. Successful snapshot loading can restore graph parameters, so tuning loss is not universal across every reopen.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-index/src/build_backend.rs:52](../../../../../crates/shamir-index/src/build_backend.rs#L52); [crates/shamir-index/src/vector/hnsw_adapter.rs:952](../../../../../crates/shamir-index/src/vector/hnsw_adapter.rs#L952); [crates/shamir-index/src/vector/snapshot.rs:879](../../../../../crates/shamir-index/src/vector/snapshot.rs#L879).
+Builder and compaction build_config use fixed m/ef values. Valid graph snapshots can restore original parameters; fallback reconstruction cannot. Test a nondefault descriptor with no usable snapshot.
 
-Grouping/duplicate: `api-wire-protocol.md#1`. This row is not another independent defect.
+Evidence: [crates/shamir-index/src/build_backend.rs:52](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-index/src/build_backend.rs#L52); [crates/shamir-index/src/vector/hnsw_adapter.rs:952](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-index/src/vector/hnsw_adapter.rs#L952).
+
+Grouping/duplicate: [api-wire-protocol.md#1](api-wire-protocol.md#review-1). This is not an additional independent defect.
 
 <a id="review-9"></a>
 
@@ -105,19 +123,23 @@ Grouping/duplicate: `api-wire-protocol.md#1`. This row is not another independen
 
 Status: `confirmed-open`. Current risk: `low`.
 
-Functional hashing streams map entries in IndexMap insertion order, unlike the base-index order-independent scheme. Equivalent maps can receive different functional posting hashes.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-index/src/functional_backend.rs:164](../../../../../crates/shamir-index/src/functional_backend.rs#L164); [crates/shamir-collections/src/lib.rs:20](../../../../../crates/shamir-collections/src/lib.rs#L20); [crates/shamir-index/src/base_index/index_keys.rs:161](../../../../../crates/shamir-index/src/base_index/index_keys.rs#L161).
+Map entries feed the hash in IndexMap order. Equal maps built in opposite insertion order can miss the same functional lookup. Canonical ordering is safer than blindly copying XOR aggregation, which has its own collision properties; migrate persisted hashes.
+
+Evidence: [crates/shamir-index/src/functional_backend.rs:164](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-index/src/functional_backend.rs#L164); [crates/shamir-collections/src/lib.rs:20](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-collections/src/lib.rs#L20); [crates/shamir-index/src/base_index/index_keys.rs:161](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-index/src/base_index/index_keys.rs#L161).
 
 <a id="review-10"></a>
 
 ### Claim 10 — `Dot` metric silently clamps distances to 0 for unnormalized vectors in HNSW (inconsistent with BruteForce)
 
-Status: `confirmed-open`. Current risk: `low`.
+Status: `not-applicable`. Current risk: `—`.
 
-HNSW and quantized scoring clamp 1-dot; BruteForceAdapter uses -dot. Normalization is documented but unenforced. HNSW's own small-index branch also uses the clamp, so the alleged 256-row crossover is inaccurate.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-index/src/vector/hnsw_adapter.rs:150](../../../../../crates/shamir-index/src/vector/hnsw_adapter.rs#L150); [crates/shamir-index/src/vector/hnsw_adapter.rs:2850](../../../../../crates/shamir-index/src/vector/hnsw_adapter.rs#L2850); [crates/shamir-index/src/vector/brute_force.rs:125](../../../../../crates/shamir-index/src/vector/brute_force.rs#L125); [crates/shamir-index/src/vector/quantized_dist.rs:274](../../../../../crates/shamir-index/src/vector/quantized_dist.rs#L274).
+The public search guide specifies prenormalized Dot vectors and implementation repeats that requirement. Raw magnitudes producing dot&gt;1 violate the supported precondition. HNSW's small-index branch also clamps, so the alleged size crossover is false. Validation may be added; automatic normalization would redefine raw inner product.
+
+Evidence: [docs/guide-docs/guide/06-search.md:169](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/docs/guide-docs/guide/06-search.md#L169); [crates/shamir-index/src/vector/hnsw_adapter.rs:153](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-index/src/vector/hnsw_adapter.rs#L153); [crates/shamir-index/src/vector/hnsw_adapter.rs:2850](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-index/src/vector/hnsw_adapter.rs#L2850).
 
 <a id="review-11"></a>
 
@@ -125,29 +147,35 @@ Evidence: [crates/shamir-index/src/vector/hnsw_adapter.rs:150](../../../../../cr
 
 Status: `confirmed-open`. Current risk: `low`.
 
-Independent Relaxed updates/readbacks permit count>0 with sum=0; avg_doc_len only guards count=0. Positive document lengths then score zero, while zero-length combinations can produce NaN.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-index/src/bm25.rs:72](../../../../../crates/shamir-index/src/bm25.rs#L72); [crates/shamir-index/src/bm25.rs:80](../../../../../crates/shamir-index/src/bm25.rs#L80); [crates/shamir-index/src/bm25.rs:38](../../../../../crates/shamir-index/src/bm25.rs#L38).
+A reader between count increment and length increment sees avg=0. With positive posting length, the term score becomes zero; zero-length combinations can produce NaN. This is not an integer division panic. A deterministic seam must sample between updates.
+
+Evidence: [crates/shamir-index/src/bm25.rs:72](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-index/src/bm25.rs#L72); [crates/shamir-index/src/bm25.rs:80](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-index/src/bm25.rs#L80); [crates/shamir-index/src/bm25.rs:38](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-index/src/bm25.rs#L38).
 
 <a id="review-12"></a>
 
 ### Claim 12 — Unbounded sorted-range upper bound `prefix \|\| 0xFF×64` excludes values with ≥64 leading 0xFF encoded bytes
 
-Status: `refuted`. Current risk: —.
+Status: `refuted`. Current risk: `—`.
 
-Every supported encoded value begins with a type tag below 0xFF. Bin begins with 0x60 before its raw bytes; therefore even arbitrarily long 0xFF payloads compare below this upper bound.
+Prior-cycle decision: `refuted`.
 
-Evidence: [crates/shamir-index/src/base_index/sorted_index_manager.rs:2627](../../../../../crates/shamir-index/src/base_index/sorted_index_manager.rs#L2627); [crates/shamir-index/src/base_index/sorted_index_manager.rs:2940](../../../../../crates/shamir-index/src/base_index/sorted_index_manager.rs#L2940); [crates/shamir-types/src/core/sort_codec.rs:39](../../../../../crates/shamir-types/src/core/sort_codec.rs#L39); [crates/shamir-types/src/core/sort_codec.rs:135](../../../../../crates/shamir-types/src/core/sort_codec.rs#L135).
+Bin encoding prepends 0x60 and every supported value tag is below 0xFF. The first compared value byte already orders below the sentinel, regardless of following FF payload length. This is pre-existing counter-evidence, not a later fix.
+
+Evidence: [crates/shamir-types/src/core/sort_codec.rs:39](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-types/src/core/sort_codec.rs#L39); [crates/shamir-types/src/core/sort_codec.rs:135](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-types/src/core/sort_codec.rs#L135); [crates/shamir-index/src/base_index/sorted_index_manager.rs:2627](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-index/src/base_index/sorted_index_manager.rs#L2627).
 
 <a id="review-13"></a>
 
 ### Claim 13 — `apply_index_ops_at_commit` silently drops any non-`BumpFtsStats` in-memory op
 
-Status: `not-applicable`. Current risk: —.
+Status: `not-applicable`. Current risk: `—`.
 
-IndexWriteOp currently has exactly SetPosting, RemovePosting, and BumpFtsStats. No other in-memory variant exists to lose. Exhaustive routing would be useful future-change hardening, not a current runtime fix.
+Prior-cycle decision: `not-applicable`.
 
-Evidence: [crates/shamir-tx/src/index_write_op.rs:90](../../../../../crates/shamir-tx/src/index_write_op.rs#L90); [crates/shamir-tx/src/index_write_op.rs:127](../../../../../crates/shamir-tx/src/index_write_op.rs#L127); [crates/shamir-index/src/write_ops.rs:170](../../../../../crates/shamir-index/src/write_ops.rs#L170).
+No such current variant exists. The three-variant enum routes the two postings to transact and BumpFtsStats to in-memory grouping. Exhaustive future routing is useful hardening, not a present lost operation.
+
+Evidence: [crates/shamir-tx/src/index_write_op.rs:90](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-tx/src/index_write_op.rs#L90); [crates/shamir-index/src/write_ops.rs:170](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-index/src/write_ops.rs#L170).
 
 <a id="review-14"></a>
 
@@ -155,20 +183,22 @@ Evidence: [crates/shamir-tx/src/index_write_op.rs:90](../../../../../crates/sham
 
 Status: `confirmed-open`. Current risk: `nit`.
 
-The round-trip test remains inline. It is reachable through the registered quant_meta module, but does not test malformed metadata; relocating it is structural cleanup.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-index/src/vector/quant_meta.rs:83](../../../../../crates/shamir-index/src/vector/quant_meta.rs#L83); [crates/shamir-index/src/vector/mod.rs:7](../../../../../crates/shamir-index/src/vector/mod.rs#L7).
+The ordinary cfg(test) module remains inline and is reachable through vector::quant_meta. Its symmetric parameter roundtrip does not test malformed metadata or guarantee loader failure behavior.
 
-Grouping/duplicate: `style-claude-md.md#2`. This row is not another independent defect.
+Evidence: [crates/shamir-index/src/vector/quant_meta.rs:83](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-index/src/vector/quant_meta.rs#L83); [crates/shamir-index/src/vector/mod.rs:7](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-index/src/vector/mod.rs#L7).
 
-## Corrections and qualified non-findings
+Grouping/duplicate: [style-claude-md.md#2](style-claude-md.md#review-2). This is not an additional independent defect.
 
-- Finding 1's lower(price) example is unsuitable: Lower expects a string and decimal type errors become Null. A Field expression establishes the real content-hashing defect. Any hash-format change needs old-posting migration/rebuild.
-- Finding 2's claim that every FullTokenizer test uses ASCII is false; Russian lowercase stemming and stopword tests exist but cannot detect uppercase case-fold failure.
-- Finding 4's paired update bumps normally cancel the document-count wrapping before returning; permanent count drift remains, but permanent u64::MAX is not established by that paired update alone.
-- A check-before-cache-insert alone still has a check-to-insert race. Use epoch-tagged entries validated on hits or a publication protocol synchronized with invalidation.
-- Replace the sorted-range defect and its proposed successor-bound task with the positive type-tag ordering proof.
-- Registered test presence is source evidence only; no test results are claimed.
+## Evidence and recipe corrections
+
+- Change Claim 10 to not-applicable under the explicit normalized-input contract.
+- Case-fold/hash fixes change persisted token/value identities and require rebuilding existing postings.
+- The paired update bumps create persistent count drift but do not by themselves leave permanent u64::MAX after both operations finish.
+- The existing lookup hook precedes the scan; it cannot force stale post-invalidation publication without another seam.
+- Replacing replay warning with rebuild on the same partially restored adapter is insufficient for deleted/no-longer-vector rows.
+- Graph CRC coverage must not be attributed to plain delta envelopes.
 
 ---
 

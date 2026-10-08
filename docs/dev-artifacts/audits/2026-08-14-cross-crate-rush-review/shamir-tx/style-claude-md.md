@@ -1,11 +1,13 @@
-<!-- revalidation:2026-10-08 source:92ad58266bf57ddea1fa3c8a47affba1a3a9a096 -->
-# shamir-tx — style-claude-md revalidation
+<!-- revalidation:2026-10-08 cycle:independent-2 source:e3765c935fc71655ee1ec0160cf180607935d89b -->
+# shamir-tx — style-claude-md independent revalidation (cycle 2)
 
-Source snapshot: `92ad58266bf57ddea1fa3c8a47affba1a3a9a096`. Revalidated 2026-10-08 by read-only XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run; no source fix is part of this update. Test registration/assertions are evidence of an oracle, not proof of a passing run.
+Frozen source snapshot: `e3765c935fc71655ee1ec0160cf180607935d89b`. Independently revalidated 2026-10-08 by a fresh XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run. Source-fixed means the specified mechanism was already removed at this snapshot; this cycle implements no source fix.
 
-This section is authoritative for current status. Original titles/IDs are retained for traceability; a refuted title is not a current assertion. The collapsed historical report below is superseded, including its counts, severity, scenarios and fix instructions. Plan IDs preserve historical numbering, not a current release mandate. [Workspace methodology and status definitions](../SUMMARY.md#status-definitions).
+This section is authoritative for current decisions. Existing IDs and allegation titles are retained for traceability; a refuted title is not a current assertion. Prior-cycle decisions were rechecked, not used as proof. The first cycle is available in repository history at this snapshot. The original historical body below remains preserved once and is superseded, including its counts, severities and recipes. [Workspace scope and status definitions](../SUMMARY.md#status-definitions).
 
-The implementation-in-mod.rs, local imports, layout drift and stale documentation remain. These are maintenance issues, not runtime High/Medium defects; the suggested family splits are optional.
+Unrelated external edits began in dependency/toolchain/CI metadata during collection; additional Rust-source edits appeared afterward. They were left untouched. Evidence and decisions are tied to the frozen commit, not those later changes or an installed toolchain. “Current” below means current at that snapshot; no re-audit of the modified working tree is implied.
+
+Manifest-only module, import placement, test-directory, and stale-documentation deviations remain. Tests are registered; closely coupled public families are permitted and metrics receive upstream coverage.
 
 ## Current claim decisions
 
@@ -13,7 +15,7 @@ The implementation-in-mod.rs, local imports, layout drift and stale documentatio
 |---:|---:|---:|---:|---:|---:|---:|
 | 7 | 5 | 0 | 0 | 0 | 0 | 2 |
 
-These are decisions on report claims, including repeated roots, bundled observations and non-findings—not a unique-bug census. Closed/N/A rows have no current risk; unverified risk is provisional. Pure style and unmeasured optimization claims do not establish runtime impact.
+These are duplicate-inclusive report decisions, not a unique-bug census. Pure style or structural optimization does not establish a runtime incident; unverified impact remains provisional.
 
 <a id="review-1"></a>
 
@@ -21,9 +23,11 @@ These are decisions on report claims, including repeated roots, bundled observat
 
 Status: `confirmed-open`. Current risk: `low`.
 
-The 1638-line module still defines helpers, RecordCell, MvccStore and implementations despite the explicit manifest-only convention. No runtime failure follows from this file organization.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-tx/src/mvcc_store/mod.rs:68](../../../../../crates/shamir-tx/src/mvcc_store/mod.rs#L68); [crates/shamir-tx/src/mvcc_store/mod.rs:94](../../../../../crates/shamir-tx/src/mvcc_store/mod.rs#L94); [crates/shamir-tx/src/mvcc_store/mod.rs:125](../../../../../crates/shamir-tx/src/mvcc_store/mod.rs#L125); [CLAUDE.md:503](../../../../../CLAUDE.md#L503).
+The file defines timestamp helpers, RecordCell, MvccStore, and implementations despite the explicit manifest-only convention. This is structural maintenance debt, not runtime High.
+
+Evidence: [crates/shamir-tx/src/mvcc_store/mod.rs:68](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-tx/src/mvcc_store/mod.rs#L68); [crates/shamir-tx/src/mvcc_store/mod.rs:125](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-tx/src/mvcc_store/mod.rs#L125); [CLAUDE.md:503](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/CLAUDE.md#L503).
 
 <a id="review-2"></a>
 
@@ -31,9 +35,11 @@ Evidence: [crates/shamir-tx/src/mvcc_store/mod.rs:68](../../../../../crates/sham
 
 Status: `confirmed-open`. Current risk: `nit`.
 
-Function-local imports remain in the identified production files. cfg(test)-only imports require separate exception treatment; placement is not a demonstrated runtime or semantic defect.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-tx/src/mvcc_store/mod.rs:399](../../../../../crates/shamir-tx/src/mvcc_store/mod.rs#L399); [crates/shamir-tx/src/mvcc_store/mod.rs:1389](../../../../../crates/shamir-tx/src/mvcc_store/mod.rs#L1389); [crates/shamir-tx/src/mvcc_store/mvcc_gc.rs:301](../../../../../crates/shamir-tx/src/mvcc_store/mvcc_gc.rs#L301); [crates/shamir-tx/src/tx_context.rs:538](../../../../../crates/shamir-tx/src/tx_context.rs#L538); [crates/shamir-tx/src/layered_interner.rs:96](../../../../../crates/shamir-tx/src/layered_interner.rs#L96); [CLAUDE.md:617](../../../../../CLAUDE.md#L617).
+Production function-local imports remain without the stated collision or cfg necessity. Test-only imports need separate exception treatment; placement does not establish runtime harm.
+
+Evidence: [crates/shamir-tx/src/mvcc_store/mod.rs:399](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-tx/src/mvcc_store/mod.rs#L399); [crates/shamir-tx/src/mvcc_store/mvcc_gc.rs:301](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-tx/src/mvcc_store/mvcc_gc.rs#L301); [crates/shamir-tx/src/layered_interner.rs:96](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-tx/src/layered_interner.rs#L96); [CLAUDE.md:617](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/CLAUDE.md#L617).
 
 <a id="review-3"></a>
 
@@ -41,9 +47,11 @@ Evidence: [crates/shamir-tx/src/mvcc_store/mod.rs:399](../../../../../crates/sha
 
 Status: `confirmed-open`. Current risk: `nit`.
 
-Most suites remain crate-root registered, with MVCC tests nested under src/tests. They are reachable and topical; directory placement does not make the tests unexecuted.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-tx/src/lib.rs:33](../../../../../crates/shamir-tx/src/lib.rs#L33); [crates/shamir-tx/src/tests/mod.rs:5](../../../../../crates/shamir-tx/src/tests/mod.rs#L5); [crates/shamir-tx/src/tests/mvcc_store_tests/mod.rs:4](../../../../../crates/shamir-tx/src/tests/mvcc_store_tests/mod.rs#L4); [CLAUDE.md:579](../../../../../CLAUDE.md#L579).
+Most suites are under crate-root src/tests rather than each implementation module's tests directory. Root and nested manifests register them correctly, so directory deviation is not orphaning.
+
+Evidence: [crates/shamir-tx/src/lib.rs:33](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-tx/src/lib.rs#L33); [crates/shamir-tx/src/tests/mod.rs:5](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-tx/src/tests/mod.rs#L5); [crates/shamir-tx/src/tests/mvcc_store_tests/mod.rs:4](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-tx/src/tests/mvcc_store_tests/mod.rs#L4); [CLAUDE.md:579](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/CLAUDE.md#L579).
 
 <a id="review-4"></a>
 
@@ -51,19 +59,23 @@ Evidence: [crates/shamir-tx/src/lib.rs:33](../../../../../crates/shamir-tx/src/l
 
 Status: `confirmed-open`. Current risk: `nit`.
 
-Stage status, version_cache vocabulary, removed record_ts links and tests-below references remain stale. PendingCommit is retained dead scaffolding; its old leader description needs that qualification.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-tx/src/lib.rs:10](../../../../../crates/shamir-tx/src/lib.rs#L10); [crates/shamir-tx/src/lib.rs:29](../../../../../crates/shamir-tx/src/lib.rs#L29); [crates/shamir-tx/src/repo_tx_gate.rs:888](../../../../../crates/shamir-tx/src/repo_tx_gate.rs#L888); [crates/shamir-tx/src/mvcc_store/version_entry.rs:27](../../../../../crates/shamir-tx/src/mvcc_store/version_entry.rs#L27); [crates/shamir-tx/src/version_codec.rs:30](../../../../../crates/shamir-tx/src/version_codec.rs#L30); [crates/shamir-tx/src/repo_tx_gate.rs:742](../../../../../crates/shamir-tx/src/repo_tx_gate.rs#L742).
+Stage status contradicts itself; cache vocabulary, removed record_ts links, tests-below references, and leader scaffolding descriptions remain stale. Additional assurances misdescribe combined production replication and forced-drain durability.
+
+Evidence: [crates/shamir-tx/src/lib.rs:10](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-tx/src/lib.rs#L10); [crates/shamir-tx/src/lib.rs:29](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-tx/src/lib.rs#L29); [crates/shamir-tx/src/mvcc_store/version_entry.rs:27](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-tx/src/mvcc_store/version_entry.rs#L27); [crates/shamir-tx/src/version_codec.rs:30](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-tx/src/version_codec.rs#L30).
 
 <a id="review-5"></a>
 
 ### Claim 5 — One-file-one-export stretched in changefeed.rs and repo_tx_gate.rs
 
-Status: `not-applicable`. Current risk: —.
+Status: `not-applicable`. Current risk: `—`.
 
-The rule explicitly permits closely coupled groups. Each file's types serve its primary feed/gate abstraction; the report itself frames splitting as direction, not a defect.
+Prior-cycle decision: `not-applicable`.
 
-Evidence: [CLAUDE.md:505](../../../../../CLAUDE.md#L505); [crates/shamir-tx/src/changefeed.rs:152](../../../../../crates/shamir-tx/src/changefeed.rs#L152); [crates/shamir-tx/src/changefeed.rs:166](../../../../../crates/shamir-tx/src/changefeed.rs#L166); [crates/shamir-tx/src/repo_tx_gate.rs:779](../../../../../crates/shamir-tx/src/repo_tx_gate.rs#L779).
+The convention permits closely coupled groups. Feed/event and gate/footprint families are coupled; the proposed splits are explicitly optional rather than proven conformance defects.
+
+Evidence: [CLAUDE.md:505](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/CLAUDE.md#L505); [crates/shamir-tx/src/changefeed.rs:166](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-tx/src/changefeed.rs#L166); [crates/shamir-tx/src/repo_tx_gate.rs:779](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-tx/src/repo_tx_gate.rs#L779).
 
 <a id="review-6"></a>
 
@@ -71,27 +83,30 @@ Evidence: [CLAUDE.md:505](../../../../../CLAUDE.md#L505); [crates/shamir-tx/src/
 
 Status: `confirmed-open`. Current risk: `nit`.
 
-No shamir-tx suite references the metric types. Registered engine tests do exercise counters and snapshots; there is no diff-arithmetic method in the current metrics implementation.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-tx/src/tests/mod.rs:1](../../../../../crates/shamir-tx/src/tests/mod.rs#L1); [crates/shamir-tx/src/metrics.rs:75](../../../../../crates/shamir-tx/src/metrics.rs#L75); [crates/shamir-engine/src/tx/tests/commit_tests.rs:465](../../../../../crates/shamir-engine/src/tx/tests/commit_tests.rs#L465); [crates/shamir-engine/src/tx/tests/commit_phase5_defer_tests.rs:270](../../../../../crates/shamir-engine/src/tx/tests/commit_phase5_defer_tests.rs#L270).
+There is no tx-local metrics suite. Registered engine commit/defer tests exercise increments and snapshots. Metrics contains no diff arithmetic method, so the historical recommendation overstates the absent API.
+
+Evidence: [crates/shamir-tx/src/tests/mod.rs:1](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-tx/src/tests/mod.rs#L1); [crates/shamir-tx/src/metrics.rs:75](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-tx/src/metrics.rs#L75); [crates/shamir-engine/src/tx/tests/commit_tests.rs:465](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-engine/src/tx/tests/commit_tests.rs#L465); [crates/shamir-engine/src/tx/tests/commit_phase5_defer_tests.rs:270](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-engine/src/tx/tests/commit_phase5_defer_tests.rs#L270).
 
 <a id="review-summary-test-organization-positives"></a>
 
 ### Claim Summary: test organization positives — No inline test blocks; manifest-only test modules and topical suites
 
-Status: `not-applicable`. Current risk: —.
+Status: `not-applicable`. Current risk: `—`.
 
-The three test manifests contain wiring only, with root and changefeed cfg(test) registrations. Their location differs from convention, but registration is intact.
+Prior-cycle decision: `not-applicable`.
 
-Evidence: [crates/shamir-tx/src/tests/mod.rs:1](../../../../../crates/shamir-tx/src/tests/mod.rs#L1); [crates/shamir-tx/src/tests/mvcc_store_tests/mod.rs:1](../../../../../crates/shamir-tx/src/tests/mvcc_store_tests/mod.rs#L1); [crates/shamir-tx/src/changefeed/tests/mod.rs:1](../../../../../crates/shamir-tx/src/changefeed/tests/mod.rs#L1); [crates/shamir-tx/src/changefeed.rs:657](../../../../../crates/shamir-tx/src/changefeed.rs#L657).
+The three test manifests contain wiring and the root/changefeed cfg(test) registrations are present. The structural positive is supported independently of whether tests pass.
 
-## Corrections and qualified non-findings
+Evidence: [crates/shamir-tx/src/tests/mod.rs:1](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-tx/src/tests/mod.rs#L1); [crates/shamir-tx/src/tests/mvcc_store_tests/mod.rs:1](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-tx/src/tests/mvcc_store_tests/mod.rs#L1); [crates/shamir-tx/src/changefeed/tests/mod.rs:1](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-tx/src/changefeed/tests/mod.rs#L1); [crates/shamir-tx/src/changefeed.rs:657](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-tx/src/changefeed.rs#L657).
 
-- Demote implementation-file organization from High to Low, and import/test-directory concerns from Medium to Nit.
-- Update shifted staging/TxContext references after the borrowed-iteration/A8 change: rewrite_set_bytes is at line 329 and apply_id_remap at line 939.
-- doctest=false disables examples, not rustdoc link diagnostics; it is not evidence that broken intra-doc links are silently accepted.
-- Metrics coverage is absent only within this crate; upstream tests exercise it. Remove the nonexistent snapshot/diff arithmetic description.
-- Do not count the opportunistic family-split recommendation as a proven defect.
+## Evidence and recipe corrections
+
+- doctest=false disables example execution, not rustdoc link diagnostics.
+- Keep structural cleanup separate from semantic fixes and preserve module paths/visibility when moving implementation.
+- Metrics are untested locally, not universally untested; remove the nonexistent diff-math recommendation.
+- Family splits and dead-export hiding are optional API/organization choices rather than runtime defects.
 
 ---
 

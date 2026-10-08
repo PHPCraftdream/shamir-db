@@ -1,11 +1,13 @@
-<!-- revalidation:2026-10-08 source:92ad58266bf57ddea1fa3c8a47affba1a3a9a096 -->
-# shamir-wasm-host — style-claude-md revalidation
+<!-- revalidation:2026-10-08 cycle:independent-2 source:e3765c935fc71655ee1ec0160cf180607935d89b -->
+# shamir-wasm-host — style-claude-md independent revalidation (cycle 2)
 
-Source snapshot: `92ad58266bf57ddea1fa3c8a47affba1a3a9a096`. Revalidated 2026-10-08 by read-only XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run; no source fix is part of this update. Test registration/assertions are evidence of an oracle, not proof of a passing run.
+Frozen source snapshot: `e3765c935fc71655ee1ec0160cf180607935d89b`. Independently revalidated 2026-10-08 by a fresh XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run. Source-fixed means the specified mechanism was already removed at this snapshot; this cycle implements no source fix.
 
-This section is authoritative for current status. Original titles/IDs are retained for traceability; a refuted title is not a current assertion. The collapsed historical report below is superseded, including its counts, severity, scenarios and fix instructions. Plan IDs preserve historical numbering, not a current release mandate. [Workspace methodology and status definitions](../SUMMARY.md#status-definitions).
+This section is authoritative for current decisions. Existing IDs and allegation titles are retained for traceability; a refuted title is not a current assertion. Prior-cycle decisions were rechecked, not used as proof. The first cycle is available in repository history at this snapshot. The original historical body below remains preserved once and is superseded, including its counts, severities and recipes. [Workspace scope and status definitions](../SUMMARY.md#status-definitions).
 
-The seven mid-body imports and documentary/manifest nits remain. Structural layout is compliant; the optional net-guard split is not an objectively established convention violation.
+Unrelated external edits began in dependency/toolchain/CI metadata during collection; additional Rust-source edits appeared afterward. They were left untouched. Evidence and decisions are tied to the frozen commit, not those later changes or an installed toolchain. “Current” below means current at that snapshot; no re-audit of the modified working tree is implied.
+
+Mandatory local import placement and several documentary/manifest nits remain. Test manifests follow the declared layout. File splitting is optional; absence of explicit lock syntax does not justify lock-free progress claims.
 
 ## Current claim decisions
 
@@ -13,7 +15,7 @@ The seven mid-body imports and documentary/manifest nits remain. Structural layo
 |---:|---:|---:|---:|---:|---:|---:|
 | 7 | 6 | 0 | 0 | 0 | 0 | 1 |
 
-These are decisions on report claims, including repeated roots, bundled observations and non-findings—not a unique-bug census. Closed/N/A rows have no current risk; unverified risk is provisional. Pure style and unmeasured optimization claims do not establish runtime impact.
+These are duplicate-inclusive report decisions, not a unique-bug census. Pure style or structural optimization does not establish a runtime incident; unverified impact remains provisional.
 
 <a id="review-1"></a>
 
@@ -21,11 +23,13 @@ These are decisions on report claims, including repeated roots, bundled observat
 
 Status: `confirmed-open`. Current risk: `nit`.
 
-Both pipe-reader closures and five compile tests still contain the identified local imports, without a collision or other documented exception. This is convention-only debt, not runtime Medium or High.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-wasm-host/src/compile.rs:574](../../../../../crates/shamir-wasm-host/src/compile.rs#L574); [crates/shamir-wasm-host/src/compile.rs:582](../../../../../crates/shamir-wasm-host/src/compile.rs#L582); [crates/shamir-wasm-host/src/tests/compile_tests.rs:111](../../../../../crates/shamir-wasm-host/src/tests/compile_tests.rs#L111); [crates/shamir-wasm-host/src/tests/compile_tests.rs:128](../../../../../crates/shamir-wasm-host/src/tests/compile_tests.rs#L128); [crates/shamir-wasm-host/src/tests/compile_tests.rs:140](../../../../../crates/shamir-wasm-host/src/tests/compile_tests.rs#L140); [crates/shamir-wasm-host/src/tests/compile_tests.rs:153](../../../../../crates/shamir-wasm-host/src/tests/compile_tests.rs#L153); [crates/shamir-wasm-host/src/tests/compile_tests.rs:169](../../../../../crates/shamir-wasm-host/src/tests/compile_tests.rs#L169).
+Two reader closures and five scanner tests retain body-local imports without a documented exception.
 
-Grouping/duplicate: `SUMMARY.md#7.1`. This row is not another independent defect.
+Evidence: [CLAUDE.md:617](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/CLAUDE.md#L617); [crates/shamir-wasm-host/src/compile.rs:574](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-wasm-host/src/compile.rs#L574); [crates/shamir-wasm-host/src/compile.rs:582](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-wasm-host/src/compile.rs#L582); [crates/shamir-wasm-host/src/tests/compile_tests.rs:111](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-wasm-host/src/tests/compile_tests.rs#L111); [crates/shamir-wasm-host/src/tests/compile_tests.rs:128](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-wasm-host/src/tests/compile_tests.rs#L128); [crates/shamir-wasm-host/src/tests/compile_tests.rs:140](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-wasm-host/src/tests/compile_tests.rs#L140); [crates/shamir-wasm-host/src/tests/compile_tests.rs:153](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-wasm-host/src/tests/compile_tests.rs#L153); [crates/shamir-wasm-host/src/tests/compile_tests.rs:169](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-wasm-host/src/tests/compile_tests.rs#L169).
+
+Grouping/duplicate: [SUMMARY.md#7.1](SUMMARY.md#review-7-1). This is not an additional independent defect.
 
 <a id="review-2"></a>
 
@@ -33,11 +37,13 @@ Grouping/duplicate: `SUMMARY.md#7.1`. This row is not another independent defect
 
 Status: `confirmed-open`. Current risk: `low`.
 
-Both implementations remain separate and egress documentation still claims reuse. The demonstrated issue is duplication/drift risk; no current runtime policy divergence was established.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-wasm-host/src/net_gateway.rs:483](../../../../../crates/shamir-wasm-host/src/net_gateway.rs#L483); [crates/shamir-wasm-host/src/env_policy.rs:75](../../../../../crates/shamir-wasm-host/src/env_policy.rs#L75).
+Separate environment/egress implementations remain. Sharing one implementation avoids drift but must also repair their common suffix behavior.
 
-Grouping/duplicate: `SUMMARY.md#7.2`. This row is not another independent defect.
+Evidence: [crates/shamir-wasm-host/src/net_gateway.rs:483](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-wasm-host/src/net_gateway.rs#L483); [crates/shamir-wasm-host/src/env_policy.rs:75](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-wasm-host/src/env_policy.rs#L75).
+
+Grouping/duplicate: [SUMMARY.md#7.2](SUMMARY.md#review-7-2). This is not an additional independent defect.
 
 <a id="review-3"></a>
 
@@ -45,23 +51,27 @@ Grouping/duplicate: `SUMMARY.md#7.2`. This row is not another independent defect
 
 Status: `confirmed-open`. Current risk: `nit`.
 
-The same host-call summary remains repeated consecutively in the doc comment.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-wasm-host/src/wasm/host_call.rs:16](../../../../../crates/shamir-wasm-host/src/wasm/host_call.rs#L16); [crates/shamir-wasm-host/src/wasm/host_call.rs:22](../../../../../crates/shamir-wasm-host/src/wasm/host_call.rs#L22).
+Consecutive identical summary blocks remain in the source documentation.
 
-Grouping/duplicate: `SUMMARY.md#7.3`. This row is not another independent defect.
+Evidence: [crates/shamir-wasm-host/src/wasm/host_call.rs:16](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-wasm-host/src/wasm/host_call.rs#L16); [crates/shamir-wasm-host/src/wasm/host_call.rs:22](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-wasm-host/src/wasm/host_call.rs#L22).
+
+Grouping/duplicate: [SUMMARY.md#7.3](SUMMARY.md#review-7-3). This is not an additional independent defect.
 
 <a id="review-4"></a>
 
 ### Claim 4 — `net_gateway.rs` carries two primary concerns (one-file-one-export, borderline)
 
-Status: `not-applicable`. Current risk: —.
+Status: `not-applicable`. Current risk: `—`.
 
-CLAUDE permits closely coupled groups, and the gateway documentation explicitly requires these egress guards. Separating DTOs/trait from guard helpers is optional organization, not a proven structural or behavioral defect.
+Prior-cycle decision: `not-applicable`.
 
-Evidence: [CLAUDE.md:509](../../../../../CLAUDE.md#L509); [crates/shamir-wasm-host/src/net_gateway.rs:7](../../../../../crates/shamir-wasm-host/src/net_gateway.rs#L7); [crates/shamir-wasm-host/src/net_gateway.rs:58](../../../../../crates/shamir-wasm-host/src/net_gateway.rs#L58).
+The rule permits coupled families, and the trait explicitly requires the adjacent guards. Splitting is organizational preference.
 
-Grouping/duplicate: `SUMMARY.md#7.4`. This row is not another independent defect.
+Evidence: [CLAUDE.md:505](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/CLAUDE.md#L505); [crates/shamir-wasm-host/src/net_gateway.rs:58](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-wasm-host/src/net_gateway.rs#L58).
+
+Grouping/duplicate: [SUMMARY.md#7.4](SUMMARY.md#review-7-4). This is not an additional independent defect.
 
 <a id="review-5"></a>
 
@@ -69,11 +79,13 @@ Grouping/duplicate: `SUMMARY.md#7.4`. This row is not another independent defect
 
 Status: `confirmed-open`. Current risk: `nit`.
 
-The direct serde declaration remains unused by this crate's source. Removing it is manifest cleanup; extra compilation cost is not established under workspace feature unification.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-wasm-host/Cargo.toml:14](../../../../../crates/shamir-wasm-host/Cargo.toml#L14).
+No direct source use is present; workspace/transitive users make extra compilation cost unsupported.
 
-Grouping/duplicate: `SUMMARY.md#7.5`. This row is not another independent defect.
+Evidence: [crates/shamir-wasm-host/Cargo.toml:14](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-wasm-host/Cargo.toml#L14).
+
+Grouping/duplicate: [SUMMARY.md#7.5](SUMMARY.md#review-7-5). This is not an additional independent defect.
 
 <a id="review-6"></a>
 
@@ -81,11 +93,13 @@ Grouping/duplicate: `SUMMARY.md#7.5`. This row is not another independent defect
 
 Status: `confirmed-open`. Current risk: `low`.
 
-Local env tests exercise native GlobalVars, not guest global imports. Actual grant/write-protection guest tests remain downstream and can skip when source compilation is unavailable.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-wasm-host/src/tests/env_globals_tests.rs:54](../../../../../crates/shamir-wasm-host/src/tests/env_globals_tests.rs#L54); [crates/shamir-db/tests/functions_lifecycle.rs:1116](../../../../../crates/shamir-db/tests/functions_lifecycle.rs#L1116); [crates/shamir-db/tests/functions_lifecycle.rs:1228](../../../../../crates/shamir-db/tests/functions_lifecycle.rs#L1228).
+Local tests access native globals. Downstream real guest controls are integration-only and can skip when compilation is unavailable.
 
-Grouping/duplicate: `SUMMARY.md#6.3`. This row is not another independent defect.
+Evidence: [crates/shamir-wasm-host/src/tests/env_globals_tests.rs:54](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-wasm-host/src/tests/env_globals_tests.rs#L54); [crates/shamir-db/tests/functions_lifecycle.rs:1116](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/tests/functions_lifecycle.rs#L1116); [crates/shamir-db/tests/functions_lifecycle.rs:1228](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/tests/functions_lifecycle.rs#L1228).
+
+Grouping/duplicate: [SUMMARY.md#6.3](SUMMARY.md#review-6-3). This is not an additional independent defect.
 
 <a id="review-7"></a>
 
@@ -93,20 +107,20 @@ Grouping/duplicate: `SUMMARY.md#6.3`. This row is not another independent defect
 
 Status: `confirmed-open`. Current risk: `nit`.
 
-The documented public-surface list still names only engine/limits/function, while the module also reexports the sanitizer and sanctioned import list.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-wasm-host/src/wasm/mod.rs:3](../../../../../crates/shamir-wasm-host/src/wasm/mod.rs#L3); [crates/shamir-wasm-host/src/wasm/mod.rs:18](../../../../../crates/shamir-wasm-host/src/wasm/mod.rs#L18).
+The public-surface doc list omits two actual sanitizer reexports.
 
-Grouping/duplicate: `SUMMARY.md#7.7`. This row is not another independent defect.
+Evidence: [crates/shamir-wasm-host/src/wasm/mod.rs:3](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-wasm-host/src/wasm/mod.rs#L3); [crates/shamir-wasm-host/src/wasm/mod.rs:18](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-wasm-host/src/wasm/mod.rs#L18).
 
-## Corrections and qualified non-findings
+Grouping/duplicate: [SUMMARY.md#7.7](SUMMARY.md#review-7-7). This is not an additional independent defect.
 
-- Imports and duplicated prose are nits; duplicated security-policy implementations are maintainability risk without a demonstrated runtime divergence.
-- The crate's two mod.rs files and lib.rs remain manifests/reexports with test registration; all ten topic files are registered, and no inline test module or TODO/FIXME debris was found.
-- The one-file rule explicitly permits closely coupled groups, so the proposed net_guard split is optional.
-- Direct lock absence and acknowledged scc len calls are confirmed; dependence on scc is not proof of lock-free progress.
-- Unused serde does not necessarily add an additional proc-macro build in this workspace.
-- The SUMMARY census incorrectly puts this report's two original Medium findings in the High column.
+## Evidence and recipe corrections
+
+- The two mod.rs files and lib.rs are manifests/reexports; all ten local test topics are wired. No inline test block or TODO/FIXME finding follows from the inspected crate.
+- Acknowledged scc len traversals are compliant with the local convention, but scc 3.8.4 entry operations are bucket-locked.
+- The historical style census wrongly placed its two Medium findings in the High column; neither establishes runtime High severity.
+- Do not turn optional net-guard splitting or uniform trusted-tool environment scrubbing into required behavioral remediation.
 
 ---
 

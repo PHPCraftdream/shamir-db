@@ -1,11 +1,13 @@
-<!-- revalidation:2026-10-08 source:92ad58266bf57ddea1fa3c8a47affba1a3a9a096 -->
-# shamir-numa — security-crypto revalidation
+<!-- revalidation:2026-10-08 cycle:independent-2 source:e3765c935fc71655ee1ec0160cf180607935d89b -->
+# shamir-numa — security-crypto independent revalidation (cycle 2)
 
-Source snapshot: `92ad58266bf57ddea1fa3c8a47affba1a3a9a096`. Revalidated 2026-10-08 by read-only XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run; no source fix is part of this update. Test registration/assertions are evidence of an oracle, not proof of a passing run.
+Frozen source snapshot: `e3765c935fc71655ee1ec0160cf180607935d89b`. Independently revalidated 2026-10-08 by a fresh XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run. Source-fixed means the specified mechanism was already removed at this snapshot; this cycle implements no source fix.
 
-This section is authoritative for current status. Original titles/IDs are retained for traceability; a refuted title is not a current assertion. The collapsed historical report below is superseded, including its counts, severity, scenarios and fix instructions. Plan IDs preserve historical numbering, not a current release mandate. [Workspace methodology and status definitions](../SUMMARY.md#status-definitions).
+This section is authoritative for current decisions. Existing IDs and allegation titles are retained for traceability; a refuted title is not a current assertion. Prior-cycle decisions were rechecked, not used as proof. The first cycle is available in repository history at this snapshot. The original historical body below remains preserved once and is superseded, including its counts, severities and recipes. [Workspace scope and status definitions](../SUMMARY.md#status-definitions).
 
-Unbounded parser expansion remains a conditional embedding DoS risk, not an established network vulnerability. Discovery diagnostic loss remains. The exact CPU_SET panic claim is unverified against the resolved libc source.
+Unrelated external edits began in dependency/toolchain/CI metadata during collection; additional Rust-source edits appeared afterward. They were left untouched. Evidence and decisions are tied to the frozen commit, not those later changes or an installed toolchain. “Current” below means current at that snapshot; no re-audit of the modified working tree is implied.
+
+No authentication or cryptographic boundary exists here. High-ID affinity panic is a conditional Linux API defect; parser exhaustion is an embedding-input risk rather than an established remote vulnerability.
 
 ## Current claim decisions
 
@@ -13,25 +15,21 @@ Unbounded parser expansion remains a conditional embedding DoS risk, not an esta
 |---:|---:|---:|---:|---:|---:|---:|
 | 3 | 3 | 0 | 0 | 0 | 0 | 0 |
 
-These are decisions on report claims, including repeated roots, bundled observations and non-findings—not a unique-bug census. Closed/N/A rows have no current risk; unverified risk is provisional. Pure style and unmeasured optimization claims do not establish runtime impact.
-
-## Parent acceptance refinements
-
-- Exact Linux libc helper source proves checked-index bounds panic; remove contradictory glibc/musl C-macro outcomes.
+These are duplicate-inclusive report decisions, not a unique-bug census. Pure style or structural optimization does not establish a runtime incident; unverified impact remains provisional.
 
 <a id="review-1"></a>
 
-### Claim 1 — `CPU_SET` fed sysfs CPU indices with no `CPU_SETSIZE` bound -- panic instead of `Err` on >=1024-CPU hosts
+### Claim 1 — `CPU_SET` fed sysfs CPU indices with no `CPU_SETSIZE` bound -- panic instead of `Err` on &gt;=1024-CPU hosts
 
 Status: `confirmed-open`. Current risk: `medium`.
 
-Parent inspection of checksummed libc 0.2.186 resolves the Linux helper: cpu_set_t has 1024 storage bits, and CPU_SET indexes bits[cpu / word_bits] with Rust array indexing. A sysfs CPU ID >=1024 therefore reaches bounds panic, not a C-macro out-of-bounds write or silent truncation. The unchecked source route remains a Medium public Linux API defect; no production worker-pinning route or tested target failure was established.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-numa/src/linux.rs:129](../../../../../crates/shamir-numa/src/linux.rs#L129); [crates/shamir-numa/src/linux.rs:143](../../../../../crates/shamir-numa/src/linux.rs#L143); [crates/shamir-numa/tests/linux_topology.rs:17](../../../../../crates/shamir-numa/tests/linux_topology.rs#L17); [Cargo.lock:1923](../../../../../Cargo.lock#L1923).
+The exact libc 0.2.186 published linux_l4re_shared.rs:1531 indexes a fixed 1024-bit array. Sysfs CPU ID 1024 suffices for bounds panic when pinning is called. No C macro, memory corruption or production worker-pinning route is involved.
 
-Pinned dependency evidence: [libc 0.2.186, src/unix/linux_like/linux_l4re_shared.rs:1531](https://docs.rs/crate/libc/0.2.186/source/src/unix/linux_like/linux_l4re_shared.rs).
+Evidence: [crates/shamir-numa/src/linux.rs:143](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-numa/src/linux.rs#L143); [Cargo.lock:1923](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/Cargo.lock#L1923); [crates/shamir-numa/tests/linux_topology.rs:19](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-numa/tests/linux_topology.rs#L19).
 
-Grouping/duplicate: `error-handling-lifecycle.md#3`. This row is not another independent defect.
+Grouping/duplicate: [error-handling-lifecycle.md#3](error-handling-lifecycle.md#review-3). This is not an additional independent defect.
 
 <a id="review-2"></a>
 
@@ -39,11 +37,13 @@ Grouping/duplicate: `error-handling-lifecycle.md#3`. This row is not another ind
 
 Status: `confirmed-open`. Current risk: `low`.
 
-The public parser materializes unconstrained ascending ranges. A caller accepting hostile strings can cause excessive allocation; existing production feed points are trusted sysfs, not network/config inputs.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-numa/src/cpulist.rs:29](../../../../../crates/shamir-numa/src/cpulist.rs#L29); [crates/shamir-numa/src/cpulist.rs:40](../../../../../crates/shamir-numa/src/cpulist.rs#L40); [crates/shamir-numa/src/linux.rs:57](../../../../../crates/shamir-numa/src/linux.rs#L57); [crates/shamir-numa/src/linux.rs:76](../../../../../crates/shamir-numa/src/linux.rs#L76).
+A syntactically valid large range expands without a budget. Hostile strings matter only if an embedding caller accepts them; current callers read kernel sysfs. Resource consumption is structural, while exact abort timing is unmeasured.
 
-Grouping/duplicate: `error-handling-lifecycle.md#1`. This row is not another independent defect.
+Evidence: [crates/shamir-numa/src/cpulist.rs:29](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-numa/src/cpulist.rs#L29); [crates/shamir-numa/src/cpulist.rs:40](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-numa/src/cpulist.rs#L40); [crates/shamir-numa/src/linux.rs:76](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-numa/src/linux.rs#L76).
+
+Grouping/duplicate: [error-handling-lifecycle.md#1](error-handling-lifecycle.md#review-1). This is not an additional independent defect.
 
 <a id="review-3"></a>
 
@@ -51,19 +51,21 @@ Grouping/duplicate: `error-handling-lifecycle.md#1`. This row is not another ind
 
 Status: `confirmed-open`. Current risk: `nit`.
 
-Err(_) still converts every per-node read failure to an empty CPU list, losing the source error before affinity-mask construction. Discovery provenance is absent from later pin failures; no privilege escalation is established.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-numa/src/linux.rs:75](../../../../../crates/shamir-numa/src/linux.rs#L75); [crates/shamir-numa/src/linux.rs:78](../../../../../crates/shamir-numa/src/linux.rs#L78); [crates/shamir-numa/src/linux.rs:142](../../../../../crates/shamir-numa/src/linux.rs#L142); [crates/shamir-numa/src/linux.rs:153](../../../../../crates/shamir-numa/src/linux.rs#L153).
+A per-node permission or I/O error is discarded into an empty CPU list; a later pin cannot recover the original error. The empty mask has no eligible CPUs and can fail with EINVAL; no privilege escalation follows.
 
-Grouping/duplicate: `error-handling-lifecycle.md#2`. This row is not another independent defect.
+Evidence: [crates/shamir-numa/src/linux.rs:75](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-numa/src/linux.rs#L75); [crates/shamir-numa/src/linux.rs:78](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-numa/src/linux.rs#L78); [crates/shamir-numa/src/linux.rs:145](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-numa/src/linux.rs#L145).
 
-## Corrections and qualified non-findings
+Grouping/duplicate: [error-handling-lifecycle.md#2](error-handling-lifecycle.md#review-2). This is not an additional independent defect.
 
-- Confirmed scoped non-findings: no authentication, cryptography, secrets, networking, command execution, or environment reads in this crate. Dynamic sysfs path segments are parsed usize values, not arbitrary path text.
-- Numeric CPU keys from trusted discovery do not establish attacker-controlled HashDoS or secret-comparison timing exposure.
-- An unsafe block containing CPU_SET does not establish memory corruption. C musl/glibc macro behavior must not be attributed to Rust helpers.
-- Panic does not necessarily abort the process under an unwinding profile; exact helper behavior and deployment panic strategy were not demonstrated.
-- The alleged startup worker-pinning scenario is hypothetical: the repository-wide caller search found no production use of this crate's pin API.
+## Evidence and recipe corrections
+
+- The overview's unresolved-CPU_SET statement is obsolete relative to both its parent refinement and this independent exact-archive inspection.
+- Cargo.toml:88 explicitly configures release panic=unwind. A CPU_SET panic is not automatically process abort; deployment boundaries still determine containment.
+- The exact helper contains checked indexing, not the historical debug_assert/C-macro variants. Numeric high-ID input violates error handling, not Rust memory safety.
+- A libc cpu_set_t builder remains Linux-specific. A portable mask-domain core must be separate from the Linux FFI adapter.
+- Missing CAP_SYS_NICE alone is not a reason self-affinity fails; empty permitted intersections and platform restrictions are the relevant qualified cases. [Linux affinity documentation](https://man7.org/linux/man-pages/man2/sched_setaffinity.2.html).
 
 ---
 

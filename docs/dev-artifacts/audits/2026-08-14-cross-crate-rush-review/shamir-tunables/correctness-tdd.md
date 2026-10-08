@@ -1,39 +1,45 @@
-<!-- revalidation:2026-10-08 source:92ad58266bf57ddea1fa3c8a47affba1a3a9a096 -->
-# shamir-tunables — correctness-tdd revalidation
+<!-- revalidation:2026-10-08 cycle:independent-2 source:e3765c935fc71655ee1ec0160cf180607935d89b -->
+# shamir-tunables — correctness-tdd independent revalidation (cycle 2)
 
-Source snapshot: `92ad58266bf57ddea1fa3c8a47affba1a3a9a096`. Revalidated 2026-10-08 by read-only XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run; no source fix is part of this update. Test registration/assertions are evidence of an oracle, not proof of a passing run.
+Frozen source snapshot: `e3765c935fc71655ee1ec0160cf180607935d89b`. Independently revalidated 2026-10-08 by a fresh XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run. Source-fixed means the specified mechanism was already removed at this snapshot; this cycle implements no source fix.
 
-This section is authoritative for current status. Original titles/IDs are retained for traceability; a refuted title is not a current assertion. The collapsed historical report below is superseded, including its counts, severity, scenarios and fix instructions. Plan IDs preserve historical numbering, not a current release mandate. [Workspace methodology and status definitions](../SUMMARY.md#status-definitions).
+This section is authoritative for current decisions. Existing IDs and allegation titles are retained for traceability; a refuted title is not a current assertion. Prior-cycle decisions were rechecked, not used as proof. The first cycle is available in repository history at this snapshot. The original historical body below remains preserved once and is superseded, including its counts, severities and recipes. [Workspace scope and status definitions](../SUMMARY.md#status-definitions).
 
-The unwired API, unchecked setters, phantom environment override, missing boundary/effect tests, and stale documentation remain. Several predicted downstream failures need correction; the unwired API warrants medium rather than demonstrated runtime high severity.
+Unrelated external edits began in dependency/toolchain/CI metadata during collection; additional Rust-source edits appeared afterward. They were left untouched. Evidence and decisions are tied to the frozen commit, not those later changes or an installed toolchain. “Current” below means current at that snapshot; no re-audit of the modified working tree is implied.
+
+The phantom startup environment setting and undocumented Duration transformation are actual source-supported discrepancies. Registered tests miss those boundaries, but intentional deferred consumption and a correctly framed future cascade are not current correctness defects.
 
 ## Current claim decisions
 
 | Claim decisions | Open | Source-fixed | Partial | Refuted | Unverified | N/A |
 |---:|---:|---:|---:|---:|---:|---:|
-| 5 | 5 | 0 | 0 | 0 | 0 | 0 |
+| 5 | 3 | 0 | 0 | 1 | 0 | 1 |
 
-These are decisions on report claims, including repeated roots, bundled observations and non-findings—not a unique-bug census. Closed/N/A rows have no current risk; unverified risk is provisional. Pure style and unmeasured optimization claims do not establish runtime impact.
+These are duplicate-inclusive report decisions, not a unique-bug census. Pure style or structural optimization does not establish a runtime incident; unverified impact remains provisional.
 
 <a id="review-1"></a>
 
 ### Claim 1 — Runtime override API is unwired — all three setters are silent no-ops for real behavior
 
-Status: `confirmed-open`. Current risk: `medium`.
+Status: `not-applicable`. Current risk: `—`.
 
-Only crate tests call the getters/setters. ServerHandle constructs the object after listener setup; contexts, frame allocations, and five accept-error backoffs still use constants. The server behavior mismatch remains, although deferral is explicit in the handle and roadmap.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-server/src/server/server_launcher.rs:985](../../../../../crates/shamir-server/src/server/server_launcher.rs#L985); [crates/shamir-server/src/server/server_launcher.rs:1048](../../../../../crates/shamir-server/src/server/server_launcher.rs#L1048); [crates/shamir-server/src/connection/handshake.rs:706](../../../../../crates/shamir-server/src/connection/handshake.rs#L706); [crates/shamir-server/src/server/server_handle.rs:96](../../../../../crates/shamir-server/src/server/server_handle.rs#L96); [docs/dev-artifacts/roadmap/TUNABLES.md:175](../../../../../docs/dev-artifacts/roadmap/TUNABLES.md#L175).
+All server reads remain constant-backed, but the handle and roadmap explicitly declare this foundation unwired. The setter/getter API itself changes stored values. A server-effect witness confirms deferred behavior, not violation of an operational promise.
+
+Evidence: [crates/shamir-server/src/server/server_handle.rs:98](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-server/src/server/server_handle.rs#L98); [docs/dev-artifacts/roadmap/TUNABLES.md:175](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/docs/dev-artifacts/roadmap/TUNABLES.md#L175); [crates/shamir-server/src/server/server_launcher.rs:1048](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-server/src/server/server_launcher.rs#L1048); [crates/shamir-tunables/src/runtime.rs:57](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-tunables/src/runtime.rs#L57).
 
 <a id="review-2"></a>
 
 ### Claim 2 — Setters accept degenerate values unvalidated; millisecond quantization silently truncates to zero
 
-Status: `confirmed-open`. Current risk: `medium`.
+Status: `confirmed-open`. Current risk: `low`.
 
-The raw usize stores and narrowing duration cast are unchanged and undocumented. Sub-ms inputs become zero and sufficiently large durations wrap. Production consequences remain latent; the existing request-loop max(1) prevents the alleged zero-permit stall even if its input is switched to a getter.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-tunables/src/runtime.rs:56](../../../../../crates/shamir-tunables/src/runtime.rs#L56); [crates/shamir-tunables/src/runtime.rs:63](../../../../../crates/shamir-tunables/src/runtime.rs#L63); [crates/shamir-tunables/src/runtime.rs:73](../../../../../crates/shamir-tunables/src/runtime.rs#L73); [crates/shamir-server/src/connection/request_loop.rs:153](../../../../../crates/shamir-server/src/connection/request_loop.rs#L153).
+900 microseconds becomes zero; Duration::new(18446744073709551, 616000000) also becomes zero because its 2^64 milliseconds narrow modulo 2^64. No precision/range policy is documented. This is local trusted-caller loss, not demonstrated server DoS; zero buffer capacity is valid and request-loop max(1) already protects zero caps.
+
+Evidence: [crates/shamir-tunables/src/runtime.rs:60](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-tunables/src/runtime.rs#L60); [crates/shamir-tunables/src/runtime.rs:63](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-tunables/src/runtime.rs#L63); [crates/shamir-server/src/connection/request_loop.rs:153](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-server/src/connection/request_loop.rs#L153).
 
 <a id="review-3"></a>
 
@@ -41,9 +47,11 @@ Evidence: [crates/shamir-tunables/src/runtime.rs:56](../../../../../crates/shami
 
 Status: `confirmed-open`. Current risk: `medium`.
 
-The startup-override promise remains, while VectorBackend initializes its threshold directly from the constant. Its mutation seam is cfg(test)-only, not an environment reader.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-tunables/src/lib.rs:149](../../../../../crates/shamir-tunables/src/lib.rs#L149); [crates/shamir-index/src/vector/vector_backend.rs:143](../../../../../crates/shamir-index/src/vector/vector_backend.rs#L143); [crates/shamir-index/src/vector/vector_backend.rs:160](../../../../../crates/shamir-index/src/vector/vector_backend.rs#L160).
+The named startup override remains promised but unread. Backend construction always initializes from the constant; only cfg(test) exposes threshold mutation. A meaningful oracle must exercise production construction with the chosen startup-source policy.
+
+Evidence: [crates/shamir-tunables/src/lib.rs:149](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-tunables/src/lib.rs#L149); [crates/shamir-index/src/vector/vector_backend.rs:143](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-index/src/vector/vector_backend.rs#L143); [crates/shamir-index/src/vector/vector_backend.rs:160](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-index/src/vector/vector_backend.rs#L160).
 
 <a id="review-4"></a>
 
@@ -51,29 +59,31 @@ Evidence: [crates/shamir-tunables/src/lib.rs:149](../../../../../crates/shamir-t
 
 Status: `confirmed-open`. Current risk: `low`.
 
-The five reachable tests still cover defaults, ordinary round trips, and single-thread Arc callability only. No boundary, overflow, double-overwrite, or server-effect test exists. defaults_equal_consts would detect a zero-initializing derived Default.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-tunables/src/lib.rs:11](../../../../../crates/shamir-tunables/src/lib.rs#L11); [crates/shamir-tunables/src/tests/mod.rs:1](../../../../../crates/shamir-tunables/src/tests/mod.rs#L1); [crates/shamir-tunables/src/tests/runtime_tests.rs:7](../../../../../crates/shamir-tunables/src/tests/runtime_tests.rs#L7); [crates/shamir-tunables/src/tests/runtime_tests.rs:27](../../../../../crates/shamir-tunables/src/tests/runtime_tests.rs#L27); [crates/shamir-tunables/src/tests/runtime_tests.rs:52](../../../../../crates/shamir-tunables/src/tests/runtime_tests.rs#L52).
+All five tests are registered but use exact ordinary values. Replacing checked/saturating duration storage with the current cast would evade them; exactly 2^64 milliseconds distinguishes that regression, whereas Duration::MAX alone does not. Defaults and ordinary stores have genuine existing oracles. Server-effect tests are conditional on implementing that feature.
+
+Evidence: [crates/shamir-tunables/src/lib.rs:11](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-tunables/src/lib.rs#L11); [crates/shamir-tunables/src/tests/mod.rs:1](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-tunables/src/tests/mod.rs#L1); [crates/shamir-tunables/src/tests/runtime_tests.rs:8](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-tunables/src/tests/runtime_tests.rs#L8); [crates/shamir-tunables/src/tests/runtime_tests.rs:35](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-tunables/src/tests/runtime_tests.rs#L35).
 
 <a id="review-5"></a>
 
 ### Claim 5 — `lib.rs` header doc stale relative to shipped `runtime.rs`
 
-Status: `confirmed-open`. Current risk: `nit`.
+Status: `refuted`. Current risk: `—`.
 
-The opening line mentions runtime knobs, but the following paragraph still describes today's contents as plain constants and promotion as future. It does not explain the existing, deliberately unwired atomic foundation.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-tunables/src/lib.rs:1](../../../../../crates/shamir-tunables/src/lib.rs#L1); [crates/shamir-tunables/src/lib.rs:4](../../../../../crates/shamir-tunables/src/lib.rs#L4); [crates/shamir-tunables/src/lib.rs:9](../../../../../crates/shamir-tunables/src/lib.rs#L9).
+The opening explicitly acknowledges runtime-overridable knobs. Its subsequent build-time-constant paragraph and future full-cascade framing remain true. Explaining the foundation in more detail is optional, not correction of an asserted absent module.
 
-## Corrections and qualified non-findings
+Evidence: [crates/shamir-tunables/src/lib.rs:1](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-tunables/src/lib.rs#L1); [crates/shamir-tunables/src/lib.rs:3](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-tunables/src/lib.rs#L3); [docs/dev-artifacts/roadmap/TUNABLES.md:175](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/docs/dev-artifacts/roadmap/TUNABLES.md#L175).
 
-- Downgrade finding 1 from high to medium: the misleading API is source-proven, but no live configuration/admin consumer or resulting production outage is demonstrated.
-- Finding 2: Vec::with_capacity(0) is a valid allocation hint, not inherently invalid. The current 50 ms Default conversion is exact; only future unsuitable defaults would expose its narrowing.
-- Finding 2: the max(1) at crates/shamir-server/src/connection/request_loop.rs:153 is value-based, not restricted to constant-fed input. Tokio 1.49 bounded mpsc rejects zero capacity; it does not hang or provide rendezvous semantics.
-- Zero interval removes the intended 50 ms error backoff, but mandatory core saturation/starvation is not proven. These are accept-error branches, not continuously ticking idle housekeeping loops.
-- Positive checks remain: consecutive push failures reset on success and terminate at >=100 (crates/shamir-server/src/subscriptions/push.rs:100,118); subscription reservation rejects at active >= cap using CAS (crates/shamir-server/src/subscriptions/registry.rs:77); the request cap feeds both primitives (crates/shamir-server/src/connection/request_loop.rs:153).
-- Qualify the backpressure guarantee: high/2 hysteresis exists, but a stuck drain causes abandonment after five seconds, not unconditional waiting until the low watermark (crates/shamir-engine/src/tx/commit.rs:492,526,549).
-- The suggested server cadence test must force the accept-error branch or use an injectable sleep/accept seam; an ordinary idle-server timing test cannot detect this wiring defect.
+## Evidence and recipe corrections
+
+- Do not infer TDD sequence or passing execution from the current five test bodies or historical green labels.
+- The supported Duration discrepancy is an inverse-style set/get domain issue. Whole-millisecond happy paths cannot establish behavior for the full accepted Duration domain.
+- The five server sleeps are accept-error backoffs. An idle-server cadence test does not discriminate their wiring.
+- Retain the qualified backpressure observation: high/2 release is bypassed after five seconds under stalled progress. The public constant comment omits that exception.
+- The threshold push logic resets on success and returns false at the configured failure count, but terminal SlowConsumer delivery is best-effort.
 
 ---
 

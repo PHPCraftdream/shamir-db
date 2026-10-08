@@ -1,11 +1,13 @@
-<!-- revalidation:2026-10-08 source:92ad58266bf57ddea1fa3c8a47affba1a3a9a096 -->
-# shamir-db — error-handling-lifecycle revalidation
+<!-- revalidation:2026-10-08 cycle:independent-2 source:e3765c935fc71655ee1ec0160cf180607935d89b -->
+# shamir-db — error-handling-lifecycle independent revalidation (cycle 2)
 
-Source snapshot: `92ad58266bf57ddea1fa3c8a47affba1a3a9a096`. Revalidated 2026-10-08 by read-only XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run; no source fix is part of this update. Test registration/assertions are evidence of an oracle, not proof of a passing run.
+Frozen source snapshot: `e3765c935fc71655ee1ec0160cf180607935d89b`. Independently revalidated 2026-10-08 by a fresh XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run. Source-fixed means the specified mechanism was already removed at this snapshot; this cycle implements no source fix.
 
-This section is authoritative for current status. Original titles/IDs are retained for traceability; a refuted title is not a current assertion. The collapsed historical report below is superseded, including its counts, severity, scenarios and fix instructions. Plan IDs preserve historical numbering, not a current release mandate. [Workspace methodology and status definitions](../SUMMARY.md#status-definitions).
+This section is authoritative for current decisions. Existing IDs and allegation titles are retained for traceability; a refuted title is not a current assertion. Prior-cycle decisions were rechecked, not used as proof. The first cycle is available in repository history at this snapshot. The original historical body below remains preserved once and is superseded, including its counts, severities and recipes. [Workspace scope and status definitions](../SUMMARY.md#status-definitions).
 
-Warn-only catalogue persistence, remove-first artifact renames and ignored cascade errors remain. The report incorrectly claims no SystemStore injection seam: existing ACL tests already replace system tables through the engine test-util seam, although lifecycle write-failure assertions remain missing.
+Unrelated external edits began in dependency/toolchain/CI metadata during collection; additional Rust-source edits appeared afterward. They were left untouched. Evidence and decisions are tied to the frozen commit, not those later changes or an installed toolchain. “Current” below means current at that snapshot; no re-audit of the modified working tree is implied.
+
+Warn-only mutations, remove-first renames and ignored cleanup results remain. Existing read-fault seams are useful but do not prove lifecycle write outcomes. Membership-error fallback is a conditional authorization bypass, not merely missing logging.
 
 ## Current claim decisions
 
@@ -13,7 +15,7 @@ Warn-only catalogue persistence, remove-first artifact renames and ignored casca
 |---:|---:|---:|---:|---:|---:|---:|
 | 12 | 12 | 0 | 0 | 0 | 0 | 0 |
 
-These are decisions on report claims, including repeated roots, bundled observations and non-findings—not a unique-bug census. Closed/N/A rows have no current risk; unverified risk is provisional. Pure style and unmeasured optimization claims do not establish runtime impact.
+These are duplicate-inclusive report decisions, not a unique-bug census. Pure style or structural optimization does not establish a runtime incident; unverified impact remains provisional.
 
 <a id="review-1"></a>
 
@@ -21,9 +23,11 @@ These are decisions on report claims, including repeated roots, bundled observat
 
 Status: `confirmed-open`. Current risk: `high`.
 
-Create/drop and database/repository/table rename persistence still logs failures and continues. Rename save failure does not stop removal of the old key. Several prerequisite reads do propagate, so not every failure is swallowed.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-db/src/shamir_db/shamir_db/db_management.rs:184](../../../../../crates/shamir-db/src/shamir_db/shamir_db/db_management.rs#L184); [crates/shamir-db/src/shamir_db/shamir_db/db_management.rs:195](../../../../../crates/shamir-db/src/shamir_db/shamir_db/db_management.rs#L195); [crates/shamir-db/src/shamir_db/shamir_db/db_management.rs:534](../../../../../crates/shamir-db/src/shamir_db/shamir_db/db_management.rs#L534); [crates/shamir-db/src/shamir_db/shamir_db/table_management.rs:323](../../../../../crates/shamir-db/src/shamir_db/shamir_db/table_management.rs#L323); [crates/shamir-db/src/shamir_db/shamir_db/table_management.rs:337](../../../../../crates/shamir-db/src/shamir_db/shamir_db/table_management.rs#L337).
+Registry mutation precedes catalogue writes, and failed save-new does not prevent remove-old. Several prerequisite loads propagate errors after live mutation. The add_table documentation admits best effort, but that does not make rename preservation or successful wire durability true.
+
+Evidence: [crates/shamir-db/src/shamir_db/shamir_db/db_management.rs:184](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/shamir_db/db_management.rs#L184); [crates/shamir-db/src/shamir_db/shamir_db/db_management.rs:195](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/shamir_db/db_management.rs#L195); [crates/shamir-db/src/shamir_db/shamir_db/table_management.rs:323](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/shamir_db/table_management.rs#L323); [crates/shamir-db/src/shamir_db/shamir_db/table_management.rs:337](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/shamir_db/table_management.rs#L337).
 
 <a id="review-2"></a>
 
@@ -31,9 +35,11 @@ Evidence: [crates/shamir-db/src/shamir_db/shamir_db/db_management.rs:184](../../
 
 Status: `confirmed-open`. Current risk: `high`.
 
-Function/validator old-row removal still precedes save. Folder rename deletes every old row before its save loop and still claims no partial state. Reordering alone preserves a copy but does not make multi-row rename atomic.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-db/src/shamir_db/shamir_db/function_management.rs:337](../../../../../crates/shamir-db/src/shamir_db/shamir_db/function_management.rs#L337); [crates/shamir-db/src/shamir_db/shamir_db/validator_management.rs:375](../../../../../crates/shamir-db/src/shamir_db/shamir_db/validator_management.rs#L375); [crates/shamir-db/src/shamir_db/shamir_db/function_management.rs:471](../../../../../crates/shamir-db/src/shamir_db/shamir_db/function_management.rs#L471); [crates/shamir-db/src/shamir_db/shamir_db/function_management.rs:567](../../../../../crates/shamir-db/src/shamir_db/shamir_db/function_management.rs#L567).
+Function/validator deletion precedes save; folder rename deletes the entire old subtree before its save loop. Its no-partial-state promise is false. Fault timing must distinguish failed-before-commit from committed-but-deferred outcomes.
+
+Evidence: [crates/shamir-db/src/shamir_db/shamir_db/function_management.rs:337](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/shamir_db/function_management.rs#L337); [crates/shamir-db/src/shamir_db/shamir_db/validator_management.rs:375](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/shamir_db/validator_management.rs#L375); [crates/shamir-db/src/shamir_db/shamir_db/function_management.rs:471](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/shamir_db/function_management.rs#L471); [crates/shamir-db/src/shamir_db/shamir_db/function_management.rs:567](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/shamir_db/function_management.rs#L567).
 
 <a id="review-3"></a>
 
@@ -41,9 +47,11 @@ Evidence: [crates/shamir-db/src/shamir_db/shamir_db/function_management.rs:337](
 
 Status: `confirmed-open`. Current risk: `medium`.
 
-Relevant tests still lack catalogue-write/rename failure assertions. But a system-table injection mechanism already exists: access_meta_tests installs custom databases/groups TableManagers into system_repo. Extend that seam rather than claiming injection is impossible.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-db/src/shamir_db/tests/access_meta_tests.rs:741](../../../../../crates/shamir-db/src/shamir_db/tests/access_meta_tests.rs#L741); [crates/shamir-db/src/shamir_db/tests/access_meta_tests.rs:759](../../../../../crates/shamir-db/src/shamir_db/tests/access_meta_tests.rs#L759); [crates/shamir-db/Cargo.toml:93](../../../../../crates/shamir-db/Cargo.toml#L93); [crates/shamir-db/src/shamir_db/tests/mod.rs:1](../../../../../crates/shamir-db/src/shamir_db/tests/mod.rs#L1).
+Registered ACL tests install replacement system TableManagers, refuting absence of a seam. Their FailingStore fails reads but forwards writes/transact; installation replaces the table cache, not the repository MVCC routing. Lifecycle history/WAL/write faults need a correctly wired extension.
+
+Evidence: [crates/shamir-db/src/shamir_db/tests/access_meta_tests.rs:647](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/tests/access_meta_tests.rs#L647); [crates/shamir-db/src/shamir_db/tests/access_meta_tests.rs:741](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/tests/access_meta_tests.rs#L741); [crates/shamir-engine/src/repo/repo_instance.rs:377](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-engine/src/repo/repo_instance.rs#L377); [crates/shamir-db/Cargo.toml:93](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/Cargo.toml#L93).
 
 <a id="review-4"></a>
 
@@ -51,11 +59,13 @@ Evidence: [crates/shamir-db/src/shamir_db/tests/access_meta_tests.rs:741](../../
 
 Status: `confirmed-open`. Current risk: `medium`.
 
-Both store methods still default absent records and call save_group. Public facade methods reach these under a per-group lock, which prevents lost-update interleavings but does not enforce existence.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-db/src/shamir_db/system_store.rs:713](../../../../../crates/shamir-db/src/shamir_db/system_store.rs#L713); [crates/shamir-db/src/shamir_db/system_store.rs:743](../../../../../crates/shamir-db/src/shamir_db/system_store.rs#L743); [crates/shamir-db/src/shamir_db/shamir_db/access_control.rs:660](../../../../../crates/shamir-db/src/shamir_db/shamir_db/access_control.rs#L660).
+Both methods load None, default fields and save. The facade group lock serializes this fabrication; it does not reject absence. set_group_owner positively demonstrates an existing NotFound alternative.
 
-Grouping/duplicate: `correctness-tdd.md#2`. This row is not another independent defect.
+Evidence: [crates/shamir-db/src/shamir_db/system_store.rs:713](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/system_store.rs#L713); [crates/shamir-db/src/shamir_db/system_store.rs:743](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/system_store.rs#L743); [crates/shamir-db/src/shamir_db/system_store.rs:771](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/system_store.rs#L771).
+
+Grouping/duplicate: [correctness-tdd.md#2](correctness-tdd.md#review-2). This is not an additional independent defect.
 
 <a id="review-5"></a>
 
@@ -63,9 +73,11 @@ Grouping/duplicate: `correctness-tdd.md#2`. This row is not another independent 
 
 Status: `confirmed-open`. Current risk: `medium`.
 
-Database/repository cascades still discard table-cleanup Results; index cascades discard their results too. Stale rows/orphaned data are possible. Table rows alone cannot resurrect a deleted database/repository because boot attaches tables only under existing parent rows.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-db/src/shamir_db/execute/admin_db_repo.rs:130](../../../../../crates/shamir-db/src/shamir_db/execute/admin_db_repo.rs#L130); [crates/shamir-db/src/shamir_db/execute/admin_db_repo.rs:377](../../../../../crates/shamir-db/src/shamir_db/execute/admin_db_repo.rs#L377); [crates/shamir-db/src/shamir_db/execute/admin_table_index.rs:252](../../../../../crates/shamir-db/src/shamir_db/execute/admin_table_index.rs#L252); [crates/shamir-db/src/shamir_db/shamir_db/core.rs:219](../../../../../crates/shamir-db/src/shamir_db/shamir_db/core.rs#L219).
+Database/repository cascades discard table cleanup Results; table index cascades discard several Results. Some inner failures already warn, so not every failure is logless. Stale table rows require surviving/recreated parent rows to become visible at reboot.
+
+Evidence: [crates/shamir-db/src/shamir_db/execute/admin_db_repo.rs:130](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/execute/admin_db_repo.rs#L130); [crates/shamir-db/src/shamir_db/execute/admin_db_repo.rs:377](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/execute/admin_db_repo.rs#L377); [crates/shamir-db/src/shamir_db/execute/admin_table_index.rs:252](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/execute/admin_table_index.rs#L252).
 
 <a id="review-6"></a>
 
@@ -73,9 +85,11 @@ Evidence: [crates/shamir-db/src/shamir_db/execute/admin_db_repo.rs:130](../../..
 
 Status: `confirmed-open`. Current risk: `low`.
 
-Grant/revoke still classify the English substring; create/drop map errors to query. Current directory errors contain the expected text, so current classification works but has no typed/stable port contract.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-db/src/shamir_db/execute/admin_users_roles.rs:148](../../../../../crates/shamir-db/src/shamir_db/execute/admin_users_roles.rs#L148); [crates/shamir-db/src/shamir_db/execute/admin_users_roles.rs:187](../../../../../crates/shamir-db/src/shamir_db/execute/admin_users_roles.rs#L187); [crates/shamir-db/src/shamir_db/ports.rs:32](../../../../../crates/shamir-db/src/shamir_db/ports.rs#L32); [crates/shamir-server/src/user_directory.rs:710](../../../../../crates/shamir-server/src/user_directory.rs#L710).
+Grant/revoke inspect user not found text. Current directory read_modify_write emits exactly that text, so present unknown-user classification is supported. The port does not guarantee the wording; other implementations can diverge.
+
+Evidence: [crates/shamir-db/src/shamir_db/execute/admin_users_roles.rs:148](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/execute/admin_users_roles.rs#L148); [crates/shamir-db/src/shamir_db/execute/admin_users_roles.rs:187](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/execute/admin_users_roles.rs#L187); [crates/shamir-server/src/user_directory.rs:590](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-server/src/user_directory.rs#L590); [crates/shamir-db/src/shamir_db/ports.rs:32](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/ports.rs#L32).
 
 <a id="review-7"></a>
 
@@ -83,11 +97,13 @@ Evidence: [crates/shamir-db/src/shamir_db/execute/admin_users_roles.rs:148](../.
 
 Status: `confirmed-open`. Current risk: `low`.
 
-Attach errors still permit degraded boot with a warning; missing-parent rows have no diagnostic. Successful attachment followed by failed recovery aborts boot. No structured failed-attach diagnostic reconciles these policies.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-db/src/shamir_db/shamir_db/core.rs:219](../../../../../crates/shamir-db/src/shamir_db/shamir_db/core.rs#L219); [crates/shamir-db/src/shamir_db/shamir_db/core.rs:243](../../../../../crates/shamir-db/src/shamir_db/shamir_db/core.rs#L243); [crates/shamir-db/src/shamir_db/shamir_db/core.rs:263](../../../../../crates/shamir-db/src/shamir_db/shamir_db/core.rs#L263).
+Attachment failure warns and continues; missing-parent rows are silent; attached user-repository recovery failure propagates. Introspection uses live registrations, so an unattached repository is not necessarily still listed normally.
 
-Grouping/duplicate: `correctness-tdd.md#4`. This row is not another independent defect.
+Evidence: [crates/shamir-db/src/shamir_db/shamir_db/core.rs:219](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/shamir_db/core.rs#L219); [crates/shamir-db/src/shamir_db/shamir_db/core.rs:243](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/shamir_db/core.rs#L243); [crates/shamir-db/src/shamir_db/shamir_db/core.rs:263](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/shamir_db/core.rs#L263).
+
+Grouping/duplicate: [correctness-tdd.md#4](correctness-tdd.md#review-4). This is not an additional independent defect.
 
 <a id="review-8"></a>
 
@@ -95,9 +111,11 @@ Grouping/duplicate: `correctness-tdd.md#4`. This row is not another independent 
 
 Status: `confirmed-open`. Current risk: `low`.
 
-Both interner error branches still continue without reporting; the helper never returns those errors despite its soft-BatchError promise. Epoch synchronization can lag, but permanent mis-resolution until a full dump is not proven: a later delta request can recover.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-db/src/shamir_db/execute/ambient_interner.rs:20](../../../../../crates/shamir-db/src/shamir_db/execute/ambient_interner.rs#L20); [crates/shamir-db/src/shamir_db/execute/ambient_interner.rs:40](../../../../../crates/shamir-db/src/shamir_db/execute/ambient_interner.rs#L40); [crates/shamir-db/src/shamir_db/execute/ambient_interner.rs:44](../../../../../crates/shamir-db/src/shamir_db/execute/ambient_interner.rs#L44); [crates/shamir-db/src/shamir_db/execute/db_execute.rs:69](../../../../../crates/shamir-db/src/shamir_db/execute/db_execute.rs#L69).
+Both interner-loading Err arms continue, so the promised soft BatchError never reaches the caller. Later delta requests can recover. Returning an ordinary failure after successful mutation would create retry ambiguity and is not a safe blanket recipe.
+
+Evidence: [crates/shamir-db/src/shamir_db/execute/ambient_interner.rs:20](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/execute/ambient_interner.rs#L20); [crates/shamir-db/src/shamir_db/execute/ambient_interner.rs:40](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/execute/ambient_interner.rs#L40); [crates/shamir-db/src/shamir_db/execute/ambient_interner.rs:44](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/execute/ambient_interner.rs#L44); [crates/shamir-db/src/shamir_db/execute/db_execute.rs:69](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/execute/db_execute.rs#L69).
 
 <a id="review-9"></a>
 
@@ -105,11 +123,13 @@ Evidence: [crates/shamir-db/src/shamir_db/execute/ambient_interner.rs:20](../../
 
 Status: `confirmed-open`. Current risk: `low`.
 
-duration_since(UNIX_EPOCH) is still unwrapped. A pre-epoch time is an environmental failure; ordinary backward clock movement that remains after the epoch does not trigger this panic.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-db/src/shamir_db/execute/helpers.rs:59](../../../../../crates/shamir-db/src/shamir_db/execute/helpers.rs#L59).
+duration_since epoch is unwrapped. The exact environmental precondition is a time before UNIX_EPOCH, not any wall-clock regression.
 
-Grouping/duplicate: `correctness-tdd.md#10`. This row is not another independent defect.
+Evidence: [crates/shamir-db/src/shamir_db/execute/helpers.rs:59](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/execute/helpers.rs#L59).
+
+Grouping/duplicate: [correctness-tdd.md#10](correctness-tdd.md#review-10). This is not an additional independent defect.
 
 <a id="review-10"></a>
 
@@ -117,19 +137,23 @@ Grouping/duplicate: `correctness-tdd.md#10`. This row is not another independent
 
 Status: `confirmed-open`. Current risk: `low`.
 
-Implicit transaction BatchErrors and status-resolution DbErrors are still string-wrapped as Internal; gateway errors use Debug Strings. Typed identity is lost, though the gateway Debug text can retain the code text.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-db/src/shamir_db/system_store.rs:156](../../../../../crates/shamir-db/src/shamir_db/system_store.rs#L156); [crates/shamir-db/src/shamir_db/system_store.rs:178](../../../../../crates/shamir-db/src/shamir_db/system_store.rs#L178); [crates/shamir-db/src/shamir_db/shamir_db/core.rs:772](../../../../../crates/shamir-db/src/shamir_db/shamir_db/core.rs#L772); [crates/shamir-db/src/shamir_db/shamir_db/db_gateway.rs:88](../../../../../crates/shamir-db/src/shamir_db/shamir_db/db_gateway.rs#L88).
+Implicit BatchErrors and status-resolution DbErrors are string-wrapped as Internal. Gateway traits require String and Debug includes code text, but variant identity is lost. A shared DbError::Batch recipe needs a dependency-direction check.
+
+Evidence: [crates/shamir-db/src/shamir_db/system_store.rs:156](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/system_store.rs#L156); [crates/shamir-db/src/shamir_db/system_store.rs:178](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/system_store.rs#L178); [crates/shamir-db/src/shamir_db/shamir_db/core.rs:772](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/shamir_db/core.rs#L772); [crates/shamir-db/src/shamir_db/shamir_db/db_gateway.rs:88](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/shamir_db/db_gateway.rs#L88).
 
 <a id="review-11"></a>
 
 ### Claim 11 — `resolve_in_group` silently converts group-lookup errors into `false` without a log
 
-Status: `confirmed-open`. Current risk: `low`.
+Status: `confirmed-open`. Current risk: `high`.
 
-The silent unwrap_or(false) remains. It removes group-class grants but is not universally fail-closed: permits selects Other when membership is false, and Other permissions can be broader than Group permissions.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-db/src/shamir_db/shamir_db/access_control.rs:916](../../../../../crates/shamir-db/src/shamir_db/shamir_db/access_control.rs#L916); [crates/shamir-types/src/access.rs:682](../../../../../crates/shamir-types/src/access.rs#L682); [crates/shamir-types/src/access.rs:709](../../../../../crates/shamir-types/src/access.rs#L709).
+For a non-owner member and resource mode 0704, normal Group Read is denied. A groups-table read error becomes false, selecting Other Read and granting access. Broader Other bits are accepted POSIX-style modes; failure need affect only groups, not resource metadata. Logging alone does not fix this bypass.
+
+Evidence: [crates/shamir-db/src/shamir_db/shamir_db/access_control.rs:916](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/shamir_db/access_control.rs#L916); [crates/shamir-db/src/shamir_db/shamir_db/access_control.rs:894](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/shamir_db/access_control.rs#L894); [crates/shamir-types/src/access.rs:682](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-types/src/access.rs#L682); [crates/shamir-types/src/access.rs:709](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-types/src/access.rs#L709); [crates/shamir-db/src/shamir_db/tests/access_meta_tests.rs:838](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/tests/access_meta_tests.rs#L838).
 
 <a id="review-12"></a>
 
@@ -137,19 +161,19 @@ Evidence: [crates/shamir-db/src/shamir_db/shamir_db/access_control.rs:916](../..
 
 Status: `confirmed-open`. Current risk: `nit`.
 
-The guarded itype unwraps and silent response-header file-read fallback remain. Present non_btree guards establish Some, so those unwraps are not a current panic defect; the read error still becomes empty headers.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-db/src/shamir_db/execute/admin_table_index.rs:459](../../../../../crates/shamir-db/src/shamir_db/execute/admin_table_index.rs#L459); [crates/shamir-db/src/shamir_db/execute/admin_table_index.rs:514](../../../../../crates/shamir-db/src/shamir_db/execute/admin_table_index.rs#L514); [crates/shamir-db/src/shamir_db/curl_gateway.rs:228](../../../../../crates/shamir-db/src/shamir_db/curl_gateway.rs#L228).
+non_btree proves itype is Some at each cited unwrap. Header read failure becomes empty headers and still loses diagnostics. Replacing safe unwraps is optional future-proofing, not a current panic correction.
 
-## Corrections and qualified non-findings
+Evidence: [crates/shamir-db/src/shamir_db/execute/admin_table_index.rs:448](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/execute/admin_table_index.rs#L448); [crates/shamir-db/src/shamir_db/execute/admin_table_index.rs:459](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/execute/admin_table_index.rs#L459); [crates/shamir-db/src/shamir_db/curl_gateway.rs:228](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/curl_gateway.rs#L228).
 
-- Existing system_repo/install_table_for_test use positively refutes 'SystemStore has no equivalent seam' and 'unverified by construction'. The missing lifecycle write-failure assertions remain real.
-- Catalogue save failures after the WAL commit point may be committed-but-not-materialized, not aborted. Tests/fixes must discriminate failure timing and outcome instead of assuming every injected storage fault makes set_via_implicit_tx return Err.
-- Write-new-before-remove-old is preservation ordering, not complete multi-row rename atomicity. Old rows are not inert merely because their live registration moved; boot reconstructs registrations from persisted rows.
-- Cascade table rows alone cannot recreate absent database/repository parents; qualify resurrection as requiring stale surviving parent rows.
-- Substring classification currently matches the directory implementation; the concern is fragility, not demonstrated present misclassification.
-- resolve_in_group false is not an unconditional deny. Retain the missing-log finding and correct the stronger fail-closed guarantee.
-- Library source contains the schema expect and guarded unwraps; the blanket 'no expect'/'sole unwrap' descriptions are inaccurate. No facade anyhow/unsafe use was found.
+## Evidence and recipe corrections
+
+- Membership fallback is a conditional authorization grant, not simply loss of group grants; its current low severity and logging-only recipe understate the defect.
+- Existing read-fault replacement is not a complete production write-fault seam: it forwards writes and does not update per_table_mvcc.
+- Some ignored cascade failures are already logged by inner methods. The missing outer outcome propagation remains real.
+- Do not fail an already-successful batch merely because an ancillary dictionary delta failed; expose a non-ambiguous soft outcome or logging.
+- Pre-existing counter-evidence is not a later fix: safe itype unwraps, existing injection access and current directory wording were already present.
 
 ---
 

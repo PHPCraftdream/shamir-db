@@ -1,19 +1,21 @@
-<!-- revalidation:2026-10-08 source:92ad58266bf57ddea1fa3c8a47affba1a3a9a096 -->
-# shamir-wal — security-crypto revalidation
+<!-- revalidation:2026-10-08 cycle:independent-2 source:e3765c935fc71655ee1ec0160cf180607935d89b -->
+# shamir-wal — security-crypto independent revalidation (cycle 2)
 
-Source snapshot: `92ad58266bf57ddea1fa3c8a47affba1a3a9a096`. Revalidated 2026-10-08 by read-only XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run; no source fix is part of this update. Test registration/assertions are evidence of an oracle, not proof of a passing run.
+Frozen source snapshot: `e3765c935fc71655ee1ec0160cf180607935d89b`. Independently revalidated 2026-10-08 by a fresh XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run. Source-fixed means the specified mechanism was already removed at this snapshot; this cycle implements no source fix.
 
-This section is authoritative for current status. Original titles/IDs are retained for traceability; a refuted title is not a current assertion. The collapsed historical report below is superseded, including its counts, severity, scenarios and fix instructions. Plan IDs preserve historical numbering, not a current release mandate. [Workspace methodology and status definitions](../SUMMARY.md#status-definitions).
+This section is authoritative for current decisions. Existing IDs and allegation titles are retained for traceability; a refuted title is not a current assertion. Prior-cycle decisions were rechecked, not used as proof. The first cycle is available in repository history at this snapshot. The original historical body below remains preserved once and is superseded, including its counts, severities and recipes. [Workspace scope and status definitions](../SUMMARY.md#status-definitions).
 
-Recovery robustness and local-directory trust documentation remain concerns. No remotely supplied WAL input boundary was established. The small-file speculative-exabyte claim lacks complete pinned dependency proof and has substantial counter-evidence.
+Unrelated external edits began in dependency/toolchain/CI metadata during collection; additional Rust-source edits appeared afterward. They were left untouched. Evidence and decisions are tied to the frozen commit, not those later changes or an installed toolchain. “Current” below means current at that snapshot; no re-audit of the modified working tree is implied.
+
+Local-file corruption and storage ownership are the relevant boundaries. The specific tiny-frame exabyte-allocation allegation is refuted by the exact published dependency paths, including the previously missing ByteBuf implementation.
 
 ## Current claim decisions
 
 | Claim decisions | Open | Source-fixed | Partial | Refuted | Unverified | N/A |
 |---:|---:|---:|---:|---:|---:|---:|
-| 11 | 6 | 0 | 1 | 1 | 1 | 2 |
+| 11 | 6 | 0 | 1 | 2 | 0 | 2 |
 
-These are decisions on report claims, including repeated roots, bundled observations and non-findings—not a unique-bug census. Closed/N/A rows have no current risk; unverified risk is provisional. Pure style and unmeasured optimization claims do not establish runtime impact.
+These are duplicate-inclusive report decisions, not a unique-bug census. Pure style or structural optimization does not establish a runtime incident; unverified impact remains provisional.
 
 <a id="review-1"></a>
 
@@ -21,31 +23,39 @@ These are decisions on report claims, including repeated roots, bundled observat
 
 Status: `confirmed-open`. Current risk: `medium`.
 
-A complete bad-CRC active frame triggers physical truncation of its entire suffix with only a warning. Trigger requires on-disk corruption or filesystem write access, not ordinary network input.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-wal/src/wal_segment.rs:391](../../../../../crates/shamir-wal/src/wal_segment.rs#L391); [crates/shamir-wal/src/wal_segment.rs:404](../../../../../crates/shamir-wal/src/wal_segment.rs#L404); [crates/shamir-wal/src/segment_set.rs:173](../../../../../crates/shamir-wal/src/segment_set.rs#L173).
+A complete CRC-bad frame causes physical suffix truncation during active open. Existing positive-frame suffixes can be lost after local corruption; this is not a demonstrated remote input path.
 
-Grouping/duplicate: `correctness-tdd.md#4`. This row is not another independent defect.
+Evidence: [crates/shamir-wal/src/wal_segment.rs:391](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-wal/src/wal_segment.rs#L391); [crates/shamir-wal/src/wal_segment.rs:404](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-wal/src/wal_segment.rs#L404).
+
+Grouping/duplicate: [correctness-tdd.md#4](correctness-tdd.md#review-4). This is not an additional independent defect.
 
 <a id="review-2"></a>
 
 ### Claim 2 — bincode 1.x decodes recovery data with no allocation bounds — small crafted/corrupt frame can OOM the process
 
-Status: `unverified`. Current risk: `low` (provisional; not a confirmed defect).
+Status: `refuted`. Current risk: `—`.
 
-The exact tiny-frame exabyte scenario is not established. Pinned bincode uses a bounds-checked slice reader, and pinned serde caps Vec preallocation at 1 MiB, contradicting the stated ops-length mechanism. Pinned serde_bytes source was unavailable. Whole-file uncapped reads are separately confirmed.
+Prior-cycle decision: `unverified`.
 
-Evidence: [Cargo.lock:413](../../../../../Cargo.lock#L413); [Cargo.lock:3204](../../../../../Cargo.lock#L3204); [Cargo.lock:3214](../../../../../Cargo.lock#L3214); [crates/shamir-wal/src/wal_entry_v2.rs:240](../../../../../crates/shamir-wal/src/wal_entry_v2.rs#L240); [crates/shamir-wal/src/wal_entry_v2.rs:251](../../../../../crates/shamir-wal/src/wal_entry_v2.rs#L251).
+The missing pinned serde_bytes 0.11.19 source and archive are available. ByteBuf calls deserialize_byte_buf; bincode 1.3.3 read_vec reaches SliceReader.get_byte_buffer, which checks remaining bytes before copying. Strings and borrowed RecordId follow checked slice paths. serde_core 1.0.228 collection hints are capped at 1 MiB, with incremental element reads. The claimed tiny-input speculative-exabyte mechanism is absent. Published sources: https://docs.rs/crate/serde_bytes/0.11.19/source/src/bytebuf.rs and https://docs.rs/crate/bincode/1.3.3/source/src/de/read.rs. This is not a universal memory bound for large corpora.
+
+Evidence: [Cargo.lock:413](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/Cargo.lock#L413); [Cargo.lock:3214](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/Cargo.lock#L3214); [Cargo.lock:3224](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/Cargo.lock#L3224); [crates/shamir-wal/src/wal_entry_v2.rs:121](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-wal/src/wal_entry_v2.rs#L121); [crates/shamir-wal/src/wal_entry_v2.rs:240](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-wal/src/wal_entry_v2.rs#L240); [crates/shamir-wal/src/wal_entry_v2.rs:251](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-wal/src/wal_entry_v2.rs#L251); [crates/shamir-types/src/types/record_id.rs:167](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-types/src/types/record_id.rs#L167).
 
 <a id="review-2-ops-length-allocation"></a>
 
 ### Claim 2/ops-length-allocation — Huge ops length causes immediate multi-exabyte Vec preallocation
 
-Status: `refuted`. Current risk: —.
+Status: `refuted`. Current risk: `—`.
 
-The inspected pinned serde Vec visitor uses cautious size hints capped at 1 MiB, then decodes elements incrementally. Pinned bincode's slice byte-buffer reader checks available input before copying; the report conflates slice and I/O reader behavior.
+Prior-cycle decision: `refuted`.
 
-Evidence: [Cargo.lock:413](../../../../../Cargo.lock#L413); [Cargo.lock:3204](../../../../../Cargo.lock#L3204); [Cargo.lock:3224](../../../../../Cargo.lock#L3224); [crates/shamir-wal/src/wal_entry_v2.rs:153](../../../../../crates/shamir-wal/src/wal_entry_v2.rs#L153); [crates/shamir-wal/src/wal_entry_v2.rs:251](../../../../../crates/shamir-wal/src/wal_entry_v2.rs#L251).
+serde_core 1.0.228 VecVisitor uses cautious&lt;T&gt;, capped at 1 MiB, then decodes elements. All reachable WAL collection element shapes consume input. Published source: https://docs.rs/crate/serde_core/1.0.228/source/src/de/impls.rs and source/src/private/size_hint.rs.
+
+Evidence: [Cargo.lock:3224](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/Cargo.lock#L3224); [crates/shamir-wal/src/wal_entry_v2.rs:153](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-wal/src/wal_entry_v2.rs#L153).
+
+Grouping/duplicate: [security-crypto.md#2](security-crypto.md#review-2). This is not an additional independent defect.
 
 <a id="review-2-unbounded-file-buffering"></a>
 
@@ -53,9 +63,11 @@ Evidence: [Cargo.lock:413](../../../../../Cargo.lock#L413); [Cargo.lock:3204](..
 
 Status: `confirmed-open`. Current risk: `low`.
 
-Repair and replay read entire files into growing Vecs; sidecar reading is also uncapped. Rotation is a post-batch threshold, not a hard file-size bound. Large input can exhaust memory, conditional on corpus size or local write access.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-wal/src/wal_segment.rs:370](../../../../../crates/shamir-wal/src/wal_segment.rs#L370); [crates/shamir-wal/src/wal_segment.rs:527](../../../../../crates/shamir-wal/src/wal_segment.rs#L527); [crates/shamir-wal/src/segment_meta.rs:130](../../../../../crates/shamir-wal/src/segment_meta.rs#L130); [crates/shamir-wal/src/segment_set.rs:250](../../../../../crates/shamir-wal/src/segment_set.rs#L250).
+Repair, replay and sidecar reading use read_to_end without a byte ceiling. A large legitimate backlog or locally enlarged file can exhaust memory; max_bytes is checked after a complete batch and is not a hard cap.
+
+Evidence: [crates/shamir-wal/src/wal_segment.rs:370](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-wal/src/wal_segment.rs#L370); [crates/shamir-wal/src/wal_segment.rs:527](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-wal/src/wal_segment.rs#L527); [crates/shamir-wal/src/segment_meta.rs:131](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-wal/src/segment_meta.rs#L131).
 
 <a id="review-3"></a>
 
@@ -63,9 +75,11 @@ Evidence: [crates/shamir-wal/src/wal_segment.rs:370](../../../../../crates/shami
 
 Status: `confirmed-open`. Current risk: `low`.
 
-WAL frames and sidecars use unkeyed CRC, with no repository authentication. A principal already able to modify the WAL corpus can forge entries or sidecar maxima. This is an undocumented filesystem trust boundary, not demonstrated remote privilege escalation; CounterDelta is currently ignored on recovery.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-wal/src/wal_segment.rs:230](../../../../../crates/shamir-wal/src/wal_segment.rs#L230); [crates/shamir-wal/src/segment_meta.rs:149](../../../../../crates/shamir-wal/src/segment_meta.rs#L149); [crates/shamir-wal/src/segment_set.rs:145](../../../../../crates/shamir-wal/src/segment_set.rs#L145); [crates/shamir-engine/src/tx/recovery.rs:58](../../../../../crates/shamir-engine/src/tx/recovery.rs#L58); [crates/shamir-engine/src/tx/recovery.rs:120](../../../../../crates/shamir-engine/src/tx/recovery.rs#L120).
+A local writer can forge CRC-valid entries or sidecar maxima; no keyed authentication binds them to a repo. This documents missing integrity trust assumptions, not privilege escalation by ordinary authenticated requests. At-rest encryption delegation does not authenticate a writable directory.
+
+Evidence: [crates/shamir-wal/src/wal_segment.rs:230](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-wal/src/wal_segment.rs#L230); [crates/shamir-wal/src/segment_set.rs:145](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-wal/src/segment_set.rs#L145); [docs/guide-docs/security/data-protection.md:23](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/docs/guide-docs/security/data-protection.md#L23).
 
 <a id="review-4"></a>
 
@@ -73,19 +87,23 @@ Evidence: [crates/shamir-wal/src/wal_segment.rs:230](../../../../../crates/shami
 
 Status: `confirmed-open`. Current risk: `low`.
 
-Unchecked usize addition can overflow on 32-bit. A four-byte maximum-length header can panic with overflow checks; wrapping release mode needs enough bytes to pass the wrapped frame-end guard before the invalid slice. A four-byte-only release file is insufficient.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-wal/src/wal_segment.rs:377](../../../../../crates/shamir-wal/src/wal_segment.rs#L377); [crates/shamir-wal/src/wal_segment.rs:380](../../../../../crates/shamir-wal/src/wal_segment.rs#L380); [crates/shamir-wal/src/wal_segment.rs:535](../../../../../crates/shamir-wal/src/wal_segment.rs#L535); [crates/shamir-wal/src/wal_segment.rs:539](../../../../../crates/shamir-wal/src/wal_segment.rs#L539).
+With len=u32::MAX and pos=0, wrapping frame_end is 7. Four bytes alone break in release; seven bytes pass the guard and create the invalid 4..3 payload slice. Debug overflow checks panic earlier. wasm32 deployment is not established.
+
+Evidence: [crates/shamir-wal/src/wal_segment.rs:380](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-wal/src/wal_segment.rs#L380); [crates/shamir-wal/src/wal_segment.rs:384](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-wal/src/wal_segment.rs#L384); [crates/shamir-wal/src/wal_segment.rs:535](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-wal/src/wal_segment.rs#L535).
 
 <a id="review-5"></a>
 
 ### Claim 5 — A single CRC-valid-but-undecodable frame aborts the entire recovery (version skew == corruption)
 
-Status: `confirmed-open`. Current risk: `nit`.
+Status: `confirmed-open`. Current risk: `low`.
 
-Decode errors still abort replay as Internal. Unsupported envelope versions already have distinct text; same-version body drift does not. History 5575ad59 added commit_version without a version bump, whereas f6ebd0ef correctly bumped for interner_delta. Fail-closed recovery itself is not a vulnerability.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-wal/src/wal_segment.rs:572](../../../../../crates/shamir-wal/src/wal_segment.rs#L572); [crates/shamir-wal/src/wal_entry_v2.rs:165](../../../../../crates/shamir-wal/src/wal_entry_v2.rs#L165); [crates/shamir-wal/src/wal_entry_v2.rs:251](../../../../../crates/shamir-wal/src/wal_entry_v2.rs#L251); [crates/shamir-wal/src/wal_entry_v2.rs:253](../../../../../crates/shamir-wal/src/wal_entry_v2.rs#L253).
+Fail-closed replay is appropriate and unknown versions have distinct text. A concrete documentation/compatibility defect exists for pre-5575ad59 version-1 bodies: positional insertion of commit_version was unversioned and current legacy decoding cannot recover an old empty-ops body. The synthetic legacy test serializes the newer shape. bincode 1.3.3 source: https://docs.rs/crate/bincode/1.3.3/source/src/de/mod.rs. General alpha upgrade support is not promised.
+
+Evidence: [crates/shamir-wal/src/wal_entry_v2.rs:137](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-wal/src/wal_entry_v2.rs#L137); [crates/shamir-wal/src/wal_entry_v2.rs:165](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-wal/src/wal_entry_v2.rs#L165); [crates/shamir-wal/src/tests/wal_entry_v2_tests.rs:163](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-wal/src/tests/wal_entry_v2_tests.rs#L163); [README.md:33](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/README.md#L33).
 
 <a id="review-6"></a>
 
@@ -93,19 +111,23 @@ Evidence: [crates/shamir-wal/src/wal_segment.rs:572](../../../../../crates/shami
 
 Status: `confirmed-open`. Current risk: `nit`.
 
-Errors preserve supplied PathBuf values, including absolute paths when configured. Ordinary grouped append errors are replaced by generic text; generic server error serialization exists, but a specific path-bearing WAL error's remote reach remains unverified.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-wal/src/wal_segment.rs:155](../../../../../crates/shamir-wal/src/wal_segment.rs#L155); [crates/shamir-wal/src/wal_segment.rs:519](../../../../../crates/shamir-wal/src/wal_segment.rs#L519); [crates/shamir-wal/src/segment_set.rs:512](../../../../../crates/shamir-wal/src/segment_set.rs#L512); [crates/shamir-wal/src/wal_group_commit.rs:201](../../../../../crates/shamir-wal/src/wal_group_commit.rs#L201); [crates/shamir-server/src/db_handler/handler.rs:611](../../../../../crates/shamir-server/src/db_handler/handler.rs#L611).
+Supplied absolute paths appear in Storage errors. Grouped append replaces most such causes with generic text; the server serializes other error messages, but a particular WAL-to-client path was not established.
+
+Evidence: [crates/shamir-wal/src/wal_segment.rs:155](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-wal/src/wal_segment.rs#L155); [crates/shamir-wal/src/wal_group_commit.rs:201](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-wal/src/wal_group_commit.rs#L201); [crates/shamir-server/src/db_handler/handler.rs:611](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-server/src/db_handler/handler.rs#L611).
 
 <a id="review-positive-sidecar-and-envelope-bounds"></a>
 
 ### Claim Positive/sidecar-and-envelope-bounds — Sidecar, active-key, and entry-envelope rejection guards are defensive
 
-Status: `not-applicable`. Current risk: —.
+Status: `not-applicable`. Current risk: `—`.
 
-Exact sidecar length precedes indexed extraction; key parsing checks length and prefix; entry decode checks five-byte envelope length. Registered tests cover these rejection branches. This does not imply bounded file reading.
+Prior-cycle decision: `not-applicable`.
 
-Evidence: [crates/shamir-wal/src/segment_meta.rs:138](../../../../../crates/shamir-wal/src/segment_meta.rs#L138); [crates/shamir-wal/src/segment_meta.rs:175](../../../../../crates/shamir-wal/src/segment_meta.rs#L175); [crates/shamir-wal/src/active_key.rs:49](../../../../../crates/shamir-wal/src/active_key.rs#L49); [crates/shamir-wal/src/tests/wal_entry_v2_tests.rs:69](../../../../../crates/shamir-wal/src/tests/wal_entry_v2_tests.rs#L69).
+Sidecar exact length precedes indexed extraction; key length/prefix and envelope length/magic/version are checked. These guards do not bound the preceding whole-file read.
+
+Evidence: [crates/shamir-wal/src/segment_meta.rs:138](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-wal/src/segment_meta.rs#L138); [crates/shamir-wal/src/active_key.rs:49](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-wal/src/active_key.rs#L49); [crates/shamir-wal/src/wal_entry_v2.rs:228](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-wal/src/wal_entry_v2.rs#L228).
 
 <a id="review-positive-sealed-and-startup-hardening"></a>
 
@@ -113,30 +135,33 @@ Evidence: [crates/shamir-wal/src/segment_meta.rs:138](../../../../../crates/sham
 
 Status: `partially-fixed`. Current risk: `medium`.
 
-Both distinctions exist in source. The sealed CRC test genuinely corrupts bytes and asserts Err; the startup PermissionDenied test never induces denial and cannot protect the flag selection.
+Prior-cycle decision: `partially-fixed`.
 
-Evidence: [crates/shamir-wal/src/wal_segment.rs:512](../../../../../crates/shamir-wal/src/wal_segment.rs#L512); [crates/shamir-wal/src/wal_segment.rs:546](../../../../../crates/shamir-wal/src/wal_segment.rs#L546); [crates/shamir-wal/src/tests/wal_segment_tests.rs:156](../../../../../crates/shamir-wal/src/tests/wal_segment_tests.rs#L156); [crates/shamir-wal/src/tests/wal_segment_tests.rs:218](../../../../../crates/shamir-wal/src/tests/wal_segment_tests.rs#L218).
+The sealed payload-flip test detects removal of the CRC Err branch. Startup denial is not induced, and sealed corrupted-length/incomplete-tail cases bypass that CRC oracle entirely.
 
-Grouping/duplicate: `correctness-tdd.md#3`. This row is not another independent defect.
+Evidence: [crates/shamir-wal/src/tests/wal_segment_tests.rs:174](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-wal/src/tests/wal_segment_tests.rs#L174); [crates/shamir-wal/src/tests/wal_segment_tests.rs:218](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-wal/src/tests/wal_segment_tests.rs#L218); [crates/shamir-wal/src/wal_segment.rs:536](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-wal/src/wal_segment.rs#L536).
+
+Grouping/duplicate: [correctness-tdd.md#3](correctness-tdd.md#review-3). This is not an additional independent defect.
 
 <a id="review-positive-no-crypto-or-unsafe-surface"></a>
 
 ### Claim Positive/no-crypto-or-unsafe-surface — No authentication, secret comparison, unsafe block, or interpreter injection surface
 
-Status: `not-applicable`. Current risk: —.
+Status: `not-applicable`. Current risk: `—`.
 
-The inspected crate has no such production code or direct crypto dependency. This supports absence of a local secret-comparison surface, not an unrestricted claim that the component has no possible timing leakage.
+Prior-cycle decision: `not-applicable`.
 
-Evidence: [crates/shamir-wal/Cargo.toml:9](../../../../../crates/shamir-wal/Cargo.toml#L9); [crates/shamir-wal/src/lib.rs:46](../../../../../crates/shamir-wal/src/lib.rs#L46).
+The inspected production crate contains no authentication primitive, unsafe block, secret comparison or command/SQL interpreter. Absence of secret comparison does not prove absence of every possible side channel.
 
-## Corrections and qualified non-findings
+Evidence: [crates/shamir-wal/Cargo.toml:9](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-wal/Cargo.toml#L9); [crates/shamir-wal/src/lib.rs:46](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-wal/src/lib.rs#L46).
 
-- Separate local filesystem tampering from remotely reachable security defects.
-- Remove the unsupported generalization that all bincode collection lengths cause speculative huge allocations; retain the independently proven uncapped-file issue.
-- Do not impose max_bytes as a strict file cap without allowing legitimate post-batch threshold overshoot.
-- CRC mismatch can result from a torn/sub-frame write as well as bit-rot or tampering; the code cannot conclusively identify its origin.
-- Returning an error without repairing a corrupt active segment is compatible with safety if appends remain gated; preserving corruption does not require continuing to append.
-- WASM-first describes hosted user logic here, not proof of a supported wasm32 WAL host.
+## Evidence and recipe corrections
+
+- Replace the previous missing-serde_bytes limitation with the checked pinned source/archive result; the tiny-input exabyte scenario is refuted, not merely still unverified.
+- bincode 1.3.3 with_limit is available without a dependency upgrade, but an explicit configuration must preserve fixint/little-endian wire semantics. A byte budget is not a universal preallocation bound for every serde dispatch.
+- Changing to bincode 2 or postcard is not a drop-in decoder fix; it requires explicitly supported layouts and a compatibility decision.
+- Use bounded reading, not only metadata().len() checks, for mutable files. Sidecars can be read with a small fixed-length-plus-one bound.
+- Do not classify every complete CRC failure as proven bit rot; a failed/torn write can also produce it.
 
 ---
 

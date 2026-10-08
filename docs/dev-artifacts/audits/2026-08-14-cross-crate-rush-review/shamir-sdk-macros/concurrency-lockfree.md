@@ -1,11 +1,13 @@
-<!-- revalidation:2026-10-08 source:92ad58266bf57ddea1fa3c8a47affba1a3a9a096 -->
-# shamir-sdk-macros — concurrency-lockfree revalidation
+<!-- revalidation:2026-10-08 cycle:independent-2 source:e3765c935fc71655ee1ec0160cf180607935d89b -->
+# shamir-sdk-macros — concurrency-lockfree independent revalidation (cycle 2)
 
-Source snapshot: `92ad58266bf57ddea1fa3c8a47affba1a3a9a096`. Revalidated 2026-10-08 by read-only XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run; no source fix is part of this update. Test registration/assertions are evidence of an oracle, not proof of a passing run.
+Frozen source snapshot: `e3765c935fc71655ee1ec0160cf180607935d89b`. Independently revalidated 2026-10-08 by a fresh XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run. Source-fixed means the specified mechanism was already removed at this snapshot; this cycle implements no source fix.
 
-This section is authoritative for current status. Original titles/IDs are retained for traceability; a refuted title is not a current assertion. The collapsed historical report below is superseded, including its counts, severity, scenarios and fix instructions. Plan IDs preserve historical numbering, not a current release mandate. [Workspace methodology and status definitions](../SUMMARY.md#status-definitions).
+This section is authoritative for current decisions. Existing IDs and allegation titles are retained for traceability; a refuted title is not a current assertion. Prior-cycle decisions were rechecked, not used as proof. The first cycle is available in repository history at this snapshot. The original historical body below remains preserved once and is superseded, including its counts, severities and recipes. [Workspace scope and status definitions](../SUMMARY.md#status-definitions).
 
-Guest-side busy polling remains open, but the claimed incompatibility with async host imports is refuted by the existing fiber bridge. No macro-owned locking defect was found.
+Unrelated external edits began in dependency/toolchain/CI metadata during collection; additional Rust-source edits appeared afterward. They were left untouched. Evidence and decisions are tied to the frozen commit, not those later changes or an installed toolchain. “Current” below means current at that snapshot; no re-audit of the modified working tree is implied.
+
+The infrastructure owns no locks. Guest-local unbounded polling is real, but current asynchronous host callbacks use fiber suspension and do not require guest Poll::Pending.
 
 ## Current claim decisions
 
@@ -13,7 +15,7 @@ Guest-side busy polling remains open, but the claimed incompatibility with async
 |---:|---:|---:|---:|---:|---:|---:|
 | 2 | 2 | 0 | 0 | 0 | 0 | 0 |
 
-These are decisions on report claims, including repeated roots, bundled observations and non-findings—not a unique-bug census. Closed/N/A rows have no current risk; unverified risk is provisional. Pure style and unmeasured optimization claims do not establish runtime impact.
+These are duplicate-inclusive report decisions, not a unique-bug census. Pure style or structural optimization does not establish a runtime incident; unverified impact remains provisional.
 
 <a id="review-1"></a>
 
@@ -21,9 +23,11 @@ These are decisions on report claims, including repeated roots, bundled observat
 
 Status: `confirmed-open`. Current risk: `medium`.
 
-All four generated entrypoints still use unbounded no-op-waker block_on. Permanently-Pending guest futures busy-poll until host metering interrupts them. Current async host imports already suspend the Wasmtime fiber while appearing synchronous to the SDK; they do not establish the alleged deterministic Pending failure.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-sdk-macros/src/lib.rs:144](../../../../../crates/shamir-sdk-macros/src/lib.rs#L144); [crates/shamir-sdk-macros/src/lib.rs:556](../../../../../crates/shamir-sdk-macros/src/lib.rs#L556); [crates/shamir-sdk/src/__rt.rs:36](../../../../../crates/shamir-sdk/src/__rt.rs#L36); [crates/shamir-sdk/src/host_imports.rs:29](../../../../../crates/shamir-sdk/src/host_imports.rs#L29); [crates/shamir-wasm-host/src/wasm/wasm_function.rs:195](../../../../../crates/shamir-wasm-host/src/wasm/wasm_function.rs#L195); [crates/shamir-wasm-host/src/wasm/wasm_function.rs:449](../../../../../crates/shamir-wasm-host/src/wasm/wasm_function.rs#L449).
+A never-ready guest future repeatedly reaches spin_loop without parking or a local poll bound. wasmtime 46.0.2 host futures instead suspend through src/runtime/fiber.rs:291: https://docs.rs/crate/wasmtime/46.0.2/source/src/runtime/fiber.rs. Fuel and an independently driven epoch deadline bound ordinary deployment execution, not measured CPU percentages.
+
+Evidence: [crates/shamir-sdk/src/__rt.rs:36](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-sdk/src/__rt.rs#L36); [crates/shamir-sdk/src/__rt.rs:50](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-sdk/src/__rt.rs#L50); [crates/shamir-wasm-host/src/wasm/wasm_function.rs:195](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-wasm-host/src/wasm/wasm_function.rs#L195); [crates/shamir-wasm-host/src/wasm/wasm_function.rs:487](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-wasm-host/src/wasm/wasm_function.rs#L487); [crates/shamir-wasm-host/src/wasm/wasm_engine.rs:154](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-wasm-host/src/wasm/wasm_engine.rs#L154); [Cargo.lock:4740](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/Cargo.lock#L4740).
 
 <a id="review-2"></a>
 
@@ -31,19 +35,19 @@ Evidence: [crates/shamir-sdk-macros/src/lib.rs:144](../../../../../crates/shamir
 
 Status: `confirmed-open`. Current risk: `low`.
 
-No local expansion or Pending-path tests exist. There is an immediate-Ready helper test and a wired generated-function runtime test, but neither checks bounded rejection of a permanently-Pending future.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-sdk-macros/Cargo.toml:13](../../../../../crates/shamir-sdk-macros/Cargo.toml#L13); [crates/shamir-sdk/src/tests/value_tests.rs:414](../../../../../crates/shamir-sdk/src/tests/value_tests.rs#L414); [crates/shamir-wasm-host/src/tests/compile_tests.rs:19](../../../../../crates/shamir-wasm-host/src/tests/compile_tests.rs#L19).
+Immediate-Ready coverage exists, but no local bounded-Pending oracle is registered. Once-Pending-then-Ready already succeeds. A bare trap/is_err assertion also passes against old host fuel exhaustion; use a controlled poll count or distinguish the intended guest rejection from fuel/epoch traps.
 
-Grouping/duplicate: `correctness-tdd.md#1`. This row is not another independent defect.
+Evidence: [crates/shamir-sdk/src/tests/value_tests.rs:414](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-sdk/src/tests/value_tests.rs#L414); [crates/shamir-wasm-host/src/tests/compile_tests.rs:35](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-wasm-host/src/tests/compile_tests.rs#L35); [crates/shamir-sdk/src/__rt.rs:50](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-sdk/src/__rt.rs#L50).
 
-## Corrections and qualified non-findings
+Grouping/duplicate: [correctness-tdd.md#1](correctness-tdd.md#review-1). This is not an additional independent defect.
 
-- The executor tolerates finite Pending sequences by repolling; Ready-on-first-poll is an intended restriction, not a mechanically enforced necessity.
-- The proposed once-Pending-then-Ready test would already complete and would not detect unbounded polling. A bounded-poll or never-ready regression oracle is needed.
-- The blanket statement that nothing exercises any generated ABI is false: crates/shamir-wasm-host/src/tests/compile_tests.rs:35 invokes #[function] output.
-- Host imports are async in the host linker already: crates/shamir-wasm-host/src/wasm/wasm_function.rs:195. Guest SDK extern calls remain synchronous.
-- Confirmed non-finding: macro implementation and generated wrapper infrastructure introduce no lock primitives or guards across their generated await. Author bodies are outside that guarantee.
+## Evidence and recipe corrections
+
+- Do not replace the executor solely because a host callback is async: the existing fiber bridge already supports that callback shape.
+- Define whether finite guest-local Pending is supported before imposing a rejection budget; a poll-count limit is not a wall-clock deadline.
+- No generated lock-bearing infrastructure was found; arbitrary author bodies are not covered by that non-finding.
 
 ---
 

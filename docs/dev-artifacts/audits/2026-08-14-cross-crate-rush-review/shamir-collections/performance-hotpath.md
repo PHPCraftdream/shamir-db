@@ -1,11 +1,13 @@
-<!-- revalidation:2026-10-08 source:92ad58266bf57ddea1fa3c8a47affba1a3a9a096 -->
-# shamir-collections — performance-hotpath revalidation
+<!-- revalidation:2026-10-08 cycle:independent-2 source:e3765c935fc71655ee1ec0160cf180607935d89b -->
+# shamir-collections — performance-hotpath independent revalidation (cycle 2)
 
-Source snapshot: `92ad58266bf57ddea1fa3c8a47affba1a3a9a096`. Revalidated 2026-10-08 by read-only XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run; no source fix is part of this update. Test registration/assertions are evidence of an oracle, not proof of a passing run.
+Frozen source snapshot: `e3765c935fc71655ee1ec0160cf180607935d89b`. Independently revalidated 2026-10-08 by a fresh XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run. Source-fixed means the specified mechanism was already removed at this snapshot; this cycle implements no source fix.
 
-This section is authoritative for current status. Original titles/IDs are retained for traceability; a refuted title is not a current assertion. The collapsed historical report below is superseded, including its counts, severity, scenarios and fix instructions. Plan IDs preserve historical numbering, not a current release mandate. [Workspace methodology and status definitions](../SUMMARY.md#status-definitions).
+This section is authoritative for current decisions. Existing IDs and allegation titles are retained for traceability; a refuted title is not a current assertion. Prior-cycle decisions were rechecked, not used as proof. The first cycle is available in repository history at this snapshot. The original historical body below remains preserved once and is superseded, including its counts, severities and recipes. [Workspace scope and status definitions](../SUMMARY.md#status-definitions).
 
-The removal-cost documentation gap and unsupported percentage remain open. The cited MVCC merge still performs repeated shift_remove calls, proving possible superlinear shifting work; no latency measurement was performed.
+Unrelated external edits began in dependency/toolchain/CI metadata during collection; additional Rust-source edits appeared afterward. They were left untouched. Evidence and decisions are tied to the frozen commit, not those later changes or an installed toolchain. “Current” below means current at that snapshot; no re-audit of the modified working tree is implied.
+
+Repeated shift-removal has a concrete superlinear witness in the MVCC consumer. The alias documentation and unsupported performance percentage remain unchanged.
 
 ## Current claim decisions
 
@@ -13,7 +15,7 @@ The removal-cost documentation gap and unsupported percentage remain open. The c
 |---:|---:|---:|---:|---:|---:|---:|
 | 2 | 2 | 0 | 0 | 0 | 0 | 0 |
 
-These are decisions on report claims, including repeated roots, bundled observations and non-findings—not a unique-bug census. Closed/N/A rows have no current risk; unverified risk is provisional. Pure style and unmeasured optimization claims do not establish runtime impact.
+These are duplicate-inclusive report decisions, not a unique-bug census. Pure style or structural optimization does not establish a runtime incident; unverified impact remains provisional.
 
 <a id="review-1"></a>
 
@@ -21,30 +23,33 @@ These are decisions on report claims, including repeated roots, bundled observat
 
 Status: `confirmed-open`. Current risk: `medium`.
 
-Alias rustdoc still omits removal costs. OverlayWinners remains a TMap and flush_group still calls shift_remove once per matched history group; repeated early-position removals can incur quadratic aggregate shifting. The consumer mechanism remains, not merely a stale citation.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-collections/src/lib.rs:19](../../../../../crates/shamir-collections/src/lib.rs#L19); [crates/shamir-collections/src/lib.rs:22](../../../../../crates/shamir-collections/src/lib.rs#L22); [Cargo.lock:1783](../../../../../Cargo.lock#L1783); [crates/shamir-tx/src/mvcc_store/version_entry.rs:42](../../../../../crates/shamir-tx/src/mvcc_store/version_entry.rs#L42); [crates/shamir-tx/src/mvcc_store/version_entry.rs:124](../../../../../crates/shamir-tx/src/mvcc_store/version_entry.rs#L124); [crates/shamir-tx/src/mvcc_store/version_entry.rs:197](../../../../../crates/shamir-tx/src/mvcc_store/version_entry.rs#L197).
+Pinned IndexMap 2.14.0 decrements later indices and removes from its dense Vec. MVCC snapshot_le returns key-sorted winners, collected into TMap; matching key-major history groups can repeatedly remove the first remaining winner, yielding N(N−1)/2 entry shifts. This proves structural worst-case work, not measured latency. Replacing shift_remove blindly changes the remaining overlay drain order. Source: https://docs.rs/crate/indexmap/2.14.0/source/src/inner.rs.
+
+Evidence: [Cargo.lock:1782](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/Cargo.lock#L1782); [crates/shamir-collections/src/lib.rs:19](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-collections/src/lib.rs#L19); [crates/shamir-tx/src/versioned_overlay.rs:221](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-tx/src/versioned_overlay.rs#L221); [crates/shamir-tx/src/mvcc_store/mod.rs:1403](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-tx/src/mvcc_store/mod.rs#L1403); [crates/shamir-tx/src/mvcc_store/version_entry.rs:124](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-tx/src/mvcc_store/version_entry.rs#L124); [crates/shamir-tx/src/mvcc_store/version_entry.rs:289](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-tx/src/mvcc_store/version_entry.rs#L289).
 
 <a id="review-2"></a>
 
 ### Claim 2 — "~15–20% faster than TMap/TSet" claim on TFxMap/TFxSet has no benchmark anywhere in the workspace
 
-Status: `confirmed-open`. Current risk: `nit`.
+Status: `confirmed-open`. Current risk: `low`.
 
-The numeric claim remains. Collection-using workspace benches were searched, but no comparative measurement supporting it was found; existing planner/filter benches do not establish this alias-family delta.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-collections/src/lib.rs:41](../../../../../crates/shamir-collections/src/lib.rs#L41); [crates/shamir-collections/src/lib.rs:45](../../../../../crates/shamir-collections/src/lib.rs#L45); [crates/shamir-query-types/benches/batch_planner.rs:22](../../../../../crates/shamir-query-types/benches/batch_planner.rs#L22); [docs/dev-artifacts/audits/shamir-collections.md:38](../../../../../docs/dev-artifacts/audits/shamir-collections.md#L38).
+The percentage persists without supporting comparative evidence in inspected benchmark sources/history. Existing collection-using planner/filter/vector benchmarks do not isolate this alias-family difference.
 
-Grouping/duplicate: `correctness-tdd.md#2`. This row is not another independent defect.
+Evidence: [crates/shamir-collections/src/lib.rs:41](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-collections/src/lib.rs#L41); [crates/shamir-collections/src/lib.rs:45](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-collections/src/lib.rs#L45); [crates/shamir-query-types/benches/batch_planner.rs:22](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-query-types/benches/batch_planner.rs#L22).
 
-## Corrections and qualified non-findings
+Grouping/duplicate: [correctness-tdd.md#2](correctness-tdd.md#review-2). This is not an additional independent defect.
 
-- Constructor non-findings need correction: nonzero IndexMap/IndexSet capacity construction is O(capacity) and allocates an indices table plus dense entries, not one allocation and constant work.
-- The crate remains free of local loops, locks and async surfaces; delegated allocation costs still count.
-- Removal costs are average-case hash-table bounds: shift_remove shifts later entries, whereas swap_remove changes order. Deprecated remove is swap-removal.
-- The MVCC claim establishes structural worst-case work, not measured production slowdown or proof that every consumer selects removals blindly.
-- Changing the MVCC caller to swap_remove requires checking overlay-only output ordering; the documentation fix alone does not remove its shifting cost.
-- Suggested replacement wording must not say measurably faster without evidence. Use an explicitly unmeasured qualitative description or cite an actual comparative run.
+## Evidence and recipe corrections
+
+- The sorted overlay construction strengthens the shifting witness: early removals are reachable without inventing arbitrary insertion order.
+- The overlay is a committed-but-undrained window; actual size, scheduling and latency were not measured.
+- swap_remove's average-case cost trades away order. The current leftover Vec is popped from the end, so a replacement must preserve or deliberately revise that observable sequence.
+- Documentation alone does not remove the consumer's quadratic shifting.
+- Do not replace the percentage with measurably faster without measurements, or describe preallocation as one constant-time allocation.
 
 ---
 

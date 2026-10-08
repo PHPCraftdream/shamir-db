@@ -1,19 +1,21 @@
-<!-- revalidation:2026-10-08 source:92ad58266bf57ddea1fa3c8a47affba1a3a9a096 -->
-# shamir-tx — security-crypto revalidation
+<!-- revalidation:2026-10-08 cycle:independent-2 source:e3765c935fc71655ee1ec0160cf180607935d89b -->
+# shamir-tx — security-crypto independent revalidation (cycle 2)
 
-Source snapshot: `92ad58266bf57ddea1fa3c8a47affba1a3a9a096`. Revalidated 2026-10-08 by read-only XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run; no source fix is part of this update. Test registration/assertions are evidence of an oracle, not proof of a passing run.
+Frozen source snapshot: `e3765c935fc71655ee1ec0160cf180607935d89b`. Independently revalidated 2026-10-08 by a fresh XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run. Source-fixed means the specified mechanism was already removed at this snapshot; this cycle implements no source fix.
 
-This section is authoritative for current status. Original titles/IDs are retained for traceability; a refuted title is not a current assertion. The collapsed historical report below is superseded, including its counts, severity, scenarios and fix instructions. Plan IDs preserve historical numbering, not a current release mandate. [Workspace methodology and status definitions](../SUMMARY.md#status-definitions).
+This section is authoritative for current decisions. Existing IDs and allegation titles are retained for traceability; a refuted title is not a current assertion. Prior-cycle decisions were rechecked, not used as proof. The first cycle is available in repository history at this snapshot. The original historical body below remains preserved once and is superseded, including its counts, severities and recipes. [Workspace scope and status definitions](../SUMMARY.md#status-definitions).
 
-Journal silent omissions and variable-length-key vacuum isolation remain conditional integrity concerns. Two panic exploits are refuted by current reachability; shared-journal disclosure requires violating supported per-repo wiring.
+Unrelated external edits began in dependency/toolchain/CI metadata during collection; additional Rust-source edits appeared afterward. They were left untouched. Evidence and decisions are tied to the frozen commit, not those later changes or an installed toolchain. “Current” below means current at that snapshot; no re-audit of the modified working tree is implied.
+
+Stored-journal integrity and variable-length-key vacuum isolation are real conditional concerns. The proposed interner and staged-row input panic exploits remain refuted; universal authentication/checksum assurances are false at the public crate boundary.
 
 ## Current claim decisions
 
 | Claim decisions | Open | Source-fixed | Partial | Refuted | Unverified | N/A |
 |---:|---:|---:|---:|---:|---:|---:|
-| 9 | 3 | 0 | 0 | 3 | 1 | 2 |
+| 9 | 3 | 0 | 0 | 4 | 0 | 2 |
 
-These are decisions on report claims, including repeated roots, bundled observations and non-findings—not a unique-bug census. Closed/N/A rows have no current risk; unverified risk is provisional. Pure style and unmeasured optimization claims do not establish runtime impact.
+These are duplicate-inclusive report decisions, not a unique-bug census. Pure style or structural optimization does not establish a runtime incident; unverified impact remains provisional.
 
 <a id="review-1"></a>
 
@@ -21,21 +23,25 @@ These are decisions on report claims, including repeated roots, bundled observat
 
 Status: `confirmed-open`. Current risk: `medium`.
 
-A decode failure only warns and does not set a resync signal. Threat sources are corrupt/incompatible stored payloads or custom stores, not a demonstrated unauthenticated remote injection path.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-tx/src/changefeed.rs:409](../../../../../crates/shamir-tx/src/changefeed.rs#L409); [crates/shamir-tx/src/changefeed.rs:411](../../../../../crates/shamir-tx/src/changefeed.rs#L411); [crates/shamir-tx/src/changefeed.rs:416](../../../../../crates/shamir-tx/src/changefeed.rs#L416).
+Malformed stored payloads trigger a warning but disappear from JournalRead without an error or gap signal. Custom stores or corrupt/incompatible stored bytes suffice; no unauthenticated remote injection path is established.
 
-Grouping/duplicate: `api-wire-protocol.md#1`. This row is not another independent defect.
+Evidence: [crates/shamir-tx/src/changefeed.rs:409](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-tx/src/changefeed.rs#L409); [crates/shamir-tx/src/changefeed.rs:416](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-tx/src/changefeed.rs#L416).
+
+Grouping/duplicate: [api-wire-protocol.md#1](api-wire-protocol.md#review-1). This is not an additional independent defect.
 
 <a id="review-2"></a>
 
 ### Claim 2 — LayeredInterner::touch_sync panics on a failure its sibling merge path treats as recoverable
 
-Status: `refuted`. Current risk: —.
+Status: `refuted`. Current risk: `—`.
 
-Every current touch_ind return is Ok; there is no field-name-conditioned Err to trigger this expect. The proposed remote input DoS lacks its required failure mechanism.
+Prior-cycle decision: `refuted`.
 
-Evidence: [crates/shamir-types/src/core/interner/interner.rs:146](../../../../../crates/shamir-types/src/core/interner/interner.rs#L146); [crates/shamir-types/src/core/interner/interner.rs:166](../../../../../crates/shamir-types/src/core/interner/interner.rs#L166); [crates/shamir-types/src/core/interner/interner.rs:176](../../../../../crates/shamir-types/src/core/interner/interner.rs#L176); [crates/shamir-tx/src/layered_interner.rs:84](../../../../../crates/shamir-tx/src/layered_interner.rs#L84).
+Interner::touch_ind has only Ok returns, including existing, raced-existing, and new-name branches. No input-conditioned Err reaches expect. Allocation/process failures do not validate the alleged recoverable field-name error.
+
+Evidence: [crates/shamir-types/src/core/interner/interner.rs:146](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-types/src/core/interner/interner.rs#L146); [crates/shamir-types/src/core/interner/interner.rs:166](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-types/src/core/interner/interner.rs#L166); [crates/shamir-types/src/core/interner/interner.rs:176](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-types/src/core/interner/interner.rs#L176); [crates/shamir-tx/src/layered_interner.rs:84](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-tx/src/layered_interner.rs#L84).
 
 <a id="review-3"></a>
 
@@ -43,29 +49,35 @@ Evidence: [crates/shamir-types/src/core/interner/interner.rs:146](../../../../..
 
 Status: `confirmed-open`. Current risk: `low`.
 
-vacuum decodes but discards orig, then applies the queried key's current-version guard to every matching row. Arbitrary public variable-length keys can cross namespaces; fixed-width production data keys avoid this case.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-tx/src/version_codec.rs:20](../../../../../crates/shamir-tx/src/version_codec.rs#L20); [crates/shamir-tx/src/mvcc_store/mvcc_gc.rs:175](../../../../../crates/shamir-tx/src/mvcc_store/mvcc_gc.rs#L175); [crates/shamir-tx/src/mvcc_store/mvcc_gc.rs:185](../../../../../crates/shamir-tx/src/mvcc_store/mvcc_gc.rs#L185); [crates/shamir-tx/src/mvcc_store/mvcc_gc.rs:214](../../../../../crates/shamir-tx/src/mvcc_store/mvcc_gc.rs#L214); [crates/shamir-types/src/types/record_id.rs:42](../../../../../crates/shamir-types/src/types/record_id.rs#L42).
+A longer logical key beginning with A||0xFF enters A's prefix vacuum. Decoded orig is discarded and A's current-version guard is applied to the foreign version, permitting its deletion under reclaim conditions. Fixed-width production data keys avoid this witness. Codec inversion itself accepts arbitrary bytes correctly.
+
+Evidence: [crates/shamir-tx/src/mvcc_store/mvcc_gc.rs:175](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-tx/src/mvcc_store/mvcc_gc.rs#L175); [crates/shamir-tx/src/mvcc_store/mvcc_gc.rs:214](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-tx/src/mvcc_store/mvcc_gc.rs#L214); [crates/shamir-tx/src/version_codec.rs:57](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-tx/src/version_codec.rs#L57); [crates/shamir-types/src/types/record_id.rs:46](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-types/src/types/record_id.rs#L46).
 
 <a id="review-4"></a>
 
 ### Claim 4 — StagedRow::as_inner panics on malformed staged bytes; invariant is a pub API doc
 
-Status: `refuted`. Current risk: —.
+Status: `refuted`. Current risk: `—`.
 
-No reachable public accessor exposes StagedRow and no in-tree call invokes as_inner. Staging reads and remapping use bytes directly; malformed remap data produces an error, not this panic.
+Prior-cycle decision: `refuted`.
 
-Evidence: [crates/shamir-tx/src/staging_store.rs:32](../../../../../crates/shamir-tx/src/staging_store.rs#L32); [crates/shamir-tx/src/staging_store.rs:81](../../../../../crates/shamir-tx/src/staging_store.rs#L81); [crates/shamir-tx/src/staging_store.rs:141](../../../../../crates/shamir-tx/src/staging_store.rs#L141); [crates/shamir-tx/src/staging_store.rs:314](../../../../../crates/shamir-tx/src/staging_store.rs#L314); [crates/shamir-tx/src/id_remap.rs:77](../../../../../crates/shamir-tx/src/id_remap.rs#L77).
+StagedRow's bytes, the containing operation, and the writes map are private; no public accessor returns the row and no in-tree caller invokes as_inner. Public reads return Bytes; remap decode failure returns an error.
+
+Evidence: [crates/shamir-tx/src/staging_store.rs:32](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-tx/src/staging_store.rs#L32); [crates/shamir-tx/src/staging_store.rs:81](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-tx/src/staging_store.rs#L81); [crates/shamir-tx/src/staging_store.rs:165](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-tx/src/staging_store.rs#L165); [crates/shamir-tx/src/id_remap.rs:77](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-tx/src/id_remap.rs#L77).
 
 <a id="review-5"></a>
 
 ### Claim 5 — Changefeed journal keys carry no repo namespace — shared stores cross-wire streams
 
-Status: `not-applicable`. Current risk: —.
+Status: `not-applicable`. Current risk: `—`.
 
-Aliasing is possible if callers deliberately share one store, but the trait explicitly requires a per-repo store and production opens each repository's __changelog__ namespace. No supported cross-tenant disclosure path was found.
+Prior-cycle decision: `not-applicable`.
 
-Evidence: [crates/shamir-tx/src/changefeed.rs:147](../../../../../crates/shamir-tx/src/changefeed.rs#L147); [crates/shamir-tx/src/changefeed.rs:160](../../../../../crates/shamir-tx/src/changefeed.rs#L160); [crates/shamir-tx/src/changefeed.rs:428](../../../../../crates/shamir-tx/src/changefeed.rs#L428); [crates/shamir-engine/src/repo/repo_instance.rs:1207](../../../../../crates/shamir-engine/src/repo/repo_instance.rs#L1207).
+The trait is explicitly per-repository and production obtains __changelog__ from the repository instance. Deliberately sharing one store aliases keys, but violates the supported store-ownership contract rather than demonstrating tenant bypass.
+
+Evidence: [crates/shamir-tx/src/changefeed.rs:147](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-tx/src/changefeed.rs#L147); [crates/shamir-engine/src/repo/repo_instance.rs:1207](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-engine/src/repo/repo_instance.rs#L1207); [crates/shamir-storage/src/storage_in_memory.rs:36](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-storage/src/storage_in_memory.rs#L36).
 
 <a id="review-6"></a>
 
@@ -73,47 +85,54 @@ Evidence: [crates/shamir-tx/src/changefeed.rs:147](../../../../../crates/shamir-
 
 Status: `confirmed-open`. Current risk: `nit`.
 
-Hasher choice and unvalidated public key APIs remain. The stronger premise is not established: layered interner maps also hash caller field-name Strings. Exploitable collision sets and claimed quadratic cost remain unverified.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-tx/src/mvcc_store/mod.rs:138](../../../../../crates/shamir-tx/src/mvcc_store/mod.rs#L138); [crates/shamir-tx/src/layered_interner.rs:95](../../../../../crates/shamir-tx/src/layered_interner.rs#L95); [crates/shamir-tx/src/tx_context.rs:538](../../../../../crates/shamir-tx/src/tx_context.rs#L538); [CLAUDE.md:366](../../../../../CLAUDE.md#L366).
+Public raw-key APIs and layered field-name Strings are hashed without a keyed hasher. This contradicts an unconditional trusted-input premise, but neither a feasible collision set nor quantitative CPU amplification was established.
+
+Evidence: [crates/shamir-tx/src/mvcc_store/mod.rs:138](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-tx/src/mvcc_store/mod.rs#L138); [crates/shamir-tx/src/layered_interner.rs:95](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-tx/src/layered_interner.rs#L95); [CLAUDE.md:345](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/CLAUDE.md#L345).
 
 <a id="review-scope-notes-crate-crypto-and-injection-boundary"></a>
 
 ### Claim Scope notes: crate crypto and injection boundary — No direct unsafe, cryptography, secret comparison or assembled command/query surface
 
-Status: `not-applicable`. Current risk: —.
+Status: `not-applicable`. Current risk: `—`.
 
-The claimed absence is supported for shamir-tx's implementation and direct dependency surface; it is not a transitive dependency or whole-workspace security certification.
+Prior-cycle decision: `not-applicable`.
 
-Evidence: [crates/shamir-tx/Cargo.toml:9](../../../../../crates/shamir-tx/Cargo.toml#L9); [crates/shamir-tx/src/version_codec.rs:42](../../../../../crates/shamir-tx/src/version_codec.rs#L42); [crates/shamir-tx/src/changefeed.rs:152](../../../../../crates/shamir-tx/src/changefeed.rs#L152).
+Inspection supports this narrow statement about shamir-tx's own implementation. It does not certify dependencies, caller authentication, checksum coverage, or neighboring crates.
+
+Evidence: [crates/shamir-tx/Cargo.toml:9](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-tx/Cargo.toml#L9); [crates/shamir-tx/src/changefeed.rs:152](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-tx/src/changefeed.rs#L152); [crates/shamir-tx/src/version_codec.rs:42](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-tx/src/version_codec.rs#L42).
 
 <a id="review-summary-workspace-wide-zero-unsafe"></a>
 
 ### Claim Summary: workspace-wide zero unsafe — Workspace-wide sweep found zero unsafe blocks
 
-Status: `refuted`. Current risk: —.
+Status: `refuted`. Current risk: `—`.
 
-Neighbouring workspace crates contain explicit unsafe blocks. Narrow the assurance to shamir-tx rather than repeating the workspace-wide assertion.
+Prior-cycle decision: `refuted`.
 
-Evidence: [crates/shamir-numa/src/linux.rs:109](../../../../../crates/shamir-numa/src/linux.rs#L109); [crates/shamir-index/src/vector/simd.rs:57](../../../../../crates/shamir-index/src/vector/simd.rs#L57).
+Neighboring SIMD and NUMA implementations contain explicit unsafe blocks. The supported absence is local to the reviewed crate.
+
+Evidence: [crates/shamir-index/src/vector/simd.rs:57](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-index/src/vector/simd.rs#L57); [crates/shamir-numa/src/linux.rs:109](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-numa/src/linux.rs#L109).
 
 <a id="review-summary-checksummed-authenticated-inputs"></a>
 
 ### Claim Summary: checksummed/authenticated inputs — Stored inputs are checksummed and the crate is behind server authentication
 
-Status: `unverified`. Current risk: —.
+Status: `refuted`. Current risk: `—`.
 
-MvccStore and ChangelogStore accept arbitrary Store implementations and public callers. The inspected interfaces do not enforce authentication or checksums; universal protection was not established.
+Prior-cycle decision: `unverified`.
 
-Evidence: [crates/shamir-tx/src/mvcc_store/mod.rs:126](../../../../../crates/shamir-tx/src/mvcc_store/mod.rs#L126); [crates/shamir-tx/src/changefeed.rs:152](../../../../../crates/shamir-tx/src/changefeed.rs#L152); [crates/shamir-tx/src/changefeed.rs:232](../../../../../crates/shamir-tx/src/changefeed.rs#L232).
+As a blanket crate guarantee this has positive counterexamples: MvccStore is publicly constructible with supported InMemoryStore storing raw Bytes, and its APIs impose no authentication. Server-specific protections and durable-backend checksum coverage remain outside this bounded validation.
 
-## Corrections and qualified non-findings
+Evidence: [crates/shamir-tx/src/mvcc_store/mod.rs:221](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-tx/src/mvcc_store/mod.rs#L221); [crates/shamir-storage/src/storage_in_memory.rs:86](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-storage/src/storage_in_memory.rs#L86); [crates/shamir-tx/src/changefeed.rs:152](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-tx/src/changefeed.rs#L152).
 
-- For uniformly random bytes, the tested-position separator probability is 1/256, not 2^-72; current RecordIds are timestamp-prefixed with a random tail, not uniformly random 16-byte strings.
-- The suffix decoder itself remains bijective for arbitrary keys. The integrity issue is cross-key prefix collection; an orig == requested_key filter directly addresses vacuum isolation.
-- The corrupt entry's journal key is not returned by ChangelogStore::range_from, so the proposed key-derived marker is unavailable without changing the seam.
-- Do not describe the interner or unused StagedRow expect as current remotely reachable process-wide DoS.
-- Shared-store aliasing is a caller-contract violation under current per-repo production wiring, not an established tenant-boundary bypass.
+## Evidence and recipe corrections
+
+- Universal checksummed/authenticated-input assurance is refuted at the public library boundary, not merely unsupported.
+- RecordIds use timestamp prefixes and random or sequence-bearing tails; byte len-9 is not generally a uniformly random byte in actual RecordIds. The 1/256 statement applies to the hypothetical uniform-byte model.
+- The correct vacuum boundary fix is exact decoded-orig filtering. Rejecting a separator byte would unnecessarily reject valid codec inputs.
+- No bin-only encoding contract or input-panic process-wide exploit was established.
 
 ---
 

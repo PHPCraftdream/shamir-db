@@ -1,19 +1,21 @@
-<!-- revalidation:2026-10-08 source:92ad58266bf57ddea1fa3c8a47affba1a3a9a096 -->
-# shamir-connect — correctness-tdd revalidation
+<!-- revalidation:2026-10-08 cycle:independent-2 source:e3765c935fc71655ee1ec0160cf180607935d89b -->
+# shamir-connect — correctness-tdd independent revalidation (cycle 2)
 
-Source snapshot: `92ad58266bf57ddea1fa3c8a47affba1a3a9a096`. Revalidated 2026-10-08 by read-only XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run; no source fix is part of this update. Test registration/assertions are evidence of an oracle, not proof of a passing run.
+Frozen source snapshot: `e3765c935fc71655ee1ec0160cf180607935d89b`. Independently revalidated 2026-10-08 by a fresh XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run. Source-fixed means the specified mechanism was already removed at this snapshot; this cycle implements no source fix.
 
-This section is authoritative for current status. Original titles/IDs are retained for traceability; a refuted title is not a current assertion. The collapsed historical report below is superseded, including its counts, severity, scenarios and fix instructions. Plan IDs preserve historical numbering, not a current release mandate. [Workspace methodology and status definitions](../SUMMARY.md#status-definitions).
+This section is authoritative for current decisions. Existing IDs and allegation titles are retained for traceability; a refuted title is not a current assertion. Prior-cycle decisions were rechecked, not used as proof. The first cycle is available in repository history at this snapshot. The original historical body below remains preserved once and is superseded, including its counts, severities and recipes. [Workspace scope and status definitions](../SUMMARY.md#status-definitions).
 
-Most concrete source defects remain. Correct the TOFU threat model, auth-message arithmetic, and TTL coverage claims; existing tests do not establish an entirely green suite.
+Unrelated external edits began in dependency/toolchain/CI metadata during collection; additional Rust-source edits appeared afterward. They were left untouched. Evidence and decisions are tied to the frozen commit, not those later changes or an installed toolchain. “Current” below means current at that snapshot; no re-audit of the modified working tree is implied.
+
+Most behavioral witnesses survive revalidation. Registration does not establish a green suite: auth header/length assertions contradict source, nonce assertions discard their result, and the watermark test misses its claimed mutation. Rotation threshold differences are already prescribed by the specification.
 
 ## Current claim decisions
 
 | Claim decisions | Open | Source-fixed | Partial | Refuted | Unverified | N/A |
 |---:|---:|---:|---:|---:|---:|---:|
-| 19 | 19 | 0 | 0 | 0 | 0 | 0 |
+| 19 | 18 | 0 | 0 | 0 | 0 | 1 |
 
-These are decisions on report claims, including repeated roots, bundled observations and non-findings—not a unique-bug census. Closed/N/A rows have no current risk; unverified risk is provisional. Pure style and unmeasured optimization claims do not establish runtime impact.
+These are duplicate-inclusive report decisions, not a unique-bug census. Pure style or structural optimization does not establish a runtime incident; unverified impact remains provisional.
 
 <a id="review-1"></a>
 
@@ -21,9 +23,11 @@ These are decisions on report claims, including repeated roots, bundled observat
 
 Status: `confirmed-open`. Current risk: `medium`.
 
-The callback still runs before strict verification and can persist an unverified pin in an embedder. Shipped Rust clients capture it locally and expose it only after success. The persistent-MITM scenario additionally needs relay-compatible binding; ordinary first-use TOFU already permits an attacker who supplies a valid signature with its own key.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-connect/src/client/handshake.rs:274](../../../../../crates/shamir-connect/src/client/handshake.rs#L274); [crates/shamir-connect/src/client/handshake.rs:288](../../../../../crates/shamir-connect/src/client/handshake.rs#L288); [crates/shamir-client/src/client.rs:615](../../../../../crates/shamir-client/src/client.rs#L615); [crates/shamir-client/src/client.rs:626](../../../../../crates/shamir-client/src/client.rs#L626).
+Valid SCRAM mutual proof plus an invalid identity signature still invokes the TOFU callback before returning Err. An embedder may persist that pin; shipped clients only capture it locally until success. The missing oracle is failure plus zero callback invocations.
+
+Evidence: [crates/shamir-connect/src/client/handshake.rs:274](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-connect/src/client/handshake.rs#L274); [crates/shamir-connect/src/client/handshake.rs:288](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-connect/src/client/handshake.rs#L288); [crates/shamir-client/src/client.rs:615](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-client/src/client.rs#L615); [crates/shamir-client/src/client.rs:626](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-client/src/client.rs#L626).
 
 <a id="review-2"></a>
 
@@ -31,9 +35,11 @@ Evidence: [crates/shamir-connect/src/client/handshake.rs:274](../../../../../cra
 
 Status: `confirmed-open`. Current risk: `medium`.
 
-Elapsed time saturates, but the subsequent unconditional watermark assignment permits an older timestamp to move the bucket backwards and a later call to re-credit time.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-connect/src/server/rate_limit.rs:339](../../../../../crates/shamir-connect/src/server/rate_limit.rs#L339); [crates/shamir-connect/src/server/rate_limit.rs:342](../../../../../crates/shamir-connect/src/server/rate_limit.rs#L342); [crates/shamir-server/src/connection/handshake.rs:680](../../../../../crates/shamir-server/src/connection/handshake.rs#L680).
+Drain at a newer timestamp, submit an older timestamp, then submit the same newer timestamp: unconditional assignment recredits the consumed interval. Production captures time before acquiring the map entry, making that ordering reachable across connection tasks.
+
+Evidence: [crates/shamir-connect/src/server/rate_limit.rs:339](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-connect/src/server/rate_limit.rs#L339); [crates/shamir-connect/src/server/rate_limit.rs:342](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-connect/src/server/rate_limit.rs#L342); [crates/shamir-server/src/connection/handshake.rs:680](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-server/src/connection/handshake.rs#L680).
 
 <a id="review-3"></a>
 
@@ -41,9 +47,11 @@ Evidence: [crates/shamir-connect/src/server/rate_limit.rs:339](../../../../../cr
 
 Status: `confirmed-open`. Current risk: `medium`.
 
-The verifier still accepts only two terminal sequence relationships, rejecting a valid log extended beyond its periodic checkpoint. Production startup does not call this helper; registered tests cover aligned and truncated logs, not a stale checkpoint.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-connect/src/server/audit_chain.rs:277](../../../../../crates/shamir-connect/src/server/audit_chain.rs#L277); [crates/shamir-connect/src/server/audit_chain.rs:429](../../../../../crates/shamir-connect/src/server/audit_chain.rs#L429); [crates/shamir-connect/src/server/tests/audit_chain_tests.rs:121](../../../../../crates/shamir-connect/src/server/tests/audit_chain_tests.rs#L121); [crates/shamir-connect/src/server/tests/audit_chain_tests.rs:136](../../../../../crates/shamir-connect/src/server/tests/audit_chain_tests.rs#L136).
+A checkpoint with next_seq 101 followed by a valid tail through 150 is rejected. Periodic checkpointing permits this healthy extension. The helper is not used by live startup. Tests cover aligned/truncated logs, not an authenticated checkpoint within an extended chain.
+
+Evidence: [crates/shamir-connect/src/server/audit_chain.rs:277](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-connect/src/server/audit_chain.rs#L277); [crates/shamir-connect/src/server/audit_chain.rs:429](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-connect/src/server/audit_chain.rs#L429); [crates/shamir-connect/src/server/tests/audit_chain_tests.rs:121](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-connect/src/server/tests/audit_chain_tests.rs#L121).
 
 <a id="review-4"></a>
 
@@ -51,11 +59,13 @@ Evidence: [crates/shamir-connect/src/server/audit_chain.rs:277](../../../../../c
 
 Status: `confirmed-open`. Current risk: `medium`.
 
-Independent feature declarations and server-gated module registration conflict with unconditional client imports. This is source-level configuration proof, not an executed compiler result.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-connect/Cargo.toml:18](../../../../../crates/shamir-connect/Cargo.toml#L18); [crates/shamir-connect/src/lib.rs:29](../../../../../crates/shamir-connect/src/lib.rs#L29); [crates/shamir-connect/src/client/handshake.rs:27](../../../../../crates/shamir-connect/src/client/handshake.rs#L27); [crates/shamir-connect/src/client/bootstrap.rs:17](../../../../../crates/shamir-connect/src/client/bootstrap.rs#L17).
+Feature-gated server registration conflicts with unconditional client imports; default feature unification is not a standalone-client oracle.
 
-Grouping/duplicate: `api-wire-protocol.md#1`. This row is not another independent defect.
+Evidence: [crates/shamir-connect/Cargo.toml:18](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-connect/Cargo.toml#L18); [crates/shamir-connect/src/client/handshake.rs:27](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-connect/src/client/handshake.rs#L27).
+
+Grouping/duplicate: [api-wire-protocol.md#1](api-wire-protocol.md#review-1). This is not an additional independent defect.
 
 <a id="review-5"></a>
 
@@ -63,11 +73,13 @@ Grouping/duplicate: `api-wire-protocol.md#1`. This row is not another independen
 
 Status: `confirmed-open`. Current risk: `medium`.
 
-Owned dispatch proceeds directly to the handler; only view dispatch consumes a rate token. The shipped server uses view dispatch, so the bypass concerns alternate integrations, not its current request loop.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-connect/src/server/dispatch.rs:100](../../../../../crates/shamir-connect/src/server/dispatch.rs#L100); [crates/shamir-connect/src/server/dispatch.rs:153](../../../../../crates/shamir-connect/src/server/dispatch.rs#L153); [crates/shamir-connect/src/server/mod.rs:28](../../../../../crates/shamir-connect/src/server/mod.rs#L28); [crates/shamir-server/src/connection/request_loop.rs:340](../../../../../crates/shamir-server/src/connection/request_loop.rs#L340).
+Owned dispatch reaches the handler without the view path's token check. Production is gated; current integration dispatch tests do not assert depleted-bucket behavior.
 
-Grouping/duplicate: `security-crypto.md#1`. This row is not another independent defect.
+Evidence: [crates/shamir-connect/src/server/dispatch.rs:100](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-connect/src/server/dispatch.rs#L100); [crates/shamir-connect/src/server/dispatch.rs:153](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-connect/src/server/dispatch.rs#L153); [crates/shamir-connect/tests/integration_session.rs:262](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-connect/tests/integration_session.rs#L262).
+
+Grouping/duplicate: [security-crypto.md#1](security-crypto.md#review-1). This is not an additional independent defect.
 
 <a id="review-6"></a>
 
@@ -75,11 +87,13 @@ Grouping/duplicate: `security-crypto.md#1`. This row is not another independent 
 
 Status: `confirmed-open`. Current risk: `low`.
 
-Both mutators still decide from a snapshot then store without CAS. Concurrent rotations can lose a key; finalization of an expired snapshot can overwrite a subsequent rotation. No live server rotation caller was found, although its finalizer is registered.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-connect/src/server/rotation.rs:152](../../../../../crates/shamir-connect/src/server/rotation.rs#L152); [crates/shamir-connect/src/server/rotation.rs:169](../../../../../crates/shamir-connect/src/server/rotation.rs#L169); [crates/shamir-connect/src/server/rotation.rs:185](../../../../../crates/shamir-connect/src/server/rotation.rs#L185); [crates/shamir-connect/src/server/rotation.rs:194](../../../../../crates/shamir-connect/src/server/rotation.rs#L194); [crates/shamir-server/src/scheduler.rs:233](../../../../../crates/shamir-server/src/scheduler.rs#L233).
+Snapshot decisions can overwrite concurrent rotation, particularly finalization of an expired prior overlap. Sequential overlap rejection/finalization tests do not force either lost-update schedule; live rotate invocation remains unestablished.
 
-Grouping/duplicate: `concurrency-lockfree.md#7`. This row is not another independent defect.
+Evidence: [crates/shamir-connect/src/server/rotation.rs:152](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-connect/src/server/rotation.rs#L152); [crates/shamir-connect/src/server/rotation.rs:194](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-connect/src/server/rotation.rs#L194); [crates/shamir-connect/tests/integration_rotation.rs:40](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-connect/tests/integration_rotation.rs#L40).
+
+Grouping/duplicate: [concurrency-lockfree.md#7](concurrency-lockfree.md#review-7). This is not an additional independent defect.
 
 <a id="review-7"></a>
 
@@ -87,11 +101,13 @@ Grouping/duplicate: `concurrency-lockfree.md#7`. This row is not another indepen
 
 Status: `confirmed-open`. Current risk: `low`.
 
-Validation and derivation can return before explicit wiping in all three client flows. Over-limit parameters and zero server nonce provide source-proven early exits; recovery of those bytes requires a separate memory-disclosure capability.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-connect/src/client/handshake.rs:209](../../../../../crates/shamir-connect/src/client/handshake.rs#L209); [crates/shamir-connect/src/client/handshake.rs:232](../../../../../crates/shamir-connect/src/client/handshake.rs#L232); [crates/shamir-connect/src/client/bootstrap.rs:93](../../../../../crates/shamir-connect/src/client/bootstrap.rs#L93); [crates/shamir-connect/src/client/changepw.rs:43](../../../../../crates/shamir-connect/src/client/changepw.rs#L43).
+Upper-cap and zero-nonce rejection occurs before wiping. Degenerate below-minimum KDF values also reach Argon2 0.5.3 Params::new and fail before wiping; published source https://docs.rs/crate/argon2/0.5.3/source/src/params.rs. Memory recovery requires an additional disclosure capability.
 
-Grouping/duplicate: `error-handling-lifecycle.md#2`. This row is not another independent defect.
+Evidence: [crates/shamir-connect/src/client/handshake.rs:209](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-connect/src/client/handshake.rs#L209); [crates/shamir-connect/src/client/bootstrap.rs:93](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-connect/src/client/bootstrap.rs#L93); [crates/shamir-connect/src/client/changepw.rs:43](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-connect/src/client/changepw.rs#L43); [Cargo.lock:218](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/Cargo.lock#L218).
+
+Grouping/duplicate: [error-handling-lifecycle.md#2](error-handling-lifecycle.md#review-2). This is not an additional independent defect.
 
 <a id="review-8"></a>
 
@@ -99,11 +115,13 @@ Grouping/duplicate: `error-handling-lifecycle.md#2`. This row is not another ind
 
 Status: `confirmed-open`. Current risk: `low`.
 
-Unsigned subtraction remains unchecked after challenge consumption. Clock regression can panic with overflow checking or wrap otherwise. A forward-expiration integration test exists; exact boundary and backwards-clock cases remain absent.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-connect/src/server/changepw.rs:139](../../../../../crates/shamir-connect/src/server/changepw.rs#L139); [crates/shamir-connect/src/server/changepw.rs:141](../../../../../crates/shamir-connect/src/server/changepw.rs#L141); [crates/shamir-connect/tests/integration_changepw.rs:195](../../../../../crates/shamir-connect/tests/integration_changepw.rs#L195).
+now less than issued_at underflows u64 after consuming the slot: checked builds panic, unchecked arithmetic wraps and rejects. The ten-minute-expired test exists; exact TTL and future-issued cases are absent.
 
-Grouping/duplicate: `error-handling-lifecycle.md#3`. This row is not another independent defect.
+Evidence: [crates/shamir-connect/src/server/changepw.rs:139](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-connect/src/server/changepw.rs#L139); [crates/shamir-connect/src/server/changepw.rs:141](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-connect/src/server/changepw.rs#L141); [crates/shamir-connect/tests/integration_changepw.rs:195](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-connect/tests/integration_changepw.rs#L195).
+
+Grouping/duplicate: [error-handling-lifecycle.md#3](error-handling-lifecycle.md#review-3). This is not an additional independent defect.
 
 <a id="review-9"></a>
 
@@ -111,11 +129,13 @@ Grouping/duplicate: `error-handling-lifecycle.md#3`. This row is not another ind
 
 Status: `confirmed-open`. Current risk: `low`.
 
-The public helper still accepts serializer configurations rather than values, ignores the map, and returns empty bytes. No caller was found; current production audit emission is not using it.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-connect/src/server/audit_chain.rs:355](../../../../../crates/shamir-connect/src/server/audit_chain.rs#L355); [crates/shamir-connect/src/server/audit_chain.rs:359](../../../../../crates/shamir-connect/src/server/audit_chain.rs#L359).
+The public body ignores its configuration-valued map and returns empty bytes; production does not call it.
 
-Grouping/duplicate: `api-wire-protocol.md#3`. This row is not another independent defect.
+Evidence: [crates/shamir-connect/src/server/audit_chain.rs:355](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-connect/src/server/audit_chain.rs#L355).
+
+Grouping/duplicate: [api-wire-protocol.md#3](api-wire-protocol.md#review-3). This is not an additional independent defect.
 
 <a id="review-10"></a>
 
@@ -123,9 +143,11 @@ Grouping/duplicate: `api-wire-protocol.md#3`. This row is not another independen
 
 Status: `confirmed-open`. Current risk: `low`.
 
-Both registered tests discard matches! results. unwrap_err detects acceptance, but not a wrong error variant.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-connect/src/common/tests/auth_message_tests.rs:151](../../../../../crates/shamir-connect/src/common/tests/auth_message_tests.rs#L151); [crates/shamir-connect/src/common/tests/auth_message_tests.rs:175](../../../../../crates/shamir-connect/src/common/tests/auth_message_tests.rs#L175); [crates/shamir-connect/src/common/tests/mod.rs:1](../../../../../crates/shamir-connect/src/common/tests/mod.rs#L1).
+Both matches! values are discarded. Returning a different error variant preserves unwrap_err and passes these assertions; returning success does not.
+
+Evidence: [crates/shamir-connect/src/common/tests/auth_message_tests.rs:151](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-connect/src/common/tests/auth_message_tests.rs#L151); [crates/shamir-connect/src/common/tests/auth_message_tests.rs:175](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-connect/src/common/tests/auth_message_tests.rs#L175).
 
 <a id="review-11"></a>
 
@@ -133,9 +155,11 @@ Evidence: [crates/shamir-connect/src/common/tests/auth_message_tests.rs:151](../
 
 Status: `confirmed-open`. Current risk: `medium`.
 
-Zero is accepted and returned after warmup. A new bucket subtracts one token from zero capacity; an existing empty bucket divides by zero. The release path is not reliably unlimited: subsequent checks can panic.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-connect/src/server/rate_limit.rs:203](../../../../../crates/shamir-connect/src/server/rate_limit.rs#L203); [crates/shamir-connect/src/server/rate_limit.rs:324](../../../../../crates/shamir-connect/src/server/rate_limit.rs#L324); [crates/shamir-connect/src/server/rate_limit.rs:350](../../../../../crates/shamir-connect/src/server/rate_limit.rs#L350); [crates/shamir-connect/src/server/rate_limit.rs:361](../../../../../crates/shamir-connect/src/server/rate_limit.rs#L361).
+Both explicit-rate constructors accept zero. After warmup, new buckets subtract cost from zero capacity; subsequent existing-bucket checks clamp to zero then divide by zero. Shipped ServerConfig validation excludes zero, so this is a public-library/config-bypass defect.
+
+Evidence: [crates/shamir-connect/src/server/rate_limit.rs:203](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-connect/src/server/rate_limit.rs#L203); [crates/shamir-connect/src/server/rate_limit.rs:243](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-connect/src/server/rate_limit.rs#L243); [crates/shamir-connect/src/server/rate_limit.rs:350](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-connect/src/server/rate_limit.rs#L350); [crates/shamir-connect/src/server/rate_limit.rs:361](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-connect/src/server/rate_limit.rs#L361); [crates/shamir-server/src/config.rs:678](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-server/src/config.rs#L678).
 
 <a id="review-12-1"></a>
 
@@ -143,9 +167,11 @@ Evidence: [crates/shamir-connect/src/server/rate_limit.rs:203](../../../../../cr
 
 Status: `confirmed-open`. Current risk: `nit`.
 
-Under-allocation remains, but the review's arithmetic is wrong: AUTH_V1 is 13 bytes, making the fixed part 143, not 144. Allocation growth is possible; a guaranteed particular allocator action was not measured.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-connect/src/common/domain_tags.rs:17](../../../../../crates/shamir-connect/src/common/domain_tags.rs#L17); [crates/shamir-connect/src/common/auth_message.rs:82](../../../../../crates/shamir-connect/src/common/auth_message.rs#L82); [crates/shamir-connect/src/common/auth_message.rs:97](../../../../../crates/shamir-connect/src/common/auth_message.rs#L97).
+The underlying underallocation remains, but the title's arithmetic is false: AUTH_V1 has 13 bytes, giving 143 fixed bytes rather than 144.
+
+Evidence: [crates/shamir-connect/src/common/domain_tags.rs:17](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-connect/src/common/domain_tags.rs#L17); [crates/shamir-connect/src/common/auth_message.rs:82](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-connect/src/common/auth_message.rs#L82).
 
 <a id="review-12-2"></a>
 
@@ -153,11 +179,13 @@ Evidence: [crates/shamir-connect/src/common/domain_tags.rs:17](../../../../../cr
 
 Status: `confirmed-open`. Current risk: `nit`.
 
-The stale directory reference remains; vectors are stored directly under test-vectors.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-connect/src/common/auth_message.rs:6](../../../../../crates/shamir-connect/src/common/auth_message.rs#L6); [crates/shamir-connect/test-vectors/README.md:11](../../../../../crates/shamir-connect/test-vectors/README.md#L11).
+The nonexistent subdirectory reference remains despite the flat fixture inventory.
 
-Grouping/duplicate: `style-claude-md.md#5`. This row is not another independent defect.
+Evidence: [crates/shamir-connect/src/common/auth_message.rs:6](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-connect/src/common/auth_message.rs#L6).
+
+Grouping/duplicate: [style-claude-md.md#5](style-claude-md.md#review-5). This is not an additional independent defect.
 
 <a id="review-12-3"></a>
 
@@ -165,21 +193,25 @@ Grouping/duplicate: `style-claude-md.md#5`. This row is not another independent 
 
 Status: `confirmed-open`. Current risk: `nit`.
 
-The direct dependency remains while normalization code calls precis-profiles and never references unicode_normalization. Exact upstream NFC behavior was not independently inspected.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-connect/Cargo.toml:40](../../../../../crates/shamir-connect/Cargo.toml#L40); [crates/shamir-connect/src/common/username.rs:26](../../../../../crates/shamir-connect/src/common/username.rs#L26); [crates/shamir-connect/src/common/username.rs:46](../../../../../crates/shamir-connect/src/common/username.rs#L46).
+Connect has no direct unicode_normalization use. Exact precis-profiles 0.1.13 enforce applies NFC upstream; https://docs.rs/crate/precis-profiles/0.1.13/source/src/usernames.rs and src/common.rs. Removing the direct declaration does not remove that transitive normalization.
+
+Evidence: [crates/shamir-connect/Cargo.toml:40](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-connect/Cargo.toml#L40); [crates/shamir-connect/src/common/username.rs:46](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-connect/src/common/username.rs#L46); [Cargo.lock:2505](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/Cargo.lock#L2505).
 
 <a id="review-12-4"></a>
 
-### Claim 12.4 — validate_client_kdf_safe returns Result<(), String>
+### Claim 12.4 — validate_client_kdf_safe returns Result&lt;(), String&gt;
 
 Status: `confirmed-open`. Current risk: `nit`.
 
-The public String error remains. Its diagnostic is discarded by handshake; current stricter validation runs first, so the outer-cap rejection there is presently unreachable.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-connect/src/common/kdf_params.rs:77](../../../../../crates/shamir-connect/src/common/kdf_params.rs#L77); [crates/shamir-connect/src/client/handshake.rs:209](../../../../../crates/shamir-connect/src/client/handshake.rs#L209).
+String errors remain; stricter prior validation makes the outer-cap handshake diagnostic unreachable.
 
-Grouping/duplicate: `api-wire-protocol.md#8`. This row is not another independent defect.
+Evidence: [crates/shamir-connect/src/common/kdf_params.rs:77](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-connect/src/common/kdf_params.rs#L77); [crates/shamir-connect/src/client/handshake.rs:209](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-connect/src/client/handshake.rs#L209).
+
+Grouping/duplicate: [api-wire-protocol.md#8](api-wire-protocol.md#review-8). This is not an additional independent defect.
 
 <a id="review-12-5"></a>
 
@@ -187,11 +219,13 @@ Grouping/duplicate: `api-wire-protocol.md#8`. This row is not another independen
 
 Status: `confirmed-open`. Current risk: `low`.
 
-Environment failures still panic. The clock panic is documented; these are not input-controlled programmer-invariant assertions.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-connect/src/common/crypto.rs:69](../../../../../crates/shamir-connect/src/common/crypto.rs#L69); [crates/shamir-connect/src/common/crypto.rs:219](../../../../../crates/shamir-connect/src/common/crypto.rs#L219); [crates/shamir-connect/src/common/time.rs:21](../../../../../crates/shamir-connect/src/common/time.rs#L21).
+Fallible environmental entropy and clock conversion still use expect. These are not ordinary network-input failures or programmer invariants.
 
-Grouping/duplicate: `error-handling-lifecycle.md#6`. This row is not another independent defect.
+Evidence: [crates/shamir-connect/src/common/crypto.rs:69](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-connect/src/common/crypto.rs#L69); [crates/shamir-connect/src/common/crypto.rs:219](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-connect/src/common/crypto.rs#L219); [crates/shamir-connect/src/common/time.rs:21](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-connect/src/common/time.rs#L21).
+
+Grouping/duplicate: [error-handling-lifecycle.md#6](error-handling-lifecycle.md#review-6). This is not an additional independent defect.
 
 <a id="review-12-6"></a>
 
@@ -199,11 +233,13 @@ Grouping/duplicate: `error-handling-lifecycle.md#6`. This row is not another ind
 
 Status: `confirmed-open`. Current risk: `nit`.
 
-The statement still merely consumes an unused function import; it performs no comparison.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-connect/src/server/handshake.rs:232](../../../../../crates/shamir-connect/src/server/handshake.rs#L232).
+The statement references a function without calling it and performs no timing or comparison operation.
 
-Grouping/duplicate: `style-claude-md.md#4`. This row is not another independent defect.
+Evidence: [crates/shamir-connect/src/server/handshake.rs:232](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-connect/src/server/handshake.rs#L232).
+
+Grouping/duplicate: [style-claude-md.md#4](style-claude-md.md#review-4). This is not an additional independent defect.
 
 <a id="review-12-7"></a>
 
@@ -211,26 +247,31 @@ Grouping/duplicate: `style-claude-md.md#4`. This row is not another independent 
 
 Status: `confirmed-open`. Current risk: `low`.
 
-The public serializer casts an unrestricted ciphertext Vec length and then writes all bytes. from_bytes rejects the resulting mismatch. Ordinary issued tickets are small, but oversized public TicketWire values are constructible.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-connect/src/server/ticket.rs:106](../../../../../crates/shamir-connect/src/server/ticket.rs#L106); [crates/shamir-connect/src/server/ticket.rs:118](../../../../../crates/shamir-connect/src/server/ticket.rs#L118); [crates/shamir-connect/src/server/ticket.rs:134](../../../../../crates/shamir-connect/src/server/ticket.rs#L134).
+A public TicketWire with 65536 ciphertext bytes serializes length zero while writing all bytes; from_bytes rejects that output. Normal issued tickets remain far smaller.
+
+Evidence: [crates/shamir-connect/src/server/ticket.rs:118](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-connect/src/server/ticket.rs#L118); [crates/shamir-connect/src/server/ticket.rs:134](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-connect/src/server/ticket.rs#L134).
 
 <a id="review-12-8"></a>
 
 ### Claim 12.8 — Undocumented rotation threshold asymmetry
 
-Status: `confirmed-open`. Current risk: `nit`.
+Status: `not-applicable`. Current risk: `—`.
 
-Broadcast verification requires over 60 seconds remaining; recovery requires only a future deadline. The recovery bound is documented, but the rationale for the difference is not. No functional defect is established.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-connect/src/client/rotation.rs:63](../../../../../crates/shamir-connect/src/client/rotation.rs#L63); [crates/shamir-connect/src/client/rotation.rs:89](../../../../../crates/shamir-connect/src/client/rotation.rs#L89); [crates/shamir-connect/src/client/rotation.rs:135](../../../../../crates/shamir-connect/src/client/rotation.rs#L135).
+The different thresholds implement separately documented normative rules: broadcast requires more than 60 seconds, recovery only an unexpired deadline. Wanting an additional rationale is documentation preference, not demonstrated divergence.
 
-## Corrections and qualified non-findings
+Evidence: [crates/shamir-connect/src/client/rotation.rs:63](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-connect/src/client/rotation.rs#L63); [crates/shamir-connect/src/client/rotation.rs:89](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-connect/src/client/rotation.rs#L89); [docs/guide-docs/client-server-protocol-spec/AUTH_PROTOCOL.md:384](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/docs/guide-docs/client-server-protocol-spec/AUTH_PROTOCOL.md#L384); [docs/guide-docs/client-server-protocol-spec/AUTH_PROTOCOL.md:730](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/docs/guide-docs/client-server-protocol-spec/AUTH_PROTOCOL.md#L730).
 
-- Do not characterize early callback execution as a demonstrated persistent MITM in the shipped Rust client. Its callback uses local capture and returns on verification failure; correctly bound TLS also prevents the described SCRAM relay.
-- AUTH_V1 is 13 bytes. The current fixed layout is 143 bytes and alice produces 148 bytes, contradicting the asserted 149-byte length.
-- TTL-expiration coverage exists at integration_changepw.rs:195; only exact boundaries and regression coverage are missing.
-- The suggested stale-checkpoint fix should authenticate the checkpoint's corresponding log entry, not simply ignore checkpoint_hmac whenever a newer tail exists.
+## Evidence and recipe corrections
+
+- Do not extend first-use TOFU callback ordering into an unconditional persistent-MITM claim. Valid attacker-signed first-use identities are already within TOFU's trust limitation, and relay requires compatible channel binding.
+- The zero-rate witness is excluded by shipped configuration validation; it remains reachable through the public limiter constructors.
+- The stale-checkpoint recipe must authenticate the checkpoint's corresponding entry even when newer entries follow. Ignoring its HMAC for an extended log is unsafe.
+- The header is 13 bytes and alice's complete transcript is 148 bytes. Correct metadata and assertions without inserting a new wire byte.
+- Rotation lower-bound asymmetry is explicitly specified, not an open correctness defect.
 
 ---
 

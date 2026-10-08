@@ -1,55 +1,61 @@
-<!-- revalidation:2026-10-08 source:92ad58266bf57ddea1fa3c8a47affba1a3a9a096 -->
-# shamir-tunables — error-handling-lifecycle revalidation
+<!-- revalidation:2026-10-08 cycle:independent-2 source:e3765c935fc71655ee1ec0160cf180607935d89b -->
+# shamir-tunables — error-handling-lifecycle independent revalidation (cycle 2)
 
-Source snapshot: `92ad58266bf57ddea1fa3c8a47affba1a3a9a096`. Revalidated 2026-10-08 by read-only XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run; no source fix is part of this update. Test registration/assertions are evidence of an oracle, not proof of a passing run.
+Frozen source snapshot: `e3765c935fc71655ee1ec0160cf180607935d89b`. Independently revalidated 2026-10-08 by a fresh XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run. Source-fixed means the specified mechanism was already removed at this snapshot; this cycle implements no source fix.
 
-This section is authoritative for current status. Original titles/IDs are retained for traceability; a refuted title is not a current assertion. The collapsed historical report below is superseded, including its counts, severity, scenarios and fix instructions. Plan IDs preserve historical numbering, not a current release mandate. [Workspace methodology and status definitions](../SUMMARY.md#status-definitions).
+This section is authoritative for current decisions. Existing IDs and allegation titles are retained for traceability; a refuted title is not a current assertion. Prior-cycle decisions were rechecked, not used as proof. The first cycle is available in repository history at this snapshot. The original historical body below remains preserved once and is superseded, including its counts, severities and recipes. [Workspace scope and status definitions](../SUMMARY.md#status-definitions).
 
-Unchecked allocation/concurrency inputs and lossy interval conversion remain latent boundary issues. Production still never consumes the object; no resource-cleanup defect exists inside the crate.
+Unrelated external edits began in dependency/toolchain/CI metadata during collection; additional Rust-source edits appeared afterward. They were left untouched. Evidence and decisions are tied to the frozen commit, not those later changes or an installed toolchain. “Current” below means current at that snapshot; no re-audit of the modified working tree is implied.
+
+There is no internal resource-lifecycle failure. Duration loss is current; allocation/concurrency panics described for future wiring are compatibility constraints rather than present setter failures.
 
 ## Current claim decisions
 
 | Claim decisions | Open | Source-fixed | Partial | Refuted | Unverified | N/A |
 |---:|---:|---:|---:|---:|---:|---:|
-| 4 | 4 | 0 | 0 | 0 | 0 | 0 |
+| 4 | 2 | 0 | 0 | 0 | 0 | 2 |
 
-These are decisions on report claims, including repeated roots, bundled observations and non-findings—not a unique-bug census. Closed/N/A rows have no current risk; unverified risk is provisional. Pure style and unmeasured optimization claims do not establish runtime impact.
+These are duplicate-inclusive report decisions, not a unique-bug census. Pure style or structural optimization does not establish a runtime incident; unverified impact remains provisional.
 
 <a id="review-1"></a>
 
 ### Claim 1 — Infallible setters accept values that arm downstream panics / zero-permit deadlocks
 
-Status: `confirmed-open`. Current risk: `medium`.
+Status: `not-applicable`. Current risk: `—`.
 
-Arbitrary usize values remain accepted. If wired, usize::MAX buffer capacity would exceed Vec's representable capacity, and excessive request caps would exceed Tokio's permit limit. The alleged zero-cap deadlock is not supported because the existing consumer always applies max(1).
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-tunables/src/runtime.rs:56](../../../../../crates/shamir-tunables/src/runtime.rs#L56); [crates/shamir-tunables/src/runtime.rs:73](../../../../../crates/shamir-tunables/src/runtime.rs#L73); [crates/shamir-server/src/connection/handshake.rs:706](../../../../../crates/shamir-server/src/connection/handshake.rs#L706); [crates/shamir-server/src/connection/request_loop.rs:153](../../../../../crates/shamir-server/src/connection/request_loop.rs#L153); [Cargo.lock:4196](../../../../../Cargo.lock#L4196).
+The usize setters store all accepted values exactly and have no documented restricted domain. Production does not consume them. Future Vec/Semaphore consumers would require an upper policy, but the actual request loop already floors zero; arbitrary storage alone is not a current panic or fallible-operation violation.
 
-Grouping/duplicate: `correctness-tdd.md#2`. This row is not another independent defect.
+Evidence: [crates/shamir-tunables/src/runtime.rs:56](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-tunables/src/runtime.rs#L56); [crates/shamir-tunables/src/runtime.rs:73](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-tunables/src/runtime.rs#L73); [crates/shamir-server/src/connection/request_loop.rs:153](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-server/src/connection/request_loop.rs#L153); [docs/dev-artifacts/roadmap/TUNABLES.md:179](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/docs/dev-artifacts/roadmap/TUNABLES.md#L179).
 
 <a id="review-2"></a>
 
 ### Claim 2 — `set_server_poll_interval` silently truncates/wraps and accepts a hot-spin value
 
-Status: `confirmed-open`. Current risk: `medium`.
+Status: `confirmed-open`. Current risk: `low`.
 
-The undocumented as_millis() as u64 remains. Sub-ms values become zero and durations beyond the stored range can wrap short or zero. This is deterministic lossy conversion; the exact Duration::MAX example does not become randomly short.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-tunables/src/runtime.rs:61](../../../../../crates/shamir-tunables/src/runtime.rs#L61); [crates/shamir-tunables/src/runtime.rs:63](../../../../../crates/shamir-tunables/src/runtime.rs#L63); [crates/shamir-tunables/src/runtime.rs:52](../../../../../crates/shamir-tunables/src/runtime.rs#L52).
+The lossy conversion is deterministic and undocumented. Exactly 2^64 milliseconds wraps to zero; sub-millisecond input also loses precision. Duration::MAX becomes u64::MAX milliseconds. No hot-spin execution follows without new consumer wiring and sustained accept errors.
 
-Grouping/duplicate: `correctness-tdd.md#2`. This row is not another independent defect.
+Evidence: [crates/shamir-tunables/src/runtime.rs:61](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-tunables/src/runtime.rs#L61); [crates/shamir-tunables/src/runtime.rs:63](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-tunables/src/runtime.rs#L63); [crates/shamir-server/src/server/server_launcher.rs:1093](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-server/src/server/server_launcher.rs#L1093).
+
+Grouping/duplicate: [correctness-tdd.md#2](correctness-tdd.md#review-2). This is not an additional independent defect.
 
 <a id="review-3"></a>
 
 ### Claim 3 — `RuntimeTunables` is dead plumbing — runtime override path has zero readers
 
-Status: `confirmed-open`. Current risk: `low`.
+Status: `not-applicable`. Current risk: `—`.
 
-The object remains a public handle-owned allocation with no production accessor consumers. Its local set/get behavior works, but server behavior does not use it.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-server/src/server/server_handle.rs:100](../../../../../crates/shamir-server/src/server/server_handle.rs#L100); [crates/shamir-server/src/server/server_launcher.rs:985](../../../../../crates/shamir-server/src/server/server_launcher.rs#L985); [crates/shamir-server/src/server/server_launcher.rs:1048](../../../../../crates/shamir-server/src/server/server_launcher.rs#L1048); [crates/shamir-server/src/connection/handshake.rs:706](../../../../../crates/shamir-server/src/connection/handshake.rs#L706).
+Intentional deferred foundation state has no unbalanced acquisition/release or required asynchronous cleanup. Its lack of server readers is documented at the public owner.
 
-Grouping/duplicate: `correctness-tdd.md#1`. This row is not another independent defect.
+Evidence: [crates/shamir-server/src/server/server_handle.rs:98](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-server/src/server/server_handle.rs#L98); [docs/dev-artifacts/roadmap/TUNABLES.md:175](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/docs/dev-artifacts/roadmap/TUNABLES.md#L175).
+
+Grouping/duplicate: [correctness-tdd.md#1](correctness-tdd.md#review-1). This is not an additional independent defect.
 
 <a id="review-4"></a>
 
@@ -57,21 +63,20 @@ Grouping/duplicate: `correctness-tdd.md#1`. This row is not another independent 
 
 Status: `confirmed-open`. Current risk: `low`.
 
-The registered five tests contain none of the zero, huge-value, sub-ms, overflow, or repeat-update cases. They cannot catch the boundary-policy defects or disconnected server wiring.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-tunables/src/lib.rs:11](../../../../../crates/shamir-tunables/src/lib.rs#L11); [crates/shamir-tunables/src/tests/mod.rs:1](../../../../../crates/shamir-tunables/src/tests/mod.rs#L1); [crates/shamir-tunables/src/tests/runtime_tests.rs:27](../../../../../crates/shamir-tunables/src/tests/runtime_tests.rs#L27); [crates/shamir-tunables/src/tests/runtime_tests.rs:52](../../../../../crates/shamir-tunables/src/tests/runtime_tests.rs#L52).
+The tests omit interval precision/range boundaries and repeat updates. Such boundary tests are possible now; the current API has no existing error-return path to cover.
 
-Grouping/duplicate: `correctness-tdd.md#4`. This row is not another independent defect.
+Evidence: [crates/shamir-tunables/src/tests/runtime_tests.rs:35](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-tunables/src/tests/runtime_tests.rs#L35); [crates/shamir-tunables/src/runtime.rs:61](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-tunables/src/runtime.rs#L61).
 
-## Corrections and qualified non-findings
+Grouping/duplicate: [correctness-tdd.md#4](correctness-tdd.md#review-4). This is not an additional independent defect.
 
-- Duration::MAX.as_millis() equals 1000*2^64-1; narrowing yields u64::MAX, not a randomly small interval. Other representable large durations can wrap to zero, so the general conversion defect remains.
-- Remove 'undefined behavior': the cast and raw stores have defined Rust behavior; their intended API policy is unspecified.
-- Boundary tests are writable before validation exists and should be red against the current implementation. An infallible API does not make such tests impossible.
-- Zero initial Vec capacity is valid. An unconditional floor for that allocation hint requires an explicit chosen policy, not a claimed standard-library invariant.
-- A lower cap floor alone is insufficient for future wiring: pinned Tokio's Semaphore::MAX_PERMITS is usize::MAX >> 3, and larger capacities panic (Cargo.lock:4196; crates/shamir-server/src/connection/request_loop.rs:154).
-- Positive checks remain valid for production implementation: no unwrap/expect/panic/todo, leaked error abstraction, OS resource, task, or required Drop cleanup. Tests contain assertions and an Arc allocation.
-- The max(1) safeguard applies to all values reaching the request loop, not only constants. A zero-cap outage after simple wiring is therefore refuted.
+## Evidence and recipe corrections
+
+- Retain the correction that defined narrowing is not undefined behavior.
+- Future wiring must respect published Tokio 1.49.0's usize::MAX &gt;&gt; 3 permit limit; a lower floor or NonZero type alone is insufficient. Source: https://docs.rs/crate/tokio/1.49.0/source/src/sync/batch_semaphore.rs; frozen pin Cargo.lock:4196.
+- Do not mandate a thiserror dependency or Result merely for infallible stores. Checked conversion can justify a fallible API, but signature changes require deliberate compatibility decisions.
+- Saturation to u64::MAX milliseconds fixes modulo wrapping, not necessarily a suitable operational maximum backoff. Choose an operational policy before any wiring.
 
 ---
 

@@ -1,11 +1,13 @@
-<!-- revalidation:2026-10-08 source:92ad58266bf57ddea1fa3c8a47affba1a3a9a096 -->
-# shamir-server — style-claude-md revalidation
+<!-- revalidation:2026-10-08 cycle:independent-2 source:e3765c935fc71655ee1ec0160cf180607935d89b -->
+# shamir-server — style-claude-md independent revalidation (cycle 2)
 
-Source snapshot: `92ad58266bf57ddea1fa3c8a47affba1a3a9a096`. Revalidated 2026-10-08 by read-only XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run; no source fix is part of this update. Test registration/assertions are evidence of an oracle, not proof of a passing run.
+Frozen source snapshot: `e3765c935fc71655ee1ec0160cf180607935d89b`. Independently revalidated 2026-10-08 by a fresh XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run. Source-fixed means the specified mechanism was already removed at this snapshot; this cycle implements no source fix.
 
-This section is authoritative for current status. Original titles/IDs are retained for traceability; a refuted title is not a current assertion. The collapsed historical report below is superseded, including its counts, severity, scenarios and fix instructions. Plan IDs preserve historical numbering, not a current release mandate. [Workspace methodology and status definitions](../SUMMARY.md#status-definitions).
+This section is authoritative for current decisions. Existing IDs and allegation titles are retained for traceability; a refuted title is not a current assertion. Prior-cycle decisions were rechecked, not used as proof. The first cycle is available in repository history at this snapshot. The original historical body below remains preserved once and is superseded, including its counts, severities and recipes. [Workspace scope and status definitions](../SUMMARY.md#status-definitions).
 
-The four HMAC imports remain a genuine style nit. Config co-location is allowed by the closely-coupled-group rule; the blanket structural-conformance claims have counterexamples.
+Unrelated external edits began in dependency/toolchain/CI metadata during collection; additional Rust-source edits appeared afterward. They were left untouched. Evidence and decisions are tied to the frozen commit, not those later changes or an installed toolchain. “Current” below means current at that snapshot; no re-audit of the modified working tree is implied.
+
+The import nit and structural counterexamples remain. Sixteen coupled schema types are permitted, and none of these style observations establishes runtime impact.
 
 ## Current claim decisions
 
@@ -13,7 +15,7 @@ The four HMAC imports remain a genuine style nit. Config co-location is allowed 
 |---:|---:|---:|---:|---:|---:|---:|
 | 5 | 1 | 0 | 0 | 4 | 0 | 0 |
 
-These are decisions on report claims, including repeated roots, bundled observations and non-findings—not a unique-bug census. Closed/N/A rows have no current risk; unverified risk is provisional. Pure style and unmeasured optimization claims do not establish runtime impact.
+These are duplicate-inclusive report decisions, not a unique-bug census. Pure style or structural optimization does not establish a runtime incident; unverified impact remains provisional.
 
 <a id="review-1"></a>
 
@@ -21,55 +23,65 @@ These are decisions on report claims, including repeated roots, bundled observat
 
 Status: `confirmed-open`. Current risk: `nit`.
 
-All four unconditionally compiled local imports remain and have no demonstrated collision exception. This is imports-at-top style debt, not a medium-severity runtime defect.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-server/src/db_handler/admin.rs:119](../../../../../crates/shamir-server/src/db_handler/admin.rs#L119); [crates/shamir-server/src/db_handler/admin.rs:294](../../../../../crates/shamir-server/src/db_handler/admin.rs#L294); [crates/shamir-server/src/db_handler/admin.rs:375](../../../../../crates/shamir-server/src/db_handler/admin.rs#L375); [crates/shamir-server/src/db_handler/admin.rs:642](../../../../../crates/shamir-server/src/db_handler/admin.rs#L642); [CLAUDE.md:617](../../../../../CLAUDE.md#L617).
+The same unconditional local import appears four times, with no inspected cfg or trait-collision exception. Hoisting preserves behavior and addresses only style debt.
+
+Evidence: [crates/shamir-server/src/db_handler/admin.rs:119](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-server/src/db_handler/admin.rs#L119); [crates/shamir-server/src/db_handler/admin.rs:294](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-server/src/db_handler/admin.rs#L294); [crates/shamir-server/src/db_handler/admin.rs:375](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-server/src/db_handler/admin.rs#L375); [crates/shamir-server/src/db_handler/admin.rs:642](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-server/src/db_handler/admin.rs#L642); [CLAUDE.md:617](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/CLAUDE.md#L617).
 
 <a id="review-2"></a>
 
 ### Claim 2 — `config.rs` bundles 16 public types in one file
 
-Status: `refuted`. Current risk: —.
+Status: `refuted`. Current risk: `—`.
 
-The 16-type inventory is accurate, but these form the same nested deserialization/validation schema. CLAUDE explicitly permits a closely-coupled group and sets no numeric maximum. Splitting remains an optional organizational preference, not an established violation.
+Prior-cycle decision: `refuted`.
 
-Evidence: [crates/shamir-server/src/config.rs:72](../../../../../crates/shamir-server/src/config.rs#L72); [crates/shamir-server/src/config.rs:89](../../../../../crates/shamir-server/src/config.rs#L89); [crates/shamir-server/src/config.rs:106](../../../../../crates/shamir-server/src/config.rs#L106); [crates/shamir-server/src/config.rs:219](../../../../../crates/shamir-server/src/config.rs#L219); [CLAUDE.md:505](../../../../../CLAUDE.md#L505).
+The inventory is accurate, but the types comprise the nested configuration schema and its validation error. The rule permits closely coupled groups and supplies no numerical cutoff.
+
+Evidence: [crates/shamir-server/src/config.rs:72](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-server/src/config.rs#L72); [crates/shamir-server/src/config.rs:219](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-server/src/config.rs#L219); [crates/shamir-server/src/config.rs:615](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-server/src/config.rs#L615); [CLAUDE.md:505](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/CLAUDE.md#L505).
 
 <a id="review-summary-mod-rs"></a>
 
 ### Claim Summary/mod.rs — Every mod.rs is re-export-only with no logic
 
-Status: `refuted`. Current risk: —.
+Status: `refuted`. Current risk: `—`.
 
-Production module manifests inspected are declarative, but tests/common/mod.rs contains helper implementations. The report's unqualified every-mod.rs statement is false.
+Prior-cycle decision: `refuted`.
 
-Evidence: [crates/shamir-server/tests/common/mod.rs:36](../../../../../crates/shamir-server/tests/common/mod.rs#L36); [crates/shamir-server/tests/common/mod.rs:51](../../../../../crates/shamir-server/tests/common/mod.rs#L51); [crates/shamir-server/tests/common/mod.rs:110](../../../../../crates/shamir-server/tests/common/mod.rs#L110).
+Production manifests inspected are declarative, but tests/common/mod.rs defines helper implementations. The unqualified every-file assertion is false.
+
+Evidence: [crates/shamir-server/tests/common/mod.rs:36](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-server/tests/common/mod.rs#L36); [crates/shamir-server/tests/common/mod.rs:51](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-server/tests/common/mod.rs#L51).
 
 <a id="review-summary-test-layout"></a>
 
 ### Claim Summary/test layout — Topic-split tests-directory layout is followed everywhere; no inline test bodies
 
-Status: `refuted`. Current risk: —.
+Status: `refuted`. Current risk: `—`.
 
-No inline test-module bodies were found, and the cited nested manifests are registered. However, service tests live in service/tests.rs rather than a topic-split service/tests/ directory with a manifest.
+Prior-cycle decision: `refuted`.
 
-Evidence: [crates/shamir-server/src/service.rs:622](../../../../../crates/shamir-server/src/service.rs#L622); [crates/shamir-server/src/service/tests.rs:1](../../../../../crates/shamir-server/src/service/tests.rs#L1); [crates/shamir-server/src/db_handler/tests/mod.rs:5](../../../../../crates/shamir-server/src/db_handler/tests/mod.rs#L5); [CLAUDE.md:573](../../../../../CLAUDE.md#L573).
+Nested topic manifests are registered and no inline test-module bodies were found. However, service uses a single service/tests.rs file, contradicting the strict directory/manifest inventory.
+
+Evidence: [crates/shamir-server/src/service.rs:622](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-server/src/service.rs#L622); [crates/shamir-server/src/service/tests.rs:1](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-server/src/service/tests.rs#L1); [crates/shamir-server/src/db_handler/tests/mod.rs:1](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-server/src/db_handler/tests/mod.rs#L1).
 
 <a id="review-no-other-findings-imports-elsewhere"></a>
 
 ### Claim No other findings/imports elsewhere — All remaining mid-body imports satisfy documented exceptions
 
-Status: `refuted`. Current risk: —.
+Status: `refuted`. Current risk: `—`.
 
-The bridge's unconditional local hash-trait import is justified only by helper scope. CLAUDE lists cfg/macro and trait-collision exceptions, not a generic non-reusable-helper exception. The original broad exemption is incorrect.
+Prior-cycle decision: `refuted`.
 
-Evidence: [crates/shamir-server/src/subscriptions/bridge.rs:115](../../../../../crates/shamir-server/src/subscriptions/bridge.rs#L115); [crates/shamir-server/src/subscriptions/bridge.rs:116](../../../../../crates/shamir-server/src/subscriptions/bridge.rs#L116); [CLAUDE.md:622](../../../../../CLAUDE.md#L622); [CLAUDE.md:629](../../../../../CLAUDE.md#L629).
+The unconditional bridge-local hash-trait import has no demonstrated collision. Helper locality is not a documented general exception; decode-cache hash_one also has a helper-local trait import.
 
-## Corrections and qualified non-findings
+Evidence: [crates/shamir-server/src/subscriptions/bridge.rs:116](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-server/src/subscriptions/bridge.rs#L116); [crates/shamir-server/src/subscriptions/decode_cache.rs:66](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-server/src/subscriptions/decode_cache.rs#L66); [CLAUDE.md:622](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/CLAUDE.md#L622).
 
-- Downgrade the import finding to nit and keep any eventual style change separate from substantive fixes.
-- Do not count permitted config-schema co-location as a defect solely because of type count.
-- Qualify manifest/layout guarantees and remove the invented single-helper import exception.
+## Evidence and recipe corrections
+
+- Do not promote structural preferences into runtime-severity findings.
+- The closely-coupled-group allowance applies without a numerical maximum.
+- The single-helper import exception in the historical report is invented; any eventual cleanup should remain separate from behavioral fixes.
 
 ---
 

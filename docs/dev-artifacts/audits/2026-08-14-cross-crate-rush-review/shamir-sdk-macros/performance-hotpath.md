@@ -1,11 +1,13 @@
-<!-- revalidation:2026-10-08 source:92ad58266bf57ddea1fa3c8a47affba1a3a9a096 -->
-# shamir-sdk-macros — performance-hotpath revalidation
+<!-- revalidation:2026-10-08 cycle:independent-2 source:e3765c935fc71655ee1ec0160cf180607935d89b -->
+# shamir-sdk-macros — performance-hotpath independent revalidation (cycle 2)
 
-Source snapshot: `92ad58266bf57ddea1fa3c8a47affba1a3a9a096`. Revalidated 2026-10-08 by read-only XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run; no source fix is part of this update. Test registration/assertions are evidence of an oracle, not proof of a passing run.
+Frozen source snapshot: `e3765c935fc71655ee1ec0160cf180607935d89b`. Independently revalidated 2026-10-08 by a fresh XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run. Source-fixed means the specified mechanism was already removed at this snapshot; this cycle implements no source fix.
 
-This section is authoritative for current status. Original titles/IDs are retained for traceability; a refuted title is not a current assertion. The collapsed historical report below is superseded, including its counts, severity, scenarios and fix instructions. Plan IDs preserve historical numbering, not a current release mandate. [Workspace methodology and status definitions](../SUMMARY.md#status-definitions).
+This section is authoritative for current decisions. Existing IDs and allegation titles are retained for traceability; a refuted title is not a current assertion. Prior-cycle decisions were rechecked, not used as proof. The first cycle is available in repository history at this snapshot. The original historical body below remains preserved once and is superseded, including its counts, severities and recipes. [Workspace scope and status definitions](../SUMMARY.md#status-definitions).
 
-Validator deep copies and retained ownership are source-proven. Cross-call leakage is not a current production defect, and numerical cost/latency claims are unmeasured.
+Unrelated external edits began in dependency/toolchain/CI metadata during collection; additional Rust-source edits appeared afterward. They were left untouched. Evidence and decisions are tied to the frozen commit, not those later changes or an installed toolchain. “Current” below means current at that snapshot; no re-audit of the modified working tree is implied.
+
+Validator cloning and retained ownership are structural costs. Fresh Store teardown prevents current cross-call leakage. Zero-initialization optimization and numerical resource claims remain unmeasured.
 
 ## Current claim decisions
 
@@ -13,7 +15,7 @@ Validator deep copies and retained ownership are source-proven. Cross-call leaka
 |---:|---:|---:|---:|---:|---:|---:|
 | 4 | 3 | 0 | 0 | 0 | 0 | 1 |
 
-These are decisions on report claims, including repeated roots, bundled observations and non-findings—not a unique-bug census. Closed/N/A rows have no current risk; unverified risk is provisional. Pure style and unmeasured optimization claims do not establish runtime impact.
+These are duplicate-inclusive report decisions, not a unique-bug census. Pure style or structural optimization does not establish a runtime incident; unverified impact remains provisional.
 
 <a id="review-1"></a>
 
@@ -21,19 +23,23 @@ These are decisions on report claims, including repeated roots, bundled observat
 
 Status: `confirmed-open`. Current risk: `medium`.
 
-Validator still clones owned recursive Value data from borrowed getters and keeps Params in the enclosing scope through block_on. There is no take/move-out API or early drop. Additional ownership and allocations are structural; a universal 3x byte multiplier is not proven.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-sdk-macros/src/lib.rs:126](../../../../../crates/shamir-sdk-macros/src/lib.rs#L126); [crates/shamir-sdk-macros/src/lib.rs:130](../../../../../crates/shamir-sdk-macros/src/lib.rs#L130); [crates/shamir-sdk-macros/src/lib.rs:137](../../../../../crates/shamir-sdk-macros/src/lib.rs#L137); [crates/shamir-sdk-macros/src/lib.rs:144](../../../../../crates/shamir-sdk-macros/src/lib.rs#L144); [crates/shamir-sdk/src/params.rs:26](../../../../../crates/shamir-sdk/src/params.rs#L26); [crates/shamir-sdk/src/value.rs:26](../../../../../crates/shamir-sdk/src/value.rs#L26).
+Borrowed getters clone recursive owned Values while the original Params remains in scope through validation. Large strings/lists/maps therefore incur redundant ownership and allocation. Neither exact peak RSS nor a universal threefold multiplier follows from source.
+
+Evidence: [crates/shamir-sdk-macros/src/lib.rs:126](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-sdk-macros/src/lib.rs#L126); [crates/shamir-sdk-macros/src/lib.rs:130](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-sdk-macros/src/lib.rs#L130); [crates/shamir-sdk-macros/src/lib.rs:137](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-sdk-macros/src/lib.rs#L137); [crates/shamir-sdk/src/params.rs:26](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-sdk/src/params.rs#L26); [crates/shamir-sdk/src/value.rs:26](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-sdk/src/value.rs#L26).
 
 <a id="review-2"></a>
 
 ### Claim 2 — `shamir_alloc` leaks every allocation; the "module is short-lived" contract is documented only here and enforced nowhere in this crate
 
-Status: `not-applicable`. Current risk: —.
+Status: `not-applicable`. Current risk: `—`.
 
-Intentional within-invocation leaks remain, but every production call creates a fresh Store and instance, reclaiming guest memory on return. SDK host-import documentation also explicitly names Store destruction. Future instance reuse is a conditional design risk, not a present cross-call leak.
+Prior-cycle decision: `not-applicable`.
 
-Evidence: [crates/shamir-sdk-macros/src/lib.rs:112](../../../../../crates/shamir-sdk-macros/src/lib.rs#L112); [crates/shamir-sdk/src/__rt.rs:28](../../../../../crates/shamir-sdk/src/__rt.rs#L28); [crates/shamir-sdk/src/host_imports.rs:60](../../../../../crates/shamir-sdk/src/host_imports.rs#L60); [crates/shamir-wasm-host/src/wasm/wasm_function.rs:474](../../../../../crates/shamir-wasm-host/src/wasm/wasm_function.rs#L474); [crates/shamir-wasm-host/src/wasm/wasm_function.rs:498](../../../../../crates/shamir-wasm-host/src/wasm/wasm_function.rs#L498); [crates/shamir-wasm-host/src/wasm/host_call.rs:149](../../../../../crates/shamir-wasm-host/src/wasm/host_call.rs#L149).
+Fresh Store/instance creation and destruction reclaim invocation memory. Published wasmtime 46.0.2 src/runtime/store.rs:2565/2578 confirms instance deallocation: https://docs.rs/crate/wasmtime/46.0.2/source/src/runtime/store.rs. Pooling slots are not live guest reuse. Within-call allocations remain intentionally memory-limited.
+
+Evidence: [crates/shamir-sdk/src/host_imports.rs:55](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-sdk/src/host_imports.rs#L55); [crates/shamir-wasm-host/src/wasm/wasm_function.rs:474](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-wasm-host/src/wasm/wasm_function.rs#L474); [crates/shamir-wasm-host/src/wasm/wasm_function.rs:498](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-wasm-host/src/wasm/wasm_function.rs#L498); [Cargo.lock:4740](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/Cargo.lock#L4740).
 
 <a id="review-3"></a>
 
@@ -41,32 +47,34 @@ Evidence: [crates/shamir-sdk-macros/src/lib.rs:112](../../../../../crates/shamir
 
 Status: `confirmed-open`. Current risk: `medium`.
 
-A persistently-Pending guest future is repeatedly polled without yielding or a guest poll limit. Finite Pending does not imply exhausting the host budget. Async host imports already use fiber suspension; the claimed unavoidable I/O-induced spin is false.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-sdk/src/__rt.rs:50](../../../../../crates/shamir-sdk/src/__rt.rs#L50); [crates/shamir-wasm-host/src/wasm/wasm_function.rs:195](../../../../../crates/shamir-wasm-host/src/wasm/wasm_function.rs#L195); [crates/shamir-wasm-host/src/wasm/wasm_function.rs:477](../../../../../crates/shamir-wasm-host/src/wasm/wasm_function.rs#L477); [crates/shamir-wasm-host/src/wasm/wasm_function.rs:487](../../../../../crates/shamir-wasm-host/src/wasm/wasm_function.rs#L487).
+Persistent guest-local Pending repeatedly polls without parking. Finite Pending and host-fiber suspension are counter-evidence to the blanket every-Pending/entire-budget scenario; no exact CPU percentage was measured.
 
-Grouping/duplicate: `concurrency-lockfree.md#1`. This row is not another independent defect.
+Evidence: [crates/shamir-sdk/src/__rt.rs:50](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-sdk/src/__rt.rs#L50); [crates/shamir-wasm-host/src/wasm/wasm_function.rs:195](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-wasm-host/src/wasm/wasm_function.rs#L195).
+
+Grouping/duplicate: [concurrency-lockfree.md#1](concurrency-lockfree.md#review-1). This is not an additional independent defect.
 
 <a id="review-4"></a>
 
 ### Claim 4 — `shamir_alloc` zero-fills O(len) bytes the host immediately overwrites, and does not reject negative `len`
 
-Status: `confirmed-open`. Current risk: `nit`.
+Status: `confirmed-open`. Current risk: `low`.
 
-Allocator semantics still request initialized len bytes, and the host overwrites that range. The negative-length guard is absent. Whether allocation emits a separate linear memset and whether eliminating it helps latency are unmeasured.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-sdk-macros/src/lib.rs:110](../../../../../crates/shamir-sdk-macros/src/lib.rs#L110); [crates/shamir-wasm-host/src/wasm/wasm_function.rs:540](../../../../../crates/shamir-wasm-host/src/wasm/wasm_function.rs#L540).
+Initialized allocation and host overwrite are present. Negative-length defense is absent and is the actionable residual; a separately emitted memset and profitable uninitialized replacement are not established.
 
-Grouping/duplicate: `security-crypto.md#2`. This row is not another independent defect.
+Evidence: [crates/shamir-sdk-macros/src/lib.rs:110](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-sdk-macros/src/lib.rs#L110); [crates/shamir-wasm-host/src/wasm/wasm_function.rs:540](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-wasm-host/src/wasm/wasm_function.rs#L540).
 
-## Corrections and qualified non-findings
+Grouping/duplicate: [security-crypto.md#2](security-crypto.md#review-2). This is not an additional independent defect.
 
-- Drop exact 3x/1x memory claims. Encoded bytes, decoded owned structures, and clones have different sizes, and the clone phase temporarily overlaps even with a later drop(params).
-- Pooling reuses allocation slots, not this call's live guest Store/heap. Fresh Store creation is the positive lifetime mechanism.
-- The lifetime contract is not documented only in the macro: crates/shamir-sdk/src/host_imports.rs:60 names Store destruction.
-- Guest-local spin can occupy a runtime worker until fuel/epoch interruption, but no measured CPU percentage or latency regression is available.
-- No macro-implementation runtime hot path exists. Parsing/string operations do scale with authored token input, so the literal claim of no unbounded-input work is too strong; no practical compile-time performance defect was established.
-- An uninitialized-buffer optimization must not create initialized u8 slices before initialization; benefit and safe representation need validation.
+## Evidence and recipe corrections
+
+- drop(params) after cloning reduces retention during validation, not the preceding peak where originals and clones coexist.
+- A take API must preserve current first-match lookup behavior and absent/null semantics. A generic swap_remove recipe can reorder remaining Params entries, observable through raw(); scope it or preserve order.
+- Do not form an initialized u8 slice over uninitialized allocation. Retaining zero-fill is a valid current choice.
+- A guest free export would require an ownership/capacity protocol; ptr and len alone are not a universal Vec reconstruction proof.
 
 ---
 

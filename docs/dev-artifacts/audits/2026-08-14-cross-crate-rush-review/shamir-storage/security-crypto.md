@@ -1,29 +1,33 @@
-<!-- revalidation:2026-10-08 source:92ad58266bf57ddea1fa3c8a47affba1a3a9a096 -->
-# shamir-storage — security-crypto revalidation
+<!-- revalidation:2026-10-08 cycle:independent-2 source:e3765c935fc71655ee1ec0160cf180607935d89b -->
+# shamir-storage — security-crypto independent revalidation (cycle 2)
 
-Source snapshot: `92ad58266bf57ddea1fa3c8a47affba1a3a9a096`. Revalidated 2026-10-08 by read-only XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run; no source fix is part of this update. Test registration/assertions are evidence of an oracle, not proof of a passing run.
+Frozen source snapshot: `e3765c935fc71655ee1ec0160cf180607935d89b`. Independently revalidated 2026-10-08 by a fresh XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run. Source-fixed means the specified mechanism was already removed at this snapshot; this cycle implements no source fix.
 
-This section is authoritative for current status. Original titles/IDs are retained for traceability; a refuted title is not a current assertion. The collapsed historical report below is superseded, including its counts, severity, scenarios and fix instructions. Plan IDs preserve historical numbering, not a current release mandate. [Workspace methodology and status definitions](../SUMMARY.md#status-definitions).
+This section is authoritative for current decisions. Existing IDs and allegation titles are retained for traceability; a refuted title is not a current assertion. Prior-cycle decisions were rechecked, not used as proof. The first cycle is available in repository history at this snapshot. The original historical body below remains preserved once and is superseded, including its counts, severities and recipes. [Workspace scope and status definitions](../SUMMARY.md#status-definitions).
 
-No local crypto/unsafe implementation was found. Name handling and hash-input trust assumptions need qualification; raw-key rendering exists, but the alleged Unicode spoofing mechanism is positively refuted.
+Unrelated external edits began in dependency/toolchain/CI metadata during collection; additional Rust-source edits appeared afterward. They were left untouched. Evidence and decisions are tied to the frozen commit, not those later changes or an installed toolchain. “Current” below means current at that snapshot; no re-audit of the modified working tree is implied.
+
+No local cryptographic or unsafe boundary was found. Exact dependencies resolve name and hashing uncertainties: name-limit panics are captured, numeric keyspace directories contradict traversal, and deterministic hashing does not establish a practical remote collision attack.
 
 ## Current claim decisions
 
 | Claim decisions | Open | Source-fixed | Partial | Refuted | Unverified | N/A |
 |---:|---:|---:|---:|---:|---:|---:|
-| 8 | 4 | 1 | 0 | 1 | 1 | 1 |
+| 8 | 5 | 1 | 0 | 1 | 0 | 1 |
 
-These are decisions on report claims, including repeated roots, bundled observations and non-findings—not a unique-bug census. Closed/N/A rows have no current risk; unverified risk is provisional. Pure style and unmeasured optimization claims do not establish runtime impact.
+These are duplicate-inclusive report decisions, not a unique-bug census. Pure style or structural optimization does not establish a runtime incident; unverified impact remains provisional.
 
 <a id="review-1"></a>
 
 ### Claim 1 — Store names passed to the durable engine unvalidated
 
-Status: `unverified`. Current risk: `low` (provisional; not a confirmed defect).
+Status: `confirmed-open`. Current risk: `low`.
 
-The shim forwards names without validation, and authorized table DDL preserves caller names. However, whether pinned fjall accepts pathological names, panics, rejects them, or permits namespace/path exploitation is unverified. This is not an established remote traversal or authorization bypass.
+Prior-cycle decision: `unverified`.
 
-Evidence: [crates/shamir-storage/src/storage_fjall.rs:229](../../../../../crates/shamir-storage/src/storage_fjall.rs#L229); [crates/shamir-storage/src/storage_fjall.rs:247](../../../../../crates/shamir-storage/src/storage_fjall.rs#L247); [crates/shamir-db/src/shamir_db/execute/admin_table_index.rs:40](../../../../../crates/shamir-db/src/shamir_db/execute/admin_table_index.rs#L40); [crates/shamir-db/src/shamir_db/shamir_db/table_management.rs:36](../../../../../crates/shamir-db/src/shamir_db/shamir_db/table_management.rs#L36); [crates/shamir-engine/src/table/table_config.rs:8](../../../../../crates/shamir-engine/src/table/table_config.rs#L8); [Cargo.lock:1332](../../../../../Cargo.lock#L1332).
+Published fjall 3.1.6 src/keyspace/name.rs checks only nonempty and &lt;=255 bytes; src/db.rs asserts it. Shim blocking tasks convert panic to Internal rather than typed validation. Control/path characters are accepted, but src/keyspace/mod.rs uses numeric IDs for directories. Authorized DDL is required; traversal/namespace bypass is refuted by this mechanism.
+
+Evidence: [crates/shamir-storage/src/storage_fjall.rs:234](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-storage/src/storage_fjall.rs#L234); [crates/shamir-db/src/shamir_db/execute/admin_table_index.rs:40](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/execute/admin_table_index.rs#L40); [Cargo.lock:1332](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/Cargo.lock#L1332).
 
 <a id="review-2"></a>
 
@@ -31,9 +35,11 @@ Evidence: [crates/shamir-storage/src/storage_fjall.rs:229](../../../../../crates
 
 Status: `confirmed-open`. Current risk: `low`.
 
-The comments still claim random 128-bit IDs and approximately 2^-128 collisions. RecordId::new instead uses wall-clock timestamp bytes plus a 64-bit Xoshiro tail. No local authentication relies on secrecy; the report's exact PRNG-recovery threshold is unverified.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-storage/src/storage_fjall.rs:154](../../../../../crates/shamir-storage/src/storage_fjall.rs#L154); [crates/shamir-storage/src/storage_fjall.rs:326](../../../../../crates/shamir-storage/src/storage_fjall.rs#L326); [crates/shamir-storage/benches/storage_fjall_pump.rs:96](../../../../../crates/shamir-storage/benches/storage_fjall_pump.rs#L96); [crates/shamir-types/src/types/record_id.rs:24](../../../../../crates/shamir-types/src/types/record_id.rs#L24); [crates/shamir-types/src/types/record_id.rs:41](../../../../../crates/shamir-types/src/types/record_id.rs#L41); [crates/shamir-types/src/types/record_id.rs:80](../../../../../crates/shamir-types/src/types/record_id.rs#L80).
+RecordId::new combines wall-clock-relative timestamp with a 64-bit thread-local Xoshiro tail. It is not uniformly random, monotonic or unique-by-construction. No auth secrecy requirement or exact recovery threshold is established.
+
+Evidence: [crates/shamir-types/src/types/record_id.rs:24](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-types/src/types/record_id.rs#L24); [crates/shamir-types/src/types/record_id.rs:41](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-types/src/types/record_id.rs#L41); [crates/shamir-storage/src/storage_fjall.rs:154](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-storage/src/storage_fjall.rs#L154).
 
 <a id="review-3"></a>
 
@@ -41,9 +47,11 @@ Evidence: [crates/shamir-storage/src/storage_fjall.rs:154](../../../../../crates
 
 Status: `confirmed-open`. Current risk: `low`.
 
-dirty accepts caller-supplied keys and the repository map accepts caller-derived names through THasher. This contradicts the blanket trust premise. Legacy posting keys contain hashes rather than verbatim values; sorted keys contain encoded values. Collision-farming practicality and the claimed remote latency amplifier remain unverified.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-storage/src/storage_membuffer.rs:154](../../../../../crates/shamir-storage/src/storage_membuffer.rs#L154); [crates/shamir-storage/src/storage_membuffer.rs:763](../../../../../crates/shamir-storage/src/storage_membuffer.rs#L763); [crates/shamir-storage/src/storage_in_memory.rs:42](../../../../../crates/shamir-storage/src/storage_in_memory.rs#L42); [crates/shamir-types/src/types/common.rs:8](../../../../../crates/shamir-types/src/types/common.rs#L8); [crates/shamir-collections/src/lib.rs:17](../../../../../crates/shamir-collections/src/lib.rs#L17); [crates/shamir-index/src/base_index/index_record_key.rs:102](../../../../../crates/shamir-index/src/base_index/index_record_key.rs#L102); [crates/shamir-index/src/base_index/sorted_index_manager.rs:2687](../../../../../crates/shamir-index/src/base_index/sorted_index_manager.rs#L2687); [Cargo.lock:3007](../../../../../Cargo.lock#L3007).
+Caller keys/names reach THasher. Exact rustc-hash 2.1.2 uses deterministic hash_bytes compression, not merely the older multiply-xor description. Legacy postings encode hashes; sorted keys encode values. Practical collision sets and remote amplification remain unverified.
+
+Evidence: [crates/shamir-storage/src/storage_membuffer.rs:154](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-storage/src/storage_membuffer.rs#L154); [crates/shamir-collections/src/lib.rs:17](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-collections/src/lib.rs#L17); [crates/shamir-index/src/base_index/sorted_index_manager.rs:2687](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-index/src/base_index/sorted_index_manager.rs#L2687); [Cargo.lock:3007](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/Cargo.lock#L3007).
 
 <a id="review-4"></a>
 
@@ -51,19 +59,23 @@ Evidence: [crates/shamir-storage/src/storage_membuffer.rs:154](../../../../../cr
 
 Status: `confirmed-open`. Current risk: `low`.
 
-Errors still include the entire key, making unbounded key disclosure/log volume a real hygiene concern. KeyBytes Debug renders numeric byte arrays, not decoded Unicode, so BiDi/newline spoofing through the alleged rendering mechanism is refuted. Cross-tenant disclosure was not demonstrated.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-storage/src/storage_fjall.rs:419](../../../../../crates/shamir-storage/src/storage_fjall.rs#L419); [crates/shamir-storage/src/storage_in_memory.rs:140](../../../../../crates/shamir-storage/src/storage_in_memory.rs#L140); [crates/shamir-storage/src/storage_membuffer.rs:797](../../../../../crates/shamir-storage/src/storage_membuffer.rs#L797); [crates/shamir-storage/src/key_bytes.rs:233](../../../../../crates/shamir-storage/src/key_bytes.rs#L233); [crates/shamir-storage/src/key_bytes/tests/debug_tests.rs:17](../../../../../crates/shamir-storage/src/key_bytes/tests/debug_tests.rs#L17).
+Missing-key errors format the full numeric byte slice, allowing large diagnostic strings for direct long-key callers. Encoded sorted values can appear as numbers; cross-tenant delivery and decoded Unicode spoofing are not established.
+
+Evidence: [crates/shamir-storage/src/storage_fjall.rs:419](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-storage/src/storage_fjall.rs#L419); [crates/shamir-storage/src/storage_in_memory.rs:140](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-storage/src/storage_in_memory.rs#L140); [crates/shamir-storage/src/key_bytes.rs:237](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-storage/src/key_bytes.rs#L237).
 
 <a id="review-4-bidi"></a>
 
 ### Claim 4.BiDi — Printable Unicode/BiDi characters survive raw-key Debug rendering
 
-Status: `refuted`. Current risk: —.
+Status: `refuted`. Current risk: `—`.
 
-Debug explicitly delegates to &[u8] formatting, and a registered test compares its output to byte-slice Debug. UTF-8 bytes are printed as numeric elements, not terminal control characters.
+Prior-cycle decision: `refuted`.
 
-Evidence: [crates/shamir-storage/src/key_bytes.rs:237](../../../../../crates/shamir-storage/src/key_bytes.rs#L237); [crates/shamir-storage/src/key_bytes/tests/debug_tests.rs:17](../../../../../crates/shamir-storage/src/key_bytes/tests/debug_tests.rs#L17); [crates/shamir-storage/src/key_bytes/tests/mod.rs:7](../../../../../crates/shamir-storage/src/key_bytes/tests/mod.rs#L7).
+Debug delegates to &[u8], printing numerical byte elements rather than UTF-8 characters. Registered Debug parity tests directly pin this rendering; the alleged control-character mechanism does not exist.
+
+Evidence: [crates/shamir-storage/src/key_bytes.rs:237](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-storage/src/key_bytes.rs#L237); [crates/shamir-storage/src/key_bytes/tests/debug_tests.rs:17](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-storage/src/key_bytes/tests/debug_tests.rs#L17).
 
 <a id="review-5"></a>
 
@@ -71,38 +83,43 @@ Evidence: [crates/shamir-storage/src/key_bytes.rs:237](../../../../../crates/sha
 
 Status: `confirmed-open`. Current risk: `nit`.
 
-ByteBuf is fully deserialized before from_slice, with no key-size policy; long inputs are then copied into a second heap buffer. The alias has already flipped, but inspected WAL serialization still uses Bytes, so a direct remote KeyBytes decoder exposure was not established.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-storage/src/key_bytes.rs:308](../../../../../crates/shamir-storage/src/key_bytes.rs#L308); [crates/shamir-storage/src/key_bytes.rs:310](../../../../../crates/shamir-storage/src/key_bytes.rs#L310); [crates/shamir-storage/src/key_bytes.rs:111](../../../../../crates/shamir-storage/src/key_bytes.rs#L111); [crates/shamir-storage/src/types.rs:9](../../../../../crates/shamir-storage/src/types.rs#L9); [crates/shamir-wal/src/wal_entry_v2.rs:87](../../../../../crates/shamir-wal/src/wal_entry_v2.rs#L87); [crates/shamir-wal/src/wal_entry_v2.rs:121](../../../../../crates/shamir-wal/src/wal_entry_v2.rs#L121).
+Deserialize materializes ByteBuf before constructing/copying KeyBytes, without its own size cap. Exact serde_bytes 0.11.19 visit_seq caps initial reservation at 4096 but permits subsequent growth; byte-buffer dispatch depends on the decoder. WAL uses Bytes, so no direct remote KeyBytes decoder is proven.
+
+Evidence: [crates/shamir-storage/src/key_bytes.rs:310](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-storage/src/key_bytes.rs#L310); [crates/shamir-storage/src/key_bytes.rs:111](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-storage/src/key_bytes.rs#L111); [crates/shamir-wal/src/wal_entry_v2.rs:87](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-wal/src/wal_entry_v2.rs#L87); [Cargo.lock:3214](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/Cargo.lock#L3214).
 
 <a id="review-nf-boundary"></a>
 
 ### Claim NF-boundary — No auth/crypto/TLS surface, no unsafe blocks, and no local secret comparison
 
-Status: `not-applicable`. Current risk: —.
+Status: `not-applicable`. Current risk: `—`.
 
-These local observations hold. Ordinary byte equality is not a demonstrated secret-dependent security boundary in this crate.
+Prior-cycle decision: `not-applicable`.
 
-Evidence: [crates/shamir-storage/src/lib.rs:16](../../../../../crates/shamir-storage/src/lib.rs#L16); [crates/shamir-storage/src/key_bytes.rs:43](../../../../../crates/shamir-storage/src/key_bytes.rs#L43); [crates/shamir-storage/src/key_bytes.rs:250](../../../../../crates/shamir-storage/src/key_bytes.rs#L250).
+Local code has no auth/TLS primitive, unsafe block or demonstrated secret comparison. Ordinary key equality has no established constant-time obligation here; dependencies may contain unsafe code.
+
+Evidence: [crates/shamir-storage/src/lib.rs:16](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-storage/src/lib.rs#L16); [crates/shamir-storage/src/key_bytes.rs:250](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-storage/src/key_bytes.rs#L250).
 
 <a id="review-nf-hydration"></a>
 
 ### Claim NF-hydration — MirroredStore hydration re-filters classifier drift/tampered mirror entries
 
-Status: `fixed`. Current risk: —.
+Status: `fixed`. Current risk: `—`.
 
-Source reclassifies each hydrated key and skips/warns on rejection. Registered tests check excluded entries and captured warnings. This protects classification only, not authenticity or validity of allowed-key values; the tag inventory is manually maintained.
+Prior-cycle decision: `fixed`.
 
-Evidence: [crates/shamir-storage/src/storage_mirrored.rs:276](../../../../../crates/shamir-storage/src/storage_mirrored.rs#L276); [crates/shamir-storage/src/tests/storage_mirrored_tests.rs:244](../../../../../crates/shamir-storage/src/tests/storage_mirrored_tests.rs#L244); [crates/shamir-storage/src/tests/storage_mirrored_tests.rs:1029](../../../../../crates/shamir-storage/src/tests/storage_mirrored_tests.rs#L1029); [crates/shamir-storage/src/tests/mod.rs:6](../../../../../crates/shamir-storage/src/tests/mod.rs#L6).
+Construction checks the classifier before primary publication and warns on rejection. Registered test checks a rejected Count key, valid control and warning count. The historical repair proves classification, not allowed-value authenticity or automatic inventory exhaustiveness.
 
-## Corrections and qualified non-findings
+Evidence: [crates/shamir-storage/src/storage_mirrored.rs:276](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-storage/src/storage_mirrored.rs#L276); [crates/shamir-storage/src/tests/storage_mirrored_tests.rs:244](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-storage/src/tests/storage_mirrored_tests.rs#L244); [crates/shamir-storage/src/tests/storage_mirrored_tests.rs:1029](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-storage/src/tests/storage_mirrored_tests.rs#L1029).
 
-- Threat model: direct Store callers or callers with relevant DDL/write authorization, not an unauthenticated client.
-- Name validation is O(name length), not O(1), when scanning characters.
-- Do not describe timestamp-prefixed randomized IDs as monotonic or unique-by-construction.
-- Legacy posting values are hashed, not stored verbatim; the classifier comment/test uses a different illustrative key shape.
-- A post-allocation length rejection does not prevent the pre-allocation DoS alleged in finding 5.
-- The safe-today claim based on KeyBytes being unused is stale; the inspected WAL/client boundary does not automatically deserialize RecordKey.
+## Evidence and recipe corrections
+
+- Exact name behavior is available at https://docs.rs/crate/fjall/3.1.6/source/src/keyspace/name.rs. Its character-restriction comment is broader than its implementation; only byte length/nonempty is checked.
+- Do not canonicalize existing accepted names or impose ASCII-only policy without compatibility and authorization analysis. Validate actual backend limits and distinguish captured task panic from process termination.
+- Exact FxHasher source is https://docs.rs/crate/rustc-hash/2.1.2/source/src/lib.rs. Deterministic hashing supports the trust-premise concern, not the historical claim of trivially manufactured practical collisions.
+- A post-ByteBuf length check cannot prevent earlier allocation. Decoder limits and public constructor policy are separate; neither a universal allocation bypass nor universal protection is established.
+- Classifier tests use a manually maintained tag inventory; illustrative posting/sorted-key shapes do not match all actual production encodings.
 
 ---
 

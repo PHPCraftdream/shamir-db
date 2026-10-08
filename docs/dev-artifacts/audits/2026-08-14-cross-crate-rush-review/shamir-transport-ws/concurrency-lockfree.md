@@ -1,11 +1,13 @@
-<!-- revalidation:2026-10-08 source:92ad58266bf57ddea1fa3c8a47affba1a3a9a096 -->
-# shamir-transport-ws — concurrency-lockfree revalidation
+<!-- revalidation:2026-10-08 cycle:independent-2 source:e3765c935fc71655ee1ec0160cf180607935d89b -->
+# shamir-transport-ws — concurrency-lockfree independent revalidation (cycle 2)
 
-Source snapshot: `92ad58266bf57ddea1fa3c8a47affba1a3a9a096`. Revalidated 2026-10-08 by read-only XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run; no source fix is part of this update. Test registration/assertions are evidence of an oracle, not proof of a passing run.
+Frozen source snapshot: `e3765c935fc71655ee1ec0160cf180607935d89b`. Independently revalidated 2026-10-08 by a fresh XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run. Source-fixed means the specified mechanism was already removed at this snapshot; this cycle implements no source fix.
 
-This section is authoritative for current status. Original titles/IDs are retained for traceability; a refuted title is not a current assertion. The collapsed historical report below is superseded, including its counts, severity, scenarios and fix instructions. Plan IDs preserve historical numbering, not a current release mandate. [Workspace methodology and status definitions](../SUMMARY.md#status-definitions).
+This section is authoritative for current decisions. Existing IDs and allegation titles are retained for traceability; a refuted title is not a current assertion. Prior-cycle decisions were rechecked, not used as proof. The first cycle is available in repository history at this snapshot. The original historical body below remains preserved once and is superseded, including its counts, severities and recipes. [Workspace scope and status definitions](../SUMMARY.md#status-definitions).
 
-Both allocation findings remain structurally true. Absence of crate-owned locks is confirmed, but complete-stack lock freedom, zero-allocation receive behavior, and simultaneous bidirectional test coverage were overstated.
+Unrelated external edits began in dependency/toolchain/CI metadata during collection; additional Rust-source edits appeared afterward. They were left untouched. Evidence and decisions are tied to the frozen commit, not those later changes or an installed toolchain. “Current” below means current at that snapshot; no re-audit of the modified working tree is implied.
+
+Allocation and clone mechanisms are confirmed, but neither is a measured throughput regression. Crate-owned synchronization is absent; deployed split halves use dependency synchronization and the current test is not simultaneous bidirectional traffic.
 
 ## Current claim decisions
 
@@ -13,7 +15,7 @@ Both allocation findings remain structurally true. Absence of crate-owned locks 
 |---:|---:|---:|---:|---:|---:|---:|
 | 2 | 2 | 0 | 0 | 0 | 0 | 0 |
 
-These are decisions on report claims, including repeated roots, bundled observations and non-findings—not a unique-bug census. Closed/N/A rows have no current risk; unverified risk is provisional. Pure style and unmeasured optimization claims do not establish runtime impact.
+These are duplicate-inclusive report decisions, not a unique-bug census. Pure style or structural optimization does not establish a runtime incident; unverified impact remains provisional.
 
 <a id="review-1"></a>
 
@@ -21,11 +23,13 @@ These are decisions on report claims, including repeated roots, bundled observat
 
 Status: `confirmed-open`. Current risk: `low`.
 
-ws_send_sink allocates and copies every payload. Production WS writers still use it and inherit the borrowed prereserved default. Receive scratch reuse is only conditional adapter-level reuse.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-transport-ws/src/framing.rs:119](../../../../../crates/shamir-transport-ws/src/framing.rs#L119); [crates/shamir-server/src/framer.rs:110](../../../../../crates/shamir-server/src/framer.rs#L110); [crates/shamir-server/src/framer.rs:357](../../../../../crates/shamir-server/src/framer.rs#L357).
+The WS writer rebuilds a prefixed Vec from borrowed payload bytes. Receive reuse applies only to fitting caller scratch; exact tungstenite 0.24.0 allocates frame/message storage and production allocates fresh request Vecs.
 
-Grouping/duplicate: `performance-hotpath.md#1`. This row is not another independent defect.
+Evidence: [crates/shamir-transport-ws/src/framing.rs:119](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-transport-ws/src/framing.rs#L119); [crates/shamir-server/src/framer.rs:123](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-server/src/framer.rs#L123); [crates/shamir-server/src/framer.rs:357](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-server/src/framer.rs#L357); [crates/shamir-server/src/connection/request_loop.rs:278](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-server/src/connection/request_loop.rs#L278).
+
+Grouping/duplicate: [performance-hotpath.md#1](performance-hotpath.md#review-1). This is not an additional independent defect.
 
 <a id="review-2"></a>
 
@@ -33,16 +37,18 @@ Grouping/duplicate: `performance-hotpath.md#1`. This row is not another independ
 
 Status: `confirmed-open`. Current risk: `low`.
 
-The policy remains Vec<String> with derived Clone. Transport accept clones it, and the production listener separately clones it before spawning each connection.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-transport-ws/src/browser.rs:22](../../../../../crates/shamir-transport-ws/src/browser.rs#L22); [crates/shamir-transport-ws/src/server.rs:118](../../../../../crates/shamir-transport-ws/src/server.rs#L118); [crates/shamir-server/src/server/server_launcher.rs:1472](../../../../../crates/shamir-server/src/server/server_launcher.rs#L1472).
+Derived Clone copies Vec&lt;String&gt; in the launcher and again in the transport. The exact callback permits a borrow, while Arc sharing can remove the launcher copy. Cost depends on configured policy size and connection churn.
 
-## Corrections and qualified non-findings
+Evidence: [crates/shamir-transport-ws/src/browser.rs:22](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-transport-ws/src/browser.rs#L22); [crates/shamir-transport-ws/src/server.rs:118](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-transport-ws/src/server.rs#L118); [crates/shamir-server/src/server/server_launcher.rs:1472](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-server/src/server/server_launcher.rs#L1472); [Cargo.lock:4467](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/Cargo.lock#L4467).
 
-- Source confirms no crate-owned Mutex/RwLock/parking_lot, atomics, concurrent maps, synchronous socket I/O, or spawned production tasks. This does not prove underlying futures split or WebSocket dependencies are lock-free.
-- split_halves_concurrent_send_recv runs a client sender against a server reader; server_sink only closes afterward. It does not test simultaneous server send and receive.
-- Receive scratch capacity reuse is established by source and assertions for fitting payloads, not end-to-end zero allocation. The production concurrent request loop creates a fresh frame Vec per request at request_loop.rs:278.
-- The source proves allocation/copy structure, not contention or latency. An ownership-taking send API also needs an ownership-capable production writer/caller interface.
+## Evidence and recipe corrections
+
+- futures-util 0.3.32 SplitStream and SplitSink both poll a BiLock; full-stack lock freedom is positively contradicted, not merely unverified. The guard is released after each poll, so this does not demonstrate a lock held across an entire await. Source: https://docs.rs/crate/futures-util/0.3.32/source/src/stream/stream/split.rs.
+- split_halves_concurrent_send_recv never sends a server payload while reading one. Its writer is the peer, and server_sink only closes afterward.
+- Ownership-taking send changes must propagate through the borrowed FrameWriter interface and preserve response-budget guard lifetime until completion or failure.
+- A borrowed callback is supported by the exact 0.24.0 sources; an explicit lifetime annotation or new Arc-specific public accept API is not inherently necessary.
 
 ---
 

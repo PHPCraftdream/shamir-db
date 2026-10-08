@@ -1,11 +1,13 @@
-<!-- revalidation:2026-10-08 source:92ad58266bf57ddea1fa3c8a47affba1a3a9a096 -->
-# shamir-tx — performance-hotpath revalidation
+<!-- revalidation:2026-10-08 cycle:independent-2 source:e3765c935fc71655ee1ec0160cf180607935d89b -->
+# shamir-tx — performance-hotpath independent revalidation (cycle 2)
 
-Source snapshot: `92ad58266bf57ddea1fa3c8a47affba1a3a9a096`. Revalidated 2026-10-08 by read-only XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run; no source fix is part of this update. Test registration/assertions are evidence of an oracle, not proof of a passing run.
+Frozen source snapshot: `e3765c935fc71655ee1ec0160cf180607935d89b`. Independently revalidated 2026-10-08 by a fresh XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run. Source-fixed means the specified mechanism was already removed at this snapshot; this cycle implements no source fix.
 
-This section is authoritative for current status. Original titles/IDs are retained for traceability; a refuted title is not a current assertion. The collapsed historical report below is superseded, including its counts, severity, scenarios and fix instructions. Plan IDs preserve historical numbering, not a current release mandate. [Workspace methodology and status definitions](../SUMMARY.md#status-definitions).
+This section is authoritative for current decisions. Existing IDs and allegation titles are retained for traceability; a refuted title is not a current assertion. Prior-cycle decisions were rechecked, not used as proof. The first cycle is available in repository history at this snapshot. The original historical body below remains preserved once and is superseded, including its counts, severities and recipes. [Workspace scope and status definitions](../SUMMARY.md#status-definitions).
 
-All reported storage-call, allocation and traversal shapes remain. The later borrowed-staging change removed a different intermediate vector, not these findings. Timing and scale-dependent harm remain unmeasured.
+Unrelated external edits began in dependency/toolchain/CI metadata during collection; additional Rust-source edits appeared afterward. They were left untouched. Evidence and decisions are tied to the frozen commit, not those later changes or an installed toolchain. “Current” below means current at that snapshot; no re-audit of the modified working tree is implied.
+
+The stated operation/allocation shapes persist. Exact IndexMap removal cost is now verified. Backend-dependent timings remain unmeasured, and proposed optimizations require ordering, snapshot, and error-semantic preservation.
 
 ## Current claim decisions
 
@@ -13,7 +15,7 @@ All reported storage-call, allocation and traversal shapes remain. The later bor
 |---:|---:|---:|---:|---:|---:|---:|
 | 14 | 13 | 0 | 0 | 0 | 0 | 1 |
 
-These are decisions on report claims, including repeated roots, bundled observations and non-findings—not a unique-bug census. Closed/N/A rows have no current risk; unverified risk is provisional. Pure style and unmeasured optimization claims do not establish runtime impact.
+These are duplicate-inclusive report decisions, not a unique-bug census. Pure style or structural optimization does not establish a runtime incident; unverified impact remains provisional.
 
 <a id="review-1"></a>
 
@@ -21,9 +23,11 @@ These are decisions on report claims, including repeated roots, bundled observat
 
 Status: `confirmed-open`. Current risk: `medium`.
 
-Fast reclaim performs a timestamp get and two removals after the write; scan reclaim adds a duplicate timestamp get only with an age cap. Backend round-trips and timing vary.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-tx/src/mvcc_store/mvcc_gc.rs:105](../../../../../crates/shamir-tx/src/mvcc_store/mvcc_gc.rs#L105); [crates/shamir-tx/src/mvcc_store/mvcc_gc.rs:109](../../../../../crates/shamir-tx/src/mvcc_store/mvcc_gc.rs#L109); [crates/shamir-tx/src/mvcc_store/mvcc_gc.rs:229](../../../../../crates/shamir-tx/src/mvcc_store/mvcc_gc.rs#L229); [crates/shamir-tx/src/mvcc_store/mvcc_gc.rs:245](../../../../../crates/shamir-tx/src/mvcc_store/mvcc_gc.rs#L245); [crates/shamir-tx/src/mvcc_store/mod.rs:830](../../../../../crates/shamir-tx/src/mvcc_store/mod.rs#L830).
+Deferred reclaim awaits one timestamp get and two removals; age-capped scan reclaim adds another timestamp get. These follow direct writes rather than joining their transact. No measured latency or universal disk round-trip count follows.
+
+Evidence: [crates/shamir-tx/src/mvcc_store/mvcc_gc.rs:105](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-tx/src/mvcc_store/mvcc_gc.rs#L105); [crates/shamir-tx/src/mvcc_store/mvcc_gc.rs:229](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-tx/src/mvcc_store/mvcc_gc.rs#L229); [crates/shamir-tx/src/mvcc_store/mvcc_gc.rs:245](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-tx/src/mvcc_store/mvcc_gc.rs#L245); [crates/shamir-tx/src/mvcc_store/mod.rs:830](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-tx/src/mvcc_store/mod.rs#L830).
 
 <a id="review-2"></a>
 
@@ -31,9 +35,11 @@ Evidence: [crates/shamir-tx/src/mvcc_store/mvcc_gc.rs:105](../../../../../crates
 
 Status: `confirmed-open`. Current risk: `high`.
 
-Both accumulate global per-key maps before deletion. gc_below stores below-threshold entries; purge stores all decoded versions. Memory scales with buffered history, although no RSS magnitude was measured.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-tx/src/mvcc_store/mvcc_gc.rs:309](../../../../../crates/shamir-tx/src/mvcc_store/mvcc_gc.rs#L309); [crates/shamir-tx/src/mvcc_store/mvcc_gc.rs:314](../../../../../crates/shamir-tx/src/mvcc_store/mvcc_gc.rs#L314); [crates/shamir-tx/src/mvcc_store/mvcc_gc.rs:405](../../../../../crates/shamir-tx/src/mvcc_store/mvcc_gc.rs#L405); [crates/shamir-tx/src/mvcc_store/mvcc_gc.rs:410](../../../../../crates/shamir-tx/src/mvcc_store/mvcc_gc.rs#L410).
+gc_below scans globally and buffers below-threshold versions; purge buffers every decoded version before reclamation. Temporary memory scales with buffered history without a chunk bound. High applies to sufficiently large retained histories, not a measured RSS threshold.
+
+Evidence: [crates/shamir-tx/src/mvcc_store/mvcc_gc.rs:309](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-tx/src/mvcc_store/mvcc_gc.rs#L309); [crates/shamir-tx/src/mvcc_store/mvcc_gc.rs:314](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-tx/src/mvcc_store/mvcc_gc.rs#L314); [crates/shamir-tx/src/mvcc_store/mvcc_gc.rs:405](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-tx/src/mvcc_store/mvcc_gc.rs#L405).
 
 <a id="review-3"></a>
 
@@ -41,9 +47,11 @@ Evidence: [crates/shamir-tx/src/mvcc_store/mvcc_gc.rs:309](../../../../../crates
 
 Status: `confirmed-open`. Current risk: `medium`.
 
-Every scan-path vacuum computes the minimum by traversing distinct snapshot-version entries. No minimum cache or ordered replacement exists.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-tx/src/repo_tx_gate.rs:659](../../../../../crates/shamir-tx/src/repo_tx_gate.rs#L659); [crates/shamir-tx/src/mvcc_store/mvcc_gc.rs:156](../../../../../crates/shamir-tx/src/mvcc_store/mvcc_gc.rs#L156).
+Scan-path vacuum recomputes the minimum by traversing distinct registered snapshot versions. Refcount deduplication can make this much smaller than concurrent-reader count; scale and latency are unmeasured.
+
+Evidence: [crates/shamir-tx/src/repo_tx_gate.rs:659](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-tx/src/repo_tx_gate.rs#L659); [crates/shamir-tx/src/mvcc_store/mvcc_gc.rs:156](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-tx/src/mvcc_store/mvcc_gc.rs#L156).
 
 <a id="review-4"></a>
 
@@ -51,9 +59,11 @@ Evidence: [crates/shamir-tx/src/repo_tx_gate.rs:659](../../../../../crates/shami
 
 Status: `confirmed-open`. Current risk: `medium`.
 
-Sorted posting vectors are still scanned with iter().any inside the nested commit-window validation. Worst-case work is proportional to window × dependencies × postings.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-tx/src/repo_tx_gate.rs:1015](../../../../../crates/shamir-tx/src/repo_tx_gate.rs#L1015); [crates/shamir-tx/src/repo_tx_gate.rs:1089](../../../../../crates/shamir-tx/src/repo_tx_gate.rs#L1089); [crates/shamir-tx/src/repo_tx_gate.rs:876](../../../../../crates/shamir-tx/src/repo_tx_gate.rs#L876).
+Posting vectors are sorted but searched linearly inside nested window/dependency validation. Binary-search replacement must intersect bounds with the requested index prefix because one table footprint can contain multiple indexes.
+
+Evidence: [crates/shamir-tx/src/repo_tx_gate.rs:1015](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-tx/src/repo_tx_gate.rs#L1015); [crates/shamir-tx/src/repo_tx_gate.rs:1078](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-tx/src/repo_tx_gate.rs#L1078); [crates/shamir-tx/src/repo_tx_gate.rs:1089](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-tx/src/repo_tx_gate.rs#L1089).
 
 <a id="review-5"></a>
 
@@ -61,9 +71,11 @@ Evidence: [crates/shamir-tx/src/repo_tx_gate.rs:1015](../../../../../crates/sham
 
 Status: `confirmed-open`. Current risk: `medium`.
 
-Each eligible decoded row copies its original key before detecting a group change, and flushing uses order-preserving shift_remove. Exact pinned IndexMap implementation costs were not independently inspected.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-tx/src/mvcc_store/version_entry.rs:193](../../../../../crates/shamir-tx/src/mvcc_store/version_entry.rs#L193); [crates/shamir-tx/src/mvcc_store/version_entry.rs:194](../../../../../crates/shamir-tx/src/mvcc_store/version_entry.rs#L194); [crates/shamir-tx/src/mvcc_store/version_entry.rs:124](../../../../../crates/shamir-tx/src/mvcc_store/version_entry.rs#L124); [Cargo.lock:1782](../../../../../Cargo.lock#L1782).
+Eligible rows copy orig before checking group change. Exact indexmap 2.14.0 shift_remove_finish updates trailing indices and calls Vec::remove, confirming linear removal work. Published source: https://docs.rs/crate/indexmap/2.14.0/source/src/inner.rs. Swapping removal changes leftover order and needs a contract decision.
+
+Evidence: [crates/shamir-tx/src/mvcc_store/version_entry.rs:193](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-tx/src/mvcc_store/version_entry.rs#L193); [crates/shamir-tx/src/mvcc_store/version_entry.rs:124](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-tx/src/mvcc_store/version_entry.rs#L124); [Cargo.lock:1782](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/Cargo.lock#L1782).
 
 <a id="review-6"></a>
 
@@ -71,11 +83,13 @@ Evidence: [crates/shamir-tx/src/mvcc_store/version_entry.rs:193](../../../../../
 
 Status: `confirmed-open`. Current risk: `medium`.
 
-Released locks retain map entries for all distinct acquired keys. The suggested unconditional remove would break lock identity for outstanding requesters.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-tx/src/mvcc_store/mvcc_locks.rs:75](../../../../../crates/shamir-tx/src/mvcc_store/mvcc_locks.rs#L75); [crates/shamir-tx/src/mvcc_store/mvcc_locks.rs:223](../../../../../crates/shamir-tx/src/mvcc_store/mvcc_locks.rs#L223).
+Empty holders do not remove the registry entry. A naive eviction allows a previously cloned old lock and a new registry lock to coexist for the same key.
 
-Grouping/duplicate: `concurrency-lockfree.md#2`. This row is not another independent defect.
+Evidence: [crates/shamir-tx/src/mvcc_store/mvcc_locks.rs:75](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-tx/src/mvcc_store/mvcc_locks.rs#L75); [crates/shamir-tx/src/mvcc_store/mvcc_locks.rs:225](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-tx/src/mvcc_store/mvcc_locks.rs#L225).
+
+Grouping/duplicate: [concurrency-lockfree.md#2](concurrency-lockfree.md#review-2). This is not an additional independent defect.
 
 <a id="review-7"></a>
 
@@ -83,9 +97,11 @@ Grouping/duplicate: `concurrency-lockfree.md#2`. This row is not another indepen
 
 Status: `confirmed-open`. Current risk: `low`.
 
-Timestamp resolution remains an awaited point lookup per timeline entry; get_many is not used on this administrative path.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-tx/src/mvcc_store/mvcc_history.rs:211](../../../../../crates/shamir-tx/src/mvcc_store/mvcc_history.rs#L211); [crates/shamir-tx/src/mvcc_store/mod.rs:1625](../../../../../crates/shamir-tx/src/mvcc_store/mod.rs#L1625).
+The timeline loop separately awaits each timestamp lookup. Batching can preserve output order and missing-timestamp semantics; backend speedup is unmeasured.
+
+Evidence: [crates/shamir-tx/src/mvcc_store/mvcc_history.rs:211](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-tx/src/mvcc_store/mvcc_history.rs#L211).
 
 <a id="review-8"></a>
 
@@ -93,9 +109,11 @@ Evidence: [crates/shamir-tx/src/mvcc_store/mvcc_history.rs:211](../../../../../c
 
 Status: `confirmed-open`. Current risk: `low`.
 
-Fallback slots resolve sequentially; get_at_many rereads current_version. Cold-heavy startup can exercise every fallback, but its prevalence and timings were not measured.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-tx/src/mvcc_store/mod.rs:1203](../../../../../crates/shamir-tx/src/mvcc_store/mod.rs#L1203); [crates/shamir-tx/src/mvcc_store/mod.rs:1607](../../../../../crates/shamir-tx/src/mvcc_store/mod.rs#L1607); [crates/shamir-tx/src/mvcc_store/mod.rs:1611](../../../../../crates/shamir-tx/src/mvcc_store/mod.rs#L1611).
+Fallback and cold slots are awaited sequentially; get_at_many rereads current_version. Removing that re-probe must preserve behavior when a cell changes after classification, not just operation count.
+
+Evidence: [crates/shamir-tx/src/mvcc_store/mod.rs:1203](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-tx/src/mvcc_store/mod.rs#L1203); [crates/shamir-tx/src/mvcc_store/mod.rs:1607](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-tx/src/mvcc_store/mod.rs#L1607); [crates/shamir-tx/src/mvcc_store/mod.rs:1611](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-tx/src/mvcc_store/mod.rs#L1611).
 
 <a id="review-9"></a>
 
@@ -103,9 +121,11 @@ Evidence: [crates/shamir-tx/src/mvcc_store/mod.rs:1203](../../../../../crates/sh
 
 Status: `confirmed-open`. Current risk: `low`.
 
-The key-major tree is fully iterated, qualifying keys are cloned into a vector, then separately removed. A version-only upper bound cannot be applied to this existing ordering.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-tx/src/versioned_overlay.rs:40](../../../../../crates/shamir-tx/src/versioned_overlay.rs#L40); [crates/shamir-tx/src/versioned_overlay.rs:178](../../../../../crates/shamir-tx/src/versioned_overlay.rs#L178); [crates/shamir-tx/src/versioned_overlay.rs:192](../../../../../crates/shamir-tx/src/versioned_overlay.rs#L192).
+The key-major tree is fully filtered, qualifying keys cloned into a vector, then removed separately. A version-only upper bound cannot restrict this existing ordering.
+
+Evidence: [crates/shamir-tx/src/versioned_overlay.rs:40](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-tx/src/versioned_overlay.rs#L40); [crates/shamir-tx/src/versioned_overlay.rs:178](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-tx/src/versioned_overlay.rs#L178); [crates/shamir-tx/src/versioned_overlay.rs:192](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-tx/src/versioned_overlay.rs#L192).
 
 <a id="review-10"></a>
 
@@ -113,9 +133,11 @@ Evidence: [crates/shamir-tx/src/versioned_overlay.rs:40](../../../../../crates/s
 
 Status: `confirmed-open`. Current risk: `low`.
 
-Each RecordChange still owns a cloned String. Borrowed iter_ops removes the staging snapshot vector, not these clones; one clone per token cannot populate multiple owned String fields.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-tx/src/changefeed.rs:459](../../../../../crates/shamir-tx/src/changefeed.rs#L459); [crates/shamir-tx/src/changefeed.rs:462](../../../../../crates/shamir-tx/src/changefeed.rs#L462); [crates/shamir-tx/src/changefeed.rs:470](../../../../../crates/shamir-tx/src/changefeed.rs#L470); [crates/shamir-tx/src/changefeed.rs:60](../../../../../crates/shamir-tx/src/changefeed.rs#L60).
+Each RecordChange owns its own String clone. Borrowed staging iteration removed an intermediate vector, not these allocations. One clone cannot populate multiple owned fields without changing representation.
+
+Evidence: [crates/shamir-tx/src/changefeed.rs:60](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-tx/src/changefeed.rs#L60); [crates/shamir-tx/src/changefeed.rs:459](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-tx/src/changefeed.rs#L459); [crates/shamir-tx/src/changefeed.rs:462](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-tx/src/changefeed.rs#L462).
 
 <a id="review-11"></a>
 
@@ -123,9 +145,11 @@ Evidence: [crates/shamir-tx/src/changefeed.rs:459](../../../../../crates/shamir-
 
 Status: `confirmed-open`. Current risk: `low`.
 
-WRITER_BATCH bounds a receive loop whose individual events each await put. The trait has no batch seam; overflow rate and resulting throughput impact were not measured.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-tx/src/changefeed.rs:154](../../../../../crates/shamir-tx/src/changefeed.rs#L154); [crates/shamir-tx/src/changefeed.rs:599](../../../../../crates/shamir-tx/src/changefeed.rs#L599); [crates/shamir-tx/src/changefeed.rs:602](../../../../../crates/shamir-tx/src/changefeed.rs#L602); [crates/shamir-tx/src/changefeed.rs:645](../../../../../crates/shamir-tx/src/changefeed.rs#L645).
+WRITER_BATCH limits receives, not storage batching. Each event awaits put and the trait has no batch method. Queue overflow is possible by design, but its frequency was not measured.
+
+Evidence: [crates/shamir-tx/src/changefeed.rs:154](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-tx/src/changefeed.rs#L154); [crates/shamir-tx/src/changefeed.rs:599](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-tx/src/changefeed.rs#L599); [crates/shamir-tx/src/changefeed.rs:645](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-tx/src/changefeed.rs#L645).
 
 <a id="review-12"></a>
 
@@ -133,9 +157,11 @@ Evidence: [crates/shamir-tx/src/changefeed.rs:154](../../../../../crates/shamir-
 
 Status: `confirmed-open`. Current risk: `nit`.
 
-Both methods still clone keys into a separate vector used by trailing vacuum, while their items vectors remain available.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-tx/src/mvcc_store/mod.rs:880](../../../../../crates/shamir-tx/src/mvcc_store/mod.rs#L880); [crates/shamir-tx/src/mvcc_store/mod.rs:934](../../../../../crates/shamir-tx/src/mvcc_store/mod.rs#L934); [crates/shamir-tx/src/mvcc_store/mod.rs:982](../../../../../crates/shamir-tx/src/mvcc_store/mod.rs#L982).
+Both methods clone keys into a separate collection for trailing vacuum while items remains available. This is a small avoidable allocation, not demonstrated runtime harm.
+
+Evidence: [crates/shamir-tx/src/mvcc_store/mod.rs:880](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-tx/src/mvcc_store/mod.rs#L880); [crates/shamir-tx/src/mvcc_store/mod.rs:934](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-tx/src/mvcc_store/mod.rs#L934); [crates/shamir-tx/src/mvcc_store/mod.rs:982](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-tx/src/mvcc_store/mod.rs#L982).
 
 <a id="review-13"></a>
 
@@ -143,28 +169,32 @@ Evidence: [crates/shamir-tx/src/mvcc_store/mod.rs:880](../../../../../crates/sha
 
 Status: `confirmed-open`. Current risk: `low`.
 
-A nonempty remap still transforms every staged Set using decode, recursive remap and encode without detecting unchanged rows. A8 captured-ID optimization does not change this path.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-tx/src/id_remap.rs:77](../../../../../crates/shamir-tx/src/id_remap.rs#L77); [crates/shamir-tx/src/id_remap.rs:80](../../../../../crates/shamir-tx/src/id_remap.rs#L80); [crates/shamir-tx/src/tx_context.rs:943](../../../../../crates/shamir-tx/src/tx_context.rs#L943); [crates/shamir-tx/src/staging_store.rs:333](../../../../../crates/shamir-tx/src/staging_store.rs#L333).
+A nonempty transaction remap transforms every staged Set using decode, recursive remap, and encode even if none of its IDs changes. Captured-ID optimization does not alter this path. Preserve original bytes only after a trustworthy unchanged determination.
+
+Evidence: [crates/shamir-tx/src/id_remap.rs:77](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-tx/src/id_remap.rs#L77); [crates/shamir-tx/src/id_remap.rs:80](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-tx/src/id_remap.rs#L80); [crates/shamir-tx/src/tx_context.rs:943](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-tx/src/tx_context.rs#L943).
 
 <a id="review-summary-positive-hot-path-guarantees"></a>
 
 ### Claim Summary: positive hot-path guarantees — Batched writes, vectored reads and atomic cardinality mirrors
 
-Status: `not-applicable`. Current risk: —.
+Status: `not-applicable`. Current risk: `—`.
 
-These mechanisms exist, but one transact call is not universally one atomic durable backend transaction: Store's default implementation is sequential and capabilities are separately documented.
+Prior-cycle decision: `not-applicable`.
 
-Evidence: [crates/shamir-tx/src/mvcc_store/mod.rs:898](../../../../../crates/shamir-tx/src/mvcc_store/mod.rs#L898); [crates/shamir-tx/src/mvcc_store/mod.rs:1189](../../../../../crates/shamir-tx/src/mvcc_store/mod.rs#L1189); [crates/shamir-tx/src/predicate_set.rs:117](../../../../../crates/shamir-tx/src/predicate_set.rs#L117); [crates/shamir-storage/src/types.rs:243](../../../../../crates/shamir-storage/src/types.rs#L243).
+These seams exist. One transact call does not guarantee atomic persistence for every accepted Store, and atomic cardinality mirrors do not prove exact concurrent counter values or a performance improvement.
 
-## Corrections and qualified non-findings
+Evidence: [crates/shamir-tx/src/mvcc_store/mod.rs:898](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-tx/src/mvcc_store/mod.rs#L898); [crates/shamir-tx/src/mvcc_store/mod.rs:1189](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-tx/src/mvcc_store/mod.rs#L1189); [crates/shamir-tx/src/predicate_set.rs:117](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-tx/src/predicate_set.rs#L117); [crates/shamir-storage/src/types.rs:243](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-storage/src/types.rs#L243).
 
-- Retain source-level cost findings without claiming measured write-latency, throughput or IOPS changes.
-- gc_below scans all history but buffers only eligible below-threshold versions; its physical keys are moved/conversion-preserved, not universally newly allocated copies.
-- The duplicate lookup_ts requires max_age_secs; keep_history with neither cap returns immediately.
-- One-key streaming requires a keyspace grouping guarantee in addition to sorted physical iteration; arbitrary variable-length key namespaces can interleave.
-- swap_remove changes leftover ordering. Existing reverse emission does not by itself prove the new order is unobservable.
-- The September borrowed-staging/A8 commit does not fix table-name clones or unchanged-row remapping.
+## Evidence and recipe corrections
+
+- IndexMap implementation availability is resolved: checksum-matched indexmap 2.14.0 archive confirms trailing-index updates and Vec::remove, strengthening Claim 5's cost evidence.
+- keep_history with no caps returns before vacuum scanning; duplicate timestamp lookup specifically requires an age cap.
+- One-key streaming GC requires logical-key contiguity, not merely sorted physical keys; variable-length namespaces can interleave.
+- Folding best-effort reclaim into a required incoming transact changes error semantics and needs the same snapshot/anchor safety proof.
+- history_of also uses an unbounded upper range and filters unrelated later keys; its cost is not limited to timestamp gets or the requested key's version count.
+- No numeric latency, throughput, allocation-time, or RSS assertions were experimentally established.
 
 ---
 

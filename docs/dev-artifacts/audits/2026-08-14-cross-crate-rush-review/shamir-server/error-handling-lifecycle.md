@@ -1,11 +1,13 @@
-<!-- revalidation:2026-10-08 source:92ad58266bf57ddea1fa3c8a47affba1a3a9a096 -->
-# shamir-server — error-handling-lifecycle revalidation
+<!-- revalidation:2026-10-08 cycle:independent-2 source:e3765c935fc71655ee1ec0160cf180607935d89b -->
+# shamir-server — error-handling-lifecycle independent revalidation (cycle 2)
 
-Source snapshot: `92ad58266bf57ddea1fa3c8a47affba1a3a9a096`. Revalidated 2026-10-08 by read-only XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run; no source fix is part of this update. Test registration/assertions are evidence of an oracle, not proof of a passing run.
+Frozen source snapshot: `e3765c935fc71655ee1ec0160cf180607935d89b`. Independently revalidated 2026-10-08 by a fresh XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run. Source-fixed means the specified mechanism was already removed at this snapshot; this cycle implements no source fix.
 
-This section is authoritative for current status. Original titles/IDs are retained for traceability; a refuted title is not a current assertion. The collapsed historical report below is superseded, including its counts, severity, scenarios and fix instructions. Plan IDs preserve historical numbering, not a current release mandate. [Workspace methodology and status definitions](../SUMMARY.md#status-definitions).
+This section is authoritative for current decisions. Existing IDs and allegation titles are retained for traceability; a refuted title is not a current assertion. Prior-cycle decisions were rechecked, not used as proof. The first cycle is available in repository history at this snapshot. The original historical body below remains preserved once and is superseded, including its counts, severities and recipes. [Workspace scope and status definitions](../SUMMARY.md#status-definitions).
 
-The clean-bill-of-health conclusion and several universal guarantees are unsupported or contradicted by current source. The timestamp-discard and best-effort-push observations are valid.
+Unrelated external edits began in dependency/toolchain/CI metadata during collection; additional Rust-source edits appeared afterward. They were left untouched. Evidence and decisions are tied to the frozen commit, not those later changes or an installed toolchain. “Current” below means current at that snapshot; no re-audit of the modified working tree is implied.
+
+The current refutations are supported. Local RAII is not a universal task-lifetime barrier; response guards and accepted connections supply additional concrete counter-evidence.
 
 ## Current claim decisions
 
@@ -13,97 +15,113 @@ The clean-bill-of-health conclusion and several universal guarantees are unsuppo
 |---:|---:|---:|---:|---:|---:|---:|
 | 8 | 0 | 0 | 0 | 5 | 0 | 3 |
 
-These are decisions on report claims, including repeated roots, bundled observations and non-findings—not a unique-bug census. Closed/N/A rows have no current risk; unverified risk is provisional. Pure style and unmeasured optimization claims do not establish runtime impact.
+These are duplicate-inclusive report decisions, not a unique-bug census. Pure style or structural optimization does not establish a runtime incident; unverified impact remains provisional.
 
 <a id="review-summary"></a>
 
 ### Claim Summary — Every fallible production path uses thiserror Results and lifecycle is uniformly RAII-correct
 
-Status: `refuted`. Current risk: —.
+Status: `refuted`. Current risk: `—`.
 
-Supervisor production helpers return Result<_, String>. More importantly, the assigned bridge attachment race contradicts universal task-cleanup claims. This is not proof that every String error is a runtime defect.
+Prior-cycle decision: `refuted`.
 
-Evidence: [crates/shamir-server/src/replication/supervisor.rs:256](../../../../../crates/shamir-server/src/replication/supervisor.rs#L256); [crates/shamir-server/src/replication/supervisor.rs:343](../../../../../crates/shamir-server/src/replication/supervisor.rs#L343); [crates/shamir-server/src/subscriptions/registry.rs:134](../../../../../crates/shamir-server/src/subscriptions/registry.rs#L134).
+Production helpers return Result&lt;_, String&gt;, and RAII does not prevent detached bridge/connection tasks or premature response-guard release. String error boundaries are not automatically runtime defects, but they refute the stated universal type inventory.
+
+Evidence: [crates/shamir-server/src/replication/supervisor.rs:256](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-server/src/replication/supervisor.rs#L256); [crates/shamir-server/src/db_handler/handler.rs:465](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-server/src/db_handler/handler.rs#L465); [crates/shamir-server/src/subscriptions/registry.rs:134](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-server/src/subscriptions/registry.rs#L134); [crates/shamir-server/src/connection/request_loop.rs:348](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-server/src/connection/request_loop.rs#L348).
 
 <a id="review-notes-expect"></a>
 
 ### Claim Notes/.expect() — All expect sites are structurally invariant-backed
 
-Status: `refuted`. Current risk: —.
+Status: `refuted`. Current risk: `—`.
 
-The retry-loop and cursor expects have visible structural guards, but installing a SIGTERM handler is fallible OS setup, not a structural invariant. The claim that failure necessarily means a doomed process was not proven.
+Prior-cycle decision: `refuted`.
 
-Evidence: [crates/shamir-server/src/runtime.rs:81](../../../../../crates/shamir-server/src/runtime.rs#L81); [crates/shamir-server/src/doctor.rs:221](../../../../../crates/shamir-server/src/doctor.rs#L221); [crates/shamir-server/src/doctor.rs:238](../../../../../crates/shamir-server/src/doctor.rs#L238); [crates/shamir-server/src/access_tree.rs:159](../../../../../crates/shamir-server/src/access_tree.rs#L159); [crates/shamir-server/src/db_handler/cursor_handlers.rs:1323](../../../../../crates/shamir-server/src/db_handler/cursor_handlers.rs#L1323).
+Cursor mode and retry-loop expects have visible guards, but SIGTERM handler installation is fallible OS setup. Its failure is not established as structurally unreachable or proof that the process is otherwise doomed.
+
+Evidence: [crates/shamir-server/src/runtime.rs:81](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-server/src/runtime.rs#L81); [crates/shamir-server/src/db_handler/cursor_handlers.rs:1323](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-server/src/db_handler/cursor_handlers.rs#L1323); [crates/shamir-server/src/doctor.rs:238](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-server/src/doctor.rs#L238).
 
 <a id="review-notes-boot-time-cleanup"></a>
 
 ### Claim Notes/boot-time cleanup — Every early launch return releases acquired resources correctly through Drop
 
-Status: `refuted`. Current risk: —.
+Status: `refuted`. Current risk: `—`.
 
-Local file ownership releases the instance lock, but spawned tasks retain cloned resources. Reapers start before later fallible metadata/TLS/bind steps; their plain token/JoinHandle drops do not cancel/join them. Successful ServerHandle shutdown does not run when launch returns Err.
+Prior-cycle decision: `refuted`.
 
-Evidence: [crates/shamir-server/src/server/server_launcher.rs:102](../../../../../crates/shamir-server/src/server/server_launcher.rs#L102); [crates/shamir-server/src/server/server_launcher.rs:529](../../../../../crates/shamir-server/src/server/server_launcher.rs#L529); [crates/shamir-server/src/server/server_launcher.rs:539](../../../../../crates/shamir-server/src/server/server_launcher.rs#L539); [crates/shamir-server/src/server/server_launcher.rs:549](../../../../../crates/shamir-server/src/server/server_launcher.rs#L549); [crates/shamir-server/src/server/server_launcher.rs:601](../../../../../crates/shamir-server/src/server/server_launcher.rs#L601); [crates/shamir-server/src/server/server_handle.rs:107](../../../../../crates/shamir-server/src/server/server_handle.rs#L107); [crates/shamir-server/src/observability.rs:90](../../../../../crates/shamir-server/src/observability.rs#L90).
+A later TLS or listener error occurs after reapers, and potentially earlier listeners, were spawned. Dropping their plain handles detaches tasks; dropping the root token does not cancel remaining clones. Exact Tokio 1.49.0 JoinHandle and tokio-util 0.7.18 CancellationToken sources support this mechanism. The local instance-lock File does drop, creating different lifetimes for the guard and surviving resources.
+
+Evidence: [crates/shamir-server/src/server/server_launcher.rs:102](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-server/src/server/server_launcher.rs#L102); [crates/shamir-server/src/server/server_launcher.rs:529](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-server/src/server/server_launcher.rs#L529); [crates/shamir-server/src/server/server_launcher.rs:601](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-server/src/server/server_launcher.rs#L601); [crates/shamir-server/src/server/server_launcher.rs:728](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-server/src/server/server_launcher.rs#L728); [crates/shamir-server/src/tx_registry.rs:298](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-server/src/tx_registry.rs#L298); [Cargo.lock:4195](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/Cargo.lock#L4195); [Cargo.lock:4261](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/Cargo.lock#L4261).
 
 <a id="review-notes-finalize-change-password"></a>
 
 ### Claim Notes/finalize_change_password — Discarded password-finalization value is a timestamp, not an error
 
-Status: `not-applicable`. Current risk: —.
+Status: `not-applicable`. Current risk: `—`.
 
-The callee returns u64, so the let-discard does not swallow a Result.
+Prior-cycle decision: `not-applicable`.
 
-Evidence: [crates/shamir-server/src/db_handler/admin.rs:572](../../../../../crates/shamir-server/src/db_handler/admin.rs#L572); [crates/shamir-connect/src/server/changepw.rs:105](../../../../../crates/shamir-connect/src/server/changepw.rs#L105).
+The callee returns u64; discarding it does not swallow a Result. This says nothing about separate persistence operations around the password-change flow.
+
+Evidence: [crates/shamir-server/src/db_handler/admin.rs:572](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-server/src/db_handler/admin.rs#L572); [crates/shamir-connect/src/server/changepw.rs:105](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-connect/src/server/changepw.rs#L105).
 
 <a id="review-notes-try-push"></a>
 
 ### Claim Notes/try_push — Discarded control-push failures follow best-effort subscription semantics
 
-Status: `not-applicable`. Current risk: —.
+Status: `not-applicable`. Current risk: `—`.
 
-Gap/Closed control frames are best-effort, and event delivery tracks consecutive push failures before closing slow consumers. A failed Gap push does not guarantee that every delivery loss is announced.
+Prior-cycle decision: `not-applicable`.
 
-Evidence: [crates/shamir-server/src/subscriptions/bridge.rs:577](../../../../../crates/shamir-server/src/subscriptions/bridge.rs#L577); [crates/shamir-server/src/subscriptions/bridge.rs:597](../../../../../crates/shamir-server/src/subscriptions/bridge.rs#L597); [crates/shamir-server/src/subscriptions/push.rs:100](../../../../../crates/shamir-server/src/subscriptions/push.rs#L100); [docs/guide-docs/client-server-protocol-spec/SUBSCRIPTIONS.md:29](../../../../../docs/guide-docs/client-server-protocol-spec/SUBSCRIPTIONS.md#L29); [docs/guide-docs/client-server-protocol-spec/SUBSCRIPTIONS.md:48](../../../../../docs/guide-docs/client-server-protocol-spec/SUBSCRIPTIONS.md#L48).
+Gap/Closed sends are intentionally best-effort, while event failures increment the slow-consumer counter. The normative subscription contract does not promise durable delivery or announcement of every individual loss.
+
+Evidence: [crates/shamir-server/src/subscriptions/bridge.rs:577](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-server/src/subscriptions/bridge.rs#L577); [crates/shamir-server/src/subscriptions/bridge.rs:597](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-server/src/subscriptions/bridge.rs#L597); [crates/shamir-server/src/subscriptions/push.rs:99](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-server/src/subscriptions/push.rs#L99); [docs/guide-docs/client-server-protocol-spec/SUBSCRIPTIONS.md:29](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/docs/guide-docs/client-server-protocol-spec/SUBSCRIPTIONS.md#L29); [docs/guide-docs/client-server-protocol-spec/SUBSCRIPTIONS.md:48](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/docs/guide-docs/client-server-protocol-spec/SUBSCRIPTIONS.md#L48).
 
 <a id="review-notes-error-path-tests"></a>
 
 ### Claim Notes/error-path tests — Dedicated tests force both restore swap-failure subcases and other resource errors
 
-Status: `refuted`. Current risk: —.
+Status: `refuted`. Current risk: `—`.
 
-Registered tests cover successful rollback, first-rename failure, copy failure and manifest failures. The first-rename test positively asserts Io and explicitly excludes both second-rename variants; it is not a SwapPartialFailure test. The successful-rollback test uses a scheduling-sensitive watcher, not a deterministic injected hook.
+Prior-cycle decision: `refuted`.
 
-Evidence: [crates/shamir-server/src/tests/mod.rs:2](../../../../../crates/shamir-server/src/tests/mod.rs#L2); [crates/shamir-server/src/tests/mod.rs:11](../../../../../crates/shamir-server/src/tests/mod.rs#L11); [crates/shamir-server/src/tests/restore_tests.rs:66](../../../../../crates/shamir-server/src/tests/restore_tests.rs#L66); [crates/shamir-server/src/tests/restore_tests.rs:93](../../../../../crates/shamir-server/src/tests/restore_tests.rs#L93); [crates/shamir-server/src/tests/restore_tests.rs:118](../../../../../crates/shamir-server/src/tests/restore_tests.rs#L118); [crates/shamir-server/src/tests/restore_tests.rs:203](../../../../../crates/shamir-server/src/tests/restore_tests.rs#L203); [crates/shamir-server/src/tests/restore_tests.rs:539](../../../../../crates/shamir-server/src/tests/restore_tests.rs#L539); [crates/shamir-server/src/tests/backup_tests.rs:236](../../../../../crates/shamir-server/src/tests/backup_tests.rs#L236).
+Registered Windows tests assert successful rollback or first-rename Io, not both second-rename failure variants. The successful-rollback fixture uses a polling watcher whose interception is scheduling-dependent. SwapPartialFailure lacks a dedicated discriminating assertion in the inspected tests.
+
+Evidence: [crates/shamir-server/src/tests/mod.rs:11](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-server/src/tests/mod.rs#L11); [crates/shamir-server/src/tests/restore_tests.rs:64](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-server/src/tests/restore_tests.rs#L64); [crates/shamir-server/src/tests/restore_tests.rs:93](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-server/src/tests/restore_tests.rs#L93); [crates/shamir-server/src/tests/restore_tests.rs:118](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-server/src/tests/restore_tests.rs#L118); [crates/shamir-server/src/tests/restore_tests.rs:203](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-server/src/tests/restore_tests.rs#L203); [crates/shamir-server/src/restore.rs:265](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-server/src/restore.rs#L265).
 
 <a id="review-notes-tx-cursor-reapers"></a>
 
 ### Claim Notes/tx-cursor-reapers — Registry reapers release expired transaction/cursor ownership
 
-Status: `not-applicable`. Current risk: —.
+Status: `not-applicable`. Current risk: `—`.
 
-The registered tests use real contexts/guards and check removal, ownership counts and cursor reapability. Those assertions are meaningful source-level coverage, not evidence of test execution or exhaustive release correctness.
+Prior-cycle decision: `not-applicable`.
 
-Evidence: [crates/shamir-server/src/tests/mod.rs:9](../../../../../crates/shamir-server/src/tests/mod.rs#L9); [crates/shamir-server/src/tests/mod.rs:16](../../../../../crates/shamir-server/src/tests/mod.rs#L16); [crates/shamir-server/src/tests/tx_registry_tests.rs:138](../../../../../crates/shamir-server/src/tests/tx_registry_tests.rs#L138); [crates/shamir-server/src/tests/cursor_registry_tests.rs:237](../../../../../crates/shamir-server/src/tests/cursor_registry_tests.rs#L237); [crates/shamir-server/src/tests/cursor_registry_tests.rs:327](../../../../../crates/shamir-server/src/tests/cursor_registry_tests.rs#L327).
+Real registry fixtures exercise expired removal, background tx reaping, session-count cleanup and fetch-lease exclusion. Removing registry ownership permits final Arc/guard drops; outstanding owners can extend the lifetime. The assertions do not independently prove every MVCC GC-floor release.
+
+Evidence: [crates/shamir-server/src/tests/tx_registry_tests.rs:138](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-server/src/tests/tx_registry_tests.rs#L138); [crates/shamir-server/src/tests/tx_registry_tests.rs:164](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-server/src/tests/tx_registry_tests.rs#L164); [crates/shamir-server/src/tests/cursor_registry_tests.rs:237](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-server/src/tests/cursor_registry_tests.rs#L237); [crates/shamir-server/src/tests/cursor_registry_tests.rs:327](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-server/src/tests/cursor_registry_tests.rs#L327); [crates/shamir-server/src/cursor_registry.rs:648](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-server/src/cursor_registry.rs#L648).
 
 <a id="review-notes-request-loop-teardown"></a>
 
 ### Claim Notes/request-loop teardown — Request-loop teardown is a hard ordered-release barrier under every exit path
 
-Status: `refuted`. Current risk: —.
+Status: `refuted`. Current risk: `—`.
 
-The described call ordering exists, but close_all runs before dispatch cancellation/drain and can lose a concurrently attached bridge handle. Non-panic JoinErrors are ignored, and panic detection happens only when the reader next drains the JoinSet, not immediately on task completion.
+Prior-cycle decision: `refuted`.
 
-Evidence: [crates/shamir-server/src/connection/request_loop.rs:240](../../../../../crates/shamir-server/src/connection/request_loop.rs#L240); [crates/shamir-server/src/connection/request_loop.rs:413](../../../../../crates/shamir-server/src/connection/request_loop.rs#L413); [crates/shamir-server/src/connection/request_loop.rs:415](../../../../../crates/shamir-server/src/connection/request_loop.rs#L415); [crates/shamir-server/src/connection/request_loop.rs:417](../../../../../crates/shamir-server/src/connection/request_loop.rs#L417); [crates/shamir-server/src/subscriptions/registry.rs:134](../../../../../crates/shamir-server/src/subscriptions/registry.rs#L134).
+The sweep precedes dispatch cancellation/drain, allowing the bridge attachment/admission race. Aborting a bridge handle also requests cancellation rather than synchronously joining its destruction. Writer writes/shutdown are unbounded awaits. Panic detection only occurs when the reader next drains completed dispatch tasks.
 
-Grouping/duplicate: `correctness-tdd.md#3`. This row is not another independent defect.
+Evidence: [crates/shamir-server/src/connection/request_loop.rs:240](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-server/src/connection/request_loop.rs#L240); [crates/shamir-server/src/connection/request_loop.rs:413](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-server/src/connection/request_loop.rs#L413); [crates/shamir-server/src/connection/request_loop.rs:417](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-server/src/connection/request_loop.rs#L417); [crates/shamir-server/src/subscriptions/registry.rs:23](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-server/src/subscriptions/registry.rs#L23).
 
-## Corrections and qualified non-findings
+Grouping/duplicate: [correctness-tdd.md#3](correctness-tdd.md#review-3). This is not an additional independent defect.
 
-- RAII releases local owners, not resources still held by detached tasks; separate pre-spawn failures from later launch failures.
-- Do not label fallible signal installation an invariant proof.
-- Remove the claim of dedicated coverage for SwapPartialFailure.
-- Restore watcher-based fault forcing is platform-gated and scheduling-sensitive; do not characterize it as deterministic.
-- The original JoinError observation is latent diagnostics debt, not by itself proof of currently reachable request loss.
+## Evidence and recipe corrections
+
+- Exact published Tokio/tokio-util sources confirm that bare JoinHandle/token drops do not provide the claimed cancellation barrier.
+- ServerHandle explicitly does not await connections; consequently its later 'no new writes can arrive' flush justification is false for already accepted connections.
+- Scheduler drop does not terminate the runtime. Dropping its sender closes broadcast receivers, and run_periodic treats that closure as shutdown.
+- Restore's two renames have distinct failure/recovery states; do not describe first-rename Io coverage as SwapPartialFailure coverage.
+- Fjall 3.1.6 published source maps PersistMode::SyncAll to journal file sync_all, but that does not turn all surrounding file operations or error-swallowing APIs into durability guarantees.
 
 ---
 

@@ -1,11 +1,13 @@
-<!-- revalidation:2026-10-08 source:92ad58266bf57ddea1fa3c8a47affba1a3a9a096 -->
-# shamir-bench-utils — correctness-tdd revalidation
+<!-- revalidation:2026-10-08 cycle:independent-2 source:e3765c935fc71655ee1ec0160cf180607935d89b -->
+# shamir-bench-utils — correctness-tdd independent revalidation (cycle 2)
 
-Source snapshot: `92ad58266bf57ddea1fa3c8a47affba1a3a9a096`. Revalidated 2026-10-08 by read-only XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run; no source fix is part of this update. Test registration/assertions are evidence of an oracle, not proof of a passing run.
+Frozen source snapshot: `e3765c935fc71655ee1ec0160cf180607935d89b`. Independently revalidated 2026-10-08 by a fresh XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run. Source-fixed means the specified mechanism was already removed at this snapshot; this cycle implements no source fix.
 
-This section is authoritative for current status. Original titles/IDs are retained for traceability; a refuted title is not a current assertion. The collapsed historical report below is superseded, including its counts, severity, scenarios and fix instructions. Plan IDs preserve historical numbering, not a current release mandate. [Workspace methodology and status definitions](../SUMMARY.md#status-definitions).
+This section is authoritative for current decisions. Existing IDs and allegation titles are retained for traceability; a refuted title is not a current assertion. Prior-cycle decisions were rechecked, not used as proof. The first cycle is available in repository history at this snapshot. The original historical body below remains preserved once and is superseded, including its counts, severities and recipes. [Workspace scope and status definitions](../SUMMARY.md#status-definitions).
 
-Coverage gaps, the floating-point endpoint violation, and documentation defects remain. The Gaussian formula is currently correct; the alleged portability flake is unverified. No remediation is source-proven complete.
+Unrelated external edits began in dependency/toolchain/CI metadata during collection; additional Rust-source edits appeared afterward. They were left untouched. Evidence and decisions are tied to the frozen commit, not those later changes or an installed toolchain. “Current” below means current at that snapshot; no re-audit of the modified working tree is implied.
+
+The nine registered tests exercise the canonical generator, but not independent Gaussian scale, historical bytes, endpoint bounds, dimension rejection, or peak-memory semantics. The endpoint defect is established; the particular alleged portability flake remains unverified.
 
 ## Current claim decisions
 
@@ -13,27 +15,31 @@ Coverage gaps, the floating-point endpoint violation, and documentation defects 
 |---:|---:|---:|---:|---:|---:|---:|
 | 9 | 8 | 0 | 0 | 0 | 1 | 0 |
 
-These are decisions on report claims, including repeated roots, bundled observations and non-findings—not a unique-bug census. Closed/N/A rows have no current risk; unverified risk is provisional. Pure style and unmeasured optimization claims do not establish runtime impact.
+These are duplicate-inclusive report decisions, not a unique-bug census. Pure style or structural optimization does not establish a runtime incident; unverified impact remains provisional.
 
 <a id="review-1"></a>
 
 ### Claim 1 — peak_mem has zero test coverage, unpinned dependency semantics, and dead public API
 
-Status: `confirmed-open`. Current risk: `medium`.
+Status: `confirmed-open`. Current risk: `low`.
 
-peak_mem has no registered tests; doctests are disabled. measure, measure_async, and current_allocated have no executable workspace callers. Wrapper reset semantics have no regression oracle, although the dependency version itself is locked.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-bench-utils/src/peak_mem.rs:54](../../../../../crates/shamir-bench-utils/src/peak_mem.rs#L54); [crates/shamir-bench-utils/src/peak_mem.rs:85](../../../../../crates/shamir-bench-utils/src/peak_mem.rs#L85); [crates/shamir-bench-utils/Cargo.toml:11](../../../../../crates/shamir-bench-utils/Cargo.toml#L11); [Cargo.lock:2396](../../../../../Cargo.lock#L2396).
+No module test registration or enabled doctest exercises measurement semantics. reset and current_peak have real bench callers, while measure, measure_async, and current_allocated are unused workspace APIs. Dependency identity is pinned; testing must distinguish reset from stale-peak retention and retain observable allocations during capture.
+
+Evidence: [crates/shamir-bench-utils/src/lib.rs:14](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-bench-utils/src/lib.rs#L14); [crates/shamir-bench-utils/src/peak_mem.rs:57](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-bench-utils/src/peak_mem.rs#L57); [crates/shamir-bench-utils/Cargo.toml:11](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-bench-utils/Cargo.toml#L11); [Cargo.lock:2396](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/Cargo.lock#L2396).
 
 <a id="review-2"></a>
 
 ### Claim 2 — Box-Muller scale is unpinned — a transcription bug in `next_gaussian` would pass the entire suite
 
-Status: `confirmed-open`. Current risk: `medium`.
+Status: `confirmed-open`. Current risk: `low`.
 
-The correct sqrt(-2*ln(s)/s) formula remains, but registered tests contain neither Gaussian golden values nor moment bounds. Comparing two calls to the same implementation cannot detect stable algorithm drift. The proposed mutation's complete-suite outcome was not executed.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-bench-utils/src/vector_data.rs:96](../../../../../crates/shamir-bench-utils/src/vector_data.rs#L96); [crates/shamir-bench-utils/src/vector_data.rs:234](../../../../../crates/shamir-bench-utils/src/vector_data.rs#L234); [crates/shamir-bench-utils/src/vector_data.rs:290](../../../../../crates/shamir-bench-utils/src/vector_data.rs#L290).
+The production formula is correct. Symmetric regeneration cannot detect deterministic drift, and the clustering sanity inequality supplies no lower variance bound. An approved reference stream plus qualified moment bounds would discriminate scale changes; exact cross-target Gaussian goldens and a complete-suite mutation result are not established.
+
+Evidence: [crates/shamir-bench-utils/src/vector_data.rs:96](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-bench-utils/src/vector_data.rs#L96); [crates/shamir-bench-utils/src/vector_data.rs:234](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-bench-utils/src/vector_data.rs#L234); [crates/shamir-bench-utils/src/vector_data.rs:326](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-bench-utils/src/vector_data.rs#L326).
 
 <a id="review-3"></a>
 
@@ -41,9 +47,11 @@ Evidence: [crates/shamir-bench-utils/src/vector_data.rs:96](../../../../../crate
 
 Status: `confirmed-open`. Current risk: `low`.
 
-The high-u32-to-f32 conversion can round to 2^32, yielding 1.0 after division. The odd multiplier makes such successor states reachable. No boundary test exists; Gaussian rejection prevents accepting the resulting unit-disk endpoint.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-bench-utils/src/vector_data.rs:67](../../../../../crates/shamir-bench-utils/src/vector_data.rs#L67); [crates/shamir-bench-utils/src/vector_data.rs:75](../../../../../crates/shamir-bench-utils/src/vector_data.rs#L75); [crates/shamir-bench-utils/src/vector_data.rs:95](../../../../../crates/shamir-bench-utils/src/vector_data.rs#L95).
+The upper 128 possible high words round to 2^32. Multiplication by the odd constant is invertible modulo 2^64, so public seed selection can produce an endpoint on the first call. No registered boundary assertion targets it.
+
+Evidence: [crates/shamir-bench-utils/src/vector_data.rs:42](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-bench-utils/src/vector_data.rs#L42); [crates/shamir-bench-utils/src/vector_data.rs:67](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-bench-utils/src/vector_data.rs#L67); [crates/shamir-bench-utils/src/vector_data.rs:75](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-bench-utils/src/vector_data.rs#L75).
 
 <a id="review-4"></a>
 
@@ -51,11 +59,13 @@ Evidence: [crates/shamir-bench-utils/src/vector_data.rs:67](../../../../../crate
 
 Status: `confirmed-open`. Current risk: `low`.
 
-The module still demonstrates iter_custom and criterion_main, and vector_data still calls its consumer a Criterion bench. Live consumers import Harness.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-bench-utils/src/peak_mem.rs:10](../../../../../crates/shamir-bench-utils/src/peak_mem.rs#L10); [crates/shamir-bench-utils/src/peak_mem.rs:44](../../../../../crates/shamir-bench-utils/src/peak_mem.rs#L44); [crates/shamir-bench-utils/src/vector_data.rs:3](../../../../../crates/shamir-bench-utils/src/vector_data.rs#L3); [CLAUDE.md:237](../../../../../CLAUDE.md#L237).
+Module examples and cross-references retain Criterion language despite the explicit Harness convention and actual Harness consumers. This is stale integration guidance, not a failing current execution proven by this audit.
 
-Grouping/duplicate: `SUMMARY.md#7.2`. This row is not another independent defect.
+Evidence: [crates/shamir-bench-utils/src/peak_mem.rs:10](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-bench-utils/src/peak_mem.rs#L10); [crates/shamir-bench-utils/src/vector_data.rs:3](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-bench-utils/src/vector_data.rs#L3); [CLAUDE.md:237](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/CLAUDE.md#L237).
+
+Grouping/duplicate: [style-claude-md.md#2](style-claude-md.md#review-2). This is not an additional independent defect.
 
 <a id="review-5"></a>
 
@@ -63,35 +73,41 @@ Grouping/duplicate: `SUMMARY.md#7.2`. This row is not another independent defect
 
 Status: `confirmed-open`. Current risk: `low`.
 
-For positive n, requested k is discarded by min(k,n); for n=0, all requested centroids survive. The blanket clamp documentation omits that exception, and the artifact stores neither sigma nor requested parameters.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-bench-utils/src/vector_data.rs:111](../../../../../crates/shamir-bench-utils/src/vector_data.rs#L111); [crates/shamir-bench-utils/src/vector_data.rs:153](../../../../../crates/shamir-bench-utils/src/vector_data.rs#L153); [crates/shamir-bench-utils/src/vector_data.rs:179](../../../../../crates/shamir-bench-utils/src/vector_data.rs#L179).
+Positive n clamps k while n=0 deliberately retains all centroids, contradicting the blanket function wording. Sigma is absent and cannot be recovered generally. This does not make effective k wrong or invalidate determinism from retained inputs.
 
-Grouping/duplicate: `SUMMARY.md#5.2`. This row is not another independent defect.
+Evidence: [crates/shamir-bench-utils/src/vector_data.rs:111](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-bench-utils/src/vector_data.rs#L111); [crates/shamir-bench-utils/src/vector_data.rs:153](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-bench-utils/src/vector_data.rs#L153); [crates/shamir-bench-utils/src/vector_data.rs:179](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-bench-utils/src/vector_data.rs#L179).
+
+Grouping/duplicate: [api-wire-protocol.md#2](api-wire-protocol.md#review-2). This is not an additional independent defect.
 
 <a id="review-6"></a>
 
 ### Claim 6 — Inline `#[cfg(test)] mod tests` violates CLAUDE.md test-organisation rule 5
 
-Status: `confirmed-open`. Current risk: `low`.
+Status: `confirmed-open`. Current risk: `nit`.
 
-All nine tests remain inline, contrary to the explicit layout rule. They are registered through lib.rs and vector_data's cfg(test) block; placement does not prevent discovery.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-bench-utils/src/lib.rs:17](../../../../../crates/shamir-bench-utils/src/lib.rs#L17); [crates/shamir-bench-utils/src/vector_data.rs:217](../../../../../crates/shamir-bench-utils/src/vector_data.rs#L217); [CLAUDE.md:594](../../../../../CLAUDE.md#L594).
+Nine tests remain in the inline block. lib.rs and cfg(test) wire them correctly; moving them is policy remediation and not a prerequisite for adding an oracle.
 
-Grouping/duplicate: `SUMMARY.md#7.1`. This row is not another independent defect.
+Evidence: [crates/shamir-bench-utils/src/lib.rs:17](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-bench-utils/src/lib.rs#L17); [crates/shamir-bench-utils/src/vector_data.rs:217](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-bench-utils/src/vector_data.rs#L217); [CLAUDE.md:594](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/CLAUDE.md#L594).
+
+Grouping/duplicate: [style-claude-md.md#1](style-claude-md.md#review-1). This is not an additional independent defect.
 
 <a id="review-7"></a>
 
 ### Claim 7 — `clustered_vectors` Panics section omits the `dim == 0` assert; `sigma` domain undocumented
 
-Status: `confirmed-open`. Current risk: `nit`.
+Status: `confirmed-open`. Current risk: `low`.
 
-The Panics section still lists only zero clusters, while zero dimension also asserts. No zero-dimension test or finite/nonnegative sigma contract exists; sigma is multiplied into every generated coordinate without validation.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-bench-utils/src/vector_data.rs:163](../../../../../crates/shamir-bench-utils/src/vector_data.rs#L163); [crates/shamir-bench-utils/src/vector_data.rs:172](../../../../../crates/shamir-bench-utils/src/vector_data.rs#L172); [crates/shamir-bench-utils/src/vector_data.rs:204](../../../../../crates/shamir-bench-utils/src/vector_data.rs#L204); [crates/shamir-bench-utils/src/vector_data.rs:341](../../../../../crates/shamir-bench-utils/src/vector_data.rs#L341).
+The Panics section omits dim=0 and only the zero-cluster rejection has a dedicated test. Sigma multiplies every noise coordinate without a documented finite/nonnegative domain. Nonfinite inputs may poison fixtures; negative sigma's interpretation requires a contract decision rather than assuming production insecurity.
 
-Grouping/duplicate: `SUMMARY.md#6.1`. This row is not another independent defect.
+Evidence: [crates/shamir-bench-utils/src/vector_data.rs:163](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-bench-utils/src/vector_data.rs#L163); [crates/shamir-bench-utils/src/vector_data.rs:172](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-bench-utils/src/vector_data.rs#L172); [crates/shamir-bench-utils/src/vector_data.rs:204](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-bench-utils/src/vector_data.rs#L204); [crates/shamir-bench-utils/src/vector_data.rs:342](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-bench-utils/src/vector_data.rs#L342).
+
+Grouping/duplicate: [SUMMARY.md#6.1](SUMMARY.md#review-6-1). This is not an additional independent defect.
 
 <a id="review-8"></a>
 
@@ -99,30 +115,34 @@ Grouping/duplicate: `SUMMARY.md#6.1`. This row is not another independent defect
 
 Status: `confirmed-open`. Current risk: `nit`.
 
-The description still advertises BENCH_QUICK, but current exports provide only vector_data and optional peak_mem; lib.rs explicitly records removal of tier tuning.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-bench-utils/Cargo.toml:6](../../../../../crates/shamir-bench-utils/Cargo.toml#L6); [crates/shamir-bench-utils/src/lib.rs:9](../../../../../crates/shamir-bench-utils/src/lib.rs#L9); [crates/shamir-bench-utils/src/lib.rs:14](../../../../../crates/shamir-bench-utils/src/lib.rs#L14).
+The description still names BENCH_QUICK while current lib.rs explicitly documents tier API removal and exports no tier functions.
 
-Grouping/duplicate: `SUMMARY.md#5.5`. This row is not another independent defect.
+Evidence: [crates/shamir-bench-utils/Cargo.toml:6](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-bench-utils/Cargo.toml#L6); [crates/shamir-bench-utils/src/lib.rs:9](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-bench-utils/src/lib.rs#L9).
+
+Grouping/duplicate: [api-wire-protocol.md#7](api-wire-protocol.md#review-7). This is not an additional independent defect.
 
 <a id="review-9"></a>
 
 ### Claim 9 — `round_robin_balances_clusters` asserts a statistical property as an exact equality
 
-Status: `unverified`. Current risk: `nit` (provisional; not a confirmed defect).
+Status: `unverified`. Current risk: `nit`.
 
-The test does infer assignments by nearest centroid rather than observing i%k. However, its fixed seed and small sigma may give ample separation; no near-tie bound, affected target, or observed failure establishes the alleged portability flake.
+Prior-cycle decision: `unverified`.
 
-Evidence: [crates/shamir-bench-utils/src/vector_data.rs:201](../../../../../crates/shamir-bench-utils/src/vector_data.rs#L201); [crates/shamir-bench-utils/src/vector_data.rs:271](../../../../../crates/shamir-bench-utils/src/vector_data.rs#L271); [crates/shamir-bench-utils/src/vector_data.rs:285](../../../../../crates/shamir-bench-utils/src/vector_data.rs#L285).
+Nearest-centroid counts are not a direct construction-label oracle; equal totals can even hide exchanged assignments. Nonetheless this deterministic seed may be well separated. No near-tie analysis or affected target proves a flake, so replacing equality with arbitrary tolerance is unjustified.
 
-## Corrections and qualified non-findings
+Evidence: [crates/shamir-bench-utils/src/vector_data.rs:201](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-bench-utils/src/vector_data.rs#L201); [crates/shamir-bench-utils/src/vector_data.rs:271](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-bench-utils/src/vector_data.rs#L271); [crates/shamir-bench-utils/src/vector_data.rs:280](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-bench-utils/src/vector_data.rs#L280); [crates/shamir-bench-utils/src/vector_data.rs:285](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-bench-utils/src/vector_data.rs#L285).
 
-- peak_mem measures tracked live heap bytes, not OS RSS; vector_report samples RSS separately through memory-stats.
-- The manifest's version requirement 0.3 does not automatically admit 0.4, and Cargo.lock pins 0.3.0. The open issue is absent behavioral tests, not an absent version pin.
-- The nine inline tests are wired. same_seed_is_byte_identical uses f32 equality, not byte/bit comparisons or historical golden output.
-- The Gaussian coverage gap is proven; a current wrong distribution and the claim that a particular mutation passes every test are not experimentally established.
-- A 24-bit conversion changes the float stream and needs an explicit compatibility decision. Cross-target exact transcendental golden values need the existing target caveat.
-- Moving tests is a layout correction, not a prerequisite for adding missing error-path or peak-memory tests.
+## Evidence and recipe corrections
+
+- Absent tests do not make the module unavailable for inspection or prove that no code ever compiles or executes; registered memory benches call its reset/read seam.
+- A peak&gt;=1 MiB check can pass with stale historical peak or unrelated allocations. An isolated reset-to-current and high-then-release-then-reset oracle is needed.
+- Use observable retained allocations or appropriate optimization barriers; a temporary Vec whose only result is its length does not independently prove allocator activity.
+- same_seed_is_byte_identical compares f32 values, not to_bits or a historical golden. Two identical faulty implementations satisfy it.
+- Nearest-centroid count equality does not require every point to retain its original label; compensating misassignments can preserve counts.
+- The upper-end probability is 128/2^32 under uniformly distributed high words, not one in four billion. This is a mathematical boundary fact, not a measured event rate.
 
 ---
 

@@ -1,11 +1,13 @@
-<!-- revalidation:2026-10-08 source:92ad58266bf57ddea1fa3c8a47affba1a3a9a096 -->
-# shamir-sdk — concurrency-lockfree revalidation
+<!-- revalidation:2026-10-08 cycle:independent-2 source:e3765c935fc71655ee1ec0160cf180607935d89b -->
+# shamir-sdk — concurrency-lockfree independent revalidation (cycle 2)
 
-Source snapshot: `92ad58266bf57ddea1fa3c8a47affba1a3a9a096`. Revalidated 2026-10-08 by read-only XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run; no source fix is part of this update. Test registration/assertions are evidence of an oracle, not proof of a passing run.
+Frozen source snapshot: `e3765c935fc71655ee1ec0160cf180607935d89b`. Independently revalidated 2026-10-08 by a fresh XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run. Source-fixed means the specified mechanism was already removed at this snapshot; this cycle implements no source fix.
 
-This section is authoritative for current status. Original titles/IDs are retained for traceability; a refuted title is not a current assertion. The collapsed historical report below is superseded, including its counts, severity, scenarios and fix instructions. Plan IDs preserve historical numbering, not a current release mandate. [Workspace methodology and status definitions](../SUMMARY.md#status-definitions).
+This section is authoritative for current decisions. Existing IDs and allegation titles are retained for traceability; a refuted title is not a current assertion. Prior-cycle decisions were rechecked, not used as proof. The first cycle is available in repository history at this snapshot. The original historical body below remains preserved once and is superseded, including its counts, severities and recipes. [Workspace scope and status definitions](../SUMMARY.md#status-definitions).
 
-The SDK's own source remains free of synchronization and hash-map structures. Unresolved futures still busy-poll, but the claimed inevitable/permanent no-progress behavior is overstated.
+Unrelated external edits began in dependency/toolchain/CI metadata during collection; additional Rust-source edits appeared afterward. They were left untouched. Evidence and decisions are tied to the frozen commit, not those later changes or an installed toolchain. “Current” below means current at that snapshot; no re-audit of the modified working tree is implied.
+
+The SDK itself contains no synchronization registries. Unresolved-future polling is real, but it is neither caused by host async imports nor inevitably nonterminating after one Pending.
 
 ## Current claim decisions
 
@@ -13,7 +15,7 @@ The SDK's own source remains free of synchronization and hash-map structures. Un
 |---:|---:|---:|---:|---:|---:|---:|
 | 3 | 1 | 0 | 0 | 0 | 0 | 2 |
 
-These are decisions on report claims, including repeated roots, bundled observations and non-findings—not a unique-bug census. Closed/N/A rows have no current risk; unverified risk is provisional. Pure style and unmeasured optimization claims do not establish runtime impact.
+These are duplicate-inclusive report decisions, not a unique-bug census. Pure style or structural optimization does not establish a runtime incident; unverified impact remains provisional.
 
 <a id="review-1"></a>
 
@@ -21,40 +23,46 @@ These are decisions on report claims, including repeated roots, bundled observat
 
 Status: `confirmed-open`. Current risk: `medium`.
 
-All four macros use the unchanged no-op-waker polling loop. Unresolved guest-local futures consume CPU without scheduling support. Repeated polls can nevertheless reach Ready; production WASM has fuel and epoch/deadline bounds, unlike direct native helper use.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-sdk/src/__rt.rs:36](../../../../../crates/shamir-sdk/src/__rt.rs#L36); [crates/shamir-sdk/src/__rt.rs:50](../../../../../crates/shamir-sdk/src/__rt.rs#L50); [crates/shamir-sdk-macros/src/lib.rs:144](../../../../../crates/shamir-sdk-macros/src/lib.rs#L144); [crates/shamir-sdk-macros/src/lib.rs:556](../../../../../crates/shamir-sdk-macros/src/lib.rs#L556); [crates/shamir-wasm-host/src/wasm/wasm_function.rs:475](../../../../../crates/shamir-wasm-host/src/wasm/wasm_function.rs#L475); [crates/shamir-wasm-host/src/wasm/wasm_function.rs:487](../../../../../crates/shamir-wasm-host/src/wasm/wasm_function.rs#L487).
+All four wrappers use the same continuous polling loop. Always-Pending exhausts the WASM execution budget; Pending-then-Ready finishes. Direct native helper use has no internal bound.
 
-Grouping/duplicate: `SUMMARY.md#2.1`. This row is not another independent defect.
+Evidence: [crates/shamir-sdk/src/__rt.rs:50](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-sdk/src/__rt.rs#L50); [crates/shamir-sdk-macros/src/lib.rs:144](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-sdk-macros/src/lib.rs#L144); [crates/shamir-wasm-host/src/wasm/wasm_function.rs:477](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-wasm-host/src/wasm/wasm_function.rs#L477).
+
+Grouping/duplicate: [SUMMARY.md#2.1](SUMMARY.md#review-2-1). This is not an additional independent defect.
 
 <a id="review-2"></a>
 
 ### Claim 2 — O(N) linear scans for keyed lookups (`Params::get`, `HttpResponse::from_value`) -- pillar-3 adjacent, bounded and documented; acked for the audit trail
 
-Status: `not-applicable`. Current risk: —.
+Status: `not-applicable`. Current risk: `—`.
 
-The scans remain O(N), but this report explicitly accepts the Vec trade-off and requires no fix. Small input counts are an expectation, not an enforced bound; hashing superiority or inferiority was not measured.
+Prior-cycle decision: `not-applicable`.
 
-Evidence: [crates/shamir-sdk/src/params.rs:26](../../../../../crates/shamir-sdk/src/params.rs#L26); [crates/shamir-sdk/src/http.rs:130](../../../../../crates/shamir-sdk/src/http.rs#L130); [crates/shamir-sdk/src/value.rs:13](../../../../../crates/shamir-sdk/src/value.rs#L13).
+Scans are present and input counts are not enforced, but the documented Vec choice and owned accessors are deliberate. No measured hashing advantage establishes a repair obligation.
 
-Grouping/duplicate: `SUMMARY.md#4.4`. This row is not another independent defect.
+Evidence: [crates/shamir-sdk/src/params.rs:26](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-sdk/src/params.rs#L26); [crates/shamir-sdk/src/http.rs:130](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-sdk/src/http.rs#L130); [crates/shamir-sdk/src/value.rs:13](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-sdk/src/value.rs#L13).
+
+Grouping/duplicate: [SUMMARY.md#4.4](SUMMARY.md#review-4-4). This is not an additional independent defect.
 
 <a id="review-summary"></a>
 
-### Claim Summary — Lock-free/O(x->0)/Fx-hash/scc-dashmap pillars: trivially compliant concurrency surface
+### Claim Summary — Lock-free/O(x-&gt;0)/Fx-hash/scc-dashmap pillars: trivially compliant concurrency surface
 
-Status: `not-applicable`. Current risk: —.
+Status: `not-applicable`. Current risk: `—`.
 
-Non-finding supported for the SDK's own source: no mutexes, atomics, concurrent registries, or hash-map fields were found. This does not extend to optional query-builder dependencies or host-runtime implementation.
+Prior-cycle decision: `not-applicable`.
 
-Evidence: [crates/shamir-sdk/src/params.rs:11](../../../../../crates/shamir-sdk/src/params.rs#L11); [crates/shamir-sdk/src/value.rs:35](../../../../../crates/shamir-sdk/src/value.rs#L35); [crates/shamir-sdk/Cargo.toml:18](../../../../../crates/shamir-sdk/Cargo.toml#L18).
+Own-source inspection found no locks, atomic/shared registries, or hash-map fields. This does not prove universal O(1) helpers or properties of the optional builder/host.
 
-## Corrections and qualified non-findings
+Evidence: [crates/shamir-sdk/src/params.rs:11](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-sdk/src/params.rs#L11); [crates/shamir-sdk/src/value.rs:35](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-sdk/src/value.rs#L35); [crates/shamir-sdk/Cargo.toml:18](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-sdk/Cargo.toml#L18).
 
-- Current host imports are synchronous from the guest's perspective; host async suspension does not itself cause guest Poll::Pending.
-- Continuous repolling disproves the statement that the no-op waker provides no possible progress mechanism.
-- Default production limits include fuel, epoch interruption, a 30-second deadline, and 64 MiB memory; permanent host-worker wedge is not established.
-- The accepted linear-scan observation is not an unresolved runtime defect requiring replacement with a hash map.
+## Evidence and recipe corrections
+
+- Published wasmtime-46.0.2.crate src/runtime/func.rs describes host async suspension through stack switching while guest calls remain synchronous.
+- A poll-once rejection policy changes currently successful Pending-then-Ready behavior and needs an explicit authoring contract.
+- Native park-based execution requires real wake synchronization; it cannot be justified solely by replacing spin_loop.
+- The no-lock non-finding is narrower than the report's original blanket O(x-&gt;0) compliance assurance.
 
 ---
 

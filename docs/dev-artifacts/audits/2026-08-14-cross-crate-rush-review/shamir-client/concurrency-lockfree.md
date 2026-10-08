@@ -1,19 +1,21 @@
-<!-- revalidation:2026-10-08 source:92ad58266bf57ddea1fa3c8a47affba1a3a9a096 -->
-# shamir-client — concurrency-lockfree revalidation
+<!-- revalidation:2026-10-08 cycle:independent-2 source:e3765c935fc71655ee1ec0160cf180607935d89b -->
+# shamir-client — concurrency-lockfree independent revalidation (cycle 2)
 
-Source snapshot: `92ad58266bf57ddea1fa3c8a47affba1a3a9a096`. Revalidated 2026-10-08 by read-only XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run; no source fix is part of this update. Test registration/assertions are evidence of an oracle, not proof of a passing run.
+Frozen source snapshot: `e3765c935fc71655ee1ec0160cf180607935d89b`. Independently revalidated 2026-10-08 by a fresh XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run. Source-fixed means the specified mechanism was already removed at this snapshot; this cycle implements no source fix.
 
-This section is authoritative for current status. Original titles/IDs are retained for traceability; a refuted title is not a current assertion. The collapsed historical report below is superseded, including its counts, severity, scenarios and fix instructions. Plan IDs preserve historical numbering, not a current release mandate. [Workspace methodology and status definitions](../SUMMARY.md#status-definitions).
+This section is authoritative for current decisions. Existing IDs and allegation titles are retained for traceability; a refuted title is not a current assertion. Prior-cycle decisions were rechecked, not used as proof. The first cycle is available in repository history at this snapshot. The original historical body below remains preserved once and is superseded, including its counts, severities and recipes. [Workspace scope and status definitions](../SUMMARY.md#status-definitions).
 
-Both protocol races and mutex-policy drift remain. The claimed truly lock-free scc replacement and cursor mutex-skip guarantee are incorrect.
+Unrelated external edits began in dependency/toolchain/CI metadata during collection; additional Rust-source edits appeared afterward. They were left untouched. Evidence and decisions are tied to the frozen commit, not those later changes or an installed toolchain. “Current” below means current at that snapshot; no re-audit of the modified working tree is implied.
+
+Two compound lifecycle/order races remain. Global mutex use violates repository policy, but scc does not supply the advertised lock-free replacement. OnceLock is optional rather than a defect fix.
 
 ## Current claim decisions
 
 | Claim decisions | Open | Source-fixed | Partial | Refuted | Unverified | N/A |
 |---:|---:|---:|---:|---:|---:|---:|
-| 10 | 8 | 0 | 0 | 1 | 0 | 1 |
+| 10 | 7 | 0 | 0 | 1 | 0 | 2 |
 
-These are decisions on report claims, including repeated roots, bundled observations and non-findings—not a unique-bug census. Closed/N/A rows have no current risk; unverified risk is provisional. Pure style and unmeasured optimization claims do not establish runtime impact.
+These are duplicate-inclusive report decisions, not a unique-bug census. Pure style or structural optimization does not establish a runtime incident; unverified impact remains provisional.
 
 <a id="review-1"></a>
 
@@ -21,11 +23,13 @@ These are decisions on report claims, including repeated roots, bundled observat
 
 Status: `confirmed-open`. Current risk: `high`.
 
-The sole closed check precedes encoding/insertion. Reader drain can finish before registration; a successful half-open write then leaves an unanswered sender.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-client/src/client.rs:408](../../../../../crates/shamir-client/src/client.rs#L408); [crates/shamir-client/src/client.rs:1240](../../../../../crates/shamir-client/src/client.rs#L1240); [crates/shamir-client/src/client.rs:1271](../../../../../crates/shamir-client/src/client.rs#L1271).
+Initial closed check is separated from registration. After the reader's final drain, a successful write leaves an unanswered sender under default None response timeout.
 
-Grouping/duplicate: `SUMMARY.md#2.1`. This row is not another independent defect.
+Evidence: [crates/shamir-client/src/client.rs:408](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-client/src/client.rs#L408); [crates/shamir-client/src/client.rs:1240](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-client/src/client.rs#L1240); [crates/shamir-client/src/client.rs:1271](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-client/src/client.rs#L1271).
+
+Grouping/duplicate: [SUMMARY.md#2.1](SUMMARY.md#review-2-1). This is not an additional independent defect.
 
 <a id="review-2"></a>
 
@@ -33,11 +37,13 @@ Grouping/duplicate: `SUMMARY.md#2.1`. This row is not another independent defect
 
 Status: `confirmed-open`. Current risk: `low`.
 
-A global mutex still serializes insertion/removal; comments address await safety, not contention. This proves policy drift, not High runtime impact.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-client/src/client.rs:250](../../../../../crates/shamir-client/src/client.rs#L250); [crates/shamir-client/src/client.rs:390](../../../../../crates/shamir-client/src/client.rs#L390); [crates/shamir-client/src/client.rs:1269](../../../../../crates/shamir-client/src/client.rs#L1269); [CLAUDE.md](../../../../../CLAUDE.md).
+Every caller inserts and reader removes under a global standard mutex. The inline no-await argument does not name the required contention category; throughput degradation is unmeasured.
 
-Grouping/duplicate: `SUMMARY.md#2.2`. This row is not another independent defect.
+Evidence: [crates/shamir-client/src/client.rs:250](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-client/src/client.rs#L250); [crates/shamir-client/src/client.rs:1269](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-client/src/client.rs#L1269).
+
+Grouping/duplicate: [SUMMARY.md#2.2](SUMMARY.md#review-2-2). This is not an additional independent defect.
 
 <a id="review-3"></a>
 
@@ -45,11 +51,13 @@ Grouping/duplicate: `SUMMARY.md#2.2`. This row is not another independent defect
 
 Status: `confirmed-open`. Current risk: `low`.
 
-Each push takes the registry mutex and misses take the buffer mutex. No contention-model justification or measured degradation establishes medium runtime severity.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-client/src/subscription.rs:28](../../../../../crates/shamir-client/src/subscription.rs#L28); [crates/shamir-client/src/subscription.rs:33](../../../../../crates/shamir-client/src/subscription.rs#L33); [crates/shamir-client/src/client.rs:331](../../../../../crates/shamir-client/src/client.rs#L331).
+Each push locks the registry, with misses locking the buffer as well. No sanctioned-category argument is supplied. This establishes policy drift, not a measured medium runtime problem.
 
-Grouping/duplicate: `SUMMARY.md#2.2`. This row is not another independent defect.
+Evidence: [crates/shamir-client/src/subscription.rs:28](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-client/src/subscription.rs#L28); [crates/shamir-client/src/subscription.rs:33](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-client/src/subscription.rs#L33); [crates/shamir-client/src/client.rs:331](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-client/src/client.rs#L331).
+
+Grouping/duplicate: [SUMMARY.md#2.2](SUMMARY.md#review-2-2). This is not an additional independent defect.
 
 <a id="review-4"></a>
 
@@ -57,11 +65,13 @@ Grouping/duplicate: `SUMMARY.md#2.2`. This row is not another independent defect
 
 Status: `confirmed-open`. Current risk: `medium`.
 
-Registration becomes visible before buffered sends finish; lookup misses can append after the flush. Both loss and ordering interleavings remain possible.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-client/src/client.rs:330](../../../../../crates/shamir-client/src/client.rs#L330); [crates/shamir-client/src/client.rs:349](../../../../../crates/shamir-client/src/client.rs#L349); [crates/shamir-client/src/client.rs:1000](../../../../../crates/shamir-client/src/client.rs#L1000); [crates/shamir-client/src/client.rs:1005](../../../../../crates/shamir-client/src/client.rs#L1005).
+Separate miss/append and insert/flush scopes permit append-after-flush and direct-send-before-FIFO-flush schedules. Independent concurrent maps do not establish a compound atomic transition.
 
-Grouping/duplicate: `SUMMARY.md#1.3`. This row is not another independent defect.
+Evidence: [crates/shamir-client/src/client.rs:330](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-client/src/client.rs#L330); [crates/shamir-client/src/client.rs:349](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-client/src/client.rs#L349); [crates/shamir-client/src/client.rs:1000](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-client/src/client.rs#L1000).
+
+Grouping/duplicate: [SUMMARY.md#1.3](SUMMARY.md#review-1-3). This is not an additional independent defect.
 
 <a id="review-5"></a>
 
@@ -69,11 +79,13 @@ Grouping/duplicate: `SUMMARY.md#1.3`. This row is not another independent defect
 
 Status: `confirmed-open`. Current risk: `medium`.
 
-The peer controls distinct sub IDs. Only each vector is capped; no global admission limit or reader-exit clearing exists.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-client/src/client.rs:350](../../../../../crates/shamir-client/src/client.rs#L350); [crates/shamir-client/src/client.rs:407](../../../../../crates/shamir-client/src/client.rs#L407); [crates/shamir-client/src/subscription.rs:30](../../../../../crates/shamir-client/src/subscription.rs#L30).
+Per-sub caps leave distinct unknown IDs unbounded, and reader exit does not clear retained buffers. Faulty/hostile peer assumptions qualify arbitrary-key flooding.
 
-Grouping/duplicate: `SUMMARY.md#4.3`. This row is not another independent defect.
+Evidence: [crates/shamir-client/src/client.rs:350](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-client/src/client.rs#L350); [crates/shamir-client/src/client.rs:407](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-client/src/client.rs#L407).
+
+Grouping/duplicate: [SUMMARY.md#4.3](SUMMARY.md#review-4-3). This is not an additional independent defect.
 
 <a id="review-6"></a>
 
@@ -81,23 +93,27 @@ Grouping/duplicate: `SUMMARY.md#4.3`. This row is not another independent defect
 
 Status: `confirmed-open`. Current risk: `low`.
 
-The dump test calls sequentially; EOF tests pre-register waiters. Neither test exercises concurrent first initialization or registration after draining.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-client/src/tests/interner_cache_tests.rs:194](../../../../../crates/shamir-client/src/tests/interner_cache_tests.rs#L194); [crates/shamir-client/src/tests/demux_tests.rs:175](../../../../../crates/shamir-client/src/tests/demux_tests.rs#L175); [crates/shamir-client/src/tests/mod.rs:1](../../../../../crates/shamir-client/src/tests/mod.rs#L1).
+Sequential warm dump and pre-registered EOF waiters cannot catch concurrent first initialization or production insert-after-drain.
 
-Grouping/duplicate: `SUMMARY.md#2.3`. This row is not another independent defect.
+Evidence: [crates/shamir-client/src/tests/interner_cache_tests.rs:194](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-client/src/tests/interner_cache_tests.rs#L194); [crates/shamir-client/src/tests/demux_tests.rs:175](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-client/src/tests/demux_tests.rs#L175).
+
+Grouping/duplicate: [SUMMARY.md#2.3](SUMMARY.md#review-2-3). This is not an additional independent defect.
 
 <a id="review-7"></a>
 
 ### Claim 7 — `CursorStream::cursor_id` cell could be a `OnceLock` instead of `StdMutex`
 
-Status: `confirmed-open`. Current risk: `nit`.
+Status: `not-applicable`. Current risk: `—`.
 
-The shared cell remains a mutex-protected write-once Option. Importantly, current code still acquires its mutex on every successful yielded record.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-client/src/cursor_stream.rs:221](../../../../../crates/shamir-client/src/cursor_stream.rs#L221); [crates/shamir-client/src/cursor_stream.rs:250](../../../../../crates/shamir-client/src/cursor_stream.rs#L250); [crates/shamir-client/src/cursor_stream.rs:276](../../../../../crates/shamir-client/src/cursor_stream.rs#L276).
+Write-once storage can be expressed differently, but the existing short mutex scope is not shown to break behavior. Correct its lock-before-is_none comment separately.
 
-Grouping/duplicate: `SUMMARY.md#2.4`. This row is not another independent defect.
+Evidence: [crates/shamir-client/src/cursor_stream.rs:221](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-client/src/cursor_stream.rs#L221); [crates/shamir-client/src/cursor_stream.rs:250](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-client/src/cursor_stream.rs#L250).
+
+Grouping/duplicate: [SUMMARY.md#2.4](SUMMARY.md#review-2-4). This is not an additional independent defect.
 
 <a id="review-8"></a>
 
@@ -105,43 +121,49 @@ Grouping/duplicate: `SUMMARY.md#2.4`. This row is not another independent defect
 
 Status: `confirmed-open`. Current risk: `nit`.
 
-After a full rid cycle, unconditional insertion can replace an outstanding sender and misroute a late response. Replacement drops the old sender rather than hanging it.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-client/src/client.rs:1259](../../../../../crates/shamir-client/src/client.rs#L1259); [crates/shamir-client/src/client.rs:1271](../../../../../crates/shamir-client/src/client.rs#L1271); [crates/shamir-client/src/client.rs:290](../../../../../crates/shamir-client/src/client.rs#L290).
+After a full ID cycle an old pending sender may be replaced and late payloads miscorrelated. Replacement resolves the old receiver as ConnectionClosed; it does not permanently hang that receiver.
 
-Grouping/duplicate: `SUMMARY.md#1.13`. This row is not another independent defect.
+Evidence: [crates/shamir-client/src/client.rs:1259](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-client/src/client.rs#L1259); [crates/shamir-client/src/client.rs:1271](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-client/src/client.rs#L1271); [crates/shamir-client/src/client.rs:290](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-client/src/client.rs#L290).
+
+Grouping/duplicate: [SUMMARY.md#1.13](SUMMARY.md#review-1-13). This is not an additional independent defect.
 
 <a id="review-nf-1"></a>
 
 ### Claim NF.1 — `interner_cache.rs` is fully pillar-compliant and lock-free
 
-Status: `refuted`. Current risk: —.
+Status: `refuted`. Current risk: `—`.
 
-THasher, CAS-max, OnceCell, and len acknowledgment exist, but pinned scc::HashMap entry access uses bucket locks; its synchronous methods can block.
+Prior-cycle decision: `refuted`.
 
-Evidence: [crates/shamir-client/src/interner_cache.rs:39](../../../../../crates/shamir-client/src/interner_cache.rs#L39); [crates/shamir-client/src/interner_cache.rs:88](../../../../../crates/shamir-client/src/interner_cache.rs#L88); [crates/shamir-client/src/interner_cache.rs:146](../../../../../crates/shamir-client/src/interner_cache.rs#L146); [Cargo.lock:3123](../../../../../Cargo.lock#L3123).
+Exact scc 3.8.4 entry methods obtain bucket read/write locks. THasher, CAS-max and nonpoisoning do not alter that fact.
 
-Grouping/duplicate: `SUMMARY.md#NF.7`. This row is not another independent defect.
+Evidence: [Cargo.lock:3123](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/Cargo.lock#L3123); [crates/shamir-client/src/interner_cache.rs:115](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-client/src/interner_cache.rs#L115).
+
+Grouping/duplicate: [SUMMARY.md#NF.7](SUMMARY.md#review-nf-7). This is not an additional independent defect.
 
 <a id="review-nf-2"></a>
 
 ### Claim NF.2 — No lock is held across an await except the sanctioned write-half guard
 
-Status: `not-applicable`. Current risk: —.
+Status: `not-applicable`. Current risk: `—`.
 
-Inspected standard-mutex scopes end before await; the async write guard intentionally spans write_frame. OnceCell also coordinates asynchronous initialization.
+Prior-cycle decision: `not-applicable`.
 
-Evidence: [crates/shamir-client/src/client.rs:389](../../../../../crates/shamir-client/src/client.rs#L389); [crates/shamir-client/src/client.rs:1277](../../../../../crates/shamir-client/src/client.rs#L1277); [crates/shamir-client/src/interner_cache.rs:175](../../../../../crates/shamir-client/src/interner_cache.rs#L175).
+Standard-mutex guards in inspected paths end before awaits. The write-half Tokio guard deliberately spans I/O; OnceCell uses semaphore-based asynchronous initialization coordination.
 
-Grouping/duplicate: `SUMMARY.md#NF.7`. This row is not another independent defect.
+Evidence: [crates/shamir-client/src/client.rs:389](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-client/src/client.rs#L389); [crates/shamir-client/src/client.rs:1277](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-client/src/client.rs#L1277); [crates/shamir-client/src/interner_cache.rs:175](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-client/src/interner_cache.rs#L175).
 
-## Corrections and qualified non-findings
+Grouping/duplicate: [SUMMARY.md#NF.7](SUMMARY.md#review-nf-7). This is not an additional independent defect.
 
-- Do not classify mutex-policy drift as runtime High solely because CLAUDE.md bans the primitive.
-- Pinned scc 3.8.4 insert_sync/remove_sync are not lock-free; switching maps does not automatically prove nonblocking execution or solve compound lifecycle races.
-- CursorStream's is_none check occurs after lock acquisition, contradicting the review's first-touch-only locking claim.
-- The registration race is conditional on the write succeeding after reader exit; ordinary write failure already removes the entry.
-- Atomic wrapping never causes a debug overflow panic; collision replaces/drops the previous sender, which makes its receiver resolve ConnectionClosed.
+## Evidence and recipe corrections
+
+- scc 3.8.4 documentation distinguishes lock-free resizing from bucket-locked entry access and warns about synchronous methods in async execution.
+- A one-lock handoff must cover routing decisions and FIFO flush together. Moving only the flush or using two independent entry_sync operations leaves a residual race.
+- No amount of no-await commentary alone establishes the repository's required contention model.
+- A raw test insert after reader completion does not exercise a fixed Client registration seam.
+- Cursor OnceLock reads still involve a state check; branch-free performance is not established.
 
 ---
 

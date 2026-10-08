@@ -1,11 +1,13 @@
-<!-- revalidation:2026-10-08 source:92ad58266bf57ddea1fa3c8a47affba1a3a9a096 -->
-# shamir-funclib — concurrency-lockfree revalidation
+<!-- revalidation:2026-10-08 cycle:independent-2 source:e3765c935fc71655ee1ec0160cf180607935d89b -->
+# shamir-funclib — concurrency-lockfree independent revalidation (cycle 2)
 
-Source snapshot: `92ad58266bf57ddea1fa3c8a47affba1a3a9a096`. Revalidated 2026-10-08 by read-only XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run; no source fix is part of this update. Test registration/assertions are evidence of an oracle, not proof of a passing run.
+Frozen source snapshot: `e3765c935fc71655ee1ec0160cf180607935d89b`. Independently revalidated 2026-10-08 by a fresh XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run. Source-fixed means the specified mechanism was already removed at this snapshot; this cycle implements no source fix.
 
-This section is authoritative for current status. Original titles/IDs are retained for traceability; a refuted title is not a current assertion. The collapsed historical report below is superseded, including its counts, severity, scenarios and fix instructions. Plan IDs preserve historical numbering, not a current release mandate. [Workspace methodology and status definitions](../SUMMARY.md#status-definitions).
+This section is authoritative for current decisions. Existing IDs and allegation titles are retained for traceability; a refuted title is not a current assertion. Prior-cycle decisions were rechecked, not used as proof. The first cycle is available in repository history at this snapshot. The original historical body below remains preserved once and is superseded, including its counts, severities and recipes. [Workspace scope and status definitions](../SUMMARY.md#status-definitions).
 
-Global regex serialization, semaphore lost wakeup, runtime-worker blocking, exclusive resolver lookups, and resolver test gaps remain. Several lock-free and deterministic-test guarantees require correction.
+Unrelated external edits began in dependency/toolchain/CI metadata during collection; additional Rust-source edits appeared afterward. They were left untouched. Evidence and decisions are tied to the frozen commit, not those later changes or an installed toolchain. “Current” below means current at that snapshot; no re-audit of the modified working tree is implied.
+
+The mutex cache, lost-notification schedule and inline KDF worker occupancy are source-established. Exact scc semantics contradict populated lock-free lookup claims; existing cap testing does not control the relevant interleavings.
 
 ## Current claim decisions
 
@@ -13,7 +15,7 @@ Global regex serialization, semaphore lost wakeup, runtime-worker blocking, excl
 |---:|---:|---:|---:|---:|---:|---:|
 | 6 | 6 | 0 | 0 | 0 | 0 | 0 |
 
-These are decisions on report claims, including repeated roots, bundled observations and non-findings—not a unique-bug census. Closed/N/A rows have no current risk; unverified risk is provisional. Pure style and unmeasured optimization claims do not establish runtime impact.
+These are duplicate-inclusive report decisions, not a unique-bug census. Pure style or structural optimization does not establish a runtime incident; unverified impact remains provisional.
 
 <a id="review-1"></a>
 
@@ -21,9 +23,11 @@ These are decisions on report claims, including repeated roots, bundled observat
 
 Status: `confirmed-open`. Current risk: `medium`.
 
-Every cached-regex call still takes the process-global mutex; a miss compiles while the guard is held, and reaching 256 entries clears the entire cache. This establishes serialization and churn, not measured milliseconds/seconds or throughput collapse. No contention-model justification or replacement is present.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-funclib/src/strings.rs:418](../../../../../crates/shamir-funclib/src/strings.rs#L418); [crates/shamir-funclib/src/strings.rs:423](../../../../../crates/shamir-funclib/src/strings.rs#L423); [crates/shamir-funclib/src/strings.rs:427](../../../../../crates/shamir-funclib/src/strings.rs#L427); [crates/shamir-funclib/src/strings.rs:429](../../../../../crates/shamir-funclib/src/strings.rs#L429); [crates/shamir-engine/src/query/filter/resolve.rs:374](../../../../../crates/shamir-engine/src/query/filter/resolve.rs#L374).
+Every hit locks one global mutex; misses compile while holding it. Inserting a 257th pattern clears the cache, causing subsequent churn. Serialization is proved, but throughput collapse and compile durations are unmeasured.
+
+Evidence: [crates/shamir-funclib/src/strings.rs:418](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-funclib/src/strings.rs#L418); [crates/shamir-funclib/src/strings.rs:423](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-funclib/src/strings.rs#L423); [crates/shamir-funclib/src/strings.rs:427](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-funclib/src/strings.rs#L427); [crates/shamir-funclib/src/strings.rs:429](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-funclib/src/strings.rs#L429).
 
 <a id="review-2"></a>
 
@@ -31,9 +35,11 @@ Evidence: [crates/shamir-funclib/src/strings.rs:418](../../../../../crates/shami
 
 Status: `confirmed-open`. Current risk: `high`.
 
-release still increments the atomic and notifies without acquiring the wait mutex. A release between a failed predicate check and Condvar::wait can leave a waiter asleep with an available permit and no future notification. The registered KDF cap test does not deterministically force this window.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-funclib/src/crypto.rs:139](../../../../../crates/shamir-funclib/src/crypto.rs#L139); [crates/shamir-funclib/src/crypto.rs:140](../../../../../crates/shamir-funclib/src/crypto.rs#L140); [crates/shamir-funclib/src/crypto.rs:145](../../../../../crates/shamir-funclib/src/crypto.rs#L145); [crates/shamir-funclib/src/crypto/tests/crypto_tests.rs:207](../../../../../crates/shamir-funclib/src/crypto/tests/crypto_tests.rs#L207).
+After all holders finish, a delayed waiter can check zero, miss all releases before wait registration, then sleep with free permits and no future notifier. A controlled check-to-wait regression is required; the KDF overlap test does not force this schedule.
+
+Evidence: [crates/shamir-funclib/src/crypto.rs:139](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-funclib/src/crypto.rs#L139); [crates/shamir-funclib/src/crypto.rs:140](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-funclib/src/crypto.rs#L140); [crates/shamir-funclib/src/crypto.rs:145](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-funclib/src/crypto.rs#L145); [crates/shamir-funclib/src/crypto/tests/crypto_tests.rs:207](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-funclib/src/crypto/tests/crypto_tests.rs#L207).
 
 <a id="review-3"></a>
 
@@ -41,9 +47,11 @@ Evidence: [crates/shamir-funclib/src/crypto.rs:139](../../../../../crates/shamir
 
 Status: `confirmed-open`. Current risk: `medium`.
 
-Query/filter and computed-write scalar calls remain synchronous; they can execute both Condvar waits and KDF work on a runtime worker. The separate named Argon2idFunction wrapper does use spawn_blocking, but does not protect these scalar-expression paths. Memory admission is bounded; worker occupancy is not.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-funclib/src/crypto.rs:102](../../../../../crates/shamir-funclib/src/crypto.rs#L102); [crates/shamir-funclib/src/crypto.rs:221](../../../../../crates/shamir-funclib/src/crypto.rs#L221); [crates/shamir-engine/src/query/filter/resolve.rs:374](../../../../../crates/shamir-engine/src/query/filter/resolve.rs#L374); [crates/shamir-engine/src/table/write_helpers.rs:314](../../../../../crates/shamir-engine/src/table/write_helpers.rs#L314); [crates/shamir-wasm-host/src/builtin.rs:63](../../../../../crates/shamir-wasm-host/src/builtin.rs#L63).
+Filter and computed-write calls synchronously perform admission waits and KDF work. The named wrapper's spawn_blocking covers a different entry point. Occupied workers remain a risk even without saturation.
+
+Evidence: [crates/shamir-funclib/src/crypto.rs:221](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-funclib/src/crypto.rs#L221); [crates/shamir-engine/src/query/filter/resolve.rs:374](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-engine/src/query/filter/resolve.rs#L374); [crates/shamir-engine/src/table/write_helpers.rs:314](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-engine/src/table/write_helpers.rs#L314); [crates/shamir-wasm-host/src/builtin.rs:63](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-wasm-host/src/builtin.rs#L63).
 
 <a id="review-4"></a>
 
@@ -51,9 +59,11 @@ Evidence: [crates/shamir-funclib/src/crypto.rs:102](../../../../../crates/shamir
 
 Status: `confirmed-open`. Current risk: `low`.
 
-get still uses get_sync. Pinned scc 3.8.4 obtains optional_writer_sync and returns an exclusively held OccupiedEntry. read_sync would use a shared bucket lock, not a genuinely lock-free read. Empty-map lookup avoids bucket locking; populated-map contention magnitude is unmeasured.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-funclib/src/scalar_resolver.rs:25](../../../../../crates/shamir-funclib/src/scalar_resolver.rs#L25); [crates/shamir-funclib/src/scalar_resolver.rs:46](../../../../../crates/shamir-funclib/src/scalar_resolver.rs#L46); [Cargo.lock:3123](../../../../../Cargo.lock#L3123).
+Published scc 3.8.4 get_sync calls optional_writer_sync and holds an exclusive bucket entry while cloning. read_sync uses a shared lock, so that substitution reduces exclusivity but does not fulfill lock-free wording.
+
+Evidence: [crates/shamir-funclib/src/scalar_resolver.rs:25](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-funclib/src/scalar_resolver.rs#L25); [crates/shamir-funclib/src/scalar_resolver.rs:46](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-funclib/src/scalar_resolver.rs#L46); [Cargo.lock:3123](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/Cargo.lock#L3123).
 
 <a id="review-5"></a>
 
@@ -61,11 +71,13 @@ Evidence: [crates/shamir-funclib/src/scalar_resolver.rs:25](../../../../../crate
 
 Status: `confirmed-open`. Current risk: `low`.
 
-There is still no dedicated registered resolver test suite, including concurrent registration/dispatch and same-name replacement. Indirect engine tests do not close those obligations.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-funclib/src/scalar_resolver.rs:145](../../../../../crates/shamir-funclib/src/scalar_resolver.rs#L145); [crates/shamir-funclib/src/tests/mod.rs:1](../../../../../crates/shamir-funclib/src/tests/mod.rs#L1); [crates/shamir-engine/src/query/read/tests/select_projection_tests.rs:284](../../../../../crates/shamir-engine/src/query/read/tests/select_projection_tests.rs#L284).
+No resolver-specific suite is wired in funclib. Registered external successful-dispatch tests do not establish occupied-name replacement, builtin shadowing, identity or controlled registration/lookup behavior.
 
-Grouping/duplicate: `style-claude-md.md#1`. This row is not another independent defect.
+Evidence: [crates/shamir-funclib/src/scalar_resolver.rs:145](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-funclib/src/scalar_resolver.rs#L145); [crates/shamir-funclib/src/tests/mod.rs:1](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-funclib/src/tests/mod.rs#L1); [crates/shamir-engine/src/query/read/tests/select_projection_tests.rs:283](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-engine/src/query/read/tests/select_projection_tests.rs#L283).
+
+Grouping/duplicate: [style-claude-md.md#1](style-claude-md.md#review-1). This is not an additional independent defect.
 
 <a id="review-6"></a>
 
@@ -73,21 +85,20 @@ Grouping/duplicate: `style-claude-md.md#1`. This row is not another independent 
 
 Status: `confirmed-open`. Current risk: `nit`.
 
-The counter is still incremented/decremented manually around hashing; unwind between them skips decrement. The permit releases through Drop. An ordinary returned KDF error does not leak the counter because decrement precedes res?. No current data-triggered KDF panic was demonstrated.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-funclib/src/crypto.rs:177](../../../../../crates/shamir-funclib/src/crypto.rs#L177); [crates/shamir-funclib/src/crypto.rs:225](../../../../../crates/shamir-funclib/src/crypto.rs#L225); [crates/shamir-funclib/src/crypto.rs:230](../../../../../crates/shamir-funclib/src/crypto.rs#L230).
+Unwind between manual increment/decrement leaves telemetry inflated, while permit Drop releases admission. Returned errors decrement before propagation. No presently input-triggerable KDF unwind was established.
 
-Grouping/duplicate: `error-handling-lifecycle.md#7`. This row is not another independent defect.
+Evidence: [crates/shamir-funclib/src/crypto.rs:178](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-funclib/src/crypto.rs#L178); [crates/shamir-funclib/src/crypto.rs:225](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-funclib/src/crypto.rs#L225); [crates/shamir-funclib/src/crypto.rs:230](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-funclib/src/crypto.rs#L230).
 
-## Corrections and qualified non-findings
+Grouping/duplicate: [error-handling-lifecycle.md#7](error-handling-lifecycle.md#review-7). This is not an additional independent defect.
 
-- No separate Fix Plan exists; recommendations are assessed in the finding rows and SUMMARY plan.
-- scc HashMap insertion and populated lookup are bucket-locked; only resizing is described as lock-free by pinned dependency source. Replacing get_sync with read_sync reduces exclusivity, not all locking.
-- TFxMap scalar registry cardinality is O(1), and no scc len call is present. AggRegistry has no len/is_empty methods, contrary to the original combined guarantee.
-- UserScalarLayer::is_empty delegates to scc's !has_entry; absence of a banned len call is confirmed, but populated is_empty is not a universal constant-time cardinality guarantee.
-- No async/await, unsafe, parking_lot, RwLock, or static mut occurrence was found in this crate. Existing Fx-backed collections and impure generation metadata are confirmed.
-- The cap's atomic admission and RAII release bound concurrent KDF allocations, but the barrier does not prove simultaneous execution or semaphore wakeup correctness.
-- The sibling Argon2Semaphore still notifies without its wait mutex; this observation settles the suggested mirror check, not a new neighboring-crate audit.
+## Evidence and recipe corrections
+
+- TFxMap registries are std::HashMap, not IndexMap; cardinality remains O(1).
+- The sibling Argon2Semaphore has the same notifier shape but retries through wait_timeout capped at one second; do not infer funclib's indefinite missed-notification hang for that sibling.
+- Acquiring the notification mutex unconditionally on release affects every release, not only contended releases.
+- A start barrier does not make peak==cap deterministic or guarantee that removing admission makes peak exceed cap.
 
 ---
 

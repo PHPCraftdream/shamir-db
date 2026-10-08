@@ -1,11 +1,13 @@
-<!-- revalidation:2026-10-08 source:92ad58266bf57ddea1fa3c8a47affba1a3a9a096 -->
-# shamir-bench-utils — concurrency-lockfree revalidation
+<!-- revalidation:2026-10-08 cycle:independent-2 source:e3765c935fc71655ee1ec0160cf180607935d89b -->
+# shamir-bench-utils — concurrency-lockfree independent revalidation (cycle 2)
 
-Source snapshot: `92ad58266bf57ddea1fa3c8a47affba1a3a9a096`. Revalidated 2026-10-08 by read-only XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run; no source fix is part of this update. Test registration/assertions are evidence of an oracle, not proof of a passing run.
+Frozen source snapshot: `e3765c935fc71655ee1ec0160cf180607935d89b`. Independently revalidated 2026-10-08 by a fresh XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run. Source-fixed means the specified mechanism was already removed at this snapshot; this cycle implements no source fix.
 
-This section is authoritative for current status. Original titles/IDs are retained for traceability; a refuted title is not a current assertion. The collapsed historical report below is superseded, including its counts, severity, scenarios and fix instructions. Plan IDs preserve historical numbering, not a current release mandate. [Workspace methodology and status definitions](../SUMMARY.md#status-definitions).
+This section is authoritative for current decisions. Existing IDs and allegation titles are retained for traceability; a refuted title is not a current assertion. Prior-cycle decisions were rechecked, not used as proof. The first cycle is available in repository history at this snapshot. The original historical body below remains preserved once and is superseded, including its counts, severities and recipes. [Workspace scope and status definitions](../SUMMARY.md#status-definitions).
 
-Own-source lock/map guarantees hold. Process-global measurement overlap and documentation gaps remain; the dependency-internal reset race cannot be independently verified.
+Unrelated external edits began in dependency/toolchain/CI metadata during collection; additional Rust-source edits appeared afterward. They were left untouched. Evidence and decisions are tied to the frozen commit, not those later changes or an installed toolchain. “Current” below means current at that snapshot; no re-audit of the modified working tree is implied.
+
+Own source has no lock-bearing structures. Exact pinned dependency inspection confirms a reset interleaving defect, and helper windows can overlap even synchronously through nesting. No production overlap or measured overhead is established.
 
 ## Current claim decisions
 
@@ -13,11 +15,7 @@ Own-source lock/map guarantees hold. Process-global measurement overlap and docu
 |---:|---:|---:|---:|---:|---:|---:|
 | 4 | 4 | 0 | 0 | 0 | 0 | 0 |
 
-These are decisions on report claims, including repeated roots, bundled observations and non-findings—not a unique-bug census. Closed/N/A rows have no current risk; unverified risk is provisional. Pure style and unmeasured optimization claims do not establish runtime impact.
-
-## Parent acceptance refinements
-
-- The pinned peak_alloc source is available: reset's two-atomic interleaving is confirmed; the separate cancellation carry-over claim remains refuted.
+These are duplicate-inclusive report decisions, not a unique-bug census. Pure style or structural optimization does not establish a runtime incident; unverified impact remains provisional.
 
 <a id="review-1"></a>
 
@@ -25,13 +23,13 @@ These are decisions on report claims, including repeated roots, bundled observat
 
 Status: `confirmed-open`. Current risk: `low`.
 
-Parent inspection of checksummed peak_alloc 0.3.0 proves reset_peak_usage is PEAK.store(CURRENT.load(Relaxed), Relaxed), while allocation uses CURRENT.fetch_add and PEAK.fetch_max. An allocation between the reset load and store can have its new high watermark overwritten by the older baseline; no later allocation need repair it. This is source-proven measurement correctness, not measured production overhead.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-bench-utils/src/peak_mem.rs:57](../../../../../crates/shamir-bench-utils/src/peak_mem.rs#L57); [Cargo.lock:2396](../../../../../Cargo.lock#L2396).
+Published peak_alloc 0.3.0 src/lib.rs:108–109 loads current then stores peak; :125–127 adds current and fetch-maxes peak. Reset-load(C), allocation-update(C+X), reset-store(C) is reachable with another allocating thread and needs no later repairing allocation. Source: https://docs.rs/crate/peak_alloc/0.3.0/source/src/lib.rs.
 
-Pinned dependency evidence: [peak_alloc 0.3.0, src/lib.rs:108](https://docs.rs/crate/peak_alloc/0.3.0/source/src/lib.rs); [peak_alloc 0.3.0, src/lib.rs:125](https://docs.rs/crate/peak_alloc/0.3.0/source/src/lib.rs).
+Evidence: [crates/shamir-bench-utils/src/peak_mem.rs:57](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-bench-utils/src/peak_mem.rs#L57); [Cargo.lock:2396](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/Cargo.lock#L2396).
 
-Grouping/duplicate: `SUMMARY.md#2.1`. This row is not another independent defect.
+Grouping/duplicate: [SUMMARY.md#2.1](SUMMARY.md#review-2-1). This is not an additional independent defect.
 
 <a id="review-2"></a>
 
@@ -39,11 +37,13 @@ Grouping/duplicate: `SUMMARY.md#2.1`. This row is not another independent defect
 
 Status: `confirmed-open`. Current risk: `low`.
 
-Both helpers reset and read the same global allocator watermark with no ownership or reentry check. Overlapping resets invalidate another measurement window. Neither helper has an executable workspace caller; live raw-reset samples are sequential.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-bench-utils/src/peak_mem.rs:40](../../../../../crates/shamir-bench-utils/src/peak_mem.rs#L40); [crates/shamir-bench-utils/src/peak_mem.rs:89](../../../../../crates/shamir-bench-utils/src/peak_mem.rs#L89); [crates/shamir-bench-utils/src/peak_mem.rs:106](../../../../../crates/shamir-bench-utils/src/peak_mem.rs#L106); [crates/shamir-engine/benches/streaming_topk.rs:143](../../../../../crates/shamir-engine/benches/streaming_topk.rs#L143).
+An outer closure can allocate and release a large buffer, then invoke inner measure, which resets away its peak before the outer capture. No parallel runtime is required. Helpers have no executable current caller; the two raw-reset benches sample sequentially.
 
-Grouping/duplicate: `SUMMARY.md#2.1`. This row is not another independent defect.
+Evidence: [crates/shamir-bench-utils/src/peak_mem.rs:89](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-bench-utils/src/peak_mem.rs#L89); [crates/shamir-bench-utils/src/peak_mem.rs:106](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-bench-utils/src/peak_mem.rs#L106); [crates/shamir-engine/benches/streaming_topk.rs:143](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-engine/benches/streaming_topk.rs#L143); [crates/shamir-index/benches/create_index_streaming.rs:211](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-index/benches/create_index_streaming.rs#L211).
+
+Grouping/duplicate: [SUMMARY.md#2.1](SUMMARY.md#review-2-1). This is not an additional independent defect.
 
 <a id="review-3"></a>
 
@@ -51,31 +51,35 @@ Grouping/duplicate: `SUMMARY.md#2.1`. This row is not another independent defect
 
 Status: `confirmed-open`. Current risk: `nit`.
 
-The synchronous helper still lacks process-global/concurrent-use warnings. The asynchronous warning still incorrectly suggests current_thread alone provides accurate per-task isolation.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-bench-utils/src/peak_mem.rs:71](../../../../../crates/shamir-bench-utils/src/peak_mem.rs#L71); [crates/shamir-bench-utils/src/peak_mem.rs:98](../../../../../crates/shamir-bench-utils/src/peak_mem.rs#L98).
+The sync helper has no warning, while the async warning incorrectly recommends current_thread as per-task isolation. Both use the same process-global allocator counters and can observe foreign allocations or nested resets.
 
-Grouping/duplicate: `SUMMARY.md#2.1`. This row is not another independent defect.
+Evidence: [crates/shamir-bench-utils/src/peak_mem.rs:71](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-bench-utils/src/peak_mem.rs#L71); [crates/shamir-bench-utils/src/peak_mem.rs:98](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-bench-utils/src/peak_mem.rs#L98).
+
+Grouping/duplicate: [SUMMARY.md#2.1](SUMMARY.md#review-2-1). This is not an additional independent defect.
 
 <a id="review-4"></a>
 
 ### Claim 4 — `#[global_allocator]` shipped from a library crate
 
-Status: `confirmed-open`. Current risk: `nit`.
+Status: `confirmed-open`. Current risk: `low`.
 
-The feature-gated library still defines the allocator globally. Linking it affects the entire binary and cannot coexist with another global allocator; the relevant constraint is absent from its module documentation.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-bench-utils/src/peak_mem.rs:39](../../../../../crates/shamir-bench-utils/src/peak_mem.rs#L39); [crates/shamir-bench-utils/src/lib.rs:14](../../../../../crates/shamir-bench-utils/src/lib.rs#L14); [crates/shamir-db/benches/bench_allocator.rs:8](../../../../../crates/shamir-db/benches/bench_allocator.rs#L8).
+The declaration is process-wide in linked consumers and cannot coexist with a second allocator declaration. Existing allocator-switch examples establish the relevant design constraint, not an observed current collision or a particular diagnostic number.
 
-Grouping/duplicate: `SUMMARY.md#5.1`. This row is not another independent defect.
+Evidence: [crates/shamir-bench-utils/src/peak_mem.rs:39](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-bench-utils/src/peak_mem.rs#L39); [crates/shamir-bench-utils/src/lib.rs:14](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-bench-utils/src/lib.rs#L14); [crates/shamir-db/benches/bench_allocator.rs:9](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/benches/bench_allocator.rs#L9).
 
-## Corrections and qualified non-findings
+Grouping/duplicate: [api-wire-protocol.md#1](api-wire-protocol.md#review-1). This is not an additional independent defect.
 
-- Own source contains no Mutex/RwLock, concurrent map, hash-keyed structure, or scc len call. Its Vec lengths are constant-time. The dependency's exact atomics/orderings were not verified.
-- Calling the crate compliant with all five pillars overlooks the separately confirmed per-point allocation loop.
-- A measurement-in-flight guard prevents overlapping cooperating measurements, not arbitrary allocator activity or a dependency-internal reset TOCTOU.
-- current_thread does not exclude unrelated tasks, other process threads, or spawn_blocking. Sequential call sites are source-proven; universally sound published peaks are not.
-- The duplicate-allocator diagnostic number was not compiler-verified; do not assert E0152/E0159.
+## Evidence and recipe corrections
+
+- The overview and non-finding bullet still saying exact dependency atomics were unverified are obsolete. The checksummed published source confirms Relaxed counters and the load/store reset.
+- Sequential sample calls establish absence of overlapping callers at those sites, not arbitrary allocation quiescence or universally sound published peaks.
+- A sampler AtomicBool cannot prevent allocator updates from unrelated threads. Stronger atomic orderings alone also do not make a two-counter reset indivisible.
+- If measurement ownership is introduced, release it with cancellation-safe lifecycle handling; do not restore stale global peaks or claim this repairs the refuted cancellation-inheritance mechanism.
+- No own Mutex/RwLock or scc traversal exists, but fetch_max contention and System allocation are not a proof that the entire allocator operation has constant latency.
 
 ---
 

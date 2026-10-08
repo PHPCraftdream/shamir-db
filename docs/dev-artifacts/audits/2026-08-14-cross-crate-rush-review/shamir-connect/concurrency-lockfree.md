@@ -1,11 +1,13 @@
-<!-- revalidation:2026-10-08 source:92ad58266bf57ddea1fa3c8a47affba1a3a9a096 -->
-# shamir-connect — concurrency-lockfree revalidation
+<!-- revalidation:2026-10-08 cycle:independent-2 source:e3765c935fc71655ee1ec0160cf180607935d89b -->
+# shamir-connect — concurrency-lockfree independent revalidation (cycle 2)
 
-Source snapshot: `92ad58266bf57ddea1fa3c8a47affba1a3a9a096`. Revalidated 2026-10-08 by read-only XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run; no source fix is part of this update. Test registration/assertions are evidence of an oracle, not proof of a passing run.
+Frozen source snapshot: `e3765c935fc71655ee1ec0160cf180607935d89b`. Independently revalidated 2026-10-08 by a fresh XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run. Source-fixed means the specified mechanism was already removed at this snapshot; this cycle implements no source fix.
 
-This section is authoritative for current status. Original titles/IDs are retained for traceability; a refuted title is not a current assertion. The collapsed historical report below is superseded, including its counts, severity, scenarios and fix instructions. Plan IDs preserve historical numbering, not a current release mandate. [Workspace methodology and status definitions](../SUMMARY.md#status-definitions).
+This section is authoritative for current decisions. Existing IDs and allegation titles are retained for traceability; a refuted title is not a current assertion. Prior-cycle decisions were rechecked, not used as proof. The first cycle is available in repository history at this snapshot. The original historical body below remains preserved once and is superseded, including its counts, severities and recipes. [Workspace scope and status definitions](../SUMMARY.md#status-definitions).
 
-The headline multiplicative fetch_max race is refuted. The subnet regression, global capped-insert scan, identity-state update races, and documentation issues remain.
+Unrelated external edits began in dependency/toolchain/CI metadata during collection; additional Rust-source edits appeared afterward. They were left untouched. Evidence and decisions are tied to the frozen commit, not those later changes or an installed toolchain. “Current” below means current at that snapshot; no re-audit of the modified working tree is implied.
+
+The equal-timestamp multiplicative refill allegation is refuted by atomic modification order. Global capped-insert work and identity update races are real. Blocking primitives and shard-lock maps must be described accurately without unsupported contention estimates.
 
 ## Current claim decisions
 
@@ -13,29 +15,33 @@ The headline multiplicative fetch_max race is refuted. The subnet regression, gl
 |---:|---:|---:|---:|---:|---:|---:|
 | 9 | 7 | 0 | 0 | 1 | 0 | 1 |
 
-These are decisions on report claims, including repeated roots, bundled observations and non-findings—not a unique-bug census. Closed/N/A rows have no current risk; unverified risk is provisional. Pure style and unmeasured optimization claims do not establish runtime impact.
+These are duplicate-inclusive report decisions, not a unique-bug census. Pure style or structural optimization does not establish a runtime incident; unverified impact remains provisional.
 
 <a id="review-1"></a>
 
 ### Claim 1 — Concurrent callers share the pre-fetch_max refill watermark and multiply refill by racer count
 
-Status: `refuted`. Current risk: —.
+Status: `refuted`. Current risk: `—`.
 
-fetch_max is an atomic read-modify-write, not an independently delayed load/store. For identical later timestamps, one caller receives the old watermark; subsequent callers receive the advanced value and compute zero elapsed. Successful token CAS updates apply each caller's refill once. The alleged N-fold shared-span credit cannot follow this code.
+Prior-cycle decision: `refuted`.
 
-Evidence: [crates/shamir-connect/src/server/session.rs:353](../../../../../crates/shamir-connect/src/server/session.rs#L353); [crates/shamir-connect/src/server/session.rs:357](../../../../../crates/shamir-connect/src/server/session.rs#L357); [crates/shamir-connect/src/server/session.rs:370](../../../../../crates/shamir-connect/src/server/session.rs#L370).
+For identical advanced timestamps, one atomic fetch_max receives the old value; subsequent operations receive the advanced value. Positive intervals telescope even with out-of-order timestamps. Retried token closures do not publish repeated refill.
+
+Evidence: [crates/shamir-connect/src/server/session.rs:353](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-connect/src/server/session.rs#L353); [crates/shamir-connect/src/server/session.rs:370](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-connect/src/server/session.rs#L370).
 
 <a id="review-2"></a>
 
 ### Claim 2 — SessionStore::cap_lock: unjustified parking_lot::Mutex held across an O(all-sessions) scan
 
-Status: `confirmed-open`. Current risk: `high`.
+Status: `confirmed-open`. Current risk: `medium`.
 
-Every capped insertion takes one global lock, traverses all sessions, and sorts the user's matches. Production SCRAM completion calls it. Complexity and serialization are proven; the numerical latency scenario is unmeasured.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-connect/src/server/session.rs:416](../../../../../crates/shamir-connect/src/server/session.rs#L416); [crates/shamir-connect/src/server/session.rs:470](../../../../../crates/shamir-connect/src/server/session.rs#L470); [crates/shamir-connect/src/server/session.rs:476](../../../../../crates/shamir-connect/src/server/session.rs#L476); [crates/shamir-server/src/connection/handshake.rs:580](../../../../../crates/shamir-server/src/connection/handshake.rs#L580).
+Every successful capped login serializes a full map traversal and matching-user sort. Production reaches it after authentication; connection/subnet limits constrain load. Scaling and cross-user serialization are proven, but High availability impact and numeric latency are not.
 
-Grouping/duplicate: `performance-hotpath.md#1`. This row is not another independent defect.
+Evidence: [crates/shamir-connect/src/server/session.rs:470](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-connect/src/server/session.rs#L470); [crates/shamir-connect/src/server/session.rs:476](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-connect/src/server/session.rs#L476); [crates/shamir-server/src/connection/handshake.rs:580](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-server/src/connection/handshake.rs#L580); [crates/shamir-server/src/server/server_launcher.rs:631](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-server/src/server/server_launcher.rs#L631).
+
+Grouping/duplicate: [performance-hotpath.md#1](performance-hotpath.md#review-1). This is not an additional independent defect.
 
 <a id="review-3"></a>
 
@@ -43,11 +49,13 @@ Grouping/duplicate: `performance-hotpath.md#1`. This row is not another independ
 
 Status: `confirmed-open`. Current risk: `low`.
 
-The critical section still includes materialization, canonical bytes, HMAC, and retention cloning. Chain ordering genuinely requires coordination. Actual contention is unmeasured; the production sink already handles blocking fsync with block_in_place on multi-thread runtimes.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-connect/src/server/audit_chain.rs:131](../../../../../crates/shamir-connect/src/server/audit_chain.rs#L131); [crates/shamir-connect/src/server/audit_chain.rs:196](../../../../../crates/shamir-connect/src/server/audit_chain.rs#L196); [crates/shamir-connect/src/server/audit_chain.rs:210](../../../../../crates/shamir-connect/src/server/audit_chain.rs#L210); [crates/shamir-server/src/audit_appender.rs:674](../../../../../crates/shamir-server/src/audit_appender.rs#L674).
+These operations remain inside the lock. Previous-HMAC dependence requires ordering; materialization can be reduced without pretending chain sequencing is independent. Production sink logging and blocking_io already exist.
 
-Grouping/duplicate: `performance-hotpath.md#4`. This row is not another independent defect.
+Evidence: [crates/shamir-connect/src/server/audit_chain.rs:196](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-connect/src/server/audit_chain.rs#L196); [crates/shamir-connect/src/server/audit_chain.rs:214](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-connect/src/server/audit_chain.rs#L214); [crates/shamir-server/src/audit_appender.rs:674](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-server/src/audit_appender.rs#L674).
+
+Grouping/duplicate: [performance-hotpath.md#4](performance-hotpath.md#review-4). This is not an additional independent defect.
 
 <a id="review-4"></a>
 
@@ -55,9 +63,11 @@ Grouping/duplicate: `performance-hotpath.md#4`. This row is not another independ
 
 Status: `confirmed-open`. Current risk: `nit`.
 
-The guard remains in scope through persist(SyncAll), contrary to the field comment. This is documentation drift, not independently demonstrated runtime damage.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-connect/src/server/durable_counters.rs:52](../../../../../crates/shamir-connect/src/server/durable_counters.rs#L52); [crates/shamir-connect/src/server/durable_counters.rs:124](../../../../../crates/shamir-connect/src/server/durable_counters.rs#L124); [crates/shamir-connect/src/server/durable_counters.rs:147](../../../../../crates/shamir-connect/src/server/durable_counters.rs#L147).
+The guard remains live through persist(SyncAll). Releasing it cannot be recommended solely to make the comment true; acceptance and durable ordering must remain protected.
+
+Evidence: [crates/shamir-connect/src/server/durable_counters.rs:52](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-connect/src/server/durable_counters.rs#L52); [crates/shamir-connect/src/server/durable_counters.rs:124](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-connect/src/server/durable_counters.rs#L124); [crates/shamir-connect/src/server/durable_counters.rs:147](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-connect/src/server/durable_counters.rs#L147).
 
 <a id="review-5"></a>
 
@@ -65,9 +75,11 @@ Evidence: [crates/shamir-connect/src/server/durable_counters.rs:52](../../../../
 
 Status: `confirmed-open`. Current risk: `nit`.
 
-Blocking acquisition remains public. Method and struct docs already say it blocks, but the module's async wording lacks an explicit off-runtime requirement. No current async request-path caller of these blocking methods was found.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-connect/src/server/argon2_semaphore.rs:10](../../../../../crates/shamir-connect/src/server/argon2_semaphore.rs#L10); [crates/shamir-connect/src/server/argon2_semaphore.rs:29](../../../../../crates/shamir-connect/src/server/argon2_semaphore.rs#L29); [crates/shamir-connect/src/server/argon2_semaphore.rs:84](../../../../../crates/shamir-connect/src/server/argon2_semaphore.rs#L84).
+Blocking acquisition is explicitly documented but async adoption guidance is misleading. No live handshake acquisition exists: production removed even try_acquire because SCRAM verification performs no Argon2.
+
+Evidence: [crates/shamir-connect/src/server/argon2_semaphore.rs:10](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-connect/src/server/argon2_semaphore.rs#L10); [crates/shamir-connect/src/server/argon2_semaphore.rs:84](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-connect/src/server/argon2_semaphore.rs#L84); [crates/shamir-server/src/connection/handshake.rs:306](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-server/src/connection/handshake.rs#L306).
 
 <a id="review-6"></a>
 
@@ -75,9 +87,11 @@ Evidence: [crates/shamir-connect/src/server/argon2_semaphore.rs:10](../../../../
 
 Status: `confirmed-open`. Current risk: `nit`.
 
-Both maps still omit the workspace Fx hasher. This is a convention difference, not a security failure; the 2–5x slowdown is unmeasured and replacing a keyed hasher requires threat-model review.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-connect/src/server/lockout.rs:256](../../../../../crates/shamir-connect/src/server/lockout.rs#L256); [crates/shamir-connect/src/server/lockout.rs:257](../../../../../crates/shamir-connect/src/server/lockout.rs#L257); [CLAUDE.md:339](../../../../../CLAUDE.md#L339).
+Both maps omit the mandated Fx hasher. DashMap 6.1.0 defaults to RandomState, confirmed in https://docs.rs/crate/dashmap/6.1.0/source/src/lib.rs. No 2–5x slowdown or security flaw follows.
+
+Evidence: [crates/shamir-connect/src/server/lockout.rs:256](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-connect/src/server/lockout.rs#L256); [Cargo.lock:1096](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/Cargo.lock#L1096); [CLAUDE.md:339](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/CLAUDE.md#L339).
 
 <a id="review-7"></a>
 
@@ -85,36 +99,43 @@ Evidence: [crates/shamir-connect/src/server/lockout.rs:256](../../../../../crate
 
 Status: `confirmed-open`. Current risk: `low`.
 
-Separate load, condition, and store permit lost rotations. try_finalize can also overwrite a rotation when it acts on an expired older overlap snapshot; it is not harmless in that interleaving. The version mirror is stored separately.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-connect/src/server/rotation.rs:152](../../../../../crates/shamir-connect/src/server/rotation.rs#L152); [crates/shamir-connect/src/server/rotation.rs:169](../../../../../crates/shamir-connect/src/server/rotation.rs#L169); [crates/shamir-connect/src/server/rotation.rs:173](../../../../../crates/shamir-connect/src/server/rotation.rs#L173); [crates/shamir-connect/src/server/rotation.rs:194](../../../../../crates/shamir-connect/src/server/rotation.rs#L194).
+Two rotations can publish different keys with the same version. A finalizer paused after loading an expired overlap can overwrite a newly rotated state. Mirror publication is separate. No live server rotate caller was found; sequential rotation tests cannot discriminate these schedules.
+
+Evidence: [crates/shamir-connect/src/server/rotation.rs:152](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-connect/src/server/rotation.rs#L152); [crates/shamir-connect/src/server/rotation.rs:169](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-connect/src/server/rotation.rs#L169); [crates/shamir-connect/src/server/rotation.rs:173](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-connect/src/server/rotation.rs#L173); [crates/shamir-connect/src/server/rotation.rs:194](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-connect/src/server/rotation.rs#L194); [crates/shamir-server/src/scheduler.rs:233](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-server/src/scheduler.rs#L233).
 
 <a id="review-8"></a>
 
-### Claim 8 — Stale Debug label reports permissions as <RwLock>
+### Claim 8 — Stale Debug label reports permissions as &lt;RwLock&gt;
 
 Status: `confirmed-open`. Current risk: `nit`.
 
-Debug still labels a plain permissions snapshot as a lock.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-connect/src/server/session.rs:111](../../../../../crates/shamir-connect/src/server/session.rs#L111); [crates/shamir-connect/src/server/session.rs:148](../../../../../crates/shamir-connect/src/server/session.rs#L148).
+Debug labels the plain immutable permissions snapshot as a lock.
+
+Evidence: [crates/shamir-connect/src/server/session.rs:111](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-connect/src/server/session.rs#L111); [crates/shamir-connect/src/server/session.rs:148](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-connect/src/server/session.rs#L148).
 
 <a id="review-summary-guarantees"></a>
 
 ### Claim Summary.guarantees — RCU snapshots, atomic challenge consumption, no guards across await, and no scc len use
 
-Status: `not-applicable`. Current risk: —.
+Status: `not-applicable`. Current risk: `—`.
 
-These source-level non-findings hold in the inspected paths. Challenge consumption uses swap(None); dispatch releases map lookup guards before awaiting. This is not a proof that every concurrent state transition is linearizable.
+Prior-cycle decision: `not-applicable`.
 
-Evidence: [crates/shamir-connect/src/server/changepw.rs:139](../../../../../crates/shamir-connect/src/server/changepw.rs#L139); [crates/shamir-connect/src/server/session.rs:507](../../../../../crates/shamir-connect/src/server/session.rs#L507); [crates/shamir-connect/src/server/dispatch.rs:100](../../../../../crates/shamir-connect/src/server/dispatch.rs#L100); [crates/shamir-connect/src/server/rotation.rs:23](../../../../../crates/shamir-connect/src/server/rotation.rs#L23).
+These scoped implementation observations hold. Lookup clones the Arc before awaiting and challenge consumption exchanges None atomically; neither proves coherent identity updates or universally lock-free registries.
 
-## Corrections and qualified non-findings
+Evidence: [crates/shamir-connect/src/server/session.rs:507](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-connect/src/server/session.rs#L507); [crates/shamir-connect/src/server/dispatch.rs:100](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-connect/src/server/dispatch.rs#L100); [crates/shamir-connect/src/server/changepw.rs:139](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-connect/src/server/changepw.rs#L139).
 
-- Remove the N-racer refill multiplication and 64x throughput claims. Relaxed ordering does not make an atomic read-modify-write non-atomic.
-- The existing #1090 stale-timestamp test is weaker than its comment: replacing fetch_max with swap still rejects that last stale call. A subsequent newer call is needed to expose regression.
-- A reserve/publish audit optimization must preserve chain and durable append ordering; reserving a placeholder HMAC alone is not a valid chain update.
-- Current server authentication does not establish the report's claim that blocking acquisition is used in async production. Treat this as API guidance debt.
+## Evidence and recipe corrections
+
+- arc-swap 1.9.1 provides compare_and_swap; the historical compare_exchange recipe is not its actual method name. Inspect returned-pointer identity and retry preconditions. Published source: https://docs.rs/crate/arc-swap/1.9.1/source/src/lib.rs; Cargo.lock:209.
+- A snapshot CAS followed by a separate version store still permits mirror incoherence; an additional finalizer store is not a proof of a coherent fix.
+- The retained historical claim that the shipped handshake exclusively uses Argon2Semaphore::try_acquire is false. That acquisition was removed; conn-limiter try_acquire calls are a different primitive.
+- No-guard-across-await and no unsafe in connect do not mean DashMap internals are lock-free or unsafe-free.
+- The #1090 stale-call oracle still ends before the discriminating subsequent newer call.
 
 ---
 

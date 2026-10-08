@@ -1,11 +1,13 @@
-<!-- revalidation:2026-10-08 source:92ad58266bf57ddea1fa3c8a47affba1a3a9a096 -->
-# shamir-sdk — correctness-tdd revalidation
+<!-- revalidation:2026-10-08 cycle:independent-2 source:e3765c935fc71655ee1ec0160cf180607935d89b -->
+# shamir-sdk — correctness-tdd independent revalidation (cycle 2)
 
-Source snapshot: `92ad58266bf57ddea1fa3c8a47affba1a3a9a096`. Revalidated 2026-10-08 by read-only XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run; no source fix is part of this update. Test registration/assertions are evidence of an oracle, not proof of a passing run.
+Frozen source snapshot: `e3765c935fc71655ee1ec0160cf180607935d89b`. Independently revalidated 2026-10-08 by a fresh XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run. Source-fixed means the specified mechanism was already removed at this snapshot; this cycle implements no source fix.
 
-This section is authoritative for current status. Original titles/IDs are retained for traceability; a refuted title is not a current assertion. The collapsed historical report below is superseded, including its counts, severity, scenarios and fix instructions. Plan IDs preserve historical numbering, not a current release mandate. [Workspace methodology and status definitions](../SUMMARY.md#status-definitions).
+This section is authoritative for current decisions. Existing IDs and allegation titles are retained for traceability; a refuted title is not a current assertion. Prior-cycle decisions were rechecked, not used as proof. The first cycle is available in repository history at this snapshot. The original historical body below remains preserved once and is superseded, including its counts, severities and recipes. [Workspace scope and status definitions](../SUMMARY.md#status-definitions).
 
-Substantial branch-coverage and boundary-hardening gaps remain. The report overstates zero coverage, universal Pending livelock, and absence of compilation elsewhere.
+Unrelated external edits began in dependency/toolchain/CI metadata during collection; additional Rust-source edits appeared afterward. They were left untouched. Evidence and decisions are tied to the frozen commit, not those later changes or an installed toolchain. “Current” below means current at that snapshot; no re-audit of the modified working tree is implied.
+
+Finite wire fixtures are meaningful, but boundary/error registrations remain incomplete. Source confirms numeric and fallback defects while disproving universal Pending livelock and compilation-nowhere claims.
 
 ## Current claim decisions
 
@@ -13,7 +15,7 @@ Substantial branch-coverage and boundary-hardening gaps remain. The report overs
 |---:|---:|---:|---:|---:|---:|---:|
 | 8 | 7 | 0 | 0 | 1 | 0 | 0 |
 
-These are decisions on report claims, including repeated roots, bundled observations and non-findings—not a unique-bug census. Closed/N/A rows have no current risk; unverified risk is provisional. Pure style and unmeasured optimization claims do not establish runtime impact.
+These are duplicate-inclusive report decisions, not a unique-bug census. Pure style or structural optimization does not establish a runtime incident; unverified impact remains provisional.
 
 <a id="review-1"></a>
 
@@ -21,11 +23,13 @@ These are decisions on report claims, including repeated roots, bundled observat
 
 Status: `confirmed-open`. Current risk: `medium`.
 
-Only value_tests and validation_tests are registered. HTTP parsing, getter failures, packing, and DB result arms remain uncovered locally; non-WASM imports still panic without an injection seam. However, i64/str getters, decode_params success, encode_value success, and block_on Ready already have tests.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-sdk/src/lib.rs:62](../../../../../crates/shamir-sdk/src/lib.rs#L62); [crates/shamir-sdk/src/tests/mod.rs:1](../../../../../crates/shamir-sdk/src/tests/mod.rs#L1); [crates/shamir-sdk/src/tests/value_tests.rs:400](../../../../../crates/shamir-sdk/src/tests/value_tests.rs#L400); [crates/shamir-sdk/src/host_imports.rs:235](../../../../../crates/shamir-sdk/src/host_imports.rs#L235); [crates/shamir-sdk/src/db.rs:86](../../../../../crates/shamir-sdk/src/db.rs#L86).
+Registered utility success tests exist, but getter failures, malformed HTTP, native packing, and DB result arms lack local oracles. A Str-bytes regression would escape them.
 
-Grouping/duplicate: `SUMMARY.md#1.1`. This row is not another independent defect.
+Evidence: [crates/shamir-sdk/src/tests/mod.rs:1](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-sdk/src/tests/mod.rs#L1); [crates/shamir-sdk/src/tests/value_tests.rs:400](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-sdk/src/tests/value_tests.rs#L400); [crates/shamir-sdk/src/host_imports.rs:235](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-sdk/src/host_imports.rs#L235).
+
+Grouping/duplicate: [SUMMARY.md#1.1](SUMMARY.md#review-1-1). This is not an additional independent defect.
 
 <a id="review-2"></a>
 
@@ -33,35 +37,41 @@ Grouping/duplicate: `SUMMARY.md#1.1`. This row is not another independent defect
 
 Status: `confirmed-open`. Current risk: `medium`.
 
-All seven fallback sites remain. Getters conflate corruption with absence, query with no rows, and call with Null. Insert and HTTP subsequently return errors for fallback Null, so not every public API returns success. Reachability requires malformed/incompatible host bytes, not directly an untrusted network response.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-sdk/src/host_imports.rs:97](../../../../../crates/shamir-sdk/src/host_imports.rs#L97); [crates/shamir-sdk/src/host_imports.rs:131](../../../../../crates/shamir-sdk/src/host_imports.rs#L131); [crates/shamir-sdk/src/host_imports.rs:183](../../../../../crates/shamir-sdk/src/host_imports.rs#L183); [crates/shamir-sdk/src/host_imports.rs:207](../../../../../crates/shamir-sdk/src/host_imports.rs#L207); [crates/shamir-sdk/src/http.rs:27](../../../../../crates/shamir-sdk/src/http.rs#L27).
+Malformed nonzero query bytes become an empty success; getters become absent. Insert/HTTP fail later, losing the source. This needs incompatible/malformed host data, not direct HTTP envelope control.
 
-Grouping/duplicate: `SUMMARY.md#6.1`. This row is not another independent defect.
+Evidence: [crates/shamir-sdk/src/host_imports.rs:183](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-sdk/src/host_imports.rs#L183); [crates/shamir-sdk/src/http.rs:27](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-sdk/src/http.rs#L27).
+
+Grouping/duplicate: [SUMMARY.md#6.1](SUMMARY.md#review-6-1). This is not an additional independent defect.
 
 <a id="review-3"></a>
 
 ### Claim 3 — `Ctx::call` accepts non-map `args`, but the host traps on them -- contract enforced only on the far side, doc says "should"
 
-Status: `confirmed-open`. Current risk: `medium`.
+Status: `confirmed-open`. Current risk: `low`.
 
-Ctx::call still forwards arbitrary Value and documents only should. The host requires Params::from_value to receive a map and turns rejection into an import error; the caller receives a Compute trap rather than a catchable SDK error.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-sdk/src/context.rs:80](../../../../../crates/shamir-sdk/src/context.rs#L80); [crates/shamir-sdk/src/context.rs:86](../../../../../crates/shamir-sdk/src/context.rs#L86); [crates/shamir-wasm-host/src/wasm/host_call.rs:91](../../../../../crates/shamir-wasm-host/src/wasm/host_call.rs#L91); [crates/shamir-wasm-host/src/params.rs:30](../../../../../crates/shamir-wasm-host/src/params.rs#L30); [crates/shamir-wasm-host/src/wasm/wasm_function.rs:593](../../../../../crates/shamir-wasm-host/src/wasm/wasm_function.rs#L593).
+Int arguments are rejected by the host as required-map failures. Enforcement is correct; the residual is incomplete should/trap documentation, not an authorization bypass.
 
-Grouping/duplicate: `SUMMARY.md#1.3`. This row is not another independent defect.
+Evidence: [crates/shamir-sdk/src/context.rs:80](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-sdk/src/context.rs#L80); [crates/shamir-wasm-host/src/wasm/host_call.rs:93](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-wasm-host/src/wasm/host_call.rs#L93).
+
+Grouping/duplicate: [SUMMARY.md#1.3](SUMMARY.md#review-1-3). This is not an additional independent defect.
 
 <a id="review-4"></a>
 
 ### Claim 4 — `__rt::block_on` is a guaranteed livelock for any future that yields `Pending`; its justifying doc comment is stale
 
-Status: `refuted`. Current risk: —.
+Status: `refuted`. Current risk: `—`.
 
-The universal claim is false: the loop polls again after Pending and returns on a subsequent Ready, even with a no-op waker. The residual defect is continuous CPU consumption for an unresolved future, plus stale documentation; those remain open under concurrency finding 1.
+Prior-cycle decision: `refuted`.
 
-Evidence: [crates/shamir-sdk/src/__rt.rs:34](../../../../../crates/shamir-sdk/src/__rt.rs#L34); [crates/shamir-sdk/src/__rt.rs:50](../../../../../crates/shamir-sdk/src/__rt.rs#L50); [crates/shamir-sdk/src/__rt.rs:52](../../../../../crates/shamir-sdk/src/__rt.rs#L52); [crates/shamir-sdk/src/__rt.rs:57](../../../../../crates/shamir-sdk/src/__rt.rs#L57).
+A Pending-once/Ready-next future completes because polling repeats. Stale comments and unresolved-future polling remain separately open.
 
-Grouping/duplicate: `SUMMARY.md#2.1`. This row is not another independent defect.
+Evidence: [crates/shamir-sdk/src/__rt.rs:50](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-sdk/src/__rt.rs#L50).
+
+Grouping/duplicate: [SUMMARY.md#2.1](SUMMARY.md#review-2-1). This is not an additional independent defect.
 
 <a id="review-5"></a>
 
@@ -69,11 +79,13 @@ Grouping/duplicate: `SUMMARY.md#2.1`. This row is not another independent defect
 
 Status: `confirmed-open`. Current risk: `low`.
 
-SDK-local function/validator compile-pass targets are still absent and doctests remain disabled. The anywhere claim is false: a registered wasm-host test compiles/invokes the flagship double shape, while standalone function and validator example crates exist. The host test can skip on unavailable toolchain.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-sdk/tests/scalar_compile_pass.rs:7](../../../../../crates/shamir-sdk/tests/scalar_compile_pass.rs#L7); [crates/shamir-sdk/tests/procedure_compile_pass.rs:7](../../../../../crates/shamir-sdk/tests/procedure_compile_pass.rs#L7); [crates/shamir-sdk/Cargo.toml:28](../../../../../crates/shamir-sdk/Cargo.toml#L28); [crates/shamir-wasm-host/src/tests/mod.rs:2](../../../../../crates/shamir-wasm-host/src/tests/mod.rs#L2); [crates/shamir-wasm-host/src/tests/compile_tests.rs:8](../../../../../crates/shamir-wasm-host/src/tests/compile_tests.rs#L8); [examples/fn-validator/src/lib.rs:15](../../../../../examples/fn-validator/src/lib.rs#L15).
+SDK integration targets cover only scalar/procedure. Host function compilation has an exact result oracle but may skip; standalone examples alone do not establish mandatory coverage.
 
-Grouping/duplicate: `SUMMARY.md#1.5`. This row is not another independent defect.
+Evidence: [crates/shamir-sdk/tests/procedure_compile_pass.rs:7](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-sdk/tests/procedure_compile_pass.rs#L7); [crates/shamir-sdk/Cargo.toml:28](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-sdk/Cargo.toml#L28); [crates/shamir-wasm-host/src/tests/compile_tests.rs:19](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-wasm-host/src/tests/compile_tests.rs#L19).
+
+Grouping/duplicate: [SUMMARY.md#1.5](SUMMARY.md#review-1-5). This is not an additional independent defect.
 
 <a id="review-6"></a>
 
@@ -81,11 +93,13 @@ Grouping/duplicate: `SUMMARY.md#1.5`. This row is not another independent defect
 
 Status: `confirmed-open`. Current risk: `low`.
 
-Unchecked i64-to-u16 casting, filter_map removal of non-string header values, and empty-body fallback remain. The normal host encoder emits a u16 status, string headers, and Bin body, so malformed-boundary handling is the issue, not demonstrated remote control of these types.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-sdk/src/http.rs:134](../../../../../crates/shamir-sdk/src/http.rs#L134); [crates/shamir-sdk/src/http.rs:139](../../../../../crates/shamir-sdk/src/http.rs#L139); [crates/shamir-sdk/src/http.rs:150](../../../../../crates/shamir-sdk/src/http.rs#L150); [crates/shamir-wasm-host/src/wasm/host_http.rs:86](../../../../../crates/shamir-wasm-host/src/wasm/host_http.rs#L86).
+Status narrowing and wrong-type header/body dropping remain. Shipped host fields are normalized; exact malformed-value rejection is the needed oracle.
 
-Grouping/duplicate: `SUMMARY.md#1.6`. This row is not another independent defect.
+Evidence: [crates/shamir-sdk/src/http.rs:134](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-sdk/src/http.rs#L134); [crates/shamir-sdk/src/http.rs:150](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-sdk/src/http.rs#L150); [crates/shamir-wasm-host/src/wasm/host_http.rs:93](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-wasm-host/src/wasm/host_http.rs#L93).
+
+Grouping/duplicate: [SUMMARY.md#1.6](SUMMARY.md#review-1-6). This is not an additional independent defect.
 
 <a id="review-7"></a>
 
@@ -93,11 +107,13 @@ Grouping/duplicate: `SUMMARY.md#1.6`. This row is not another independent defect
 
 Status: `confirmed-open`. Current risk: `low`.
 
-visit_u64 still wraps values above i64::MAX, and non-finite float tests are absent. NaN requires bit/byte assertions because guest PartialEq is non-reflexive; infinity does not. Host u64 promotion was fixed independently, but the SDK visitor remains unchanged.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-sdk/src/value.rs:26](../../../../../crates/shamir-sdk/src/value.rs#L26); [crates/shamir-sdk/src/value.rs:97](../../../../../crates/shamir-sdk/src/value.rs#L97); [crates/shamir-sdk/src/tests/value_tests.rs:14](../../../../../crates/shamir-sdk/src/tests/value_tests.rs#L14); [crates/shamir-sdk/src/tests/value_tests.rs:83](../../../../../crates/shamir-sdk/src/tests/value_tests.rs#L83); [crates/shamir-types/src/types/value.rs:142](../../../../../crates/shamir-types/src/types/value.rs#L142).
+External uint64 maximum wraps in SDK decoding. NaN is non-reflexive, infinity is comparable; neither edge has fixtures. Host Big promotion does not alter SDK visit_u64.
 
-Grouping/duplicate: `SUMMARY.md#1.7`. This row is not another independent defect.
+Evidence: [crates/shamir-sdk/src/value.rs:98](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-sdk/src/value.rs#L98); [crates/shamir-sdk/src/tests/value_tests.rs:83](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-sdk/src/tests/value_tests.rs#L83); [crates/shamir-types/src/types/value.rs:142](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-types/src/types/value.rs#L142).
+
+Grouping/duplicate: [SUMMARY.md#1.7](SUMMARY.md#review-1-7). This is not an additional independent defect.
 
 <a id="review-8"></a>
 
@@ -105,19 +121,19 @@ Grouping/duplicate: `SUMMARY.md#1.7`. This row is not another independent defect
 
 Status: `confirmed-open`. Current risk: `nit`.
 
-All four cited source facts remain: stale test path, type_name implemented in params.rs, raw-filter docs without builder-exception rationale, and message-only Error. Private type_name placement is cosmetic, not independently a demonstrated structural violation; Error taxonomy is tracked separately.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-sdk/src/value.rs:9](../../../../../crates/shamir-sdk/src/value.rs#L9); [crates/shamir-sdk/src/params.rs:96](../../../../../crates/shamir-sdk/src/params.rs#L96); [crates/shamir-sdk/src/db.rs:94](../../../../../crates/shamir-sdk/src/db.rs#L94); [crates/shamir-sdk/src/error.rs:7](../../../../../crates/shamir-sdk/src/error.rs#L7).
+The stale path and missing builder rationale remain. Private helper placement is permitted closely-coupled organization; message-only Error is the separately tracked category issue, not proof that thiserror is required for correctness.
 
-## Corrections and qualified non-findings
+Evidence: [crates/shamir-sdk/src/value.rs:9](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-sdk/src/value.rs#L9); [crates/shamir-sdk/src/params.rs:96](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-sdk/src/params.rs#L96); [crates/shamir-sdk/src/db.rs:94](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-sdk/src/db.rs#L94); [crates/shamir-sdk/src/error.rs:7](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-sdk/src/error.rs#L7).
 
-- Replace zero-tests wording with missing branch coverage; existing encode_value, decode_params, i64/str, and Ready-path tests are wired. Source does not establish the historical Red/Green sequence.
-- Table::get returns Option<Value>, not Result or Ok(None); its own Ok(None) documentation is inaccurate.
-- A no-op waker does not prevent progress under continuous polling. Pending-once futures can complete; unresolved futures still burn CPU.
-- WASM spinning is bounded by fuel, memory policy, and epoch/deadline mechanisms; it is not an indefinitely wedged production worker under default limits.
-- Function compilation exists outside this crate; examples alone are not proof of execution or a mandatory compile-test target.
-- Infinity is comparable with PartialEq. Neither the NaN coverage gap nor idiomatic float PartialEq alone proves incorrect serialization.
-- High severity for missing tests is not source-proven runtime impact.
+## Evidence and recipe corrections
+
+- Absent assertions cannot establish whether historical Red/Green development was followed.
+- Table::get returns Option, not Ok(None); its own documentation also contains that inaccurate phrase.
+- Compile-pass integration targets are excluded by the default --lib runner.
+- The existing conformance helper compares genuinely separate host/guest encoders, but its ordinary map fixtures do not cover recognized-prefix keys or duplicates.
+- A no-op waker does not prevent later polls from observing progress; production fuel contradicts an indefinite default WASM loop.
 
 ---
 

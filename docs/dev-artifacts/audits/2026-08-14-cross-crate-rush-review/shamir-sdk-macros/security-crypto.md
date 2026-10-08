@@ -1,19 +1,21 @@
-<!-- revalidation:2026-10-08 source:92ad58266bf57ddea1fa3c8a47affba1a3a9a096 -->
-# shamir-sdk-macros — security-crypto revalidation
+<!-- revalidation:2026-10-08 cycle:independent-2 source:e3765c935fc71655ee1ec0160cf180607935d89b -->
+# shamir-sdk-macros — security-crypto independent revalidation (cycle 2)
 
-Source snapshot: `92ad58266bf57ddea1fa3c8a47affba1a3a9a096`. Revalidated 2026-10-08 by read-only XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run; no source fix is part of this update. Test registration/assertions are evidence of an oracle, not proof of a passing run.
+Frozen source snapshot: `e3765c935fc71655ee1ec0160cf180607935d89b`. Independently revalidated 2026-10-08 by a fresh XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run. Source-fixed means the specified mechanism was already removed at this snapshot; this cycle implements no source fix.
 
-This section is authoritative for current status. Original titles/IDs are retained for traceability; a refuted title is not a current assertion. The collapsed historical report below is superseded, including its counts, severity, scenarios and fix instructions. Plan IDs preserve historical numbering, not a current release mandate. [Workspace methodology and status definitions](../SUMMARY.md#status-definitions).
+This section is authoritative for current decisions. Existing IDs and allegation titles are retained for traceability; a refuted title is not a current assertion. Prior-cycle decisions were rechecked, not used as proof. The first cycle is available in repository history at this snapshot. The original historical body below remains preserved once and is superseded, including its counts, severities and recipes. [Workspace scope and status definitions](../SUMMARY.md#status-definitions).
 
-Malformed decoding and unchecked guest ABI preconditions remain robustness concerns under a trusted-host boundary. Absolute coverage and structural-purity guarantees are false; trap-text disclosure is unverified.
+Unrelated external edits began in dependency/toolchain/CI metadata during collection; additional Rust-source edits appeared afterward. They were left untouched. Evidence and decisions are tied to the frozen commit, not those later changes or an installed toolchain. “Current” below means current at that snapshot; no re-audit of the modified working tree is implied.
+
+Fail-quiet decoding and unchecked slice preconditions remain. Ordinary host input construction is checked; no ordinary remote-user validation bypass was proved. Panic-text disclosure remains separate from the confirmed error-classification loss.
 
 ## Current claim decisions
 
 | Claim decisions | Open | Source-fixed | Partial | Refuted | Unverified | N/A |
 |---:|---:|---:|---:|---:|---:|---:|
-| 6 | 4 | 0 | 0 | 1 | 1 | 0 |
+| 6 | 3 | 0 | 0 | 2 | 1 | 0 |
 
-These are decisions on report claims, including repeated roots, bundled observations and non-findings—not a unique-bug census. Closed/N/A rows have no current risk; unverified risk is provisional. Pure style and unmeasured optimization claims do not establish runtime impact.
+These are duplicate-inclusive report decisions, not a unique-bug census. Pure style or structural optimization does not establish a runtime incident; unverified impact remains provisional.
 
 <a id="review-1"></a>
 
@@ -21,9 +23,11 @@ These are decisions on report claims, including repeated roots, bundled observat
 
 Status: `confirmed-open`. Current risk: `medium`.
 
-decode_params still converts malformed/non-map input into empty Params, and validator extraction still substitutes Null/None. The normal engine adapter explicitly supplies both keys, so UPDATE-as-INSERT requires host corruption, schema drift, or an alternative caller; ordinary record input alone does not establish this bypass.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-sdk/src/__rt.rs:11](../../../../../crates/shamir-sdk/src/__rt.rs#L11); [crates/shamir-sdk-macros/src/lib.rs:129](../../../../../crates/shamir-sdk-macros/src/lib.rs#L129); [crates/shamir-sdk-macros/src/lib.rs:135](../../../../../crates/shamir-sdk-macros/src/lib.rs#L135); [crates/shamir-engine/src/validator/wasm_record_validator.rs:60](../../../../../crates/shamir-engine/src/validator/wasm_record_validator.rs#L60); [crates/shamir-engine/src/validator/wasm_record_validator.rs:65](../../../../../crates/shamir-engine/src/validator/wasm_record_validator.rs#L65).
+Reserved/malformed MessagePack or a valid non-map produces empty Params and then Null/None. The engine supplies record and old_record normally, including legitimate deletion Null. Whether an abnormal payload permits a write depends on the validator body. An oracle must reject malformed input while accepting a valid empty parameter map where allowed.
+
+Evidence: [crates/shamir-sdk/src/__rt.rs:11](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-sdk/src/__rt.rs#L11); [crates/shamir-sdk-macros/src/lib.rs:129](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-sdk-macros/src/lib.rs#L129); [crates/shamir-sdk-macros/src/lib.rs:135](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-sdk-macros/src/lib.rs#L135); [crates/shamir-engine/src/validator/wasm_record_validator.rs:60](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-engine/src/validator/wasm_record_validator.rs#L60); [crates/shamir-engine/src/validator/wasm_record_validator.rs:65](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-engine/src/validator/wasm_record_validator.rs#L65).
 
 <a id="review-2"></a>
 
@@ -31,66 +35,72 @@ Evidence: [crates/shamir-sdk/src/__rt.rs:11](../../../../../crates/shamir-sdk/sr
 
 Status: `confirmed-open`. Current risk: `low`.
 
-All four exports still construct slices without checking signed lengths or pointer validity. Negative lengths violate Rust slice preconditions. The standard host checks input length and memory range before calling; guest sandbox isolation does not make Rust UB valid or prove one deterministic trap outcome.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-sdk-macros/src/lib.rs:122](../../../../../crates/shamir-sdk-macros/src/lib.rs#L122); [crates/shamir-sdk-macros/src/lib.rs:255](../../../../../crates/shamir-sdk-macros/src/lib.rs#L255); [crates/shamir-sdk-macros/src/lib.rs:383](../../../../../crates/shamir-sdk-macros/src/lib.rs#L383); [crates/shamir-sdk-macros/src/lib.rs:549](../../../../../crates/shamir-sdk-macros/src/lib.rs#L549); [crates/shamir-wasm-host/src/wasm/wasm_function.rs:518](../../../../../crates/shamir-wasm-host/src/wasm/wasm_function.rs#L518); [crates/shamir-wasm-host/src/wasm/wasm_function.rs:533](../../../../../crates/shamir-wasm-host/src/wasm/wasm_function.rs#L533).
+All four safe public exports construct slices from caller-supplied integers. Negative len violates slice extent requirements; a safe Rust call with ptr=0,len=0 also violates non-null requirements. Ordinary WASM host calls use checked lengths and allocated ranges. A sign guard alone does not prove allocation, provenance, initialization or aliasing, nor make the safe export sound.
+
+Evidence: [crates/shamir-sdk-macros/src/lib.rs:120](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-sdk-macros/src/lib.rs#L120); [crates/shamir-sdk-macros/src/lib.rs:123](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-sdk-macros/src/lib.rs#L123); [crates/shamir-sdk-macros/src/lib.rs:547](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-sdk-macros/src/lib.rs#L547); [crates/shamir-wasm-host/src/wasm/wasm_function.rs:518](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-wasm-host/src/wasm/wasm_function.rs#L518); [crates/shamir-wasm-host/src/wasm/wasm_function.rs:533](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-wasm-host/src/wasm/wasm_function.rs#L533).
 
 <a id="review-3"></a>
 
 ### Claim 3 — No tests cover the two boundary-bearing macros or any runtime behavior of the generated ABI
 
-Status: `refuted`. Current risk: —.
+Status: `refuted`. Current risk: `—`.
 
-The registered compile_and_invoke_double test compiles #[function] through the SDK and invokes the resulting WASM ABI, asserting 42. This predates the review, not a fix. Validator, malformed-input, negative-length, and user-error generated-ABI coverage remain absent.
+Prior-cycle decision: `refuted`.
 
-Evidence: [crates/shamir-wasm-host/src/tests/compile_tests.rs:11](../../../../../crates/shamir-wasm-host/src/tests/compile_tests.rs#L11); [crates/shamir-wasm-host/src/tests/compile_tests.rs:19](../../../../../crates/shamir-wasm-host/src/tests/compile_tests.rs#L19); [crates/shamir-wasm-host/src/tests/compile_tests.rs:35](../../../../../crates/shamir-wasm-host/src/tests/compile_tests.rs#L35); [crates/shamir-wasm-host/src/tests/mod.rs:2](../../../../../crates/shamir-wasm-host/src/tests/mod.rs#L2); [crates/shamir-wasm-host/src/compile.rs:511](../../../../../crates/shamir-wasm-host/src/compile.rs#L511).
+Registered compile_and_invoke_double compiles the actual function macro and asserts the WASM result 42. History already contains it in 07b511b2, so this is pre-existing counter-evidence, not a fix. Validator and malformed/error ABI gaps remain separately open.
 
-Grouping/duplicate: `correctness-tdd.md#1`. This row is not another independent defect.
+Evidence: [crates/shamir-wasm-host/src/tests/mod.rs:2](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-wasm-host/src/tests/mod.rs#L2); [crates/shamir-wasm-host/src/tests/compile_tests.rs:19](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-wasm-host/src/tests/compile_tests.rs#L19); [crates/shamir-wasm-host/src/tests/compile_tests.rs:37](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-wasm-host/src/tests/compile_tests.rs#L37).
+
+Grouping/duplicate: [correctness-tdd.md#1](correctness-tdd.md#review-1). This is not an additional independent defect.
 
 <a id="review-4"></a>
 
 ### Claim 4 — User error strings passed verbatim into the trap channel
 
-Status: `unverified`. Current risk: `low` (provisional; not a confirmed defect).
+Status: `unverified`. Current risk: `low`.
 
-Passing e.to_string() to the panic helper is proven. Passing that panic text verbatim into a Wasmtime trap or exposing it to callers is not: the inspected path formats the runtime error, with no explicit panic-text transport. Conditional information disclosure needs target/runtime evidence.
+Prior-cycle decision: `unverified`.
 
-Evidence: [crates/shamir-sdk-macros/src/lib.rs:272](../../../../../crates/shamir-sdk-macros/src/lib.rs#L272); [crates/shamir-sdk/src/__rt.rs:64](../../../../../crates/shamir-sdk/src/__rt.rs#L64); [crates/shamir-wasm-host/src/wasm/wasm_function.rs:593](../../../../../crates/shamir-wasm-host/src/wasm/wasm_function.rs#L593); [crates/shamir-db/src/shamir_db/shamir_db/function_management.rs:739](../../../../../crates/shamir-db/src/shamir_db/shamir_db/function_management.rs#L739); [Cargo.lock:4740](../../../../../Cargo.lock#L4740).
+The message reaches guest panic formatting, but the guest uses wasm32-unknown-unknown with panic=abort and no explicit panic-message import. Returned host text is formatted from Wasmtime's error. Verbatim secret/message propagation is not proven; a structured User classification repair does not itself establish or close this disclosure hypothesis.
 
-Grouping/duplicate: `error-handling-lifecycle.md#2`. This row is not another independent defect.
+Evidence: [crates/shamir-sdk-macros/src/lib.rs:272](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-sdk-macros/src/lib.rs#L272); [crates/shamir-sdk/src/__rt.rs:68](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-sdk/src/__rt.rs#L68); [crates/shamir-wasm-host/src/compile.rs:517](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-wasm-host/src/compile.rs#L517); [crates/shamir-wasm-host/src/wasm/wasm_function.rs:593](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-wasm-host/src/wasm/wasm_function.rs#L593).
 
 <a id="review-5"></a>
 
 ### Claim 5 — String-comparison return-type checks: `#[validator]`/`#[function]` reject valid spellings; all accept same-named foreign types
 
-Status: `confirmed-open`. Current risk: `nit`.
+Status: `confirmed-open`. Current risk: `low`.
 
-False rejection of qualified SDK types remains. Bare imported foreign names can pass lexical checks but encounter concrete SDK wrapper type checking. Arbitrary qualified my_crate::Validation is not accepted by the validator's exact Validation comparison.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-sdk-macros/src/lib.rs:66](../../../../../crates/shamir-sdk-macros/src/lib.rs#L66); [crates/shamir-sdk-macros/src/lib.rs:98](../../../../../crates/shamir-sdk-macros/src/lib.rs#L98); [crates/shamir-sdk-macros/src/lib.rs:197](../../../../../crates/shamir-sdk-macros/src/lib.rs#L197); [crates/shamir-sdk-macros/src/lib.rs:411](../../../../../crates/shamir-sdk-macros/src/lib.rs#L411).
+Qualified SDK false rejections are concrete. Bare imported foreign names can pass lexical validation but incompatible outputs fail concrete SDK type checking. Qualified my_crate::Validation does not pass the exact validator check.
 
-Grouping/duplicate: `api-wire-protocol.md#1`. This row is not another independent defect.
+Evidence: [crates/shamir-sdk-macros/src/lib.rs:66](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-sdk-macros/src/lib.rs#L66); [crates/shamir-sdk-macros/src/lib.rs:98](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-sdk-macros/src/lib.rs#L98); [crates/shamir-sdk-macros/src/lib.rs:197](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-sdk-macros/src/lib.rs#L197).
+
+Grouping/duplicate: [api-wire-protocol.md#1](api-wire-protocol.md#review-1). This is not an additional independent defect.
 
 <a id="review-6"></a>
 
 ### Claim 6 — "Only one macro per crate" constraint documented but unenforced
 
-Status: `confirmed-open`. Current risk: `nit`.
+Status: `refuted`. Current risk: `—`.
 
-Targeted duplicate-entrypoint diagnostics remain absent. Duplicate fixed ABI symbols already prevent a valid multiple-entrypoint binary; no security bypass is established.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-sdk-macros/src/lib.rs:15](../../../../../crates/shamir-sdk-macros/src/lib.rs#L15); [crates/shamir-sdk-macros/src/lib.rs:108](../../../../../crates/shamir-sdk-macros/src/lib.rs#L108); [crates/shamir-sdk-macros/src/lib.rs:238](../../../../../crates/shamir-sdk-macros/src/lib.rs#L238).
+Duplicate fixed exports enforce the supported artifact shape. A dedicated second-attribute diagnostic would improve ergonomics but is not a missing security invariant.
 
-Grouping/duplicate: `correctness-tdd.md#4`. This row is not another independent defect.
+Evidence: [crates/shamir-sdk-macros/src/lib.rs:108](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-sdk-macros/src/lib.rs#L108); [crates/shamir-sdk-macros/src/lib.rs:238](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-sdk-macros/src/lib.rs#L238).
 
-## Corrections and qualified non-findings
+Grouping/duplicate: [correctness-tdd.md#4](correctness-tdd.md#review-4). This is not an additional independent defect.
 
-- Refuted non-finding: lack of a Ctx parameter does not structurally guarantee scalar purity. Public construction reaches host-backed methods, and the linker does not select imports by macro kind: crates/shamir-sdk/src/context.rs:64; crates/shamir-wasm-host/src/wasm/wasm_function.rs:178.
-- Confirmed non-findings: the macro file contains only its four generated unsafe slice blocks; allocator output is initialized; generated identifier construction uses the parsed function Ident; no cryptographic/authentication primitive exists here.
-- Malformed decoding is a fail-quiet boundary defect, but whether it permits a write depends on the validator body. UPDATE bypass is not proven reachable through the normal adapter.
-- Do not reject every nonempty encoding of an empty map: an empty parameter map is valid. Distinguish decode failure from valid emptiness.
-- Two length-check lines do not eliminate every pointer/provenance/null precondition violation.
-- Params::i64 formats a key and type name, not the offending value's contents: crates/shamir-sdk/src/params.rs:38.
+## Evidence and recipe corrections
+
+- The positive parsed-Ident assurance does not establish helper-name construction totality: raw identifiers expose a separate expansion panic.
+- Zero-filled allocator output is initialized, but a Safety comment and sandbox containment do not validate arbitrary Rust raw-slice preconditions.
+- Do not execute invalid-slice calls as a red test. First test a safe validation seam or implement rejection, then exercise rejection without forming the invalid slice.
+- Params::i64 reports the parameter key and type name, not the offending value's contents. User-message classification and verbatim disclosure are distinct claims.
 
 ---
 

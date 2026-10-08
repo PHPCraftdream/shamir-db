@@ -1,11 +1,13 @@
-<!-- revalidation:2026-10-08 source:92ad58266bf57ddea1fa3c8a47affba1a3a9a096 -->
-# shamir-transport-ws — performance-hotpath revalidation
+<!-- revalidation:2026-10-08 cycle:independent-2 source:e3765c935fc71655ee1ec0160cf180607935d89b -->
+# shamir-transport-ws — performance-hotpath independent revalidation (cycle 2)
 
-Source snapshot: `92ad58266bf57ddea1fa3c8a47affba1a3a9a096`. Revalidated 2026-10-08 by read-only XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run; no source fix is part of this update. Test registration/assertions are evidence of an oracle, not proof of a passing run.
+Frozen source snapshot: `e3765c935fc71655ee1ec0160cf180607935d89b`. Independently revalidated 2026-10-08 by a fresh XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run. Source-fixed means the specified mechanism was already removed at this snapshot; this cycle implements no source fix.
 
-This section is authoritative for current status. Original titles/IDs are retained for traceability; a refuted title is not a current assertion. The collapsed historical report below is superseded, including its counts, severity, scenarios and fix instructions. Plan IDs preserve historical numbering, not a current release mandate. [Workspace methodology and status definitions](../SUMMARY.md#status-definitions).
+This section is authoritative for current decisions. Existing IDs and allegation titles are retained for traceability; a refuted title is not a current assertion. Prior-cycle decisions were rechecked, not used as proof. The first cycle is available in repository history at this snapshot. The original historical body below remains preserved once and is superseded, including its counts, severities and recipes. [Workspace scope and status definitions](../SUMMARY.md#status-definitions).
 
-Per-send allocation/copy and per-accept policy cloning remain source-proven. Receive reuse and queue-growth guarantees need correction; measured runtime impact remains unknown.
+Unrelated external edits began in dependency/toolchain/CI metadata during collection; additional Rust-source edits appeared afterward. They were left untouched. Evidence and decisions are tied to the frozen commit, not those later changes or an installed toolchain. “Current” below means current at that snapshot; no re-audit of the modified working tree is implied.
+
+The send copy and policy clone are structural costs, not measured regression magnitudes. Exact dependency inspection validates encoded Pong-buffer growth under blocked output, while refuting writer-only flushing and the asserted API-version cutoff.
 
 ## Current claim decisions
 
@@ -13,21 +15,19 @@ Per-send allocation/copy and per-accept policy cloning remain source-proven. Rec
 |---:|---:|---:|---:|---:|---:|---:|
 | 5 | 5 | 0 | 0 | 0 | 0 | 0 |
 
-These are decisions on report claims, including repeated roots, bundled observations and non-findings—not a unique-bug census. Closed/N/A rows have no current risk; unverified risk is provisional. Pure style and unmeasured optimization claims do not establish runtime impact.
-
-## Parent acceptance refinements
-
-- Source inspection resolves Pong handling: single pending Pong and read-time flushing coexist with an uncapped encoded write buffer under sustained WouldBlock.
+These are duplicate-inclusive report decisions, not a unique-bug census. Pure style or structural optimization does not establish a runtime incident; unverified impact remains provisional.
 
 <a id="review-1"></a>
 
 ### Claim 1 — WSS send hot path: fresh heap alloc + full-payload copy per frame; TCP's prereserved zero-copy path is silently defeated
 
-Status: `confirmed-open`. Current risk: `medium`.
+Status: `confirmed-open`. Current risk: `low`.
 
-The request writer supplies prefixed bytes, WS inherits the default that strips the prefix, and ws_send_sink allocates/copies them again. No owned-buffer send or WS prereserved override exists.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-server/src/connection/request_loop.rs:198](../../../../../crates/shamir-server/src/connection/request_loop.rs#L198); [crates/shamir-server/src/framer.rs:123](../../../../../crates/shamir-server/src/framer.rs#L123); [crates/shamir-server/src/framer.rs:357](../../../../../crates/shamir-server/src/framer.rs#L357); [crates/shamir-transport-ws/src/framing.rs:119](../../../../../crates/shamir-transport-ws/src/framing.rs#L119).
+The response writer borrows a prefixed Vec; the default strips four bytes and ws_send_sink allocates and copies the payload again. This is confirmed avoidable adapter work, but no throughput or latency severity was measured. Budget guards currently remain held across the write.
+
+Evidence: [crates/shamir-server/src/connection/request_loop.rs:198](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-server/src/connection/request_loop.rs#L198); [crates/shamir-server/src/framer.rs:123](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-server/src/framer.rs#L123); [crates/shamir-server/src/framer.rs:357](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-server/src/framer.rs#L357); [crates/shamir-transport-ws/src/framing.rs:119](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-transport-ws/src/framing.rs#L119).
 
 <a id="review-2"></a>
 
@@ -35,13 +35,13 @@ Evidence: [crates/shamir-server/src/connection/request_loop.rs:198](../../../../
 
 Status: `confirmed-open`. Current risk: `medium`.
 
-The adapter has no control-frame budget. Parent pinned-source inspection corrects the mechanism: tungstenite 0.24 tries flushing during read and has a single replaceable additional_send Pong, so 'only the writer flushes' is false. However FrameCodec appends a Pong into its Vec before attempting the write; read ignores WouldBlock, and the default max_write_buffer_size is usize::MAX. A peer that keeps supplying Pings while refusing replies can grow that outgoing byte buffer. The SCRAM client_proof read has no surrounding timeout after the bounded AuthInit read. These are source-visible conditional backpressure/liveness risks; no CPU/RSS measurement or reproduction was performed.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-transport-ws/src/framing.rs:176](../../../../../crates/shamir-transport-ws/src/framing.rs#L176); [crates/shamir-transport-ws/src/server.rs:43](../../../../../crates/shamir-transport-ws/src/server.rs#L43); [Cargo.lock:4245](../../../../../Cargo.lock#L4245); [Cargo.lock:4467](../../../../../Cargo.lock#L4467).
+Exact 0.24.0 reader flushing serializes pending Pongs into an uncapped output Vec before writes. WouldBlock does not stop subsequent reads, including through the inspected TLS stack. After draining the challenge, an unauthenticated peer can stop reading replies and keep sending Pings during the unbounded proof read. Connection-count limits bound peers, not this per-peer buffer.
 
-Pinned dependency evidence: [tungstenite 0.24.0, src/protocol/mod.rs:387](https://docs.rs/crate/tungstenite/0.24.0/source/src/protocol/mod.rs); [tungstenite 0.24.0, src/protocol/mod.rs:729](https://docs.rs/crate/tungstenite/0.24.0/source/src/protocol/mod.rs); [tungstenite 0.24.0, src/protocol/frame/mod.rs:1](https://docs.rs/crate/tungstenite/0.24.0/source/src/protocol/frame/mod.rs).
+Evidence: [crates/shamir-transport-ws/src/framing.rs:176](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-transport-ws/src/framing.rs#L176); [crates/shamir-transport-ws/src/server.rs:43](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-transport-ws/src/server.rs#L43); [crates/shamir-server/src/connection/handshake.rs:291](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-server/src/connection/handshake.rs#L291); [Cargo.lock:4223](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/Cargo.lock#L4223); [Cargo.lock:4467](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/Cargo.lock#L4467).
 
-Grouping/duplicate: `security-crypto.md#4`. This row is not another independent defect.
+Grouping/duplicate: [security-crypto.md#4](security-crypto.md#review-4). This is not an additional independent defect.
 
 <a id="review-3"></a>
 
@@ -49,11 +49,13 @@ Grouping/duplicate: `security-crypto.md#4`. This row is not another independent 
 
 Status: `confirmed-open`. Current risk: `low`.
 
-The redundant dependency remains in the resolved graph. Build-time waste is structurally plausible; exact compilation cost and final binary bloat were not measured.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-transport-ws/Cargo.toml:20](../../../../../crates/shamir-transport-ws/Cargo.toml#L20); [Cargo.lock:3781](../../../../../Cargo.lock#L3781); [Cargo.lock:4487](../../../../../Cargo.lock#L4487).
+The unused incompatible direct dependency remains in the selected graph. Final executable retention, exact compilation overhead and runtime reachability of a second parser are not established.
 
-Grouping/duplicate: `security-crypto.md#1`. This row is not another independent defect.
+Evidence: [crates/shamir-transport-ws/Cargo.toml:20](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-transport-ws/Cargo.toml#L20); [Cargo.lock:3781](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/Cargo.lock#L3781); [Cargo.lock:4487](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/Cargo.lock#L4487).
+
+Grouping/duplicate: [security-crypto.md#1](security-crypto.md#review-1). This is not an additional independent defect.
 
 <a id="review-4"></a>
 
@@ -61,9 +63,11 @@ Grouping/duplicate: `security-crypto.md#1`. This row is not another independent 
 
 Status: `confirmed-open`. Current risk: `nit`.
 
-The misleading attribution remains. Transport framing enforces a supplied cap; the server chooses MAX_PRE_AUTH_FRAME.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-transport-ws/src/server.rs:27](../../../../../crates/shamir-transport-ws/src/server.rs#L27); [crates/shamir-transport-ws/src/framing.rs:163](../../../../../crates/shamir-transport-ws/src/framing.rs#L163); [crates/shamir-server/src/connection/handshake.rs:717](../../../../../crates/shamir-server/src/connection/handshake.rs#L717).
+Transport validation is phase-agnostic. The server chooses MAX_PRE_AUTH_FRAME after tungstenite has assembled the message; the documentation confuses caller policy with codec buffering.
+
+Evidence: [crates/shamir-transport-ws/src/server.rs:27](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-transport-ws/src/server.rs#L27); [crates/shamir-transport-ws/src/framing.rs:163](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-transport-ws/src/framing.rs#L163); [crates/shamir-server/src/connection/handshake.rs:717](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-server/src/connection/handshake.rs#L717).
 
 <a id="review-5"></a>
 
@@ -71,21 +75,23 @@ Evidence: [crates/shamir-transport-ws/src/server.rs:27](../../../../../crates/sh
 
 Status: `confirmed-open`. Current risk: `nit`.
 
-Both transport accept and its production spawn site still clone the Vec<String> policy.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-transport-ws/src/server.rs:118](../../../../../crates/shamir-transport-ws/src/server.rs#L118); [crates/shamir-server/src/server/server_launcher.rs:1472](../../../../../crates/shamir-server/src/server/server_launcher.rs#L1472).
+The transport and launcher each clone the Vec&lt;String&gt;. This is policy-size-dependent connection setup work, with no measured runtime impact.
 
-Grouping/duplicate: `concurrency-lockfree.md#2`. This row is not another independent defect.
+Evidence: [crates/shamir-transport-ws/src/server.rs:118](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-transport-ws/src/server.rs#L118); [crates/shamir-server/src/server/server_launcher.rs:1472](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-server/src/server/server_launcher.rs#L1472).
 
-## Corrections and qualified non-findings
+Grouping/duplicate: [concurrency-lockfree.md#2](concurrency-lockfree.md#review-2). This is not an additional independent defect.
 
-- Receive validation is constant-time in payload length, but successful reception copies O(payload bytes). Only fitting caller scratch avoids adapter reallocation; WebSocket message assembly is separate.
-- The current concurrent production request loop allocates a fresh frame_buf at request_loop.rs:278. The report's claim that this loop reuses receive scratch is refuted.
-- The capacity test checks the supplied Vec, not all transport allocations.
-- One adapter allocation and one payload copy are proven. Exact tungstenite internal copies, two extra 16 MiB traversals, and throughput/latency penalties are unverified.
-- The proposed Vec sender cannot take ownership through the current &[u8] prereserved trait contract without coordinated caller/interface changes. Cloning scratch into Message::Binary does not remove the copy.
-- Do not retain the claimed 0.26 write-buffer API transition or unlimited Pong queue as established facts without checking effective 0.24 source.
-- No crate-owned locks or scc len calls exist. Allowlist matching is O(pattern count and compared string bytes), per handshake, rather than globally constant-time.
+## Evidence and recipe corrections
+
+- The established redundant send copy is low-severity optimization debt without measurement, not a demonstrated medium-severity throughput defect.
+- Exact tungstenite 0.24.0 FrameCodec::buffer_frame reserves and formats into an output Vec; receive frame storage and IncompleteMessage::extend also allocate/copy. This improves structural evidence but supplies no exact CPU or RSS figure.
+- max_write_buffer_size and write_buffer_size already exist in tungstenite 0.24.0; max_send_queue is deprecated and does nothing. An upgrade is neither necessary nor sufficient to impose a finite buffer cap.
+- A 16 MiB message cap is not a 16 MiB process-memory bound. Fragmented-message storage, frame storage, scratch and TLS buffering are separate.
+- Zero-copy handoff requires an owned production interface; Vec::splice may move the payload and may allocate. Moving ownership into Message::Binary does not eliminate codec/TLS copies.
+- Static configuration size does not make allowlist matching globally O(1); it scans patterns and compared bytes.
+- Sources: https://docs.rs/crate/tungstenite/0.24.0/source/src/protocol/frame/mod.rs; https://docs.rs/crate/tungstenite/0.24.0/source/src/protocol/message.rs; https://docs.rs/crate/tokio-rustls/0.26.4/source/src/common/mod.rs.
 
 ---
 

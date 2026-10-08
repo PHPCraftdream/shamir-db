@@ -1,11 +1,13 @@
-<!-- revalidation:2026-10-08 source:92ad58266bf57ddea1fa3c8a47affba1a3a9a096 -->
-# shamir-engine — correctness-tdd revalidation
+<!-- revalidation:2026-10-08 cycle:independent-2 source:e3765c935fc71655ee1ec0160cf180607935d89b -->
+# shamir-engine — correctness-tdd independent revalidation (cycle 2)
 
-Source snapshot: `92ad58266bf57ddea1fa3c8a47affba1a3a9a096`. Revalidated 2026-10-08 by read-only XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run; no source fix is part of this update. Test registration/assertions are evidence of an oracle, not proof of a passing run.
+Frozen source snapshot: `e3765c935fc71655ee1ec0160cf180607935d89b`. Independently revalidated 2026-10-08 by a fresh XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run. Source-fixed means the specified mechanism was already removed at this snapshot; this cycle implements no source fix.
 
-This section is authoritative for current status. Original titles/IDs are retained for traceability; a refuted title is not a current assertion. The collapsed historical report below is superseded, including its counts, severity, scenarios and fix instructions. Plan IDs preserve historical numbering, not a current release mandate. [Workspace methodology and status definitions](../SUMMARY.md#status-definitions).
+This section is authoritative for current decisions. Existing IDs and allegation titles are retained for traceability; a refuted title is not a current assertion. Prior-cycle decisions were rechecked, not used as proof. The first cycle is available in repository history at this snapshot. The original historical body below remains preserved once and is superseded, including its counts, severities and recipes. [Workspace scope and status definitions](../SUMMARY.md#status-definitions).
 
-Most mechanisms were repaired in the September campaign. All three pre-read error-swallowing sites remain open, and their proposed regression file is unregistered.
+Unrelated external edits began in dependency/toolchain/CI metadata during collection; additional Rust-source edits appeared afterward. They were left untouched. Evidence and decisions are tied to the frozen commit, not those later changes or an installed toolchain. “Current” below means current at that snapshot; no re-audit of the modified working tree is implied.
+
+The named original mechanisms are mostly removed. Pre-read error swallowing remains; registered tests provide specific oracles, not blanket acceptance. Additional semantic regressions appear in optimized membership paths.
 
 ## Current claim decisions
 
@@ -13,27 +15,31 @@ Most mechanisms were repaired in the September campaign. All three pre-read erro
 |---:|---:|---:|---:|---:|---:|---:|
 | 10 | 1 | 8 | 0 | 0 | 1 | 0 |
 
-These are decisions on report claims, including repeated roots, bundled observations and non-findings—not a unique-bug census. Closed/N/A rows have no current risk; unverified risk is provisional. Pure style and unmeasured optimization claims do not establish runtime impact.
+These are duplicate-inclusive report decisions, not a unique-bug census. Pure style or structural optimization does not establish a runtime incident; unverified impact remains provisional.
 
 <a id="review-1"></a>
 
 ### Claim 1 — StoreChangelog::range_from streams the ENTIRE journal tail before applying limit
 
-Status: `fixed`. Current risk: —.
+Status: `fixed`. Current risk: `—`.
 
-Collection stops at limit, handles zero without reading, and propagates stream errors. Registered counting-store assertions detect whole-tail consumption.
+Prior-cycle decision: `fixed`.
 
-Evidence: [crates/shamir-engine/src/repo/changelog_store.rs:47](../../../../../crates/shamir-engine/src/repo/changelog_store.rs#L47); [crates/shamir-engine/src/repo/tests/changelog_store_tests.rs:113](../../../../../crates/shamir-engine/src/repo/tests/changelog_store_tests.rs#L113); [crates/shamir-engine/src/repo/tests/mod.rs:2](../../../../../crates/shamir-engine/src/repo/tests/mod.rs#L2).
+The loop stops at limit; the registered counting Store test would detect whole-tail consumption.
+
+Evidence: [crates/shamir-engine/src/repo/changelog_store.rs:54](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-engine/src/repo/changelog_store.rs#L54); [crates/shamir-engine/src/repo/tests/changelog_store_tests.rs:113](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-engine/src/repo/tests/changelog_store_tests.rs#L113).
 
 <a id="review-2"></a>
 
 ### Claim 2 — Drainer Phase B silently drops Put/Delete for tables with no MvccStore — and its justification comment is false
 
-Status: `fixed`. Current risk: —.
+Status: `fixed`. Current risk: `—`.
 
-Missing registrations now resolve the table and write history or raw data; resolution/write failures prevent finalization. A registered test evicts the map entry and checks recovered data.
+Prior-cycle decision: `fixed`.
 
-Evidence: [crates/shamir-engine/src/tx/drainer.rs:599](../../../../../crates/shamir-engine/src/tx/drainer.rs#L599); [crates/shamir-engine/src/tx/drainer.rs:662](../../../../../crates/shamir-engine/src/tx/drainer.rs#L662); [crates/shamir-engine/src/tx/tests/drainer_tests.rs:371](../../../../../crates/shamir-engine/src/tx/tests/drainer_tests.rs#L371).
+Retained tables resolve to history/raw writes; failures enter failed_tables and block contiguous finalization. The registered missing-map test checks the recovered value.
+
+Evidence: [crates/shamir-engine/src/tx/drainer.rs:599](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-engine/src/tx/drainer.rs#L599); [crates/shamir-engine/src/tx/drainer.rs:742](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-engine/src/tx/drainer.rs#L742); [crates/shamir-engine/src/tx/tests/drainer_tests.rs:371](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-engine/src/tx/tests/drainer_tests.rs#L371).
 
 <a id="review-3"></a>
 
@@ -41,96 +47,112 @@ Evidence: [crates/shamir-engine/src/tx/drainer.rs:599](../../../../../crates/sha
 
 Status: `confirmed-open`. Current risk: `high`.
 
-All three .ok() conversions remain; genuine read/decode errors still select absent-row branches. The added regression file is not registered.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-engine/src/table/table_manager_crud.rs:457](../../../../../crates/shamir-engine/src/table/table_manager_crud.rs#L457); [crates/shamir-engine/src/table/table_manager_crud.rs:537](../../../../../crates/shamir-engine/src/table/table_manager_crud.rs#L537); [crates/shamir-engine/src/table/table_manager_tx_ops.rs:1106](../../../../../crates/shamir-engine/src/table/table_manager_tx_ops.rs#L1106); [crates/shamir-engine/src/table/tests/mod.rs:1](../../../../../crates/shamir-engine/src/table/tests/mod.rs#L1).
+All three .ok conversions remain. A genuine pre-read failure selects no-op deletion or insert-shaped index/counter planning. These are low-level public API witnesses, not established wire-path exploits.
 
-Grouping/duplicate: `error-handling-lifecycle.md#1`. This row is not another independent defect.
+Evidence: [crates/shamir-engine/src/table/table_manager_crud.rs:457](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-engine/src/table/table_manager_crud.rs#L457); [crates/shamir-engine/src/table/table_manager_crud.rs:537](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-engine/src/table/table_manager_crud.rs#L537); [crates/shamir-engine/src/table/table_manager_tx_ops.rs:1106](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-engine/src/table/table_manager_tx_ops.rs#L1106).
+
+Grouping/duplicate: [error-handling-lifecycle.md#1](error-handling-lifecycle.md#review-1). This is not an additional independent defect.
 
 <a id="review-4"></a>
 
 ### Claim 4 — GroupCommit: a panicking leader strands leader_busy = true forever
 
-Status: `fixed`. Current risk: —.
+Status: `fixed`. Current risk: `—`.
 
-catch_unwind covers closure invocation and future polling; notification and leadership release follow. Registered assertions check settlement and a successful subsequent flush.
+Prior-cycle decision: `fixed`.
 
-Evidence: [crates/shamir-engine/src/repo/group_commit/group_commit.rs:137](../../../../../crates/shamir-engine/src/repo/group_commit/group_commit.rs#L137); [crates/shamir-engine/src/repo/group_commit/group_commit.rs:161](../../../../../crates/shamir-engine/src/repo/group_commit/group_commit.rs#L161); [crates/shamir-engine/src/repo/group_commit/tests/mod.rs:3](../../../../../crates/shamir-engine/src/repo/group_commit/tests/mod.rs#L3).
+Closure invocation and polling are inside catch_unwind; waiters settle and leadership resets. The registered test additionally requires a successful subsequent flush.
+
+Evidence: [crates/shamir-engine/src/repo/group_commit/group_commit.rs:137](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-engine/src/repo/group_commit/group_commit.rs#L137); [crates/shamir-engine/src/repo/group_commit/group_commit.rs:161](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-engine/src/repo/group_commit/group_commit.rs#L161); [crates/shamir-engine/src/repo/group_commit/tests/panicking_flush_tests.rs:22](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-engine/src/repo/group_commit/tests/panicking_flush_tests.rs#L22).
 
 <a id="review-5"></a>
 
 ### Claim 5 — rederive_stale_value_ops_post_stage is quadratic in staged ops (O(R×W) per commit)
 
-Status: `fixed`. Current risk: —.
+Status: `fixed`. Current risk: `—`.
 
-Dedup maps/sets are built once per table and incrementally updated; row-level lookups no longer rebuild or scan the whole index write-set.
+Prior-cycle decision: `fixed`.
 
-Evidence: [crates/shamir-engine/src/tx/pre_commit.rs:2062](../../../../../crates/shamir-engine/src/tx/pre_commit.rs#L2062); [crates/shamir-engine/src/tx/pre_commit.rs:2152](../../../../../crates/shamir-engine/src/tx/pre_commit.rs#L2152); [crates/shamir-engine/src/tx/pre_commit.rs:2279](../../../../../crates/shamir-engine/src/tx/pre_commit.rs#L2279).
+Dedup structures are built before the row loop and updated after appended operations, preserving owner/family distinctions.
 
-Grouping/duplicate: `performance-hotpath.md#1`. This row is not another independent defect.
+Evidence: [crates/shamir-engine/src/tx/pre_commit.rs:2062](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-engine/src/tx/pre_commit.rs#L2062); [crates/shamir-engine/src/tx/pre_commit.rs:2279](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-engine/src/tx/pre_commit.rs#L2279); [crates/shamir-engine/src/tx/pre_commit.rs:2350](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-engine/src/tx/pre_commit.rs#L2350).
+
+Grouping/duplicate: [performance-hotpath.md#1](performance-hotpath.md#review-1). This is not an additional independent defect.
 
 <a id="review-6"></a>
 
 ### Claim 6 — Stale doc asserts a footprint-ordering invariant the AsyncIndex path no longer has
 
-Status: `fixed`. Current risk: —.
+Status: `fixed`. Current risk: `—`.
 
-The documentation now identifies pre-publication footprint recording as shared and retains only two genuine divergence axes.
+Prior-cycle decision: `fixed`.
 
-Evidence: [crates/shamir-engine/src/tx/finalize.rs:21](../../../../../crates/shamir-engine/src/tx/finalize.rs#L21); [crates/shamir-engine/src/tx/commit.rs:765](../../../../../crates/shamir-engine/src/tx/commit.rs#L765); [crates/shamir-engine/src/tx/commit.rs:772](../../../../../crates/shamir-engine/src/tx/commit.rs#L772).
+Documentation now agrees with footprint-before-publish source ordering.
+
+Evidence: [crates/shamir-engine/src/tx/finalize.rs:21](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-engine/src/tx/finalize.rs#L21); [crates/shamir-engine/src/tx/commit.rs:765](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-engine/src/tx/commit.rs#L765); [crates/shamir-engine/src/tx/commit.rs:772](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-engine/src/tx/commit.rs#L772).
 
 <a id="review-7"></a>
 
 ### Claim 7 — Dead do-nothing loop and by-construction unwrap()s in SessionPermissions
 
-Status: `fixed`. Current risk: —.
+Status: `fixed`. Current risk: `—`.
 
-The empty loop is gone and data operations use a dedicated resource helper. RBAC scaffolding is excluded from default production exports.
+Prior-cycle decision: `fixed`.
 
-Evidence: [crates/shamir-engine/src/query/auth/session.rs:166](../../../../../crates/shamir-engine/src/query/auth/session.rs#L166); [crates/shamir-engine/src/query/auth/session.rs:231](../../../../../crates/shamir-engine/src/query/auth/session.rs#L231); [crates/shamir-engine/src/query/auth/mod.rs:19](../../../../../crates/shamir-engine/src/query/auth/mod.rs#L19).
+The empty loop is removed and resource extraction is factored; default production excludes the scaffolding. Original enum-protected unwraps were not arbitrary-input panics.
 
-Grouping/duplicate: `security-crypto.md#7`. This row is not another independent defect.
+Evidence: [crates/shamir-engine/src/query/auth/session.rs:166](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-engine/src/query/auth/session.rs#L166); [crates/shamir-engine/src/query/auth/session.rs:231](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-engine/src/query/auth/session.rs#L231); [crates/shamir-engine/src/query/auth/mod.rs:19](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-engine/src/query/auth/mod.rs#L19).
+
+Grouping/duplicate: [security-crypto.md#7](security-crypto.md#review-7). This is not an additional independent defect.
 
 <a id="review-8"></a>
 
 ### Claim 8 — Two implementation files embed inline cfg(test) mod tests
 
-Status: `fixed`. Current risk: —.
+Status: `fixed`. Current risk: `—`.
 
-Both ordinary test modules were moved into existing test directories and registered. The separately gated loom model remains intentionally inline.
+Prior-cycle decision: `fixed`.
 
-Evidence: [crates/shamir-engine/src/table/tests/mod.rs:98](../../../../../crates/shamir-engine/src/table/tests/mod.rs#L98); [crates/shamir-engine/src/query/read/tests/mod.rs:4](../../../../../crates/shamir-engine/src/query/read/tests/mod.rs#L4); [crates/shamir-engine/src/table/writer_drain_barrier.rs:469](../../../../../crates/shamir-engine/src/table/writer_drain_barrier.rs#L469).
+Both relocated ordinary test files are registered; the separate loom model remains feature-coupled.
 
-Grouping/duplicate: `style-claude-md.md#3`. This row is not another independent defect.
+Evidence: [crates/shamir-engine/src/table/tests/mod.rs:98](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-engine/src/table/tests/mod.rs#L98); [crates/shamir-engine/src/query/read/tests/mod.rs:4](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-engine/src/query/read/tests/mod.rs#L4).
+
+Grouping/duplicate: [style-claude-md.md#3](style-claude-md.md#review-3). This is not an additional independent defect.
 
 <a id="review-9"></a>
 
 ### Claim 9 — RecordCounter::persist dirty-flag race can drop the last persist trigger
 
-Status: `fixed`. Current risk: —.
+Status: `fixed`. Current risk: `—`.
 
-The dirty boolean was removed; persistence compares cache with the exact last-written value, preserving visibility of racing increments.
+Prior-cycle decision: `fixed`.
 
-Evidence: [crates/shamir-engine/src/table/record_counter.rs:169](../../../../../crates/shamir-engine/src/table/record_counter.rs#L169); [crates/shamir-engine/src/table/record_counter.rs:187](../../../../../crates/shamir-engine/src/table/record_counter.rs#L187); [crates/shamir-engine/src/table/tests/record_counter_tests.rs:337](../../../../../crates/shamir-engine/src/table/tests/record_counter_tests.rs#L337).
+last_persisted records the value actually written, so a racing increment remains distinguishable. The pause-seam test checks a second durable flush.
 
-Grouping/duplicate: `concurrency-lockfree.md#3`. This row is not another independent defect.
+Evidence: [crates/shamir-engine/src/table/record_counter.rs:180](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-engine/src/table/record_counter.rs#L180); [crates/shamir-engine/src/table/record_counter.rs:187](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-engine/src/table/record_counter.rs#L187); [crates/shamir-engine/src/table/tests/record_counter_tests.rs:374](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-engine/src/table/tests/record_counter_tests.rs#L374).
+
+Grouping/duplicate: [concurrency-lockfree.md#3](concurrency-lockfree.md#review-3). This is not an additional independent defect.
 
 <a id="review-coverage-verdict-tdd-lens"></a>
 
 ### Claim Coverage verdict (TDD lens) — No vacuous tests; the remaining gaps align exactly with the findings
 
-Status: `unverified`. Current risk: —.
+Status: `unverified`. Current risk: `—`.
 
-Drainer and leader-panic tests are now registered. Pre-read tests remain unreachable; blanket non-vacuity is not established. No tests were executed.
+Prior-cycle decision: `unverified`.
 
-Evidence: [crates/shamir-engine/src/tx/tests/drainer_tests.rs:371](../../../../../crates/shamir-engine/src/tx/tests/drainer_tests.rs#L371); [crates/shamir-engine/src/repo/group_commit/tests/mod.rs:3](../../../../../crates/shamir-engine/src/repo/group_commit/tests/mod.rs#L3); [crates/shamir-engine/src/table/tests/mod.rs:1](../../../../../crates/shamir-engine/src/table/tests/mod.rs#L1).
+Selected registered assertions are discriminating, but two regression files are orphaned and the new numeric-membership witnesses lack matching oracles. No universal test conclusion follows.
 
-## Corrections and qualified non-findings
+Evidence: [crates/shamir-engine/src/table/tests/mod.rs:1](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-engine/src/table/tests/mod.rs#L1); [crates/shamir-engine/src/query/filter/tests/eval_tests/collection_tests.rs:550](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-engine/src/query/filter/tests/eval_tests/collection_tests.rs#L550); [crates/shamir-engine/src/validator/schema/tests/schema_validator_tests.rs:210](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-engine/src/validator/schema/tests/schema_validator_tests.rs#L210).
 
-- Do not describe the crate as unchanged since August: 6c286cc9 and d2a8a0f6 changed it on September 3.
-- The missing-MVCC test preserves the table while removing its registration; actual DROP also removes catalog/token state. Intentional disposal of a dropped table is not independently proof of permanent loss of a retained table.
-- The original table_ref unwraps were protected by the matched enum variants, not an arbitrary runtime assumption.
-- Inline-test placement is structural debt, not a runtime medium-severity defect.
+## Evidence and recipe corrections
+
+- The missing-map drainer test retains the table and removes only its MVCC map entry. Actual DROP also removes catalog/token registrations; intentionally discarded table contents are not proof of lost retained data.
+- The ordinary pre-read fault injector does not cover TableManager::get. Registering the orphan file alone would not make its delete/set fixtures valid.
+- The historical counter recipe that rereads cache and stores that reread as last_persisted is unsafe: it can label an unwritten increment persisted. Record the value actually written.
+- Original clone-removal findings can remain source-fixed while newly introduced semantic regressions remain open; source-fixed is not a universal correctness label.
 
 ---
 

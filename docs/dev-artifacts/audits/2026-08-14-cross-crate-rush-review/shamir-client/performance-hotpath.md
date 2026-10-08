@@ -1,11 +1,13 @@
-<!-- revalidation:2026-10-08 source:92ad58266bf57ddea1fa3c8a47affba1a3a9a096 -->
-# shamir-client — performance-hotpath revalidation
+<!-- revalidation:2026-10-08 cycle:independent-2 source:e3765c935fc71655ee1ec0160cf180607935d89b -->
+# shamir-client — performance-hotpath independent revalidation (cycle 2)
 
-Source snapshot: `92ad58266bf57ddea1fa3c8a47affba1a3a9a096`. Revalidated 2026-10-08 by read-only XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run; no source fix is part of this update. Test registration/assertions are evidence of an oracle, not proof of a passing run.
+Frozen source snapshot: `e3765c935fc71655ee1ec0160cf180607935d89b`. Independently revalidated 2026-10-08 by a fresh XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run. Source-fixed means the specified mechanism was already removed at this snapshot; this cycle implements no source fix.
 
-This section is authoritative for current status. Original titles/IDs are retained for traceability; a refuted title is not a current assertion. The collapsed historical report below is superseded, including its counts, severity, scenarios and fix instructions. Plan IDs preserve historical numbering, not a current release mandate. [Workspace methodology and status definitions](../SUMMARY.md#status-definitions).
+This section is authoritative for current decisions. Existing IDs and allegation titles are retained for traceability; a refuted title is not a current assertion. Prior-cycle decisions were rechecked, not used as proof. The first cycle is available in repository history at this snapshot. The original historical body below remains preserved once and is superseded, including its counts, severities and recipes. [Workspace scope and status definitions](../SUMMARY.md#status-definitions).
 
-Copying, per-row allocations, cancellation retention, and global buffer growth remain source-proven. Latency assertions and exact allocation totals were overstated.
+Unrelated external edits began in dependency/toolchain/CI metadata during collection; additional Rust-source edits appeared afterward. They were left untouched. Evidence and decisions are tied to the frozen commit, not those later changes or an installed toolchain. “Current” below means current at that snapshot; no re-audit of the modified working tree is implied.
+
+Staging copies and repeated allocations are visible, but their workload impact is not measured. The actionable resource defects are cancellation retention, global early-buffer growth and decoder allocations; useful ambient synchronization must remain.
 
 ## Current claim decisions
 
@@ -13,31 +15,35 @@ Copying, per-row allocations, cancellation retention, and global buffer growth r
 |---:|---:|---:|---:|---:|---:|---:|
 | 10 | 10 | 0 | 0 | 0 | 0 | 0 |
 
-These are decisions on report claims, including repeated roots, bundled observations and non-findings—not a unique-bug census. Closed/N/A rows have no current risk; unverified risk is provisional. Pure style and unmeasured optimization claims do not establish runtime impact.
+These are duplicate-inclusive report decisions, not a unique-bug census. Pure style or structural optimization does not establish a runtime incident; unverified impact remains provisional.
 
 <a id="review-1"></a>
 
 ### Claim 1 — `roundtrip` clones the whole serialized request per call and ignores the zero-copy envelope built for exactly this path
 
-Status: `confirmed-open`. Current risk: `medium`.
+Status: `confirmed-open`. Current risk: `low`.
 
-Scratch is cloned, owning envelope allocates sid and serializes body again, and write_frame copies the envelope. No benchmark establishes High impact.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-client/src/client.rs:1256](../../../../../crates/shamir-client/src/client.rs#L1256); [crates/shamir-connect/src/common/envelope.rs:43](../../../../../crates/shamir-connect/src/common/envelope.rs#L43); [crates/shamir-transport-tcp/src/framing.rs:160](../../../../../crates/shamir-transport-tcp/src/framing.rs#L160).
+Scratch is cloned, sid is owned, envelope bytes are serialized and framing copies them again. Scratch reuse still avoids scratch regrowth. No measurement supports medium/high performance severity.
 
-Grouping/duplicate: `SUMMARY.md#4.1`. This row is not another independent defect.
+Evidence: [crates/shamir-client/src/client.rs:1256](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-client/src/client.rs#L1256); [crates/shamir-connect/src/common/envelope.rs:43](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-connect/src/common/envelope.rs#L43); [crates/shamir-transport-tcp/src/framing.rs:160](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-transport-tcp/src/framing.rs#L160).
+
+Grouping/duplicate: [SUMMARY.md#4.1](SUMMARY.md#review-4-1). This is not an additional independent defect.
 
 <a id="review-2"></a>
 
 ### Claim 2 — v2 read path: per-row `ByteBuf` clone and per-row×repo `get_or_create` key allocations in de-intern
 
-Status: `confirmed-open`. Current risk: `medium`.
+Status: `confirmed-open`. Current risk: `low`.
 
-Every IdBytes row is cloned; each candidate-repo attempt allocates registry key strings before cache lookup. Maps are not hoisted.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-client/src/interner_cache_ops.rs:654](../../../../../crates/shamir-client/src/interner_cache_ops.rs#L654); [crates/shamir-client/src/interner_cache_ops.rs:729](../../../../../crates/shamir-client/src/interner_cache_ops.rs#L729); [crates/shamir-client/src/interner_cache.rs:207](../../../../../crates/shamir-client/src/interner_cache.rs#L207).
+Rows are cloned and each candidate lookup allocates db/repo keys. Hoisting must preserve correct result provenance rather than merely accelerate wrong-map probing.
 
-Grouping/duplicate: `SUMMARY.md#4.2`. This row is not another independent defect.
+Evidence: [crates/shamir-client/src/interner_cache_ops.rs:654](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-client/src/interner_cache_ops.rs#L654); [crates/shamir-client/src/interner_cache_ops.rs:729](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-client/src/interner_cache_ops.rs#L729); [crates/shamir-client/src/interner_cache.rs:207](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-client/src/interner_cache.rs#L207).
+
+Grouping/duplicate: [SUMMARY.md#4.2](SUMMARY.md#review-4-2). This is not an additional independent defect.
 
 <a id="review-3"></a>
 
@@ -45,11 +51,13 @@ Grouping/duplicate: `SUMMARY.md#4.2`. This row is not another independent defect
 
 Status: `confirmed-open`. Current risk: `medium`.
 
-Per-key caps do not bound total entries or bytes; every new peer-supplied unknown sub ID creates a retained vector.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-client/src/client.rs:350](../../../../../crates/shamir-client/src/client.rs#L350); [crates/shamir-client/src/subscription.rs:30](../../../../../crates/shamir-client/src/subscription.rs#L30).
+Per-key envelope limits do not limit peer-controlled distinct keys or total bytes; retained state is not cleared on reader exit.
 
-Grouping/duplicate: `SUMMARY.md#4.3`. This row is not another independent defect.
+Evidence: [crates/shamir-client/src/client.rs:350](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-client/src/client.rs#L350); [crates/shamir-client/src/client.rs:407](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-client/src/client.rs#L407).
+
+Grouping/duplicate: [SUMMARY.md#4.3](SUMMARY.md#review-4-3). This is not an additional independent defect.
 
 <a id="review-4"></a>
 
@@ -57,11 +65,13 @@ Grouping/duplicate: `SUMMARY.md#4.3`. This row is not another independent defect
 
 Status: `confirmed-open`. Current risk: `medium`.
 
-After registration, cancellation bypasses write-failure and local-timeout cleanup. Entries survive until response arrival or connection death.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-client/src/client.rs:1267](../../../../../crates/shamir-client/src/client.rs#L1267); [crates/shamir-client/src/client.rs:1277](../../../../../crates/shamir-client/src/client.rs#L1277); [crates/shamir-client/src/client.rs:1290](../../../../../crates/shamir-client/src/client.rs#L1290).
+Cancellation at post-registration await points has no drop cleanup. Against a live silent peer repeated external cancellations accumulate entries until response/teardown.
 
-Grouping/duplicate: `SUMMARY.md#4.4`. This row is not another independent defect.
+Evidence: [crates/shamir-client/src/client.rs:1267](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-client/src/client.rs#L1267); [crates/shamir-client/src/client.rs:1277](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-client/src/client.rs#L1277); [crates/shamir-client/src/client.rs:1290](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-client/src/client.rs#L1290).
+
+Grouping/duplicate: [SUMMARY.md#4.4](SUMMARY.md#review-4-4). This is not an additional independent defect.
 
 <a id="review-5"></a>
 
@@ -69,23 +79,27 @@ Grouping/duplicate: `SUMMARY.md#4.4`. This row is not another independent defect
 
 Status: `confirmed-open`. Current risk: `low`.
 
-Global map mutexes and insufficient contention comments remain. Serialization is structural; a throughput degradation curve was not measured.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-client/src/client.rs:250](../../../../../crates/shamir-client/src/client.rs#L250); [crates/shamir-client/src/client.rs:331](../../../../../crates/shamir-client/src/client.rs#L331); [crates/shamir-client/src/client.rs:1269](../../../../../crates/shamir-client/src/client.rs#L1269).
+Per-request and per-push global lock operations remain. Their structural serialization is known; degradation curves and high severity are not measured.
 
-Grouping/duplicate: `SUMMARY.md#2.2`. This row is not another independent defect.
+Evidence: [crates/shamir-client/src/client.rs:250](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-client/src/client.rs#L250); [crates/shamir-client/src/client.rs:331](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-client/src/client.rs#L331); [crates/shamir-client/src/client.rs:1269](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-client/src/client.rs#L1269).
+
+Grouping/duplicate: [SUMMARY.md#2.2](SUMMARY.md#review-2-2). This is not an additional independent defect.
 
 <a id="review-6"></a>
 
 ### Claim 6 — Ambient interner sync runs on every `execute` regardless of server version or cache state
 
-Status: `confirmed-open`. Current risk: `low`.
+Status: `confirmed-open`. Current risk: `nit`.
 
-Empty epoch maps trigger query traversal and map creation without version gating; execute_with_touch collects/touches before checking version. Cold v2 sync is useful, however.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-client/src/client.rs:1053](../../../../../crates/shamir-client/src/client.rs#L1053); [crates/shamir-client/src/interner_cache_ops.rs:357](../../../../../crates/shamir-client/src/interner_cache_ops.rs#L357); [crates/shamir-client/src/interner_cache_ops.rs:389](../../../../../crates/shamir-client/src/interner_cache_ops.rs#L389).
+The work occurs, but cold-v2 sync populates useful cache state and pre-touch is an explicit method promise. Blanket skip-when-cold would remove functionality; benefit of gating is unmeasured.
 
-Grouping/duplicate: `SUMMARY.md#4.5`. This row is not another independent defect.
+Evidence: [crates/shamir-client/src/client.rs:1053](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-client/src/client.rs#L1053); [crates/shamir-client/src/interner_cache_ops.rs:357](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-client/src/interner_cache_ops.rs#L357); [crates/shamir-client/src/tests/ambient_sync_tests.rs:143](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-client/src/tests/ambient_sync_tests.rs#L143).
+
+Grouping/duplicate: [SUMMARY.md#4.5](SUMMARY.md#review-4-5). This is not an additional independent defect.
 
 <a id="review-7"></a>
 
@@ -93,11 +107,13 @@ Grouping/duplicate: `SUMMARY.md#4.5`. This row is not another independent defect
 
 Status: `confirmed-open`. Current risk: `low`.
 
-Storage encoding returns owned Bytes and the client copies it into Vec. Pinned bytes supports consuming From<Bytes> for Vec, not a public into_vec method.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-client/src/interner_cache_ops.rs:611](../../../../../crates/shamir-client/src/interner_cache_ops.rs#L611); [crates/shamir-types/src/codecs/interned/messagepack.rs:873](../../../../../crates/shamir-types/src/codecs/interned/messagepack.rs#L873); [Cargo.lock:571](../../../../../Cargo.lock#L571).
+An owned storage encoding is copied before ByteBuf ownership. Exact bytes 1.11.1 has consuming From&lt;Bytes&gt; for Vec, not public into_vec. Source: https://docs.rs/crate/bytes/1.11.1/source/src/bytes.rs
 
-Grouping/duplicate: `SUMMARY.md#4.6`. This row is not another independent defect.
+Evidence: [crates/shamir-client/src/interner_cache_ops.rs:612](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-client/src/interner_cache_ops.rs#L612); [Cargo.lock:571](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/Cargo.lock#L571).
+
+Grouping/duplicate: [SUMMARY.md#4.6](SUMMARY.md#review-4-6). This is not an additional independent defect.
 
 <a id="review-8"></a>
 
@@ -105,23 +121,27 @@ Grouping/duplicate: `SUMMARY.md#4.6`. This row is not another independent defect
 
 Status: `confirmed-open`. Current risk: `low`.
 
-Every visited key is cloned into per-repo vectors before sorting and deduplication, making allocation proportional to occurrences rather than distinct names.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-client/src/interner_cache_ops.rs:471](../../../../../crates/shamir-client/src/interner_cache_ops.rs#L471); [crates/shamir-client/src/interner_cache_ops.rs:377](../../../../../crates/shamir-client/src/interner_cache_ops.rs#L377).
+Key occurrences are cloned before sort/dedup. Borrowed per-repo sets can reduce staging while preserving the same touch input set.
 
-Grouping/duplicate: `SUMMARY.md#4.7`. This row is not another independent defect.
+Evidence: [crates/shamir-client/src/interner_cache_ops.rs:471](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-client/src/interner_cache_ops.rs#L471); [crates/shamir-client/src/interner_cache_ops.rs:377](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-client/src/interner_cache_ops.rs#L377).
+
+Grouping/duplicate: [SUMMARY.md#4.7](SUMMARY.md#review-4-7). This is not an additional independent defect.
 
 <a id="review-9"></a>
 
 ### Claim 9 — Push frames pay up to two failed envelope parses before `PushEnvelope` decode
 
-Status: `confirmed-open`. Current risk: `low`.
+Status: `confirmed-open`. Current risk: `nit`.
 
-Reader attempts ResponseEnvelope, ErrorEnvelope, then PushEnvelope. Three attempts are structural, but the cited response-side sid allocation does not exist.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-client/src/client.rs:194](../../../../../crates/shamir-client/src/client.rs#L194); [crates/shamir-client/src/client.rs:329](../../../../../crates/shamir-client/src/client.rs#L329); [crates/shamir-connect/src/common/envelope.rs:178](../../../../../crates/shamir-connect/src/common/envelope.rs#L178).
+Current pushes are attempted as Response, Error and Push shapes. The claimed sid allocation is nonexistent on these response paths; no measured overhead establishes low or higher impact.
 
-Grouping/duplicate: `SUMMARY.md#5.6`. This row is not another independent defect.
+Evidence: [crates/shamir-client/src/client.rs:194](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-client/src/client.rs#L194); [crates/shamir-client/src/client.rs:329](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-client/src/client.rs#L329); [crates/shamir-connect/src/common/envelope.rs:178](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-connect/src/common/envelope.rs#L178).
+
+Grouping/duplicate: [SUMMARY.md#5.6](SUMMARY.md#review-5-6). This is not an additional independent defect.
 
 <a id="review-10"></a>
 
@@ -129,24 +149,22 @@ Grouping/duplicate: `SUMMARY.md#5.6`. This row is not another independent defect
 
 Status: `confirmed-open`. Current risk: `nit`.
 
-No client benchmarks or allocation-counter tests exist; existing timeout/channel tests do not cover cancellation retention or global early-buffer growth.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-client/Cargo.toml:43](../../../../../crates/shamir-client/Cargo.toml#L43); [crates/shamir-client/src/tests/mod.rs:1](../../../../../crates/shamir-client/src/tests/mod.rs#L1); [crates/shamir-client/src/tests/timeout_tests.rs:111](../../../../../crates/shamir-client/src/tests/timeout_tests.rs#L111).
+No client benchmarks/allocation oracles exist. Existing bounded-channel and timeout tests do not measure global early-buffer cardinality, cancelled pending growth or allocation counts.
 
-Grouping/duplicate: `SUMMARY.md#4.8`. This row is not another independent defect.
+Evidence: [crates/shamir-client/Cargo.toml:43](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-client/Cargo.toml#L43); [crates/shamir-client/src/tests/mod.rs:1](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-client/src/tests/mod.rs#L1).
 
-## Corrections and qualified non-findings
+Grouping/duplicate: [SUMMARY.md#4.8](SUMMARY.md#review-4-8). This is not an additional independent defect.
 
-- Request scratch reuse still avoids repeated scratch growth; buf.clone does not nullify every benefit of reuse.
-- The stated three allocations/two payload copies exclude write_frame's additional vector/copy and possible output-vector reallocations.
-- RequestEnvelopeRef eliminates owning sid/body staging, not copying body bytes into serialized output; 'single allocation' is not established by to_vec_named.
-- The proposed Bytes::into_vec call is unavailable in pinned bytes 1.11.1; use its consuming Vec conversion or an appropriate encoding API.
-- Do not suppress cold-v2 ambient sync indiscriminately: it actually populates caches and is asserted by crates/shamir-client/src/tests/ambient_sync_tests.rs:143.
-- V1 pre-touch also follows the public method's explicit pre-touch contract; avoiding it requires an intentional contract decision, not a blanket assertion that it is always pointless.
-- The existing demux tests cover channel saturation and one unknown-sub insertion, not the claimed EARLY_BUFFER_CAP saturation.
-- The v2 refresh test does not isolate refresh_repo, because execute merges ambient deltas first.
-- Pinned scc synchronous operations use bucket locks; proposed replacements are not automatically lock-free.
-- Cursor mutex-skip performance claims are contradicted by lock-before-is_none at crates/shamir-client/src/cursor_stream.rs:250.
+## Evidence and recipe corrections
+
+- Exact three-allocation/two-copy totals omit framing and possible reallocations; borrowed serialization still copies into output.
+- The _into storage encoder consumes scratch with mem::take; its current implementation does not retain capacity across records.
+- The unknown-ID refresh test is ambient-masked, and refresh_repo_merges_delta already has gamma through touch_fields. Neither isolates refresh.
+- A first-key classifier cannot assume named-map key order. Any optimization must preserve general map decoding and current wire bytes.
+- The mpsc saturation test concerns a four-slot registered channel, not EARLY_BUFFER_CAP. Its cap-plus-two assertion is weaker than proving the exact capacity/drop-new behavior.
+- One microbenchmark cannot establish connection-wide cancellation or global memory invariants; use direct production-seam assertions.
 
 ---
 

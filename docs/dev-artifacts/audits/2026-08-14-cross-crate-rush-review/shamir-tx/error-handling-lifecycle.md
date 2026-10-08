@@ -1,11 +1,13 @@
-<!-- revalidation:2026-10-08 source:92ad58266bf57ddea1fa3c8a47affba1a3a9a096 -->
-# shamir-tx — error-handling-lifecycle revalidation
+<!-- revalidation:2026-10-08 cycle:independent-2 source:e3765c935fc71655ee1ec0160cf180607935d89b -->
+# shamir-tx — error-handling-lifecycle independent revalidation (cycle 2)
 
-Source snapshot: `92ad58266bf57ddea1fa3c8a47affba1a3a9a096`. Revalidated 2026-10-08 by read-only XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run; no source fix is part of this update. Test registration/assertions are evidence of an oracle, not proof of a passing run.
+Frozen source snapshot: `e3765c935fc71655ee1ec0160cf180607935d89b`. Independently revalidated 2026-10-08 by a fresh XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run. Source-fixed means the specified mechanism was already removed at this snapshot; this cycle implements no source fix.
 
-This section is authoritative for current status. Original titles/IDs are retained for traceability; a refuted title is not a current assertion. The collapsed historical report below is superseded, including its counts, severity, scenarios and fix instructions. Plan IDs preserve historical numbering, not a current release mandate. [Workspace methodology and status definitions](../SUMMARY.md#status-definitions).
+This section is authoritative for current decisions. Existing IDs and allegation titles are retained for traceability; a refuted title is not a current assertion. Prior-cycle decisions were rechecked, not used as proof. The first cycle is available in repository history at this snapshot. The original historical body below remains preserved once and is superseded, including its counts, severities and recipes. [Workspace scope and status definitions](../SUMMARY.md#status-definitions).
 
-Failed-write cell masking and journal/scan error signaling remain. The interner input-panic and staged-read process-panic claims are not supported by reachable current code.
+Unrelated external edits began in dependency/toolchain/CI metadata during collection; additional Rust-source edits appeared afterward. They were left untouched. Evidence and decisions are tied to the frozen commit, not those later changes or an installed toolchain. “Current” below means current at that snapshot; no re-audit of the modified working tree is implied.
+
+Failed direct writes mask prior values, journal failures remain ambiguous, and bad timestamp rebuilds remain cached. Refuted panic scenarios remain refuted. Partial-scan omissions alone are conservative under a correct floor, contrary to a current parent refinement.
 
 ## Current claim decisions
 
@@ -13,7 +15,7 @@ Failed-write cell masking and journal/scan error signaling remain. The interner 
 |---:|---:|---:|---:|---:|---:|---:|
 | 12 | 9 | 0 | 0 | 2 | 0 | 1 |
 
-These are decisions on report claims, including repeated roots, bundled observations and non-findings—not a unique-bug census. Closed/N/A rows have no current risk; unverified risk is provisional. Pure style and unmeasured optimization claims do not establish runtime impact.
+These are duplicate-inclusive report decisions, not a unique-bug census. Pure style or structural optimization does not establish a runtime incident; unverified impact remains provisional.
 
 <a id="review-1"></a>
 
@@ -21,9 +23,11 @@ These are decisions on report claims, including repeated roots, bundled observat
 
 Status: `confirmed-open`. Current risk: `high`.
 
-Cells are bumped before transact; error propagation drops VersionGuard but leaves the cell pointing at an absent version. Exact-version point reads return None although older history remains.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-tx/src/mvcc_store/mod.rs:785](../../../../../crates/shamir-tx/src/mvcc_store/mod.rs#L785); [crates/shamir-tx/src/mvcc_store/mod.rs:799](../../../../../crates/shamir-tx/src/mvcc_store/mod.rs#L799); [crates/shamir-tx/src/mvcc_store/mod.rs:1051](../../../../../crates/shamir-tx/src/mvcc_store/mod.rs#L1051); [crates/shamir-tx/src/mvcc_store/mod.rs:1291](../../../../../crates/shamir-tx/src/mvcc_store/mod.rs#L1291); [crates/shamir-tx/src/version_guard.rs:107](../../../../../crates/shamir-tx/src/version_guard.rs#L107).
+With committed k::5 present, a failed write at 6 bumps the cell first; guard Drop marks 6 Aborted and advances the floor but does not restore the cell. Exact k::6 lookup returns None although k::5 remains. Direct engine CRUD callers exist. Oracle must start with an existing value and assert exact point/stream preservation after failure, including a later-operation batch fault.
+
+Evidence: [crates/shamir-tx/src/mvcc_store/mod.rs:785](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-tx/src/mvcc_store/mod.rs#L785); [crates/shamir-tx/src/mvcc_store/mod.rs:799](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-tx/src/mvcc_store/mod.rs#L799); [crates/shamir-tx/src/mvcc_store/mod.rs:1291](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-tx/src/mvcc_store/mod.rs#L1291); [crates/shamir-tx/src/version_guard.rs:107](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-tx/src/version_guard.rs#L107); [crates/shamir-engine/src/table/table_manager_crud.rs:218](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-engine/src/table/table_manager_crud.rs#L218).
 
 <a id="review-2"></a>
 
@@ -31,9 +35,11 @@ Evidence: [crates/shamir-tx/src/mvcc_store/mod.rs:785](../../../../../crates/sha
 
 Status: `confirmed-open`. Current risk: `medium`.
 
-unwrap_or_default converts failed decision-input batches to empty batches without diagnostics. Sibling scans propagate errors; missing entries can also invalidate anchor selection, so over-retention-only safety is not established.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-tx/src/mvcc_store/mvcc_gc.rs:174](../../../../../crates/shamir-tx/src/mvcc_store/mvcc_gc.rs#L174); [crates/shamir-tx/src/mvcc_store/mvcc_gc.rs:193](../../../../../crates/shamir-tx/src/mvcc_store/mvcc_gc.rs#L193); [crates/shamir-tx/src/mvcc_store/mvcc_gc.rs:312](../../../../../crates/shamir-tx/src/mvcc_store/mvcc_gc.rs#L312); [crates/shamir-tx/src/mvcc_store/mvcc_gc.rs:408](../../../../../crates/shamir-tx/src/mvcc_store/mvcc_gc.rs#L408).
+unwrap_or_default silently omits failed scan batches while siblings propagate errors, causing hidden incomplete reclamation. However, omission alone cannot delete an observed required snapshot anchor under a correct floor: observed versions &gt;= floor are protected; an observed true below-floor maximum remains the observed maximum; an omitted anchor is not a deletion candidate. Other floor/namespace bugs are separate.
+
+Evidence: [crates/shamir-tx/src/mvcc_store/mvcc_gc.rs:174](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-tx/src/mvcc_store/mvcc_gc.rs#L174); [crates/shamir-tx/src/mvcc_store/mvcc_gc.rs:193](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-tx/src/mvcc_store/mvcc_gc.rs#L193); [crates/shamir-tx/src/mvcc_store/mvcc_gc.rs:214](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-tx/src/mvcc_store/mvcc_gc.rs#L214); [crates/shamir-tx/src/mvcc_store/mvcc_gc.rs:236](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-tx/src/mvcc_store/mvcc_gc.rs#L236).
 
 <a id="review-3"></a>
 
@@ -41,9 +47,11 @@ Evidence: [crates/shamir-tx/src/mvcc_store/mvcc_gc.rs:174](../../../../../crates
 
 Status: `confirmed-open`. Current risk: `medium`.
 
-Serialization/put failure only warns; the writer receives no gap-marker handle. Closed sends are ignored, and later successful puts advance the max persisted version past missing events.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-tx/src/changefeed.rs:336](../../../../../crates/shamir-tx/src/changefeed.rs#L336); [crates/shamir-tx/src/changefeed.rs:557](../../../../../crates/shamir-tx/src/changefeed.rs#L557); [crates/shamir-tx/src/changefeed.rs:639](../../../../../crates/shamir-tx/src/changefeed.rs#L639); [crates/shamir-tx/src/changefeed.rs:645](../../../../../crates/shamir-tx/src/changefeed.rs#L645); [crates/shamir-tx/src/changefeed.rs:653](../../../../../crates/shamir-tx/src/changefeed.rs#L653).
+Failed serialization or put only warns; the writer has no gap-marker handle. Closed sends are ignored. A later successful higher-version put advances max persisted past the missing event. A failing-put then successful-put oracle must assert an explicit loss/error signal, not just maximum progress.
+
+Evidence: [crates/shamir-tx/src/changefeed.rs:336](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-tx/src/changefeed.rs#L336); [crates/shamir-tx/src/changefeed.rs:557](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-tx/src/changefeed.rs#L557); [crates/shamir-tx/src/changefeed.rs:639](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-tx/src/changefeed.rs#L639); [crates/shamir-tx/src/changefeed.rs:653](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-tx/src/changefeed.rs#L653).
 
 <a id="review-4"></a>
 
@@ -51,9 +59,11 @@ Evidence: [crates/shamir-tx/src/changefeed.rs:336](../../../../../crates/shamir-
 
 Status: `confirmed-open`. Current risk: `low`.
 
-The declared dependency remains unused and the identified APIs retain String errors. The normative error-model violation is maintainability debt, not independently a Medium runtime defect.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-tx/Cargo.toml:23](../../../../../crates/shamir-tx/Cargo.toml#L23); [crates/shamir-tx/src/changefeed.rs:154](../../../../../crates/shamir-tx/src/changefeed.rs#L154); [crates/shamir-tx/src/staging_store.rs:329](../../../../../crates/shamir-tx/src/staging_store.rs#L329); [crates/shamir-tx/src/tx_context.rs:942](../../../../../crates/shamir-tx/src/tx_context.rs#L942); [crates/shamir-tx/src/mvcc_store/retention.rs:60](../../../../../crates/shamir-tx/src/mvcc_store/retention.rs#L60).
+The dependency is declared without use and the identified boundaries use String. Typed library errors are maintenance debt; converting the public trait requires coordinated implementor/caller changes, not merely a drop-in derive.
+
+Evidence: [crates/shamir-tx/Cargo.toml:23](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-tx/Cargo.toml#L23); [crates/shamir-tx/src/changefeed.rs:154](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-tx/src/changefeed.rs#L154); [crates/shamir-tx/src/mvcc_store/retention.rs:60](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-tx/src/mvcc_store/retention.rs#L60); [crates/shamir-tx/src/tx_context.rs:942](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-tx/src/tx_context.rs#L942).
 
 <a id="review-5"></a>
 
@@ -61,9 +71,11 @@ Evidence: [crates/shamir-tx/Cargo.toml:23](../../../../../crates/shamir-tx/Cargo
 
 Status: `confirmed-open`. Current risk: `medium`.
 
-Registered tests lack prior-value recovery, failed batch watermark, drain-error release and vectored-read fault assertions. The census is four fault-injection tests, including ts_atomicity, not exactly three.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-tx/src/tests/mvcc_store_tests/mod.rs:10](../../../../../crates/shamir-tx/src/tests/mvcc_store_tests/mod.rs#L10); [crates/shamir-tx/src/tests/mvcc_store_tests/error_tests.rs:43](../../../../../crates/shamir-tx/src/tests/mvcc_store_tests/error_tests.rs#L43); [crates/shamir-tx/src/tests/mvcc_store_tests/ts_atomicity_tests.rs:237](../../../../../crates/shamir-tx/src/tests/mvcc_store_tests/ts_atomicity_tests.rs#L237); [crates/shamir-tx/src/tests/mvcc_store_tests/write_committed_batch_tests.rs:379](../../../../../crates/shamir-tx/src/tests/mvcc_store_tests/write_committed_batch_tests.rs#L379).
+Four registered fresh-key fault tests exist, including ts_atomicity; fail_set rejects the first Set in a sequential mock. They do not prove prior-value restoration, late-operation rollback, batch watermark obligations, vectored fault propagation, or drain-error guard release. The deferral test only proves primitive no-write/Ok behavior, not engine acceptance safety.
+
+Evidence: [crates/shamir-tx/src/tests/mvcc_store_tests/error_tests.rs:43](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-tx/src/tests/mvcc_store_tests/error_tests.rs#L43); [crates/shamir-tx/src/tests/mvcc_store_tests/ts_atomicity_tests.rs:237](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-tx/src/tests/mvcc_store_tests/ts_atomicity_tests.rs#L237); [crates/shamir-tx/src/tests/mvcc_store_tests/test_stores.rs:92](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-tx/src/tests/mvcc_store_tests/test_stores.rs#L92); [crates/shamir-tx/src/tests/mvcc_store_tests/write_committed_batch_tests.rs:363](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-tx/src/tests/mvcc_store_tests/write_committed_batch_tests.rs#L363).
 
 <a id="review-6"></a>
 
@@ -71,35 +83,41 @@ Evidence: [crates/shamir-tx/src/tests/mvcc_store_tests/mod.rs:10](../../../../..
 
 Status: `confirmed-open`. Current risk: `medium`.
 
-Skipped batches are never retried once ready becomes true. The documented fallback is absent from production, rather than merely ineffective for partially populated indexes.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-tx/src/mvcc_store/mod.rs:408](../../../../../crates/shamir-tx/src/mvcc_store/mod.rs#L408); [crates/shamir-tx/src/mvcc_store/mod.rs:428](../../../../../crates/shamir-tx/src/mvcc_store/mod.rs#L428); [crates/shamir-tx/src/mvcc_store/mvcc_history.rs:95](../../../../../crates/shamir-tx/src/mvcc_store/mvcc_history.rs#L95).
+Error batches are skipped and ready prevents retry; production lookup has no scan fallback. A healthy subsequent read can remain incomplete for the process lifetime.
 
-Grouping/duplicate: `correctness-tdd.md#3`. This row is not another independent defect.
+Evidence: [crates/shamir-tx/src/mvcc_store/mod.rs:408](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-tx/src/mvcc_store/mod.rs#L408); [crates/shamir-tx/src/mvcc_store/mod.rs:428](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-tx/src/mvcc_store/mod.rs#L428); [crates/shamir-tx/src/mvcc_store/mvcc_history.rs:95](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-tx/src/mvcc_store/mvcc_history.rs#L95).
+
+Grouping/duplicate: [correctness-tdd.md#3](correctness-tdd.md#review-3). This is not an additional independent defect.
 
 <a id="review-7"></a>
 
 ### Claim 7 — LayeredInterner::touch_sync panics on a fallible signature its sibling propagates
 
-Status: `refuted`. Current risk: —.
+Status: `refuted`. Current risk: `—`.
 
-Current Interner::touch_ind returns Ok on every branch and has no input-validation Err branch. The expect and propagated sibling differ in future API resilience, not current input failure behavior.
+Prior-cycle decision: `refuted`.
 
-Evidence: [crates/shamir-tx/src/layered_interner.rs:84](../../../../../crates/shamir-tx/src/layered_interner.rs#L84); [crates/shamir-types/src/core/interner/interner.rs:138](../../../../../crates/shamir-types/src/core/interner/interner.rs#L138); [crates/shamir-types/src/core/interner/interner.rs:146](../../../../../crates/shamir-types/src/core/interner/interner.rs#L146); [crates/shamir-types/src/core/interner/interner.rs:166](../../../../../crates/shamir-types/src/core/interner/interner.rs#L166); [crates/shamir-types/src/core/interner/interner.rs:176](../../../../../crates/shamir-types/src/core/interner/interner.rs#L176).
+The current callee never returns Err. Different caller handling is prospective resilience, not a current input-conditioned panic mechanism.
 
-Grouping/duplicate: `security-crypto.md#2`. This row is not another independent defect.
+Evidence: [crates/shamir-tx/src/layered_interner.rs:84](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-tx/src/layered_interner.rs#L84); [crates/shamir-types/src/core/interner/interner.rs:146](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-types/src/core/interner/interner.rs#L146); [crates/shamir-types/src/core/interner/interner.rs:176](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-types/src/core/interner/interner.rs#L176).
+
+Grouping/duplicate: [security-crypto.md#2](security-crypto.md#review-2). This is not an additional independent defect.
 
 <a id="review-8"></a>
 
 ### Claim 8 — StagedRow::as_inner panics on decode failure though construction is unvalidated
 
-Status: `refuted`. Current risk: —.
+Status: `refuted`. Current risk: `—`.
 
-as_inner has no callers. StagedRow's field, containing operation and writes map are private; public staging reads expose Bytes, not StagedRow. Current read-your-own-write/remap paths do not invoke the panic.
+Prior-cycle decision: `refuted`.
 
-Evidence: [crates/shamir-tx/src/staging_store.rs:32](../../../../../crates/shamir-tx/src/staging_store.rs#L32); [crates/shamir-tx/src/staging_store.rs:46](../../../../../crates/shamir-tx/src/staging_store.rs#L46); [crates/shamir-tx/src/staging_store.rs:52](../../../../../crates/shamir-tx/src/staging_store.rs#L52); [crates/shamir-tx/src/staging_store.rs:81](../../../../../crates/shamir-tx/src/staging_store.rs#L81); [crates/shamir-tx/src/staging_store.rs:141](../../../../../crates/shamir-tx/src/staging_store.rs#L141); [crates/shamir-tx/src/staging_store.rs:165](../../../../../crates/shamir-tx/src/staging_store.rs#L165).
+The panic method has no callers and no public construction/access path exposes a StagedRow. Current byte reads and remapping bypass it.
 
-Grouping/duplicate: `security-crypto.md#4`. This row is not another independent defect.
+Evidence: [crates/shamir-tx/src/staging_store.rs:32](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-tx/src/staging_store.rs#L32); [crates/shamir-tx/src/staging_store.rs:81](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-tx/src/staging_store.rs#L81); [crates/shamir-tx/src/staging_store.rs:165](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-tx/src/staging_store.rs#L165).
+
+Grouping/duplicate: [security-crypto.md#4](security-crypto.md#review-4). This is not an additional independent defect.
 
 <a id="review-9"></a>
 
@@ -107,9 +125,11 @@ Grouping/duplicate: `security-crypto.md#4`. This row is not another independent 
 
 Status: `confirmed-open`. Current risk: `nit`.
 
-The outer documentation promises history-first and no visible state after failure; the method calls visible publication first, then fallible history.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-tx/src/mvcc_store/mvcc_history.rs:413](../../../../../crates/shamir-tx/src/mvcc_store/mvcc_history.rs#L413); [crates/shamir-tx/src/mvcc_store/mvcc_history.rs:427](../../../../../crates/shamir-tx/src/mvcc_store/mvcc_history.rs#L427).
+Outer prose promises history-first/no visible failed state; implementation publishes visible state before awaiting history. This combined method also has a production replication caller, contrary to the broader test/direct-only assurance.
+
+Evidence: [crates/shamir-tx/src/mvcc_store/mvcc_history.rs:413](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-tx/src/mvcc_store/mvcc_history.rs#L413); [crates/shamir-tx/src/mvcc_store/mvcc_history.rs:427](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-tx/src/mvcc_store/mvcc_history.rs#L427); [crates/shamir-engine/src/tx/apply_replicated.rs:338](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-engine/src/tx/apply_replicated.rs#L338).
 
 <a id="review-10"></a>
 
@@ -117,9 +137,11 @@ Evidence: [crates/shamir-tx/src/mvcc_store/mvcc_history.rs:413](../../../../../c
 
 Status: `confirmed-open`. Current risk: `nit`.
 
-All get errors become None without diagnostics. Age-dependent reclaim keeps unknown-age entries, but history reporting silently loses timestamp information.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-tx/src/mvcc_store/mod.rs:1634](../../../../../crates/shamir-tx/src/mvcc_store/mod.rs#L1634); [crates/shamir-tx/src/mvcc_store/mvcc_gc.rs:232](../../../../../crates/shamir-tx/src/mvcc_store/mvcc_gc.rs#L232); [crates/shamir-tx/src/mvcc_store/mvcc_history.rs:212](../../../../../crates/shamir-tx/src/mvcc_store/mvcc_history.rs#L212).
+All get errors map to None without diagnostics. Age-dependent reclaim conservatively keeps unknown-age entries, but history reporting cannot distinguish absent timestamps from storage failure.
+
+Evidence: [crates/shamir-tx/src/mvcc_store/mod.rs:1634](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-tx/src/mvcc_store/mod.rs#L1634); [crates/shamir-tx/src/mvcc_store/mvcc_gc.rs:232](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-tx/src/mvcc_store/mvcc_gc.rs#L232); [crates/shamir-tx/src/mvcc_store/mvcc_history.rs:212](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-tx/src/mvcc_store/mvcc_history.rs#L212).
 
 <a id="review-11"></a>
 
@@ -127,27 +149,32 @@ Evidence: [crates/shamir-tx/src/mvcc_store/mod.rs:1634](../../../../../crates/sh
 
 Status: `confirmed-open`. Current risk: `nit`.
 
-new unconditionally calls spawn and discards its handle; pinned Tokio source confirms off-runtime panic. Current engine initialization is runtime-hosted, so this is a constructor/lifecycle contract issue.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-tx/src/changefeed.rs:232](../../../../../crates/shamir-tx/src/changefeed.rs#L232); [crates/shamir-tx/src/changefeed.rs:249](../../../../../crates/shamir-tx/src/changefeed.rs#L249); [crates/shamir-engine/src/repo/repo_instance.rs:1204](../../../../../crates/shamir-engine/src/repo/repo_instance.rs#L1204); [Cargo.lock:4195](../../../../../Cargo.lock#L4195).
+new calls spawn and drops its handle. Exact Tokio 1.49.0 spawn requires runtime context; current engine initialization is runtime-hosted. This is a constructor/lifecycle documentation issue, not an established production panic. Source: https://docs.rs/crate/tokio/1.49.0/source/src/task/spawn.rs
+
+Evidence: [crates/shamir-tx/src/changefeed.rs:249](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-tx/src/changefeed.rs#L249); [crates/shamir-engine/src/repo/repo_instance.rs:1204](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-engine/src/repo/repo_instance.rs#L1204); [Cargo.lock:4195](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/Cargo.lock#L4195).
 
 <a id="review-summary-raii-guarantees"></a>
 
 ### Claim Summary: RAII guarantees — VersionGuard, CellReservationGuard and SnapshotGuard discharge synchronous cleanup obligations
 
-Status: `not-applicable`. Current risk: —.
+Status: `not-applicable`. Current risk: `—`.
 
-Their Drop implementations perform terminal marking, owner-checked reservation release and snapshot refcount removal. These mechanisms do not restore failed-write cells or repair independently evicted reservations.
+Prior-cycle decision: `not-applicable`.
 
-Evidence: [crates/shamir-tx/src/version_guard.rs:100](../../../../../crates/shamir-tx/src/version_guard.rs#L100); [crates/shamir-tx/src/cell_reservation_guard.rs:102](../../../../../crates/shamir-tx/src/cell_reservation_guard.rs#L102); [crates/shamir-tx/src/repo_tx_gate.rs:234](../../../../../crates/shamir-tx/src/repo_tx_gate.rs#L234).
+Their Drop operations are present and synchronous. Those narrow obligations do not ensure failed-write rollback, complete persistence, retained reservations, or semantic undo after a WAL append.
 
-## Corrections and qualified non-findings
+Evidence: [crates/shamir-tx/src/version_guard.rs:100](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-tx/src/version_guard.rs#L100); [crates/shamir-tx/src/cell_reservation_guard.rs:102](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-tx/src/cell_reservation_guard.rs#L102); [crates/shamir-tx/src/repo_tx_gate.rs:234](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-tx/src/repo_tx_gate.rs#L234); [crates/shamir-tx/src/repo_wal_manager.rs:62](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-tx/src/repo_wal_manager.rs#L62).
 
-- Failed-write masking is persistent while the bad cell remains, not necessarily permanent: once the global floor exceeds its version, a later cache prune can evict it and cold resolution can recover the old value.
-- Unconditional restore_cell(old_v) is unsafe against a newer concurrent writer. Recovery must condition on ownership/current failed version and handle multiple pending failures and partial backend writes.
-- Missing scan batches can omit the true snapshot anchor; selecting another observed anchor may permit deleting the required observed version. Do not assert partial scans are always conservative.
-- The fault double's transact is sequential and fail_set rejects its first Set. The ts_atomicity test does not prove rollback after a later operation fails.
-- Rust task panic does not inherently terminate the entire Tokio runtime/process; panic strategy and caller handling must be established separately.
+## Evidence and recipe corrections
+
+- The current refinement suggesting scan omissions alone can delete a required observed anchor is refuted under exact key isolation and a correct snapshot floor. The true maximum is either observed and retained, or omitted and not deleted.
+- That conditional conservatism does not excuse silent scan errors or repair the independent min_alive and prefix-isolation defects.
+- Failed-cell masking is not necessarily permanent: a later higher global floor plus cache pruning can enable cold recovery.
+- Unconditional restoration can overwrite a newer writer; post-log publication can reopen the original snapshot race. Partial backend application must be modeled.
+- apply_committed_ops is used by production apply_replicated, where the caller explicitly has no local WAL entry to offer the drainer. Its failure state cannot universally be described as automatically healed by background drain.
+- The existing deferral oracle does not check the downstream durable watermark, overlay retention, or WAL cleanup.
 
 ---
 

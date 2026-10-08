@@ -1,29 +1,33 @@
-<!-- revalidation:2026-10-08 source:92ad58266bf57ddea1fa3c8a47affba1a3a9a096 -->
-# shamir-db — concurrency-lockfree revalidation
+<!-- revalidation:2026-10-08 cycle:independent-2 source:e3765c935fc71655ee1ec0160cf180607935d89b -->
+# shamir-db — concurrency-lockfree independent revalidation (cycle 2)
 
-Source snapshot: `92ad58266bf57ddea1fa3c8a47affba1a3a9a096`. Revalidated 2026-10-08 by read-only XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run; no source fix is part of this update. Test registration/assertions are evidence of an oracle, not proof of a passing run.
+Frozen source snapshot: `e3765c935fc71655ee1ec0160cf180607935d89b`. Independently revalidated 2026-10-08 by a fresh XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run. Source-fixed means the specified mechanism was already removed at this snapshot; this cycle implements no source fix.
 
-This section is authoritative for current status. Original titles/IDs are retained for traceability; a refuted title is not a current assertion. The collapsed historical report below is superseded, including its counts, severity, scenarios and fix instructions. Plan IDs preserve historical numbering, not a current release mandate. [Workspace methodology and status definitions](../SUMMARY.md#status-definitions).
+This section is authoritative for current decisions. Existing IDs and allegation titles are retained for traceability; a refuted title is not a current assertion. Prior-cycle decisions were rechecked, not used as proof. The first cycle is available in repository history at this snapshot. The original historical body below remains preserved once and is superseded, including its counts, severities and recipes. [Workspace scope and status definitions](../SUMMARY.md#status-definitions).
 
-The missing batch ACL deduplication is source-proven fixed through Authorized. Namespace DDL and group resurrection races remain. Direct crate code still avoids the named synchronous lock types; this does not make DashMap internals lock-free.
+Unrelated external edits began in dependency/toolchain/CI metadata during collection; additional Rust-source edits appeared afterward. They were left untouched. Evidence and decisions are tied to the frozen commit, not those later changes or an installed toolchain. “Current” below means current at that snapshot; no re-audit of the modified working tree is implied.
+
+Authorized closes repeated-target ACL calls. Namespace mutations and completed-drop group resurrection remain. Snapshot caching is optional architecture, not a missing correctness requirement.
 
 ## Current claim decisions
 
 | Claim decisions | Open | Source-fixed | Partial | Refuted | Unverified | N/A |
 |---:|---:|---:|---:|---:|---:|---:|
-| 8 | 7 | 1 | 0 | 0 | 0 | 0 |
+| 8 | 6 | 1 | 0 | 0 | 0 | 1 |
 
-These are decisions on report claims, including repeated roots, bundled observations and non-findings—not a unique-bug census. Closed/N/A rows have no current risk; unverified risk is provisional. Pure style and unmeasured optimization claims do not establish runtime impact.
+These are duplicate-inclusive report decisions, not a unique-bug census. Pure style or structural optimization does not establish a runtime incident; unverified impact remains provisional.
 
 <a id="review-1"></a>
 
 ### Claim 1 — `execute_as` re-runs the full async ACL traversal per batch op — missing the inline dedup cache its sibling `tx_execute_as` already established
 
-Status: `fixed`. Current risk: —.
+Status: `fixed`. Current risk: `—`.
 
-execute_as and tx_execute_as both mint Authorized; its TFxSet skips repeated (action,path) gate calls. ShamirDb's AccessGate delegates to real ACL checks. Source proves deduplication, not the historical 50 ns estimate. Registered seam tests do not count repeated-target checks.
+Prior-cycle decision: `fixed`.
 
-Evidence: [crates/shamir-db/src/shamir_db/execute/db_execute.rs:40](../../../../../crates/shamir-db/src/shamir_db/execute/db_execute.rs#L40); [crates/shamir-db/src/shamir_db/execute/db_tx.rs:126](../../../../../crates/shamir-db/src/shamir_db/execute/db_tx.rs#L126); [crates/shamir-engine/src/query/batch/authorized.rs:102](../../../../../crates/shamir-engine/src/query/batch/authorized.rs#L102); [crates/shamir-db/src/shamir_db/shamir_db/access_control.rs:1209](../../../../../crates/shamir-db/src/shamir_db/shamir_db/access_control.rs#L1209); [crates/shamir-engine/src/query/batch/tests/mod.rs:1](../../../../../crates/shamir-engine/src/query/batch/tests/mod.rs#L1).
+Both facade callers use Authorized's TFxSet. The registered recording-gate test checks nested targets but does not count repeated identical checks; a dedup-removal mutation could escape that oracle.
+
+Evidence: [crates/shamir-db/src/shamir_db/execute/db_execute.rs:40](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/execute/db_execute.rs#L40); [crates/shamir-db/src/shamir_db/execute/db_tx.rs:126](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/execute/db_tx.rs#L126); [crates/shamir-engine/src/query/batch/authorized.rs:102](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-engine/src/query/batch/authorized.rs#L102); [crates/shamir-engine/src/query/batch/tests/authorized_tests.rs:220](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-engine/src/query/batch/tests/authorized_tests.rs#L220).
 
 <a id="review-2"></a>
 
@@ -31,9 +35,11 @@ Evidence: [crates/shamir-db/src/shamir_db/execute/db_execute.rs:40](../../../../
 
 Status: `confirmed-open`. Current risk: `medium`.
 
-No shared namespace lock spans table existence checks, registration and catalogue mutation. The index-cascade barrier covers only index operations. rename_table_stores snapshots config before awaits; a later concurrent removal can invalidate the facade guard.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-db/src/shamir_db/execute/admin_table_index.rs:50](../../../../../crates/shamir-db/src/shamir_db/execute/admin_table_index.rs#L50); [crates/shamir-db/src/shamir_db/shamir_db/table_management.rs:217](../../../../../crates/shamir-db/src/shamir_db/shamir_db/table_management.rs#L217); [crates/shamir-db/src/shamir_db/shamir_db/table_management.rs:314](../../../../../crates/shamir-db/src/shamir_db/shamir_db/table_management.rs#L314); [crates/shamir-engine/src/repo/repo_instance.rs:563](../../../../../crates/shamir-engine/src/repo/repo_instance.rs#L563).
+Existence probes precede awaited catalogue reads/copies without a common namespace guard. A completed competing removal before rename's config snapshot yields false and the debug assertion. If both renames capture config first, both may return true; a guaranteed loser panic is inaccurate.
+
+Evidence: [crates/shamir-db/src/shamir_db/execute/admin_table_index.rs:50](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/execute/admin_table_index.rs#L50); [crates/shamir-db/src/shamir_db/shamir_db/table_management.rs:217](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/shamir_db/table_management.rs#L217); [crates/shamir-db/src/shamir_db/shamir_db/table_management.rs:314](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/shamir_db/table_management.rs#L314); [crates/shamir-engine/src/repo/repo_instance.rs:563](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-engine/src/repo/repo_instance.rs#L563).
 
 <a id="review-3"></a>
 
@@ -41,19 +47,23 @@ Evidence: [crates/shamir-db/src/shamir_db/execute/admin_table_index.rs:50](../..
 
 Status: `confirmed-open`. Current risk: `medium`.
 
-Creation handlers take their locks; drop/rename handlers and facade mutations do not. Registry changes and awaited catalogue writes can interleave. A missing catalogue cannot itself resurrect an instance; stale surviving or late-written catalogue rows are the actual resurrection mechanism.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-db/src/shamir_db/execute/admin_db_repo.rs:52](../../../../../crates/shamir-db/src/shamir_db/execute/admin_db_repo.rs#L52); [crates/shamir-db/src/shamir_db/execute/admin_db_repo.rs:221](../../../../../crates/shamir-db/src/shamir_db/execute/admin_db_repo.rs#L221); [crates/shamir-db/src/shamir_db/execute/admin_db_repo.rs:77](../../../../../crates/shamir-db/src/shamir_db/execute/admin_db_repo.rs#L77); [crates/shamir-db/src/shamir_db/shamir_db/db_management.rs:159](../../../../../crates/shamir-db/src/shamir_db/shamir_db/db_management.rs#L159).
+Creation holds global/per-database locks, but drop/rename do not. A late create catalogue write can survive an already-completed removal; rename can overwrite a concurrently created destination. A missing catalogue row alone cannot cause resurrection.
+
+Evidence: [crates/shamir-db/src/shamir_db/execute/admin_db_repo.rs:52](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/execute/admin_db_repo.rs#L52); [crates/shamir-db/src/shamir_db/execute/admin_db_repo.rs:221](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/execute/admin_db_repo.rs#L221); [crates/shamir-db/src/shamir_db/shamir_db/db_management.rs:159](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/shamir_db/db_management.rs#L159); [crates/shamir-db/src/shamir_db/shamir_db/db_management.rs:431](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/shamir_db/db_management.rs#L431).
 
 <a id="review-4"></a>
 
 ### Claim 4 — Per-request ACL metadata is re-read from storage on every authorization — no lock-free snapshot (pillar 5 `ArcSwap` fit)
 
-Status: `confirmed-open`. Current risk: `low`.
+Status: `not-applicable`. Current risk: `—`.
 
-resource_meta still loads catalogue rows/settings on each distinct check. No shared ACL snapshot exists. ArcSwap is an optional optimization; introducing it requires coherent mutation invalidation and cannot be justified as a mandatory runtime correctness fix.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-db/src/shamir_db/shamir_db/access_control.rs:56](../../../../../crates/shamir-db/src/shamir_db/shamir_db/access_control.rs#L56); [crates/shamir-db/src/shamir_db/shamir_db/access_control.rs:150](../../../../../crates/shamir-db/src/shamir_db/shamir_db/access_control.rs#L150); [crates/shamir-db/src/shamir_db/shamir_db/access_control.rs:851](../../../../../crates/shamir-db/src/shamir_db/shamir_db/access_control.rs#L851).
+Catalogue rereads are real and their scan cost is covered separately. No contract requires an ArcSwap ACL snapshot; coherent fresh storage reads are valid behavior. Cache publication/invalidation is an optional optimization with security obligations.
+
+Evidence: [crates/shamir-db/src/shamir_db/shamir_db/access_control.rs:56](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/shamir_db/access_control.rs#L56); [crates/shamir-db/src/shamir_db/shamir_db/access_control.rs:851](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/shamir_db/access_control.rs#L851).
 
 <a id="review-5"></a>
 
@@ -61,11 +71,13 @@ Evidence: [crates/shamir-db/src/shamir_db/shamir_db/access_control.rs:56](../../
 
 Status: `confirmed-open`. Current risk: `medium`.
 
-Rename/add authorization and wire existence checks precede lock acquisition. Under the lock, missing rows still become default membership/ownership and are saved. The lock serializes mutations but does not reject a completed earlier deletion.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-db/src/shamir_db/shamir_db/access_control.rs:575](../../../../../crates/shamir-db/src/shamir_db/shamir_db/access_control.rs#L575); [crates/shamir-db/src/shamir_db/shamir_db/access_control.rs:587](../../../../../crates/shamir-db/src/shamir_db/shamir_db/access_control.rs#L587); [crates/shamir-db/src/shamir_db/shamir_db/access_control.rs:617](../../../../../crates/shamir-db/src/shamir_db/shamir_db/access_control.rs#L617); [crates/shamir-db/src/shamir_db/system_store.rs:713](../../../../../crates/shamir-db/src/shamir_db/system_store.rs#L713).
+Authorize/resolve can finish before waiting on the group lock. After drop releases that lock, rename/add reload absence as empty/System defaults and save a new record. Existing start-barrier tests do not force this sequence.
 
-Grouping/duplicate: `correctness-tdd.md#2`. This row is not another independent defect.
+Evidence: [crates/shamir-db/src/shamir_db/shamir_db/access_control.rs:575](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/shamir_db/access_control.rs#L575); [crates/shamir-db/src/shamir_db/shamir_db/access_control.rs:617](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/shamir_db/access_control.rs#L617); [crates/shamir-db/src/shamir_db/system_store.rs:713](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/system_store.rs#L713).
+
+Grouping/duplicate: [correctness-tdd.md#2](correctness-tdd.md#review-2). This is not an additional independent defect.
 
 <a id="review-6"></a>
 
@@ -73,9 +85,11 @@ Grouping/duplicate: `correctness-tdd.md#2`. This row is not another independent 
 
 Status: `confirmed-open`. Current risk: `low`.
 
-The helper still materializes all repositories and scans for the pair. Replacing it with load_repository would reduce materialization, but that helper also scans storage; the proposed substitution is not an O(1) fix.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-db/src/shamir_db/system_store.rs:339](../../../../../crates/shamir-db/src/shamir_db/system_store.rs#L339); [crates/shamir-db/src/shamir_db/system_store.rs:837](../../../../../crates/shamir-db/src/shamir_db/system_store.rs#L837); [crates/shamir-db/src/shamir_db/shamir_db/db_management.rs:506](../../../../../crates/shamir-db/src/shamir_db/shamir_db/db_management.rs#L506).
+load_repository_record loads all rows then searches the pair. load_repository avoids full result materialization but remains an unindexed scan and has different corrupt-row visibility; equivalence should not be asserted for all failure cases.
+
+Evidence: [crates/shamir-db/src/shamir_db/system_store.rs:339](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/system_store.rs#L339); [crates/shamir-db/src/shamir_db/system_store.rs:837](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/system_store.rs#L837).
 
 <a id="review-7"></a>
 
@@ -83,9 +97,11 @@ Evidence: [crates/shamir-db/src/shamir_db/system_store.rs:339](../../../../../cr
 
 Status: `confirmed-open`. Current risk: `low`.
 
-The map probe still precedes snapshot/drain awaits and final insertion without a reservation. Different destinations can permit two starts. Disabled by default, but the server now exposes an explicit configuration opt-in; the claim that it never enables the API is false.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-db/src/shamir_db/execute/admin_migration.rs:91](../../../../../crates/shamir-db/src/shamir_db/execute/admin_migration.rs#L91); [crates/shamir-db/src/shamir_db/execute/admin_migration.rs:177](../../../../../crates/shamir-db/src/shamir_db/execute/admin_migration.rs#L177); [crates/shamir-db/src/shamir_db/execute/admin_migration.rs:195](../../../../../crates/shamir-db/src/shamir_db/execute/admin_migration.rs#L195); [crates/shamir-server/src/server/server_launcher.rs:383](../../../../../crates/shamir-server/src/server/server_launcher.rs#L383).
+Two enabled starts with distinct destinations can both pass targets_table before snapshot/drain and final insertion. The default-disabled server posture limits reachability. The shared map's probe also omits database identity.
+
+Evidence: [crates/shamir-db/src/shamir_db/execute/admin_migration.rs:91](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/execute/admin_migration.rs#L91); [crates/shamir-db/src/shamir_db/execute/admin_migration.rs:177](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/execute/admin_migration.rs#L177); [crates/shamir-db/src/shamir_db/execute/admin_migration.rs:195](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/execute/admin_migration.rs#L195); [crates/shamir-server/src/server/server_launcher.rs:383](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-server/src/server/server_launcher.rs#L383).
 
 <a id="review-8"></a>
 
@@ -93,18 +109,19 @@ Evidence: [crates/shamir-db/src/shamir_db/execute/admin_migration.rs:91](../../.
 
 Status: `confirmed-open`. Current risk: `nit`.
 
-Name resolution still loads and linearly searches all groups. A Filter::Eq rewrite alone would remain a storage scan on the unindexed system table; an actual keyed index/cache is needed for the advertised constant lookup.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-db/src/shamir_db/shamir_db/access_control.rs:777](../../../../../crates/shamir-db/src/shamir_db/shamir_db/access_control.rs#L777); [crates/shamir-db/src/shamir_db/system_store.rs:105](../../../../../crates/shamir-db/src/shamir_db/system_store.rs#L105).
+Name resolution loads and searches all groups. Its own method documentation explicitly says it scans, contradicting the historical undocumented-cost assertion. Eq filtering alone is not a keyed lookup.
 
-## Corrections and qualified non-findings
+Evidence: [crates/shamir-db/src/shamir_db/shamir_db/access_control.rs:752](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/shamir_db/access_control.rs#L752); [crates/shamir-db/src/shamir_db/shamir_db/access_control.rs:777](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/shamir_db/access_control.rs#L777).
 
-- Replace the missing-cache headline with the Authorized dedup mechanism introduced by adb0c8fd and its current source proof.
-- No explicit std::sync::Mutex/RwLock or parking_lot use was found in facade production source; DashMap 6.1.0 itself depends on lock_api/parking_lot_core, so do not equate this with universally lock-free execution.
-- Existing create-lock and schema-barrier tests are registered and exercise real guards; group start barriers do not force all claimed adverse interleavings.
-- A table-level engine barrier is not automatically a namespace lock, especially for creation before a TableManager exists. Serialize source/destination and parent namespace mutations consistently.
-- Migration's try_lock wording in core documentation is stale; the current duplicate probe uses targets_table, and the server has an operator configuration opt-in.
-- ACL cache hits are source-proven fewer calls, not measured latency. Non-System examples also exclude Admin, which bypasses ACL traversal.
+## Evidence and recipe corrections
+
+- A shared snapshot is a design option; retain scan costs as the actionable structural concern.
+- Per-name locking must include both rename endpoints and parent namespace mutations in a consistent order; a barrier on an already-existing table cannot protect creation.
+- Two rename callers do not necessarily produce a false return: the engine returns true after copying its earlier config snapshot.
+- Exact dashmap 6.1.0 uses synchronous shard locks. Dropping guards before awaits is supported at inspected sites, not proof of universal lock-free execution.
+- Creation lock tests use sleep/is_finished negative checks without a started-at-acquisition handshake; their eventual positive assertions are useful, but the negative scheduling proof is not absolute.
 
 ---
 

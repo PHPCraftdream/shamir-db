@@ -1,39 +1,45 @@
-<!-- revalidation:2026-10-08 source:92ad58266bf57ddea1fa3c8a47affba1a3a9a096 -->
-# shamir-query-builder — performance-hotpath revalidation
+<!-- revalidation:2026-10-08 cycle:independent-2 source:e3765c935fc71655ee1ec0160cf180607935d89b -->
+# shamir-query-builder — performance-hotpath independent revalidation (cycle 2)
 
-Source snapshot: `92ad58266bf57ddea1fa3c8a47affba1a3a9a096`. Revalidated 2026-10-08 by read-only XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run; no source fix is part of this update. Test registration/assertions are evidence of an oracle, not proof of a passing run.
+Frozen source snapshot: `e3765c935fc71655ee1ec0160cf180607935d89b`. Independently revalidated 2026-10-08 by a fresh XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run. Source-fixed means the specified mechanism was already removed at this snapshot; this cycle implements no source fix.
 
-This section is authoritative for current status. Original titles/IDs are retained for traceability; a refuted title is not a current assertion. The collapsed historical report below is superseded, including its counts, severity, scenarios and fix instructions. Plan IDs preserve historical numbering, not a current release mandate. [Workspace methodology and status definitions](../SUMMARY.md#status-definitions).
+This section is authoritative for current decisions. Existing IDs and allegation titles are retained for traceability; a refuted title is not a current assertion. Prior-cycle decisions were rechecked, not used as proof. The first cycle is available in repository history at this snapshot. The original historical body below remains preserved once and is superseded, including its counts, severities and recipes. [Workspace scope and status definitions](../SUMMARY.md#status-definitions).
 
-The allocation/codec mechanisms remain present and no builder benchmarks exist. The claimed latency multipliers and exact allocation counts are unsupported. The proposed raw Vec<QueryRecord> batching rewrite is not semantics-preserving for all row variants.
+Unrelated external edits began in dependency/toolchain/CI metadata during collection; additional Rust-source edits appeared afterward. They were left untouched. Evidence and decisions are tied to the frozen commit, not those later changes or an installed toolchain. “Current” below means current at that snapshot; no re-audit of the modified working tree is implied.
+
+Per-field and per-row codec work, request cloning, fallback serialization and quadratic switch output are directly visible. Their numerical costs and production bottleneck status are unmeasured. The explicit diagnostic roundtrip is intentional functionality.
 
 ## Current claim decisions
 
 | Claim decisions | Open | Source-fixed | Partial | Refuted | Unverified | N/A |
 |---:|---:|---:|---:|---:|---:|---:|
-| 6 | 6 | 0 | 0 | 0 | 0 | 0 |
+| 6 | 5 | 0 | 0 | 0 | 0 | 1 |
 
-These are decisions on report claims, including repeated roots, bundled observations and non-findings—not a unique-bug census. Closed/N/A rows have no current risk; unverified risk is provisional. Pure style and unmeasured optimization claims do not establish runtime impact.
+These are duplicate-inclusive report decisions, not a unique-bug census. Pure style or structural optimization does not establish a runtime incident; unverified impact remains provisional.
 
 <a id="review-1"></a>
 
 ### Claim 1 — `Doc::set` does a full msgpack round-trip per field -- the crate's per-row hot loop
 
-Status: `confirmed-open`. Current risk: `medium`.
+Status: `confirmed-open`. Current risk: `low`.
 
-Every set still encodes FilterValue into a byte buffer and decodes QueryValue. The exported literal converter remains unused here. This proves avoidable per-field codec work, not CPU dominance, single-digit-x slowdown, or two allocations for every scalar.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-query-builder/src/write/doc.rs:43](../../../../../crates/shamir-query-builder/src/write/doc.rs#L43); [crates/shamir-query-builder/src/macros/mod.rs:25](../../../../../crates/shamir-query-builder/src/macros/mod.rs#L25); [crates/shamir-query-types/src/filter/filter_value.rs:322](../../../../../crates/shamir-query-types/src/filter/filter_value.rs#L322); [crates/shamir-query-types/src/filter/tests/mod.rs:2](../../../../../crates/shamir-query-types/src/filter/tests/mod.rs#L2); [crates/shamir-query-types/src/filter/tests/filter_value_conv_tests.rs:152](../../../../../crates/shamir-query-types/src/filter/tests/filter_value_conv_tests.rs#L152).
+Every set encodes FilterValue and decodes QueryValue, including scalar literals supported by an existing converter. This proves avoidable work, not medium runtime harm, CPU dominance or two allocations per scalar. Converter equivalence must preserve binary and expression-marker shapes.
+
+Evidence: [crates/shamir-query-builder/src/write/doc.rs:43](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-query-builder/src/write/doc.rs#L43); [crates/shamir-query-builder/src/macros/mod.rs:25](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-query-builder/src/macros/mod.rs#L25); [crates/shamir-query-types/src/filter/filter_value.rs:322](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-query-types/src/filter/filter_value.rs#L322).
 
 <a id="review-2"></a>
 
 ### Claim 2 — `rows_as` deserializes via a per-record encode+decode round-trip instead of one batched pass
 
-Status: `confirmed-open`. Current risk: `medium`.
+Status: `confirmed-open`. Current risk: `low`.
 
-rows_as still invokes deserialize_record once per row, allocating intermediate bytes repeatedly. Batching can amortize setup, but serializing qr.records directly changes Inserted and IdBytes semantics because the current helper serializes as_value(), not QueryRecord itself.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-query-builder/src/response/batch_response_ext.rs:90](../../../../../crates/shamir-query-builder/src/response/batch_response_ext.rs#L90); [crates/shamir-query-builder/src/response/batch_response_ext.rs:186](../../../../../crates/shamir-query-builder/src/response/batch_response_ext.rs#L186); [crates/shamir-query-types/src/read/query_record.rs:58](../../../../../crates/shamir-query-types/src/read/query_record.rs#L58); [crates/shamir-query-types/src/read/query_record.rs:189](../../../../../crates/shamir-query-types/src/read/query_record.rs#L189); [crates/shamir-query-types/src/write/inserted_record.rs:30](../../../../../crates/shamir-query-types/src/write/inserted_record.rs#L30); [crates/shamir-query-builder/src/response/tests/response_tests.rs:110](../../../../../crates/shamir-query-builder/src/response/tests/response_tests.rs#L110).
+The iterator calls deserialize_record for each row, producing repeated buffers/setup. No measured medium impact is available. Raw Vec&lt;QueryRecord&gt; batching is incompatible with current Inserted/IdBytes as_value projections; existing response tests cover Direct rows, not that preservation requirement.
+
+Evidence: [crates/shamir-query-builder/src/response/batch_response_ext.rs:90](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-query-builder/src/response/batch_response_ext.rs#L90); [crates/shamir-query-builder/src/response/batch_response_ext.rs:186](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-query-builder/src/response/batch_response_ext.rs#L186); [crates/shamir-query-types/src/read/query_record.rs:58](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-query-types/src/read/query_record.rs#L58); [crates/shamir-query-types/src/read/query_record.rs:189](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-query-types/src/read/query_record.rs#L189); [crates/shamir-query-builder/src/response/tests/response_tests.rs:110](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-query-builder/src/response/tests/response_tests.rs#L110).
 
 <a id="review-3"></a>
 
@@ -41,9 +47,11 @@ Evidence: [crates/shamir-query-builder/src/response/batch_response_ext.rs:90](..
 
 Status: `confirmed-open`. Current risk: `low`.
 
-Only Read/Insert/Update/Set/Delete receive typed arms. Call and Subscribe still pay encode/decode before walking. Any Subscribe extension must respect delivery-time scope and inspect all relevant delivery forms rather than blindly traversing nested bodies.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-query-builder/src/batch/batch.rs:1313](../../../../../crates/shamir-query-builder/src/batch/batch.rs#L1313); [crates/shamir-query-builder/src/batch/batch.rs:1333](../../../../../crates/shamir-query-builder/src/batch/batch.rs#L1333); [crates/shamir-query-builder/src/batch/batch.rs:1228](../../../../../crates/shamir-query-builder/src/batch/batch.rs#L1228); [crates/shamir-query-builder/src/batch/subscribe.rs](../../../../../crates/shamir-query-builder/src/batch/subscribe.rs).
+Neither operation has a typed collection arm. Call params can be walked directly; Subscribe requires separate source-filter and delivery-time scope analysis, including Records, Keys, Batch and Call. A mechanical all-field walk would preserve existing semantic mistakes.
+
+Evidence: [crates/shamir-query-builder/src/batch/batch.rs:1313](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-query-builder/src/batch/batch.rs#L1313); [crates/shamir-query-builder/src/batch/batch.rs:1333](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-query-builder/src/batch/batch.rs#L1333); [crates/shamir-query-types/src/subscribe/deliver_mode.rs:10](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-query-types/src/subscribe/deliver_mode.rs#L10).
 
 <a id="review-4"></a>
 
@@ -51,9 +59,11 @@ Evidence: [crates/shamir-query-builder/src/batch/batch.rs:1313](../../../../../c
 
 Status: `confirmed-open`. Current risk: `low`.
 
-build still clones accumulated fields and to_msgpack serializes that clone. SDK execution and interner-cache callers still use build. No consuming request/encoding alternative exists. Extra copying is proven; an exact peak-memory doubling is not.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-query-builder/src/batch/batch.rs:868](../../../../../crates/shamir-query-builder/src/batch/batch.rs#L868); [crates/shamir-query-builder/src/batch/batch.rs:886](../../../../../crates/shamir-query-builder/src/batch/batch.rs#L886); [crates/shamir-sdk/src/db.rs:139](../../../../../crates/shamir-sdk/src/db.rs#L139); [crates/shamir-client/src/interner_cache_ops.rs:201](../../../../../crates/shamir-client/src/interner_cache_ops.rs#L201); [crates/shamir-client/src/interner_cache_ops.rs:233](../../../../../crates/shamir-client/src/interner_cache_ops.rs#L233); [crates/shamir-client/src/interner_cache_ops.rs:272](../../../../../crates/shamir-client/src/interner_cache_ops.rs#L272).
+build clones accumulated queries and payloads; SDK execution and to_msgpack use it. No consuming alternative exists. Extra copying is proven, but exact peak-memory doubling is not; retain borrowed build for deliberate reuse.
+
+Evidence: [crates/shamir-query-builder/src/batch/batch.rs:868](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-query-builder/src/batch/batch.rs#L868); [crates/shamir-query-builder/src/batch/batch.rs:886](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-query-builder/src/batch/batch.rs#L886); [crates/shamir-sdk/src/db.rs:139](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-sdk/src/db.rs#L139).
 
 <a id="review-5"></a>
 
@@ -61,29 +71,31 @@ Evidence: [crates/shamir-query-builder/src/batch/batch.rs:868](../../../../../cr
 
 Status: `confirmed-open`. Current risk: `low`.
 
-Every case clones prior condition trees into its guard, yielding quadratic aggregate output/construction work for fixed-size conditions. Documentation still omits this scaling. It is a property of the chosen wire encoding, not evidence of measured harmful latency.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-query-builder/src/batch/batch.rs:1033](../../../../../crates/shamir-query-builder/src/batch/batch.rs#L1033); [crates/shamir-query-builder/src/batch/batch.rs:1065](../../../../../crates/shamir-query-builder/src/batch/batch.rs#L1065).
+Each case clones all prior condition trees; summed guard size is quadratic for fixed-size conditions. Documentation omits this cost. No measured harmful case count exists, and a $cond value chain is not automatically equivalent to separate conditional BatchOps.
+
+Evidence: [crates/shamir-query-builder/src/batch/batch.rs:1033](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-query-builder/src/batch/batch.rs#L1033); [crates/shamir-query-builder/src/batch/batch.rs:1065](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-query-builder/src/batch/batch.rs#L1065); [crates/shamir-query-builder/src/batch/batch.rs:1077](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-query-builder/src/batch/batch.rs#L1077).
 
 <a id="review-6"></a>
 
 ### Claim 6 — `to_request_via_msgpack` is a build+encode+decode triple on a public API
 
-Status: `confirmed-open`. Current risk: `nit`.
+Status: `not-applicable`. Current risk: `—`.
 
-The helper still clones via build, encodes, and decodes. Its documentation already explicitly describes round-tripping and test use. Relative to to_msgpack, the additional stage is decode; the asserted approximately-three-times cost is unmeasured.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-query-builder/src/batch/batch.rs:868](../../../../../crates/shamir-query-builder/src/batch/batch.rs#L868); [crates/shamir-query-builder/src/batch/batch.rs:872](../../../../../crates/shamir-query-builder/src/batch/batch.rs#L872); [crates/shamir-query-builder/src/batch/batch.rs:878](../../../../../crates/shamir-query-builder/src/batch/batch.rs#L878).
+The helper explicitly promises codec roundtripping, notably for tests. Its extra decode is the requested behavior, not redundant implementation of to_msgpack. Public availability alone establishes no misuse or performance defect; panic handling remains separately actionable.
 
-## Corrections and qualified non-findings
+Evidence: [crates/shamir-query-builder/src/batch/batch.rs:872](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-query-builder/src/batch/batch.rs#L872); [crates/shamir-query-builder/src/batch/batch.rs:878](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-query-builder/src/batch/batch.rs#L878); [crates/shamir-query-builder/src/batch/tests/to_request_via_msgpack_tests.rs:12](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-query-builder/src/batch/tests/to_request_via_msgpack_tests.rs#L12).
 
-- Finding 1's original High is not supported as a runtime severity without workload measurements; the structural optimization opportunity is confirmed.
-- Scalar decoding need not allocate a new heap tree, so the universal 2*N*F transient-allocation lower bound is false. The borrowed converter clones strings/binaries and allocates arrays; it is not universally a zero-allocation move.
-- Both current and proposed rows_as implementations traverse all row data. Batching reduces buffers/setup, not O(N) data processing or an established twofold decode cost.
-- QueryRecord::Inserted serialization injects record identity whereas as_value returns cloned fields; IdBytes serializes binary whereas as_value returns Null. Preserve the current projection when batching and add variant-specific regression tests.
-- Existing response tests are reachable through response/mod.rs and response/tests/mod.rs and cover ordinary Direct rows and malformed fields, not the proposed variant-preservation requirement.
-- No benches or benchmark target exist in this crate. Claims of bottlenecks, CPU dominance, WASM amplification, and numerical speedups remain unverified.
-- The fallback's 'unconditionally-correct' label must be removed; correctness findings 1 and 3 positively contradict it.
+## Evidence and recipe corrections
+
+- Findings 1 and 2 are confirmed low-severity optimization opportunities, not measured medium-impact bottlenecks.
+- The literal converter borrows and clones strings/binary payloads; it is not a universal zero-allocation move. Arrays containing expressions can require fallback.
+- Batching rows reduces per-row buffer/setup frequency, not the amount of row data traversed. Preserve as_value projections, first-failure behavior and decoder-depth boundaries; an extra enclosing sequence can change a boundary case.
+- Replacing switch operations with a nested value expression must preserve operation aliases, result shape, dependencies, skip propagation and effects; it is not an established drop-in O(K) recipe.
+- No approximately-three-times ratio follows from counting stages. to_msgpack already includes build plus encode.
 
 ---
 

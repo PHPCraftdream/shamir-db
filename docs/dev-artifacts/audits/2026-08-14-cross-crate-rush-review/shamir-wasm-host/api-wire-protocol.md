@@ -1,31 +1,35 @@
-<!-- revalidation:2026-10-08 source:92ad58266bf57ddea1fa3c8a47affba1a3a9a096 -->
-# shamir-wasm-host — api-wire-protocol revalidation
+<!-- revalidation:2026-10-08 cycle:independent-2 source:e3765c935fc71655ee1ec0160cf180607935d89b -->
+# shamir-wasm-host — api-wire-protocol independent revalidation (cycle 2)
 
-Source snapshot: `92ad58266bf57ddea1fa3c8a47affba1a3a9a096`. Revalidated 2026-10-08 by read-only XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run; no source fix is part of this update. Test registration/assertions are evidence of an oracle, not proof of a passing run.
+Frozen source snapshot: `e3765c935fc71655ee1ec0160cf180607935d89b`. Independently revalidated 2026-10-08 by a fresh XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run. Source-fixed means the specified mechanism was already removed at this snapshot; this cycle implements no source fix.
 
-This section is authoritative for current status. Original titles/IDs are retained for traceability; a refuted title is not a current assertion. The collapsed historical report below is superseded, including its counts, severity, scenarios and fix instructions. Plan IDs preserve historical numbering, not a current release mandate. [Workspace methodology and status definitions](../SUMMARY.md#status-definitions).
+This section is authoritative for current decisions. Existing IDs and allegation titles are retained for traceability; a refuted title is not a current assertion. Prior-cycle decisions were rechecked, not used as proof. The first cycle is available in repository history at this snapshot. The original historical body below remains preserved once and is superseded, including its counts, severities and recipes. [Workspace scope and status definitions](../SUMMARY.md#status-definitions).
 
-Header loss and permissive request decoding remain. Contract/documentation drift and string-only errors remain; the pin sentinel is documented optional API design, not a demonstrated defect.
+Unrelated external edits began in dependency/toolchain/CI metadata during collection; additional Rust-source edits appeared afterward. They were left untouched. Evidence and decisions are tied to the frozen commit, not those later changes or an installed toolchain. “Current” below means current at that snapshot; no re-audit of the modified working tree is implied.
+
+HTTP multiplicity loss and malformed request coercion are confirmed. Native grant prose and source deployment constraints remain inaccurate. Explicit trap conventions and the documented pin sentinel are intentional design; universal Map conformance is disproved by reserved-prefix decoding.
 
 ## Current claim decisions
 
 | Claim decisions | Open | Source-fixed | Partial | Refuted | Unverified | N/A |
 |---:|---:|---:|---:|---:|---:|---:|
-| 14 | 13 | 0 | 0 | 0 | 0 | 1 |
+| 14 | 12 | 0 | 0 | 0 | 0 | 2 |
 
-These are decisions on report claims, including repeated roots, bundled observations and non-findings—not a unique-bug census. Closed/N/A rows have no current risk; unverified risk is provisional. Pure style and unmeasured optimization claims do not establish runtime impact.
+These are duplicate-inclusive report decisions, not a unique-bug census. Pure style or structural optimization does not establish a runtime incident; unverified impact remains provisional.
 
 <a id="review-1"></a>
 
 ### Claim 1 — HTTP wire codec collapses duplicate headers (`Set-Cookie` loss on both directions)
 
-Status: `confirmed-open`. Current risk: `high`.
+Status: `confirmed-open`. Current risk: `medium`.
 
-Host response encoding overwrites identical header names. SDK requests preserve duplicate entries in a Vec-backed Map, but host QueryValue map deserialization overwrites duplicate keys before request decoding.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-wasm-host/src/wasm/host_http.rs:89](../../../../../crates/shamir-wasm-host/src/wasm/host_http.rs#L89); [crates/shamir-sdk/src/http.rs:99](../../../../../crates/shamir-sdk/src/http.rs#L99); [crates/shamir-sdk/src/value.rs:58](../../../../../crates/shamir-sdk/src/value.rs#L58); [crates/shamir-types/src/types/value.rs:269](../../../../../crates/shamir-types/src/types/value.rs#L269).
+Host response insertion overwrites identical names; SDK request Vec-map duplicates overwrite during host QueryValue deserialization.
 
-Grouping/duplicate: `SUMMARY.md#5.1`. This row is not another independent defect.
+Evidence: [crates/shamir-wasm-host/src/wasm/host_http.rs:89](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-wasm-host/src/wasm/host_http.rs#L89); [crates/shamir-sdk/src/http.rs:99](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-sdk/src/http.rs#L99); [crates/shamir-types/src/types/value.rs:269](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-types/src/types/value.rs#L269).
+
+Grouping/duplicate: [SUMMARY.md#5.1](SUMMARY.md#review-5-1). This is not an additional independent defect.
 
 <a id="review-2"></a>
 
@@ -33,11 +37,13 @@ Grouping/duplicate: `SUMMARY.md#5.1`. This row is not another independent defect
 
 Status: `confirmed-open`. Current risk: `low`.
 
-The options comment still states permissive inheritance; current user-function enforcement denies explicit empty grants. The downstream denial test already exists, with a toolchain-dependent skip path.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-wasm-host/src/meta.rs:189](../../../../../crates/shamir-wasm-host/src/meta.rs#L189); [crates/shamir-db/src/shamir_db/shamir_db/core.rs:841](../../../../../crates/shamir-db/src/shamir_db/shamir_db/core.rs#L841); [crates/shamir-db/tests/functions_lifecycle.rs:907](../../../../../crates/shamir-db/tests/functions_lifecycle.rs#L907).
+Permissive options prose conflicts with explicit empty-grant deny-all enforcement and its downstream assertion.
 
-Grouping/duplicate: `SUMMARY.md#3.2`. This row is not another independent defect.
+Evidence: [crates/shamir-wasm-host/src/meta.rs:189](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-wasm-host/src/meta.rs#L189); [crates/shamir-db/tests/functions_lifecycle.rs:907](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/tests/functions_lifecycle.rs#L907).
+
+Grouping/duplicate: [SUMMARY.md#3.2](SUMMARY.md#review-3-2). This is not an additional independent defect.
 
 <a id="review-3"></a>
 
@@ -45,11 +51,13 @@ Grouping/duplicate: `SUMMARY.md#3.2`. This row is not another independent defect
 
 Status: `confirmed-open`. Current risk: `low`.
 
-FnCtx's type/builder documentation still attributes grant enforcement to global_get, while that native method directly reads globals. The guest import checks grants; trusted native code is outside that bytecode threat boundary.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-wasm-host/src/context.rs:289](../../../../../crates/shamir-wasm-host/src/context.rs#L289); [crates/shamir-wasm-host/src/context.rs:392](../../../../../crates/shamir-wasm-host/src/context.rs#L392); [crates/shamir-wasm-host/src/context.rs:426](../../../../../crates/shamir-wasm-host/src/context.rs#L426); [crates/shamir-wasm-host/src/wasm/host_globals.rs:79](../../../../../crates/shamir-wasm-host/src/wasm/host_globals.rs#L79).
+The trusted native getter reads directly; only the guest import checks the grant set.
 
-Grouping/duplicate: `SUMMARY.md#5.2`. This row is not another independent defect.
+Evidence: [crates/shamir-wasm-host/src/context.rs:392](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-wasm-host/src/context.rs#L392); [crates/shamir-wasm-host/src/context.rs:426](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-wasm-host/src/context.rs#L426); [crates/shamir-wasm-host/src/wasm/host_globals.rs:79](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-wasm-host/src/wasm/host_globals.rs#L79).
+
+Grouping/duplicate: [SUMMARY.md#5.2](SUMMARY.md#review-5-2). This is not an additional independent defect.
 
 <a id="review-4"></a>
 
@@ -57,23 +65,27 @@ Grouping/duplicate: `SUMMARY.md#5.2`. This row is not another independent defect
 
 Status: `confirmed-open`. Current risk: `low`.
 
-Public gateway methods and guards still return String errors, and host imports convert them into trap prose. Native callers lack structured discrimination/source chains; this is API/error-design debt rather than a demonstrated runtime failure.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-wasm-host/src/db_gateway.rs:65](../../../../../crates/shamir-wasm-host/src/db_gateway.rs#L65); [crates/shamir-wasm-host/src/net_gateway.rs:60](../../../../../crates/shamir-wasm-host/src/net_gateway.rs#L60); [crates/shamir-wasm-host/src/net_gateway.rs:160](../../../../../crates/shamir-wasm-host/src/net_gateway.rs#L160).
+Public methods and guards flatten classifications/causes. Typed error design is a coordinated API change, not demonstrated privilege repair.
 
-Grouping/duplicate: `SUMMARY.md#5.3`. This row is not another independent defect.
+Evidence: [crates/shamir-wasm-host/src/db_gateway.rs:65](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-wasm-host/src/db_gateway.rs#L65); [crates/shamir-wasm-host/src/net_gateway.rs:60](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-wasm-host/src/net_gateway.rs#L60).
+
+Grouping/duplicate: [SUMMARY.md#5.3](SUMMARY.md#review-5-3). This is not an additional independent defect.
 
 <a id="review-5"></a>
 
 ### Claim 5 — Inconsistent guest-facing error contract across sibling host imports (envelope vs uncatchable trap)
 
-Status: `confirmed-open`. Current risk: `low`.
+Status: `not-applicable`. Current risk: `—`.
 
-HTTP gateway errors become envelopes, while DB/call errors become traps. The asymmetry is deliberate/documented but prevents guest recovery from DB gateway failures. BatchResponse itself has no existing error-envelope field.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-wasm-host/src/wasm/host_http.rs:145](../../../../../crates/shamir-wasm-host/src/wasm/host_http.rs#L145); [crates/shamir-wasm-host/src/wasm/host_db.rs:187](../../../../../crates/shamir-wasm-host/src/wasm/host_db.rs#L187); [crates/shamir-db/src/shamir_db/shamir_db/db_gateway.rs:292](../../../../../crates/shamir-db/src/shamir_db/shamir_db/db_gateway.rs#L292); [crates/shamir-query-types/src/batch/batch_response.rs:30](../../../../../crates/shamir-query-types/src/batch/batch_response.rs#L30).
+Both conventions are deliberate and documented. Catchable DB errors would be a new protocol; no existing BatchResponse error payload can simply be returned.
 
-Grouping/duplicate: `SUMMARY.md#5.4`. This row is not another independent defect.
+Evidence: [crates/shamir-wasm-host/src/wasm/host_http.rs:99](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-wasm-host/src/wasm/host_http.rs#L99); [crates/shamir-wasm-host/src/wasm/host_db.rs:187](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-wasm-host/src/wasm/host_db.rs#L187); [crates/shamir-query-types/src/batch/batch_response.rs:30](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-query-types/src/batch/batch_response.rs#L30).
+
+Grouping/duplicate: [SUMMARY.md#5.4](SUMMARY.md#review-5-4). This is not an additional independent defect.
 
 <a id="review-6"></a>
 
@@ -81,11 +93,13 @@ Grouping/duplicate: `SUMMARY.md#5.4`. This row is not another independent defect
 
 Status: `confirmed-open`. Current risk: `medium`.
 
-Wrong-shaped headers and non-Bin bodies still default to empty. method/url reject wrong types but accept absence as empty strings. Header entries inside accepted Map/List containers do receive type/shape validation.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-wasm-host/src/wasm/host_http.rs:26](../../../../../crates/shamir-wasm-host/src/wasm/host_http.rs#L26); [crates/shamir-wasm-host/src/wasm/host_http.rs:39](../../../../../crates/shamir-wasm-host/src/wasm/host_http.rs#L39); [crates/shamir-wasm-host/src/wasm/host_http.rs:67](../../../../../crates/shamir-wasm-host/src/wasm/host_http.rs#L67).
+Missing method/url are not strict, wrong header/body shapes become empty, while entries in accepted containers receive validation.
 
-Grouping/duplicate: `SUMMARY.md#5.5`. This row is not another independent defect.
+Evidence: [crates/shamir-wasm-host/src/wasm/host_http.rs:33](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-wasm-host/src/wasm/host_http.rs#L33); [crates/shamir-wasm-host/src/wasm/host_http.rs:39](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-wasm-host/src/wasm/host_http.rs#L39); [crates/shamir-wasm-host/src/wasm/host_http.rs:67](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-wasm-host/src/wasm/host_http.rs#L67).
+
+Grouping/duplicate: [SUMMARY.md#5.5](SUMMARY.md#review-5-5). This is not an additional independent defect.
 
 <a id="review-7"></a>
 
@@ -93,23 +107,27 @@ Grouping/duplicate: `SUMMARY.md#5.5`. This row is not another independent defect
 
 Status: `confirmed-open`. Current risk: `medium`.
 
-SDK lookup still canonicalizes a build-time manifest-relative path without override. Source compilation therefore requires that layout. The guide already describes compilation as an optional development facility, so this is not a failure of binary-only guest deployment.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-wasm-host/src/compile.rs:485](../../../../../crates/shamir-wasm-host/src/compile.rs#L485); [docs/guide-docs/guide/05-functions.md:136](../../../../../docs/guide-docs/guide/05-functions.md#L136); [docs/guide-docs/guide/05-functions.md:369](../../../../../docs/guide-docs/guide/05-functions.md#L369).
+No host-controlled override exists for the canonicalized build-time SDK path. Optional source deployment fails when that tree is absent; uploaded WASM is unaffected.
 
-Grouping/duplicate: `SUMMARY.md#5.6`. This row is not another independent defect.
+Evidence: [crates/shamir-wasm-host/src/compile.rs:485](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-wasm-host/src/compile.rs#L485); [docs/guide-docs/guide/05-functions.md:369](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/docs/guide-docs/guide/05-functions.md#L369).
+
+Grouping/duplicate: [SUMMARY.md#5.6](SUMMARY.md#review-5-6). This is not an additional independent defect.
 
 <a id="review-8"></a>
 
 ### Claim 8 — `ResolvedPin::pinned_ips` uses an empty-Vec sentinel for "do not pin"
 
-Status: `not-applicable`. Current risk: —.
+Status: `not-applicable`. Current risk: `—`.
 
-The sentinel is explicitly documented, emitted only on the exact-match bypass, correctly consumed by the current curl caller, and tested. Option would be an optional type refinement; no current misuse is demonstrated.
+Prior-cycle decision: `not-applicable`.
 
-Evidence: [crates/shamir-wasm-host/src/net_gateway.rs:125](../../../../../crates/shamir-wasm-host/src/net_gateway.rs#L125); [crates/shamir-wasm-host/src/net_gateway.rs:169](../../../../../crates/shamir-wasm-host/src/net_gateway.rs#L169); [crates/shamir-db/src/shamir_db/curl_gateway.rs:195](../../../../../crates/shamir-db/src/shamir_db/curl_gateway.rs#L195); [crates/shamir-wasm-host/src/tests/net_gateway_tests.rs:159](../../../../../crates/shamir-wasm-host/src/tests/net_gateway_tests.rs#L159).
+The exact-match no-resolution sentinel is documented, tested and correctly converted into no curl resolve entries.
 
-Grouping/duplicate: `SUMMARY.md#5.8`. This row is not another independent defect.
+Evidence: [crates/shamir-wasm-host/src/net_gateway.rs:125](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-wasm-host/src/net_gateway.rs#L125); [crates/shamir-wasm-host/src/tests/net_gateway_tests.rs:169](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-wasm-host/src/tests/net_gateway_tests.rs#L169); [crates/shamir-db/src/shamir_db/curl_gateway.rs:195](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/curl_gateway.rs#L195).
+
+Grouping/duplicate: [SUMMARY.md#5.8](SUMMARY.md#review-5-8). This is not an additional independent defect.
 
 <a id="review-9"></a>
 
@@ -117,11 +135,13 @@ Grouping/duplicate: `SUMMARY.md#5.8`. This row is not another independent defect
 
 Status: `confirmed-open`. Current risk: `low`.
 
-Environment and egress matching still have separate implementations. No present divergence is shown, but fixes can drift and the egress comment misleadingly describes reuse.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-wasm-host/src/env_policy.rs:75](../../../../../crates/shamir-wasm-host/src/env_policy.rs#L75); [crates/shamir-wasm-host/src/net_gateway.rs:483](../../../../../crates/shamir-wasm-host/src/net_gateway.rs#L483).
+Two implementations remain despite reuse prose. They share a present suffix false negative rather than currently differing.
 
-Grouping/duplicate: `SUMMARY.md#7.2`. This row is not another independent defect.
+Evidence: [crates/shamir-wasm-host/src/env_policy.rs:75](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-wasm-host/src/env_policy.rs#L75); [crates/shamir-wasm-host/src/net_gateway.rs:483](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-wasm-host/src/net_gateway.rs#L483).
+
+Grouping/duplicate: [SUMMARY.md#7.2](SUMMARY.md#review-7-2). This is not an additional independent defect.
 
 <a id="review-10"></a>
 
@@ -129,11 +149,13 @@ Grouping/duplicate: `SUMMARY.md#7.2`. This row is not another independent defect
 
 Status: `confirmed-open`. Current risk: `low`.
 
-Malformed/unknown metadata values still silently default or disappear, and metadata injection adds no format version. Dropping grants narrows those sets; the security impact of Invoker fallback is actor-dependent.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-wasm-host/src/meta.rs:113](../../../../../crates/shamir-wasm-host/src/meta.rs#L113); [crates/shamir-wasm-host/src/meta.rs:129](../../../../../crates/shamir-wasm-host/src/meta.rs#L129); [crates/shamir-wasm-host/src/meta.rs:151](../../../../../crates/shamir-wasm-host/src/meta.rs#L151).
+Invalid present fields default or truncate without diagnostics. Missing-field compatibility is intentional; universal fail-closed security fallback is not proved.
 
-Grouping/duplicate: `SUMMARY.md#5.7`. This row is not another independent defect.
+Evidence: [crates/shamir-wasm-host/src/meta.rs:113](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-wasm-host/src/meta.rs#L113); [crates/shamir-wasm-host/src/meta.rs:129](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-wasm-host/src/meta.rs#L129).
+
+Grouping/duplicate: [SUMMARY.md#5.7](SUMMARY.md#review-5-7). This is not an additional independent defect.
 
 <a id="review-11"></a>
 
@@ -141,11 +163,13 @@ Grouping/duplicate: `SUMMARY.md#5.7`. This row is not another independent defect
 
 Status: `confirmed-open`. Current risk: `low`.
 
-No registered local test directly exercises HTTP codecs, DB guest imports, or a specifically asserted depth-limit trap. Existing actor probes do invoke call successfully; the recursive fuel test accepts any error.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-wasm-host/src/tests/mod.rs:1](../../../../../crates/shamir-wasm-host/src/tests/mod.rs#L1); [crates/shamir-wasm-host/src/tests/nested_actor_tests.rs:85](../../../../../crates/shamir-wasm-host/src/tests/nested_actor_tests.rs#L85); [crates/shamir-wasm-host/src/tests/wasm_tests.rs:313](../../../../../crates/shamir-wasm-host/src/tests/wasm_tests.rs#L313).
+No local registered oracle tests those behaviors specifically. Successful actor call probes and generic recursive errors do not cover them.
 
-Grouping/duplicate: `SUMMARY.md#6.3`. This row is not another independent defect.
+Evidence: [crates/shamir-wasm-host/src/tests/mod.rs:1](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-wasm-host/src/tests/mod.rs#L1); [crates/shamir-wasm-host/src/tests/nested_actor_tests.rs:125](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-wasm-host/src/tests/nested_actor_tests.rs#L125); [crates/shamir-wasm-host/src/tests/wasm_tests.rs:313](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-wasm-host/src/tests/wasm_tests.rs#L313).
+
+Grouping/duplicate: [SUMMARY.md#6.3](SUMMARY.md#review-6-3). This is not an additional independent defect.
 
 <a id="review-12"></a>
 
@@ -153,11 +177,13 @@ Grouping/duplicate: `SUMMARY.md#6.3`. This row is not another independent defect
 
 Status: `confirmed-open`. Current risk: `nit`.
 
-Public guard/pin documentation still references finding 2c without a consumer-facing reference. The substantive DNS-pinning explanation remains useful; this is documentation cleanup only.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-wasm-host/src/net_gateway.rs:109](../../../../../crates/shamir-wasm-host/src/net_gateway.rs#L109); [crates/shamir-wasm-host/src/net_gateway.rs:118](../../../../../crates/shamir-wasm-host/src/net_gateway.rs#L118); [crates/shamir-wasm-host/src/net_gateway.rs:148](../../../../../crates/shamir-wasm-host/src/net_gateway.rs#L148).
+Public pin/guard prose still uses finding 2c without a consumer-facing reference.
 
-Grouping/duplicate: `SUMMARY.md#5.9`. This row is not another independent defect.
+Evidence: [crates/shamir-wasm-host/src/net_gateway.rs:109](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-wasm-host/src/net_gateway.rs#L109); [crates/shamir-wasm-host/src/net_gateway.rs:148](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-wasm-host/src/net_gateway.rs#L148).
+
+Grouping/duplicate: [SUMMARY.md#5.9](SUMMARY.md#review-5-9). This is not an additional independent defect.
 
 <a id="review-13"></a>
 
@@ -165,11 +191,13 @@ Grouping/duplicate: `SUMMARY.md#5.9`. This row is not another independent defect
 
 Status: `confirmed-open`. Current risk: `nit`.
 
-The identifying six-line host-call documentation block still appears twice consecutively.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-wasm-host/src/wasm/host_call.rs:16](../../../../../crates/shamir-wasm-host/src/wasm/host_call.rs#L16); [crates/shamir-wasm-host/src/wasm/host_call.rs:22](../../../../../crates/shamir-wasm-host/src/wasm/host_call.rs#L22).
+The identifying summary paragraphs remain duplicated consecutively.
 
-Grouping/duplicate: `SUMMARY.md#7.3`. This row is not another independent defect.
+Evidence: [crates/shamir-wasm-host/src/wasm/host_call.rs:16](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-wasm-host/src/wasm/host_call.rs#L16); [crates/shamir-wasm-host/src/wasm/host_call.rs:22](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-wasm-host/src/wasm/host_call.rs#L22).
+
+Grouping/duplicate: [SUMMARY.md#7.3](SUMMARY.md#review-7-3). This is not an additional independent defect.
 
 <a id="review-14"></a>
 
@@ -177,24 +205,22 @@ Grouping/duplicate: `SUMMARY.md#7.3`. This row is not another independent defect
 
 Status: `confirmed-open`. Current risk: `nit`.
 
-serde remains a direct dependency without source usage. This does not establish extra project-wide proc-macro compilation, since workspace/transitive consumers already use serde.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-wasm-host/Cargo.toml:14](../../../../../crates/shamir-wasm-host/Cargo.toml#L14); [crates/shamir-wasm-host/src/lib.rs:20](../../../../../crates/shamir-wasm-host/src/lib.rs#L20).
+The crate has no direct source use; additional workspace build cost cannot be inferred from this alone.
 
-Grouping/duplicate: `SUMMARY.md#7.5`. This row is not another independent defect.
+Evidence: [crates/shamir-wasm-host/Cargo.toml:14](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-wasm-host/Cargo.toml#L14).
 
-## Corrections and qualified non-findings
+Grouping/duplicate: [SUMMARY.md#7.5](SUMMARY.md#review-7-5). This is not an additional independent defect.
 
-- Request duplicates are not lost inside the SDK's Vec-backed Value::Map; loss occurs when host QueryValue deserialization inserts duplicate keys into its unique-key map.
-- A header-shape migration must update SDK HttpResponse::from_value as well as host response encoding and SDK request encoding; otherwise List responses decode to empty headers.
-- Missing method/url are not currently strict.
-- HTTP malformed-input and memory errors also trap. The statement that only missing gateway traps is too broad; only successfully decoded gateway runtime errors are enveloped.
-- DB not-found is not uniformly fatal: db_get's normal absence is returned as 0.
-- BatchResponse at crates/shamir-query-types/src/batch/batch_response.rs:30 has no existing error channel. A catchable db_execute convention requires coordinated host/SDK protocol work.
-- The pin sentinel already meets the original alternative of documenting its meaning; no actual bad consumer was found.
-- The guide already recommends precompiled WASM in production. Source compilation is not promised to require no external toolchain.
-- Packed ptr/len and absence conventions agree for the inspected host/SDK paths; sanitizer/linker name equality is meaningfully tested. This is not universal value-format conformance proof.
-- No serde_json or raw JSON query construction was found in this crate.
+## Evidence and recipe corrections
+
+- Header multiplicity loss occurs after request bytes cross into the host unique-key map, not in SDK Vec-map construction.
+- Header migration must support old stored guests and change SDK response decoding; changing only encoders produces silently empty response headers.
+- The HTTP import also traps decode, memory and guest-allocation errors. 'Only no gateway traps' is inaccurate; only successfully decoded gateway runtime errors use the envelope.
+- Explicitly documented trap recovery differences are not a wire defect. BatchResponse has no existing error channel.
+- Packed pointer/absence conventions agree on inspected paths, but that does not prove universal value conformance: reserved prefixes alter keys, and mixed async-import getter paths reject synchronous allocator reentry.
+- Any cwasm extension must use authenticated trusted compiled artifacts and exact unsafe deserialization requirements; magic-header detection alone is not a safe recipe.
 
 ---
 

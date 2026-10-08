@@ -1,11 +1,13 @@
-<!-- revalidation:2026-10-08 source:92ad58266bf57ddea1fa3c8a47affba1a3a9a096 -->
-# shamir-engine — style-claude-md revalidation
+<!-- revalidation:2026-10-08 cycle:independent-2 source:e3765c935fc71655ee1ec0160cf180607935d89b -->
+# shamir-engine — style-claude-md independent revalidation (cycle 2)
 
-Source snapshot: `92ad58266bf57ddea1fa3c8a47affba1a3a9a096`. Revalidated 2026-10-08 by read-only XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run; no source fix is part of this update. Test registration/assertions are evidence of an oracle, not proof of a passing run.
+Frozen source snapshot: `e3765c935fc71655ee1ec0160cf180607935d89b`. Independently revalidated 2026-10-08 by a fresh XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run. Source-fixed means the specified mechanism was already removed at this snapshot; this cycle implements no source fix.
 
-This section is authoritative for current status. Original titles/IDs are retained for traceability; a refuted title is not a current assertion. The collapsed historical report below is superseded, including its counts, severity, scenarios and fix instructions. Plan IDs preserve historical numbering, not a current release mandate. [Workspace methodology and status definitions](../SUMMARY.md#status-definitions).
+This section is authoritative for current decisions. Existing IDs and allegation titles are retained for traceability; a refuted title is not a current assertion. Prior-cycle decisions were rechecked, not used as proof. The first cycle is available in repository history at this snapshot. The original historical body below remains preserved once and is superseded, including its counts, severities and recipes. [Workspace scope and status definitions](../SUMMARY.md#status-definitions).
 
-The concrete structural cleanups were made. Original runtime-like severity escalation was unjustified, and the closely coupled repo_types family is permitted.
+Unrelated external edits began in dependency/toolchain/CI metadata during collection; additional Rust-source edits appeared afterward. They were left untouched. Evidence and decisions are tied to the frozen commit, not those later changes or an installed toolchain. “Current” below means current at that snapshot; no re-audit of the modified working tree is implied.
+
+The listed structural edits are present and ordinary tests are registered after relocation. They are convention repairs, not runtime High/Medium defects. The promised isolated style-only delivery was not followed.
 
 ## Current claim decisions
 
@@ -13,95 +15,110 @@ The concrete structural cleanups were made. Original runtime-like severity escal
 |---:|---:|---:|---:|---:|---:|---:|
 | 8 | 0 | 7 | 0 | 0 | 0 | 1 |
 
-These are decisions on report claims, including repeated roots, bundled observations and non-findings—not a unique-bug census. Closed/N/A rows have no current risk; unverified risk is provisional. Pure style and unmeasured optimization claims do not establish runtime impact.
+These are duplicate-inclusive report decisions, not a unique-bug census. Pure style or structural optimization does not establish a runtime incident; unverified impact remains provisional.
 
 <a id="review-1"></a>
 
 ### Claim 1 — mod.rs contains a full implementation, not re-exports
 
-Status: `fixed`. Current risk: —.
+Status: `fixed`. Current risk: `—`.
 
-GroupCommit implementation now lives in group_commit.rs; mod.rs contains declarations and exports.
+Prior-cycle decision: `fixed`.
 
-Evidence: [crates/shamir-engine/src/repo/group_commit/mod.rs:1](../../../../../crates/shamir-engine/src/repo/group_commit/mod.rs#L1).
+GroupCommit now lives in its sibling file; the manifest declares and exports it.
+
+Evidence: [crates/shamir-engine/src/repo/group_commit/mod.rs:1](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-engine/src/repo/group_commit/mod.rs#L1).
 
 <a id="review-2"></a>
 
 ### Claim 2 — Systemic mid-function use imports
 
-Status: `fixed`. Current risk: —.
+Status: `fixed`. Current risk: `—`.
 
-Production imports were hoisted. Remaining indented production-source imports are within test-gated blocks or the loom module, matching documented exceptions.
+Prior-cycle decision: `fixed`.
 
-Evidence: [crates/shamir-engine/src/migration/shadow_log.rs:2](../../../../../crates/shamir-engine/src/migration/shadow_log.rs#L2); [crates/shamir-engine/src/tx/commit_phases.rs:614](../../../../../crates/shamir-engine/src/tx/commit_phases.rs#L614); [crates/shamir-engine/src/table/writer_drain_barrier.rs:469](../../../../../crates/shamir-engine/src/table/writer_drain_barrier.rs#L469).
+Assigned imports were hoisted. Remaining indented implementation-file imports are test-gated or within the opt-in loom model.
+
+Evidence: [crates/shamir-engine/src/migration/shadow_log.rs:2](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-engine/src/migration/shadow_log.rs#L2); [crates/shamir-engine/src/tx/commit_phases.rs:616](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-engine/src/tx/commit_phases.rs#L616); [crates/shamir-engine/src/table/writer_drain_barrier.rs:471](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-engine/src/table/writer_drain_barrier.rs#L471).
 
 <a id="review-3"></a>
 
 ### Claim 3 — Inline cfg(test) mod tests embedded in implementation files
 
-Status: `fixed`. Current risk: —.
+Status: `fixed`. Current risk: `—`.
 
-Both ordinary inline modules were moved and registered in existing manifests.
+Prior-cycle decision: `fixed`.
 
-Evidence: [crates/shamir-engine/src/table/tests/mod.rs:98](../../../../../crates/shamir-engine/src/table/tests/mod.rs#L98); [crates/shamir-engine/src/query/read/tests/mod.rs:4](../../../../../crates/shamir-engine/src/query/read/tests/mod.rs#L4).
+Both moved ordinary test modules appear in their existing test manifests; the feature-coupled loom model remains separate.
+
+Evidence: [crates/shamir-engine/src/table/tests/mod.rs:98](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-engine/src/table/tests/mod.rs#L98); [crates/shamir-engine/src/query/read/tests/mod.rs:4](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-engine/src/query/read/tests/mod.rs#L4).
 
 <a id="review-4"></a>
 
 ### Claim 4 — Test manifests deviate from pub mod form and duplicate cfg gating
 
-Status: `fixed`. Current risk: —.
+Status: `fixed`. Current risk: `—`.
 
-Assigned test declarations use pub mod without redundant per-entry test gates; private declarations remain for helper modules.
+Prior-cycle decision: `fixed`.
 
-Evidence: [crates/shamir-engine/src/repo/tests/mod.rs:1](../../../../../crates/shamir-engine/src/repo/tests/mod.rs#L1); [crates/shamir-engine/src/repo/group_commit/tests/mod.rs:1](../../../../../crates/shamir-engine/src/repo/group_commit/tests/mod.rs#L1); [crates/shamir-engine/src/query/batch/tests/executor_tests/mod.rs:2](../../../../../crates/shamir-engine/src/query/batch/tests/executor_tests/mod.rs#L2).
+Assigned test declarations are normalized. Feature/debug gates and private helper modules have valid distinct purposes and must remain.
+
+Evidence: [crates/shamir-engine/src/repo/tests/mod.rs:1](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-engine/src/repo/tests/mod.rs#L1); [crates/shamir-engine/src/repo/group_commit/tests/mod.rs:1](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-engine/src/repo/group_commit/tests/mod.rs#L1); [crates/shamir-engine/src/query/batch/tests/executor_tests/mod.rs:2](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-engine/src/query/batch/tests/executor_tests/mod.rs#L2).
 
 <a id="review-5"></a>
 
 ### Claim 5 — Test files missing the _tests suffix
 
-Status: `fixed`. Current risk: —.
+Status: `fixed`. Current risk: `—`.
 
-All five named files were renamed and their manifest references updated.
+Prior-cycle decision: `fixed`.
 
-Evidence: [crates/shamir-engine/src/tx/tests/mod.rs:22](../../../../../crates/shamir-engine/src/tx/tests/mod.rs#L22); [crates/shamir-engine/src/table/tests/mod.rs:22](../../../../../crates/shamir-engine/src/table/tests/mod.rs#L22).
+All five named test files and manifest references now carry the suffix.
+
+Evidence: [crates/shamir-engine/src/tx/tests/mod.rs:22](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-engine/src/tx/tests/mod.rs#L22); [crates/shamir-engine/src/table/tests/mod.rs:22](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-engine/src/table/tests/mod.rs#L22).
 
 <a id="review-6"></a>
 
 ### Claim 6 — Test file nests redundant cfg(test) mod tests
 
-Status: `fixed`. Current risk: —.
+Status: `fixed`. Current risk: `—`.
 
-Watchdog test functions are now at file scope under the parent test registration.
+Prior-cycle decision: `fixed`.
 
-Evidence: [crates/shamir-engine/src/query/batch/tests/watchdog_tests.rs:177](../../../../../crates/shamir-engine/src/query/batch/tests/watchdog_tests.rs#L177); [crates/shamir-engine/src/query/batch/tests/mod.rs:23](../../../../../crates/shamir-engine/src/query/batch/tests/mod.rs#L23).
+Watchdog tests are file-level functions under the parent registration.
+
+Evidence: [crates/shamir-engine/src/query/batch/tests/watchdog_tests.rs:177](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-engine/src/query/batch/tests/watchdog_tests.rs#L177); [crates/shamir-engine/src/query/batch/tests/mod.rs:23](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-engine/src/query/batch/tests/mod.rs#L23).
 
 <a id="review-7"></a>
 
 ### Claim 7 — Tail-of-file pub use re-exports outside mod.rs
 
-Status: `fixed`. Current risk: —.
+Status: `fixed`. Current risk: `—`.
 
-The query_runner tail exports were removed; batch/mod.rs owns the executor exports.
+Prior-cycle decision: `fixed`.
 
-Evidence: [crates/shamir-engine/src/query/batch/mod.rs:159](../../../../../crates/shamir-engine/src/query/batch/mod.rs#L159); [crates/shamir-engine/src/query/batch/mod.rs:162](../../../../../crates/shamir-engine/src/query/batch/mod.rs#L162).
+query_runner no longer duplicates the canonical batch manifest exports.
+
+Evidence: [crates/shamir-engine/src/query/batch/mod.rs:159](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-engine/src/query/batch/mod.rs#L159); [crates/shamir-engine/src/query/batch/mod.rs:162](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-engine/src/query/batch/mod.rs#L162).
 
 <a id="review-8"></a>
 
 ### Claim 8 — repo_types.rs stretches one-primary-export rule to eleven public types
 
-Status: `not-applicable`. Current risk: —.
+Status: `not-applicable`. Current risk: `—`.
 
-Backend composites and factories form the closely coupled family explicitly allowed by CLAUDE.md; splitting was optional, not a defect fix.
+Prior-cycle decision: `not-applicable`.
 
-Evidence: [crates/shamir-engine/src/repo/repo_types.rs:30](../../../../../crates/shamir-engine/src/repo/repo_types.rs#L30); [crates/shamir-engine/src/repo/repo_types.rs:310](../../../../../crates/shamir-engine/src/repo/repo_types.rs#L310); [CLAUDE.md:504](../../../../../CLAUDE.md#L504).
+Backend composites and factories fit the expressly permitted closely coupled family; splitting is optional.
 
-## Corrections and qualified non-findings
+Evidence: [crates/shamir-engine/src/repo/repo_types.rs:30](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-engine/src/repo/repo_types.rs#L30); [crates/shamir-engine/src/repo/repo_types.rs:310](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-engine/src/repo/repo_types.rs#L310); [CLAUDE.md:505](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/CLAUDE.md#L505).
 
-- Style-only findings are nits, not runtime High/Medium without a demonstrated runtime mechanism.
-- The correct path is src/repo/repo_types.rs.
-- The documented filename and pub-mod examples should not be overstated as independent functional guarantees.
-- The campaign mixed style and substantive edits in 6c286cc9; it was not the promised isolated style-only commit, and its SHA is not in .git-blame-ignore-revs.
-- Do not reuse the old sixteen-mod.rs count as a current structural inventory.
+## Evidence and recipe corrections
+
+- The historical sixteen-mod.rs inventory and runtime severity escalation are not current evidence.
+- 6c286cc9 contains both substantive and structural edits; its SHA is absent from .git-blame-ignore-revs. Completed file moves do not fulfill the isolated style-commit promise.
+- Do not mechanically remove feature/debug test gates or make helper modules public merely to match a manifest example.
+- Deleting a duplicate public export path or parser is an API change, even when the crate is unpublished; convention compliance does not itself prove consumer compatibility.
 
 ---
 

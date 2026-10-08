@@ -1,11 +1,13 @@
-<!-- revalidation:2026-10-08 source:92ad58266bf57ddea1fa3c8a47affba1a3a9a096 -->
-# shamir-wasm-host — concurrency-lockfree revalidation
+<!-- revalidation:2026-10-08 cycle:independent-2 source:e3765c935fc71655ee1ec0160cf180607935d89b -->
+# shamir-wasm-host — concurrency-lockfree independent revalidation (cycle 2)
 
-Source snapshot: `92ad58266bf57ddea1fa3c8a47affba1a3a9a096`. Revalidated 2026-10-08 by read-only XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run; no source fix is part of this update. Test registration/assertions are evidence of an oracle, not proof of a passing run.
+Frozen source snapshot: `e3765c935fc71655ee1ec0160cf180607935d89b`. Independently revalidated 2026-10-08 by a fresh XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run. Source-fixed means the specified mechanism was already removed at this snapshot; this cycle implements no source fix.
 
-This section is authoritative for current status. Original titles/IDs are retained for traceability; a refuted title is not a current assertion. The collapsed historical report below is superseded, including its counts, severity, scenarios and fix instructions. Plan IDs preserve historical numbering, not a current release mandate. [Workspace methodology and status definitions](../SUMMARY.md#status-definitions).
+This section is authoritative for current decisions. Existing IDs and allegation titles are retained for traceability; a refuted title is not a current assertion. Prior-cycle decisions were rechecked, not used as proof. The first cycle is available in repository history at this snapshot. The original historical body below remains preserved once and is superseded, including its counts, severities and recipes. [Workspace scope and status definitions](../SUMMARY.md#status-definitions).
 
-Fuel descent and runtime-blocking compilation remain open, as do overwrite and rename races. Explicit lock absence is confirmed, but dependency internals should not be described as proven lock-free.
+Unrelated external edits began in dependency/toolchain/CI metadata during collection; additional Rust-source edits appeared afterward. They were left untouched. Evidence and decisions are tied to the frozen commit, not those later changes or an installed toolchain. “Current” below means current at that snapshot; no re-audit of the modified working tree is implied.
+
+The principal concurrency mechanisms remain defective. Exact scc source positively refutes the crate's blanket lock-free wording and validates single-key entry remedies, while making naive two-entry rename recipes unsafe.
 
 ## Current claim decisions
 
@@ -13,7 +15,7 @@ Fuel descent and runtime-blocking compilation remain open, as do overwrite and r
 |---:|---:|---:|---:|---:|---:|---:|
 | 6 | 6 | 0 | 0 | 0 | 0 | 0 |
 
-These are decisions on report claims, including repeated roots, bundled observations and non-findings—not a unique-bug census. Closed/N/A rows have no current risk; unverified risk is provisional. Pure style and unmeasured optimization claims do not establish runtime impact.
+These are duplicate-inclusive report decisions, not a unique-bug census. Pure style or structural optimization does not establish a runtime incident; unverified impact remains provisional.
 
 <a id="review-1"></a>
 
@@ -21,11 +23,13 @@ These are decisions on report claims, including repeated roots, bundled observat
 
 Status: `confirmed-open`. Current risk: `high`.
 
-The shared counter is loaded without reservation and charged only after the awaited invocation finishes. Ancestors' outstanding grants are invisible to descendant admission.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-wasm-host/src/wasm/wasm_function.rs:438](../../../../../crates/shamir-wasm-host/src/wasm/wasm_function.rs#L438); [crates/shamir-wasm-host/src/wasm/wasm_function.rs:587](../../../../../crates/shamir-wasm-host/src/wasm/wasm_function.rs#L587).
+Child admission reads a balance excluding the suspended parent's consumed fuel and outstanding grant.
 
-Grouping/duplicate: `SUMMARY.md#1.1`. This row is not another independent defect.
+Evidence: [crates/shamir-wasm-host/src/wasm/wasm_function.rs:438](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-wasm-host/src/wasm/wasm_function.rs#L438); [crates/shamir-wasm-host/src/wasm/wasm_function.rs:587](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-wasm-host/src/wasm/wasm_function.rs#L587).
+
+Grouping/duplicate: [SUMMARY.md#1.1](SUMMARY.md#review-1-1). This is not an additional independent defect.
 
 <a id="review-2"></a>
 
@@ -33,11 +37,13 @@ Grouping/duplicate: `SUMMARY.md#1.1`. This row is not another independent defect
 
 Status: `confirmed-open`. Current risk: `high`.
 
-Both async DDL paths invoke synchronous source compilation and Module compilation inline. Neither path offloads the expensive operations, and subprocess stages outside cargo's wait have no corresponding deadline.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-db/src/shamir_db/shamir_db/function_management.rs:172](../../../../../crates/shamir-db/src/shamir_db/shamir_db/function_management.rs#L172); [crates/shamir-db/src/shamir_db/shamir_db/function_management.rs:183](../../../../../crates/shamir-db/src/shamir_db/shamir_db/function_management.rs#L183); [crates/shamir-db/src/shamir_db/shamir_db/validator_management.rs:221](../../../../../crates/shamir-db/src/shamir_db/shamir_db/validator_management.rs#L221).
+Both async DDL paths run source and Wasmtime compilation inline; cargo's wait deadline does not cover the pipeline.
 
-Grouping/duplicate: `SUMMARY.md#2.1`. This row is not another independent defect.
+Evidence: [crates/shamir-db/src/shamir_db/shamir_db/function_management.rs:172](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/shamir_db/function_management.rs#L172); [crates/shamir-db/src/shamir_db/shamir_db/validator_management.rs:232](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/shamir_db/validator_management.rs#L232).
+
+Grouping/duplicate: [SUMMARY.md#2.1](SUMMARY.md#review-2-1). This is not an additional independent defect.
 
 <a id="review-3"></a>
 
@@ -45,11 +51,13 @@ Grouping/duplicate: `SUMMARY.md#2.1`. This row is not another independent defect
 
 Status: `confirmed-open`. Current risk: `low`.
 
-All three overwrite operations retain the two-operation gap and ignore insertion failures. The review's specific interleaving is inaccurate: after B inserts, A's insert fails rather than replacing B.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-wasm-host/src/registry.rs:52](../../../../../crates/shamir-wasm-host/src/registry.rs#L52); [crates/shamir-wasm-host/src/context.rs:52](../../../../../crates/shamir-wasm-host/src/context.rs#L52); [crates/shamir-wasm-host/src/context.rs:166](../../../../../crates/shamir-wasm-host/src/context.rs#L166).
+Remove/read/competing insert/intended insert-failure is reachable. scc 3.8.4 rejects the last insertion rather than overwriting the competing value.
 
-Grouping/duplicate: `SUMMARY.md#2.2`. This row is not another independent defect.
+Evidence: [crates/shamir-wasm-host/src/registry.rs:52](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-wasm-host/src/registry.rs#L52); [crates/shamir-wasm-host/src/context.rs:166](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-wasm-host/src/context.rs#L166); [Cargo.lock:3123](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/Cargo.lock#L3123).
+
+Grouping/duplicate: [SUMMARY.md#2.2](SUMMARY.md#review-2-2). This is not an additional independent defect.
 
 <a id="review-4"></a>
 
@@ -57,11 +65,13 @@ Grouping/duplicate: `SUMMARY.md#2.2`. This row is not another independent defect
 
 Status: `confirmed-open`. Current risk: `low`.
 
-After removing from, a target collision triggers restoration whose insertion error is discarded. A racing registration of from can therefore prevent restoration and drop the captured artifact.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-wasm-host/src/registry.rs:79](../../../../../crates/shamir-wasm-host/src/registry.rs#L79); [crates/shamir-wasm-host/src/registry.rs:84](../../../../../crates/shamir-wasm-host/src/registry.rs#L84); [crates/shamir-wasm-host/src/registry.rs:86](../../../../../crates/shamir-wasm-host/src/registry.rs#L86).
+Reoccupation of source and target after removal makes both inserts fail; restoration failure is discarded.
 
-Grouping/duplicate: `SUMMARY.md#2.3`. This row is not another independent defect.
+Evidence: [crates/shamir-wasm-host/src/registry.rs:79](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-wasm-host/src/registry.rs#L79); [crates/shamir-wasm-host/src/registry.rs:86](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-wasm-host/src/registry.rs#L86).
+
+Grouping/duplicate: [SUMMARY.md#2.3](SUMMARY.md#review-2-3). This is not an additional independent defect.
 
 <a id="review-5"></a>
 
@@ -69,11 +79,13 @@ Grouping/duplicate: `SUMMARY.md#2.3`. This row is not another independent defect
 
 Status: `confirmed-open`. Current risk: `medium`.
 
-Ticker spawn errors are still discarded and engine creation succeeds. This removes independent wall-clock interruption; finite fuel remains an instruction-count bound, so CPU execution is not literally unbounded.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-wasm-host/src/wasm/wasm_engine.rs:129](../../../../../crates/shamir-wasm-host/src/wasm/wasm_engine.rs#L129); [crates/shamir-wasm-host/src/wasm/wasm_engine.rs:162](../../../../../crates/shamir-wasm-host/src/wasm/wasm_engine.rs#L162).
+Engine construction succeeds after failed ticker spawn. Independent epoch interruption disappears; finite fuel does not.
 
-Grouping/duplicate: `SUMMARY.md#6.2`. This row is not another independent defect.
+Evidence: [crates/shamir-wasm-host/src/wasm/wasm_engine.rs:129](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-wasm-host/src/wasm/wasm_engine.rs#L129); [crates/shamir-wasm-host/src/wasm/wasm_engine.rs:162](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-wasm-host/src/wasm/wasm_engine.rs#L162).
+
+Grouping/duplicate: [SUMMARY.md#6.2](SUMMARY.md#review-6-2). This is not an additional independent defect.
 
 <a id="review-6"></a>
 
@@ -81,20 +93,20 @@ Grouping/duplicate: `SUMMARY.md#6.2`. This row is not another independent defect
 
 Status: `confirmed-open`. Current risk: `low`.
 
-The wait error arm joins pipe readers without first killing or reaping cargo. Those joins can themselves block until the running process tree closes its pipe handles.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-wasm-host/src/compile.rs:607](../../../../../crates/shamir-wasm-host/src/compile.rs#L607).
+The error arm joins readers while cargo or descendants may still run and hold their pipes.
 
-Grouping/duplicate: `SUMMARY.md#6.8`. This row is not another independent defect.
+Evidence: [crates/shamir-wasm-host/src/compile.rs:607](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-wasm-host/src/compile.rs#L607).
 
-## Corrections and qualified non-findings
+Grouping/duplicate: [SUMMARY.md#6.8](SUMMARY.md#review-6-8). This is not an additional independent defect.
 
-- No explicit Mutex, RwLock, parking_lot lock, or guard held across await was found in this crate. scc::HashMap plus synchronous entry operations is not, by itself, proof of end-to-end lock-free progress.
-- Every inspected scc len use has its O(N) acknowledgement; registry invocation clones the Arc before awaiting.
-- Argon2 offloading is source-proven at crates/shamir-wasm-host/src/builtin.rs:63. The worker test at crates/shamir-wasm-host/src/tests/argon2id_tests.rs:92 is not a deterministic proof: its spawned task can run independently before an inline hash.
-- Overlapping writers have no natural total last-writer order. The concrete defects are transient absence and ignored failed insertion, not the report's asserted overwrite interleaving.
-- A top-level local fuel budget is not written back into the caller's FnCtx.
-- Compilation can take longer than 120 seconds because probes, teardown joins, and wasm-opt are outside the bounded cargo wait.
+## Evidence and recipe corrections
+
+- Dependency-level progress is no longer merely unverified: scc 3.8.4 explicitly documents bucket read-write locks for entry access. Published source: https://docs.rs/crate/scc/3.8.4/source/src/hash_map.rs; Cargo.lock:3123.
+- Do not hold target and source scc entry guards to implement rename without proving bucket identity and lock ordering. Different keys can occupy the same bucket.
+- The Argon2 worker test runs its test future outside the single worker and permits the ticker to run before hashing begins. It is not a deterministic negative control for inline hashing.
+- Relaxed fuel atomics are not a payload-publication data race here. The defect is the accounting protocol, not the absence of Acquire/Release.
 
 ---
 

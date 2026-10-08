@@ -1,19 +1,21 @@
-<!-- revalidation:2026-10-08 source:92ad58266bf57ddea1fa3c8a47affba1a3a9a096 -->
-# shamir-numa — performance-hotpath revalidation
+<!-- revalidation:2026-10-08 cycle:independent-2 source:e3765c935fc71655ee1ec0160cf180607935d89b -->
+# shamir-numa — performance-hotpath independent revalidation (cycle 2)
 
-Source snapshot: `92ad58266bf57ddea1fa3c8a47affba1a3a9a096`. Revalidated 2026-10-08 by read-only XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run; no source fix is part of this update. Test registration/assertions are evidence of an oracle, not proof of a passing run.
+Frozen source snapshot: `e3765c935fc71655ee1ec0160cf180607935d89b`. Independently revalidated 2026-10-08 by a fresh XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run. Source-fixed means the specified mechanism was already removed at this snapshot; this cycle implements no source fix.
 
-This section is authoritative for current status. Original titles/IDs are retained for traceability; a refuted title is not a current assertion. The collapsed historical report below is superseded, including its counts, severity, scenarios and fix instructions. Plan IDs preserve historical numbering, not a current release mandate. [Workspace methodology and status definitions](../SUMMARY.md#status-definitions).
+This section is authoritative for current decisions. Existing IDs and allegation titles are retained for traceability; a refuted title is not a current assertion. Prior-cycle decisions were rechecked, not used as proof. The first cycle is available in repository history at this snapshot. The original historical body below remains preserved once and is superseded, including its counts, severities and recipes. [Workspace scope and status definitions](../SUMMARY.md#status-definitions).
 
-Extra single-replica dispatch, unbounded range materialization, unsupported mirror-latency wording, and absent in-crate read benchmarks remain. Structural costs are established; latency and physical locality are not.
+Unrelated external edits began in dependency/toolchain/CI metadata during collection; additional Rust-source edits appeared afterward. They were left untouched. Evidence and decisions are tied to the frozen commit, not those later changes or an installed toolchain. “Current” below means current at that snapshot; no re-audit of the modified working tree is implied.
+
+Source establishes extra wrapper dispatch, linear mirror store count and repeated discovery work. It establishes neither physical node locality nor numerical performance effects; benchmark absence is optional measurement work.
 
 ## Current claim decisions
 
 | Claim decisions | Open | Source-fixed | Partial | Refuted | Unverified | N/A |
 |---:|---:|---:|---:|---:|---:|---:|
-| 4 | 4 | 0 | 0 | 0 | 0 | 0 |
+| 4 | 3 | 0 | 0 | 0 | 0 | 1 |
 
-These are decisions on report claims, including repeated roots, bundled observations and non-findings—not a unique-bug census. Closed/N/A rows have no current risk; unverified risk is provisional. Pure style and unmeasured optimization claims do not establish runtime impact.
+These are duplicate-inclusive report decisions, not a unique-bug census. Pure style or structural optimization does not establish a runtime incident; unverified impact remains provisional.
 
 <a id="review-1"></a>
 
@@ -21,9 +23,11 @@ These are decisions on report claims, including repeated roots, bundled observat
 
 Status: `confirmed-open`. Current risk: `low`.
 
-load_local() still calls the trait-object current_node() and replica indexing without a single-replica shortcut. The absolute zero-overhead promise is unsupported; emitted instructions and measured latency were not verified.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-numa/src/node_replicated.rs:71](../../../../../crates/shamir-numa/src/node_replicated.rs#L71); [crates/shamir-numa/src/node_replicated.rs:121](../../../../../crates/shamir-numa/src/node_replicated.rs#L121); [crates/shamir-numa/src/lib.rs:29](../../../../../crates/shamir-numa/src/lib.rs#L29); [crates/shamir-index/src/base_index/index_info.rs:288](../../../../../crates/shamir-index/src/base_index/index_info.rs#L288).
+load_local always calls current_node and resolves a replica, even with one replica. The documentation's absolute equivalence is unjustified; generated instructions and latency were not inspected, so this is not a measured regression.
+
+Evidence: [crates/shamir-numa/src/node_replicated.rs:71](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-numa/src/node_replicated.rs#L71); [crates/shamir-numa/src/node_replicated.rs:121](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-numa/src/node_replicated.rs#L121); [crates/shamir-numa/src/lib.rs:29](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-numa/src/lib.rs#L29).
 
 <a id="review-2"></a>
 
@@ -31,11 +35,13 @@ Evidence: [crates/shamir-numa/src/node_replicated.rs:71](../../../../../crates/s
 
 Status: `confirmed-open`. Current risk: `low`.
 
-Ascending ranges are expanded into Vec before deduplication, with neither token-span nor aggregate bounds. Expansion cost is source-proven; allocation timing and failure details were not reproduced.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-numa/src/cpulist.rs:38](../../../../../crates/shamir-numa/src/cpulist.rs#L38); [crates/shamir-numa/src/cpulist.rs:40](../../../../../crates/shamir-numa/src/cpulist.rs#L40); [crates/shamir-numa/src/cpulist.rs:51](../../../../../crates/shamir-numa/src/cpulist.rs#L51).
+Materialization precedes sort/dedup, with neither span nor cumulative expansion limits. Repeated individually small ranges also grow intermediate work. Current sysfs callers do not establish adversarial production reachability.
 
-Grouping/duplicate: `error-handling-lifecycle.md#1`. This row is not another independent defect.
+Evidence: [crates/shamir-numa/src/cpulist.rs:40](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-numa/src/cpulist.rs#L40); [crates/shamir-numa/src/cpulist.rs:51](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-numa/src/cpulist.rs#L51).
+
+Grouping/duplicate: [error-handling-lifecycle.md#1](error-handling-lifecycle.md#review-1). This is not an additional independent defect.
 
 <a id="review-3"></a>
 
@@ -43,30 +49,33 @@ Grouping/duplicate: `error-handling-lifecycle.md#1`. This row is not another ind
 
 Status: `confirmed-open`. Current risk: `nit`.
 
-There is one mirror store per remaining replica, with no scheduling-time bound. Linear store count is established; each store being physically remote and the claimed 100–300 ns/µs figures are unverified.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-numa/src/node_replicated.rs:26](../../../../../crates/shamir-numa/src/node_replicated.rs#L26); [crates/shamir-numa/src/node_replicated.rs:104](../../../../../crates/shamir-numa/src/node_replicated.rs#L104); [crates/shamir-numa/src/node_replicated.rs:105](../../../../../crates/shamir-numa/src/node_replicated.rs#L105).
+There are N-1 mirror stores, and descheduling can delay even a single writer arbitrarily. Concurrent mirrors additionally need not converge. Remote-store placement and the historical latency figures are not established.
 
-Grouping/duplicate: `concurrency-lockfree.md#1`. This row is not another independent defect.
+Evidence: [crates/shamir-numa/src/node_replicated.rs:26](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-numa/src/node_replicated.rs#L26); [crates/shamir-numa/src/node_replicated.rs:104](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-numa/src/node_replicated.rs#L104).
+
+Grouping/duplicate: [concurrency-lockfree.md#1](concurrency-lockfree.md#review-1). This is not an additional independent defect.
 
 <a id="review-4"></a>
 
 ### Claim 4 — No micro-bench for the `load_local` read path despite two live consumers
 
-Status: `confirmed-open`. Current risk: `nit`.
+Status: `not-applicable`. Current risk: `—`.
 
-The crate has no benches directory, bench target, or benchmark dependency, while IndexInfo and SortedIndexManager use load_local(). Absence of a benchmark does not itself demonstrate a performance regression.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-numa/Cargo.toml:18](../../../../../crates/shamir-numa/Cargo.toml#L18); [crates/shamir-numa/README.md:74](../../../../../crates/shamir-numa/README.md#L74); [crates/shamir-index/src/base_index/index_info.rs:288](../../../../../crates/shamir-index/src/base_index/index_info.rs#L288); [crates/shamir-index/src/base_index/sorted_index_manager.rs:530](../../../../../crates/shamir-index/src/base_index/sorted_index_manager.rs#L530).
+The absence is factual, but no contract requires every crate to have a benchmark. Live consumers do not turn that absence into a runtime defect. Comparative benchmarking is optional before making performance claims.
 
-## Corrections and qualified non-findings
+Evidence: [crates/shamir-numa/Cargo.toml:18](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-numa/Cargo.toml#L18); [crates/shamir-index/src/base_index/index_info.rs:288](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-index/src/base_index/index_info.rs#L288); [crates/shamir-index/src/base_index/sorted_index_manager.rs:530](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-index/src/base_index/sorted_index_manager.rs#L530).
 
-- Steady-state wrapper reads contain no explicit allocation or topology-size traversal; Linux reverse lookup is expected O(1). These are structural observations, not measured throughput.
-- All allocation happens on construction/probe paths is false: store allocates Arc<T>, rcu creates replacements, and inspected arc-swap 1.9.1 may allocate thread-local debt bookkeeping on first use.
-- Physical node locality is not proven by padding or choosing a replica index. Construction clones one shared Arc<T> into a contiguous cell allocation without per-node memory binding (crates/shamir-numa/src/node_replicated.rs:50).
-- Do not call the trait dispatch universally non-inlinable: compiler devirtualization was not examined. A source shortcut also does not prove literally zero machine-code overhead.
-- Switching Guard reads to owned Arc reads is not proven negligible; it changes refcount behavior and needs measurement before a performance recommendation.
-- The nanosecond visibility bound is unsupported even for one writer because a writer can be descheduled mid-pass; concurrent writers additionally lack convergence.
+## Evidence and recipe corrections
+
+- One shared Arc payload and one contiguous replica-cell allocation do not constitute physically node-local data replication; correct README/lib/struct locality assurances.
+- arc-swap 1.9.1 published src/debt/list.rs:169 can allocate bookkeeping. store allocates replacements and rcu invokes allocation-producing conversion; the historical construction-only allocation assurance is false.
+- Fx lookup is expected constant-time, not a universal worst-case bound. Compiler devirtualization and dispatch cost remain unmeasured.
+- Replacing the public DI trait with a closed enum would remove extensibility; it is not a semantics-neutral optimization recipe.
+- Owned Arc loads change refcount/debt behavior. Neither their cost nor a proposed shortcut's literal zero overhead is established.
 
 ---
 

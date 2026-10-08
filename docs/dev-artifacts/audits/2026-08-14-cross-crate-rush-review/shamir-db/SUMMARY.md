@@ -1,19 +1,21 @@
-<!-- revalidation:2026-10-08 source:92ad58266bf57ddea1fa3c8a47affba1a3a9a096 -->
-# shamir-db — SUMMARY revalidation
+<!-- revalidation:2026-10-08 cycle:independent-2 source:e3765c935fc71655ee1ec0160cf180607935d89b -->
+# shamir-db — SUMMARY independent revalidation (cycle 2)
 
-Source snapshot: `92ad58266bf57ddea1fa3c8a47affba1a3a9a096`. Revalidated 2026-10-08 by read-only XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run; no source fix is part of this update. Test registration/assertions are evidence of an oracle, not proof of a passing run.
+Frozen source snapshot: `e3765c935fc71655ee1ec0160cf180607935d89b`. Independently revalidated 2026-10-08 by a fresh XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run. Source-fixed means the specified mechanism was already removed at this snapshot; this cycle implements no source fix.
 
-This section is authoritative for current status. Original titles/IDs are retained for traceability; a refuted title is not a current assertion. The collapsed historical report below is superseded, including its counts, severity, scenarios and fix instructions. Plan IDs preserve historical numbering, not a current release mandate. [Workspace methodology and status definitions](../SUMMARY.md#status-definitions).
+This section is authoritative for current decisions. Existing IDs and allegation titles are retained for traceability; a refuted title is not a current assertion. Prior-cycle decisions were rechecked, not used as proof. The first cycle is available in repository history at this snapshot. The original historical body below remains preserved once and is superseded, including its counts, severities and recipes. [Workspace scope and status definitions](../SUMMARY.md#status-definitions).
 
-All consolidated entries were revalidated. The missing ACL dedup mechanism is fixed; scan costs remain. Catalogue mutations, validator replacement and authorization gaps remain open. The curl exploit is unverified, and several structural/style claims and proposed fixes need qualification. Historical severity/count totals must not be reused as current validated totals.
+Unrelated external edits began in dependency/toolchain/CI metadata during collection; additional Rust-source edits appeared afterward. They were left untouched. Evidence and decisions are tied to the frozen commit, not those later changes or an installed toolchain. “Current” below means current at that snapshot; no re-audit of the modified working tree is implied.
+
+All 72 consolidated claims and 20 plans were independently checked. Core correctness findings remain, dedup is fixed, and optional contracts should be removed from defect counts. Curl injection gains conditional primary-source proof; membership-error severity increases. Catalogue recovery and successful schema-preservation gaps also require attention.
 
 ## Current claim decisions
 
 | Claim decisions | Open | Source-fixed | Partial | Refuted | Unverified | N/A |
 |---:|---:|---:|---:|---:|---:|---:|
-| 72 | 66 | 2 | 1 | 0 | 1 | 2 |
+| 72 | 60 | 2 | 1 | 0 | 0 | 9 |
 
-These are decisions on report claims, including repeated roots, bundled observations and non-findings—not a unique-bug census. Closed/N/A rows have no current risk; unverified risk is provisional. Pure style and unmeasured optimization claims do not establish runtime impact.
+These are duplicate-inclusive report decisions, not a unique-bug census. Pure style or structural optimization does not establish a runtime incident; unverified impact remains provisional.
 
 <a id="review-1-1"></a>
 
@@ -21,11 +23,13 @@ These are decisions on report claims, including repeated roots, bundled observat
 
 Status: `confirmed-open`. Current risk: `high`.
 
-op.drop_db supplies enumeration, self.db_name supplies table/validator deletion; errors are ignored.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-db/src/shamir_db/execute/admin_db_repo.rs:133](../../../../../crates/shamir-db/src/shamir_db/execute/admin_db_repo.rs#L133).
+Enumeration uses the named database while table deletion uses the batch database; matching names expose destructive cross-target behavior.
 
-Grouping/duplicate: `correctness-tdd.md#1`. This row is not another independent defect.
+Evidence: [crates/shamir-db/src/shamir_db/execute/admin_db_repo.rs:133](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/execute/admin_db_repo.rs#L133).
+
+Grouping/duplicate: [correctness-tdd.md#1](correctness-tdd.md#review-1). This is not an additional independent defect.
 
 <a id="review-1-2"></a>
 
@@ -33,11 +37,13 @@ Grouping/duplicate: `correctness-tdd.md#1`. This row is not another independent 
 
 Status: `confirmed-open`. Current risk: `medium`.
 
-Absent group rows still become defaults and are saved; the wire numeric remove path lacks existence validation. Privileged management reachability, not unauthenticated escalation.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-db/src/shamir_db/system_store.rs:743](../../../../../crates/shamir-db/src/shamir_db/system_store.rs#L743); [crates/shamir-db/src/shamir_db/execute/admin_access.rs:454](../../../../../crates/shamir-db/src/shamir_db/execute/admin_access.rs#L454).
+Numeric missing IDs pass resolution; removal defaults absent fields and saves a row under privileged management authority.
 
-Grouping/duplicate: `correctness-tdd.md#2`. This row is not another independent defect.
+Evidence: [crates/shamir-db/src/shamir_db/system_store.rs:743](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/system_store.rs#L743); [crates/shamir-db/src/shamir_db/execute/admin_access.rs:454](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/execute/admin_access.rs#L454).
+
+Grouping/duplicate: [correctness-tdd.md#2](correctness-tdd.md#review-2). This is not an additional independent defect.
 
 <a id="review-1-3"></a>
 
@@ -45,11 +51,13 @@ Grouping/duplicate: `correctness-tdd.md#2`. This row is not another independent 
 
 Status: `confirmed-open`. Current risk: `medium`.
 
-The omissions/comment remain. save_database_meta already flushes; current Buffered-WAL/history architecture requires more than blindly adding data_store.flush.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-db/src/shamir_db/system_store.rs:204](../../../../../crates/shamir-db/src/shamir_db/system_store.rs#L204); [crates/shamir-db/tests/rename_db_e2e.rs:312](../../../../../crates/shamir-db/tests/rename_db_e2e.rs#L312).
+The omissions remain; existing data-store flushes do not drain history or synchronize separate Buffered WAL, and flush_all excludes SystemStore.
 
-Grouping/duplicate: `correctness-tdd.md#3`. This row is not another independent defect.
+Evidence: [crates/shamir-db/src/shamir_db/system_store.rs:204](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/system_store.rs#L204); [crates/shamir-engine/src/tx/commit.rs:973](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-engine/src/tx/commit.rs#L973); [crates/shamir-db/src/shamir_db/shamir_db/db_management.rs:634](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/shamir_db/db_management.rs#L634).
+
+Grouping/duplicate: [correctness-tdd.md#3](correctness-tdd.md#review-3). This is not an additional independent defect.
 
 <a id="review-1-4"></a>
 
@@ -57,11 +65,13 @@ Grouping/duplicate: `correctness-tdd.md#3`. This row is not another independent 
 
 Status: `confirmed-open`. Current risk: `medium`.
 
-No missing-parent diagnostic/reattachment exists; attach errors warn-and-continue whereas recovery errors abort. Repair can restore visibility, so 'forever' is excessive.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-db/src/shamir_db/shamir_db/core.rs:219](../../../../../crates/shamir-db/src/shamir_db/shamir_db/core.rs#L219); [crates/shamir-db/src/shamir_db/shamir_db/core.rs:243](../../../../../crates/shamir-db/src/shamir_db/shamir_db/core.rs#L243).
+Boot has no missing-parent diagnostic or attachment; repair can restore visibility, so forever is excessive.
 
-Grouping/duplicate: `correctness-tdd.md#4`. This row is not another independent defect.
+Evidence: [crates/shamir-db/src/shamir_db/shamir_db/core.rs:219](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/shamir_db/core.rs#L219).
+
+Grouping/duplicate: [correctness-tdd.md#4](correctness-tdd.md#review-4). This is not an additional independent defect.
 
 <a id="review-1-5"></a>
 
@@ -69,11 +79,13 @@ Grouping/duplicate: `correctness-tdd.md#4`. This row is not another independent 
 
 Status: `confirmed-open`. Current risk: `medium`.
 
-Failed builtin-name registration still falls through to metadata insertion; effective actor also reads the user catalogue row.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-db/src/shamir_db/shamir_db/core.rs:324](../../../../../crates/shamir-db/src/shamir_db/shamir_db/core.rs#L324); [crates/shamir-db/src/shamir_db/shamir_db/core.rs:332](../../../../../crates/shamir-db/src/shamir_db/shamir_db/core.rs#L332).
+Failed builtin-name registration still inserts catalogue metadata; effective actor independently reads that same row.
 
-Grouping/duplicate: `correctness-tdd.md#5`. This row is not another independent defect.
+Evidence: [crates/shamir-db/src/shamir_db/shamir_db/core.rs:324](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/shamir_db/core.rs#L324); [crates/shamir-db/src/shamir_db/shamir_db/access_control.rs:995](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/shamir_db/access_control.rs#L995).
+
+Grouping/duplicate: [correctness-tdd.md#5](correctness-tdd.md#review-5). This is not an additional independent defect.
 
 <a id="review-1-6"></a>
 
@@ -81,11 +93,13 @@ Grouping/duplicate: `correctness-tdd.md#5`. This row is not another independent 
 
 Status: `confirmed-open`. Current risk: `high`.
 
-Old catalogue removal still precedes replacement save after live rename.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-db/src/shamir_db/shamir_db/function_management.rs:337](../../../../../crates/shamir-db/src/shamir_db/shamir_db/function_management.rs#L337); [crates/shamir-db/src/shamir_db/shamir_db/validator_management.rs:375](../../../../../crates/shamir-db/src/shamir_db/shamir_db/validator_management.rs#L375).
+Live rename precedes old-row deletion and new-row save; failure compensation is absent.
 
-Grouping/duplicate: `error-handling-lifecycle.md#2`. This row is not another independent defect.
+Evidence: [crates/shamir-db/src/shamir_db/shamir_db/function_management.rs:337](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/shamir_db/function_management.rs#L337); [crates/shamir-db/src/shamir_db/shamir_db/validator_management.rs:375](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/shamir_db/validator_management.rs#L375).
+
+Grouping/duplicate: [error-handling-lifecycle.md#2](error-handling-lifecycle.md#review-2). This is not an additional independent defect.
 
 <a id="review-1-7"></a>
 
@@ -93,11 +107,13 @@ Grouping/duplicate: `error-handling-lifecycle.md#2`. This row is not another ind
 
 Status: `confirmed-open`. Current risk: `low`.
 
-Public facade creation still inserts unconditionally; wire-only creation locking does not defend embedding calls.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-db/src/shamir_db/shamir_db/db_management.rs:39](../../../../../crates/shamir-db/src/shamir_db/shamir_db/db_management.rs#L39).
+create_db_as inserts a fresh instance without duplicate defense; new lookups lose the prior registration.
 
-Grouping/duplicate: `correctness-tdd.md#7`. This row is not another independent defect.
+Evidence: [crates/shamir-db/src/shamir_db/shamir_db/db_management.rs:39](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/shamir_db/db_management.rs#L39).
+
+Grouping/duplicate: [correctness-tdd.md#7](correctness-tdd.md#review-7). This is not an additional independent defect.
 
 <a id="review-1-8"></a>
 
@@ -105,11 +121,13 @@ Grouping/duplicate: `correctness-tdd.md#7`. This row is not another independent 
 
 Status: `confirmed-open`. Current risk: `low`.
 
-existed and IF EXISTS remain live-registry-only. Normal function listing is also registry-only, correcting the advertised listing scenario.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-db/src/shamir_db/shamir_db/function_management.rs:284](../../../../../crates/shamir-db/src/shamir_db/shamir_db/function_management.rs#L284); [crates/shamir-db/src/shamir_db/execute/admin_function.rs:138](../../../../../crates/shamir-db/src/shamir_db/execute/admin_function.rs#L138).
+Registry-only existed and IF EXISTS ignore durable-only rows; normal listing is registry-only too.
 
-Grouping/duplicate: `correctness-tdd.md#8`. This row is not another independent defect.
+Evidence: [crates/shamir-db/src/shamir_db/shamir_db/function_management.rs:284](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/shamir_db/function_management.rs#L284); [crates/shamir-db/src/shamir_db/execute/admin_function.rs:138](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/execute/admin_function.rs#L138).
+
+Grouping/duplicate: [correctness-tdd.md#8](correctness-tdd.md#review-8). This is not an additional independent defect.
 
 <a id="review-1-9"></a>
 
@@ -117,11 +135,13 @@ Grouping/duplicate: `correctness-tdd.md#8`. This row is not another independent 
 
 Status: `confirmed-open`. Current risk: `high`.
 
-Identity fallback and both persisted/live binding destruction remain.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-db/src/shamir_db/shamir_db/validator_management.rs:249](../../../../../crates/shamir-db/src/shamir_db/shamir_db/validator_management.rs#L249); [crates/shamir-engine/src/validator/registry.rs:156](../../../../../crates/shamir-engine/src/validator/registry.rs#L156).
+Catalogue identity fallback is absent and removal clears live reverse bindings after persisting an empty list.
 
-Grouping/duplicate: `api-wire-protocol.md#1`. This row is not another independent defect.
+Evidence: [crates/shamir-db/src/shamir_db/shamir_db/validator_management.rs:249](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/shamir_db/validator_management.rs#L249); [crates/shamir-engine/src/validator/registry.rs:156](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-engine/src/validator/registry.rs#L156).
+
+Grouping/duplicate: [api-wire-protocol.md#1](api-wire-protocol.md#review-1). This is not an additional independent defect.
 
 <a id="review-1-10"></a>
 
@@ -129,11 +149,13 @@ Grouping/duplicate: `api-wire-protocol.md#1`. This row is not another independen
 
 Status: `confirmed-open`. Current risk: `low`.
 
-Clock panic remains. touch_ind has no explicit Err return today, refuting the claimed interner-error panic scenario.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-db/src/shamir_db/execute/helpers.rs:61](../../../../../crates/shamir-db/src/shamir_db/execute/helpers.rs#L61); [crates/shamir-types/src/core/interner/interner.rs:138](../../../../../crates/shamir-types/src/core/interner/interner.rs#L138).
+Pre-epoch clock panic remains; touch_ind has no current explicit returned-error branch, refuting that half's scenario.
 
-Grouping/duplicate: `correctness-tdd.md#10`. This row is not another independent defect.
+Evidence: [crates/shamir-db/src/shamir_db/execute/helpers.rs:61](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/execute/helpers.rs#L61); [crates/shamir-types/src/core/interner/interner.rs:138](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-types/src/core/interner/interner.rs#L138).
+
+Grouping/duplicate: [correctness-tdd.md#10](correctness-tdd.md#review-10). This is not an additional independent defect.
 
 <a id="review-1-11"></a>
 
@@ -141,11 +163,13 @@ Grouping/duplicate: `correctness-tdd.md#10`. This row is not another independent
 
 Status: `confirmed-open`. Current risk: `low`.
 
-RMW conversion still defaults unknown actions before strict reparse.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-db/src/shamir_db/execute/admin_schema.rs:1343](../../../../../crates/shamir-db/src/shamir_db/execute/admin_schema.rs#L1343); [crates/shamir-db/src/shamir_db/execute/admin_schema.rs:1352](../../../../../crates/shamir-db/src/shamir_db/execute/admin_schema.rs#L1352).
+Invalid present action values normalize before strict reparse; valid ordinary wire rules do not supply this bad catalogue state.
 
-Grouping/duplicate: `correctness-tdd.md#11`. This row is not another independent defect.
+Evidence: [crates/shamir-db/src/shamir_db/execute/admin_schema.rs:1343](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/execute/admin_schema.rs#L1343); [crates/shamir-db/src/shamir_db/execute/admin_schema.rs:1352](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/execute/admin_schema.rs#L1352).
+
+Grouping/duplicate: [correctness-tdd.md#11](correctness-tdd.md#review-11). This is not an additional independent defect.
 
 <a id="review-1-12"></a>
 
@@ -153,23 +177,27 @@ Grouping/duplicate: `correctness-tdd.md#11`. This row is not another independent
 
 Status: `confirmed-open`. Current risk: `medium`.
 
-Isolation downgrade and no-op version write remain; current username/schema false-sharing is refuted because production username callers no longer acquire this map.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-db/src/shamir_db/execute/db_tx.rs:80](../../../../../crates/shamir-db/src/shamir_db/execute/db_tx.rs#L80); [crates/shamir-db/src/shamir_db/execute/admin_schema.rs:876](../../../../../crates/shamir-db/src/shamir_db/execute/admin_schema.rs#L876); [crates/shamir-db/src/shamir_db/execute/admin_users_roles.rs:137](../../../../../crates/shamir-db/src/shamir_db/execute/admin_users_roles.rs#L137).
+Isolation silently downgrades and no-op removal persists a version bump; current username-lock false sharing remains refuted.
 
-Grouping/duplicate: `correctness-tdd.md#12`. This row is not another independent defect.
+Evidence: [crates/shamir-db/src/shamir_db/execute/db_tx.rs:80](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/execute/db_tx.rs#L80); [crates/shamir-db/src/shamir_db/execute/admin_schema.rs:876](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/execute/admin_schema.rs#L876); [crates/shamir-db/src/shamir_db/execute/admin_users_roles.rs:137](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/execute/admin_users_roles.rs#L137).
+
+Grouping/duplicate: [correctness-tdd.md#12](correctness-tdd.md#review-12). This is not an additional independent defect.
 
 <a id="review-2-1"></a>
 
 ### Claim 2.1 — `execute_as` re-runs the full async ACL traversal per batch op — the inline dedup cache its sibling `tx_execute_as` established was never ported
 
-Status: `fixed`. Current risk: —.
+Status: `fixed`. Current risk: `—`.
 
-Authorized's TFxSet now deduplicates both facade execution paths. No repeated-target gate-count test was found; source is the fix proof.
+Prior-cycle decision: `fixed`.
 
-Evidence: [crates/shamir-db/src/shamir_db/execute/db_execute.rs:40](../../../../../crates/shamir-db/src/shamir_db/execute/db_execute.rs#L40); [crates/shamir-engine/src/query/batch/authorized.rs:104](../../../../../crates/shamir-engine/src/query/batch/authorized.rs#L104).
+Both entry points use Authorized's seen set; repeated-target gate-count regression remains absent.
 
-Grouping/duplicate: `concurrency-lockfree.md#1`. This row is not another independent defect.
+Evidence: [crates/shamir-engine/src/query/batch/authorized.rs:104](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-engine/src/query/batch/authorized.rs#L104); [crates/shamir-db/src/shamir_db/execute/db_execute.rs:40](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/execute/db_execute.rs#L40).
+
+Grouping/duplicate: [concurrency-lockfree.md#1](concurrency-lockfree.md#review-1). This is not an additional independent defect.
 
 <a id="review-2-2"></a>
 
@@ -177,11 +205,13 @@ Grouping/duplicate: `concurrency-lockfree.md#1`. This row is not another indepen
 
 Status: `confirmed-open`. Current risk: `medium`.
 
-Table namespace guard/mutation/catalogue windows remain unprotected by one common lock; index-cascade admission is not equivalent.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-db/src/shamir_db/execute/admin_table_index.rs:50](../../../../../crates/shamir-db/src/shamir_db/execute/admin_table_index.rs#L50); [crates/shamir-db/src/shamir_db/shamir_db/table_management.rs:314](../../../../../crates/shamir-db/src/shamir_db/shamir_db/table_management.rs#L314).
+No common namespace guard covers probes, config snapshot, store copies and catalogue changes; the index-only barrier is insufficient.
 
-Grouping/duplicate: `concurrency-lockfree.md#2`. This row is not another independent defect.
+Evidence: [crates/shamir-db/src/shamir_db/shamir_db/table_management.rs:217](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/shamir_db/table_management.rs#L217); [crates/shamir-engine/src/repo/repo_instance.rs:563](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-engine/src/repo/repo_instance.rs#L563).
+
+Grouping/duplicate: [concurrency-lockfree.md#2](concurrency-lockfree.md#review-2). This is not an additional independent defect.
 
 <a id="review-2-3"></a>
 
@@ -189,23 +219,27 @@ Grouping/duplicate: `concurrency-lockfree.md#2`. This row is not another indepen
 
 Status: `confirmed-open`. Current risk: `medium`.
 
-Drop/rename remain outside creation locks and can interleave registry/catalogue changes.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-db/src/shamir_db/execute/admin_db_repo.rs:77](../../../../../crates/shamir-db/src/shamir_db/execute/admin_db_repo.rs#L77); [crates/shamir-db/src/shamir_db/shamir_db/db_management.rs:159](../../../../../crates/shamir-db/src/shamir_db/shamir_db/db_management.rs#L159).
+Drop/rename bypass creation locks, permitting destination overwrite or late stale catalogue writes.
 
-Grouping/duplicate: `concurrency-lockfree.md#3`. This row is not another independent defect.
+Evidence: [crates/shamir-db/src/shamir_db/execute/admin_db_repo.rs:52](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/execute/admin_db_repo.rs#L52); [crates/shamir-db/src/shamir_db/shamir_db/db_management.rs:159](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/shamir_db/db_management.rs#L159).
+
+Grouping/duplicate: [concurrency-lockfree.md#3](concurrency-lockfree.md#review-3). This is not an additional independent defect.
 
 <a id="review-2-4"></a>
 
 ### Claim 2.4 — Per-request ACL metadata is re-read from storage on every authorization — no lock-free snapshot (pillar-5 `ArcSwap` fit)
 
-Status: `confirmed-open`. Current risk: `low`.
+Status: `not-applicable`. Current risk: `—`.
 
-Distinct authorization checks still read catalogues. Snapshot caching is optional architecture and requires coherent invalidation.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-db/src/shamir_db/shamir_db/access_control.rs:851](../../../../../crates/shamir-db/src/shamir_db/shamir_db/access_control.rs#L851).
+Fresh catalogue reads are permitted architecture; ArcSwap caching is optional and requires a coherent invalidation design.
 
-Grouping/duplicate: `concurrency-lockfree.md#4`. This row is not another independent defect.
+Evidence: [crates/shamir-db/src/shamir_db/shamir_db/access_control.rs:851](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/shamir_db/access_control.rs#L851).
+
+Grouping/duplicate: [concurrency-lockfree.md#4](concurrency-lockfree.md#review-4). This is not an additional independent defect.
 
 <a id="review-2-5"></a>
 
@@ -213,11 +247,13 @@ Grouping/duplicate: `concurrency-lockfree.md#4`. This row is not another indepen
 
 Status: `confirmed-open`. Current risk: `medium`.
 
-The under-lock missing-record defaults still permit recreation after a completed drop.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-db/src/shamir_db/shamir_db/access_control.rs:617](../../../../../crates/shamir-db/src/shamir_db/shamir_db/access_control.rs#L617); [crates/shamir-db/src/shamir_db/system_store.rs:713](../../../../../crates/shamir-db/src/shamir_db/system_store.rs#L713).
+After pre-lock authorization, a dropped group is reloaded as defaults and saved under the acquired lock.
 
-Grouping/duplicate: `concurrency-lockfree.md#5`. This row is not another independent defect.
+Evidence: [crates/shamir-db/src/shamir_db/shamir_db/access_control.rs:617](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/shamir_db/access_control.rs#L617); [crates/shamir-db/src/shamir_db/system_store.rs:713](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/system_store.rs#L713).
+
+Grouping/duplicate: [concurrency-lockfree.md#5](concurrency-lockfree.md#review-5). This is not an additional independent defect.
 
 <a id="review-2-6"></a>
 
@@ -225,11 +261,13 @@ Grouping/duplicate: `concurrency-lockfree.md#5`. This row is not another indepen
 
 Status: `confirmed-open`. Current risk: `low`.
 
-All-repository materialization/search remains; the suggested alternative filtered method is also a storage scan.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-db/src/shamir_db/system_store.rs:339](../../../../../crates/shamir-db/src/shamir_db/system_store.rs#L339).
+The helper loads every repository then searches; filtered substitution is still a scan, not constant lookup.
 
-Grouping/duplicate: `concurrency-lockfree.md#6`. This row is not another independent defect.
+Evidence: [crates/shamir-db/src/shamir_db/system_store.rs:339](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/system_store.rs#L339); [crates/shamir-db/src/shamir_db/system_store.rs:837](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/system_store.rs#L837).
+
+Grouping/duplicate: [concurrency-lockfree.md#6](concurrency-lockfree.md#review-6). This is not an additional independent defect.
 
 <a id="review-2-7"></a>
 
@@ -237,11 +275,13 @@ Grouping/duplicate: `concurrency-lockfree.md#6`. This row is not another indepen
 
 Status: `confirmed-open`. Current risk: `low`.
 
-No early atomic reservation exists. Default disabled posture remains, but server configuration can explicitly enable it.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-db/src/shamir_db/execute/admin_migration.rs:91](../../../../../crates/shamir-db/src/shamir_db/execute/admin_migration.rs#L91); [crates/shamir-server/src/server/server_launcher.rs:383](../../../../../crates/shamir-server/src/server/server_launcher.rs#L383).
+An enabled pair of starts can both pass the pre-await probe and insert distinct coordinators.
 
-Grouping/duplicate: `concurrency-lockfree.md#7`. This row is not another independent defect.
+Evidence: [crates/shamir-db/src/shamir_db/execute/admin_migration.rs:91](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/execute/admin_migration.rs#L91); [crates/shamir-db/src/shamir_db/execute/admin_migration.rs:195](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/execute/admin_migration.rs#L195).
+
+Grouping/duplicate: [concurrency-lockfree.md#7](concurrency-lockfree.md#review-7). This is not an additional independent defect.
 
 <a id="review-2-8"></a>
 
@@ -249,23 +289,27 @@ Grouping/duplicate: `concurrency-lockfree.md#7`. This row is not another indepen
 
 Status: `confirmed-open`. Current risk: `nit`.
 
-Name resolution still loads/searches all groups; Eq alone would not establish constant lookup.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-db/src/shamir_db/shamir_db/access_control.rs:777](../../../../../crates/shamir-db/src/shamir_db/shamir_db/access_control.rs#L777).
+Name resolution loads/searches all groups; its own documentation already explicitly states scanning.
 
-Grouping/duplicate: `concurrency-lockfree.md#8`. This row is not another independent defect.
+Evidence: [crates/shamir-db/src/shamir_db/shamir_db/access_control.rs:752](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/shamir_db/access_control.rs#L752); [crates/shamir-db/src/shamir_db/shamir_db/access_control.rs:777](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/shamir_db/access_control.rs#L777).
+
+Grouping/duplicate: [concurrency-lockfree.md#8](concurrency-lockfree.md#review-8). This is not an additional independent defect.
 
 <a id="review-3-1"></a>
 
 ### Claim 3.1 — Guest-controlled header values/method can inject arbitrary curl config directives (CRLF injection)
 
-Status: `unverified`. Current risk: `high` (provisional; not a confirmed defect).
+Status: `confirmed-open`. Current risk: `high`.
 
-Raw controls reach quoted config, but external curl parser/version behavior and arbitrary-directive consequences lack supplied proof.
+Prior-cycle decision: `unverified`.
 
-Evidence: [crates/shamir-db/src/shamir_db/curl_gateway.rs:83](../../../../../crates/shamir-db/src/shamir_db/curl_gateway.rs#L83); [crates/shamir-db/src/shamir_db/curl_gateway.rs:210](../../../../../crates/shamir-db/src/shamir_db/curl_gateway.rs#L210).
+Raw LF reaches configuration; inspected published parsers accept separate injected directives. Egress grants and compatible curl are prerequisites; installed-version execution remains unverified.
 
-Grouping/duplicate: `security-crypto.md#1`. This row is not another independent defect.
+Evidence: [crates/shamir-db/src/shamir_db/curl_gateway.rs:83](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/curl_gateway.rs#L83); [crates/shamir-db/src/shamir_db/curl_gateway.rs:210](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/curl_gateway.rs#L210).
+
+Grouping/duplicate: [security-crypto.md#1](security-crypto.md#review-1). This is not an additional independent defect.
 
 <a id="review-3-2"></a>
 
@@ -273,11 +317,13 @@ Grouping/duplicate: `security-crypto.md#1`. This row is not another independent 
 
 Status: `confirmed-open`. Current risk: `medium`.
 
-Attachment still lacks an actor/gate, unlike explicit Store-Read-gated dumps.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-db/src/shamir_db/execute/ambient_interner.rs:30](../../../../../crates/shamir-db/src/shamir_db/execute/ambient_interner.rs#L30); [crates/shamir-db/src/shamir_db/execute/admin_interner.rs:50](../../../../../crates/shamir-db/src/shamir_db/execute/admin_interner.rs#L50).
+Database Read plus a permitted empty batch can return denied-repository dictionary entries without Store Read.
 
-Grouping/duplicate: `security-crypto.md#2`. This row is not another independent defect.
+Evidence: [crates/shamir-db/src/shamir_db/execute/ambient_interner.rs:30](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/execute/ambient_interner.rs#L30); [crates/shamir-db/src/shamir_db/execute/admin_interner.rs:50](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/execute/admin_interner.rs#L50).
+
+Grouping/duplicate: [security-crypto.md#2](security-crypto.md#review-2). This is not an additional independent defect.
 
 <a id="review-3-3"></a>
 
@@ -285,11 +331,13 @@ Grouping/duplicate: `security-crypto.md#2`. This row is not another independent 
 
 Status: `confirmed-open`. Current risk: `medium`.
 
-Source compilation still lacks the singleton Execute check. Fixed manifest generation narrows the original arbitrary-build-script threat narrative.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-db/src/shamir_db/shamir_db/validator_management.rs:221](../../../../../crates/shamir-db/src/shamir_db/shamir_db/validator_management.rs#L221); [crates/shamir-wasm-host/src/compile.rs:55](../../../../../crates/shamir-wasm-host/src/compile.rs#L55).
+Source creation checks no WasmCompiler gate; ordinary-user direct wire reachability uses ForEach, not top-level admin dispatch.
 
-Grouping/duplicate: `security-crypto.md#3`. This row is not another independent defect.
+Evidence: [crates/shamir-db/src/shamir_db/shamir_db/validator_management.rs:221](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/shamir_db/validator_management.rs#L221); [crates/shamir-engine/src/query/batch/query_runner.rs:758](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-engine/src/query/batch/query_runner.rs#L758).
+
+Grouping/duplicate: [security-crypto.md#3](security-crypto.md#review-3). This is not an additional independent defect.
 
 <a id="review-3-4"></a>
 
@@ -297,11 +345,13 @@ Grouping/duplicate: `security-crypto.md#3`. This row is not another independent 
 
 Status: `confirmed-open`. Current risk: `low`.
 
-Unbounded response-file read remains for granted allowlisted egress.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-db/src/shamir_db/curl_gateway.rs:161](../../../../../crates/shamir-db/src/shamir_db/curl_gateway.rs#L161).
+Granted egress uses uncapped read_to_end; time limiting does not bound response bytes.
 
-Grouping/duplicate: `security-crypto.md#4`. This row is not another independent defect.
+Evidence: [crates/shamir-db/src/shamir_db/curl_gateway.rs:161](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/curl_gateway.rs#L161).
+
+Grouping/duplicate: [security-crypto.md#4](security-crypto.md#review-4). This is not an additional independent defect.
 
 <a id="review-3-5"></a>
 
@@ -309,23 +359,27 @@ Grouping/duplicate: `security-crypto.md#4`. This row is not another independent 
 
 Status: `confirmed-open`. Current risk: `low`.
 
-Unused direct declarations and absent-net documentation remain; universal runtime linking is not established.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-db/Cargo.toml:59](../../../../../crates/shamir-db/Cargo.toml#L59); [crates/shamir-db/Cargo.toml:64](../../../../../crates/shamir-db/Cargo.toml#L64); [crates/shamir-db/src/lib.rs:8](../../../../../crates/shamir-db/src/lib.rs#L8).
+Manifest declarations have no facade production consumers; runtime linkage/attack surface is not proved.
 
-Grouping/duplicate: `security-crypto.md#5`. This row is not another independent defect.
+Evidence: [crates/shamir-db/Cargo.toml:59](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/Cargo.toml#L59); [crates/shamir-db/Cargo.toml:64](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/Cargo.toml#L64).
+
+Grouping/duplicate: [security-crypto.md#5](security-crypto.md#review-5). This is not an additional independent defect.
 
 <a id="review-3-6"></a>
 
 ### Claim 3.6 — `ShamirDb::execute` (System-actor, ACL-bypassing) is public and undiscoverable-hidden
 
-Status: `confirmed-open`. Current risk: `low`.
+Status: `not-applicable`. Current risk: `—`.
 
-System wrappers remain discoverable; current server routes call actor-aware methods.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-db/src/shamir_db/execute/db_execute.rs:19](../../../../../crates/shamir-db/src/shamir_db/execute/db_execute.rs#L19); [crates/shamir-server/src/db_handler/handler.rs:580](../../../../../crates/shamir-server/src/db_handler/handler.rs#L580).
+Embedded privilege is deliberate and live server callers use execute_as; hiding is optional API guidance.
 
-Grouping/duplicate: `api-wire-protocol.md#3`. This row is not another independent defect.
+Evidence: [crates/shamir-db/src/shamir_db/execute/db_execute.rs:19](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/execute/db_execute.rs#L19); [docs/guide-docs/client-server-protocol-spec/SECURITY_MODEL.md:111](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/docs/guide-docs/client-server-protocol-spec/SECURITY_MODEL.md#L111).
+
+Grouping/duplicate: [api-wire-protocol.md#3](api-wire-protocol.md#review-3). This is not an additional independent defect.
 
 <a id="review-3-7"></a>
 
@@ -333,11 +387,13 @@ Grouping/duplicate: `api-wire-protocol.md#3`. This row is not another independen
 
 Status: `confirmed-open`. Current risk: `low`.
 
-Setter still replaces only the receiver's Arc.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-db/src/shamir_db/shamir_db/function_management.rs:604](../../../../../crates/shamir-db/src/shamir_db/shamir_db/function_management.rs#L604).
+Setter replaces only one handle's Arc; configure-before-use documentation limits the asserted revocation scenario.
 
-Grouping/duplicate: `security-crypto.md#7`. This row is not another independent defect.
+Evidence: [crates/shamir-db/src/shamir_db/shamir_db/function_management.rs:604](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/shamir_db/function_management.rs#L604).
+
+Grouping/duplicate: [security-crypto.md#7](security-crypto.md#review-7). This is not an additional independent defect.
 
 <a id="review-3-8"></a>
 
@@ -345,23 +401,27 @@ Grouping/duplicate: `security-crypto.md#7`. This row is not another independent 
 
 Status: `confirmed-open`. Current risk: `nit`.
 
-Write-only hash metadata remains; no present integrity enforcement depends on it.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-db/src/shamir_db/shamir_db/function_management.rs:187](../../../../../crates/shamir-db/src/shamir_db/shamir_db/function_management.rs#L187).
+FxHash remains write-only metadata, not a currently trusted admission control.
 
-Grouping/duplicate: `api-wire-protocol.md#10`. This row is not another independent defect.
+Evidence: [crates/shamir-db/src/shamir_db/shamir_db/function_management.rs:187](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/shamir_db/function_management.rs#L187); [Cargo.lock:3007](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/Cargo.lock#L3007).
+
+Grouping/duplicate: [api-wire-protocol.md#10](api-wire-protocol.md#review-10). This is not an additional independent defect.
 
 <a id="review-3-9"></a>
 
 ### Claim 3.9 — `SECURITY DEFINER` grants the guest the owner-actor raw DB gateway, including admin ops
 
-Status: `confirmed-open`. Current risk: `nit`.
+Status: `not-applicable`. Current risk: `—`.
 
-Gateway authority includes admin operations. Caller exploitation depends on guest behavior; chmod-open definer alone does not automatically expose an arbitrary-admin oracle.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-db/src/shamir_db/shamir_db/db_gateway.rs:285](../../../../../crates/shamir-db/src/shamir_db/shamir_db/db_gateway.rs#L285); [crates/shamir-db/src/shamir_db/shamir_db/access_control.rs:1007](../../../../../crates/shamir-db/src/shamir_db/shamir_db/access_control.rs#L1007).
+Owner-actor delegation is intentional; arbitrary-admin exposure requires guest logic that exposes those operations.
 
-Grouping/duplicate: `security-crypto.md#9`. This row is not another independent defect.
+Evidence: [crates/shamir-db/src/shamir_db/shamir_db/db_gateway.rs:285](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/shamir_db/db_gateway.rs#L285); [docs/guide-docs/guide/05-functions.md:284](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/docs/guide-docs/guide/05-functions.md#L284).
+
+Grouping/duplicate: [security-crypto.md#9](security-crypto.md#review-9). This is not an additional independent defect.
 
 <a id="review-4-1"></a>
 
@@ -369,23 +429,27 @@ Grouping/duplicate: `security-crypto.md#9`. This row is not another independent 
 
 Status: `partially-fixed`. Current risk: `medium`.
 
-Unindexed scans remain, but identical required checks are deduplicated and rejected rows use byte prefilters rather than universal full de-interning.
+Prior-cycle decision: `partially-fixed`.
 
-Evidence: [crates/shamir-db/src/shamir_db/system_store.rs:97](../../../../../crates/shamir-db/src/shamir_db/system_store.rs#L97); [crates/shamir-engine/src/query/batch/authorized.rs:104](../../../../../crates/shamir-engine/src/query/batch/authorized.rs#L104); [crates/shamir-engine/src/table/table.rs:318](../../../../../crates/shamir-engine/src/table/table.rs#L318).
+Dedup removes repeated required pairs; unindexed per-distinct-check scans and common-ancestor rereads remain.
 
-Grouping/duplicate: `performance-hotpath.md#1`. This row is not another independent defect.
+Evidence: [crates/shamir-db/src/shamir_db/system_store.rs:97](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/system_store.rs#L97); [crates/shamir-engine/src/query/batch/authorized.rs:104](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-engine/src/query/batch/authorized.rs#L104).
+
+Grouping/duplicate: [performance-hotpath.md#1](performance-hotpath.md#review-1). This is not an additional independent defect.
 
 <a id="review-4-2"></a>
 
 ### Claim 4.2 — `execute_as` re-authorizes every op in a batch without dedupe
 
-Status: `fixed`. Current risk: —.
+Status: `fixed`. Current risk: `—`.
 
-Shared Authorized seam now performs set-based deduplication.
+Prior-cycle decision: `fixed`.
 
-Evidence: [crates/shamir-engine/src/query/batch/authorized.rs:102](../../../../../crates/shamir-engine/src/query/batch/authorized.rs#L102); [crates/shamir-db/src/shamir_db/execute/db_execute.rs:40](../../../../../crates/shamir-db/src/shamir_db/execute/db_execute.rs#L40).
+Authorized skips repeated action/path pairs in both execution modes.
 
-Grouping/duplicate: `concurrency-lockfree.md#1`. This row is not another independent defect.
+Evidence: [crates/shamir-engine/src/query/batch/authorized.rs:102](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-engine/src/query/batch/authorized.rs#L102); [crates/shamir-db/src/shamir_db/execute/db_tx.rs:126](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/execute/db_tx.rs#L126).
+
+Grouping/duplicate: [concurrency-lockfree.md#1](concurrency-lockfree.md#review-1). This is not an additional independent defect.
 
 <a id="review-4-3"></a>
 
@@ -393,11 +457,13 @@ Grouping/duplicate: `concurrency-lockfree.md#1`. This row is not another indepen
 
 Status: `confirmed-open`. Current risk: `medium`.
 
-Authorization and effective_fn_actor still independently load the record for User calls; folder depth can add further reads.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-db/src/shamir_db/shamir_db/function_management.rs:720](../../../../../crates/shamir-db/src/shamir_db/shamir_db/function_management.rs#L720); [crates/shamir-db/src/shamir_db/shamir_db/access_control.rs:995](../../../../../crates/shamir-db/src/shamir_db/shamir_db/access_control.rs#L995).
+User authorization loads the function before effective_fn_actor independently reloads it; folder depth adds reads.
 
-Grouping/duplicate: `performance-hotpath.md#3`. This row is not another independent defect.
+Evidence: [crates/shamir-db/src/shamir_db/shamir_db/function_management.rs:720](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/shamir_db/function_management.rs#L720); [crates/shamir-db/src/shamir_db/shamir_db/access_control.rs:995](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/shamir_db/access_control.rs#L995).
+
+Grouping/duplicate: [performance-hotpath.md#3](performance-hotpath.md#review-3). This is not an additional independent defect.
 
 <a id="review-4-4"></a>
 
@@ -405,11 +471,13 @@ Grouping/duplicate: `performance-hotpath.md#3`. This row is not another independ
 
 Status: `confirmed-open`. Current risk: `medium`.
 
-False comments and per-live-entry catalogue scans remain; complexity, not latency, is established.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-db/src/shamir_db/shamir_db/function_management.rs:377](../../../../../crates/shamir-db/src/shamir_db/shamir_db/function_management.rs#L377); [crates/shamir-db/src/shamir_db/shamir_db/validator_management.rs:418](../../../../../crates/shamir-db/src/shamir_db/shamir_db/validator_management.rs#L418).
+Listing loops perform unindexed filtered reads per live entry; structure supports a product cost, not measured latency.
 
-Grouping/duplicate: `performance-hotpath.md#4`. This row is not another independent defect.
+Evidence: [crates/shamir-db/src/shamir_db/shamir_db/function_management.rs:377](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/shamir_db/function_management.rs#L377); [crates/shamir-db/src/shamir_db/shamir_db/validator_management.rs:418](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/shamir_db/validator_management.rs#L418).
+
+Grouping/duplicate: [performance-hotpath.md#4](performance-hotpath.md#review-4). This is not an additional independent defect.
 
 <a id="review-4-5"></a>
 
@@ -417,11 +485,13 @@ Grouping/duplicate: `performance-hotpath.md#4`. This row is not another independ
 
 Status: `confirmed-open`. Current risk: `medium`.
 
-Dictionary materialization/max remains. Request mappings-max is not a correct global epoch replacement.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-db/src/shamir_db/execute/admin_interner.rs:170](../../../../../crates/shamir-db/src/shamir_db/execute/admin_interner.rs#L170); [crates/shamir-types/src/core/interner/interner.rs:157](../../../../../crates/shamir-types/src/core/interner/interner.rs#L157).
+Touch materializes all entries for max; request-only maxima and allocation counters fail global publication/gap semantics.
 
-Grouping/duplicate: `performance-hotpath.md#5`. This row is not another independent defect.
+Evidence: [crates/shamir-db/src/shamir_db/execute/admin_interner.rs:170](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/execute/admin_interner.rs#L170); [crates/shamir-types/src/core/interner/interner.rs:522](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-types/src/core/interner/interner.rs#L522).
+
+Grouping/duplicate: [performance-hotpath.md#5](performance-hotpath.md#review-5). This is not an additional independent defect.
 
 <a id="review-4-6"></a>
 
@@ -429,11 +499,13 @@ Grouping/duplicate: `performance-hotpath.md#5`. This row is not another independ
 
 Status: `confirmed-open`. Current risk: `low`.
 
-Nested repo/table pairing remains.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-db/src/shamir_db/shamir_db/core.rs:230](../../../../../crates/shamir-db/src/shamir_db/shamir_db/core.rs#L230).
+Each repository filters the complete table list; startup product work remains.
 
-Grouping/duplicate: `performance-hotpath.md#6`. This row is not another independent defect.
+Evidence: [crates/shamir-db/src/shamir_db/shamir_db/core.rs:230](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/shamir_db/core.rs#L230).
+
+Grouping/duplicate: [performance-hotpath.md#6](performance-hotpath.md#review-6). This is not an additional independent defect.
 
 <a id="review-4-7"></a>
 
@@ -441,11 +513,13 @@ Grouping/duplicate: `performance-hotpath.md#6`. This row is not another independ
 
 Status: `confirmed-open`. Current risk: `low`.
 
-Per-sibling filtered catalogue scans remain: O(siblings × global table rows).
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-db/src/shamir_db/shamir_db/table_management.rs:265](../../../../../crates/shamir-db/src/shamir_db/shamir_db/table_management.rs#L265); [crates/shamir-db/src/shamir_db/execute/admin_table_index.rs:173](../../../../../crates/shamir-db/src/shamir_db/execute/admin_table_index.rs#L173).
+Each sibling invokes a filtered global tables-catalogue scan.
 
-Grouping/duplicate: `performance-hotpath.md#7`. This row is not another independent defect.
+Evidence: [crates/shamir-db/src/shamir_db/shamir_db/table_management.rs:265](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/shamir_db/table_management.rs#L265); [crates/shamir-db/src/shamir_db/execute/admin_table_index.rs:173](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/execute/admin_table_index.rs#L173).
+
+Grouping/duplicate: [performance-hotpath.md#7](performance-hotpath.md#review-7). This is not an additional independent defect.
 
 <a id="review-4-10"></a>
 
@@ -453,9 +527,11 @@ Grouping/duplicate: `performance-hotpath.md#7`. This row is not another independ
 
 Status: `confirmed-open`. Current risk: `medium`.
 
-Both guards still skip load Err/None and malformed schema shapes. They inspect referencing child/sibling rows, not parent rows. Merely propagating Err leaves the Ok(None)/malformed-schema omission paths.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-db/src/shamir_db/shamir_db/table_management.rs:269](../../../../../crates/shamir-db/src/shamir_db/shamir_db/table_management.rs#L269); [crates/shamir-db/src/shamir_db/shamir_db/table_management.rs:273](../../../../../crates/shamir-db/src/shamir_db/shamir_db/table_management.rs#L273); [crates/shamir-db/src/shamir_db/execute/admin_table_index.rs:177](../../../../../crates/shamir-db/src/shamir_db/execute/admin_table_index.rs#L177); [crates/shamir-db/src/shamir_db/execute/admin_table_index.rs:181](../../../../../crates/shamir-db/src/shamir_db/execute/admin_table_index.rs#L181).
+Both guards continue on Err/None and non-list schema, and malformed FK shapes simply fail to match. These are child/sibling rows, not parent rows. A failed child lookup permits destructive parent DDL despite a live reference. Corruption diagnostics can also be discarded inside SystemStore. Oracle: inject that sibling failure and prove parent registration/data remain unchanged.
+
+Evidence: [crates/shamir-db/src/shamir_db/shamir_db/table_management.rs:263](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/shamir_db/table_management.rs#L263); [crates/shamir-db/src/shamir_db/shamir_db/table_management.rs:273](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/shamir_db/table_management.rs#L273); [crates/shamir-db/src/shamir_db/execute/admin_table_index.rs:177](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/execute/admin_table_index.rs#L177); [crates/shamir-db/src/shamir_db/system_store.rs:888](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/system_store.rs#L888).
 
 <a id="review-4-8"></a>
 
@@ -463,11 +539,13 @@ Evidence: [crates/shamir-db/src/shamir_db/shamir_db/table_management.rs:269](../
 
 Status: `confirmed-open`. Current risk: `low`.
 
-Fresh Vec/filter and gateway Arc remain; material performance impact is unmeasured.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-db/src/shamir_db/shamir_db/core.rs:847](../../../../../crates/shamir-db/src/shamir_db/shamir_db/core.rs#L847); [crates/shamir-db/src/shamir_db/shamir_db/core.rs:851](../../../../../crates/shamir-db/src/shamir_db/shamir_db/core.rs#L851).
+Fresh Vec/filter/Arc construction remains; meaningful runtime impact is unmeasured.
 
-Grouping/duplicate: `performance-hotpath.md#8`. This row is not another independent defect.
+Evidence: [crates/shamir-db/src/shamir_db/shamir_db/core.rs:847](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/shamir_db/core.rs#L847); [crates/shamir-db/src/shamir_db/shamir_db/core.rs:851](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/shamir_db/core.rs#L851).
+
+Grouping/duplicate: [performance-hotpath.md#8](performance-hotpath.md#review-8). This is not an additional independent defect.
 
 <a id="review-4-9"></a>
 
@@ -475,11 +553,13 @@ Grouping/duplicate: `performance-hotpath.md#8`. This row is not another independ
 
 Status: `confirmed-open`. Current risk: `nit`.
 
-Non-evicting admin/schema lock entries remain; 'only unbounded-growth sites' is unsupported and current username-key production use is absent.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-db/src/shamir_db/shamir_db/core.rs:55](../../../../../crates/shamir-db/src/shamir_db/shamir_db/core.rs#L55); [crates/shamir-db/src/shamir_db/execute/admin_schema.rs:93](../../../../../crates/shamir-db/src/shamir_db/execute/admin_schema.rs#L93).
+Admin/schema locks retain entries by design; other registries grow too, and usernames no longer populate this map in production.
 
-Grouping/duplicate: `performance-hotpath.md#9`. This row is not another independent defect.
+Evidence: [crates/shamir-db/src/shamir_db/shamir_db/core.rs:55](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/shamir_db/core.rs#L55); [crates/shamir-db/src/shamir_db/execute/admin_users_roles.rs:137](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/execute/admin_users_roles.rs#L137).
+
+Grouping/duplicate: [performance-hotpath.md#9](performance-hotpath.md#review-9). This is not an additional independent defect.
 
 <a id="review-5-1"></a>
 
@@ -487,11 +567,13 @@ Grouping/duplicate: `performance-hotpath.md#9`. This row is not another independ
 
 Status: `confirmed-open`. Current risk: `high`.
 
-The facade still erases persisted/live bindings and may replace a catalogue-only identity.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-db/src/shamir_db/shamir_db/validator_management.rs:249](../../../../../crates/shamir-db/src/shamir_db/shamir_db/validator_management.rs#L249); [crates/shamir-db/src/shamir_db/shamir_db/validator_management.rs:305](../../../../../crates/shamir-db/src/shamir_db/shamir_db/validator_management.rs#L305).
+Empty persisted bindings plus remove/re-register erase both reverse binding stores while table-side references survive.
 
-Grouping/duplicate: `api-wire-protocol.md#1`. This row is not another independent defect.
+Evidence: [crates/shamir-db/src/shamir_db/shamir_db/validator_management.rs:284](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/shamir_db/validator_management.rs#L284); [crates/shamir-db/src/shamir_db/shamir_db/validator_management.rs:305](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/shamir_db/validator_management.rs#L305).
+
+Grouping/duplicate: [api-wire-protocol.md#1](api-wire-protocol.md#review-1). This is not an additional independent defect.
 
 <a id="review-5-2"></a>
 
@@ -499,23 +581,27 @@ Grouping/duplicate: `api-wire-protocol.md#1`. This row is not another independen
 
 Status: `confirmed-open`. Current risk: `low`.
 
-Legacy exports remain; README already warns they are not the production protocol. API confusion is not demonstrated runtime High.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-db/src/lib.rs:26](../../../../../crates/shamir-db/src/lib.rs#L26); [crates/shamir-db/src/api/README.md:17](../../../../../crates/shamir-db/src/api/README.md#L17).
+Legacy DTO exports remain, with README warning and no active transport consumer.
 
-Grouping/duplicate: `api-wire-protocol.md#2`. This row is not another independent defect.
+Evidence: [crates/shamir-db/src/lib.rs:26](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/lib.rs#L26); [crates/shamir-db/src/api/README.md:17](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/api/README.md#L17).
+
+Grouping/duplicate: [api-wire-protocol.md#2](api-wire-protocol.md#review-2). This is not an additional independent defect.
 
 <a id="review-5-3"></a>
 
 ### Claim 5.3 — Convenience `execute` / `tx_begin` / `tx_execute` / `tx_commit` default to `Actor::System` (admin bypass)
 
-Status: `confirmed-open`. Current risk: `low`.
+Status: `not-applicable`. Current risk: `—`.
 
-Public System wrappers remain; inspected live server request paths use *_as.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-db/src/shamir_db/execute/db_execute.rs:19](../../../../../crates/shamir-db/src/shamir_db/execute/db_execute.rs#L19); [crates/shamir-db/src/shamir_db/execute/db_tx.rs:159](../../../../../crates/shamir-db/src/shamir_db/execute/db_tx.rs#L159).
+Documented embedded privileged behavior; actual server transaction methods preserve authenticated actors.
 
-Grouping/duplicate: `api-wire-protocol.md#3`. This row is not another independent defect.
+Evidence: [crates/shamir-db/src/shamir_db/execute/db_tx.rs:159](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/execute/db_tx.rs#L159); [crates/shamir-server/src/db_handler/tx_handlers.rs:247](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-server/src/db_handler/tx_handlers.rs#L247).
+
+Grouping/duplicate: [api-wire-protocol.md#3](api-wire-protocol.md#review-3). This is not an additional independent defect.
 
 <a id="review-5-4"></a>
 
@@ -523,23 +609,27 @@ Grouping/duplicate: `api-wire-protocol.md#3`. This row is not another independen
 
 Status: `confirmed-open`. Current risk: `low`.
 
-Typed manual construction and missing exception explanations remain; no actual malformed operation is established.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-db/src/shamir_db/shamir_db/db_gateway.rs:130](../../../../../crates/shamir-db/src/shamir_db/shamir_db/db_gateway.rs#L130); [crates/shamir-db/Cargo.toml:102](../../../../../crates/shamir-db/Cargo.toml#L102).
+Manual DTO construction lacks builder-exception rationale; no malformed operation is demonstrated.
 
-Grouping/duplicate: `api-wire-protocol.md#4`. This row is not another independent defect.
+Evidence: [crates/shamir-db/src/shamir_db/shamir_db/db_gateway.rs:130](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/shamir_db/db_gateway.rs#L130); [crates/shamir-db/Cargo.toml:102](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/Cargo.toml#L102).
+
+Grouping/duplicate: [api-wire-protocol.md#4](api-wire-protocol.md#review-4). This is not an additional independent defect.
 
 <a id="review-5-5"></a>
 
 ### Claim 5.5 — Wire error-`code` contract populated unevenly across handler families; `TransactionInfo::aborted` reason mixes stable codes with free text
 
-Status: `confirmed-open`. Current risk: `low`.
+Status: `not-applicable`. Current risk: `—`.
 
-Uneven metadata remains, but code is explicitly optional and reason explicitly human-readable; a closed vocabulary is a proposed contract.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-query-types/src/batch/batch_error.rs:36](../../../../../crates/shamir-query-types/src/batch/batch_error.rs#L36); [crates/shamir-query-types/src/batch/transaction_info.rs:14](../../../../../crates/shamir-query-types/src/batch/transaction_info.rs#L14).
+Current DTO documentation expressly permits these shapes; a closed vocabulary would be a new contract.
 
-Grouping/duplicate: `api-wire-protocol.md#5`. This row is not another independent defect.
+Evidence: [crates/shamir-query-types/src/batch/batch_error.rs:36](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-query-types/src/batch/batch_error.rs#L36); [crates/shamir-query-types/src/batch/transaction_info.rs:14](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-query-types/src/batch/transaction_info.rs#L14).
+
+Grouping/duplicate: [api-wire-protocol.md#5](api-wire-protocol.md#review-5). This is not an additional independent defect.
 
 <a id="review-5-6"></a>
 
@@ -547,11 +637,13 @@ Grouping/duplicate: `api-wire-protocol.md#5`. This row is not another independen
 
 Status: `confirmed-open`. Current risk: `medium`.
 
-Unknown values still silently select Snapshot.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-db/src/shamir_db/execute/db_tx.rs:80](../../../../../crates/shamir-db/src/shamir_db/execute/db_tx.rs#L80).
+Unknown strings succeed with Snapshot while the server reports the original requested string.
 
-Grouping/duplicate: `api-wire-protocol.md#6`. This row is not another independent defect.
+Evidence: [crates/shamir-db/src/shamir_db/execute/db_tx.rs:80](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/execute/db_tx.rs#L80); [crates/shamir-server/src/db_handler/tx_handlers.rs:64](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-server/src/db_handler/tx_handlers.rs#L64).
+
+Grouping/duplicate: [api-wire-protocol.md#6](api-wire-protocol.md#review-6). This is not an additional independent defect.
 
 <a id="review-5-7"></a>
 
@@ -559,11 +651,13 @@ Grouping/duplicate: `api-wire-protocol.md#6`. This row is not another independen
 
 Status: `confirmed-open`. Current risk: `low`.
 
-Error-to-Null helper remains; an actual currently failing DTO/event was not demonstrated.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-db/src/shamir_db/execute/helpers.rs:73](../../../../../crates/shamir-db/src/shamir_db/execute/helpers.rs#L73); [crates/shamir-db/src/shamir_db/execute/admin_retention.rs:206](../../../../../crates/shamir-db/src/shamir_db/execute/admin_retention.rs#L206).
+Generic error collapse is proven, but a currently failing event DTO and projection corruption were not shown.
 
-Grouping/duplicate: `api-wire-protocol.md#7`. This row is not another independent defect.
+Evidence: [crates/shamir-db/src/shamir_db/execute/helpers.rs:73](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/execute/helpers.rs#L73).
+
+Grouping/duplicate: [api-wire-protocol.md#7](api-wire-protocol.md#review-7). This is not an additional independent defect.
 
 <a id="review-5-8"></a>
 
@@ -571,11 +665,13 @@ Grouping/duplicate: `api-wire-protocol.md#7`. This row is not another independen
 
 Status: `confirmed-open`. Current risk: `low`.
 
-Unused declarations and nonexistent-module documentation remain.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-db/Cargo.toml:64](../../../../../crates/shamir-db/Cargo.toml#L64); [crates/shamir-db/src/lib.rs:8](../../../../../crates/shamir-db/src/lib.rs#L8).
+Unused TLS declarations and absent net documentation persist.
 
-Grouping/duplicate: `security-crypto.md#5`. This row is not another independent defect.
+Evidence: [crates/shamir-db/Cargo.toml:64](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/Cargo.toml#L64); [crates/shamir-db/src/lib.rs:8](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/lib.rs#L8).
+
+Grouping/duplicate: [security-crypto.md#5](security-crypto.md#review-5). This is not an additional independent defect.
 
 <a id="review-5-9"></a>
 
@@ -583,23 +679,27 @@ Grouping/duplicate: `security-crypto.md#5`. This row is not another independent 
 
 Status: `confirmed-open`. Current risk: `low`.
 
-Parse/table errors are still collapsed into Internal.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-db/src/shamir_db/shamir_db/core.rs:764](../../../../../crates/shamir-db/src/shamir_db/shamir_db/core.rs#L764); [crates/shamir-db/src/shamir_db/shamir_db/core.rs:772](../../../../../crates/shamir-db/src/shamir_db/shamir_db/core.rs#L772).
+Parse and table-resolution variants are both collapsed into Internal Strings.
 
-Grouping/duplicate: `error-handling-lifecycle.md#10`. This row is not another independent defect.
+Evidence: [crates/shamir-db/src/shamir_db/shamir_db/core.rs:764](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/shamir_db/core.rs#L764); [crates/shamir-db/src/shamir_db/shamir_db/core.rs:772](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/shamir_db/core.rs#L772).
+
+Grouping/duplicate: [error-handling-lifecycle.md#10](error-handling-lifecycle.md#review-10). This is not an additional independent defect.
 
 <a id="review-5-10"></a>
 
 ### Claim 5.10 — Catalogue `wasm_hash` and `version` fields are dead, and the hash is not integrity-grade
 
-Status: `confirmed-open`. Current risk: `low`.
+Status: `confirmed-open`. Current risk: `nit`.
 
-WASM hash metadata remains unverified and function version stays 1; validator version and universal-row claims are inaccurate.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-db/src/shamir_db/shamir_db/function_management.rs:205](../../../../../crates/shamir-db/src/shamir_db/shamir_db/function_management.rs#L205); [crates/shamir-db/src/shamir_db/shamir_db/validator_management.rs:267](../../../../../crates/shamir-db/src/shamir_db/shamir_db/validator_management.rs#L267).
+Only function version is written as 1; hashes remain metadata with no verified integrity consumer.
 
-Grouping/duplicate: `api-wire-protocol.md#10`. This row is not another independent defect.
+Evidence: [crates/shamir-db/src/shamir_db/shamir_db/function_management.rs:205](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/shamir_db/function_management.rs#L205); [crates/shamir-db/src/shamir_db/shamir_db/validator_management.rs:267](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/shamir_db/validator_management.rs#L267).
+
+Grouping/duplicate: [api-wire-protocol.md#10](api-wire-protocol.md#review-10). This is not an additional independent defect.
 
 <a id="review-5-11"></a>
 
@@ -607,11 +707,13 @@ Grouping/duplicate: `api-wire-protocol.md#10`. This row is not another independe
 
 Status: `confirmed-open`. Current risk: `high`.
 
-Warn-only persistence still yields a DbInstance and wire creation success.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-db/src/shamir_db/shamir_db/db_management.rs:58](../../../../../crates/shamir-db/src/shamir_db/shamir_db/db_management.rs#L58); [crates/shamir-db/src/shamir_db/execute/admin_db_repo.rs:70](../../../../../crates/shamir-db/src/shamir_db/execute/admin_db_repo.rs#L70).
+Warn-only save failure still returns DbInstance and created=true.
 
-Grouping/duplicate: `error-handling-lifecycle.md#1`. This row is not another independent defect.
+Evidence: [crates/shamir-db/src/shamir_db/shamir_db/db_management.rs:58](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/shamir_db/db_management.rs#L58); [crates/shamir-db/src/shamir_db/execute/admin_db_repo.rs:70](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/execute/admin_db_repo.rs#L70).
+
+Grouping/duplicate: [error-handling-lifecycle.md#1](error-handling-lifecycle.md#review-1). This is not an additional independent defect.
 
 <a id="review-5-12"></a>
 
@@ -619,11 +721,13 @@ Grouping/duplicate: `error-handling-lifecycle.md#1`. This row is not another ind
 
 Status: `confirmed-open`. Current risk: `nit`.
 
-All four listed sites remain. Gateway Debug output is unstructured but can include code text, contrary to the original assertion.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-db/src/shamir_db/execute/helpers.rs:61](../../../../../crates/shamir-db/src/shamir_db/execute/helpers.rs#L61); [crates/shamir-db/src/shamir_db/shamir_db/db_gateway.rs:88](../../../../../crates/shamir-db/src/shamir_db/shamir_db/db_gateway.rs#L88); [crates/shamir-db/src/main.rs:7](../../../../../crates/shamir-db/src/main.rs#L7); [crates/shamir-db/src/shamir_db/ports.rs:6](../../../../../crates/shamir-db/src/shamir_db/ports.rs#L6).
+Clock unwrap, Debug gateway error, codec demo and ports typo remain; Debug retains code text.
 
-Grouping/duplicate: `api-wire-protocol.md#12`. This row is not another independent defect.
+Evidence: [crates/shamir-db/src/shamir_db/execute/helpers.rs:61](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/execute/helpers.rs#L61); [crates/shamir-db/src/shamir_db/shamir_db/db_gateway.rs:88](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/shamir_db/db_gateway.rs#L88); [crates/shamir-db/src/main.rs:7](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/main.rs#L7); [crates/shamir-db/src/shamir_db/ports.rs:6](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/ports.rs#L6).
+
+Grouping/duplicate: [api-wire-protocol.md#12](api-wire-protocol.md#review-12). This is not an additional independent defect.
 
 <a id="review-6-1"></a>
 
@@ -631,11 +735,13 @@ Grouping/duplicate: `api-wire-protocol.md#12`. This row is not another independe
 
 Status: `confirmed-open`. Current risk: `high`.
 
-Save errors still do not prevent old-key removal or successful lifecycle responses.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-db/src/shamir_db/shamir_db/db_management.rs:184](../../../../../crates/shamir-db/src/shamir_db/shamir_db/db_management.rs#L184); [crates/shamir-db/src/shamir_db/shamir_db/table_management.rs:337](../../../../../crates/shamir-db/src/shamir_db/shamir_db/table_management.rs#L337).
+Failed save-new does not stop remove-old or successful lifecycle results; prerequisite failures can also follow live mutation.
 
-Grouping/duplicate: `error-handling-lifecycle.md#1`. This row is not another independent defect.
+Evidence: [crates/shamir-db/src/shamir_db/shamir_db/db_management.rs:184](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/shamir_db/db_management.rs#L184); [crates/shamir-db/src/shamir_db/shamir_db/table_management.rs:337](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/shamir_db/table_management.rs#L337).
+
+Grouping/duplicate: [error-handling-lifecycle.md#1](error-handling-lifecycle.md#review-1). This is not an additional independent defect.
 
 <a id="review-6-2"></a>
 
@@ -643,11 +749,13 @@ Grouping/duplicate: `error-handling-lifecycle.md#1`. This row is not another ind
 
 Status: `confirmed-open`. Current risk: `high`.
 
-All three remove-first orderings remain; folder atomicity prose is false.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-db/src/shamir_db/shamir_db/function_management.rs:337](../../../../../crates/shamir-db/src/shamir_db/shamir_db/function_management.rs#L337); [crates/shamir-db/src/shamir_db/shamir_db/function_management.rs:567](../../../../../crates/shamir-db/src/shamir_db/shamir_db/function_management.rs#L567); [crates/shamir-db/src/shamir_db/shamir_db/validator_management.rs:375](../../../../../crates/shamir-db/src/shamir_db/shamir_db/validator_management.rs#L375).
+All three old-row-first orderings remain; folder no-partial-state prose is contradicted by its two mutation loops.
 
-Grouping/duplicate: `error-handling-lifecycle.md#2`. This row is not another independent defect.
+Evidence: [crates/shamir-db/src/shamir_db/shamir_db/function_management.rs:567](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/shamir_db/function_management.rs#L567); [crates/shamir-db/src/shamir_db/shamir_db/validator_management.rs:375](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/shamir_db/validator_management.rs#L375).
+
+Grouping/duplicate: [error-handling-lifecycle.md#2](error-handling-lifecycle.md#review-2). This is not an additional independent defect.
 
 <a id="review-6-3"></a>
 
@@ -655,11 +763,13 @@ Grouping/duplicate: `error-handling-lifecycle.md#2`. This row is not another ind
 
 Status: `confirmed-open`. Current risk: `medium`.
 
-Lifecycle write-failure assertions remain missing, but existing system-table replacement tests refute the claimed absence of an injection seam.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-db/src/shamir_db/tests/access_meta_tests.rs:759](../../../../../crates/shamir-db/src/shamir_db/tests/access_meta_tests.rs#L759); [crates/shamir-db/Cargo.toml:93](../../../../../crates/shamir-db/Cargo.toml#L93).
+Read-fault injection exists; lifecycle write/history/WAL failure assertions and correct MVCC-routing injection remain absent.
 
-Grouping/duplicate: `error-handling-lifecycle.md#3`. This row is not another independent defect.
+Evidence: [crates/shamir-db/src/shamir_db/tests/access_meta_tests.rs:741](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/tests/access_meta_tests.rs#L741); [crates/shamir-engine/src/repo/repo_instance.rs:377](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-engine/src/repo/repo_instance.rs#L377).
+
+Grouping/duplicate: [error-handling-lifecycle.md#3](error-handling-lifecycle.md#review-3). This is not an additional independent defect.
 
 <a id="review-6-4"></a>
 
@@ -667,11 +777,13 @@ Grouping/duplicate: `error-handling-lifecycle.md#3`. This row is not another ind
 
 Status: `confirmed-open`. Current risk: `medium`.
 
-Missing-group default-and-save behavior remains in both methods.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-db/src/shamir_db/system_store.rs:713](../../../../../crates/shamir-db/src/shamir_db/system_store.rs#L713); [crates/shamir-db/src/shamir_db/system_store.rs:743](../../../../../crates/shamir-db/src/shamir_db/system_store.rs#L743).
+Both member methods save fabricated defaults when the record is absent.
 
-Grouping/duplicate: `correctness-tdd.md#2`. This row is not another independent defect.
+Evidence: [crates/shamir-db/src/shamir_db/system_store.rs:713](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/system_store.rs#L713); [crates/shamir-db/src/shamir_db/system_store.rs:743](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/system_store.rs#L743).
+
+Grouping/duplicate: [correctness-tdd.md#2](correctness-tdd.md#review-2). This is not an additional independent defect.
 
 <a id="review-6-5"></a>
 
@@ -679,11 +791,13 @@ Grouping/duplicate: `correctness-tdd.md#2`. This row is not another independent 
 
 Status: `confirmed-open`. Current risk: `medium`.
 
-Ignored Results remain. Surviving table rows alone do not resurrect deleted parents.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-db/src/shamir_db/execute/admin_db_repo.rs:130](../../../../../crates/shamir-db/src/shamir_db/execute/admin_db_repo.rs#L130); [crates/shamir-db/src/shamir_db/execute/admin_db_repo.rs:377](../../../../../crates/shamir-db/src/shamir_db/execute/admin_db_repo.rs#L377).
+Outer cleanup outcomes are discarded; some inner failures warn, and table rows alone cannot restore missing parents.
 
-Grouping/duplicate: `error-handling-lifecycle.md#5`. This row is not another independent defect.
+Evidence: [crates/shamir-db/src/shamir_db/execute/admin_db_repo.rs:130](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/execute/admin_db_repo.rs#L130); [crates/shamir-db/src/shamir_db/execute/admin_db_repo.rs:377](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/execute/admin_db_repo.rs#L377).
+
+Grouping/duplicate: [error-handling-lifecycle.md#5](error-handling-lifecycle.md#review-5). This is not an additional independent defect.
 
 <a id="review-6-6"></a>
 
@@ -691,11 +805,13 @@ Grouping/duplicate: `error-handling-lifecycle.md#5`. This row is not another ind
 
 Status: `confirmed-open`. Current risk: `low`.
 
-English-substring classification remains; current implementation text matches it, but the port contract does not guarantee that.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-db/src/shamir_db/execute/admin_users_roles.rs:148](../../../../../crates/shamir-db/src/shamir_db/execute/admin_users_roles.rs#L148); [crates/shamir-server/src/user_directory.rs:710](../../../../../crates/shamir-server/src/user_directory.rs#L710).
+The text classifier matches current directory wording but is not a guaranteed port-level taxonomy.
 
-Grouping/duplicate: `error-handling-lifecycle.md#6`. This row is not another independent defect.
+Evidence: [crates/shamir-db/src/shamir_db/execute/admin_users_roles.rs:148](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/execute/admin_users_roles.rs#L148); [crates/shamir-server/src/user_directory.rs:590](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-server/src/user_directory.rs#L590).
+
+Grouping/duplicate: [error-handling-lifecycle.md#6](error-handling-lifecycle.md#review-6). This is not an additional independent defect.
 
 <a id="review-6-7"></a>
 
@@ -703,11 +819,13 @@ Grouping/duplicate: `error-handling-lifecycle.md#6`. This row is not another ind
 
 Status: `confirmed-open`. Current risk: `low`.
 
-Soft attach failure and silent missing-parent handling remain distinct from hard recovery failure.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-db/src/shamir_db/shamir_db/core.rs:243](../../../../../crates/shamir-db/src/shamir_db/shamir_db/core.rs#L243); [crates/shamir-db/src/shamir_db/shamir_db/core.rs:263](../../../../../crates/shamir-db/src/shamir_db/shamir_db/core.rs#L263).
+Attach failures warn/continue, missing parents are silent, and user-repository replay failures abort boot.
 
-Grouping/duplicate: `error-handling-lifecycle.md#7`. This row is not another independent defect.
+Evidence: [crates/shamir-db/src/shamir_db/shamir_db/core.rs:243](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/shamir_db/core.rs#L243); [crates/shamir-db/src/shamir_db/shamir_db/core.rs:263](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/shamir_db/core.rs#L263).
+
+Grouping/duplicate: [error-handling-lifecycle.md#7](error-handling-lifecycle.md#review-7). This is not an additional independent defect.
 
 <a id="review-6-8"></a>
 
@@ -715,11 +833,13 @@ Grouping/duplicate: `error-handling-lifecycle.md#7`. This row is not another ind
 
 Status: `confirmed-open`. Current risk: `low`.
 
-Interner errors still continue silently despite promised soft BatchError. Later delta retry can recover; permanent stale state is not proven.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-db/src/shamir_db/execute/ambient_interner.rs:20](../../../../../crates/shamir-db/src/shamir_db/execute/ambient_interner.rs#L20); [crates/shamir-db/src/shamir_db/execute/ambient_interner.rs:40](../../../../../crates/shamir-db/src/shamir_db/execute/ambient_interner.rs#L40).
+Loading failures continue without the documented soft error; later retry can recover dictionary synchronization.
 
-Grouping/duplicate: `error-handling-lifecycle.md#8`. This row is not another independent defect.
+Evidence: [crates/shamir-db/src/shamir_db/execute/ambient_interner.rs:20](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/execute/ambient_interner.rs#L20); [crates/shamir-db/src/shamir_db/execute/ambient_interner.rs:40](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/execute/ambient_interner.rs#L40).
+
+Grouping/duplicate: [error-handling-lifecycle.md#8](error-handling-lifecycle.md#review-8). This is not an additional independent defect.
 
 <a id="review-6-9"></a>
 
@@ -727,11 +847,13 @@ Grouping/duplicate: `error-handling-lifecycle.md#8`. This row is not another ind
 
 Status: `confirmed-open`. Current risk: `low`.
 
-Pre-epoch clock unwrap remains; ordinary post-epoch regression is not sufficient.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-db/src/shamir_db/execute/helpers.rs:61](../../../../../crates/shamir-db/src/shamir_db/execute/helpers.rs#L61).
+The epoch-duration unwrap remains; post-epoch clock regression is insufficient to trigger it.
 
-Grouping/duplicate: `correctness-tdd.md#10`. This row is not another independent defect.
+Evidence: [crates/shamir-db/src/shamir_db/execute/helpers.rs:61](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/execute/helpers.rs#L61).
+
+Grouping/duplicate: [correctness-tdd.md#10](correctness-tdd.md#review-10). This is not an additional independent defect.
 
 <a id="review-6-10"></a>
 
@@ -739,23 +861,27 @@ Grouping/duplicate: `correctness-tdd.md#10`. This row is not another independent
 
 Status: `confirmed-open`. Current risk: `low`.
 
-Internal wrappers and Debug gateway Strings still erase typed identity. Debug can retain code text.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-db/src/shamir_db/system_store.rs:156](../../../../../crates/shamir-db/src/shamir_db/system_store.rs#L156); [crates/shamir-db/src/shamir_db/shamir_db/core.rs:772](../../../../../crates/shamir-db/src/shamir_db/shamir_db/core.rs#L772); [crates/shamir-db/src/shamir_db/shamir_db/db_gateway.rs:88](../../../../../crates/shamir-db/src/shamir_db/shamir_db/db_gateway.rs#L88).
+Internal wrappers lose variants and gateway Strings lose structure, although Debug can retain textual codes.
 
-Grouping/duplicate: `error-handling-lifecycle.md#10`. This row is not another independent defect.
+Evidence: [crates/shamir-db/src/shamir_db/system_store.rs:156](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/system_store.rs#L156); [crates/shamir-db/src/shamir_db/shamir_db/core.rs:772](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/shamir_db/core.rs#L772); [crates/shamir-db/src/shamir_db/shamir_db/db_gateway.rs:88](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/shamir_db/db_gateway.rs#L88).
+
+Grouping/duplicate: [error-handling-lifecycle.md#10](error-handling-lifecycle.md#review-10). This is not an additional independent defect.
 
 <a id="review-6-11"></a>
 
 ### Claim 6.11 — `resolve_in_group` silently converts group-lookup errors into `false` without a log
 
-Status: `confirmed-open`. Current risk: `low`.
+Status: `confirmed-open`. Current risk: `high`.
 
-Silent fallback remains; selecting Other is not universally a denial when Other mode bits are broader.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-db/src/shamir_db/shamir_db/access_control.rs:916](../../../../../crates/shamir-db/src/shamir_db/shamir_db/access_control.rs#L916); [crates/shamir-types/src/access.rs:682](../../../../../crates/shamir-types/src/access.rs#L682).
+A non-owner group member denied Read under mode 0704 gains Other Read when a group lookup error becomes false; logging alone is inadequate.
 
-Grouping/duplicate: `error-handling-lifecycle.md#11`. This row is not another independent defect.
+Evidence: [crates/shamir-db/src/shamir_db/shamir_db/access_control.rs:916](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/shamir_db/access_control.rs#L916); [crates/shamir-types/src/access.rs:682](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-types/src/access.rs#L682); [crates/shamir-types/src/access.rs:709](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-types/src/access.rs#L709).
+
+Grouping/duplicate: [error-handling-lifecycle.md#11](error-handling-lifecycle.md#review-11). This is not an additional independent defect.
 
 <a id="review-6-12"></a>
 
@@ -763,11 +889,13 @@ Grouping/duplicate: `error-handling-lifecycle.md#11`. This row is not another in
 
 Status: `confirmed-open`. Current risk: `nit`.
 
-Guarded safe unwraps and empty-header fallback remain; only the latter loses a current error signal.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-db/src/shamir_db/execute/admin_table_index.rs:459](../../../../../crates/shamir-db/src/shamir_db/execute/admin_table_index.rs#L459); [crates/shamir-db/src/shamir_db/curl_gateway.rs:228](../../../../../crates/shamir-db/src/shamir_db/curl_gateway.rs#L228).
+Guards establish Some at unwrap sites; header-file read errors still become empty headers.
 
-Grouping/duplicate: `error-handling-lifecycle.md#12`. This row is not another independent defect.
+Evidence: [crates/shamir-db/src/shamir_db/execute/admin_table_index.rs:448](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/execute/admin_table_index.rs#L448); [crates/shamir-db/src/shamir_db/curl_gateway.rs:228](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/curl_gateway.rs#L228).
+
+Grouping/duplicate: [error-handling-lifecycle.md#12](error-handling-lifecycle.md#review-12). This is not an additional independent defect.
 
 <a id="review-7-1"></a>
 
@@ -775,23 +903,27 @@ Grouping/duplicate: `error-handling-lifecycle.md#12`. This row is not another in
 
 Status: `confirmed-open`. Current risk: `low`.
 
-Cited local imports remain; stylistic severity only.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-db/src/shamir_db/shamir_db/core.rs:759](../../../../../crates/shamir-db/src/shamir_db/shamir_db/core.rs#L759); [crates/shamir-db/src/shamir_db/execute/admin_replication.rs:498](../../../../../crates/shamir-db/src/shamir_db/execute/admin_replication.rs#L498).
+Ten cited production imports remain without a documented imports-at-top exception.
 
-Grouping/duplicate: `style-claude-md.md#1`. This row is not another independent defect.
+Evidence: [crates/shamir-db/src/shamir_db/shamir_db/core.rs:759](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/shamir_db/core.rs#L759); [crates/shamir-db/src/shamir_db/shamir_db/schema_management.rs:109](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/shamir_db/schema_management.rs#L109); [crates/shamir-db/src/shamir_db/execute/admin_replication.rs:498](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/execute/admin_replication.rs#L498).
+
+Grouping/duplicate: [style-claude-md.md#1](style-claude-md.md#review-1). This is not an additional independent defect.
 
 <a id="review-7-2"></a>
 
 ### Claim 7.2 — `shamir_db::shamir_db` module inception suppressed with an unannotated allow
 
-Status: `confirmed-open`. Current risk: `low`.
+Status: `confirmed-open`. Current risk: `nit`.
 
-Unexplained allow remains, but top-level reexports exist and flattening requires preserving public-path compatibility.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-db/src/shamir_db/mod.rs:7](../../../../../crates/shamir-db/src/shamir_db/mod.rs#L7); [crates/shamir-db/src/lib.rs:32](../../../../../crates/shamir-db/src/lib.rs#L32).
+Unexplained allow remains; top-level reexports exist and deep public paths need compatibility handling.
 
-Grouping/duplicate: `style-claude-md.md#2`. This row is not another independent defect.
+Evidence: [crates/shamir-db/src/shamir_db/mod.rs:7](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/mod.rs#L7); [crates/shamir-db/src/lib.rs:32](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/lib.rs#L32).
+
+Grouping/duplicate: [style-claude-md.md#2](style-claude-md.md#review-2). This is not an additional independent defect.
 
 <a id="review-7-3"></a>
 
@@ -799,11 +931,13 @@ Grouping/duplicate: `style-claude-md.md#2`. This row is not another independent 
 
 Status: `confirmed-open`. Current risk: `nit`.
 
-Constant remains in the module manifest.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-db/src/shamir_db/shamir_db/mod.rs:15](../../../../../crates/shamir-db/src/shamir_db/shamir_db/mod.rs#L15).
+SYSTEM_DB_NAME remains defined rather than reexported in mod.rs.
 
-Grouping/duplicate: `style-claude-md.md#3`. This row is not another independent defect.
+Evidence: [crates/shamir-db/src/shamir_db/shamir_db/mod.rs:15](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/shamir_db/mod.rs#L15).
+
+Grouping/duplicate: [style-claude-md.md#3](style-claude-md.md#review-3). This is not an additional independent defect.
 
 <a id="review-7-4"></a>
 
@@ -811,11 +945,13 @@ Grouping/duplicate: `style-claude-md.md#3`. This row is not another independent 
 
 Status: `confirmed-open`. Current risk: `nit`.
 
-File-wide attributes remain without local rationale; the legacy API README does document deprecated UserValue.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-db/src/main.rs:1](../../../../../crates/shamir-db/src/main.rs#L1); [crates/shamir-db/src/api/types.rs:1](../../../../../crates/shamir-db/src/api/types.rs#L1); [crates/shamir-db/src/api/README.md:11](../../../../../crates/shamir-db/src/api/README.md#L11).
+Attributes remain; external README already explains the legacy API's compatibility reason.
 
-Grouping/duplicate: `style-claude-md.md#4`. This row is not another independent defect.
+Evidence: [crates/shamir-db/src/main.rs:1](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/main.rs#L1); [crates/shamir-db/src/api/types.rs:1](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/api/types.rs#L1); [crates/shamir-db/src/api/README.md:11](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/api/README.md#L11).
+
+Grouping/duplicate: [style-claude-md.md#4](style-claude-md.md#review-4). This is not an additional independent defect.
 
 <a id="review-7-5"></a>
 
@@ -823,315 +959,466 @@ Grouping/duplicate: `style-claude-md.md#4`. This row is not another independent 
 
 Status: `confirmed-open`. Current risk: `nit`.
 
-Bare semicolon and duplicate comment remain without behavioral effect.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-db/src/shamir_db/curl_gateway.rs:132](../../../../../crates/shamir-db/src/shamir_db/curl_gateway.rs#L132).
+Bare semicolon and repeated comment remain behaviorally inert.
 
-Grouping/duplicate: `style-claude-md.md#5`. This row is not another independent defect.
+Evidence: [crates/shamir-db/src/shamir_db/curl_gateway.rs:132](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/curl_gateway.rs#L132).
+
+Grouping/duplicate: [style-claude-md.md#5](style-claude-md.md#review-5). This is not an additional independent defect.
 
 <a id="review-7-6"></a>
 
 ### Claim 7.6 — `tests/mod.rs` manifests use private `mod` instead of the documented `pub mod` form
 
-Status: `not-applicable`. Current risk: —.
+Status: `not-applicable`. Current risk: `—`.
 
-Visibility in an example is not a required test-discovery property; current private manifests are wired.
+Prior-cycle decision: `not-applicable`.
 
-Evidence: [crates/shamir-db/src/shamir_db/tests/mod.rs:1](../../../../../crates/shamir-db/src/shamir_db/tests/mod.rs#L1); [crates/shamir-db/src/shamir_db/mod.rs:1](../../../../../crates/shamir-db/src/shamir_db/mod.rs#L1).
+Private declarations are registered by parent cfg(test); visibility is not a discovery requirement.
 
-Grouping/duplicate: `style-claude-md.md#6`. This row is not another independent defect.
+Evidence: [crates/shamir-db/src/shamir_db/tests/mod.rs:1](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/tests/mod.rs#L1); [crates/shamir-db/src/shamir_db/mod.rs:1](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/mod.rs#L1).
+
+Grouping/duplicate: [style-claude-md.md#6](style-claude-md.md#review-6). This is not an additional independent defect.
 
 <a id="review-7-7"></a>
 
 ### Claim 7.7 — Inconsistent qualified vs imported spelling of `new_map`/`QueryValue` throughout the facade
 
-Status: `confirmed-open`. Current risk: `nit`.
+Status: `not-applicable`. Current risk: `—`.
 
-Mixed spelling remains as optional consistency polish, not a normative/runtime violation.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-db/src/shamir_db/system_store.rs:9](../../../../../crates/shamir-db/src/shamir_db/system_store.rs#L9); [crates/shamir-db/src/shamir_db/system_store.rs:148](../../../../../crates/shamir-db/src/shamir_db/system_store.rs#L148).
+Equivalent spellings violate no specified rule; normalization is optional preference.
 
-Grouping/duplicate: `style-claude-md.md#7`. This row is not another independent defect.
+Evidence: [crates/shamir-db/src/shamir_db/system_store.rs:9](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/system_store.rs#L9); [crates/shamir-db/src/shamir_db/system_store.rs:148](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/system_store.rs#L148).
+
+Grouping/duplicate: [style-claude-md.md#7](style-claude-md.md#review-7). This is not an additional independent defect.
 
 <a id="review-7-8"></a>
 
 ### Claim 7.8 — `schema_management` alone breaks the sibling export convention
 
-Status: `confirmed-open`. Current risk: `nit`.
+Status: `not-applicable`. Current risk: `—`.
 
-Crate-visible schema module and deep imports remain; organization only.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-db/src/shamir_db/shamir_db/mod.rs:8](../../../../../crates/shamir-db/src/shamir_db/shamir_db/mod.rs#L8).
+Crate-visible shared helpers and internal deep imports require no mandatory matching sibling visibility.
 
-Grouping/duplicate: `style-claude-md.md#8`. This row is not another independent defect.
+Evidence: [crates/shamir-db/src/shamir_db/shamir_db/mod.rs:8](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/shamir_db/mod.rs#L8).
+
+Grouping/duplicate: [style-claude-md.md#8](style-claude-md.md#review-8). This is not an additional independent defect.
 
 <a id="review-7-9"></a>
 
 ### Claim 7.9 — `ports.rs` carries four public exports in one file (borderline cohesion)
 
-Status: `not-applicable`. Current risk: —.
+Status: `not-applicable`. Current risk: `—`.
 
-Documented identity seam fits the expressly allowed closely coupled group exception.
+Prior-cycle decision: `not-applicable`.
 
-Evidence: [crates/shamir-db/src/shamir_db/ports.rs:1](../../../../../crates/shamir-db/src/shamir_db/ports.rs#L1).
+The documented shared identity/dependency-direction seam fits the closely coupled export exception.
 
-Grouping/duplicate: `style-claude-md.md#9`. This row is not another independent defect.
+Evidence: [crates/shamir-db/src/shamir_db/ports.rs:1](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/ports.rs#L1).
 
-## Current fix-plan state
+Grouping/duplicate: [style-claude-md.md#9](style-claude-md.md#review-9). This is not an additional independent defect.
 
-| Claim decisions | Open | Source-fixed | Partial | Refuted | Unverified | N/A |
+## Revalidated plan decisions
+
+| Plan decisions | Open | Source-fixed | Partial | Refuted | Unverified | N/A |
 |---:|---:|---:|---:|---:|---:|---:|
-| 20 | 17 | 0 | 2 | 0 | 1 | 0 |
+| 20 | 18 | 0 | 2 | 0 | 0 | 0 |
 
-A source-fixed item closes only its stated mechanism. Partial items retain the obligations named below; proposed fixes must obey the corrections and current contracts, not merely copy the historical recipe.
+Historical P0/P1/P2 numbering is an identifier, not a current release mandate. The reasons below include completion status, safety qualifications and discriminating acceptance requirements.
 
 <a id="plan-p0-1"></a>
 
 ### Plan P0.1 — P0.1
 
-Status: `confirmed-open`. Current risk: —.
+Status: `confirmed-open`.
 
-Wrong database argument, ignored database/repository cascade errors and absent cross-database regression remain. Fixing one loop does not close repository/index cascade error handling.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-db/src/shamir_db/execute/admin_db_repo.rs:133](../../../../../crates/shamir-db/src/shamir_db/execute/admin_db_repo.rs#L133); [crates/shamir-db/src/shamir_db/execute/admin_db_repo.rs:377](../../../../../crates/shamir-db/src/shamir_db/execute/admin_db_repo.rs#L377); [crates/shamir-db/src/shamir_db/execute/admin_table_index.rs:252](../../../../../crates/shamir-db/src/shamir_db/execute/admin_table_index.rs#L252).
+Wrong database targeting and discarded cleanup outcomes remain. Preserve supported cross-database DDL by using the actual target; rejecting all cross-database operations is a contract change. Cover repository/index cleanup and observe unchanged A data/bindings in the regression.
+
+Evidence: [crates/shamir-db/src/shamir_db/execute/admin_db_repo.rs:133](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/execute/admin_db_repo.rs#L133); [crates/shamir-db/src/shamir_db/execute/admin_db_repo.rs:377](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/execute/admin_db_repo.rs#L377); [crates/shamir-db/src/shamir_db/execute/admin_table_index.rs:252](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/execute/admin_table_index.rs#L252).
 
 <a id="plan-p0-2"></a>
 
 ### Plan P0.2 — P0.2
 
-Status: `unverified`. Current risk: —.
+Status: `confirmed-open`.
 
-Raw-control rejection and its tests are absent, but the claimed arbitrary-directive vulnerability needs pinned curl-parser proof. Validate that claim before retaining its exploit-specific P0 narrative.
+Prior-cycle decision: `unverified`.
 
-Evidence: [crates/shamir-db/src/shamir_db/curl_gateway.rs:210](../../../../../crates/shamir-db/src/shamir_db/curl_gateway.rs#L210); [crates/shamir-db/src/shamir_db/tests/curl_gateway_tests.rs:6](../../../../../crates/shamir-db/src/shamir_db/tests/curl_gateway_tests.rs#L6).
+Compatible published parser source now proves directive injection. Reject raw configuration controls before writing guest values; separately define valid HTTP header/method syntax. Test the production config-building seam, not merely a copied escape helper.
+
+Evidence: [crates/shamir-db/src/shamir_db/curl_gateway.rs:83](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/curl_gateway.rs#L83); [crates/shamir-db/src/shamir_db/curl_gateway.rs:210](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/curl_gateway.rs#L210); [crates/shamir-db/src/shamir_db/tests/curl_gateway_tests.rs:6](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/tests/curl_gateway_tests.rs#L6).
 
 <a id="plan-p0-3"></a>
 
 ### Plan P0.3 — P0.3
 
-Status: `confirmed-open`. Current risk: —.
+Status: `confirmed-open`.
 
-Warn-only catalogue failures and all three remove-first rename paths remain. Preserve old copies and return honest outcomes, accounting for committed/deferred WAL operations and multi-row atomicity.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-db/src/shamir_db/shamir_db/db_management.rs:184](../../../../../crates/shamir-db/src/shamir_db/shamir_db/db_management.rs#L184); [crates/shamir-db/src/shamir_db/shamir_db/function_management.rs:337](../../../../../crates/shamir-db/src/shamir_db/shamir_db/function_management.rs#L337); [crates/shamir-db/src/shamir_db/shamir_db/function_management.rs:567](../../../../../crates/shamir-db/src/shamir_db/shamir_db/function_management.rs#L567); [crates/shamir-db/src/shamir_db/shamir_db/validator_management.rs:375](../../../../../crates/shamir-db/src/shamir_db/shamir_db/validator_management.rs#L375).
+Warn-only writes and remove-first renames remain. Write-before-remove preserves a copy but does not establish atomic multi-row rename, rollback or ownership consistency. Return honest pre/post-WAL-commit outcomes and reconcile live registrations rather than claiming every Err aborted.
+
+Evidence: [crates/shamir-db/src/shamir_db/shamir_db/db_management.rs:184](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/shamir_db/db_management.rs#L184); [crates/shamir-db/src/shamir_db/shamir_db/function_management.rs:337](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/shamir_db/function_management.rs#L337); [crates/shamir-db/src/shamir_db/shamir_db/function_management.rs:567](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/shamir_db/function_management.rs#L567); [crates/shamir-engine/src/repo/repo_instance.rs:1153](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-engine/src/repo/repo_instance.rs#L1153).
 
 <a id="plan-p0-4"></a>
 
 ### Plan P0.4 — P0.4
 
-Status: `confirmed-open`. Current risk: —.
+Status: `confirmed-open`.
 
-replace_artifact, persisted/live binding preservation, catalogue identity fallback and a bound-replace/drop regression remain absent from this path. Native replacement is not a safe binding-preservation template.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-db/src/shamir_db/shamir_db/validator_management.rs:249](../../../../../crates/shamir-db/src/shamir_db/shamir_db/validator_management.rs#L249); [crates/shamir-db/src/shamir_db/shamir_db/validator_management.rs:305](../../../../../crates/shamir-db/src/shamir_db/shamir_db/validator_management.rs#L305); [crates/shamir-engine/src/validator/registry.rs:112](../../../../../crates/shamir-engine/src/validator/registry.rs#L112).
+Binding-preserving replacement is not used. Handle catalogue-only IDs, require successful live replacement or register/restore bookkeeping, preserve table-side bindings and existing metadata, and account for concurrent bind/drop. The native implementation is not a safe template.
+
+Evidence: [crates/shamir-db/src/shamir_db/shamir_db/validator_management.rs:95](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/shamir_db/validator_management.rs#L95); [crates/shamir-db/src/shamir_db/shamir_db/validator_management.rs:249](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/shamir_db/validator_management.rs#L249); [crates/shamir-engine/src/validator/registry.rs:112](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-engine/src/validator/registry.rs#L112).
 
 <a id="plan-p0-5"></a>
 
 ### Plan P0.5 — P0.5
 
-Status: `confirmed-open`. Current risk: —.
+Status: `confirmed-open`.
 
-Missing-row rejection under group locks and missing-group remove regression remain absent. A dispatcher precheck alone would leave completed-drop resurrection open.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-db/src/shamir_db/system_store.rs:743](../../../../../crates/shamir-db/src/shamir_db/system_store.rs#L743); [crates/shamir-db/src/shamir_db/shamir_db/access_control.rs:617](../../../../../crates/shamir-db/src/shamir_db/shamir_db/access_control.rs#L617); [crates/shamir-db/src/shamir_db/execute/admin_access.rs:454](../../../../../crates/shamir-db/src/shamir_db/execute/admin_access.rs#L454).
+Absent-row mutation remains. Reject under the same group lock after reloading, including rename; a dispatcher-only precheck leaves completed-drop resurrection. Keep removal of a nonmember from an existing group idempotent.
+
+Evidence: [crates/shamir-db/src/shamir_db/system_store.rs:743](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/system_store.rs#L743); [crates/shamir-db/src/shamir_db/shamir_db/access_control.rs:617](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/shamir_db/access_control.rs#L617); [crates/shamir-db/src/shamir_db/tests/admin_access_validation_tests.rs:570](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/tests/admin_access_validation_tests.rs#L570).
 
 <a id="plan-p1-6"></a>
 
 ### Plan P1.6 — P1.6
 
-Status: `partially-fixed`. Current risk: —.
+Status: `partially-fixed`.
 
-Both execution paths now deduplicate via Authorized. Catalogue scans and false O(1) comments remain. Keyed metadata reads do not automatically fix name-to-group-id resolution; the batch Database-Read check is outside the dedup set.
+Prior-cycle decision: `partially-fixed`.
 
-Evidence: [crates/shamir-engine/src/query/batch/authorized.rs:98](../../../../../crates/shamir-engine/src/query/batch/authorized.rs#L98); [crates/shamir-engine/src/query/batch/authorized.rs:102](../../../../../crates/shamir-engine/src/query/batch/authorized.rs#L102); [crates/shamir-db/src/shamir_db/system_store.rs:813](../../../../../crates/shamir-db/src/shamir_db/system_store.rs#L813); [crates/shamir-db/src/shamir_db/shamir_db/function_management.rs:377](../../../../../crates/shamir-db/src/shamir_db/shamir_db/function_management.rs#L377).
+Authorized dedup is complete. Scans and false O(1) comments remain. A keyed shortcut must preserve exact key derivation, interning and MVCC visibility; a metadata cache requires ownership/group invalidation. Group-name lookup remains a separate index problem.
+
+Evidence: [crates/shamir-engine/src/query/batch/authorized.rs:102](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-engine/src/query/batch/authorized.rs#L102); [crates/shamir-db/src/shamir_db/system_store.rs:813](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/system_store.rs#L813); [crates/shamir-engine/src/table/table_manager_streaming.rs:229](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-engine/src/table/table_manager_streaming.rs#L229).
 
 <a id="plan-p1-7"></a>
 
 ### Plan P1.7 — P1.7
 
-Status: `confirmed-open`. Current risk: —.
+Status: `confirmed-open`.
 
-Common table and database/repository namespace serialization remains absent. Cover source/destination and parent changes; an existing-table index barrier alone is insufficient.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-db/src/shamir_db/execute/admin_table_index.rs:50](../../../../../crates/shamir-db/src/shamir_db/execute/admin_table_index.rs#L50); [crates/shamir-db/src/shamir_db/execute/admin_db_repo.rs:77](../../../../../crates/shamir-db/src/shamir_db/execute/admin_db_repo.rs#L77); [crates/shamir-db/src/shamir_db/shamir_db/table_management.rs:217](../../../../../crates/shamir-db/src/shamir_db/shamir_db/table_management.rs#L217).
+Namespace-wide serialization remains absent. Cover both rename names and parent changes in a consistent order; existing-table admission alone cannot cover creation. Avoid reacquiring the nonreentrant creation mutex through a newly locked facade method.
+
+Evidence: [crates/shamir-db/src/shamir_db/execute/admin_db_repo.rs:52](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/execute/admin_db_repo.rs#L52); [crates/shamir-db/src/shamir_db/execute/admin_table_index.rs:50](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/execute/admin_table_index.rs#L50); [crates/shamir-db/src/shamir_db/shamir_db/table_management.rs:217](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/shamir_db/table_management.rs#L217).
 
 <a id="plan-p1-8"></a>
 
 ### Plan P1.8 — P1.8
 
-Status: `confirmed-open`. Current risk: —.
+Status: `confirmed-open`.
 
-Ambient Store-Read and validator WasmCompiler-Execute gates remain absent. System wrappers and legacy shim remain public. Current server routes already use *_as; shim/wrapper changes are lower-severity compatibility-sensitive hygiene.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-db/src/shamir_db/execute/ambient_interner.rs:22](../../../../../crates/shamir-db/src/shamir_db/execute/ambient_interner.rs#L22); [crates/shamir-db/src/shamir_db/shamir_db/validator_management.rs:221](../../../../../crates/shamir-db/src/shamir_db/shamir_db/validator_management.rs#L221); [crates/shamir-db/src/shamir_db/execute/db_execute.rs:14](../../../../../crates/shamir-db/src/shamir_db/execute/db_execute.rs#L14); [crates/shamir-db/src/lib.rs:26](../../../../../crates/shamir-db/src/lib.rs#L26).
+Ambient Store-Read and validator WasmCompiler-Execute gates remain missing. Thread the effective actor and fail closed on actual authorization errors. System wrappers are deliberate, and legacy API removal is compatibility-sensitive; those are not prerequisites for closing the two gates.
+
+Evidence: [crates/shamir-db/src/shamir_db/execute/ambient_interner.rs:22](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/execute/ambient_interner.rs#L22); [crates/shamir-db/src/shamir_db/shamir_db/validator_management.rs:221](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/shamir_db/validator_management.rs#L221); [docs/guide-docs/client-server-protocol-spec/SECURITY_MODEL.md:111](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/docs/guide-docs/client-server-protocol-spec/SECURITY_MODEL.md#L111).
 
 <a id="plan-p1-9"></a>
 
 ### Plan P1.9 — P1.9
 
-Status: `confirmed-open`. Current risk: —.
+Status: `confirmed-open`.
 
-Database/replication explicit durability omissions, false reopen comment, orphan diagnostics and builtin metadata fallthrough remain. Attach failures already warn. Reconcile WAL/history durability and define consistent builtin replacement semantics instead of treating continue alone as a full fix.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-db/src/shamir_db/system_store.rs:204](../../../../../crates/shamir-db/src/shamir_db/system_store.rs#L204); [crates/shamir-db/src/shamir_db/shamir_db/core.rs:243](../../../../../crates/shamir-db/src/shamir_db/shamir_db/core.rs#L243); [crates/shamir-db/src/shamir_db/shamir_db/core.rs:324](../../../../../crates/shamir-db/src/shamir_db/shamir_db/core.rs#L324); [crates/shamir-db/tests/rename_db_e2e.rs:312](../../../../../crates/shamir-db/tests/rename_db_e2e.rs#L312).
+Durability and startup diagnostics remain unresolved. Add system-repository recovery before catalogue reads and a real WAL/history durability barrier; data_store.flush alone is insufficient. Builtin continue does not fix the independent catalogue-driven effective actor.
+
+Evidence: [crates/shamir-db/src/shamir_db/system_store.rs:112](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/system_store.rs#L112); [crates/shamir-engine/src/tx/commit.rs:973](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-engine/src/tx/commit.rs#L973); [crates/shamir-db/src/shamir_db/shamir_db/core.rs:324](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/shamir_db/core.rs#L324); [crates/shamir-db/src/shamir_db/shamir_db/access_control.rs:995](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/shamir_db/access_control.rs#L995).
 
 <a id="plan-p1-10"></a>
 
 ### Plan P1.10 — P1.10
 
-Status: `confirmed-open`. Current risk: —.
+Status: `confirmed-open`.
 
-Per-sibling scans and silent guard omissions remain. Fail closed on load failures and malformed or unexpectedly missing live-sibling catalogue records; allowing every Ok(None) to continue does not close the complete corruption mechanism.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-db/src/shamir_db/shamir_db/table_management.rs:263](../../../../../crates/shamir-db/src/shamir_db/shamir_db/table_management.rs#L263); [crates/shamir-db/src/shamir_db/shamir_db/table_management.rs:273](../../../../../crates/shamir-db/src/shamir_db/shamir_db/table_management.rs#L273); [crates/shamir-db/src/shamir_db/execute/admin_table_index.rs:177](../../../../../crates/shamir-db/src/shamir_db/execute/admin_table_index.rs#L177).
+FK guards retain failed/missing/malformed-row skips. A one-pass rewrite must inspect corruption diagnostics, distinguish legitimate schema absence from malformed presence, and prevent concurrent namespace/schema changes from invalidating the proof before mutation.
+
+Evidence: [crates/shamir-db/src/shamir_db/shamir_db/table_management.rs:269](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/shamir_db/table_management.rs#L269); [crates/shamir-db/src/shamir_db/shamir_db/table_management.rs:273](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/shamir_db/table_management.rs#L273); [crates/shamir-db/src/shamir_db/execute/admin_table_index.rs:177](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/execute/admin_table_index.rs#L177).
 
 <a id="plan-p1-11"></a>
 
 ### Plan P1.11 — P1.11
 
-Status: `partially-fixed`. Current risk: —.
+Status: `partially-fixed`.
 
-The system-table replacement seam already exists and is used by registered ACL failure tests. Lifecycle write/rename, orphan boot and immediate durability assertions remain missing; reuse/extend the seam and discriminate pre- versus post-WAL-commit failure.
+Prior-cycle decision: `partially-fixed`.
 
-Evidence: [crates/shamir-db/src/shamir_db/tests/access_meta_tests.rs:759](../../../../../crates/shamir-db/src/shamir_db/tests/access_meta_tests.rs#L759); [crates/shamir-db/Cargo.toml:93](../../../../../crates/shamir-db/Cargo.toml#L93); [crates/shamir-db/src/shamir_db/tests/mod.rs:1](../../../../../crates/shamir-db/src/shamir_db/tests/mod.rs#L1); [crates/shamir-engine/src/tx/commit.rs:968](../../../../../crates/shamir-engine/src/tx/commit.rs#L968).
+A registered read-fault replacement seam already exists. It does not replace repository MVCC routing and forwards writes, so lifecycle tests need a production-relevant history/WAL fault extension. Assert outcomes, old/new rows and reopened state, not bare is_err or graceful reopen.
+
+Evidence: [crates/shamir-db/src/shamir_db/tests/access_meta_tests.rs:741](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/tests/access_meta_tests.rs#L741); [crates/shamir-engine/src/repo/repo_instance.rs:377](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-engine/src/repo/repo_instance.rs#L377); [crates/shamir-engine/src/tx/commit.rs:968](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-engine/src/tx/commit.rs#L968).
 
 <a id="plan-p1-12"></a>
 
 ### Plan P1.12 — P1.12
 
-Status: `confirmed-open`. Current risk: —.
+Status: `confirmed-open`.
 
-Isolation validation and fallible to_qv remain absent. Code normalization remains a design proposal: optional error codes and human-readable abort reason are the current documented DTO contract.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-db/src/shamir_db/execute/db_tx.rs:80](../../../../../crates/shamir-db/src/shamir_db/execute/db_tx.rs#L80); [crates/shamir-db/src/shamir_db/execute/helpers.rs:73](../../../../../crates/shamir-db/src/shamir_db/execute/helpers.rs#L73); [crates/shamir-query-types/src/batch/transaction_info.rs:14](../../../../../crates/shamir-query-types/src/batch/transaction_info.rs#L14).
+Isolation validation and fallible conversion are absent. Preserve valid snapshot/serializable behavior and add invalid-string rejection before BEGIN success. A closed error vocabulary is optional redesign, not restoration of the current optional-code/human-readable contract.
+
+Evidence: [crates/shamir-db/src/shamir_db/execute/db_tx.rs:80](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/execute/db_tx.rs#L80); [crates/shamir-db/src/shamir_db/execute/helpers.rs:73](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/execute/helpers.rs#L73); [crates/shamir-query-types/src/batch/transaction_info.rs:14](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-query-types/src/batch/transaction_info.rs#L14).
 
 <a id="plan-p1-13"></a>
 
 ### Plan P1.13 — P1.13
 
-Status: `confirmed-open`. Current risk: —.
+Status: `confirmed-open`.
 
-Port substring classification, Internal error wrapping, Debug gateway strings and clock unwrap remain. The interner expect has no current returned-Err mechanism; Debug code-loss wording must be corrected.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-db/src/shamir_db/execute/admin_users_roles.rs:148](../../../../../crates/shamir-db/src/shamir_db/execute/admin_users_roles.rs#L148); [crates/shamir-db/src/shamir_db/shamir_db/core.rs:764](../../../../../crates/shamir-db/src/shamir_db/shamir_db/core.rs#L764); [crates/shamir-db/src/shamir_db/shamir_db/db_gateway.rs:88](../../../../../crates/shamir-db/src/shamir_db/shamir_db/db_gateway.rs#L88); [crates/shamir-db/src/shamir_db/execute/helpers.rs:61](../../../../../crates/shamir-db/src/shamir_db/execute/helpers.rs#L61).
+Substring classification, Internal wrappers and pre-epoch unwrap remain. Preserve underlying resolution variants; Display alone may omit codes. Introducing shared Batch error types needs a dependency-direction proof. The interner returned-Err panic is not a current mechanism.
+
+Evidence: [crates/shamir-db/src/shamir_db/execute/admin_users_roles.rs:148](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/execute/admin_users_roles.rs#L148); [crates/shamir-db/src/shamir_db/shamir_db/core.rs:772](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/shamir_db/core.rs#L772); [crates/shamir-db/src/shamir_db/execute/helpers.rs:61](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/execute/helpers.rs#L61).
 
 <a id="plan-p1-14"></a>
 
 ### Plan P1.14 — P1.14
 
-Status: `confirmed-open`. Current risk: —.
+Status: `confirmed-open`.
 
-Function existed/IF EXISTS still ignore catalogue-only rows. Propagate catalogue-read errors rather than treating them as absence; avoid short-circuit logic that skips required cleanup.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-db/src/shamir_db/shamir_db/function_management.rs:284](../../../../../crates/shamir-db/src/shamir_db/shamir_db/function_management.rs#L284); [crates/shamir-db/src/shamir_db/execute/admin_function.rs:138](../../../../../crates/shamir-db/src/shamir_db/execute/admin_function.rs#L138).
+Catalogue-only function existence is ignored. Read catalogue state fallibly before mutation, combine existence without skipping cleanup, preserve builtin/live-only semantics and propagate read failures rather than calling them absence.
+
+Evidence: [crates/shamir-db/src/shamir_db/shamir_db/function_management.rs:284](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/shamir_db/function_management.rs#L284); [crates/shamir-db/src/shamir_db/execute/admin_function.rs:138](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/execute/admin_function.rs#L138).
 
 <a id="plan-p2-15"></a>
 
 ### Plan P2.15 — P2.15
 
-Status: `confirmed-open`. Current risk: —.
+Status: `confirmed-open`.
 
-No ACL snapshot/invalidation test or group-lookup error log exists. Snapshot caching is optional; the group fallback also requires correcting the claim that false always denies.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-db/src/shamir_db/shamir_db/access_control.rs:851](../../../../../crates/shamir-db/src/shamir_db/shamir_db/access_control.rs#L851); [crates/shamir-db/src/shamir_db/shamir_db/access_control.rs:916](../../../../../crates/shamir-db/src/shamir_db/shamir_db/access_control.rs#L916); [crates/shamir-types/src/access.rs:682](../../../../../crates/shamir-types/src/access.rs#L682).
+ACL snapshots are optional. The membership part requires more than warn logging: propagate genuine lookup failure and deny, since false can select broader Other rights. If caching is chosen, invalidate ownership, membership and create/drop/rename state coherently.
+
+Evidence: [crates/shamir-db/src/shamir_db/shamir_db/access_control.rs:916](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/shamir_db/access_control.rs#L916); [crates/shamir-types/src/access.rs:682](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-types/src/access.rs#L682).
 
 <a id="plan-p2-16"></a>
 
 ### Plan P2.16 — P2.16
 
-Status: `confirmed-open`. Current risk: —.
+Status: `confirmed-open`.
 
-Duplicate function load, nested boot pairing, fresh allowlist intersection and dictionary-wide touch epoch remain. Preserve global publication/gap semantics in any epoch optimization.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-db/src/shamir_db/shamir_db/access_control.rs:995](../../../../../crates/shamir-db/src/shamir_db/shamir_db/access_control.rs#L995); [crates/shamir-db/src/shamir_db/shamir_db/core.rs:230](../../../../../crates/shamir-db/src/shamir_db/shamir_db/core.rs#L230); [crates/shamir-db/src/shamir_db/shamir_db/core.rs:847](../../../../../crates/shamir-db/src/shamir_db/shamir_db/core.rs#L847); [crates/shamir-db/src/shamir_db/execute/admin_interner.rs:170](../../../../../crates/shamir-db/src/shamir_db/execute/admin_interner.rs#L170).
+The structural optimizations remain unimplemented. Preserve per-invocation authority and allowlist changes, table-before-recovery order, and distinct published-max versus contiguous-delta epoch semantics. No measured benefit is established.
+
+Evidence: [crates/shamir-db/src/shamir_db/shamir_db/access_control.rs:995](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/shamir_db/access_control.rs#L995); [crates/shamir-db/src/shamir_db/shamir_db/core.rs:230](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/shamir_db/core.rs#L230); [crates/shamir-db/src/shamir_db/shamir_db/core.rs:847](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/shamir_db/core.rs#L847); [crates/shamir-db/src/shamir_db/execute/admin_interner.rs:170](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/execute/admin_interner.rs#L170).
 
 <a id="plan-p2-17"></a>
 
 ### Plan P2.17 — P2.17
 
-Status: `confirmed-open`. Current risk: —.
+Status: `confirmed-open`.
 
-Response byte cap, globally shared allowlist updates, dead dependency/doc cleanup and explicit definer admin-breadth documentation remain absent. Definer privilege is deliberate; arbitrary-admin exposure requires guest behavior.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-db/src/shamir_db/curl_gateway.rs:161](../../../../../crates/shamir-db/src/shamir_db/curl_gateway.rs#L161); [crates/shamir-db/src/shamir_db/shamir_db/function_management.rs:604](../../../../../crates/shamir-db/src/shamir_db/shamir_db/function_management.rs#L604); [crates/shamir-db/Cargo.toml:64](../../../../../crates/shamir-db/Cargo.toml#L64); [crates/shamir-db/src/shamir_db/shamir_db/db_gateway.rs:285](../../../../../crates/shamir-db/src/shamir_db/shamir_db/db_gateway.rs#L285).
+Byte caps, shared-update semantics and dependency/docs cleanup remain. Do not rely solely on external curl max-filesize to bound host reads across unknown versions. Define in-flight revocation semantics; a DML-only definer restriction would be incompatible capability tightening.
+
+Evidence: [crates/shamir-db/src/shamir_db/curl_gateway.rs:161](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/curl_gateway.rs#L161); [crates/shamir-db/src/shamir_db/shamir_db/function_management.rs:604](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/shamir_db/function_management.rs#L604); [crates/shamir-db/Cargo.toml:64](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/Cargo.toml#L64); [crates/shamir-db/src/shamir_db/shamir_db/db_gateway.rs:285](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/shamir_db/db_gateway.rs#L285).
 
 <a id="plan-p2-18"></a>
 
 ### Plan P2.18 — P2.18
 
-Status: `confirmed-open`. Current risk: —.
+Status: `confirmed-open`.
 
-Builder rationale, metadata contract, duplicate-safe/fallible create_db, strict FK DTO action parsing and migration reservation remain unresolved. Validator version is not written; no cache/hash consumer presently implements an integrity promise.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-db/Cargo.toml:102](../../../../../crates/shamir-db/Cargo.toml#L102); [crates/shamir-db/src/shamir_db/shamir_db/function_management.rs:205](../../../../../crates/shamir-db/src/shamir_db/shamir_db/function_management.rs#L205); [crates/shamir-db/src/shamir_db/shamir_db/db_management.rs:39](../../../../../crates/shamir-db/src/shamir_db/shamir_db/db_management.rs#L39); [crates/shamir-db/src/shamir_db/execute/admin_schema.rs:1343](../../../../../crates/shamir-db/src/shamir_db/execute/admin_schema.rs#L1343); [crates/shamir-db/src/shamir_db/execute/admin_migration.rs:91](../../../../../crates/shamir-db/src/shamir_db/execute/admin_migration.rs#L91).
+Typed construction rationale, metadata semantics, duplicate creation, strict FK DTO parsing and migration reservation remain. Acquire creation locks once, preserve absent-field legacy FK defaults, and key migration reservation by database/repository/table with cleanup on every terminal path.
+
+Evidence: [crates/shamir-db/src/shamir_db/shamir_db/db_management.rs:39](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/shamir_db/db_management.rs#L39); [crates/shamir-db/src/shamir_db/execute/admin_db_repo.rs:52](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/execute/admin_db_repo.rs#L52); [crates/shamir-db/src/shamir_db/execute/admin_schema.rs:1343](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/execute/admin_schema.rs#L1343); [crates/shamir-db/src/shamir_db/execute/admin_migration.rs:91](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/execute/admin_migration.rs#L91).
 
 <a id="plan-p2-19"></a>
 
 ### Plan P2.19 — P2.19
 
-Status: `confirmed-open`. Current risk: —.
+Status: `confirmed-open`.
 
-No-op schema writes, stale lock-map documentation, ambient/header error reporting, safe-unwrap polish, demo bin and typo remain. Current username/schema false-sharing is refuted, and guarded itype unwraps are safe today.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-db/src/shamir_db/execute/admin_schema.rs:876](../../../../../crates/shamir-db/src/shamir_db/execute/admin_schema.rs#L876); [crates/shamir-db/src/shamir_db/execute/admin_users_roles.rs:137](../../../../../crates/shamir-db/src/shamir_db/execute/admin_users_roles.rs#L137); [crates/shamir-db/src/shamir_db/execute/ambient_interner.rs:40](../../../../../crates/shamir-db/src/shamir_db/execute/ambient_interner.rs#L40); [crates/shamir-db/src/shamir_db/curl_gateway.rs:228](../../../../../crates/shamir-db/src/shamir_db/curl_gateway.rs#L228); [crates/shamir-db/src/main.rs:7](../../../../../crates/shamir-db/src/main.rs#L7).
+Ancillary logging and small hygiene remain. No-op version behavior is an API-policy choice; current username false sharing is refuted and guarded unwraps are safe. Keep successful mutation distinct from failed ancillary delta attachment.
+
+Evidence: [crates/shamir-db/src/shamir_db/execute/admin_schema.rs:876](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/execute/admin_schema.rs#L876); [crates/shamir-db/src/shamir_db/execute/admin_users_roles.rs:137](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/execute/admin_users_roles.rs#L137); [crates/shamir-db/src/shamir_db/execute/ambient_interner.rs:40](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/execute/ambient_interner.rs#L40); [crates/shamir-db/src/shamir_db/curl_gateway.rs:228](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/curl_gateway.rs#L228).
 
 <a id="plan-p2-20"></a>
 
 ### Plan P2.20 — P2.20
 
-Status: `confirmed-open`. Current risk: —.
+Status: `confirmed-open`.
 
-Actual style items remain. Manifest visibility and port cohesion require no fix; normalization/reexport changes are optional. Public module flattening is compatibility-sensitive, not merely mechanical. No commit is authorized by this revalidation.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-db/src/shamir_db/shamir_db/core.rs:759](../../../../../crates/shamir-db/src/shamir_db/shamir_db/core.rs#L759); [crates/shamir-db/src/shamir_db/mod.rs:7](../../../../../crates/shamir-db/src/shamir_db/mod.rs#L7); [crates/shamir-db/src/shamir_db/shamir_db/mod.rs:15](../../../../../crates/shamir-db/src/shamir_db/shamir_db/mod.rs#L15); [crates/shamir-db/src/shamir_db/tests/mod.rs:1](../../../../../crates/shamir-db/src/shamir_db/tests/mod.rs#L1); [crates/shamir-db/src/shamir_db/ports.rs:1](../../../../../crates/shamir-db/src/shamir_db/ports.rs#L1).
+Actual import/constant/allow/semicolon hygiene remains. Private test visibility, port cohesion, mixed spelling and schema visibility require no mandatory change. Public flattening must retain compatibility; no commit or edit was authorized.
 
-## Corrections and qualified non-findings
+Evidence: [crates/shamir-db/src/shamir_db/shamir_db/core.rs:759](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/shamir_db/core.rs#L759); [crates/shamir-db/src/shamir_db/shamir_db/mod.rs:15](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/shamir_db/mod.rs#L15); [crates/shamir-db/src/shamir_db/mod.rs:7](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/mod.rs#L7); [crates/shamir-db/src/shamir_db/tests/mod.rs:1](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/tests/mod.rs#L1).
 
-- All source findings and SUMMARY-only 4.10 are covered; duplicates retain independent rows. Historical lens/distinct severity totals are not current validated defect totals.
-- Source-proven ACL deduplication is fixed through Authorized, not an unimplemented cache task. Remaining scan costs scale with distinct checks and catalogue cardinalities.
-- The curl arbitrary-directive exploit lacks pinned external-parser proof; retain unchecked-control evidence separately from unverified proxy/file-write consequences.
-- The synthesis's FK row terminology is wrong: the guards inspect referencing child/sibling rows. Error-only propagation is insufficient for malformed/absent catalogue records.
-- Existing system-table fault injection refutes the absent-seam premise. Lifecycle error assertions remain missing; current commit/materialization semantics require fault timing discrimination.
-- Missing-parent boot and cascade scenarios must not imply table rows alone recreate deleted database/repository parents.
-- Native validator replacement also destroys binding bookkeeping; it is not a preservation model.
-- Current touch_ind always explicitly returns Ok; ordinary clock regression is not the pre-epoch panic condition. Namespace false-sharing lacks a current username consumer.
-- Optional BatchError codes, human-readable transaction reason, private test manifests and closely coupled identity ports must not be presented as violated stronger contracts.
-- Five benchmark targets and registered test trees remain source-confirmed. No tests were executed, no empirical performance results established, and no universal non-vacuous/deterministic test guarantee asserted.
-- Relevant history confirms adb0c8fd migrated both facade paths to Authorized; current TFxSet and AccessGate delegation, not the commit message, prove the fix. Server migration opt-in is already present despite stale facade documentation.
-- Reviewed pins include dashmap 6.1.0, scc 3.8.4, rustc-hash 2.1.2, fjall 3.1.6, argon2 0.5.3, rustls 0.23.37, tokio-rustls 0.26.4 and rcgen 0.13.2. These do not pin the external curl executable.
+## Additional observations
+
+| Observation decisions | Open | Source-fixed | Partial | Refuted | Unverified | N/A |
+|---:|---:|---:|---:|---:|---:|---:|
+| 6 | 6 | 0 | 0 | 0 | 0 | 0 |
+
+Existing observation IDs remain stable. New cycle-2 rows follow them; cross-module duplicates and extra triggers are grouped explicitly. None is an implemented fix.
+
+<a id="observation-new-1"></a>
+
+### Observation NEW.1 — SystemStore catalogue WAL is not replayed before boot reads
+
+Status: `confirmed-open`. Current risk: `high`.
+
+Additional observation in this independent cycle; it may overlap an existing root.
+
+SystemStore::init only calls DbInstance::add_repo, whose factory path constructs registrations without replay. ShamirDb immediately reads catalogue tables. A process crash after a catalogue commit reaches WAL but before history drain can therefore leave surviving committed metadata invisible at boot. Version-floor scanning reads WAL numbers, not values. Lazy drainer seeding may recover later after another operation starts it, too late for the already-built serving set. No crash/reopen experiment was run.
+
+Evidence: [crates/shamir-db/src/shamir_db/system_store.rs:112](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/system_store.rs#L112); [crates/shamir-db/src/shamir_db/shamir_db/core.rs:194](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/shamir_db/core.rs#L194); [crates/shamir-engine/src/db_instance/db_instance.rs:52](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-engine/src/db_instance/db_instance.rs#L52); [crates/shamir-engine/src/repo/repo_instance.rs:719](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-engine/src/repo/repo_instance.rs#L719); [crates/shamir-engine/src/tx/drainer.rs:1017](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-engine/src/tx/drainer.rs#L1017); [crates/shamir-engine/src/tx/recovery.rs:329](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-engine/src/tx/recovery.rs#L329).
+
+<a id="observation-new-2"></a>
+
+### Observation NEW.2 — Successful repository rename discards declarative schema catalogue fields
+
+Status: `confirmed-open`. Current risk: `high`.
+
+Additional observation in this independent cycle; it may overlap an existing root.
+
+rename_repo_as loads the full child record but rewrites it through save_table, which constructs only names, enable_indexes and ResourceMeta. schema/schema_validator_id/schema_version are lost even when every write succeeds. Live info-store bindings travel with the repository; after cold reopen boot_compile_schemas skips the now-schema-less rows, leaving persisted schema bindings without their compiled validator. Applicable writes then fail closed. The registered rename test covers data/indexes, not schema plus cold reopen.
+
+Evidence: [crates/shamir-db/src/shamir_db/shamir_db/db_management.rs:563](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/shamir_db/db_management.rs#L563); [crates/shamir-db/src/shamir_db/shamir_db/db_management.rs:573](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/shamir_db/db_management.rs#L573); [crates/shamir-db/src/shamir_db/system_store.rs:365](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/system_store.rs#L365); [crates/shamir-db/src/shamir_db/shamir_db/schema_management.rs:660](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/shamir_db/schema_management.rs#L660); [crates/shamir-engine/src/table/table_manager_validators.rs:331](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-engine/src/table/table_manager_validators.rs#L331); [crates/shamir-db/tests/rename_repo_e2e.rs:51](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/tests/rename_repo_e2e.rs#L51).
+
+<a id="observation-new-3"></a>
+
+### Observation NEW.3 — Relaxed catalogue reads can turn corrupt metadata into default-open ACLs
+
+Status: `confirmed-open`. Current risk: `high`.
+
+Additional observation in this independent cycle; it may overlap an existing root.
+
+The normal unindexed metadata path enumerates opaque MVCC bodies. A malformed non-map body reaches RecordView rejection; read_streaming records corruption but returns a successful result without that row. SystemStore lookup discards corrupt_records and returns None, and resource_meta maps None to open metadata. With an already-live restricted database and healthy ancestor settings, its non-owner can consequently gain access. This requires malformed bytes admitted by the storage/log layer or catalogue mutation; it is not a claim that checksum-detected backend errors are swallowed or that a default client can manufacture corruption.
+
+Evidence: [crates/shamir-engine/src/table/table_manager_streaming.rs:229](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-engine/src/table/table_manager_streaming.rs#L229); [crates/shamir-engine/src/query/filter/eval_bytes.rs:546](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-engine/src/query/filter/eval_bytes.rs#L546); [crates/shamir-types/src/record_view/lens.rs:767](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-types/src/record_view/lens.rs#L767); [crates/shamir-engine/src/table/read_exec.rs:1635](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-engine/src/table/read_exec.rs#L1635); [crates/shamir-db/src/shamir_db/system_store.rs:819](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/system_store.rs#L819); [crates/shamir-db/src/shamir_db/shamir_db/access_control.rs:56](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/shamir_db/access_control.rs#L56).
+
+<a id="observation-new-4"></a>
+
+### Observation NEW.4 — Namespace Create permits replacement of another owner's private function
+
+Status: `confirmed-open`. Current risk: `high`.
+
+Additional observation in this independent cycle; it may overlap an existing root.
+
+create_function_with_opts_as checks FunctionNamespace Create but never existing-function Write/Manage before replace=true; it overwrites both artifact and ResourceMeta with the caller. A User with database visibility and namespace Create can use a one-element nontransactional ForEach body to bypass the server's top-level-only coarse admin gate and replace a known System/other-user-owned function. This establishes cross-owner artifact takeover; automatic secret extraction is not claimed. Preserve explicit replacement/ownership policy and require a target permission if private ownership is intended to protect replacement.
+
+Evidence: [crates/shamir-db/src/shamir_db/execute/admin_function.rs:38](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/execute/admin_function.rs#L38); [crates/shamir-db/src/shamir_db/shamir_db/function_management.rs:140](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/shamir_db/function_management.rs#L140); [crates/shamir-db/src/shamir_db/shamir_db/function_management.rs:245](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/shamir_db/function_management.rs#L245); [crates/shamir-server/src/db_handler/handler.rs:512](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-server/src/db_handler/handler.rs#L512); [crates/shamir-query-types/src/batch/batch_op.rs:577](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-query-types/src/batch/batch_op.rs#L577); [crates/shamir-engine/src/query/batch/query_runner.rs:758](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-engine/src/query/batch/query_runner.rs#L758); [crates/shamir-engine/src/query/batch/query_runner.rs:988](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-engine/src/query/batch/query_runner.rs#L988).
+
+<a id="observation-new-5"></a>
+
+### Observation NEW.5 — Host source compilation blocks the async caller directly
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+Additional observation in this independent cycle; it may overlap an existing root.
+
+Both async creation methods directly call synchronous compile_rust_source. Its implementation performs filesystem work, toolchain probes and child.wait_timeout on the caller thread, without a facade spawn_blocking boundary. A permitted source submission therefore blocks a Tokio worker; a current-thread embedder blocks its whole runtime. This contradicts the inspected async/offload rule, without claiming measured starvation duration or CPU usage.
+
+Evidence: [CLAUDE.md:338](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/CLAUDE.md#L338); [crates/shamir-db/src/shamir_db/shamir_db/function_management.rs:172](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/shamir_db/function_management.rs#L172); [crates/shamir-db/src/shamir_db/shamir_db/validator_management.rs:221](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/shamir_db/validator_management.rs#L221); [crates/shamir-wasm-host/src/compile.rs:454](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-wasm-host/src/compile.rs#L454); [crates/shamir-wasm-host/src/compile.rs:592](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-wasm-host/src/compile.rs#L592).
+
+Grouping/duplicate: [../shamir-wasm-host/concurrency-lockfree.md#2](../shamir-wasm-host/concurrency-lockfree.md#review-2). This is not an additional independent defect.
+
+<a id="observation-new-6"></a>
+
+### Observation NEW.6 — Repeated curl resolve lines discard earlier validated addresses
+
+Status: `confirmed-open`. Current risk: `low`.
+
+Additional observation in this independent cycle; it may overlap an existing root.
+
+build_resolve_lines emits one same-host/port entry per IP and claims curl tries all in order. Exact published curl 8.10.1 Curl_loadhostpairs deletes the previous cache entry for that pair before inserting the next. Only the last validated address remains, potentially losing a working fallback; it does not introduce an unvalidated destination. The current multi-IP unit test asserts this incorrect text oracle. A single comma-separated address-list entry matches the inspected parser. Installed curl behavior was not executed.
+
+Evidence: [crates/shamir-db/src/shamir_db/curl_gateway.rs:190](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/curl_gateway.rs#L190); [crates/shamir-db/src/shamir_db/curl_gateway.rs:197](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/curl_gateway.rs#L197); [crates/shamir-db/src/shamir_db/tests/curl_gateway_tests.rs:37](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/tests/curl_gateway_tests.rs#L37).
+
+## Evidence and recipe corrections
+
+- Current decision totals must be recomputed: several optional/design rows are not-applicable, curl is conditionally confirmed, and membership fallback is high under a concrete permission configuration.
+- flush_all iterates only the public dbs registry; it neither flushes nor recovers the private SystemStore repository.
+- Immediate catalogue durability is not repaired by copying existing data_store.flush calls after the MVCC overlay/history cutover.
+- Five explicit Harness entries do not mean exactly five discovered benchmark targets; the root-level allocator helper is auto-discoverable.
+- Normal top-level admin wire operations are superuser-gated. ForEach is not is_admin, and its body reaches the facade dispatcher, providing a concrete qualified ordinary-user route.
+- Write-before-remove prevents one absence window, not multi-row atomicity; persisted old rows remain active inputs to boot.
+- The existing ACL replacement seam is real but requires correct MVCC/history/WAL routing for lifecycle write-failure acceptance.
+- Do not retain blanket fail-closed ACL assurances: membership errors and discarded corruption diagnostics can select permissive outcomes.
+- No current dependency pin identifies the installed curl; the compatible-version parser witness and deployment verification are separate facts.
+
+## Module scope and limitations
+
+Coverage: 8 assigned documents, 143 current claim rows, 20 plan rows, 0 pre-existing observation rows; 6 added observation rows in this cycle. Counts are calculated from the accepted rows.
+
+Assigned documents: [correctness-tdd.md](correctness-tdd.md); [concurrency-lockfree.md](concurrency-lockfree.md); [security-crypto.md](security-crypto.md); [performance-hotpath.md](performance-hotpath.md); [api-wire-protocol.md](api-wire-protocol.md); [error-handling-lifecycle.md](error-handling-lifecycle.md); [style-claude-md.md](style-claude-md.md); [SUMMARY.md](SUMMARY.md).
+
+- All eight documents, including their complete historical sections, were inspected. No current NEW.N observation headings or TASK_GROUPS.md exist in the assigned directory.
+- Read-only inspection only: no files changed and no compiler, test, benchmark, reproduction, server, dependency operation or child agent ran.
+- HEAD matched the required revision; inspected source and Cargo.lock have no changes relative to the reports' stated source snapshot.
+- Runtime measurements, test success, exact resource-exhaustion thresholds and exact crash-loss intervals were not established.
+- The deployed curl executable remains unidentified. Published curl 8.10.1 and 8.14.1 parser source establishes a compatible-version injection witness, not execution on this machine.
+- This is bounded claim revalidation. New findings arise from the inspected guarantees and call chains, not an exhaustive workspace security audit.
+
+## Guarantee checks
+
+- **Repeated batch authorization requirements are deduplicated in both facade execution paths.** — `supported`. Both callers mint Authorized; its TFxSet skips repeated action/path pairs. The initial Database-Read check remains outside that set. History adb0c8fd shows removal of the old loop; current source proves the fix. Reference: crates/shamir-engine/src/query/batch/authorized.rs:98.
+- **Catalogue failures cannot produce an authorization grant.** — `diverges`. Explicit resource_meta Err is denied, but membership Err becomes Other-class access, and relaxed catalogue reads can discard corrupt rows before the facade treats their absence as open metadata. Reference: crates/shamir-db/src/shamir_db/shamir_db/access_control.rs:851.
+- **DDL catalogue mutations are immediately durable.** — `diverges`. Implicit commits append Buffered WAL and publish overlays. Flushing the vestigial data store neither drains history nor synchronizes the separate WAL. Published fjall 3.1.6 src/db.rs persist(SyncAll) concerns its own journal; its cached archive checksum matches Cargo.lock:1335. Reference: crates/shamir-db/src/shamir_db/system_store.rs:282.
+- **WAL recovery occurs before catalogue data determines the serving set.** — `diverges`. SystemStore::init attaches its repository but does not recover it before load_databases/load_repositories. User repositories have explicit recovery; WAL version-floor scanning is not replay. Reference: crates/shamir-db/src/shamir_db/system_store.rs:89.
+- **Replacing a validator preserves stable identity and table bindings.** — `diverges`. replace_artifact provides that operation, but both facade replacement implementations rebuild empty bound_in and remove the old registry entry. WASM replacement also lacks catalogue identity fallback. Reference: crates/shamir-engine/src/validator/registry.rs:104.
+- **Table/repository rename preserves catalogue metadata and rejects dangling foreign keys.** — `diverges`. FK discovery skips failed/malformed sibling records. Repository rename rebuilds child rows through save_table rather than preserving schema fields. Write-before-remove ordering alone does not establish atomicity. Reference: crates/shamir-db/src/shamir_db/shamir_db/table_management.rs:171.
+- **System convenience wrappers constitute a current authentication bypass.** — `diverges`. The documented embedded trust boundary deliberately permits privileged convenience APIs, and inspected server handlers use actor-aware calls. Misusing a wrapper in a future handler is a prospective integration risk, not an existing bypass. Reference: docs/guide-docs/client-server-protocol-spec/SECURITY_MODEL.md:111.
+- **All errors require a closed machine-readable code and abort reasons contain only codes.** — `diverges`. QueryError.code is explicitly optional; TransactionInfo.reason is explicitly human-readable. Normalization would introduce a new contract. Reference: crates/shamir-query-types/src/batch/batch_error.rs:36.
+- **Only WasmCompiler-Execute-authorized actors can trigger host source compilation.** — `diverges`. The function source path checks the singleton; the validator source path does not. Top-level wire admin requests are superuser-gated, but a nontransactional ForEach body reaches facade admin dispatch without that coarse recursive gate. Reference: crates/shamir-wasm-host/src/compile.rs:31.
+- **Curl configuration escaping prevents guest-controlled directives.** — `diverges`. Raw LF survives escaping. The [curl 8.14.1 parser](https://raw.githubusercontent.com/curl/curl/curl-8_14_1/src/tool_parsecfg.c) reads physical lines and accepts an unterminated quoted parameter; an injected following directive and comment suffix are parsed independently. Reference: crates/shamir-db/src/shamir_db/curl_gateway.rs:210.
+- **Every validated DNS address remains available to curl in order.** — `diverges`. Repeated same-host/port resolve entries replace earlier addresses in [curl 8.10.1 Curl_loadhostpairs](https://raw.githubusercontent.com/curl/curl/curl-8_10_1/lib/hostip.c). The final address remains validated, but the claimed multi-address fallback is absent. Reference: crates/shamir-db/src/shamir_db/curl_gateway.rs:190.
+- **The crate has exactly five benchmark targets and the allocator helper is not a target.** — `diverges`. There are five explicit Harness targets, but edition 2021 leaves autobenches enabled; benches/bench_allocator.rs is also discoverable. This follows the [Cargo target-discovery contract](https://doc.rust-lang.org/cargo/reference/cargo-targets.html#target-auto-discovery), without running Cargo. Reference: crates/shamir-db/Cargo.toml:108.
+- **Registered test organization establishes coverage of the reported lifecycle failures.** — `diverges`. The four unit trees and ddl_wire_e2e integration harness are registered. Default test.sh selects lib tests; integration targets require full selection. Registration and happy-path roundtrips do not establish the missing adverse-state oracles. Reference: crates/shamir-db/src/shamir_db/tests/mod.rs:1.
+- **Facade execution is universally lock-free.** — `diverges`. No direct forbidden synchronous lock type was found in facade production source, but exact dashmap 6.1.0 src/lib.rs stores RwLock-protected shards. Published archive checksum matches Cargo.lock:1099; concurrent-map use is not universal lock-free execution. Reference: crates/shamir-db/src/shamir_db/shamir_db/core.rs:51.
+- **The persisted WASM hash is an integrity control.** — `diverges`. The field is write-only metadata. Exact rustc-hash 2.1.2 identifies FxHasher as noncryptographic; its published archive checksum matches Cargo.lock:3010. Function version remains 1, while validator creation writes no version field. Reference: crates/shamir-db/src/shamir_db/shamir_db/function_management.rs:187.
+- **to_qv is a universally lossless conversion.** — `diverges`. Both encoding and decoding errors collapse to Null. Exact rmp-serde 1.3.1 decode.rs from_slice delegates to its deserializer; container dispatch can return decoding errors. Its published archive checksum matches Cargo.lock:2952. No presently failing event DTO was demonstrated. Reference: crates/shamir-db/src/shamir_db/execute/helpers.rs:67.
+
+## Reviewer's prior-cycle comparison
+
+These are the independent reviewer's comparisons before parent refinements; the accepted ledgers above govern final decisions and counts.
+
+- security-crypto.md#1, SUMMARY.md#3.1 and Plan P0.2 change from unverified to confirmed-open for compatible curl versions: published physical-line parsing and unterminated-quote handling provide the missing mechanism proof. Installed-version verification remains a limitation.
+- error-handling-lifecycle.md#11 and SUMMARY.md#6.11 remain open but increase from low to high: mode 0704 supplies a concrete deny-to-grant membership-error witness. The logging-only plan is insufficient.
+- api-wire-protocol.md#3/#5, security-crypto.md#6/#9, concurrency-lockfree.md#4 and their SUMMARY counterparts change from confirmed-open to not-applicable: privileged embedded APIs, optional error metadata, definer delegation and snapshot architecture are documented behavior or optional design choices.
+- style-claude-md.md#7/#8 and SUMMARY.md#7.7/#7.8 change from confirmed-open to not-applicable because no normative or behavioral violation supports the optional spelling/visibility preferences.
+- The prior assurance that bench_allocator.rs is not an additional benchmark target is contradicted by edition-2021 auto-discovery and the absence of autobenches=false.
+- The prior durability explanation overcredits flush_all: it excludes SystemStore. A successful graceful reopen with ignored operation results is not proof of immediate catalogue crash durability.
+- The original missing ACL dedup mechanism is genuinely fixed. Existing interner-error counter-evidence, private-test registration and cohesive-port support are pre-existing refutations/non-findings, not fixes.
+- All current rows were checked independently before producing these verdicts; historical green labels and first-cycle conclusions were not treated as proof.
 
 ## Current follow-up order
 
-1. Fix cross-database CASCADE targeting and propagate/represent all cascade failures.
-2. Preserve validator identity and durable/live bindings on replacement; add a registered bound-replace/drop regression.
-3. Repair catalogue mutation failure handling and remove-first renames with honest WAL-commit/materialization outcomes.
-4. Reject absent groups under mutation locks, including completed-drop resurrection and wire removal.
-5. Add ambient Store-Read and validator WasmCompiler-Execute authorization checks.
-6. Establish immediate catalogue durability across Buffered WAL/history materialization; add lifecycle failure and boot-diagnostic coverage using the existing injection seam.
-7. Serialize database/repository/table namespaces and fail closed in FK guards; reject unknown transaction isolation.
-8. Validate the curl parser/version claim, reject raw configuration controls, and bound response bytes.
-9. Keep the ACL dedup finding closed; address remaining catalogue scan/list/FK costs structurally before claiming latency improvements.
-10. Handle API metadata, logging and style cleanup separately from substantive correctness/security work; do not impose unsupported visibility/cohesion changes.
-
-## Coverage and limitations
-
-- All eight assigned Markdown files were read completely; all 71 lens findings, 72 SUMMARY entries and 20 Fix Plan items are represented. No TASK_GROUPS file exists in this module directory.
-- Read-only source, registration, contract, lockfile and history inspection only. No files changed; no builds, tests, benchmarks, external searches or reproductions executed.
-- Fixed denotes source-proven mechanism, not executed-test acceptance.
-- External curl executable/version and its configuration parser are not pinned or supplied in the repository; arbitrary-directive injection and its advertised exploitation consequences remain unverified.
-- Complexity and allocation conclusions are structural. Reported nanosecond costs, latency multipliers, OOM outcomes and exact crash-loss windows were not experimentally validated.
-- Broad guarantees about every test being non-vacuous or every concurrency regression being deterministic are not established by the relevant registered tests inspected.
-
-## Reviewed document inventory
-
-- [correctness-tdd.md](./correctness-tdd.md) — 12 claim decisions; 0 explicit plan items.
-- [concurrency-lockfree.md](./concurrency-lockfree.md) — 8 claim decisions; 0 explicit plan items.
-- [security-crypto.md](./security-crypto.md) — 9 claim decisions; 0 explicit plan items.
-- [performance-hotpath.md](./performance-hotpath.md) — 9 claim decisions; 0 explicit plan items.
-- [api-wire-protocol.md](./api-wire-protocol.md) — 12 claim decisions; 0 explicit plan items.
-- [error-handling-lifecycle.md](./error-handling-lifecycle.md) — 12 claim decisions; 0 explicit plan items.
-- [style-claude-md.md](./style-claude-md.md) — 9 claim decisions; 0 explicit plan items.
-- [SUMMARY.md](./SUMMARY.md) — 72 claim decisions; 20 explicit plan items.
+1. Correct cross-database CASCADE targeting and cross-owner artifact replacement authorization; include actual server recursion paths in acceptance.
+2. Repair conditional ACL fail-open paths: membership lookup errors and corrupt catalogue rows must not become broader permissions.
+3. Recover SystemStore WAL before boot reads and establish genuine catalogue WAL/history durability; preserve schema metadata through repository rename.
+4. Preserve validator identity/bindings and repair catalogue mutation/rename error outcomes with pre/post-commit-discriminating oracles.
+5. Reject absent groups under locks, serialize namespace mutations, fail closed in FK discovery and reject unknown isolation strings.
+6. Reject curl configuration controls, bound response bytes, correct multi-address pin construction, enforce validator compiler permission and offload synchronous compilation.
+7. Keep ACL dedup closed; address remaining structural scans with visibility-safe reads and evidence before performance claims. Separate optional API/style preferences from defects.
 
 ---
 

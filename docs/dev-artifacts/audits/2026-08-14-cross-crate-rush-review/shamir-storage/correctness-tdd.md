@@ -1,11 +1,13 @@
-<!-- revalidation:2026-10-08 source:92ad58266bf57ddea1fa3c8a47affba1a3a9a096 -->
-# shamir-storage — correctness-tdd revalidation
+<!-- revalidation:2026-10-08 cycle:independent-2 source:e3765c935fc71655ee1ec0160cf180607935d89b -->
+# shamir-storage — correctness-tdd independent revalidation (cycle 2)
 
-Source snapshot: `92ad58266bf57ddea1fa3c8a47affba1a3a9a096`. Revalidated 2026-10-08 by read-only XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run; no source fix is part of this update. Test registration/assertions are evidence of an oracle, not proof of a passing run.
+Frozen source snapshot: `e3765c935fc71655ee1ec0160cf180607935d89b`. Independently revalidated 2026-10-08 by a fresh XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run. Source-fixed means the specified mechanism was already removed at this snapshot; this cycle implements no source fix.
 
-This section is authoritative for current status. Original titles/IDs are retained for traceability; a refuted title is not a current assertion. The collapsed historical report below is superseded, including its counts, severity, scenarios and fix instructions. Plan IDs preserve historical numbering, not a current release mandate. [Workspace methodology and status definitions](../SUMMARY.md#status-definitions).
+This section is authoritative for current decisions. Existing IDs and allegation titles are retained for traceability; a refuted title is not a current assertion. Prior-cycle decisions were rechecked, not used as proof. The first cycle is available in repository history at this snapshot. The original historical body below remains preserved once and is superseded, including its counts, severities and recipes. [Workspace scope and status definitions](../SUMMARY.md#status-definitions).
 
-The principal cache and scan defects remain. Shared tests cover ordinary MemBuffer get_many behavior, but not its reader/writer race. Self-copy record doubling is refuted.
+Unrelated external edits began in dependency/toolchain/CI metadata during collection; additional Rust-source edits appeared afterward. They were left untouched. Evidence and decisions are tied to the frozen commit, not those later changes or an installed toolchain. “Current” below means current at that snapshot; no re-audit of the modified working tree is implied.
+
+Concrete stale-fill, cursor and flag witnesses remain. Several registered tests have narrower discriminating power than their names/comments imply; no green-test or completion-last inference is justified.
 
 ## Current claim decisions
 
@@ -13,7 +15,7 @@ The principal cache and scan defects remain. Shared tests cover ordinary MemBuff
 |---:|---:|---:|---:|---:|---:|---:|
 | 12 | 9 | 0 | 0 | 3 | 0 | 0 |
 
-These are decisions on report claims, including repeated roots, bundled observations and non-findings—not a unique-bug census. Closed/N/A rows have no current risk; unverified risk is provisional. Pure style and unmeasured optimization claims do not establish runtime impact.
+These are duplicate-inclusive report decisions, not a unique-bug census. Pure style or structural optimization does not establish a runtime incident; unverified impact remains provisional.
 
 <a id="review-1"></a>
 
@@ -21,9 +23,11 @@ These are decisions on report claims, including repeated roots, bundled observat
 
 Status: `confirmed-open`. Current risk: `high`.
 
-After awaiting inner.get_many, every returned Live/Tombstone is inserted without a dirty recheck. Cache-first subsequent reads can retain the stale result after a concurrent buffered write and its eventual drain.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-storage/src/storage_membuffer.rs:790](../../../../../crates/shamir-storage/src/storage_membuffer.rs#L790); [crates/shamir-storage/src/storage_membuffer.rs:1231](../../../../../crates/shamir-storage/src/storage_membuffer.rs#L1231); [crates/shamir-storage/src/storage_membuffer.rs:1246](../../../../../crates/shamir-storage/src/storage_membuffer.rs#L1246); [crates/shamir-storage/src/storage_membuffer.rs:1258](../../../../../crates/shamir-storage/src/storage_membuffer.rs#L1258).
+With K absent in inner, pause get_many after deciding None, acknowledge set(K,V), then complete the stale fill. Later wrapper get returns NotFound even after flush. No stale dirty_count assumption is required: get_many probes dirty directly before the writer.
+
+Evidence: [crates/shamir-storage/src/storage_membuffer.rs:1231](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-storage/src/storage_membuffer.rs#L1231); [crates/shamir-storage/src/storage_membuffer.rs:1258](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-storage/src/storage_membuffer.rs#L1258); [crates/shamir-storage/src/storage_membuffer.rs:790](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-storage/src/storage_membuffer.rs#L790).
 
 <a id="review-2"></a>
 
@@ -31,9 +35,11 @@ Evidence: [crates/shamir-storage/src/storage_membuffer.rs:790](../../../../../cr
 
 Status: `confirmed-open`. Current risk: `medium`.
 
-Cache republish remains unconditional; remove_if protects only dirty cleanup. The registered regression checks real_inner after flush, not buffered reads, so it cannot detect cache/inner disagreement.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-storage/src/storage_membuffer.rs:1048](../../../../../crates/shamir-storage/src/storage_membuffer.rs#L1048); [crates/shamir-storage/src/storage_membuffer.rs:1060](../../../../../crates/shamir-storage/src/storage_membuffer.rs#L1060); [crates/shamir-storage/src/storage_membuffer.rs:1071](../../../../../crates/shamir-storage/src/storage_membuffer.rs#L1071); [crates/shamir-storage/src/tests/storage_membuffer_tests.rs:799](../../../../../crates/shamir-storage/src/tests/storage_membuffer_tests.rs#L799); [crates/shamir-storage/src/tests/storage_membuffer_tests.rs:832](../../../../../crates/shamir-storage/src/tests/storage_membuffer_tests.rs#L832).
+A differing writer injected during inner transact remains dirty, but transaction cache publication hides it. After drain, compare buffered.get and real_inner.get. Existing test asserts only the latter.
+
+Evidence: [crates/shamir-storage/src/storage_membuffer.rs:1048](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-storage/src/storage_membuffer.rs#L1048); [crates/shamir-storage/src/storage_membuffer.rs:1060](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-storage/src/storage_membuffer.rs#L1060); [crates/shamir-storage/src/tests/storage_membuffer_tests.rs:832](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-storage/src/tests/storage_membuffer_tests.rs#L832).
 
 <a id="review-3"></a>
 
@@ -41,9 +47,11 @@ Evidence: [crates/shamir-storage/src/storage_membuffer.rs:1048](../../../../../c
 
 Status: `confirmed-open`. Current risk: `medium`.
 
-An inclusive range is followed by an unconditional first-item skip. Removing the previous cursor between pulls makes that skip consume the unseen successor. Existing batching tests do not interleave cursor deletion.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-storage/src/storage_in_memory.rs:196](../../../../../crates/shamir-storage/src/storage_in_memory.rs#L196); [crates/shamir-storage/src/storage_in_memory.rs:201](../../../../../crates/shamir-storage/src/storage_in_memory.rs#L201); [crates/shamir-storage/src/storage_in_memory.rs:205](../../../../../crates/shamir-storage/src/storage_in_memory.rs#L205); [crates/shamir-storage/src/tests/storage_in_memory_tests.rs:235](../../../../../crates/shamir-storage/src/tests/storage_in_memory_tests.rs#L235).
+Seed A,B,C; pull A with size one; remove A; next pull skips B and returns C. Existing batching test has no between-pull mutation. Exact scc supports excluded-bound ranges.
+
+Evidence: [crates/shamir-storage/src/storage_in_memory.rs:196](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-storage/src/storage_in_memory.rs#L196); [crates/shamir-storage/src/storage_in_memory.rs:205](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-storage/src/storage_in_memory.rs#L205); [crates/shamir-storage/src/tests/storage_in_memory_tests.rs:235](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-storage/src/tests/storage_in_memory_tests.rs#L235).
 
 <a id="review-4"></a>
 
@@ -51,9 +59,11 @@ Evidence: [crates/shamir-storage/src/storage_in_memory.rs:196](../../../../../cr
 
 Status: `confirmed-open`. Current risk: `medium`.
 
-Both implementations return false on dirty/cache misses without consulting inner. remove_many explicitly promises an existed flag. Table::delete forwards remove's result, and the non-MVCC manager uses it to gate counter/index cleanup; shared-suite removal targets were previously populated through the wrapper.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-storage/src/storage_membuffer.rs:886](../../../../../crates/shamir-storage/src/storage_membuffer.rs#L886); [crates/shamir-storage/src/storage_membuffer.rs:1183](../../../../../crates/shamir-storage/src/storage_membuffer.rs#L1183); [crates/shamir-storage/src/types.rs:168](../../../../../crates/shamir-storage/src/types.rs#L168); [crates/shamir-storage/src/tests/types_tests.rs:97](../../../../../crates/shamir-storage/src/tests/types_tests.rs#L97); [crates/shamir-engine/src/table/table.rs:182](../../../../../crates/shamir-engine/src/table/table.rs#L182); [crates/shamir-engine/src/table/table_manager_crud.rs:472](../../../../../crates/shamir-engine/src/table/table_manager_crud.rs#L472).
+Seed raw inner before constructing wrapper; remove/remove_many returns false while flush removes the value. Shared targets are wrapper-populated. Manager pre-read normally warms the cache, so default-server bookkeeping loss is not established by this simple witness.
+
+Evidence: [crates/shamir-storage/src/storage_membuffer.rs:886](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-storage/src/storage_membuffer.rs#L886); [crates/shamir-storage/src/tests/types_tests.rs:97](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-storage/src/tests/types_tests.rs#L97); [crates/shamir-engine/src/table/table_manager_crud.rs:456](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-engine/src/table/table_manager_crud.rs#L456).
 
 <a id="review-5"></a>
 
@@ -61,9 +71,11 @@ Evidence: [crates/shamir-storage/src/storage_membuffer.rs:886](../../../../../cr
 
 Status: `confirmed-open`. Current risk: `low`.
 
-The helper still has only InMemory, MemBuffer, and feature-gated Fjall callers. CachedStore's registered dedicated tests do not invoke it.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-storage/src/tests/types_tests.rs:38](../../../../../crates/shamir-storage/src/tests/types_tests.rs#L38); [crates/shamir-storage/src/tests/storage_in_memory_tests.rs:77](../../../../../crates/shamir-storage/src/tests/storage_in_memory_tests.rs#L77); [crates/shamir-storage/src/tests/storage_membuffer_tests.rs:33](../../../../../crates/shamir-storage/src/tests/storage_membuffer_tests.rs#L33); [crates/shamir-storage/src/tests/storage_fjall_tests.rs:125](../../../../../crates/shamir-storage/src/tests/storage_fjall_tests.rs#L125); [crates/shamir-storage/src/tests/mod.rs:3](../../../../../crates/shamir-storage/src/tests/mod.rs#L3).
+Helper callers remain only InMemory, MemBuffer and gated Fjall. Neither Cached mode invokes it; Mirrored dedicated assertions are partial coverage, not absence of all batch testing.
+
+Evidence: [crates/shamir-storage/src/tests/types_tests.rs:38](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-storage/src/tests/types_tests.rs#L38); [crates/shamir-storage/src/tests/storage_membuffer_tests.rs:33](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-storage/src/tests/storage_membuffer_tests.rs#L33); [crates/shamir-storage/src/tests/storage_fjall_tests.rs:125](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-storage/src/tests/storage_fjall_tests.rs#L125).
 
 <a id="review-6"></a>
 
@@ -71,9 +83,11 @@ Evidence: [crates/shamir-storage/src/tests/types_tests.rs:38](../../../../../cra
 
 Status: `confirmed-open`. Current risk: `low`.
 
-Each store_get constructs a fresh OnceLock worker. insert/transact use that worker, while set/remove use spawn_blocking even within the same handle. The transact comment overstates ordering; thread lifecycle is already documented and joined on drop, so this is not a proven thread leak.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-storage/src/storage_fjall.rs:240](../../../../../crates/shamir-storage/src/storage_fjall.rs#L240); [crates/shamir-storage/src/storage_fjall.rs:312](../../../../../crates/shamir-storage/src/storage_fjall.rs#L312); [crates/shamir-storage/src/storage_fjall.rs:337](../../../../../crates/shamir-storage/src/storage_fjall.rs#L337); [crates/shamir-storage/src/storage_fjall.rs:494](../../../../../crates/shamir-storage/src/storage_fjall.rs#L494); [crates/shamir-storage/src/storage_fjall.rs:134](../../../../../crates/shamir-storage/src/storage_fjall.rs#L134).
+Each store_get constructs a new OnceLock; only insert/transact use it. Point writes are not universally ordered with transactions, and lazy worker teardown is explicitly joined rather than leaked.
+
+Evidence: [crates/shamir-storage/src/storage_fjall.rs:240](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-storage/src/storage_fjall.rs#L240); [crates/shamir-storage/src/storage_fjall.rs:312](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-storage/src/storage_fjall.rs#L312); [crates/shamir-storage/src/storage_fjall.rs:494](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-storage/src/storage_fjall.rs#L494).
 
 <a id="review-7"></a>
 
@@ -81,11 +95,13 @@ Evidence: [crates/shamir-storage/src/storage_fjall.rs:240](../../../../../crates
 
 Status: `confirmed-open`. Current risk: `low`.
 
-The non-atomic remove/reinsert path and ignored duplicate result remain. However, final-state ordering between overlapping calls is not determined by their completion order; the original later-finishing-writer argument is not a valid standalone oracle.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-storage/src/storage_in_memory.rs:120](../../../../../crates/shamir-storage/src/storage_in_memory.rs#L120); [crates/shamir-storage/src/storage_in_memory.rs:129](../../../../../crates/shamir-storage/src/storage_in_memory.rs#L129); [crates/shamir-storage/src/storage_in_memory.rs:130](../../../../../crates/shamir-storage/src/storage_in_memory.rs#L130).
+Remove/reinsert and ignored Duplicate remain, but an older overlapping write legally may linearize later. Retain the transient-absence facet; reject the later-completing-wins oracle.
 
-Grouping/duplicate: `concurrency-lockfree.md#3`. This row is not another independent defect.
+Evidence: [crates/shamir-storage/src/storage_in_memory.rs:129](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-storage/src/storage_in_memory.rs#L129); [crates/shamir-storage/src/storage_in_memory.rs:130](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-storage/src/storage_in_memory.rs#L130).
+
+Grouping/duplicate: [concurrency-lockfree.md#3](concurrency-lockfree.md#review-3). This is not an additional independent defect.
 
 <a id="review-8"></a>
 
@@ -93,19 +109,23 @@ Grouping/duplicate: `concurrency-lockfree.md#3`. This row is not another indepen
 
 Status: `confirmed-open`. Current risk: `nit`.
 
-insert increments size regardless of insert_sync success. reload clears the tree and resets/refills the counter independently of live writes. Fresh generated IDs do not exclude a concurrent lazy fill of the same newly inserted inner key.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-storage/src/storage_cached.rs:306](../../../../../crates/shamir-storage/src/storage_cached.rs#L306); [crates/shamir-storage/src/storage_cached.rs:311](../../../../../crates/shamir-storage/src/storage_cached.rs#L311); [crates/shamir-storage/src/storage_cached.rs:420](../../../../../crates/shamir-storage/src/storage_cached.rs#L420); [crates/shamir-storage/src/storage_cached.rs:423](../../../../../crates/shamir-storage/src/storage_cached.rs#L423); [crates/shamir-storage/src/storage_cached.rs:480](../../../../../crates/shamir-storage/src/storage_cached.rs#L480).
+Insert always increments despite possible racing lazy-fill Duplicate. Reload separately clears/resets/refills while mutations update size. Assert final actual tree cardinality against the counter under controlled publication races.
+
+Evidence: [crates/shamir-storage/src/storage_cached.rs:311](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-storage/src/storage_cached.rs#L311); [crates/shamir-storage/src/storage_cached.rs:423](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-storage/src/storage_cached.rs#L423); [crates/shamir-storage/src/storage_cached.rs:480](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-storage/src/storage_cached.rs#L480).
 
 <a id="review-9"></a>
 
 ### Claim 9 — Nit — Repo::copy_store default has no from == to self-copy guard
 
-Status: `refuted`. Current risk: —.
+Status: `refuted`. Current risk: `—`.
 
-The missing guard is real, but the alleged record doubling is false: copy_store calls set_many with the original keys, not insert/insert_many. Quiescent self-copy overwrites the same entries and generates no new keys.
+Prior-cycle decision: `refuted`.
 
-Evidence: [crates/shamir-storage/src/types.rs:488](../../../../../crates/shamir-storage/src/types.rs#L488); [crates/shamir-storage/src/types.rs:500](../../../../../crates/shamir-storage/src/types.rs#L500); [crates/shamir-storage/src/types.rs:160](../../../../../crates/shamir-storage/src/types.rs#L160); [crates/shamir-storage/src/storage_in_memory.rs:120](../../../../../crates/shamir-storage/src/storage_in_memory.rs#L120).
+copy_store calls set_many using original keys, never generated-key insert. Missing equality guard is real but the alleged doubling is contradicted by the implementation.
+
+Evidence: [crates/shamir-storage/src/types.rs:488](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-storage/src/types.rs#L488); [crates/shamir-storage/src/types.rs:500](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-storage/src/types.rs#L500).
 
 <a id="review-10"></a>
 
@@ -113,37 +133,42 @@ Evidence: [crates/shamir-storage/src/types.rs:488](../../../../../crates/shamir-
 
 Status: `confirmed-open`. Current risk: `nit`.
 
-The main ClearRaceHook documentation already explains the counter redesign, but the batch-hook and test narration still describe boolean clear/republish mechanisms. Listed function-local imports also remain.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-storage/src/membuffer_clear_race_hook.rs:1](../../../../../crates/shamir-storage/src/membuffer_clear_race_hook.rs#L1); [crates/shamir-storage/src/membuffer_clear_race_hook.rs:61](../../../../../crates/shamir-storage/src/membuffer_clear_race_hook.rs#L61); [crates/shamir-storage/src/tests/storage_membuffer_tests.rs:845](../../../../../crates/shamir-storage/src/tests/storage_membuffer_tests.rs#L845); [crates/shamir-storage/src/types.rs:489](../../../../../crates/shamir-storage/src/types.rs#L489).
+Main hook header acknowledges the redesign, but batch hook/test comments still describe boolean restoration; function-local imports also remain. The seams are registered, not orphaned.
+
+Evidence: [crates/shamir-storage/src/membuffer_clear_race_hook.rs:61](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-storage/src/membuffer_clear_race_hook.rs#L61); [crates/shamir-storage/src/tests/storage_membuffer_tests.rs:845](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-storage/src/tests/storage_membuffer_tests.rs#L845); [crates/shamir-storage/src/types.rs:489](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-storage/src/types.rs#L489).
 
 <a id="review-nf-get-many-coverage"></a>
 
 ### Claim NF-get_many-coverage — Summary assertion that MemBuffer get_many lacks coverage
 
-Status: `refuted`. Current risk: —.
+Status: `refuted`. Current risk: `—`.
 
-The registered buffered shared-suite test exercises get_many hits, misses, ordering, and empty input. The missing coverage is specifically concurrent stale cache-fill.
+Prior-cycle decision: `refuted`.
 
-Evidence: [crates/shamir-storage/src/tests/mod.rs:5](../../../../../crates/shamir-storage/src/tests/mod.rs#L5); [crates/shamir-storage/src/tests/storage_membuffer_tests.rs:28](../../../../../crates/shamir-storage/src/tests/storage_membuffer_tests.rs#L28); [crates/shamir-storage/src/tests/types_tests.rs:124](../../../../../crates/shamir-storage/src/tests/types_tests.rs#L124).
+The registered buffered shared-suite case asserts get_many hit/miss order and empty input after flush. It does not exercise concurrent stale fill, but positively refutes total absence.
+
+Evidence: [crates/shamir-storage/src/tests/storage_membuffer_tests.rs:28](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-storage/src/tests/storage_membuffer_tests.rs#L28); [crates/shamir-storage/src/tests/types_tests.rs:124](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-storage/src/tests/types_tests.rs#L124).
 
 <a id="review-nf-fjall-deleted-cursor"></a>
 
 ### Claim NF-fjall-deleted-cursor — Praised fjall deleted-cursor regression
 
-Status: `refuted`. Current risk: —.
+Status: `refuted`. Current risk: `—`.
 
-The test deletes k2 before creating/pulling the stream. Its first two live entries are k1 and k3, so k2 is never the emitted cursor. It does not detect deletion of a cursor between batch pulls.
+Prior-cycle decision: `refuted`.
 
-Evidence: [crates/shamir-storage/src/tests/storage_fjall_tests.rs:204](../../../../../crates/shamir-storage/src/tests/storage_fjall_tests.rs#L204); [crates/shamir-storage/src/tests/storage_fjall_tests.rs:220](../../../../../crates/shamir-storage/src/tests/storage_fjall_tests.rs#L220); [crates/shamir-storage/src/tests/storage_fjall_tests.rs:229](../../../../../crates/shamir-storage/src/tests/storage_fjall_tests.rs#L229).
+k2 is removed before stream creation. With size two the first cursor is k3, so no emitted cursor is deleted between pulls. Output correctness does not establish the named counterfactual.
 
-## Corrections and qualified non-findings
+Evidence: [crates/shamir-storage/src/tests/storage_fjall_tests.rs:220](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-storage/src/tests/storage_fjall_tests.rs#L220); [crates/shamir-storage/src/tests/storage_fjall_tests.rs:229](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-storage/src/tests/storage_fjall_tests.rs#L229).
 
-- Finding 3's quoted Excluded contract is specifically documented on scan_prefix_stream; the range implementation nevertheless demonstrably drops an unseen successor.
-- MemBuffer(Fjall) is the default buffered disk stack, not the hybrid data-store implementation. Hybrid data/history stores are plain in-memory.
-- Do not treat TableManager dispatch as unconditional same-key serialization: its write lock is conditional.
-- Porting the single-get dirty recheck narrows, but does not fully close, the async cache-insertion race.
-- Preserve the two facets of finding 8 and the two facets of finding 10 when deduplicating.
+## Evidence and recipe corrections
+
+- ConcurrentWriterInner::transact discards its original ops and only injects the writer. Removing guarded dirty cleanup would leave a miss, not the comment's transacted value; the asserted concurrent value still discriminates dirty-loss, not successful native transact behavior.
+- Porting the single-get recheck cannot fully close a subsequent async cache.insert race; test durable backing and wrapper reads after all controlled operations settle.
+- MemBuffer(Fjall) is not the hybrid data implementation. Default RepoInstance also unwraps the MVCC data store; practical exposure is strongest on buffered info/history and direct library configurations.
+- The shared helper's bare is_err deletion checks do not identify NotFound specifically, and flag-forwarding mocks do not prove advertised atomicity.
 
 ---
 

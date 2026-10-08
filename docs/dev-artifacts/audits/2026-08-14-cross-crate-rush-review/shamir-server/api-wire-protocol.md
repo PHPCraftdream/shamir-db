@@ -1,11 +1,13 @@
-<!-- revalidation:2026-10-08 source:92ad58266bf57ddea1fa3c8a47affba1a3a9a096 -->
-# shamir-server — api-wire-protocol revalidation
+<!-- revalidation:2026-10-08 cycle:independent-2 source:e3765c935fc71655ee1ec0160cf180607935d89b -->
+# shamir-server — api-wire-protocol independent revalidation (cycle 2)
 
-Source snapshot: `92ad58266bf57ddea1fa3c8a47affba1a3a9a096`. Revalidated 2026-10-08 by read-only XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run; no source fix is part of this update. Test registration/assertions are evidence of an oracle, not proof of a passing run.
+Frozen source snapshot: `e3765c935fc71655ee1ec0160cf180607935d89b`. Independently revalidated 2026-10-08 by a fresh XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run. Source-fixed means the specified mechanism was already removed at this snapshot; this cycle implements no source fix.
 
-This section is authoritative for current status. Original titles/IDs are retained for traceability; a refuted title is not a current assertion. The collapsed historical report below is superseded, including its counts, severity, scenarios and fix instructions. Plan IDs preserve historical numbering, not a current release mandate. [Workspace methodology and status definitions](../SUMMARY.md#status-definitions).
+This section is authoritative for current decisions. Existing IDs and allegation titles are retained for traceability; a refuted title is not a current assertion. Prior-cycle decisions were rechecked, not used as proof. The first cycle is available in repository history at this snapshot. The original historical body below remains preserved once and is superseded, including its counts, severities and recipes. [Workspace scope and status definitions](../SUMMARY.md#status-definitions).
 
-The /info documentation mismatch and latent version-width issue remain; repeated HMAC-key derivation is refuted by a cache that predates the review.
+Unrelated external edits began in dependency/toolchain/CI metadata during collection; additional Rust-source edits appeared afterward. They were left untouched. Evidence and decisions are tied to the frozen commit, not those later changes or an installed toolchain. “Current” below means current at that snapshot; no re-audit of the modified working tree is implied.
+
+The /info prose mismatch and prospective query-version narrowing remain. HMAC re-derivation is refuted by pre-existing caching, and current handshake layouts agree.
 
 ## Current claim decisions
 
@@ -13,7 +15,7 @@ The /info documentation mismatch and latent version-width issue remain; repeated
 |---:|---:|---:|---:|---:|---:|---:|
 | 4 | 2 | 0 | 0 | 1 | 0 | 1 |
 
-These are decisions on report claims, including repeated roots, bundled observations and non-findings—not a unique-bug census. Closed/N/A rows have no current risk; unverified risk is provisional. Pure style and unmeasured optimization claims do not establish runtime impact.
+These are duplicate-inclusive report decisions, not a unique-bug census. Pure style or structural optimization does not establish a runtime incident; unverified impact remains provisional.
 
 <a id="review-1"></a>
 
@@ -21,9 +23,11 @@ These are decisions on report claims, including repeated roots, bundled observat
 
 Status: `confirmed-open`. Current risk: `low`.
 
-The observability module still promises pretty-printed curl output, while the handler and registered HTTP test use MessagePack. The operations guide correctly documents MessagePack; config.rs:155 and the crate header do not repeat the pretty-print promise.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-server/src/observability.rs:26](../../../../../crates/shamir-server/src/observability.rs#L26); [crates/shamir-server/src/observability.rs:595](../../../../../crates/shamir-server/src/observability.rs#L595); [crates/shamir-server/src/observability.rs:598](../../../../../crates/shamir-server/src/observability.rs#L598); [crates/shamir-server/tests/observability_http.rs:172](../../../../../crates/shamir-server/tests/observability_http.rs#L172); [docs/guide-docs/guide/07-operations.md:277](../../../../../docs/guide-docs/guide/07-operations.md#L277); [crates/shamir-server/src/config.rs:155](../../../../../crates/shamir-server/src/config.rs#L155).
+The module promises pretty-printed curl output, but info_handler returns named MessagePack with application/msgpack. The registered HTTP assertion decodes MessagePack and the operations guide agrees with implementation; correcting that module prose preserves the existing wire contract.
+
+Evidence: [crates/shamir-server/src/observability.rs:26](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-server/src/observability.rs#L26); [crates/shamir-server/src/observability.rs:595](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-server/src/observability.rs#L595); [crates/shamir-server/src/observability.rs:598](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-server/src/observability.rs#L598); [crates/shamir-server/tests/observability_http.rs:180](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-server/tests/observability_http.rs#L180); [docs/guide-docs/guide/07-operations.md:279](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/docs/guide-docs/guide/07-operations.md#L279).
 
 <a id="review-2"></a>
 
@@ -31,36 +35,42 @@ Evidence: [crates/shamir-server/src/observability.rs:26](../../../../../crates/s
 
 Status: `confirmed-open`. Current risk: `low`.
 
-Both casts still silently narrow a u32 value to u8. The current value is 2, so no present wrap occurs. The actual imported constant is in shamir-query-types; widening requires coordinated changes to client wire DTOs, AtomicU8 storage and the public accessor.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-server/src/connection/handshake.rs:25](../../../../../crates/shamir-server/src/connection/handshake.rs#L25); [crates/shamir-server/src/connection/handshake.rs:152](../../../../../crates/shamir-server/src/connection/handshake.rs#L152); [crates/shamir-server/src/connection/handshake.rs:640](../../../../../crates/shamir-server/src/connection/handshake.rs#L640); [crates/shamir-server/src/connection/wire.rs:61](../../../../../crates/shamir-server/src/connection/wire.rs#L61); [crates/shamir-server/src/connection/wire.rs:91](../../../../../crates/shamir-server/src/connection/wire.rs#L91); [crates/shamir-query-types/src/wire/db_message.rs:21](../../../../../crates/shamir-query-types/src/wire/db_message.rs#L21); [crates/shamir-client/src/client.rs:456](../../../../../crates/shamir-client/src/client.rs#L456); [crates/shamir-client/src/client.rs:987](../../../../../crates/shamir-client/src/client.rs#L987).
+Both unchecked casts narrow the actual query-types constant. Current value 2 fits, so this is a prospective compatibility risk, not a current decode failure. Any widening must include both server/client DTOs, AtomicU8 storage and the public client accessor.
+
+Evidence: [crates/shamir-server/src/connection/handshake.rs:152](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-server/src/connection/handshake.rs#L152); [crates/shamir-server/src/connection/handshake.rs:640](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-server/src/connection/handshake.rs#L640); [crates/shamir-query-types/src/wire/db_message.rs:21](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-query-types/src/wire/db_message.rs#L21); [crates/shamir-client/src/client.rs:456](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-client/src/client.rs#L456); [crates/shamir-client/src/client.rs:987](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-client/src/client.rs#L987).
 
 <a id="review-3"></a>
 
 ### Claim 3 — `check_destructive_hmacs` re-derives the HMAC key on every destructive-op sweep across `execute` and `tx_execute`
 
-Status: `refuted`. Current risk: —.
+Status: `refuted`. Current risk: `—`.
 
-session.hmac_key returns a OnceLock-cached key; SessionStore warms it after stamping the ID. The cache was introduced by 111df6b3 on 2026-05-16, before this review. Repeated calls copy the cached key, not re-derive it. Derivation is domain-separated SHA-256, not HKDF.
+Prior-cycle decision: `refuted`.
 
-Evidence: [crates/shamir-server/src/db_handler/admin.rs:650](../../../../../crates/shamir-server/src/db_handler/admin.rs#L650); [crates/shamir-connect/src/server/session.rs:138](../../../../../crates/shamir-connect/src/server/session.rs#L138); [crates/shamir-connect/src/server/session.rs:284](../../../../../crates/shamir-connect/src/server/session.rs#L284); [crates/shamir-connect/src/server/session.rs:446](../../../../../crates/shamir-connect/src/server/session.rs#L446); [crates/shamir-connect/src/common/crypto.rs:96](../../../../../crates/shamir-connect/src/common/crypto.rs#L96).
+Session::hmac_key uses OnceLock, warmed when SessionStore stamps the ID. History confirms commit 111df6b331d1171bb60d6b9d6d7abf9f85924067 introduced this on 2026-05-16, before the original report. Calls copy cached bytes; derivation is domain-separated SHA-256, not HKDF.
+
+Evidence: [crates/shamir-connect/src/server/session.rs:284](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-connect/src/server/session.rs#L284); [crates/shamir-connect/src/server/session.rs:446](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-connect/src/server/session.rs#L446); [crates/shamir-connect/src/common/crypto.rs:96](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-connect/src/common/crypto.rs#L96); [crates/shamir-server/src/db_handler/admin.rs:650](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-server/src/db_handler/admin.rs#L650).
 
 <a id="review-summary-wire-and-builder"></a>
 
 ### Claim Summary/wire-and-builder — Positional wire discipline, separate version axes and no builder-rule violations
 
-Status: `not-applicable`. Current risk: —.
+Status: `not-applicable`. Current risk: `—`.
 
-Inspected handshake fields retain explicit positional-field comments and version types are distinct. JSON uses include backup/doctor DTO serialization, not merely one test, but these are not query construction. The universal builder-conformance assertion was not expanded into a fresh audit.
+Prior-cycle decision: `not-applicable`.
 
-Evidence: [crates/shamir-server/src/connection/wire.rs:35](../../../../../crates/shamir-server/src/connection/wire.rs#L35); [crates/shamir-server/src/version.rs:45](../../../../../crates/shamir-server/src/version.rs#L45); [crates/shamir-server/src/backup.rs:332](../../../../../crates/shamir-server/src/backup.rs#L332); [crates/shamir-server/src/doctor.rs:189](../../../../../crates/shamir-server/src/doctor.rs#L189); [crates/shamir-server/src/subscriptions/payload.rs:1](../../../../../crates/shamir-server/src/subscriptions/payload.rs#L1).
+Inspected handshake DTOs preserve positional defaults/order, and protocol/query version axes are separate. JSON sites found in this crate serialize backup/doctor DTOs or test those formats, not construct queries. This supports the inspected paths rather than a transitive universal guarantee.
 
-## Corrections and qualified non-findings
+Evidence: [crates/shamir-server/src/connection/wire.rs:35](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-server/src/connection/wire.rs#L35); [crates/shamir-client/src/wire_frames.rs:67](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-client/src/wire_frames.rs#L67); [crates/shamir-server/src/version.rs:45](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-server/src/version.rs#L45); [crates/shamir-server/src/backup.rs:332](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-server/src/backup.rs#L332); [crates/shamir-server/src/doctor.rs:189](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-server/src/doctor.rs#L189).
 
-- Restrict the /info prose correction to actual misleading text; config.rs:155 merely lists endpoints.
-- Prefer a compile-time u8 ceiling assertion or a coordinated protocol/client widening; changing only server DTOs is incomplete.
-- Remove the HMAC re-derivation finding rather than reporting a post-review fix.
-- Replace the inaccurate 'one serde_json use' inventory with the non-query DTO distinction.
+## Evidence and recipe corrections
+
+- Changing /info to JSON would change an existing documented/tested representation; a prose correction is the minimal safe resolution.
+- Clamping or wrapping an overflowing advertised version can misrepresent server capability. Prefer a compile-time ceiling or coordinated protocol/client change.
+- The relevant handshake import is the query-types constant, not merely the similarly named server/version constant.
+- No new HMAC cache is needed, and the pre-existing cache must not be labeled a later fix.
 
 ---
 

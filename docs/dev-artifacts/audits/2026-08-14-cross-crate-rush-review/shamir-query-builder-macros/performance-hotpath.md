@@ -1,31 +1,33 @@
-<!-- revalidation:2026-10-08 source:92ad58266bf57ddea1fa3c8a47affba1a3a9a096 -->
-# shamir-query-builder-macros — performance-hotpath revalidation
+<!-- revalidation:2026-10-08 cycle:independent-2 source:e3765c935fc71655ee1ec0160cf180607935d89b -->
+# shamir-query-builder-macros — performance-hotpath independent revalidation (cycle 2)
 
-Source snapshot: `92ad58266bf57ddea1fa3c8a47affba1a3a9a096`. Revalidated 2026-10-08 by read-only XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run; no source fix is part of this update. Test registration/assertions are evidence of an oracle, not proof of a passing run.
+Frozen source snapshot: `e3765c935fc71655ee1ec0160cf180607935d89b`. Independently revalidated 2026-10-08 by a fresh XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run. Source-fixed means the specified mechanism was already removed at this snapshot; this cycle implements no source fix.
 
-This section is authoritative for current status. Original titles/IDs are retained for traceability; a refuted title is not a current assertion. The collapsed historical report below is superseded, including its counts, severity, scenarios and fix instructions. Plan IDs preserve historical numbering, not a current release mandate. [Workspace methodology and status definitions](../SUMMARY.md#status-definitions).
+This section is authoritative for current decisions. Existing IDs and allegation titles are retained for traceability; a refuted title is not a current assertion. Prior-cycle decisions were rechecked, not used as proof. The first cycle is available in repository history at this snapshot. The original historical body below remains preserved once and is superseded, including its counts, severities and recipes. [Workspace scope and status definitions](../SUMMARY.md#status-definitions).
 
-Growing-prefix codegen and compile-time allocation shapes remain unchanged. Exact compiler-backend quadratic cost and reported millisecond effects are unverified; capture/reparse and String/Vec construction are source-visible but unmeasured.
+Unrelated external edits began in dependency/toolchain/CI metadata during collection; additional Rust-source edits appeared afterward. They were left untouched. Evidence and decisions are tied to the frozen commit, not those later changes or an installed toolchain. “Current” below means current at that snapshot; no re-audit of the modified working tree is implied.
+
+The previously missing compiler-backend source closes the complexity evidence gap. Three loops perform quadratic shallow prefix work on declared Rust 1.94.0; practical latency remains unknown.
 
 ## Current claim decisions
 
 | Claim decisions | Open | Source-fixed | Partial | Refuted | Unverified | N/A |
 |---:|---:|---:|---:|---:|---:|---:|
-| 3 | 2 | 0 | 0 | 0 | 1 | 0 |
+| 3 | 3 | 0 | 0 | 0 | 0 | 0 |
 
-These are decisions on report claims, including repeated roots, bundled observations and non-findings—not a unique-bug census. Closed/N/A rows have no current risk; unverified risk is provisional. Pure style and unmeasured optimization claims do not establish runtime impact.
+These are duplicate-inclusive report decisions, not a unique-bug census. Pure style or structural optimization does not establish a runtime incident; unverified impact remains provisional.
 
 <a id="review-1"></a>
 
 ### Claim 1 — Quadratic token re-interpolation when accumulating builder chains in loops
 
-Status: `unverified`. Current risk: `medium` (provisional; not a confirmed defect).
+Status: `confirmed-open`. Current risk: `low`.
 
-Three loops repeatedly interpolate the accumulated stream. Fallback token traversal supports a quadratic structural concern there; pinned quote does not universally deep-copy nested streams, and compiler concatenation is delegated to rustc. No evidence establishes the claimed compiler-backend complexity, hundreds-of-ms latency or an unaffected small-N threshold.
+Prior-cycle decision: `unverified`.
 
-Evidence: [crates/shamir-query-builder-macros/src/query_parse.rs:779](../../../../../crates/shamir-query-builder-macros/src/query_parse.rs#L779); [crates/shamir-query-builder-macros/src/query_parse.rs:810](../../../../../crates/shamir-query-builder-macros/src/query_parse.rs#L810); [crates/shamir-query-builder-macros/src/query_parse.rs:849](../../../../../crates/shamir-query-builder-macros/src/query_parse.rs#L849); [Cargo.lock:2538](../../../../../Cargo.lock#L2538); [Cargo.lock:2661](../../../../../Cargo.lock#L2661).
+quote 1.0.45 ToTokens clones the prefix; proc-macro2 1.0.106 unwraps/flushed cloned DeferredTokenStreams. Tagged Rust 1.94.0 concatenation calls push_tree/push_stream; Arc::make_mut and iter().cloned()/extend copy growing top-level prefixes. Hence fixed-size method fragments incur quadratic aggregate prefix work. Nested groups are shared, not universally deep-copied. [Exact backend](https://github.com/rust-lang/rust/blob/1.94.0/compiler/rustc_ast/src/tokenstream.rs#L612).
 
-Grouping/duplicate: `SUMMARY.md#4.1`. This row is not another independent defect.
+Evidence: [crates/shamir-query-builder-macros/src/query_parse.rs:779](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-query-builder-macros/src/query_parse.rs#L779); [crates/shamir-query-builder-macros/src/query_parse.rs:810](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-query-builder-macros/src/query_parse.rs#L810); [crates/shamir-query-builder-macros/src/query_parse.rs:849](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-query-builder-macros/src/query_parse.rs#L849); [Cargo.lock:2537](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/Cargo.lock#L2537); [Cargo.lock:2660](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/Cargo.lock#L2660); [rust-toolchain.toml:15](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/rust-toolchain.toml#L15).
 
 <a id="review-2"></a>
 
@@ -33,11 +35,11 @@ Grouping/duplicate: `SUMMARY.md#4.1`. This row is not another independent defect
 
 Status: `confirmed-open`. Current risk: `nit`.
 
-parse_filter_expr still collects tokens, rebuilds encountered groups with joined spans and parses the resulting stream as Expr. That extra processing is structural; exact 2x traffic and full deep-copy counts are backend-dependent, and no latency impact was measured.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-query-builder-macros/src/query_parse.rs:493](../../../../../crates/shamir-query-builder-macros/src/query_parse.rs#L493); [crates/shamir-query-builder-macros/src/query_parse.rs:508](../../../../../crates/shamir-query-builder-macros/src/query_parse.rs#L508); [crates/shamir-query-builder-macros/src/query_parse.rs:543](../../../../../crates/shamir-query-builder-macros/src/query_parse.rs#L543).
+Capture, reconstruction of encountered outer groups and Expr reparsing remain. Group interiors are captured wholesale, not individually reconstructed by this loop. Exact traffic ratios and latency are not established.
 
-Grouping/duplicate: `SUMMARY.md#4.2`. This row is not another independent defect.
+Evidence: [crates/shamir-query-builder-macros/src/query_parse.rs:493](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-query-builder-macros/src/query_parse.rs#L493); [crates/shamir-query-builder-macros/src/query_parse.rs:508](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-query-builder-macros/src/query_parse.rs#L508); [crates/shamir-query-builder-macros/src/query_parse.rs:543](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-query-builder-macros/src/query_parse.rs#L543).
 
 <a id="review-3"></a>
 
@@ -45,18 +47,18 @@ Grouping/duplicate: `SUMMARY.md#4.2`. This row is not another independent defect
 
 Status: `confirmed-open`. Current risk: `nit`.
 
-Callee to_string, Vec<&Expr> collection, selected Ident reconstruction and Vec<String> field extraction remain. These are compile-time allocation opportunities, not measured bottlenecks; argument/path sizes are input-dependent rather than universally constant-bounded.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-query-builder-macros/src/filter_lower.rs:120](../../../../../crates/shamir-query-builder-macros/src/filter_lower.rs#L120); [crates/shamir-query-builder-macros/src/filter_lower.rs:132](../../../../../crates/shamir-query-builder-macros/src/filter_lower.rs#L132); [crates/shamir-query-builder-macros/src/filter_lower.rs:145](../../../../../crates/shamir-query-builder-macros/src/filter_lower.rs#L145); [crates/shamir-query-builder-macros/src/filter_lower.rs:330](../../../../../crates/shamir-query-builder-macros/src/filter_lower.rs#L330).
+Callee String, argument-reference Vec, field Strings and selected identifier reconstruction are visible. They are optimization candidates without measured significance; arguments are collected before arity rejection and path length is input-dependent.
 
-Grouping/duplicate: `SUMMARY.md#4.3`. This row is not another independent defect.
+Evidence: [crates/shamir-query-builder-macros/src/filter_lower.rs:120](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-query-builder-macros/src/filter_lower.rs#L120); [crates/shamir-query-builder-macros/src/filter_lower.rs:132](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-query-builder-macros/src/filter_lower.rs#L132); [crates/shamir-query-builder-macros/src/filter_lower.rs:145](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-query-builder-macros/src/filter_lower.rs#L145); [crates/shamir-query-builder-macros/src/filter_lower.rs:330](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-query-builder-macros/src/filter_lower.rs#L330).
 
-## Corrections and qualified non-findings
+## Evidence and recipe corrections
 
-- Distinguish proc-macro expansion work from the runtime builders emitted by these macros; this report does not establish runtime latency or allocation regressions.
-- Replace universal deep-copy, exact token-copy sums and numerical latency assertions with the backend-qualified structural evidence.
-- The span.join() calls are valid: resolved proc-macro2 DelimSpan::join takes no argument.
-- Profile-driven optimization remains appropriate for token recapture and predicate micro-allocations; no measurements were performed.
+- Upgrade structural compiler-backend complexity from unverified to confirmed-open, while removing hundreds-of-milliseconds, small-N immunity, hang and universal deep-copy claims.
+- Exact dependency sources checked: quote 1.0.45 src/to_tokens.rs:273; proc-macro2 1.0.106 src/wrapper.rs:75,245 and src/fallback.rs:309. Published labels: https://docs.rs/crate/quote/1.0.45/source/src/to_tokens.rs and https://docs.rs/crate/proc-macro2/1.0.106/source/src/wrapper.rs.
+- One-pass fragments must preserve method order, spans, values, evaluation order and terminal return types. This is a source-level complexity improvement, not a measured speedup.
+- If field intermediates become Ident values, explicitly materialize string literals before emission; quoting Idents directly would change field names into caller expressions.
 
 ---
 

@@ -1,11 +1,13 @@
-<!-- revalidation:2026-10-08 source:92ad58266bf57ddea1fa3c8a47affba1a3a9a096 -->
-# shamir-query-types — concurrency-lockfree revalidation
+<!-- revalidation:2026-10-08 cycle:independent-2 source:e3765c935fc71655ee1ec0160cf180607935d89b -->
+# shamir-query-types — concurrency-lockfree independent revalidation (cycle 2)
 
-Source snapshot: `92ad58266bf57ddea1fa3c8a47affba1a3a9a096`. Revalidated 2026-10-08 by read-only XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run; no source fix is part of this update. Test registration/assertions are evidence of an oracle, not proof of a passing run.
+Frozen source snapshot: `e3765c935fc71655ee1ec0160cf180607935d89b`. Independently revalidated 2026-10-08 by a fresh XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run. Source-fixed means the specified mechanism was already removed at this snapshot; this cycle implements no source fix.
 
-This section is authoritative for current status. Original titles/IDs are retained for traceability; a refuted title is not a current assertion. The collapsed historical report below is superseded, including its counts, severity, scenarios and fix instructions. Plan IDs preserve historical numbering, not a current release mandate. [Workspace methodology and status definitions](../SUMMARY.md#status-definitions).
+This section is authoritative for current decisions. Existing IDs and allegation titles are retained for traceability; a refuted title is not a current assertion. Prior-cycle decisions were rechecked, not used as proof. The first cycle is available in repository history at this snapshot. The original historical body below remains preserved once and is superseded, including its counts, severities and recipes. [Workspace scope and status definitions](../SUMMARY.md#status-definitions).
 
-The no-concurrency-surface conclusion remains valid for this crate's own source and bench: no executable async, locks, atomics, channels, spawns, static mutable state, or unsafe. Planning is DTO-only, and the executor still runs stage aliases sequentially.
+Unrelated external edits began in dependency/toolchain/CI metadata during collection; additional Rust-source edits appeared afterward. They were left untouched. Evidence and decisions are tied to the frozen commit, not those later changes or an installed toolchain. “Current” below means current at that snapshot; no re-audit of the modified working tree is implied.
+
+No direct executable concurrency or unsafe surface was found. Sequential stage execution is independently source-supported; absence of transitive concurrency dependencies and blanket parallelism honesty are not.
 
 ## Current claim decisions
 
@@ -13,16 +15,15 @@ The no-concurrency-surface conclusion remains valid for this crate's own source 
 |---:|---:|---:|---:|---:|---:|---:|
 | 0 | 0 | 0 | 0 | 0 | 0 | 0 |
 
-These are decisions on report claims, including repeated roots, bundled observations and non-findings—not a unique-bug census. Closed/N/A rows have no current risk; unverified risk is provisional. Pure style and unmeasured optimization claims do not establish runtime impact.
+These are duplicate-inclusive report decisions, not a unique-bug census. Pure style or structural optimization does not establish a runtime incident; unverified impact remains provisional.
 
-No local defect was established for this lens. The scope and positive-assurance qualifications below still apply.
+## Evidence and recipe corrections
 
-## Corrections and qualified non-findings
-
-- The nesting-depth walker is bounded recursion, not an iterative worklist: crates/shamir-query-types/src/batch/planner.rs:770.
-- The absence of direct concurrency dependencies does not establish their absence transitively through shamir-types.
-- Sequential execution is source-proven at crates/shamir-engine/src/query/batch/batch_execute.rs:522; historical try_join_all performance claims are documentary evidence only.
-- The planner's example still says stage 1 runs in parallel despite its explicit logical-grouping disclaimer.
+- Cargo.lock:3813 positively includes arc-swap and dashmap through shamir-types. No direct concurrency source does not mean none can be pulled in.
+- max_nesting_depth_of_ops is bounded recursion at planner.rs:770, not an iterative worklist.
+- planner.rs:57 still says stage 1 runs in parallel; batch_execute.rs:522 runs aliases sequentially. The disclaimer is accurate, but the overview's universally honest-documentation assurance is too broad.
+- Historical try_join_all timing is documentary evidence only, not a measurement performed or independently validated in this cycle.
+- BatchPlanner is not the crate's only logic: custom codecs, reference parsing, canonicalization and validation helpers also execute code.
 
 ---
 

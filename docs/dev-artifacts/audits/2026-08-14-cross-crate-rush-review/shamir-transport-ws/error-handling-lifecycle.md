@@ -1,19 +1,21 @@
-<!-- revalidation:2026-10-08 source:92ad58266bf57ddea1fa3c8a47affba1a3a9a096 -->
-# shamir-transport-ws — error-handling-lifecycle revalidation
+<!-- revalidation:2026-10-08 cycle:independent-2 source:e3765c935fc71655ee1ec0160cf180607935d89b -->
+# shamir-transport-ws — error-handling-lifecycle independent revalidation (cycle 2)
 
-Source snapshot: `92ad58266bf57ddea1fa3c8a47affba1a3a9a096`. Revalidated 2026-10-08 by read-only XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run; no source fix is part of this update. Test registration/assertions are evidence of an oracle, not proof of a passing run.
+Frozen source snapshot: `e3765c935fc71655ee1ec0160cf180607935d89b`. Independently revalidated 2026-10-08 by a fresh XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run. Source-fixed means the specified mechanism was already removed at this snapshot; this cycle implements no source fix.
 
-This section is authoritative for current status. Original titles/IDs are retained for traceability; a refuted title is not a current assertion. The collapsed historical report below is superseded, including its counts, severity, scenarios and fix instructions. Plan IDs preserve historical numbering, not a current release mandate. [Workspace methodology and status definitions](../SUMMARY.md#status-definitions).
+This section is authoritative for current decisions. Existing IDs and allegation titles are retained for traceability; a refuted title is not a current assertion. Prior-cycle decisions were rechecked, not used as proof. The first cycle is available in repository history at this snapshot. The original historical body below remains preserved once and is superseded, including its counts, severities and recipes. [Workspace scope and status definitions](../SUMMARY.md#status-definitions).
 
-Result/thiserror discipline and ownership-based cleanup remain sound. Typed accept classification, exact error-path tests, outbound bounds, and exporter diagnostics remain open.
+Unrelated external edits began in dependency/toolchain/CI metadata during collection; additional Rust-source edits appeared afterward. They were left untouched. Evidence and decisions are tied to the frozen commit, not those later changes or an installed toolchain. “Current” below means current at that snapshot; no re-audit of the modified working tree is implied.
+
+Owned acceptance cleanup and typed Result discipline are supported. The public rejection taxonomy is not produced by the APIs. Preserved scratch on error is a valid unspecified postcondition, not an established replay defect; WS protocol-close obligations remain incomplete.
 
 ## Current claim decisions
 
 | Claim decisions | Open | Source-fixed | Partial | Refuted | Unverified | N/A |
 |---:|---:|---:|---:|---:|---:|---:|
-| 7 | 7 | 0 | 0 | 0 | 0 | 0 |
+| 7 | 6 | 0 | 0 | 0 | 0 | 1 |
 
-These are decisions on report claims, including repeated roots, bundled observations and non-findings—not a unique-bug census. Closed/N/A rows have no current risk; unverified risk is provisional. Pure style and unmeasured optimization claims do not establish runtime impact.
+These are duplicate-inclusive report decisions, not a unique-bug census. Pure style or structural optimization does not establish a runtime incident; unverified impact remains provisional.
 
 <a id="review-1"></a>
 
@@ -21,9 +23,11 @@ These are decisions on report claims, including repeated roots, bundled observat
 
 Status: `confirmed-open`. Current risk: `low`.
 
-Policy rejection remains inside the callback and acceptors propagate only tungstenite errors. Typed variants are not returned; current production callers merely log failures.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-transport-ws/src/server.rs:55](../../../../../crates/shamir-transport-ws/src/server.rs#L55); [crates/shamir-transport-ws/src/server.rs:99](../../../../../crates/shamir-transport-ws/src/server.rs#L99); [crates/shamir-transport-ws/src/server.rs:144](../../../../../crates/shamir-transport-ws/src/server.rs#L144); [crates/shamir-server/src/server/server_launcher.rs:1502](../../../../../crates/shamir-server/src/server/server_launcher.rs#L1502).
+Exact tungstenite 0.24.0 ServerHandshake converts a callback rejection into Error::Http after writing the response. The acceptor question-mark conversion produces only Handshake. HTTP status remains structurally accessible; original path/rejection details require preserving callback state.
+
+Evidence: [crates/shamir-transport-ws/src/server.rs:55](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-transport-ws/src/server.rs#L55); [crates/shamir-transport-ws/src/server.rs:99](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-transport-ws/src/server.rs#L99); [crates/shamir-transport-ws/src/server.rs:144](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-transport-ws/src/server.rs#L144); [Cargo.lock:4467](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/Cargo.lock#L4467).
 
 <a id="review-2"></a>
 
@@ -31,11 +35,13 @@ Evidence: [crates/shamir-transport-ws/src/server.rs:55](../../../../../crates/sh
 
 Status: `confirmed-open`. Current risk: `medium`.
 
-Neither accept rejection paths nor framing malformed-message variants have targeted assertions; the oversize test remains is_err-only. Positive TS browser integration does not detect removed rejection checks.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-transport-ws/src/tests/server_tests.rs:7](../../../../../crates/shamir-transport-ws/src/tests/server_tests.rs#L7); [crates/shamir-transport-ws/tests/framing_round_trip.rs:69](../../../../../crates/shamir-transport-ws/tests/framing_round_trip.rs#L69); [crates/shamir-transport-ws/src/framing.rs:148](../../../../../crates/shamir-transport-ws/src/framing.rs#L148).
+Targeted policy-rejection and malformed-message oracles are absent. Positive live/TS tests and the bare oversize is_err assertion cannot distinguish removing rejection or substituting error variants.
 
-Grouping/duplicate: `correctness-tdd.md#2`. This row is not another independent defect.
+Evidence: [crates/shamir-transport-ws/src/tests/server_tests.rs:7](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-transport-ws/src/tests/server_tests.rs#L7); [crates/shamir-transport-ws/tests/framing_round_trip.rs:69](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-transport-ws/tests/framing_round_trip.rs#L69).
+
+Grouping/duplicate: [correctness-tdd.md#2](correctness-tdd.md#review-2). This is not an additional independent defect.
 
 <a id="review-3"></a>
 
@@ -43,11 +49,13 @@ Grouping/duplicate: `correctness-tdd.md#2`. This row is not another independent 
 
 Status: `confirmed-open`. Current risk: `low`.
 
-The unchecked cast and allocation remain, unlike TCP's local size rejection.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-transport-ws/src/framing.rs:118](../../../../../crates/shamir-transport-ws/src/framing.rs#L118); [crates/shamir-transport-tcp/src/framing.rs:153](../../../../../crates/shamir-transport-tcp/src/framing.rs#L153).
+The WS sender has neither TCP's 16 MiB guard nor checked narrowing before allocation. Peer rejection is not a local send-validation guarantee.
 
-Grouping/duplicate: `api-wire-protocol.md#3`. This row is not another independent defect.
+Evidence: [crates/shamir-transport-ws/src/framing.rs:118](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-transport-ws/src/framing.rs#L118); [crates/shamir-transport-tcp/src/framing.rs:153](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-transport-tcp/src/framing.rs#L153).
+
+Grouping/duplicate: [api-wire-protocol.md#3](api-wire-protocol.md#review-3). This is not an additional independent defect.
 
 <a id="review-4"></a>
 
@@ -55,21 +63,25 @@ Grouping/duplicate: `api-wire-protocol.md#3`. This row is not another independen
 
 Status: `confirmed-open`. Current risk: `low`.
 
-The wrapper still returns Option and the TCP helper erases rustls errors with ok(). Native WSS still converts None into zeros, but this does not automatically change binding_mode.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-transport-ws/src/tls_exporter.rs:20](../../../../../crates/shamir-transport-ws/src/tls_exporter.rs#L20); [crates/shamir-transport-tcp/src/tls.rs:81](../../../../../crates/shamir-transport-tcp/src/tls.rs#L81); [crates/shamir-server/src/server/server_launcher.rs:1391](../../../../../crates/shamir-server/src/server/server_launcher.rs#L1391).
+The wrapper preserves the TCP helper's ok()-to-Option error erasure; the native production caller substitutes zeros. A reachable failure of the real completed TLS exporter is not demonstrated, and mode remains TlsExporter.
 
-Grouping/duplicate: `security-crypto.md#5`. This row is not another independent defect.
+Evidence: [crates/shamir-transport-ws/src/tls_exporter.rs:20](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-transport-ws/src/tls_exporter.rs#L20); [crates/shamir-transport-tcp/src/tls.rs:81](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-transport-tcp/src/tls.rs#L81); [crates/shamir-server/src/server/server_launcher.rs:1391](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-server/src/server/server_launcher.rs#L1391).
+
+Grouping/duplicate: [security-crypto.md#5](security-crypto.md#review-5). This is not an additional independent defect.
 
 <a id="review-5"></a>
 
 ### Claim 5 — Framing error leaves the caller's scratch buffer holding the previous frame
 
-Status: `confirmed-open`. Current risk: `nit`.
+Status: `not-applicable`. Current risk: `—`.
 
-Clear remains success-only. Error-path buffer semantics are undocumented, but production callers check errors before decoding; stale-request processing is not demonstrated.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-transport-ws/src/framing.rs:149](../../../../../crates/shamir-transport-ws/src/framing.rs#L149); [crates/shamir-transport-ws/src/framing.rs:169](../../../../../crates/shamir-transport-ws/src/framing.rs#L169); [crates/shamir-server/src/connection/handshake.rs:719](../../../../../crates/shamir-server/src/connection/handshake.rs#L719).
+Retention is factual, but no empty-on-error guarantee exists. Validation fails before modifying a fully initialized prior buffer; production checks Err before decoding. Ignoring Result is caller misuse. Documenting the postcondition is optional API clarification, not a demonstrated remediation obligation.
+
+Evidence: [crates/shamir-transport-ws/src/framing.rs:149](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-transport-ws/src/framing.rs#L149); [crates/shamir-transport-ws/src/framing.rs:169](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-transport-ws/src/framing.rs#L169); [crates/shamir-server/src/connection/handshake.rs:719](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-server/src/connection/handshake.rs#L719); [crates/shamir-server/src/connection/request_loop.rs:280](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-server/src/connection/request_loop.rs#L280).
 
 <a id="review-6"></a>
 
@@ -77,11 +89,13 @@ Evidence: [crates/shamir-transport-ws/src/framing.rs:149](../../../../../crates/
 
 Status: `confirmed-open`. Current risk: `nit`.
 
-The attribution remains wrong; ws_recv_into does enforce the caller's numeric cap, just not an intrinsic pre-auth 4 KiB policy.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-transport-ws/src/server.rs:27](../../../../../crates/shamir-transport-ws/src/server.rs#L27); [crates/shamir-transport-ws/src/framing.rs:163](../../../../../crates/shamir-transport-ws/src/framing.rs#L163); [crates/shamir-server/src/connection/handshake.rs:717](../../../../../crates/shamir-server/src/connection/handshake.rs#L717).
+The adapter does enforce its supplied numeric cap; it has no intrinsic 4 KiB or authentication-phase rule. The server supplies that rule after codec assembly.
 
-Grouping/duplicate: `performance-hotpath.md#4`. This row is not another independent defect.
+Evidence: [crates/shamir-transport-ws/src/server.rs:27](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-transport-ws/src/server.rs#L27); [crates/shamir-transport-ws/src/framing.rs:163](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-transport-ws/src/framing.rs#L163); [crates/shamir-server/src/connection/handshake.rs:717](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-server/src/connection/handshake.rs#L717).
+
+Grouping/duplicate: [performance-hotpath.md#4](performance-hotpath.md#review-4). This is not an additional independent defect.
 
 <a id="review-7"></a>
 
@@ -89,17 +103,19 @@ Grouping/duplicate: `performance-hotpath.md#4`. This row is not another independ
 
 Status: `confirmed-open`. Current risk: `nit`.
 
-HeaderValue conversion failure still becomes None and then Missing. Rejection remains fail-closed; the diagnostic distinction is lost.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-transport-ws/src/server.rs:132](../../../../../crates/shamir-transport-ws/src/server.rs#L132); [crates/shamir-transport-ws/src/browser.rs:99](../../../../../crates/shamir-transport-ws/src/browser.rs#L99).
+Exact http 1.4.0 permits opaque header octets but to_str rejects them; ok() then yields None and Missing. The upgrade still fails. The lost distinction is present-but-invalid versus absent, not a UTF-8-only issue.
 
-## Corrections and qualified non-findings
+Evidence: [crates/shamir-transport-ws/src/server.rs:132](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-transport-ws/src/server.rs#L132); [crates/shamir-transport-ws/src/browser.rs:99](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-transport-ws/src/browser.rs#L99); [Cargo.lock:1672](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/Cargo.lock#L1672).
 
-- Handshake(Error::Http) exposes HTTP status structurally; distinguishing 403 from 404 does not require response-body string matching. Recovering the original typed Origin reason is a separate issue.
-- Returning zero bytes does not turn a native listener into mode 0x02. The original automatic-downgrade scenario is overstated.
-- Source confirms validation before binding, owned-stream cleanup on failed acceptance, no crate-owned production tasks/files/locks, thiserror enums, and no production panic/unwrap/anyhow/Box<dyn Error>.
-- Test manifests and parent registration are correct. Integration framing placement is appropriate, but positive coverage must not be described as proving untested negative guarantees.
-- Buffer retention on Err is a documentation/API-semantics concern, not a proven current replay or memory-safety bug.
+## Evidence and recipe corrections
+
+- Typed callback rejections can be retained in borrowed local state without shared locks. HTTP status alone cannot reconstruct WrongPath.actual or the full original OriginRejected value after a static-body change.
+- An owned stream dropped on acceptance failure is not a resource leak. Established WS connections additionally have protocol-close and finite cleanup obligations; the blanket lifecycle-clean assurance does not prove those.
+- Clearing scratch changes an unspecified error postcondition and cancellation-visible state; it is not necessary to prevent current stale-request processing.
+- No native-to-browser mode downgrade follows from zero fallback, and the cited Rust-client checks do not certify every WSS client.
+- Published sources inspected: tungstenite 0.24.0 src/handshake/server.rs, https://docs.rs/crate/tungstenite/0.24.0/source/src/handshake/server.rs; http 1.4.0 src/header/value.rs, https://docs.rs/crate/http/1.4.0/source/src/header/value.rs.
 
 ---
 

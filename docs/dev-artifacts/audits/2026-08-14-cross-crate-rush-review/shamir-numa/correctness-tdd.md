@@ -1,23 +1,21 @@
-<!-- revalidation:2026-10-08 source:92ad58266bf57ddea1fa3c8a47affba1a3a9a096 -->
-# shamir-numa — correctness-tdd revalidation
+<!-- revalidation:2026-10-08 cycle:independent-2 source:e3765c935fc71655ee1ec0160cf180607935d89b -->
+# shamir-numa — correctness-tdd independent revalidation (cycle 2)
 
-Source snapshot: `92ad58266bf57ddea1fa3c8a47affba1a3a9a096`. Revalidated 2026-10-08 by read-only XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run; no source fix is part of this update. Test registration/assertions are evidence of an oracle, not proof of a passing run.
+Frozen source snapshot: `e3765c935fc71655ee1ec0160cf180607935d89b`. Independently revalidated 2026-10-08 by a fresh XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run. Source-fixed means the specified mechanism was already removed at this snapshot; this cycle implements no source fix.
 
-This section is authoritative for current status. Original titles/IDs are retained for traceability; a refuted title is not a current assertion. The collapsed historical report below is superseded, including its counts, severity, scenarios and fix instructions. Plan IDs preserve historical numbering, not a current release mandate. [Workspace methodology and status definitions](../SUMMARY.md#status-definitions).
+This section is authoritative for current decisions. Existing IDs and allegation titles are retained for traceability; a refuted title is not a current assertion. Prior-cycle decisions were rechecked, not used as proof. The first cycle is available in repository history at this snapshot. The original historical body below remains preserved once and is superseded, including its counts, severities and recipes. [Workspace scope and status definitions](../SUMMARY.md#status-definitions).
 
-The mirror race and its concurrency-test gap remain. Linux probe coverage, explicit-node clamping, unbounded parsing, and inline tests remain unchanged. CPU_SET outcome claims need resolved dependency evidence; the doctest criticism conflicts with explicit policy.
+Unrelated external edits began in dependency/toolchain/CI metadata during collection; additional Rust-source edits appeared afterward. They were left untouched. Evidence and decisions are tied to the frozen commit, not those later changes or an installed toolchain. “Current” below means current at that snapshot; no re-audit of the modified working tree is implied.
+
+The canonical CAS has a meaningful registered oracle; the crate's concurrent mirror guarantee does not. Portable sequential tests are useful, while Linux discovery coverage depends on host shape.
 
 ## Current claim decisions
 
 | Claim decisions | Open | Source-fixed | Partial | Refuted | Unverified | N/A |
 |---:|---:|---:|---:|---:|---:|---:|
-| 9 | 8 | 0 | 0 | 1 | 0 | 0 |
+| 9 | 7 | 0 | 0 | 1 | 0 | 1 |
 
-These are decisions on report claims, including repeated roots, bundled observations and non-findings—not a unique-bug census. Closed/N/A rows have no current risk; unverified risk is provisional. Pure style and unmeasured optimization claims do not establish runtime impact.
-
-## Parent acceptance refinements
-
-- Exact Linux libc helper source proves checked-index bounds panic; remove contradictory glibc/musl C-macro outcomes.
+These are duplicate-inclusive report decisions, not a unique-bug census. Pure style or structural optimization does not establish a runtime incident; unverified impact remains provisional.
 
 <a id="review-1"></a>
 
@@ -25,11 +23,13 @@ These are decisions on report claims, including repeated roots, bundled observat
 
 Status: `confirmed-open`. Current risk: `high`.
 
-A can capture X1, B publish and mirror X2, then A overwrite nonzero replicas with X1. No version check or repair pass exists. Consumer DDL serialization limits, but does not fix, this public concurrent-writer contract.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-numa/src/node_replicated.rs:96](../../../../../crates/shamir-numa/src/node_replicated.rs#L96); [crates/shamir-numa/src/node_replicated.rs:103](../../../../../crates/shamir-numa/src/node_replicated.rs#L103); [crates/shamir-index/src/base_index/index_info.rs:252](../../../../../crates/shamir-index/src/base_index/index_info.rs#L252); [crates/shamir-engine/src/table/table_manager.rs:1322](../../../../../crates/shamir-engine/src/table/table_manager.rs#L1322).
+A captures X1, B commits and mirrors X2, then A mirrors X1 and finishes. No repair remains scheduled. Force this production-method interleaving and assert every replica after both writers finish; ordinary engine DDL admission limits production reachability.
 
-Grouping/duplicate: `concurrency-lockfree.md#1`. This row is not another independent defect.
+Evidence: [crates/shamir-numa/src/node_replicated.rs:98](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-numa/src/node_replicated.rs#L98); [crates/shamir-numa/src/node_replicated.rs:103](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-numa/src/node_replicated.rs#L103); [crates/shamir-numa/src/node_replicated.rs:105](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-numa/src/node_replicated.rs#L105); [crates/shamir-engine/src/table/table_manager.rs:1322](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-engine/src/table/table_manager.rs#L1322).
+
+Grouping/duplicate: [concurrency-lockfree.md#1](concurrency-lockfree.md#review-1). This is not an additional independent defect.
 
 <a id="review-2"></a>
 
@@ -37,35 +37,39 @@ Grouping/duplicate: `concurrency-lockfree.md#1`. This row is not another indepen
 
 Status: `confirmed-open`. Current risk: `medium`.
 
-The registered eight-thread test asserts only node 0. Sequential all-replica tests cannot detect stale mirror ordering; mixed writers and concurrent four-node convergence remain uncovered.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-numa/src/lib.rs:66](../../../../../crates/shamir-numa/src/lib.rs#L66); [crates/shamir-numa/src/tests/mod.rs:12](../../../../../crates/shamir-numa/src/tests/mod.rs#L12); [crates/shamir-numa/src/tests/node_replicated_tests.rs:96](../../../../../crates/shamir-numa/src/tests/node_replicated_tests.rs#L96); [crates/shamir-numa/src/tests/node_replicated_tests.rs:116](../../../../../crates/shamir-numa/src/tests/node_replicated_tests.rs#L116).
+The eight-thread test joins writers and asserts only node 0. Sequential all-replica assertions catch missing mirroring, not reordered mirrors. A deterministic delayed-mirror oracle must inspect every replica and mixed publication methods.
+
+Evidence: [crates/shamir-numa/src/lib.rs:66](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-numa/src/lib.rs#L66); [crates/shamir-numa/src/tests/mod.rs:12](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-numa/src/tests/mod.rs#L12); [crates/shamir-numa/src/tests/node_replicated_tests.rs:116](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-numa/src/tests/node_replicated_tests.rs#L116).
 
 <a id="review-3"></a>
 
 ### Claim 3 — Out-of-range `store_node` / `load_node` silently redirect to node 0
 
-Status: `confirmed-open`. Current risk: `medium`.
+Status: `not-applicable`. Current risk: `—`.
 
-Both explicit-node methods use replica(), which maps invalid indices to zero; store_node therefore writes the wrong target without error. This is documented behavior, not an undocumented change; built-in topology replacement/shrink is not implemented.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-numa/src/node_replicated.rs:75](../../../../../crates/shamir-numa/src/node_replicated.rs#L75); [crates/shamir-numa/src/node_replicated.rs:114](../../../../../crates/shamir-numa/src/node_replicated.rs#L114); [crates/shamir-numa/src/node_replicated.rs:121](../../../../../crates/shamir-numa/src/node_replicated.rs#L121).
+The redirection is expressly documented for both methods and implemented accordingly. No rejection guarantee, built-in topology replacement or production store_node caller establishes a defect. Fallible alternatives are optional API redesign.
 
-Grouping/duplicate: `api-wire-protocol.md#3`. This row is not another independent defect.
+Evidence: [crates/shamir-numa/src/node_replicated.rs:75](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-numa/src/node_replicated.rs#L75); [crates/shamir-numa/src/node_replicated.rs:114](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-numa/src/node_replicated.rs#L114); [crates/shamir-numa/src/node_replicated.rs:121](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-numa/src/node_replicated.rs#L121).
+
+Grouping/duplicate: [api-wire-protocol.md#3](api-wire-protocol.md#review-3). This is not an additional independent defect.
 
 <a id="review-4"></a>
 
-### Claim 4 — `LinuxTopology::pin_current_thread_to_node` uses a fixed 1024-CPU `cpu_set_t`; CPUs >= 1024 pin wrongly or fail
+### Claim 4 — `LinuxTopology::pin_current_thread_to_node` uses a fixed 1024-CPU `cpu_set_t`; CPUs &gt;= 1024 pin wrongly or fail
 
 Status: `confirmed-open`. Current risk: `medium`.
 
-Parent inspection of checksummed libc 0.2.186 resolves the Linux helper: cpu_set_t has 1024 storage bits, and CPU_SET indexes bits[cpu / word_bits] with Rust array indexing. A sysfs CPU ID >=1024 therefore reaches bounds panic, not a C-macro out-of-bounds write or silent truncation. The unchecked source route remains a Medium public Linux API defect; no production worker-pinning route or tested target failure was established.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-numa/src/linux.rs:139](../../../../../crates/shamir-numa/src/linux.rs#L139); [crates/shamir-numa/src/linux.rs:143](../../../../../crates/shamir-numa/src/linux.rs#L143); [crates/shamir-numa/src/linux.rs:147](../../../../../crates/shamir-numa/src/linux.rs#L147); [Cargo.lock:1923](../../../../../Cargo.lock#L1923).
+A discovered CPU ID 1024 reaches checked-index panic in libc 0.2.186 published linux_l4re_shared.rs:1531, not truncation or corruption. The public Result contract is violated; production pinning was not found. A boundary oracle must reject without invoking the syscall.
 
-Pinned dependency evidence: [libc 0.2.186, src/unix/linux_like/linux_l4re_shared.rs:1531](https://docs.rs/crate/libc/0.2.186/source/src/unix/linux_like/linux_l4re_shared.rs).
+Evidence: [crates/shamir-numa/src/linux.rs:143](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-numa/src/linux.rs#L143); [Cargo.lock:1923](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/Cargo.lock#L1923); [crates/shamir-numa/src/topology.rs:35](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-numa/src/topology.rs#L35).
 
-Grouping/duplicate: `error-handling-lifecycle.md#3`. This row is not another independent defect.
+Grouping/duplicate: [error-handling-lifecycle.md#3](error-handling-lifecycle.md#review-3). This is not an additional independent defect.
 
 <a id="review-5"></a>
 
@@ -73,11 +77,13 @@ Grouping/duplicate: `error-handling-lifecycle.md#3`. This row is not another ind
 
 Status: `confirmed-open`. Current risk: `low`.
 
-probe() still hard-codes sysfs reads. Registered Linux tests inspect the host rather than deterministically exercising sparse node IDs, empty lists, reverse-map misses, or read failures.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-numa/src/linux.rs:52](../../../../../crates/shamir-numa/src/linux.rs#L52); [crates/shamir-numa/src/linux.rs:74](../../../../../crates/shamir-numa/src/linux.rs#L74); [crates/shamir-numa/src/linux.rs:179](../../../../../crates/shamir-numa/src/linux.rs#L179); [crates/shamir-numa/tests/linux_topology.rs:10](../../../../../crates/shamir-numa/tests/linux_topology.rs#L10).
+probe reads fixed sysfs paths. Host tests do not discriminate sparse-ID mapping, missing files, non-NotFound errors or reverse-map misses. An injected production discovery path is needed; copied parsing logic would not test this mechanism.
 
-Grouping/duplicate: `error-handling-lifecycle.md#4`. This row is not another independent defect.
+Evidence: [crates/shamir-numa/src/linux.rs:54](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-numa/src/linux.rs#L54); [crates/shamir-numa/src/linux.rs:74](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-numa/src/linux.rs#L74); [crates/shamir-numa/src/linux.rs:179](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-numa/src/linux.rs#L179).
+
+Grouping/duplicate: [error-handling-lifecycle.md#4](error-handling-lifecycle.md#review-4). This is not an additional independent defect.
 
 <a id="review-6"></a>
 
@@ -85,21 +91,25 @@ Grouping/duplicate: `error-handling-lifecycle.md#4`. This row is not another ind
 
 Status: `confirmed-open`. Current risk: `low`.
 
-The two host tests remain inline despite the explicit prohibition. They are registered on Linux; this is a layout violation, not proof of missing execution or a runtime failure.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-numa/src/linux.rs:179](../../../../../crates/shamir-numa/src/linux.rs#L179); [crates/shamir-numa/src/lib.rs:47](../../../../../crates/shamir-numa/src/lib.rs#L47); [CLAUDE.md:594](../../../../../CLAUDE.md#L594).
+The inline module violates the explicit layout rule but is registered under Linux cfg. Relocation must preserve that cfg and production imports; placement does not establish runtime failure.
 
-Grouping/duplicate: `style-claude-md.md#1`. This row is not another independent defect.
+Evidence: [crates/shamir-numa/src/linux.rs:179](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-numa/src/linux.rs#L179); [crates/shamir-numa/src/lib.rs:47](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-numa/src/lib.rs#L47); [CLAUDE.md:594](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/CLAUDE.md#L594).
+
+Grouping/duplicate: [style-claude-md.md#1](style-claude-md.md#review-1). This is not an additional independent defect.
 
 <a id="review-7"></a>
 
 ### Claim 7 — Dead doctest in `cpulist.rs` -- assertions never compiled or run
 
-Status: `refuted`. Current risk: —.
+Status: `refuted`. Current risk: `—`.
 
-Nonexecution is intentional: Cargo.toml explicitly retains rendered examples as illustration and moves behavioral coverage into tests. Registered tests exercise empty input and mixed inclusive ranges; absence of executable doctests is not a policy defect.
+Prior-cycle decision: `refuted`.
 
-Evidence: [crates/shamir-numa/Cargo.toml:10](../../../../../crates/shamir-numa/Cargo.toml#L10); [crates/shamir-numa/src/cpulist.rs:24](../../../../../crates/shamir-numa/src/cpulist.rs#L24); [crates/shamir-numa/src/tests/cpulist_tests.rs:25](../../../../../crates/shamir-numa/src/tests/cpulist_tests.rs#L25); [crates/shamir-numa/src/tests/cpulist_tests.rs:36](../../../../../crates/shamir-numa/src/tests/cpulist_tests.rs#L36); [crates/shamir-numa/src/tests/mod.rs:9](../../../../../crates/shamir-numa/src/tests/mod.rs#L9).
+Nonexecution follows explicit manifest policy, not a defect. Registered tests assert empty input and mixed inclusive ranges, providing counter-evidence to the historical claim that no behavioral mechanism catches drift.
+
+Evidence: [crates/shamir-numa/Cargo.toml:10](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-numa/Cargo.toml#L10); [crates/shamir-numa/src/tests/mod.rs:9](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-numa/src/tests/mod.rs#L9); [crates/shamir-numa/src/tests/cpulist_tests.rs:25](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-numa/src/tests/cpulist_tests.rs#L25); [crates/shamir-numa/src/tests/cpulist_tests.rs:36](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-numa/src/tests/cpulist_tests.rs#L36).
 
 <a id="review-8"></a>
 
@@ -107,11 +117,13 @@ Evidence: [crates/shamir-numa/Cargo.toml:10](../../../../../crates/shamir-numa/C
 
 Status: `confirmed-open`. Current risk: `low`.
 
-Every valid ascending usize range is materialized before sorting/deduplication, without a span or aggregate limit. Current production inputs are kernel-generated; no remote-input route was found.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-numa/src/cpulist.rs:38](../../../../../crates/shamir-numa/src/cpulist.rs#L38); [crates/shamir-numa/src/cpulist.rs:40](../../../../../crates/shamir-numa/src/cpulist.rs#L40); [crates/shamir-numa/src/linux.rs:57](../../../../../crates/shamir-numa/src/linux.rs#L57); [crates/shamir-numa/src/linux.rs:76](../../../../../crates/shamir-numa/src/linux.rs#L76).
+Valid ascending ranges are expanded before deduplication without span or aggregate budgets. Large external tooling input causes excessive work/allocation; current service callers use trusted sysfs. No exact OOM threshold is established.
 
-Grouping/duplicate: `error-handling-lifecycle.md#1`. This row is not another independent defect.
+Evidence: [crates/shamir-numa/src/cpulist.rs:38](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-numa/src/cpulist.rs#L38); [crates/shamir-numa/src/cpulist.rs:40](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-numa/src/cpulist.rs#L40); [crates/shamir-numa/src/linux.rs:57](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-numa/src/linux.rs#L57).
+
+Grouping/duplicate: [error-handling-lifecycle.md#1](error-handling-lifecycle.md#review-1). This is not an additional independent defect.
 
 <a id="review-9"></a>
 
@@ -119,18 +131,18 @@ Grouping/duplicate: `error-handling-lifecycle.md#1`. This row is not another ind
 
 Status: `confirmed-open`. Current risk: `nit`.
 
-detect() still checks positive node count after probe() rejects an empty list, and probe() still sorts parser output that is already sorted. Both are harmless redundant work.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-numa/src/detect.rs:26](../../../../../crates/shamir-numa/src/detect.rs#L26); [crates/shamir-numa/src/linux.rs:62](../../../../../crates/shamir-numa/src/linux.rs#L62); [crates/shamir-numa/src/linux.rs:70](../../../../../crates/shamir-numa/src/linux.rs#L70); [crates/shamir-numa/src/cpulist.rs:51](../../../../../crates/shamir-numa/src/cpulist.rs#L51).
+probe rejects an empty node list and parse_cpulist already sorts output. The extra positive-count check and sort are present but harmless; their removal is cleanup, not correctness repair.
 
-## Corrections and qualified non-findings
+Evidence: [crates/shamir-numa/src/detect.rs:26](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-numa/src/detect.rs#L26); [crates/shamir-numa/src/linux.rs:62](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-numa/src/linux.rs#L62); [crates/shamir-numa/src/linux.rs:70](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-numa/src/linux.rs#L70); [crates/shamir-numa/src/cpulist.rs:51](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-numa/src/cpulist.rs#L51).
 
-- Portable parser/fallback/mock/padding tests are source-wired and contain behavioral assertions; no test execution is claimed. Mock override tests use fresh joined threads.
-- The concurrent node-0 test has a meaningful oracle for lost increments, but not mirror convergence. Sequential mirror tests do detect removal of mirroring.
-- The load_local out-of-range test is masked by MockTopology's own clamp and identical initial replicas; it does not independently prove NodeReplicated's defensive clamp.
-- CPU_SET claims must distinguish the Rust libc helper from C macros. Adjacent inspected libc versions use checked Rust array indexing, not the alleged C glibc/musl behavior; exact resolved-version outcomes remain unverified.
-- A future every-replica storm is schedule-dependent, not guaranteed Red. Force the stale-mirror interleaving for a deterministic regression oracle.
-- No built-in topology swap/shrink mechanism supports finding 3's particular example; an explicitly invalid NodeId still demonstrates the API behavior.
+## Evidence and recipe corrections
+
+- The overview and correction bullets still call exact CPU_SET behavior unverified despite the parent refinement. Independently inspected checksummed libc 0.2.186 establishes bounds panic.
+- The existing load_local out-of-range test cannot detect deletion of NodeReplicated's clamp: MockTopology already returns 0, and both replicas initially contain the same value. Use a non-clamping topology and distinguishable replicas.
+- An every-replica storm is schedule-dependent, not guaranteed Red. Force the stale-mirror schedule through the production publication seam.
+- A generic writer Mutex is not automatically sanctioned merely because current consumers perform DDL. It changes progress/reentrancy semantics and requires unwind-safe release and a demonstrated contention model.
 
 ---
 

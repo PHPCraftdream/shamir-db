@@ -1,11 +1,13 @@
-<!-- revalidation:2026-10-08 source:92ad58266bf57ddea1fa3c8a47affba1a3a9a096 -->
-# shamir-bench-utils — style-claude-md revalidation
+<!-- revalidation:2026-10-08 cycle:independent-2 source:e3765c935fc71655ee1ec0160cf180607935d89b -->
+# shamir-bench-utils — style-claude-md independent revalidation (cycle 2)
 
-Source snapshot: `92ad58266bf57ddea1fa3c8a47affba1a3a9a096`. Revalidated 2026-10-08 by read-only XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run; no source fix is part of this update. Test registration/assertions are evidence of an oracle, not proof of a passing run.
+Frozen source snapshot: `e3765c935fc71655ee1ec0160cf180607935d89b`. Independently revalidated 2026-10-08 by a fresh XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run. Source-fixed means the specified mechanism was already removed at this snapshot; this cycle implements no source fix.
 
-This section is authoritative for current status. Original titles/IDs are retained for traceability; a refuted title is not a current assertion. The collapsed historical report below is superseded, including its counts, severity, scenarios and fix instructions. Plan IDs preserve historical numbering, not a current release mandate. [Workspace methodology and status definitions](../SUMMARY.md#status-definitions).
+This section is authoritative for current decisions. Existing IDs and allegation titles are retained for traceability; a refuted title is not a current assertion. Prior-cycle decisions were rechecked, not used as proof. The first cycle is available in repository history at this snapshot. The original historical body below remains preserved once and is superseded, including its counts, severities and recipes. [Workspace scope and status definitions](../SUMMARY.md#status-definitions).
 
-Inline test layout and stale documentation remain, but layout alone is low-severity hygiene, not a runtime High. The unrelated-export objection is refuted by the explicit closely-coupled-group allowance.
+Unrelated external edits began in dependency/toolchain/CI metadata during collection; additional Rust-source edits appeared afterward. They were left untouched. Evidence and decisions are tied to the frozen commit, not those later changes or an installed toolchain. “Current” below means current at that snapshot; no re-audit of the modified working tree is implied.
+
+Mandatory inline-test layout and stale integration documentation are unresolved. Registration is intact, export coupling is permitted, and the external-checkout documentation pointer is not a repository-resolving reference.
 
 ## Current claim decisions
 
@@ -13,19 +15,19 @@ Inline test layout and stale documentation remain, but layout alone is low-sever
 |---:|---:|---:|---:|---:|---:|---:|
 | 5 | 4 | 0 | 0 | 1 | 0 | 0 |
 
-These are decisions on report claims, including repeated roots, bundled observations and non-findings—not a unique-bug census. Closed/N/A rows have no current risk; unverified risk is provisional. Pure style and unmeasured optimization claims do not establish runtime impact.
+These are duplicate-inclusive report decisions, not a unique-bug census. Pure style or structural optimization does not establish a runtime incident; unverified impact remains provisional.
 
 <a id="review-1"></a>
 
 ### Claim 1 — Entire test module embedded inline in `vector_data.rs`, violating the mandatory `tests/` layout
 
-Status: `confirmed-open`. Current risk: `low`.
+Status: `confirmed-open`. Current risk: `nit`.
 
-The nine-test inline block violates the rule, but lib.rs and cfg(test) register it correctly. No missing discovery or runtime High mechanism follows from placement.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-bench-utils/src/lib.rs:17](../../../../../crates/shamir-bench-utils/src/lib.rs#L17); [crates/shamir-bench-utils/src/vector_data.rs:217](../../../../../crates/shamir-bench-utils/src/vector_data.rs#L217); [CLAUDE.md:594](../../../../../CLAUDE.md#L594).
+The cfg(test) block violates the explicit directory-layout policy. lib.rs registers the module and all nine tests remain discoverable. Neither a runtime High nor lost test registration follows from this policy violation.
 
-Grouping/duplicate: `SUMMARY.md#7.1`. This row is not another independent defect.
+Evidence: [crates/shamir-bench-utils/src/vector_data.rs:217](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-bench-utils/src/vector_data.rs#L217); [crates/shamir-bench-utils/src/lib.rs:17](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-bench-utils/src/lib.rs#L17); [CLAUDE.md:594](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/CLAUDE.md#L594).
 
 <a id="review-2"></a>
 
@@ -33,35 +35,37 @@ Grouping/duplicate: `SUMMARY.md#7.1`. This row is not another independent defect
 
 Status: `confirmed-open`. Current risk: `low`.
 
-The ignored Criterion recipe and setup wording remain. Actual consumers use Harness, and measure/measure_async/current_allocated still have no executable callers.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-bench-utils/src/peak_mem.rs:10](../../../../../crates/shamir-bench-utils/src/peak_mem.rs#L10); [crates/shamir-bench-utils/src/peak_mem.rs:44](../../../../../crates/shamir-bench-utils/src/peak_mem.rs#L44); [crates/shamir-index/benches/create_index_streaming.rs:65](../../../../../crates/shamir-index/benches/create_index_streaming.rs#L65); [CLAUDE.md:237](../../../../../CLAUDE.md#L237).
+The primary ignored example and setup reference are still Criterion-specific despite the Harness requirement and actual consumers. Unused public measurement helpers need not be deleted to correct documentation; their behavioral test gap remains separate.
 
-Grouping/duplicate: `SUMMARY.md#7.2`. This row is not another independent defect.
+Evidence: [crates/shamir-bench-utils/src/peak_mem.rs:10](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-bench-utils/src/peak_mem.rs#L10); [crates/shamir-bench-utils/src/peak_mem.rs:44](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-bench-utils/src/peak_mem.rs#L44); [crates/shamir-index/benches/create_index_streaming.rs:65](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-index/benches/create_index_streaming.rs#L65); [CLAUDE.md:237](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/CLAUDE.md#L237).
 
 <a id="review-3"></a>
 
 ### Claim 3 — Stale "criterion bench" cross-reference in `vector_data.rs` module doc
 
-Status: `confirmed-open`. Current risk: `low`.
+Status: `confirmed-open`. Current risk: `nit`.
 
-The qualifier still contradicts vector_search's Harness import and migration documentation.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-bench-utils/src/vector_data.rs:3](../../../../../crates/shamir-bench-utils/src/vector_data.rs#L3); [crates/shamir-engine/benches/vector_search.rs:46](../../../../../crates/shamir-engine/benches/vector_search.rs#L46); [crates/shamir-engine/benches/vector_search.rs:53](../../../../../crates/shamir-engine/benches/vector_search.rs#L53).
+The named file exists, but imports Harness and explicitly records migration. The qualifier is inaccurate, independently of whether the path resolves.
 
-Grouping/duplicate: `SUMMARY.md#7.2`. This row is not another independent defect.
+Evidence: [crates/shamir-bench-utils/src/vector_data.rs:3](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-bench-utils/src/vector_data.rs#L3); [crates/shamir-engine/benches/vector_search.rs:46](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-engine/benches/vector_search.rs#L46); [crates/shamir-engine/benches/vector_search.rs:53](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-engine/benches/vector_search.rs#L53).
+
+Grouping/duplicate: [style-claude-md.md#2](style-claude-md.md#review-2). This is not an additional independent defect.
 
 <a id="review-4"></a>
 
 ### Claim 4 — `vector_data.rs` carries three public exports (`Lcg`, `ClusteredDataset`, `clustered_vectors`) — borderline against one-file-one-export
 
-Status: `refuted`. Current risk: —.
+Status: `refuted`. Current risk: `—`.
 
-The rule explicitly permits closely coupled groups. The generator directly instantiates Lcg, consumes its Gaussian method, and returns ClusteredDataset; these constitute one fixture-generation unit. A split is optional organization, not a proven violation.
+Prior-cycle decision: `refuted`.
 
-Evidence: [CLAUDE.md:505](../../../../../CLAUDE.md#L505); [crates/shamir-bench-utils/src/vector_data.rs:185](../../../../../crates/shamir-bench-utils/src/vector_data.rs#L185); [crates/shamir-bench-utils/src/vector_data.rs:204](../../../../../crates/shamir-bench-utils/src/vector_data.rs#L204); [crates/shamir-bench-utils/src/vector_data.rs:209](../../../../../crates/shamir-bench-utils/src/vector_data.rs#L209).
+The explicit closely-coupled-group allowance covers the RNG, consuming generator, and returned dataset. Optional extraction may aid organization but is not required conformance remediation.
 
-Grouping/duplicate: `SUMMARY.md#7.3`. This row is not another independent defect.
+Evidence: [CLAUDE.md:505](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/CLAUDE.md#L505); [crates/shamir-bench-utils/src/vector_data.rs:185](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-bench-utils/src/vector_data.rs#L185); [crates/shamir-bench-utils/src/vector_data.rs:204](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-bench-utils/src/vector_data.rs#L204); [crates/shamir-bench-utils/src/vector_data.rs:209](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-bench-utils/src/vector_data.rs#L209).
 
 <a id="review-5"></a>
 
@@ -69,19 +73,19 @@ Grouping/duplicate: `SUMMARY.md#7.3`. This row is not another independent defect
 
 Status: `confirmed-open`. Current risk: `nit`.
 
-The module still tells readers to report only a triple, while function documentation requires five inputs. The consumer lists five values but erroneously calls them a triple.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-bench-utils/src/vector_data.rs:29](../../../../../crates/shamir-bench-utils/src/vector_data.rs#L29); [crates/shamir-bench-utils/src/vector_data.rs:158](../../../../../crates/shamir-bench-utils/src/vector_data.rs#L158); [crates/shamir-engine/benches/vector_search.rs:19](../../../../../crates/shamir-engine/benches/vector_search.rs#L19).
+The module's three-value instruction omits n and dim. Function documentation specifies all five, and the consumer calls a five-value tuple a triple. Current report code prints the full inputs, so published omission is not established.
 
-Grouping/duplicate: `SUMMARY.md#7.4`. This row is not another independent defect.
+Evidence: [crates/shamir-bench-utils/src/vector_data.rs:29](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-bench-utils/src/vector_data.rs#L29); [crates/shamir-bench-utils/src/vector_data.rs:158](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-bench-utils/src/vector_data.rs#L158); [crates/shamir-engine/benches/vector_search.rs:19](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-engine/benches/vector_search.rs#L19); [crates/shamir-engine/examples/vector_report.rs:336](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-engine/examples/vector_report.rs#L336).
 
-## Corrections and qualified non-findings
+## Evidence and recipe corrections
 
-- Downgrade the original High for inline tests: this is mandatory structural hygiene, not demonstrated behavioral breakage. Stale Criterion documentation is likewise documentation severity.
-- lib.rs remains declaration-only; own imports are at module headers except the permitted test use super::*; no current mod.rs contains implementation.
-- Named bench/example/test references resolve, but lib.rs also contains an external-checkout harness pointer, so the blanket claim that every documentation pointer resolves within the repository is too broad.
-- The historical manifest comment does not disable unit tests or create an authorized layout exception.
-- Do not require unrelated implementation splitting as part of moving tests; the documented coupled-group allowance applies.
+- Imports and declaration-only lib.rs conform; the inline test import is the documented exception. There is no own mod.rs implementation to criticize.
+- The machine-specific external-checkout pointer at lib.rs:4 is still nonportable and conflicts with the user's repository-path discipline; replace it with the published harness reference when edits are authorized.
+- The manifest comment neither disables unit tests nor grants an exception to the required tests-directory policy.
+- Fixing layout does not require splitting permitted coupled exports, removing valid unused public APIs, or weakening test assertions.
+- Documentation replacements should say tracked peak allocation rather than peak RSS and must not reproduce the false setup-activation or current_thread-isolation assurances.
 
 ---
 

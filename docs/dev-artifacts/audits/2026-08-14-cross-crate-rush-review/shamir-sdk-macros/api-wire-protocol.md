@@ -1,19 +1,21 @@
-<!-- revalidation:2026-10-08 source:92ad58266bf57ddea1fa3c8a47affba1a3a9a096 -->
-# shamir-sdk-macros — api-wire-protocol revalidation
+<!-- revalidation:2026-10-08 cycle:independent-2 source:e3765c935fc71655ee1ec0160cf180607935d89b -->
+# shamir-sdk-macros — api-wire-protocol independent revalidation (cycle 2)
 
-Source snapshot: `92ad58266bf57ddea1fa3c8a47affba1a3a9a096`. Revalidated 2026-10-08 by read-only XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run; no source fix is part of this update. Test registration/assertions are evidence of an oracle, not proof of a passing run.
+Frozen source snapshot: `e3765c935fc71655ee1ec0160cf180607935d89b`. Independently revalidated 2026-10-08 by a fresh XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run. Source-fixed means the specified mechanism was already removed at this snapshot; this cycle implements no source fix.
 
-This section is authoritative for current status. Original titles/IDs are retained for traceability; a refuted title is not a current assertion. The collapsed historical report below is superseded, including its counts, severity, scenarios and fix instructions. Plan IDs preserve historical numbering, not a current release mandate. [Workspace methodology and status definitions](../SUMMARY.md#status-definitions).
+This section is authoritative for current decisions. Existing IDs and allegation titles are retained for traceability; a refuted title is not a current assertion. Prior-cycle decisions were rechecked, not used as proof. The first cycle is available in repository history at this snapshot. The original historical body below remains preserved once and is superseded, including its counts, severities and recipes. [Workspace scope and status definitions](../SUMMARY.md#status-definitions).
 
-Signature acceptance, decode handling, error-channel, pattern/attribute diagnostics, and the procedure example remain unchanged. Return-check severity is build/API impact, not runtime High.
+Unrelated external edits began in dependency/toolchain/CI metadata during collection; additional Rust-source edits appeared afterward. They were left untouched. Evidence and decisions are tied to the frozen commit, not those later changes or an installed toolchain. “Current” below means current at that snapshot; no re-audit of the modified working tree is implied.
+
+Public signature acceptance and boundary/error semantics have concrete gaps. Export uniqueness is already enforced. The bad procedure example is source-proven; duplication is optional maintenance work.
 
 ## Current claim decisions
 
 | Claim decisions | Open | Source-fixed | Partial | Refuted | Unverified | N/A |
 |---:|---:|---:|---:|---:|---:|---:|
-| 10 | 10 | 0 | 0 | 0 | 0 | 0 |
+| 10 | 9 | 0 | 0 | 0 | 0 | 1 |
 
-These are decisions on report claims, including repeated roots, bundled observations and non-findings—not a unique-bug census. Closed/N/A rows have no current risk; unverified risk is provisional. Pure style and unmeasured optimization claims do not establish runtime impact.
+These are duplicate-inclusive report decisions, not a unique-bug census. Pure style or structural optimization does not establish a runtime incident; unverified impact remains provisional.
 
 <a id="review-1"></a>
 
@@ -21,9 +23,11 @@ These are decisions on report claims, including repeated roots, bundled observat
 
 Status: `confirmed-open`. Current risk: `medium`.
 
-Exact Validation/function Result strings differ from procedure/scalar normalization, which omits std::result::. Qualified SDK spellings used by sibling tests are rejected by function. Argument compatibility is checked downstream by concrete wrapper calls, not wholly unchecked.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-sdk-macros/src/lib.rs:66](../../../../../crates/shamir-sdk-macros/src/lib.rs#L66); [crates/shamir-sdk-macros/src/lib.rs:197](../../../../../crates/shamir-sdk-macros/src/lib.rs#L197); [crates/shamir-sdk-macros/src/lib.rs:411](../../../../../crates/shamir-sdk-macros/src/lib.rs#L411); [crates/shamir-sdk/tests/procedure_compile_pass.rs:11](../../../../../crates/shamir-sdk/tests/procedure_compile_pass.rs#L11); [crates/shamir-sdk/tests/scalar_compile_pass.rs:8](../../../../../crates/shamir-sdk/tests/scalar_compile_pass.rs#L8).
+The same qualified SDK Result spelling is accepted by procedure/scalar and rejected by function; qualified Validation is rejected. std::result:: is omitted despite the helper's qualification assurance. Compiler-enforced concrete SDK returns prevent runtime foreign-type confusion. Use a cross-macro compile matrix, not snapshots alone.
+
+Evidence: [crates/shamir-sdk-macros/src/lib.rs:66](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-sdk-macros/src/lib.rs#L66); [crates/shamir-sdk-macros/src/lib.rs:197](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-sdk-macros/src/lib.rs#L197); [crates/shamir-sdk-macros/src/lib.rs:408](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-sdk-macros/src/lib.rs#L408); [crates/shamir-sdk/tests/procedure_compile_pass.rs:11](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-sdk/tests/procedure_compile_pass.rs#L11).
 
 <a id="review-2"></a>
 
@@ -31,11 +35,13 @@ Evidence: [crates/shamir-sdk-macros/src/lib.rs:66](../../../../../crates/shamir-
 
 Status: `confirmed-open`. Current risk: `medium`.
 
-Malformed or non-map input still becomes empty Params, then Null/None in validators. This loses decode-versus-domain failure information. Normal host calls encode a parameter map; incompatibility/security reachability requires an abnormal host/caller or unsupported wire shape.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-sdk/src/__rt.rs:11](../../../../../crates/shamir-sdk/src/__rt.rs#L11); [crates/shamir-sdk-macros/src/lib.rs:129](../../../../../crates/shamir-sdk-macros/src/lib.rs#L129); [crates/shamir-wasm-host/src/wasm/wasm_function.rs:407](../../../../../crates/shamir-wasm-host/src/wasm/wasm_function.rs#L407).
+Failed/non-map decoding loses the error channel before validator fallbacks. Ordinary host construction emits a map; abnormal wire input is required for the reported malformed-input scenario.
 
-Grouping/duplicate: `security-crypto.md#1`. This row is not another independent defect.
+Evidence: [crates/shamir-sdk/src/__rt.rs:11](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-sdk/src/__rt.rs#L11); [crates/shamir-wasm-host/src/wasm/wasm_function.rs:407](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-wasm-host/src/wasm/wasm_function.rs#L407).
+
+Grouping/duplicate: [security-crypto.md#1](security-crypto.md#review-1). This is not an additional independent defect.
 
 <a id="review-3"></a>
 
@@ -43,11 +49,13 @@ Grouping/duplicate: `security-crypto.md#1`. This row is not another independent 
 
 Status: `confirmed-open`. Current risk: `medium`.
 
-Err still invokes the panic helper and host runtime failures become Compute. No top-level result envelope exists. The semantic loss is User-versus-Compute classification; SDK Error is a message struct, not the claimed rich error taxonomy.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-sdk-macros/src/lib.rs:251](../../../../../crates/shamir-sdk-macros/src/lib.rs#L251); [crates/shamir-sdk-macros/src/lib.rs:272](../../../../../crates/shamir-sdk-macros/src/lib.rs#L272); [crates/shamir-sdk/src/error.rs:7](../../../../../crates/shamir-sdk/src/error.rs#L7); [crates/shamir-sdk/src/__rt.rs:68](../../../../../crates/shamir-sdk/src/__rt.rs#L68); [crates/shamir-wasm-host/src/wasm/wasm_function.rs:593](../../../../../crates/shamir-wasm-host/src/wasm/wasm_function.rs#L593).
+Err takes the panic path and becomes Compute, not User. This is a classification defect; actual panic-message delivery and rich guest error variants are not established.
 
-Grouping/duplicate: `error-handling-lifecycle.md#2`. This row is not another independent defect.
+Evidence: [crates/shamir-sdk-macros/src/lib.rs:272](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-sdk-macros/src/lib.rs#L272); [crates/shamir-wasm-host/src/wasm/wasm_function.rs:593](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-wasm-host/src/wasm/wasm_function.rs#L593).
+
+Grouping/duplicate: [error-handling-lifecycle.md#2](error-handling-lifecycle.md#review-2). This is not an additional independent defect.
 
 <a id="review-4"></a>
 
@@ -55,11 +63,13 @@ Grouping/duplicate: `error-handling-lifecycle.md#2`. This row is not another ind
 
 Status: `confirmed-open`. Current risk: `low`.
 
-Semantic validation still panics without constructing syn::Error. Parser errors are already handled separately by parse_macro_input.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-sdk-macros/src/lib.rs:45](../../../../../crates/shamir-sdk-macros/src/lib.rs#L45); [crates/shamir-sdk-macros/src/lib.rs:51](../../../../../crates/shamir-sdk-macros/src/lib.rs#L51); [crates/shamir-sdk-macros/src/lib.rs:196](../../../../../crates/shamir-sdk-macros/src/lib.rs#L196); [crates/shamir-sdk-macros/src/lib.rs:486](../../../../../crates/shamir-sdk-macros/src/lib.rs#L486).
+Semantic validation remains assert/panic-based; parse_macro_input already handles parsing through compile errors.
 
-Grouping/duplicate: `error-handling-lifecycle.md#1`. This row is not another independent defect.
+Evidence: [crates/shamir-sdk-macros/src/lib.rs:45](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-sdk-macros/src/lib.rs#L45); [crates/shamir-sdk-macros/src/lib.rs:486](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-sdk-macros/src/lib.rs#L486).
+
+Grouping/duplicate: [error-handling-lifecycle.md#1](error-handling-lifecycle.md#review-1). This is not an additional independent defect.
 
 <a id="review-5"></a>
 
@@ -67,11 +77,13 @@ Grouping/duplicate: `error-handling-lifecycle.md#1`. This row is not another ind
 
 Status: `confirmed-open`. Current risk: `medium`.
 
-Validator and signature-rejection UI coverage remain absent. The function-zero-coverage subclaim is refuted by the wired compiler/runtime test; that test covers only a bare-prelude successful signature, not qualification/rejection cases.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-sdk-macros/Cargo.toml:13](../../../../../crates/shamir-sdk-macros/Cargo.toml#L13); [crates/shamir-wasm-host/src/tests/compile_tests.rs:11](../../../../../crates/shamir-wasm-host/src/tests/compile_tests.rs#L11); [crates/shamir-wasm-host/src/tests/compile_tests.rs:19](../../../../../crates/shamir-wasm-host/src/tests/compile_tests.rs#L19); [crates/shamir-sdk/tests/scalar_compile_pass.rs:7](../../../../../crates/shamir-sdk/tests/scalar_compile_pass.rs#L7).
+The function-zero-coverage facet is refuted by the registered WASM test. Validator and signature UI/error-path coverage remain absent; existing successful bare-prelude compilation cannot catch rejected qualified spellings.
 
-Grouping/duplicate: `correctness-tdd.md#1`. This row is not another independent defect.
+Evidence: [crates/shamir-wasm-host/src/tests/compile_tests.rs:11](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-wasm-host/src/tests/compile_tests.rs#L11); [crates/shamir-wasm-host/src/tests/compile_tests.rs:19](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-wasm-host/src/tests/compile_tests.rs#L19); [crates/shamir-sdk-macros/Cargo.toml:13](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-sdk-macros/Cargo.toml#L13).
+
+Grouping/duplicate: [correctness-tdd.md#1](correctness-tdd.md#review-1). This is not an additional independent defect.
 
 <a id="review-6"></a>
 
@@ -79,9 +91,11 @@ Grouping/duplicate: `correctness-tdd.md#1`. This row is not another independent 
 
 Status: `confirmed-open`. Current risk: `low`.
 
-The example still wraps query(None)'s Result<Vec<Value>> directly in Ok despite the declared Result<Value>. The correct prelude example unwraps with ? and wraps Value::List.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-sdk-macros/src/lib.rs:292](../../../../../crates/shamir-sdk-macros/src/lib.rs#L292); [crates/shamir-sdk/src/db.rs:98](../../../../../crates/shamir-sdk/src/db.rs#L98); [crates/shamir-sdk/src/prelude.rs:35](../../../../../crates/shamir-sdk/src/prelude.rs#L35).
+query(None) returns Result&lt;Vec&lt;Value&gt;&gt;, but the example directly wraps it in Ok for a Result&lt;Value&gt; function. The independent prelude example correctly uses ? followed by Value::List.
+
+Evidence: [crates/shamir-sdk-macros/src/lib.rs:292](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-sdk-macros/src/lib.rs#L292); [crates/shamir-sdk/src/db.rs:98](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-sdk/src/db.rs#L98); [crates/shamir-sdk/src/prelude.rs:35](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-sdk/src/prelude.rs#L35).
 
 <a id="review-7"></a>
 
@@ -89,11 +103,13 @@ Evidence: [crates/shamir-sdk-macros/src/lib.rs:292](../../../../../crates/shamir
 
 Status: `confirmed-open`. Current risk: `low`.
 
-Nonempty attributes remain ignored, and no targeted multiple-entrypoint diagnostic exists. Duplicate ABI symbols already reject incompatible multiple expansions; a const _: sentinel cannot improve that across modules.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-sdk-macros/src/lib.rs:44](../../../../../crates/shamir-sdk-macros/src/lib.rs#L44); [crates/shamir-sdk-macros/src/lib.rs:176](../../../../../crates/shamir-sdk-macros/src/lib.rs#L176); [crates/shamir-sdk-macros/src/lib.rs:108](../../../../../crates/shamir-sdk-macros/src/lib.rs#L108); [crates/shamir-sdk-macros/src/lib.rs:238](../../../../../crates/shamir-sdk-macros/src/lib.rs#L238).
+Nonempty attribute arguments are silently discarded. The separate unenforced-uniqueness facet is refuted by fixed ABI symbol collisions; specialized diagnostics are optional.
 
-Grouping/duplicate: `correctness-tdd.md#4`. This row is not another independent defect.
+Evidence: [crates/shamir-sdk-macros/src/lib.rs:44](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-sdk-macros/src/lib.rs#L44); [crates/shamir-sdk-macros/src/lib.rs:108](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-sdk-macros/src/lib.rs#L108).
+
+Grouping/duplicate: [correctness-tdd.md#10](correctness-tdd.md#review-10). This is not an additional independent defect.
 
 <a id="review-8"></a>
 
@@ -101,45 +117,48 @@ Grouping/duplicate: `correctness-tdd.md#4`. This row is not another independent 
 
 Status: `confirmed-open`. Current risk: `low`.
 
-The unchecked cast remains, but the numeric title is wrong for wasm32: -1 casts to usize::MAX, approximately 4 GiB, and Vec may reject capacity before allocating. The normal host converts lengths with i32::try_from.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-sdk-macros/src/lib.rs:109](../../../../../crates/shamir-sdk-macros/src/lib.rs#L109); [crates/shamir-wasm-host/src/wasm/wasm_function.rs:518](../../../../../crates/shamir-wasm-host/src/wasm/wasm_function.rs#L518); [crates/shamir-wasm-host/src/compile.rs:539](../../../../../crates/shamir-wasm-host/src/compile.rs#L539).
+The signed cast remains unchecked. On the declared wasm32 guest target, -1 becomes usize::MAX, approximately 4 GiB, not 2^63; capacity rejection can precede actual allocation.
 
-Grouping/duplicate: `security-crypto.md#2`. This row is not another independent defect.
+Evidence: [crates/shamir-sdk-macros/src/lib.rs:110](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-sdk-macros/src/lib.rs#L110); [crates/shamir-wasm-host/src/compile.rs:539](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-wasm-host/src/compile.rs#L539).
+
+Grouping/duplicate: [security-crypto.md#2](security-crypto.md#review-2). This is not an additional independent defect.
 
 <a id="review-9"></a>
 
 ### Claim 9 — Four macros in one `lib.rs` with the ABI emitter duplicated four times
 
-Status: `confirmed-open`. Current risk: `low`.
+Status: `not-applicable`. Current risk: `—`.
 
-Four hand-maintained emitters and inconsistent validation remain. This is maintainability/drift risk, not a measured runtime defect.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-sdk-macros/src/lib.rs:91](../../../../../crates/shamir-sdk-macros/src/lib.rs#L91); [crates/shamir-sdk-macros/src/lib.rs:221](../../../../../crates/shamir-sdk-macros/src/lib.rs#L221); [crates/shamir-sdk-macros/src/lib.rs:353](../../../../../crates/shamir-sdk-macros/src/lib.rs#L353); [crates/shamir-sdk-macros/src/lib.rs:521](../../../../../crates/shamir-sdk-macros/src/lib.rs#L521).
+Duplication is present, but closely coupled macros are permitted and no current wire divergence follows merely from file organization. Extraction is optional maintenance; actual return-check divergence is tracked separately.
 
-Grouping/duplicate: `style-claude-md.md#1`. This row is not another independent defect.
+Evidence: [crates/shamir-sdk-macros/src/lib.rs:91](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-sdk-macros/src/lib.rs#L91); [crates/shamir-sdk-macros/src/lib.rs:521](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-sdk-macros/src/lib.rs#L521); [CLAUDE.md:505](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/CLAUDE.md#L505).
+
+Grouping/duplicate: [style-claude-md.md#1](style-claude-md.md#review-1). This is not an additional independent defect.
 
 <a id="review-10"></a>
 
 ### Claim 10 — `type_contains_ctx` purity check is lexical, not semantic
 
-Status: `confirmed-open`. Current risk: `nit`.
+Status: `confirmed-open`. Current risk: `low`.
 
-The token-word heuristic remains and cannot resolve aliases. Concrete Params forwarding prevents passing Ctx as the sole argument, but does not prevent constructing Ctx inside the body; the report's structural-purity guarantee is false.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-sdk-macros/src/lib.rs:425](../../../../../crates/shamir-sdk-macros/src/lib.rs#L425); [crates/shamir-sdk-macros/src/lib.rs:525](../../../../../crates/shamir-sdk-macros/src/lib.rs#L525); [crates/shamir-sdk/src/context.rs:64](../../../../../crates/shamir-sdk/src/context.rs#L64).
+The argument check does not resolve aliases, but passing an actual Ctx still conflicts with concrete Params forwarding. The real purity escape is Ctx construction inside a valid body, subject to host policy.
 
-Grouping/duplicate: `correctness-tdd.md#9`. This row is not another independent defect.
+Evidence: [crates/shamir-sdk-macros/src/lib.rs:425](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-sdk-macros/src/lib.rs#L425); [crates/shamir-sdk-macros/src/lib.rs:525](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-sdk-macros/src/lib.rs#L525); [crates/shamir-sdk/src/context.rs:64](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-sdk/src/context.rs#L64).
 
-## Corrections and qualified non-findings
+Grouping/duplicate: [correctness-tdd.md#9](correctness-tdd.md#review-9). This is not an additional independent defect.
 
-- Builder-only non-finding remains valid for the macro crate: its example uses the typed Table API, and it constructs no raw serde_json query.
-- Qualified type acceptance is a Medium API/build defect; no runtime type-confusion path was demonstrated.
-- Syntactic final-segment matching still cannot resolve aliases or establish semantic type identity; retain compiler-enforced SDK compatibility.
-- SDK Error has no MissingParam variant or thiserror-derived taxonomy: crates/shamir-sdk/src/error.rs:7.
-- Guest panic formatting does not prove its text survives into Wasmtime's returned trap. A string prefix alone is not a source-proven substitute for a structured envelope.
-- There is no shrink_to_fit call in these allocators to remove.
-- Use guest-target ABI tests: native 64-bit invocation of these i32-pointer exports would truncate pointers.
+## Evidence and recipe corrections
+
+- Changing all successful results to an unversioned {ok:...}/{err:...} map is incompatible with the current raw QueryValue ABI and arbitrary user maps. Coordinate explicit ABI identification and legacy decode behavior; a small retrofitted leading tag can collide with existing MessagePack.
+- Final-segment syntax checks cannot establish semantic type identity or resolve aliases. Preserve concrete SDK compatibility checks.
+- Guest ABI runtime tests must use the guest target; native 64-bit pointers cannot be represented by these i32 exports.
+- Published rmp-serde 1.3.1 src/decode.rs routes this Value through deserialize_any, whose array/map branches decrement depth. This does not justify a universal depth assurance for every decoder dispatch: https://docs.rs/crate/rmp-serde/1.3.1/source/src/decode.rs; pin Cargo.lock:2949.
 
 ---
 

@@ -1,29 +1,33 @@
-<!-- revalidation:2026-10-08 source:92ad58266bf57ddea1fa3c8a47affba1a3a9a096 -->
-# shamir-connect — performance-hotpath revalidation
+<!-- revalidation:2026-10-08 cycle:independent-2 source:e3765c935fc71655ee1ec0160cf180607935d89b -->
+# shamir-connect — performance-hotpath independent revalidation (cycle 2)
 
-Source snapshot: `92ad58266bf57ddea1fa3c8a47affba1a3a9a096`. Revalidated 2026-10-08 by read-only XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run; no source fix is part of this update. Test registration/assertions are evidence of an oracle, not proof of a passing run.
+Frozen source snapshot: `e3765c935fc71655ee1ec0160cf180607935d89b`. Independently revalidated 2026-10-08 by a fresh XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run. Source-fixed means the specified mechanism was already removed at this snapshot; this cycle implements no source fix.
 
-This section is authoritative for current status. Original titles/IDs are retained for traceability; a refuted title is not a current assertion. The collapsed historical report below is superseded, including its counts, severity, scenarios and fix instructions. Plan IDs preserve historical numbering, not a current release mandate. [Workspace methodology and status definitions](../SUMMARY.md#status-definitions).
+This section is authoritative for current decisions. Existing IDs and allegation titles are retained for traceability; a refuted title is not a current assertion. Prior-cycle decisions were rechecked, not used as proof. The first cycle is available in repository history at this snapshot. The original historical body below remains preserved once and is superseded, including its counts, severities and recipes. [Workspace scope and status definitions](../SUMMARY.md#status-definitions).
 
-The all-session capped-insert scan and permanently retained audit entries are proven cost defects. Clock and latency comparisons are overstated; both dispatch variants sample time.
+Unrelated external edits began in dependency/toolchain/CI metadata during collection; additional Rust-source edits appeared afterward. They were left untouched. Evidence and decisions are tied to the frozen commit, not those later changes or an installed toolchain. “Current” below means current at that snapshot; no re-audit of the modified working tree is implied.
+
+Unbounded audit retention is production-reachable and the strongest availability issue. Capped login globally serializes O(total sessions) work, while resume lacks cap enforcement. Clock sampling and missing benchmarks are not independently demonstrated performance defects.
 
 ## Current claim decisions
 
 | Claim decisions | Open | Source-fixed | Partial | Refuted | Unverified | N/A |
 |---:|---:|---:|---:|---:|---:|---:|
-| 7 | 5 | 0 | 0 | 1 | 0 | 1 |
+| 7 | 4 | 0 | 0 | 1 | 0 | 2 |
 
-These are decisions on report claims, including repeated roots, bundled observations and non-findings—not a unique-bug census. Closed/N/A rows have no current risk; unverified risk is provisional. Pure style and unmeasured optimization claims do not establish runtime impact.
+These are duplicate-inclusive report decisions, not a unique-bug census. Pure style or structural optimization does not establish a runtime incident; unverified impact remains provisional.
 
 <a id="review-1"></a>
 
 ### Claim 1 — Per-user session-cap insert does an O(total-sessions) scan under a global mutex
 
-Status: `confirmed-open`. Current risk: `high`.
+Status: `confirmed-open`. Current risk: `medium`.
 
-Capped insertion traverses the whole map and sorts matching sessions under a global mutex. Production login calls it. Cost includes O(N) traversal and O(U log U) sorting; exact latency is unmeasured.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-connect/src/server/session.rs:470](../../../../../crates/shamir-connect/src/server/session.rs#L470); [crates/shamir-connect/src/server/session.rs:476](../../../../../crates/shamir-connect/src/server/session.rs#L476); [crates/shamir-connect/src/server/session.rs:484](../../../../../crates/shamir-connect/src/server/session.rs#L484); [crates/shamir-server/src/connection/handshake.rs:580](../../../../../crates/shamir-server/src/connection/handshake.rs#L580).
+Production successful login holds cap_lock through full-map iteration and O(U log U) matching-user sorting. Cross-user scaling is concrete; numerical delay or a High resource-exhaustion threshold is not measured.
+
+Evidence: [crates/shamir-connect/src/server/session.rs:470](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-connect/src/server/session.rs#L470); [crates/shamir-connect/src/server/session.rs:476](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-connect/src/server/session.rs#L476); [crates/shamir-connect/src/server/session.rs:484](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-connect/src/server/session.rs#L484); [crates/shamir-server/src/connection/handshake.rs:580](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-server/src/connection/handshake.rs#L580).
 
 <a id="review-2"></a>
 
@@ -31,9 +35,11 @@ Evidence: [crates/shamir-connect/src/server/session.rs:470](../../../../../crate
 
 Status: `confirmed-open`. Current risk: `high`.
 
-Every append deep-clones into retained entries; neither appender use nor checkpointing removes entries. The production launcher builds this chain. Memory scales with total emitted events, even when a durable sink is configured.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-connect/src/server/audit_chain.rs:140](../../../../../crates/shamir-connect/src/server/audit_chain.rs#L140); [crates/shamir-connect/src/server/audit_chain.rs:214](../../../../../crates/shamir-connect/src/server/audit_chain.rs#L214); [crates/shamir-connect/src/server/audit_chain.rs:427](../../../../../crates/shamir-connect/src/server/audit_chain.rs#L427); [crates/shamir-server/src/server/server_launcher.rs:338](../../../../../crates/shamir-server/src/server/server_launcher.rs#L338).
+Every append deep-clones into an unbounded retained Vec even with the shipped durable appender. Production emits auth and rate-limit events; no draining API or retention setting bounds this memory. Exact OOM time/RSS is unmeasured.
+
+Evidence: [crates/shamir-connect/src/server/audit_chain.rs:140](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-connect/src/server/audit_chain.rs#L140); [crates/shamir-connect/src/server/audit_chain.rs:214](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-connect/src/server/audit_chain.rs#L214); [crates/shamir-server/src/server/server_launcher.rs:338](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-server/src/server/server_launcher.rs#L338); [crates/shamir-server/src/connection/handshake.rs:47](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-server/src/connection/handshake.rs#L47).
 
 <a id="review-3"></a>
 
@@ -41,9 +47,11 @@ Evidence: [crates/shamir-connect/src/server/audit_chain.rs:140](../../../../../c
 
 Status: `confirmed-open`. Current risk: `medium`.
 
-Successful resume still calls uncapped insert, and the live wrapper adds no cap. It can exceed 16 through valid successive tickets; replaying the same consumed ticket is rejected and is not the amplification mechanism.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-connect/src/server/resume.rs:366](../../../../../crates/shamir-connect/src/server/resume.rs#L366); [crates/shamir-connect/src/server/resume.rs:432](../../../../../crates/shamir-connect/src/server/resume.rs#L432); [crates/shamir-server/src/connection/handshake.rs:128](../../../../../crates/shamir-server/src/connection/handshake.rs#L128).
+Resume inserts without eviction. Production's 24-hour ticket refresh TTL prevents successive refresh issuance against the same 24-hour chain deadline, but multiple valid full-auth families still allow exceeding 16 sessions. Reusing one consumed ticket is rejected.
+
+Evidence: [crates/shamir-connect/src/server/resume.rs:366](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-connect/src/server/resume.rs#L366); [crates/shamir-connect/src/server/resume.rs:385](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-connect/src/server/resume.rs#L385); [crates/shamir-connect/src/server/resume.rs:432](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-connect/src/server/resume.rs#L432); [crates/shamir-server/src/connection/handshake.rs:116](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-server/src/connection/handshake.rs#L116); [crates/shamir-server/src/connection/handshake.rs:607](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-server/src/connection/handshake.rs#L607).
 
 <a id="review-4"></a>
 
@@ -51,46 +59,54 @@ Evidence: [crates/shamir-connect/src/server/resume.rs:366](../../../../../crates
 
 Status: `confirmed-open`. Current risk: `low`.
 
-These operations remain under the chain lock. Required serialization and unnecessary materialization should be distinguished; the microsecond and throughput estimates are not verified.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-connect/src/server/audit_chain.rs:196](../../../../../crates/shamir-connect/src/server/audit_chain.rs#L196); [crates/shamir-connect/src/server/audit_chain.rs:210](../../../../../crates/shamir-connect/src/server/audit_chain.rs#L210); [crates/shamir-connect/src/server/audit_chain.rs:214](../../../../../crates/shamir-connect/src/server/audit_chain.rs#L214).
+The critical section contains all those operations. Five String fields and retained details contribute clone cost; chain sequencing is necessary, while materialization/retention cost is reducible.
+
+Evidence: [crates/shamir-connect/src/server/audit_chain.rs:196](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-connect/src/server/audit_chain.rs#L196); [crates/shamir-connect/src/server/audit_chain.rs:210](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-connect/src/server/audit_chain.rs#L210); [crates/shamir-connect/src/server/audit_chain.rs:214](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-connect/src/server/audit_chain.rs#L214).
 
 <a id="review-5"></a>
 
 ### Claim 5 — Owning-envelope dispatch_request still pays a wall-clock syscall per request
 
-Status: `confirmed-open`. Current risk: `nit`.
+Status: `not-applicable`. Current risk: `—`.
 
-Owned dispatch samples time via lookup/touch. However, view dispatch uses the same lookup and samples time again for its rate gate; it does not implement the claimed avoidance. A syscall implementation and 100 ns cost are unverified.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-connect/src/server/dispatch.rs:78](../../../../../crates/shamir-connect/src/server/dispatch.rs#L78); [crates/shamir-connect/src/server/dispatch.rs:131](../../../../../crates/shamir-connect/src/server/dispatch.rs#L131); [crates/shamir-connect/src/server/dispatch.rs:153](../../../../../crates/shamir-connect/src/server/dispatch.rs#L153); [crates/shamir-connect/src/server/session.rs:297](../../../../../crates/shamir-connect/src/server/session.rs#L297).
+A clock read exists, but that is not a demonstrated defect: view dispatch performs the same lookup clock read and another gate read. Neither syscall implementation nor claimed cost was established; shared sampling is an optional optimization.
+
+Evidence: [crates/shamir-connect/src/server/dispatch.rs:78](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-connect/src/server/dispatch.rs#L78); [crates/shamir-connect/src/server/dispatch.rs:131](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-connect/src/server/dispatch.rs#L131); [crates/shamir-connect/src/server/dispatch.rs:153](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-connect/src/server/dispatch.rs#L153); [crates/shamir-connect/src/common/time.rs:19](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-connect/src/common/time.rs#L19).
 
 <a id="review-summary-optimizations"></a>
 
 ### Claim Summary.optimizations — Cached ciphers/HMAC keys, borrowed envelopes, atomics, Fx hashing, and exact capacities
 
-Status: `refuted`. Current risk: —.
+Status: `refuted`. Current risk: `—`.
 
-Cipher and HMAC caches, borrowed envelopes, and atomic buckets exist. The bundled universal claims are false: lockout maps use the default hasher, and AuthMessage's requested capacity is smaller than its actual output. No performance gain was measured.
+Prior-cycle decision: `refuted`.
 
-Evidence: [crates/shamir-connect/src/server/resume.rs:164](../../../../../crates/shamir-connect/src/server/resume.rs#L164); [crates/shamir-connect/src/server/session.rs:284](../../../../../crates/shamir-connect/src/server/session.rs#L284); [crates/shamir-connect/src/common/envelope.rs:122](../../../../../crates/shamir-connect/src/common/envelope.rs#L122); [crates/shamir-connect/src/server/lockout.rs:256](../../../../../crates/shamir-connect/src/server/lockout.rs#L256); [crates/shamir-connect/src/common/auth_message.rs:82](../../../../../crates/shamir-connect/src/common/auth_message.rs#L82).
+Several optimizations exist, but the universal bundle fails: lockout uses RandomState, AuthMessage's requested capacity is short, and public mutable key fields can invalidate the meaning of permanent cipher caches.
+
+Evidence: [crates/shamir-connect/src/server/resume.rs:164](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-connect/src/server/resume.rs#L164); [crates/shamir-connect/src/server/session.rs:284](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-connect/src/server/session.rs#L284); [crates/shamir-connect/src/server/lockout.rs:256](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-connect/src/server/lockout.rs#L256); [crates/shamir-connect/src/common/auth_message.rs:82](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-connect/src/common/auth_message.rs#L82).
 
 <a id="review-test-coverage-note"></a>
 
 ### Claim Test-coverage note — Capped insertion has LRU tests but no scale benchmark; audit append is unbenchmarked
 
-Status: `not-applicable`. Current risk: —.
+Status: `not-applicable`. Current risk: `—`.
 
-Registered integration tests cover capped-insert LRU behavior, and hot_paths benchmarks omit capped insertion and audit append. Their absence does not itself prove the reported latency estimates.
+Prior-cycle decision: `not-applicable`.
 
-Evidence: [crates/shamir-connect/tests/integration_session.rs:381](../../../../../crates/shamir-connect/tests/integration_session.rs#L381); [crates/shamir-connect/tests/integration_session.rs:416](../../../../../crates/shamir-connect/tests/integration_session.rs#L416); [crates/shamir-connect/benches/hot_paths.rs:299](../../../../../crates/shamir-connect/benches/hot_paths.rs#L299).
+Registered sequential LRU tests and the stated benchmark omissions are real. They do not establish the latency scenarios or production contention magnitude.
 
-## Corrections and qualified non-findings
+Evidence: [crates/shamir-connect/tests/integration_session.rs:381](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-connect/tests/integration_session.rs#L381); [crates/shamir-connect/tests/integration_session.rs:416](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-connect/tests/integration_session.rs#L416); [crates/shamir-connect/benches/hot_paths.rs:148](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-connect/benches/hot_paths.rs#L148).
 
-- Arc<AuditEntry> reduces clone cost but does not bound retention; a ring, drain, or retention-free mode is still required.
-- AuditEntry has five Strings, not six.
-- View dispatch does not currently avoid lookup's clock read.
-- Do not call resume the measured hottest creation path or attach numeric latency estimates without measurements.
+## Evidence and recipe corrections
+
+- Retire the deployed successive-refresh amplification story: run_resume requests a full 24-hour refreshed TTL, making issue_refresh false for ordinary existing 24-hour chains. Independent valid ticket families remain a sufficient cap-bypass witness.
+- Session-map bounds, connection limits, credential requirements and GC affect deployed scaling; no 100k-session latency prediction was verified.
+- Arc&lt;AuditEntry&gt; removes deep clones but does not bound retained event count.
+- A secondary index must include uncapped/public insert, remove, kicks, GC and eviction, and must handle users already above the cap rather than evicting just one perpetually.
 
 ---
 

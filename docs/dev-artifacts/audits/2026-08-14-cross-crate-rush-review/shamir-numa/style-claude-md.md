@@ -1,11 +1,13 @@
-<!-- revalidation:2026-10-08 source:92ad58266bf57ddea1fa3c8a47affba1a3a9a096 -->
-# shamir-numa — style-claude-md revalidation
+<!-- revalidation:2026-10-08 cycle:independent-2 source:e3765c935fc71655ee1ec0160cf180607935d89b -->
+# shamir-numa — style-claude-md independent revalidation (cycle 2)
 
-Source snapshot: `92ad58266bf57ddea1fa3c8a47affba1a3a9a096`. Revalidated 2026-10-08 by read-only XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run; no source fix is part of this update. Test registration/assertions are evidence of an oracle, not proof of a passing run.
+Frozen source snapshot: `e3765c935fc71655ee1ec0160cf180607935d89b`. Independently revalidated 2026-10-08 by a fresh XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run. Source-fixed means the specified mechanism was already removed at this snapshot; this cycle implements no source fix.
 
-This section is authoritative for current status. Original titles/IDs are retained for traceability; a refuted title is not a current assertion. The collapsed historical report below is superseded, including its counts, severity, scenarios and fix instructions. Plan IDs preserve historical numbering, not a current release mandate. [Workspace methodology and status definitions](../SUMMARY.md#status-definitions).
+This section is authoritative for current decisions. Existing IDs and allegation titles are retained for traceability; a refuted title is not a current assertion. Prior-cycle decisions were rechecked, not used as proof. The first cycle is available in repository history at this snapshot. The original historical body below remains preserved once and is superseded, including its counts, severities and recipes. [Workspace scope and status definitions](../SUMMARY.md#status-definitions).
 
-Inline Linux tests and stale scope documentation remain. Inline placement is a low-severity convention issue, not missing registration; intentionally nonexecuted examples are not a structural violation.
+Unrelated external edits began in dependency/toolchain/CI metadata during collection; additional Rust-source edits appeared afterward. They were left untouched. Evidence and decisions are tied to the frozen commit, not those later changes or an installed toolchain. “Current” below means current at that snapshot; no re-audit of the modified working tree is implied.
+
+The inline Linux test block is a real layout-policy exception, and scope prose is stale. Test registration is intact; illustrative nonexecuted examples comply with manifest policy.
 
 ## Current claim decisions
 
@@ -13,7 +15,7 @@ Inline Linux tests and stale scope documentation remain. Inline placement is a l
 |---:|---:|---:|---:|---:|---:|---:|
 | 3 | 2 | 0 | 0 | 1 | 0 | 0 |
 
-These are decisions on report claims, including repeated roots, bundled observations and non-findings—not a unique-bug census. Closed/N/A rows have no current risk; unverified risk is provisional. Pure style and unmeasured optimization claims do not establish runtime impact.
+These are duplicate-inclusive report decisions, not a unique-bug census. Pure style or structural optimization does not establish a runtime incident; unverified impact remains provisional.
 
 <a id="review-1"></a>
 
@@ -21,9 +23,11 @@ These are decisions on report claims, including repeated roots, bundled observat
 
 Status: `confirmed-open`. Current risk: `low`.
 
-linux.rs still embeds the two tests contrary to the explicit test-layout rule. lib.rs includes that module on Linux, so the tests are reachable even though absent from the separate test manifest.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-numa/src/linux.rs:179](../../../../../crates/shamir-numa/src/linux.rs#L179); [crates/shamir-numa/src/lib.rs:47](../../../../../crates/shamir-numa/src/lib.rs#L47); [crates/shamir-numa/src/tests/mod.rs:8](../../../../../crates/shamir-numa/src/tests/mod.rs#L8); [CLAUDE.md:594](../../../../../CLAUDE.md#L594).
+The implementation embeds two tests despite the explicit prohibition. lib.rs selects linux.rs under Linux cfg, so they are not dead. Move them into the existing manifest layout while preserving Linux-only compilation.
+
+Evidence: [crates/shamir-numa/src/linux.rs:179](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-numa/src/linux.rs#L179); [crates/shamir-numa/src/lib.rs:47](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-numa/src/lib.rs#L47); [AGENTS.md:146](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/AGENTS.md#L146); [CLAUDE.md:594](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/CLAUDE.md#L594).
 
 <a id="review-2"></a>
 
@@ -31,31 +35,34 @@ Evidence: [crates/shamir-numa/src/linux.rs:179](../../../../../crates/shamir-num
 
 Status: `confirmed-open`. Current risk: `low`.
 
-Scope/tier/roadmap prose still calls the Linux implementation forthcoming despite its exported probe and existing Linux tests. The QEMU smoke harness also already exists; only full guest Rust integration is pending.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-numa/src/lib.rs:34](../../../../../crates/shamir-numa/src/lib.rs#L34); [crates/shamir-numa/src/tests/mod.rs:5](../../../../../crates/shamir-numa/src/tests/mod.rs#L5); [crates/shamir-numa/README.md:79](../../../../../crates/shamir-numa/README.md#L79); [crates/shamir-numa/src/lib.rs:60](../../../../../crates/shamir-numa/src/lib.rs#L60); [scripts/ci-qemu-numa-test.sh:6](../../../../../scripts/ci-qemu-numa-test.sh#L6).
+LinuxTopology and Linux detect are implemented and exported, and the QEMU smoke script exists. Future-work prose remains in lib.rs, README and test-manifest documentation; full guest Rust integration is the actual pending portion.
 
-Grouping/duplicate: `api-wire-protocol.md#2`. This row is not another independent defect.
+Evidence: [crates/shamir-numa/src/lib.rs:34](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-numa/src/lib.rs#L34); [crates/shamir-numa/src/lib.rs:60](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-numa/src/lib.rs#L60); [crates/shamir-numa/src/tests/mod.rs:5](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-numa/src/tests/mod.rs#L5); [crates/shamir-numa/README.md:79](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-numa/README.md#L79); [scripts/ci-qemu-numa-test.sh:6](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/scripts/ci-qemu-numa-test.sh#L6).
+
+Grouping/duplicate: [api-wire-protocol.md#2](api-wire-protocol.md#review-2). This is not an additional independent defect.
 
 <a id="review-3"></a>
 
 ### Claim 3 — Doc example in `cpulist.rs` is never compiled or executed
 
-Status: `refuted`. Current risk: —.
+Status: `refuted`. Current risk: `—`.
 
-This is the explicitly sanctioned rendered-example policy, not a style defect. Behavioral parser tests are separately registered. Adding the exact illustrative literal to unit tests is optional strengthening, not a required repair.
+Prior-cycle decision: `refuted`.
 
-Evidence: [crates/shamir-numa/Cargo.toml:10](../../../../../crates/shamir-numa/Cargo.toml#L10); [crates/shamir-numa/src/cpulist.rs:24](../../../../../crates/shamir-numa/src/cpulist.rs#L24); [crates/shamir-numa/src/tests/mod.rs:9](../../../../../crates/shamir-numa/src/tests/mod.rs#L9); [crates/shamir-numa/src/tests/cpulist_tests.rs:25](../../../../../crates/shamir-numa/src/tests/cpulist_tests.rs#L25); [crates/shamir-numa/src/tests/cpulist_tests.rs:36](../../../../../crates/shamir-numa/src/tests/cpulist_tests.rs#L36).
+Cargo.toml expressly keeps rendered examples nonexecuted, with behavioral tests registered separately. Exact-literal test coverage could be strengthened, but nonexecution is not a structural violation or a later fix.
 
-Grouping/duplicate: `correctness-tdd.md#7`. This row is not another independent defect.
+Evidence: [crates/shamir-numa/Cargo.toml:10](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-numa/Cargo.toml#L10); [crates/shamir-numa/src/tests/mod.rs:9](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-numa/src/tests/mod.rs#L9); [crates/shamir-numa/src/tests/cpulist_tests.rs:25](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-numa/src/tests/cpulist_tests.rs#L25).
 
-## Corrections and qualified non-findings
+Grouping/duplicate: [correctness-tdd.md#7](correctness-tdd.md#review-7). This is not an additional independent defect.
 
-- Confirmed structural non-findings: tests/mod.rs is manifest-only, lib.rs wires it under cfg(test), implementation imports are at file/module headers, and NodeId/CpuId form a closely coupled identifier pair.
-- Downgrade original medium inline-test severity to low: placement alone does not cause runtime failure, and the tests are not dead.
-- The report's only real-sysfs coverage wording is false: crates/shamir-numa/tests/linux_topology.rs also supplies registered Linux integration tests.
-- Do not describe the QEMU Tier-3 smoke harness as future work. Full guest-side Rust test execution remains future work.
-- No executable-doctest requirement should be introduced contrary to Cargo.toml's explicit policy.
+## Evidence and recipe corrections
+
+- Inline placement is not missing registration, and integration tests also exercise the Linux factory/pin surface.
+- Relocating tests must update imports formerly supplied by super::* and keep Linux-only items cfg-gated.
+- The historical instruction to leave QEMU entirely marked future work is false; the shipped smoke oracle is narrower than full integration and needs the qualification identified below.
+- No doctest-policy change or new commit is required by this read-only revalidation.
 
 ---
 

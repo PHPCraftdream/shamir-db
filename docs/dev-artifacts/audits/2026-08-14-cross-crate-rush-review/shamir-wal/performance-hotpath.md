@@ -1,59 +1,69 @@
-<!-- revalidation:2026-10-08 source:92ad58266bf57ddea1fa3c8a47affba1a3a9a096 -->
-# shamir-wal — performance-hotpath revalidation
+<!-- revalidation:2026-10-08 cycle:independent-2 source:e3765c935fc71655ee1ec0160cf180607935d89b -->
+# shamir-wal — performance-hotpath independent revalidation (cycle 2)
 
-Source snapshot: `92ad58266bf57ddea1fa3c8a47affba1a3a9a096`. Revalidated 2026-10-08 by read-only XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run; no source fix is part of this update. Test registration/assertions are evidence of an oracle, not proof of a passing run.
+Frozen source snapshot: `e3765c935fc71655ee1ec0160cf180607935d89b`. Independently revalidated 2026-10-08 by a fresh XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run. Source-fixed means the specified mechanism was already removed at this snapshot; this cycle implements no source fix.
 
-This section is authoritative for current status. Original titles/IDs are retained for traceability; a refuted title is not a current assertion. The collapsed historical report below is superseded, including its counts, severity, scenarios and fix instructions. Plan IDs preserve historical numbering, not a current release mandate. [Workspace methodology and status definitions](../SUMMARY.md#status-definitions).
+This section is authoritative for current decisions. Existing IDs and allegation titles are retained for traceability; a refuted title is not a current assertion. Prior-cycle decisions were rechecked, not used as proof. The first cycle is available in repository history at this snapshot. The original historical body below remains preserved once and is superseded, including its counts, severities and recipes. [Workspace scope and status definitions](../SUMMARY.md#status-definitions).
 
-The linear scans, buffering, and allocation shapes remain. Exact timing and allocation-count claims are unverified. The two explicitly deliberate allocation/copy costs are not defects, and the exact-one-syscall guarantee is overstated.
+Unrelated external edits began in dependency/toolchain/CI metadata during collection; additional Rust-source edits appeared afterward. They were left untouched. Evidence and decisions are tied to the frozen commit, not those later changes or an installed toolchain. “Current” below means current at that snapshot; no re-audit of the modified working tree is implied.
+
+Worst-case linear probes and corpus materialization are source-supported. Capacity guesses, queue allocation and full fallback decoding are tuning opportunities, not independently established performance defects.
 
 ## Current claim decisions
 
 | Claim decisions | Open | Source-fixed | Partial | Refuted | Unverified | N/A |
 |---:|---:|---:|---:|---:|---:|---:|
-| 10 | 5 | 0 | 0 | 1 | 1 | 3 |
+| 10 | 2 | 0 | 0 | 1 | 1 | 6 |
 
-These are decisions on report claims, including repeated roots, bundled observations and non-findings—not a unique-bug census. Closed/N/A rows have no current risk; unverified risk is provisional. Pure style and unmeasured optimization claims do not establish runtime impact.
+These are duplicate-inclusive report decisions, not a unique-bug census. Pure style or structural optimization does not establish a runtime incident; unverified impact remains provisional.
 
 <a id="review-1"></a>
 
 ### Claim 1 — has_truncatable on the Mem sink is an O(frames) scan run on every drainer tick
 
-Status: `confirmed-open`. Current risk: `medium`.
+Status: `confirmed-open`. Current risk: `low`.
 
-The probe performs any under the frames mutex, giving O(frames) worst-case work when no frame qualifies. Drainer invokes it on the idle and completed-pass paths. File probing is likewise O(sealed segments), not universally bounded.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-wal/src/wal_sink.rs:205](../../../../../crates/shamir-wal/src/wal_sink.rs#L205); [crates/shamir-wal/src/segment_set.rs:559](../../../../../crates/shamir-wal/src/segment_set.rs#L559); [crates/shamir-engine/src/tx/drainer.rs:337](../../../../../crates/shamir-engine/src/tx/drainer.rs#L337); [crates/shamir-engine/src/tx/drainer.rs:953](../../../../../crates/shamir-engine/src/tx/drainer.rs#L953).
+Mem any scans all frames when none qualifies, under frames; the idle and completed drainer paths invoke the probe. File any similarly scans sealed metadata. Backlog-dependent work is proven; the claimed CPU burden and Medium operational impact were not.
+
+Evidence: [crates/shamir-wal/src/wal_sink.rs:205](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-wal/src/wal_sink.rs#L205); [crates/shamir-engine/src/tx/drainer.rs:337](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-engine/src/tx/drainer.rs#L337); [crates/shamir-engine/src/tx/drainer.rs:953](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-engine/src/tx/drainer.rs#L953).
 
 <a id="review-2"></a>
 
 ### Claim 2 — WalEntryV2::encode starts from a 256-byte capacity guess that realistic entries overflow
 
-Status: `confirmed-open`. Current risk: `low`.
+Status: `not-applicable`. Current risk: `—`.
 
-Encode reserves 256 bytes; the startup benchmark's 256-byte body plus headers necessarily exceeds it. Growth is source-supported, but five reallocations, mandatory memcpy, and a universal common-case impact are not established.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-wal/src/wal_entry_v2.rs:215](../../../../../crates/shamir-wal/src/wal_entry_v2.rs#L215); [crates/shamir-wal/src/wal_entry_v2.rs:218](../../../../../crates/shamir-wal/src/wal_entry_v2.rs#L218); [crates/shamir-wal/benches/wal_startup_open.rs:37](../../../../../crates/shamir-wal/benches/wal_startup_open.rs#L37); [crates/shamir-wal/benches/wal_startup_open.rs:45](../../../../../crates/shamir-wal/benches/wal_startup_open.rs#L45).
+A 256-byte body plus fields exceeds the reservation, but Vec growth is intended and the fixture does not establish workload prevalence or that double-pass sizing is faster. No exact reallocation count or regression is proved.
+
+Evidence: [crates/shamir-wal/src/wal_entry_v2.rs:215](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-wal/src/wal_entry_v2.rs#L215); [crates/shamir-wal/benches/wal_startup_open.rs:37](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-wal/benches/wal_startup_open.rs#L37).
 
 <a id="review-3"></a>
 
 ### Claim 3 — Per-window allocation churn in lead_until_drained: pending Vec regrows from capacity 0 every window
 
-Status: `confirmed-open`. Current risk: `low`.
+Status: `not-applicable`. Current risk: `—`.
 
-mem::take replaces pending with an empty zero-capacity vector; each window also allocates payload and metadata vectors and scans metadata twice. No capacity recycling exists. Exact allocation counts and bottleneck significance are unmeasured.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-wal/src/wal_group_commit.rs:158](../../../../../crates/shamir-wal/src/wal_group_commit.rs#L158); [crates/shamir-wal/src/wal_group_commit.rs:277](../../../../../crates/shamir-wal/src/wal_group_commit.rs#L277); [crates/shamir-wal/src/wal_group_commit.rs:280](../../../../../crates/shamir-wal/src/wal_group_commit.rs#L280); [crates/shamir-wal/src/wal_group_commit.rs:298](../../../../../crates/shamir-wal/src/wal_group_commit.rs#L298); [crates/shamir-wal/src/segment_set.rs:242](../../../../../crates/shamir-wal/src/segment_set.rs#L242).
+mem::take drops reusable queue capacity and fresh payload/meta vectors are allocated. This is a real source-level cost, but no violated allocation contract, measured regression or bottleneck distinguishes it from an intentional simple ownership design.
+
+Evidence: [crates/shamir-wal/src/wal_group_commit.rs:277](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-wal/src/wal_group_commit.rs#L277); [crates/shamir-wal/src/wal_group_commit.rs:280](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-wal/src/wal_group_commit.rs#L280).
 
 <a id="review-4"></a>
 
 ### Claim 4 — Startup sidecar fallback decodes every entry to extract one u64
 
-Status: `confirmed-open`. Current risk: `low`.
+Status: `not-applicable`. Current risk: `—`.
 
-Missing or invalid sidecar invokes full sealed replay, constructs complete entries, scans commit_version, then drops them. This is unnecessary decode/allocation work for metadata discovery, although CRC validation still requires reading payload bytes.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-wal/src/segment_set.rs:147](../../../../../crates/shamir-wal/src/segment_set.rs#L147); [crates/shamir-wal/src/segment_set.rs:155](../../../../../crates/shamir-wal/src/segment_set.rs#L155); [crates/shamir-wal/src/wal_segment.rs:527](../../../../../crates/shamir-wal/src/wal_segment.rs#L527); [crates/shamir-wal/src/wal_segment.rs:572](../../../../../crates/shamir-wal/src/wal_segment.rs#L572).
+Fallback decodes complete entries to derive maxima, as documented. That also validates payloads before metadata acceptance; header-only decoding would change failure behavior. Its optimization benefit is unmeasured and actual recovery still needs the entries.
+
+Evidence: [crates/shamir-wal/src/segment_set.rs:155](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-wal/src/segment_set.rs#L155); [crates/shamir-wal/src/wal_segment.rs:572](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-wal/src/wal_segment.rs#L572).
 
 <a id="review-5"></a>
 
@@ -61,68 +71,79 @@ Evidence: [crates/shamir-wal/src/segment_set.rs:147](../../../../../crates/shami
 
 Status: `confirmed-open`. Current risk: `low`.
 
-SegmentSet accumulates all sealed and active entries; Mem does the same under its mutex. Memory grows with the untruncated corpus. This also occurs on live drainer gap-recovery, not just cold boot.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-wal/src/segment_set.rs:433](../../../../../crates/shamir-wal/src/segment_set.rs#L433); [crates/shamir-wal/src/segment_set.rs:442](../../../../../crates/shamir-wal/src/segment_set.rs#L442); [crates/shamir-wal/src/wal_sink.rs:163](../../../../../crates/shamir-wal/src/wal_sink.rs#L163); [crates/shamir-engine/src/tx/drainer.rs:368](../../../../../crates/shamir-engine/src/tx/drainer.rs#L368); [crates/shamir-engine/src/tx/recovery.rs:335](../../../../../crates/shamir-engine/src/tx/recovery.rs#L335).
+Decoded entries from every segment accumulate before return; Mem additionally retains encoded frames. A large retained corpus therefore produces backlog-dependent peak memory, including live gap recovery. No specific OOM threshold is proved.
+
+Evidence: [crates/shamir-wal/src/segment_set.rs:433](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-wal/src/segment_set.rs#L433); [crates/shamir-wal/src/wal_sink.rs:163](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-wal/src/wal_sink.rs#L163); [crates/shamir-engine/src/tx/drainer.rs:368](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-engine/src/tx/drainer.rs#L368).
 
 <a id="review-6"></a>
 
 ### Claim 6 — Full window bytes memcpy'd into the coalescing buffer per append batch
 
-Status: `not-applicable`. Current risk: —.
+Status: `not-applicable`. Current risk: `—`.
 
-The copy exists and deliberately coalesces framing into one write_all call. The report itself identifies it as a sound trade and not a defect. Moving owned Vecs through pending and payload collections does not copy their contents.
+Prior-cycle decision: `not-applicable`.
 
-Evidence: [crates/shamir-wal/src/wal_segment.rs:228](../../../../../crates/shamir-wal/src/wal_segment.rs#L228); [crates/shamir-wal/src/wal_segment.rs:232](../../../../../crates/shamir-wal/src/wal_segment.rs#L232); [crates/shamir-wal/src/wal_segment.rs:236](../../../../../crates/shamir-wal/src/wal_segment.rs#L236); [crates/shamir-wal/src/wal_group_commit.rs:283](../../../../../crates/shamir-wal/src/wal_group_commit.rs#L283).
+The explicit copy constructs contiguous framed output for write_all. Moving Vec ownership through pending and payloads does not itself copy contents. This is a deliberate trade, not a defect.
+
+Evidence: [crates/shamir-wal/src/wal_segment.rs:232](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-wal/src/wal_segment.rs#L232); [crates/shamir-wal/src/wal_group_commit.rs:283](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-wal/src/wal_group_commit.rs#L283).
 
 <a id="review-7"></a>
 
-### Claim 7 — One Arc<Waiter> heap allocation per single append
+### Claim 7 — One Arc&lt;Waiter&gt; heap allocation per single append
 
-Status: `not-applicable`. Current risk: —.
+Status: `not-applicable`. Current risk: `—`.
 
-The allocation exists and is an explicit coordination design choice. No correctness failure or measured current regression is alleged; historical alternative-performance percentages were not revalidated.
+Prior-cycle decision: `not-applicable`.
 
-Evidence: [crates/shamir-wal/src/wal_group_commit.rs:175](../../../../../crates/shamir-wal/src/wal_group_commit.rs#L175); [crates/shamir-wal/src/wal_group_commit.rs:44](../../../../../crates/shamir-wal/src/wal_group_commit.rs#L44).
+Arc&lt;Waiter&gt; is required by this ownership design and is an acknowledged cost. No current regression or mandatory replacement is established.
+
+Evidence: [crates/shamir-wal/src/wal_group_commit.rs:175](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-wal/src/wal_group_commit.rs#L175).
 
 <a id="review-theme-core-amortization"></a>
 
 ### Claim Theme/core-amortization — Exactly one write and at most one fsync per window
 
-Status: `refuted`. Current risk: —.
+Status: `refuted`. Current risk: `—`.
 
-There is one normal sink append_batch and at most one coordinator-requested sync per window. write_all may issue multiple OS writes; rotation performs its own fsync, Synced rotation can add another, and failure retry adds another append.
+Prior-cycle decision: `refuted`.
 
-Evidence: [crates/shamir-wal/src/wal_group_commit.rs:290](../../../../../crates/shamir-wal/src/wal_group_commit.rs#L290); [crates/shamir-wal/src/wal_group_commit.rs:309](../../../../../crates/shamir-wal/src/wal_group_commit.rs#L309); [crates/shamir-wal/src/wal_segment.rs:236](../../../../../crates/shamir-wal/src/wal_segment.rs#L236); [crates/shamir-wal/src/segment_set.rs:270](../../../../../crates/shamir-wal/src/segment_set.rs#L270); [crates/shamir-wal/src/segment_set.rs:367](../../../../../crates/shamir-wal/src/segment_set.rs#L367).
+One coordinator append request is not one guaranteed OS write; rotation fsync, sidecar fsync, retry and background synchronization are additional work.
+
+Evidence: [crates/shamir-wal/src/wal_segment.rs:236](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-wal/src/wal_segment.rs#L236); [crates/shamir-wal/src/segment_set.rs:367](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-wal/src/segment_set.rs#L367); [crates/shamir-wal/src/segment_meta.rs:103](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-wal/src/segment_meta.rs#L103).
 
 <a id="review-theme-sidecar-startup-saving"></a>
 
 ### Claim Theme/sidecar-startup-saving — Sidecar removed O(total WAL bytes) startup replay
 
-Status: `not-applicable`. Current risk: —.
+Status: `not-applicable`. Current risk: `—`.
 
-Valid sidecars avoid sealed data decoding during maximum discovery, demonstrated by a sensitive registered corrupt-data test. Active repair still scans its file; actual recovery still reads the corpus, and segment discovery sorts filenames.
+Prior-cycle decision: `not-applicable`.
 
-Evidence: [crates/shamir-wal/src/segment_set.rs:106](../../../../../crates/shamir-wal/src/segment_set.rs#L106); [crates/shamir-wal/src/segment_set.rs:145](../../../../../crates/shamir-wal/src/segment_set.rs#L145); [crates/shamir-wal/src/segment_set.rs:173](../../../../../crates/shamir-wal/src/segment_set.rs#L173); [crates/shamir-wal/src/tests/segment_set_tests.rs:557](../../../../../crates/shamir-wal/src/tests/segment_set_tests.rs#L557); [crates/shamir-tx/src/repo_wal_manager.rs:135](../../../../../crates/shamir-tx/src/repo_wal_manager.rs#L135).
+Valid sidecars avoid sealed decoding during maximum discovery; the corrupt-data test discriminates that branch. Active repair and RepoWalManager recovery still read WAL data, so the benefit is not elimination of total database startup replay.
+
+Evidence: [crates/shamir-wal/src/segment_set.rs:145](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-wal/src/segment_set.rs#L145); [crates/shamir-wal/src/tests/segment_set_tests.rs:557](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-wal/src/tests/segment_set_tests.rs#L557); [crates/shamir-tx/src/repo_wal_manager.rs:135](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-tx/src/repo_wal_manager.rs#L135).
 
 <a id="review-theme-measured-performance"></a>
 
 ### Claim Theme/measured-performance — Historical 4.4× scaling, 63× fsync dominance, and lock-cost measurements
 
-Status: `unverified`. Current risk: —.
+Status: `unverified`. Current risk: `—`.
 
-Relevant benchmark targets are registered and source contains historical measurements, but none was executed. The direct SegmentSet benchmark times the entire append path and cannot isolate the inner mutex.
+Prior-cycle decision: `unverified`.
 
-Evidence: [crates/shamir-wal/Cargo.toml:26](../../../../../crates/shamir-wal/Cargo.toml#L26); [crates/shamir-wal/Cargo.toml:34](../../../../../crates/shamir-wal/Cargo.toml#L34); [crates/shamir-wal/benches/segment_set_lock.rs:131](../../../../../crates/shamir-wal/benches/segment_set_lock.rs#L131); [crates/shamir-wal/src/wal_segment.rs:90](../../../../../crates/shamir-wal/src/wal_segment.rs#L90).
+Benchmark targets are registered, but no measurements were reproduced. Sustained append amortizes spawning while still timing encoding/framing, blocking dispatch and serialized file writes; it does not isolate inner-mutex acquisition.
 
-## Corrections and qualified non-findings
+Evidence: [crates/shamir-wal/Cargo.toml:26](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-wal/Cargo.toml#L26); [crates/shamir-wal/benches/segment_set_lock.rs:131](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-wal/benches/segment_set_lock.rs#L131).
 
-- Use worst-case O(N), because any short-circuits when a qualifying frame occurs early.
-- Neither an 8 MiB threshold nor a single append leader bounds the sealed-segment count.
-- Large serialize_into writes can grow a Vec directly to fit; the proposed five-reallocation ladder is not proven.
-- CRC scanning remains O(payload bytes) even if a header-only metadata decoder eliminates entry materialization.
-- Streaming recovery must retain global commit-version ordering; filename order alone does not establish it.
-- Benchmarks and fsync-count tests do not prove an exact count of kernel write/fsync syscalls.
+## Evidence and recipe corrections
+
+- Do not count unmeasured allocation-sizing/recycling/fallback changes as confirmed defects merely because an alternative representation exists.
+- An O(1) minimum mirror must cover arbitrary version order, pinned entries and every append/truncate mutation. Taking a retained head is not a minimum proof.
+- A merge of per-segment streams requires each stream to be commit-version sorted; physical append order is expressly not that order.
+- The append/truncate benchmark's 1 GiB cap and ignored deletion count do not prove rotation or reclamation was exercised.
+- The startup benchmark includes runtime construction, uses relatively small synthetic segments, and does not measure complete RepoInstance recovery.
 
 ---
 

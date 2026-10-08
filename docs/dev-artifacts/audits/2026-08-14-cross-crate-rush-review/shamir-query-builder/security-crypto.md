@@ -1,11 +1,13 @@
-<!-- revalidation:2026-10-08 source:92ad58266bf57ddea1fa3c8a47affba1a3a9a096 -->
-# shamir-query-builder — security-crypto revalidation
+<!-- revalidation:2026-10-08 cycle:independent-2 source:e3765c935fc71655ee1ec0160cf180607935d89b -->
+# shamir-query-builder — security-crypto independent revalidation (cycle 2)
 
-Source snapshot: `92ad58266bf57ddea1fa3c8a47affba1a3a9a096`. Revalidated 2026-10-08 by read-only XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run; no source fix is part of this update. Test registration/assertions are evidence of an oracle, not proof of a passing run.
+Frozen source snapshot: `e3765c935fc71655ee1ec0160cf180607935d89b`. Independently revalidated 2026-10-08 by a fresh XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run. Source-fixed means the specified mechanism was already removed at this snapshot; this cycle implements no source fix.
 
-This section is authoritative for current status. Original titles/IDs are retained for traceability; a refuted title is not a current assertion. The collapsed historical report below is superseded, including its counts, severity, scenarios and fix instructions. Plan IDs preserve historical numbering, not a current release mandate. [Workspace methodology and status definitions](../SUMMARY.md#status-definitions).
+This section is authoritative for current decisions. Existing IDs and allegation titles are retained for traceability; a refuted title is not a current assertion. Prior-cycle decisions were rechecked, not used as proof. The first cycle is available in repository history at this snapshot. The original historical body below remains preserved once and is superseded, including its counts, severities and recipes. [Workspace scope and status definitions](../SUMMARY.md#status-definitions).
 
-The zeroize-disabled deployment claim is refuted by an overlooked transitive default-feature edge. Bare-String builder lifetime and missing local HMAC affordances remain low-severity concerns, not demonstrated remote security bypasses.
+Unrelated external edits began in dependency/toolchain/CI metadata during collection; additional Rust-source edits appeared afterward. They were left untouched. Evidence and decisions are tied to the frozen commit, not those later changes or an installed toolchain. “Current” below means current at that snapshot; no re-audit of the modified working tree is implied.
+
+The feature-disabled zeroization claim remains refuted by the actual transitive edge. Abandoned CreateUser builders retain an unprotected String lifetime. Missing local HMAC feedback is distinct from session authentication and server-side confirmation.
 
 ## Current claim decisions
 
@@ -13,17 +15,19 @@ The zeroize-disabled deployment claim is refuted by an overlooked transitive def
 |---:|---:|---:|---:|---:|---:|---:|
 | 3 | 2 | 0 | 0 | 1 | 0 | 0 |
 
-These are decisions on report claims, including repeated roots, bundled observations and non-findings—not a unique-bug census. Closed/N/A rows have no current risk; unverified risk is provisional. Pure style and unmeasured optimization claims do not establish runtime impact.
+These are duplicate-inclusive report decisions, not a unique-bug census. Pure style or structural optimization does not establish a runtime incident; unverified impact remains provisional.
 
 <a id="review-1"></a>
 
 ### Claim 1 — Plaintext password's zeroize-on-drop is silently disabled by this crate's own dependency profile
 
-Status: `refuted`. Current risk: —.
+Status: `refuted`. Current risk: `—`.
 
-Although the builder directly disables shamir-types defaults, shamir-query-types depends on shamir-types without disabling defaults. That edge enables shamir-types' default crypto feature and zeroize Drop even when query-types' own defaults are disabled. This mechanism predates the audit; it is not a later fix.
+Prior-cycle decision: `refuted`.
 
-Evidence: [crates/shamir-query-builder/Cargo.toml:17](../../../../../crates/shamir-query-builder/Cargo.toml#L17); [crates/shamir-query-builder/Cargo.toml:20](../../../../../crates/shamir-query-builder/Cargo.toml#L20); [crates/shamir-query-types/Cargo.toml:11](../../../../../crates/shamir-query-types/Cargo.toml#L11); [crates/shamir-types/Cargo.toml:53](../../../../../crates/shamir-types/Cargo.toml#L53); [crates/shamir-types/src/secret.rs:67](../../../../../crates/shamir-types/src/secret.rs#L67); [Cargo.lock:5473](../../../../../Cargo.lock#L5473).
+query-types unconditionally enables shamir-types defaults, including crypto, despite the builder's direct default-features=false edge. SecretString's cfg-gated Drop therefore remains enabled in this graph. This is pre-existing counter-evidence, not a source fix.
+
+Evidence: [crates/shamir-query-builder/Cargo.toml:17](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-query-builder/Cargo.toml#L17); [crates/shamir-query-types/Cargo.toml:11](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-query-types/Cargo.toml#L11); [crates/shamir-types/Cargo.toml:53](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-types/Cargo.toml#L53); [crates/shamir-types/src/secret.rs:67](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-types/src/secret.rs#L67).
 
 <a id="review-2"></a>
 
@@ -31,9 +35,11 @@ Evidence: [crates/shamir-query-builder/Cargo.toml:17](../../../../../crates/sham
 
 Status: `confirmed-open`. Current risk: `low`.
 
-CreateUser still stores String and wraps it only when producing CreateUserOp. Dropping the unbuilt builder bypasses SecretString's wipe. The field is private and the builder lacks Debug/Clone, so the report's implication that ordinary downstream code can directly log or clone that field is overstated.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-query-builder/src/ddl/auth.rs:8](../../../../../crates/shamir-query-builder/src/ddl/auth.rs#L8); [crates/shamir-query-builder/src/ddl/auth.rs:19](../../../../../crates/shamir-query-builder/src/ddl/auth.rs#L19); [crates/shamir-query-builder/src/ddl/auth.rs:52](../../../../../crates/shamir-query-builder/src/ddl/auth.rs#L52); [crates/shamir-types/src/secret.rs:68](../../../../../crates/shamir-types/src/secret.rs#L68).
+Dropping create_user(name,password) before build drops an ordinary String, bypassing SecretString's wipe. Private fields and absent Debug/Clone prevent the alleged direct downstream field logging. Exposure requires memory access; retention duration is unmeasured.
+
+Evidence: [crates/shamir-query-builder/src/ddl/auth.rs:8](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-query-builder/src/ddl/auth.rs#L8); [crates/shamir-query-builder/src/ddl/auth.rs:19](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-query-builder/src/ddl/auth.rs#L19); [crates/shamir-query-builder/src/ddl/auth.rs:52](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-query-builder/src/ddl/auth.rs#L52); [crates/shamir-types/src/secret.rs:68](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-types/src/secret.rs#L68).
 
 <a id="review-3"></a>
 
@@ -41,20 +47,20 @@ Evidence: [crates/shamir-query-builder/src/ddl/auth.rs:8](../../../../../crates/
 
 Status: `confirmed-open`. Current risk: `low`.
 
-Gated builders still carry optional tags and perform no local presence check; conditional CreateFunction requirements remain unenforced locally. The inspected network handler rejects absent/invalid tags for covered top-level ops. This is construction-time feedback/documentation debt, not proof of authorization bypass; embedded execution has a different trust boundary.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-query-builder/src/ddl/auth.rs:49](../../../../../crates/shamir-query-builder/src/ddl/auth.rs#L49); [crates/shamir-query-builder/src/ddl/access_control.rs:92](../../../../../crates/shamir-query-builder/src/ddl/access_control.rs#L92); [crates/shamir-query-builder/src/ddl/function.rs:86](../../../../../crates/shamir-query-builder/src/ddl/function.rs#L86); [crates/shamir-query-builder/src/ddl/function.rs:95](../../../../../crates/shamir-query-builder/src/ddl/function.rs#L95); [crates/shamir-server/src/db_handler/admin.rs:637](../../../../../crates/shamir-server/src/db_handler/admin.rs#L637); [crates/shamir-server/src/db_handler/admin.rs:740](../../../../../crates/shamir-server/src/db_handler/admin.rs#L740); [crates/shamir-server/src/db_handler/handler.rs:549](../../../../../crates/shamir-server/src/db_handler/handler.rs#L549); [crates/shamir-server/src/db_handler/tx_handlers.rs:119](../../../../../crates/shamir-server/src/db_handler/tx_handlers.rs#L119).
+CreateUser, Chmod and conditional CreateFunction construction leave hmac optional without local rejection. Inspected top-level Execute/TxExecute handlers reject missing or invalid required tags. The gate is documented as a 'did you mean it' confirmation, not authentication; no remote bypass follows from builder permissiveness.
 
-## Corrections and qualified non-findings
+Evidence: [crates/shamir-query-builder/src/ddl/auth.rs:49](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-query-builder/src/ddl/auth.rs#L49); [crates/shamir-query-builder/src/ddl/access_control.rs:92](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-query-builder/src/ddl/access_control.rs#L92); [crates/shamir-query-builder/src/ddl/function.rs:86](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-query-builder/src/ddl/function.rs#L86); [crates/shamir-server/src/db_handler/admin.rs:637](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-server/src/db_handler/admin.rs#L637); [crates/shamir-server/src/db_handler/handler.rs:549](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-server/src/db_handler/handler.rs#L549); [crates/shamir-server/src/db_handler/tx_handlers.rs:119](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-server/src/db_handler/tx_handlers.rs#L119).
 
-- Dependency comments promising that guest builds skip zeroize are stale relative to the actual transitive dependency edge; default-features=false does not recursively disable another dependency's defaults.
-- Memory-residue exposure requires access to process/WASM memory. Neither indefinite retention nor automatic appearance in JS heap snapshots was established.
-- No unsafe code, secret/tag comparison, or textual-query interpolation was found in builder implementation. DTO construction avoids that injection mechanism, not every possible downstream security flaw.
-- The claimed single format! occurrence is false: handle/path construction also uses format!, without creating command/query text. ASCII-delimiter path slicing is boundary-safe.
-- Response extraction uses checked lookups and typed errors in crates/shamir-query-builder/src/response/batch_response_ext.rs:176. No malformed-response panic was identified in that code; arbitrary user Deserialize implementations are outside this guarantee.
-- The assertion that all remaining codec expects are current input-unreachable invariants is unverified. Non-finite floats are serialized directly; they are not established codec-error examples.
-- SecretString's redacting Debug is source-proven and checked by crates/shamir-query-types/src/wire/tests/db_message_tests.rs:168. Those tests do not prove zeroization of all plaintext copies or abandoned builders.
-- The msgpack fallback is not correctly conservative in every case: nested scope and literal-marker false positives remain.
+Grouping/duplicate: [error-handling-lifecycle.md#3](error-handling-lifecycle.md#review-3). This is not an additional independent defect.
+
+## Evidence and recipe corrections
+
+- Adding crypto merely to restore zeroization is unnecessary in the frozen dependency graph. Wrap the password immediately while preserving transparent wire serialization and ownership transfer.
+- Exact zeroize 1.8.2 archive confirms volatile slice clearing plus a compiler fence; SecretString invokes it on current string bytes. This does not establish removal of every caller copy, spare-capacity residue, serialized request buffer, or microarchitectural exposure.
+- Typed DTO construction eliminates textual query interpolation, not every downstream security defect. HMAC coverage inspected here is top-level; nested and embedded authorization are not comprehensively proven.
+- The assertion that remaining codec expects are input-unreachable is contradicted by the published decoder's deep-container failure mechanism.
 
 ---
 

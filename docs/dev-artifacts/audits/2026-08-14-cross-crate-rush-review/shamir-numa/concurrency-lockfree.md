@@ -1,11 +1,13 @@
-<!-- revalidation:2026-10-08 source:92ad58266bf57ddea1fa3c8a47affba1a3a9a096 -->
-# shamir-numa — concurrency-lockfree revalidation
+<!-- revalidation:2026-10-08 cycle:independent-2 source:e3765c935fc71655ee1ec0160cf180607935d89b -->
+# shamir-numa — concurrency-lockfree independent revalidation (cycle 2)
 
-Source snapshot: `92ad58266bf57ddea1fa3c8a47affba1a3a9a096`. Revalidated 2026-10-08 by read-only XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run; no source fix is part of this update. Test registration/assertions are evidence of an oracle, not proof of a passing run.
+Frozen source snapshot: `e3765c935fc71655ee1ec0160cf180607935d89b`. Independently revalidated 2026-10-08 by a fresh XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run. Source-fixed means the specified mechanism was already removed at this snapshot; this cycle implements no source fix.
 
-This section is authoritative for current status. Original titles/IDs are retained for traceability; a refuted title is not a current assertion. The collapsed historical report below is superseded, including its counts, severity, scenarios and fix instructions. Plan IDs preserve historical numbering, not a current release mandate. [Workspace methodology and status definitions](../SUMMARY.md#status-definitions).
+This section is authoritative for current decisions. Existing IDs and allegation titles are retained for traceability; a refuted title is not a current assertion. Prior-cycle decisions were rechecked, not used as proof. The first cycle is available in repository history at this snapshot. The original historical body below remains preserved once and is superseded, including its counts, severities and recipes. [Workspace scope and status definitions](../SUMMARY.md#status-definitions).
 
-The unversioned mirror race, missing concurrent convergence assertions, and repeated topology probing all remain. Lock-free and constant-cost guarantees require narrower wording.
+Unrelated external edits began in dependency/toolchain/CI metadata during collection; additional Rust-source edits appeared afterward. They were left untouched. Evidence and decisions are tied to the frozen commit, not those later changes or an installed toolchain. “Current” below means current at that snapshot; no re-audit of the modified working tree is implied.
+
+The unversioned mirror defect is independently source-proven. Per-cell atomicity, immutable reverse-map reads and a fixture-only Mutex are supported, but whole-operation lock freedom is not.
 
 ## Current claim decisions
 
@@ -13,7 +15,7 @@ The unversioned mirror race, missing concurrent convergence assertions, and repe
 |---:|---:|---:|---:|---:|---:|---:|
 | 3 | 3 | 0 | 0 | 0 | 0 | 0 |
 
-These are decisions on report claims, including repeated roots, bundled observations and non-findings—not a unique-bug census. Closed/N/A rows have no current risk; unverified risk is provisional. Pure style and unmeasured optimization claims do not establish runtime impact.
+These are duplicate-inclusive report decisions, not a unique-bug census. Pure style or structural optimization does not establish a runtime incident; unverified impact remains provisional.
 
 <a id="review-1"></a>
 
@@ -21,9 +23,11 @@ These are decisions on report claims, including repeated roots, bundled observat
 
 Status: `confirmed-open`. Current risk: `high`.
 
-rcu() snapshots node 0 once and blindly mirrors it; store() independently walks all cells. Concurrent completed publications can leave nonzero replicas stale indefinitely. No epoch, serialization, or convergence retry was added.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-numa/src/node_replicated.rs:82](../../../../../crates/shamir-numa/src/node_replicated.rs#L82); [crates/shamir-numa/src/node_replicated.rs:96](../../../../../crates/shamir-numa/src/node_replicated.rs#L96); [crates/shamir-numa/src/node_replicated.rs:103](../../../../../crates/shamir-numa/src/node_replicated.rs#L103); [crates/shamir-index/src/base_index/sorted_index_manager.rs:633](../../../../../crates/shamir-index/src/base_index/sorted_index_manager.rs#L633).
+With two replicas, A publishes and captures X1; B publishes and mirrors X2; A writes X1 last to replica 1. Canonical X2 survives while replica 1 remains X1 after quiescence. store/store and mixed writers admit the same ordering. No convergence pass or publication-bound version exists.
+
+Evidence: [crates/shamir-numa/src/node_replicated.rs:82](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-numa/src/node_replicated.rs#L82); [crates/shamir-numa/src/node_replicated.rs:98](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-numa/src/node_replicated.rs#L98); [crates/shamir-numa/src/node_replicated.rs:103](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-numa/src/node_replicated.rs#L103); [crates/shamir-numa/src/node_replicated.rs:105](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-numa/src/node_replicated.rs#L105).
 
 <a id="review-2"></a>
 
@@ -31,11 +35,13 @@ Evidence: [crates/shamir-numa/src/node_replicated.rs:82](../../../../../crates/s
 
 Status: `confirmed-open`. Current risk: `medium`.
 
-The only concurrent writer test checks node 0 after joining threads. The registered suite has no concurrent store/rcu convergence oracle or four-node concurrent storm.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-numa/src/tests/mod.rs:12](../../../../../crates/shamir-numa/src/tests/mod.rs#L12); [crates/shamir-numa/src/tests/node_replicated_tests.rs:96](../../../../../crates/shamir-numa/src/tests/node_replicated_tests.rs#L96); [crates/shamir-numa/src/tests/node_replicated_tests.rs:116](../../../../../crates/shamir-numa/src/tests/node_replicated_tests.rs#L116).
+The registered concurrent test inspects only canonical node 0. Its increment oracle is meaningful but remains unchanged if every concurrent mirror is stale; sequential mirror tests do not force that counterexample.
 
-Grouping/duplicate: `correctness-tdd.md#2`. This row is not another independent defect.
+Evidence: [crates/shamir-numa/src/tests/mod.rs:12](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-numa/src/tests/mod.rs#L12); [crates/shamir-numa/src/tests/node_replicated_tests.rs:96](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-numa/src/tests/node_replicated_tests.rs#L96); [crates/shamir-numa/src/tests/node_replicated_tests.rs:116](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-numa/src/tests/node_replicated_tests.rs#L116).
+
+Grouping/duplicate: [correctness-tdd.md#2](correctness-tdd.md#review-2). This is not an additional independent defect.
 
 <a id="review-3"></a>
 
@@ -43,19 +49,19 @@ Grouping/duplicate: `correctness-tdd.md#2`. This row is not another independent 
 
 Status: `confirmed-open`. Current risk: `low`.
 
-Every Linux detect() performs probe(); constructors, deserialization, and IndexInfo cloning still invoke it. SortedIndexManager::new is async and synchronously probes. No shared detection cache exists.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-numa/src/detect.rs:24](../../../../../crates/shamir-numa/src/detect.rs#L24); [crates/shamir-numa/src/linux.rs:55](../../../../../crates/shamir-numa/src/linux.rs#L55); [crates/shamir-numa/src/linux.rs:75](../../../../../crates/shamir-numa/src/linux.rs#L75); [crates/shamir-index/src/base_index/index_info.rs:142](../../../../../crates/shamir-index/src/base_index/index_info.rs#L142); [crates/shamir-index/src/base_index/index_info.rs:340](../../../../../crates/shamir-index/src/base_index/index_info.rs#L340); [crates/shamir-index/src/base_index/sorted_index_manager.rs:296](../../../../../crates/shamir-index/src/base_index/sorted_index_manager.rs#L296).
+Linux detect performs discovery every time. IndexInfo construction, deserialization and cloning invoke it; async SortedIndexManager::new invokes it synchronously. This proves repeated blocking construction work, not per-record query latency or a measured slowdown.
 
-## Corrections and qualified non-findings
+Evidence: [crates/shamir-numa/src/detect.rs:25](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-numa/src/detect.rs#L25); [crates/shamir-numa/src/linux.rs:168](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-numa/src/linux.rs#L168); [crates/shamir-index/src/base_index/index_info.rs:142](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-index/src/base_index/index_info.rs#L142); [crates/shamir-index/src/base_index/index_info.rs:340](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-index/src/base_index/index_info.rs#L340); [crates/shamir-index/src/base_index/sorted_index_manager.rs:296](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-index/src/base_index/sorted_index_manager.rs#L296).
 
-- Confirmed non-findings: the sole crate Mutex is the documented MockTopology fixture; there are no async functions, map guards across await, or scc cardinality calls. CPU reverse lookup uses immutable TFxMap.
-- Cargo.toml's arc-swap 1.7 is a range, not the resolved version. Cargo.lock pins 1.9.1; its inspected rcu implementation is a load/CAS retry loop.
-- The CAS primitive does not lock the callback, but arbitrary f, allocation, and T destruction can block. Fully lock-free for arbitrary f is an overclaim.
-- Current TableManager::begin_write_barrier holds per-table DDL admission and a write guard. Inspected sorted create/drop bodies hold these across publication, so merely listing several DDL sites does not prove concurrent publication on normal engine paths.
-- Node 0's per-cell publication remains atomic; this is not a blanket guarantee against arbitrary store replacement or store_node divergence.
-- Sharing a detected Topology would eliminate repeated discovery, not automatically share unrelated registries. SortedIndexManager clones already share their NodeReplicated through Arc.
-- current_node's Fx-map lookup is expected O(1), not a universal worst-case hash-table bound. Actual vDSO dispatch was not independently verified.
+## Evidence and recipe corrections
+
+- Exact arc-swap 1.9.1 published src/lib.rs:622 supplies CAS retries, not a lock around f. Arbitrary callbacks, allocators and destructors can nevertheless block.
+- An epoch increment after a successful canonical CAS is unsafe as an ordering recipe: an earlier CAS winner can obtain a later epoch after another writer finishes. Publish version and value together.
+- A re-read/retry mirror approach must cover store as well as rcu, preserve intentional store_node divergence, and state quiescence/progress assumptions.
+- Inspected sorted create/drop and regular online registration/final-publication phases hold per-table DDL admission. The online scan releases it, so do not generalize whole-body serialization; the inspected definition publications themselves remain guarded.
+- Sharing Topology does not share registry contents. SortedIndexManager clones already share their registry; IndexInfo clones intentionally snapshot into independent registries.
 
 ---
 

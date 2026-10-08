@@ -1,19 +1,21 @@
-<!-- revalidation:2026-10-08 source:92ad58266bf57ddea1fa3c8a47affba1a3a9a096 -->
-# shamir-query-types — style-claude-md revalidation
+<!-- revalidation:2026-10-08 cycle:independent-2 source:e3765c935fc71655ee1ec0160cf180607935d89b -->
+# shamir-query-types — style-claude-md independent revalidation (cycle 2)
 
-Source snapshot: `92ad58266bf57ddea1fa3c8a47affba1a3a9a096`. Revalidated 2026-10-08 by read-only XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run; no source fix is part of this update. Test registration/assertions are evidence of an oracle, not proof of a passing run.
+Frozen source snapshot: `e3765c935fc71655ee1ec0160cf180607935d89b`. Independently revalidated 2026-10-08 by a fresh XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run. Source-fixed means the specified mechanism was already removed at this snapshot; this cycle implements no source fix.
 
-This section is authoritative for current status. Original titles/IDs are retained for traceability; a refuted title is not a current assertion. The collapsed historical report below is superseded, including its counts, severity, scenarios and fix instructions. Plan IDs preserve historical numbering, not a current release mandate. [Workspace methodology and status definitions](../SUMMARY.md#status-definitions).
+This section is authoritative for current decisions. Existing IDs and allegation titles are retained for traceability; a refuted title is not a current assertion. Prior-cycle decisions were rechecked, not used as proof. The first cycle is available in repository history at this snapshot. The original historical body below remains preserved once and is superseded, including its counts, severities and recipes. [Workspace scope and status definitions](../SUMMARY.md#status-definitions).
 
-Most cited structural/import/doc inconsistencies remain, but their severity is organizational rather than runtime High. The generic types buckets fall within the explicit closely-coupled-group exception, so that alleged rule violation is refuted.
+Unrelated external edits began in dependency/toolchain/CI metadata during collection; additional Rust-source edits appeared afterward. They were left untouched. Evidence and decisions are tied to the frozen commit, not those later changes or an installed toolchain. “Current” below means current at that snapshot; no re-audit of the modified working tree is implied.
+
+Explicit layout/import violations remain and are organizational Low issues. Duplicate helpers are maintainability nits. Missing purpose headers and related type-family grouping do not violate a mandatory rule.
 
 ## Current claim decisions
 
 | Claim decisions | Open | Source-fixed | Partial | Refuted | Unverified | N/A |
 |---:|---:|---:|---:|---:|---:|---:|
-| 10 | 9 | 0 | 0 | 1 | 0 | 0 |
+| 10 | 8 | 0 | 0 | 2 | 0 | 0 |
 
-These are decisions on report claims, including repeated roots, bundled observations and non-findings—not a unique-bug census. Closed/N/A rows have no current risk; unverified risk is provisional. Pure style and unmeasured optimization claims do not establish runtime impact.
+These are duplicate-inclusive report decisions, not a unique-bug census. Pure style or structural optimization does not establish a runtime incident; unverified impact remains provisional.
 
 <a id="review-1"></a>
 
@@ -21,9 +23,11 @@ These are decisions on report claims, including repeated roots, bundled observat
 
 Status: `confirmed-open`. Current risk: `low`.
 
-validator/mod.rs still defines WriteOp and ValidationError; call/mod.rs still defines CallOp/default_repo. This violates the explicit module-layout rule, without a demonstrated runtime/security impact.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-query-types/src/validator/mod.rs:9](../../../../../crates/shamir-query-types/src/validator/mod.rs#L9); [crates/shamir-query-types/src/validator/mod.rs:23](../../../../../crates/shamir-query-types/src/validator/mod.rs#L23); [crates/shamir-query-types/src/call/mod.rs:13](../../../../../crates/shamir-query-types/src/call/mod.rs#L13); [crates/shamir-query-types/src/call/mod.rs:31](../../../../../crates/shamir-query-types/src/call/mod.rs#L31); [CLAUDE.md:487](../../../../../CLAUDE.md#L487).
+validator/mod.rs defines WriteOp/ValidationError and call/mod.rs defines CallOp/default_repo. The explicit re-export-only rule applies; no runtime or security effect is established.
+
+Evidence: [crates/shamir-query-types/src/validator/mod.rs:9](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-query-types/src/validator/mod.rs#L9); [crates/shamir-query-types/src/validator/mod.rs:23](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-query-types/src/validator/mod.rs#L23); [crates/shamir-query-types/src/call/mod.rs:13](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-query-types/src/call/mod.rs#L13); [crates/shamir-query-types/src/call/mod.rs:31](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-query-types/src/call/mod.rs#L31); [CLAUDE.md:487](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/CLAUDE.md#L487).
 
 <a id="review-2"></a>
 
@@ -31,9 +35,11 @@ Evidence: [crates/shamir-query-types/src/validator/mod.rs:9](../../../../../crat
 
 Status: `confirmed-open`. Current risk: `low`.
 
-Both inline modules remain alongside wired sibling files. Tests are reachable; the defect is split/overlapping organization, not lost coverage or runtime High severity.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-query-types/src/read/query_record.rs:302](../../../../../crates/shamir-query-types/src/read/query_record.rs#L302); [crates/shamir-query-types/src/write/inserted_record.rs:135](../../../../../crates/shamir-query-types/src/write/inserted_record.rs#L135); [crates/shamir-query-types/src/read/tests/mod.rs:3](../../../../../crates/shamir-query-types/src/read/tests/mod.rs#L3); [crates/shamir-query-types/src/write/tests/mod.rs:2](../../../../../crates/shamir-query-types/src/write/tests/mod.rs#L2).
+Both inline modules coexist with registered sibling suites. Moving them should preserve test registration, feature gates and distinct assertions; no orphaned-test claim is supported.
+
+Evidence: [crates/shamir-query-types/src/read/query_record.rs:303](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-query-types/src/read/query_record.rs#L303); [crates/shamir-query-types/src/write/inserted_record.rs:135](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-query-types/src/write/inserted_record.rs#L135); [crates/shamir-query-types/src/read/tests/mod.rs:3](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-query-types/src/read/tests/mod.rs#L3); [crates/shamir-query-types/src/write/tests/mod.rs:2](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-query-types/src/write/tests/mod.rs#L2).
 
 <a id="review-3"></a>
 
@@ -41,9 +47,11 @@ Evidence: [crates/shamir-query-types/src/read/query_record.rs:302](../../../../.
 
 Status: `confirmed-open`. Current risk: `low`.
 
-All originally cited function-local imports remain without qualifying collision/cfg explanations. This is convention debt; the report's count mixes imported functions and individual use statements.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-query-types/src/hmac.rs:79](../../../../../crates/shamir-query-types/src/hmac.rs#L79); [crates/shamir-query-types/src/hmac.rs:412](../../../../../crates/shamir-query-types/src/hmac.rs#L412); [crates/shamir-query-types/src/batch/planner.rs:372](../../../../../crates/shamir-query-types/src/batch/planner.rs#L372); [crates/shamir-query-types/src/batch/batch_op.rs:260](../../../../../crates/shamir-query-types/src/batch/batch_op.rs#L260); [crates/shamir-query-types/src/table_ref.rs:52](../../../../../crates/shamir-query-types/src/table_ref.rs#L52); [CLAUDE.md:615](../../../../../CLAUDE.md#L615).
+The original cited sites contain thirteen use statements, remain unchanged and have no collision/cfg exception. InsertedRecord's visitor has another local use not counted by that original list.
+
+Evidence: [crates/shamir-query-types/src/hmac.rs:79](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-query-types/src/hmac.rs#L79); [crates/shamir-query-types/src/hmac.rs:412](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-query-types/src/hmac.rs#L412); [crates/shamir-query-types/src/batch/planner.rs:372](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-query-types/src/batch/planner.rs#L372); [crates/shamir-query-types/src/batch/batch_op.rs:260](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-query-types/src/batch/batch_op.rs#L260); [crates/shamir-query-types/src/table_ref.rs:52](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-query-types/src/table_ref.rs#L52); [crates/shamir-query-types/src/write/inserted_record.rs:96](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-query-types/src/write/inserted_record.rs#L96); [CLAUDE.md:615](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/CLAUDE.md#L615).
 
 <a id="review-4"></a>
 
@@ -51,9 +59,11 @@ Evidence: [crates/shamir-query-types/src/hmac.rs:79](../../../../../crates/shami
 
 Status: `confirmed-open`. Current risk: `low`.
 
-The twelve cited local imports remain in the six test files. Their manifests remain wired; no runtime effect is shown.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-query-types/src/batch/tests/planner_tests.rs:456](../../../../../crates/shamir-query-types/src/batch/tests/planner_tests.rs#L456); [crates/shamir-query-types/src/read/tests/query_record_tests.rs:78](../../../../../crates/shamir-query-types/src/read/tests/query_record_tests.rs#L78); [crates/shamir-query-types/src/filter/tests/filter_value_conv_tests.rs:113](../../../../../crates/shamir-query-types/src/filter/tests/filter_value_conv_tests.rs#L113); [crates/shamir-query-types/src/wire/tests/repl_tests.rs:22](../../../../../crates/shamir-query-types/src/wire/tests/repl_tests.rs#L22); [crates/shamir-query-types/src/read/tests/pagination_after_tests.rs:120](../../../../../crates/shamir-query-types/src/read/tests/pagination_after_tests.rs#L120); [crates/shamir-query-types/src/write/tests/insert_op_tests.rs:25](../../../../../crates/shamir-query-types/src/write/tests/insert_op_tests.rs#L25).
+All twelve cited statements remain in six wired test files. Several repeat header imports. The inline-test super import exception does not apply to these function bodies.
+
+Evidence: [crates/shamir-query-types/src/batch/tests/planner_tests.rs:456](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-query-types/src/batch/tests/planner_tests.rs#L456); [crates/shamir-query-types/src/read/tests/query_record_tests.rs:78](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-query-types/src/read/tests/query_record_tests.rs#L78); [crates/shamir-query-types/src/filter/tests/filter_value_conv_tests.rs:113](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-query-types/src/filter/tests/filter_value_conv_tests.rs#L113); [crates/shamir-query-types/src/wire/tests/repl_tests.rs:22](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-query-types/src/wire/tests/repl_tests.rs#L22); [crates/shamir-query-types/src/read/tests/pagination_after_tests.rs:120](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-query-types/src/read/tests/pagination_after_tests.rs#L120); [crates/shamir-query-types/src/write/tests/insert_op_tests.rs:25](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-query-types/src/write/tests/insert_op_tests.rs#L25).
 
 <a id="review-5"></a>
 
@@ -61,19 +71,23 @@ Evidence: [crates/shamir-query-types/src/batch/tests/planner_tests.rs:456](../..
 
 Status: `confirmed-open`. Current risk: `low`.
 
-The alias is still defined rather than re-exported in mod.rs. The module-layout violation is source-proven and purely structural.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-query-types/src/filter/mod.rs:21](../../../../../crates/shamir-query-types/src/filter/mod.rs#L21); [CLAUDE.md:487](../../../../../CLAUDE.md#L487).
+The public alias is a type definition inside mod.rs, contrary to the explicit layout rule. A sibling definition plus unchanged re-export preserves naming and behavior.
+
+Evidence: [crates/shamir-query-types/src/filter/mod.rs:19](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-query-types/src/filter/mod.rs#L19); [crates/shamir-query-types/src/filter/mod.rs:21](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-query-types/src/filter/mod.rs#L21); [CLAUDE.md:487](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/CLAUDE.md#L487).
 
 <a id="review-6"></a>
 
 ### Claim 6 — `is_false` helper defined four times with three visibilities and two referencing conventions
 
-Status: `confirmed-open`. Current risk: `low`.
+Status: `confirmed-open`. Current risk: `nit`.
 
-All four identical helpers and visibility/reference differences persist. No current behavioral divergence is present; this is maintainability duplication.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-query-types/src/admin/types/db_ops.rs:6](../../../../../crates/shamir-query-types/src/admin/types/db_ops.rs#L6); [crates/shamir-query-types/src/admin/types/schema_ops.rs:162](../../../../../crates/shamir-query-types/src/admin/types/schema_ops.rs#L162); [crates/shamir-query-types/src/admin/types/repl_ops.rs:43](../../../../../crates/shamir-query-types/src/admin/types/repl_ops.rs#L43); [crates/shamir-query-types/src/read/read_query.rs:52](../../../../../crates/shamir-query-types/src/read/read_query.rs#L52).
+Four identical boolean helpers persist. There is no actual wire divergence or mandatory single-helper rule; this is duplication debt. The schema helper is publicly nameable despite doc(hidden), so deleting it needs API consideration.
+
+Evidence: [crates/shamir-query-types/src/admin/types/db_ops.rs:6](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-query-types/src/admin/types/db_ops.rs#L6); [crates/shamir-query-types/src/admin/types/schema_ops.rs:162](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-query-types/src/admin/types/schema_ops.rs#L162); [crates/shamir-query-types/src/admin/types/repl_ops.rs:43](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-query-types/src/admin/types/repl_ops.rs#L43); [crates/shamir-query-types/src/read/read_query.rs:52](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-query-types/src/read/read_query.rs#L52).
 
 <a id="review-7"></a>
 
@@ -81,11 +95,13 @@ Evidence: [crates/shamir-query-types/src/admin/types/db_ops.rs:6](../../../../..
 
 Status: `confirmed-open`. Current risk: `nit`.
 
-The error-code comment still lists fk_restrict twice; emitted codes are unaffected.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-query-types/src/wire/db_message.rs:330](../../../../../crates/shamir-query-types/src/wire/db_message.rs#L330); [crates/shamir-query-types/src/wire/db_message.rs:332](../../../../../crates/shamir-query-types/src/wire/db_message.rs#L332).
+The comment lists fk_restrict twice. Removing duplication changes documentation only, not server emission or client parsing.
 
-Grouping/duplicate: `api-wire-protocol.md#17`. This row is not another independent defect.
+Evidence: [crates/shamir-query-types/src/wire/db_message.rs:330](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-query-types/src/wire/db_message.rs#L330); [crates/shamir-query-types/src/wire/db_message.rs:332](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-query-types/src/wire/db_message.rs#L332).
+
+Grouping/duplicate: [api-wire-protocol.md#17](api-wire-protocol.md#review-17). This is not an additional independent defect.
 
 <a id="review-8"></a>
 
@@ -93,38 +109,44 @@ Grouping/duplicate: `api-wire-protocol.md#17`. This row is not another independe
 
 Status: `confirmed-open`. Current risk: `nit`.
 
-Prose still separates the initial header-bearing table from later pipe rows without a new table header.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-query-types/src/hmac.rs:28](../../../../../crates/shamir-query-types/src/hmac.rs#L28); [crates/shamir-query-types/src/hmac.rs:44](../../../../../crates/shamir-query-types/src/hmac.rs#L44); [crates/shamir-query-types/src/hmac.rs:61](../../../../../crates/shamir-query-types/src/hmac.rs#L61).
+Prose ends the first table before later pipe rows, which have no new header/separator. The malformed documentation layout remains; no rendering command was run.
 
-Grouping/duplicate: `api-wire-protocol.md#17`. This row is not another independent defect.
+Evidence: [crates/shamir-query-types/src/hmac.rs:28](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-query-types/src/hmac.rs#L28); [crates/shamir-query-types/src/hmac.rs:44](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-query-types/src/hmac.rs#L44); [crates/shamir-query-types/src/hmac.rs:61](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-query-types/src/hmac.rs#L61).
+
+Grouping/duplicate: [api-wire-protocol.md#17](api-wire-protocol.md#review-17). This is not an additional independent defect.
 
 <a id="review-9"></a>
 
 ### Claim 9 — Inconsistent `//!` module-doc headers
 
-Status: `confirmed-open`. Current risk: `nit`.
+Status: `refuted`. Current risk: `—`.
 
-The cited subscribe implementation files and test files still begin with imports rather than purpose headers. This is a convention inconsistency, not a mandatory runtime requirement.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-query-types/src/subscribe/deliver_mode.rs:1](../../../../../crates/shamir-query-types/src/subscribe/deliver_mode.rs#L1); [crates/shamir-query-types/src/subscribe/event_mask.rs:1](../../../../../crates/shamir-query-types/src/subscribe/event_mask.rs#L1); [crates/shamir-query-types/src/subscribe/source.rs:1](../../../../../crates/shamir-query-types/src/subscribe/source.rs#L1); [crates/shamir-query-types/src/subscribe/subscribe_op.rs:1](../../../../../crates/shamir-query-types/src/subscribe/subscribe_op.rs#L1); [crates/shamir-query-types/src/subscribe/unsubscribe_op.rs:1](../../../../../crates/shamir-query-types/src/subscribe/unsubscribe_op.rs#L1); [crates/shamir-query-types/src/tests/hmac_tests.rs:1](../../../../../crates/shamir-query-types/src/tests/hmac_tests.rs#L1); [crates/shamir-query-types/src/validator/tests/write_op_tests.rs:1](../../../../../crates/shamir-query-types/src/validator/tests/write_op_tests.rs#L1); [crates/shamir-query-types/src/wire/tests/db_message_tests.rs:1](../../../../../crates/shamir-query-types/src/wire/tests/db_message_tests.rs#L1).
+The cited files do begin with imports, but AGENTS/CLAUDE contain no rule requiring //! headers everywhere. Existing declarations have descriptive item docs. This is an optional consistency recommendation, not mandatory conformance debt.
+
+Evidence: [crates/shamir-query-types/src/subscribe/deliver_mode.rs:1](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-query-types/src/subscribe/deliver_mode.rs#L1); [crates/shamir-query-types/src/subscribe/event_mask.rs:1](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-query-types/src/subscribe/event_mask.rs#L1); [crates/shamir-query-types/src/subscribe/source.rs:1](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-query-types/src/subscribe/source.rs#L1); [crates/shamir-query-types/src/tests/hmac_tests.rs:1](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-query-types/src/tests/hmac_tests.rs#L1); [CLAUDE.md:478](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/CLAUDE.md#L478).
 
 <a id="review-10"></a>
 
 ### Claim 10 — Inconsistent per-file granularity: `types.rs` multi-type buckets vs. per-family splits
 
-Status: `refuted`. Current risk: —.
+Status: `refuted`. Current risk: `—`.
 
-CLAUDE explicitly permits closely-coupled groups. The cited files group related DML/config and auth DTO families, and the report itself concedes that justification. No rule requires uniform re-export/test-registration ordering.
+Prior-cycle decision: `refuted`.
 
-Evidence: [CLAUDE.md:489](../../../../../CLAUDE.md#L489); [crates/shamir-query-types/src/write/types.rs:1](../../../../../crates/shamir-query-types/src/write/types.rs#L1); [crates/shamir-query-types/src/auth/types.rs:1](../../../../../crates/shamir-query-types/src/auth/types.rs#L1).
+The explicit closely-coupled-group allowance covers related DML/config and auth DTO families. Uniform declaration/test registration ordering is not mandated. Optional future splitting should not be presented as required remediation.
 
-## Corrections and qualified non-findings
+Evidence: [CLAUDE.md:489](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/CLAUDE.md#L489); [crates/shamir-query-types/src/write/types.rs:1](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-query-types/src/write/types.rs#L1); [crates/shamir-query-types/src/auth/types.rs:1](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-query-types/src/auth/types.rs#L1).
 
-- Findings 1 and 2 are Low structural debt, not runtime High; finding 3 is likewise convention-only.
-- The originally cited implementation sites contain thirteen individual use statements, not ten; twelve cited test-file statements is consistent.
-- Closely-coupled type families and module declaration ordering do not establish a mandatory-rule breach.
-- The crate skeleton is not universally one-tests-directory-per-module: call has no local test module.
+## Evidence and recipe corrections
+
+- The originally enumerated implementation sites contain thirteen statements, but that is not a complete crate-wide count: inserted_record.rs:96 supplies another.
+- Preserve publicly nameable aliases/helpers during structural cleanup; doc(hidden) does not make schema_ops::is_false private.
+- Not every module has a local tests directory; call has no test registration. This does not itself violate the rule for modules that have tests.
+- Missing //! headers are optional consistency work, and closely-coupled type-family grouping is expressly permitted.
 
 ---
 

@@ -1,19 +1,21 @@
-<!-- revalidation:2026-10-08 source:92ad58266bf57ddea1fa3c8a47affba1a3a9a096 -->
-# shamir-types — api-wire-protocol revalidation
+<!-- revalidation:2026-10-08 cycle:independent-2 source:e3765c935fc71655ee1ec0160cf180607935d89b -->
+# shamir-types — api-wire-protocol independent revalidation (cycle 2)
 
-Source snapshot: `92ad58266bf57ddea1fa3c8a47affba1a3a9a096`. Revalidated 2026-10-08 by read-only XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run; no source fix is part of this update. Test registration/assertions are evidence of an oracle, not proof of a passing run.
+Frozen source snapshot: `e3765c935fc71655ee1ec0160cf180607935d89b`. Independently revalidated 2026-10-08 by a fresh XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run. Source-fixed means the specified mechanism was already removed at this snapshot; this cycle implements no source fix.
 
-This section is authoritative for current status. Original titles/IDs are retained for traceability; a refuted title is not a current assertion. The collapsed historical report below is superseded, including its counts, severity, scenarios and fix instructions. Plan IDs preserve historical numbering, not a current release mandate. [Workspace methodology and status definitions](../SUMMARY.md#status-definitions).
+This section is authoritative for current decisions. Existing IDs and allegation titles are retained for traceability; a refuted title is not a current assertion. Prior-cycle decisions were rechecked, not used as proof. The first cycle is available in repository history at this snapshot. The original historical body below remains preserved once and is superseded, including its counts, severities and recipes. [Workspace scope and status definitions](../SUMMARY.md#status-definitions).
 
-Lossy variant encoding, decoder inconsistency, constructor collisions, error swallowing, and stale codec documentation remain. Several API-polish items are intentional contracts or incorrectly described rather than defects.
+Unrelated external edits began in dependency/toolchain/CI metadata during collection; additional Rust-source edits appeared afterward. They were left untouched. Evidence and decisions are tied to the frozen commit, not those later changes or an installed toolchain. “Current” below means current at that snapshot; no re-audit of the modified working tree is implied.
+
+Typed/wire distinctions are real: raw uint promotion diverges, signed-zero hashing is invalid, and whole-record conversion hides errors. Intentional projections and documented truncation must not be treated as unconditional redesign mandates.
 
 ## Current claim decisions
 
 | Claim decisions | Open | Source-fixed | Partial | Refuted | Unverified | N/A |
 |---:|---:|---:|---:|---:|---:|---:|
-| 16 | 14 | 0 | 0 | 1 | 0 | 1 |
+| 16 | 11 | 0 | 0 | 1 | 0 | 4 |
 
-These are decisions on report claims, including repeated roots, bundled observations and non-findings—not a unique-bug census. Closed/N/A rows have no current risk; unverified risk is provisional. Pure style and unmeasured optimization claims do not establish runtime impact.
+These are duplicate-inclusive report decisions, not a unique-bug census. Pure style or structural optimization does not establish a runtime incident; unverified impact remains provisional.
 
 <a id="review-1"></a>
 
@@ -21,29 +23,35 @@ These are decisions on report claims, including repeated roots, bundled observat
 
 Status: `confirmed-open`. Current risk: `medium`.
 
-All inspected serializers still flatten Dec/Big to strings and Set to arrays; decoders do not restore variants. Loss is deliberate and tested, and Big's wire rule is documented externally, but Value/README contract clarity and typed numeric comparisons remain incomplete. ScalarRef comparison lacks Str-to-Dec/Big arms; normal lit_u64 builders instead emit strings and can match string storage. Parent qualification: documented string/list projection is not itself an unexpected wire defect. Remaining documentation and direct typed-RHS comparison consistency must distinguish embedded values from the ordinary serialized protocol path.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-types/src/types/value.rs:72](../../../../../crates/shamir-types/src/types/value.rs#L72); [crates/shamir-types/src/types/value.rs:83](../../../../../crates/shamir-types/src/types/value.rs#L83); [crates/shamir-types/src/codecs/interned/messagepack.rs:954](../../../../../crates/shamir-types/src/codecs/interned/messagepack.rs#L954); [crates/shamir-types/src/record_view/scalar_ref.rs:192](../../../../../crates/shamir-types/src/record_view/scalar_ref.rs#L192); [crates/shamir-types/src/types/tests/value_tests.rs:420](../../../../../crates/shamir-types/src/types/tests/value_tests.rs#L420); [docs/guide-docs/client-server-protocol-spec/NUMERIC_WIRE_SEMANTICS.md:21](../../../../../docs/guide-docs/client-server-protocol-spec/NUMERIC_WIRE_SEMANTICS.md#L21).
+Str/List projection is intentional and test-pinned; false universal roundtrip docs and typed Dec/Big RHS versus stored-string comparison gaps remain. FilterNode's scalar fast path does not fall back when a string scalar is present.
+
+Evidence: [crates/shamir-types/src/types/value.rs:72](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-types/src/types/value.rs#L72); [crates/shamir-types/src/record_view/scalar_ref.rs:192](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-types/src/record_view/scalar_ref.rs#L192); [crates/shamir-engine/src/query/filter/filter_node.rs:621](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-engine/src/query/filter/filter_node.rs#L621).
 
 <a id="review-2"></a>
 
-### Claim 2 — Split-brain decode contract for msgpack u64 > i64::MAX (Big vs Str depending on decoder)
+### Claim 2 — Split-brain decode contract for msgpack u64 &gt; i64::MAX (Big vs Str depending on decoder)
 
 Status: `confirmed-open`. Current risk: `medium`.
 
-ValueVisitor promotes raw uint64 to Big; custom decoder and lens emit decimal Str. From<usize> still wraps on 64-bit oversized input. Existing tests separately pin contradictory decoder outcomes. The normative wire document specifies Big promotion, so recommending Str everywhere would change the documented contract.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-types/src/types/value.rs:142](../../../../../crates/shamir-types/src/types/value.rs#L142); [crates/shamir-types/src/types/value.rs:660](../../../../../crates/shamir-types/src/types/value.rs#L660); [crates/shamir-types/src/codecs/interned/messagepack.rs:183](../../../../../crates/shamir-types/src/codecs/interned/messagepack.rs#L183); [crates/shamir-types/src/record_view/lens.rs:614](../../../../../crates/shamir-types/src/record_view/lens.rs#L614); [crates/shamir-types/src/types/tests/value_tests.rs:643](../../../../../crates/shamir-types/src/types/tests/value_tests.rs#L643); [crates/shamir-types/src/codecs/interned/tests/messagepack_tests.rs:562](../../../../../crates/shamir-types/src/codecs/interned/tests/messagepack_tests.rs#L562); [docs/guide-docs/client-server-protocol-spec/NUMERIC_WIRE_SEMANTICS.md:6](../../../../../docs/guide-docs/client-server-protocol-spec/NUMERIC_WIRE_SEMANTICS.md#L6).
+Visitor Big promotion differs from custom/lens Str output; From&lt;usize&gt; wraps on 64-bit oversized input. Decimal-text equality in the parity test hides the discriminant difference.
+
+Evidence: [crates/shamir-types/src/types/value.rs:142](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-types/src/types/value.rs#L142); [crates/shamir-types/src/types/value.rs:662](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-types/src/types/value.rs#L662); [crates/shamir-types/src/record_view/tests/deintern_parity_tests.rs:301](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-types/src/record_view/tests/deintern_parity_tests.rs#L301).
 
 <a id="review-3"></a>
 
-### Claim 3 — RecordId::system() silently truncates names longer than 12 bytes -> durable-ID collisions
+### Claim 3 — RecordId::system() silently truncates names longer than 12 bytes -&gt; durable-ID collisions
 
-Status: `confirmed-open`. Current risk: `medium`.
+Status: `not-applicable`. Current risk: `—`.
 
-The total constructor still truncates, and its registered test intentionally asserts aliasing. Truncation is documented, not undisclosed. Several production DDL sites have independently avoided long-name collisions; this does not fix the constructor. A <=12-byte check alone would not prevent trailing-NUL/padding aliases.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-types/src/types/record_id.rs:94](../../../../../crates/shamir-types/src/types/record_id.rs#L94); [crates/shamir-types/src/types/record_id.rs:100](../../../../../crates/shamir-types/src/types/record_id.rs#L100); [crates/shamir-types/src/types/tests/record_id_tests.rs:48](../../../../../crates/shamir-types/src/types/tests/record_id_tests.rs#L48); [crates/shamir-index/src/persistence.rs:529](../../../../../crates/shamir-index/src/persistence.rs#L529).
+The source promises direct copying truncated to twelve bytes and the registered test requires aliasing. No current colliding production pair was established; existing indexes_unique/sorted_indexes literals show that blanket length rejection is incompatible.
+
+Evidence: [crates/shamir-types/src/types/record_id.rs:94](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-types/src/types/record_id.rs#L94); [crates/shamir-types/src/types/tests/record_id_tests.rs:48](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-types/src/types/tests/record_id_tests.rs#L48); [crates/shamir-index/src/base_index/index_manager.rs:498](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-index/src/base_index/index_manager.rs#L498).
 
 <a id="review-4"></a>
 
@@ -51,11 +59,13 @@ Evidence: [crates/shamir-types/src/types/record_id.rs:94](../../../../../crates/
 
 Status: `confirmed-open`. Current risk: `high`.
 
-IEEE zero equality and raw-bit non-NaN hashing still disagree; the wired test asserts divergent hashes.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-types/src/types/value.rs:293](../../../../../crates/shamir-types/src/types/value.rs#L293); [crates/shamir-types/src/types/value.rs:709](../../../../../crates/shamir-types/src/types/value.rs#L709); [crates/shamir-types/src/types/tests/value_tests.rs:525](../../../../../crates/shamir-types/src/types/tests/value_tests.rs#L525).
+Equal Values hash different non-NaN bits, and the registered test requires those hashes to differ; the oracle needs inversion and equal-key collection controls.
 
-Grouping/duplicate: `correctness-tdd.md:1`. This row is not another independent defect.
+Evidence: [crates/shamir-types/src/types/value.rs:293](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-types/src/types/value.rs#L293); [crates/shamir-types/src/types/tests/value_tests.rs:525](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-types/src/types/tests/value_tests.rs#L525).
+
+Grouping/duplicate: [correctness-tdd.md#1](correctness-tdd.md#review-1). This is not an additional independent defect.
 
 <a id="review-5"></a>
 
@@ -63,9 +73,11 @@ Grouping/duplicate: `correctness-tdd.md:1`. This row is not another independent 
 
 Status: `confirmed-open`. Current risk: `medium`.
 
-Both tree and lens trait implementations still use unwrap_or(Null), erasing missing-id failures. Current full-record projection and validator adapters consume this method. Swallowing is documented but remains indistinguishable from legal Null data.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-types/src/record_view/record_ref.rs:107](../../../../../crates/shamir-types/src/record_view/record_ref.rs#L107); [crates/shamir-types/src/record_view/record_ref.rs:223](../../../../../crates/shamir-types/src/record_view/record_ref.rs#L223); [crates/shamir-types/src/record_view/record_ref.rs:349](../../../../../crates/shamir-types/src/record_view/record_ref.rs#L349); [crates/shamir-engine/src/query/read/select_projection.rs:225](../../../../../crates/shamir-engine/src/query/read/select_projection.rs#L225); [crates/shamir-engine/src/validator/record_fields.rs:175](../../../../../crates/shamir-engine/src/validator/record_fields.rs#L175).
+A map with an unresolved interner ID produces a codec error but RecordRef converts it to legal Null; live full-record projection and validator adapters consume this path.
+
+Evidence: [crates/shamir-types/src/record_view/record_ref.rs:223](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-types/src/record_view/record_ref.rs#L223); [crates/shamir-types/src/record_view/record_ref.rs:349](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-types/src/record_view/record_ref.rs#L349); [crates/shamir-engine/src/validator/record_fields.rs:175](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-engine/src/validator/record_fields.rs#L175).
 
 <a id="review-6"></a>
 
@@ -73,19 +85,23 @@ Evidence: [crates/shamir-types/src/record_view/record_ref.rs:107](../../../../..
 
 Status: `confirmed-open`. Current risk: `low`.
 
-README still advertises removed InternedCodec/CodecFormat/legacy modules, wrong return types, a de-intern panic, and all-type round trips. Current exports and Result-returning implementation contradict it.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-types/src/codecs/README.md:13](../../../../../crates/shamir-types/src/codecs/README.md#L13); [crates/shamir-types/src/codecs/README.md:63](../../../../../crates/shamir-types/src/codecs/README.md#L63); [crates/shamir-types/src/codecs/README.md:290](../../../../../crates/shamir-types/src/codecs/README.md#L290); [crates/shamir-types/src/codecs/README.md:430](../../../../../crates/shamir-types/src/codecs/README.md#L430); [crates/shamir-types/src/codecs/interned/mod.rs:7](../../../../../crates/shamir-types/src/codecs/interned/mod.rs#L7); [crates/shamir-types/src/codecs/interned/common.rs:24](../../../../../crates/shamir-types/src/codecs/interned/common.rs#L24).
+Removed legacy traits/modules remain advertised; deintern_key actually returns Result, and all-type roundtrip claims contradict deliberate projections and bincode dispatch.
+
+Evidence: [crates/shamir-types/src/codecs/README.md:63](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-types/src/codecs/README.md#L63); [crates/shamir-types/src/codecs/README.md:430](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-types/src/codecs/README.md#L430); [crates/shamir-types/src/codecs/interned/common.rs:24](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-types/src/codecs/interned/common.rs#L24).
 
 <a id="review-7"></a>
 
 ### Claim 7 — ResourcePath renders URIs (Display) but has no parser; rendering duplicated cross-crate
 
-Status: `confirmed-open`. Current risk: `low`.
+Status: `not-applicable`. Current risk: `—`.
 
-Display and HMAC's ResourceRef renderer remain separate, matching implementations; no ResourcePath parser is present. This is maintenance debt, not a current signing discrepancy. Both signing sides use canonical_resource_ref, and Display does not promise parsing or a round trip.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-types/src/access.rs:561](../../../../../crates/shamir-types/src/access.rs#L561); [crates/shamir-query-types/src/hmac.rs:179](../../../../../crates/shamir-query-types/src/hmac.rs#L179); [crates/shamir-query-types/src/hmac.rs:184](../../../../../crates/shamir-query-types/src/hmac.rs#L184); [crates/shamir-server/src/db_handler/admin.rs:697](../../../../../crates/shamir-server/src/db_handler/admin.rs#L697).
+No lossless/parser contract exists. HMAC's current renderer matches the corresponding Display shapes and sign/verify share it; duplicated maintenance is not a current signing defect.
+
+Evidence: [crates/shamir-types/src/access.rs:561](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-types/src/access.rs#L561); [crates/shamir-query-types/src/hmac.rs:179](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-query-types/src/hmac.rs#L179).
 
 <a id="review-8"></a>
 
@@ -93,11 +109,13 @@ Evidence: [crates/shamir-types/src/access.rs:561](../../../../../crates/shamir-t
 
 Status: `confirmed-open`. Current risk: `low`.
 
-Two distinct public enums remain and convenience functions return the basic bincode enum, not the adjacent codecs::CodecError. Wrong-type matching/propagation is normally a compile error, not silently missed runtime errors.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-types/src/codecs/basic/bincode.rs:8](../../../../../crates/shamir-types/src/codecs/basic/bincode.rs#L8); [crates/shamir-types/src/codecs/error.rs:4](../../../../../crates/shamir-types/src/codecs/error.rs#L4); [crates/shamir-types/src/codecs/mod.rs:12](../../../../../crates/shamir-types/src/codecs/mod.rs#L12).
+Convenience functions return the manual bincode enum rather than the adjacent canonical type; mismatched variant/type use fails statically, not silently at runtime.
 
-Grouping/duplicate: `error-handling-lifecycle.md:2`. This row is not another independent defect.
+Evidence: [crates/shamir-types/src/codecs/basic/bincode.rs:8](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-types/src/codecs/basic/bincode.rs#L8); [crates/shamir-types/src/codecs/mod.rs:12](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-types/src/codecs/mod.rs#L12).
+
+Grouping/duplicate: [error-handling-lifecycle.md#2](error-handling-lifecycle.md#review-2). This is not an additional independent defect.
 
 <a id="review-9"></a>
 
@@ -105,21 +123,25 @@ Grouping/duplicate: `error-handling-lifecycle.md:2`. This row is not another ind
 
 Status: `confirmed-open`. Current risk: `low`.
 
-touch_ind still returns a production-infallible Result with &'static str; touch_with_id returns formatted String errors. No inspected production caller substring-matches them, and a String error type does not allocate on successful calls.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-types/src/core/interner/interner.rs:138](../../../../../crates/shamir-types/src/core/interner/interner.rs#L138); [crates/shamir-types/src/core/interner/interner.rs:348](../../../../../crates/shamir-types/src/core/interner/interner.rs#L348); [crates/shamir-engine/src/tx/recovery.rs:491](../../../../../crates/shamir-engine/src/tx/recovery.rs#L491).
+The unstructured error types remain. A String error type allocates only when constructing an error, and inspected recovery code uniformly propagates it.
 
-Grouping/duplicate: `error-handling-lifecycle.md:3`. This row is not another independent defect.
+Evidence: [crates/shamir-types/src/core/interner/interner.rs:348](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-types/src/core/interner/interner.rs#L348); [crates/shamir-engine/src/tx/drainer.rs:1116](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-engine/src/tx/drainer.rs#L1116).
+
+Grouping/duplicate: [error-handling-lifecycle.md#3](error-handling-lifecycle.md#review-3). This is not an additional independent defect.
 
 <a id="review-10"></a>
 
 ### Claim 10 — ResourceMeta::inject_into silently no-ops on non-map records
 
-Status: `confirmed-open`. Current risk: `low`.
+Status: `not-applicable`. Current risk: `—`.
 
-The method returns unit and writes only inside the Map branch. Actual non-map privilege widening was not established; inspected normal callers construct maps. A fallible API would detect future misuse.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-types/src/access.rs:245](../../../../../crates/shamir-types/src/access.rs#L245); [crates/shamir-types/src/access.rs:304](../../../../../crates/shamir-types/src/access.rs#L304); [crates/shamir-db/src/shamir_db/system_store.rs:194](../../../../../crates/shamir-db/src/shamir_db/system_store.rs#L194).
+The method documents injection into a Map, not arbitrary Value recipients. A fallible nonmap check is optional hardening; the alleged deployed privilege widening was not established.
+
+Evidence: [crates/shamir-types/src/access.rs:243](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-types/src/access.rs#L243); [crates/shamir-types/src/access.rs:245](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-types/src/access.rs#L245).
 
 <a id="review-11"></a>
 
@@ -127,29 +149,35 @@ Evidence: [crates/shamir-types/src/access.rs:245](../../../../../crates/shamir-t
 
 Status: `confirmed-open`. Current risk: `nit`.
 
-All five components are evaluated separately below; the pre-epoch claim is refuted, random Default is intentional, and remaining items are documentation/API hygiene.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-types/src/types/record_id.rs:45](../../../../../crates/shamir-types/src/types/record_id.rs#L45); [crates/shamir-types/src/types/record_id.rs:127](../../../../../crates/shamir-types/src/types/record_id.rs#L127); [crates/shamir-types/src/macros/mpack.rs:291](../../../../../crates/shamir-types/src/macros/mpack.rs#L291).
+Three documentation/API-hygiene components survive; random Default is intentional and the signed pre-epoch clamp allegation is false.
+
+Evidence: [crates/shamir-types/src/types/value.rs:19](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-types/src/types/value.rs#L19); [crates/shamir-types/src/macros/mpack.rs:286](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-types/src/macros/mpack.rs#L286).
 
 <a id="review-11a"></a>
 
 ### Claim 11a — Default for RecordId generates a fresh random ID
 
-Status: `not-applicable`. Current risk: —.
+Status: `not-applicable`. Current risk: `—`.
 
-Default intentionally delegates to new. Copy/Hash imposes no nil-default requirement, and cloning an already-created id does not mint another id. Deprecating this trait behavior is an API-policy choice, not a proven fix.
+Prior-cycle decision: `not-applicable`.
 
-Evidence: [crates/shamir-types/src/types/record_id.rs:20](../../../../../crates/shamir-types/src/types/record_id.rs#L20); [crates/shamir-types/src/types/record_id.rs:127](../../../../../crates/shamir-types/src/types/record_id.rs#L127).
+Default explicitly calls new; cloning this Copy identifier preserves its bytes and does not mint another ID.
+
+Evidence: [crates/shamir-types/src/types/record_id.rs:127](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-types/src/types/record_id.rs#L127).
 
 <a id="review-11b"></a>
 
 ### Claim 11b — from_ts before CUSTOM_EPOCH produces system-prefixed IDs
 
-Status: `refuted`. Current risk: —.
+Status: `refuted`. Current risk: `—`.
 
-The operands are signed i64. Ordinary pre-epoch subtraction is negative and encodes with nonzero leading bytes; integer-underflow saturation produces i64::MIN, also not a zero prefix. The genuine post-epoch 2^32-microsecond hole is a different supported claim.
+Prior-cycle decision: `refuted`.
 
-Evidence: [crates/shamir-types/src/types/record_id.rs:14](../../../../../crates/shamir-types/src/types/record_id.rs#L14); [crates/shamir-types/src/types/record_id.rs:45](../../../../../crates/shamir-types/src/types/record_id.rs#L45); [crates/shamir-types/src/types/record_id.rs:108](../../../../../crates/shamir-types/src/types/record_id.rs#L108).
+Signed subtraction produces negative values or i64::MIN on underflow, both with nonzero leading bytes. The post-epoch zero-prefix interval is a different witness.
+
+Evidence: [crates/shamir-types/src/types/record_id.rs:45](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-types/src/types/record_id.rs#L45); [crates/shamir-types/src/types/record_id.rs:108](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-types/src/types/record_id.rs#L108).
 
 <a id="review-11c"></a>
 
@@ -157,9 +185,11 @@ Evidence: [crates/shamir-types/src/types/record_id.rs:14](../../../../../crates/
 
 Status: `confirmed-open`. Current risk: `nit`.
 
-Both aliases still have identical underlying types but different documented purposes. The tests-only UserValue migration wording is overly broad; QueryValue remains an intentional name-keyed boundary type, not inherently forbidden production use.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-types/src/types/value.rs:19](../../../../../crates/shamir-types/src/types/value.rs#L19); [crates/shamir-types/src/types/value.rs:29](../../../../../crates/shamir-types/src/types/value.rs#L29); [crates/shamir-types/src/codecs/interned/codec.rs:137](../../../../../crates/shamir-types/src/codecs/interned/codec.rs#L137).
+The aliases are identical but intentionally named for different roles; the blanket production-use wording overstates migration requirements.
+
+Evidence: [crates/shamir-types/src/types/value.rs:19](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-types/src/types/value.rs#L19); [crates/shamir-types/src/types/value.rs:30](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-types/src/types/value.rs#L30).
 
 <a id="review-11d"></a>
 
@@ -167,11 +197,13 @@ Evidence: [crates/shamir-types/src/types/value.rs:19](../../../../../crates/sham
 
 Status: `confirmed-open`. Current risk: `nit`.
 
-Stale paths and duplicated derive text remain. They are unfenced rustdoc prose rather than runnable doctests, so enabling doctests alone would not execute these snippets.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-types/src/codecs/basic/bincode.rs:24](../../../../../crates/shamir-types/src/codecs/basic/bincode.rs#L24); [crates/shamir-types/src/codecs/basic/bincode.rs:42](../../../../../crates/shamir-types/src/codecs/basic/bincode.rs#L42); [crates/shamir-types/Cargo.toml:89](../../../../../crates/shamir-types/Cargo.toml#L89).
+Obsolete paths and repeated derives remain outside code fences, so enabling doctests alone would not turn them into executable tests.
 
-Grouping/duplicate: `correctness-tdd.md:10`. This row is not another independent defect.
+Evidence: [crates/shamir-types/src/codecs/basic/bincode.rs:26](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-types/src/codecs/basic/bincode.rs#L26).
+
+Grouping/duplicate: [correctness-tdd.md#10](correctness-tdd.md#review-10). This is not an additional independent defect.
 
 <a id="review-11e"></a>
 
@@ -179,18 +211,19 @@ Grouping/duplicate: `correctness-tdd.md:10`. This row is not another independent
 
 Status: `confirmed-open`. Current risk: `nit`.
 
-The public doc-hidden trait has no private sealing supertrait, so downstream local types can implement it. Its non-API warning does not enforce the advertised seal.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-types/src/macros/mpack.rs:286](../../../../../crates/shamir-types/src/macros/mpack.rs#L286); [crates/shamir-types/src/macros/mpack.rs:291](../../../../../crates/shamir-types/src/macros/mpack.rs#L291).
+A public doc-hidden trait without a private supertrait permits downstream local implementations; the prose warning is not sealing.
 
-## Corrections and qualified non-findings
+Evidence: [crates/shamir-types/src/macros/mpack.rs:286](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-types/src/macros/mpack.rs#L286); [crates/shamir-types/src/macros/mpack.rs:291](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-types/src/macros/mpack.rs#L291).
 
-- Big's flattening rule is already documented in NUMERIC_WIRE_SEMANTICS.md; describe incomplete public-type documentation rather than universally undocumented behavior.
-- FilterValue has no direct Dec/Big literal variant. Exact OQL ::dec syntax/reachability was not established; source-supported mismatch is a persisted string field compared with an in-memory typed numeric RHS.
-- Generic Value::from_bytes accepts id-keyed storage maps; msgpack_to_inner instead requires string keys. They are not interchangeable storage decoders.
-- HMAC clients and servers share the same canonical_resource_ref implementation. Divergence from diagnostic Display is hypothetical maintenance risk, not established signature failure.
-- The code does not support the pre-epoch clamp claim, success-path String allocation claim, or silent wrong-error-type matching claim.
-- Wire/lens parity tests are scoped to fixtures and supported shapes; raw oversized uint64, malformed iteration, and header-derived allocation prevent a universal mechanically-sound guarantee.
+## Evidence and recipe corrections
+
+- Documented Str/List projection is not itself an unexpected wire defect. Ext-tag support would require changes to generic serde, custom decoding, lens representation, and clients, with a migration policy.
+- Big is the explicit raw-uint decode contract; Str-everywhere is not a semantics-preserving cleanup.
+- ResourcePath parser addition, checked system-name construction, and fallible Map injection are optional API policies absent a stronger contract or reachable misuse.
+- The broad byte-exact assurance excludes repeated IDs, nonminimal key widths, extension dispatch differences, and ordinary string keys interpreted by legacy prefixes.
+- Generic Value decoding uses rmp-serde 1.3.1 published src/decode.rs; custom msgpack_to_inner requires string keys and is not an interchangeable storage-map decoder.
 
 ---
 

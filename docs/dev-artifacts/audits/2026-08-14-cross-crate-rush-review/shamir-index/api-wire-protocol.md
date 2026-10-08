@@ -1,11 +1,13 @@
-<!-- revalidation:2026-10-08 source:92ad58266bf57ddea1fa3c8a47affba1a3a9a096 -->
-# shamir-index — api-wire-protocol revalidation
+<!-- revalidation:2026-10-08 cycle:independent-2 source:e3765c935fc71655ee1ec0160cf180607935d89b -->
+# shamir-index — api-wire-protocol independent revalidation (cycle 2)
 
-Source snapshot: `92ad58266bf57ddea1fa3c8a47affba1a3a9a096`. Revalidated 2026-10-08 by read-only XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run; no source fix is part of this update. Test registration/assertions are evidence of an oracle, not proof of a passing run.
+Frozen source snapshot: `e3765c935fc71655ee1ec0160cf180607935d89b`. Independently revalidated 2026-10-08 by a fresh XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run. Source-fixed means the specified mechanism was already removed at this snapshot; this cycle implements no source fix.
 
-This section is authoritative for current status. Original titles/IDs are retained for traceability; a refuted title is not a current assertion. The collapsed historical report below is superseded, including its counts, severity, scenarios and fix instructions. Plan IDs preserve historical numbering, not a current release mandate. [Workspace methodology and status definitions](../SUMMARY.md#status-definitions).
+This section is authoritative for current decisions. Existing IDs and allegation titles are retained for traceability; a refuted title is not a current assertion. Prior-cycle decisions were rechecked, not used as proof. The first cycle is available in repository history at this snapshot. The original historical body below remains preserved once and is superseded, including its counts, severities and recipes. [Workspace scope and status definitions](../SUMMARY.md#status-definitions).
 
-Persisted tuning, SQ8 intent, snapshot compatibility, pruning, and error-contract gaps remain. Historical v1 shapes now positively confirm the layout incompatibility. The options field is unused but not intrinsically an API defect.
+Unrelated external edits began in dependency/toolchain/CI metadata during collection; additional Rust-source edits appeared afterward. They were left untouched. Evidence and decisions are tied to the frozen commit, not those later changes or an installed toolchain. “Current” below means current at that snapshot; no re-audit of the modified working tree is implied.
+
+Reconstruction and genuine historical-byte compatibility defects remain. Hash-format and ordinal notes are compatibility/documentation debt rather than demonstrated current version corruption. Options and permissive prefix parsing are not intrinsically invalid APIs.
 
 ## Current claim decisions
 
@@ -13,7 +15,7 @@ Persisted tuning, SQ8 intent, snapshot compatibility, pruning, and error-contrac
 |---:|---:|---:|---:|---:|---:|---:|
 | 11 | 10 | 0 | 0 | 0 | 0 | 1 |
 
-These are decisions on report claims, including repeated roots, bundled observations and non-findings—not a unique-bug census. Closed/N/A rows have no current risk; unverified risk is provisional. Pure style and unmeasured optimization claims do not establish runtime impact.
+These are duplicate-inclusive report decisions, not a unique-bug census. Pure style or structural optimization does not establish a runtime incident; unverified impact remains provisional.
 
 <a id="review-1"></a>
 
@@ -21,9 +23,11 @@ These are decisions on report claims, including repeated roots, bundled observat
 
 Status: `confirmed-open`. Current risk: `medium`.
 
-The shared builder never matches cfg.backend; it always constructs default in-process HNSW, including for an External descriptor. Normal engine DDL constructs only InProcessHnsw; valid snapshots can retain actual graph parameters.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-index/src/build_backend.rs:52](../../../../../crates/shamir-index/src/build_backend.rs#L52); [crates/shamir-index/src/kind.rs:190](../../../../../crates/shamir-index/src/kind.rs#L190); [crates/shamir-engine/src/table/table_manager_index_mgmt.rs:348](../../../../../crates/shamir-engine/src/table/table_manager_index_mgmt.rs#L348); [crates/shamir-engine/src/table/table_manager.rs:665](../../../../../crates/shamir-engine/src/table/table_manager.rs#L665).
+The builder always creates default in-process HNSW, including for External. Successful snapshots restore live graph parameters; absent/corrupt snapshots and compaction defaults lose tuning. Test nondefault m/ef through fallback reopen and compaction.
+
+Evidence: [crates/shamir-index/src/build_backend.rs:52](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-index/src/build_backend.rs#L52); [crates/shamir-index/src/vector/hnsw_adapter.rs:952](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-index/src/vector/hnsw_adapter.rs#L952); [crates/shamir-engine/src/table/table_manager.rs:665](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-engine/src/table/table_manager.rs#L665).
 
 <a id="review-2"></a>
 
@@ -31,9 +35,11 @@ Evidence: [crates/shamir-index/src/build_backend.rs:52](../../../../../crates/sh
 
 Status: `confirmed-open`. Current risk: `medium`.
 
-Descriptor quantization is skipped; builder and nonquantized from_parts produce quantization=None. Fitted v2 snapshots restore SQ8, but absent/corrupt/pre-fit snapshots lose intent. The exact frequency and total-memory multiplier are unmeasured.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-index/src/kind.rs:185](../../../../../crates/shamir-index/src/kind.rs#L185); [crates/shamir-index/src/build_backend.rs:53](../../../../../crates/shamir-index/src/build_backend.rs#L53); [crates/shamir-index/src/vector/hnsw_adapter.rs:549](../../../../../crates/shamir-index/src/vector/hnsw_adapter.rs#L549); [crates/shamir-index/src/vector/hnsw_adapter.rs:618](../../../../../crates/shamir-index/src/vector/hnsw_adapter.rs#L618).
+serde(skip) removes intent and from_parts sets None, disabling future fit. Fitted snapshots reconstruct Some(Sq8); therefore only pre-fit/absent/corrupt snapshot paths demonstrate intent loss, not 'most' restarts quantitatively.
+
+Evidence: [crates/shamir-index/src/kind.rs:185](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-index/src/kind.rs#L185); [crates/shamir-index/src/vector/hnsw_adapter.rs:549](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-index/src/vector/hnsw_adapter.rs#L549); [crates/shamir-index/src/vector/hnsw_adapter.rs:618](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-index/src/vector/hnsw_adapter.rs#L618).
 
 <a id="review-3"></a>
 
@@ -41,19 +47,23 @@ Evidence: [crates/shamir-index/src/kind.rs:185](../../../../../crates/shamir-ind
 
 Status: `confirmed-open`. Current risk: `medium`.
 
-History at 3ed3069b^ lacks manifest q fields and sidecar vectors_u8. Current positional decoding has no legacy fallback. The registered migration test relabels current structs, so it cannot detect genuine v1 layout incompatibility.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-index/src/vector/snapshot.rs:279](../../../../../crates/shamir-index/src/vector/snapshot.rs#L279); [crates/shamir-index/src/vector/snapshot.rs:723](../../../../../crates/shamir-index/src/vector/snapshot.rs#L723); [crates/shamir-index/src/vector/snapshot.rs:762](../../../../../crates/shamir-index/src/vector/snapshot.rs#L762); [crates/shamir-index/src/vector/tests/quantization_snapshot_tests.rs:384](../../../../../crates/shamir-index/src/vector/tests/quantization_snapshot_tests.rs#L384); [docs/guide-docs/guide/06-search.md:440](../../../../../docs/guide-docs/guide/06-search.md#L440).
+Historical 3ed3069b^ manifest lacks q fields and sidecar lacks vectors_u8. Current positional bincode 1.3.3 decoding has no fallback. The registered test re-encodes current structs with version=1 and cannot detect historical layout failure. Published source: https://docs.rs/crate/bincode/1.3.3/source/src/de/mod.rs.
+
+Evidence: [crates/shamir-index/src/vector/snapshot.rs:279](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-index/src/vector/snapshot.rs#L279); [crates/shamir-index/src/vector/snapshot.rs:723](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-index/src/vector/snapshot.rs#L723); [crates/shamir-index/src/vector/tests/quantization_snapshot_tests.rs:384](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-index/src/vector/tests/quantization_snapshot_tests.rs#L384); [Cargo.lock:413](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/Cargo.lock#L413).
 
 <a id="review-4"></a>
 
 ### Claim 4 — Persisted posting keys depend on FxHasher output stability, with no version coupling and a caret-pinned dependency
 
-Status: `confirmed-open`. Current risk: `medium`.
+Status: `confirmed-open`. Current risk: `low`.
 
-Posting identities still use FxHasher under caret 2.1; lockfile resolves 2.1.2. No algorithm identity/self-check is coupled to format version 2. This is upgrade compatibility debt, not proof that the current patch changed output.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-index/Cargo.toml:30](../../../../../crates/shamir-index/Cargo.toml#L30); [Cargo.lock:3007](../../../../../Cargo.lock#L3007); [crates/shamir-index/src/tokenizer.rs:466](../../../../../crates/shamir-index/src/tokenizer.rs#L466); [crates/shamir-index/src/persistence.rs:37](../../../../../crates/shamir-index/src/persistence.rs#L37).
+The caret declaration and format version omit algorithm/target identity. Exact rustc-hash 2.1.2 is pointer-width-sensitive; no current patch-output regression was demonstrated. This is prospective compatibility debt. Published source: https://docs.rs/crate/rustc-hash/2.1.2/source/src/lib.rs.
+
+Evidence: [crates/shamir-index/Cargo.toml:30](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-index/Cargo.toml#L30); [Cargo.lock:3007](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/Cargo.lock#L3007); [crates/shamir-index/src/persistence.rs:37](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-index/src/persistence.rs#L37).
 
 <a id="review-5"></a>
 
@@ -61,9 +71,11 @@ Evidence: [crates/shamir-index/Cargo.toml:30](../../../../../crates/shamir-index
 
 Status: `confirmed-open`. Current risk: `medium`.
 
-The caller retains only old graph/data counts; flip removes those sections and sidecar, not qgraph/qdata. Quantized old-generation chunks remain orphaned after successful flips.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-index/src/vector/vector_backend.rs:906](../../../../../crates/shamir-index/src/vector/vector_backend.rs#L906); [crates/shamir-index/src/vector/snapshot.rs:1287](../../../../../crates/shamir-index/src/vector/snapshot.rs#L1287); [crates/shamir-index/src/vector/snapshot.rs:1300](../../../../../crates/shamir-index/src/vector/snapshot.rs#L1300).
+Old manifest state retains only graph/data counts and flip removes only those sections plus sidecar. Successful quantized flips leave old q chunks. Assert exact old-generation namespace emptiness, not only manifest advancement.
+
+Evidence: [crates/shamir-index/src/vector/vector_backend.rs:906](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-index/src/vector/vector_backend.rs#L906); [crates/shamir-index/src/vector/snapshot.rs:1300](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-index/src/vector/snapshot.rs#L1300).
 
 <a id="review-6"></a>
 
@@ -71,9 +83,11 @@ Evidence: [crates/shamir-index/src/vector/vector_backend.rs:906](../../../../../
 
 Status: `confirmed-open`. Current risk: `low`.
 
-open still deserializes MetaEnvelope<T> before inspecting the fixed header. A payload-shape failure can mask an unsupported envelope version as Decode.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-index/src/meta_envelope.rs:54](../../../../../crates/shamir-index/src/meta_envelope.rs#L54); [crates/shamir-index/src/meta_envelope.rs:64](../../../../../crates/shamir-index/src/meta_envelope.rs#L64).
+A valid unsupported header with an incompatible/truncated payload yields Decode before UnsupportedVersion. Header-first dispatch can preserve the existing fixed byte layout if the exact bincode options are retained.
+
+Evidence: [crates/shamir-index/src/meta_envelope.rs:54](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-index/src/meta_envelope.rs#L54); [crates/shamir-index/src/meta_envelope.rs:64](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-index/src/meta_envelope.rs#L64).
 
 <a id="review-7"></a>
 
@@ -81,29 +95,35 @@ Evidence: [crates/shamir-index/src/meta_envelope.rs:54](../../../../../crates/sh
 
 Status: `confirmed-open`. Current risk: `medium`.
 
-The load path checks the quantization method, but not dimension/mins/scales consistency before synchronous to_quantizer asserts. Sidecar payload metadata is not included in the graph-section checksum.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-index/src/vector/snapshot.rs:822](../../../../../crates/shamir-index/src/vector/snapshot.rs#L822); [crates/shamir-index/src/vector/snapshot.rs:973](../../../../../crates/shamir-index/src/vector/snapshot.rs#L973); [crates/shamir-index/src/vector/quant_meta.rs:73](../../../../../crates/shamir-index/src/vector/quant_meta.rs#L73); [crates/shamir-index/src/vector/sq8.rs:91](../../../../../crates/shamir-index/src/vector/sq8.rs#L91).
+Method is checked, but dim/mins/scales consistency is not. Changing only validly encoded QuantMeta lengths leaves graph-section CRC unchanged and reaches synchronous assertions. Tests must assert typed corruption/rebuild, not only malformed envelope rejection.
+
+Evidence: [crates/shamir-index/src/vector/snapshot.rs:822](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-index/src/vector/snapshot.rs#L822); [crates/shamir-index/src/vector/snapshot.rs:973](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-index/src/vector/snapshot.rs#L973); [crates/shamir-index/src/vector/quant_meta.rs:73](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-index/src/vector/quant_meta.rs#L73); [crates/shamir-index/src/vector/sq8.rs:91](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-index/src/vector/sq8.rs#L91).
 
 <a id="review-8"></a>
 
 ### Claim 8 — Bincode ordinal-stability contract is documented on some persisted enums but missing on others
 
-Status: `confirmed-open`. Current risk: `low`.
+Status: `confirmed-open`. Current risk: `nit`.
 
-IndexKind, TokenizerKind, and IndexExpr still lack explicit append-only ordinal contracts, although they are nested in persisted descriptors. No actual enum-reorder corruption is demonstrated.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-index/src/kind.rs:11](../../../../../crates/shamir-index/src/kind.rs#L11); [crates/shamir-index/src/kind.rs:25](../../../../../crates/shamir-index/src/kind.rs#L25); [crates/shamir-index/src/expr.rs:21](../../../../../crates/shamir-index/src/expr.rs#L21); [crates/shamir-index/src/persistence.rs:97](../../../../../crates/shamir-index/src/persistence.rs#L97).
+IndexKind, TokenizerKind, and IndexExpr lack the notes present on sibling enums. Actual ordinal serialization is confirmed in bincode 1.3.3, but no enum reorder is shown. This is preventive documentation, not current wire corruption.
+
+Evidence: [crates/shamir-index/src/kind.rs:11](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-index/src/kind.rs#L11); [crates/shamir-index/src/kind.rs:25](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-index/src/kind.rs#L25); [crates/shamir-index/src/expr.rs:21](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-index/src/expr.rs#L21); [Cargo.lock:413](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/Cargo.lock#L413).
 
 <a id="review-9"></a>
 
 ### Claim 9 — `IndexDescriptor.options` is dead public API
 
-Status: `not-applicable`. Current risk: —.
+Status: `not-applicable`. Current risk: `—`.
 
-The field is still unused by shipped builders and round-tripped as opaque bytes. Its documented opaque/default-empty nature does not promise interpreted tuning; an extension carrier is not inherently a correctness defect.
+Prior-cycle decision: `not-applicable`.
 
-Evidence: [crates/shamir-index/src/descriptor.rs:26](../../../../../crates/shamir-index/src/descriptor.rs#L26); [crates/shamir-index/src/descriptor.rs:59](../../../../../crates/shamir-index/src/descriptor.rs#L59); [crates/shamir-index/src/build_backend.rs:28](../../../../../crates/shamir-index/src/build_backend.rs#L28); [crates/shamir-index/src/persistence.rs:212](../../../../../crates/shamir-index/src/persistence.rs#L212).
+The public field is explicitly opaque/default-empty and persisted unchanged. No interpreted tuning promise is violated. Removal would require migration; using it as a versioned carrier is an optional design.
+
+Evidence: [crates/shamir-index/src/descriptor.rs:26](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-index/src/descriptor.rs#L26); [crates/shamir-index/src/persistence.rs:212](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-index/src/persistence.rs#L212).
 
 <a id="review-10"></a>
 
@@ -111,9 +131,11 @@ Evidence: [crates/shamir-index/src/descriptor.rs:26](../../../../../crates/shami
 
 Status: `confirmed-open`. Current risk: `low`.
 
-Nonempty posting decode errors still use the same default as legitimate empty legacy postings, without warning or error. This can silently alter ranked scoring.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-index/src/fts_ranked_backend.rs:125](../../../../../crates/shamir-index/src/fts_ranked_backend.rs#L125); [crates/shamir-index/src/fts_ranked_backend.rs:128](../../../../../crates/shamir-index/src/fts_ranked_backend.rs#L128).
+Empty legacy postings deliberately default, but nonempty bincode failures use the same fallback without signal. Corrupt nonempty values can alter ranking. An oracle must inject that branch and inspect scoring/error behavior.
+
+Evidence: [crates/shamir-index/src/fts_ranked_backend.rs:125](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-index/src/fts_ranked_backend.rs#L125); [crates/shamir-index/src/fts_ranked_backend.rs:128](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-index/src/fts_ranked_backend.rs#L128).
 
 <a id="review-11"></a>
 
@@ -121,20 +143,20 @@ Evidence: [crates/shamir-index/src/fts_ranked_backend.rs:125](../../../../../cra
 
 Status: `confirmed-open`. Current risk: `nit`.
 
-lifecycle still says Failed is unnecessary despite the shipped variant. from_bytes still returns String errors and accepts longer buffers; with_values remains public and only comment-deprecated.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-index/src/lifecycle.rs:31](../../../../../crates/shamir-index/src/lifecycle.rs#L31); [crates/shamir-index/src/state.rs:73](../../../../../crates/shamir-index/src/state.rs#L73); [crates/shamir-index/src/base_index/index_record_key.rs:104](../../../../../crates/shamir-index/src/base_index/index_record_key.rs#L104); [crates/shamir-index/src/base_index/index_record_key.rs:62](../../../../../crates/shamir-index/src/base_index/index_record_key.rs#L62).
+Failed is shipped while lifecycle still argues it is unnecessary. from_bytes intentionally reads a 25-byte prefix and has safe slice bounds; accepting a longer posting key and returning String are not independently proven correctness defects. Public with_values removal is API-breaking.
 
-## Corrections and qualified non-findings
+Evidence: [crates/shamir-index/src/lifecycle.rs:31](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-index/src/lifecycle.rs#L31); [crates/shamir-index/src/state.rs:73](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-index/src/state.rs#L73); [crates/shamir-index/src/base_index/index_record_key.rs:104](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-index/src/base_index/index_record_key.rs#L104); [crates/shamir-index/src/base_index/index_record_key.rs:62](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-index/src/base_index/index_record_key.rs#L62).
 
-- Successful snapshot graph loads can preserve HNSW parameters; the builder defect concerns construction/rebuild and unsupported External interpretation.
-- History resolves the v1 caveat: quantization was reserved, but vectors_u8 and all q-manifest fields were not. The advertised genuine-v1 compatibility is unsupported by the current positional layouts.
-- rustc-hash and hnsw_rs declarations are in crates/shamir-index/Cargo.toml, not the workspace Cargo.toml. Resolved pins are rustc-hash 2.1.2, bincode 1.3.3, scc 3.8.4, and hnsw_rs 0.3.4.
-- Exact pinning is useful but does not by itself provide portable persisted-hash semantics or detect format changes. No current algorithm-output regression was established.
-- Do not remove the persisted options field without a codec migration; using it for durable SQ8 intent remains a possible implementation choice.
-- panic=unwind is configured. Data-driven panics can fail an open/query task, but a process-wide abort is not automatic.
-- Typed queries/ops and absence of a direct serde_json dependency remain confirmed. DSL parsers return Option; unknown quantization strings map to None rather than a typed rejection.
-- Base-index shadow-shape decoders and format-version gating remain present; their existence does not establish the missing snapshot v1 fallback.
+## Evidence and recipe corrections
+
+- Do not claim universal reopen tuning loss or quantify 'most' SQ8 restarts; fitted snapshot restoration is positive counter-evidence.
+- The v1 sidecar already contained reserved quantization; only genuinely absent fields justify the positional-layout witness.
+- Exact pinning alone does not make FxHasher cross-target or persisted-format stable.
+- Appending an enum variant preserves old-into-new ordinal meanings, not new-variant readability by old readers.
+- String error payloads and public deprecated helpers are API tradeoffs; length-equality changes must first distinguish logical key decoding from prefix parsing.
+- The configured unwind policy means a data-driven panic need not abort the entire server process.
 
 ---
 

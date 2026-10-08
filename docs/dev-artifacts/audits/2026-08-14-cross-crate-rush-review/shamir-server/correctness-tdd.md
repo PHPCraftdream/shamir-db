@@ -1,11 +1,13 @@
-<!-- revalidation:2026-10-08 source:92ad58266bf57ddea1fa3c8a47affba1a3a9a096 -->
-# shamir-server — correctness-tdd revalidation
+<!-- revalidation:2026-10-08 cycle:independent-2 source:e3765c935fc71655ee1ec0160cf180607935d89b -->
+# shamir-server — correctness-tdd independent revalidation (cycle 2)
 
-Source snapshot: `92ad58266bf57ddea1fa3c8a47affba1a3a9a096`. Revalidated 2026-10-08 by read-only XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run; no source fix is part of this update. Test registration/assertions are evidence of an oracle, not proof of a passing run.
+Frozen source snapshot: `e3765c935fc71655ee1ec0160cf180607935d89b`. Independently revalidated 2026-10-08 by a fresh XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run. Source-fixed means the specified mechanism was already removed at this snapshot; this cycle implements no source fix.
 
-This section is authoritative for current status. Original titles/IDs are retained for traceability; a refuted title is not a current assertion. The collapsed historical report below is superseded, including its counts, severity, scenarios and fix instructions. Plan IDs preserve historical numbering, not a current release mandate. [Workspace methodology and status definitions](../SUMMARY.md#status-definitions).
+This section is authoritative for current decisions. Existing IDs and allegation titles are retained for traceability; a refuted title is not a current assertion. Prior-cycle decisions were rechecked, not used as proof. The first cycle is available in repository history at this snapshot. The original historical body below remains preserved once and is superseded, including its counts, severities and recipes. [Workspace scope and status definitions](../SUMMARY.md#status-definitions).
 
-Nine numbered observations remain open, with narrower reachability or impact qualifications; the namespace-prefix defect is refuted by the documented contract. The replica bypass remains conditional on explicitly configuring the handler ReadOnly.
+Unrelated external edits began in dependency/toolchain/CI metadata during collection; additional Rust-source edits appeared afterward. They were left untouched. Evidence and decisions are tied to the frozen commit, not those later changes or an installed toolchain. “Current” below means current at that snapshot; no re-audit of the modified working tree is implied.
+
+The read-only transaction bypass, supervisor liveness gap and bridge teardown race remain source-demonstrable. Prefix matching is intentional. Several remaining entries concern test or diagnostic quality rather than current runtime failures.
 
 ## Current claim decisions
 
@@ -13,7 +15,7 @@ Nine numbered observations remain open, with narrower reachability or impact qua
 |---:|---:|---:|---:|---:|---:|---:|
 | 11 | 9 | 0 | 0 | 2 | 0 | 0 |
 
-These are decisions on report claims, including repeated roots, bundled observations and non-findings—not a unique-bug census. Closed/N/A rows have no current risk; unverified risk is provisional. Pure style and unmeasured optimization claims do not establish runtime impact.
+These are duplicate-inclusive report decisions, not a unique-bug census. Pure style or structural optimization does not establish a runtime incident; unverified impact remains provisional.
 
 <a id="review-1"></a>
 
@@ -21,9 +23,11 @@ These are decisions on report claims, including repeated roots, bundled observat
 
 Status: `confirmed-open`. Current risk: `high`.
 
-TxExecute reaches tx_execute_as without the Execute-only NodeMode gate, and TxCommit applies the transaction. Existing DB/table ACLs still apply: this is not available to every authenticated principal. The stock launcher never sets ReadOnly; exploitation requires an explicitly ReadOnly handler deployment.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-server/src/db_handler/handler.rs:529](../../../../../crates/shamir-server/src/db_handler/handler.rs#L529); [crates/shamir-server/src/db_handler/handler.rs:379](../../../../../crates/shamir-server/src/db_handler/handler.rs#L379); [crates/shamir-server/src/db_handler/tx_handlers.rs:168](../../../../../crates/shamir-server/src/db_handler/tx_handlers.rs#L168); [crates/shamir-server/src/db_handler/tx_handlers.rs:247](../../../../../crates/shamir-server/src/db_handler/tx_handlers.rs#L247); [crates/shamir-db/src/shamir_db/execute/db_tx.rs:126](../../../../../crates/shamir-db/src/shamir_db/execute/db_tx.rs#L126); [crates/shamir-db/src/shamir_db/execute/db_tx.rs:171](../../../../../crates/shamir-db/src/shamir_db/execute/db_tx.rs#L171); [crates/shamir-server/src/server/server_launcher.rs:461](../../../../../crates/shamir-server/src/server/server_launcher.rs#L461); [crates/shamir-server/src/db_handler/tests/mod.rs:5](../../../../../crates/shamir-server/src/db_handler/tests/mod.rs#L5).
+With an explicitly ReadOnly handler and a principal authorized to write the target resources, TxBegin → TxExecute(insert) → TxCommit reaches the engine without NodeMode rejection. Database/table authorization still applies. Registered node-mode tests call Execute, so they do not catch this path.
+
+Evidence: [crates/shamir-server/src/db_handler/handler.rs:529](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-server/src/db_handler/handler.rs#L529); [crates/shamir-server/src/db_handler/tx_handlers.rs:168](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-server/src/db_handler/tx_handlers.rs#L168); [crates/shamir-server/src/db_handler/tx_handlers.rs:247](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-server/src/db_handler/tx_handlers.rs#L247); [crates/shamir-db/src/shamir_db/execute/db_tx.rs:126](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/execute/db_tx.rs#L126); [crates/shamir-server/src/db_handler/tests/node_mode_tests.rs:157](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-server/src/db_handler/tests/node_mode_tests.rs#L157).
 
 <a id="review-2"></a>
 
@@ -31,9 +35,11 @@ Evidence: [crates/shamir-server/src/db_handler/handler.rs:529](../../../../../cr
 
 Status: `confirmed-open`. Current risk: `high`.
 
-Task exits do not clear registry entries or test join liveness. However, reconcile removes entries for every non-active row, including resync_required; the 10-second production tick therefore normally clears journal-gap entries. Stalling remains possible for terminal errors leaving state active, or resuming before an intervening inactive-state reconciliation. The original permanent-gap scenario is overstated.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-server/src/replication/supervisor.rs:213](../../../../../crates/shamir-server/src/replication/supervisor.rs#L213); [crates/shamir-server/src/replication/supervisor.rs:223](../../../../../crates/shamir-server/src/replication/supervisor.rs#L223); [crates/shamir-server/src/replication/supervisor.rs:231](../../../../../crates/shamir-server/src/replication/supervisor.rs#L231); [crates/shamir-server/src/replication/supervisor.rs:286](../../../../../crates/shamir-server/src/replication/supervisor.rs#L286); [crates/shamir-server/src/replication/tests/supervisor_tests.rs:398](../../../../../crates/shamir-server/src/replication/tests/supervisor_tests.rs#L398); [crates/shamir-server/src/server/server_launcher.rs:962](../../../../../crates/shamir-server/src/server/server_launcher.rs#L962); [crates/shamir-server/src/server/server_launcher.rs:1526](../../../../../crates/shamir-server/src/server/server_launcher.rs#L1526).
+A terminal StaleLeaderEpoch return leaves the catalogue active and the dead task registered; reconcile checks contains_sync rather than joins. A gap normally becomes resync_required and is removed on the next inactive-state reconcile, but reactivation before that reconcile also preserves the stale entry. The existing gap test never tests restart.
+
+Evidence: [crates/shamir-server/src/replication/follower_loop.rs:249](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-server/src/replication/follower_loop.rs#L249); [crates/shamir-server/src/replication/supervisor.rs:213](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-server/src/replication/supervisor.rs#L213); [crates/shamir-server/src/replication/supervisor.rs:231](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-server/src/replication/supervisor.rs#L231); [crates/shamir-server/src/replication/supervisor.rs:286](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-server/src/replication/supervisor.rs#L286); [crates/shamir-server/src/replication/tests/supervisor_tests.rs:402](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-server/src/replication/tests/supervisor_tests.rs#L402).
 
 <a id="review-3"></a>
 
@@ -41,9 +47,11 @@ Evidence: [crates/shamir-server/src/replication/supervisor.rs:213](../../../../.
 
 Status: `confirmed-open`. Current risk: `medium`.
 
-close_all can remove the handle-less placeholder before attach_handle; a missing-key update then drops the still-running JoinHandle without aborting it. Teardown closes subscriptions before aborting/draining dispatch, allowing this interleaving. The registered late-attach test checks cardinality, not cancellation of a live bridge.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-server/src/subscriptions/registry.rs:134](../../../../../crates/shamir-server/src/subscriptions/registry.rs#L134); [crates/shamir-server/src/subscriptions/registry.rs:150](../../../../../crates/shamir-server/src/subscriptions/registry.rs#L150); [crates/shamir-server/src/db_handler/subscribe_handler.rs:87](../../../../../crates/shamir-server/src/db_handler/subscribe_handler.rs#L87); [crates/shamir-server/src/db_handler/subscribe_handler.rs:93](../../../../../crates/shamir-server/src/db_handler/subscribe_handler.rs#L93); [crates/shamir-server/src/connection/request_loop.rs:413](../../../../../crates/shamir-server/src/connection/request_loop.rs#L413); [crates/shamir-server/src/subscriptions/tests/registry_tests.rs:48](../../../../../crates/shamir-server/src/subscriptions/tests/registry_tests.rs#L48); [docs/guide-docs/client-server-protocol-spec/SUBSCRIPTIONS.md:38](../../../../../docs/guide-docs/client-server-protocol-spec/SUBSCRIPTIONS.md#L38); [Cargo.lock:4195](../../../../../Cargo.lock#L4195).
+Reserve placeholder, remove it during close_all, spawn/attach a still-running bridge: scc 3.8.4 update_sync does not invoke its closure on a missing key, dropping the captured handle. Tokio 1.49.0 JoinHandle drop detaches rather than aborts. Teardown races with dispatch on a multithread runtime. The late-attach test checks counts using an empty task, not live-task termination.
+
+Evidence: [crates/shamir-server/src/subscriptions/registry.rs:134](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-server/src/subscriptions/registry.rs#L134); [crates/shamir-server/src/subscriptions/registry.rs:150](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-server/src/subscriptions/registry.rs#L150); [crates/shamir-server/src/db_handler/subscribe_handler.rs:87](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-server/src/db_handler/subscribe_handler.rs#L87); [crates/shamir-server/src/connection/request_loop.rs:413](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-server/src/connection/request_loop.rs#L413); [crates/shamir-server/src/subscriptions/tests/registry_tests.rs:48](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-server/src/subscriptions/tests/registry_tests.rs#L48); [Cargo.lock:3123](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/Cargo.lock#L3123); [Cargo.lock:4195](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/Cargo.lock#L4195).
 
 <a id="review-4"></a>
 
@@ -51,19 +59,23 @@ Evidence: [crates/shamir-server/src/subscriptions/registry.rs:134](../../../../.
 
 Status: `confirmed-open`. Current risk: `medium`.
 
-A non-regressing Hello reply to Pull logs and immediately continues without sleeping. A repeatedly malformed source can drive rapid retries; actual CPU cost depends on source and transport latency and was not measured.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-server/src/replication/follower_loop.rs:281](../../../../../crates/shamir-server/src/replication/follower_loop.rs#L281); [crates/shamir-server/src/replication/follower_loop.rs:287](../../../../../crates/shamir-server/src/replication/follower_loop.rs#L287); [crates/shamir-server/src/replication/follower_loop.rs:278](../../../../../crates/shamir-server/src/replication/follower_loop.rs#L278).
+Repeated non-regressing Hello replies to Pull reach an immediate continue. A malformed custom or authenticated upstream source can trigger rapid retries; the normal leader path need not produce this variant. Retry rate and CPU impact depend on transport latency and are unmeasured.
+
+Evidence: [crates/shamir-server/src/replication/follower_loop.rs:265](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-server/src/replication/follower_loop.rs#L265); [crates/shamir-server/src/replication/follower_loop.rs:281](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-server/src/replication/follower_loop.rs#L281); [crates/shamir-server/src/replication/follower_loop.rs:287](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-server/src/replication/follower_loop.rs#L287).
 
 <a id="review-5"></a>
 
 ### Claim 5 — `try_join_next()` swallows non-panic `JoinError`s silently
 
-Status: `confirmed-open`. Current risk: `low`.
+Status: `confirmed-open`. Current risk: `nit`.
 
-The drain still logs only panics. This is a latent diagnostics gap, not a demonstrated currently reachable lost-request path: the visible cancellation producer is abort_all after leaving the reader loop.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-server/src/connection/request_loop.rs:240](../../../../../crates/shamir-server/src/connection/request_loop.rs#L240); [crates/shamir-server/src/connection/request_loop.rs:242](../../../../../crates/shamir-server/src/connection/request_loop.rs#L242); [crates/shamir-server/src/connection/request_loop.rs:415](../../../../../crates/shamir-server/src/connection/request_loop.rs#L415).
+The branch is silent, but the inspected cancellation producer is abort_all during teardown, whose separate drain intentionally discards results. No currently reachable individual-cancellation request-loss mechanism was found. This is optional diagnostics debt, not a demonstrated availability defect.
+
+Evidence: [crates/shamir-server/src/connection/request_loop.rs:240](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-server/src/connection/request_loop.rs#L240); [crates/shamir-server/src/connection/request_loop.rs:415](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-server/src/connection/request_loop.rs#L415).
 
 <a id="review-6"></a>
 
@@ -71,29 +83,35 @@ Evidence: [crates/shamir-server/src/connection/request_loop.rs:240](../../../../
 
 Status: `confirmed-open`. Current risk: `nit`.
 
-The otherwise unused import and discarded enum value remain. This has no runtime effect; the alleged unmet historical error-handling obligation is unsupported.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-server/src/connection/request_loop.rs:42](../../../../../crates/shamir-server/src/connection/request_loop.rs#L42); [crates/shamir-server/src/connection/request_loop.rs:431](../../../../../crates/shamir-server/src/connection/request_loop.rs#L431).
+The imported enum is referenced only by the final discarded value. Removal changes no behavior; the code does not establish an omitted historical error-handling obligation.
+
+Evidence: [crates/shamir-server/src/connection/request_loop.rs:42](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-server/src/connection/request_loop.rs#L42); [crates/shamir-server/src/connection/request_loop.rs:431](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-server/src/connection/request_loop.rs#L431).
 
 <a id="review-7"></a>
 
 ### Claim 7 — Log-mask override matching is a raw substring/prefix test, not a namespace-segment match
 
-Status: `refuted`. Current risk: —.
+Status: `refuted`. Current risk: `—`.
 
-Raw longest-prefix matching is already the documented contract, and registered tests deliberately require matches across underscore boundaries. Requiring :: would change that contract. A walnut example could clarify behavior but does not demonstrate a defect.
+Prior-cycle decision: `refuted`.
 
-Evidence: [crates/shamir-server/src/logging.rs:107](../../../../../crates/shamir-server/src/logging.rs#L107); [crates/shamir-server/src/logging.rs:135](../../../../../crates/shamir-server/src/logging.rs#L135); [crates/shamir-server/src/logging.rs:142](../../../../../crates/shamir-server/src/logging.rs#L142); [crates/shamir-server/src/logging/tests/log_mask_tests.rs:32](../../../../../crates/shamir-server/src/logging/tests/log_mask_tests.rs#L32); [crates/shamir-server/src/logging/tests/log_mask_tests.rs:64](../../../../../crates/shamir-server/src/logging/tests/log_mask_tests.rs#L64); [docs/guide-docs/guide/07-operations.md:321](../../../../../docs/guide-docs/guide/07-operations.md#L321).
+Longest raw-prefix matching is documented and tested, including wal matching wal_compact. Requiring :: would break intended underscore-prefix behavior. A hypothetical walnut target is not counter-evidence to that contract.
+
+Evidence: [crates/shamir-server/src/logging.rs:135](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-server/src/logging.rs#L135); [crates/shamir-server/src/logging/tests/log_mask_tests.rs:64](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-server/src/logging/tests/log_mask_tests.rs#L64); [docs/guide-docs/guide/07-operations.md:321](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/docs/guide-docs/guide/07-operations.md#L321).
 
 <a id="review-8"></a>
 
 ### Claim 8 — `Scheduler::shutdown()` regression test has no timeout bound on the documented race it guards against
 
-Status: `confirmed-open`. Current risk: `low`.
+Status: `confirmed-open`. Current risk: `nit`.
 
-The auto-discovered integration test still awaits shutdown without a local timeout. The implementation synchronously subscribes receivers before spawning, closing the documented race; this finding concerns failure localization, not a current shutdown bug. Nextest default timeout is 180 seconds, while its CI profile permits 600 seconds.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-server/tests/scheduler.rs:153](../../../../../crates/shamir-server/tests/scheduler.rs#L153); [crates/shamir-server/tests/scheduler.rs:156](../../../../../crates/shamir-server/tests/scheduler.rs#L156); [crates/shamir-server/src/scheduler.rs:126](../../../../../crates/shamir-server/src/scheduler.rs#L126); [.config/nextest.toml:49](../../../../../.config/nextest.toml#L49); [.config/nextest.toml:63](../../../../../.config/nextest.toml#L63).
+The immediate-shutdown test lacks a local timeout, but runner timeouts already detect a hang. Production receivers are created before spawning, eliminating the specified lost-send window. A short local deadline improves localization rather than adding otherwise absent hang detection.
+
+Evidence: [crates/shamir-server/tests/scheduler.rs:153](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-server/tests/scheduler.rs#L153); [crates/shamir-server/tests/scheduler.rs:156](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-server/tests/scheduler.rs#L156); [crates/shamir-server/src/scheduler.rs:126](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-server/src/scheduler.rs#L126); [.config/nextest.toml:49](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/.config/nextest.toml#L49); [.config/nextest.toml:63](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/.config/nextest.toml#L63).
 
 <a id="review-9"></a>
 
@@ -101,9 +119,11 @@ Evidence: [crates/shamir-server/tests/scheduler.rs:153](../../../../../crates/sh
 
 Status: `confirmed-open`. Current risk: `low`.
 
-safe_run still catches unwinding panics, but the registered integration mocks only increment counters. None forces a tick panic and verifies a subsequent invocation.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-server/src/scheduler.rs:140](../../../../../crates/shamir-server/src/scheduler.rs#L140); [crates/shamir-server/src/scheduler.rs:314](../../../../../crates/shamir-server/src/scheduler.rs#L314); [crates/shamir-server/tests/scheduler.rs:44](../../../../../crates/shamir-server/tests/scheduler.rs#L44); [crates/shamir-server/tests/scheduler.rs:174](../../../../../crates/shamir-server/tests/scheduler.rs#L174); [crates/shamir-server/tests/scheduler.rs:218](../../../../../crates/shamir-server/tests/scheduler.rs#L218).
+Production ticks use catch_unwind, but registered scheduler mocks only increment counters. Removing the panic catcher would not fail these tests. The discriminating oracle is a first invocation that unwinds followed by an observed successful later tick.
+
+Evidence: [crates/shamir-server/src/scheduler.rs:314](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-server/src/scheduler.rs#L314); [crates/shamir-server/tests/scheduler.rs:44](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-server/tests/scheduler.rs#L44); [crates/shamir-server/tests/scheduler.rs:174](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-server/tests/scheduler.rs#L174).
 
 <a id="review-10"></a>
 
@@ -111,27 +131,30 @@ Evidence: [crates/shamir-server/src/scheduler.rs:140](../../../../../crates/sham
 
 Status: `confirmed-open`. Current risk: `low`.
 
-The HTTP integration test observes only post-launch 200. False state and the 503 handler exist, but no HTTP assertion exercises them. Observability is spawned after data listeners bind, so the report's proposed pre-listener window does not exist in the stock launch order.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-server/tests/observability_http.rs:133](../../../../../crates/shamir-server/tests/observability_http.rs#L133); [crates/shamir-server/tests/observability_http.rs:149](../../../../../crates/shamir-server/tests/observability_http.rs#L149); [crates/shamir-server/src/observability.rs:75](../../../../../crates/shamir-server/src/observability.rs#L75); [crates/shamir-server/src/observability.rs:557](../../../../../crates/shamir-server/src/observability.rs#L557); [crates/shamir-server/src/server/server_launcher.rs:878](../../../../../crates/shamir-server/src/server/server_launcher.rs#L878); [crates/shamir-server/src/server/server_launcher.rs:936](../../../../../crates/shamir-server/src/server/server_launcher.rs#L936).
+The handler has a real false→503 branch, but the HTTP test observes only 200 after launch. Stock observability is started after data listeners bind, so its negative branch should be tested through direct spawn before mark_ready, not an invented pre-listener boot window.
+
+Evidence: [crates/shamir-server/src/observability.rs:75](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-server/src/observability.rs#L75); [crates/shamir-server/src/observability.rs:557](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-server/src/observability.rs#L557); [crates/shamir-server/tests/observability_http.rs:149](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-server/tests/observability_http.rs#L149); [crates/shamir-server/src/server/server_launcher.rs:878](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-server/src/server/server_launcher.rs#L878).
 
 <a id="review-no-findings-for-other-reviewed-areas"></a>
 
 ### Claim No findings for other reviewed areas — Other areas are free of logic bugs and vacuous tests
 
-Status: `refuted`. Current risk: —.
+Status: `refuted`. Current risk: `—`.
 
-The blanket guarantee is too strong: registry_insert_and_remove never inserts or removes, and the late-attach test checks counts without checking live-task cancellation. The assigned teardown defect also contradicts a clean lifecycle guarantee. Remaining unrelated modules were not freshly audited.
+Prior-cycle decision: `refuted`.
 
-Evidence: [crates/shamir-server/src/subscriptions/tests/registry_tests.rs:4](../../../../../crates/shamir-server/src/subscriptions/tests/registry_tests.rs#L4); [crates/shamir-server/src/subscriptions/tests/registry_tests.rs:48](../../../../../crates/shamir-server/src/subscriptions/tests/registry_tests.rs#L48); [crates/shamir-server/src/connection/request_loop.rs:413](../../../../../crates/shamir-server/src/connection/request_loop.rs#L413).
+Positive counterexamples include registry_insert_and_remove performing neither operation, the count-only attachment oracle, and response-budget tests taking the guard inside a scope unlike production. The newly identified production guard-lifetime defect further defeats the clean conclusion.
 
-## Corrections and qualified non-findings
+Evidence: [crates/shamir-server/src/subscriptions/tests/registry_tests.rs:4](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-server/src/subscriptions/tests/registry_tests.rs#L4); [crates/shamir-server/src/subscriptions/tests/registry_tests.rs:48](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-server/src/subscriptions/tests/registry_tests.rs#L48); [crates/shamir-server/src/db_handler/tests/byte_budget_exhaustion_tests.rs:126](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-server/src/db_handler/tests/byte_budget_exhaustion_tests.rs#L126); [crates/shamir-server/src/connection/request_loop.rs:348](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-server/src/connection/request_loop.rs#L348).
 
-- Replace the unconditional critical/any-authenticated-client framing with an ACL-authorized, explicitly ReadOnly-handler threat model.
-- NodeMode documentation is in db_handler/config.rs, not the top-level deployment Config; the stock launcher does not configure it.
-- A reconciliation observing resync_required, paused or deletion removes the stale supervisor entry; restart is not the only recovery.
-- Subscription teardown must also prevent dispatch from creating subscriptions after close_all; merely fixing missing-key attachment is not a complete lifetime barrier.
-- Remove the assertion that a discarded ConnectError proves an unmet historical obligation.
+## Evidence and recipe corrections
+
+- Non-panic JoinError logging and a local scheduler deadline are diagnostics/test-localization nits; no current individual-cancellation failure was established.
+- A missing-slot abort alone does not prevent subscriptions admitted after close_all. Teardown must close admission or cancel/drain dispatch before its final bridge sweep.
+- Bootstrap gate unit tests copy the caller's match; changing production to omit that match would not necessarily fail them.
+- The response-budget helpers claim production-equivalent scoping but retrieve the guard inside the scope, whereas production retrieves it afterward.
 
 ---
 

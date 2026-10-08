@@ -1,11 +1,13 @@
-<!-- revalidation:2026-10-08 source:92ad58266bf57ddea1fa3c8a47affba1a3a9a096 -->
-# shamir-query-builder-macros — correctness-tdd revalidation
+<!-- revalidation:2026-10-08 cycle:independent-2 source:e3765c935fc71655ee1ec0160cf180607935d89b -->
+# shamir-query-builder-macros — correctness-tdd independent revalidation (cycle 2)
 
-Source snapshot: `92ad58266bf57ddea1fa3c8a47affba1a3a9a096`. Revalidated 2026-10-08 by read-only XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run; no source fix is part of this update. Test registration/assertions are evidence of an oracle, not proof of a passing run.
+Frozen source snapshot: `e3765c935fc71655ee1ec0160cf180607935d89b`. Independently revalidated 2026-10-08 by a fresh XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run. Source-fixed means the specified mechanism was already removed at this snapshot; this cycle implements no source fix.
 
-This section is authoritative for current status. Original titles/IDs are retained for traceability; a refuted title is not a current assertion. The collapsed historical report below is superseded, including its counts, severity, scenarios and fix instructions. Plan IDs preserve historical numbering, not a current release mandate. [Workspace methodology and status definitions](../SUMMARY.md#status-definitions).
+This section is authoritative for current decisions. Existing IDs and allegation titles are retained for traceability; a refuted title is not a current assertion. Prior-cycle decisions were rechecked, not used as proof. The first cycle is available in repository history at this snapshot. The original historical body below remains preserved once and is superseded, including its counts, severities and recipes. [Workspace scope and status definitions](../SUMMARY.md#status-definitions).
 
-The alleged silent write truncation is refuted by the pinned syn parser mechanism. Call lowering, negative-test coverage, grammar restrictions and documentation defects remain. Macro source and consumer macro tests have no changes since the original review-document commit.
+Unrelated external edits began in dependency/toolchain/CI metadata during collection; additional Rust-source edits appeared afterward. They were left untouched. Evidence and decisions are tied to the frozen commit, not those later changes or an installed toolchain. “Current” below means current at that snapshot; no re-audit of the modified working tree is implied.
+
+Pinned parser source disproves scoped-token truncation. Dependency and grammar limitations persist; positive coverage is meaningful but does not cover rejection paths or raw-identifier name preservation.
 
 ## Current claim decisions
 
@@ -13,31 +15,31 @@ The alleged silent write truncation is refuted by the pinned syn parser mechanis
 |---:|---:|---:|---:|---:|---:|---:|
 | 7 | 6 | 0 | 0 | 1 | 0 | 0 |
 
-These are decisions on report claims, including repeated roots, bundled observations and non-findings—not a unique-bug census. Closed/N/A rows have no current risk; unverified risk is provisional. Pure style and unmeasured optimization claims do not establish runtime impact.
+These are duplicate-inclusive report decisions, not a unique-bug census. Pure style or structural optimization does not establish a runtime incident; unverified impact remains provisional.
 
 <a id="review-1"></a>
 
 ### Claim 1 — Malformed doc-map / call-args / select-fn args are silently truncated, not rejected (missing `content.is_empty()` checks)
 
-Status: `refuted`. Current risk: —.
+Status: `refuted`. Current risk: `—`.
 
-The cited buffers share syn's unexpected-token state. In resolved syn 2.0.114, dropping a nonempty scoped ParseBuffer records leftovers; Parser::parse2 checks them. q_macro uses parse_macro_input!, so these malformed groups are rejected before emission. Explicit local checks remain useful for diagnostics, not data-loss prevention.
+Prior-cycle decision: `refuted`.
 
-Evidence: [Cargo.lock:3600](../../../../../Cargo.lock#L3600); [Cargo.lock:4024](../../../../../Cargo.lock#L4024); [crates/shamir-query-builder-macros/src/query_parse.rs:574](../../../../../crates/shamir-query-builder-macros/src/query_parse.rs#L574); [crates/shamir-query-builder-macros/src/query_parse.rs:687](../../../../../crates/shamir-query-builder-macros/src/query_parse.rs#L687); [crates/shamir-query-builder-macros/src/query_parse.rs:1014](../../../../../crates/shamir-query-builder-macros/src/query_parse.rs#L1014).
+Missing-comma maps, call f(1 2), and count(a, b) leave scoped tokens that syn 2.0.114 records and rejects before emission. This was pre-existing counter-evidence, not a later fix. Published src/parse.rs:265,1293: https://docs.rs/crate/syn/2.0.114/source/src/parse.rs.
 
-Grouping/duplicate: `api-wire-protocol.md#1`. This row is not another independent defect.
+Evidence: [Cargo.lock:4023](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/Cargo.lock#L4023); [crates/shamir-query-builder-macros/src/query_parse.rs:574](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-query-builder-macros/src/query_parse.rs#L574); [crates/shamir-query-builder-macros/src/query_parse.rs:687](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-query-builder-macros/src/query_parse.rs#L687); [crates/shamir-query-builder-macros/src/query_parse.rs:1014](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-query-builder-macros/src/query_parse.rs#L1014).
 
 <a id="review-2"></a>
 
 ### Claim 2 — `q!(call ...)` hardcodes `repo: "main"` with no grammar to override it
 
-Status: `confirmed-open`. Current risk: `medium`.
+Status: `confirmed-open`. Current risk: `low`.
 
-CallMacro still parses only an identifier/string name and arguments, then emits repo main. Batch::call_in_repo is an existing builder escape hatch; hand-constructing CallOp is not required. The limitation concerns default invocation context, not proof that a procedure cannot explicitly access another authorized repository.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-query-builder-macros/src/query_parse.rs:673](../../../../../crates/shamir-query-builder-macros/src/query_parse.rs#L673); [crates/shamir-query-builder-macros/src/query_parse.rs:917](../../../../../crates/shamir-query-builder-macros/src/query_parse.rs#L917); [crates/shamir-query-builder/src/batch/batch.rs:701](../../../../../crates/shamir-query-builder/src/batch/batch.rs#L701).
+The override and macro documentation gap persists. Main agrees with CallOp and Batch::call defaults; Batch::call_in_repo already provides an escape hatch. Wrong-context effects require an authorized procedure using the default, not an ACL bypass.
 
-Grouping/duplicate: `SUMMARY.md#1.2`. This row is not another independent defect.
+Evidence: [crates/shamir-query-builder-macros/src/query_parse.rs:673](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-query-builder-macros/src/query_parse.rs#L673); [crates/shamir-query-builder-macros/src/query_parse.rs:917](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-query-builder-macros/src/query_parse.rs#L917); [crates/shamir-query-types/src/call/mod.rs:13](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-query-types/src/call/mod.rs#L13); [crates/shamir-query-builder/src/batch/batch.rs:701](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-query-builder/src/batch/batch.rs#L701); [crates/shamir-db/src/shamir_db/shamir_db/function_management.rs:732](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/shamir_db/function_management.rs#L732).
 
 <a id="review-3"></a>
 
@@ -45,11 +47,11 @@ Grouping/duplicate: `SUMMARY.md#1.2`. This row is not another independent defect
 
 Status: `confirmed-open`. Current risk: `medium`.
 
-No macro error-test harness or trybuild dependency exists. Registered consumer tests exercise accepted expansions, not syn rejection branches. Default count(*) alias, string-literal write tables and a bare-variable filter RHS remain absent from the inspected macro coverage. This establishes a coverage gap, not historical proof that no Red step ever occurred.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-query-builder-macros/Cargo.toml:13](../../../../../crates/shamir-query-builder-macros/Cargo.toml#L13); [crates/shamir-query-builder/src/macros/mod.rs:191](../../../../../crates/shamir-query-builder/src/macros/mod.rs#L191); [crates/shamir-query-builder/src/macros/tests/mod.rs:2](../../../../../crates/shamir-query-builder/src/macros/tests/mod.rs#L2); [crates/shamir-query-builder/src/macros/tests/q_macro_tests.rs:234](../../../../../crates/shamir-query-builder/src/macros/tests/q_macro_tests.rs#L234); [crates/shamir-query-builder/src/macros/tests/filter_macro_tests.rs:35](../../../../../crates/shamir-query-builder/src/macros/tests/filter_macro_tests.rs#L35).
+No registered rejection harness exists. Deleting unknown-name rejection or accepting malformed groups would not be caught by accepted-input tests. Default count alias, literal write-table and bare-variable RHS cases also lack pins. Historical Red activity cannot be inferred from absence.
 
-Grouping/duplicate: `SUMMARY.md#6.1`. This row is not another independent defect.
+Evidence: [crates/shamir-query-builder-macros/Cargo.toml:13](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-query-builder-macros/Cargo.toml#L13); [crates/shamir-query-builder/src/macros/tests/mod.rs:2](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-query-builder/src/macros/tests/mod.rs#L2); [crates/shamir-query-builder/src/macros/tests/filter_macro_tests.rs:35](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-query-builder/src/macros/tests/filter_macro_tests.rs#L35); [crates/shamir-query-builder/src/macros/tests/q_macro_tests.rs:234](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-query-builder/src/macros/tests/q_macro_tests.rs#L234).
 
 <a id="review-4"></a>
 
@@ -57,11 +59,11 @@ Grouping/duplicate: `SUMMARY.md#6.1`. This row is not another independent defect
 
 Status: `confirmed-open`. Current risk: `low`.
 
-Both clauses still parse bare Ident values. Nested grouping can use segment arrays through IntoFieldPath, but dotted strings are not split. Likewise order_by_asc/desc wrap a string as one segment; fixing nested ordering needs path-capable construction, not merely joining parsed identifiers with dots.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-query-builder-macros/src/query_parse.rs:223](../../../../../crates/shamir-query-builder-macros/src/query_parse.rs#L223); [crates/shamir-query-builder-macros/src/query_parse.rs:265](../../../../../crates/shamir-query-builder-macros/src/query_parse.rs#L265); [crates/shamir-query-builder/src/val/filter_value.rs:18](../../../../../crates/shamir-query-builder/src/val/filter_value.rs#L18); [crates/shamir-query-types/src/read/order_by.rs:46](../../../../../crates/shamir-query-types/src/read/order_by.rs#L46).
+Both parsers require bare Ident. A dotted key fails locally. Grouping can use builder segment arrays; string ordering constructors preserve one segment, so merely joining identifiers with dots is not a valid nested-ordering fix.
 
-Grouping/duplicate: `SUMMARY.md#5.5`. This row is not another independent defect.
+Evidence: [crates/shamir-query-builder-macros/src/query_parse.rs:223](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-query-builder-macros/src/query_parse.rs#L223); [crates/shamir-query-builder-macros/src/query_parse.rs:265](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-query-builder-macros/src/query_parse.rs#L265); [crates/shamir-query-builder/src/val/filter_value.rs:18](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-query-builder/src/val/filter_value.rs#L18); [crates/shamir-query-types/src/read/order_by.rs:48](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-query-types/src/read/order_by.rs#L48).
 
 <a id="review-5"></a>
 
@@ -69,11 +71,11 @@ Grouping/duplicate: `SUMMARY.md#5.5`. This row is not another independent defect
 
 Status: `confirmed-open`. Current risk: `low`.
 
-The token collector stops on the six clause keywords without expression-position or preceding-dot awareness. Grouped expressions avoid this scan restriction; neither the reservation nor the workaround is documented.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-query-builder-macros/src/query_parse.rs:499](../../../../../crates/shamir-query-builder-macros/src/query_parse.rs#L499); [crates/shamir-query-builder-macros/src/query_parse.rs:547](../../../../../crates/shamir-query-builder-macros/src/query_parse.rs#L547); [crates/shamir-query-builder-macros/src/lib.rs:127](../../../../../crates/shamir-query-builder-macros/src/lib.rs#L127).
+where limit &gt; 5 produces an empty capture; where x == limit produces an incomplete expression. Standalone filter! accepts these names. Parenthesizing the expression works; the reservation remains undocumented.
 
-Grouping/duplicate: `SUMMARY.md#5.3`. This row is not another independent defect.
+Evidence: [crates/shamir-query-builder-macros/src/query_parse.rs:499](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-query-builder-macros/src/query_parse.rs#L499); [crates/shamir-query-builder-macros/src/query_parse.rs:547](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-query-builder-macros/src/query_parse.rs#L547); [crates/shamir-query-builder-macros/src/lib.rs:127](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-query-builder-macros/src/lib.rs#L127).
 
 <a id="review-6"></a>
 
@@ -81,11 +83,11 @@ Grouping/duplicate: `SUMMARY.md#5.3`. This row is not another independent defect
 
 Status: `confirmed-open`. Current risk: `low`.
 
-At a terminal comma, the helper returns true and callers break without consuming it; the final check reports unexpected query tokens. The asc/desc checks are reachable for malformed or keyword-named list continuations, so they are not literally dead code.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-query-builder-macros/src/query_parse.rs:224](../../../../../crates/shamir-query-builder-macros/src/query_parse.rs#L224); [crates/shamir-query-builder-macros/src/query_parse.rs:252](../../../../../crates/shamir-query-builder-macros/src/query_parse.rs#L252); [crates/shamir-query-builder-macros/src/query_parse.rs:276](../../../../../crates/shamir-query-builder-macros/src/query_parse.rs#L276); [crates/shamir-query-builder-macros/src/query_parse.rs:566](../../../../../crates/shamir-query-builder-macros/src/query_parse.rs#L566); [crates/shamir-query-builder-macros/src/query_parse.rs:300](../../../../../crates/shamir-query-builder-macros/src/query_parse.rs#L300).
+Terminal commas remain unconsumed and trigger the outer clause-order error. Asc/desc branches are not dead: select a, asc and group_by a, desc reach them, rejecting otherwise identifier-shaped continuations. Removing EOF detection alone would still reject trailing commas.
 
-Grouping/duplicate: `SUMMARY.md#1.3`. This row is not another independent defect.
+Evidence: [crates/shamir-query-builder-macros/src/query_parse.rs:224](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-query-builder-macros/src/query_parse.rs#L224); [crates/shamir-query-builder-macros/src/query_parse.rs:252](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-query-builder-macros/src/query_parse.rs#L252); [crates/shamir-query-builder-macros/src/query_parse.rs:276](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-query-builder-macros/src/query_parse.rs#L276); [crates/shamir-query-builder-macros/src/query_parse.rs:566](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-query-builder-macros/src/query_parse.rs#L566); [crates/shamir-query-builder-macros/src/query_parse.rs:300](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-query-builder-macros/src/query_parse.rs#L300).
 
 <a id="review-7"></a>
 
@@ -93,19 +95,19 @@ Grouping/duplicate: `SUMMARY.md#1.3`. This row is not another independent defect
 
 Status: `confirmed-open`. Current risk: `nit`.
 
-Rustdoc still says 19; lowering recognizes 17 names and rejects the two vector-option constructor names. Those options remain available through public builder functions, not exclusively through raw wire construction.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-query-builder-macros/src/lib.rs:129](../../../../../crates/shamir-query-builder-macros/src/lib.rs#L129); [crates/shamir-query-builder-macros/src/filter_lower.rs:134](../../../../../crates/shamir-query-builder-macros/src/filter_lower.rs#L134); [crates/shamir-query-builder-macros/src/filter_lower.rs:299](../../../../../crates/shamir-query-builder-macros/src/filter_lower.rs#L299); [crates/shamir-query-builder/src/filter/leaf.rs:295](../../../../../crates/shamir-query-builder/src/filter/leaf.rs#L295); [crates/shamir-query-builder/src/filter/leaf.rs:313](../../../../../crates/shamir-query-builder/src/filter/leaf.rs#L313).
+The count is wrong. The two option constructors exist publicly but are outside the documented whitelist; their omission is optional DSL feature parity, not unsafe-filter construction or a runtime defect.
 
-Grouping/duplicate: `SUMMARY.md#1.4`. This row is not another independent defect.
+Evidence: [crates/shamir-query-builder-macros/src/lib.rs:129](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-query-builder-macros/src/lib.rs#L129); [crates/shamir-query-builder-macros/src/filter_lower.rs:299](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-query-builder-macros/src/filter_lower.rs#L299); [crates/shamir-query-builder/src/filter/leaf.rs:295](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-query-builder/src/filter/leaf.rs#L295); [crates/shamir-query-builder/src/filter/leaf.rs:313](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-query-builder/src/filter/leaf.rs#L313).
 
-## Corrections and qualified non-findings
+## Evidence and recipe corrections
 
-- Replace the silent-truncation/data-loss conclusion with source-proven rejection under syn 2.0.114; diagnostic specificity and rejection fixtures are the remaining work.
-- Parsing syn::parse::Nothing through content.parse() does not itself check buffer exhaustion: Nothing consumes no tokens. Use an explicit is_empty check.
-- Nested paths must remain separate segments. IntoFieldPath for strings and OrderByItem::asc/desc do not interpret dots.
-- The happy-path differential tests and three snapshots are registered and non-vacuous, but their passing status was not tested here. Additional macro-consuming integration tests also exist in shamir-db.
-- Test absence cannot establish the historical claim that TDD Red was never performed.
+- A local exhaustion check improves diagnostic specificity; it does not repair currently silent scoped-token loss.
+- syn 2.0.114 Nothing::parse consumes nothing. content.parse::&lt;Nothing&gt;() is not an exhaustion check.
+- A nested-path recipe must retain segments rather than send a dotted string to existing ordering constructors.
+- Positive differential tests cover real generated constructors, not all input identities. Raw identifiers invalidate the historical broad happy-path soundness assurance.
+- No macro-source or consumer-macro-test change exists between the original report commit, the prior revalidation snapshot and this frozen base.
 
 ---
 

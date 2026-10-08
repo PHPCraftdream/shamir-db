@@ -1,11 +1,13 @@
-<!-- revalidation:2026-10-08 source:92ad58266bf57ddea1fa3c8a47affba1a3a9a096 -->
-# shamir-bench-utils — api-wire-protocol revalidation
+<!-- revalidation:2026-10-08 cycle:independent-2 source:e3765c935fc71655ee1ec0160cf180607935d89b -->
+# shamir-bench-utils — api-wire-protocol independent revalidation (cycle 2)
 
-Source snapshot: `92ad58266bf57ddea1fa3c8a47affba1a3a9a096`. Revalidated 2026-10-08 by read-only XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run; no source fix is part of this update. Test registration/assertions are evidence of an oracle, not proof of a passing run.
+Frozen source snapshot: `e3765c935fc71655ee1ec0160cf180607935d89b`. Independently revalidated 2026-10-08 by a fresh XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run. Source-fixed means the specified mechanism was already removed at this snapshot; this cycle implements no source fix.
 
-This section is authoritative for current status. Original titles/IDs are retained for traceability; a refuted title is not a current assertion. The collapsed historical report below is superseded, including its counts, severity, scenarios and fix instructions. Plan IDs preserve historical numbering, not a current release mandate. [Workspace methodology and status definitions](../SUMMARY.md#status-definitions).
+This section is authoritative for current decisions. Existing IDs and allegation titles are retained for traceability; a refuted title is not a current assertion. Prior-cycle decisions were rechecked, not used as proof. The first cycle is available in repository history at this snapshot. The original historical body below remains preserved once and is superseded, including its counts, severities and recipes. [Workspace scope and status definitions](../SUMMARY.md#status-definitions).
 
-Feature plumbing, artifact metadata, mirror enforcement, versioning, and documentation remain unresolved. The blanket all-dev-binaries allocator claim is narrowed to binaries actually linking the helper.
+Unrelated external edits began in dependency/toolchain/CI metadata during collection; additional Rust-source edits appeared afterward. They were left untouched. Evidence and decisions are tied to the frozen commit, not those later changes or an installed toolchain. “Current” below means current at that snapshot; no re-audit of the modified working tree is implied.
+
+There is no wire protocol here. Concrete issues are allocator activation documentation, artifact provenance, missing comparison oracles, local input validation, and the float endpoint contract. Some requested design changes are optional, and blanket binary-linkage or mirror-identity claims exceed the contract.
 
 ## Current claim decisions
 
@@ -13,7 +15,7 @@ Feature plumbing, artifact metadata, mirror enforcement, versioning, and documen
 |---:|---:|---:|---:|---:|---:|---:|
 | 9 | 9 | 0 | 0 | 0 | 0 | 0 |
 
-These are decisions on report claims, including repeated roots, bundled observations and non-findings—not a unique-bug census. Closed/N/A rows have no current risk; unverified risk is provisional. Pure style and unmeasured optimization claims do not establish runtime impact.
+These are duplicate-inclusive report decisions, not a unique-bug census. Pure style or structural optimization does not establish a runtime incident; unverified impact remains provisional.
 
 <a id="review-1"></a>
 
@@ -21,35 +23,35 @@ These are decisions on report claims, including repeated roots, bundled observat
 
 Status: `confirmed-open`. Current risk: `medium`.
 
-Both dev dependencies still unconditionally enable peak_mem; importing only vector_data therefore also links a crate containing PeakAlloc. This proves the timing-only fixture consumers are affected, not that every unused dev dependency is linked into every test/bench/example binary.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-engine/Cargo.toml:107](../../../../../crates/shamir-engine/Cargo.toml#L107); [crates/shamir-index/Cargo.toml:64](../../../../../crates/shamir-index/Cargo.toml#L64); [crates/shamir-bench-utils/src/peak_mem.rs:39](../../../../../crates/shamir-bench-utils/src/peak_mem.rs#L39); [crates/shamir-engine/benches/filtered_vector_search.rs:25](../../../../../crates/shamir-engine/benches/filtered_vector_search.rs#L25).
+Both dev-dependency entries enable peak_mem. filtered_vector_search and sq8_hot_path import vector fixtures, linking the helper allocator without setup or memory measurement. This contradicts ordinary-bench isolation, not the narrower fact that the helper package has no default feature.
 
-Grouping/duplicate: `SUMMARY.md#5.1`. This row is not another independent defect.
+Evidence: [crates/shamir-engine/Cargo.toml:107](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-engine/Cargo.toml#L107); [crates/shamir-index/Cargo.toml:64](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-index/Cargo.toml#L64); [crates/shamir-engine/benches/filtered_vector_search.rs:25](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-engine/benches/filtered_vector_search.rs#L25); [crates/shamir-index/benches/sq8_hot_path.rs:22](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-index/benches/sq8_hot_path.rs#L22); [crates/shamir-bench-utils/src/peak_mem.rs:39](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-bench-utils/src/peak_mem.rs#L39).
 
 <a id="review-2"></a>
 
 ### Claim 2 — `ClusteredDataset` doc claims "(k, σ) parameters are recoverable from the artefact alone" — σ never is, and k is clamped
 
-Status: `confirmed-open`. Current risk: `medium`.
+Status: `confirmed-open`. Current risk: `low`.
 
-Only vectors and centroids are stored. Requested k, sigma, and seed cannot be recovered exactly; k() returns effective centroid count. The report still maintains separate requested parameters.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-bench-utils/src/vector_data.rs:111](../../../../../crates/shamir-bench-utils/src/vector_data.rs#L111); [crates/shamir-bench-utils/src/vector_data.rs:113](../../../../../crates/shamir-bench-utils/src/vector_data.rs#L113); [crates/shamir-bench-utils/src/vector_data.rs:179](../../../../../crates/shamir-bench-utils/src/vector_data.rs#L179); [crates/shamir-engine/examples/vector_report.rs:184](../../../../../crates/shamir-engine/examples/vector_report.rs#L184).
+No parameter fields exist. n=0 makes sigma unidentifiable from the artifact, and positive-n clamping discards requested k. The current report explicitly retains requested parameters, so a demonstrated mislabelled current report does not follow. Effective k remains correct and sufficient for the same draw sequence with other inputs retained.
 
-Grouping/duplicate: `SUMMARY.md#5.2`. This row is not another independent defect.
+Evidence: [crates/shamir-bench-utils/src/vector_data.rs:111](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-bench-utils/src/vector_data.rs#L111); [crates/shamir-bench-utils/src/vector_data.rs:113](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-bench-utils/src/vector_data.rs#L113); [crates/shamir-bench-utils/src/vector_data.rs:179](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-bench-utils/src/vector_data.rs#L179); [crates/shamir-engine/examples/vector_report.rs:184](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-engine/examples/vector_report.rs#L184).
 
 <a id="review-3"></a>
 
 ### Claim 3 — The cross-crate LCG "lineage" contract is prose-only: ~13 hand-maintained mirrors, zero enforcement, and the stated justification for the duplication is stale
 
-Status: `confirmed-open`. Current risk: `medium`.
+Status: `confirmed-open`. Current risk: `low`.
 
-The named local generators still duplicate constants/formulas without canonical comparison tests; sq8's no-dev-dependency justification is false. However, several named uniform helpers intentionally use a different float mapping, and the stated lineage contract requires shared constants, not identical Gaussian datasets at every site.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-index/src/vector/tests/sq8_tests.rs:16](../../../../../crates/shamir-index/src/vector/tests/sq8_tests.rs#L16); [crates/shamir-index/src/vector/tests/sq8_tests.rs:33](../../../../../crates/shamir-index/src/vector/tests/sq8_tests.rs#L33); [crates/shamir-index/src/vector/tests/hnsw_rs_contract_tests.rs:43](../../../../../crates/shamir-index/src/vector/tests/hnsw_rs_contract_tests.rs#L43); [crates/shamir-index/src/vector/tests/mod.rs:14](../../../../../crates/shamir-index/src/vector/tests/mod.rs#L14); [crates/shamir-index/Cargo.toml:64](../../../../../crates/shamir-index/Cargo.toml#L64).
+All named mirror sites and registration paths were checked. Integer constants agree; Gaussian mirrors duplicate formulas without canonical tests. The stale sq8 no-dev-dependency comment is false. Uniform mappings, deletion selection, and local generators' unclamped k behavior must not be silently replaced under a universal byte-identity premise.
 
-Grouping/duplicate: `SUMMARY.md#5.3`. This row is not another independent defect.
+Evidence: [crates/shamir-index/src/vector/tests/sq8_tests.rs:16](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-index/src/vector/tests/sq8_tests.rs#L16); [crates/shamir-index/src/vector/tests/sq8_tests.rs:63](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-index/src/vector/tests/sq8_tests.rs#L63); [crates/shamir-index/src/vector/tests/quantization_snapshot_tests.rs:101](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-index/src/vector/tests/quantization_snapshot_tests.rs#L101); [crates/shamir-index/src/vector/tests/hnsw_rs_contract_tests.rs:43](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-index/src/vector/tests/hnsw_rs_contract_tests.rs#L43); [crates/shamir-index/src/vector/tests/mod.rs:2](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-index/src/vector/tests/mod.rs#L2); [crates/shamir-index/Cargo.toml:64](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-index/Cargo.toml#L64).
 
 <a id="review-4"></a>
 
@@ -57,11 +59,11 @@ Grouping/duplicate: `SUMMARY.md#5.3`. This row is not another independent defect
 
 Status: `confirmed-open`. Current risk: `low`.
 
-The public artifact and generator contain no algorithm-version identifier, and the report prints the five input parameters without a generator version or source revision.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-bench-utils/src/vector_data.rs:158](../../../../../crates/shamir-bench-utils/src/vector_data.rs#L158); [crates/shamir-bench-utils/src/vector_data.rs:113](../../../../../crates/shamir-bench-utils/src/vector_data.rs#L113); [crates/shamir-engine/examples/vector_report.rs:336](../../../../../crates/shamir-engine/examples/vector_report.rs#L336).
+Headers identify V0.4 and five input values, not generator code revision. The release checklist asks for versions/SHA. This supports provenance follow-up, not a claim that current fixed-source determinism fails or that DATASET_FORMAT_VERSION is the only valid solution.
 
-Grouping/duplicate: `SUMMARY.md#5.4`. This row is not another independent defect.
+Evidence: [crates/shamir-engine/examples/vector_report.rs:332](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-engine/examples/vector_report.rs#L332); [crates/shamir-engine/examples/vector_report.rs:336](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-engine/examples/vector_report.rs#L336); [docs/dev-artifacts/roadmap/VECTOR_PRODUCTION_EXECUTION.md:245](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/docs/dev-artifacts/roadmap/VECTOR_PRODUCTION_EXECUTION.md#L245).
 
 <a id="review-5"></a>
 
@@ -69,11 +71,13 @@ Grouping/duplicate: `SUMMARY.md#5.4`. This row is not another independent defect
 
 Status: `confirmed-open`. Current risk: `low`.
 
-Ignored examples and setup documentation still use the removed integration; doctests remain disabled, and actual benches use Harness.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-bench-utils/src/peak_mem.rs:10](../../../../../crates/shamir-bench-utils/src/peak_mem.rs#L10); [crates/shamir-bench-utils/src/peak_mem.rs:44](../../../../../crates/shamir-bench-utils/src/peak_mem.rs#L44); [crates/shamir-bench-utils/Cargo.toml:11](../../../../../crates/shamir-bench-utils/Cargo.toml#L11).
+The ignored recipe still uses iter_custom and criterion_main; actual memory benches use Harness with raw one-shot sampling. The documentation gap is direct, while unused public APIs are not independently erroneous.
 
-Grouping/duplicate: `SUMMARY.md#7.2`. This row is not another independent defect.
+Evidence: [crates/shamir-bench-utils/src/peak_mem.rs:10](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-bench-utils/src/peak_mem.rs#L10); [crates/shamir-bench-utils/src/peak_mem.rs:44](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-bench-utils/src/peak_mem.rs#L44); [crates/shamir-index/benches/create_index_streaming.rs:65](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-index/benches/create_index_streaming.rs#L65).
+
+Grouping/duplicate: [style-claude-md.md#2](style-claude-md.md#review-2). This is not an additional independent defect.
 
 <a id="review-6"></a>
 
@@ -81,59 +85,62 @@ Grouping/duplicate: `SUMMARY.md#7.2`. This row is not another independent defect
 
 Status: `confirmed-open`. Current risk: `low`.
 
-Both asserts remain. Contrary to the original all-constant-caller premise, vector_report accepts zero VR_K_CLUSTERS through parsing and passes it to the helper. This is local report-tool validation, not remote production reachability.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-bench-utils/src/vector_data.rs:171](../../../../../crates/shamir-bench-utils/src/vector_data.rs#L171); [crates/shamir-engine/examples/vector_report.rs:110](../../../../../crates/shamir-engine/examples/vector_report.rs#L110); [crates/shamir-engine/examples/vector_report.rs:212](../../../../../crates/shamir-engine/examples/vector_report.rs#L212); [crates/shamir-engine/examples/vector_report.rs:406](../../../../../crates/shamir-engine/examples/vector_report.rs#L406).
+The two asserts remain. VR_K_CLUSTERS=0 and persisted_hnsw PH_DIM=0 have source-complete local environment paths. Boundary validation can repair these operator-input cases without requiring every fixed-fixture caller to adopt a new Result signature.
 
-Grouping/duplicate: `SUMMARY.md#6.1`. This row is not another independent defect.
+Evidence: [crates/shamir-bench-utils/src/vector_data.rs:171](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-bench-utils/src/vector_data.rs#L171); [crates/shamir-engine/examples/vector_report.rs:406](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-engine/examples/vector_report.rs#L406); [crates/shamir-engine/examples/persisted_hnsw.rs:207](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-engine/examples/persisted_hnsw.rs#L207); [crates/shamir-engine/examples/persisted_hnsw.rs:363](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-engine/examples/persisted_hnsw.rs#L363).
+
+Grouping/duplicate: [error-handling-lifecycle.md#1](error-handling-lifecycle.md#review-1). This is not an additional independent defect.
 
 <a id="review-7"></a>
 
 ### Claim 7 — Cargo.toml `description` advertises the removed BENCH_QUICK tier feature
 
-Status: `confirmed-open`. Current risk: `low`.
+Status: `confirmed-open`. Current risk: `nit`.
 
-The removed tier feature remains in package metadata despite its absence from current implementation.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-bench-utils/Cargo.toml:6](../../../../../crates/shamir-bench-utils/Cargo.toml#L6); [crates/shamir-bench-utils/src/lib.rs:9](../../../../../crates/shamir-bench-utils/src/lib.rs#L9).
+The package description names removed behavior; current exports are only vector_data and feature-gated peak_mem. No runtime tier implementation remains to validate.
 
-Grouping/duplicate: `SUMMARY.md#5.5`. This row is not another independent defect.
+Evidence: [crates/shamir-bench-utils/Cargo.toml:6](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-bench-utils/Cargo.toml#L6); [crates/shamir-bench-utils/src/lib.rs:9](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-bench-utils/src/lib.rs#L9); [crates/shamir-bench-utils/src/lib.rs:17](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-bench-utils/src/lib.rs#L17).
 
 <a id="review-8"></a>
 
 ### Claim 8 — `Lcg::next_f32` can return exactly 1.0, violating its documented `[0, 1)` range
 
-Status: `confirmed-open`. Current risk: `nit`.
+Status: `confirmed-open`. Current risk: `low`.
 
-The unchanged u32-to-f32 conversion rounds the top 128 high-word values to 2^32 before division. The issue is source-proven, not merely a hypothetical endpoint.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-bench-utils/src/vector_data.rs:71](../../../../../crates/shamir-bench-utils/src/vector_data.rs#L71); [crates/shamir-bench-utils/src/vector_data.rs:75](../../../../../crates/shamir-bench-utils/src/vector_data.rs#L75).
+A reachable successor with high word 0xFFFFFFFF converts to 2^32 as f32 and divides to one. A crafted predecessor seed discriminates the bug; random sweeps are unnecessary. Gaussian endpoint rejection limits current downstream impact.
 
-Grouping/duplicate: `SUMMARY.md#1.3`. This row is not another independent defect.
+Evidence: [crates/shamir-bench-utils/src/vector_data.rs:67](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-bench-utils/src/vector_data.rs#L67); [crates/shamir-bench-utils/src/vector_data.rs:75](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-bench-utils/src/vector_data.rs#L75); [crates/shamir-bench-utils/src/vector_data.rs:95](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-bench-utils/src/vector_data.rs#L95).
+
+Grouping/duplicate: [correctness-tdd.md#3](correctness-tdd.md#review-3). This is not an additional independent defect.
 
 <a id="review-9"></a>
 
 ### Claim 9 — `peak_mem::measure`/`measure_async` have an undocumented process-global single-flight contract; `setup()`'s stated rationale is dubious; tuple return
 
-Status: `confirmed-open`. Current risk: `nit`.
+Status: `confirmed-open`. Current risk: `low`.
 
-No process-wide single-measurement contract or ownership exists. setup has no activation operation, only a static reference. The documented tuple is not itself a correctness defect; a named return type is optional API polish.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-bench-utils/src/peak_mem.rs:48](../../../../../crates/shamir-bench-utils/src/peak_mem.rs#L48); [crates/shamir-bench-utils/src/peak_mem.rs:74](../../../../../crates/shamir-bench-utils/src/peak_mem.rs#L74); [crates/shamir-bench-utils/src/peak_mem.rs:89](../../../../../crates/shamir-bench-utils/src/peak_mem.rs#L89); [crates/shamir-bench-utils/src/peak_mem.rs:106](../../../../../crates/shamir-bench-utils/src/peak_mem.rs#L106).
+Nested or concurrent resets can erase an existing window's maximum. setup has no activation operation, and single-thread execution does not isolate a global allocator. The documented tuple is a valid API shape; naming its fields is optional polish.
 
-Grouping/duplicate: `SUMMARY.md#2.1`. This row is not another independent defect.
+Evidence: [crates/shamir-bench-utils/src/peak_mem.rs:48](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-bench-utils/src/peak_mem.rs#L48); [crates/shamir-bench-utils/src/peak_mem.rs:74](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-bench-utils/src/peak_mem.rs#L74); [crates/shamir-bench-utils/src/peak_mem.rs:89](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-bench-utils/src/peak_mem.rs#L89); [crates/shamir-bench-utils/src/peak_mem.rs:106](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-bench-utils/src/peak_mem.rs#L106).
 
-## Corrections and qualified non-findings
+Grouping/duplicate: [SUMMARY.md#2.1](SUMMARY.md#review-2-1). This is not an additional independent defect.
 
-- No serde, wire operations, or query construction exist in this crate; builder-only compliance is confirmed. Dependency-free means default configuration only: peak_alloc is optional.
-- Feature resolution is not proof of linkage. No helper imports occur in the engine/index library test sources; do not claim every unit-test binary runs under PeakAlloc.
-- Consumer passthrough features remain invocation-wide: required-features controls target eligibility, not allocator isolation when several targets share an enabled invocation.
-- Canonical imports are shamir_bench_utils::vector_data::{Lcg, clustered_vectors}; the proposed root imports do not match lib.rs exports.
-- All named mirror sites and their test registrations were inspected. Shared-state constants, uniform mappings, Gaussian generators, and deletion selection are distinct contracts; migration must preserve intended variants.
-- The original brief requests the same multiplier and seeded reproducibility, not byte identity with every uniform contract-test helper.
-- The endpoint probability over uniformly distributed high words is 128/2^32, approximately 2^-25, not 2^-32.
-- Reading current_peak alone does not corrupt counters; overlapping reset operations invalidate measurement ownership.
-- A pure layout change preserving draw order need not change generator output or require an algorithm-version bump.
+## Evidence and recipe corrections
+
+- Builder-only compliance is supported because no queries, serialization, or wire operations are constructed here; calling fixture determinism a wire protocol is only analogy.
+- Cargo resolver 2 feature unification does not imply linkage of an unused dependency. Passthrough features and required-features remain invocation-wide, as described by the [Cargo resolver documentation](https://doc.rust-lang.org/cargo/reference/resolver.html#feature-resolver-version-2).
+- Canonical imports are under shamir_bench_utils::vector_data. Blanket replacement of uniform or deletion helpers would change intentional distributions.
+- Gaussian mirror helpers emit requested k centroids rather than applying the canonical positive-n clamp; migration needs an explicitly shared input domain.
+- Correct recovery documentation may be sufficient; adding metadata or version constants is a design option. Existing public mutable row fields also mean preserved request metadata would not certify subsequently mutated contents.
+- A 24-bit next_f32 fix does not repair next_range for arbitrary adjacent finite bounds.
 
 ---
 

@@ -1,11 +1,13 @@
-<!-- revalidation:2026-10-08 source:92ad58266bf57ddea1fa3c8a47affba1a3a9a096 -->
-# shamir-index — concurrency-lockfree revalidation
+<!-- revalidation:2026-10-08 cycle:independent-2 source:e3765c935fc71655ee1ec0160cf180607935d89b -->
+# shamir-index — concurrency-lockfree independent revalidation (cycle 2)
 
-Source snapshot: `92ad58266bf57ddea1fa3c8a47affba1a3a9a096`. Revalidated 2026-10-08 by read-only XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run; no source fix is part of this update. Test registration/assertions are evidence of an oracle, not proof of a passing run.
+Frozen source snapshot: `e3765c935fc71655ee1ec0160cf180607935d89b`. Independently revalidated 2026-10-08 by a fresh XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run. Source-fixed means the specified mechanism was already removed at this snapshot; this cycle implements no source fix.
 
-This section is authoritative for current status. Original titles/IDs are retained for traceability; a refuted title is not a current assertion. The collapsed historical report below is superseded, including its counts, severity, scenarios and fix instructions. Plan IDs preserve historical numbering, not a current release mandate. [Workspace methodology and status definitions](../SUMMARY.md#status-definitions).
+This section is authoritative for current decisions. Existing IDs and allegation titles are retained for traceability; a refuted title is not a current assertion. Prior-cycle decisions were rechecked, not used as proof. The first cycle is available in repository history at this snapshot. The original historical body below remains preserved once and is superseded, including its counts, severities and recipes. [Workspace scope and status definitions](../SUMMARY.md#status-definitions).
 
-Snapshot coordination, planner inconsistency, shadow-write errors, and structural cost debt remain. The claimed production Phase-D dirty-set race is excluded by caller barriers. Some architectural praise needs narrower dependency and timing claims.
+Unrelated external edits began in dependency/toolchain/CI metadata during collection; additional Rust-source edits appeared afterward. They were left untouched. Evidence and decisions are tied to the frozen commit, not those later changes or an installed toolchain. “Current” below means current at that snapshot; no re-audit of the modified working tree is implied.
+
+Snapshot coordination and compaction cutover remain the main correctness concerns. Dirty-set and registry claims require production admission context. Structural scan costs are confirmed without latency measurements; scc is concurrent but not universally lock-free.
 
 ## Current claim decisions
 
@@ -13,7 +15,7 @@ Snapshot coordination, planner inconsistency, shadow-write errors, and structura
 |---:|---:|---:|---:|---:|---:|---:|
 | 10 | 9 | 0 | 0 | 1 | 0 | 0 |
 
-These are decisions on report claims, including repeated roots, bundled observations and non-findings—not a unique-bug census. Closed/N/A rows have no current risk; unverified risk is provisional. Pure style and unmeasured optimization claims do not establish runtime impact.
+These are duplicate-inclusive report decisions, not a unique-bug census. Pure style or structural optimization does not establish a runtime incident; unverified impact remains provisional.
 
 <a id="review-1"></a>
 
@@ -21,9 +23,11 @@ These are decisions on report claims, including repeated roots, bundled observat
 
 Status: `confirmed-open`. Current risk: `high`.
 
-The dump remains unquiesced and scans maps separately. The stated zombie schedule reverses actual scan order; however, durable deltas precede graph promotion and can be incorrectly absorbed/pruned, establishing snapshot-loss risk.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-index/src/vector/snapshot.rs:529](../../../../../crates/shamir-index/src/vector/snapshot.rs#L529); [crates/shamir-index/src/vector/vector_backend.rs:919](../../../../../crates/shamir-index/src/vector/vector_backend.rs#L919); [crates/shamir-engine/src/tx/commit_phases.rs:939](../../../../../crates/shamir-engine/src/tx/commit_phases.rs#L939); [crates/shamir-engine/src/tx/materialize.rs:214](../../../../../crates/shamir-engine/src/tx/materialize.rs#L214).
+Graph dump precedes independent forward/reverse/deleted/vector scans. The historical deleted-before-forward zombie schedule is impossible as written. A delayed graph promotion after an already-counted delta provides the reachable loss witness; coherency and applied watermark both require coordination.
+
+Evidence: [crates/shamir-index/src/vector/snapshot.rs:529](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-index/src/vector/snapshot.rs#L529); [crates/shamir-index/src/vector/vector_backend.rs:919](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-index/src/vector/vector_backend.rs#L919); [crates/shamir-engine/src/tx/commit_phases.rs:939](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-engine/src/tx/commit_phases.rs#L939).
 
 <a id="review-2"></a>
 
@@ -31,19 +35,23 @@ Evidence: [crates/shamir-index/src/vector/snapshot.rs:529](../../../../../crates
 
 Status: `confirmed-open`. Current risk: `low`.
 
-The batch planner still emits direct postings for Building definitions without the single-row capture predicate. Engine batch staging reaches it. The original future update/delete consequence is hypothetical, not a demonstrated current corruption.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-index/src/base_index/index_manager.rs:2458](../../../../../crates/shamir-index/src/base_index/index_manager.rs#L2458); [crates/shamir-index/src/base_index/index_manager.rs:2525](../../../../../crates/shamir-index/src/base_index/index_manager.rs#L2525); [crates/shamir-engine/src/table/table_manager_tx_ops.rs:836](../../../../../crates/shamir-engine/src/table/table_manager_tx_ops.rs#L836).
+Single-row creation diverts Building definitions to dirty capture; batch creation emits postings directly and engine batch callers reach it. This contradicts the routing invariant, but future batched update/delete corruption is not present-day proof.
+
+Evidence: [crates/shamir-index/src/base_index/index_manager.rs:2458](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-index/src/base_index/index_manager.rs#L2458); [crates/shamir-index/src/base_index/index_manager.rs:2525](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-index/src/base_index/index_manager.rs#L2525); [crates/shamir-engine/src/table/table_manager_tx_ops.rs:836](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-engine/src/table/table_manager_tx_ops.rs#L836).
 
 <a id="review-3"></a>
 
 ### Claim 3 — TOCTOU between lock-free `is_build_in_flight` check and Mutex-guarded dirty-set insert can leak an orphan dirty-set entry at Phase D
 
-Status: `refuted`. Current risk: —.
+Status: `refuted`. Current risk: `—`.
 
-The primitive check/insert is separate, but production Phase D first raises admission, drains writers, and holds the write lock through clear_build_in_flight. The alleged racing writer cannot overlap that clear under this protocol.
+Prior-cycle decision: `refuted`.
 
-Evidence: [crates/shamir-index/src/base_index/index_manager.rs:1022](../../../../../crates/shamir-index/src/base_index/index_manager.rs#L1022); [crates/shamir-engine/src/table/table_manager_index_mgmt.rs:2906](../../../../../crates/shamir-engine/src/table/table_manager_index_mgmt.rs#L2906); [crates/shamir-engine/src/table/table_manager_index_mgmt.rs:2947](../../../../../crates/shamir-engine/src/table/table_manager_index_mgmt.rs#L2947); [crates/shamir-engine/src/table/table_manager.rs:1322](../../../../../crates/shamir-engine/src/table/table_manager.rs#L1322).
+The helper is check-then-insert, but supported Phase D raises admission, drains writers, and holds the write lock through final dirty drain and clear. The alleged production writer cannot overlap that clear. Direct precondition-breaking helper use is different.
+
+Evidence: [crates/shamir-engine/src/table/table_manager_index_mgmt.rs:2906](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-engine/src/table/table_manager_index_mgmt.rs#L2906); [crates/shamir-engine/src/table/table_manager_index_mgmt.rs:2947](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-engine/src/table/table_manager_index_mgmt.rs#L2947); [crates/shamir-engine/src/table/table_manager.rs:1322](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-engine/src/table/table_manager.rs#L1322).
 
 <a id="review-4"></a>
 
@@ -51,9 +59,11 @@ Evidence: [crates/shamir-index/src/base_index/index_manager.rs:1022](../../../..
 
 Status: `confirmed-open`. Current risk: `low`.
 
-Lookup still scans by_id under the read lease. The descriptor is borrowed, not cloned; only the selected backend Arc is cloned. The uniqueness/multi-id design decision remains documented.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-index/src/registry.rs:609](../../../../../crates/shamir-index/src/registry.rs#L609); [crates/shamir-index/src/registry.rs:659](../../../../../crates/shamir-index/src/registry.rs#L659); [crates/shamir-index/src/registry.rs:666](../../../../../crates/shamir-index/src/registry.rs#L666).
+The by_id traversal remains documented design debt. Each descriptor is borrowed, not deep-cloned. A reverse registry needs a uniqueness/multiple-backend selection contract and synchronized create/drop/rename/state updates.
+
+Evidence: [crates/shamir-index/src/registry.rs:609](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-index/src/registry.rs#L609); [crates/shamir-index/src/registry.rs:659](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-index/src/registry.rs#L659); [crates/shamir-index/src/registry.rs:666](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-index/src/registry.rs#L666).
 
 <a id="review-5"></a>
 
@@ -61,11 +71,13 @@ Evidence: [crates/shamir-index/src/registry.rs:609](../../../../../crates/shamir
 
 Status: `confirmed-open`. Current risk: `high`.
 
-Shadow upsert/batch errors are discarded, with no failure latch or upsert reconciliation before swap. A failed update after S0 capture can leave a missing or stale target vector.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-index/src/vector/vector_backend.rs:296](../../../../../crates/shamir-index/src/vector/vector_backend.rs#L296); [crates/shamir-index/src/vector/vector_backend.rs:512](../../../../../crates/shamir-index/src/vector/vector_backend.rs#L512); [crates/shamir-index/src/vector/vector_backend.rs:1102](../../../../../crates/shamir-index/src/vector/vector_backend.rs#L1102).
+A failed target update after S0 capture is not repaired by insert-if-absent backfill. Result discards and unconditional swap persist the stale/missing target state. Error latching must also synchronize with late in-flight writes.
 
-Grouping/duplicate: `error-handling-lifecycle.md#2`. This row is not another independent defect.
+Evidence: [crates/shamir-index/src/vector/vector_backend.rs:296](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-index/src/vector/vector_backend.rs#L296); [crates/shamir-index/src/vector/vector_backend.rs:512](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-index/src/vector/vector_backend.rs#L512); [crates/shamir-index/src/vector/vector_backend.rs:1102](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-index/src/vector/vector_backend.rs#L1102).
+
+Grouping/duplicate: [error-handling-lifecycle.md#2](error-handling-lifecycle.md#review-2). This is not an additional independent defect.
 
 <a id="review-6"></a>
 
@@ -73,9 +85,11 @@ Grouping/duplicate: `error-handling-lifecycle.md#2`. This row is not another ind
 
 Status: `confirmed-open`. Current risk: `low`.
 
-Regular and sorted sweeps still accumulate all keys before remove_many; FTS sweeps still await individual removes. These are distinct cold-path memory and batching issues, not one identical root defect.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-index/src/base_index/index_manager.rs:1250](../../../../../crates/shamir-index/src/base_index/index_manager.rs#L1250); [crates/shamir-index/src/base_index/sorted_index_manager.rs:799](../../../../../crates/shamir-index/src/base_index/sorted_index_manager.rs#L799); [crates/shamir-index/src/fts_backend.rs:247](../../../../../crates/shamir-index/src/fts_backend.rs#L247).
+Regular and sorted sweeps buffer every key before remove_many. FTS instead removes individually. These are separate cold-path allocation/batching shapes; paged cleanup must preserve reader drain and durable tombstone ordering.
+
+Evidence: [crates/shamir-index/src/base_index/index_manager.rs:1250](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-index/src/base_index/index_manager.rs#L1250); [crates/shamir-index/src/base_index/sorted_index_manager.rs:799](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-index/src/base_index/sorted_index_manager.rs#L799); [crates/shamir-index/src/fts_backend.rs:247](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-index/src/fts_backend.rs#L247).
 
 <a id="review-7"></a>
 
@@ -83,9 +97,11 @@ Evidence: [crates/shamir-index/src/base_index/index_manager.rs:1250](../../../..
 
 Status: `confirmed-open`. Current risk: `low`.
 
-Distance scanning and heap maintenance remain inline. Public adapter injection permits use beyond tests, but the shipped backend builder selects HNSW; no tens-of-milliseconds measurement was established.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-index/src/vector/brute_force.rs:262](../../../../../crates/shamir-index/src/vector/brute_force.rs#L262); [crates/shamir-index/src/vector/brute_force.rs:297](../../../../../crates/shamir-index/src/vector/brute_force.rs#L297); [crates/shamir-index/src/build_backend.rs:53](../../../../../crates/shamir-index/src/build_backend.rs#L53).
+Distance scan and heap maintenance run inline. Public adapter injection permits library deployment, but default builder selects HNSW. No exact blocked-worker duration is established; moving owned snapshot work off-thread is compatible.
+
+Evidence: [crates/shamir-index/src/vector/brute_force.rs:297](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-index/src/vector/brute_force.rs#L297); [crates/shamir-index/src/build_backend.rs:53](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-index/src/build_backend.rs#L53).
 
 <a id="review-8"></a>
 
@@ -93,9 +109,11 @@ Evidence: [crates/shamir-index/src/vector/brute_force.rs:262](../../../../../cra
 
 Status: `confirmed-open`. Current risk: `nit`.
 
-Absolute wording still conflicts with guarded DashMap cache accesses. The shown cache guards are short-lived and released before awaits; no lock-order cycle is established by these accesses.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-index/src/reader_drain_gate.rs:85](../../../../../crates/shamir-index/src/reader_drain_gate.rs#L85); [crates/shamir-index/src/base_index/index_manager.rs:2808](../../../../../crates/shamir-index/src/base_index/index_manager.rs#L2808); [crates/shamir-index/src/base_index/index_manager.rs:2826](../../../../../crates/shamir-index/src/base_index/index_manager.rs#L2826); [crates/shamir-index/src/base_index/index_manager.rs:2874](../../../../../crates/shamir-index/src/base_index/index_manager.rs#L2874).
+Cache access acquires shard locks while the read guard lives. Observed cache guards release before awaits and before destructive operations; this shows wording drift, not a lock-order cycle.
+
+Evidence: [crates/shamir-index/src/reader_drain_gate.rs:85](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-index/src/reader_drain_gate.rs#L85); [crates/shamir-index/src/base_index/index_manager.rs:2826](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-index/src/base_index/index_manager.rs#L2826); [crates/shamir-index/src/base_index/index_manager.rs:2874](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-index/src/base_index/index_manager.rs#L2874).
 
 <a id="review-9"></a>
 
@@ -103,9 +121,11 @@ Evidence: [crates/shamir-index/src/reader_drain_gate.rs:85](../../../../../crate
 
 Status: `confirmed-open`. Current risk: `nit`.
 
-The private one-shot shutdown slot still lacks its local justification. Its guard is dropped before awaiting the JoinHandle, so this is documentation conformance, not an await-held lock defect.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-index/src/vector/brute_force.rs:64](../../../../../crates/shamir-index/src/vector/brute_force.rs#L64); [crates/shamir-index/src/vector/brute_force.rs:131](../../../../../crates/shamir-index/src/vector/brute_force.rs#L131).
+The private teardown slot still lacks an inline contention model. Its guard ends before join.await; runtime blocking/await-held mutex allegations are unsupported.
+
+Evidence: [crates/shamir-index/src/vector/brute_force.rs:64](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-index/src/vector/brute_force.rs#L64); [crates/shamir-index/src/vector/brute_force.rs:131](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-index/src/vector/brute_force.rs#L131).
 
 <a id="review-10"></a>
 
@@ -113,18 +133,19 @@ Evidence: [crates/shamir-index/src/vector/brute_force.rs:64](../../../../../crat
 
 Status: `confirmed-open`. Current risk: `low`.
 
-Both counters still use wrapping subtraction. Invalid/double delete accounting can wrap; zero-length update transitions provide an existing source of spurious delete bumps.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-index/src/bm25.rs:87](../../../../../crates/shamir-index/src/bm25.rs#L87); [crates/shamir-index/src/fts_ranked_backend.rs:223](../../../../../crates/shamir-index/src/fts_ranked_backend.rs#L223).
+Both fetch_sub operations wrap. Public invalid/double accounting can poison counts; empty→nonempty update supplies a transient spurious subtraction, but its paired addition normally cancels the count wrap before return. Saturation is defense, not correction of the underlying update bug.
 
-## Corrections and qualified non-findings
+Evidence: [crates/shamir-index/src/bm25.rs:87](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-index/src/bm25.rs#L87); [crates/shamir-index/src/fts_ranked_backend.rs:223](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-index/src/fts_ranked_backend.rs#L223).
 
-- Snapshot scans are forward map, reverse map, tombstones, then vectors—not tombstones before forward map. Remove the claimed proven zombie timeline; retain the coordination defect and applied-watermark requirement.
-- Phase-D production reachability must include the writer-drain/admission protocol; an isolated helper TOCTOU is not sufficient proof.
-- Registry lookup does not deep-clone descriptors or paths.
-- Do not deduplicate the base-index all-keys sweep into the index2 per-key/error-swallowing sweep; preserve both residual work items.
-- ReaderDrainGate's SeqCst protocol and RAII decrements are present. Its docs explicitly disclaim formal starvation freedom; the opt-in loom model is not an execution result or a complete memory-model proof.
-- Concurrent scc registry usage and annotated len calls are source-visible; describing every scc HashMap operation as formally lock-free requires dependency-level evidence.
+## Evidence and recipe corrections
+
+- Exact scc 3.8.4 published src/hash_map.rs documents bucket read-write serialization and warns about synchronous methods in async code. Existing concurrency design must not be advertised as formally lock-free merely because it uses scc.
+- Correct snapshot chronology to forward map, reverse map, tombstones, vectors; preserve NEW.1 as the discriminating pruning-loss mechanism.
+- Snapshot coordination needs one coherent graph/map capture and a contiguous applied boundary; reordering scans or quiescing only maps is insufficient.
+- A four-byte NEON load cannot be replaced with an unconditional eight-byte vld1_u8 load under the existing four-byte loop bounds.
+- ReaderDrainGate's loom model adds fences to its modeled operations and is opt-in; neither its existence nor historical green labels prove production execution.
 
 ---
 

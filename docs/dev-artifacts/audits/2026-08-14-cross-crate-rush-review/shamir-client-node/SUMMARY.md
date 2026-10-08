@@ -1,65 +1,69 @@
-<!-- revalidation:2026-10-08 source:92ad58266bf57ddea1fa3c8a47affba1a3a9a096 -->
-# shamir-client-node — SUMMARY revalidation
+<!-- revalidation:2026-10-08 cycle:independent-2 source:e3765c935fc71655ee1ec0160cf180607935d89b -->
+# shamir-client-node — SUMMARY independent revalidation (cycle 2)
 
-Source snapshot: `92ad58266bf57ddea1fa3c8a47affba1a3a9a096`. Revalidated 2026-10-08 by read-only XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run; no source fix is part of this update. Test registration/assertions are evidence of an oracle, not proof of a passing run.
+Frozen source snapshot: `e3765c935fc71655ee1ec0160cf180607935d89b`. Independently revalidated 2026-10-08 by a fresh XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run. Source-fixed means the specified mechanism was already removed at this snapshot; this cycle implements no source fix.
 
-This section is authoritative for current status. Original titles/IDs are retained for traceability; a refuted title is not a current assertion. The collapsed historical report below is superseded, including its counts, severity, scenarios and fix instructions. Plan IDs preserve historical numbering, not a current release mandate. [Workspace methodology and status definitions](../SUMMARY.md#status-definitions).
+This section is authoritative for current decisions. Existing IDs and allegation titles are retained for traceability; a refuted title is not a current assertion. Prior-cycle decisions were rechecked, not used as proof. The first cycle is available in repository history at this snapshot. The original historical body below remains preserved once and is superseded, including its counts, severities and recipes. [Workspace scope and status definitions](../SUMMARY.md#status-definitions).
 
-The source-proven address, timeout, locking and API/documentation gaps remain. Parent exact-version dependency inspection refutes the alleged dead wrapper, and raw repl errors are intentional. Publication/FFI panic behavior remains unverified; registered coverage was inspected but not run.
+Unrelated external edits began in dependency/toolchain/CI metadata during collection; additional Rust-source edits appeared afterward. They were left untouched. Evidence and decisions are tied to the frozen commit, not those later changes or an installed toolchain. “Current” below means current at that snapshot; no re-audit of the modified working tree is implied.
+
+Receiver-sensitive factory construction, raw replication errors, automatic finalization and existing nightly registration independently refute the original major omissions. Address parsing, unbounded waits, serialization of concurrent requests and stalled-close behavior remain. Exact dependency inspection also exposes caller-owned Buffer races and integer-fidelity loss. Claim 1.5 has a valid raw-ID false-positive witness, so its current non-functional-only assurance is too strong. Several remaining alleged defects are optional API policies rather than violated contracts.
 
 ## Current claim decisions
 
 | Claim decisions | Open | Source-fixed | Partial | Refuted | Unverified | N/A |
 |---:|---:|---:|---:|---:|---:|---:|
-| 32 | 18 | 0 | 1 | 7 | 2 | 4 |
+| 32 | 16 | 0 | 0 | 8 | 1 | 7 |
 
-These are decisions on report claims, including repeated roots, bundled observations and non-findings—not a unique-bug census. Closed/N/A rows have no current risk; unverified risk is provisional. Pure style and unmeasured optimization claims do not establish runtime impact.
-
-## Parent acceptance refinements
-
-- The exact N-API factory source is available and supports receiver-sensitive construction; inheriting connect does not bypass the wrapper prototype.
+These are duplicate-inclusive report decisions, not a unique-bug census. Pure style or structural optimization does not establish a runtime incident; unverified impact remains provisional.
 
 <a id="review-1-1"></a>
 
 ### Claim 1.1 — Wrapper's `execute`/`repl`/typed-error overrides are unreachable: `connect()` returns native-class instances
 
-Status: `refuted`. Current risk: —.
+Status: `refuted`. Current risk: `—`.
 
-Parent inspection resolves the exact dependency mechanism. napi-derive 3.5.10's 5.1.2 backend retains CallbackInfo.this for an async factory and calls cb.factory; napi 3.10.5's _factory restores that receiver and passes it to napi_new_instance. Calling the inherited static method as the exported wrapper subclass therefore uses that subclass constructor, not a hardcoded native-class constructor. The alleged dead-wrapper/critical mechanism is refuted by source. No native artifact or e2e execution was used.
+Prior-cycle decision: `refuted`.
 
-Evidence: [crates/shamir-client-node/wrapper.js:93](../../../../../crates/shamir-client-node/wrapper.js#L93); [crates/shamir-client-node/src/lib.rs:96](../../../../../crates/shamir-client-node/src/lib.rs#L96); [crates/shamir-client-node/Cargo.toml:39](../../../../../crates/shamir-client-node/Cargo.toml#L39); [tests/e2e/e2e.test.js:35](../../../../../tests/e2e/e2e.test.js#L35); [tests/e2e/tests/02-basic-crud.test.js:19](../../../../../tests/e2e/tests/02-basic-crud.test.js#L19).
+Calling the inherited factory through the wrapper supplies that subclass as its receiver. Exact napi 3.10.5 _factory constructs through the restored receiver; inspected backend 5.1.2 generates cb.factory. Existing registered object-level CRUD would fail under the alleged base-instance mutation. No reprototyping repair is justified.
 
-Pinned dependency evidence: [napi 3.10.5, src/bindgen_runtime/callback_info.rs:27](https://docs.rs/crate/napi/3.10.5/source/src/bindgen_runtime/callback_info.rs); [napi 3.10.5, src/bindgen_runtime/callback_info.rs:199](https://docs.rs/crate/napi/3.10.5/source/src/bindgen_runtime/callback_info.rs); [napi-derive-backend 5.1.2, src/codegen/fn.rs:275](https://docs.rs/crate/napi-derive-backend/5.1.2/source/src/codegen/fn.rs); [napi-derive-backend 5.1.2, src/codegen/fn.rs:820](https://docs.rs/crate/napi-derive-backend/5.1.2/source/src/codegen/fn.rs).
+Evidence: [crates/shamir-client-node/wrapper.js:93](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-client-node/wrapper.js#L93); [crates/shamir-client-node/src/lib.rs:96](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-client-node/src/lib.rs#L96); [crates/shamir-client-node/Cargo.toml:39](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-client-node/Cargo.toml#L39); [napi 3.10.5 published src/bindgen_runtime/callback_info.rs:199](https://docs.rs/crate/napi/3.10.5/source/src/bindgen_runtime/callback_info.rs); [napi-derive-backend 5.1.2 published src/codegen/fn.rs:275](https://docs.rs/crate/napi-derive-backend/5.1.2/source/src/codegen/fn.rs); [tests/e2e/tests/02-basic-crud.test.js:19](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/tests/e2e/tests/02-basic-crud.test.js#L19).
 
 <a id="review-1-2"></a>
 
 ### Claim 1.2 — Documented hostname usage can never connect: `host` is parsed as an IP literal
 
-Status: `confirmed-open`. Current risk: `high`.
+Status: `confirmed-open`. Current risk: `medium`.
 
-Host and port are still concatenated and parsed as SocketAddr without DNS resolution. Documented DNS names and unbracketed IPv6 such as ::1 fail before connection establishment.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-client-node/src/lib.rs:53](../../../../../crates/shamir-client-node/src/lib.rs#L53); [crates/shamir-client-node/src/lib.rs:100](../../../../../crates/shamir-client-node/src/lib.rs#L100); [crates/shamir-client/src/client.rs:60](../../../../../crates/shamir-client/src/client.rs#L60).
+The documented DNS host fails before networking, as does unbracketed ::1 after concatenation. IPv4 and bracketed IPv6 work. This is a configuration-specific public-input defect, not universal connection failure. A discriminating oracle must exercise hostname resolution and IPv6 address construction through the actual connect path.
+
+Evidence: [crates/shamir-client-node/src/lib.rs:53](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-client-node/src/lib.rs#L53); [crates/shamir-client-node/src/lib.rs:100](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-client-node/src/lib.rs#L100); [crates/shamir-client/src/client.rs:60](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-client/src/client.rs#L60).
 
 <a id="review-1-3"></a>
 
 ### Claim 1.3 — `ReplResponse::Error` is returned as success: wrapper marker checks `kind`, repl errors use `repl_kind`
 
-Status: `refuted`. Current risk: —.
+Status: `refuted`. Current risk: `—`.
 
-The tag distinction is real, but the existing API intentionally returns raw ReplResponse buffers, including its Error variant and fencing epoch. Typed exceptions are promised for DbResponse::Error, not every ReplResponse::Error. The registered bad_role test explicitly requires successful resolution with repl_kind:error and leader_epoch. Changing this would change the contract, not repair a proven violation.
+Prior-cycle decision: `refuted`.
 
-Evidence: [crates/shamir-client-node/wrapper.d.ts:19](../../../../../crates/shamir-client-node/wrapper.d.ts#L19); [crates/shamir-client-node/wrapper.js:104](../../../../../crates/shamir-client-node/wrapper.js#L104); [crates/shamir-client/src/client.rs:1154](../../../../../crates/shamir-client/src/client.rs#L1154); [crates/shamir-query-types/src/wire/repl.rs:66](../../../../../crates/shamir-query-types/src/wire/repl.rs#L66); [tests/e2e/tests/16-replication.test.js:229](../../../../../tests/e2e/tests/16-replication.test.js#L229).
+Raw protocol Error results are intentional and retain leader_epoch. The server capability gate, core pass-through, wrapper contract and registered bad_role assertions agree. Converting them into the smaller DB-error marker would alter behavior and potentially discard fencing information.
+
+Evidence: [crates/shamir-server/src/db_handler/repl_handler.rs:52](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-server/src/db_handler/repl_handler.rs#L52); [crates/shamir-client/src/client.rs:1164](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-client/src/client.rs#L1164); [crates/shamir-client-node/wrapper.js:104](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-client-node/wrapper.js#L104); [crates/shamir-query-types/src/wire/repl.rs:97](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-query-types/src/wire/repl.rs#L97); [tests/e2e/tests/16-replication.test.js:235](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/tests/e2e/tests/16-replication.test.js#L235).
 
 <a id="review-1-4"></a>
 
 ### Claim 1.4 — No automated tests anywhere; the "proof" script re-implements the logic it claims to prove
 
-Status: `partially-fixed`. Current risk: `medium`.
+Status: `confirmed-open`. Current risk: `medium`.
 
-Current automated coverage includes a wired nightly connect/CRUD/error suite, contradicting 'none anywhere'; this coverage predates the review, so it is not a newly discovered fix. The proof still copies marker detection, and the e2e error tests inspect message text rather than asserting actual ShamirDbError.code/retryable. Direct marker-byte compatibility coverage remains absent.
+Prior-cycle decision: `partially-fixed`.
 
-Evidence: [.github/workflows/ts-e2e-nightly.yml:162](../../../../../.github/workflows/ts-e2e-nightly.yml#L162); [tests/e2e/package.json:14](../../../../../tests/e2e/package.json#L14); [tests/e2e/helpers/runner.js:106](../../../../../tests/e2e/helpers/runner.js#L106); [tests/e2e/tests/09-errors.test.js:33](../../../../../tests/e2e/tests/09-errors.test.js#L33); [crates/shamir-client-node/proof-typed-errors.js:67](../../../../../crates/shamir-client-node/proof-typed-errors.js#L67).
+The no-tests premise is refuted by pre-existing nightly registration, not repaired after review. The residual oracle gap remains open: the proof copies detection, and actual e2e errors only inspect messages. Removing ShamirDbError.code/retryable assignments while preserving its message would evade these assertions. Test actual public methods and Rust-produced marker bytes.
+
+Evidence: [.github/workflows/ts-e2e-nightly.yml:162](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/.github/workflows/ts-e2e-nightly.yml#L162); [tests/e2e/e2e.test.js:51](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/tests/e2e/e2e.test.js#L51); [tests/e2e/helpers/runner.js:106](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/tests/e2e/helpers/runner.js#L106); [tests/e2e/tests/09-errors.test.js:33](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/tests/e2e/tests/09-errors.test.js#L33); [crates/shamir-client-node/proof-typed-errors.js:67](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-client-node/proof-typed-errors.js#L67); [crates/shamir-client-node/wrapper.js:64](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-client-node/wrapper.js#L64).
 
 <a id="review-1-5"></a>
 
@@ -67,19 +71,23 @@ Evidence: [.github/workflows/ts-e2e-nightly.yml:162](../../../../../.github/work
 
 Status: `confirmed-open`. Current risk: `low`.
 
-The success buffer contains raw user-id bytes, yet the override copies and attempts MessagePack decoding solely to detect an error marker, discarding successful decoded values and swallowing decode failures. This is structural overhead when the override is reached, not demonstrated latency or a current functional failure. Arbitrary bytes need not decode successfully.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-client-node/wrapper.js:123](../../../../../crates/shamir-client-node/wrapper.js#L123); [crates/shamir-client-node/wrapper.js:82](../../../../../crates/shamir-client-node/wrapper.js#L82); [crates/shamir-client-node/src/lib.rs:268](../../../../../crates/shamir-client-node/src/lib.rs#L268).
+Besides avoidable decoding, there is a valid false-positive shape. The 16 bytes 82 a4 6b 69 6e 64 a5 65 72 72 6f 72 a1 78 a1 79 encode {kind:error,x:y}; inspected codec 3.1.3 accepts that map, and the wrapper throws ShamirDbError with undefined code/message. The directory's unrestricted random-byte generator permits this ID; its masked first-eight-byte principal is nonzero, and it is accepted when unused. This is a rare valid-ID edge case, not a measured incidence or remote privilege escalation.
+
+Evidence: [crates/shamir-client-node/wrapper.js:82](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-client-node/wrapper.js#L82); [crates/shamir-client-node/wrapper.js:123](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-client-node/wrapper.js#L123); [crates/shamir-client-node/src/lib.rs:268](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-client-node/src/lib.rs#L268); [crates/shamir-server/src/db_handler/admin.rs:223](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-server/src/db_handler/admin.rs#L223); [crates/shamir-server/src/user_directory.rs:513](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-server/src/user_directory.rs#L513); [crates/shamir-server/src/user_directory.rs:526](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-server/src/user_directory.rs#L526); [crates/shamir-types/src/access.rs:33](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-types/src/access.rs#L33); [@msgpack/msgpack 3.1.3 src/Decoder.ts:640](https://github.com/msgpack/msgpack-javascript/blob/v3.1.3/src/Decoder.ts#L640).
 
 <a id="review-1-6"></a>
 
 ### Claim 1.6 — `execute` decodes the payload before the closed-check; decode errors mask "client closed"
 
-Status: `confirmed-open`. Current risk: `low`.
+Status: `not-applicable`. Current risk: `—`.
 
-Execute and repl still deserialize before checking the Option<Client>. Malformed input therefore wins over the closed-client diagnostic. This is an error-precedence choice; no documented precedence guarantee establishes a stronger correctness defect.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-client-node/src/lib.rs:205](../../../../../crates/shamir-client-node/src/lib.rs#L205); [crates/shamir-client-node/src/lib.rs:207](../../../../../crates/shamir-client-node/src/lib.rs#L207); [crates/shamir-client-node/src/lib.rs:233](../../../../../crates/shamir-client-node/src/lib.rs#L233); [crates/shamir-client-node/src/lib.rs:235](../../../../../crates/shamir-client-node/src/lib.rs#L235).
+The ordering is real, but no contract requires closed-state errors to outrank invalid-input errors. It is a diagnostic policy choice, not established incorrect behavior. Moving decoding under the mutex would also increase its holding scope.
+
+Evidence: [crates/shamir-client-node/src/lib.rs:205](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-client-node/src/lib.rs#L205); [crates/shamir-client-node/src/lib.rs:207](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-client-node/src/lib.rs#L207); [crates/shamir-client-node/src/lib.rs:233](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-client-node/src/lib.rs#L233); [crates/shamir-client-node/wrapper.d.ts:57](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-client-node/wrapper.d.ts#L57).
 
 <a id="review-1-7"></a>
 
@@ -87,9 +95,11 @@ Evidence: [crates/shamir-client-node/src/lib.rs:205](../../../../../crates/shami
 
 Status: `confirmed-open`. Current risk: `nit`.
 
-The metadata divergence remains undocumented locally. The alleged loader failure is not caused by Cargo's version: enforcement compares the npm platform package's version against the generated npm version, and local native-file loads bypass that comparison.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-client-node/Cargo.toml:3](../../../../../crates/shamir-client-node/Cargo.toml#L3); [crates/shamir-client-node/package.json:3](../../../../../crates/shamir-client-node/package.json#L3); [crates/shamir-client-node/index.js:126](../../../../../crates/shamir-client-node/index.js#L126); [crates/shamir-client-node/index.js:132](../../../../../crates/shamir-client-node/index.js#L132).
+The metadata mismatch persists without a local explanation. It does not itself cause loader rejection: the optional comparison concerns npm platform-package metadata, while local native-file loading bypasses it. A release-policy note is sufficient; no unsolicited version change is warranted.
+
+Evidence: [crates/shamir-client-node/Cargo.toml:3](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-client-node/Cargo.toml#L3); [crates/shamir-client-node/package.json:3](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-client-node/package.json#L3); [crates/shamir-client-node/index.js:126](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-client-node/index.js#L126); [crates/shamir-client-node/index.js:132](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-client-node/index.js#L132).
 
 <a id="review-2-1"></a>
 
@@ -97,9 +107,11 @@ Evidence: [crates/shamir-client-node/Cargo.toml:3](../../../../../crates/shamir-
 
 Status: `confirmed-open`. Current risk: `medium`.
 
-All request methods retain the binding mutex throughout their core roundtrip, structurally preventing concurrent requests on one binding instance despite core rid multiplexing. This queues that client's promises; it does not establish a Node event-loop freeze or measured throughput loss.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-client-node/src/lib.rs:82](../../../../../crates/shamir-client-node/src/lib.rs#L82); [crates/shamir-client-node/src/lib.rs:193](../../../../../crates/shamir-client-node/src/lib.rs#L193); [crates/shamir-client-node/src/lib.rs:207](../../../../../crates/shamir-client-node/src/lib.rs#L207); [crates/shamir-client-node/src/lib.rs:285](../../../../../crates/shamir-client-node/src/lib.rs#L285); [crates/shamir-client/src/client.rs:1233](../../../../../crates/shamir-client/src/client.rs#L1233).
+Every request retains the exclusive binding guard through its core await, so a second call cannot register/send while the first awaits a response. This defeats the core's documented concurrent-call semantics. A controlled peer observing two requests before releasing either response discriminates this mechanism; existing sequential CRUD does not.
+
+Evidence: [crates/shamir-client-node/src/lib.rs:82](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-client-node/src/lib.rs#L82); [crates/shamir-client-node/src/lib.rs:193](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-client-node/src/lib.rs#L193); [crates/shamir-client-node/src/lib.rs:207](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-client-node/src/lib.rs#L207); [crates/shamir-client-node/src/lib.rs:285](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-client-node/src/lib.rs#L285); [crates/shamir-client/src/client.rs:418](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-client/src/client.rs#L418); [crates/shamir-client/src/client.rs:1267](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-client/src/client.rs#L1267).
 
 <a id="review-2-2"></a>
 
@@ -107,9 +119,11 @@ Evidence: [crates/shamir-client-node/src/lib.rs:82](../../../../../crates/shamir
 
 Status: `confirmed-open`. Current risk: `medium`.
 
-Cached getters are immutable connect-time snapshots. Close must first acquire the same mutex held by an unbounded request and then retains it through core shutdown. A stalled preceding request can prevent close indefinitely. Moving shutdown outside the guard alone cannot bypass that preceding holder.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-client-node/src/lib.rs:140](../../../../../crates/shamir-client-node/src/lib.rs#L140); [crates/shamir-client-node/src/lib.rs:178](../../../../../crates/shamir-client-node/src/lib.rs#L178); [crates/shamir-client-node/src/lib.rs:207](../../../../../crates/shamir-client-node/src/lib.rs#L207); [crates/shamir-client-node/src/lib.rs:311](../../../../../crates/shamir-client-node/src/lib.rs#L311).
+Getter snapshots are immutable and independent of the request mutex. However, an unanswered request holds that mutex indefinitely and close cannot acquire it. Close also retains its own guard during shutdown. The useful oracle is close plus pending-call settlement after a peer receives but withholds a response, not a sleep-based timing assertion.
+
+Evidence: [crates/shamir-client-node/src/lib.rs:140](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-client-node/src/lib.rs#L140); [crates/shamir-client-node/src/lib.rs:178](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-client-node/src/lib.rs#L178); [crates/shamir-client-node/src/lib.rs:207](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-client-node/src/lib.rs#L207); [crates/shamir-client-node/src/lib.rs:311](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-client-node/src/lib.rs#L311); [crates/shamir-client-node/src/lib.rs:132](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-client-node/src/lib.rs#L132).
 
 <a id="review-3-1"></a>
 
@@ -117,19 +131,23 @@ Evidence: [crates/shamir-client-node/src/lib.rs:140](../../../../../crates/shami
 
 Status: `confirmed-open`. Current risk: `high`.
 
-Both core timeout options remain hardcoded None, with no binding cancellation API. An unresponsive configured peer can stall TLS/SCRAM or requests. The closed-check/register/drain race also remains structurally possible. Importantly, merely exposing existing knobs would not bound the full handshake, mutex acquisition, or request write: core connect_timeout covers TCP only and request_timeout starts after writing.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-client-node/src/lib.rs:130](../../../../../crates/shamir-client-node/src/lib.rs#L130); [crates/shamir-client-node/wrapper.d.ts:35](../../../../../crates/shamir-client-node/wrapper.d.ts#L35); [crates/shamir-client/src/client.rs:218](../../../../../crates/shamir-client/src/client.rs#L218); [crates/shamir-client/src/client.rs:479](../../../../../crates/shamir-client/src/client.rs#L479); [crates/shamir-client/src/client.rs:509](../../../../../crates/shamir-client/src/client.rs#L509); [crates/shamir-client/src/client.rs:1240](../../../../../crates/shamir-client/src/client.rs#L1240); [crates/shamir-client/src/client.rs:1267](../../../../../crates/shamir-client/src/client.rs#L1267); [crates/shamir-client/src/client.rs:1290](../../../../../crates/shamir-client/src/client.rs#L1290).
+Both timeout options are None, and there is no cancellation surface. A configured peer can stall TLS/SCRAM or withhold a response; Promise.race does not cancel the native operation. The reader can also mark closed/drain between roundtrip's initial check and later registration, leaving a new waiter if its write succeeds. Existing knobs only bound TCP establishment and post-write response waiting, not the complete operation.
+
+Evidence: [crates/shamir-client-node/src/lib.rs:130](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-client-node/src/lib.rs#L130); [crates/shamir-client-node/wrapper.d.ts:35](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-client-node/wrapper.d.ts#L35); [crates/shamir-client/src/client.rs:479](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-client/src/client.rs#L479); [crates/shamir-client/src/client.rs:509](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-client/src/client.rs#L509); [crates/shamir-client/src/client.rs:407](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-client/src/client.rs#L407); [crates/shamir-client/src/client.rs:1240](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-client/src/client.rs#L1240); [crates/shamir-client/src/client.rs:1267](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-client/src/client.rs#L1267); [crates/shamir-client/src/client.rs:1290](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-client/src/client.rs#L1290).
 
 <a id="review-3-2"></a>
 
 ### Claim 3.2 — No `catch_unwind` discipline at the FFI boundary
 
-Status: `unverified`. Current risk: `medium` (provisional; not a confirmed defect).
+Status: `refuted`. Current risk: `—`.
 
-No catch_unwind attributes are present, but no concrete reachable panic or version-specific generated-boundary behavior was established. The cited core expect is protected: successful authentication either starts with a supplied pin or invokes the callback that stores one. Malformed MessagePack is handled through Result; attacker-triggered process abort and historical hung-promise claims remain unsupported.
+Prior-cycle decision: `unverified`.
 
-Evidence: [crates/shamir-client-node/src/lib.rs:96](../../../../../crates/shamir-client-node/src/lib.rs#L96); [crates/shamir-client-node/src/lib.rs:205](../../../../../crates/shamir-client-node/src/lib.rs#L205); [crates/shamir-client/src/client.rs:610](../../../../../crates/shamir-client/src/client.rs#L610); [crates/shamir-client/src/client.rs:614](../../../../../crates/shamir-client/src/client.rs#L614); [crates/shamir-client/src/client.rs:631](../../../../../crates/shamir-client/src/client.rs#L631); [crates/shamir-connect/src/client/handshake.rs:266](../../../../../crates/shamir-connect/src/client/handshake.rs#L266); [crates/shamir-client-node/Cargo.toml:39](../../../../../crates/shamir-client-node/Cargo.toml#L39).
+As a mandatory repair for the cited async panic/hung-promise scenario, this is refuted by exact dependency evidence. napi 3.10.5 monitors the spawned future's JoinError and rejects the promise on unwinding panic. Successful authentication protects the pin expect, and decoding has Result paths with relevant recursion guards. Missing attributes remain literal facts, but do not prove a defect. Synchronous resolver/finalizer panics and non-unwinding failures are not certified safe.
+
+Evidence: [crates/shamir-client-node/Cargo.toml:39](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-client-node/Cargo.toml#L39); [crates/shamir-client-node/src/lib.rs:96](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-client-node/src/lib.rs#L96); [crates/shamir-client/src/client.rs:631](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-client/src/client.rs#L631); [crates/shamir-connect/src/client/handshake.rs:266](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-connect/src/client/handshake.rs#L266); [napi 3.10.5 published src/tokio_runtime.rs:256](https://docs.rs/crate/napi/3.10.5/source/src/tokio_runtime.rs); [napi 3.10.5 published src/tokio_runtime.rs:299](https://docs.rs/crate/napi/3.10.5/source/src/tokio_runtime.rs).
 
 <a id="review-3-3"></a>
 
@@ -137,9 +155,11 @@ Evidence: [crates/shamir-client-node/src/lib.rs:96](../../../../../crates/shamir
 
 Status: `confirmed-open`. Current risk: `low`.
 
-Ticket and session-id snapshots remain plain owned storage, retained even after close; the core ticket is separately Zeroizing. This concerns local memory disclosure/core dumps, not a demonstrated remote extraction path. The pin is a public-key hash, not a secret, and caller-owned JS Buffers can be overwritten although complete copy erasure cannot be guaranteed.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-client-node/src/lib.rs:85](../../../../../crates/shamir-client-node/src/lib.rs#L85); [crates/shamir-client-node/src/lib.rs:143](../../../../../crates/shamir-client-node/src/lib.rs#L143); [crates/shamir-client-node/src/lib.rs:311](../../../../../crates/shamir-client-node/src/lib.rs#L311); [crates/shamir-client/src/client.rs:436](../../../../../crates/shamir-client/src/client.rs#L436); [crates/shamir-client/src/client.rs:1098](../../../../../crates/shamir-client/src/client.rs#L1098); [docs/guide-docs/client-server-protocol-spec/SESSION_RESUMPTION.md:292](../../../../../docs/guide-docs/client-server-protocol-spec/SESSION_RESUMPTION.md#L292).
+Ticket and session-id snapshots are ordinary owned storage, duplicated from core and retained after close. Ticket getters make additional caller-owned copies. This is local memory-disclosure hygiene, not demonstrated remote extraction. The public-key pin is not secret; wiping JS Buffers is possible but cannot erase every copy.
+
+Evidence: [crates/shamir-client-node/src/lib.rs:85](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-client-node/src/lib.rs#L85); [crates/shamir-client-node/src/lib.rs:143](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-client-node/src/lib.rs#L143); [crates/shamir-client-node/src/lib.rs:178](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-client-node/src/lib.rs#L178); [crates/shamir-client-node/src/lib.rs:311](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-client-node/src/lib.rs#L311); [crates/shamir-client/src/client.rs:436](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-client/src/client.rs#L436); [docs/guide-docs/client-server-protocol-spec/SESSION_RESUMPTION.md:292](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/docs/guide-docs/client-server-protocol-spec/SESSION_RESUMPTION.md#L292).
 
 <a id="review-3-4"></a>
 
@@ -147,19 +167,23 @@ Evidence: [crates/shamir-client-node/src/lib.rs:85](../../../../../crates/shamir
 
 Status: `confirmed-open`. Current risk: `nit`.
 
-The eventual core password Vec is Zeroizing, but the documentation does not delimit that guarantee from JS/intermediate copies. Address or pin validation can also return before the password is wrapped. Exact transient napi-copy behavior was not verified.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-client-node/src/lib.rs:61](../../../../../crates/shamir-client-node/src/lib.rs#L61); [crates/shamir-client-node/src/lib.rs:98](../../../../../crates/shamir-client-node/src/lib.rs#L98); [crates/shamir-client-node/src/lib.rs:111](../../../../../crates/shamir-client-node/src/lib.rs#L111); [crates/shamir-client-node/src/lib.rs:127](../../../../../crates/shamir-client-node/src/lib.rs#L127); [crates/shamir-client-node/index.d.ts:76](../../../../../crates/shamir-client-node/index.d.ts#L76).
+Invalid address/port/pin validation can return before the ordinary password String is wrapped. Exact napi 3.10.5 String conversion allocates one UTF-8 Vec and transfers it into String; mandatory additional transient native copies are not proven. createScramUser also wraps its password only after awaiting the binding lock. The documentation should scope the eventual Zeroizing guarantee and separately qualify JS copies.
+
+Evidence: [crates/shamir-client-node/src/lib.rs:61](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-client-node/src/lib.rs#L61); [crates/shamir-client-node/src/lib.rs:98](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-client-node/src/lib.rs#L98); [crates/shamir-client-node/src/lib.rs:111](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-client-node/src/lib.rs#L111); [crates/shamir-client-node/src/lib.rs:127](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-client-node/src/lib.rs#L127); [crates/shamir-client-node/src/lib.rs:260](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-client-node/src/lib.rs#L260); [napi 3.10.5 published src/bindgen_runtime/js_values/string.rs:64](https://docs.rs/crate/napi/3.10.5/source/src/bindgen_runtime/js_values/string.rs).
 
 <a id="review-3-positive-notes"></a>
 
 ### Claim 3.Positive notes — Positive notes (kept for calibration parity)
 
-Status: `not-applicable`. Current risk: —.
+Status: `not-applicable`. Current risk: `—`.
 
-Source supports pre-handshake trustedPin length validation, delegation of binding authentication/crypto to Rust, MessagePack rather than JSON at the boundary, and an identical four-code retryable set. Successful TOFU capture is returned for caller-managed persistence; the binding itself does not persist it. These are scoped positive observations, not a full dependency or security certification.
+Prior-cycle decision: `not-applicable`.
 
-Evidence: [crates/shamir-client-node/src/lib.rs:107](../../../../../crates/shamir-client-node/src/lib.rs#L107); [crates/shamir-client-node/src/lib.rs:136](../../../../../crates/shamir-client-node/src/lib.rs#L136); [crates/shamir-client-node/src/lib.rs:217](../../../../../crates/shamir-client-node/src/lib.rs#L217); [crates/shamir-client/src/client.rs:614](../../../../../crates/shamir-client/src/client.rs#L614); [crates/shamir-client-node/wrapper.js:39](../../../../../crates/shamir-client-node/wrapper.js#L39); [crates/shamir-client-ts/src/core/errors.ts:28](../../../../../crates/shamir-client-ts/src/core/errors.ts#L28).
+Trusted-pin length validation, native authentication delegation, MessagePack exchange and the matching four-code retryable set are supported. TOFU persistence remains caller-managed. These scoped positives do not establish race-free Buffer access, complete credential erasure or impossibility of client/server deployment drift.
+
+Evidence: [crates/shamir-client-node/src/lib.rs:107](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-client-node/src/lib.rs#L107); [crates/shamir-client-node/src/lib.rs:136](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-client-node/src/lib.rs#L136); [crates/shamir-client-node/wrapper.js:39](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-client-node/wrapper.js#L39); [crates/shamir-client-ts/src/core/errors.ts:28](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-client-ts/src/core/errors.ts#L28); [crates/shamir-connect/src/client/handshake.rs:266](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-connect/src/client/handshake.rs#L266).
 
 <a id="review-4-1"></a>
 
@@ -167,11 +191,13 @@ Evidence: [crates/shamir-client-node/src/lib.rs:107](../../../../../crates/shami
 
 Status: `confirmed-open`. Current risk: `medium`.
 
-Close still queues behind request-held mutex guards and holds its own guard during shutdown. Its dependency on an unbounded request is source-proven; the report's operational timing and server-session consequences were not measured.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-client-node/src/lib.rs:207](../../../../../crates/shamir-client-node/src/lib.rs#L207); [crates/shamir-client-node/src/lib.rs:311](../../../../../crates/shamir-client-node/src/lib.rs#L311); [crates/shamir-client-node/src/lib.rs:133](../../../../../crates/shamir-client-node/src/lib.rs#L133).
+The stalled preceding request prevents close from acquiring the lock. Shortening close's own guard lifetime alone cannot fix that dependency. No operational timing or forced-termination scenario was measured.
 
-Grouping/duplicate: `SUMMARY.md:2.2`. This row is not another independent defect.
+Evidence: [crates/shamir-client-node/src/lib.rs:207](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-client-node/src/lib.rs#L207); [crates/shamir-client-node/src/lib.rs:311](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-client-node/src/lib.rs#L311).
+
+Grouping/duplicate: [SUMMARY.md#2.2](SUMMARY.md#review-2-2). This is not an additional independent defect.
 
 <a id="review-4-2"></a>
 
@@ -179,31 +205,37 @@ Grouping/duplicate: `SUMMARY.md:2.2`. This row is not another independent defect
 
 Status: `confirmed-open`. Current risk: `low`.
 
-The override explicitly copies the entire Buffer through new Uint8Array(buf), then discards decoding results for repl/user creation. Installed MessagePack 3.1.3 decodes binary event blobs as subarray views, so it does not necessarily parse or copy the event contents again. Native Buffer construction copies and 'triple handling' latency were not proven. Partial overlap with 1.5, but the general response copy is broader.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-client-node/wrapper.js:82](../../../../../crates/shamir-client-node/wrapper.js#L82); [crates/shamir-client-node/wrapper.js:109](../../../../../crates/shamir-client-node/wrapper.js#L109); [crates/shamir-client-node/wrapper.js:123](../../../../../crates/shamir-client-node/wrapper.js#L123); [crates/shamir-query-types/src/wire/repl.rs:86](../../../../../crates/shamir-query-types/src/wire/repl.rs#L86); `tests/e2e/node_modules/@msgpack/msgpack/src/Decoder.ts:772` (local dependency evidence; not a committed file).
+new Uint8Array(Buffer) copies the response, and repl/user creation discard decoded results. Exact installed @msgpack/msgpack 3.1.3 returns binary blobs as subarray views rather than parsing their contents. Exact napi 3.10.5 normally transfers Vec storage through an external Buffer, with a copying fallback; a mandatory additional native copy is refuted. Latency/RSS impact remains unmeasured.
+
+Evidence: [crates/shamir-client-node/wrapper.js:82](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-client-node/wrapper.js#L82); [crates/shamir-client-node/wrapper.js:112](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-client-node/wrapper.js#L112); [crates/shamir-client-node/wrapper.js:126](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-client-node/wrapper.js#L126); [crates/shamir-query-types/src/wire/repl.rs:86](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-query-types/src/wire/repl.rs#L86); [@msgpack/msgpack 3.1.3 src/Decoder.ts:772](https://github.com/msgpack/msgpack-javascript/blob/v3.1.3/src/Decoder.ts#L772); [napi 3.10.5 published src/bindgen_runtime/js_values/buffer.rs:401](https://docs.rs/crate/napi/3.10.5/source/src/bindgen_runtime/js_values/buffer.rs); [napi 3.10.5 published src/bindgen_runtime/js_values/buffer.rs:556](https://docs.rs/crate/napi/3.10.5/source/src/bindgen_runtime/js_values/buffer.rs).
 
 <a id="review-4-positive-notes"></a>
 
 ### Claim 4.Positive notes — Positive notes
 
-Status: `not-applicable`. Current risk: —.
+Status: `not-applicable`. Current risk: `—`.
 
-Request I/O is expressed as async Rust operations and the binding enables napi's async feature. However, synchronous wrapper encoding/decoding and copying execute on the JS thread, so 'nothing blocks the JS event loop' is too broad. Fixed arrays have constant-size copies; resumptionTicket clones a variable-length Vec. The number of serialization boundaries is visible, but 'priced correctly' has no measurement support.
+Prior-cycle decision: `not-applicable`.
 
-Evidence: [crates/shamir-client-node/Cargo.toml:39](../../../../../crates/shamir-client-node/Cargo.toml#L39); [crates/shamir-client-node/src/lib.rs:192](../../../../../crates/shamir-client-node/src/lib.rs#L192); [crates/shamir-client-node/src/lib.rs:159](../../../../../crates/shamir-client-node/src/lib.rs#L159); [crates/shamir-client-node/src/lib.rs:178](../../../../../crates/shamir-client-node/src/lib.rs#L178); [crates/shamir-client-node/wrapper.js:82](../../../../../crates/shamir-client-node/wrapper.js#L82); [crates/shamir-client-node/wrapper.js:99](../../../../../crates/shamir-client-node/wrapper.js#L99).
+Native I/O uses async Rust and the pinned napi async feature maps to tokio_rt. Wrapper encode/decode and copies remain synchronous JS work. Fixed-size getters have fixed copying cost; ticket copying is length-dependent. Neither universal event-loop nonblocking behavior nor pricing correctness follows.
+
+Evidence: [crates/shamir-client-node/Cargo.toml:39](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-client-node/Cargo.toml#L39); [crates/shamir-client-node/wrapper.js:82](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-client-node/wrapper.js#L82); [crates/shamir-client-node/wrapper.js:99](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-client-node/wrapper.js#L99); [crates/shamir-client-node/src/lib.rs:178](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-client-node/src/lib.rs#L178); `napi 3.10.5 published Cargo.toml, async and tokio_rt features`.
 
 <a id="review-5-1"></a>
 
 ### Claim 5.1 — *(primary: same as 1.3)* — repl error channel drift: the binding flattens `ReplResponse::Error` into a success buffer, breaking the wire's error taxonomy at the JS boundary
 
-Status: `refuted`. Current risk: —.
+Status: `refuted`. Current risk: `—`.
 
-The wire Error variant, code, message, and leader_epoch are preserved in the returned raw buffer. Existing documentation and the registered denial test distinguish this protocol result from DbResponse::Error exceptions; no flattening or lost taxonomy is demonstrated.
+Prior-cycle decision: `refuted`.
 
-Evidence: [crates/shamir-client-node/src/lib.rs:239](../../../../../crates/shamir-client-node/src/lib.rs#L239); [crates/shamir-client-node/wrapper.d.ts:19](../../../../../crates/shamir-client-node/wrapper.d.ts#L19); [crates/shamir-query-types/src/wire/repl.rs:97](../../../../../crates/shamir-query-types/src/wire/repl.rs#L97); [tests/e2e/tests/16-replication.test.js:235](../../../../../tests/e2e/tests/16-replication.test.js#L235).
+The protocol variant, code, message and fencing epoch survive unchanged in the raw buffer. Successful Promise resolution is the documented and tested raw-result contract, not taxonomy flattening.
 
-Grouping/duplicate: `SUMMARY.md:1.3`. This row is not another independent defect.
+Evidence: [crates/shamir-client-node/src/lib.rs:239](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-client-node/src/lib.rs#L239); [crates/shamir-client-node/wrapper.d.ts:19](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-client-node/wrapper.d.ts#L19); [crates/shamir-query-types/src/wire/repl.rs:97](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-query-types/src/wire/repl.rs#L97); [tests/e2e/tests/16-replication.test.js:235](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/tests/e2e/tests/16-replication.test.js#L235).
+
+Grouping/duplicate: [SUMMARY.md#1.3](SUMMARY.md#review-1-3). This is not an additional independent defect.
 
 <a id="review-5-2"></a>
 
@@ -211,9 +243,11 @@ Grouping/duplicate: `SUMMARY.md:1.3`. This row is not another independent defect
 
 Status: `confirmed-open`. Current risk: `medium`.
 
-The binding still advertises 1:1 parity but lacks resume, connect_local, push subscription, cursor streaming, and server_query_version, while exporting ticket getters. No ticket input exists. The report additionally misquotes ticket getter documentation: persistence instructions belong to the pin getter, not the ticket getter.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-client-node/src/lib.rs:3](../../../../../crates/shamir-client-node/src/lib.rs#L3); [crates/shamir-client-node/src/lib.rs:176](../../../../../crates/shamir-client-node/src/lib.rs#L176); [crates/shamir-client-node/wrapper.d.ts:35](../../../../../crates/shamir-client-node/wrapper.d.ts#L35); [crates/shamir-client-node/wrapper.d.ts:49](../../../../../crates/shamir-client-node/wrapper.d.ts#L49); [crates/shamir-client/src/client.rs:862](../../../../../crates/shamir-client/src/client.rs#L862); [crates/shamir-client/src/client.rs:987](../../../../../crates/shamir-client/src/client.rs#L987); [crates/shamir-client/src/client.rs:996](../../../../../crates/shamir-client/src/client.rs#L996).
+The API is a subset despite its parity statement: resume, connect_local, subscription/cursor APIs, DDL status and server_query_version are absent. Ticket getters exist without an input path, but their docs do not instruct persistence. Correcting the subset documentation is a valid resolution; blindly exposing current core resume is not identity-safe.
+
+Evidence: [crates/shamir-client-node/src/lib.rs:3](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-client-node/src/lib.rs#L3); [crates/shamir-client-node/src/lib.rs:176](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-client-node/src/lib.rs#L176); [crates/shamir-client-node/wrapper.d.ts:49](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-client-node/wrapper.d.ts#L49); [crates/shamir-client/src/client.rs:862](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-client/src/client.rs#L862); [crates/shamir-client/src/client.rs:987](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-client/src/client.rs#L987); [crates/shamir-client/src/client.rs:1194](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-client/src/client.rs#L1194).
 
 <a id="review-5-3"></a>
 
@@ -221,29 +255,35 @@ Evidence: [crates/shamir-client-node/src/lib.rs:3](../../../../../crates/shamir-
 
 Status: `confirmed-open`. Current risk: `medium`.
 
-The binding's declaration remains object→object and its example hand-assembles queries, without exported batch types or a documented builder integration. However, TS builders produce ordinary wire objects usable as execute inputs; existing Node tests demonstrate that integration structurally. Batch.execute itself requires executeWithTouch, which this binding lacks. Omitting return_all is intentional and valid, not a failure.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-client-node/src/lib.rs:19](../../../../../crates/shamir-client-node/src/lib.rs#L19); [crates/shamir-client-node/wrapper.d.ts:58](../../../../../crates/shamir-client-node/wrapper.d.ts#L58); [crates/shamir-client-ts/src/core/builders/batch.ts:334](../../../../../crates/shamir-client-ts/src/core/builders/batch.ts#L334); [crates/shamir-client-ts/src/core/builders/batch.ts:370](../../../../../crates/shamir-client-ts/src/core/builders/batch.ts#L370); [tests/e2e/tests/02-basic-crud.test.js:32](../../../../../tests/e2e/tests/02-basic-crud.test.js#L32); [crates/shamir-query-types/src/batch/batch_request.rs:90](../../../../../crates/shamir-query-types/src/batch/batch_request.rs#L90); [CLAUDE.md:546](../../../../../CLAUDE.md#L546).
+The hand-assembled example and object-to-object declaration remain underspecified. Existing Node tests prove structural integration with TS builders for their exercised values; different client classes do not prohibit passing built objects. Batch.execute requires executeWithTouch, which is absent. Omitted return_all is valid. Full builder compatibility additionally requires resolving the BigInt codec gap, not merely documenting batch.build().
+
+Evidence: [CLAUDE.md:546](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/CLAUDE.md#L546); [crates/shamir-client-node/src/lib.rs:19](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-client-node/src/lib.rs#L19); [crates/shamir-client-node/wrapper.d.ts:58](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-client-node/wrapper.d.ts#L58); [crates/shamir-client-ts/src/core/builders/batch.ts:334](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-client-ts/src/core/builders/batch.ts#L334); [crates/shamir-client-ts/src/core/builders/batch.ts:370](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-client-ts/src/core/builders/batch.ts#L370); [tests/e2e/helpers/fixtures.js:23](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/tests/e2e/helpers/fixtures.js#L23); [crates/shamir-query-types/src/batch/batch_request.rs:90](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-query-types/src/batch/batch_request.rs#L90).
 
 <a id="review-5-4"></a>
 
 ### Claim 5.4 — `set_replicator` success buffer is fabricated from caller inputs, not the server echo
 
-Status: `confirmed-open`. Current risk: `low`.
+Status: `not-applicable`. Current risk: `—`.
 
-The core discards echoed fields and the binding reconstructs them from input, so the structural observation remains. Today's server explicitly echoes exactly those inputs, and the wrapper's public result is void. Canonical-name corruption is hypothetical, not a current defect; any action is primarily documentation hygiene.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-client/src/client.rs:1147](../../../../../crates/shamir-client/src/client.rs#L1147); [crates/shamir-client-node/src/lib.rs:291](../../../../../crates/shamir-client-node/src/lib.rs#L291); [crates/shamir-client-node/src/lib.rs:297](../../../../../crates/shamir-client-node/src/lib.rs#L297); [crates/shamir-server/src/db_handler/admin.rs:393](../../../../../crates/shamir-server/src/db_handler/admin.rs#L393); [crates/shamir-client-node/wrapper.js:148](../../../../../crates/shamir-client-node/wrapper.js#L148); [crates/shamir-client-node/wrapper.d.ts:66](../../../../../crates/shamir-client-node/wrapper.d.ts#L66).
+Reconstruction occurs, but the current server returns those exact user/on inputs and the public wrapper returns void. No caller can persist a fabricated canonical name through that result. Future server normalization is a prospective compatibility consideration, not a current violated guarantee requiring a core signature change.
+
+Evidence: [crates/shamir-server/src/db_handler/admin.rs:393](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-server/src/db_handler/admin.rs#L393); [crates/shamir-client/src/client.rs:1147](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-client/src/client.rs#L1147); [crates/shamir-client-node/src/lib.rs:297](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-client-node/src/lib.rs#L297); [crates/shamir-client-node/wrapper.js:148](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-client-node/wrapper.js#L148); [crates/shamir-client-node/wrapper.d.ts:66](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-client-node/wrapper.d.ts#L66).
 
 <a id="review-5-5"></a>
 
 ### Claim 5.5 — Generated loader's platform packages are unpublished/undeclared: every non-win32-x64-msvc path is dead
 
-Status: `unverified`. Current risk: `low` (provisional; not a confirmed defect).
+Status: `unverified`. Current risk: `low`.
 
-Six build targets and no optionalDependencies are confirmed, but publication state and packed artifacts were not inspected. Every supported loader branch first accepts a locally built native file, so non-Windows paths are not intrinsically dead. No native binary is committed or currently present in the binding directory, including the supposedly shipped MSVC binary.
+Prior-cycle decision: `unverified`.
 
-Evidence: [crates/shamir-client-node/package.json:20](../../../../../crates/shamir-client-node/package.json#L20); [crates/shamir-client-node/package.json:33](../../../../../crates/shamir-client-node/package.json#L33); [crates/shamir-client-node/index.js:126](../../../../../crates/shamir-client-node/index.js#L126); [crates/shamir-client-node/index.js:193](../../../../../crates/shamir-client-node/index.js#L193); [crates/shamir-client-node/index.js:283](../../../../../crates/shamir-client-node/index.js#L283); [.gitignore:28](../../../../../.gitignore#L28); [tests/e2e/README.md:39](../../../../../tests/e2e/README.md#L39).
+No optionalDependencies are declared, but every listed supported platform can load a locally supplied native file first. No binary is committed or presently in the binding directory. Publication/packed-artifact claims remain unverified, and the root README explicitly describes source-first distribution.
+
+Evidence: [README.md:18](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/README.md#L18); [crates/shamir-client-node/package.json:20](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-client-node/package.json#L20); [crates/shamir-client-node/package.json:33](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-client-node/package.json#L33); [crates/shamir-client-node/index.js:126](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-client-node/index.js#L126); [crates/shamir-client-node/index.js:193](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-client-node/index.js#L193); [crates/shamir-client-node/index.js:283](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-client-node/index.js#L283); [.gitignore:29](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/.gitignore#L29).
 
 <a id="review-6-1"></a>
 
@@ -251,61 +291,73 @@ Evidence: [crates/shamir-client-node/package.json:20](../../../../../crates/sham
 
 Status: `confirmed-open`. Current risk: `medium`.
 
-A request can hold the sole binding mutex indefinitely, preventing close from reaching core shutdown. Idempotence after successful completion does not provide shutdown responsiveness under stalls.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-client-node/src/lib.rs:207](../../../../../crates/shamir-client-node/src/lib.rs#L207); [crates/shamir-client-node/src/lib.rs:308](../../../../../crates/shamir-client-node/src/lib.rs#L308); [crates/shamir-client-node/src/lib.rs:311](../../../../../crates/shamir-client-node/src/lib.rs#L311).
+Close is idempotent after completion, but cannot interrupt an unanswered request holding the same mutex. This is the same shutdown-responsiveness mechanism as 2.2.
 
-Grouping/duplicate: `SUMMARY.md:2.2`. This row is not another independent defect.
+Evidence: [crates/shamir-client-node/src/lib.rs:207](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-client-node/src/lib.rs#L207); [crates/shamir-client-node/src/lib.rs:308](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-client-node/src/lib.rs#L308); [crates/shamir-client-node/src/lib.rs:311](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-client-node/src/lib.rs#L311).
+
+Grouping/duplicate: [SUMMARY.md#2.2](SUMMARY.md#review-2-2). This is not an additional independent defect.
 
 <a id="review-6-2"></a>
 
 ### Claim 6.2 — Infrastructure errors lose all taxonomy crossing the boundary
 
-Status: `confirmed-open`. Current risk: `low`.
+Status: `not-applicable`. Current risk: `—`.
 
-infra_error still converts every ClientError variant to display text through Error::from_reason, discarding variant-specific identity and structured payloads. The report overstates this as absence of any name/code: a generic JS/napi error identity is different from preserving ClientError taxonomy.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-client-node/src/lib.rs:351](../../../../../crates/shamir-client-node/src/lib.rs#L351); [crates/shamir-client/src/error.rs:5](../../../../../crates/shamir-client/src/error.rs#L5); [crates/shamir-client/src/error.rs:44](../../../../../crates/shamir-client/src/error.rs#L44); [crates/shamir-client/src/error.rs:54](../../../../../crates/shamir-client/src/error.rs#L54).
+Variant-specific core information is reduced to display text, but this is an explicitly documented plain-error boundary; stable infrastructure variant codes are not promised. Published napi 3.10.5 supplies GenericFailure as the generic error code, so absence of any code/name is also false. A richer taxonomy is an optional API enhancement, separate from the promised DB-error properties.
+
+Evidence: [crates/shamir-client-node/src/lib.rs:340](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-client-node/src/lib.rs#L340); [crates/shamir-client-node/src/lib.rs:351](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-client-node/src/lib.rs#L351); [crates/shamir-client-node/wrapper.d.ts:19](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-client-node/wrapper.d.ts#L19); [crates/shamir-client/src/error.rs:5](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-client/src/error.rs#L5); `napi 3.10.5 published src/error.rs, Error::from_reason and JsError conversion`.
 
 <a id="review-6-3"></a>
 
 ### Claim 6.3 — No Drop/finalization: a GC'd-without-close client leaks the TCP connection and server session until expiry
 
-Status: `refuted`. Current risk: —.
+Status: `refuted`. Current risk: `—`.
 
-Dropping the binding's owned Option<Client> invokes core Client::Drop, which aborts the reader task; the writer is an owned field, not a detached socket owner. This cleanup predates the review. Exact napi GC timing is unverified, but the asserted absence of core cleanup is false. Server teardown also does not evict the session immediately after explicit close, so retained session state cannot be attributed specifically to missing binding Drop.
+Prior-cycle decision: `refuted`.
 
-Evidence: [crates/shamir-client-node/src/lib.rs:82](../../../../../crates/shamir-client-node/src/lib.rs#L82); [crates/shamir-client/src/client.rs:1316](../../../../../crates/shamir-client/src/client.rs#L1316); [crates/shamir-client/src/client.rs:649](../../../../../crates/shamir-client/src/client.rs#L649); [crates/shamir-server/src/connection/request_loop.rs:410](../../../../../crates/shamir-server/src/connection/request_loop.rs#L410); [crates/shamir-connect/src/server/session.rs:539](../../../../../crates/shamir-connect/src/server/session.rs#L539).
+Exact napi finalization consumes the boxed binding object, whose owned client invokes core Drop and aborts the reader. Writer ownership is also released. This cleanup predates the audit. Pending calls may delay GC, and server session retention occurs after explicit close too; neither establishes the asserted missing-finalizer leak.
+
+Evidence: [crates/shamir-client-node/src/lib.rs:82](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-client-node/src/lib.rs#L82); [crates/shamir-client/src/client.rs:1316](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-client/src/client.rs#L1316); [napi 3.10.5 published src/bindgen_runtime/mod.rs:51](https://docs.rs/crate/napi/3.10.5/source/src/bindgen_runtime/mod.rs); `napi-derive-backend 5.1.2 published src/codegen/struct.rs, generated ObjectFinalize implementation`; [crates/shamir-server/src/connection/request_loop.rs:410](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-server/src/connection/request_loop.rs#L410); [crates/shamir-connect/src/server/session.rs:539](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-connect/src/server/session.rs#L539).
 
 <a id="review-6-4"></a>
 
 ### Claim 6.4 — `encode_db_error`'s own failure path degrades to a plain Error (acceptable, but untested and undocumented)
 
-Status: `not-applicable`. Current risk: —.
+Status: `not-applicable`. Current risk: `—`.
 
-The explicit serialization-error fallback remains, but the encoded value contains only owned Strings and no ordinary reachable serializer failure was established. This accepted fallback is not an actionable runtime defect; tests should prioritize real marker compatibility rather than manufacturing an unreachable branch.
+Prior-cycle decision: `not-applicable`.
 
-Evidence: [crates/shamir-client-node/src/lib.rs:361](../../../../../crates/shamir-client-node/src/lib.rs#L361); [crates/shamir-query-types/src/wire/db_message.rs:316](../../../../../crates/shamir-query-types/src/wire/db_message.rs#L316).
+The plain-error fallback is explicit and reasonable, not an established violation of the promised DB-error surface. Exact rmp-serde 1.3.1's fallible Vec writer can return a reservation error for supported owned-string markers, so the fallback must not be called intrinsically unreachable. Its presence avoids an unconditional panic; preserve it and separately test real marker shape/property compatibility. This is conditional codec/resource behavior, not a claim about every separately resolved Node dependency graph.
+
+Evidence: [crates/shamir-client-node/src/lib.rs:361](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-client-node/src/lib.rs#L361); [crates/shamir-query-types/src/wire/db_message.rs:316](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-query-types/src/wire/db_message.rs#L316); [crates/shamir-transport-tcp/src/framing.rs:15](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-transport-tcp/src/framing.rs#L15).
 
 <a id="review-7-1"></a>
 
 ### Claim 7.1 — `src/lib.rs` carries multiple primary exports; error-mapping helpers belong in a sibling file
 
-Status: `refuted`. Current risk: —.
+Status: `refuted`. Current risk: `—`.
 
-CLAUDE permits a closely coupled group in one file. ConnectOptions, ShamirClient, and its private boundary helpers form such a group; private helper functions are not unrelated primary public exports. Splitting is optional organization, not a demonstrated convention violation. Stale decoder references remain separately covered by 7.4.
+Prior-cycle decision: `refuted`.
 
-Evidence: [CLAUDE.md:505](../../../../../CLAUDE.md#L505); [crates/shamir-client-node/src/lib.rs:52](../../../../../crates/shamir-client-node/src/lib.rs#L52); [crates/shamir-client-node/src/lib.rs:81](../../../../../crates/shamir-client-node/src/lib.rs#L81); [crates/shamir-client-node/src/lib.rs:351](../../../../../crates/shamir-client-node/src/lib.rs#L351); [crates/shamir-client-node/src/lib.rs:361](../../../../../crates/shamir-client-node/src/lib.rs#L361).
+The project permits a closely coupled group. Connection options, the binding class and its private boundary helpers form that group. Private helper functions are not unrelated primary exports; splitting is optional organization.
+
+Evidence: [CLAUDE.md:505](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/CLAUDE.md#L505); [crates/shamir-client-node/src/lib.rs:52](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-client-node/src/lib.rs#L52); [crates/shamir-client-node/src/lib.rs:81](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-client-node/src/lib.rs#L81); [crates/shamir-client-node/src/lib.rs:351](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-client-node/src/lib.rs#L351).
 
 <a id="review-7-2"></a>
 
 ### Claim 7.2 — Test layout violates the repo convention: no `tests/` directory, no automated runner
 
-Status: `refuted`. Current risk: —.
+Status: `refuted`. Current risk: `—`.
 
-An automated Node runner exists and is wired into nightly CI. The Rust layout rule applies to modules containing tests; absence of Rust unit tests is a coverage gap, not proof of an incorrectly laid-out test module. Targeted typed-marker coverage remains open under 1.4/P1.8.
+Prior-cycle decision: `refuted`.
 
-Evidence: [tests/e2e/helpers/runner.js:106](../../../../../tests/e2e/helpers/runner.js#L106); [tests/e2e/e2e.test.js:51](../../../../../tests/e2e/e2e.test.js#L51); [.github/workflows/ts-e2e-nightly.yml:162](../../../../../.github/workflows/ts-e2e-nightly.yml#L162); [CLAUDE.md:573](../../../../../CLAUDE.md#L573); [crates/shamir-client-node/src/lib.rs:366](../../../../../crates/shamir-client-node/src/lib.rs#L366).
+The Node runner and nightly registration exist. There is no Rust test module whose layout violates the per-module rule; lack of Rust unit coverage is a coverage gap, not an orphaned-module/layout violation. Workspace exclusion is intentional.
+
+Evidence: [CLAUDE.md:573](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/CLAUDE.md#L573); [Cargo.toml:14](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/Cargo.toml#L14); [tests/e2e/helpers/runner.js:106](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/tests/e2e/helpers/runner.js#L106); [tests/e2e/e2e.test.js:51](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/tests/e2e/e2e.test.js#L51); [.github/workflows/ts-e2e-nightly.yml:162](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/.github/workflows/ts-e2e-nightly.yml#L162).
 
 <a id="review-7-3"></a>
 
@@ -313,9 +365,11 @@ Evidence: [tests/e2e/helpers/runner.js:106](../../../../../tests/e2e/helpers/run
 
 Status: `confirmed-open`. Current risk: `nit`.
 
-The repl boundary explains its raw-serde exception while execute does not. Both deserialize incoming bytes rather than constructing queries; the missing explanation is comment hygiene, not a runtime defect.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-client-node/src/lib.rs:205](../../../../../crates/shamir-client-node/src/lib.rs#L205); [crates/shamir-client-node/src/lib.rs:231](../../../../../crates/shamir-client-node/src/lib.rs#L231); [CLAUDE.md:554](../../../../../CLAUDE.md#L554).
+Both operations deserialize incoming FFI bytes rather than constructing queries. Only repl explicitly explains the sanctioned exception. This is scoped comment hygiene, not a decoding or builder-construction defect.
+
+Evidence: [CLAUDE.md:554](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/CLAUDE.md#L554); [crates/shamir-client-node/src/lib.rs:205](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-client-node/src/lib.rs#L205); [crates/shamir-client-node/src/lib.rs:231](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-client-node/src/lib.rs#L231).
 
 <a id="review-7-4"></a>
 
@@ -323,263 +377,364 @@ Evidence: [crates/shamir-client-node/src/lib.rs:205](../../../../../crates/shami
 
 Status: `confirmed-open`. Current risk: `nit`.
 
-The proof and native implementation still identify index.js as the decoder, while package.json selects wrapper.js and index.js is only the generated loader.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-client-node/proof-typed-errors.js:10](../../../../../crates/shamir-client-node/proof-typed-errors.js#L10); [crates/shamir-client-node/proof-typed-errors.js:67](../../../../../crates/shamir-client-node/proof-typed-errors.js#L67); [crates/shamir-client-node/src/lib.rs:213](../../../../../crates/shamir-client-node/src/lib.rs#L213); [crates/shamir-client-node/src/lib.rs:336](../../../../../crates/shamir-client-node/src/lib.rs#L336); [crates/shamir-client-node/package.json:5](../../../../../crates/shamir-client-node/package.json#L5).
+Native comments and the copied proof point to the generated loader as the decoder, although package.json selects wrapper.js. The stale references remain and can misdirect maintenance.
+
+Evidence: [crates/shamir-client-node/proof-typed-errors.js:10](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-client-node/proof-typed-errors.js#L10); [crates/shamir-client-node/proof-typed-errors.js:67](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-client-node/proof-typed-errors.js#L67); [crates/shamir-client-node/src/lib.rs:213](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-client-node/src/lib.rs#L213); [crates/shamir-client-node/src/lib.rs:336](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-client-node/src/lib.rs#L336); [crates/shamir-client-node/package.json:5](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-client-node/package.json#L5).
 
 <a id="review-executive-summary"></a>
 
 ### Claim Executive summary — Executive summary
 
-Status: `refuted`. Current risk: —.
+Status: `refuted`. Current risk: `—`.
 
-DNS/IPv6 and absent timeout concerns remain. The categorical dead-wrapper blocker is refuted by receiver-sensitive pinned N-API factory code, and the repl-error blocker contradicts the deliberate raw-response contract. No blanket shippability verdict or execution success follows.
+Prior-cycle decision: `refuted`.
 
-Evidence: [crates/shamir-client-node/src/lib.rs:100](../../../../../crates/shamir-client-node/src/lib.rs#L100); [crates/shamir-client-node/src/lib.rs:132](../../../../../crates/shamir-client-node/src/lib.rs#L132); [crates/shamir-client-node/wrapper.d.ts:19](../../../../../crates/shamir-client-node/wrapper.d.ts#L19); [tests/e2e/tests/16-replication.test.js:235](../../../../../tests/e2e/tests/16-replication.test.js#L235).
+The dead-wrapper and repl-error shipping blockers are contradicted by exact factory semantics and the intentional raw-result contract. Address and availability defects remain, and fresh ownership/integer-fidelity evidence requires attention. This bounded inspection cannot supply a blanket shippability or runtime-success verdict.
 
-Pinned dependency evidence: [napi 3.10.5, src/bindgen_runtime/callback_info.rs:27](https://docs.rs/crate/napi/3.10.5/source/src/bindgen_runtime/callback_info.rs); [napi 3.10.5, src/bindgen_runtime/callback_info.rs:199](https://docs.rs/crate/napi/3.10.5/source/src/bindgen_runtime/callback_info.rs); [napi-derive-backend 5.1.2, src/codegen/fn.rs:275](https://docs.rs/crate/napi-derive-backend/5.1.2/source/src/codegen/fn.rs); [napi-derive-backend 5.1.2, src/codegen/fn.rs:820](https://docs.rs/crate/napi-derive-backend/5.1.2/source/src/codegen/fn.rs).
+Evidence: [crates/shamir-client-node/Cargo.toml:39](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-client-node/Cargo.toml#L39); [crates/shamir-client-node/src/lib.rs:100](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-client-node/src/lib.rs#L100); [crates/shamir-client-node/src/lib.rs:132](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-client-node/src/lib.rs#L132); [crates/shamir-client-node/wrapper.js:93](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-client-node/wrapper.js#L93); [tests/e2e/tests/16-replication.test.js:235](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/tests/e2e/tests/16-replication.test.js#L235).
 
 <a id="review-finding-counts"></a>
 
 ### Claim Finding counts — Finding counts
 
-Status: `not-applicable`. Current risk: —.
+Status: `not-applicable`. Current risk: `—`.
 
-The original arithmetic correctly counts 28 lens rows and 25 groups using its three duplicate reductions. It is not a current verified-defect census: several rows are refuted, unverified, accepted fallbacks, or documentation-only observations. No source-proven critical defect was established.
+Prior-cycle decision: `not-applicable`.
 
-Evidence: [docs/dev-artifacts/audits/2026-08-14-cross-crate-rush-review/shamir-client-node/SUMMARY.md:475](../../../../../docs/dev-artifacts/audits/2026-08-14-cross-crate-rush-review/shamir-client-node/SUMMARY.md) (line at source snapshot `92ad5826`, before this revalidation prefix).
+Historical arithmetic counts 28 lens rows and 25 groups, not 25 proven defects. This revalidation yields 16 open, 8 refuted, 1 unverified and 7 not-applicable current claim rows, with no fixed/partially-fixed rows. These include duplicate roots, documentation issues and structural cost observations; the two fresh mechanisms are additional.
 
-## Current fix-plan state
+Evidence: [docs/dev-artifacts/audits/2026-08-14-cross-crate-rush-review/shamir-client-node/SUMMARY.md:12](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/docs/dev-artifacts/audits/2026-08-14-cross-crate-rush-review/shamir-client-node/SUMMARY.md#L12); [docs/dev-artifacts/audits/2026-08-14-cross-crate-rush-review/shamir-client-node/SUMMARY.md:344](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/docs/dev-artifacts/audits/2026-08-14-cross-crate-rush-review/shamir-client-node/SUMMARY.md#L344); [docs/dev-artifacts/audits/2026-08-14-cross-crate-rush-review/shamir-client-node/SUMMARY.md:1071](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/docs/dev-artifacts/audits/2026-08-14-cross-crate-rush-review/shamir-client-node/SUMMARY.md#L1071).
 
-| Claim decisions | Open | Source-fixed | Partial | Refuted | Unverified | N/A |
+## Revalidated plan decisions
+
+| Plan decisions | Open | Source-fixed | Partial | Refuted | Unverified | N/A |
 |---:|---:|---:|---:|---:|---:|---:|
-| 18 | 13 | 0 | 0 | 0 | 2 | 3 |
+| 18 | 10 | 0 | 0 | 0 | 1 | 7 |
 
-A source-fixed item closes only its stated mechanism. Partial items retain the obligations named below; proposed fixes must obey the corrections and current contracts, not merely copy the historical recipe.
+Historical P0/P1/P2 numbering is an identifier, not a current release mandate. The reasons below include completion status, safety qualifications and discriminating acceptance requirements.
 
 <a id="plan-p0-1"></a>
 
 ### Plan P0.1 — P0.1
 
-Status: `not-applicable`. Current risk: —.
+Status: `not-applicable`.
 
-The proposed static override is not required to repair the alleged prototype defect: pinned factory code creates through the JS receiver. A direct public-wrapper/prototype regression is still useful coverage, but its absence does not establish a shipping blocker.
+Prior-cycle decision: `not-applicable`.
 
-Evidence: [crates/shamir-client-node/wrapper.js:93](../../../../../crates/shamir-client-node/wrapper.js#L93); [crates/shamir-client-node/Cargo.toml:39](../../../../../crates/shamir-client-node/Cargo.toml#L39); [tests/e2e/e2e.test.js:35](../../../../../tests/e2e/e2e.test.js#L35); [tests/e2e/tests/02-basic-crud.test.js:19](../../../../../tests/e2e/tests/02-basic-crud.test.js#L19).
+Receiver-sensitive construction already supports the wrapper. A public connect/prototype regression oracle is useful, but a static override/reprototype operation is not a required repair.
 
-Pinned dependency evidence: [napi 3.10.5, src/bindgen_runtime/callback_info.rs:27](https://docs.rs/crate/napi/3.10.5/source/src/bindgen_runtime/callback_info.rs); [napi 3.10.5, src/bindgen_runtime/callback_info.rs:199](https://docs.rs/crate/napi/3.10.5/source/src/bindgen_runtime/callback_info.rs); [napi-derive-backend 5.1.2, src/codegen/fn.rs:275](https://docs.rs/crate/napi-derive-backend/5.1.2/source/src/codegen/fn.rs); [napi-derive-backend 5.1.2, src/codegen/fn.rs:820](https://docs.rs/crate/napi-derive-backend/5.1.2/source/src/codegen/fn.rs).
+Evidence: [crates/shamir-client-node/wrapper.js:93](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-client-node/wrapper.js#L93); [napi 3.10.5 published src/bindgen_runtime/callback_info.rs:199](https://docs.rs/crate/napi/3.10.5/source/src/bindgen_runtime/callback_info.rs); [tests/e2e/tests/02-basic-crud.test.js:19](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/tests/e2e/tests/02-basic-crud.test.js#L19).
 
 <a id="plan-p0-2"></a>
 
 ### Plan P0.2 — P0.2
 
-Status: `not-applicable`. Current risk: —.
+Status: `not-applicable`.
 
-The proposed repl-error conversion contradicts the existing raw-buffer result contract and registered bad_role test. Preserve leader_epoch and distinguish protocol Error results from DbResponse::Error exceptions unless deliberately changing the API.
+Prior-cycle decision: `not-applicable`.
 
-Evidence: [crates/shamir-client-node/wrapper.d.ts:19](../../../../../crates/shamir-client-node/wrapper.d.ts#L19); [crates/shamir-query-types/src/wire/repl.rs:97](../../../../../crates/shamir-query-types/src/wire/repl.rs#L97); [tests/e2e/tests/16-replication.test.js:235](../../../../../tests/e2e/tests/16-replication.test.js#L235).
+Converting repl_kind:error into the DB-error marker would break the registered raw-response contract and can lose leader_epoch. Preserve the two error channels unless making an explicitly versioned API change.
+
+Evidence: [crates/shamir-query-types/src/wire/repl.rs:97](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-query-types/src/wire/repl.rs#L97); [crates/shamir-client-node/wrapper.js:104](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-client-node/wrapper.js#L104); [tests/e2e/tests/16-replication.test.js:235](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/tests/e2e/tests/16-replication.test.js#L235).
 
 <a id="plan-p0-3"></a>
 
 ### Plan P0.3 — P0.3
 
-Status: `confirmed-open`. Current risk: —.
+Status: `confirmed-open`.
 
-Neither IpAddr-based IPv6 construction nor DNS lookup exists. Host parsing and its documented behavior still need alignment.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-client-node/src/lib.rs:53](../../../../../crates/shamir-client-node/src/lib.rs#L53); [crates/shamir-client-node/src/lib.rs:100](../../../../../crates/shamir-client-node/src/lib.rs#L100).
+DNS resolution and ordinary IPv6 construction remain absent. IpAddr plus SocketAddr::new is suitable, but the recipe must preserve previously accepted bracketed IPv6, keep TLS serverName/pin semantics independent of address resolution, and define address-selection/deadline behavior.
+
+Evidence: [crates/shamir-client-node/src/lib.rs:53](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-client-node/src/lib.rs#L53); [crates/shamir-client-node/src/lib.rs:100](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-client-node/src/lib.rs#L100); [crates/shamir-client-node/src/lib.rs:125](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-client-node/src/lib.rs#L125).
 
 <a id="plan-p0-4"></a>
 
 ### Plan P0.4 — P0.4
 
-Status: `confirmed-open`. Current risk: —.
+Status: `confirmed-open`.
 
-Timeout fields remain absent and both core options are None. Exposing the existing knobs is only partial mitigation: full handshake, request lock acquisition, and writes remain outside their current bounds.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-client-node/wrapper.d.ts:35](../../../../../crates/shamir-client-node/wrapper.d.ts#L35); [crates/shamir-client-node/src/lib.rs:132](../../../../../crates/shamir-client-node/src/lib.rs#L132); [crates/shamir-client/src/client.rs:478](../../../../../crates/shamir-client/src/client.rs#L478); [crates/shamir-client/src/client.rs:1277](../../../../../crates/shamir-client/src/client.rs#L1277); [crates/shamir-client/src/client.rs:1290](../../../../../crates/shamir-client/src/client.rs#L1290).
+Both knobs remain None. Merely surfacing them leaves DNS/full TLS-SCRAM, lock waits and writes outside the existing budgets. Define whole-operation terminal deadlines and pending-entry cleanup; a timed-out write/request must not be treated as proof that the server performed no mutation.
+
+Evidence: [crates/shamir-client-node/src/lib.rs:132](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-client-node/src/lib.rs#L132); [crates/shamir-client/src/client.rs:479](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-client/src/client.rs#L479); [crates/shamir-client/src/client.rs:1277](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-client/src/client.rs#L1277); [crates/shamir-client/src/client.rs:1290](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-client/src/client.rs#L1290).
 
 <a id="plan-p1-5"></a>
 
 ### Plan P1.5 — P1.5
 
-Status: `confirmed-open`. Current risk: —.
+Status: `confirmed-open`.
 
-Close still retains its guard during shutdown. Taking-and-releasing fixes that holding scope but cannot let close bypass a request already holding the same mutex; coordinate with P1.6. Core reader abort also does not execute its normal EOF drain, so the proposed guaranteed ConnectionClosed delivery requires additional lifecycle design.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-client-node/src/lib.rs:311](../../../../../crates/shamir-client-node/src/lib.rs#L311); [crates/shamir-client-node/src/lib.rs:207](../../../../../crates/shamir-client-node/src/lib.rs#L207); [crates/shamir-client/src/client.rs:407](../../../../../crates/shamir-client/src/client.rs#L407); [crates/shamir-client/src/client.rs:1308](../../../../../crates/shamir-client/src/client.rs#L1308).
+Taking the client then releasing close's guard shortens only its own holding scope; it cannot bypass a request already holding the mutex. Coordinate with ownership redesign. Core reader abort skips its normal EOF drain, so explicit pending settlement and admission closure are required before promising ConnectionClosed delivery.
+
+Evidence: [crates/shamir-client-node/src/lib.rs:207](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-client-node/src/lib.rs#L207); [crates/shamir-client-node/src/lib.rs:311](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-client-node/src/lib.rs#L311); [crates/shamir-client/src/client.rs:407](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-client/src/client.rs#L407); [crates/shamir-client/src/client.rs:1306](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-client/src/client.rs#L1306).
 
 <a id="plan-p1-6"></a>
 
 ### Plan P1.6 — P1.6
 
-Status: `confirmed-open`. Current risk: —.
+Status: `confirmed-open`.
 
-The binding still holds its exclusive mutex across roundtrips. Clone-out/shared ownership needs a close mechanism that works with active references; Arc::try_unwrap alone cannot reliably close while callers retain Arcs.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-client-node/src/lib.rs:82](../../../../../crates/shamir-client-node/src/lib.rs#L82); [crates/shamir-client-node/src/lib.rs:215](../../../../../crates/shamir-client-node/src/lib.rs#L215); [crates/shamir-client/src/client.rs:1306](../../../../../crates/shamir-client/src/client.rs#L1306).
+The exclusive guard still spans roundtrips. Shared clone-out must include a shutdown mechanism usable while references are active; Arc::try_unwrap is not reliable under those conditions. Preserve request correlation and define cancellation of partially written frames as terminal transport cleanup.
+
+Evidence: [crates/shamir-client-node/src/lib.rs:82](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-client-node/src/lib.rs#L82); [crates/shamir-client-node/src/lib.rs:215](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-client-node/src/lib.rs#L215); [crates/shamir-client/src/client.rs:1233](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-client/src/client.rs#L1233); [crates/shamir-client/src/client.rs:1306](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-client/src/client.rs#L1306).
 
 <a id="plan-p1-7"></a>
 
 ### Plan P1.7 — P1.7
 
-Status: `unverified`. Current risk: —.
+Status: `not-applicable`.
 
-No catch_unwind attributes were added. Before treating blanket annotations as a required fix, establish pinned napi async/sync panic behavior and an actual reachable panic. The cited pin expect is source-protected by successful handshake processing.
+Prior-cycle decision: `unverified`.
 
-Evidence: [crates/shamir-client-node/src/lib.rs:96](../../../../../crates/shamir-client-node/src/lib.rs#L96); [crates/shamir-client-node/Cargo.toml:39](../../../../../crates/shamir-client-node/Cargo.toml#L39); [crates/shamir-client/src/client.rs:631](../../../../../crates/shamir-client/src/client.rs#L631); [crates/shamir-connect/src/client/handshake.rs:266](../../../../../crates/shamir-connect/src/client/handshake.rs#L266).
+No concrete cited panic mechanism requires blanket annotations: pinned napi already rejects unwinding async-body panics, and the pin expect has a proved invariant. Generated catch_unwind around setup is not a substitute for polling-time handling, nor can it fix Buffer undefined behavior or non-unwinding failures. Sync resolver/finalizer containment remains a separately scoped question.
+
+Evidence: [crates/shamir-client-node/Cargo.toml:39](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-client-node/Cargo.toml#L39); [crates/shamir-connect/src/client/handshake.rs:266](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-connect/src/client/handshake.rs#L266); [napi 3.10.5 published src/tokio_runtime.rs:299](https://docs.rs/crate/napi/3.10.5/source/src/tokio_runtime.rs); `napi-derive-backend 5.1.2 published src/codegen/fn.rs, native_call and catch_unwind generation`.
 
 <a id="plan-p1-8"></a>
 
 ### Plan P1.8 — P1.8
 
-Status: `confirmed-open`. Current risk: —.
+Status: `confirmed-open`.
 
-Direct typed-marker and Rust→JS byte-compatibility tests remain absent; the copied proof remains unsuitable as the production-wrapper oracle. Reuse the existing wired e2e lane and assert actual error properties. Exporting an internal decoder is not required if public wrapper methods are tested.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-client-node/proof-typed-errors.js:67](../../../../../crates/shamir-client-node/proof-typed-errors.js#L67); [crates/shamir-client-node/package.json:29](../../../../../crates/shamir-client-node/package.json#L29); [tests/e2e/tests/09-errors.test.js:33](../../../../../tests/e2e/tests/09-errors.test.js#L33); [.github/workflows/ts-e2e-nightly.yml:162](../../../../../.github/workflows/ts-e2e-nightly.yml#L162).
+Actual typed-property and cross-language marker oracles remain absent. Extend the existing public-wrapper lane; assert code/retryable/detail and exercise the valid 16-byte raw-ID collision. Use Rust-produced bytes or independent golden fixtures. Exporting private decoder helpers or copying detection logic is unnecessary and weakens the oracle.
+
+Evidence: [tests/e2e/tests/09-errors.test.js:33](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/tests/e2e/tests/09-errors.test.js#L33); [crates/shamir-client-node/proof-typed-errors.js:67](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-client-node/proof-typed-errors.js#L67); [crates/shamir-client-node/src/lib.rs:361](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-client-node/src/lib.rs#L361); [.github/workflows/ts-e2e-nightly.yml:162](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/.github/workflows/ts-e2e-nightly.yml#L162).
 
 <a id="plan-p1-9"></a>
 
 ### Plan P1.9 — P1.9
 
-Status: `confirmed-open`. Current risk: —.
+Status: `not-applicable`.
 
-Infrastructure errors still carry display text rather than stable variant-specific codes or structured causes.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-client-node/src/lib.rs:351](../../../../../crates/shamir-client-node/src/lib.rs#L351); [crates/shamir-client/src/error.rs:5](../../../../../crates/shamir-client/src/error.rs#L5).
+Stable infrastructure variant codes would be an API enhancement, not completion of a currently promised contract. Error::new(GenericFailure, ...) still supplies only the generic code; setting properties requires a real JS-value/resolver mechanism, not a property operation on an ordinary Rust napi::Error.
+
+Evidence: [crates/shamir-client-node/src/lib.rs:340](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-client-node/src/lib.rs#L340); [crates/shamir-client-node/src/lib.rs:351](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-client-node/src/lib.rs#L351); `napi 3.10.5 published src/error.rs, JsError conversion`; [napi 3.10.5 published src/tokio_runtime.rs:256](https://docs.rs/crate/napi/3.10.5/source/src/tokio_runtime.rs).
 
 <a id="plan-p2-10"></a>
 
 ### Plan P2.10 — P2.10
 
-Status: `confirmed-open`. Current risk: —.
+Status: `confirmed-open`.
 
-Discarded decoding and explicit Buffer copies remain. Passing the Buffer directly avoids the copy; merely renaming a try-decode helper hasDbErrorMarker does not eliminate decoding/materialization. Any protocol redesign must also distinguish raw user-id success bytes without changing intentional repl Error results.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-client-node/wrapper.js:82](../../../../../crates/shamir-client-node/wrapper.js#L82); [crates/shamir-client-node/wrapper.js:112](../../../../../crates/shamir-client-node/wrapper.js#L112); [crates/shamir-client-node/wrapper.js:126](../../../../../crates/shamir-client-node/wrapper.js#L126); `tests/e2e/node_modules/@msgpack/msgpack/src/utils/typedArrays.ts:7` (local dependency evidence; not a committed file).
+Passing Buffer directly avoids the explicit copy, but renaming a try-decode helper does not eliminate parsing/materialization. Marker detection must validate the complete typed kind/code/message shape, thereby excluding the 16-byte success collision. Preserve raw user IDs and intentional repl Error results; do not introduce an incompatible response envelope casually.
+
+Evidence: [crates/shamir-client-node/wrapper.js:82](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-client-node/wrapper.js#L82); [crates/shamir-client-node/wrapper.js:112](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-client-node/wrapper.js#L112); [crates/shamir-client-node/wrapper.js:126](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-client-node/wrapper.js#L126); [crates/shamir-client-node/src/lib.rs:361](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-client-node/src/lib.rs#L361); [@msgpack/msgpack 3.1.3 src/utils/typedArrays.ts:7](https://github.com/msgpack/msgpack-javascript/blob/v3.1.3/src/utils/typedArrays.ts#L7).
 
 <a id="plan-p2-11"></a>
 
 ### Plan P2.11 — P2.11
 
-Status: `not-applicable`. Current risk: —.
+Status: `not-applicable`.
 
-Core Client::Drop already aborts its reader, and the binding owns that client. An additional async Drop-close task is not required to fix the alleged detached connection leak. Explicit close remains the clean shutdown path; exact napi finalization timing is unverified.
+Prior-cycle decision: `not-applicable`.
 
-Evidence: [crates/shamir-client-node/src/lib.rs:82](../../../../../crates/shamir-client-node/src/lib.rs#L82); [crates/shamir-client/src/client.rs:1316](../../../../../crates/shamir-client/src/client.rs#L1316); [crates/shamir-client/src/client.rs:1306](../../../../../crates/shamir-client/src/client.rs#L1306).
+Default napi finalization and core Drop already provide ownership cleanup. Adding an asynchronous Drop-close task is not required and would create another task-lifetime/runtime dependency. Explicit close remains the clean protocol-shutdown path.
+
+Evidence: [napi 3.10.5 published src/bindgen_runtime/mod.rs:51](https://docs.rs/crate/napi/3.10.5/source/src/bindgen_runtime/mod.rs); [crates/shamir-client/src/client.rs:1316](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-client/src/client.rs#L1316); [crates/shamir-client/src/client.rs:1306](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-client/src/client.rs#L1306).
 
 <a id="plan-p2-12"></a>
 
 ### Plan P2.12 — P2.12
 
-Status: `confirmed-open`. Current risk: —.
+Status: `confirmed-open`.
 
-Neither resume nor server_query_version is exposed and the 1:1 claim remains. Documenting the supported subset is a valid scoped resolution; surfacing resume requires a separately verified identity and ticket contract.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-client-node/src/lib.rs:3](../../../../../crates/shamir-client-node/src/lib.rs#L3); [crates/shamir-client-node/wrapper.d.ts:49](../../../../../crates/shamir-client-node/wrapper.d.ts#L49); [crates/shamir-client/src/client.rs:862](../../../../../crates/shamir-client/src/client.rs#L862); [crates/shamir-client/src/client.rs:987](../../../../../crates/shamir-client/src/client.rs#L987).
+The subset/parity documentation remains inaccurate. Correcting it is safe. Directly routing a new Node resume method to current core resume is not: its accept-any-cert TLS configuration is followed by unsigned ResumeOk acceptance, and pinned_hash is only cached. Establish authenticated server identity and bounded lifecycle semantics before exposing that path.
+
+Evidence: [crates/shamir-client-node/src/lib.rs:3](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-client-node/src/lib.rs#L3); [crates/shamir-client/src/client.rs:862](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-client/src/client.rs#L862); [crates/shamir-client/src/client.rs:937](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-client/src/client.rs#L937); [crates/shamir-client/src/wire_frames.rs:52](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-client/src/wire_frames.rs#L52); [crates/shamir-transport-tcp/src/tls.rs:63](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-transport-tcp/src/tls.rs#L63); [crates/shamir-transport-tcp/src/tls.rs:130](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-transport-tcp/src/tls.rs#L130).
 
 <a id="plan-p2-13"></a>
 
 ### Plan P2.13 — P2.13
 
-Status: `confirmed-open`. Current risk: —.
+Status: `confirmed-open`.
 
-Batch types and a Node-facing builder recipe remain missing. TS Batch.build output is already a compatible plain wire object; document execute(db, batch.build()) rather than claiming class identity prevents integration or promising Batch.execute compatibility without executeWithTouch.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-client-node/wrapper.d.ts:58](../../../../../crates/shamir-client-node/wrapper.d.ts#L58); [crates/shamir-client-ts/src/core/builders/batch.ts:334](../../../../../crates/shamir-client-ts/src/core/builders/batch.ts#L334); [crates/shamir-client-ts/src/core/builders/batch.ts:370](../../../../../crates/shamir-client-ts/src/core/builders/batch.ts#L370); [crates/shamir-client-ts/src/index.ts:71](../../../../../crates/shamir-client-ts/src/index.ts#L71).
+Batch declarations and a Node-facing builder recipe remain missing. Built plain objects integrate structurally, while Batch.execute still needs executeWithTouch. Re-exported TS types must not promise unsupported bigint values; resolve codec fidelity alongside full compatibility claims.
+
+Evidence: [crates/shamir-client-node/wrapper.d.ts:58](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-client-node/wrapper.d.ts#L58); [crates/shamir-client-ts/src/core/builders/batch.ts:334](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-client-ts/src/core/builders/batch.ts#L334); [crates/shamir-client-ts/src/core/builders/batch.ts:370](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-client-ts/src/core/builders/batch.ts#L370); [crates/shamir-client-ts/src/core/framing.ts:61](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-client-ts/src/core/framing.ts#L61); [crates/shamir-client-node/wrapper.js:99](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-client-node/wrapper.js#L99).
 
 <a id="plan-p2-14"></a>
 
 ### Plan P2.14 — P2.14
 
-Status: `confirmed-open`. Current risk: —.
+Status: `not-applicable`.
 
-The synthetic acknowledgement and echo wording remain. Today's server echoes identical inputs and the wrapper returns void; clarifying the comment is sufficient hygiene. A core public-signature change is not justified by a current canonicalization failure.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-client-node/src/lib.rs:291](../../../../../crates/shamir-client-node/src/lib.rs#L291); [crates/shamir-client/src/client.rs:1147](../../../../../crates/shamir-client/src/client.rs#L1147); [crates/shamir-server/src/db_handler/admin.rs:393](../../../../../crates/shamir-server/src/db_handler/admin.rs#L393); [crates/shamir-client-node/wrapper.js:148](../../../../../crates/shamir-client-node/wrapper.js#L148).
+The current server echo equals the reconstructed acknowledgement and the wrapper returns void. No semantic repair requires changing the core signature or success wire shape. Clarifying that reconstruction occurs is optional documentation hygiene.
+
+Evidence: [crates/shamir-server/src/db_handler/admin.rs:393](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-server/src/db_handler/admin.rs#L393); [crates/shamir-client/src/client.rs:1147](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-client/src/client.rs#L1147); [crates/shamir-client-node/src/lib.rs:297](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-client-node/src/lib.rs#L297); [crates/shamir-client-node/wrapper.js:148](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-client-node/wrapper.js#L148).
 
 <a id="plan-p2-15"></a>
 
 ### Plan P2.15 — P2.15
 
-Status: `unverified`. Current risk: —.
+Status: `unverified`.
 
-The manifest still lists six targets without optionalDependencies. Required packaging changes depend on the intended distribution contract and actual published artifacts, neither established here. Local platform builds are supported by loader branches; trimming targets is not itself proof of a runtime fix.
+Prior-cycle decision: `unverified`.
 
-Evidence: [crates/shamir-client-node/package.json:20](../../../../../crates/shamir-client-node/package.json#L20); [crates/shamir-client-node/package.json:33](../../../../../crates/shamir-client-node/package.json#L33); [crates/shamir-client-node/index.js:283](../../../../../crates/shamir-client-node/index.js#L283); [tests/e2e/README.md:39](../../../../../tests/e2e/README.md#L39).
+Required publishing changes depend on an actual artifact/distribution contract not established here. Local native-file loading supports non-Windows branches. Trimming build targets would remove supported build possibilities without proving a packaging repair.
+
+Evidence: [README.md:18](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/README.md#L18); [crates/shamir-client-node/package.json:20](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-client-node/package.json#L20); [crates/shamir-client-node/index.js:283](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-client-node/index.js#L283); [tests/e2e/README.md:39](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/tests/e2e/README.md#L39).
 
 <a id="plan-p2-16"></a>
 
 ### Plan P2.16 — P2.16
 
-Status: `confirmed-open`. Current risk: —.
+Status: `confirmed-open`.
 
-Ticket/session-id snapshots remain non-zeroizing and password copy limitations remain undocumented. Focus wiping on credentials, not the public pin; distinguish overwriteable JS Buffers from immutable strings and unavoidable copies.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-client-node/src/lib.rs:85](../../../../../crates/shamir-client-node/src/lib.rs#L85); [crates/shamir-client-node/src/lib.rs:143](../../../../../crates/shamir-client-node/src/lib.rs#L143); [crates/shamir-client-node/src/lib.rs:61](../../../../../crates/shamir-client-node/src/lib.rs#L61); [crates/shamir-client-node/src/lib.rs:127](../../../../../crates/shamir-client-node/src/lib.rs#L127).
+Credential snapshots remain ordinary storage. Drop-zeroizing owned ticket/session copies can preserve immutable getter behavior; clearing them on close requires an explicit post-close getter policy. Wrap native password ownership before validation/await where feasible. The public pin need not be treated as a secret, and JS-copy erasure cannot be universally promised.
+
+Evidence: [crates/shamir-client-node/src/lib.rs:85](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-client-node/src/lib.rs#L85); [crates/shamir-client-node/src/lib.rs:143](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-client-node/src/lib.rs#L143); [crates/shamir-client-node/src/lib.rs:127](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-client-node/src/lib.rs#L127); [crates/shamir-client-node/src/lib.rs:260](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-client-node/src/lib.rs#L260); [crates/shamir-client-node/src/lib.rs:311](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-client-node/src/lib.rs#L311).
 
 <a id="plan-p2-17"></a>
 
 ### Plan P2.17 — P2.17
 
-Status: `confirmed-open`. Current risk: —.
+Status: `confirmed-open`.
 
-Exception-comment, stale wrapper-name, and version-explanation edits remain undone. Splitting private helpers is not mandated by the closely-coupled-group rule. Prefer an intentional version note over an unsolicited version change.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-client-node/src/lib.rs:205](../../../../../crates/shamir-client-node/src/lib.rs#L205); [crates/shamir-client-node/src/lib.rs:336](../../../../../crates/shamir-client-node/src/lib.rs#L336); [crates/shamir-client-node/proof-typed-errors.js:10](../../../../../crates/shamir-client-node/proof-typed-errors.js#L10); [crates/shamir-client-node/Cargo.toml:3](../../../../../crates/shamir-client-node/Cargo.toml#L3); [crates/shamir-client-node/package.json:3](../../../../../crates/shamir-client-node/package.json#L3); [CLAUDE.md:505](../../../../../CLAUDE.md#L505).
+Stale wrapper names, the exception explanation and version-policy note remain actionable nits. Splitting closely coupled private helpers is optional. Correct documentation without an unsolicited version bump.
+
+Evidence: [crates/shamir-client-node/src/lib.rs:205](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-client-node/src/lib.rs#L205); [crates/shamir-client-node/src/lib.rs:336](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-client-node/src/lib.rs#L336); [crates/shamir-client-node/proof-typed-errors.js:10](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-client-node/proof-typed-errors.js#L10); [crates/shamir-client-node/Cargo.toml:3](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-client-node/Cargo.toml#L3); [crates/shamir-client-node/package.json:3](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-client-node/package.json#L3); [CLAUDE.md:505](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/CLAUDE.md#L505).
 
 <a id="plan-p2-18"></a>
 
 ### Plan P2.18 — P2.18
 
-Status: `confirmed-open`. Current risk: —.
+Status: `not-applicable`.
 
-Both methods still decode before checking closed state. Decide and document error precedence before treating this diagnostic ordering as a correctness requirement.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-client-node/src/lib.rs:205](../../../../../crates/shamir-client-node/src/lib.rs#L205); [crates/shamir-client-node/src/lib.rs:207](../../../../../crates/shamir-client-node/src/lib.rs#L207); [crates/shamir-client-node/src/lib.rs:233](../../../../../crates/shamir-client-node/src/lib.rs#L233); [crates/shamir-client-node/src/lib.rs:235](../../../../../crates/shamir-client-node/src/lib.rs#L235).
+No documented error-precedence obligation establishes a defect to close. A policy change is optional; decoding while holding the lifecycle mutex would worsen contention and should not be presented as a neutral repair.
 
-## Corrections and qualified non-findings
+Evidence: [crates/shamir-client-node/src/lib.rs:205](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-client-node/src/lib.rs#L205); [crates/shamir-client-node/src/lib.rs:207](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-client-node/src/lib.rs#L207); [crates/shamir-client-node/src/lib.rs:233](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-client-node/src/lib.rs#L233).
 
-- Do not repeat the alleged factory/subclass failure as established fact without pinned napi implementation or experimental evidence. Existing registered happy-path tests can detect its advertised TypeError consequence; registrations are not passing test results.
-- ReplResponse::Error is intentionally a raw protocol result with a fencing epoch. wrapper.d.ts promises typed exceptions for DbResponse::Error. Converting the former into the latter would change tested behavior and can discard epoch information.
-- The binding source is unchanged between summary commit 6df2afa9 and the inspected HEAD. Core Drop cleanup originated in d13ca5c0; Node nightly registration originated in b90a4472. These predate the review and refute omissions rather than prove later repairs.
-- There is no committed native binary: .gitignore excludes binding binaries and its private lockfiles. The report's committed/shipped MSVC artifact premise is unsupported by this checkout.
-- Existing automated e2e coverage follows package.json → e2e.test.js → runAll → registered .test.js functions → awaited assertions → nonzero failure exit. Message-based error assertions can detect missing rejection but do not verify typed code/retryable properties.
-- Taking close outside its own guard does not bypass an already-held request guard. Core close aborts the reader rather than executing its ordinary EOF drain; do not promise pending-request settlement without tracing a coordinated shutdown mechanism.
-- Exposing current timeout options does not bound the full TLS/SCRAM handshake, request write, or binding mutex wait. Availability exposure requires an unresponsive configured peer or connection failure; no arbitrary remote panic exploit was established.
-- The sole cited pin expect has a source-proven invariant on successful authentication. Historical napi issue references and unspecified parser panics are not version-specific FFI failure proof.
-- TS builder outputs can feed the binding as plain objects, although Batch.execute currently needs executeWithTouch. execution_time_us is a response field, and omitted return_all intentionally defaults true; those original examples are not demonstrated request defects.
-- The setReplicator success buffer is reconstructed, but the current server echoes exactly the same fields and the wrapper discards them. Canonicalization corruption is hypothetical.
-- Cargo/npm version divergence does not directly trip the loader: its optional version check compares npm platform-package metadata, not the Rust crate version.
-- Performance conclusions are structural only. The wrapper's explicit response copy is O(buffer length); installed MessagePack returns binary blobs as views. Extra native copies, event-content decoding, latency, and 'priced correctly' were not measured or established.
-- Async native I/O does not mean all JS work is nonblocking: wrapper encoding/decoding is synchronous. Ticket getter copying is variable-length, unlike fixed-array getters.
-- The public pin is not secret material. JS Buffers can be explicitly overwritten, while complete erasure of immutable strings and all FFI copies cannot be promised. Password validation failures can precede Zeroizing construction.
-- Server session retention also occurs after explicit close in the inspected teardown path; it is not proof that binding GC leaks a detached TCP connection.
-- The one-primary-export rule permits closely coupled groups, and the tests-directory rule applies to modules containing tests. Neither establishes the original blanket style violations.
-- Retain the original 28-row census only as review bookkeeping; recompute actionable status/severity counts after revalidation instead of presenting 25 allegations as 25 verified defects.
+## Additional observations
+
+| Observation decisions | Open | Source-fixed | Partial | Refuted | Unverified | N/A |
+|---:|---:|---:|---:|---:|---:|---:|
+| 2 | 2 | 0 | 0 | 0 | 0 | 0 |
+
+Existing observation IDs remain stable. New cycle-2 rows follow them; cross-module duplicates and extra triggers are grouped explicitly. None is an implemented fix.
+
+<a id="observation-new-1"></a>
+
+### Observation NEW.1 — Caller-owned Buffer aliases are read on async workers without mutation isolation
+
+Status: `confirmed-open`. Current risk: `high`.
+
+Additional observation in this independent cycle; it may overlap an existing root.
+
+Public repl forwards the caller's Buffer unchanged; connect also retains the caller's trustedPin Buffer. Generated async dispatch runs Rust reading/copying of these bytes on a Tokio worker. Exact napi 3.10.5 FromNapiValue obtains the original JS pointer and holds only a lifetime reference; its Send comment explicitly acknowledges unsynchronized JS mutation as undefined behavior. Ordinary JS can reuse or overwrite the buffer while the worker reads it. This is a local API ownership/safety witness, not proof of remote exploitability or observed crashing. Snapshot ownership must be established synchronously before off-thread dispatch; copying only inside the worker still races. Published source: https://docs.rs/crate/napi/3.10.5/source/src/bindgen_runtime/js_values/buffer.rs.
+
+Evidence: [crates/shamir-client-node/Cargo.toml:39](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-client-node/Cargo.toml#L39); [crates/shamir-client-node/wrapper.js:109](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-client-node/wrapper.js#L109); [crates/shamir-client-node/src/lib.rs:107](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-client-node/src/lib.rs#L107); [crates/shamir-client-node/src/lib.rs:233](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-client-node/src/lib.rs#L233); [napi 3.10.5 published src/bindgen_runtime/js_values/buffer.rs:390](https://docs.rs/crate/napi/3.10.5/source/src/bindgen_runtime/js_values/buffer.rs); [napi 3.10.5 published src/bindgen_runtime/js_values/buffer.rs:449](https://docs.rs/crate/napi/3.10.5/source/src/bindgen_runtime/js_values/buffer.rs); [napi 3.10.5 published src/bindgen_runtime/js_values/buffer.rs:490](https://docs.rs/crate/napi/3.10.5/source/src/bindgen_runtime/js_values/buffer.rs); [napi-derive-backend 5.1.2 published src/codegen/fn.rs:265](https://docs.rs/crate/napi-derive-backend/5.1.2/source/src/codegen/fn.rs).
+
+<a id="observation-new-2"></a>
+
+### Observation NEW.2 — Default object-level MessagePack conversion loses integer fidelity and rejects BigInt inputs
+
+Status: `confirmed-open`. Current risk: `high`.
+
+Additional observation in this independent cycle; it may overlap an existing root.
+
+For inspected @msgpack/msgpack 3.1.3, permitted by the binding's ^3.0.0 range, both codec calls omit useBigInt64. A legitimate Rust Int value 9007199254740993 in a record response is emitted as a 64-bit integer but decoded to Number 9007199254740992. A Node read followed by rewriting that value can therefore corrupt data. Genuine bigint inputs are rejected before reaching Rust. Values above i64::MAX represented as Big strings are a different, preserved case. A discriminating oracle needs independently produced positive/negative unsafe-integer fixtures and actual wrapper input tests; a symmetric default-JS roundtrip misses the original value. A fix must also preserve integer markers for safe wide Number fields, not blindly enable BigInt64 and change them to float64. Published package source label: @msgpack/msgpack 3.1.3 src/Decoder.ts, src/Encoder.ts and src/utils/int.ts; package archive provenance is recorded in the TS lockfile.
+
+Evidence: [crates/shamir-client-node/package.json:34](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-client-node/package.json#L34); [crates/shamir-client-node/wrapper.js:82](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-client-node/wrapper.js#L82); [crates/shamir-client-node/wrapper.js:99](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-client-node/wrapper.js#L99); [crates/shamir-types/src/types/value.rs:70](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-types/src/types/value.rs#L70); [crates/shamir-types/src/types/value.rs:142](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-types/src/types/value.rs#L142); [crates/shamir-client-ts/src/core/framing.ts:61](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-client-ts/src/core/framing.ts#L61); [crates/shamir-client-ts/src/core/framing.ts:71](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-client-ts/src/core/framing.ts#L71); [crates/shamir-client-ts/package-lock.json:438](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-client-ts/package-lock.json#L438); [@msgpack/msgpack 3.1.3 src/Decoder.ts:243](https://github.com/msgpack/msgpack-javascript/blob/v3.1.3/src/Decoder.ts#L243); [@msgpack/msgpack 3.1.3 src/Decoder.ts:522](https://github.com/msgpack/msgpack-javascript/blob/v3.1.3/src/Decoder.ts#L522); [@msgpack/msgpack 3.1.3 src/Encoder.ts:189](https://github.com/msgpack/msgpack-javascript/blob/v3.1.3/src/Encoder.ts#L189); [@msgpack/msgpack 3.1.3 src/utils/int.ts:28](https://github.com/msgpack/msgpack-javascript/blob/v3.1.3/src/utils/int.ts#L28).
+
+## Evidence and recipe corrections
+
+- Claim 1.4's partially-fixed label conflates pre-existing counter-evidence with a repair. Nightly registration originated in b90a4472; core Drop cleanup originated in d13ca5c0. The relevant Node source diff from 6df2afa9 to frozen HEAD is empty.
+- The current assertion that user-id decoding is only overhead misses a valid 16-byte kind:error map. Validate the complete marker shape; a kind-only discriminator is ambiguous with unrestricted raw IDs.
+- Exact napi 3.10.5 source settles ordinary async-body unwinding behavior: the task is monitored and its deferred rejected. Do not retain historical hung-promise allegations from unspecified versions as evidence. This is not a universal FFI-safety assurance.
+- napi-derive 3.5.10 is exactly pinned, but its published backend requirement beginning at 5.1.2 is a compatible range. Calling the whole transitive graph exactly pinned is inaccurate without the excluded binding's lock.
+- The historical assumption that Buffer::from(Vec) necessarily copies is false for napi 3.10.5's normal external-buffer path. Its fallback copies. The JS new Uint8Array(Buffer) copy remains explicit.
+- Raw repl Error results intentionally preserve leader_epoch. A generic exception conversion is an API change, not a repair; the production server capability gate confirms the registered denial scenario.
+- Error precedence and infrastructure-code enrichment are optional API policies under the current documented surface. Synthetic setReplicator acknowledgement fields match the current server and are discarded by the void wrapper; canonical-name corruption is not a current caller-visible mechanism.
+- The resume recipe has a concrete unresolved identity problem: core caches the supplied pin without verifying it after accept-any-cert TLS and unsigned ResumeOk. Documentation-only subset correction is safe; direct feature exposure is not yet a verified repair.
+- TS builder compatibility is established only for exercised shapes. The binding's default MessagePack encoder cannot accept genuine bigint inputs, so a universal execute(db, batch.build()) assurance requires qualification.
+- The Rust module example requires shamir-client-node, while package.json names the package shamir-client. Also, wrapper.d.ts's header suggests object-level repl/user creation although those methods retain raw Buffer results.
+- No method here proves synchronous JS work is nonblocking or serialization is priced correctly. Ticket getter cost depends on ticket length. Existing toy-value CRUD does not prove complete numeric-domain roundtrip fidelity.
+- The root's source-first alpha statement precludes inferring a publishing failure from undeclared platform packages alone. Loader local-file branches support platform builds; no committed/shipped MSVC binary was found.
+- Current claim totals should be updated to 16 open, 8 refuted, 1 unverified and 7 not-applicable; plan totals become 10 open, 1 unverified and 7 not-applicable. Neither tally is a unique runtime-defect count.
+- Parent acceptance: rmp-serde 1.3.1 FallibleWriter returns try_reserve failures as I/O errors. A supported marker can therefore reach the plain-error fallback under reservation failure; N/A means the fallback is reasonable, not that allocation-error return paths are impossible.
+
+## Module scope and limitations
+
+Coverage: 1 assigned documents, 32 current claim rows, 18 plan rows, 0 pre-existing observation rows; 2 added observation rows in this cycle. Counts are calculated from the accepted rows.
+
+Assigned documents: [SUMMARY.md](SUMMARY.md).
+
+- Read-only source, documentation, history and dependency inspection; no builds, tests, reproductions or performance measurements.
+- The excluded binding has no committed or present Cargo.lock. Its napi 3.10.5 and napi-derive 3.5.10 pins were inspected from cached published archives. napi-derive's backend requirement is a compatible range beginning at 5.1.2, not an exact transitive pin; backend 5.1.2 was inspected.
+- Frozen workspace versions are tokio 1.49.0, serde 1.0.228, rmp-serde 1.3.1 and zeroize 1.8.2; these do not establish the binding's complete separately resolved graph. The rmp-serde archive SHA-256 matches the frozen lock checksum.
+- Exact installed harness source for @msgpack/msgpack 3.1.3 was inspected. This version satisfies the binding's ^3.0.0 requirement, but the binding has no present npm installation or lockfile. Codec findings specify this inspected resolution rather than asserting every deployment uses it.
+- No native binary is committed or presently in the binding directory. Published npm artifacts, actual GC scheduling, CI results and deployed configurations were not verified.
+- The checkout acquired concurrent dependency, toolchain and CI metadata changes. Canonical affected metadata was re-read from frozen HEAD; assigned reports and reviewed Node/core implementation files remained unchanged. This reviewer wrote nothing.
+- Coverage is complete for the assigned claim checklist, not an exhaustive Rust Intel or upstream-core audit.
+
+## Guarantee checks
+
+- **The project is source-first alpha, and the Node binding is built separately.** — `supported`. The binding is excluded from workspace selection. Its toolchain declares stable plus an MSVC target, whereas frozen root metadata pins 1.94.0. Neither published binaries nor an exactly reproducible separately resolved binding are established. Reference: README.md:16; Cargo.toml:14; crates/shamir-client-node/rust-toolchain.toml:7.
+- **Inherited connect constructs instances with the exported wrapper subclass prototype.** — `supported`. Published napi 3.10.5 callback_info.rs restores the factory receiver and passes it to napi_new_instance. Inspected backend 5.1.2 generates receiver-preserving cb.factory calls. Sources: https://docs.rs/crate/napi/3.10.5/source/src/bindgen_runtime/callback_info.rs and https://docs.rs/crate/napi-derive-backend/5.1.2/source/src/codegen/fn.rs. This is source counter-evidence, not an executed native-artifact result. Reference: crates/shamir-client-node/src/lib.rs:96; crates/shamir-client-node/wrapper.js:93; crates/shamir-client-node/Cargo.toml:39.
+- **DbResponse::Error becomes ShamirDbError with code, detail and retryable on wrapped buffer-returning methods.** — `supported`. The named MessagePack marker and wrapper property assignments agree structurally. The four retryable codes match the TS SDK. Existing error tests do not independently prove these properties across the actual native boundary. Reference: crates/shamir-query-types/src/wire/db_message.rs:280; crates/shamir-client-node/src/lib.rs:361; crates/shamir-client-node/wrapper.js:61.
+- **Every raw user-id success buffer is distinguishable from a DB-error marker.** — `diverges`. A valid 16-byte ID can itself encode a map containing kind:error. The detector validates only kind, not the required string code/message fields. The directory generates unrestricted random bytes, rather than UUID-version-filtered bytes. Claim 1.5 contains the concrete witness. Reference: crates/shamir-client-node/wrapper.js:82; crates/shamir-client-node/wrapper.js:123; crates/shamir-server/src/user_directory.rs:513.
+- **Replication-layer Error replies remain raw protocol results carrying leader_epoch.** — `supported`. The server's capability-denial path returns ReplResponse::Error. Core and binding preserve that variant, and the registered denial test requires normal resolution with its code and fencing epoch. DbResponse::Error exceptions are a separate contract. Reference: crates/shamir-query-types/src/wire/repl.rs:66; crates/shamir-server/src/db_handler/repl_handler.rs:52; tests/e2e/tests/16-replication.test.js:235.
+- **ConnectOptions.host accepts the documented DNS hostname and ordinary IPv6 host literal.** — `diverges`. SocketAddr parsing performs no DNS lookup. db.example.com and unbracketed ::1 fail; IPv4 and bracketed IPv6 remain usable. Reference: crates/shamir-client-node/src/lib.rs:53; crates/shamir-client-node/src/lib.rs:100.
+- **The binding mirrors the Rust client's concurrent request and API capabilities.** — `diverges`. An exclusive binding mutex spans every roundtrip, defeating core multiplexing. Resume, local IPC connection, push subscription, cursor streaming, DDL-status and query-version capabilities are also absent. Reference: crates/shamir-client-node/src/lib.rs:3; crates/shamir-client-node/src/lib.rs:193; crates/shamir-client/src/client.rs:418.
+- **Close can terminate the client independently of an unanswered request.** — `diverges`. An unanswered request retains the mutex with no response deadline, and close cannot acquire it. Moving only close's shutdown await outside its guard does not remove this preceding-holder dependency. Reference: crates/shamir-client-node/src/lib.rs:311; crates/shamir-client-node/src/lib.rs:132; crates/shamir-client/src/client.rs:1290.
+- **An otherwise collectible native client has ownership-based cleanup without a custom binding Drop.** — `supported`. Published napi 3.10.5 raw_finalize_unchecked consumes the boxed object through ObjectFinalize; owned fields then drop, invoking core reader abort and writer ownership cleanup. Source: https://docs.rs/crate/napi/3.10.5/source/src/bindgen_runtime/mod.rs. Pending native calls can retain references and delay collectibility; immediate GC or session eviction is not promised. Reference: crates/shamir-client-node/src/lib.rs:82; crates/shamir-client/src/client.rs:1316.
+- **Missing catch_unwind attributes imply ordinary async-body panics escape or leave promises pending.** — `diverges`. Published napi 3.10.5 execute_tokio_future_with_finalize_callback awaits the spawned task and rejects its deferred on an unwinding panic. The cited pin expect is protected by successful authentication. Source: https://docs.rs/crate/napi/3.10.5/source/src/tokio_runtime.rs. This does not certify synchronous resolver/finalizer paths, OOM, stack overflow or undefined behavior. Reference: crates/shamir-client-node/Cargo.toml:39; crates/shamir-client-node/src/lib.rs:96; crates/shamir-connect/src/client/handshake.rs:266.
+- **Native credential storage and password conversion are comprehensively zeroized.** — `diverges`. Ticket/session snapshots are ordinary storage retained after close. Connect validation can drop an ordinary password String before Zeroizing construction. Published napi 3.10.5 string.rs converts through one UTF-8 Vec reused by String; additional transient native copies are not established. The pin is public, and JS-owned copies require separate qualifications. Reference: crates/shamir-client-node/src/lib.rs:61; crates/shamir-client-node/src/lib.rs:85; crates/shamir-client-node/src/lib.rs:127.
+- **Caller-owned Buffer arguments are safe to read on the async worker while JavaScript retains mutable aliases.** — `diverges`. Exact napi 3.10.5 Buffer conversion references the original JS allocation without copying or preventing writes. Its Send safety comment explicitly identifies unsynchronized JS modification as undefined behavior. The public repl and trustedPin paths expose this ownership gap. Reference: crates/shamir-client-node/src/lib.rs:107; crates/shamir-client-node/src/lib.rs:233; crates/shamir-client-node/wrapper.js:109.
+- **Object-level MessagePack exchange preserves all valid 64-bit integer values.** — `diverges`. With inspected @msgpack/msgpack 3.1.3, default int64/uint64 decoding returns Number and rounds unsafe integers; default encoding rejects genuine bigint inputs. Rust's Int representation remains exact. The separate Big-as-decimal-string representation does not protect Int values between 2^53 and i64::MAX. Reference: crates/shamir-types/src/types/value.rs:70; crates/shamir-client-node/wrapper.js:82; crates/shamir-client-node/wrapper.js:99.
+- **Malformed MessagePack necessarily follows an unbounded recursion path.** — `diverges`. Exact rmp-serde 1.3.1 any_inner guards array/map/ext descent with a default depth counter of 1024. Struct/sequence and QueryValue deserialize_any paths use it; flattened buffering and internally tagged repl input also consume container data through guarded dispatch. deserialize_enum has a distinct path without the same outer guard, so this is not a universal parser-safety certification or a measured stack threshold. Source: https://docs.rs/crate/rmp-serde/1.3.1/source/src/decode.rs. Reference: Cargo.lock:2949; crates/shamir-types/src/types/value.rs:283; crates/shamir-query-types/src/batch/batch_op.rs:262.
+- **Registered Node tests exercise the public wrapper and prove typed-error properties.** — `diverges`. Public-wrapper connect/CRUD tests are registered in the Windows nightly lane and can catch a raw-Buffer/prototype regression. Error tests check message text, not code/retryable assignments; removing those assignments while preserving messages would evade them. The manual proof copies marker detection. Reference: tests/e2e/package.json:14; tests/e2e/e2e.test.js:35; tests/e2e/helpers/runner.js:106; tests/e2e/tests/09-errors.test.js:33.
+- **The proposed direct exposure of core resume would preserve pinned server identity.** — `diverges`. Core resume uses the accept-any-certificate configuration, accepts an unsigned WireResumeOk and merely caches opts.pinned_hash. The supplied pin is not verified on that path. This is a concrete safety objection to the proposed recipe, not a currently reachable Node-resume vulnerability because Node exposes no resume method. Reference: crates/shamir-client/src/client.rs:862; crates/shamir-client/src/client.rs:937; crates/shamir-client/src/wire_frames.rs:52; crates/shamir-transport-tcp/src/tls.rs:63.
+
+## Reviewer's prior-cycle comparison
+
+These are the independent reviewer's comparisons before parent refinements; the accepted ledgers above govern final decisions and counts.
+
+- 1.4: partially-fixed -&gt; confirmed-open for the residual oracle gap; automated coverage is pre-existing counter-evidence to the no-tests premise, not a later fix.
+- 1.5: confirmed-open retained, but the overhead-only/no-functional-failure assessment is corrected by a concrete valid 16-byte raw-ID false-positive witness.
+- 3.2: unverified -&gt; refuted as the asserted mandatory async-panic repair; exact napi 3.10.5 already monitors unwinding future panics and rejects their promises. Synchronous resolver/finalizer and non-unwinding safety remain expressly uncertified.
+- 1.6, 5.4 and 6.2: confirmed-open -&gt; not-applicable because the observed mechanisms are current intentional/unspecified API policies or harmless acknowledgement reconstruction, not proved contract violations. Corresponding P2.18, P2.14 and P1.9 recipes are optional.
+- 1.2 remains open, calibrated medium: the documented DNS/unbracketed-IPv6 configurations fail, but numeric IPv4 and bracketed IPv6 remain usable.
+- P2.12 remains open, with stronger negative safety evidence: the proposed core resume route caches rather than verifies the pin after accept-any-cert TLS. Node currently does not expose this route.
+- Factory/refuted-repl/finalization/style conclusions were independently supported by actual source and exact archive inspection; no earlier accepted conclusion was used as proof.
+- All assigned current rows and the complete historical bodies/recipes were inspected. No source fix or passing execution result is claimed.
 
 ## Current follow-up order
 
-1. Retain receiver-sensitive N-API factory construction; add direct public-wrapper/prototype and typed-error assertions. The alleged critical static-factory repair is not applicable.
-2. Fix DNS/unbracketed-IPv6 host handling and accurately document connection inputs.
-3. Expose timeout controls while defining bounds for the full handshake, lock acquisition, write, and response phases.
-4. Redesign request ownership and coordinated close together so shutdown can interrupt stalled requests and settle pending callers.
-5. Correct unsupported review claims, SDK-parity documentation, builder/type integration, and variant-specific infrastructure error handling.
-6. Then address credential-copy hygiene, explicit response copies/discarded decoding, and scoped documentation nits; verify packaging against actual release artifacts.
-
-## Coverage and limitations
-
-- This module contains only SUMMARY.md; all 28 original findings, both positive-note sections, the executive synthesis, census, and all 18 Fix Plan items were assessed.
-- Read-only inspection only: no files changed, git mutations, child agents, builds, tests, benchmarks, or reproductions.
-- Root Cargo.lock resolves tokio 1.49.0, serde 1.0.228, rmp-serde 1.3.1, and zeroize 1.8.2 for the workspace, not necessarily for the separately resolved binding.
-- Installed MessagePack 3.1.3 source was inspected read-only; that installation is not a committed binding dependency lock.
-- Published npm packages, packed release contents, CI execution results, and measured latency were not verified.
-- Parent read the exact napi 3.10.5, napi-derive 3.5.10 and backend 5.1.2 source archives. No generated native artifact or e2e run was performed; the factory refutation is source-based.
-
-## Reviewed document inventory
-
-- [SUMMARY.md](./SUMMARY.md) — 32 claim decisions; 18 explicit plan items.
+1. Establish immutable owned snapshots before async dispatch for externally supplied Buffers; catch_unwind cannot repair this ownership violation.
+2. Preserve integer fidelity across the actual public wrapper, with independent unsafe-integer fixtures and BigInt input coverage.
+3. Strengthen the error discriminator to validate complete marker shape and cover the valid 16-byte user-ID collision through the production wrapper.
+4. Design request admission, bounded handshake/write/response lifetimes and coordinated close together; verify pending settlement without assuming timeout means rollback.
+5. Fix documented DNS/unbracketed-IPv6 inputs while preserving bracketed IPv6 and identity-pin semantics.
+6. Correct subset/builder documentation and typed declarations; do not expose current core resume until server identity verification is established.
+7. Then address credential-copy hygiene, explicit response copying and documentation/version-policy nits. Verify packaging only against an actual distribution contract.
 
 ---
 

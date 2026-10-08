@@ -1,127 +1,149 @@
-<!-- revalidation:2026-10-08 source:92ad58266bf57ddea1fa3c8a47affba1a3a9a096 -->
-# shamir-server — performance-hotpath revalidation
+<!-- revalidation:2026-10-08 cycle:independent-2 source:e3765c935fc71655ee1ec0160cf180607935d89b -->
+# shamir-server — performance-hotpath independent revalidation (cycle 2)
 
-Source snapshot: `92ad58266bf57ddea1fa3c8a47affba1a3a9a096`. Revalidated 2026-10-08 by read-only XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run; no source fix is part of this update. Test registration/assertions are evidence of an oracle, not proof of a passing run.
+Frozen source snapshot: `e3765c935fc71655ee1ec0160cf180607935d89b`. Independently revalidated 2026-10-08 by a fresh XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run. Source-fixed means the specified mechanism was already removed at this snapshot; this cycle implements no source fix.
 
-This section is authoritative for current status. Original titles/IDs are retained for traceability; a refuted title is not a current assertion. The collapsed historical report below is superseded, including its counts, severity, scenarios and fix instructions. Plan IDs preserve historical numbering, not a current release mandate. [Workspace methodology and status definitions](../SUMMARY.md#status-definitions).
+This section is authoritative for current decisions. Existing IDs and allegation titles are retained for traceability; a refuted title is not a current assertion. Prior-cycle decisions were rechecked, not used as proof. The first cycle is available in repository history at this snapshot. The original historical body below remains preserved once and is superseded, including its counts, severities and recipes. [Workspace scope and status definitions](../SUMMARY.md#status-definitions).
 
-No measured timing conclusions are available. Several allocation and bounded-work observations are supported, but the universal constant-time/no-unbounded-buffer assurances need qualification.
+Unrelated external edits began in dependency/toolchain/CI metadata during collection; additional Rust-source edits appeared afterward. They were left untouched. Evidence and decisions are tied to the frozen commit, not those later changes or an installed toolchain. “Current” below means current at that snapshot; no re-audit of the modified working tree is implied.
+
+Several narrow bounded-work observations are supported. Universal bounded-memory assurances are contradicted by the production response-guard handoff. Dependency source is available, but exact concurrent range-removal complexity remains unproved.
 
 ## Current claim decisions
 
 | Claim decisions | Open | Source-fixed | Partial | Refuted | Unverified | N/A |
 |---:|---:|---:|---:|---:|---:|---:|
-| 10 | 0 | 0 | 0 | 2 | 2 | 6 |
+| 10 | 0 | 0 | 0 | 3 | 1 | 6 |
 
-These are decisions on report claims, including repeated roots, bundled observations and non-findings—not a unique-bug census. Closed/N/A rows have no current risk; unverified risk is provisional. Pure style and unmeasured optimization claims do not establish runtime impact.
+These are duplicate-inclusive report decisions, not a unique-bug census. Pure style or structural optimization does not establish a runtime incident; unverified impact remains provisional.
 
 <a id="review-summary"></a>
 
 ### Claim Summary — No hidden hot-path complexity, avoidable allocations or unbounded buffers across all 113 files
 
-Status: `unverified`. Current risk: —.
+Status: `refuted`. Current risk: `—`.
 
-Historical exhaustive inspection and independent-agent coverage cannot be reconstructed from current source alone. This revalidation inspected assigned mechanisms, not a fresh whole-crate audit. Explicit unbounded-budget configuration is supported, so bounded memory is deployment-dependent.
+Prior-cycle decision: `unverified`.
 
-Evidence: [crates/shamir-server/src/server/server_launcher.rs:451](../../../../../crates/shamir-server/src/server/server_launcher.rs#L451); [crates/shamir-server/src/byte_budget.rs:96](../../../../../crates/shamir-server/src/byte_budget.rs#L96); [crates/shamir-server/src/config.rs:355](../../../../../crates/shamir-server/src/config.rs#L355).
+The claimed blanket assurance has positive counter-evidence: the default finite response budget releases its reservation before queued/writing response bytes disappear, manifests have no size ceiling, and target lookups allocate. Historical exhaustive-review coverage and quantitative performance cannot be reconstructed.
+
+Evidence: [crates/shamir-server/src/connection/request_loop.rs:340](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-server/src/connection/request_loop.rs#L340); [crates/shamir-server/src/connection/request_loop.rs:348](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-server/src/connection/request_loop.rs#L348); [crates/shamir-server/src/subscriptions/target_match.rs:44](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-server/src/subscriptions/target_match.rs#L44); [crates/shamir-server/src/backup.rs:404](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-server/src/backup.rs#L404).
 
 <a id="review-subscription-bridge"></a>
 
 ### Claim Subscription bridge — Indexed subscription matching and CV-first cache eviction
 
-Status: `unverified`. Current risk: —.
+Status: `unverified`. Current risk: `—`.
 
-The index narrows matching to k relevant targets, not total O(1) event work; lookup constructs a temporary table String. CV-first TreeIndex keys and remove_range_sync are present, but exact O(evicted + log N) behavior of pinned scc 3.8.4 was not externally verified.
+Prior-cycle decision: `unverified`.
 
-Evidence: [crates/shamir-server/src/subscriptions/target_match.rs:14](../../../../../crates/shamir-server/src/subscriptions/target_match.rs#L14); [crates/shamir-server/src/subscriptions/target_match.rs:44](../../../../../crates/shamir-server/src/subscriptions/target_match.rs#L44); [crates/shamir-server/src/subscriptions/target_match.rs:83](../../../../../crates/shamir-server/src/subscriptions/target_match.rs#L83); [crates/shamir-server/src/subscriptions/decode_cache.rs:44](../../../../../crates/shamir-server/src/subscriptions/decode_cache.rs#L44); [crates/shamir-server/src/subscriptions/decode_cache.rs:132](../../../../../crates/shamir-server/src/subscriptions/decode_cache.rs#L132); [crates/shamir-server/src/subscriptions/deliver_cache.rs:101](../../../../../crates/shamir-server/src/subscriptions/deliver_cache.rs#L101); [Cargo.lock:3123](../../../../../Cargo.lock#L3123).
+The index does an owned-key hash lookup followed by up to k target/filter checks, and the caches use leading commit-version keys with range removal. Exact scc 3.8.4 src/tree_index.rs is available and explicitly notes O(N) border-subtree traversal; the full claimed O(evicted + log N) bound under concurrency is not established by the local cache comment.
+
+Evidence: [crates/shamir-server/src/subscriptions/target_match.rs:44](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-server/src/subscriptions/target_match.rs#L44); [crates/shamir-server/src/subscriptions/target_match.rs:83](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-server/src/subscriptions/target_match.rs#L83); [crates/shamir-server/src/subscriptions/decode_cache.rs:132](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-server/src/subscriptions/decode_cache.rs#L132); [crates/shamir-server/src/subscriptions/deliver_cache.rs:101](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-server/src/subscriptions/deliver_cache.rs#L101); [Cargo.lock:3123](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/Cargo.lock#L3123).
 
 <a id="review-connection-request-loop"></a>
 
 ### Claim Connection request loop — Bounded concurrency/backpressure and direct length-prefixed serialization
 
-Status: `not-applicable`. Current risk: —.
+Status: `not-applicable`. Current risk: `—`.
 
-Semaphore and writer-channel capacities derive from max_in_flight, and encode_prereserved serializes after a four-byte prefix directly. This bounds counts and removes one framing copy, not all allocations or server-wide bytes.
+Prior-cycle decision: `not-applicable`.
 
-Evidence: [crates/shamir-server/src/connection/request_loop.rs:63](../../../../../crates/shamir-server/src/connection/request_loop.rs#L63); [crates/shamir-server/src/connection/request_loop.rs:153](../../../../../crates/shamir-server/src/connection/request_loop.rs#L153); [crates/shamir-server/src/connection/request_loop.rs:155](../../../../../crates/shamir-server/src/connection/request_loop.rs#L155); [crates/shamir-server/src/connection/request_loop.rs:278](../../../../../crates/shamir-server/src/connection/request_loop.rs#L278).
+Semaphore/channel counts are bounded by max_in_flight and serialization starts after a reserved four-byte prefix. These mechanisms remain real, but count bounds do not establish the promised server-wide byte-budget lifetime or a bounded teardown duration.
+
+Evidence: [crates/shamir-server/src/connection/request_loop.rs:63](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-server/src/connection/request_loop.rs#L63); [crates/shamir-server/src/connection/request_loop.rs:153](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-server/src/connection/request_loop.rs#L153); [crates/shamir-server/src/connection/request_loop.rs:155](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-server/src/connection/request_loop.rs#L155); [crates/shamir-server/src/connection/request_loop.rs:348](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-server/src/connection/request_loop.rs#L348).
 
 <a id="review-cursor-pagination"></a>
 
 ### Claim Cursor pagination — Capped keyset retry and one-time null probe
 
-Status: `not-applicable`. Current risk: —.
+Status: `not-applicable`. Current risk: `—`.
 
-The inspected keyset fetch grows its row limit up to the configured ceiling and returns StuckAtCeiling when progress is impossible. The null probe occurs during cursor creation. A row-result ceiling is not a bound on rows scanned or universal query cost.
+Prior-cycle decision: `not-applicable`.
 
-Evidence: [crates/shamir-server/src/db_handler/cursor_handlers.rs:909](../../../../../crates/shamir-server/src/db_handler/cursor_handlers.rs#L909); [crates/shamir-server/src/db_handler/cursor_handlers.rs:1007](../../../../../crates/shamir-server/src/db_handler/cursor_handlers.rs#L1007); [crates/shamir-server/src/db_handler/cursor_handlers.rs:1029](../../../../../crates/shamir-server/src/db_handler/cursor_handlers.rs#L1029); [crates/shamir-server/src/db_handler/cursor_handlers.rs:1038](../../../../../crates/shamir-server/src/db_handler/cursor_handlers.rs#L1038); [crates/shamir-server/src/db_handler/cursor_handlers.rs:1338](../../../../../crates/shamir-server/src/db_handler/cursor_handlers.rs#L1338).
+Keyset internal limits grow to a ceiling with a StuckAtCeiling exit, and the null probe occurs during eligible cursor creation. Internal reads include a peek row; the cap limits returned rows/retries, not total scan/sort work. IndexSeek creation can deliberately use a full-scan fallback.
+
+Evidence: [crates/shamir-server/src/db_handler/cursor_handlers.rs:909](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-server/src/db_handler/cursor_handlers.rs#L909); [crates/shamir-server/src/db_handler/cursor_handlers.rs:1007](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-server/src/db_handler/cursor_handlers.rs#L1007); [crates/shamir-server/src/db_handler/cursor_handlers.rs:1038](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-server/src/db_handler/cursor_handlers.rs#L1038); [crates/shamir-server/src/db_handler/cursor_handlers.rs:1338](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-server/src/db_handler/cursor_handlers.rs#L1338); [crates/shamir-server/src/db_handler/cursor_handlers.rs:1376](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-server/src/db_handler/cursor_handlers.rs#L1376).
 
 <a id="review-registries"></a>
 
 ### Claim Registries — Atomic cardinality mirrors and pruning of historical session/IP entries
 
-Status: `not-applicable`. Current risk: —.
+Status: `not-applicable`. Current risk: `—`.
 
-The named cardinality paths use atomics, and zero-count IP/session entries are removed. This observation does not prove every registry is leak-free; the assigned subscription teardown and supervisor-liveness defects remain.
+Prior-cycle decision: `not-applicable`.
 
-Evidence: [crates/shamir-server/src/subscriptions/registry.rs:37](../../../../../crates/shamir-server/src/subscriptions/registry.rs#L37); [crates/shamir-server/src/subscriptions/registry.rs:156](../../../../../crates/shamir-server/src/subscriptions/registry.rs#L156); [crates/shamir-server/src/conn_limiter.rs:240](../../../../../crates/shamir-server/src/conn_limiter.rs#L240); [crates/shamir-server/src/conn_limiter.rs:249](../../../../../crates/shamir-server/src/conn_limiter.rs#L249); [crates/shamir-server/src/cursor_registry.rs:597](../../../../../crates/shamir-server/src/cursor_registry.rs#L597); [crates/shamir-server/src/tx_registry.rs:250](../../../../../crates/shamir-server/src/tx_registry.rs#L250).
+The cited paths maintain atomic counters and remove zero-count session/IP entries. This is a narrow implementation observation; subscription teardown and dead supervisor entries prevent a general leak-free conclusion.
+
+Evidence: [crates/shamir-server/src/subscriptions/registry.rs:37](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-server/src/subscriptions/registry.rs#L37); [crates/shamir-server/src/conn_limiter.rs:240](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-server/src/conn_limiter.rs#L240); [crates/shamir-server/src/cursor_registry.rs:601](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-server/src/cursor_registry.rs#L601); [crates/shamir-server/src/tx_registry.rs:250](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-server/src/tx_registry.rs#L250).
 
 <a id="review-byte-budget"></a>
 
 ### Claim Byte budget — CAS fast path, contention-only Notify parking and upfront reservation
 
-Status: `not-applicable`. Current risk: —.
+Status: `not-applicable`. Current risk: `—`.
 
-The CAS attempt precedes waiter creation; contended waits enable registration before rechecking. Execute reserves before execution and guards release through Drop. Unbounded mode is an explicit supported exception, and not every response path uses this Execute reservation.
+Prior-cycle decision: `not-applicable`.
 
-Evidence: [crates/shamir-server/src/byte_budget.rs:131](../../../../../crates/shamir-server/src/byte_budget.rs#L131); [crates/shamir-server/src/byte_budget.rs:149](../../../../../crates/shamir-server/src/byte_budget.rs#L149); [crates/shamir-server/src/byte_budget.rs:155](../../../../../crates/shamir-server/src/byte_budget.rs#L155); [crates/shamir-server/src/byte_budget.rs:234](../../../../../crates/shamir-server/src/byte_budget.rs#L234); [crates/shamir-server/src/db_handler/handler.rs:573](../../../../../crates/shamir-server/src/db_handler/handler.rs#L573); [crates/shamir-server/src/connection/request_loop.rs:97](../../../../../crates/shamir-server/src/connection/request_loop.rs#L97).
+CAS-before-registration, enable-before-recheck and Execute upfront acquisition are present. Their local accounting works, but production destroys the task-local guard before taking it for WriterMsg. The narrow fast-path observation is supported; end-to-end response retention is not.
+
+Evidence: [crates/shamir-server/src/byte_budget.rs:131](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-server/src/byte_budget.rs#L131); [crates/shamir-server/src/byte_budget.rs:155](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-server/src/byte_budget.rs#L155); [crates/shamir-server/src/db_handler/handler.rs:573](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-server/src/db_handler/handler.rs#L573); [crates/shamir-server/src/byte_budget.rs:339](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-server/src/byte_budget.rs#L339); [crates/shamir-server/src/connection/request_loop.rs:348](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-server/src/connection/request_loop.rs#L348).
 
 <a id="review-user-directory"></a>
 
 ### Claim User directory — Cached hot-path ticket invalidation lookup
 
-Status: `not-applicable`. Current risk: —.
+Status: `not-applicable`. Current risk: `—`.
 
-The lookup uses an in-memory hash map of atomic invalidation epochs, populated during boot and maintained on user mutations. O(1) is expected hash-map lookup shape, not a proven worst-case or measured latency.
+Prior-cycle decision: `not-applicable`.
 
-Evidence: [crates/shamir-server/src/user_directory.rs:278](../../../../../crates/shamir-server/src/user_directory.rs#L278); [crates/shamir-server/src/user_directory.rs:328](../../../../../crates/shamir-server/src/user_directory.rs#L328); [crates/shamir-server/src/user_directory.rs:432](../../../../../crates/shamir-server/src/user_directory.rs#L432); [crates/shamir-server/src/user_directory.rs:562](../../../../../crates/shamir-server/src/user_directory.rs#L562).
+Lookup reads the warmed in-memory map and atomic epoch, without a Fjall read/decode. Mutation updates occur after persistence. Expected hash-lookup cost is supported, but scc read_sync is bucket-locked rather than universally lock-free or worst-case O(1).
+
+Evidence: [crates/shamir-server/src/user_directory.rs:278](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-server/src/user_directory.rs#L278); [crates/shamir-server/src/user_directory.rs:432](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-server/src/user_directory.rs#L432); [crates/shamir-server/src/user_directory.rs:606](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-server/src/user_directory.rs#L606); [Cargo.lock:3123](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/Cargo.lock#L3123).
 
 <a id="review-backup-restore"></a>
 
 ### Claim Backup/restore — Streaming file hashing; only a small manifest is read whole
 
-Status: `refuted`. Current risk: —.
+Status: `refuted`. Current risk: `—`.
 
-File-content hashing does use a fixed 1 MiB buffer. However, the manifest is read and decoded whole with no size ceiling, and verification also materializes file-path/accounting collections. Calling that index necessarily small or the entire operation fixed-memory is unsupported.
+Prior-cycle decision: `refuted`.
 
-Evidence: [crates/shamir-server/src/backup.rs:50](../../../../../crates/shamir-server/src/backup.rs#L50); [crates/shamir-server/src/backup.rs:59](../../../../../crates/shamir-server/src/backup.rs#L59); [crates/shamir-server/src/backup.rs:404](../../../../../crates/shamir-server/src/backup.rs#L404); [crates/shamir-server/src/backup.rs:416](../../../../../crates/shamir-server/src/backup.rs#L416); [crates/shamir-server/src/backup.rs:449](../../../../../crates/shamir-server/src/backup.rs#L449).
+File-content hashing uses a fixed 1 MiB buffer, but fs::read loads the entire uncapped manifest and verification stores accounting/on-disk path collections. 'Small' and whole-operation fixed-memory claims are unsupported.
+
+Evidence: [crates/shamir-server/src/backup.rs:50](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-server/src/backup.rs#L50); [crates/shamir-server/src/backup.rs:59](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-server/src/backup.rs#L59); [crates/shamir-server/src/backup.rs:404](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-server/src/backup.rs#L404); [crates/shamir-server/src/backup.rs:416](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-server/src/backup.rs#L416); [crates/shamir-server/src/backup.rs:449](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-server/src/backup.rs#L449).
 
 <a id="review-replication"></a>
 
 ### Claim Replication — 1000-event pulls and exponential backoff on transient failures
 
-Status: `refuted`. Current risk: —.
+Status: `refuted`. Current risk: `—`.
 
-1000 is the requested pull limit, and catalogue reconciliation runs every ten seconds. The blanket backoff assurance is false for Hello replies; structured-error replies also reset backoff before invoking sleep_backoff, preventing exponential growth for repeated structured errors.
+Prior-cycle decision: `refuted`.
 
-Evidence: [crates/shamir-server/src/replication/follower_loop.rs:50](../../../../../crates/shamir-server/src/replication/follower_loop.rs#L50); [crates/shamir-server/src/replication/follower_loop.rs:231](../../../../../crates/shamir-server/src/replication/follower_loop.rs#L231); [crates/shamir-server/src/replication/follower_loop.rs:265](../../../../../crates/shamir-server/src/replication/follower_loop.rs#L265); [crates/shamir-server/src/replication/follower_loop.rs:278](../../../../../crates/shamir-server/src/replication/follower_loop.rs#L278); [crates/shamir-server/src/replication/follower_loop.rs:287](../../../../../crates/shamir-server/src/replication/follower_loop.rs#L287); [crates/shamir-server/src/server/server_launcher.rs:1526](../../../../../crates/shamir-server/src/server/server_launcher.rs#L1526).
+1000 is a requested pull limit, not a validation of every source's returned event count. Hello skips sleeping; successful transport replies reset backoff before structured-error/decode handling, defeating escalating backoff for repeated such failures.
+
+Evidence: [crates/shamir-server/src/replication/follower_loop.rs:231](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-server/src/replication/follower_loop.rs#L231); [crates/shamir-server/src/replication/follower_loop.rs:265](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-server/src/replication/follower_loop.rs#L265); [crates/shamir-server/src/replication/follower_loop.rs:278](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-server/src/replication/follower_loop.rs#L278); [crates/shamir-server/src/replication/follower_loop.rs:287](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-server/src/replication/follower_loop.rs#L287); [crates/shamir-server/src/replication/follower_loop.rs:316](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-server/src/replication/follower_loop.rs#L316).
 
 <a id="review-scheduler-observability"></a>
 
 ### Claim Scheduler / observability — Periodic GC and metrics work are off the request path
 
-Status: `not-applicable`. Current risk: —.
+Status: `not-applicable`. Current risk: `—`.
 
-The named maintenance work is scheduled in separate tasks. This establishes scheduling separation, not zero runtime-worker interference or measured cost.
+Prior-cycle decision: `not-applicable`.
 
-Evidence: [crates/shamir-server/src/scheduler.rs:136](../../../../../crates/shamir-server/src/scheduler.rs#L136); [crates/shamir-server/src/scheduler.rs:273](../../../../../crates/shamir-server/src/scheduler.rs#L273); [crates/shamir-server/src/observability.rs:96](../../../../../crates/shamir-server/src/observability.rs#L96).
+Maintenance runs in separate spawned tasks. Synchronous tick/collector work can still occupy runtime workers, and degraded-index collection also walks indexes. Separate scheduling does not prove zero interference or the module's quantitative cost claims.
 
-## Corrections and qualified non-findings
+Evidence: [crates/shamir-server/src/scheduler.rs:299](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-server/src/scheduler.rs#L299); [crates/shamir-server/src/observability.rs:447](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-server/src/observability.rs#L447); [crates/shamir-server/src/observability.rs:456](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-server/src/observability.rs#L456); [crates/shamir-server/src/observability.rs:473](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-server/src/observability.rs#L473).
 
-- Describe matching as expected hash lookup plus O(k) target/filter work, with a temporary owned-key allocation.
-- Treat the scc eviction complexity as unverified for the pinned implementation, not established by its local doc comment.
-- Distinguish bounded frame/task counts from bounded process memory and bounded query scanning.
-- The manifest has no enforced small-size guarantee.
-- Backoff is not exponential on every failure shape.
+## Evidence and recipe corrections
+
+- The response budget is not merely deployment-dependent: its production handoff currently loses the guard even when the default finite cap is enabled.
+- The scc archive is available. Its range-removal implementation does not justify treating the local O(evicted + log N) comment as a proven concurrent bound.
+- A requested replication event limit is not an enforced bound against every ReplSource response.
+- Cursor ceilings permit a peek row and do not cap total underlying scan/sort work.
+- Observability's nanosecond rendering and 30–50 microsecond collection claims were not verified; separate Tokio tasks share runtime resources.
 
 ---
 

@@ -1,11 +1,13 @@
-<!-- revalidation:2026-10-08 source:92ad58266bf57ddea1fa3c8a47affba1a3a9a096 -->
-# shamir-query-builder-macros — error-handling-lifecycle revalidation
+<!-- revalidation:2026-10-08 cycle:independent-2 source:e3765c935fc71655ee1ec0160cf180607935d89b -->
+# shamir-query-builder-macros — error-handling-lifecycle independent revalidation (cycle 2)
 
-Source snapshot: `92ad58266bf57ddea1fa3c8a47affba1a3a9a096`. Revalidated 2026-10-08 by read-only XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run; no source fix is part of this update. Test registration/assertions are evidence of an oracle, not proof of a passing run.
+Frozen source snapshot: `e3765c935fc71655ee1ec0160cf180607935d89b`. Independently revalidated 2026-10-08 by a fresh XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run. Source-fixed means the specified mechanism was already removed at this snapshot; this cycle implements no source fix.
 
-This section is authoritative for current status. Original titles/IDs are retained for traceability; a refuted title is not a current assertion. The collapsed historical report below is superseded, including its counts, severity, scenarios and fix instructions. Plan IDs preserve historical numbering, not a current release mandate. [Workspace methodology and status definitions](../SUMMARY.md#status-definitions).
+This section is authoritative for current decisions. Existing IDs and allegation titles are retained for traceability; a refuted title is not a current assertion. Prior-cycle decisions were rechecked, not used as proof. The first cycle is available in repository history at this snapshot. The original historical body below remains preserved once and is superseded, including its counts, severities and recipes. [Workspace scope and status definitions](../SUMMARY.md#status-definitions).
 
-The scoped-leftover rejection non-finding is source-proven for the resolved syn version. Own-crate Result/compile-error handling and lack of resource ownership remain clean. Diagnostic coverage and polish remain; an actual compiler abort from deep input is unverified.
+Unrelated external edits began in dependency/toolchain/CI metadata during collection; additional Rust-source edits appeared afterward. They were left untouched. Evidence and decisions are tied to the frozen commit, not those later changes or an installed toolchain. “Current” below means current at that snapshot; no re-audit of the modified working tree is implied.
+
+Ordinary rejections use structured compile errors and scoped leftovers are rejected. Diagnostic coverage remains missing. The suggested depth guard requires a non-recursive error-construction path.
 
 ## Current claim decisions
 
@@ -13,7 +15,7 @@ The scoped-leftover rejection non-finding is source-proven for the resolved syn 
 |---:|---:|---:|---:|---:|---:|---:|
 | 5 | 4 | 0 | 0 | 0 | 1 | 0 |
 
-These are decisions on report claims, including repeated roots, bundled observations and non-findings—not a unique-bug census. Closed/N/A rows have no current risk; unverified risk is provisional. Pure style and unmeasured optimization claims do not establish runtime impact.
+These are duplicate-inclusive report decisions, not a unique-bug census. Pure style or structural optimization does not establish a runtime incident; unverified impact remains provisional.
 
 <a id="review-1"></a>
 
@@ -21,11 +23,13 @@ These are decisions on report claims, including repeated roots, bundled observat
 
 Status: `confirmed-open`. Current risk: `medium`.
 
-No reachable negative parser/lowering harness, compile-fail fixtures or trybuild dependency was found. The registered consumer suite cannot detect changes confined to rejection branches. High severity is unsupported by this coverage gap alone.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-query-builder-macros/Cargo.toml:13](../../../../../crates/shamir-query-builder-macros/Cargo.toml#L13); [crates/shamir-query-builder/src/macros/tests/mod.rs:2](../../../../../crates/shamir-query-builder/src/macros/tests/mod.rs#L2); [crates/shamir-query-builder/src/macros/tests/q_macro_tests.rs:42](../../../../../crates/shamir-query-builder/src/macros/tests/q_macro_tests.rs#L42); [crates/shamir-query-builder-macros/src/filter_lower.rs:299](../../../../../crates/shamir-query-builder-macros/src/filter_lower.rs#L299); [crates/shamir-query-builder-macros/src/query_parse.rs:637](../../../../../crates/shamir-query-builder-macros/src/query_parse.rs#L637).
+No reachable negative harness was found. Registered accepted-input tests cannot catch changing unknown-predicate rejection into acceptance or weakening delete's required-WHERE rule. This is a coverage gap, not evidence of current high-impact corruption.
 
-Grouping/duplicate: `SUMMARY.md#6.1`. This row is not another independent defect.
+Evidence: [crates/shamir-query-builder-macros/Cargo.toml:13](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-query-builder-macros/Cargo.toml#L13); [crates/shamir-query-builder/src/macros/tests/mod.rs:2](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-query-builder/src/macros/tests/mod.rs#L2); [crates/shamir-query-builder-macros/src/filter_lower.rs:299](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-query-builder-macros/src/filter_lower.rs#L299); [crates/shamir-query-builder-macros/src/query_parse.rs:637](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-query-builder-macros/src/query_parse.rs#L637).
+
+Grouping/duplicate: [correctness-tdd.md#3](correctness-tdd.md#review-3). This is not an additional independent defect.
 
 <a id="review-2"></a>
 
@@ -33,11 +37,11 @@ Grouping/duplicate: `SUMMARY.md#6.1`. This row is not another independent defect
 
 Status: `confirmed-open`. Current risk: `low`.
 
-An unknown identifier followed by parentheses still falls through to field parsing. Its parentheses remain at the outer query level and trigger the generic trailing-query/clause-order diagnostic rather than an unknown-select-function error.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-query-builder-macros/src/query_parse.rs:433](../../../../../crates/shamir-query-builder-macros/src/query_parse.rs#L433); [crates/shamir-query-builder-macros/src/query_parse.rs:441](../../../../../crates/shamir-query-builder-macros/src/query_parse.rs#L441); [crates/shamir-query-builder-macros/src/query_parse.rs:300](../../../../../crates/shamir-query-builder-macros/src/query_parse.rs#L300).
+select myfunc(x) consumes myfunc as a field after unknown-name fallthrough, leaving parentheses for the outer query error. It is rejected, but the message does not identify the unsupported select function.
 
-Grouping/duplicate: `SUMMARY.md#6.2`. This row is not another independent defect.
+Evidence: [crates/shamir-query-builder-macros/src/query_parse.rs:433](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-query-builder-macros/src/query_parse.rs#L433); [crates/shamir-query-builder-macros/src/query_parse.rs:441](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-query-builder-macros/src/query_parse.rs#L441); [crates/shamir-query-builder-macros/src/query_parse.rs:300](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-query-builder-macros/src/query_parse.rs#L300).
 
 <a id="review-3"></a>
 
@@ -45,23 +49,23 @@ Grouping/duplicate: `SUMMARY.md#6.2`. This row is not another independent defect
 
 Status: `confirmed-open`. Current risk: `low`.
 
-Field identifiers and aliases still become Strings before quote emits string literals, losing their original identifier spans. RHS Expr tokens are retained. Span loss is source-proven; the exact rustc underline in a hypothetical future API mismatch was not reproduced.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-query-builder-macros/src/filter_lower.rs:333](../../../../../crates/shamir-query-builder-macros/src/filter_lower.rs#L333); [crates/shamir-query-builder-macros/src/query_parse.rs:947](../../../../../crates/shamir-query-builder-macros/src/query_parse.rs#L947); [crates/shamir-query-builder-macros/src/query_parse.rs:974](../../../../../crates/shamir-query-builder-macros/src/query_parse.rs#L974); [crates/shamir-query-builder-macros/src/query_parse.rs:1003](../../../../../crates/shamir-query-builder-macros/src/query_parse.rs#L1003).
+Identifier spans are lost when converted to String; quote 1.0.45 ToTokens for str creates a new literal. The exact future compiler underline is unverified. Published source: https://docs.rs/crate/quote/1.0.45/source/src/to_tokens.rs.
 
-Grouping/duplicate: `SUMMARY.md#6.3`. This row is not another independent defect.
+Evidence: [Cargo.lock:2660](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/Cargo.lock#L2660); [crates/shamir-query-builder-macros/src/filter_lower.rs:333](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-query-builder-macros/src/filter_lower.rs#L333); [crates/shamir-query-builder-macros/src/query_parse.rs:947](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-query-builder-macros/src/query_parse.rs#L947); [crates/shamir-query-builder-macros/src/query_parse.rs:1003](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-query-builder-macros/src/query_parse.rs#L1003).
 
 <a id="review-4"></a>
 
 ### Claim 4 — Unbounded recursion in expression lowering; pathological nesting aborts rustc instead of erroring
 
-Status: `unverified`. Current risk: `low` (provisional; not a confirmed defect).
+Status: `unverified`. Current risk: `low`.
 
-lower, binary/unary lowering and field-segment collection recurse without a local cap. This proves a depth-dependent stack-hardening concern, not that the stated enormous input survives parsing or that rustc itself aborts rather than reporting a proc-macro-server failure. No reproduction was permitted.
+Prior-cycle decision: `unverified`.
 
-Evidence: [crates/shamir-query-builder-macros/src/filter_lower.rs:26](../../../../../crates/shamir-query-builder-macros/src/filter_lower.rs#L26); [crates/shamir-query-builder-macros/src/filter_lower.rs:61](../../../../../crates/shamir-query-builder-macros/src/filter_lower.rs#L61); [crates/shamir-query-builder-macros/src/filter_lower.rs:102](../../../../../crates/shamir-query-builder-macros/src/filter_lower.rs#L102); [crates/shamir-query-builder-macros/src/filter_lower.rs:337](../../../../../crates/shamir-query-builder-macros/src/filter_lower.rs#L337).
+Depth-dependent recursion is present, but accepted depth and abort behavior are not proven. A lowering cap alone also leaves parsing, recursive diagnostic rendering and AST destruction outside its protection.
 
-Grouping/duplicate: `SUMMARY.md#6.4`. This row is not another independent defect.
+Evidence: [crates/shamir-query-builder-macros/src/filter_lower.rs:26](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-query-builder-macros/src/filter_lower.rs#L26); [crates/shamir-query-builder-macros/src/filter_lower.rs:102](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-query-builder-macros/src/filter_lower.rs#L102); [crates/shamir-query-builder-macros/src/filter_lower.rs:337](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-query-builder-macros/src/filter_lower.rs#L337); [crates/shamir-query-builder-macros/src/filter_lower.rs:43](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-query-builder-macros/src/filter_lower.rs#L43); [Cargo.lock:4023](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/Cargo.lock#L4023).
 
 <a id="review-5"></a>
 
@@ -69,19 +73,18 @@ Grouping/duplicate: `SUMMARY.md#6.4`. This row is not another independent defect
 
 Status: `confirmed-open`. Current risk: `nit`.
 
-Both WHERE and HAVING still use an empty-expression message naming WHERE. Predicate field validation still uses a catch-all message naming comparison LHS.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-query-builder-macros/src/query_parse.rs:235](../../../../../crates/shamir-query-builder-macros/src/query_parse.rs#L235); [crates/shamir-query-builder-macros/src/query_parse.rs:540](../../../../../crates/shamir-query-builder-macros/src/query_parse.rs#L540); [crates/shamir-query-builder-macros/src/filter_lower.rs:143](../../../../../crates/shamir-query-builder-macros/src/filter_lower.rs#L143); [crates/shamir-query-builder-macros/src/filter_lower.rs:351](../../../../../crates/shamir-query-builder-macros/src/filter_lower.rs#L351).
+An empty HAVING expression reports 'after where'; like("status", pattern) reports a comparison-LHS problem. Both inputs are correctly rejected, so this is message specificity only.
 
-Grouping/duplicate: `SUMMARY.md#6.5`. This row is not another independent defect.
+Evidence: [crates/shamir-query-builder-macros/src/query_parse.rs:235](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-query-builder-macros/src/query_parse.rs#L235); [crates/shamir-query-builder-macros/src/query_parse.rs:540](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-query-builder-macros/src/query_parse.rs#L540); [crates/shamir-query-builder-macros/src/filter_lower.rs:143](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-query-builder-macros/src/filter_lower.rs#L143); [crates/shamir-query-builder-macros/src/filter_lower.rs:351](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-query-builder-macros/src/filter_lower.rs#L351).
 
-## Corrections and qualified non-findings
+## Evidence and recipe corrections
 
-- Non-findings retained: own-crate implementation has no unwrap/expect/panic/todo/unimplemented calls, uses syn::Result and converts ordinary rejections into compile_error tokens. This is not a guarantee against stack exhaustion or panics in emitted runtime builders.
-- Non-findings retained: nested scoped-buffer leftovers are rejected by syn 2.0.114; no silent field-loss mechanism exists at the cited sites.
-- Resource cleanup and thiserror/anyhow conventions are not-applicable: this crate owns no files, locks, tasks or connections, and syn::Error is its compiler-diagnostic boundary type.
-- A compile-fail fixture directory alone is not coverage. It needs a reachable harness. scripts/test.sh defaults to --lib; integration-only harnesses require --full or equivalent explicit registration.
-- Unknown select-function parentheses are not consumed by a scoped content parser on that branch; the local outer-stream check is the direct rejection mechanism.
+- No explicit own-crate panic calls is supported; 'never panic on input' is stronger and unproved. Emitted Doc::set also contains runtime expect calls outside this crate.
+- The historical depth-cap recipe uses Error::new_spanned(expr). syn 2.0.114 src/error.rs:194 calls into_token_stream, and ExprParen/ExprUnary printing recursively visits children. Use an already available token span for a bounded error, and separately account for parsing/destruction. Published sources: https://docs.rs/crate/syn/2.0.114/source/src/error.rs and https://docs.rs/crate/syn/2.0.114/source/src/expr.rs.
+- A fixture directory is not registration. An integration-only harness is excluded by default --lib mode.
+- Unknown select-function rejection comes directly from the outer-stream check, not scoped-buffer Drop on that branch.
 
 ---
 

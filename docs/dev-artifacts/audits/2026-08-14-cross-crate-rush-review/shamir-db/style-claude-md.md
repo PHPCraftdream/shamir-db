@@ -1,19 +1,21 @@
-<!-- revalidation:2026-10-08 source:92ad58266bf57ddea1fa3c8a47affba1a3a9a096 -->
-# shamir-db — style-claude-md revalidation
+<!-- revalidation:2026-10-08 cycle:independent-2 source:e3765c935fc71655ee1ec0160cf180607935d89b -->
+# shamir-db — style-claude-md independent revalidation (cycle 2)
 
-Source snapshot: `92ad58266bf57ddea1fa3c8a47affba1a3a9a096`. Revalidated 2026-10-08 by read-only XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run; no source fix is part of this update. Test registration/assertions are evidence of an oracle, not proof of a passing run.
+Frozen source snapshot: `e3765c935fc71655ee1ec0160cf180607935d89b`. Independently revalidated 2026-10-08 by a fresh XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run. Source-fixed means the specified mechanism was already removed at this snapshot; this cycle implements no source fix.
 
-This section is authoritative for current status. Original titles/IDs are retained for traceability; a refuted title is not a current assertion. The collapsed historical report below is superseded, including its counts, severity, scenarios and fix instructions. Plan IDs preserve historical numbering, not a current release mandate. [Workspace methodology and status definitions](../SUMMARY.md#status-definitions).
+This section is authoritative for current decisions. Existing IDs and allegation titles are retained for traceability; a refuted title is not a current assertion. Prior-cycle decisions were rechecked, not used as proof. The first cycle is available in repository history at this snapshot. The original historical body below remains preserved once and is superseded, including its counts, severities and recipes. [Workspace scope and status definitions](../SUMMARY.md#status-definitions).
 
-The identified import, module, constant and small hygiene differences remain. Their severities should stay stylistic. Test-module visibility and identity-port cohesion are not actionable violations of the instructions.
+Unrelated external edits began in dependency/toolchain/CI metadata during collection; additional Rust-source edits appeared afterward. They were left untouched. Evidence and decisions are tied to the frozen commit, not those later changes or an installed toolchain. “Current” below means current at that snapshot; no re-audit of the modified working tree is implied.
+
+Local imports, the manifest constant and small hygiene issues remain. Private test modules, cohesive identity ports and optional spelling/export preferences are not required fixes.
 
 ## Current claim decisions
 
 | Claim decisions | Open | Source-fixed | Partial | Refuted | Unverified | N/A |
 |---:|---:|---:|---:|---:|---:|---:|
-| 9 | 7 | 0 | 0 | 0 | 0 | 2 |
+| 9 | 5 | 0 | 0 | 0 | 0 | 4 |
 
-These are decisions on report claims, including repeated roots, bundled observations and non-findings—not a unique-bug census. Closed/N/A rows have no current risk; unverified risk is provisional. Pure style and unmeasured optimization claims do not establish runtime impact.
+These are duplicate-inclusive report decisions, not a unique-bug census. Pure style or structural optimization does not establish a runtime incident; unverified impact remains provisional.
 
 <a id="review-1"></a>
 
@@ -21,19 +23,23 @@ These are decisions on report claims, including repeated roots, bundled observat
 
 Status: `confirmed-open`. Current risk: `low`.
 
-The ten cited local imports remain across core, schema management and replication, including the duplicate RecordId import. No documented exception applies. This is source organization, not a medium runtime defect.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-db/src/shamir_db/shamir_db/core.rs:759](../../../../../crates/shamir-db/src/shamir_db/shamir_db/core.rs#L759); [crates/shamir-db/src/shamir_db/shamir_db/schema_management.rs:109](../../../../../crates/shamir-db/src/shamir_db/shamir_db/schema_management.rs#L109); [crates/shamir-db/src/shamir_db/shamir_db/schema_management.rs:418](../../../../../crates/shamir-db/src/shamir_db/shamir_db/schema_management.rs#L418); [crates/shamir-db/src/shamir_db/execute/admin_replication.rs:498](../../../../../crates/shamir-db/src/shamir_db/execute/admin_replication.rs#L498).
+The ten cited imports remain in core, schema parsing and replication. No named exception applies; RecordId is already imported at core's header. This is the explicit imports-at-top convention, not runtime risk.
+
+Evidence: [crates/shamir-db/src/shamir_db/shamir_db/core.rs:759](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/shamir_db/core.rs#L759); [crates/shamir-db/src/shamir_db/shamir_db/schema_management.rs:109](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/shamir_db/schema_management.rs#L109); [crates/shamir-db/src/shamir_db/execute/admin_replication.rs:498](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/execute/admin_replication.rs#L498); [CLAUDE.md:587](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/CLAUDE.md#L587).
 
 <a id="review-2"></a>
 
 ### Claim 2 — `shamir_db::shamir_db` module inception suppressed with an unannotated allow
 
-Status: `confirmed-open`. Current risk: `low`.
+Status: `confirmed-open`. Current risk: `nit`.
 
-The nested public module and unexplained allow remain. Top-level convenience reexports already exist, so callers are not forced to use the deep path. Flattening would need compatibility handling for existing public deep paths.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-db/src/shamir_db/mod.rs:7](../../../../../crates/shamir-db/src/shamir_db/mod.rs#L7); [crates/shamir-db/src/lib.rs:32](../../../../../crates/shamir-db/src/lib.rs#L32).
+The nested public module and allow remain. Top-level convenience reexports already exist. Justification is harmless hygiene; flattening without preserving the old public deep path is not a mechanical cleanup.
+
+Evidence: [crates/shamir-db/src/shamir_db/mod.rs:7](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/mod.rs#L7); [crates/shamir-db/src/lib.rs:32](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/lib.rs#L32).
 
 <a id="review-3"></a>
 
@@ -41,9 +47,11 @@ Evidence: [crates/shamir-db/src/shamir_db/mod.rs:7](../../../../../crates/shamir
 
 Status: `confirmed-open`. Current risk: `nit`.
 
-The constant definition remains in the inner module manifest, contrary to the reexports-only instruction. Its location has no established runtime consequence.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-db/src/shamir_db/shamir_db/mod.rs:15](../../../../../crates/shamir-db/src/shamir_db/shamir_db/mod.rs#L15); [AGENTS.md:132](../../../../../AGENTS.md#L132).
+SYSTEM_DB_NAME is defined in the module manifest, contrary to the reexports-only convention. Moving it must retain sufficient visibility for sibling consumers.
+
+Evidence: [crates/shamir-db/src/shamir_db/shamir_db/mod.rs:15](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/shamir_db/mod.rs#L15); [AGENTS.md:132](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/AGENTS.md#L132).
 
 <a id="review-4"></a>
 
@@ -51,9 +59,11 @@ Evidence: [crates/shamir-db/src/shamir_db/shamir_db/mod.rs:15](../../../../../cr
 
 Status: `confirmed-open`. Current risk: `nit`.
 
-All three file-wide attributes remain without local rationale. The legacy API README does explain deprecated UserValue and compatibility intent, so the rationale is missing locally, not entirely absent.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-db/src/main.rs:1](../../../../../crates/shamir-db/src/main.rs#L1); [crates/shamir-db/src/api/types.rs:1](../../../../../crates/shamir-db/src/api/types.rs#L1); [crates/shamir-db/src/api/tests/api_tests.rs:1](../../../../../crates/shamir-db/src/api/tests/api_tests.rs#L1); [crates/shamir-db/src/api/README.md:11](../../../../../crates/shamir-db/src/api/README.md#L11).
+All three attributes remain. The API README positively explains legacy UserValue compatibility, so rationale exists outside the annotated files.
+
+Evidence: [crates/shamir-db/src/main.rs:1](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/main.rs#L1); [crates/shamir-db/src/api/types.rs:1](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/api/types.rs#L1); [crates/shamir-db/src/api/tests/api_tests.rs:1](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/api/tests/api_tests.rs#L1); [crates/shamir-db/src/api/README.md:11](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/api/README.md#L11).
 
 <a id="review-5"></a>
 
@@ -61,59 +71,66 @@ Evidence: [crates/shamir-db/src/main.rs:1](../../../../../crates/shamir-db/src/m
 
 Status: `confirmed-open`. Current risk: `nit`.
 
-The bare semicolon and duplicate cleanup comment remain. They have no behavioral effect.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-db/src/shamir_db/curl_gateway.rs:132](../../../../../crates/shamir-db/src/shamir_db/curl_gateway.rs#L132).
+The semicolon and duplicate cleanup comment are present and behaviorally inert.
+
+Evidence: [crates/shamir-db/src/shamir_db/curl_gateway.rs:132](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/curl_gateway.rs#L132); [crates/shamir-db/src/shamir_db/curl_gateway.rs:172](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/curl_gateway.rs#L172).
 
 <a id="review-6"></a>
 
 ### Claim 6 — `tests/mod.rs` manifests use private `mod` instead of the documented `pub mod` form
 
-Status: `not-applicable`. Current risk: —.
+Status: `not-applicable`. Current risk: `—`.
 
-Private declarations remain, but pub mod is an illustrative snippet, not an explicit visibility requirement. Parent cfg(test) wiring reaches the tests regardless; no test-discovery or conformance defect is established.
+Prior-cycle decision: `not-applicable`.
 
-Evidence: [crates/shamir-db/src/shamir_db/tests/mod.rs:1](../../../../../crates/shamir-db/src/shamir_db/tests/mod.rs#L1); [crates/shamir-db/src/shamir_db/mod.rs:1](../../../../../crates/shamir-db/src/shamir_db/mod.rs#L1); [crates/shamir-db/src/api/mod.rs:5](../../../../../crates/shamir-db/src/api/mod.rs#L5).
+All four private manifests have parent cfg(test) wiring. Public visibility is not required for discovery and the documentation snippet is illustrative.
+
+Evidence: [crates/shamir-db/src/shamir_db/tests/mod.rs:1](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/tests/mod.rs#L1); [crates/shamir-db/src/shamir_db/mod.rs:1](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/mod.rs#L1); [crates/shamir-db/src/api/mod.rs:5](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/api/mod.rs#L5); [crates/shamir-db/src/shamir_db/shamir_db/mod.rs:12](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/shamir_db/mod.rs#L12); [crates/shamir-db/src/shamir_db/execute/mod.rs:48](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/execute/mod.rs#L48).
 
 <a id="review-7"></a>
 
 ### Claim 7 — Inconsistent qualified vs imported spelling of `new_map`/`QueryValue` throughout the facade
 
-Status: `confirmed-open`. Current risk: `nit`.
+Status: `not-applicable`. Current risk: `—`.
 
-Mixed spellings remain. The report correctly calls this optional consistency polish, not a CLAUDE rule violation or functional defect.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-db/src/shamir_db/system_store.rs:9](../../../../../crates/shamir-db/src/shamir_db/system_store.rs#L9); [crates/shamir-db/src/shamir_db/system_store.rs:148](../../../../../crates/shamir-db/src/shamir_db/system_store.rs#L148); [crates/shamir-db/src/shamir_db/shamir_db/function_management.rs:206](../../../../../crates/shamir-db/src/shamir_db/shamir_db/function_management.rs#L206).
+Both spellings refer to the same typed items. The report itself identifies no normative rule or behavioral defect; normalization is optional editorial preference.
+
+Evidence: [crates/shamir-db/src/shamir_db/system_store.rs:9](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/system_store.rs#L9); [crates/shamir-db/src/shamir_db/system_store.rs:148](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/system_store.rs#L148); [crates/shamir-db/src/shamir_db/shamir_db/function_management.rs:206](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/shamir_db/function_management.rs#L206).
 
 <a id="review-8"></a>
 
 ### Claim 8 — `schema_management` alone breaks the sibling export convention
 
-Status: `confirmed-open`. Current risk: `nit`.
+Status: `not-applicable`. Current risk: `—`.
 
-The pub(crate) module and deep imports remain. This differs from sibling surface organization but is neither an access-control nor runtime defect.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-db/src/shamir_db/shamir_db/mod.rs:8](../../../../../crates/shamir-db/src/shamir_db/shamir_db/mod.rs#L8); [crates/shamir-db/src/shamir_db/execute/admin_table_index.rs:6](../../../../../crates/shamir-db/src/shamir_db/execute/admin_table_index.rs#L6); [crates/shamir-db/src/shamir_db/execute/admin_schema.rs:42](../../../../../crates/shamir-db/src/shamir_db/execute/admin_schema.rs#L42).
+The deliberate crate-visible module permits internal shared helpers/constants. No rule requires every sibling module's visibility to match; deep internal imports do not break a public contract.
+
+Evidence: [crates/shamir-db/src/shamir_db/shamir_db/mod.rs:8](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/shamir_db/mod.rs#L8); [crates/shamir-db/src/shamir_db/execute/admin_schema.rs:42](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/execute/admin_schema.rs#L42).
 
 <a id="review-9"></a>
 
 ### Claim 9 — `ports.rs` carries four public exports in one file (borderline cohesion)
 
-Status: `not-applicable`. Current risk: —.
+Status: `not-applicable`. Current risk: `—`.
 
-The four exports form the explicitly documented shared identity seam and fit the allowed closely coupled group exception. The original report itself requests no present action.
+Prior-cycle decision: `not-applicable`.
 
-Evidence: [crates/shamir-db/src/shamir_db/ports.rs:1](../../../../../crates/shamir-db/src/shamir_db/ports.rs#L1); [crates/shamir-db/src/shamir_db/ports.rs:25](../../../../../crates/shamir-db/src/shamir_db/ports.rs#L25); [crates/shamir-db/src/shamir_db/mod.rs:12](../../../../../crates/shamir-db/src/shamir_db/mod.rs#L12).
+Module documentation explicitly establishes a shared dependency-direction identity seam. The closely coupled group exception supports the four exports.
 
-## Corrections and qualified non-findings
+Evidence: [crates/shamir-db/src/shamir_db/ports.rs:1](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/ports.rs#L1); [crates/shamir-db/src/shamir_db/ports.rs:25](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/ports.rs#L25); [crates/shamir-db/src/shamir_db/mod.rs:12](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/mod.rs#L12).
 
-- Style findings 1–2 are low source-organization concerns, not medium runtime defects; constant and deprecation-allow location are nits.
-- Private test manifests are valid and registered. Do not change their visibility merely to imitate an example.
-- ports.rs cohesion is positively supported by the module's dependency-direction contract and the closely coupled exception.
-- Top-level ShamirDb reexports already avoid forcing consumers through module inception; flattening public deep modules is not purely mechanical compatibility-wise.
-- The named module manifests, four cfg(test) trees and multi-file ddl_wire_e2e harness are wired; no inline test blocks were found in implementation source.
-- Five registered benchmarks still use bench_scale_tool::Harness with harness=false; doctest=false has a rationale. The helper bench_allocator.rs is not an additional benchmark target.
-- No global statement that every comment/import is exemplary or every test non-vacuous is warranted from this assigned-claim review.
+## Evidence and recipe corrections
+
+- Mixed spelling and internal schema-module visibility are optional preferences, not open conformance defects.
+- There are five explicit Harness benchmarks, not necessarily five Cargo benchmark targets: the allocator helper is auto-discoverable with edition 2021 and autobenches not disabled.
+- The execute module map includes the implemented submodules but is not proof that every comment remains accurate; core still contains stale redb and migration descriptions.
+- Neither module flattening nor constant relocation preserves consumers automatically; retain paths/visibility deliberately.
 
 ---
 

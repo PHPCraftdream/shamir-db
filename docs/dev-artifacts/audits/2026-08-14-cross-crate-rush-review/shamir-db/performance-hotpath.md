@@ -1,11 +1,13 @@
-<!-- revalidation:2026-10-08 source:92ad58266bf57ddea1fa3c8a47affba1a3a9a096 -->
-# shamir-db — performance-hotpath revalidation
+<!-- revalidation:2026-10-08 cycle:independent-2 source:e3765c935fc71655ee1ec0160cf180607935d89b -->
+# shamir-db — performance-hotpath independent revalidation (cycle 2)
 
-Source snapshot: `92ad58266bf57ddea1fa3c8a47affba1a3a9a096`. Revalidated 2026-10-08 by read-only XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run; no source fix is part of this update. Test registration/assertions are evidence of an oracle, not proof of a passing run.
+Frozen source snapshot: `e3765c935fc71655ee1ec0160cf180607935d89b`. Independently revalidated 2026-10-08 by a fresh XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run. Source-fixed means the specified mechanism was already removed at this snapshot; this cycle implements no source fix.
 
-This section is authoritative for current status. Original titles/IDs are retained for traceability; a refuted title is not a current assertion. The collapsed historical report below is superseded, including its counts, severity, scenarios and fix instructions. Plan IDs preserve historical numbering, not a current release mandate. [Workspace methodology and status definitions](../SUMMARY.md#status-definitions).
+This section is authoritative for current decisions. Existing IDs and allegation titles are retained for traceability; a refuted title is not a current assertion. Prior-cycle decisions were rechecked, not used as proof. The first cycle is available in repository history at this snapshot. The original historical body below remains preserved once and is superseded, including its counts, severities and recipes. [Workspace scope and status definitions](../SUMMARY.md#status-definitions).
 
-Batch ACL deduplication is fixed, but unindexed catalogue scans and repeated function/list/FK lookups remain. Current byte-level prefilters make the original claim of fully decoding and de-interning every scanned row inaccurate. No latency conclusions were measured.
+Unrelated external edits began in dependency/toolchain/CI metadata during collection; additional Rust-source edits appeared afterward. They were left untouched. Evidence and decisions are tied to the frozen commit, not those later changes or an installed toolchain. “Current” below means current at that snapshot; no re-audit of the modified working tree is implied.
+
+Unindexed catalogue scans and product-shaped startup/list/FK work remain source-proven. Repeated-target ACL calls are fixed. No material latency, throughput or memory improvement was measured.
 
 ## Current claim decisions
 
@@ -13,7 +15,7 @@ Batch ACL deduplication is fixed, but unindexed catalogue scans and repeated fun
 |---:|---:|---:|---:|---:|---:|---:|
 | 9 | 7 | 1 | 1 | 0 | 0 | 0 |
 
-These are decisions on report claims, including repeated roots, bundled observations and non-findings—not a unique-bug census. Closed/N/A rows have no current risk; unverified risk is provisional. Pure style and unmeasured optimization claims do not establish runtime impact.
+These are duplicate-inclusive report decisions, not a unique-bug census. Pure style or structural optimization does not establish a runtime incident; unverified impact remains provisional.
 
 <a id="review-1"></a>
 
@@ -21,21 +23,25 @@ These are decisions on report claims, including repeated roots, bundled observat
 
 Status: `partially-fixed`. Current risk: `medium`.
 
-System lookup filters still scan unindexed catalogues, but Authorized now deduplicates repeated action/path pairs. Cost is per distinct check, across differently sized ancestor catalogues; byte-level prefiltering avoids full de-interning of every rejected row.
+Prior-cycle decision: `partially-fixed`.
 
-Evidence: [crates/shamir-db/src/shamir_db/system_store.rs:97](../../../../../crates/shamir-db/src/shamir_db/system_store.rs#L97); [crates/shamir-db/src/shamir_db/system_store.rs:813](../../../../../crates/shamir-db/src/shamir_db/system_store.rs#L813); [crates/shamir-engine/src/query/batch/authorized.rs:102](../../../../../crates/shamir-engine/src/query/batch/authorized.rs#L102); [crates/shamir-engine/src/table/read_exec.rs:895](../../../../../crates/shamir-engine/src/table/read_exec.rs#L895); [crates/shamir-engine/src/table/table.rs:318](../../../../../crates/shamir-engine/src/table/table.rs#L318).
+Plain system TableConfigs and Eq-filter reads retain scans. Authorized deduplicates distinct action/path checks, not all common ancestors. MVCC enumeration can additionally visit retained versions; byte prefilters avoid universal full de-interning.
+
+Evidence: [crates/shamir-db/src/shamir_db/system_store.rs:97](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/system_store.rs#L97); [crates/shamir-db/src/shamir_db/system_store.rs:813](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/system_store.rs#L813); [crates/shamir-engine/src/query/batch/authorized.rs:102](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-engine/src/query/batch/authorized.rs#L102); [crates/shamir-engine/src/table/table_manager_streaming.rs:229](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-engine/src/table/table_manager_streaming.rs#L229); [crates/shamir-engine/src/table/table.rs:318](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-engine/src/table/table.rs#L318).
 
 <a id="review-2"></a>
 
 ### Claim 2 — `execute_as` re-authorizes every op in a batch without dedupe (the inline ACL cache exists only in `tx_execute_as`)
 
-Status: `fixed`. Current risk: —.
+Status: `fixed`. Current risk: `—`.
 
-Both entry points now use Authorized's set-based deduplication before execution. The original N-identical-operations/N-traversals mechanism no longer exists.
+Prior-cycle decision: `fixed`.
 
-Evidence: [crates/shamir-db/src/shamir_db/execute/db_execute.rs:40](../../../../../crates/shamir-db/src/shamir_db/execute/db_execute.rs#L40); [crates/shamir-db/src/shamir_db/execute/db_tx.rs:126](../../../../../crates/shamir-db/src/shamir_db/execute/db_tx.rs#L126); [crates/shamir-engine/src/query/batch/authorized.rs:104](../../../../../crates/shamir-engine/src/query/batch/authorized.rs#L104).
+Both callers now use the same set-based Authorized mechanism; the former per-identical-op traversal loop is absent.
 
-Grouping/duplicate: `concurrency-lockfree.md#1`. This row is not another independent defect.
+Evidence: [crates/shamir-db/src/shamir_db/execute/db_execute.rs:40](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/execute/db_execute.rs#L40); [crates/shamir-db/src/shamir_db/execute/db_tx.rs:126](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/execute/db_tx.rs#L126); [crates/shamir-engine/src/query/batch/authorized.rs:104](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-engine/src/query/batch/authorized.rs#L104).
+
+Grouping/duplicate: [concurrency-lockfree.md#1](concurrency-lockfree.md#review-1). This is not an additional independent defect.
 
 <a id="review-3"></a>
 
@@ -43,9 +49,11 @@ Grouping/duplicate: `concurrency-lockfree.md#1`. This row is not another indepen
 
 Status: `confirmed-open`. Current risk: `medium`.
 
-User invocation still resolves the function through authorization and loads it again in effective_fn_actor. Root/namespace and any folder ancestors add their own reads; System/Admin skip authorization but effective_fn_actor still loads.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-db/src/shamir_db/shamir_db/function_management.rs:711](../../../../../crates/shamir-db/src/shamir_db/shamir_db/function_management.rs#L711); [crates/shamir-db/src/shamir_db/shamir_db/function_management.rs:720](../../../../../crates/shamir-db/src/shamir_db/shamir_db/function_management.rs#L720); [crates/shamir-db/src/shamir_db/shamir_db/access_control.rs:93](../../../../../crates/shamir-db/src/shamir_db/shamir_db/access_control.rs#L93); [crates/shamir-db/src/shamir_db/shamir_db/access_control.rs:995](../../../../../crates/shamir-db/src/shamir_db/shamir_db/access_control.rs#L995).
+User invocation authorizes the function then effective_fn_actor loads it again. Root/namespace/folder traversal adds reads; System/Admin bypass traversal but not effective-actor loading. Caching must preserve ownership/setuid/security changes.
+
+Evidence: [crates/shamir-db/src/shamir_db/shamir_db/function_management.rs:711](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/shamir_db/function_management.rs#L711); [crates/shamir-db/src/shamir_db/shamir_db/function_management.rs:720](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/shamir_db/function_management.rs#L720); [crates/shamir-db/src/shamir_db/shamir_db/access_control.rs:995](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/shamir_db/access_control.rs#L995).
 
 <a id="review-4"></a>
 
@@ -53,9 +61,11 @@ Evidence: [crates/shamir-db/src/shamir_db/shamir_db/function_management.rs:711](
 
 Status: `confirmed-open`. Current risk: `medium`.
 
-The comments remain false for current unindexed filtered reads. Listing performs one scan per live function/validator, structurally O(live registrations × catalogue rows), quadratic when both scale together.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-db/src/shamir_db/execute/admin_access.rs:21](../../../../../crates/shamir-db/src/shamir_db/execute/admin_access.rs#L21); [crates/shamir-db/src/shamir_db/shamir_db/function_management.rs:377](../../../../../crates/shamir-db/src/shamir_db/shamir_db/function_management.rs#L377); [crates/shamir-db/src/shamir_db/shamir_db/function_management.rs:382](../../../../../crates/shamir-db/src/shamir_db/shamir_db/function_management.rs#L382); [crates/shamir-db/src/shamir_db/shamir_db/validator_management.rs:418](../../../../../crates/shamir-db/src/shamir_db/shamir_db/validator_management.rs#L418).
+Per-live-entry listing performs filtered catalogue reads with no system indexes. Work grows with live entries times scanned catalogue/history size. The comments calling these constant-time lookups are false; exact decode counts and latency multipliers are unsupported.
+
+Evidence: [crates/shamir-db/src/shamir_db/shamir_db/function_management.rs:377](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/shamir_db/function_management.rs#L377); [crates/shamir-db/src/shamir_db/shamir_db/validator_management.rs:89](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/shamir_db/validator_management.rs#L89); [crates/shamir-db/src/shamir_db/shamir_db/validator_management.rs:418](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/shamir_db/validator_management.rs#L418); [crates/shamir-db/src/shamir_db/execute/admin_access.rs:21](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/execute/admin_access.rs#L21).
 
 <a id="review-5"></a>
 
@@ -63,9 +73,11 @@ Evidence: [crates/shamir-db/src/shamir_db/execute/admin_access.rs:21](../../../.
 
 Status: `confirmed-open`. Current risk: `medium`.
 
-all_entries still allocates/materializes the dictionary before max. The interner already has an allocation counter, but IDs can have gaps and concurrent publication holes. Max of this request's mappings is not the global epoch, especially for retouches or an empty request.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-db/src/shamir_db/execute/admin_interner.rs:170](../../../../../crates/shamir-db/src/shamir_db/execute/admin_interner.rs#L170); [crates/shamir-types/src/core/interner/interner.rs:157](../../../../../crates/shamir-types/src/core/interner/interner.rs#L157); [crates/shamir-types/src/core/interner/interner.rs:328](../../../../../crates/shamir-types/src/core/interner/interner.rs#L328); [crates/shamir-types/src/core/interner/interner.rs:522](../../../../../crates/shamir-types/src/core/interner/interner.rs#L522).
+all_entries allocates names and scans the reverse spine before max. Retouching an old name or touching an empty list disproves request-mappings-max as the global epoch. Allocation reservations can leak IDs; publication holes forbid an unchecked allocation-counter substitute.
+
+Evidence: [crates/shamir-db/src/shamir_db/execute/admin_interner.rs:170](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/execute/admin_interner.rs#L170); [crates/shamir-types/src/core/interner/interner.rs:157](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-types/src/core/interner/interner.rs#L157); [crates/shamir-types/src/core/interner/interner.rs:328](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-types/src/core/interner/interner.rs#L328); [crates/shamir-types/src/core/interner/interner.rs:522](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-types/src/core/interner/interner.rs#L522).
 
 <a id="review-6"></a>
 
@@ -73,9 +85,11 @@ Evidence: [crates/shamir-db/src/shamir_db/execute/admin_interner.rs:170](../../.
 
 Status: `confirmed-open`. Current risk: `low`.
 
-Every repository still filters the entire table_records list. One-pass grouping would remove the product term; this is startup structural work, not a measured restart delay.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-db/src/shamir_db/shamir_db/core.rs:210](../../../../../crates/shamir-db/src/shamir_db/shamir_db/core.rs#L210); [crates/shamir-db/src/shamir_db/shamir_db/core.rs:230](../../../../../crates/shamir-db/src/shamir_db/shamir_db/core.rs#L230).
+Each repository scans the entire table_records list. One-pass grouping removes the product term while preserving table registration before replay; no restart delay was measured.
+
+Evidence: [crates/shamir-db/src/shamir_db/shamir_db/core.rs:230](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/shamir_db/core.rs#L230).
 
 <a id="review-7"></a>
 
@@ -83,9 +97,11 @@ Evidence: [crates/shamir-db/src/shamir_db/shamir_db/core.rs:210](../../../../../
 
 Status: `confirmed-open`. Current risk: `low`.
 
-Both guards still call load_table_record per sibling, and that lookup scans the global table catalogue. Exact structural cost is O(repo siblings × global catalogue rows), not necessarily the square of one count.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-db/src/shamir_db/shamir_db/table_management.rs:258](../../../../../crates/shamir-db/src/shamir_db/shamir_db/table_management.rs#L258); [crates/shamir-db/src/shamir_db/execute/admin_table_index.rs:165](../../../../../crates/shamir-db/src/shamir_db/execute/admin_table_index.rs#L165); [crates/shamir-db/src/shamir_db/system_store.rs:870](../../../../../crates/shamir-db/src/shamir_db/system_store.rs#L870).
+Drop/rename each load every sibling through a filtered global catalogue scan. Complexity is sibling count times scanned catalogue/history size, not universally one table count squared. A shared snapshot must remain valid until mutation.
+
+Evidence: [crates/shamir-db/src/shamir_db/shamir_db/table_management.rs:258](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/shamir_db/table_management.rs#L258); [crates/shamir-db/src/shamir_db/execute/admin_table_index.rs:165](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/execute/admin_table_index.rs#L165); [crates/shamir-db/src/shamir_db/system_store.rs:870](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/system_store.rs#L870).
 
 <a id="review-8"></a>
 
@@ -93,9 +109,11 @@ Evidence: [crates/shamir-db/src/shamir_db/shamir_db/table_management.rs:258](../
 
 Status: `confirmed-open`. Current risk: `low`.
 
-Function metadata is cloned, a fresh effective Vec is built using linear contains, and a gateway Arc is allocated per invocation. Allocation/product complexity is proven; list sizes, material latency and benefits of caching are not measured.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-db/src/shamir_db/shamir_db/core.rs:832](../../../../../crates/shamir-db/src/shamir_db/shamir_db/core.rs#L832); [crates/shamir-db/src/shamir_db/shamir_db/core.rs:847](../../../../../crates/shamir-db/src/shamir_db/shamir_db/core.rs#L847); [crates/shamir-db/src/shamir_db/shamir_db/core.rs:851](../../../../../crates/shamir-db/src/shamir_db/shamir_db/core.rs#L851).
+The builder clones metadata, allocates a Vec and performs literal Vec::contains intersection before allocating a gateway. This is structural optimization opportunity, not demonstrated harmful latency. Precomputation requires grant/allowlist invalidation.
+
+Evidence: [crates/shamir-db/src/shamir_db/shamir_db/core.rs:832](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/shamir_db/core.rs#L832); [crates/shamir-db/src/shamir_db/shamir_db/core.rs:847](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/shamir_db/core.rs#L847); [crates/shamir-db/src/shamir_db/shamir_db/core.rs:851](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/shamir_db/core.rs#L851).
 
 <a id="review-9"></a>
 
@@ -103,18 +121,19 @@ Evidence: [crates/shamir-db/src/shamir_db/shamir_db/core.rs:832](../../../../../
 
 Status: `confirmed-open`. Current risk: `nit`.
 
-Per-key lock entries remain non-evicting and document rare mutation contention. The 'only unbounded-growth sites' claim is unsupported: catalogues/registries also grow. The admin_user_locks production key family is currently schema-only.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-db/src/shamir_db/shamir_db/core.rs:55](../../../../../crates/shamir-db/src/shamir_db/shamir_db/core.rs#L55); [crates/shamir-db/src/shamir_db/shamir_db/core.rs:66](../../../../../crates/shamir-db/src/shamir_db/shamir_db/core.rs#L66); [crates/shamir-db/src/shamir_db/shamir_db/core.rs:99](../../../../../crates/shamir-db/src/shamir_db/shamir_db/core.rs#L99); [crates/shamir-db/src/shamir_db/execute/admin_schema.rs:93](../../../../../crates/shamir-db/src/shamir_db/execute/admin_schema.rs#L93).
+Retention is explicitly documented and currently admin/schema-frequency. Catalogues and registries also grow, so these are not the only unbounded sites. Naive eviction can create two independent locks for one live key.
 
-## Corrections and qualified non-findings
+Evidence: [crates/shamir-db/src/shamir_db/shamir_db/core.rs:55](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/shamir_db/core.rs#L55); [crates/shamir-db/src/shamir_db/shamir_db/core.rs:66](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/shamir_db/core.rs#L66); [crates/shamir-db/src/shamir_db/execute/admin_schema.rs:93](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/execute/admin_schema.rs#L93).
 
-- Replace per-op ACL cost with per-distinct-(action,path) cost after Authorized deduplication; do not call a two-variable product inherently quadratic.
-- Remove the 5 × 10k full-decodes example: ancestors use different catalogue tables, and byte-level prefiltering rejects rows without full de-interning.
-- authorize_gate still sets up one database/repository/table and has no catalogue-cardinality axis; it does not validate the reported scaling or latency multipliers.
-- A Filter::Eq substitution is not a keyed storage shortcut. Current SetOp key semantics do not by themselves prove an efficient facade get-by-key read exists.
-- InternerTouch's suggested mappings-max fix is incorrect. A replacement epoch accessor must respect global published-entry and gap semantics.
-- Per-key lock retention is documented admin/schema design debt, not an established request-hot-path leak or exclusive source of unbounded growth.
+## Evidence and recipe corrections
+
+- Count distinct authorization requirements and separate each ancestor's catalogue cardinality; retained MVCC versions can add enumeration work beyond current row count.
+- The authorize_gate benchmark has one database/repository/table and no catalogue-cardinality axis.
+- A raw keyed shortcut must reproduce SetOp key derivation and MVCC visibility, not read the vestigial main store.
+- Interner delta contiguous-watermark semantics and full-dump maximum-ID semantics are distinct. Optimize the stated operation without silently changing either.
+- Weak-value/LRU lock replacement needs a lifetime proof; retaining an old guard while evicting/recreating its key defeats serialization.
 
 ---
 

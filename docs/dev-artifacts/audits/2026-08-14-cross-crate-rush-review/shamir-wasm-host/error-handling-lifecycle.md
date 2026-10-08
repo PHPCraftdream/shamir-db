@@ -1,19 +1,21 @@
-<!-- revalidation:2026-10-08 source:92ad58266bf57ddea1fa3c8a47affba1a3a9a096 -->
-# shamir-wasm-host — error-handling-lifecycle revalidation
+<!-- revalidation:2026-10-08 cycle:independent-2 source:e3765c935fc71655ee1ec0160cf180607935d89b -->
+# shamir-wasm-host — error-handling-lifecycle independent revalidation (cycle 2)
 
-Source snapshot: `92ad58266bf57ddea1fa3c8a47affba1a3a9a096`. Revalidated 2026-10-08 by read-only XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run; no source fix is part of this update. Test registration/assertions are evidence of an oracle, not proof of a passing run.
+Frozen source snapshot: `e3765c935fc71655ee1ec0160cf180607935d89b`. Independently revalidated 2026-10-08 by a fresh XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run. Source-fixed means the specified mechanism was already removed at this snapshot; this cycle implements no source fix.
 
-This section is authoritative for current status. Original titles/IDs are retained for traceability; a refuted title is not a current assertion. The collapsed historical report below is superseded, including its counts, severity, scenarios and fix instructions. Plan IDs preserve historical numbering, not a current release mandate. [Workspace methodology and status definitions](../SUMMARY.md#status-definitions).
+This section is authoritative for current decisions. Existing IDs and allegation titles are retained for traceability; a refuted title is not a current assertion. Prior-cycle decisions were rechecked, not used as proof. The first cycle is available in repository history at this snapshot. The original historical body below remains preserved once and is superseded, including its counts, severities and recipes. [Workspace scope and status definitions](../SUMMARY.md#status-definitions).
 
-Cancellation under-accounting, ticker failure, compile teardown, panic classification, and test gaps remain. The original cancellation capacity-loss scenario reverses the actual accounting effect.
+Unrelated external edits began in dependency/toolchain/CI metadata during collection; additional Rust-source edits appeared afterward. They were left untouched. Evidence and decisions are tied to the frozen commit, not those later changes or an installed toolchain. “Current” below means current at that snapshot; no re-audit of the modified working tree is implied.
+
+Cancellation undercharging, silent ticker failure and incomplete compiler teardown remain. Exact Wasmtime source makes typed trap classification implementable and reveals an independent getter reentry failure. The unreachable UTF-8 fallback is not a current defect.
 
 ## Current claim decisions
 
 | Claim decisions | Open | Source-fixed | Partial | Refuted | Unverified | N/A |
 |---:|---:|---:|---:|---:|---:|---:|
-| 12 | 12 | 0 | 0 | 0 | 0 | 0 |
+| 12 | 11 | 0 | 0 | 0 | 0 | 1 |
 
-These are decisions on report claims, including repeated roots, bundled observations and non-findings—not a unique-bug census. Closed/N/A rows have no current risk; unverified risk is provisional. Pure style and unmeasured optimization claims do not establish runtime impact.
+These are duplicate-inclusive report decisions, not a unique-bug census. Pure style or structural optimization does not establish a runtime incident; unverified impact remains provisional.
 
 <a id="review-1"></a>
 
@@ -21,11 +23,13 @@ These are decisions on report claims, including repeated roots, bundled observat
 
 Status: `confirmed-open`. Current risk: `medium`.
 
-Dropped futures skip the post-await fetch_sub because no Drop accounting exists. This leaves consumed instructions uncharged and remaining fuel too high; it does not permanently reserve or exhaust capacity as the report claims.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-wasm-host/src/wasm/wasm_function.rs:581](../../../../../crates/shamir-wasm-host/src/wasm/wasm_function.rs#L581); [crates/shamir-wasm-host/src/wasm/wasm_function.rs:587](../../../../../crates/shamir-wasm-host/src/wasm/wasm_function.rs#L587).
+Dropping an awaited child bypasses post-await charging, leaving too much shared fuel. It does not deplete reserved capacity.
 
-Grouping/duplicate: `SUMMARY.md#6.1`. This row is not another independent defect.
+Evidence: [crates/shamir-wasm-host/src/wasm/wasm_function.rs:581](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-wasm-host/src/wasm/wasm_function.rs#L581); [crates/shamir-wasm-host/src/wasm/wasm_function.rs:587](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-wasm-host/src/wasm/wasm_function.rs#L587).
+
+Grouping/duplicate: [SUMMARY.md#6.1](SUMMARY.md#review-6-1). This is not an additional independent defect.
 
 <a id="review-2"></a>
 
@@ -33,11 +37,13 @@ Grouping/duplicate: `SUMMARY.md#6.1`. This row is not another independent defect
 
 Status: `confirmed-open`. Current risk: `medium`.
 
-Ticker construction still discards thread-spawn failure and returns an apparently usable engine. Epoch advancement can be absent; finite Store fuel remains enabled.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-wasm-host/src/wasm/wasm_engine.rs:129](../../../../../crates/shamir-wasm-host/src/wasm/wasm_engine.rs#L129); [crates/shamir-wasm-host/src/wasm/wasm_engine.rs:162](../../../../../crates/shamir-wasm-host/src/wasm/wasm_engine.rs#L162).
+A failed thread spawn is neither reported nor fatal; epoch advancement is absent despite successful engine construction.
 
-Grouping/duplicate: `SUMMARY.md#6.2`. This row is not another independent defect.
+Evidence: [crates/shamir-wasm-host/src/wasm/wasm_engine.rs:129](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-wasm-host/src/wasm/wasm_engine.rs#L129); [crates/shamir-wasm-host/src/wasm/wasm_engine.rs:162](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-wasm-host/src/wasm/wasm_engine.rs#L162).
+
+Grouping/duplicate: [SUMMARY.md#6.2](SUMMARY.md#review-6-2). This is not an additional independent defect.
 
 <a id="review-3"></a>
 
@@ -45,11 +51,13 @@ Grouping/duplicate: `SUMMARY.md#6.2`. This row is not another independent defect
 
 Status: `confirmed-open`. Current risk: `low`.
 
-The named local trap/codec/ABI boundary matrices remain absent. The blanket claim that no guest import is invoked is false: actor tests invoke call, and recursion may invoke it depending on fuel consumption.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-wasm-host/src/tests/mod.rs:1](../../../../../crates/shamir-wasm-host/src/tests/mod.rs#L1); [crates/shamir-wasm-host/src/tests/nested_actor_tests.rs:85](../../../../../crates/shamir-wasm-host/src/tests/nested_actor_tests.rs#L85); [crates/shamir-wasm-host/src/tests/wasm_sanitizer_tests.rs:93](../../../../../crates/shamir-wasm-host/src/tests/wasm_sanitizer_tests.rs#L93).
+Named guest behavior and boundary matrices are absent. Call actor probes are real import invocations, unlike sanitizer fixtures declaring all names.
 
-Grouping/duplicate: `SUMMARY.md#6.3`. This row is not another independent defect.
+Evidence: [crates/shamir-wasm-host/src/tests/mod.rs:1](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-wasm-host/src/tests/mod.rs#L1); [crates/shamir-wasm-host/src/tests/wasm_sanitizer_tests.rs:93](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-wasm-host/src/tests/wasm_sanitizer_tests.rs#L93); [crates/shamir-wasm-host/src/tests/nested_actor_tests.rs:85](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-wasm-host/src/tests/nested_actor_tests.rs#L85).
+
+Grouping/duplicate: [SUMMARY.md#6.3](SUMMARY.md#review-6-3). This is not an additional independent defect.
 
 <a id="review-4"></a>
 
@@ -57,11 +65,13 @@ Grouping/duplicate: `SUMMARY.md#6.3`. This row is not another independent defect
 
 Status: `confirmed-open`. Current risk: `low`.
 
-String errors remain the public gateway/guard contract, with flattened trap messages. Typed classification and source chains are unavailable across that boundary.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-wasm-host/src/db_gateway.rs:86](../../../../../crates/shamir-wasm-host/src/db_gateway.rs#L86); [crates/shamir-wasm-host/src/net_gateway.rs:60](../../../../../crates/shamir-wasm-host/src/net_gateway.rs#L60); [crates/shamir-wasm-host/src/net_gateway.rs:160](../../../../../crates/shamir-wasm-host/src/net_gateway.rs#L160).
+Public boundaries still flatten structured causes and classifications into String.
 
-Grouping/duplicate: `SUMMARY.md#5.3`. This row is not another independent defect.
+Evidence: [crates/shamir-wasm-host/src/db_gateway.rs:86](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-wasm-host/src/db_gateway.rs#L86); [crates/shamir-wasm-host/src/net_gateway.rs:60](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-wasm-host/src/net_gateway.rs#L60).
+
+Grouping/duplicate: [SUMMARY.md#5.3](SUMMARY.md#review-5-3). This is not an additional independent defect.
 
 <a id="review-5"></a>
 
@@ -69,11 +79,13 @@ Grouping/duplicate: `SUMMARY.md#5.3`. This row is not another independent defect
 
 Status: `confirmed-open`. Current risk: `low`.
 
-The JoinError is still discarded without checking is_panic. FunctionError's comment explicitly includes panic, but its display says cancelled and the returned error loses the payload; a panic hook may still log it.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-wasm-host/src/builtin.rs:83](../../../../../crates/shamir-wasm-host/src/builtin.rs#L83); [crates/shamir-wasm-host/src/error.rs:36](../../../../../crates/shamir-wasm-host/src/error.rs#L36).
+JoinError is discarded. Returned diagnostics lose panic identity, although the enum comment allows panic and hooks may log it.
 
-Grouping/duplicate: `SUMMARY.md#6.5`. This row is not another independent defect.
+Evidence: [crates/shamir-wasm-host/src/builtin.rs:83](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-wasm-host/src/builtin.rs#L83); [crates/shamir-wasm-host/src/error.rs:36](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-wasm-host/src/error.rs#L36).
+
+Grouping/duplicate: [SUMMARY.md#6.5](SUMMARY.md#review-6-5). This is not an additional independent defect.
 
 <a id="review-6"></a>
 
@@ -81,11 +93,13 @@ Grouping/duplicate: `SUMMARY.md#6.5`. This row is not another independent defect
 
 Status: `confirmed-open`. Current risk: `low`.
 
-Fuel/epoch classification still searches Display strings, including strings originating in host errors. The fuel test checks only Compute, so it does not pin classification text or mechanism.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-wasm-host/src/wasm/wasm_function.rs:593](../../../../../crates/shamir-wasm-host/src/wasm/wasm_function.rs#L593); [crates/shamir-wasm-host/src/tests/wasm_tests.rs:212](../../../../../crates/shamir-wasm-host/src/tests/wasm_tests.rs#L212).
+Display is not the typed cause. Exact Wasmtime 46.0.2 exposes OutOfFuel and Interrupt; the latter's display does not contain 'epoch'.
 
-Grouping/duplicate: `SUMMARY.md#6.6`. This row is not another independent defect.
+Evidence: [crates/shamir-wasm-host/src/wasm/wasm_function.rs:593](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-wasm-host/src/wasm/wasm_function.rs#L593); [crates/shamir-wasm-host/src/tests/wasm_tests.rs:212](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-wasm-host/src/tests/wasm_tests.rs#L212); [Cargo.lock:4741](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/Cargo.lock#L4741).
+
+Grouping/duplicate: [SUMMARY.md#6.6](SUMMARY.md#review-6-6). This is not an additional independent defect.
 
 <a id="review-7"></a>
 
@@ -93,11 +107,13 @@ Grouping/duplicate: `SUMMARY.md#6.6`. This row is not another independent defect
 
 Status: `confirmed-open`. Current risk: `low`.
 
-Both cargo path arguments still use to_str().unwrap_or(""). Non-Unicode paths become unrelated empty arguments rather than being preserved as OS paths or reported explicitly.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-wasm-host/src/compile.rs:542](../../../../../crates/shamir-wasm-host/src/compile.rs#L542); [crates/shamir-wasm-host/src/compile.rs:544](../../../../../crates/shamir-wasm-host/src/compile.rs#L544).
+Both failed path conversions substitute empty strings rather than preserving native OS paths or reporting the condition.
 
-Grouping/duplicate: `SUMMARY.md#6.7`. This row is not another independent defect.
+Evidence: [crates/shamir-wasm-host/src/compile.rs:542](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-wasm-host/src/compile.rs#L542); [crates/shamir-wasm-host/src/compile.rs:544](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-wasm-host/src/compile.rs#L544).
+
+Grouping/duplicate: [SUMMARY.md#6.7](SUMMARY.md#review-6-7). This is not an additional independent defect.
 
 <a id="review-8"></a>
 
@@ -105,11 +121,13 @@ Grouping/duplicate: `SUMMARY.md#6.7`. This row is not another independent defect
 
 Status: `confirmed-open`. Current risk: `low`.
 
-Timeout still ignores kill failure and uses an unbounded wait, followed by unbounded reader joins. A cargo-only kill also does not establish pipe EOF while descendants retain handles.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-wasm-host/src/compile.rs:598](../../../../../crates/shamir-wasm-host/src/compile.rs#L598); [crates/shamir-wasm-host/src/compile.rs:599](../../../../../crates/shamir-wasm-host/src/compile.rs#L599); [crates/shamir-wasm-host/src/compile.rs:600](../../../../../crates/shamir-wasm-host/src/compile.rs#L600).
+Ignored kill failure is followed by unbounded wait/joins; descendants holding pipes can block even after the direct child exits.
 
-Grouping/duplicate: `SUMMARY.md#6.8`. This row is not another independent defect.
+Evidence: [crates/shamir-wasm-host/src/compile.rs:598](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-wasm-host/src/compile.rs#L598); [crates/shamir-wasm-host/src/compile.rs:600](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-wasm-host/src/compile.rs#L600).
+
+Grouping/duplicate: [SUMMARY.md#6.8](SUMMARY.md#review-6-8). This is not an additional independent defect.
 
 <a id="review-9"></a>
 
@@ -117,11 +135,13 @@ Grouping/duplicate: `SUMMARY.md#6.8`. This row is not another independent defect
 
 Status: `confirmed-open`. Current risk: `low`.
 
-The restoration insert still discards its failure, while the returned AlreadyExists error identifies only the target collision. Concurrent reoccupation of the source can lose the original registry entry.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-wasm-host/src/registry.rs:83](../../../../../crates/shamir-wasm-host/src/registry.rs#L83).
+A source re-registration after removal defeats restoration, and its error is discarded after target insertion fails.
 
-Grouping/duplicate: `SUMMARY.md#2.3`. This row is not another independent defect.
+Evidence: [crates/shamir-wasm-host/src/registry.rs:83](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-wasm-host/src/registry.rs#L83); [crates/shamir-wasm-host/src/registry.rs:86](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-wasm-host/src/registry.rs#L86).
+
+Grouping/duplicate: [SUMMARY.md#2.3](SUMMARY.md#review-2-3). This is not an additional independent defect.
 
 <a id="review-10"></a>
 
@@ -129,23 +149,27 @@ Grouping/duplicate: `SUMMARY.md#2.3`. This row is not another independent defect
 
 Status: `confirmed-open`. Current risk: `low`.
 
-Every successful ticker spawn loops forever and retains an Engine clone; neither singleton construction nor shutdown is enforced. Tests and database creation construct engines independently.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-wasm-host/src/wasm/wasm_engine.rs:155](../../../../../crates/shamir-wasm-host/src/wasm/wasm_engine.rs#L155); [crates/shamir-wasm-host/src/tests/wasm_tests.rs:155](../../../../../crates/shamir-wasm-host/src/tests/wasm_tests.rs#L155).
+The detached thread retains its Engine clone with no last-owner shutdown mechanism.
 
-Grouping/duplicate: `SUMMARY.md#4.4`. This row is not another independent defect.
+Evidence: [crates/shamir-wasm-host/src/wasm/wasm_engine.rs:155](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-wasm-host/src/wasm/wasm_engine.rs#L155).
+
+Grouping/duplicate: [SUMMARY.md#4.4](SUMMARY.md#review-4-4). This is not an additional independent defect.
 
 <a id="review-11"></a>
 
 ### Claim 11 — Nit: forbidden-macro scanner fails open (`unwrap_or_default`) on an invariant break
 
-Status: `confirmed-open`. Current risk: `nit`.
+Status: `not-applicable`. Current risk: `—`.
 
-The fallback still returns empty cleaned source on UTF-8 conversion failure. Current complete-token blanking preserves UTF-8, so the fallback is unreachable for current valid input; this is defensive-maintenance preference, not a demonstrated bypass.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-wasm-host/src/compile.rs:151](../../../../../crates/shamir-wasm-host/src/compile.rs#L151); [crates/shamir-wasm-host/src/compile.rs:252](../../../../../crates/shamir-wasm-host/src/compile.rs#L252).
+Current &str transformations preserve UTF-8, so conversion failure is unreachable. The proposed assertion is optional defensive maintenance.
 
-Grouping/duplicate: `SUMMARY.md#6.11`. This row is not another independent defect.
+Evidence: [crates/shamir-wasm-host/src/compile.rs:151](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-wasm-host/src/compile.rs#L151); [crates/shamir-wasm-host/src/compile.rs:252](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-wasm-host/src/compile.rs#L252).
+
+Grouping/duplicate: [SUMMARY.md#6.11](SUMMARY.md#review-6-11). This is not an additional independent defect.
 
 <a id="review-12"></a>
 
@@ -153,23 +177,22 @@ Grouping/duplicate: `SUMMARY.md#6.11`. This row is not another independent defec
 
 Status: `confirmed-open`. Current risk: `low`.
 
-Parsing failures and non-string grant entries still disappear without a warning. Missing-field compatibility and malformed-field corruption remain observationally indistinguishable.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-wasm-host/src/meta.rs:113](../../../../../crates/shamir-wasm-host/src/meta.rs#L113); [crates/shamir-wasm-host/src/meta.rs:129](../../../../../crates/shamir-wasm-host/src/meta.rs#L129); [crates/shamir-wasm-host/src/meta.rs:138](../../../../../crates/shamir-wasm-host/src/meta.rs#L138).
+Invalid enums and non-string grants silently fall back/filter, without distinguishing corruption from missing-field compatibility.
 
-Grouping/duplicate: `SUMMARY.md#5.7`. This row is not another independent defect.
+Evidence: [crates/shamir-wasm-host/src/meta.rs:113](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-wasm-host/src/meta.rs#L113); [crates/shamir-wasm-host/src/meta.rs:129](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-wasm-host/src/meta.rs#L129).
 
-## Corrections and qualified non-findings
+Grouping/duplicate: [SUMMARY.md#5.7](SUMMARY.md#review-5-7). This is not an additional independent defect.
 
-- Cancellation causes undercharging, not lost fuel capacity. Fresh top-level FnCtx calls receive independent locally created counters, so permanent depletion across reuse of that ordinary context is not supported.
-- A top-level tokio timeout can drop nested Store futures and thereby skip their accounting even while the outer call reaches its own final debit.
-- Do not prefer silently skipping an uncertain charge as a security fix; that would preserve under-accounting. Cancellation-safe accounting needs an explicit conservative policy.
-- Fuel does stop CPU guests once exhausted. Epoch interruption adds an independent wall-clock bound; u64::MAX is currently not a working unlimited configuration.
-- There are ten sanctioned imports, not eight, and actor probes do call a real import.
-- Reader joins need lifecycle bounds too. A bounded child reap alone does not make compile teardown bounded.
-- Argon2 panic details are lost from the returned FunctionError, not necessarily from all process logs because panic hooks may emit them.
-- Use the exact resolved Wasmtime trap API when planning typed classification; the review's TrapCode spelling was not verified.
-- No unsafe or unguarded production unwrap was identified in this crate, but the stated graceful-degradation properties do not cover ticker spawn or all process teardown paths.
+## Evidence and recipe corrections
+
+- Cancellation causes undercharging. A final debit guard must outlive execution but inspect fuel before the Store is destroyed; do not silently skip uncertain charges as a security remedy.
+- A top-level timeout can cancel child Store accounting while still allowing the parent to reach its own final debit.
+- Exact typed trap support is verified: Wasmtime 46.0.2 src/runtime/trap.rs reexports wasmtime_environ::Trap, including OutOfFuel and Interrupt. Published source: https://docs.rs/crate/wasmtime/46.0.2/source/src/runtime/trap.rs.
+- Returning a new name on failed rename changes registry identity/ownership semantics and is not clean rollback. Logging only makes loss visible.
+- Compiler teardown must bound reader lifetimes and own descendants, not just add another direct-child wait.
+- The historical to_str().map_err recipe is invalid Rust because to_str returns Option; native path arguments are preferable where Unicode is unnecessary.
 
 ---
 

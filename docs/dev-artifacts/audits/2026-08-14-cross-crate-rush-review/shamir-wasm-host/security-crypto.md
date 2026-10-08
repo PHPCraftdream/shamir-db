@@ -1,19 +1,21 @@
-<!-- revalidation:2026-10-08 source:92ad58266bf57ddea1fa3c8a47affba1a3a9a096 -->
-# shamir-wasm-host — security-crypto revalidation
+<!-- revalidation:2026-10-08 cycle:independent-2 source:e3765c935fc71655ee1ec0160cf180607935d89b -->
+# shamir-wasm-host — security-crypto independent revalidation (cycle 2)
 
-Source snapshot: `92ad58266bf57ddea1fa3c8a47affba1a3a9a096`. Revalidated 2026-10-08 by read-only XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run; no source fix is part of this update. Test registration/assertions are evidence of an oracle, not proof of a passing run.
+Frozen source snapshot: `e3765c935fc71655ee1ec0160cf180607935d89b`. Independently revalidated 2026-10-08 by a fresh XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run. Source-fixed means the specified mechanism was already removed at this snapshot; this cycle implements no source fix.
 
-This section is authoritative for current status. Original titles/IDs are retained for traceability; a refuted title is not a current assertion. The collapsed historical report below is superseded, including its counts, severity, scenarios and fix instructions. Plan IDs preserve historical numbering, not a current release mandate. [Workspace methodology and status definitions](../SUMMARY.md#status-definitions).
+This section is authoritative for current decisions. Existing IDs and allegation titles are retained for traceability; a refuted title is not a current assertion. Prior-cycle decisions were rechecked, not used as proof. The first cycle is available in repository history at this snapshot. The original historical body below remains preserved once and is superseded, including its counts, severities and recipes. [Workspace scope and status definitions](../SUMMARY.md#status-definitions).
 
-Whitespace scanner bypass, IPv4 guard omissions, compile teardown, ticker failure, and environment issues remain. The alleged unbounded Argon2 KDF concurrency is refuted by the already-existing delegated implementation.
+Unrelated external edits began in dependency/toolchain/CI metadata during collection; additional Rust-source edits appeared afterward. They were left untouched. Evidence and decisions are tied to the frozen commit, not those later changes or an installed toolchain. “Current” below means current at that snapshot; no re-audit of the modified working tree is implied.
+
+Macro recognition and unspecified-IPv4 policy gaps remain; the original uncapped-hash claim remains refuted. Compiler-authority coverage is incomplete, and the existing capped KDF gate has a distinct liveness defect.
 
 ## Current claim decisions
 
 | Claim decisions | Open | Source-fixed | Partial | Refuted | Unverified | N/A |
 |---:|---:|---:|---:|---:|---:|---:|
-| 8 | 7 | 0 | 0 | 1 | 0 | 0 |
+| 8 | 6 | 0 | 0 | 1 | 0 | 1 |
 
-These are decisions on report claims, including repeated roots, bundled observations and non-findings—not a unique-bug census. Closed/N/A rows have no current risk; unverified risk is provisional. Pure style and unmeasured optimization claims do not establish runtime impact.
+These are duplicate-inclusive report decisions, not a unique-bug census. Pure style or structural optimization does not establish a runtime incident; unverified impact remains provisional.
 
 <a id="review-1"></a>
 
@@ -21,11 +23,13 @@ These are decisions on report claims, including repeated roots, bundled observat
 
 Status: `confirmed-open`. Current risk: `high`.
 
-The cleaned-source matcher still requires an adjacent bang. Valid forms such as env !("NAME") or include_str /*c*/!("file") evade it. Reachability requires source-compilation rights and a working toolchain/SDK layout.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-wasm-host/src/compile.rs:365](../../../../../crates/shamir-wasm-host/src/compile.rs#L365); [crates/shamir-wasm-host/src/compile.rs:168](../../../../../crates/shamir-wasm-host/src/compile.rs#L168); [crates/shamir-db/src/shamir_db/shamir_db/function_management.rs:169](../../../../../crates/shamir-db/src/shamir_db/shamir_db/function_management.rs#L169).
+Valid include_bytes /*c*/!(...) survives comment blanking and misses the adjacent-bang check. A permitted source compilation can embed a readable file.
 
-Grouping/duplicate: `SUMMARY.md#3.1`. This row is not another independent defect.
+Evidence: [crates/shamir-wasm-host/src/compile.rs:168](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-wasm-host/src/compile.rs#L168); [crates/shamir-wasm-host/src/compile.rs:365](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-wasm-host/src/compile.rs#L365).
+
+Grouping/duplicate: [SUMMARY.md#3.1](SUMMARY.md#review-3-1). This is not an additional independent defect.
 
 <a id="review-2"></a>
 
@@ -33,11 +37,13 @@ Grouping/duplicate: `SUMMARY.md#3.1`. This row is not another independent defect
 
 Status: `confirmed-open`. Current risk: `medium`.
 
-The shared IPv4 predicate still omits unspecified/0/8 and the listed special ranges. Wildcard-authorized requests can pass those addresses; actual localhost connection behavior is platform-dependent and unverified.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-wasm-host/src/net_gateway.rs:459](../../../../../crates/shamir-wasm-host/src/net_gateway.rs#L459); [crates/shamir-wasm-host/src/net_gateway.rs:186](../../../../../crates/shamir-wasm-host/src/net_gateway.rs#L186); [crates/shamir-db/src/shamir_db/curl_gateway.rs:49](../../../../../crates/shamir-db/src/shamir_db/curl_gateway.rs#L49).
+Wildcard-authorized 0.0.0.0 passes the IPv4 predicate. Network reachability is configuration/platform-dependent and was not reproduced.
 
-Grouping/duplicate: `SUMMARY.md#3.3`. This row is not another independent defect.
+Evidence: [crates/shamir-wasm-host/src/net_gateway.rs:459](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-wasm-host/src/net_gateway.rs#L459); [crates/shamir-wasm-host/src/net_gateway.rs:186](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-wasm-host/src/net_gateway.rs#L186).
+
+Grouping/duplicate: [SUMMARY.md#3.3](SUMMARY.md#review-3-3). This is not an additional independent defect.
 
 <a id="review-3"></a>
 
@@ -45,11 +51,13 @@ Grouping/duplicate: `SUMMARY.md#3.3`. This row is not another independent defect
 
 Status: `confirmed-open`. Current risk: `low`.
 
-The stale permissive options comment remains. Current enforcement explicitly empties the effective allowlist for a user function with empty grants; missing metadata is a separate builtin fallback.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-wasm-host/src/meta.rs:188](../../../../../crates/shamir-wasm-host/src/meta.rs#L188); [crates/shamir-db/src/shamir_db/shamir_db/core.rs:834](../../../../../crates/shamir-db/src/shamir_db/shamir_db/core.rs#L834).
+The options default is described as permissive, although explicit empty user-function metadata creates a deny-all gateway.
 
-Grouping/duplicate: `SUMMARY.md#3.2`. This row is not another independent defect.
+Evidence: [crates/shamir-wasm-host/src/meta.rs:189](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-wasm-host/src/meta.rs#L189); [crates/shamir-db/src/shamir_db/shamir_db/core.rs:841](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/shamir_db/core.rs#L841).
+
+Grouping/duplicate: [SUMMARY.md#3.2](SUMMARY.md#review-3-2). This is not an additional independent defect.
 
 <a id="review-4"></a>
 
@@ -57,23 +65,27 @@ Grouping/duplicate: `SUMMARY.md#3.2`. This row is not another independent defect
 
 Status: `confirmed-open`. Current risk: `low`.
 
-Cargo is spawned without process-tree ownership and timeout kills only the direct child. Descendants may outlive it and retain pipe handles; actual orphan lifetime was not reproduced.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-wasm-host/src/compile.rs:563](../../../../../crates/shamir-wasm-host/src/compile.rs#L563); [crates/shamir-wasm-host/src/compile.rs:598](../../../../../crates/shamir-wasm-host/src/compile.rs#L598); [crates/shamir-wasm-host/src/compile.rs:600](../../../../../crates/shamir-wasm-host/src/compile.rs#L600).
+Only the cargo child is killed; descendants are not owned as a tree and can retain pipe handles.
 
-Grouping/duplicate: `SUMMARY.md#6.8`. This row is not another independent defect.
+Evidence: [crates/shamir-wasm-host/src/compile.rs:563](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-wasm-host/src/compile.rs#L563); [crates/shamir-wasm-host/src/compile.rs:598](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-wasm-host/src/compile.rs#L598).
+
+Grouping/duplicate: [SUMMARY.md#6.8](SUMMARY.md#review-6-8). This is not an additional independent defect.
 
 <a id="review-5"></a>
 
 ### Claim 5 — No bound on concurrent Argon2id invocations; cost parameters fully caller-supplied at this layer
 
-Status: `refuted`. Current risk: —.
+Status: `refuted`. Current risk: `—`.
 
-The wrapper delegates crypto/argon2id through the canonical funclib registry. That exact implementation acquires a process-global 16-permit gate before hashing and clamps memory to 64 MiB, time/parallelism to 16, and length to 256.
+Prior-cycle decision: `refuted`.
 
-Evidence: [crates/shamir-wasm-host/src/builtin.rs:64](../../../../../crates/shamir-wasm-host/src/builtin.rs#L64); [crates/shamir-wasm-host/src/scalar.rs:20](../../../../../crates/shamir-wasm-host/src/scalar.rs#L20); [crates/shamir-funclib/src/lib.rs:63](../../../../../crates/shamir-funclib/src/lib.rs#L63); [crates/shamir-funclib/src/crypto.rs:203](../../../../../crates/shamir-funclib/src/crypto.rs#L203); [crates/shamir-funclib/src/crypto.rs:221](../../../../../crates/shamir-funclib/src/crypto.rs#L221).
+The actual delegated hash is bounded by 16 permits and per-call parameter checks predating this review. No 512 simultaneous hash-allocation witness follows from the wrapper.
 
-Grouping/duplicate: `SUMMARY.md#3.4`. This row is not another independent defect.
+Evidence: [crates/shamir-wasm-host/src/builtin.rs:64](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-wasm-host/src/builtin.rs#L64); [crates/shamir-funclib/src/crypto.rs:203](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-funclib/src/crypto.rs#L203); [crates/shamir-funclib/src/crypto.rs:221](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-funclib/src/crypto.rs#L221).
+
+Grouping/duplicate: [SUMMARY.md#3.4](SUMMARY.md#review-3-4). This is not an additional independent defect.
 
 <a id="review-6"></a>
 
@@ -81,23 +93,27 @@ Grouping/duplicate: `SUMMARY.md#3.4`. This row is not another independent defect
 
 Status: `confirmed-open`. Current risk: `medium`.
 
-A failed ticker spawn remains silent. This disables epoch-based wall-clock interruption, not fuel exhaustion; the u64::MAX test configuration is currently rejected before guest execution.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-wasm-host/src/wasm/wasm_engine.rs:162](../../../../../crates/shamir-wasm-host/src/wasm/wasm_engine.rs#L162); [crates/shamir-wasm-host/src/wasm/wasm_function.rs:436](../../../../../crates/shamir-wasm-host/src/wasm/wasm_function.rs#L436).
+Thread spawn failure is discarded. A large in-range finite fuel budget can occupy the worker without an independent wall-clock interrupt.
 
-Grouping/duplicate: `SUMMARY.md#6.2`. This row is not another independent defect.
+Evidence: [crates/shamir-wasm-host/src/wasm/wasm_engine.rs:162](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-wasm-host/src/wasm/wasm_engine.rs#L162); [crates/shamir-wasm-host/src/wasm/wasm_function.rs:474](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-wasm-host/src/wasm/wasm_function.rs#L474).
+
+Grouping/duplicate: [SUMMARY.md#6.2](SUMMARY.md#review-6-2). This is not an additional independent defect.
 
 <a id="review-7"></a>
 
 ### Claim 7 — `wasm-opt`/toolchain probes run with the full inherited host environment
 
-Status: `confirmed-open`. Current risk: `nit`.
+Status: `not-applicable`. Current risk: `—`.
 
-Only the guest cargo-build Command is scrubbed. wasm-opt probe/processing and cargo/rustup probes still inherit the host environment. No concrete secret-exfiltration mechanism through these trusted tools was established.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-wasm-host/src/compile.rs:550](../../../../../crates/shamir-wasm-host/src/compile.rs#L550); [crates/shamir-wasm-host/src/compile.rs:650](../../../../../crates/shamir-wasm-host/src/compile.rs#L650); [crates/shamir-wasm-host/src/compile.rs:664](../../../../../crates/shamir-wasm-host/src/compile.rs#L664); [crates/shamir-wasm-host/src/compile.rs:700](../../../../../crates/shamir-wasm-host/src/compile.rs#L700).
+The source-controlled cargo build is scrubbed; inheritance by trusted probes/optimizer is outside that specific guarantee. No current exfiltration mechanism is proved.
 
-Grouping/duplicate: `SUMMARY.md#3.5`. This row is not another independent defect.
+Evidence: [crates/shamir-wasm-host/src/compile.rs:24](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-wasm-host/src/compile.rs#L24); [crates/shamir-wasm-host/src/compile.rs:550](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-wasm-host/src/compile.rs#L550); [crates/shamir-wasm-host/src/compile.rs:650](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-wasm-host/src/compile.rs#L650).
+
+Grouping/duplicate: [SUMMARY.md#3.5](SUMMARY.md#review-3-5). This is not an additional independent defect.
 
 <a id="review-8"></a>
 
@@ -105,25 +121,22 @@ Grouping/duplicate: `SUMMARY.md#3.5`. This row is not another independent defect
 
 Status: `confirmed-open`. Current risk: `medium`.
 
-Unicode environment enumeration remains unconditional before filtering and is reached during database initialization. Invalid-Unicode environment entries can panic rather than being skipped.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-wasm-host/src/context.rs:211](../../../../../crates/shamir-wasm-host/src/context.rs#L211); [crates/shamir-db/src/shamir_db/shamir_db/core.rs:168](../../../../../crates/shamir-db/src/shamir_db/shamir_db/core.rs#L168).
+Unicode enumeration can panic before the inclusion policy rejects an entry; initialization reaches the method directly.
 
-Grouping/duplicate: `SUMMARY.md#1.4`. This row is not another independent defect.
+Evidence: [crates/shamir-wasm-host/src/context.rs:211](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-wasm-host/src/context.rs#L211); [crates/shamir-db/src/shamir_db/shamir_db/core.rs:168](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/shamir_db/core.rs#L168).
 
-## Corrections and qualified non-findings
+Grouping/duplicate: [SUMMARY.md#1.4](SUMMARY.md#review-1-4). This is not an additional independent defect.
 
-- The Argon2 concurrency gate predates the original review: commit 190e1f08 is dated 2026-07-08. This is a refuted original claim, not a newly landed fix.
-- The funclib cap test is wired through crates/shamir-funclib/src/crypto.rs:316 and crates/shamir-funclib/src/crypto/tests/mod.rs:1. It observes gated hashing, but its barrier and expensive work do not mathematically guarantee simultaneous saturation under arbitrary scheduling.
-- The source-compiler permission gate is configurable access control, not an OS sandbox or admin-only default: WasmCompiler defaults to 0755 at crates/shamir-db/src/shamir_db/shamir_db/access_control.rs:173.
-- Examples env !"HOME" and include_str !"file" lack required macro delimiters. Use valid delimited examples when documenting the confirmed scanner bypass.
-- Arbitrary guest-added build.rs/dependencies are not reachable through the fixed generated manifest at crates/shamir-wasm-host/src/compile.rs:501.
-- Confirmed clean: no unsafe or explicit banned locks in this crate; sanitizer name allowlist and component rejection remain at crates/shamir-wasm-host/src/wasm/wasm_sanitizer.rs:135 and :160; the real linker comparison is wired at crates/shamir-wasm-host/src/tests/wasm_sanitizer_tests.rs:248.
-- The sanitizer checks import names, not function kind/signature. Name-matched non-function imports are left to Wasmtime linker type validation; do not claim the sanitizer alone enforces those types.
-- Guest-memory read/write ranges remain checked. Denied env reads and absent values both return 0, and env writes trap, at crates/shamir-wasm-host/src/wasm/host_globals.rs:46 and :79; this proves matching return semantics, not timing-oracle absence.
-- RI-7 actor propagation remains source-proven and has meaningful wired probe assertions at crates/shamir-wasm-host/src/tests/nested_actor_tests.rs:125. Database/network/grant inheritance is source-proven but not independently asserted by those actor-only tests.
-- Non-canonical private-IP tests remain wired. Wildcard resolution returns validated pins and CurlNetGateway consumes them; exact matches intentionally bypass resolution. This is not a proof of all curl/platform networking behavior.
-- 0.0.0.0 is not proven to be the only possible literal-address policy gap.
+## Evidence and recipe corrections
+
+- The compiler permission gate covers source functions, not all source validators. A default 0755 or intentionally hardened 0700 gate is access control, not compiler isolation.
+- The KDF cap remains real, but cap validity is not a liveness proof. The release path can notify between a waiter's failed predicate test and Condvar::wait.
+- The sanitizer's kind/signature wording remains inaccurate: sanctioned-name non-function imports can pass its scan and are rejected by subsequent linker type validation.
+- Denied and absent return values agree; timing-oracle absence was not established. Granted global reads can also fail when an async import makes synchronous allocator reentry illegal.
+- The fixed generated manifest prevents guest-added dependencies/build scripts. The older design note's generic dependency-smuggling caveat is not a current source-input witness.
+- No claim of exhaustive curl safety follows from successful guard pin production. Exact hostname exceptions intentionally waive private-resolution checks.
 
 ---
 

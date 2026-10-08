@@ -1,11 +1,13 @@
-<!-- revalidation:2026-10-08 source:92ad58266bf57ddea1fa3c8a47affba1a3a9a096 -->
-# shamir-index — error-handling-lifecycle revalidation
+<!-- revalidation:2026-10-08 cycle:independent-2 source:e3765c935fc71655ee1ec0160cf180607935d89b -->
+# shamir-index — error-handling-lifecycle independent revalidation (cycle 2)
 
-Source snapshot: `92ad58266bf57ddea1fa3c8a47affba1a3a9a096`. Revalidated 2026-10-08 by read-only XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run; no source fix is part of this update. Test registration/assertions are evidence of an oracle, not proof of a passing run.
+Frozen source snapshot: `e3765c935fc71655ee1ec0160cf180607935d89b`. Independently revalidated 2026-10-08 by a fresh XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run. Source-fixed means the specified mechanism was already removed at this snapshot; this cycle implements no source fix.
 
-This section is authoritative for current status. Original titles/IDs are retained for traceability; a refuted title is not a current assertion. The collapsed historical report below is superseded, including its counts, severity, scenarios and fix instructions. Plan IDs preserve historical numbering, not a current release mandate. [Workspace methodology and status definitions](../SUMMARY.md#status-definitions).
+This section is authoritative for current decisions. Existing IDs and allegation titles are retained for traceability; a refuted title is not a current assertion. Prior-cycle decisions were rechecked, not used as proof. The first cycle is available in repository history at this snapshot. The original historical body below remains preserved once and is superseded, including its counts, severities and recipes. [Workspace scope and status definitions](../SUMMARY.md#status-definitions).
 
-Sorted-open swallowing, compaction errors, cleanup omissions, SQ8 observability, and error flattening remain. The persisted-Btree boot-panic claim is refuted. Non-hash fault coverage exists, contrary to the report, but does not cover the entire requested matrix.
+Unrelated external edits began in dependency/toolchain/CI metadata during collection; additional Rust-source edits appeared afterward. They were left untouched. Evidence and decisions are tied to the frozen commit, not those later changes or an installed toolchain. “Current” below means current at that snapshot; no re-audit of the modified working tree is implied.
+
+Sorted read-error swallowing, shadow-write error loss, false-success cleanup, metadata assertions, and error flattening remain. Btree open panic and exclusively-hash fault coverage are refuted by actual callers and registered tests. Several defensive expects are valid programmer invariants.
 
 ## Current claim decisions
 
@@ -13,7 +15,7 @@ Sorted-open swallowing, compaction errors, cleanup omissions, SQ8 observability,
 |---:|---:|---:|---:|---:|---:|---:|
 | 13 | 9 | 0 | 0 | 2 | 0 | 2 |
 
-These are decisions on report claims, including repeated roots, bundled observations and non-findings—not a unique-bug census. Closed/N/A rows have no current risk; unverified risk is provisional. Pure style and unmeasured optimization claims do not establish runtime impact.
+These are duplicate-inclusive report decisions, not a unique-bug census. Pure style or structural optimization does not establish a runtime incident; unverified impact remains provisional.
 
 <a id="review-1"></a>
 
@@ -21,9 +23,11 @@ These are decisions on report claims, including repeated roots, bundled observat
 
 Status: `confirmed-open`. Current risk: `high`.
 
-Metadata get still treats every Err as successful absence. Later persist_defs serializes the empty registry. Existing sorted corruption tests cover decoding, not an injected initial get failure.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-index/src/base_index/sorted_index_manager.rs:2706](../../../../../crates/shamir-index/src/base_index/sorted_index_manager.rs#L2706); [crates/shamir-index/src/base_index/sorted_index_manager.rs:2692](../../../../../crates/shamir-index/src/base_index/sorted_index_manager.rs#L2692); [crates/shamir-index/src/base_index/tests/f72_legacy_state_compat_tests.rs:318](../../../../../crates/shamir-index/src/base_index/tests/f72_legacy_state_compat_tests.rs#L318).
+Err(_) returns Ok before decoding or hydration. A transient backend failure opens with no definitions; later persist_defs writes that registry. Decode-corruption tests and a FaultyStore delegating get do not cover this exact seam.
+
+Evidence: [crates/shamir-index/src/base_index/sorted_index_manager.rs:2706](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-index/src/base_index/sorted_index_manager.rs#L2706); [crates/shamir-index/src/base_index/sorted_index_manager.rs:2692](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-index/src/base_index/sorted_index_manager.rs#L2692); [crates/shamir-index/src/base_index/tests/p12_ddl_partial_error_tests.rs:75](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-index/src/base_index/tests/p12_ddl_partial_error_tests.rs#L75).
 
 <a id="review-2"></a>
 
@@ -31,9 +35,11 @@ Evidence: [crates/shamir-index/src/base_index/sorted_index_manager.rs:2706](../.
 
 Status: `confirmed-open`. Current risk: `high`.
 
-All shadow result discards remain and swap has no shadow-failure guard. Delete reconciliation exists, so not every discarded delete necessarily creates a permanent hole; failed upserts can still publish missing/stale vectors.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-index/src/vector/vector_backend.rs:296](../../../../../crates/shamir-index/src/vector/vector_backend.rs#L296); [crates/shamir-index/src/vector/vector_backend.rs:512](../../../../../crates/shamir-index/src/vector/vector_backend.rs#L512); [crates/shamir-index/src/vector/vector_backend.rs:1089](../../../../../crates/shamir-index/src/vector/vector_backend.rs#L1089); [crates/shamir-index/src/vector/vector_backend.rs:1102](../../../../../crates/shamir-index/src/vector/vector_backend.rs#L1102).
+All target result discards remain and cutover has no failure barrier. Delete reconciliation supplies counter-evidence to blanket delete loss, but a failed update after S0 capture can leave a stale/missing target. Existing successful compaction tests do not inject this error.
+
+Evidence: [crates/shamir-index/src/vector/vector_backend.rs:296](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-index/src/vector/vector_backend.rs#L296); [crates/shamir-index/src/vector/vector_backend.rs:512](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-index/src/vector/vector_backend.rs#L512); [crates/shamir-index/src/vector/vector_backend.rs:1089](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-index/src/vector/vector_backend.rs#L1089); [crates/shamir-index/src/vector/vector_backend.rs:1102](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-index/src/vector/vector_backend.rs#L1102).
 
 <a id="review-3"></a>
 
@@ -41,9 +47,11 @@ Evidence: [crates/shamir-index/src/vector/vector_backend.rs:296](../../../../../
 
 Status: `confirmed-open`. Current risk: `medium`.
 
-All three storage-backed drops still discard remove errors; functional drop materializes all entries. Vector drop remains empty, and recovery excludes snapshot keys. Scan errors do propagate, so not all drop error handling is dead.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-index/src/fts_backend.rs:248](../../../../../crates/shamir-index/src/fts_backend.rs#L248); [crates/shamir-index/src/fts_ranked_backend.rs:409](../../../../../crates/shamir-index/src/fts_ranked_backend.rs#L409); [crates/shamir-index/src/functional_backend.rs:298](../../../../../crates/shamir-index/src/functional_backend.rs#L298); [crates/shamir-index/src/vector/vector_backend.rs:739](../../../../../crates/shamir-index/src/vector/vector_backend.rs#L739); [crates/shamir-index/src/persistence.rs:633](../../../../../crates/shamir-index/src/persistence.rs#L633).
+FTS and functional drops discard every per-key removal error, while scan errors propagate. Vector drop does nothing and binary-prefix recovery misses its persisted string namespace. A scan-failure test cannot detect swallowed removal errors; inject remove failure and inspect retained recovery state.
+
+Evidence: [crates/shamir-index/src/fts_backend.rs:248](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-index/src/fts_backend.rs#L248); [crates/shamir-index/src/fts_ranked_backend.rs:409](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-index/src/fts_ranked_backend.rs#L409); [crates/shamir-index/src/functional_backend.rs:298](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-index/src/functional_backend.rs#L298); [crates/shamir-index/src/vector/vector_backend.rs:739](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-index/src/vector/vector_backend.rs#L739); [crates/shamir-index/src/persistence.rs:633](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-index/src/persistence.rs#L633).
 
 <a id="review-4"></a>
 
@@ -51,19 +59,23 @@ Evidence: [crates/shamir-index/src/fts_backend.rs:248](../../../../../crates/sha
 
 Status: `confirmed-open`. Current risk: `medium`.
 
-All three fit triggers still discard errors, and no fit logging exists. FitGuard resets single-flight state, allowing later pre-fit retries; permanent unquantized degradation from every one-off failure is not established.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-index/src/vector/hnsw_adapter.rs:946](../../../../../crates/shamir-index/src/vector/hnsw_adapter.rs#L946); [crates/shamir-index/src/vector/hnsw_adapter.rs:2474](../../../../../crates/shamir-index/src/vector/hnsw_adapter.rs#L2474); [crates/shamir-index/src/vector/hnsw_adapter.rs:2712](../../../../../crates/shamir-index/src/vector/hnsw_adapter.rs#L2712); [crates/shamir-index/src/vector/hnsw_adapter.rs:1310](../../../../../crates/shamir-index/src/vector/hnsw_adapter.rs#L1310).
+Three trigger sites discard Result and the fit function does not log. FitGuard resets single-flight state, allowing pre-fit retries. Errors after fitted publication require different recovery from errors before publication; do not universally report 'staying on f32'.
+
+Evidence: [crates/shamir-index/src/vector/hnsw_adapter.rs:946](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-index/src/vector/hnsw_adapter.rs#L946); [crates/shamir-index/src/vector/hnsw_adapter.rs:1310](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-index/src/vector/hnsw_adapter.rs#L1310); [crates/shamir-index/src/vector/hnsw_adapter.rs:2474](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-index/src/vector/hnsw_adapter.rs#L2474); [crates/shamir-index/src/vector/hnsw_adapter.rs:2712](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-index/src/vector/hnsw_adapter.rs#L2712).
 
 <a id="review-5"></a>
 
 ### Claim 5 — `build_index2_backend` panics via `unreachable!` on a persisted (disk-driven) descriptor kind
 
-Status: `refuted`. Current risk: —.
+Status: `refuted`. Current risk: `—`.
 
-Persisted table-open descriptors are explicitly filtered for Btree before builder dispatch. The builder's direct Btree panic exists, but the report omitted the positive caller guard excluding its claimed boot path.
+Prior-cycle decision: `refuted`.
 
-Evidence: [crates/shamir-engine/src/table/table_manager.rs:660](../../../../../crates/shamir-engine/src/table/table_manager.rs#L660); [crates/shamir-index/src/build_backend.rs:66](../../../../../crates/shamir-index/src/build_backend.rs#L66).
+The persisted descriptor loop skips Btree before calling the builder. The public builder still panics on direct unsupported use, but that is not the alleged disk-driven open path and was excluded before this review.
+
+Evidence: [crates/shamir-engine/src/table/table_manager.rs:661](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-engine/src/table/table_manager.rs#L661); [crates/shamir-index/src/build_backend.rs:66](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-index/src/build_backend.rs#L66).
 
 <a id="review-6"></a>
 
@@ -71,19 +83,23 @@ Evidence: [crates/shamir-engine/src/table/table_manager.rs:660](../../../../../c
 
 Status: `confirmed-open`. Current risk: `medium`.
 
-Storage(String) and repeated to_string conversions still discard error variants and source chains. Metadata set errors are still rewrapped as DbError::Internal.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-index/src/backend.rs:59](../../../../../crates/shamir-index/src/backend.rs#L59); [crates/shamir-index/src/write_ops.rs:96](../../../../../crates/shamir-index/src/write_ops.rs#L96); [crates/shamir-index/src/persistence.rs:105](../../../../../crates/shamir-index/src/persistence.rs#L105).
+Storage(String) and to_string conversions prevent variant/source inspection. save_index2_metadata also changes Store::set errors into Internal. This is an actual diagnostic/recovery limitation, though not every API in the crate loses typed DbError.
+
+Evidence: [crates/shamir-index/src/backend.rs:59](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-index/src/backend.rs#L59); [crates/shamir-index/src/write_ops.rs:96](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-index/src/write_ops.rs#L96); [crates/shamir-index/src/persistence.rs:105](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-index/src/persistence.rs#L105).
 
 <a id="review-7"></a>
 
 ### Claim 7 — Enriched error paths are unit-tested only for the regular-hash family
 
-Status: `refuted`. Current risk: —.
+Status: `refuted`. Current risk: `—`.
 
-Registered engine tests inject unique/sorted CREATE persist failures, unique DROP failures during RENAME with structured-error assertions, and index2 drop scan failures. Remaining sorted DROP/RENAME and remove-error cases are not thereby covered.
+Prior-cycle decision: `refuted`.
 
-Evidence: [crates/shamir-engine/src/table/tests/index_create_persist_atomicity_tests.rs:195](../../../../../crates/shamir-engine/src/table/tests/index_create_persist_atomicity_tests.rs#L195); [crates/shamir-engine/src/table/tests/p967_ddl_structured_error_tests.rs:191](../../../../../crates/shamir-engine/src/table/tests/p967_ddl_structured_error_tests.rs#L191); [crates/shamir-engine/src/table/tests/r0d_fail_closed_recovery_tests.rs:269](../../../../../crates/shamir-engine/src/table/tests/r0d_fail_closed_recovery_tests.rs#L269); [crates/shamir-engine/src/table/tests/mod.rs:42](../../../../../crates/shamir-engine/src/table/tests/mod.rs#L42); [crates/shamir-engine/src/table/tests/mod.rs:67](../../../../../crates/shamir-engine/src/table/tests/mod.rs#L67); [crates/shamir-engine/src/table/tests/mod.rs:72](../../../../../crates/shamir-engine/src/table/tests/mod.rs#L72).
+Registered tests assert unique/sorted creation fault outcomes, unique rename structured Failed status, and index2 recovery Failed state after scan failure. They are concrete counterexamples to the blanket absence claim, not proof of every manager persist/remove/crash phase.
+
+Evidence: [crates/shamir-engine/src/table/tests/index_create_persist_atomicity_tests.rs:195](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-engine/src/table/tests/index_create_persist_atomicity_tests.rs#L195); [crates/shamir-engine/src/table/tests/p967_ddl_structured_error_tests.rs:191](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-engine/src/table/tests/p967_ddl_structured_error_tests.rs#L191); [crates/shamir-engine/src/table/tests/r0d_fail_closed_recovery_tests.rs:269](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-engine/src/table/tests/r0d_fail_closed_recovery_tests.rs#L269); [crates/shamir-engine/src/table/tests/mod.rs:42](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-engine/src/table/tests/mod.rs#L42).
 
 <a id="review-8"></a>
 
@@ -91,19 +107,23 @@ Evidence: [crates/shamir-engine/src/table/tests/index_create_persist_atomicity_t
 
 Status: `confirmed-open`. Current risk: `low`.
 
-All four pre-epoch clock unwraps remain. They can panic when their success-status paths are reached with a pre-epoch clock; ordinary sibling timestamp construction uses a fallback.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-index/src/base_index/index_manager.rs:2354](../../../../../crates/shamir-index/src/base_index/index_manager.rs#L2354); [crates/shamir-index/src/base_index/index_manager_unique.rs:892](../../../../../crates/shamir-index/src/base_index/index_manager_unique.rs#L892); [crates/shamir-index/src/base_index/sorted_index_manager.rs:1071](../../../../../crates/shamir-index/src/base_index/sorted_index_manager.rs#L1071); [crates/shamir-index/src/base_index/sorted_index_manager.rs:1566](../../../../../crates/shamir-index/src/base_index/sorted_index_manager.rs#L1566).
+Regular DROP, unique DROP, sorted DROP, and sorted RENAME success-status construction unwrap SystemTime conversion. A pre-epoch clock panics only when those status paths execute. Sibling constructors already use fallback timestamps.
+
+Evidence: [crates/shamir-index/src/base_index/index_manager.rs:2355](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-index/src/base_index/index_manager.rs#L2355); [crates/shamir-index/src/base_index/index_manager_unique.rs:893](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-index/src/base_index/index_manager_unique.rs#L893); [crates/shamir-index/src/base_index/sorted_index_manager.rs:1072](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-index/src/base_index/sorted_index_manager.rs#L1072); [crates/shamir-index/src/base_index/sorted_index_manager.rs:1567](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-index/src/base_index/sorted_index_manager.rs#L1567).
 
 <a id="review-9"></a>
 
 ### Claim 9 — Read-hot-path `.expect` panics for the "quantized_active but unset" invariant, while sibling sites return errors
 
-Status: `not-applicable`. Current risk: —.
+Status: `not-applicable`. Current risk: `—`.
 
-The expects remain, but quantizer and u8 graph publish before is_fitted Release, observed through Acquire. No valid production state reaching an unset value was found; programmer-invariant panics are permitted by project policy.
+Prior-cycle decision: `not-applicable`.
 
-Evidence: [crates/shamir-index/src/vector/hnsw_adapter.rs:1226](../../../../../crates/shamir-index/src/vector/hnsw_adapter.rs#L1226); [crates/shamir-index/src/vector/hnsw_adapter.rs:1461](../../../../../crates/shamir-index/src/vector/hnsw_adapter.rs#L1461); [crates/shamir-index/src/vector/hnsw_adapter.rs:1531](../../../../../crates/shamir-index/src/vector/hnsw_adapter.rs#L1531); [crates/shamir-index/src/vector/hnsw_adapter.rs:1791](../../../../../crates/shamir-index/src/vector/hnsw_adapter.rs#L1791).
+The quantizer is set and u8 graph stored before is_fitted Release; quantized_active observes Acquire. Loaded fitted construction installs both before exposing the adapter. No current supported execution reaches an unset required value; optional fallibility is not a bug fix.
+
+Evidence: [crates/shamir-index/src/vector/hnsw_adapter.rs:1226](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-index/src/vector/hnsw_adapter.rs#L1226); [crates/shamir-index/src/vector/hnsw_adapter.rs:1461](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-index/src/vector/hnsw_adapter.rs#L1461); [crates/shamir-index/src/vector/hnsw_adapter.rs:1531](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-index/src/vector/hnsw_adapter.rs#L1531); [crates/shamir-index/src/vector/hnsw_adapter.rs:618](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-index/src/vector/hnsw_adapter.rs#L618).
 
 <a id="review-10"></a>
 
@@ -111,9 +131,11 @@ Evidence: [crates/shamir-index/src/vector/hnsw_adapter.rs:1226](../../../../../c
 
 Status: `confirmed-open`. Current risk: `low`.
 
-Corrupt nonempty FTS postings default, undecodable rebuild rows skip, covering encode errors return empty bytes, and stats deletion wraps. These remain separate subcases; wrapping is not a safe degradation.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-index/src/fts_ranked_backend.rs:128](../../../../../crates/shamir-index/src/fts_ranked_backend.rs#L128); [crates/shamir-index/src/fts_ranked_backend.rs:390](../../../../../crates/shamir-index/src/fts_ranked_backend.rs#L390); [crates/shamir-index/src/base_index/sorted_index_manager.rs:2867](../../../../../crates/shamir-index/src/base_index/sorted_index_manager.rs#L2867); [crates/shamir-index/src/bm25.rs:89](../../../../../crates/shamir-index/src/bm25.rs#L89).
+Nonempty posting decode failures default, undecodable rebuild rows skip, covering encoding errors return empty, and counters wrap. The first two and counter arithmetic have concrete inputs; a reachable failure of scalar-only covering serialization was not established, so that arm is observability hardening rather than proven loss.
+
+Evidence: [crates/shamir-index/src/fts_ranked_backend.rs:128](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-index/src/fts_ranked_backend.rs#L128); [crates/shamir-index/src/fts_ranked_backend.rs:390](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-index/src/fts_ranked_backend.rs#L390); [crates/shamir-index/src/base_index/sorted_index_manager.rs:2867](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-index/src/base_index/sorted_index_manager.rs#L2867); [crates/shamir-index/src/bm25.rs:89](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-index/src/bm25.rs#L89).
 
 <a id="review-11"></a>
 
@@ -121,21 +143,25 @@ Evidence: [crates/shamir-index/src/fts_ranked_backend.rs:128](../../../../../cra
 
 Status: `confirmed-open`. Current risk: `medium`.
 
-The loader still invokes synchronous assertions on externally decoded dimension/mins/scales data without validation. Chunk checksums do not cover these metadata fields.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-index/src/vector/snapshot.rs:973](../../../../../crates/shamir-index/src/vector/snapshot.rs#L973); [crates/shamir-index/src/vector/quant_meta.rs:73](../../../../../crates/shamir-index/src/vector/quant_meta.rs#L73).
+Validly decoded inconsistent quantizer lengths or zero dimension reach synchronous assertions outside the spawn_blocking graph loader. Graph-section CRC does not cover these fields. Return typed Corrupt and exercise the production restore fallback.
 
-Grouping/duplicate: `api-wire-protocol.md#7`. This row is not another independent defect.
+Evidence: [crates/shamir-index/src/vector/snapshot.rs:973](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-index/src/vector/snapshot.rs#L973); [crates/shamir-index/src/vector/quant_meta.rs:73](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-index/src/vector/quant_meta.rs#L73); [crates/shamir-index/src/vector/sq8.rs:91](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-index/src/vector/sq8.rs#L91).
+
+Grouping/duplicate: [api-wire-protocol.md#7](api-wire-protocol.md#review-7). This is not an additional independent defect.
 
 <a id="review-12"></a>
 
 ### Claim 12 — `IndexRegistry::insert` can still return `Err` leaving `by_id` populated (the exact partial publish #1009 closed via pre-check)
 
-Status: `not-applicable`. Current risk: —.
+Status: `not-applicable`. Current risk: `—`.
 
-The late error arm lacks rollback, but the documented external admission precondition excludes concurrent same-name insertion; reopen is sequential. This is optional defense against precondition-breaking library use, not a proven supported-path defect.
+Prior-cycle decision: `not-applicable`.
 
-Evidence: [crates/shamir-index/src/registry.rs:198](../../../../../crates/shamir-index/src/registry.rs#L198); [crates/shamir-index/src/registry.rs:237](../../../../../crates/shamir-index/src/registry.rs#L237); [crates/shamir-index/src/registry.rs:302](../../../../../crates/shamir-index/src/registry.rs#L302); [crates/shamir-engine/src/table/table_manager.rs:1322](../../../../../crates/shamir-engine/src/table/table_manager.rs#L1322).
+The late map error has no rollback, but the documented ddl_admission precondition serializes supported insert/remove/rename callers; reopen is sequential. Same-name races on a bare registry violate the explicit precondition.
+
+Evidence: [crates/shamir-index/src/registry.rs:198](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-index/src/registry.rs#L198); [crates/shamir-index/src/registry.rs:237](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-index/src/registry.rs#L237); [crates/shamir-index/src/registry.rs:302](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-index/src/registry.rs#L302); [crates/shamir-engine/src/table/table_manager.rs:1322](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-engine/src/table/table_manager.rs#L1322).
 
 <a id="review-13"></a>
 
@@ -143,19 +169,20 @@ Evidence: [crates/shamir-index/src/registry.rs:198](../../../../../crates/shamir
 
 Status: `confirmed-open`. Current risk: `nit`.
 
-Both shutdowns still discard JoinError. BruteForce's poisoning expect remains, but its private one-shot take has no demonstrated poisoning source; panic-result observability is the concrete residual issue.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-index/src/actor.rs:100](../../../../../crates/shamir-index/src/actor.rs#L100); [crates/shamir-index/src/vector/brute_force.rs:131](../../../../../crates/shamir-index/src/vector/brute_force.rs#L131).
+Both shutdown methods await and discard JoinError, so a panicked applier is not reported as failed drain. BruteForce's private one-shot take has no inspected poison-producing operation; poisoning panic is not an independently established production witness.
 
-## Corrections and qualified non-findings
+Evidence: [crates/shamir-index/src/actor.rs:100](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-index/src/actor.rs#L100); [crates/shamir-index/src/vector/brute_force.rs:131](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-index/src/vector/brute_force.rs#L131).
 
-- The Btree guard and non-hash fault tests predate this review; classify these sweeping allegations as refuted, not newly fixed.
-- The index2 scan-failure test cannot detect swallowed per-key remove failures: it fails before any removal. Extend the specific oracle rather than claiming no fault coverage exists.
-- Logging shadow failures is not a correctness fix. Safe compaction cutover must account for in-flight shadow writes and prevent publication of a failed target; a flag checked once before swap still needs synchronization.
-- FitGuard allows retries before fitting activates; remove the unconditional permanent-f32 claim. Post-publication fit failures need state-aware handling, not an assumption that every error leaves an untouched f32 adapter.
-- A query-task panic is not necessarily a process abort under the configured unwind profile.
-- Header/sidecar checks and DDL RAII/tombstone machinery remain present, but sorted initial get errors and per-key removal errors are exceptions to the broad fail-closed praise.
-- Typed storage errors should preserve context and source; changing public error variants requires API compatibility consideration.
+## Evidence and recipe corrections
+
+- Existing creation fault tests cover engine admission/interner persistence boundaries and live-state assertions, not automatically every lower-manager persistence phase.
+- A one-time compaction failure flag check leaves a check-to-swap race; successful cutover requires fencing/draining in-flight shadow writes.
+- Vector cleanup must stop background snapshot/compaction writers before deleting its namespace, or deleted records can be recreated.
+- The qload_dir leak retains complete graph/data files, not merely a tiny loader object; it is a separate filesystem lifecycle issue.
+- The historical 6.1 fix does not require changing IndexError first: SortedIndexManager::load already returns typed DbResult.
+- String errors, prefix parsers, and permitted programmer-invariant panics must not all be classified as runtime corruption.
 
 ---
 

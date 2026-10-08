@@ -1,11 +1,13 @@
-<!-- revalidation:2026-10-08 source:92ad58266bf57ddea1fa3c8a47affba1a3a9a096 -->
-# shamir-collections — style-claude-md revalidation
+<!-- revalidation:2026-10-08 cycle:independent-2 source:e3765c935fc71655ee1ec0160cf180607935d89b -->
+# shamir-collections — style-claude-md independent revalidation (cycle 2)
 
-Source snapshot: `92ad58266bf57ddea1fa3c8a47affba1a3a9a096`. Revalidated 2026-10-08 by read-only XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run; no source fix is part of this update. Test registration/assertions are evidence of an oracle, not proof of a passing run.
+Frozen source snapshot: `e3765c935fc71655ee1ec0160cf180607935d89b`. Independently revalidated 2026-10-08 by a fresh XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run. Source-fixed means the specified mechanism was already removed at this snapshot; this cycle implements no source fix.
 
-This section is authoritative for current status. Original titles/IDs are retained for traceability; a refuted title is not a current assertion. The collapsed historical report below is superseded, including its counts, severity, scenarios and fix instructions. Plan IDs preserve historical numbering, not a current release mandate. [Workspace methodology and status definitions](../SUMMARY.md#status-definitions).
+This section is authoritative for current decisions. Existing IDs and allegation titles are retained for traceability; a refuted title is not a current assertion. Prior-cycle decisions were rechecked, not used as proof. The first cycle is available in repository history at this snapshot. The original historical body below remains preserved once and is superseded, including its counts, severities and recipes. [Workspace scope and status definitions](../SUMMARY.md#status-definitions).
 
-The leaf remains structurally conformant and all three minor observations remain. Test absence is coverage debt, not a test-layout violation; import/doc nits are not runtime defects.
+Unrelated external edits began in dependency/toolchain/CI metadata during collection; additional Rust-source edits appeared afterward. They were left untouched. Evidence and decisions are tied to the frozen commit, not those later changes or an installed toolchain. “Current” below means current at that snapshot; no re-audit of the modified working tree is implied.
+
+The single closely coupled implementation file and header imports conform to the structural rules. Remaining documentation/import observations are non-runtime debt.
 
 ## Current claim decisions
 
@@ -13,19 +15,21 @@ The leaf remains structurally conformant and all three minor observations remain
 |---:|---:|---:|---:|---:|---:|---:|
 | 3 | 3 | 0 | 0 | 0 | 0 | 0 |
 
-These are decisions on report claims, including repeated roots, bundled observations and non-findings—not a unique-bug census. Closed/N/A rows have no current risk; unverified risk is provisional. Pure style and unmeasured optimization claims do not establish runtime impact.
+These are duplicate-inclusive report decisions, not a unique-bug census. Pure style or structural optimization does not establish a runtime incident; unverified impact remains provisional.
 
 <a id="review-1"></a>
 
 ### Claim 1 — No tests anywhere in the pillar-4 anchor crate
 
-Status: `confirmed-open`. Current risk: `low`.
+Status: `confirmed-open`. Current risk: `medium`.
 
-No test files or registration exist and doctests are disabled. The absence does not violate rules governing the layout of tests that already exist.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-collections/src/lib.rs:63](../../../../../crates/shamir-collections/src/lib.rs#L63); [crates/shamir-collections/Cargo.toml:16](../../../../../crates/shamir-collections/Cargo.toml#L16); [CLAUDE.md:573](../../../../../CLAUDE.md#L573).
+The local suite remains absent, but absence is not a violation of where existing tests must be organized. Registered consumer tests preclude a blanket no-in-repository-coverage assurance.
 
-Grouping/duplicate: `correctness-tdd.md#1`. This row is not another independent defect.
+Evidence: [crates/shamir-collections/src/lib.rs:63](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-collections/src/lib.rs#L63); [crates/shamir-types/src/types/tests/mod.rs:10](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-types/src/types/tests/mod.rs#L10); [crates/shamir-collections/Cargo.toml:16](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-collections/Cargo.toml#L16).
+
+Grouping/duplicate: [correctness-tdd.md#1](correctness-tdd.md#review-1). This is not an additional independent defect.
 
 <a id="review-2"></a>
 
@@ -33,11 +37,13 @@ Grouping/duplicate: `correctness-tdd.md#1`. This row is not another independent 
 
 Status: `confirmed-open`. Current risk: `nit`.
 
-The redundant Eq import remains. A future toolchain warning is speculative and was not established by source or execution.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-collections/src/lib.rs:13](../../../../../crates/shamir-collections/src/lib.rs#L13); [rust-toolchain.toml:15](../../../../../rust-toolchain.toml#L15).
+The import is unnecessary but remains legal. Neither current nor prospective toolchain warnings were demonstrated.
 
-Grouping/duplicate: `correctness-tdd.md#3`. This row is not another independent defect.
+Evidence: [crates/shamir-collections/src/lib.rs:13](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-collections/src/lib.rs#L13).
+
+Grouping/duplicate: [correctness-tdd.md#3](correctness-tdd.md#review-3). This is not an additional independent defect.
 
 <a id="review-3"></a>
 
@@ -45,21 +51,21 @@ Grouping/duplicate: `correctness-tdd.md#3`. This row is not another independent 
 
 Status: `confirmed-open`. Current risk: `nit`.
 
-THasher and all constructors remain undocumented, and the broad allow still has no local explanation. Both facets remain; clippy.toml supplies the external sanction.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-collections/src/lib.rs:9](../../../../../crates/shamir-collections/src/lib.rs#L9); [crates/shamir-collections/src/lib.rs:17](../../../../../crates/shamir-collections/src/lib.rs#L17); [crates/shamir-collections/src/lib.rs:25](../../../../../crates/shamir-collections/src/lib.rs#L25); [crates/shamir-collections/src/lib.rs:61](../../../../../crates/shamir-collections/src/lib.rs#L61); [clippy.toml:39](../../../../../clippy.toml#L39).
+THasher/eight constructors lack rustdoc and the local lint suppression lacks an explanation. External sanction and doctest rationale exist; this is discoverability debt.
 
-Grouping/duplicate: `api-wire-protocol.md#2`. This row is not another independent defect.
+Evidence: [crates/shamir-collections/src/lib.rs:9](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-collections/src/lib.rs#L9); [crates/shamir-collections/src/lib.rs:17](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-collections/src/lib.rs#L17); [crates/shamir-collections/src/lib.rs:25](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-collections/src/lib.rs#L25); [clippy.toml:39](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/clippy.toml#L39).
 
-## Corrections and qualified non-findings
+Grouping/duplicate: [api-wire-protocol.md#2](api-wire-protocol.md#review-2). This is not an additional independent defect.
 
-- The single closely-coupled aliases/constructors file still fits CLAUDE.md:505; a sibling-file split is not required.
-- All imports remain at the header; there are no inline test modules or mod.rs layout violations in this crate.
-- The crate-wide allow remains intentionally sanctioned. Missing local justification and future lint containment are separate from a present prohibited-type defect.
-- Hasher type assertions and explicit ordered-key assertions are appropriate tests; identical iteration does not itself establish Fx hashing.
-- Downstream tests exist and are wired, so nothing in-repo catches it is too absolute. Existing equality/shared-reference oracles nevertheless do not replace the missing direct contract guards.
-- Do not present speculative toolchain-upgrade gate noise as demonstrated behavior.
-- The doc facet duplicates api-wire-protocol finding 2; the allow-comment facet separately duplicates security-crypto finding 2.
+## Evidence and recipe corrections
+
+- Splitting thirteen closely coupled exports into sibling files is not required by the primary-export rule.
+- No inline test module or mod.rs structural violation exists locally.
+- The allow-comment facet also duplicates security-crypto.md#2; it is not a separate runtime defect.
+- Doctest enablement should respect the documented project-wide policy.
+- Do not infer current gate success or future warning behavior from the pinned toolchain metadata.
 
 ---
 

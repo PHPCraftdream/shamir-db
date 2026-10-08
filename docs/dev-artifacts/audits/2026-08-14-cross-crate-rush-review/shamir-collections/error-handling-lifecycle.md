@@ -1,11 +1,13 @@
-<!-- revalidation:2026-10-08 source:92ad58266bf57ddea1fa3c8a47affba1a3a9a096 -->
-# shamir-collections — error-handling-lifecycle revalidation
+<!-- revalidation:2026-10-08 cycle:independent-2 source:e3765c935fc71655ee1ec0160cf180607935d89b -->
+# shamir-collections — error-handling-lifecycle independent revalidation (cycle 2)
 
-Source snapshot: `92ad58266bf57ddea1fa3c8a47affba1a3a9a096`. Revalidated 2026-10-08 by read-only XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run; no source fix is part of this update. Test registration/assertions are evidence of an oracle, not proof of a passing run.
+Frozen source snapshot: `e3765c935fc71655ee1ec0160cf180607935d89b`. Independently revalidated 2026-10-08 by a fresh XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run. Source-fixed means the specified mechanism was already removed at this snapshot; this cycle implements no source fix.
 
-This section is authoritative for current status. Original titles/IDs are retained for traceability; a refuted title is not a current assertion. The collapsed historical report below is superseded, including its counts, severity, scenarios and fix instructions. Plan IDs preserve historical numbering, not a current release mandate. [Workspace methodology and status definitions](../SUMMARY.md#status-definitions).
+This section is authoritative for current decisions. Existing IDs and allegation titles are retained for traceability; a refuted title is not a current assertion. Prior-cycle decisions were rechecked, not used as proof. The first cycle is available in repository history at this snapshot. The original historical body below remains preserved once and is superseded, including its counts, severities and recipes. [Workspace scope and status definitions](../SUMMARY.md#status-definitions).
 
-The constructors remain infallible and undocumented, with no local tests. The original only-abort wording and trusted-capacity call-site assurance are incorrect: capacity overflow can unwind, and a public decoder already forwards a declared MessagePack map count.
+Unrelated external edits began in dependency/toolchain/CI metadata during collection; additional Rust-source edits appeared afterward. They were left untouched. Evidence and decisions are tied to the frozen commit, not those later changes or an installed toolchain. “Current” below means current at that snapshot; no re-audit of the modified working tree is implied.
+
+Constructors delegate ordinary collection allocation without a recoverable reservation API. Caller validation, rather than universal fallible leaf constructors, is the important boundary obligation.
 
 ## Current claim decisions
 
@@ -13,7 +15,7 @@ The constructors remain infallible and undocumented, with no local tests. The or
 |---:|---:|---:|---:|---:|---:|---:|
 | 2 | 2 | 0 | 0 | 0 | 0 | 0 |
 
-These are decisions on report claims, including repeated roots, bundled observations and non-findings—not a unique-bug census. Closed/N/A rows have no current risk; unverified risk is provisional. Pure style and unmeasured optimization claims do not establish runtime impact.
+These are duplicate-inclusive report decisions, not a unique-bug census. Pure style or structural optimization does not establish a runtime incident; unverified impact remains provisional.
 
 <a id="review-1"></a>
 
@@ -21,32 +23,35 @@ These are decisions on report claims, including repeated roots, bundled observat
 
 Status: `confirmed-open`. Current risk: `low`.
 
-All four _wc helpers still allocate without returning reservation errors or documenting failure behavior. Pinned hashbrown distinguishes capacity-overflow panic from allocation-failure abort. The existing public MessagePack decoder forwards Map32's declared count to new_map_wc before reading entries; remote production reachability was not established.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-collections/src/lib.rs:29](../../../../../crates/shamir-collections/src/lib.rs#L29); [crates/shamir-collections/src/lib.rs:37](../../../../../crates/shamir-collections/src/lib.rs#L37); [crates/shamir-collections/src/lib.rs:53](../../../../../crates/shamir-collections/src/lib.rs#L53); [crates/shamir-collections/src/lib.rs:61](../../../../../crates/shamir-collections/src/lib.rs#L61); [Cargo.lock:1601](../../../../../Cargo.lock#L1601); [Cargo.toml:88](../../../../../Cargo.toml#L88); [crates/shamir-types/src/codecs/interned/messagepack.rs:251](../../../../../crates/shamir-types/src/codecs/interned/messagepack.rs#L251); [crates/shamir-types/src/codecs/interned/messagepack.rs:318](../../../../../crates/shamir-types/src/codecs/interned/messagepack.rs#L318).
+The corrected current claim remains: helpers are infallible and undocumented. Its literal only-abort title is false because hashbrown 0.17.1 panics on capacity overflow. A raw Map32 header reaches new_map_wc before entries are read, contradicting the historical trusted-capacity assurance. Missing try helpers alone is an API choice; accepting unchecked declared counts is the caller hazard. Source: https://docs.rs/crate/hashbrown/0.17.1/source/src/raw.rs.
+
+Evidence: [crates/shamir-collections/src/lib.rs:29](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-collections/src/lib.rs#L29); [crates/shamir-collections/src/lib.rs:53](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-collections/src/lib.rs#L53); [Cargo.lock:1600](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/Cargo.lock#L1600); [Cargo.toml:88](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/Cargo.toml#L88); [crates/shamir-types/src/codecs/interned/messagepack.rs:251](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-types/src/codecs/interned/messagepack.rs#L251); [crates/shamir-types/src/codecs/interned/messagepack.rs:318](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-types/src/codecs/interned/messagepack.rs#L318).
 
 <a id="review-2"></a>
 
 ### Claim 2 — Zero tests anywhere in the crate — exported contract has no regression net
 
-Status: `confirmed-open`. Current risk: `low`.
+Status: `confirmed-open`. Current risk: `medium`.
 
-There is still no local regression suite for builder identity, capacity or collection semantics. No Result-based cleanup path exists locally, but delegated capacity-overflow/allocation failure remains an observable boundary condition.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-collections/src/lib.rs:25](../../../../../crates/shamir-collections/src/lib.rs#L25); [crates/shamir-collections/src/lib.rs:63](../../../../../crates/shamir-collections/src/lib.rs#L63); [crates/shamir-collections/Cargo.toml:16](../../../../../crates/shamir-collections/Cargo.toml#L16).
+Local contract tests are absent; downstream coverage is real but incomplete. No local returned-error cleanup path exists, while delegated allocation failure remains observable. Capacity-overflow tests can distinguish panic versus returned error without attempting destructive OOM allocation.
 
-Grouping/duplicate: `correctness-tdd.md#1`. This row is not another independent defect.
+Evidence: [crates/shamir-collections/src/lib.rs:29](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-collections/src/lib.rs#L29); [crates/shamir-collections/src/lib.rs:63](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-collections/src/lib.rs#L63); [crates/shamir-collections/Cargo.toml:16](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-collections/Cargo.toml#L16).
 
-## Corrections and qualified non-findings
+Grouping/duplicate: [correctness-tdd.md#1](correctness-tdd.md#review-1). This is not an additional independent defect.
 
-- Refute the literal only-abort assertion: pinned hashbrown panics on capacity overflow, and the workspace release profile uses panic=unwind. Ordinary allocation failure remains distinct.
-- Refute the all-literals-or-materialized-lengths assurance: decode_map receives a Map16/Map32 header count, not a validated materialized collection length.
-- Value's serde visitor separately clamps size_hint preallocation at value.rs:204 and value.rs:212; that mitigation does not cover the raw decode_map path.
-- The backup manifest example is an existing caller, not hypothetical, although its requested capacity is the length of an already-deserialized vector.
-- Documentation explains allocation policy but does not make hostile declared counts recoverable. Bound or fallibly reserve them at the decoder boundary when that API accepts untrusted bytes.
-- Local absence of explicit unwrap/expect/panic/assert sites, error types, I/O, locks and custom Drop logic remains confirmed. Returned collections still own allocations, so no resources/no fallibility must not be interpreted as a transitive guarantee.
-- Switching an IndexMap hasher alone does not change insertion-order iteration; the proposed failure explanation conflates hasher identity and ordered backing.
-- No error cleanup or test success was verified by execution.
+## Evidence and recipe corrections
+
+- Ordinary owned collection constructors need not all return Result merely because allocation can fail. Document their delegated policy and validate hostile counts at accepting boundaries.
+- The map and sequence Value visitors' 4096 initial-hint cap does not protect raw decode_map, raw decode_array, or RecordView::index.
+- RecordView::index is another header-derived preallocation seam, not a validated materialized length; it uses TFxMap directly and would not be repaired by changing only new_* helpers.
+- IndexMap fallible reservation reports its own TryReserveError; std collections use std::collections::TryReserveError. A shared try-helper recipe must preserve distinct error types or deliberately introduce a conversion.
+- Reservation failure does not make subsequent key/value allocations or later growth universally fallible. Avoid claiming complete OOM recovery.
+- The backup example exists at shamir-server/src/backup.rs:416, but its argument is an already-materialized manifest vector length.
+- Default std-linked allocation failure aborts, whereas capacity overflow and configurable allocation handling are distinct. Reference: [Rust 1.94.0 allocation handler](https://github.com/rust-lang/rust/blob/1.94.0/library/alloc/src/alloc.rs).
 
 ---
 

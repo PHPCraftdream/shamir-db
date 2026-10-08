@@ -1,11 +1,13 @@
-<!-- revalidation:2026-10-08 source:92ad58266bf57ddea1fa3c8a47affba1a3a9a096 -->
-# shamir-storage — concurrency-lockfree revalidation
+<!-- revalidation:2026-10-08 cycle:independent-2 source:e3765c935fc71655ee1ec0160cf180607935d89b -->
+# shamir-storage — concurrency-lockfree independent revalidation (cycle 2)
 
-Source snapshot: `92ad58266bf57ddea1fa3c8a47affba1a3a9a096`. Revalidated 2026-10-08 by read-only XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run; no source fix is part of this update. Test registration/assertions are evidence of an oracle, not proof of a passing run.
+Frozen source snapshot: `e3765c935fc71655ee1ec0160cf180607935d89b`. Independently revalidated 2026-10-08 by a fresh XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run. Source-fixed means the specified mechanism was already removed at this snapshot; this cycle implements no source fix.
 
-This section is authoritative for current status. Original titles/IDs are retained for traceability; a refuted title is not a current assertion. The collapsed historical report below is superseded, including its counts, severity, scenarios and fix instructions. Plan IDs preserve historical numbering, not a current release mandate. [Workspace methodology and status definitions](../SUMMARY.md#status-definitions).
+This section is authoritative for current decisions. Existing IDs and allegation titles are retained for traceability; a refuted title is not a current assertion. Prior-cycle decisions were rechecked, not used as proof. The first cycle is available in repository history at this snapshot. The original historical body below remains preserved once and is superseded, including its counts, severities and recipes. [Workspace scope and status definitions](../SUMMARY.md#status-definitions).
 
-The concrete cache-ordering, non-atomic mutation, blocking-send, and eager-scan mechanisms remain. Claims about unavailable pinned dependency APIs are not independently verified.
+Unrelated external edits began in dependency/toolchain/CI metadata during collection; additional Rust-source edits appeared afterward. They were left untouched. Evidence and decisions are tied to the frozen commit, not those later changes or an installed toolchain. “Current” below means current at that snapshot; no re-audit of the modified working tree is implied.
+
+Compound cache/backing publication remains unordered despite atomic fields and concurrent containers. Exact scc and moka APIs are available; their availability does not supply cross-layer ordering.
 
 ## Current claim decisions
 
@@ -13,7 +15,7 @@ The concrete cache-ordering, non-atomic mutation, blocking-send, and eager-scan 
 |---:|---:|---:|---:|---:|---:|---:|
 | 9 | 8 | 0 | 0 | 0 | 0 | 1 |
 
-These are decisions on report claims, including repeated roots, bundled observations and non-findings—not a unique-bug census. Closed/N/A rows have no current risk; unverified risk is provisional. Pure style and unmeasured optimization claims do not establish runtime impact.
+These are duplicate-inclusive report decisions, not a unique-bug census. Pure style or structural optimization does not establish a runtime incident; unverified impact remains provisional.
 
 <a id="review-1"></a>
 
@@ -21,9 +23,11 @@ These are decisions on report claims, including repeated roots, bundled observat
 
 Status: `confirmed-open`. Current risk: `high`.
 
-Sync backing writes and cache updates have independent ordering; cache_upsert and transact population still remove then insert and ignore Duplicate. A stale cache value can persist after all overlapping operations finish, disagreeing with inner. The concurrent test uses distinct writer keys.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-storage/src/storage_cached.rs:151](../../../../../crates/shamir-storage/src/storage_cached.rs#L151); [crates/shamir-storage/src/storage_cached.rs:403](../../../../../crates/shamir-storage/src/storage_cached.rs#L403); [crates/shamir-storage/src/storage_cached.rs:431](../../../../../crates/shamir-storage/src/storage_cached.rs#L431); [crates/shamir-storage/src/storage_cached.rs:471](../../../../../crates/shamir-storage/src/storage_cached.rs#L471); [crates/shamir-storage/src/tests/storage_cached_tests.rs:320](../../../../../crates/shamir-storage/src/tests/storage_cached_tests.rs#L320).
+Force backing A then B, publish cache B then A: cache returns A after both calls while inner returns B. Async queued writes also bypass ordering with direct transact. Distinct-key tests cannot detect either witness.
+
+Evidence: [crates/shamir-storage/src/storage_cached.rs:403](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-storage/src/storage_cached.rs#L403); [crates/shamir-storage/src/storage_cached.rs:431](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-storage/src/storage_cached.rs#L431); [crates/shamir-storage/src/storage_cached.rs:671](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-storage/src/storage_cached.rs#L671).
 
 <a id="review-2"></a>
 
@@ -31,11 +35,13 @@ Evidence: [crates/shamir-storage/src/storage_cached.rs:151](../../../../../crate
 
 Status: `confirmed-open`. Current risk: `high`.
 
-The post-inner read-fill remains unconditional, unlike single-get's recheck. Ordinary shared-suite coverage exists, but no test controls this concurrent fill window.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-storage/src/storage_membuffer.rs:874](../../../../../crates/shamir-storage/src/storage_membuffer.rs#L874); [crates/shamir-storage/src/storage_membuffer.rs:1246](../../../../../crates/shamir-storage/src/storage_membuffer.rs#L1246); [crates/shamir-storage/src/storage_membuffer.rs:1258](../../../../../crates/shamir-storage/src/storage_membuffer.rs#L1258); [crates/shamir-storage/src/tests/types_tests.rs:124](../../../../../crates/shamir-storage/src/tests/types_tests.rs#L124).
+Pause the miss response before fill, complete a buffered writer, then fill stale None/Live. Cache-first reads persistently hide the dirty value; shared tests cover only ordinary behavior.
 
-Grouping/duplicate: `correctness-tdd.md#1`. This row is not another independent defect.
+Evidence: [crates/shamir-storage/src/storage_membuffer.rs:1246](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-storage/src/storage_membuffer.rs#L1246); [crates/shamir-storage/src/storage_membuffer.rs:1258](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-storage/src/storage_membuffer.rs#L1258).
+
+Grouping/duplicate: [correctness-tdd.md#1](correctness-tdd.md#review-1). This is not an additional independent defect.
 
 <a id="review-3"></a>
 
@@ -43,9 +49,11 @@ Grouping/duplicate: `correctness-tdd.md#1`. This row is not another independent 
 
 Status: `confirmed-open`. Current risk: `medium`.
 
-The remove/reinsert window and ignored duplicate result are present, allowing transient absence and an acknowledged call whose supplied value was not inserted. The proposed upsert API's existence/semantics are unverified against unavailable scc 3.8.4 sources; overlapping completion order alone is not a correctness oracle.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-storage/src/storage_in_memory.rs:124](../../../../../crates/shamir-storage/src/storage_in_memory.rs#L124); [crates/shamir-storage/src/storage_in_memory.rs:129](../../../../../crates/shamir-storage/src/storage_in_memory.rs#L129); [crates/shamir-storage/src/storage_in_memory.rs:130](../../../../../crates/shamir-storage/src/storage_in_memory.rs#L130); [Cargo.lock:3123](../../../../../Cargo.lock#L3123).
+Existing-key update removes the entry before reinsertion, so a reader can observe NotFound although neither old nor new state is absent. Exact scc 3.8.4 has CAS-published upsert_sync. Ignored Duplicate and completion order alone do not prove an impossible overlapping-write history.
+
+Evidence: [crates/shamir-storage/src/storage_in_memory.rs:129](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-storage/src/storage_in_memory.rs#L129); [crates/shamir-storage/src/storage_in_memory.rs:130](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-storage/src/storage_in_memory.rs#L130); [Cargo.lock:3123](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/Cargo.lock#L3123).
 
 <a id="review-4"></a>
 
@@ -53,9 +61,11 @@ Evidence: [crates/shamir-storage/src/storage_in_memory.rs:124](../../../../../cr
 
 Status: `confirmed-open`. Current risk: `medium`.
 
-async submit directly invokes blocking SyncSender::send on a bounded channel before awaiting its reply. Saturation blocks executing runtime threads, not just tasks; timing and production saturation were not measured.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-storage/src/storage_fjall.rs:92](../../../../../crates/shamir-storage/src/storage_fjall.rs#L92); [crates/shamir-storage/src/storage_fjall.rs:194](../../../../../crates/shamir-storage/src/storage_fjall.rs#L194); [crates/shamir-storage/src/storage_fjall.rs:199](../../../../../crates/shamir-storage/src/storage_fjall.rs#L199); [crates/shamir-storage/src/storage_fjall.rs:330](../../../../../crates/shamir-storage/src/storage_fjall.rs#L330); [crates/shamir-storage/src/storage_fjall.rs:496](../../../../../crates/shamir-storage/src/storage_fjall.rs#L496).
+A saturated 1024-slot SyncSender blocks its executing OS runtime thread before reply await. A controlled stalled consumer plus unrelated heartbeat would discriminate; no saturation measurement exists.
+
+Evidence: [crates/shamir-storage/src/storage_fjall.rs:92](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-storage/src/storage_fjall.rs#L92); [crates/shamir-storage/src/storage_fjall.rs:199](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-storage/src/storage_fjall.rs#L199).
 
 <a id="review-5"></a>
 
@@ -63,9 +73,11 @@ Evidence: [crates/shamir-storage/src/storage_fjall.rs:92](../../../../../crates/
 
 Status: `confirmed-open`. Current risk: `low`.
 
-The builder still uses plain build and never supplies THasher, unlike dirty. Exact default-hasher internals, build_with_hasher API support, and any speedup are unverified against the unavailable pinned moka source.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-storage/src/storage_membuffer.rs:142](../../../../../crates/shamir-storage/src/storage_membuffer.rs#L142); [crates/shamir-storage/src/storage_membuffer.rs:232](../../../../../crates/shamir-storage/src/storage_membuffer.rs#L232); [crates/shamir-storage/src/storage_membuffer.rs:255](../../../../../crates/shamir-storage/src/storage_membuffer.rs#L255); [Cargo.lock:2221](../../../../../Cargo.lock#L2221).
+Published moka 0.12.15 src/future/builder.rs positively confirms std RandomState and custom-hasher support. This is policy nonconformance; speedup and security tradeoff are unmeasured.
+
+Evidence: [crates/shamir-storage/src/storage_membuffer.rs:255](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-storage/src/storage_membuffer.rs#L255); [Cargo.lock:2221](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/Cargo.lock#L2221).
 
 <a id="review-6"></a>
 
@@ -73,11 +85,13 @@ Evidence: [crates/shamir-storage/src/storage_membuffer.rs:142](../../../../../cr
 
 Status: `confirmed-open`. Current risk: `medium`.
 
-Both methods collect all matching key/value handles before constructing the stream, under one Guard. The Guard ends before yielding; peak result-vector storage remains proportional to all matches.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-storage/src/storage_in_memory.rs:153](../../../../../crates/shamir-storage/src/storage_in_memory.rs#L153); [crates/shamir-storage/src/storage_in_memory.rs:154](../../../../../crates/shamir-storage/src/storage_in_memory.rs#L154); [crates/shamir-storage/src/storage_in_memory.rs:158](../../../../../crates/shamir-storage/src/storage_in_memory.rs#L158); [crates/shamir-storage/src/storage_in_memory.rs:240](../../../../../crates/shamir-storage/src/storage_in_memory.rs#L240).
+Construction collects all matching handles while one Guard is live. The Guard does not cross stream awaits, but first-pull laziness and batch-bounded allocation are absent.
 
-Grouping/duplicate: `performance-hotpath.md#2`. This row is not another independent defect.
+Evidence: [crates/shamir-storage/src/storage_in_memory.rs:153](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-storage/src/storage_in_memory.rs#L153); [crates/shamir-storage/src/storage_in_memory.rs:240](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-storage/src/storage_in_memory.rs#L240).
+
+Grouping/duplicate: [performance-hotpath.md#2](performance-hotpath.md#review-2). This is not an additional independent defect.
 
 <a id="review-7"></a>
 
@@ -85,9 +99,11 @@ Grouping/duplicate: `performance-hotpath.md#2`. This row is not another independ
 
 Status: `confirmed-open`. Current risk: `low`.
 
-reload clears live cache and resets size before awaiting streamed refill, with no quiescence precondition or ordering guard. Concurrent writes/read-fills can disagree with refill and its counter. A cache hit does not fall through to inner, so reads are not universally safe.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-storage/src/storage_cached.rs:306](../../../../../crates/shamir-storage/src/storage_cached.rs#L306); [crates/shamir-storage/src/storage_cached.rs:311](../../../../../crates/shamir-storage/src/storage_cached.rs#L311); [crates/shamir-storage/src/storage_cached.rs:318](../../../../../crates/shamir-storage/src/storage_cached.rs#L318); [crates/shamir-storage/src/storage_cached.rs:471](../../../../../crates/shamir-storage/src/storage_cached.rs#L471).
+Clear/reset/refill can interleave with cache updates and lazy fills; subsequent stale hits bypass inner. Quiescent reload tests do not verify a live resync protocol.
+
+Evidence: [crates/shamir-storage/src/storage_cached.rs:311](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-storage/src/storage_cached.rs#L311); [crates/shamir-storage/src/storage_cached.rs:318](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-storage/src/storage_cached.rs#L318); [crates/shamir-storage/src/storage_cached.rs:471](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-storage/src/storage_cached.rs#L471).
 
 <a id="review-8"></a>
 
@@ -95,29 +111,32 @@ Evidence: [crates/shamir-storage/src/storage_cached.rs:306](../../../../../crate
 
 Status: `confirmed-open`. Current risk: `nit`.
 
-Worker and spawn_blocking routes remain independent. The broad point-write-ordering comment is unsupported by those routes; dependency-internal journal locking was not independently verified.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-storage/src/storage_fjall.rs:34](../../../../../crates/shamir-storage/src/storage_fjall.rs#L34); [crates/shamir-storage/src/storage_fjall.rs:337](../../../../../crates/shamir-storage/src/storage_fjall.rs#L337); [crates/shamir-storage/src/storage_fjall.rs:494](../../../../../crates/shamir-storage/src/storage_fjall.rs#L494); [crates/shamir-storage/src/storage_fjall.rs:550](../../../../../crates/shamir-storage/src/storage_fjall.rs#L550).
+Exact fjall 3.1.6 src/keyspace/mod.rs and src/batch/mod.rs acquire the journal writer, confirming serialization but not submission intent across independent routes/handles. Overlapping reordering is not inherently a correctness violation.
 
-Grouping/duplicate: `correctness-tdd.md#6`. This row is not another independent defect.
+Evidence: [crates/shamir-storage/src/storage_fjall.rs:337](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-storage/src/storage_fjall.rs#L337); [crates/shamir-storage/src/storage_fjall.rs:494](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-storage/src/storage_fjall.rs#L494); [Cargo.lock:1332](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/Cargo.lock#L1332).
+
+Grouping/duplicate: [correctness-tdd.md#6](correctness-tdd.md#review-6). This is not an additional independent defect.
 
 <a id="review-nf-pillar-compliance"></a>
 
 ### Claim NF-pillar-compliance — Zero direct production Mutex/RwLock/parking_lot and no scc len calls; THasher, ArcSwap, atomic mirrors
 
-Status: `not-applicable`. Current risk: —.
+Status: `not-applicable`. Current risk: `—`.
 
-These source-level structural observations hold. They do not prove the entire backend stack is lock-free: DashMap is sharded-lock based, and dependency internals were not available.
+Prior-cycle decision: `not-applicable`.
 
-Evidence: [crates/shamir-storage/src/storage_membuffer.rs:142](../../../../../crates/shamir-storage/src/storage_membuffer.rs#L142); [crates/shamir-storage/src/storage_membuffer.rs:154](../../../../../crates/shamir-storage/src/storage_membuffer.rs#L154); [crates/shamir-storage/src/storage_cached.rs:194](../../../../../crates/shamir-storage/src/storage_cached.rs#L194); [crates/shamir-storage/src/tests/storage_membuffer_tests.rs:765](../../../../../crates/shamir-storage/src/tests/storage_membuffer_tests.rs#L765).
+No direct production Mutex/RwLock/parking_lot or scc len use was found. DashMap uses shard locks; dirty mutation and counter updates are separate operations, so documentation does not prove a compound invariant.
 
-## Corrections and qualified non-findings
+Evidence: [crates/shamir-storage/src/storage_membuffer.rs:154](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-storage/src/storage_membuffer.rs#L154); [crates/shamir-storage/src/storage_membuffer.rs:778](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-storage/src/storage_membuffer.rs#L778).
 
-- The repository does not vendor the cited scc/moka sources; pinned external API claims must remain unverified.
-- An atomic tree upsert alone cannot order backing commits against cache publication or prevent stale read-fill.
-- Do not assert that a later-completing overlapping set must win.
-- TableManager's conditional barrier/unique lock does not prove universal same-key serialization.
-- The guard is held during collection, not across stream awaits.
+## Evidence and recipe corrections
+
+- scc 3.8.4 upsert_sync and Range::DoubleEndedIterator are verified in checksum-matching published source, not unavailable or inferred from another version: https://docs.rs/crate/scc/3.8.4/source/src/tree_index.rs.
+- moka custom hashing changes the generic cache type. Change build_cache and ArcSwap field types together; the historical isolated build_with_hasher line does not type-match current Cache&lt;K,V&gt;.
+- A single cache helper/upsert does not fence backing commit order, pending Async jobs, lazy fills, transaction publication or reload.
+- Conditional TableManager write barriers do not establish universal same-key serialization. Release/Acquire ordering also does not merge a DashMap operation and a later counter update into one atomic event.
 
 ---
 

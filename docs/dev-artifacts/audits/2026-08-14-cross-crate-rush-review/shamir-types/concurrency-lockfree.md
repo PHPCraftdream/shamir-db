@@ -1,11 +1,13 @@
-<!-- revalidation:2026-10-08 source:92ad58266bf57ddea1fa3c8a47affba1a3a9a096 -->
-# shamir-types — concurrency-lockfree revalidation
+<!-- revalidation:2026-10-08 cycle:independent-2 source:e3765c935fc71655ee1ec0160cf180607935d89b -->
+# shamir-types — concurrency-lockfree independent revalidation (cycle 2)
 
-Source snapshot: `92ad58266bf57ddea1fa3c8a47affba1a3a9a096`. Revalidated 2026-10-08 by read-only XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run; no source fix is part of this update. Test registration/assertions are evidence of an oracle, not proof of a passing run.
+Frozen source snapshot: `e3765c935fc71655ee1ec0160cf180607935d89b`. Independently revalidated 2026-10-08 by a fresh XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run. Source-fixed means the specified mechanism was already removed at this snapshot; this cycle implements no source fix.
 
-This section is authoritative for current status. Original titles/IDs are retained for traceability; a refuted title is not a current assertion. The collapsed historical report below is superseded, including its counts, severity, scenarios and fix instructions. Plan IDs preserve historical numbering, not a current release mandate. [Workspace methodology and status definitions](../SUMMARY.md#status-definitions).
+This section is authoritative for current decisions. Existing IDs and allegation titles are retained for traceability; a refuted title is not a current assertion. Prior-cycle decisions were rechecked, not used as proof. The first cycle is available in repository history at this snapshot. The original historical body below remains preserved once and is superseded, including its counts, severities and recipes. [Workspace scope and status definitions](../SUMMARY.md#status-definitions).
 
-Reverse reads remain RCU-based and the registered write mutex remains sanctioned. Publication windows and leaked reservations remain. The report overstates lock-freedom, production use of for_each_field, and universal lens allocation safety.
+Unrelated external edits began in dependency/toolchain/CI metadata during collection; additional Rust-source edits appeared afterward. They were left untouched. Evidence and decisions are tied to the frozen commit, not those later changes or an installed toolchain. “Current” below means current at that snapshot; no re-audit of the modified working tree is implied.
+
+The reverse read mechanism and sanctioned growth mutex are justified. Forward publication remains incomplete; exact DashMap behavior also disproves whole-interner lock-free and atomic-length descriptions.
 
 ## Current claim decisions
 
@@ -13,7 +15,7 @@ Reverse reads remain RCU-based and the registered write mutex remains sanctioned
 |---:|---:|---:|---:|---:|---:|---:|
 | 5 | 4 | 0 | 0 | 0 | 0 | 1 |
 
-These are decisions on report claims, including repeated roots, bundled observations and non-findings—not a unique-bug census. Closed/N/A rows have no current risk; unverified risk is provisional. Pure style and unmeasured optimization claims do not establish runtime impact.
+These are duplicate-inclusive report decisions, not a unique-bug census. Pure style or structural optimization does not establish a runtime incident; unverified impact remains provisional.
 
 <a id="review-1"></a>
 
@@ -21,11 +23,13 @@ These are decisions on report claims, including repeated roots, bundled observat
 
 Status: `confirmed-open`. Current risk: `low`.
 
-The rescan mechanism remains, but the 34+ general RecordView/RecordRef consumers do not establish use of this particular method. Only types tests currently call for_each_field.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-types/src/record_view/record_ref.rs:338](../../../../../crates/shamir-types/src/record_view/record_ref.rs#L338); [crates/shamir-types/src/record_view/lens.rs:1139](../../../../../crates/shamir-types/src/record_view/lens.rs#L1139); [crates/shamir-types/src/record_view/tests/record_ref_tests.rs:969](../../../../../crates/shamir-types/src/record_view/tests/record_ref_tests.rs#L969).
+Every emitted field triggers a fresh lookup/materialization scan. Only tests currently call this method; 34+ general lens consumers do not establish its production use.
 
-Grouping/duplicate: `performance-hotpath.md:2`. This row is not another independent defect.
+Evidence: [crates/shamir-types/src/record_view/record_ref.rs:338](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-types/src/record_view/record_ref.rs#L338); [crates/shamir-types/src/record_view/lens.rs:1139](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-types/src/record_view/lens.rs#L1139).
+
+Grouping/duplicate: [performance-hotpath.md#2](performance-hotpath.md#review-2). This is not an additional independent defect.
 
 <a id="review-2"></a>
 
@@ -33,21 +37,25 @@ Grouping/duplicate: `performance-hotpath.md:2`. This row is not another independ
 
 Status: `confirmed-open`. Current risk: `high`.
 
-The four designated capacity allocations remain header-driven and uncapped. The custom decoder accepts string keys and has no current production caller found; merge consumes storage bytes. The claimed direct id-msgpack-to-custom-decoder route is incorrect, although reachable lens de-interning also trusts a header count.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-types/src/codecs/interned/messagepack.rs:305](../../../../../crates/shamir-types/src/codecs/interned/messagepack.rs#L305); [crates/shamir-types/src/codecs/interned/messagepack.rs:318](../../../../../crates/shamir-types/src/codecs/interned/messagepack.rs#L318); [crates/shamir-types/src/codecs/interned/messagepack.rs:581](../../../../../crates/shamir-types/src/codecs/interned/messagepack.rs#L581); [crates/shamir-types/src/codecs/interned/messagepack.rs:585](../../../../../crates/shamir-types/src/codecs/interned/messagepack.rs#L585); [crates/shamir-types/src/codecs/interned/codec.rs:154](../../../../../crates/shamir-types/src/codecs/interned/codec.rs#L154); [crates/shamir-engine/src/table/write_exec.rs:382](../../../../../crates/shamir-engine/src/table/write_exec.rs#L382).
+Custom decoding and merge allocate from unchecked counts. Current S-write uses the lens, whose de-intern/index helpers independently retain header-allocation hazards.
 
-Grouping/duplicate: `error-handling-lifecycle.md:1`. This row is not another independent defect.
+Evidence: [crates/shamir-types/src/codecs/interned/messagepack.rs:305](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-types/src/codecs/interned/messagepack.rs#L305); [crates/shamir-types/src/codecs/interned/messagepack.rs:585](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-types/src/codecs/interned/messagepack.rs#L585); [crates/shamir-types/src/codecs/interned/codec.rs:154](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-types/src/codecs/interned/codec.rs#L154).
+
+Grouping/duplicate: [error-handling-lifecycle.md#1](error-handling-lifecycle.md#review-1). This is not an additional independent defect.
 
 <a id="review-3"></a>
 
 ### Claim 3 — Sanctioned `reverse_write_lock` also held across the doubling-growth clone-forward — write-stall grows with spine length
 
-Status: `not-applicable`. Current risk: —.
+Status: `not-applicable`. Current risk: `—`.
 
-O(N) work under the growth lock is real but already documented as the sanctioned correctness tradeoff. Dense monotonic growth has logarithmically many resizes and O(N) total clone work, not N full-spine clones. No measured unacceptable stall establishes a defect.
+Prior-cycle decision: `not-applicable`.
 
-Evidence: [crates/shamir-types/src/core/interner/interner.rs:18](../../../../../crates/shamir-types/src/core/interner/interner.rs#L18); [crates/shamir-types/src/core/interner/interner.rs:73](../../../../../crates/shamir-types/src/core/interner/interner.rs#L73); [crates/shamir-types/src/core/interner/interner.rs:209](../../../../../crates/shamir-types/src/core/interner/interner.rs#L209); [crates/shamir-types/src/core/interner/interner.rs:250](../../../../../crates/shamir-types/src/core/interner/interner.rs#L250); [CLAUDE.md:429](../../../../../CLAUDE.md#L429).
+The source expressly documents serialized growth to prevent lost reverse writes. Doubling yields geometric total clone work; unacceptable stalls are not measured.
+
+Evidence: [crates/shamir-types/src/core/interner/interner.rs:18](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-types/src/core/interner/interner.rs#L18); [crates/shamir-types/src/core/interner/interner.rs:250](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-types/src/core/interner/interner.rs#L250).
 
 <a id="review-4"></a>
 
@@ -55,9 +63,11 @@ Evidence: [crates/shamir-types/src/core/interner/interner.rs:18](../../../../../
 
 Status: `confirmed-open`. Current risk: `low`.
 
-Forward insertion precedes reverse publication; racing get_ind or touch_ind's Exists path can return an id before reverse resolution succeeds. Collision rollback exposes a temporary mapping to the other name's id. Window duration is unmeasured; New's postcondition does not protect Exists callers.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-types/src/core/interner/interner.rs:145](../../../../../crates/shamir-types/src/core/interner/interner.rs#L145); [crates/shamir-types/src/core/interner/interner.rs:169](../../../../../crates/shamir-types/src/core/interner/interner.rs#L169); [crates/shamir-types/src/core/interner/interner.rs:175](../../../../../crates/shamir-types/src/core/interner/interner.rs#L175); [crates/shamir-types/src/core/interner/interner.rs:404](../../../../../crates/shamir-types/src/core/interner/interner.rs#L404); [crates/shamir-types/src/core/interner/interner.rs:445](../../../../../crates/shamir-types/src/core/interner/interner.rs#L445).
+DashMap 6.1.0 published src/mapref/entry.rs returns a guard from insert, but these statements discard it before reverse publication. Exists callers can observe unresolved IDs; rollback can expose a losing association temporarily.
+
+Evidence: [crates/shamir-types/src/core/interner/interner.rs:169](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-types/src/core/interner/interner.rs#L169); [crates/shamir-types/src/core/interner/interner.rs:404](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-types/src/core/interner/interner.rs#L404); [crates/shamir-types/src/core/interner/interner.rs:445](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-types/src/core/interner/interner.rs#L445); [Cargo.lock:1096](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/Cargo.lock#L1096).
 
 <a id="review-5"></a>
 
@@ -65,17 +75,18 @@ Evidence: [crates/shamir-types/src/core/interner/interner.rs:145](../../../../..
 
 Status: `confirmed-open`. Current risk: `nit`.
 
-README still names a reverse DashMap and Mutex<u64>, while source uses ArcSwap/OnceLock, AtomicU64, and a reverse-write Mutex<()>. Its forward DashMap lock-free-read claim is also incorrect.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-types/src/core/README.md:64](../../../../../crates/shamir-types/src/core/README.md#L64); [crates/shamir-types/src/core/README.md:83](../../../../../crates/shamir-types/src/core/README.md#L83); [crates/shamir-types/src/core/interner/interner.rs:59](../../../../../crates/shamir-types/src/core/interner/interner.rs#L59); [Cargo.lock:1096](../../../../../Cargo.lock#L1096).
+The README's reverse DashMap/mutex-counter layout is obsolete. Exact DashMap 6.1.0 reads and len take shard locks; only reverse ArcSwap reads support the lock-free description.
 
-## Corrections and qualified non-findings
+Evidence: [crates/shamir-types/src/core/README.md:64](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-types/src/core/README.md#L64); [crates/shamir-types/src/core/interner/interner.rs:72](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-types/src/core/interner/interner.rs#L72); [Cargo.lock:1096](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/Cargo.lock#L1096).
 
-- DashMap is sharded and locking; only the interner's reverse-read direction is lock-free. The crate is not wholly lock-free.
-- The sanctioned mutex, absence of executable async/await and scc len calls, immutable LazyLock sentinel, and thread-local RNG remain source-supported.
-- The claim of no std::collections references is now false: validate_keys.rs:78 exposes a documented hasher-generic HashMap boundary. This does not prove a default-RandomState violation.
-- Concurrent-growth and gap tests are registered and assert both directions, uniqueness, and gap capture. They do not deterministically test the forward-publication window or cross-API collision.
-- The blanket claim that the lens is safe from header allocation is false for RecordView::index at crates/shamir-types/src/record_view/lens.rs:1064.
+## Evidence and recipe corrections
+
+- DashMap 6.1.0 published src/lib.rs::_len iterates shard read guards and sums lengths; the historical 'sharded-counter based' assertion is inaccurate.
+- Publication duration is not guaranteed to be nanoseconds: a writer can be descheduled before reverse population.
+- Growth tests verify completed bidirectional mappings but do not deterministically hold a writer between reservation/publication while readers compile cached filters.
+- The hasher-generic std::collections boundary is intentional and does not prove default RandomState use.
 
 ---
 

@@ -1,11 +1,13 @@
-<!-- revalidation:2026-10-08 source:92ad58266bf57ddea1fa3c8a47affba1a3a9a096 -->
-# shamir-bench-utils — error-handling-lifecycle revalidation
+<!-- revalidation:2026-10-08 cycle:independent-2 source:e3765c935fc71655ee1ec0160cf180607935d89b -->
+# shamir-bench-utils — error-handling-lifecycle independent revalidation (cycle 2)
 
-Source snapshot: `92ad58266bf57ddea1fa3c8a47affba1a3a9a096`. Revalidated 2026-10-08 by read-only XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run; no source fix is part of this update. Test registration/assertions are evidence of an oracle, not proof of a passing run.
+Frozen source snapshot: `e3765c935fc71655ee1ec0160cf180607935d89b`. Independently revalidated 2026-10-08 by a fresh XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run. Source-fixed means the specified mechanism was already removed at this snapshot; this cycle implements no source fix.
 
-This section is authoritative for current status. Original titles/IDs are retained for traceability; a refuted title is not a current assertion. The collapsed historical report below is superseded, including its counts, severity, scenarios and fix instructions. Plan IDs preserve historical numbering, not a current release mandate. [Workspace methodology and status definitions](../SUMMARY.md#status-definitions).
+This section is authoritative for current decisions. Existing IDs and allegation titles are retained for traceability; a refuted title is not a current assertion. Prior-cycle decisions were rechecked, not used as proof. The first cycle is available in repository history at this snapshot. The original historical body below remains preserved once and is superseded, including its counts, severities and recipes. [Workspace scope and status definitions](../SUMMARY.md#status-definitions).
 
-The externally reachable zero-cluster panic, missing zero-dimension documentation/test, allocator activation documentation, and inline layout remain. Cancellation carry-over into the next reset-based measurement is refuted.
+Unrelated external edits began in dependency/toolchain/CI metadata during collection; additional Rust-source edits appeared afterward. They were left untouched. Evidence and decisions are tied to the frozen commit, not those later changes or an installed toolchain. “Current” below means current at that snapshot; no re-audit of the modified working tree is implied.
+
+Local example inputs reach both rejection asserts. The dimension path is independently reachable through persisted_hnsw despite vector_report's filter. Existing reset-before-work behavior refutes cancellation carry-over, while ownership and coverage gaps remain separate.
 
 ## Current claim decisions
 
@@ -13,19 +15,19 @@ The externally reachable zero-cluster panic, missing zero-dimension documentatio
 |---:|---:|---:|---:|---:|---:|---:|
 | 5 | 4 | 0 | 0 | 1 | 0 | 0 |
 
-These are decisions on report claims, including repeated roots, bundled observations and non-findings—not a unique-bug census. Closed/N/A rows have no current risk; unverified risk is provisional. Pure style and unmeasured optimization claims do not establish runtime impact.
+These are duplicate-inclusive report decisions, not a unique-bug census. Pure style or structural optimization does not establish a runtime incident; unverified impact remains provisional.
 
 <a id="review-1"></a>
 
 ### Claim 1 — `clustered_vectors` validates arguments with `assert!` instead of `Result`/`thiserror`, and one caller feeds it externally-controlled input
 
-Status: `confirmed-open`. Current risk: `medium`.
+Status: `confirmed-open`. Current risk: `low`.
 
-vector_report parses zero as a valid usize, stores it without validation, and calls clustered_vectors, which asserts. Reachability is through the local example's environment, not database requests.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-engine/examples/vector_report.rs:110](../../../../../crates/shamir-engine/examples/vector_report.rs#L110); [crates/shamir-engine/examples/vector_report.rs:406](../../../../../crates/shamir-engine/examples/vector_report.rs#L406); [crates/shamir-engine/examples/vector_report.rs:427](../../../../../crates/shamir-engine/examples/vector_report.rs#L427); [crates/shamir-bench-utils/src/vector_data.rs:171](../../../../../crates/shamir-bench-utils/src/vector_data.rs#L171).
+env_usize accepts zero. VR_K_CLUSTERS=0 is passed through DatasetParams to the cluster assert; PH_DIM=0 similarly reaches the dimension assert in another example. Authority is local environment control, not database-client permissions or a shipped server request.
 
-Grouping/duplicate: `SUMMARY.md#6.1`. This row is not another independent defect.
+Evidence: [crates/shamir-engine/examples/vector_report.rs:110](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-engine/examples/vector_report.rs#L110); [crates/shamir-engine/examples/vector_report.rs:406](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-engine/examples/vector_report.rs#L406); [crates/shamir-engine/examples/vector_report.rs:212](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-engine/examples/vector_report.rs#L212); [crates/shamir-engine/examples/persisted_hnsw.rs:83](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-engine/examples/persisted_hnsw.rs#L83); [crates/shamir-engine/examples/persisted_hnsw.rs:363](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-engine/examples/persisted_hnsw.rs#L363); [crates/shamir-bench-utils/src/vector_data.rs:171](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-bench-utils/src/vector_data.rs#L171).
 
 <a id="review-2"></a>
 
@@ -33,23 +35,27 @@ Grouping/duplicate: `SUMMARY.md#6.1`. This row is not another independent defect
 
 Status: `confirmed-open`. Current risk: `low`.
 
-Zero dimension still asserts, but only zero clusters are documented and covered by should_panic. The missing error-path coverage is confirmed; vector_report itself filters zero dimensions.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-bench-utils/src/vector_data.rs:163](../../../../../crates/shamir-bench-utils/src/vector_data.rs#L163); [crates/shamir-bench-utils/src/vector_data.rs:172](../../../../../crates/shamir-bench-utils/src/vector_data.rs#L172); [crates/shamir-bench-utils/src/vector_data.rs:342](../../../../../crates/shamir-bench-utils/src/vector_data.rs#L342); [crates/shamir-engine/examples/vector_report.rs:130](../../../../../crates/shamir-engine/examples/vector_report.rs#L130).
+The function documents only zero clusters and the test block contains only that rejection oracle. vector_report filters zero dimensions, but persisted_hnsw does not; its environment-derived dimension reaches this undocumented panic.
 
-Grouping/duplicate: `SUMMARY.md#6.1`. This row is not another independent defect.
+Evidence: [crates/shamir-bench-utils/src/vector_data.rs:163](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-bench-utils/src/vector_data.rs#L163); [crates/shamir-bench-utils/src/vector_data.rs:172](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-bench-utils/src/vector_data.rs#L172); [crates/shamir-bench-utils/src/vector_data.rs:342](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-bench-utils/src/vector_data.rs#L342); [crates/shamir-engine/examples/vector_report.rs:130](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-engine/examples/vector_report.rs#L130); [crates/shamir-engine/examples/persisted_hnsw.rs:207](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-engine/examples/persisted_hnsw.rs#L207).
+
+Grouping/duplicate: [SUMMARY.md#6.1](SUMMARY.md#review-6-1). This is not an additional independent defect.
 
 <a id="review-3"></a>
 
 ### Claim 3 — `measure` / `measure_async` have no drop-guard: global peak counter is left perturbed on panic or future cancellation; module has zero tests
 
-Status: `refuted`. Current risk: —.
+Status: `refuted`. Current risk: `—`.
 
-Every subsequent helper measurement resets before executing its workload, so an aborted window's historical peak is not inherited merely because no drop guard exists. Allocations still live at the next reset are legitimate process baseline; continuing foreign work is the separate contamination issue. Zero tests remain true.
+Prior-cycle decision: `refuted`.
 
-Evidence: [crates/shamir-bench-utils/src/peak_mem.rs:54](../../../../../crates/shamir-bench-utils/src/peak_mem.rs#L54); [crates/shamir-bench-utils/src/peak_mem.rs:89](../../../../../crates/shamir-bench-utils/src/peak_mem.rs#L89); [crates/shamir-bench-utils/src/peak_mem.rs:106](../../../../../crates/shamir-bench-utils/src/peak_mem.rs#L106).
+Both subsequent helper entry paths reset before executing work. There is no armed ownership state to restore. Surviving allocations and continuing spawned work belong to baseline or contamination concerns, not inherited historical peak. Missing tests remain an independently open coverage row.
 
-Grouping/duplicate: `SUMMARY.md#2.1`. This row is not another independent defect.
+Evidence: [crates/shamir-bench-utils/src/peak_mem.rs:89](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-bench-utils/src/peak_mem.rs#L89); [crates/shamir-bench-utils/src/peak_mem.rs:106](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-bench-utils/src/peak_mem.rs#L106).
+
+Grouping/duplicate: [SUMMARY.md#2.1](SUMMARY.md#review-2-1). This is not an additional independent defect.
 
 <a id="review-4"></a>
 
@@ -57,11 +63,13 @@ Grouping/duplicate: `SUMMARY.md#2.1`. This row is not another independent defect
 
 Status: `confirmed-open`. Current risk: `low`.
 
-The allocator still activates for linked consumers independently of setup, and both manifests enable its feature unconditionally. The claim about every test binary overstates linkage; actual fixture and memory consumers are source-proven.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-bench-utils/src/peak_mem.rs:34](../../../../../crates/shamir-bench-utils/src/peak_mem.rs#L34); [crates/shamir-bench-utils/src/peak_mem.rs:39](../../../../../crates/shamir-bench-utils/src/peak_mem.rs#L39); [crates/shamir-bench-utils/src/peak_mem.rs:48](../../../../../crates/shamir-bench-utils/src/peak_mem.rs#L48); [crates/shamir-engine/Cargo.toml:107](../../../../../crates/shamir-engine/Cargo.toml#L107); [crates/shamir-index/Cargo.toml:64](../../../../../crates/shamir-index/Cargo.toml#L64).
+The library declaration activates independently of setup for actual linked consumers, and both dev manifests enable it. Every-unit-test wording exceeds linkage evidence; no runtime setup operation switches allocators.
 
-Grouping/duplicate: `SUMMARY.md#5.1`. This row is not another independent defect.
+Evidence: [crates/shamir-bench-utils/src/peak_mem.rs:34](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-bench-utils/src/peak_mem.rs#L34); [crates/shamir-bench-utils/src/peak_mem.rs:39](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-bench-utils/src/peak_mem.rs#L39); [crates/shamir-bench-utils/src/peak_mem.rs:48](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-bench-utils/src/peak_mem.rs#L48); [crates/shamir-engine/Cargo.toml:107](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-engine/Cargo.toml#L107); [crates/shamir-index/Cargo.toml:64](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-index/Cargo.toml#L64).
+
+Grouping/duplicate: [api-wire-protocol.md#1](api-wire-protocol.md#review-1). This is not an additional independent defect.
 
 <a id="review-5"></a>
 
@@ -69,20 +77,21 @@ Grouping/duplicate: `SUMMARY.md#5.1`. This row is not another independent defect
 
 Status: `confirmed-open`. Current risk: `nit`.
 
-The inline cfg(test) module and misleading manifest comment remain. All existing tests are registered; inline placement does not technically prevent adding the missing tests.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-bench-utils/src/vector_data.rs:217](../../../../../crates/shamir-bench-utils/src/vector_data.rs#L217); [crates/shamir-bench-utils/Cargo.toml:10](../../../../../crates/shamir-bench-utils/Cargo.toml#L10); [CLAUDE.md:594](../../../../../CLAUDE.md#L594).
+The inline block and comment remain, without a sanctioned small-crate exception. The tests are registered; their placement neither causes nor prevents the missing error-path oracle.
 
-Grouping/duplicate: `SUMMARY.md#7.1`. This row is not another independent defect.
+Evidence: [crates/shamir-bench-utils/src/vector_data.rs:217](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-bench-utils/src/vector_data.rs#L217); [crates/shamir-bench-utils/Cargo.toml:10](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-bench-utils/Cargo.toml#L10); [CLAUDE.md:594](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/CLAUDE.md#L594).
 
-## Corrections and qualified non-findings
+Grouping/duplicate: [style-claude-md.md#1](style-claude-md.md#review-1). This is not an additional independent defect.
 
-- The named cargo-run reproduction was not performed; the configured runner also restricts ordinary example execution. The environment-to-assert source path is nevertheless established.
-- The cited caller filters dim=0, so its zero-dimension failure scenario is not demonstrated. Missing library documentation and coverage remain.
-- reset is documented as reset-to-current, not reset-to-zero; the proposed reset-zeroes-counter test contradicts the contract.
-- There is no armed/disarmed measurement state to restore today. RAII release becomes necessary if a new single-flight claim is introduced, but resetting on cancellation does not isolate outstanding allocations.
-- A boundary validation fix can remove the demonstrated user-input panic without necessarily replacing every bench-helper assert with a Result API.
-- Allocation failure remains possible; an API lacking Result is not an unconditional no-failure guarantee.
+## Evidence and recipe corrections
+
+- The current vector_report-specific zero-dimension refutation is correct, but it must not become an all-callers assurance: persisted_hnsw accepts PH_DIM=0.
+- Changing the helper to Result and adding expect to environment-derived callers does not yield graceful validation; propagate or diagnose those errors at the local tool boundary.
+- reset-to-zero conflicts with the documented baseline-preserving contract and exact peak_alloc 0.3.0 implementation.
+- There is no present ownership flag requiring cancellation restoration. A future guard needs RAII release, not unconditional global-counter restoration.
+- No Result return is not an infallibility proof: allocation and capacity failures remain possible.
 
 ---
 

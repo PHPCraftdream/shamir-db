@@ -1,29 +1,33 @@
-<!-- revalidation:2026-10-08 source:92ad58266bf57ddea1fa3c8a47affba1a3a9a096 -->
-# shamir-db — security-crypto revalidation
+<!-- revalidation:2026-10-08 cycle:independent-2 source:e3765c935fc71655ee1ec0160cf180607935d89b -->
+# shamir-db — security-crypto independent revalidation (cycle 2)
 
-Source snapshot: `92ad58266bf57ddea1fa3c8a47affba1a3a9a096`. Revalidated 2026-10-08 by read-only XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run; no source fix is part of this update. Test registration/assertions are evidence of an oracle, not proof of a passing run.
+Frozen source snapshot: `e3765c935fc71655ee1ec0160cf180607935d89b`. Independently revalidated 2026-10-08 by a fresh XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run. Source-fixed means the specified mechanism was already removed at this snapshot; this cycle implements no source fix.
 
-This section is authoritative for current status. Original titles/IDs are retained for traceability; a refuted title is not a current assertion. The collapsed historical report below is superseded, including its counts, severity, scenarios and fix instructions. Plan IDs preserve historical numbering, not a current release mandate. [Workspace methodology and status definitions](../SUMMARY.md#status-definitions).
+This section is authoritative for current decisions. Existing IDs and allegation titles are retained for traceability; a refuted title is not a current assertion. Prior-cycle decisions were rechecked, not used as proof. The first cycle is available in repository history at this snapshot. The original historical body below remains preserved once and is superseded, including its counts, severities and recipes. [Workspace scope and status definitions](../SUMMARY.md#status-definitions).
 
-The ambient interner and validator compiler authorization gaps remain reachable. Curl raw controls remain unchecked, but the advertised arbitrary-directive exploit lacks external-parser/version proof. Crypto delegation, actor-aware server calls and DNS pin construction remain visible in source.
+Unrelated external edits began in dependency/toolchain/CI metadata during collection; additional Rust-source edits appeared afterward. They were left untouched. Evidence and decisions are tied to the frozen commit, not those later changes or an installed toolchain. “Current” below means current at that snapshot; no re-audit of the modified working tree is implied.
+
+The ambient dictionary and validator compiler gates remain missing. Published curl parser inspection supplies the previously missing compatible-version injection proof. Embedded System wrappers and SECURITY DEFINER breadth are intentional behavior.
 
 ## Current claim decisions
 
 | Claim decisions | Open | Source-fixed | Partial | Refuted | Unverified | N/A |
 |---:|---:|---:|---:|---:|---:|---:|
-| 9 | 8 | 0 | 0 | 0 | 1 | 0 |
+| 9 | 7 | 0 | 0 | 0 | 0 | 2 |
 
-These are decisions on report claims, including repeated roots, bundled observations and non-findings—not a unique-bug census. Closed/N/A rows have no current risk; unverified risk is provisional. Pure style and unmeasured optimization claims do not establish runtime impact.
+These are duplicate-inclusive report decisions, not a unique-bug census. Pure style or structural optimization does not establish a runtime incident; unverified impact remains provisional.
 
 <a id="review-1"></a>
 
 ### Claim 1 — Guest-controlled header values/method can inject arbitrary curl config directives (CRLF injection)
 
-Status: `unverified`. Current risk: `high` (provisional; not a confirmed defect).
+Status: `confirmed-open`. Current risk: `high`.
 
-Method/header C0 bytes reach quoted configuration values unchanged. However, arbitrary top-level directive interpretation of unterminated quoted lines depends on the external curl parser/version, which is not supplied or pinned. Proxy, file-write and nested-config consequences cannot be declared confirmed.
+Prior-cycle decision: `unverified`.
 
-Evidence: [crates/shamir-db/src/shamir_db/curl_gateway.rs:71](../../../../../crates/shamir-db/src/shamir_db/curl_gateway.rs#L71); [crates/shamir-db/src/shamir_db/curl_gateway.rs:83](../../../../../crates/shamir-db/src/shamir_db/curl_gateway.rs#L83); [crates/shamir-db/src/shamir_db/curl_gateway.rs:116](../../../../../crates/shamir-db/src/shamir_db/curl_gateway.rs#L116); [crates/shamir-db/src/shamir_db/curl_gateway.rs:210](../../../../../crates/shamir-db/src/shamir_db/curl_gateway.rs#L210); [crates/shamir-db/src/shamir_db/tests/curl_gateway_tests.rs:6](../../../../../crates/shamir-db/src/shamir_db/tests/curl_gateway_tests.rs#L6).
+For granted egress, a header value containing LF, an unquoted directive, LF and # escapes onto separate config lines. [curl 8.10.1 parsing](https://raw.githubusercontent.com/curl/curl/curl-8_10_1/src/tool_parsecfg.c) accepts the unterminated quoted first line; the suffix comments out the appended quote. Deployed-version effects remain unmeasured.
+
+Evidence: [crates/shamir-db/src/shamir_db/curl_gateway.rs:83](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/curl_gateway.rs#L83); [crates/shamir-db/src/shamir_db/curl_gateway.rs:116](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/curl_gateway.rs#L116); [crates/shamir-db/src/shamir_db/curl_gateway.rs:210](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/curl_gateway.rs#L210); [crates/shamir-db/src/shamir_db/tests/curl_gateway_tests.rs:6](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/tests/curl_gateway_tests.rs#L6).
 
 <a id="review-2"></a>
 
@@ -31,9 +35,11 @@ Evidence: [crates/shamir-db/src/shamir_db/curl_gateway.rs:71](../../../../../cra
 
 Status: `confirmed-open`. Current risk: `medium`.
 
-Ambient attachment has no actor/gate argument and resolves every requested repo after successful execution. Database Read plus an empty/otherwise permitted batch can expose a denied store's vocabulary; explicit InternerDump separately requires Store Read.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-db/src/shamir_db/execute/db_execute.rs:68](../../../../../crates/shamir-db/src/shamir_db/execute/db_execute.rs#L68); [crates/shamir-db/src/shamir_db/execute/ambient_interner.rs:30](../../../../../crates/shamir-db/src/shamir_db/execute/ambient_interner.rs#L30); [crates/shamir-db/src/shamir_db/execute/ambient_interner.rs:46](../../../../../crates/shamir-db/src/shamir_db/execute/ambient_interner.rs#L46); [crates/shamir-db/src/shamir_db/execute/admin_interner.rs:50](../../../../../crates/shamir-db/src/shamir_db/execute/admin_interner.rs#L50).
+A User with Database Read can send an empty permitted batch and epoch zero for a denied repository. Attachment has no actor/gate and returns entries; the explicit dump requires Store Read. This reaches the normal server execute path without admin operations.
+
+Evidence: [crates/shamir-db/src/shamir_db/execute/db_execute.rs:68](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/execute/db_execute.rs#L68); [crates/shamir-db/src/shamir_db/execute/ambient_interner.rs:30](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/execute/ambient_interner.rs#L30); [crates/shamir-db/src/shamir_db/execute/admin_interner.rs:50](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/execute/admin_interner.rs#L50).
 
 <a id="review-3"></a>
 
@@ -41,9 +47,11 @@ Evidence: [crates/shamir-db/src/shamir_db/execute/db_execute.rs:68](../../../../
 
 Status: `confirmed-open`. Current risk: `medium`.
 
-Wire creation checks FunctionNamespace Create, then validator Source directly invokes compile_rust_source without WasmCompiler authorization. This proves unauthorized host compilation, not arbitrary attacker-provided build-script execution: the generated manifest fixes dependencies and compiler hardening exists.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-db/src/shamir_db/execute/admin_validator.rs:36](../../../../../crates/shamir-db/src/shamir_db/execute/admin_validator.rs#L36); [crates/shamir-db/src/shamir_db/shamir_db/validator_management.rs:220](../../../../../crates/shamir-db/src/shamir_db/shamir_db/validator_management.rs#L220); [crates/shamir-db/src/shamir_db/shamir_db/function_management.rs:169](../../../../../crates/shamir-db/src/shamir_db/shamir_db/function_management.rs#L169); [crates/shamir-wasm-host/src/compile.rs:55](../../../../../crates/shamir-wasm-host/src/compile.rs#L55).
+Namespace Create is checked, but validator Source directly invokes compilation. Direct top-level wire creation is superuser-only; a one-element nontransactional ForEach body can reach the same dispatcher as User because the coarse gate checks only the outer operation. Fixed manifest generation refutes arbitrary guest dependency/build-script injection.
+
+Evidence: [crates/shamir-db/src/shamir_db/execute/admin_validator.rs:36](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/execute/admin_validator.rs#L36); [crates/shamir-db/src/shamir_db/shamir_db/validator_management.rs:221](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/shamir_db/validator_management.rs#L221); [crates/shamir-server/src/db_handler/handler.rs:512](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-server/src/db_handler/handler.rs#L512); [crates/shamir-query-types/src/batch/batch_op.rs:577](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-query-types/src/batch/batch_op.rs#L577); [crates/shamir-engine/src/query/batch/query_runner.rs:758](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-engine/src/query/batch/query_runner.rs#L758).
 
 <a id="review-4"></a>
 
@@ -51,9 +59,11 @@ Evidence: [crates/shamir-db/src/shamir_db/execute/admin_validator.rs:36](../../.
 
 Status: `confirmed-open`. Current risk: `low`.
 
-Configuration still has only a time limit, and the response file is read_to_end into an unbounded Vec. Reachability requires enabled function egress to an allowed host; exact OOM size and impact are unmeasured.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-db/src/shamir_db/curl_gateway.rs:100](../../../../../crates/shamir-db/src/shamir_db/curl_gateway.rs#L100); [crates/shamir-db/src/shamir_db/curl_gateway.rs:161](../../../../../crates/shamir-db/src/shamir_db/curl_gateway.rs#L161); [crates/shamir-db/src/shamir_db/shamir_db/core.rs:840](../../../../../crates/shamir-db/src/shamir_db/shamir_db/core.rs#L840).
+Granted allowlisted egress writes an uncapped response file and reads it entirely into Vec. A time limit is not a byte limit. OOM, exact maximum body and whole-server impact were not measured.
+
+Evidence: [crates/shamir-db/src/shamir_db/curl_gateway.rs:100](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/curl_gateway.rs#L100); [crates/shamir-db/src/shamir_db/curl_gateway.rs:161](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/curl_gateway.rs#L161); [crates/shamir-db/src/shamir_db/shamir_db/core.rs:832](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/shamir_db/core.rs#L832).
 
 <a id="review-5"></a>
 
@@ -61,21 +71,25 @@ Evidence: [crates/shamir-db/src/shamir_db/curl_gateway.rs:100](../../../../../cr
 
 Status: `confirmed-open`. Current risk: `low`.
 
-The four direct dependencies and stale network-module rationale remain, without corresponding facade source consumers. This is dependency/build hygiene; unused declarations do not prove all crypto code is linked or reachable in every binary.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-db/Cargo.toml:59](../../../../../crates/shamir-db/Cargo.toml#L59); [crates/shamir-db/Cargo.toml:64](../../../../../crates/shamir-db/Cargo.toml#L64); [Cargo.lock:3423](../../../../../Cargo.lock#L3423); [Cargo.lock:3435](../../../../../Cargo.lock#L3435).
+Direct argon2/rustls/tokio-rustls/rcgen declarations lack facade production consumers and the advertised net module is absent. Locked versions are 0.5.3/0.23.37/0.26.4/0.13.2. Declaration/build debt does not prove reachable or universally linked crypto code.
+
+Evidence: [crates/shamir-db/Cargo.toml:59](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/Cargo.toml#L59); [crates/shamir-db/Cargo.toml:64](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/Cargo.toml#L64); [crates/shamir-db/src/lib.rs:8](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/lib.rs#L8); [Cargo.lock:218](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/Cargo.lock#L218); [Cargo.lock:3048](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/Cargo.lock#L3048); [Cargo.lock:4223](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/Cargo.lock#L4223); [Cargo.lock:2796](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/Cargo.lock#L2796).
 
 <a id="review-6"></a>
 
 ### Claim 6 — `ShamirDb::execute` (System-actor, ACL-bypassing) is public and undiscoverable-hidden, unlike its #606 peers
 
-Status: `confirmed-open`. Current risk: `low`.
+Status: `not-applicable`. Current risk: `—`.
 
-Bare execute/tx wrappers remain publicly documented System delegates without doc(hidden). Current server request paths use actor-aware variants, so this is an embedder API footgun, not a demonstrated current server authentication bypass.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-db/src/shamir_db/execute/db_execute.rs:14](../../../../../crates/shamir-db/src/shamir_db/execute/db_execute.rs#L14); [crates/shamir-db/src/shamir_db/execute/db_execute.rs:19](../../../../../crates/shamir-db/src/shamir_db/execute/db_execute.rs#L19); [crates/shamir-db/src/shamir_db/execute/db_tx.rs:41](../../../../../crates/shamir-db/src/shamir_db/execute/db_tx.rs#L41); [crates/shamir-server/src/db_handler/handler.rs:580](../../../../../crates/shamir-server/src/db_handler/handler.rs#L580).
+The wrapper is deliberately privileged and execute_as documents that delegation. The security model explicitly accepts the embedded-process trust boundary, and inspected server routes retain authenticated actors. Hiding/deprecating it is optional integration hygiene.
 
-Grouping/duplicate: `api-wire-protocol.md#3`. This row is not another independent defect.
+Evidence: [crates/shamir-db/src/shamir_db/execute/db_execute.rs:19](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/execute/db_execute.rs#L19); [crates/shamir-db/src/shamir_db/execute/db_execute.rs:24](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/execute/db_execute.rs#L24); [crates/shamir-server/src/db_handler/handler.rs:580](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-server/src/db_handler/handler.rs#L580); [docs/guide-docs/client-server-protocol-spec/SECURITY_MODEL.md:111](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/docs/guide-docs/client-server-protocol-spec/SECURITY_MODEL.md#L111).
+
+Grouping/duplicate: [api-wire-protocol.md#3](api-wire-protocol.md#review-3). This is not an additional independent defect.
 
 <a id="review-7"></a>
 
@@ -83,9 +97,11 @@ Grouping/duplicate: `api-wire-protocol.md#3`. This row is not another independen
 
 Status: `confirmed-open`. Current risk: `low`.
 
-The setter replaces one handle's Arc<Vec>, whereas cloned handles retain their prior Arc. Runtime tightening through one clone is therefore not global; the documented setup-before-invocation convention narrows ordinary reachability.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-db/src/shamir_db/shamir_db/core.rs:49](../../../../../crates/shamir-db/src/shamir_db/shamir_db/core.rs#L49); [crates/shamir-db/src/shamir_db/shamir_db/core.rs:79](../../../../../crates/shamir-db/src/shamir_db/shamir_db/core.rs#L79); [crates/shamir-db/src/shamir_db/shamir_db/function_management.rs:603](../../../../../crates/shamir-db/src/shamir_db/shamir_db/function_management.rs#L603).
+Replacing Arc&lt;Vec&gt; on one cloned handle leaves other handles unchanged. This violates a hypothetical global runtime revocation expectation, not the documented configure-before-use convention. Existing invocations also retain their constructed gateway.
+
+Evidence: [crates/shamir-db/src/shamir_db/shamir_db/core.rs:49](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/shamir_db/core.rs#L49); [crates/shamir-db/src/shamir_db/shamir_db/function_management.rs:599](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/shamir_db/function_management.rs#L599); [crates/shamir-db/src/shamir_db/shamir_db/function_management.rs:604](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/shamir_db/function_management.rs#L604).
 
 <a id="review-8"></a>
 
@@ -93,30 +109,34 @@ Evidence: [crates/shamir-db/src/shamir_db/shamir_db/core.rs:49](../../../../../c
 
 Status: `confirmed-open`. Current risk: `nit`.
 
-WASM catalogue writes still produce FxHasher metadata; no integrity-verification consumer was found. This is a metadata-contract caution, not an active failed integrity control. Native rows omit this field.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-db/src/shamir_db/shamir_db/function_management.rs:187](../../../../../crates/shamir-db/src/shamir_db/shamir_db/function_management.rs#L187); [crates/shamir-db/src/shamir_db/shamir_db/validator_management.rs:236](../../../../../crates/shamir-db/src/shamir_db/shamir_db/validator_management.rs#L236); [Cargo.lock:3008](../../../../../Cargo.lock#L3008).
+Write-only FxHasher metadata remains. Exact rustc-hash 2.1.2 published source describes a noncryptographic usize-based hash. No current artifact admission or integrity decision depends on this field.
 
-Grouping/duplicate: `api-wire-protocol.md#10`. This row is not another independent defect.
+Evidence: [crates/shamir-db/src/shamir_db/shamir_db/function_management.rs:187](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/shamir_db/function_management.rs#L187); [crates/shamir-db/src/shamir_db/shamir_db/validator_management.rs:236](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/shamir_db/validator_management.rs#L236); [Cargo.lock:3007](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/Cargo.lock#L3007).
+
+Grouping/duplicate: [api-wire-protocol.md#10](api-wire-protocol.md#review-10). This is not an additional independent defect.
 
 <a id="review-9"></a>
 
 ### Claim 9 — `SECURITY DEFINER` grants the guest the owner-actor raw DB gateway, including admin ops
 
-Status: `confirmed-open`. Current risk: `nit`.
+Status: `not-applicable`. Current risk: `—`.
 
-The effective-owner gateway accepts arbitrary BatchRequest operations without a DML-only filter. This is intentional privilege delegation with underdocumented breadth; an open definer function becomes an admin oracle only if its guest logic exposes caller-controlled operations or is malicious/compromised.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-db/src/shamir_db/shamir_db/access_control.rs:1007](../../../../../crates/shamir-db/src/shamir_db/shamir_db/access_control.rs#L1007); [crates/shamir-db/src/shamir_db/shamir_db/function_management.rs:721](../../../../../crates/shamir-db/src/shamir_db/shamir_db/function_management.rs#L721); [crates/shamir-db/src/shamir_db/shamir_db/db_gateway.rs:285](../../../../../crates/shamir-db/src/shamir_db/shamir_db/db_gateway.rs#L285).
+Owner-actor delegation and arbitrary batch gateway execution are intentional. The procedure controls its operations and outputs; opening invocation alone does not expose arbitrary admin requests. A DML-only restriction would change the capability contract.
 
-## Corrections and qualified non-findings
+Evidence: [crates/shamir-db/src/shamir_db/shamir_db/access_control.rs:1007](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/shamir_db/access_control.rs#L1007); [crates/shamir-db/src/shamir_db/shamir_db/db_gateway.rs:285](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/shamir_db/db_gateway.rs#L285); [docs/guide-docs/guide/05-functions.md:284](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/docs/guide-docs/guide/05-functions.md#L284).
 
-- Downgrade CRLF exploitation certainty to unverified; raw-control propagation is confirmed, external parser behavior is not.
-- WasmCompiler bypass proves access-policy failure and compilation-resource exposure. Fixed dependency generation, forbidden-macro scanning, environment scrubbing and timeout invalidate the report's blanket arbitrary guest build-script/proc-macro execution narrative.
-- SSRF checks precede process launch and resolve lines pin validated addresses. Exact operator allowlist entries deliberately have no DNS pin; this is not an unconditional all-host pin guarantee.
-- Password administration delegates through UserAdminPort and SecretString::reveal; no facade unsafe blocks were found. Existing server calls preserve the authenticated actor.
-- Registered curl tests cover escaping and resolve construction, not CRLF rejection; compiler permission tests cover functions, not validators; ambient denied-store delta coverage remains absent.
-- Removing dead direct dependencies does not imply removing their shared workspace lockfile packages or prove a runtime attack-surface reduction.
+## Evidence and recipe corrections
+
+- Compatible curl parser behavior is now positively established; lack of an installed-version probe does not invalidate that conditional witness.
+- A plain injected output directive may be superseded by the gateway's later output directive. Do not claim every directive has its advertised final effect.
+- Top-level ordinary-user admin requests are blocked by the server's coarse gate; the relevant ordinary-user compiler witness uses ForEach recursion.
+- The resolve-string tests assert generated text, not curl's interpretation. Multiple same-host entries do not retain every address.
+- SECURITY DEFINER is authorized capability delegation, not itself an open defect. Documenting breadth is reasonable; restricting it requires an explicit design decision.
+- A runtime allowlist update must specify whether it affects existing gateways and in-flight invocations; shared ArcSwap alone addresses new construction.
 
 ---
 

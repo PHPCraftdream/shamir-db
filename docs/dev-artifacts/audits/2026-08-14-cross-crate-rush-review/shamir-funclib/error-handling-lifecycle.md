@@ -1,19 +1,21 @@
-<!-- revalidation:2026-10-08 source:92ad58266bf57ddea1fa3c8a47affba1a3a9a096 -->
-# shamir-funclib — error-handling-lifecycle revalidation
+<!-- revalidation:2026-10-08 cycle:independent-2 source:e3765c935fc71655ee1ec0160cf180607935d89b -->
+# shamir-funclib — error-handling-lifecycle independent revalidation (cycle 2)
 
-Source snapshot: `92ad58266bf57ddea1fa3c8a47affba1a3a9a096`. Revalidated 2026-10-08 by read-only XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run; no source fix is part of this update. Test registration/assertions are evidence of an oracle, not proof of a passing run.
+Frozen source snapshot: `e3765c935fc71655ee1ec0160cf180607935d89b`. Independently revalidated 2026-10-08 by a fresh XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run. Source-fixed means the specified mechanism was already removed at this snapshot; this cycle implements no source fix.
 
-This section is authoritative for current status. Original titles/IDs are retained for traceability; a refuted title is not a current assertion. The collapsed historical report below is superseded, including its counts, severity, scenarios and fix instructions. Plan IDs preserve historical numbering, not a current release mandate. [Workspace methodology and status definitions](../SUMMARY.md#status-definitions).
+This section is authoritative for current decisions. Existing IDs and allegation titles are retained for traceability; a refuted title is not a current assertion. Prior-cycle decisions were rechecked, not used as proof. The first cycle is available in repository history at this snapshot. The original historical body below remains preserved once and is superseded, including its counts, severities and recipes. [Workspace scope and status definitions](../SUMMARY.md#status-definitions).
 
-Recursive validation, unchecked allocation/arithmetic, and the native user-scalar replacement contract remain defective. Poison/counter and parser annotations are lower-priority hardening, not proven ordinary-input failures.
+Unrelated external edits began in dependency/toolchain/CI metadata during collection; additional Rust-source edits appeared afterward. They were left untouched. Evidence and decisions are tied to the frozen commit, not those later changes or an installed toolchain. “Current” below means current at that snapshot; no re-audit of the modified working tree is implied.
+
+Recursion and output amplification can escape unwind isolation; reductions and age can instead produce unwindable panics or wrong arithmetic. Native duplicate registration violates its documented replacement contract. Safe invariant sites should not remain classified as repair obligations.
 
 ## Current claim decisions
 
 | Claim decisions | Open | Source-fixed | Partial | Refuted | Unverified | N/A |
 |---:|---:|---:|---:|---:|---:|---:|
-| 10 | 10 | 0 | 0 | 0 | 0 | 0 |
+| 10 | 9 | 0 | 0 | 0 | 0 | 1 |
 
-These are decisions on report claims, including repeated roots, bundled observations and non-findings—not a unique-bug census. Closed/N/A rows have no current risk; unverified risk is provisional. Pure style and unmeasured optimization claims do not establish runtime impact.
+These are duplicate-inclusive report decisions, not a unique-bug census. Pure style or structural optimization does not establish a runtime incident; unverified impact remains provisional.
 
 <a id="review-1"></a>
 
@@ -21,9 +23,11 @@ These are decisions on report claims, including repeated roots, bundled observat
 
 Status: `confirmed-open`. Current risk: `high`.
 
-The parser still has unbounded mutual recursion and no MAX_JSON_DEPTH. Its registered tests cover only shallow input. Evaluated string content bypasses serde_json's nesting limit; sufficient nesting exhausts stack and is not converted into ScalarError by unwind isolation. Exact depth and universal deployment/privilege assertions remain unverified.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-funclib/src/validate.rs:98](../../../../../crates/shamir-funclib/src/validate.rs#L98); [crates/shamir-funclib/src/validate.rs:123](../../../../../crates/shamir-funclib/src/validate.rs#L123); [crates/shamir-funclib/src/validate.rs:156](../../../../../crates/shamir-funclib/src/validate.rs#L156); [crates/shamir-funclib/src/validate.rs:178](../../../../../crates/shamir-funclib/src/validate.rs#L178); [crates/shamir-funclib/src/validate/tests/validate_tests.rs:183](../../../../../crates/shamir-funclib/src/validate/tests/validate_tests.rs#L183); [Cargo.toml:88](../../../../../Cargo.toml#L88).
+value recursively calls array/object, which call value again, with no depth admission. Nested JSON is carried inside Str and bypasses structural codec limits. Shallow tests offer no depth-bound oracle; precise failing depth is unknown.
+
+Evidence: [crates/shamir-funclib/src/validate.rs:123](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-funclib/src/validate.rs#L123); [crates/shamir-funclib/src/validate.rs:154](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-funclib/src/validate.rs#L154); [crates/shamir-funclib/src/validate.rs:178](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-funclib/src/validate.rs#L178); [crates/shamir-funclib/src/validate/tests/validate_tests.rs:183](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-funclib/src/validate/tests/validate_tests.rs#L183).
 
 <a id="review-2"></a>
 
@@ -31,9 +35,11 @@ Evidence: [crates/shamir-funclib/src/validate.rs:98](../../../../../crates/shami
 
 Status: `confirmed-open`. Current risk: `high`.
 
-All three implementation families still accept unbounded positive i64 sizes and allocate before returning a result. No ceiling tests exist; existing tests cover small results and negative arguments. Use checked byte-size arithmetic and a per-result byte ceiling, accounting for multi-byte pad characters and intermediate allocations.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-funclib/src/strings.rs:233](../../../../../crates/shamir-funclib/src/strings.rs#L233); [crates/shamir-funclib/src/strings.rs:406](../../../../../crates/shamir-funclib/src/strings.rs#L406); [crates/shamir-funclib/src/gen.rs:75](../../../../../crates/shamir-funclib/src/gen.rs#L75); [crates/shamir-funclib/src/tests/strings_tests.rs:168](../../../../../crates/shamir-funclib/src/tests/strings_tests.rs#L168); [crates/shamir-funclib/src/gen/tests/gen_tests.rs:124](../../../../../crates/shamir-funclib/src/gen/tests/gen_tests.rs#L124).
+Only negativity is rejected before result allocation. Checked multiplication, checked platform-size conversion and byte ceilings are absent; pad additionally builds intermediate fill/output strings. Existing tests do not assert upper-bound rejection.
+
+Evidence: [crates/shamir-funclib/src/gen.rs:71](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-funclib/src/gen.rs#L71); [crates/shamir-funclib/src/strings.rs:233](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-funclib/src/strings.rs#L233); [crates/shamir-funclib/src/strings.rs:406](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-funclib/src/strings.rs#L406); [crates/shamir-funclib/src/tests/strings_tests.rs:168](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-funclib/src/tests/strings_tests.rs#L168).
 
 <a id="review-3"></a>
 
@@ -41,9 +47,11 @@ Evidence: [crates/shamir-funclib/src/strings.rs:233](../../../../../crates/shami
 
 Status: `confirmed-open`. Current risk: `medium`.
 
-register still discards insert_sync's result. Pinned scc returns Err on existing keys without changing the stored value, contradicting '(or replace)'. This affects native embedder re-registration; it is not proof that the distinct WASM CREATE OR REPLACE workflow is broken. Existing reopen tests register into a fresh layer, not an occupied name.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-funclib/src/scalar_resolver.rs:39](../../../../../crates/shamir-funclib/src/scalar_resolver.rs#L39); [crates/shamir-funclib/src/scalar_resolver.rs:41](../../../../../crates/shamir-funclib/src/scalar_resolver.rs#L41); [Cargo.lock:3123](../../../../../Cargo.lock#L3123); [crates/shamir-db/src/shamir_db/tests/user_scalar_tests.rs:367](../../../../../crates/shamir-db/src/shamir_db/tests/user_scalar_tests.rs#L367); [crates/shamir-wasm-host/src/registry.rs:50](../../../../../crates/shamir-wasm-host/src/registry.rs#L50).
+Published scc 3.8.4 leaves occupied keys unchanged; the discarded Err retains the old native callable. Reopen tests create a fresh layer. A same-layer A-then-B invocation oracle is missing; WASM replacement is a different registry.
+
+Evidence: [crates/shamir-funclib/src/scalar_resolver.rs:39](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-funclib/src/scalar_resolver.rs#L39); [crates/shamir-funclib/src/scalar_resolver.rs:41](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-funclib/src/scalar_resolver.rs#L41); [Cargo.lock:3123](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/Cargo.lock#L3123); [crates/shamir-db/src/shamir_db/tests/user_scalar_tests.rs:401](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/tests/user_scalar_tests.rs#L401); [crates/shamir-wasm-host/src/registry.rs:50](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-wasm-host/src/registry.rs#L50).
 
 <a id="review-4"></a>
 
@@ -51,9 +59,11 @@ Evidence: [crates/shamir-funclib/src/scalar_resolver.rs:39](../../../../../crate
 
 Status: `confirmed-open`. Current risk: `medium`.
 
-Unchecked Decimal sum/avg, variance mean/squared deviations, range subtraction, and array summation remain. Pinned Decimal operators panic rather than return errors, independent of Rust overflow-check settings. No MAX/MIN overflow regressions are registered in these suites. Current positive-denominator average divisions do not themselves establish an overflow trigger.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-funclib/src/agg.rs:286](../../../../../crates/shamir-funclib/src/agg.rs#L286); [crates/shamir-funclib/src/agg.rs:322](../../../../../crates/shamir-funclib/src/agg.rs#L322); [crates/shamir-funclib/src/agg.rs:514](../../../../../crates/shamir-funclib/src/agg.rs#L514); [crates/shamir-funclib/src/agg.rs:852](../../../../../crates/shamir-funclib/src/agg.rs#L852); [crates/shamir-funclib/src/arrays.rs:276](../../../../../crates/shamir-funclib/src/arrays.rs#L276); [Cargo.lock:2979](../../../../../Cargo.lock#L2979).
+Published rust_decimal 1.40.0 operators panic on overflow. Sum/avg retain unchecked addition, variance unchecked sum/subtraction/squaring and range unchecked subtraction. Native MAX pairs and query Int deviations ±10^15 provide distinct witnesses; no corresponding error-code oracle is registered.
+
+Evidence: [crates/shamir-funclib/src/agg.rs:286](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-funclib/src/agg.rs#L286); [crates/shamir-funclib/src/agg.rs:322](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-funclib/src/agg.rs#L322); [crates/shamir-funclib/src/agg.rs:514](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-funclib/src/agg.rs#L514); [crates/shamir-funclib/src/agg.rs:852](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-funclib/src/agg.rs#L852); [crates/shamir-funclib/src/arrays.rs:276](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-funclib/src/arrays.rs#L276); [Cargo.lock:2979](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/Cargo.lock#L2979).
 
 <a id="review-5"></a>
 
@@ -61,9 +71,11 @@ Evidence: [crates/shamir-funclib/src/agg.rs:286](../../../../../crates/shamir-fu
 
 Status: `confirmed-open`. Current risk: `medium`.
 
-age still has unchecked now_ms - then and truncating division, while diff_secs is checked and floored. Its registered test does not use i64::MIN. checked_sub and an explicit rounding contract remain required.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-funclib/src/datetime.rs:78](../../../../../crates/shamir-funclib/src/datetime.rs#L78); [crates/shamir-funclib/src/datetime.rs:264](../../../../../crates/shamir-funclib/src/datetime.rs#L264); [crates/shamir-funclib/src/datetime/tests/datetime_tests.rs:47](../../../../../crates/shamir-funclib/src/datetime/tests/datetime_tests.rs#L47); [crates/shamir-funclib/src/datetime/tests/datetime_tests.rs:177](../../../../../crates/shamir-funclib/src/datetime/tests/datetime_tests.rs#L177).
+now_ms-i64::MIN overflows at the current positive epoch. Debug arithmetic can panic and unchecked release arithmetic can wrap. The ordinary-past test cannot discriminate this; checked subtraction and an explicit duration-rounding policy are needed.
+
+Evidence: [crates/shamir-funclib/src/datetime.rs:78](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-funclib/src/datetime.rs#L78); [crates/shamir-funclib/src/datetime.rs:264](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-funclib/src/datetime.rs#L264); [crates/shamir-funclib/src/datetime/tests/datetime_tests.rs:47](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-funclib/src/datetime/tests/datetime_tests.rs#L47).
 
 <a id="review-6"></a>
 
@@ -71,9 +83,11 @@ Evidence: [crates/shamir-funclib/src/datetime.rs:78](../../../../../crates/shami
 
 Status: `confirmed-open`. Current risk: `low`.
 
-Arbitrary String codes, regex synonyms, error allocation, and absent detail remain. A catalog/documentation would improve contract control. The current struct implements Error and Display; thiserror being prescribed for enums does not by itself make this struct incorrect. No actual frontend localization failure was proven.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-funclib/src/registry.rs:20](../../../../../crates/shamir-funclib/src/registry.rs#L20); [crates/shamir-funclib/src/registry.rs:26](../../../../../crates/shamir-funclib/src/registry.rs#L26); [crates/shamir-funclib/src/strings.rs:427](../../../../../crates/shamir-funclib/src/strings.rs#L427); [crates/shamir-funclib/src/validate.rs:342](../../../../../crates/shamir-funclib/src/validate.rs#L342); [crates/shamir-funclib/src/crypto.rs:229](../../../../../crates/shamir-funclib/src/crypto.rs#L229).
+Builtin code spellings lack a central catalog and errors own Strings. bad_regex and bad_pattern are distinct established outputs. Error/Display are implemented correctly; absent detail and thiserror conversion are optional, and client localization failure is unproved.
+
+Evidence: [crates/shamir-funclib/src/registry.rs:20](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-funclib/src/registry.rs#L20); [crates/shamir-funclib/src/registry.rs:31](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-funclib/src/registry.rs#L31); [crates/shamir-funclib/src/strings.rs:427](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-funclib/src/strings.rs#L427); [crates/shamir-funclib/src/validate.rs:342](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-funclib/src/validate.rs#L342).
 
 <a id="review-7"></a>
 
@@ -81,9 +95,11 @@ Evidence: [crates/shamir-funclib/src/registry.rs:20](../../../../../crates/shami
 
 Status: `confirmed-open`. Current risk: `nit`.
 
-Both poison expects and manual counter bracketing remain. The production wait critical section has no demonstrated panic source, so poison propagation is conditional hardening. Counter leakage requires unwind during the bracket; normal returned KDF errors decrement correctly. Permit lifetime itself is RAII-safe.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-funclib/src/crypto.rs:139](../../../../../crates/shamir-funclib/src/crypto.rs#L139); [crates/shamir-funclib/src/crypto.rs:141](../../../../../crates/shamir-funclib/src/crypto.rs#L141); [crates/shamir-funclib/src/crypto.rs:177](../../../../../crates/shamir-funclib/src/crypto.rs#L177); [crates/shamir-funclib/src/crypto.rs:225](../../../../../crates/shamir-funclib/src/crypto.rs#L225); [crates/shamir-funclib/src/crypto.rs:230](../../../../../crates/shamir-funclib/src/crypto.rs#L230).
+Poison propagation and non-RAII telemetry remain conditional hardening concerns. The current wait critical section supplies no demonstrated panic trigger. Normal KDF errors decrement correctly; permit Drop still releases on unwind.
+
+Evidence: [crates/shamir-funclib/src/crypto.rs:139](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-funclib/src/crypto.rs#L139); [crates/shamir-funclib/src/crypto.rs:141](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-funclib/src/crypto.rs#L141); [crates/shamir-funclib/src/crypto.rs:178](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-funclib/src/crypto.rs#L178); [crates/shamir-funclib/src/crypto.rs:225](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-funclib/src/crypto.rs#L225); [crates/shamir-funclib/src/crypto.rs:230](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-funclib/src/crypto.rs#L230).
 
 <a id="review-8"></a>
 
@@ -91,11 +107,13 @@ Evidence: [crates/shamir-funclib/src/crypto.rs:139](../../../../../crates/shamir
 
 Status: `confirmed-open`. Current risk: `low`.
 
-The two error-defaulting helpers remain. A native custom key accepted by the public generic API can fail serialization and collapse distinct keys into identical canonical encodings. This is not established as a remote ordinary-String-key CAS exploit. debug_assert nonempty would neither propagate errors nor protect release behavior.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-funclib/src/canonical.rs:187](../../../../../crates/shamir-funclib/src/canonical.rs#L187); [crates/shamir-funclib/src/canonical.rs:193](../../../../../crates/shamir-funclib/src/canonical.rs#L193); [crates/shamir-funclib/src/canonical.rs:199](../../../../../crates/shamir-funclib/src/canonical.rs#L199).
+A native custom Serialize key can return Err; public canonical APIs silently encode it as empty. Different single-key maps can then have identical canonical bytes. Published rmp-serde 1.3.1 explicitly permits user serialization failure; ordinary String keys do not trigger it.
 
-Grouping/duplicate: `security-crypto.md#8`. This row is not another independent defect.
+Evidence: [crates/shamir-funclib/src/canonical.rs:187](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-funclib/src/canonical.rs#L187); [crates/shamir-funclib/src/canonical.rs:199](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-funclib/src/canonical.rs#L199); [Cargo.lock:2949](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/Cargo.lock#L2949).
+
+Grouping/duplicate: [security-crypto.md#8](security-crypto.md#review-8). This is not an additional independent defect.
 
 <a id="review-9"></a>
 
@@ -103,31 +121,33 @@ Grouping/duplicate: `security-crypto.md#8`. This row is not another independent 
 
 Status: `confirmed-open`. Current risk: `low`.
 
-Dedicated tests and wiring remain absent. Indirect facade/engine coverage proves ordinary dispatch routes, not collision replacement, shadowing, unknown-function/arity parity, or concurrent layer behavior.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-funclib/src/scalar_resolver.rs:135](../../../../../crates/shamir-funclib/src/scalar_resolver.rs#L135); [crates/shamir-funclib/src/tests/mod.rs:1](../../../../../crates/shamir-funclib/src/tests/mod.rs#L1); [crates/shamir-db/src/shamir_db/tests/user_scalar_tests.rs:51](../../../../../crates/shamir-db/src/shamir_db/tests/user_scalar_tests.rs#L51).
+No dedicated suite exercises duplicate registration, shadowing, resolver unknown/arity parity or concurrency. The registered facade test proves a successful dispatch seam, not these independent obligations.
 
-Grouping/duplicate: `style-claude-md.md#1`. This row is not another independent defect.
+Evidence: [crates/shamir-funclib/src/scalar_resolver.rs:135](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-funclib/src/scalar_resolver.rs#L135); [crates/shamir-funclib/src/tests/mod.rs:1](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-funclib/src/tests/mod.rs#L1); [crates/shamir-db/src/shamir_db/tests/user_scalar_tests.rs:48](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/tests/user_scalar_tests.rs#L48).
+
+Grouping/duplicate: [style-claude-md.md#1](style-claude-md.md#review-1). This is not an additional independent defect.
 
 <a id="review-10"></a>
 
 ### Claim 10 — Unannotated panicky/fallible primitives in library code
 
-Status: `confirmed-open`. Current risk: `nit`.
+Status: `not-applicable`. Current risk: `—`.
 
-The midnight unwrap, StddevAgg NaN fallback, and arrays reduce unreachable remain. Pinned chrono proves the unwrap infallible; pinned Decimal's valid-value to_f64 implementation always returns Some; Reduce's unmatched branch is excluded by the outer match. These are optional annotation/readability cleanups, not current error paths. The cited agg.rs:268 unreachable does not exist.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-funclib/src/datetime.rs:153](../../../../../crates/shamir-funclib/src/datetime.rs#L153); [crates/shamir-funclib/src/agg.rs:472](../../../../../crates/shamir-funclib/src/agg.rs#L472); [crates/shamir-funclib/src/arrays.rs:268](../../../../../crates/shamir-funclib/src/arrays.rs#L268); [Cargo.lock:655](../../../../../Cargo.lock#L655); [Cargo.lock:2979](../../../../../Cargo.lock#L2979).
+chrono 0.4.43 makes midnight conversion infallible; rust_decimal 1.40.0 to_f64 returns Some for valid Decimal values; the Reduce branch is excluded by its enclosing match. No rule requires replacing safe invariant expressions. The cited agg unreachable site is absent.
 
-## Corrections and qualified non-findings
+Evidence: [crates/shamir-funclib/src/datetime.rs:153](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-funclib/src/datetime.rs#L153); [crates/shamir-funclib/src/agg.rs:472](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-funclib/src/agg.rs#L472); [crates/shamir-funclib/src/arrays.rs:248](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-funclib/src/arrays.rs#L248); [Cargo.lock:655](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/Cargo.lock#L655); [Cargo.lock:2979](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/Cargo.lock#L2979).
 
-- No separate Fix Plan exists; all Suggested fixes are assessed in the matching rows and SUMMARY plan.
-- The date panic allegation is refuted, not fixed: no source change was needed to establish the chrono midnight invariant.
-- Use one deliberate stable overflow code with compatibility consideration; the reports inconsistently propose overflow and out_of_range.
-- Replacing a registration with remove-then-insert creates an observable absence/race window. Prefer a single entry-operation replacement with specified concurrent semantics.
-- The resource-abort mechanisms bypass panic=unwind, but ordinary capacity-overflow and Decimal panics generally unwind; do not equate every panic with process termination.
-- Critical recursion severity is recalibrated to high availability risk under established authorized evaluation reachability; exact exploit thresholds and all-deployment assertions were not proven.
-- Root shared tests remain reachable despite organizational nonconformance. Dedicated resolver testing, rather than a test-directory move alone, is the substantive coverage obligation.
+## Evidence and recipe corrections
+
+- Safe invariant annotation and Decimal-to-f64 readability changes are optional, not remaining runtime error paths.
+- Atomic replacement is not sufficient safety for indexed scalars: persisted functional indexes resolve functions by live name. Redefinition must preserve semantics or coordinate index rebuilding/versioning.
+- Do not use remove-then-insert replacement; it exposes absence and concurrent insertion windows.
+- Decimal and capacity-overflow panics are not automatically process aborts under panic=unwind.
+- Checked sum can still reject a representable final average because an intermediate sum overflows; document that numerical/error policy rather than claiming universal mathematical equivalence.
 
 ---
 

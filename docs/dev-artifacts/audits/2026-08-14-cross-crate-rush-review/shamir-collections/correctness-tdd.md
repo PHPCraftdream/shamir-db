@@ -1,11 +1,13 @@
-<!-- revalidation:2026-10-08 source:92ad58266bf57ddea1fa3c8a47affba1a3a9a096 -->
-# shamir-collections — correctness-tdd revalidation
+<!-- revalidation:2026-10-08 cycle:independent-2 source:e3765c935fc71655ee1ec0160cf180607935d89b -->
+# shamir-collections — correctness-tdd independent revalidation (cycle 2)
 
-Source snapshot: `92ad58266bf57ddea1fa3c8a47affba1a3a9a096`. Revalidated 2026-10-08 by read-only XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run; no source fix is part of this update. Test registration/assertions are evidence of an oracle, not proof of a passing run.
+Frozen source snapshot: `e3765c935fc71655ee1ec0160cf180607935d89b`. Independently revalidated 2026-10-08 by a fresh XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run. Source-fixed means the specified mechanism was already removed at this snapshot; this cycle implements no source fix.
 
-This section is authoritative for current status. Original titles/IDs are retained for traceability; a refuted title is not a current assertion. The collapsed historical report below is superseded, including its counts, severity, scenarios and fix instructions. Plan IDs preserve historical numbering, not a current release mandate. [Workspace methodology and status definitions](../SUMMARY.md#status-definitions).
+This section is authoritative for current decisions. Existing IDs and allegation titles are retained for traceability; a refuted title is not a current assertion. Prior-cycle decisions were rechecked, not used as proof. The first cycle is available in repository history at this snapshot. The original historical body below remains preserved once and is superseded, including its counts, severities and recipes. [Workspace scope and status definitions](../SUMMARY.md#status-definitions).
 
-The crate still has no local tests, retains unsupported quantitative rustdoc and the redundant Eq import. These are open coverage/documentation issues, not evidence of an existing High-severity runtime correctness defect.
+Unrelated external edits began in dependency/toolchain/CI metadata during collection; additional Rust-source edits appeared afterward. They were left untouched. Evidence and decisions are tied to the frozen commit, not those later changes or an installed toolchain. “Current” below means current at that snapshot; no re-audit of the modified working tree is implied.
+
+The thin implementation selects the intended backing types. Missing local contract guards and unsupported documentation remain; no present high-severity collection correctness failure was established.
 
 ## Current claim decisions
 
@@ -13,7 +15,7 @@ The crate still has no local tests, retains unsupported quantitative rustdoc and
 |---:|---:|---:|---:|---:|---:|---:|
 | 3 | 3 | 0 | 0 | 0 | 0 | 0 |
 
-These are decisions on report claims, including repeated roots, bundled observations and non-findings—not a unique-bug census. Closed/N/A rows have no current risk; unverified risk is provisional. Pure style and unmeasured optimization claims do not establish runtime impact.
+These are duplicate-inclusive report decisions, not a unique-bug census. Pure style or structural optimization does not establish a runtime incident; unverified impact remains provisional.
 
 <a id="review-1"></a>
 
@@ -21,9 +23,11 @@ These are decisions on report claims, including repeated roots, bundled observat
 
 Status: `confirmed-open`. Current risk: `medium`.
 
-Only Cargo.toml and lib.rs exist; there is no test registration or test target, and doctests remain disabled. Direct hasher, constructor-capacity, removal-order and duplicate-decoding guards are absent. The blanket assertion that downstream behavior has no coverage is too strong.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-collections/src/lib.rs:17](../../../../../crates/shamir-collections/src/lib.rs#L17); [crates/shamir-collections/src/lib.rs:63](../../../../../crates/shamir-collections/src/lib.rs#L63); [crates/shamir-collections/Cargo.toml:16](../../../../../crates/shamir-collections/Cargo.toml#L16); [scripts/test.sh:104](../../../../../scripts/test.sh#L104); [crates/shamir-types/src/types/tests/value_tests.rs:52](../../../../../crates/shamir-types/src/types/tests/value_tests.rs#L52).
+Local tests and registration are absent. However, registered downstream roundtrips and value-hash tests provide some protection, so the literal every-contract assertion is excessive. Discriminating additions should inspect builder types and explicit key sequences, test successful capacity lower bounds, and distinguish shift-removal from swap-removal.
+
+Evidence: [crates/shamir-collections/src/lib.rs:17](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-collections/src/lib.rs#L17); [crates/shamir-collections/Cargo.toml:16](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-collections/Cargo.toml#L16); [crates/shamir-types/src/types/tests/mod.rs:10](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-types/src/types/tests/mod.rs#L10); [crates/shamir-types/src/types/tests/value_tests.rs:52](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-types/src/types/tests/value_tests.rs#L52); [scripts/test.sh:104](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/scripts/test.sh#L104).
 
 <a id="review-2"></a>
 
@@ -31,9 +35,11 @@ Evidence: [crates/shamir-collections/src/lib.rs:17](../../../../../crates/shamir
 
 Status: `confirmed-open`. Current risk: `low`.
 
-Both aliases still claim 15–20% faster lookups without an identified comparative harness or recorded measurement. The introductory commit repeats the number but supplies no measurement proof.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-collections/src/lib.rs:41](../../../../../crates/shamir-collections/src/lib.rs#L41); [crates/shamir-collections/src/lib.rs:45](../../../../../crates/shamir-collections/src/lib.rs#L45); [crates/shamir-collections/Cargo.toml:9](../../../../../crates/shamir-collections/Cargo.toml#L9); [docs/dev-artifacts/audits/shamir-collections.md:38](../../../../../docs/dev-artifacts/audits/shamir-collections.md#L38).
+Both aliases retain the 15–20% assertion. The introduction commit repeats it without a comparative harness/result; the planning table describes an expected effect. No inspected benchmark substantiates the percentage. This is unsupported documentation, not proof the percentage is numerically false.
+
+Evidence: [crates/shamir-collections/src/lib.rs:41](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-collections/src/lib.rs#L41); [crates/shamir-collections/src/lib.rs:45](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-collections/src/lib.rs#L45); [docs/dev-artifacts/audits/shamir-collections.md:38](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/docs/dev-artifacts/audits/shamir-collections.md#L38).
 
 <a id="review-3"></a>
 
@@ -41,21 +47,19 @@ Evidence: [crates/shamir-collections/src/lib.rs:41](../../../../../crates/shamir
 
 Status: `confirmed-open`. Current risk: `nit`.
 
-The explicit Eq import remains redundant with the prelude. Hash is not a prelude trait and its separate import is necessary.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-collections/src/lib.rs:13](../../../../../crates/shamir-collections/src/lib.rs#L13); [crates/shamir-collections/src/lib.rs:15](../../../../../crates/shamir-collections/src/lib.rs#L15); [crates/shamir-collections/src/lib.rs:25](../../../../../crates/shamir-collections/src/lib.rs#L25).
+Eq is supplied by the edition's standard prelude; its explicit import remains redundant. Hash must remain imported. No compiler-warning regression was demonstrated.
 
-## Corrections and qualified non-findings
+Evidence: [crates/shamir-collections/src/lib.rs:13](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-collections/src/lib.rs#L13); [crates/shamir-collections/src/lib.rs:15](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-collections/src/lib.rs#L15).
 
-- Downgrade finding 1 from High to Medium coverage debt: no current runtime correctness failure was established.
-- IndexMap 2.14.0 remove delegates to swap_remove and disrupts order; it is not an order-preserving O(n) removal. Proposed tests must use the correct oracle.
-- IndexMap insertion-order iteration is independent of its hasher. A RandomState substitution alone does not scramble TMap/TSet iteration.
-- Hasher identity must be checked directly through types/builders or suitable hash assertions; deterministic ordered iteration cannot identify FxHasher, and TFx iteration order is not a public guarantee.
-- The @types scope also runs shamir-types assertions. Reachable value round-trip tests exist, but map equality assertions do not establish entry order or collection-builder identity.
-- The order-labelled storage_bytes test compares two encoders traversing the same collection and then compares different record contents; it does not independently pin TMap insertion order.
-- The planning document's expected-effect table is at line 38; its Low column denotes implementation complexity, not probability. Historical provenance of a measured number is not established.
-- The sanctioned allow and partial shamir-types re-export observations remain accurate. All eight constructors still have live callers, including new_fx_map_wc in user_directory.
-- Relevant history shows the implementation's last change predates the reviews; neither the hash migration nor its commit message proves these review items fixed.
+## Evidence and recipe corrections
+
+- Disabled doctests follow documented repository policy; do not infer an unexplained policy failure from this leaf's missing comment.
+- IndexMap 2.14.0 remove delegates to swap_remove. Test the resulting order explicitly rather than expecting order-preserving remove.
+- Map equality ignores entry order. The storage_bytes order-labelled test shares collection traversal between encoders and compares different record contents, so its inequality assertion is not an independent ordering oracle.
+- The planning document's Low column describes implementation complexity, not probability. The public project is alpha, not a stable released API.
+- All eight constructors have callers; new_fx_map_wc is used with explicit generic arguments in user_directory.rs:1026.
 
 ---
 

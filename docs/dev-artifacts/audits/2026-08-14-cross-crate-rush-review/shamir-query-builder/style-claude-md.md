@@ -1,11 +1,13 @@
-<!-- revalidation:2026-10-08 source:92ad58266bf57ddea1fa3c8a47affba1a3a9a096 -->
-# shamir-query-builder — style-claude-md revalidation
+<!-- revalidation:2026-10-08 cycle:independent-2 source:e3765c935fc71655ee1ec0160cf180607935d89b -->
+# shamir-query-builder — style-claude-md independent revalidation (cycle 2)
 
-Source snapshot: `92ad58266bf57ddea1fa3c8a47affba1a3a9a096`. Revalidated 2026-10-08 by read-only XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run; no source fix is part of this update. Test registration/assertions are evidence of an oracle, not proof of a passing run.
+Frozen source snapshot: `e3765c935fc71655ee1ec0160cf180607935d89b`. Independently revalidated 2026-10-08 by a fresh XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run. Source-fixed means the specified mechanism was already removed at this snapshot; this cycle implements no source fix.
 
-This section is authoritative for current status. Original titles/IDs are retained for traceability; a refuted title is not a current assertion. The collapsed historical report below is superseded, including its counts, severity, scenarios and fix instructions. Plan IDs preserve historical numbering, not a current release mandate. [Workspace methodology and status definitions](../SUMMARY.md#status-definitions).
+This section is authoritative for current decisions. Existing IDs and allegation titles are retained for traceability; a refuted title is not a current assertion. Prior-cycle decisions were rechecked, not used as proof. The first cycle is available in repository history at this snapshot. The original historical body below remains preserved once and is superseded, including its counts, severities and recipes. [Workspace scope and status definitions](../SUMMARY.md#status-definitions).
 
-The structural deviations remain unchanged. Their impact is maintenance/documentation, not runtime Medium/High severity. Several blanket positive conformance claims are contradicted by the same source tree.
+Unrelated external edits began in dependency/toolchain/CI metadata during collection; additional Rust-source edits appeared afterward. They were left untouched. Evidence and decisions are tied to the frozen commit, not those later changes or an installed toolchain. “Current” below means current at that snapshot; no re-audit of the modified working tree is implied.
+
+Reported structural deviations remain and are maintenance-only. Tests are registered despite the cursor layout exception. Several historical blanket conformance assertions overstate the actual tree.
 
 ## Current claim decisions
 
@@ -13,7 +15,7 @@ The structural deviations remain unchanged. Their impact is maintenance/document
 |---:|---:|---:|---:|---:|---:|---:|
 | 7 | 7 | 0 | 0 | 0 | 0 | 0 |
 
-These are decisions on report claims, including repeated roots, bundled observations and non-findings—not a unique-bug census. Closed/N/A rows have no current risk; unverified risk is provisional. Pure style and unmeasured optimization claims do not establish runtime impact.
+These are duplicate-inclusive report decisions, not a unique-bug census. Pure style or structural optimization does not establish a runtime incident; unverified impact remains provisional.
 
 <a id="review-1"></a>
 
@@ -21,9 +23,11 @@ These are decisions on report claims, including repeated roots, bundled observat
 
 Status: `confirmed-open`. Current risk: `low`.
 
-wire/mod.rs still owns ToWire methods and blanket implementation rather than sibling-file wiring, contrary to the manifest-only rule. No functional defect is established.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [AGENTS.md](../../../../../AGENTS.md); [CLAUDE.md](../../../../../CLAUDE.md); [crates/shamir-query-builder/src/wire/mod.rs:24](../../../../../crates/shamir-query-builder/src/wire/mod.rs#L24); [crates/shamir-query-builder/src/wire/mod.rs:48](../../../../../crates/shamir-query-builder/src/wire/mod.rs#L48).
+The manifest file owns the trait's codec methods and blanket implementation. A sibling-file move can preserve the public path; no runtime defect follows from placement.
+
+Evidence: [AGENTS.md:116](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/AGENTS.md#L116); [crates/shamir-query-builder/src/wire/mod.rs:24](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-query-builder/src/wire/mod.rs#L24); [crates/shamir-query-builder/src/wire/mod.rs:48](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-query-builder/src/wire/mod.rs#L48).
 
 <a id="review-2"></a>
 
@@ -31,9 +35,11 @@ Evidence: [AGENTS.md](../../../../../AGENTS.md); [CLAUDE.md](../../../../../CLAU
 
 Status: `confirmed-open`. Current risk: `low`.
 
-All four exported declarative macros remain in mod.rs; no documented macro exception was found in the current project rules. File separation is structural, independent of the macro hygiene defect.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [CLAUDE.md](../../../../../CLAUDE.md); [crates/shamir-query-builder/src/macros/mod.rs:25](../../../../../crates/shamir-query-builder/src/macros/mod.rs#L25); [crates/shamir-query-builder/src/macros/mod.rs:47](../../../../../crates/shamir-query-builder/src/macros/mod.rs#L47); [crates/shamir-query-builder/src/macros/mod.rs:63](../../../../../crates/shamir-query-builder/src/macros/mod.rs#L63); [crates/shamir-query-builder/src/macros/mod.rs:86](../../../../../crates/shamir-query-builder/src/macros/mod.rs#L86).
+doc, vals, bind and subscribe definitions remain in the manifest file, without a documented policy exception. Moving definitions must preserve macro_export paths and lexical wiring; hygiene is a separate functional issue.
+
+Evidence: [crates/shamir-query-builder/src/macros/mod.rs:25](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-query-builder/src/macros/mod.rs#L25); [crates/shamir-query-builder/src/macros/mod.rs:47](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-query-builder/src/macros/mod.rs#L47); [crates/shamir-query-builder/src/macros/mod.rs:63](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-query-builder/src/macros/mod.rs#L63); [crates/shamir-query-builder/src/macros/mod.rs:86](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-query-builder/src/macros/mod.rs#L86); [crates/shamir-query-builder/src/lib.rs:53](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-query-builder/src/lib.rs#L53).
 
 <a id="review-3"></a>
 
@@ -41,9 +47,11 @@ Evidence: [CLAUDE.md](../../../../../CLAUDE.md); [crates/shamir-query-builder/sr
 
 Status: `confirmed-open`. Current risk: `low`.
 
-Schema and access-control files still bundle independently exposed builders. Auth, validator, replication, list, migration, buffer-config, retention, and function family files remain. Whether a particular family qualifies as closely coupled is a policy judgment; their existence does not imply runtime risk.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [CLAUDE.md](../../../../../CLAUDE.md); [crates/shamir-query-builder/src/ddl/schema.rs:36](../../../../../crates/shamir-query-builder/src/ddl/schema.rs#L36); [crates/shamir-query-builder/src/ddl/schema.rs:408](../../../../../crates/shamir-query-builder/src/ddl/schema.rs#L408); [crates/shamir-query-builder/src/ddl/access_control.rs:22](../../../../../crates/shamir-query-builder/src/ddl/access_control.rs#L22); [crates/shamir-query-builder/src/ddl/access_control.rs:77](../../../../../crates/shamir-query-builder/src/ddl/access_control.rs#L77); [crates/shamir-query-builder/src/ddl/auth.rs:19](../../../../../crates/shamir-query-builder/src/ddl/auth.rs#L19); [crates/shamir-query-builder/src/ddl/validator.rs:21](../../../../../crates/shamir-query-builder/src/ddl/validator.rs#L21); [crates/shamir-query-builder/src/ddl/replication.rs:35](../../../../../crates/shamir-query-builder/src/ddl/replication.rs#L35); [crates/shamir-query-builder/src/ddl/list.rs:24](../../../../../crates/shamir-query-builder/src/ddl/list.rs#L24); [crates/shamir-query-builder/src/ddl/migration.rs](../../../../../crates/shamir-query-builder/src/ddl/migration.rs); [crates/shamir-query-builder/src/ddl/buffer_config.rs:18](../../../../../crates/shamir-query-builder/src/ddl/buffer_config.rs#L18); [crates/shamir-query-builder/src/ddl/retention.rs:20](../../../../../crates/shamir-query-builder/src/ddl/retention.rs#L20); [crates/shamir-query-builder/src/ddl/function.rs:24](../../../../../crates/shamir-query-builder/src/ddl/function.rs#L24).
+Schema and access-control expose multiple independent builders; the other listed family files likewise remain. The closely-coupled-group allowance requires per-family policy judgment, not a blanket split or runtime severity.
+
+Evidence: [CLAUDE.md:508](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/CLAUDE.md#L508); [crates/shamir-query-builder/src/ddl/schema.rs:36](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-query-builder/src/ddl/schema.rs#L36); [crates/shamir-query-builder/src/ddl/schema.rs:408](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-query-builder/src/ddl/schema.rs#L408); [crates/shamir-query-builder/src/ddl/access_control.rs:22](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-query-builder/src/ddl/access_control.rs#L22); [crates/shamir-query-builder/src/ddl/access_control.rs:77](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-query-builder/src/ddl/access_control.rs#L77).
 
 <a id="review-4"></a>
 
@@ -51,9 +59,11 @@ Evidence: [CLAUDE.md](../../../../../CLAUDE.md); [crates/shamir-query-builder/sr
 
 Status: `confirmed-open`. Current risk: `low`.
 
-The redundant function-local QueryValue import and the reported test-local imports remain. No relevant collision exception is documented. This is a convention issue, not a functional or performance defect.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-query-builder/src/batch/batch.rs:10](../../../../../crates/shamir-query-builder/src/batch/batch.rs#L10); [crates/shamir-query-builder/src/batch/batch.rs:1123](../../../../../crates/shamir-query-builder/src/batch/batch.rs#L1123); [crates/shamir-query-builder/src/batch/tests/after_tests.rs:24](../../../../../crates/shamir-query-builder/src/batch/tests/after_tests.rs#L24); [crates/shamir-query-builder/src/batch/tests/batch_tests.rs:448](../../../../../crates/shamir-query-builder/src/batch/tests/batch_tests.rs#L448); [crates/shamir-query-builder/src/macros/tests/q_macro_tests.rs:298](../../../../../crates/shamir-query-builder/src/macros/tests/q_macro_tests.rs#L298); [crates/shamir-query-builder/src/select/tests/select_tests.rs:123](../../../../../crates/shamir-query-builder/src/select/tests/select_tests.rs#L123); [crates/shamir-query-builder/src/query/tests/query_tests.rs:1036](../../../../../crates/shamir-query-builder/src/query/tests/query_tests.rs#L1036); [crates/shamir-query-builder/src/ddl/tests/replication_ddl_tests.rs:268](../../../../../crates/shamir-query-builder/src/ddl/tests/replication_ddl_tests.rs#L268).
+collect_query_refs repeats an existing header import locally; listed tests contain local imports without collision exceptions. This is policy drift, not a behavior or performance problem.
+
+Evidence: [crates/shamir-query-builder/src/batch/batch.rs:10](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-query-builder/src/batch/batch.rs#L10); [crates/shamir-query-builder/src/batch/batch.rs:1123](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-query-builder/src/batch/batch.rs#L1123); [crates/shamir-query-builder/src/batch/tests/after_tests.rs:24](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-query-builder/src/batch/tests/after_tests.rs#L24); [crates/shamir-query-builder/src/macros/tests/q_macro_tests.rs:298](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-query-builder/src/macros/tests/q_macro_tests.rs#L298).
 
 <a id="review-5"></a>
 
@@ -61,9 +71,11 @@ Evidence: [crates/shamir-query-builder/src/batch/batch.rs:10](../../../../../cra
 
 Status: `confirmed-open`. Current risk: `low`.
 
-cursor still wires a single cursor/tests.rs file. Its tests are reachable; only the prescribed directory/manifest layout is missing.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-query-builder/src/cursor.rs:81](../../../../../crates/shamir-query-builder/src/cursor.rs#L81); [crates/shamir-query-builder/src/cursor/tests.rs:1](../../../../../crates/shamir-query-builder/src/cursor/tests.rs#L1); [crates/shamir-query-builder/src/lib.rs:50](../../../../../crates/shamir-query-builder/src/lib.rs#L50).
+cursor.rs correctly registers cursor/tests.rs under cfg(test). Only the prescribed directory/manifest organization is absent; the tests are not orphaned.
+
+Evidence: [crates/shamir-query-builder/src/lib.rs:50](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-query-builder/src/lib.rs#L50); [crates/shamir-query-builder/src/cursor.rs:81](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-query-builder/src/cursor.rs#L81); [crates/shamir-query-builder/src/cursor/tests.rs:1](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-query-builder/src/cursor/tests.rs#L1).
 
 <a id="review-6"></a>
 
@@ -71,9 +83,11 @@ Evidence: [crates/shamir-query-builder/src/cursor.rs:81](../../../../../crates/s
 
 Status: `confirmed-open`. Current risk: `nit`.
 
-AggFunc/AggregateField and UpdateReturnMode still have sibling and manifest re-exports. They resolve to identical items, so no ambiguity/runtime defect exists. Removing sibling pub use requires retaining ordinary imports used by implementation.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-query-builder/src/select/select_item.rs:8](../../../../../crates/shamir-query-builder/src/select/select_item.rs#L8); [crates/shamir-query-builder/src/select/mod.rs:9](../../../../../crates/shamir-query-builder/src/select/mod.rs#L9); [crates/shamir-query-builder/src/select/mod.rs:12](../../../../../crates/shamir-query-builder/src/select/mod.rs#L12); [crates/shamir-query-builder/src/write/update.rs:10](../../../../../crates/shamir-query-builder/src/write/update.rs#L10); [crates/shamir-query-builder/src/write/mod.rs:69](../../../../../crates/shamir-query-builder/src/write/mod.rs#L69).
+AggFunc/AggregateField and UpdateReturnMode are exported through both routes but refer to identical items. Removing sibling pub use requires retaining non-public imports used by implementation.
+
+Evidence: [crates/shamir-query-builder/src/select/select_item.rs:8](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-query-builder/src/select/select_item.rs#L8); [crates/shamir-query-builder/src/select/mod.rs:12](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-query-builder/src/select/mod.rs#L12); [crates/shamir-query-builder/src/write/update.rs:10](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-query-builder/src/write/update.rs#L10); [crates/shamir-query-builder/src/write/mod.rs:69](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-query-builder/src/write/mod.rs#L69).
 
 <a id="review-7"></a>
 
@@ -81,19 +95,20 @@ Evidence: [crates/shamir-query-builder/src/select/select_item.rs:8](../../../../
 
 Status: `confirmed-open`. Current risk: `nit`.
 
-The module inventory still omits wire and bind!/subscribe!, and Insert::row still says mpak! rather than mpack!.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-query-builder/src/lib.rs:33](../../../../../crates/shamir-query-builder/src/lib.rs#L33); [crates/shamir-query-builder/src/lib.rs:42](../../../../../crates/shamir-query-builder/src/lib.rs#L42); [crates/shamir-query-builder/src/write/insert.rs:44](../../../../../crates/shamir-query-builder/src/write/insert.rs#L44).
+The crate inventory omits wire and the bind/subscribe declarative macros, and Insert::row still says mpak!. These are documentary omissions, not absent functionality.
 
-## Corrections and qualified non-findings
+Evidence: [crates/shamir-query-builder/src/lib.rs:33](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-query-builder/src/lib.rs#L33); [crates/shamir-query-builder/src/lib.rs:42](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-query-builder/src/lib.rs#L42); [crates/shamir-query-builder/src/write/insert.rs:44](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-query-builder/src/write/insert.rs#L44).
 
-- The original Medium ratings for findings 1–3 describe structural policy debt; no runtime Medium impact is established.
-- The opening assertion that implementation imports all live at the top contradicts finding 4 and current batch.rs:1123.
-- Not every module uses a tests/ directory: cursor is the explicit exception.
-- The universal multiline mpack literal claim is false, for example crates/shamir-query-builder/src/response/tests/response_tests.rs:115 and crates/shamir-query-builder/src/batch/tests/to_request_via_msgpack_tests.rs:17.
-- No inline test module or raw serde_json query construction was found in builder src/. Integration fixture serde_json parsing is a wire-fixture exception, not raw query construction.
-- The exact original import-site count should not be treated as a stable invariant; the reported production and listed test sites were found.
-- A family-file exception is a policy choice under the closely-coupled-group provision, not automatically a correctness fix.
+Grouping/duplicate: [SUMMARY.md#7.6](SUMMARY.md#review-7-6). This is not an additional independent defect.
+
+## Evidence and recipe corrections
+
+- Cursor's registered tests.rs contradicts the universal tests-directory assurance; local imports contradict the universal header-import assurance.
+- Single-line mpack literals remain, including response_tests.rs:115 and to_request_via_msgpack_tests.rs:17; multiline conformance is not universal.
+- Re-export cleanup is not literally deletion-only: preserve ordinary imports needed by the implementation.
+- Mechanical module moves must preserve macro lexical scope and all public naming paths. No runtime improvement is established by these style changes.
 
 ---
 

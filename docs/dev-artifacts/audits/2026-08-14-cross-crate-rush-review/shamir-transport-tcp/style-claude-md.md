@@ -1,11 +1,13 @@
-<!-- revalidation:2026-10-08 source:92ad58266bf57ddea1fa3c8a47affba1a3a9a096 -->
-# shamir-transport-tcp — style-claude-md revalidation
+<!-- revalidation:2026-10-08 cycle:independent-2 source:e3765c935fc71655ee1ec0160cf180607935d89b -->
+# shamir-transport-tcp — style-claude-md independent revalidation (cycle 2)
 
-Source snapshot: `92ad58266bf57ddea1fa3c8a47affba1a3a9a096`. Revalidated 2026-10-08 by read-only XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run; no source fix is part of this update. Test registration/assertions are evidence of an oracle, not proof of a passing run.
+Frozen source snapshot: `e3765c935fc71655ee1ec0160cf180607935d89b`. Independently revalidated 2026-10-08 by a fresh XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run. Source-fixed means the specified mechanism was already removed at this snapshot; this cycle implements no source fix.
 
-This section is authoritative for current status. Original titles/IDs are retained for traceability; a refuted title is not a current assertion. The collapsed historical report below is superseded, including its counts, severity, scenarios and fix instructions. Plan IDs preserve historical numbering, not a current release mandate. [Workspace methodology and status definitions](../SUMMARY.md#status-definitions).
+This section is authoritative for current decisions. Existing IDs and allegation titles are retained for traceability; a refuted title is not a current assertion. Prior-cycle decisions were rechecked, not used as proof. The first cycle is available in repository history at this snapshot. The original historical body below remains preserved once and is superseded, including its counts, severities and recipes. [Workspace scope and status definitions](../SUMMARY.md#status-definitions).
 
-All structural cleanup conditions remain. Import placement and export consistency are style/API debt, not medium runtime defects; the trait-implementation criticism itself needs correction.
+Unrelated external edits began in dependency/toolchain/CI metadata during collection; additional Rust-source edits appeared afterward. They were left untouched. Evidence and decisions are tied to the frozen commit, not those later changes or an installed toolchain. “Current” below means current at that snapshot; no re-audit of the modified working tree is implied.
+
+The stated structural conditions persist, generally at nit severity. Public module access, registered integration tests and explicit local trait implementations provide important counter-evidence to broader criticism.
 
 ## Current claim decisions
 
@@ -13,19 +15,21 @@ All structural cleanup conditions remain. Import placement and export consistenc
 |---:|---:|---:|---:|---:|---:|---:|
 | 8 | 8 | 0 | 0 | 0 | 0 | 0 |
 
-These are decisions on report claims, including repeated roots, bundled observations and non-findings—not a unique-bug census. Closed/N/A rows have no current risk; unverified risk is provisional. Pure style and unmeasured optimization claims do not establish runtime impact.
+These are duplicate-inclusive report decisions, not a unique-bug census. Pure style or structural optimization does not establish a runtime incident; unverified impact remains provisional.
 
 <a id="review-1"></a>
 
 ### Claim 1 — Crate-root re-exports are partial, stale, and used by nobody
 
-Status: `confirmed-open`. Current risk: `low`.
+Status: `confirmed-open`. Current risk: `nit`.
 
-Root exports remain incomplete and test wiring remains interleaved. No repository Rust consumer uses the root exports; this does not establish absence of external consumers.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-transport-tcp/src/lib.rs:12](../../../../../crates/shamir-transport-tcp/src/lib.rs#L12); [crates/shamir-transport-tcp/src/lib.rs:13](../../../../../crates/shamir-transport-tcp/src/lib.rs#L13); [crates/shamir-transport-tcp/src/lib.rs:16](../../../../../crates/shamir-transport-tcp/src/lib.rs#L16); [crates/shamir-client/src/client.rs:39](../../../../../crates/shamir-client/src/client.rs#L39).
+Root aliases are partial and unused by repository Rust callers, but public module paths remain complete. No rule requires every item at the root, and removal still changes the API.
 
-Grouping/duplicate: `SUMMARY.md#7.1`. This row is not another independent defect.
+Evidence: [crates/shamir-transport-tcp/src/lib.rs:8](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-transport-tcp/src/lib.rs#L8); [crates/shamir-transport-tcp/src/lib.rs:12](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-transport-tcp/src/lib.rs#L12); [crates/shamir-client/src/client.rs:39](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-client/src/client.rs#L39).
+
+Grouping/duplicate: [SUMMARY.md#7.1](SUMMARY.md#review-7-1). This is not an additional independent defect.
 
 <a id="review-2"></a>
 
@@ -33,23 +37,27 @@ Grouping/duplicate: `SUMMARY.md#7.1`. This row is not another independent defect
 
 Status: `confirmed-open`. Current risk: `nit`.
 
-The identified local imports remain without a documented exception. There are six use statements across four enclosing bodies, not five statements/sites; no functional failure follows from their placement.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-transport-tcp/tests/framing.rs:50](../../../../../crates/shamir-transport-tcp/tests/framing.rs#L50); [crates/shamir-transport-tcp/tests/framing.rs:155](../../../../../crates/shamir-transport-tcp/tests/framing.rs#L155); [crates/shamir-transport-tcp/tests/tls13_only.rs:36](../../../../../crates/shamir-transport-tcp/tests/tls13_only.rs#L36); [crates/shamir-transport-tcp/tests/echo_e2e.rs:208](../../../../../crates/shamir-transport-tcp/tests/echo_e2e.rs#L208).
+Six statements in four bodies remain; no scope exception is documented. The TLS fixture already imports CertificateDer at file scope.
 
-Grouping/duplicate: `SUMMARY.md#7.2`. This row is not another independent defect.
+Evidence: [crates/shamir-transport-tcp/tests/framing.rs:50](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-transport-tcp/tests/framing.rs#L50); [crates/shamir-transport-tcp/tests/tls13_only.rs:36](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-transport-tcp/tests/tls13_only.rs#L36); [crates/shamir-transport-tcp/tests/echo_e2e.rs:208](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-transport-tcp/tests/echo_e2e.rs#L208).
+
+Grouping/duplicate: [SUMMARY.md#7.2](SUMMARY.md#review-7-2). This is not an additional independent defect.
 
 <a id="review-3"></a>
 
 ### Claim 3 — Spec wire constant duplicated from a direct dependency
 
-Status: `confirmed-open`. Current risk: `low`.
+Status: `confirmed-open`. Current risk: `nit`.
 
-The exporter label still duplicates the identical shamir-connect constant, and the context remains public without an external repository consumer. No current label mismatch exists.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-transport-tcp/src/tls.rs:18](../../../../../crates/shamir-transport-tcp/src/tls.rs#L18); [crates/shamir-transport-tcp/src/tls.rs:20](../../../../../crates/shamir-transport-tcp/src/tls.rs#L20); [crates/shamir-connect/src/common/domain_tags.rs:35](../../../../../crates/shamir-connect/src/common/domain_tags.rs#L35); [crates/shamir-transport-tcp/Cargo.toml:11](../../../../../crates/shamir-transport-tcp/Cargo.toml#L11).
+The label duplicates an identical dependency constant; context is public. No current mismatch exists, and future drift is a maintenance hypothesis.
 
-Grouping/duplicate: `SUMMARY.md#7.5`. This row is not another independent defect.
+Evidence: [crates/shamir-transport-tcp/src/tls.rs:18](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-transport-tcp/src/tls.rs#L18); [crates/shamir-connect/src/common/domain_tags.rs:35](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-connect/src/common/domain_tags.rs#L35).
+
+Grouping/duplicate: [SUMMARY.md#7.5](SUMMARY.md#review-7-5). This is not an additional independent defect.
 
 <a id="review-4"></a>
 
@@ -57,23 +65,27 @@ Grouping/duplicate: `SUMMARY.md#7.5`. This row is not another independent defect
 
 Status: `confirmed-open`. Current risk: `nit`.
 
-Both unused repository constants and redundant allowances remain. Their public reachability makes the dead_code allowances unnecessary; no runtime defect is demonstrated.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-transport-tcp/src/listener.rs:96](../../../../../crates/shamir-transport-tcp/src/listener.rs#L96).
+The allowances are redundant for publicly reachable constants. No repository consumer exists, but public reachability prevents treating removal as purely private cleanup.
 
-Grouping/duplicate: `SUMMARY.md#7.3`. This row is not another independent defect.
+Evidence: [crates/shamir-transport-tcp/src/listener.rs:96](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-transport-tcp/src/listener.rs#L96).
+
+Grouping/duplicate: [SUMMARY.md#7.3](SUMMARY.md#review-7-3). This is not an additional independent defect.
 
 <a id="review-5"></a>
 
 ### Claim 5 — In-src `tests/` layout covers only one of three modules
 
-Status: `confirmed-open`. Current risk: `low`.
+Status: `confirmed-open`. Current risk: `nit`.
 
-The source test manifest still contains only listener_tests. Pure framing tests remain in the integration file and no TLS unit-error suite exists.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-transport-tcp/src/tests/mod.rs:1](../../../../../crates/shamir-transport-tcp/src/tests/mod.rs#L1); [crates/shamir-transport-tcp/tests/framing.rs:203](../../../../../crates/shamir-transport-tcp/tests/framing.rs#L203); [crates/shamir-transport-tcp/src/lib.rs:13](../../../../../crates/shamir-transport-tcp/src/lib.rs#L13).
+Only listener_tests is a unit module; framing tests are valid integration targets. The structural rule is not fully realized, but integration placement itself does not invalidate those tests.
 
-Grouping/duplicate: `SUMMARY.md#7.4`. This row is not another independent defect.
+Evidence: [crates/shamir-transport-tcp/src/tests/mod.rs:1](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-transport-tcp/src/tests/mod.rs#L1); [crates/shamir-transport-tcp/tests/framing.rs:203](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-transport-tcp/tests/framing.rs#L203).
+
+Grouping/duplicate: [SUMMARY.md#7.4](SUMMARY.md#review-7-4). This is not an additional independent defect.
 
 <a id="review-6"></a>
 
@@ -81,11 +93,13 @@ Grouping/duplicate: `SUMMARY.md#7.4`. This row is not another independent defect
 
 Status: `confirmed-open`. Current risk: `nit`.
 
-The claimed direct rustls-connection implementations and version-decoupling rationale remain inaccurate. However, the report's assertion that tokio-rustls streams do not implement this local trait is positively contradicted by the two impl blocks.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-transport-tcp/src/tls.rs:85](../../../../../crates/shamir-transport-tcp/src/tls.rs#L85); [crates/shamir-transport-tcp/src/tls.rs:98](../../../../../crates/shamir-transport-tcp/src/tls.rs#L98); [crates/shamir-transport-tcp/src/tls.rs:111](../../../../../crates/shamir-transport-tcp/src/tls.rs#L111).
+Both explicit tokio-rustls implementations exist. The actual inaccuracies are the standalone rustls-connection claim and version-decoupling rationale despite a rustls::Error signature.
 
-Grouping/duplicate: `SUMMARY.md#5.4`. This row is not another independent defect.
+Evidence: [crates/shamir-transport-tcp/src/tls.rs:85](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-transport-tcp/src/tls.rs#L85); [crates/shamir-transport-tcp/src/tls.rs:95](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-transport-tcp/src/tls.rs#L95); [crates/shamir-transport-tcp/src/tls.rs:98](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-transport-tcp/src/tls.rs#L98); [crates/shamir-transport-tcp/src/tls.rs:111](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-transport-tcp/src/tls.rs#L111).
+
+Grouping/duplicate: [SUMMARY.md#5.4](SUMMARY.md#review-5-4). This is not an additional independent defect.
 
 <a id="review-7"></a>
 
@@ -93,11 +107,13 @@ Grouping/duplicate: `SUMMARY.md#5.4`. This row is not another independent defect
 
 Status: `confirmed-open`. Current risk: `nit`.
 
-The variant still mentions Unix sockets while the enforcement methods accept SocketAddr and create TcpListener. Clarify the broader policy versus this TCP-only API.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-transport-tcp/src/listener.rs:30](../../../../../crates/shamir-transport-tcp/src/listener.rs#L30); [crates/shamir-transport-tcp/src/listener.rs:40](../../../../../crates/shamir-transport-tcp/src/listener.rs#L40); [crates/shamir-transport-tcp/src/listener.rs:75](../../../../../crates/shamir-transport-tcp/src/listener.rs#L75).
+The broader UDS policy is valid, but allows/bind_validated are TCP-address APIs. Qualifying their scope resolves the ambiguity.
 
-Grouping/duplicate: `SUMMARY.md#5.3`. This row is not another independent defect.
+Evidence: [crates/shamir-transport-tcp/src/listener.rs:30](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-transport-tcp/src/listener.rs#L30); [crates/shamir-transport-tcp/src/listener.rs:75](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-transport-tcp/src/listener.rs#L75).
+
+Grouping/duplicate: [SUMMARY.md#5.3](SUMMARY.md#review-5-3). This is not an additional independent defect.
 
 <a id="review-8"></a>
 
@@ -105,19 +121,20 @@ Grouping/duplicate: `SUMMARY.md#5.3`. This row is not another independent defect
 
 Status: `confirmed-open`. Current risk: `nit`.
 
-The TLS header still mixes rustls::pki_types and direct rustls_pki_types imports. This is spelling consistency only, not evidence of distinct incompatible types.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-transport-tcp/src/tls.rs:10](../../../../../crates/shamir-transport-tcp/src/tls.rs#L10); [crates/shamir-transport-tcp/src/tls.rs:12](../../../../../crates/shamir-transport-tcp/src/tls.rs#L12).
+The direct and re-exported pki-types imports resolve to the same locked package; only spelling consistency is at issue.
 
-Grouping/duplicate: `SUMMARY.md#7.6`. This row is not another independent defect.
+Evidence: [crates/shamir-transport-tcp/src/tls.rs:10](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-transport-tcp/src/tls.rs#L10); [crates/shamir-transport-tcp/src/tls.rs:12](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-transport-tcp/src/tls.rs#L12); [Cargo.lock:3063](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/Cargo.lock#L3063).
 
-## Corrections and qualified non-findings
+Grouping/duplicate: [SUMMARY.md#7.6](SUMMARY.md#review-7-6). This is not an additional independent defect.
 
-- Recalibrate export consistency to low and local imports/dead public constants to nit; these are not runtime medium-severity defects.
-- The local-import count is six statements in four bodies.
-- Local trait impls do make upstream stream types implement ConnectionExporter. The actual missing implementation is for standalone rustls connection types claimed in the documentation.
-- No inline implementation-file test modules, manifest-only tests/mod.rs, coherent per-file groups, top-level implementation imports, thiserror framing/listener errors, disabled doctests and the required benchmark harness remain source-supported.
-- No repository caller does not imply no external public-API consumer; removal still deserves compatibility consideration.
+## Evidence and recipe corrections
+
+- The proposed crate-root src/tests/framing_tests.rs move is not the same as the expressly described src/framing/tests per-module layout.
+- Public constants/root exports/context should not be deleted or privatized merely because repository searches find no callers.
+- Ordinary Cargo integration tests are not structurally invalid just because their subject can also be tested at unit scope.
+- Completing root aliases and unifying import spelling are preferences; they should not be presented as runtime defects.
 
 ---
 

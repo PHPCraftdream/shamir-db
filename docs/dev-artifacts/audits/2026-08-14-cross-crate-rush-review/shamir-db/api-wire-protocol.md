@@ -1,19 +1,21 @@
-<!-- revalidation:2026-10-08 source:92ad58266bf57ddea1fa3c8a47affba1a3a9a096 -->
-# shamir-db — api-wire-protocol revalidation
+<!-- revalidation:2026-10-08 cycle:independent-2 source:e3765c935fc71655ee1ec0160cf180607935d89b -->
+# shamir-db — api-wire-protocol independent revalidation (cycle 2)
 
-Source snapshot: `92ad58266bf57ddea1fa3c8a47affba1a3a9a096`. Revalidated 2026-10-08 by read-only XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run; no source fix is part of this update. Test registration/assertions are evidence of an oracle, not proof of a passing run.
+Frozen source snapshot: `e3765c935fc71655ee1ec0160cf180607935d89b`. Independently revalidated 2026-10-08 by a fresh XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run. Source-fixed means the specified mechanism was already removed at this snapshot; this cycle implements no source fix.
 
-This section is authoritative for current status. Original titles/IDs are retained for traceability; a refuted title is not a current assertion. The collapsed historical report below is superseded, including its counts, severity, scenarios and fix instructions. Plan IDs preserve historical numbering, not a current release mandate. [Workspace methodology and status definitions](../SUMMARY.md#status-definitions).
+This section is authoritative for current decisions. Existing IDs and allegation titles are retained for traceability; a refuted title is not a current assertion. Prior-cycle decisions were rechecked, not used as proof. The first cycle is available in repository history at this snapshot. The original historical body below remains preserved once and is superseded, including its counts, severities and recipes. [Workspace scope and status definitions](../SUMMARY.md#status-definitions).
 
-Validator replacement remains a substantive correctness defect. Most other rows describe open API/design hygiene rather than runtime High risks. Actual server routes use the canonical actor-aware batch API; optional error codes and human-readable abort reasons must not be represented as a violated closed-code schema.
+Unrelated external edits began in dependency/toolchain/CI metadata during collection; additional Rust-source edits appeared afterward. They were left untouched. Evidence and decisions are tied to the frozen commit, not those later changes or an installed toolchain. “Current” below means current at that snapshot; no re-audit of the modified working tree is implied.
+
+Validator identity/binding destruction and silent isolation downgrade are concrete defects. The legacy shim and error-conversion sites retain hygiene debt; privileged wrappers and optional error fields are documented contracts.
 
 ## Current claim decisions
 
 | Claim decisions | Open | Source-fixed | Partial | Refuted | Unverified | N/A |
 |---:|---:|---:|---:|---:|---:|---:|
-| 12 | 12 | 0 | 0 | 0 | 0 | 0 |
+| 12 | 10 | 0 | 0 | 0 | 0 | 2 |
 
-These are decisions on report claims, including repeated roots, bundled observations and non-findings—not a unique-bug census. Closed/N/A rows have no current risk; unverified risk is provisional. Pure style and unmeasured optimization claims do not establish runtime impact.
+These are duplicate-inclusive report decisions, not a unique-bug census. Pure style or structural optimization does not establish a runtime incident; unverified impact remains provisional.
 
 <a id="review-1"></a>
 
@@ -21,9 +23,11 @@ These are decisions on report claims, including repeated roots, bundled observat
 
 Status: `confirmed-open`. Current risk: `high`.
 
-The facade still chooses identity only from the live registry, writes empty bound_in and removes/re-registers. Registry removal clears its reverse binding set, allowing drop while table-side bindings remain. replace_artifact exists but is not used here.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-db/src/shamir_db/shamir_db/validator_management.rs:249](../../../../../crates/shamir-db/src/shamir_db/shamir_db/validator_management.rs#L249); [crates/shamir-db/src/shamir_db/shamir_db/validator_management.rs:284](../../../../../crates/shamir-db/src/shamir_db/shamir_db/validator_management.rs#L284); [crates/shamir-db/src/shamir_db/shamir_db/validator_management.rs:305](../../../../../crates/shamir-db/src/shamir_db/shamir_db/validator_management.rs#L305); [crates/shamir-engine/src/validator/registry.rs:112](../../../../../crates/shamir-engine/src/validator/registry.rs#L112); [crates/shamir-engine/src/validator/registry.rs:156](../../../../../crates/shamir-engine/src/validator/registry.rs#L156).
+Replace saves bound_in=[] and removes the live entry, erasing its reverse binding set. Drop then succeeds despite persisted table-side bindings; those writes fail closed after removal. The discriminating regression must replace an already-bound validator, preserve its ID/bookkeeping, and still refuse drop.
+
+Evidence: [crates/shamir-db/src/shamir_db/shamir_db/validator_management.rs:249](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/shamir_db/validator_management.rs#L249); [crates/shamir-db/src/shamir_db/shamir_db/validator_management.rs:284](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/shamir_db/validator_management.rs#L284); [crates/shamir-db/src/shamir_db/shamir_db/validator_management.rs:305](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/shamir_db/validator_management.rs#L305); [crates/shamir-engine/src/validator/registry.rs:156](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-engine/src/validator/registry.rs#L156); [crates/shamir-db/tests/validators_e2e.rs:488](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/tests/validators_e2e.rs#L488).
 
 <a id="review-2"></a>
 
@@ -31,19 +35,23 @@ Evidence: [crates/shamir-db/src/shamir_db/shamir_db/validator_management.rs:249]
 
 Status: `confirmed-open`. Current risk: `low`.
 
-The legacy envelope remains exported and only its own tests consume it; the server imports canonical DbRequest. Its README already identifies it as vestigial and unsupported. Discoverability debt is real, but no current runtime High defect is established.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-db/src/lib.rs:26](../../../../../crates/shamir-db/src/lib.rs#L26); [crates/shamir-db/src/api/types.rs:24](../../../../../crates/shamir-db/src/api/types.rs#L24); [crates/shamir-db/src/api/README.md:1](../../../../../crates/shamir-db/src/api/README.md#L1); [crates/shamir-server/src/db_handler/handler.rs:84](../../../../../crates/shamir-server/src/db_handler/handler.rs#L84).
+The DTOs remain public with client/server prose, but their README identifies them as vestigial and no workspace transport consumes them. No active protocol incompatibility is demonstrated. Removing them changes an external Rust API.
+
+Evidence: [crates/shamir-db/src/lib.rs:26](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/lib.rs#L26); [crates/shamir-db/src/api/types.rs:24](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/api/types.rs#L24); [crates/shamir-db/src/api/README.md:17](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/api/README.md#L17).
 
 <a id="review-3"></a>
 
 ### Claim 3 — Convenience `execute` / `tx_begin` / `tx_execute` / `tx_commit` default to `Actor::System` (admin bypass)
 
-Status: `confirmed-open`. Current risk: `low`.
+Status: `not-applicable`. Current risk: `—`.
 
-The four wrappers remain public System delegates without hiding/deprecation. Current server execute and transaction handlers use *_as, so the observed issue is an embedding footgun rather than an existing wire bypass.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-db/src/shamir_db/execute/db_execute.rs:19](../../../../../crates/shamir-db/src/shamir_db/execute/db_execute.rs#L19); [crates/shamir-db/src/shamir_db/execute/db_tx.rs:41](../../../../../crates/shamir-db/src/shamir_db/execute/db_tx.rs#L41); [crates/shamir-db/src/shamir_db/execute/db_tx.rs:106](../../../../../crates/shamir-db/src/shamir_db/execute/db_tx.rs#L106); [crates/shamir-db/src/shamir_db/execute/db_tx.rs:159](../../../../../crates/shamir-db/src/shamir_db/execute/db_tx.rs#L159); [crates/shamir-server/src/db_handler/tx_handlers.rs:29](../../../../../crates/shamir-server/src/db_handler/tx_handlers.rs#L29).
+These methods intentionally delegate with System and actor-aware counterparts exist. The embedded trust model accepts privileged direct APIs; inspected server paths call *_as. Better warnings are optional, not a source-proven authentication defect.
+
+Evidence: [crates/shamir-db/src/shamir_db/execute/db_execute.rs:19](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/execute/db_execute.rs#L19); [crates/shamir-db/src/shamir_db/execute/db_tx.rs:41](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/execute/db_tx.rs#L41); [crates/shamir-db/src/shamir_db/execute/db_tx.rs:106](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/execute/db_tx.rs#L106); [crates/shamir-db/src/shamir_db/execute/db_tx.rs:159](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/execute/db_tx.rs#L159); [docs/guide-docs/client-server-protocol-spec/SECURITY_MODEL.md:111](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/docs/guide-docs/client-server-protocol-spec/SECURITY_MODEL.md#L111).
 
 <a id="review-4"></a>
 
@@ -51,19 +59,23 @@ Evidence: [crates/shamir-db/src/shamir_db/execute/db_execute.rs:19](../../../../
 
 Status: `confirmed-open`. Current risk: `low`.
 
-Typed operation/request literals remain in SystemStore, replication and the gateway without the requested exception rationale; the builder is still dev-only. This is convention/maintenance debt, not evidence of malformed wire or runtime corruption.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [CLAUDE.md:516](../../../../../CLAUDE.md#L516); [crates/shamir-db/src/shamir_db/system_store.rs:199](../../../../../crates/shamir-db/src/shamir_db/system_store.rs#L199); [crates/shamir-db/src/shamir_db/execute/admin_replication.rs:87](../../../../../crates/shamir-db/src/shamir_db/execute/admin_replication.rs#L87); [crates/shamir-db/src/shamir_db/shamir_db/db_gateway.rs:130](../../../../../crates/shamir-db/src/shamir_db/shamir_db/db_gateway.rs#L130); [crates/shamir-db/Cargo.toml:102](../../../../../crates/shamir-db/Cargo.toml#L102).
+SystemStore, replication and gateway construct typed DTOs while the builder is dev-only and lacks the requested exception explanation. This is convention debt; no malformed request is established. Moving construction must preserve explicit defaults, field paths and batch semantics.
+
+Evidence: [CLAUDE.md:516](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/CLAUDE.md#L516); [crates/shamir-db/src/shamir_db/system_store.rs:199](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/system_store.rs#L199); [crates/shamir-db/src/shamir_db/execute/admin_replication.rs:87](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/execute/admin_replication.rs#L87); [crates/shamir-db/src/shamir_db/shamir_db/db_gateway.rs:130](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/shamir_db/db_gateway.rs#L130); [crates/shamir-db/Cargo.toml:102](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/Cargo.toml#L102).
 
 <a id="review-5"></a>
 
 ### Claim 5 — Wire error-`code` contract populated unevenly across handler families; `TransactionInfo::aborted` reason mixes stable codes with free text
 
-Status: `confirmed-open`. Current risk: `low`.
+Status: `not-applicable`. Current risk: `—`.
 
-Uneven codes and mixed abort strings remain. However, BatchError explicitly permits an optional code and TransactionInfo documents reason as human-readable; requiring a closed abort-code field would be a new contract, not restoration of a proven current guarantee.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-db/src/shamir_db/execute/db_tx.rs:71](../../../../../crates/shamir-db/src/shamir_db/execute/db_tx.rs#L71); [crates/shamir-db/src/shamir_db/execute/db_tx.rs:217](../../../../../crates/shamir-db/src/shamir_db/execute/db_tx.rs#L217); [crates/shamir-query-types/src/batch/batch_error.rs:36](../../../../../crates/shamir-query-types/src/batch/batch_error.rs#L36); [crates/shamir-query-types/src/batch/transaction_info.rs:14](../../../../../crates/shamir-query-types/src/batch/transaction_info.rs#L14).
+The observed fields conform to their documented types: code is optional and reason is human-readable. Specific promised codes remain testable, but a universally closed vocabulary is a proposed API redesign.
+
+Evidence: [crates/shamir-query-types/src/batch/batch_error.rs:36](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-query-types/src/batch/batch_error.rs#L36); [crates/shamir-query-types/src/batch/transaction_info.rs:14](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-query-types/src/batch/transaction_info.rs#L14); [crates/shamir-db/src/shamir_db/execute/db_tx.rs:217](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/execute/db_tx.rs#L217).
 
 <a id="review-6"></a>
 
@@ -71,9 +83,11 @@ Evidence: [crates/shamir-db/src/shamir_db/execute/db_tx.rs:71](../../../../../cr
 
 Status: `confirmed-open`. Current risk: `medium`.
 
-Only the exact serializable string selects Serializable; every other input selects Snapshot. The server forwards the requested string and even reports it back, so an invalid requested isolation can succeed under weaker semantics.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-db/src/shamir_db/execute/db_tx.rs:80](../../../../../crates/shamir-db/src/shamir_db/execute/db_tx.rs#L80); [crates/shamir-server/src/db_handler/tx_handlers.rs:26](../../../../../crates/shamir-server/src/db_handler/tx_handlers.rs#L26); [crates/shamir-server/src/db_handler/tx_handlers.rs:64](../../../../../crates/shamir-server/src/db_handler/tx_handlers.rs#L64).
+Only exact serializable selects Serializable; a typo succeeds as Snapshot and TxOpened echoes the typo. The oracle must inspect selected isolation or reject invalid input, not merely assert BEGIN succeeded.
+
+Evidence: [crates/shamir-db/src/shamir_db/execute/db_tx.rs:80](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/execute/db_tx.rs#L80); [crates/shamir-server/src/db_handler/tx_handlers.rs:26](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-server/src/db_handler/tx_handlers.rs#L26); [crates/shamir-server/src/db_handler/tx_handlers.rs:64](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-server/src/db_handler/tx_handlers.rs#L64).
 
 <a id="review-7"></a>
 
@@ -81,9 +95,11 @@ Evidence: [crates/shamir-db/src/shamir_db/execute/db_tx.rs:80](../../../../../cr
 
 Status: `confirmed-open`. Current risk: `low`.
 
-The generic helper still discards encoding/decoding errors and returns Null; ChangesSince maps every event through it. Silent error collapse is source-proven, but an actual currently failing event/DTO serialization was not demonstrated.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-db/src/shamir_db/execute/helpers.rs:73](../../../../../crates/shamir-db/src/shamir_db/execute/helpers.rs#L73); [crates/shamir-db/src/shamir_db/execute/admin_retention.rs:206](../../../../../crates/shamir-db/src/shamir_db/execute/admin_retention.rs#L206).
+The generic helper discards either Result error; ChangesSince applies it to each event. Exact rmp-serde 1.3.1 archive source confirms the fallible conversion path. A currently failing event was not shown, so projection corruption remains a hypothetical consequence.
+
+Evidence: [crates/shamir-db/src/shamir_db/execute/helpers.rs:73](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/execute/helpers.rs#L73); [crates/shamir-db/src/shamir_db/execute/admin_retention.rs:206](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/execute/admin_retention.rs#L206); [Cargo.lock:2949](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/Cargo.lock#L2949).
 
 <a id="review-8"></a>
 
@@ -91,11 +107,13 @@ Evidence: [crates/shamir-db/src/shamir_db/execute/helpers.rs:73](../../../../../
 
 Status: `confirmed-open`. Current risk: `low`.
 
-The unused TLS declarations and lib documentation advertising an absent net module remain. This establishes manifest/documentation debt, not automatically linked reachable TLS attack surface.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-db/Cargo.toml:64](../../../../../crates/shamir-db/Cargo.toml#L64); [crates/shamir-db/src/lib.rs:8](../../../../../crates/shamir-db/src/lib.rs#L8).
+The direct declarations and stale lib documentation remain; inspected facade source has no corresponding module or consumers. Dependency cleanup does not automatically remove shared lockfile packages.
 
-Grouping/duplicate: `security-crypto.md#5`. This row is not another independent defect.
+Evidence: [crates/shamir-db/Cargo.toml:64](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/Cargo.toml#L64); [crates/shamir-db/src/lib.rs:8](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/lib.rs#L8).
+
+Grouping/duplicate: [security-crypto.md#5](security-crypto.md#review-5). This is not an additional independent defect.
 
 <a id="review-9"></a>
 
@@ -103,21 +121,25 @@ Grouping/duplicate: `security-crypto.md#5`. This row is not another independent 
 
 Status: `confirmed-open`. Current risk: `low`.
 
-Invalid RecordId input still becomes Internal, and every table-resolution DbError is string-wrapped into Internal. Validation and underlying NotFound/Storage identity are lost.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-db/src/shamir_db/shamir_db/core.rs:764](../../../../../crates/shamir-db/src/shamir_db/shamir_db/core.rs#L764); [crates/shamir-db/src/shamir_db/shamir_db/core.rs:772](../../../../../crates/shamir-db/src/shamir_db/shamir_db/core.rs#L772).
+RecordId parse failure and every underlying table-resolution error are wrapped as Internal. Parse failure should remain distinguishable from missing tables and real storage failure; converting every resolution error to NotFound is also wrong.
 
-Grouping/duplicate: `error-handling-lifecycle.md#10`. This row is not another independent defect.
+Evidence: [crates/shamir-db/src/shamir_db/shamir_db/core.rs:764](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/shamir_db/core.rs#L764); [crates/shamir-db/src/shamir_db/shamir_db/core.rs:772](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/shamir_db/core.rs#L772).
+
+Grouping/duplicate: [error-handling-lifecycle.md#10](error-handling-lifecycle.md#review-10). This is not an additional independent defect.
 
 <a id="review-10"></a>
 
 ### Claim 10 — Catalogue `wasm_hash` and `version` fields are dead, and the hash is not integrity-grade
 
-Status: `confirmed-open`. Current risk: `low`.
+Status: `confirmed-open`. Current risk: `nit`.
 
-WASM rows still store write-only FxHash metadata; function version remains 1 on replacement. Validators do not write version, contrary to the report. Native rows omit WASM hashes. No active integrity/version enforcement consumer was found.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-db/src/shamir_db/shamir_db/function_management.rs:187](../../../../../crates/shamir-db/src/shamir_db/shamir_db/function_management.rs#L187); [crates/shamir-db/src/shamir_db/shamir_db/function_management.rs:205](../../../../../crates/shamir-db/src/shamir_db/shamir_db/function_management.rs#L205); [crates/shamir-db/src/shamir_db/shamir_db/validator_management.rs:267](../../../../../crates/shamir-db/src/shamir_db/shamir_db/validator_management.rs#L267); [crates/shamir-db/src/shamir_db/shamir_db/validator_management.rs:119](../../../../../crates/shamir-db/src/shamir_db/shamir_db/validator_management.rs#L119); [Cargo.lock:3008](../../../../../Cargo.lock#L3008).
+WASM rows write noncryptographic FxHash metadata without verification; function replacement writes version 1. Validators write no version and native rows omit WASM hashes. Neither field currently establishes an integrity/version promise.
+
+Evidence: [crates/shamir-db/src/shamir_db/shamir_db/function_management.rs:187](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/shamir_db/function_management.rs#L187); [crates/shamir-db/src/shamir_db/shamir_db/function_management.rs:205](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/shamir_db/function_management.rs#L205); [crates/shamir-db/src/shamir_db/shamir_db/validator_management.rs:267](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/shamir_db/validator_management.rs#L267); [Cargo.lock:3007](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/Cargo.lock#L3007).
 
 <a id="review-11"></a>
 
@@ -125,11 +147,13 @@ Evidence: [crates/shamir-db/src/shamir_db/shamir_db/function_management.rs:187](
 
 Status: `confirmed-open`. Current risk: `high`.
 
-Creation returns DbInstance after warn-only persistence failure, and the wire handler unconditionally reports created. The report's contrasting add_repo_as also swallows its catalogue failures; only other failures propagate there.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-db/src/shamir_db/shamir_db/db_management.rs:58](../../../../../crates/shamir-db/src/shamir_db/shamir_db/db_management.rs#L58); [crates/shamir-db/src/shamir_db/execute/admin_db_repo.rs:67](../../../../../crates/shamir-db/src/shamir_db/execute/admin_db_repo.rs#L67); [crates/shamir-db/src/shamir_db/shamir_db/db_management.rs:396](../../../../../crates/shamir-db/src/shamir_db/shamir_db/db_management.rs#L396).
+create_db_as returns DbInstance after warn-only save failure; the handler reports created=true. A pre-commit failure can leave no catalogue record; a post-commit flush/persist error may instead leave committed state, so the outcome must distinguish those cases.
 
-Grouping/duplicate: `error-handling-lifecycle.md#1`. This row is not another independent defect.
+Evidence: [crates/shamir-db/src/shamir_db/shamir_db/db_management.rs:58](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/shamir_db/db_management.rs#L58); [crates/shamir-db/src/shamir_db/execute/admin_db_repo.rs:67](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/execute/admin_db_repo.rs#L67).
+
+Grouping/duplicate: [error-handling-lifecycle.md#1](error-handling-lifecycle.md#review-1). This is not an additional independent defect.
 
 <a id="review-12"></a>
 
@@ -137,19 +161,19 @@ Grouping/duplicate: `error-handling-lifecycle.md#1`. This row is not another ind
 
 Status: `confirmed-open`. Current risk: `nit`.
 
-Clock unwrap, Debug gateway rendering, codec-demo binary and ports prose typo remain. Debug formatting actually includes QueryError.code; it loses structured access, not necessarily the textual code.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-db/src/shamir_db/execute/helpers.rs:61](../../../../../crates/shamir-db/src/shamir_db/execute/helpers.rs#L61); [crates/shamir-db/src/shamir_db/shamir_db/db_gateway.rs:88](../../../../../crates/shamir-db/src/shamir_db/shamir_db/db_gateway.rs#L88); [crates/shamir-db/src/main.rs:7](../../../../../crates/shamir-db/src/main.rs#L7); [crates/shamir-db/src/shamir_db/ports.rs:6](../../../../../crates/shamir-db/src/shamir_db/ports.rs#L6); [crates/shamir-query-types/src/batch/batch_error.rs:39](../../../../../crates/shamir-query-types/src/batch/batch_error.rs#L39).
+All four sites remain. Derived Debug contains QueryError.code text but loses structured identity; Display alone does not guarantee a code-preserving string contract. The codec-demo binary is real, not the production server.
 
-## Corrections and qualified non-findings
+Evidence: [crates/shamir-db/src/shamir_db/execute/helpers.rs:61](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/execute/helpers.rs#L61); [crates/shamir-db/src/shamir_db/shamir_db/db_gateway.rs:88](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/shamir_db/db_gateway.rs#L88); [crates/shamir-db/src/main.rs:7](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/main.rs#L7); [crates/shamir-db/src/shamir_db/ports.rs:6](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/ports.rs#L6).
 
-- The bound-validator replacement defect is confirmed in both durable and live bookkeeping; no relevant registered bound-replace-then-drop regression was found.
-- Native replacement is not a binding-preserving reference implementation: it also writes empty bound_in and removes the old registry entry.
-- Treat the unused legacy API shim as low-severity API hygiene, not runtime High. Removing it may affect external Rust consumers even though no workspace transport uses it.
-- Optional BatchError.code and human-readable TransactionInfo.reason are documented contracts. Standardizing them needs an explicit compatibility/design decision.
-- Only function rows write version: 1; do not claim every validator row does. FxHash remains metadata rather than a verified security control.
-- Debug rendering is unstable/unstructured but does not intrinsically omit the code field.
-- Unit and multi-file integration manifests are wired; public versus private test-module visibility is not required for test discovery.
+## Evidence and recipe corrections
+
+- System convenience methods and optional error metadata are deliberate contracts, not currently violated authentication or wire-schema guarantees.
+- Native validator replacement is only an identity-fallback reference; it also destroys binding bookkeeping.
+- A safe replacement recipe must handle a catalogue-only ID when replace_artifact returns false, preserve existing ownership unless explicitly changed, and reconcile table-side bindings.
+- Malformed status input can map to Validation, but preserve the actual table-resolution error rather than manufacturing NotFound.
+- Metadata removal or introducing digest/version enforcement needs a compatibility decision; no current verified integrity control has failed.
 
 ---
 

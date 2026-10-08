@@ -1,11 +1,13 @@
-<!-- revalidation:2026-10-08 source:92ad58266bf57ddea1fa3c8a47affba1a3a9a096 -->
-# shamir-transport-tcp — api-wire-protocol revalidation
+<!-- revalidation:2026-10-08 cycle:independent-2 source:e3765c935fc71655ee1ec0160cf180607935d89b -->
+# shamir-transport-tcp — api-wire-protocol independent revalidation (cycle 2)
 
-Source snapshot: `92ad58266bf57ddea1fa3c8a47affba1a3a9a096`. Revalidated 2026-10-08 by read-only XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run; no source fix is part of this update. Test registration/assertions are evidence of an oracle, not proof of a passing run.
+Frozen source snapshot: `e3765c935fc71655ee1ec0160cf180607935d89b`. Independently revalidated 2026-10-08 by a fresh XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run. Source-fixed means the specified mechanism was already removed at this snapshot; this cycle implements no source fix.
 
-This section is authoritative for current status. Original titles/IDs are retained for traceability; a refuted title is not a current assertion. The collapsed historical report below is superseded, including its counts, severity, scenarios and fix instructions. Plan IDs preserve historical numbering, not a current release mandate. [Workspace methodology and status definitions](../SUMMARY.md#status-definitions).
+This section is authoritative for current decisions. Existing IDs and allegation titles are retained for traceability; a refuted title is not a current assertion. Prior-cycle decisions were rechecked, not used as proof. The first cycle is available in repository history at this snapshot. The original historical body below remains preserved once and is superseded, including its counts, severities and recipes. [Workspace scope and status definitions](../SUMMARY.md#status-definitions).
 
-All original API and documentation conditions remain, with negotiated-limit and security consequences qualified. The 32-byte exporter contract is already documented; its error erasure remains open.
+Unrelated external edits began in dependency/toolchain/CI metadata during collection; additional Rust-source edits appeared afterward. They were left untouched. Evidence and decisions are tied to the frozen commit, not those later changes or an installed toolchain. “Current” below means current at that snapshot; no re-audit of the modified working tree is implied.
+
+Wire primitives mostly match the project protocol; the concrete defects are contradictory empty-data documentation and misleading malformed-prefix errors. Several remaining rows are optional API consistency choices.
 
 ## Current claim decisions
 
@@ -13,31 +15,35 @@ All original API and documentation conditions remain, with negotiated-limit and 
 |---:|---:|---:|---:|---:|---:|---:|
 | 12 | 12 | 0 | 0 | 0 | 0 | 0 |
 
-These are decisions on report claims, including repeated roots, bundled observations and non-findings—not a unique-bug census. Closed/N/A rows have no current risk; unverified risk is provisional. Pure style and unmeasured optimization claims do not establish runtime impact.
+These are duplicate-inclusive report decisions, not a unique-bug census. Pure style or structural optimization does not establish a runtime incident; unverified impact remains provisional.
 
 <a id="review-1"></a>
 
 ### Claim 1 — Write API can emit the reserved close marker as a data frame; module doc contradicts spec §2
 
-Status: `confirmed-open`. Current risk: `medium`.
+Status: `confirmed-open`. Current risk: `low`.
 
-Generic data writers accept zero-length input while readers reserve zero for PeerClose; the contradictory documentation remains.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-transport-tcp/src/framing.rs:8](../../../../../crates/shamir-transport-tcp/src/framing.rs#L8); [crates/shamir-transport-tcp/src/framing.rs:153](../../../../../crates/shamir-transport-tcp/src/framing.rs#L153); [crates/shamir-transport-tcp/src/framing.rs:250](../../../../../crates/shamir-transport-tcp/src/framing.rs#L250); [docs/guide-docs/client-server-protocol-spec/TRANSPORT_TCP.md:28](../../../../../docs/guide-docs/client-server-protocol-spec/TRANSPORT_TCP.md#L28).
+Empty generic writes emit zero and both readers return PeerClose. The documented empty-data interpretation is false; forbidding generic close emission is optional API strengthening.
 
-Grouping/duplicate: `SUMMARY.md#1.1`. This row is not another independent defect.
+Evidence: [crates/shamir-transport-tcp/src/framing.rs:8](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-transport-tcp/src/framing.rs#L8); [crates/shamir-transport-tcp/src/framing.rs:153](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-transport-tcp/src/framing.rs#L153); [crates/shamir-transport-tcp/src/framing.rs:250](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-transport-tcp/src/framing.rs#L250).
+
+Grouping/duplicate: [SUMMARY.md#1.1](SUMMARY.md#review-1-1). This is not an additional independent defect.
 
 <a id="review-2"></a>
 
 ### Claim 2 — Library error APIs use `Box<dyn Error + Send + Sync>` instead of a `thiserror` enum
 
-Status: `confirmed-open`. Current risk: `medium`.
+Status: `confirmed-open`. Current risk: `nit`.
 
-Both public TLS setup functions still return boxed errors rather than an enumerable typed error surface.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-transport-tcp/src/tls.rs:30](../../../../../crates/shamir-transport-tcp/src/tls.rs#L30); [crates/shamir-transport-tcp/src/tls.rs:44](../../../../../crates/shamir-transport-tcp/src/tls.rs#L44).
+Both constructors remain boxed. Typed enumeration is absent, but concrete errors can be downcast and callers need not string-match.
 
-Grouping/duplicate: `SUMMARY.md#6.2`. This row is not another independent defect.
+Evidence: [crates/shamir-transport-tcp/src/tls.rs:30](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-transport-tcp/src/tls.rs#L30); [crates/shamir-transport-tcp/src/tls.rs:44](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-transport-tcp/src/tls.rs#L44).
+
+Grouping/duplicate: [SUMMARY.md#6.2](SUMMARY.md#review-6-2). This is not an additional independent defect.
 
 <a id="review-3"></a>
 
@@ -45,35 +51,41 @@ Grouping/duplicate: `SUMMARY.md#6.2`. This row is not another independent defect
 
 Status: `confirmed-open`. Current risk: `low`.
 
-Too-short and mismatched-prefix inputs still use TooLarge, yielding false size-comparison diagnostics.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-transport-tcp/src/framing.rs:24](../../../../../crates/shamir-transport-tcp/src/framing.rs#L24); [crates/shamir-transport-tcp/src/framing.rs:241](../../../../../crates/shamir-transport-tcp/src/framing.rs#L241); [crates/shamir-transport-tcp/src/framing.rs:250](../../../../../crates/shamir-transport-tcp/src/framing.rs#L250).
+Short or inconsistent prefixes produce false size diagnostics. They are rejected before I/O, so the demonstrated consequence is classification/diagnostic error.
 
-Grouping/duplicate: `SUMMARY.md#6.1`. This row is not another independent defect.
+Evidence: [crates/shamir-transport-tcp/src/framing.rs:241](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-transport-tcp/src/framing.rs#L241); [crates/shamir-transport-tcp/src/framing.rs:250](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-transport-tcp/src/framing.rs#L250).
+
+Grouping/duplicate: [SUMMARY.md#6.1](SUMMARY.md#review-6-1). This is not an additional independent defect.
 
 <a id="review-4"></a>
 
 ### Claim 4 — Write-side frame cap is hardcoded to `MAX_FRAME_SIZE_DEFAULT`; reader/writer API asymmetry
 
-Status: `confirmed-open`. Current risk: `low`.
+Status: `confirmed-open`. Current risk: `nit`.
 
-No capped writer companion or writer limit parameter exists. Future negotiation is hypothetical; current phase-specific limits are defined by the protocol.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-transport-tcp/src/framing.rs:47](../../../../../crates/shamir-transport-tcp/src/framing.rs#L47); [crates/shamir-transport-tcp/src/framing.rs:153](../../../../../crates/shamir-transport-tcp/src/framing.rs#L153); [crates/shamir-transport-tcp/src/framing.rs:192](../../../../../crates/shamir-transport-tcp/src/framing.rs#L192); [crates/shamir-transport-tcp/src/framing.rs:250](../../../../../crates/shamir-transport-tcp/src/framing.rs#L250).
+Writers have no supplied-limit parameter. A future negotiated-limit failure is hypothetical; current phase-limit obligations do not alone prove a writer violation.
 
-Grouping/duplicate: `SUMMARY.md#5.1`. This row is not another independent defect.
+Evidence: [crates/shamir-transport-tcp/src/framing.rs:47](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-transport-tcp/src/framing.rs#L47); [crates/shamir-transport-tcp/src/framing.rs:153](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-transport-tcp/src/framing.rs#L153).
+
+Grouping/duplicate: [SUMMARY.md#5.1](SUMMARY.md#review-5-1). This is not an additional independent defect.
 
 <a id="review-5"></a>
 
 ### Claim 5 — Normative loopback predicate is not reusable, so shamir-server duplicates spec §2.2 policy
 
-Status: `confirmed-open`. Current risk: `low`.
+Status: `confirmed-open`. Current risk: `nit`.
 
-The transport predicate remains private and server configuration retains an equivalent independent predicate. They currently agree; divergence is maintenance risk, not an observed policy bypass.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-transport-tcp/src/listener.rs:51](../../../../../crates/shamir-transport-tcp/src/listener.rs#L51); [crates/shamir-server/src/config.rs:820](../../../../../crates/shamir-server/src/config.rs#L820); [crates/shamir-server/src/config.rs:873](../../../../../crates/shamir-server/src/config.rs#L873).
+The private predicates are equivalent; public profile-based validation is reusable. Sharing a smaller primitive is optional maintenance, not current policy disagreement.
 
-Grouping/duplicate: `SUMMARY.md#5.2`. This row is not another independent defect.
+Evidence: [crates/shamir-transport-tcp/src/listener.rs:40](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-transport-tcp/src/listener.rs#L40); [crates/shamir-server/src/config.rs:877](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-server/src/config.rs#L877).
+
+Grouping/duplicate: [SUMMARY.md#5.2](SUMMARY.md#review-5-2). This is not an additional independent defect.
 
 <a id="review-6"></a>
 
@@ -81,23 +93,27 @@ Grouping/duplicate: `SUMMARY.md#5.2`. This row is not another independent defect
 
 Status: `confirmed-open`. Current risk: `low`.
 
-The rustls error is still erased into None. The accompanying claim that fixed output length lacks documentation is contradicted by the function's opening documentation.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-transport-tcp/src/tls.rs:71](../../../../../crates/shamir-transport-tcp/src/tls.rs#L71); [crates/shamir-transport-tcp/src/tls.rs:77](../../../../../crates/shamir-transport-tcp/src/tls.rs#L77); [crates/shamir-transport-tcp/src/tls.rs:81](../../../../../crates/shamir-transport-tcp/src/tls.rs#L81).
+The rustls error is erased. The 32-byte contract is already explicit; server zero fallbacks remain, while the client returns an error.
 
-Grouping/duplicate: `SUMMARY.md#3.3`. This row is not another independent defect.
+Evidence: [crates/shamir-transport-tcp/src/tls.rs:71](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-transport-tcp/src/tls.rs#L71); [crates/shamir-transport-tcp/src/tls.rs:81](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-transport-tcp/src/tls.rs#L81); [crates/shamir-client/src/client.rs:480](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-client/src/client.rs#L480).
+
+Grouping/duplicate: [SUMMARY.md#3.3](SUMMARY.md#review-3-3). This is not an additional independent defect.
 
 <a id="review-7"></a>
 
 ### Claim 7 — Uneven crate-root re-exports: the recommended pooled API is not at the root
 
-Status: `confirmed-open`. Current risk: `low`.
+Status: `confirmed-open`. Current risk: `nit`.
 
-Root exports still omit pooled framing helpers, write_close and the exporter adapter/constants. Repository callers use module paths; this is discoverability/consistency debt.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-transport-tcp/src/lib.rs:12](../../../../../crates/shamir-transport-tcp/src/lib.rs#L12); [crates/shamir-transport-tcp/src/lib.rs:16](../../../../../crates/shamir-transport-tcp/src/lib.rs#L16); [crates/shamir-client/src/client.rs:39](../../../../../crates/shamir-client/src/client.rs#L39).
+The helpers are fully available under public framing/tls modules. Missing root aliases affect discoverability, not reachability or runtime correctness.
 
-Grouping/duplicate: `SUMMARY.md#7.1`. This row is not another independent defect.
+Evidence: [crates/shamir-transport-tcp/src/lib.rs:8](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-transport-tcp/src/lib.rs#L8); [crates/shamir-transport-tcp/src/lib.rs:12](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-transport-tcp/src/lib.rs#L12).
+
+Grouping/duplicate: [SUMMARY.md#7.1](SUMMARY.md#review-7-1). This is not an additional independent defect.
 
 <a id="review-8"></a>
 
@@ -105,11 +121,13 @@ Grouping/duplicate: `SUMMARY.md#7.1`. This row is not another independent defect
 
 Status: `confirmed-open`. Current risk: `nit`.
 
-The documentation names a different trait than the actual crate-local ConnectionExporter parameter.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-transport-tcp/src/tls.rs:73](../../../../../crates/shamir-transport-tcp/src/tls.rs#L73); [crates/shamir-transport-tcp/src/tls.rs:77](../../../../../crates/shamir-transport-tcp/src/tls.rs#L77).
+The signature uses the local ConnectionExporter trait, not the trait named by the documentation.
 
-Grouping/duplicate: `SUMMARY.md#5.4`. This row is not another independent defect.
+Evidence: [crates/shamir-transport-tcp/src/tls.rs:73](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-transport-tcp/src/tls.rs#L73); [crates/shamir-transport-tcp/src/tls.rs:77](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-transport-tcp/src/tls.rs#L77).
+
+Grouping/duplicate: [SUMMARY.md#5.4](SUMMARY.md#review-5-4). This is not an additional independent defect.
 
 <a id="review-9"></a>
 
@@ -117,11 +135,13 @@ Grouping/duplicate: `SUMMARY.md#5.4`. This row is not another independent defect
 
 Status: `confirmed-open`. Current risk: `nit`.
 
-UDS clauses remain without a qualification that this crate's validator and binder accept TCP socket addresses only. The broader protocol's UDS allowance itself is legitimate.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-transport-tcp/src/listener.rs:4](../../../../../crates/shamir-transport-tcp/src/listener.rs#L4); [crates/shamir-transport-tcp/src/listener.rs:30](../../../../../crates/shamir-transport-tcp/src/listener.rs#L30); [crates/shamir-transport-tcp/src/listener.rs:75](../../../../../crates/shamir-transport-tcp/src/listener.rs#L75).
+The broader whitelist includes UDS, but SocketAddr/TcpListener cannot express it. Qualify API scope rather than adding an unsupported stub.
 
-Grouping/duplicate: `SUMMARY.md#5.3`. This row is not another independent defect.
+Evidence: [crates/shamir-transport-tcp/src/listener.rs:30](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-transport-tcp/src/listener.rs#L30); [crates/shamir-transport-tcp/src/listener.rs:75](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-transport-tcp/src/listener.rs#L75).
+
+Grouping/duplicate: [SUMMARY.md#5.3](SUMMARY.md#review-5-3). This is not an additional independent defect.
 
 <a id="review-10"></a>
 
@@ -129,11 +149,13 @@ Grouping/duplicate: `SUMMARY.md#5.3`. This row is not another independent defect
 
 Status: `confirmed-open`. Current risk: `nit`.
 
-Public loopback constants and redundant allowances remain; no repository Rust consumer references them.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-transport-tcp/src/listener.rs:96](../../../../../crates/shamir-transport-tcp/src/listener.rs#L96).
+The unused repository constants remain publicly reachable, making the allowances redundant but removal an API change.
 
-Grouping/duplicate: `SUMMARY.md#7.3`. This row is not another independent defect.
+Evidence: [crates/shamir-transport-tcp/src/listener.rs:96](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-transport-tcp/src/listener.rs#L96).
+
+Grouping/duplicate: [SUMMARY.md#7.3](SUMMARY.md#review-7-3). This is not an additional independent defect.
 
 <a id="review-11"></a>
 
@@ -141,11 +163,13 @@ Grouping/duplicate: `SUMMARY.md#7.3`. This row is not another independent defect
 
 Status: `confirmed-open`. Current risk: `nit`.
 
-The manifest still enables full Tokio features. Feature breadth is source-proven; binary-size or compile-time savings from trimming are not measured and depend on downstream feature unification.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-transport-tcp/Cargo.toml:14](../../../../../crates/shamir-transport-tcp/Cargo.toml#L14).
+Full is enabled. No measured downstream size/compile benefit or isolation from feature unification is established.
 
-Grouping/duplicate: `SUMMARY.md#5.5`. This row is not another independent defect.
+Evidence: [crates/shamir-transport-tcp/Cargo.toml:14](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-transport-tcp/Cargo.toml#L14).
+
+Grouping/duplicate: [SUMMARY.md#5.5](SUMMARY.md#review-5-5). This is not an additional independent defect.
 
 <a id="review-12"></a>
 
@@ -153,20 +177,20 @@ Grouping/duplicate: `SUMMARY.md#5.5`. This row is not another independent defect
 
 Status: `confirmed-open`. Current risk: `nit`.
 
-Both integration files retain independent copies of all four handshake Wire structs, fast_kdf and make_user.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-transport-tcp/tests/handshake_e2e.rs:41](../../../../../crates/shamir-transport-tcp/tests/handshake_e2e.rs#L41); [crates/shamir-transport-tcp/tests/handshake_e2e.rs:85](../../../../../crates/shamir-transport-tcp/tests/handshake_e2e.rs#L85); [crates/shamir-transport-tcp/tests/echo_e2e.rs:57](../../../../../crates/shamir-transport-tcp/tests/echo_e2e.rs#L57); [crates/shamir-transport-tcp/tests/echo_e2e.rs:122](../../../../../crates/shamir-transport-tcp/tests/echo_e2e.rs#L122).
+Both files duplicate the four Wire types and KDF/user fixtures. Their shared implementation assumptions are not independent external wire evidence.
 
-Grouping/duplicate: `SUMMARY.md#5.6`. This row is not another independent defect.
+Evidence: [crates/shamir-transport-tcp/tests/handshake_e2e.rs:41](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-transport-tcp/tests/handshake_e2e.rs#L41); [crates/shamir-transport-tcp/tests/echo_e2e.rs:57](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-transport-tcp/tests/echo_e2e.rs#L57).
 
-## Corrections and qualified non-findings
+Grouping/duplicate: [SUMMARY.md#5.6](SUMMARY.md#review-5-6). This is not an additional independent defect.
 
-- TLS 1.3-only builder configuration and registered negative negotiation tests remain source-supported, not execution-verified.
-- No raw serde_json query construction exists in this crate; test-local Wire structs remain wire-format fixtures.
-- The exporter length contract already exists at src/tls.rs:71; its TCP specification location is TRANSPORT_TCP.md:41.
-- Tokio-rustls streams genuinely implement ConnectionExporter through this crate's impls. The WS helper forwards through those impls rather than providing its own.
-- The wire-equivalence tests do not establish a single underlying write or a TLS-record count.
-- Deleting public root exports or constants is an API change even when no repository caller uses them; completing or clarifying exports avoids that assumption.
+## Evidence and recipe corrections
+
+- Complete root re-exports are optional; existing module paths are not defective.
+- The pre-handshake-exporter test recipe cannot directly pass a standalone rustls connection to this local trait without an adapter.
+- Byte-equivalence tests compare decoded payloads, not raw framed bytes, underlying write counts or TLS-record counts.
+- A shared fixture removes duplication but still needs external protocol expectations and production-seam coverage.
 
 ---
 

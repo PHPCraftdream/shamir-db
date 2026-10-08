@@ -1,11 +1,13 @@
-<!-- revalidation:2026-10-08 source:92ad58266bf57ddea1fa3c8a47affba1a3a9a096 -->
-# shamir-types — performance-hotpath revalidation
+<!-- revalidation:2026-10-08 cycle:independent-2 source:e3765c935fc71655ee1ec0160cf180607935d89b -->
+# shamir-types — performance-hotpath independent revalidation (cycle 2)
 
-Source snapshot: `92ad58266bf57ddea1fa3c8a47affba1a3a9a096`. Revalidated 2026-10-08 by read-only XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run; no source fix is part of this update. Test registration/assertions are evidence of an oracle, not proof of a passing run.
+Frozen source snapshot: `e3765c935fc71655ee1ec0160cf180607935d89b`. Independently revalidated 2026-10-08 by a fresh XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run. Source-fixed means the specified mechanism was already removed at this snapshot; this cycle implements no source fix.
 
-This section is authoritative for current status. Original titles/IDs are retained for traceability; a refuted title is not a current assertion. The collapsed historical report below is superseded, including its counts, severity, scenarios and fix instructions. Plan IDs preserve historical numbering, not a current release mandate. [Workspace methodology and status definitions](../SUMMARY.md#status-definitions).
+This section is authoritative for current decisions. Existing IDs and allegation titles are retained for traceability; a refuted title is not a current assertion. Prior-cycle decisions were rechecked, not used as proof. The first cycle is available in repository history at this snapshot. The original historical body below remains preserved once and is superseded, including its counts, severities and recipes. [Workspace scope and status definitions](../SUMMARY.md#status-definitions).
 
-Projection rescans and several avoidable allocations remain structurally proven. Scratch-buffer finding is refuted by the explicit ownership-transfer contract and registered zero-capacity test. for_each_field currently has no engine caller; latency claims are unmeasured.
+Unrelated external edits began in dependency/toolchain/CI metadata during collection; additional Rust-source edits appeared afterward. They were left untouched. Evidence and decisions are tied to the frozen commit, not those later changes or an installed toolchain. “Current” below means current at that snapshot; no re-audit of the modified working tree is implied.
+
+Live projection rescans are the clearest current asymptotic issue. Other allocation opportunities are structurally present but unmeasured; scratch handoff is intentional and aggregate validation is justified.
 
 ## Current claim decisions
 
@@ -13,7 +15,7 @@ Projection rescans and several avoidable allocations remain structurally proven.
 |---:|---:|---:|---:|---:|---:|---:|
 | 9 | 7 | 0 | 0 | 1 | 0 | 1 |
 
-These are decisions on report claims, including repeated roots, bundled observations and non-findings—not a unique-bug census. Closed/N/A rows have no current risk; unverified risk is provisional. Pure style and unmeasured optimization claims do not establish runtime impact.
+These are duplicate-inclusive report decisions, not a unique-bug census. Pure style or structural optimization does not establish a runtime incident; unverified impact remains provisional.
 
 <a id="review-1"></a>
 
@@ -21,9 +23,11 @@ These are decisions on report claims, including repeated roots, bundled observat
 
 Status: `confirmed-open`. Current risk: `medium`.
 
-Each selected id restarts value_bytes_at's map scan; live S-read callers invoke this per row. Worst-case O(k*f) entry traversal remains. Existing semantic tests do not enforce scaling; numerical marker-count/throughput-collapse examples were not measured.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-types/src/codecs/interned/projection.rs:62](../../../../../crates/shamir-types/src/codecs/interned/projection.rs#L62); [crates/shamir-types/src/record_view/lens.rs:1139](../../../../../crates/shamir-types/src/record_view/lens.rs#L1139); [crates/shamir-engine/src/table/read_exec.rs:1544](../../../../../crates/shamir-engine/src/table/read_exec.rs#L1544); [crates/shamir-engine/src/table/read_exec.rs:1585](../../../../../crates/shamir-engine/src/table/read_exec.rs#L1585).
+Each field_value_bytes call starts at body offset zero on live S-read projection, giving worst-case O(selected*fields) traversal plus subtree skipping. Registered tests do not detect scaling.
+
+Evidence: [crates/shamir-types/src/codecs/interned/projection.rs:62](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-types/src/codecs/interned/projection.rs#L62); [crates/shamir-types/src/record_view/lens.rs:1139](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-types/src/record_view/lens.rs#L1139); [crates/shamir-engine/src/table/read_exec.rs:1544](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-engine/src/table/read_exec.rs#L1544).
 
 <a id="review-2"></a>
 
@@ -31,9 +35,11 @@ Evidence: [crates/shamir-types/src/codecs/interned/projection.rs:62](../../../..
 
 Status: `confirmed-open`. Current risk: `low`.
 
-The method discards the iterated value and scans again for each field. Only tests currently call it; SELECT * uses other lens/de-intern paths. Quadratic complexity is proven, current production latency impact is not.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-types/src/record_view/record_ref.rs:338](../../../../../crates/shamir-types/src/record_view/record_ref.rs#L338); [crates/shamir-types/src/record_view/lens.rs:1139](../../../../../crates/shamir-types/src/record_view/lens.rs#L1139); [crates/shamir-types/src/record_view/tests/record_ref_tests.rs:969](../../../../../crates/shamir-types/src/record_view/tests/record_ref_tests.rs#L969).
+The already-read value is discarded and materialize_at rescans for every field. Only tests currently call this method; production SELECT * uses other paths.
+
+Evidence: [crates/shamir-types/src/record_view/record_ref.rs:338](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-types/src/record_view/record_ref.rs#L338); [crates/shamir-engine/src/table/read_exec.rs:1537](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-engine/src/table/read_exec.rs#L1537).
 
 <a id="review-3"></a>
 
@@ -41,19 +47,23 @@ Evidence: [crates/shamir-types/src/record_view/record_ref.rs:338](../../../../..
 
 Status: `confirmed-open`. Current risk: `low`.
 
-Nonempty string keys are copied by read_str before borrowed interner lookup. This decoder accepts external string-keyed form, not stored id-keyed maps, and no current production caller was found. The WAL/storage-hot-path framing is incorrect.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-types/src/codecs/interned/messagepack.rs:130](../../../../../crates/shamir-types/src/codecs/interned/messagepack.rs#L130); [crates/shamir-types/src/codecs/interned/messagepack.rs:139](../../../../../crates/shamir-types/src/codecs/interned/messagepack.rs#L139); [crates/shamir-types/src/codecs/interned/messagepack.rs:324](../../../../../crates/shamir-types/src/codecs/interned/messagepack.rs#L324); [crates/shamir-types/src/codecs/interned/messagepack.rs:341](../../../../../crates/shamir-types/src/codecs/interned/messagepack.rs#L341).
+Nonempty keys are copied before borrowed interner lookup. This custom decoder requires external string keys and has no current production caller found, so its alleged WAL hot-path impact is unsupported.
+
+Evidence: [crates/shamir-types/src/codecs/interned/messagepack.rs:139](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-types/src/codecs/interned/messagepack.rs#L139); [crates/shamir-types/src/codecs/interned/messagepack.rs:324](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-types/src/codecs/interned/messagepack.rs#L324).
 
 <a id="review-4"></a>
 
 ### Claim 4 — `query_value_to_storage_bytes_into` defeats its own scratch-buffer purpose — capacity resets to 0 every call
 
-Status: `refuted`. Current risk: —.
+Status: `refuted`. Current risk: `—`.
 
-Source explicitly documents consumed Vec ownership, zero-copy Bytes handoff, and regrowth on the next call. A registered test asserts capacity zero and valid repeated output. Reserving a replacement Vec adds another allocation; it does not reuse the transferred allocation.
+Prior-cycle decision: `refuted`.
 
-Evidence: [crates/shamir-types/src/codecs/interned/messagepack.rs:878](../../../../../crates/shamir-types/src/codecs/interned/messagepack.rs#L878); [crates/shamir-types/src/codecs/interned/messagepack.rs:907](../../../../../crates/shamir-types/src/codecs/interned/messagepack.rs#L907); [crates/shamir-types/src/codecs/interned/tests/storage_bytes_tests.rs:516](../../../../../crates/shamir-types/src/codecs/interned/tests/storage_bytes_tests.rs#L516); [crates/shamir-types/src/codecs/interned/tests/storage_bytes_tests.rs:534](../../../../../crates/shamir-types/src/codecs/interned/tests/storage_bytes_tests.rs#L534).
+Consumed scratch and regrowth are explicit contracts with a registered capacity-zero test, introduced before the review. Bytes 1.11.1 published src/bytes.rs transfers the payload allocation; reserve replacement does not reuse it.
+
+Evidence: [crates/shamir-types/src/codecs/interned/messagepack.rs:882](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-types/src/codecs/interned/messagepack.rs#L882); [crates/shamir-types/src/codecs/interned/tests/storage_bytes_tests.rs:534](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-types/src/codecs/interned/tests/storage_bytes_tests.rs#L534); [Cargo.lock:571](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/Cargo.lock#L571).
 
 <a id="review-5"></a>
 
@@ -61,9 +71,11 @@ Evidence: [crates/shamir-types/src/codecs/interned/messagepack.rs:878](../../../
 
 Status: `confirmed-open`. Current risk: `low`.
 
-fetch_add precedes entry arbitration; Occupied losers permanently consume ids. Subsequent ids can enlarge the reverse spine and persistent gaps freeze entries_after's contiguous high-water mark. Temporary Arc/String allocations are dropped, not leaked; production race frequency is unmeasured.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-types/src/core/interner/interner.rs:149](../../../../../crates/shamir-types/src/core/interner/interner.rs#L149); [crates/shamir-types/src/core/interner/interner.rs:157](../../../../../crates/shamir-types/src/core/interner/interner.rs#L157); [crates/shamir-types/src/core/interner/interner.rs:163](../../../../../crates/shamir-types/src/core/interner/interner.rs#L163); [crates/shamir-types/src/core/interner/interner.rs:509](../../../../../crates/shamir-types/src/core/interner/interner.rs#L509); [crates/shamir-types/src/core/interner/interner.rs:554](../../../../../crates/shamir-types/src/core/interner/interner.rs#L554).
+fetch_add occurs before entry arbitration, so Occupied losers permanently leave ID holes. Those affect spine sizing and delta recapture, but temporary String/Arc allocations are freed.
+
+Evidence: [crates/shamir-types/src/core/interner/interner.rs:157](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-types/src/core/interner/interner.rs#L157); [crates/shamir-types/src/core/interner/interner.rs:163](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-types/src/core/interner/interner.rs#L163); [crates/shamir-types/src/core/interner/interner.rs:554](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-types/src/core/interner/interner.rs#L554).
 
 <a id="review-6"></a>
 
@@ -71,9 +83,11 @@ Evidence: [crates/shamir-types/src/core/interner/interner.rs:149](../../../../..
 
 Status: `confirmed-open`. Current risk: `low`.
 
-New keys and values are still independently serialized into temporary buffers and copied. Replaced old values also allocate a temporary buffer. Streaming is a valid optimization opportunity; no measured significance is established.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-types/src/codecs/interned/messagepack.rs:648](../../../../../crates/shamir-types/src/codecs/interned/messagepack.rs#L648); [crates/shamir-types/src/codecs/interned/messagepack.rs:661](../../../../../crates/shamir-types/src/codecs/interned/messagepack.rs#L661); [crates/shamir-types/src/codecs/interned/messagepack.rs:667](../../../../../crates/shamir-types/src/codecs/interned/messagepack.rs#L667); [crates/shamir-engine/src/table/write_exec.rs:738](../../../../../crates/shamir-engine/src/table/write_exec.rs#L738).
+Replacement values and new entries are independently encoded and copied into output. Streaming could remove these payload temporaries without changing order/encoding; no significance was measured.
+
+Evidence: [crates/shamir-types/src/codecs/interned/messagepack.rs:648](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-types/src/codecs/interned/messagepack.rs#L648); [crates/shamir-types/src/codecs/interned/messagepack.rs:661](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-types/src/codecs/interned/messagepack.rs#L661); [crates/shamir-types/src/codecs/interned/messagepack.rs:667](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-types/src/codecs/interned/messagepack.rs#L667).
 
 <a id="review-7"></a>
 
@@ -81,19 +95,23 @@ Evidence: [crates/shamir-types/src/codecs/interned/messagepack.rs:648](../../../
 
 Status: `confirmed-open`. Current risk: `low`.
 
-Non-admin authorization calls ancestors, which allocates and clones owned parent segments. System/Admin bypass occurs first. Depth is bounded for database paths but FunctionFolder depth is caller-sized, invalidating the blanket <=5 bound.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-types/src/access.rs:504](../../../../../crates/shamir-types/src/access.rs#L504); [crates/shamir-types/src/access.rs:524](../../../../../crates/shamir-types/src/access.rs#L524); [crates/shamir-types/src/access.rs:550](../../../../../crates/shamir-types/src/access.rs#L550); [crates/shamir-db/src/shamir_db/shamir_db/access_control.rs:840](../../../../../crates/shamir-db/src/shamir_db/shamir_db/access_control.rs#L840); [crates/shamir-db/src/shamir_db/shamir_db/access_control.rs:850](../../../../../crates/shamir-db/src/shamir_db/shamir_db/access_control.rs#L850).
+Non-admin checks allocate a Vec and clone parent segments. FunctionFolder chains are caller-sized; preserving nearest-first awaited checks constrains a callback replacement.
+
+Evidence: [crates/shamir-types/src/access.rs:524](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-types/src/access.rs#L524); [crates/shamir-types/src/access.rs:550](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-types/src/access.rs#L550); [crates/shamir-db/src/shamir_db/shamir_db/access_control.rs:850](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/shamir_db/access_control.rs#L850).
 
 <a id="review-8"></a>
 
 ### Claim 8 — Lazy aggregate cursors pay an eager full-subtree validation walk, then walk again when consumed
 
-Status: `not-applicable`. Current risk: —.
+Status: `not-applicable`. Current risk: `—`.
 
-The double walk exists and is already described as validation followed by lazy re-walking. It establishes safe slice bounds; no incorrect behavior or measured performance regression is established. An exact ~2x cost is not guaranteed for nested aggregates.
+Prior-cycle decision: `not-applicable`.
 
-Evidence: [crates/shamir-types/src/record_view/lens.rs:622](../../../../../crates/shamir-types/src/record_view/lens.rs#L622); [crates/shamir-types/src/record_view/lens.rs:641](../../../../../crates/shamir-types/src/record_view/lens.rs#L641); [crates/shamir-types/src/record_view/record_value.rs:80](../../../../../crates/shamir-types/src/record_view/record_value.rs#L80).
+The eager skip followed by lazy iteration is documented and establishes safe slice bounds. Nested consumption need not cost exactly twice the work.
+
+Evidence: [crates/shamir-types/src/record_view/lens.rs:622](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-types/src/record_view/lens.rs#L622); [crates/shamir-types/src/record_view/lens.rs:641](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-types/src/record_view/lens.rs#L641).
 
 <a id="review-9"></a>
 
@@ -101,17 +119,20 @@ Evidence: [crates/shamir-types/src/record_view/lens.rs:622](../../../../../crate
 
 Status: `confirmed-open`. Current risk: `nit`.
 
-walked is still assembled for every segment before success/error branching. It is avoidable success-path string work, not demonstrated latency or correctness failure; String growth does not imply a fresh allocation per segment.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-types/src/types/value.rs:578](../../../../../crates/shamir-types/src/types/value.rs#L578); [crates/shamir-types/src/types/value.rs:590](../../../../../crates/shamir-types/src/types/value.rs#L590); [crates/shamir-types/src/types/value.rs:603](../../../../../crates/shamir-types/src/types/value.rs#L603).
+set_path updates walked before every branch, including successful traversal. This is avoidable copying, not proof of per-segment allocation or material runtime regression.
 
-## Corrections and qualified non-findings
+Evidence: [crates/shamir-types/src/types/value.rs:590](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-types/src/types/value.rs#L590).
 
-- The scratch handoff and its capacity-zero test landed in e15d73f2 before the review; the original review overlooked both.
-- A shared span index must itself bound header-derived preallocation. Reusing RecordView::index unchanged would retain the allocation hazard at lens.rs:1064.
-- FieldIndex stores value starts, not complete byte spans. Extracting raw spans requires a deliberate extension, and aggregate skipping is proportional to subtree content.
-- merge_storage_bytes is not allocation-free overall: it allocates entries, old_ids, new_keys, output, replacement-value buffers, and new-entry buffers.
-- General parity tests are registered, but neither their names nor successful hypothetical runs establish asymptotic scaling.
+## Evidence and recipe corrections
+
+- FieldIndex stores starts, not complete spans, and trusts the map header for capacity. It is not a safe drop-in optimization without bounded construction and explicit accepted-input semantics.
+- Using existing FieldIndex changes repeated-key lookup from first-wins to last-wins unless duplicate inputs are rejected or handled deliberately.
+- Bytes 1.11.1 can allocate Shared bookkeeping when Vec length differs from capacity; zero-copy payload transfer is not an allocation-free guarantee.
+- DashMap 6.1.0 published src/lib.rs::_len reads all shards; it is not an atomic/sharded-counter cardinality operation.
+- A synchronous ancestors callback cannot directly replace authorization's asynchronous metadata checks.
+- Numeric marker counts, throughput collapse, per-operation nanoseconds, and exact double-walk multipliers were not measured.
 
 ---
 

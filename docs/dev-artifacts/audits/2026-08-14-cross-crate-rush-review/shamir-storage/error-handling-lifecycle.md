@@ -1,11 +1,13 @@
-<!-- revalidation:2026-10-08 source:92ad58266bf57ddea1fa3c8a47affba1a3a9a096 -->
-# shamir-storage — error-handling-lifecycle revalidation
+<!-- revalidation:2026-10-08 cycle:independent-2 source:e3765c935fc71655ee1ec0160cf180607935d89b -->
+# shamir-storage — error-handling-lifecycle independent revalidation (cycle 2)
 
-Source snapshot: `92ad58266bf57ddea1fa3c8a47affba1a3a9a096`. Revalidated 2026-10-08 by read-only XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run; no source fix is part of this update. Test registration/assertions are evidence of an oracle, not proof of a passing run.
+Frozen source snapshot: `e3765c935fc71655ee1ec0160cf180607935d89b`. Independently revalidated 2026-10-08 by a fresh XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run. Source-fixed means the specified mechanism was already removed at this snapshot; this cycle implements no source fix.
 
-This section is authoritative for current status. Original titles/IDs are retained for traceability; a refuted title is not a current assertion. The collapsed historical report below is superseded, including its counts, severity, scenarios and fix instructions. Plan IDs preserve historical numbering, not a current release mandate. [Workspace methodology and status definitions](../SUMMARY.md#status-definitions).
+This section is authoritative for current decisions. Existing IDs and allegation titles are retained for traceability; a refuted title is not a current assertion. Prior-cycle decisions were rechecked, not used as proof. The first cycle is available in repository history at this snapshot. The original historical body below remains preserved once and is superseded, including its counts, severities and recipes. [Workspace scope and status definitions](../SUMMARY.md#status-definitions).
 
-Worker-death liveness, silent drop observability, missing error-path coverage, and copy failure semantics remain. Normal Result failures are surfaced by Cached flush; that does not cover worker panics.
+Unrelated external edits began in dependency/toolchain/CI metadata during collection; additional Rust-source edits appeared afterward. They were left untouched. Evidence and decisions are tied to the frozen commit, not those later changes or an installed toolchain. “Current” below means current at that snapshot; no re-audit of the modified working tree is implied.
+
+Normal Result failures are propagated at several seams, but worker death, unacknowledged shutdown and partial-copy policy remain open. Narrow historical fixes are supported without upgrading them into universal durability guarantees.
 
 ## Current claim decisions
 
@@ -13,7 +15,7 @@ Worker-death liveness, silent drop observability, missing error-path coverage, a
 |---:|---:|---:|---:|---:|---:|---:|
 | 13 | 8 | 3 | 0 | 1 | 0 | 1 |
 
-These are decisions on report claims, including repeated roots, bundled observations and non-findings—not a unique-bug census. Closed/N/A rows have no current risk; unverified risk is provisional. Pure style and unmeasured optimization claims do not establish runtime impact.
+These are duplicate-inclusive report decisions, not a unique-bug census. Pure style or structural optimization does not establish a runtime incident; unverified impact remains provisional.
 
 <a id="review-1"></a>
 
@@ -21,9 +23,11 @@ These are decisions on report claims, including repeated roots, bundled observat
 
 Status: `confirmed-open`. Current risk: `high`.
 
-The JoinHandle is discarded; pending decrement/notification occur only after an awaited inner call returns. An unwinding panic or worker cancellation with queued jobs leaves pending nonzero and no death notification. Existing failing-inner tests return Err rather than kill the worker.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-storage/src/storage_cached.rs:68](../../../../../crates/shamir-storage/src/storage_cached.rs#L68); [crates/shamir-storage/src/storage_cached.rs:85](../../../../../crates/shamir-storage/src/storage_cached.rs#L85); [crates/shamir-storage/src/storage_cached.rs:106](../../../../../crates/shamir-storage/src/storage_cached.rs#L106); [crates/shamir-storage/src/storage_cached.rs:243](../../../../../crates/shamir-storage/src/storage_cached.rs#L243); [crates/shamir-storage/src/storage_cached.rs:383](../../../../../crates/shamir-storage/src/storage_cached.rs#L383); [crates/shamir-storage/src/tests/storage_cached_tests.rs:984](../../../../../crates/shamir-storage/src/tests/storage_cached_tests.rs#L984).
+Inner set/remove unwinds before pending decrement/notify; discarded JoinHandle leaves outstanding jobs and waiters stranded. Subsequent closed sends only undo their own increment. Existing FailingStore returns Err rather than panicking.
+
+Evidence: [crates/shamir-storage/src/storage_cached.rs:85](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-storage/src/storage_cached.rs#L85); [crates/shamir-storage/src/storage_cached.rs:106](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-storage/src/storage_cached.rs#L106); [crates/shamir-storage/src/storage_cached.rs:243](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-storage/src/storage_cached.rs#L243); [crates/shamir-storage/src/tests/storage_cached_tests.rs:984](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-storage/src/tests/storage_cached_tests.rs#L984).
 
 <a id="review-2"></a>
 
@@ -31,11 +35,13 @@ Evidence: [crates/shamir-storage/src/storage_cached.rs:68](../../../../../crates
 
 Status: `confirmed-open`. Current risk: `medium`.
 
-The bounded synchronous send is still directly executed by async submit.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-storage/src/storage_fjall.rs:92](../../../../../crates/shamir-storage/src/storage_fjall.rs#L92); [crates/shamir-storage/src/storage_fjall.rs:199](../../../../../crates/shamir-storage/src/storage_fjall.rs#L199).
+SyncSender::send is directly executed before async reply waiting; queue saturation blocks runtime workers, not merely submitting tasks.
 
-Grouping/duplicate: `concurrency-lockfree.md#4`. This row is not another independent defect.
+Evidence: [crates/shamir-storage/src/storage_fjall.rs:199](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-storage/src/storage_fjall.rs#L199).
+
+Grouping/duplicate: [concurrency-lockfree.md#4](concurrency-lockfree.md#review-4). This is not an additional independent defect.
 
 <a id="review-3"></a>
 
@@ -43,9 +49,11 @@ Grouping/duplicate: `concurrency-lockfree.md#4`. This row is not another indepen
 
 Status: `confirmed-open`. Current risk: `medium`.
 
-Drop only sets shutdown and notifies; it provides no acknowledged drain or dirty-loss warning. Loss is possible, not inevitable: a flusher already awaiting select holds upgraded state and can execute one drain after the wake because shutdown is checked before select, not afterward.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-storage/src/storage_membuffer.rs:324](../../../../../crates/shamir-storage/src/storage_membuffer.rs#L324); [crates/shamir-storage/src/storage_membuffer.rs:339](../../../../../crates/shamir-storage/src/storage_membuffer.rs#L339); [crates/shamir-storage/src/storage_membuffer.rs:344](../../../../../crates/shamir-storage/src/storage_membuffer.rs#L344); [crates/shamir-storage/src/storage_membuffer.rs:353](../../../../../crates/shamir-storage/src/storage_membuffer.rs#L353); [crates/shamir-storage/src/storage_membuffer.rs:621](../../../../../crates/shamir-storage/src/storage_membuffer.rs#L621).
+Drop sets shutdown/notifies without acknowledged drain or warning. A flusher already waiting can execute one batch because shutdown is checked before select; larger dirty sets can remain unflushed.
+
+Evidence: [crates/shamir-storage/src/storage_membuffer.rs:339](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-storage/src/storage_membuffer.rs#L339); [crates/shamir-storage/src/storage_membuffer.rs:353](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-storage/src/storage_membuffer.rs#L353); [crates/shamir-storage/src/storage_membuffer.rs:621](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-storage/src/storage_membuffer.rs#L621).
 
 <a id="review-4"></a>
 
@@ -53,9 +61,11 @@ Evidence: [crates/shamir-storage/src/storage_membuffer.rs:324](../../../../../cr
 
 Status: `confirmed-open`. Current risk: `medium`.
 
-flush_errors has initialization/increment sites but no reader. Registered tests do not force MemBuffer drain failures, Cached closed-send branches, Fjall submit failures, or copy_store partial errors. Cached normal background Err paths do have separate tests.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-storage/src/storage_membuffer.rs:192](../../../../../crates/shamir-storage/src/storage_membuffer.rs#L192); [crates/shamir-storage/src/storage_membuffer.rs:355](../../../../../crates/shamir-storage/src/storage_membuffer.rs#L355); [crates/shamir-storage/src/storage_cached.rs:446](../../../../../crates/shamir-storage/src/storage_cached.rs#L446); [crates/shamir-storage/src/storage_cached.rs:499](../../../../../crates/shamir-storage/src/storage_cached.rs#L499); [crates/shamir-storage/src/storage_fjall.rs:199](../../../../../crates/shamir-storage/src/storage_fjall.rs#L199); [crates/shamir-storage/src/types.rs:488](../../../../../crates/shamir-storage/src/types.rs#L488); [crates/shamir-storage/src/tests/mod.rs:1](../../../../../crates/shamir-storage/src/tests/mod.rs#L1).
+flush_errors is only initialized/incremented. Tests do not force MemBuffer backing failures, Cached closed sends, Fjall submit failures or partial copy; ordinary Cached background Err tests are distinct existing coverage.
+
+Evidence: [crates/shamir-storage/src/storage_membuffer.rs:192](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-storage/src/storage_membuffer.rs#L192); [crates/shamir-storage/src/storage_membuffer.rs:355](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-storage/src/storage_membuffer.rs#L355); [crates/shamir-storage/src/tests/storage_cached_tests.rs:1031](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-storage/src/tests/storage_cached_tests.rs#L1031).
 
 <a id="review-5"></a>
 
@@ -63,9 +73,11 @@ Evidence: [crates/shamir-storage/src/storage_membuffer.rs:192](../../../../../cr
 
 Status: `confirmed-open`. Current risk: `low`.
 
-remove immediately evicts the cache before awaiting/enqueuing the backing delete. Without a negative marker, a later get can read and cache the old backing value even before the delete finishes; a failed delete leaves it available. Worker errors are logged and flush can fail, so 'zero signal' is overstated.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-storage/src/storage_cached.rs:487](../../../../../crates/shamir-storage/src/storage_cached.rs#L487); [crates/shamir-storage/src/storage_cached.rs:469](../../../../../crates/shamir-storage/src/storage_cached.rs#L469); [crates/shamir-storage/src/storage_cached.rs:92](../../../../../crates/shamir-storage/src/storage_cached.rs#L92); [crates/shamir-storage/src/storage_cached.rs:499](../../../../../crates/shamir-storage/src/storage_cached.rs#L499).
+Delay backing remove, read the evicted key and refill old V, then complete remove: cache still serves V after successful deletion/flush. A failure is not required. Failed jobs are logged and surfaced by flush.
+
+Evidence: [crates/shamir-storage/src/storage_cached.rs:487](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-storage/src/storage_cached.rs#L487); [crates/shamir-storage/src/storage_cached.rs:476](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-storage/src/storage_cached.rs#L476); [crates/shamir-storage/src/storage_cached.rs:92](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-storage/src/storage_cached.rs#L92).
 
 <a id="review-6"></a>
 
@@ -73,9 +85,11 @@ Evidence: [crates/shamir-storage/src/storage_cached.rs:487](../../../../../crate
 
 Status: `confirmed-open`. Current risk: `low`.
 
-Streaming or set_many errors propagate after earlier destination writes without rollback. Engine rename copies three stores sequentially. Retrying overwrites matching keys but does not remove stale destination extras.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-storage/src/types.rs:488](../../../../../crates/shamir-storage/src/types.rs#L488); [crates/shamir-storage/src/types.rs:495](../../../../../crates/shamir-storage/src/types.rs#L495); [crates/shamir-storage/src/types.rs:500](../../../../../crates/shamir-storage/src/types.rs#L500); [crates/shamir-engine/src/repo/repo_instance.rs:593](../../../../../crates/shamir-engine/src/repo/repo_instance.rs#L593).
+Errors after previous set_many batches preserve partial destination state; retry overwrites matching keys but does not remove extras. Caller-owned pre-existing destinations preclude blanket deletion cleanup.
+
+Evidence: [crates/shamir-storage/src/types.rs:495](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-storage/src/types.rs#L495); [crates/shamir-storage/src/types.rs:500](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-storage/src/types.rs#L500); [crates/shamir-engine/src/repo/repo_instance.rs:593](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-engine/src/repo/repo_instance.rs#L593).
 
 <a id="review-7"></a>
 
@@ -83,11 +97,13 @@ Evidence: [crates/shamir-storage/src/types.rs:488](../../../../../crates/shamir-
 
 Status: `confirmed-open`. Current risk: `low`.
 
-Fresh handles and per-instance lazy workers remain. Worker Drop closes and joins, so the concern is conditional creation/teardown cost and ordering scope, not an established leak. Behavior of surviving handles after delete depends on unavailable fjall internals.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-storage/src/storage_fjall.rs:240](../../../../../crates/shamir-storage/src/storage_fjall.rs#L240); [crates/shamir-storage/src/storage_fjall.rs:289](../../../../../crates/shamir-storage/src/storage_fjall.rs#L289); [crates/shamir-storage/src/storage_fjall.rs:134](../../../../../crates/shamir-storage/src/storage_fjall.rs#L134).
+Per-handle lazy creation/join cost exists conditionally. Exact fjall 3.1.6 sets is_deleted and rejects subsequent point insert/remove with KeyspaceDeleted; read/batch lifecycle should not be generalized from that narrower result.
 
-Grouping/duplicate: `correctness-tdd.md#6`. This row is not another independent defect.
+Evidence: [crates/shamir-storage/src/storage_fjall.rs:240](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-storage/src/storage_fjall.rs#L240); [crates/shamir-storage/src/storage_fjall.rs:134](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-storage/src/storage_fjall.rs#L134); [Cargo.lock:1332](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/Cargo.lock#L1332).
+
+Grouping/duplicate: [correctness-tdd.md#6](correctness-tdd.md#review-6). This is not an additional independent defect.
 
 <a id="review-8"></a>
 
@@ -95,67 +111,78 @@ Grouping/duplicate: `correctness-tdd.md#6`. This row is not another independent 
 
 Status: `confirmed-open`. Current risk: `nit`.
 
-CodecError and most backend errors are still flattened into String. Worker thread creation still uses expect, whose environmental failure is not an unreachable programmer invariant.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-storage/src/error.rs:92](../../../../../crates/shamir-storage/src/error.rs#L92); [crates/shamir-storage/src/error.rs:37](../../../../../crates/shamir-storage/src/error.rs#L37); [crates/shamir-storage/src/storage_fjall.rs:95](../../../../../crates/shamir-storage/src/storage_fjall.rs#L95); [crates/shamir-storage/src/storage_fjall.rs:98](../../../../../crates/shamir-storage/src/storage_fjall.rs#L98).
+Codec/backend errors lose source chains; spawn expect can panic on environmental resource failure. Flattening is diagnostic preference, whereas fallible thread startup violates the stated Result discipline.
+
+Evidence: [crates/shamir-storage/src/error.rs:94](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-storage/src/error.rs#L94); [crates/shamir-storage/src/storage_fjall.rs:98](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-storage/src/storage_fjall.rs#L98).
 
 <a id="review-nf-panic-surface"></a>
 
 ### Claim NF-panic-surface — Every production unwrap/expect is genuinely unreachable with inline justification
 
-Status: `refuted`. Current risk: —.
+Status: `refuted`. Current risk: `—`.
 
-Worker spawn expect can fail on OS resource exhaustion. Some cited sites are ignored insertion results rather than unwrap/expect, and their 'insert always succeeds after remove' comments are false under concurrency.
+Prior-cycle decision: `refuted`.
 
-Evidence: [crates/shamir-storage/src/storage_fjall.rs:98](../../../../../crates/shamir-storage/src/storage_fjall.rs#L98); [crates/shamir-storage/src/storage_cached.rs:158](../../../../../crates/shamir-storage/src/storage_cached.rs#L158); [crates/shamir-storage/src/storage_cached.rs:409](../../../../../crates/shamir-storage/src/storage_cached.rs#L409); [crates/shamir-storage/src/storage_in_memory.rs:130](../../../../../crates/shamir-storage/src/storage_in_memory.rs#L130).
+Thread creation is fallible. Several historical citations are ignored inserts, not unwraps, and insertion-after-remove is not guaranteed under concurrent writers. Backend invalid-name assertions add a captured panic path.
+
+Evidence: [crates/shamir-storage/src/storage_fjall.rs:98](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-storage/src/storage_fjall.rs#L98); [crates/shamir-storage/src/storage_cached.rs:409](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-storage/src/storage_cached.rs#L409); [crates/shamir-storage/src/storage_fjall.rs:234](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-storage/src/storage_fjall.rs#L234).
 
 <a id="review-nf-dirty-cleanup"></a>
 
 ### Claim NF-dirty-cleanup — drain_once retains dirty on error and guarded cleanup preserves differing concurrent writes
 
-Status: `fixed`. Current risk: —.
+Status: `fixed`. Current risk: `—`.
 
-Backing operations propagate errors before cleanup; remove_if deletes only matching slots. The registered transact injection test detects deletion of a differing concurrent dirty value, but not stale cache publication or universal drain ordering.
+Prior-cycle decision: `fixed`.
 
-Evidence: [crates/shamir-storage/src/storage_membuffer.rs:527](../../../../../crates/shamir-storage/src/storage_membuffer.rs#L527); [crates/shamir-storage/src/storage_membuffer.rs:554](../../../../../crates/shamir-storage/src/storage_membuffer.rs#L554); [crates/shamir-storage/src/storage_membuffer.rs:1060](../../../../../crates/shamir-storage/src/storage_membuffer.rs#L1060); [crates/shamir-storage/src/tests/storage_membuffer_tests.rs:799](../../../../../crates/shamir-storage/src/tests/storage_membuffer_tests.rs#L799).
+Backing ? propagation precedes removal, and value-matching remove_if preserves differing concurrent dirty values. The injected regression catches reverting that removal guard; it does not prove outstanding drain-write ordering.
+
+Evidence: [crates/shamir-storage/src/storage_membuffer.rs:527](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-storage/src/storage_membuffer.rs#L527); [crates/shamir-storage/src/storage_membuffer.rs:554](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-storage/src/storage_membuffer.rs#L554); [crates/shamir-storage/src/tests/storage_membuffer_tests.rs:799](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-storage/src/tests/storage_membuffer_tests.rs#L799).
 
 <a id="review-nf-mirror-first"></a>
 
 ### Claim NF-mirror-first — MirroredStore mirror-first ordering delivers honest error atomicity
 
-Status: `fixed`. Current risk: —.
+Status: `fixed`. Current risk: `—`.
 
-Mirror failures occur before primary mutation for set/remove and either transact subset. Registered injected-failure tests check the primary. Whole-mirror rollback additionally requires an error-atomic mirror; arbitrary Store implementations need not provide it.
+Prior-cycle decision: `fixed`.
 
-Evidence: [crates/shamir-storage/src/storage_mirrored.rs:351](../../../../../crates/shamir-storage/src/storage_mirrored.rs#L351); [crates/shamir-storage/src/storage_mirrored.rs:381](../../../../../crates/shamir-storage/src/storage_mirrored.rs#L381); [crates/shamir-storage/src/storage_mirrored.rs:595](../../../../../crates/shamir-storage/src/storage_mirrored.rs#L595); [crates/shamir-storage/src/tests/storage_mirrored_tests.rs:608](../../../../../crates/shamir-storage/src/tests/storage_mirrored_tests.rs#L608); [crates/shamir-storage/src/tests/storage_mirrored_tests.rs:865](../../../../../crates/shamir-storage/src/tests/storage_mirrored_tests.rs#L865); [crates/shamir-storage/src/tests/storage_mirrored_tests.rs:916](../../../../../crates/shamir-storage/src/tests/storage_mirrored_tests.rs#L916).
+All fallible mirror calls precede primary changes; injected Err tests observe seeded primary values or both absent subsets. Mocks fail before applying anything, so they cannot prove the actual mirror's rollback/error detection.
+
+Evidence: [crates/shamir-storage/src/storage_mirrored.rs:351](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-storage/src/storage_mirrored.rs#L351); [crates/shamir-storage/src/storage_mirrored.rs:595](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-storage/src/storage_mirrored.rs#L595); [crates/shamir-storage/src/tests/storage_mirrored_tests.rs:608](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-storage/src/tests/storage_mirrored_tests.rs#L608).
 
 <a id="review-nf-cached-flush"></a>
 
 ### Claim NF-cached-flush — Cached flush always attempts inner.flush and consumes background errors once
 
-Status: `fixed`. Current risk: —.
+Status: `fixed`. Current risk: `—`.
 
-After the pending wait returns, inner.flush runs regardless of its background result, and write_error.swap(None) consumes the most recent error. Registered tests assert repeat-flush behavior and an inner-flush marker. This does not cover worker death or report every coalesced failure separately.
+Prior-cycle decision: `fixed`.
 
-Evidence: [crates/shamir-storage/src/storage_cached.rs:346](../../../../../crates/shamir-storage/src/storage_cached.rs#L346); [crates/shamir-storage/src/storage_cached.rs:397](../../../../../crates/shamir-storage/src/storage_cached.rs#L397); [crates/shamir-storage/src/tests/storage_cached_tests.rs:1031](../../../../../crates/shamir-storage/src/tests/storage_cached_tests.rs#L1031); [crates/shamir-storage/src/tests/storage_cached_tests.rs:1170](../../../../../crates/shamir-storage/src/tests/storage_cached_tests.rs#L1170).
+After pending settles, inner.flush is attempted for either background result, and swap(None) consumes the latest error. Repeat-flush and marker assertions discriminate the prior early-return bug. Cancellation or worker death is outside this guarantee.
+
+Evidence: [crates/shamir-storage/src/storage_cached.rs:346](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-storage/src/storage_cached.rs#L346); [crates/shamir-storage/src/storage_cached.rs:397](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-storage/src/storage_cached.rs#L397); [crates/shamir-storage/src/tests/storage_cached_tests.rs:1170](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-storage/src/tests/storage_cached_tests.rs#L1170).
 
 <a id="review-nf-notify"></a>
 
 ### Claim NF-notify — Notify future created before the pending check is race-free with notify_waiters
 
-Status: `not-applicable`. Current risk: —.
+Status: `not-applicable`. Current risk: `—`.
 
-The source creates Notified before loading pending and uses notify_waiters. Locally available pinned Tokio documentation confirms creation is sufficient for notify_waiters, unlike notify_one; worker survival remains a separate condition.
+Prior-cycle decision: `not-applicable`.
 
-Evidence: [crates/shamir-storage/src/storage_cached.rs:109](../../../../../crates/shamir-storage/src/storage_cached.rs#L109); [crates/shamir-storage/src/storage_cached.rs:385](../../../../../crates/shamir-storage/src/storage_cached.rs#L385); [Cargo.lock:4195](../../../../../Cargo.lock#L4195).
+Exact Tokio 1.49.0 documentation promises notify_waiters delivery from Notified creation, even unpolled; the source uses that operation rather than notify_one. Worker survival is separate.
 
-## Corrections and qualified non-findings
+Evidence: [crates/shamir-storage/src/storage_cached.rs:109](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-storage/src/storage_cached.rs#L109); [crates/shamir-storage/src/storage_cached.rs:385](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-storage/src/storage_cached.rs#L385); [Cargo.lock:4195](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/Cargo.lock#L4195).
 
-- Do not describe ordinary allocation failure as necessarily an unwinding panic; the worker-death case is established for unwinding inner panics/cancellation.
-- A per-job decrement guard alone does not discharge queued jobs when the worker dies; flush needs a worker-death signal.
-- Drop does not invariably exit before draining; no completion guarantee and absent observability are the supported claims.
-- Failed async writes are explicitly logged; remove resurrection can also occur before a successful backing delete.
-- Destination cleanup must not delete a pre-existing caller-owned store; copy_store does not currently require a fresh destination.
+## Evidence and recipe corrections
+
+- Ordinary allocation failure is not established as an unwinding worker panic; a custom inner panic supplies the supported liveness witness.
+- A per-job Drop guard and periodic counter recheck do not settle a dead worker's remaining queue. Maintain an explicit terminal signal and preserve queued-write failure accounting.
+- Native fjall 3.1.6 WriteBatch discards write_batch errors; its default later Buffer persist detects persistent failures but need not detect an earlier transient partial-batch failure. Mirror-first cannot repair an erroneously successful mirror result.
+- The historical fixed mechanisms predate the original August report. No new implementation fix occurred during this review.
 
 ---
 

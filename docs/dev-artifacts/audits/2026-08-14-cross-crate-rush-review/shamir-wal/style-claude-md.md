@@ -1,11 +1,13 @@
-<!-- revalidation:2026-10-08 source:92ad58266bf57ddea1fa3c8a47affba1a3a9a096 -->
-# shamir-wal — style-claude-md revalidation
+<!-- revalidation:2026-10-08 cycle:independent-2 source:e3765c935fc71655ee1ec0160cf180607935d89b -->
+# shamir-wal — style-claude-md independent revalidation (cycle 2)
 
-Source snapshot: `92ad58266bf57ddea1fa3c8a47affba1a3a9a096`. Revalidated 2026-10-08 by read-only XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run; no source fix is part of this update. Test registration/assertions are evidence of an oracle, not proof of a passing run.
+Frozen source snapshot: `e3765c935fc71655ee1ec0160cf180607935d89b`. Independently revalidated 2026-10-08 by a fresh XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run. Source-fixed means the specified mechanism was already removed at this snapshot; this cycle implements no source fix.
 
-This section is authoritative for current status. Original titles/IDs are retained for traceability; a refuted title is not a current assertion. The collapsed historical report below is superseded, including its counts, severity, scenarios and fix instructions. Plan IDs preserve historical numbering, not a current release mandate. [Workspace methodology and status definitions](../SUMMARY.md#status-definitions).
+This section is authoritative for current decisions. Existing IDs and allegation titles are retained for traceability; a refuted title is not a current assertion. Prior-cycle decisions were rechecked, not used as proof. The first cycle is available in repository history at this snapshot. The original historical body below remains preserved once and is superseded, including its counts, severities and recipes. [Workspace scope and status definitions](../SUMMARY.md#status-definitions).
 
-Structural and stale-documentation debt remains, but it is not runtime High. Coupled MemSink/WalSink types are explicitly allowed by the repository rule.
+Unrelated external edits began in dependency/toolchain/CI metadata during collection; additional Rust-source edits appeared afterward. They were left untouched. Evidence and decisions are tied to the frozen commit, not those later changes or an installed toolchain. “Current” below means current at that snapshot; no re-audit of the modified working tree is implied.
+
+The actual layout violation and stale architecture prose remain Low/Nit work. Registered tests are not orphaned, and closely coupled types are explicitly allowed.
 
 ## Current claim decisions
 
@@ -13,7 +15,7 @@ Structural and stale-documentation debt remains, but it is not runtime High. Cou
 |---:|---:|---:|---:|---:|---:|---:|
 | 9 | 7 | 0 | 0 | 0 | 0 | 2 |
 
-These are decisions on report claims, including repeated roots, bundled observations and non-findings—not a unique-bug census. Closed/N/A rows have no current risk; unverified risk is provisional. Pure style and unmeasured optimization claims do not establish runtime impact.
+These are duplicate-inclusive report decisions, not a unique-bug census. Pure style or structural optimization does not establish a runtime incident; unverified impact remains provisional.
 
 <a id="review-1"></a>
 
@@ -21,9 +23,11 @@ These are decisions on report claims, including repeated roots, bundled observat
 
 Status: `confirmed-open`. Current risk: `low`.
 
-Five tests remain inline in segment_meta. They are registered and discoverable by Rust; the violation concerns repository layout, not missing runtime coverage.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-wal/src/segment_meta.rs:175](../../../../../crates/shamir-wal/src/segment_meta.rs#L175); [crates/shamir-wal/src/tests/mod.rs:1](../../../../../crates/shamir-wal/src/tests/mod.rs#L1); [crates/shamir-wal/src/lib.rs:47](../../../../../crates/shamir-wal/src/lib.rs#L47).
+Five tests reside in an inline cfg(test) implementation-file module, contrary to the explicit repository rule; Rust registration remains intact.
+
+Evidence: [crates/shamir-wal/src/segment_meta.rs:175](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-wal/src/segment_meta.rs#L175); [AGENTS.md:158](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/AGENTS.md#L158).
 
 <a id="review-2"></a>
 
@@ -31,11 +35,13 @@ Evidence: [crates/shamir-wal/src/segment_meta.rs:175](../../../../../crates/sham
 
 Status: `confirmed-open`. Current risk: `low`.
 
-Entry and segment preambles still reference removed wal_entry/WalManager symbols and KV dispatch. Current manifests and segment construction positively contradict that architecture. No rustdoc execution was performed.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-wal/src/wal_entry_v2.rs:3](../../../../../crates/shamir-wal/src/wal_entry_v2.rs#L3); [crates/shamir-wal/src/wal_entry_v2.rs:14](../../../../../crates/shamir-wal/src/wal_entry_v2.rs#L14); [crates/shamir-wal/src/wal_segment.rs:3](../../../../../crates/shamir-wal/src/wal_segment.rs#L3); [crates/shamir-wal/src/lib.rs:46](../../../../../crates/shamir-wal/src/lib.rs#L46).
+Entry/segment docs describe removed KV dispatch and link absent WalManager/wal_entry types, contradicting current exports and construction.
 
-Grouping/duplicate: `api-wire-protocol.md#3`. This row is not another independent defect.
+Evidence: [crates/shamir-wal/src/wal_entry_v2.rs:3](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-wal/src/wal_entry_v2.rs#L3); [crates/shamir-wal/src/wal_segment.rs:3](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-wal/src/wal_segment.rs#L3).
+
+Grouping/duplicate: [api-wire-protocol.md#3](api-wire-protocol.md#review-3). This is not an additional independent defect.
 
 <a id="review-3"></a>
 
@@ -43,9 +49,11 @@ Grouping/duplicate: `api-wire-protocol.md#3`. This row is not another independen
 
 Status: `confirmed-open`. Current risk: `low`.
 
-The unwired F6a paragraph remains, while RepoInstance constructs SegmentSet and WalSink::File holds it. This is positively contradicted documentation, not an unwired runtime feature.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-wal/src/segment_set.rs:15](../../../../../crates/shamir-wal/src/segment_set.rs#L15); [crates/shamir-wal/src/wal_sink.rs:86](../../../../../crates/shamir-wal/src/wal_sink.rs#L86); [crates/shamir-engine/src/repo/repo_instance.rs:829](../../../../../crates/shamir-engine/src/repo/repo_instance.rs#L829).
+The F6a unwired paragraph remains although File stores SegmentSet and RepoInstance constructs it.
+
+Evidence: [crates/shamir-wal/src/segment_set.rs:15](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-wal/src/segment_set.rs#L15); [crates/shamir-wal/src/wal_sink.rs:86](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-wal/src/wal_sink.rs#L86); [crates/shamir-engine/src/repo/repo_instance.rs:830](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-engine/src/repo/repo_instance.rs#L830).
 
 <a id="review-4"></a>
 
@@ -53,11 +61,13 @@ Evidence: [crates/shamir-wal/src/segment_set.rs:15](../../../../../crates/shamir
 
 Status: `confirmed-open`. Current risk: `low`.
 
-The export and three-callsites/recovery-scan prose remain despite only own-test code consumers being found. Retaining a legacy helper is defensible if described accurately.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-wal/src/active_key.rs:4](../../../../../crates/shamir-wal/src/active_key.rs#L4); [crates/shamir-wal/src/active_key.rs:8](../../../../../crates/shamir-wal/src/active_key.rs#L8); [crates/shamir-wal/src/lib.rs:54](../../../../../crates/shamir-wal/src/lib.rs#L54); [crates/shamir-wal/src/tests/active_key_tests.rs:1](../../../../../crates/shamir-wal/src/tests/active_key_tests.rs#L1).
+The three-callsites/recovery-scan prose remains, but source consumers are its own tests. Retention as a documented legacy helper is valid; export alone does not assert current use.
 
-Grouping/duplicate: `api-wire-protocol.md#3`. This row is not another independent defect.
+Evidence: [crates/shamir-wal/src/active_key.rs:4](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-wal/src/active_key.rs#L4); [crates/shamir-wal/src/lib.rs:54](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-wal/src/lib.rs#L54).
+
+Grouping/duplicate: [api-wire-protocol.md#3](api-wire-protocol.md#review-3). This is not an additional independent defect.
 
 <a id="review-5"></a>
 
@@ -65,19 +75,23 @@ Grouping/duplicate: `api-wire-protocol.md#3`. This row is not another independen
 
 Status: `confirmed-open`. Current risk: `nit`.
 
-Four Duration imports remain inside test bodies, with no stated collision or cfg exception. This is style-only.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-wal/src/tests/wal_group_commit_tests.rs:222](../../../../../crates/shamir-wal/src/tests/wal_group_commit_tests.rs#L222); [crates/shamir-wal/src/tests/wal_group_commit_tests.rs:253](../../../../../crates/shamir-wal/src/tests/wal_group_commit_tests.rs#L253); [crates/shamir-wal/src/tests/wal_group_commit_tests.rs:270](../../../../../crates/shamir-wal/src/tests/wal_group_commit_tests.rs#L270); [crates/shamir-wal/src/tests/wal_group_commit_tests.rs:447](../../../../../crates/shamir-wal/src/tests/wal_group_commit_tests.rs#L447).
+Four test-body imports have no collision or cfg rationale and violate imports-at-top.
+
+Evidence: [crates/shamir-wal/src/tests/wal_group_commit_tests.rs:222](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-wal/src/tests/wal_group_commit_tests.rs#L222); [crates/shamir-wal/src/tests/wal_group_commit_tests.rs:253](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-wal/src/tests/wal_group_commit_tests.rs#L253); [crates/shamir-wal/src/tests/wal_group_commit_tests.rs:270](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-wal/src/tests/wal_group_commit_tests.rs#L270); [crates/shamir-wal/src/tests/wal_group_commit_tests.rs:447](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-wal/src/tests/wal_group_commit_tests.rs#L447).
 
 <a id="review-6"></a>
 
 ### Claim 6 — pub mod segment_meta exports nothing public
 
-Status: `confirmed-open`. Current risk: `low`.
+Status: `confirmed-open`. Current risk: `nit`.
 
-The module is public but functions are crate-private or private; public module docs link private read_blocking. Empty surface/private-link debt is source-visible, although a rustdoc warning was not executed.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-wal/src/lib.rs:47](../../../../../crates/shamir-wal/src/lib.rs#L47); [crates/shamir-wal/src/segment_meta.rs:11](../../../../../crates/shamir-wal/src/segment_meta.rs#L11); [crates/shamir-wal/src/segment_meta.rs:120](../../../../../crates/shamir-wal/src/segment_meta.rs#L120); [crates/shamir-wal/src/segment_meta.rs:164](../../../../../crates/shamir-wal/src/segment_meta.rs#L164).
+The public module exposes only private/crate-private functions and links private read_blocking from its docs. This is namespace/documentation debt, not a runtime defect or observed rustdoc run.
+
+Evidence: [crates/shamir-wal/src/lib.rs:47](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-wal/src/lib.rs#L47); [crates/shamir-wal/src/segment_meta.rs:11](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-wal/src/segment_meta.rs#L11); [crates/shamir-wal/src/segment_meta.rs:120](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-wal/src/segment_meta.rs#L120).
 
 <a id="review-7"></a>
 
@@ -85,37 +99,42 @@ Evidence: [crates/shamir-wal/src/lib.rs:47](../../../../../crates/shamir-wal/src
 
 Status: `confirmed-open`. Current risk: `nit`.
 
-Both blanket allowances remain without justification. Calling them entirely ineffective is too broad: an impl-level allowance can suppress dead private helpers. No current runtime defect follows.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-wal/src/wal_segment.rs:108](../../../../../crates/shamir-wal/src/wal_segment.rs#L108); [crates/shamir-wal/src/wal_segment.rs:132](../../../../../crates/shamir-wal/src/wal_segment.rs#L132); [crates/shamir-wal/src/wal_segment.rs:500](../../../../../crates/shamir-wal/src/wal_segment.rs#L500).
+Both broad allowances remain without rationale. The impl allowance can suppress private-helper warnings, so 'does nothing' is inaccurate; no runtime consequence was demonstrated.
+
+Evidence: [crates/shamir-wal/src/wal_segment.rs:108](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-wal/src/wal_segment.rs#L108); [crates/shamir-wal/src/wal_segment.rs:132](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-wal/src/wal_segment.rs#L132).
 
 <a id="review-8"></a>
 
 ### Claim 8 — wal_sink.rs carries two public types with separate impl blocks (borderline)
 
-Status: `not-applicable`. Current risk: —.
+Status: `not-applicable`. Current risk: `—`.
 
-MemSink is directly the payload of WalSink::Mem, fitting the permitted closely-coupled group exception. The enum-versus-trait rationale already appears in item docs; an additional module doc is optional.
+Prior-cycle decision: `not-applicable`.
 
-Evidence: [crates/shamir-wal/src/wal_sink.rs:17](../../../../../crates/shamir-wal/src/wal_sink.rs#L17); [crates/shamir-wal/src/wal_sink.rs:80](../../../../../crates/shamir-wal/src/wal_sink.rs#L80); [crates/shamir-wal/src/wal_sink.rs:89](../../../../../crates/shamir-wal/src/wal_sink.rs#L89).
+MemSink is the enum variant's payload and fits the expressly permitted closely-coupled group. Additional module prose or splitting is optional.
+
+Evidence: [crates/shamir-wal/src/wal_sink.rs:17](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-wal/src/wal_sink.rs#L17); [crates/shamir-wal/src/wal_sink.rs:89](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-wal/src/wal_sink.rs#L89); [CLAUDE.md:497](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/CLAUDE.md#L497).
 
 <a id="review-conformant-manifests-and-registration"></a>
 
 ### Claim Conformant/manifests-and-registration — Manifest-only roots and topic-split test registration conform
 
-Status: `not-applicable`. Current risk: —.
+Status: `not-applicable`. Current risk: `—`.
 
-lib.rs contains declarations/reexports rather than implementation logic; cfg(test) wires the six manifest-listed test modules. Coupled WAL entry/operation and coordinator/durability types also fit the structural exception.
+Prior-cycle decision: `not-applicable`.
 
-Evidence: [crates/shamir-wal/src/lib.rs:43](../../../../../crates/shamir-wal/src/lib.rs#L43); [crates/shamir-wal/src/tests/mod.rs:1](../../../../../crates/shamir-wal/src/tests/mod.rs#L1); [crates/shamir-wal/src/wal_entry_v2.rs:49](../../../../../crates/shamir-wal/src/wal_entry_v2.rs#L49); [crates/shamir-wal/src/wal_group_commit.rs:81](../../../../../crates/shamir-wal/src/wal_group_commit.rs#L81).
+lib.rs declares/reexports; cfg(test) mounts a manifest containing six topic modules. Coupled entry/op and coordinator/tier types fit the structural exception.
 
-## Corrections and qualified non-findings
+Evidence: [crates/shamir-wal/src/lib.rs:43](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-wal/src/lib.rs#L43); [crates/shamir-wal/src/tests/mod.rs:1](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-wal/src/tests/mod.rs#L1).
 
-- Downgrade inline-test layout from High to Low; it does not disable test discovery.
-- Stale architecture documentation is Low unless a concrete runtime consequence is established.
-- The four local test imports are a Nit.
-- doctest=false is not itself why broken links evade detection; rustdoc resolves links independently, while the stated gate does not build documentation.
-- Additional stale links include SegmentSet::recover in lib.rs, where the actual API is replay.
+## Evidence and recipe corrections
+
+- Inline placement does not prevent Rust discovery and is not runtime High.
+- Private encode/decode are not reachable from arbitrary sibling test modules. Mount extracted tests as a descendant of segment_meta, or deliberately widen only crate visibility.
+- doctest=false does not disable ordinary rustdoc link resolution.
+- Additional stale guarantees include SegmentSet::recover instead of replay, wal.commit advancing truncation although it is a no-op, and max_committed spanning active contents although reopen resets that watermark.
 
 ---
 

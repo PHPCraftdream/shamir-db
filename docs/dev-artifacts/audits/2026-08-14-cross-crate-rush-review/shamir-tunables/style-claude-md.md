@@ -1,58 +1,66 @@
-<!-- revalidation:2026-10-08 source:92ad58266bf57ddea1fa3c8a47affba1a3a9a096 -->
-# shamir-tunables — style-claude-md revalidation
+<!-- revalidation:2026-10-08 cycle:independent-2 source:e3765c935fc71655ee1ec0160cf180607935d89b -->
+# shamir-tunables — style-claude-md independent revalidation (cycle 2)
 
-Source snapshot: `92ad58266bf57ddea1fa3c8a47affba1a3a9a096`. Revalidated 2026-10-08 by read-only XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run; no source fix is part of this update. Test registration/assertions are evidence of an oracle, not proof of a passing run.
+Frozen source snapshot: `e3765c935fc71655ee1ec0160cf180607935d89b`. Independently revalidated 2026-10-08 by a fresh XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run. Source-fixed means the specified mechanism was already removed at this snapshot; this cycle implements no source fix.
 
-This section is authoritative for current status. Original titles/IDs are retained for traceability; a refuted title is not a current assertion. The collapsed historical report below is superseded, including its counts, severity, scenarios and fix instructions. Plan IDs preserve historical numbering, not a current release mandate. [Workspace methodology and status definitions](../SUMMARY.md#status-definitions).
+This section is authoritative for current decisions. Existing IDs and allegation titles are retained for traceability; a refuted title is not a current assertion. Prior-cycle decisions were rechecked, not used as proof. The first cycle is available in repository history at this snapshot. The original historical body below remains preserved once and is superseded, including its counts, severities and recipes. [Workspace scope and status definitions](../SUMMARY.md#status-definitions).
 
-Inline namespace definitions and two documentation nits remain unchanged. The namespace split is advisory consistency work, not a hard mod.rs violation or runtime defect; root test organization is compliant.
+Unrelated external edits began in dependency/toolchain/CI metadata during collection; additional Rust-source edits appeared afterward. They were left untouched. Evidence and decisions are tied to the frozen commit, not those later changes or an installed toolchain. “Current” below means current at that snapshot; no re-audit of the modified working tree is implied.
+
+Root tests and imports follow the stated conventions. Namespace splitting and documentation deduplication are optional preferences; the existing crate introduction already distinguishes runtime knobs from a future full cascade.
 
 ## Current claim decisions
 
 | Claim decisions | Open | Source-fixed | Partial | Refuted | Unverified | N/A |
 |---:|---:|---:|---:|---:|---:|---:|
-| 3 | 3 | 0 | 0 | 0 | 0 | 0 |
+| 3 | 0 | 0 | 0 | 1 | 0 | 2 |
 
-These are decisions on report claims, including repeated roots, bundled observations and non-findings—not a unique-bug census. Closed/N/A rows have no current risk; unverified risk is provisional. Pure style and unmeasured optimization claims do not establish runtime impact.
+These are duplicate-inclusive report decisions, not a unique-bug census. Pure style or structural optimization does not establish a runtime incident; unverified impact remains provisional.
 
 <a id="review-1"></a>
 
 ### Claim 1 — `lib.rs` embeds two definition modules inline instead of the workspace's manifest-style `lib.rs`
 
-Status: `confirmed-open`. Current risk: `low`.
+Status: `not-applicable`. Current risk: `—`.
 
-Both constant namespaces remain inline, unlike the cited sibling roots. This confirms the optional consistency observation only: the literal restriction names mod.rs, and CLAUDE permits closely coupled export groups.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-tunables/src/lib.rs:17](../../../../../crates/shamir-tunables/src/lib.rs#L17); [crates/shamir-tunables/src/lib.rs:31](../../../../../crates/shamir-tunables/src/lib.rs#L31); [CLAUDE.md:503](../../../../../CLAUDE.md#L503); [CLAUDE.md:505](../../../../../CLAUDE.md#L505); [crates/shamir-query-types/src/lib.rs:36](../../../../../crates/shamir-query-types/src/lib.rs#L36).
+The layout observation is true, but the literal mod.rs rule and closely coupled export allowance do not require this root to match sampled siblings. No functional or mandatory style defect is proved.
+
+Evidence: [crates/shamir-tunables/src/lib.rs:17](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-tunables/src/lib.rs#L17); [crates/shamir-tunables/src/lib.rs:31](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-tunables/src/lib.rs#L31); [CLAUDE.md:503](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/CLAUDE.md#L503); [CLAUDE.md:505](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/CLAUDE.md#L505).
 
 <a id="review-2"></a>
 
 ### Claim 2 — `RuntimeTunables` struct doc duplicates the module doc nearly verbatim
 
-Status: `confirmed-open`. Current risk: `nit`.
+Status: `not-applicable`. Current risk: `—`.
 
-The module and struct documentation still repeat atomic-read and constant-initialization semantics. No deduplication occurred.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-tunables/src/runtime.rs:1](../../../../../crates/shamir-tunables/src/runtime.rs#L1); [crates/shamir-tunables/src/runtime.rs:13](../../../../../crates/shamir-tunables/src/runtime.rs#L13).
+Consistent semantics are repeated at module and struct entry points. No contrary rule or existing drift establishes a defect; deduplication is optional.
+
+Evidence: [crates/shamir-tunables/src/runtime.rs:1](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-tunables/src/runtime.rs#L1); [crates/shamir-tunables/src/runtime.rs:13](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-tunables/src/runtime.rs#L13).
 
 <a id="review-3"></a>
 
 ### Claim 3 — Crate-level doc is stale relative to the shipped `runtime` module
 
-Status: `confirmed-open`. Current risk: `nit`.
+Status: `refuted`. Current risk: `—`.
 
-The header paragraph and package description still emphasize build-time-only/future promotion despite the existing runtime foundation. The opening line already acknowledges runtime knobs, so the omission is partial rather than total.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-tunables/src/lib.rs:1](../../../../../crates/shamir-tunables/src/lib.rs#L1); [crates/shamir-tunables/src/lib.rs:4](../../../../../crates/shamir-tunables/src/lib.rs#L4); [crates/shamir-tunables/Cargo.toml:6](../../../../../crates/shamir-tunables/Cargo.toml#L6).
+The first line acknowledges runtime-overridable knobs; the following paragraph accurately describes build-time constants and future cascade promotion. The existing foundation is not the completed cascade, so the future framing is not stale.
 
-Grouping/duplicate: `correctness-tdd.md#5`. This row is not another independent defect.
+Evidence: [crates/shamir-tunables/src/lib.rs:1](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-tunables/src/lib.rs#L1); [crates/shamir-tunables/src/lib.rs:3](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-tunables/src/lib.rs#L3); [docs/dev-artifacts/roadmap/TUNABLES.md:180](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/docs/dev-artifacts/roadmap/TUNABLES.md#L180).
 
-## Corrections and qualified non-findings
+Grouping/duplicate: [correctness-tdd.md#5](correctness-tdd.md#review-5). This is not an additional independent defect.
 
-- Retain the structural positives: root tests are registered, tests/mod.rs contains only the topic declaration, no inline test block exists, and imports are at file/module headers (crates/shamir-tunables/src/lib.rs:11,14,32; crates/shamir-tunables/src/tests/mod.rs:1).
-- Replace 'entire public API covered/no coverage gap' with 'ordinary runtime defaults and set/get calls covered'; boundary, repeated-update, cross-thread, and consumer-effect coverage remain absent.
-- Splitting the two namespaces is optional style work. The current closely related constant group does not establish a hard violation of CLAUDE.md:505, and no runtime severity follows from the layout.
-- Fix stale documentation by accurately describing the unwired foundation, not by claiming the existing runtime fields already form a live cascade.
+## Evidence and recipe corrections
+
+- Do not classify optional consistency observations as confirmed-open runtime risks.
+- Retain the root-test compliance decision: the manifest reaches five ordinary unit tests, without inline implementation test blocks.
+- The historical entire-API/no-gap assertion is false: direct Default, interval boundaries, repeated updates and cross-thread sharing are not all independently exercised.
+- Any optional clarification should distinguish an in-memory foundation from live server consumption and a full scope cascade.
 
 ---
 

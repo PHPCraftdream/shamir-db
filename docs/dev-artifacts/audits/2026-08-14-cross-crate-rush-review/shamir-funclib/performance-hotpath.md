@@ -1,11 +1,13 @@
-<!-- revalidation:2026-10-08 source:92ad58266bf57ddea1fa3c8a47affba1a3a9a096 -->
-# shamir-funclib — performance-hotpath revalidation
+<!-- revalidation:2026-10-08 cycle:independent-2 source:e3765c935fc71655ee1ec0160cf180607935d89b -->
+# shamir-funclib — performance-hotpath independent revalidation (cycle 2)
 
-Source snapshot: `92ad58266bf57ddea1fa3c8a47affba1a3a9a096`. Revalidated 2026-10-08 by read-only XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run; no source fix is part of this update. Test registration/assertions are evidence of an oracle, not proof of a passing run.
+Frozen source snapshot: `e3765c935fc71655ee1ec0160cf180607935d89b`. Independently revalidated 2026-10-08 by a fresh XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run. Source-fixed means the specified mechanism was already removed at this snapshot; this cycle implements no source fix.
 
-This section is authoritative for current status. Original titles/IDs are retained for traceability; a refuted title is not a current assertion. The collapsed historical report below is superseded, including its counts, severity, scenarios and fix instructions. Plan IDs preserve historical numbering, not a current release mandate. [Workspace methodology and status definitions](../SUMMARY.md#status-definitions).
+This section is authoritative for current decisions. Existing IDs and allegation titles are retained for traceability; a refuted title is not a current assertion. Prior-cycle decisions were rechecked, not used as proof. The first cycle is available in repository history at this snapshot. The original historical body below remains preserved once and is superseded, including its counts, severities and recipes. [Workspace scope and status definitions](../SUMMARY.md#status-definitions).
 
-Both aggregate dedup scans, repeated regex compilation, global cache serialization, and variance buffering remain. Allocation nits are present, but the proposed blanket stable-to-unstable sort equivalence is refuted.
+Unrelated external edits began in dependency/toolchain/CI metadata during collection; additional Rust-source edits appeared afterward. They were left untouched. Evidence and decisions are tied to the frozen commit, not those later changes or an installed toolchain. “Current” below means current at that snapshot; no re-audit of the modified working tree is implied.
+
+Growing aggregate scans, repeated regex builds and variance buffering are structural costs, not measured latency defects. Stable tie order is observable. Small allocation opportunities remain optimizations rather than evidence of significant deployed slowdown.
 
 ## Current claim decisions
 
@@ -13,7 +15,7 @@ Both aggregate dedup scans, repeated regex compilation, global cache serializati
 |---:|---:|---:|---:|---:|---:|---:|
 | 10 | 9 | 0 | 0 | 1 | 0 | 0 |
 
-These are decisions on report claims, including repeated roots, bundled observations and non-findings—not a unique-bug census. Closed/N/A rows have no current risk; unverified risk is provisional. Pure style and unmeasured optimization claims do not establish runtime impact.
+These are duplicate-inclusive report decisions, not a unique-bug census. Pure style or structural optimization does not establish a runtime incident; unverified impact remains provisional.
 
 <a id="review-1"></a>
 
@@ -21,9 +23,11 @@ These are decisions on report claims, including repeated roots, bundled observat
 
 Status: `confirmed-open`. Current risk: `medium`.
 
-Each non-null input still scans seen using compare and clones unseen values. All-unique input performs N(N-1)/2 comparisons; comparison cost can additionally depend on value size. Engine AggregateFn reaches count_distinct, whereas typed Count{distinct:true} is rejected. Existing tests are small and there is no aggregate scale bench. Sort-based replacement cannot promise identical semantics until non-transitive compare equality is resolved.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-funclib/src/agg.rs:202](../../../../../crates/shamir-funclib/src/agg.rs#L202); [crates/shamir-funclib/src/agg/tests/agg_tests.rs:68](../../../../../crates/shamir-funclib/src/agg/tests/agg_tests.rs#L68); [crates/shamir-funclib/benches/distinct_arrays.rs:75](../../../../../crates/shamir-funclib/benches/distinct_arrays.rs#L75); [crates/shamir-engine/src/query/read/aggregate.rs:861](../../../../../crates/shamir-engine/src/query/read/aggregate.rs#L861); [crates/shamir-engine/src/query/read/aggregate.rs:889](../../../../../crates/shamir-engine/src/query/read/aggregate.rs#L889).
+Each unique row scans all prior representatives: fixed-size unique inputs require N(N-1)/2 comparisons. AggregateFn reaches this implementation; typed Count distinct is rejected. Sorting is not semantics-preserving until compare equality becomes lawful.
+
+Evidence: [crates/shamir-funclib/src/agg.rs:202](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-funclib/src/agg.rs#L202); [crates/shamir-engine/src/query/read/aggregate.rs:861](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-engine/src/query/read/aggregate.rs#L861); [crates/shamir-engine/src/query/read/aggregate.rs:889](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-engine/src/query/read/aggregate.rs#L889); [crates/shamir-funclib/src/agg/tests/agg_tests.rs:68](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-funclib/src/agg/tests/agg_tests.rs#L68).
 
 <a id="review-2"></a>
 
@@ -31,9 +35,11 @@ Evidence: [crates/shamir-funclib/src/agg.rs:202](../../../../../crates/shamir-fu
 
 Status: `confirmed-open`. Current risk: `medium`.
 
-Regex::new remains per invocation rather than in a reusable pattern cache. Per-row callers therefore repeat compilation structurally. No timings or global-allocator serialization measurements support the report's numeric latency claims.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-funclib/src/validate.rs:342](../../../../../crates/shamir-funclib/src/validate.rs#L342); [crates/shamir-engine/src/query/filter/resolve.rs:374](../../../../../crates/shamir-engine/src/query/filter/resolve.rs#L374); [crates/shamir-funclib/src/validate/tests/validate_tests.rs:164](../../../../../crates/shamir-funclib/src/validate/tests/validate_tests.rs#L164).
+Regex::new runs inside the predicate closure for every evaluation, including repeated constant patterns across rows. Tests validate results/error spelling, not compilation reuse. No numerical latency or allocator-serialization proof exists.
+
+Evidence: [crates/shamir-funclib/src/validate.rs:342](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-funclib/src/validate.rs#L342); [crates/shamir-engine/src/query/filter/resolve.rs:374](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-engine/src/query/filter/resolve.rs#L374); [crates/shamir-funclib/src/validate/tests/validate_tests.rs:164](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-funclib/src/validate/tests/validate_tests.rs#L164).
 
 <a id="review-3"></a>
 
@@ -41,9 +47,11 @@ Evidence: [crates/shamir-funclib/src/validate.rs:342](../../../../../crates/sham
 
 Status: `confirmed-open`. Current risk: `medium`.
 
-The wrapper still scans its growing seen Vec on every non-null row; its 'bounded-cardinality cold path' assertion has no enforced bound. Sorted Vec insertion still has O(C) movement and requires a valid order, so the proposed binary-search change is not a complete asymptotic repair. Preserve order-sensitive inner-aggregate semantics.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-funclib/src/agg.rs:223](../../../../../crates/shamir-funclib/src/agg.rs#L223); [crates/shamir-funclib/src/agg.rs:245](../../../../../crates/shamir-funclib/src/agg.rs#L245); [crates/shamir-engine/src/query/read/aggregate.rs:996](../../../../../crates/shamir-engine/src/query/read/aggregate.rs#L996); [crates/shamir-funclib/src/agg/tests/agg_tests.rs:555](../../../../../crates/shamir-funclib/src/agg/tests/agg_tests.rs#L555).
+Every non-null input scans a growing seen Vec; the claimed bounded cardinality is unenforced. Binary search plus sorted Vec insertion retains O(C) movement. A replacement must preserve first-occurrence representative and inner aggregate input order.
+
+Evidence: [crates/shamir-funclib/src/agg.rs:223](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-funclib/src/agg.rs#L223); [crates/shamir-funclib/src/agg.rs:245](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-funclib/src/agg.rs#L245); [crates/shamir-engine/src/query/read/aggregate.rs:996](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-engine/src/query/read/aggregate.rs#L996); [crates/shamir-funclib/src/agg/tests/agg_tests.rs:548](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-funclib/src/agg/tests/agg_tests.rs#L548).
 
 <a id="review-4"></a>
 
@@ -51,9 +59,11 @@ Evidence: [crates/shamir-funclib/src/agg.rs:223](../../../../../crates/shamir-fu
 
 Status: `confirmed-open`. Current risk: `medium`.
 
-Both still retain Vec<Decimal> and compute two-pass variance at finalize, establishing O(N) scratch per instance. Welford is not implemented. Any streaming replacement must specify checked arithmetic and Decimal rounding/accuracy; adjusting test tolerance alone does not establish equivalence.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-funclib/src/agg.rs:448](../../../../../crates/shamir-funclib/src/agg.rs#L448); [crates/shamir-funclib/src/agg.rs:467](../../../../../crates/shamir-funclib/src/agg.rs#L467); [crates/shamir-funclib/src/agg.rs:484](../../../../../crates/shamir-funclib/src/agg.rs#L484); [crates/shamir-funclib/src/agg.rs:512](../../../../../crates/shamir-funclib/src/agg.rs#L512).
+Each instance retains all non-null Decimal inputs before two-pass finalization. This proves linear scratch growth, not a measured RSS threshold. Welford needs an explicit accuracy, rounding and overflow contract; changing test tolerance alone is insufficient.
+
+Evidence: [crates/shamir-funclib/src/agg.rs:448](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-funclib/src/agg.rs#L448); [crates/shamir-funclib/src/agg.rs:484](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-funclib/src/agg.rs#L484); [crates/shamir-funclib/src/agg.rs:512](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-funclib/src/agg.rs#L512).
 
 <a id="review-5"></a>
 
@@ -61,11 +71,13 @@ Evidence: [crates/shamir-funclib/src/agg.rs:448](../../../../../crates/shamir-fu
 
 Status: `confirmed-open`. Current risk: `high`.
 
-The argument still has no positive upper bound before vec allocation. This is scalar-expression output amplification, not merely unmeasured performance debt.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-funclib/src/gen.rs:71](../../../../../crates/shamir-funclib/src/gen.rs#L71); [crates/shamir-funclib/src/gen.rs:75](../../../../../crates/shamir-funclib/src/gen.rs#L75).
+A positive caller-controlled i64 reaches vec allocation directly. Neither input-frame size nor later response limits bound this output amplification.
 
-Grouping/duplicate: `error-handling-lifecycle.md#2`. This row is not another independent defect.
+Evidence: [crates/shamir-funclib/src/gen.rs:71](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-funclib/src/gen.rs#L71); [crates/shamir-funclib/src/gen.rs:75](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-funclib/src/gen.rs#L75).
+
+Grouping/duplicate: [error-handling-lifecycle.md#2](error-handling-lifecycle.md#review-2). This is not an additional independent defect.
 
 <a id="review-6"></a>
 
@@ -73,11 +85,13 @@ Grouping/duplicate: `error-handling-lifecycle.md#2`. This row is not another ind
 
 Status: `confirmed-open`. Current risk: `medium`.
 
-The mutex, compilation under guard, and clear-all eviction remain. Serialization/churn are source-proven; throughput impact is unmeasured. scc read_sync would be shared-bucket-locked rather than lock-free.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-funclib/src/strings.rs:418](../../../../../crates/shamir-funclib/src/strings.rs#L418); [crates/shamir-funclib/src/strings.rs:427](../../../../../crates/shamir-funclib/src/strings.rs#L427); [crates/shamir-funclib/src/strings.rs:429](../../../../../crates/shamir-funclib/src/strings.rs#L429); [Cargo.lock:3123](../../../../../Cargo.lock#L3123).
+A hit still acquires the global mutex; a miss compiles under it and can clear all cached entries. Published scc 3.8.4 read_sync is shared-locked, not the historical recipe's lock-free lookup.
 
-Grouping/duplicate: `concurrency-lockfree.md#1`. This row is not another independent defect.
+Evidence: [crates/shamir-funclib/src/strings.rs:418](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-funclib/src/strings.rs#L418); [crates/shamir-funclib/src/strings.rs:427](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-funclib/src/strings.rs#L427); [crates/shamir-funclib/src/strings.rs:429](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-funclib/src/strings.rs#L429); [Cargo.lock:3123](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/Cargo.lock#L3123).
+
+Grouping/duplicate: [concurrency-lockfree.md#1](concurrency-lockfree.md#review-1). This is not an additional independent defect.
 
 <a id="review-7"></a>
 
@@ -85,19 +99,23 @@ Grouping/duplicate: `concurrency-lockfree.md#1`. This row is not another indepen
 
 Status: `confirmed-open`. Current risk: `low`.
 
-key_is_prev_hash still serializes _prev_hash separately for each top-level key. Hoisting would remove repeated allocation/encoding. The claim that this runs on every sequenced production write is not established: the located CAS validator is an integration-test implementation.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-funclib/src/canonical.rs:156](../../../../../crates/shamir-funclib/src/canonical.rs#L156); [crates/shamir-funclib/src/canonical.rs:193](../../../../../crates/shamir-funclib/src/canonical.rs#L193); [crates/shamir-db/tests/cas_sequenced_e2e.rs:53](../../../../../crates/shamir-db/tests/cas_sequenced_e2e.rs#L53); [crates/shamir-db/tests/cas_sequenced_e2e.rs:90](../../../../../crates/shamir-db/tests/cas_sequenced_e2e.rs#L90).
+The top-level loop calls key_is_prev_hash for each key and recreates the same encoded constant. Hoisting is byte-preserving. Located CAS usage is test-local, so every-production-write frequency is unsupported.
+
+Evidence: [crates/shamir-funclib/src/canonical.rs:156](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-funclib/src/canonical.rs#L156); [crates/shamir-funclib/src/canonical.rs:193](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-funclib/src/canonical.rs#L193); [crates/shamir-db/tests/cas_sequenced_e2e.rs:90](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/tests/cas_sequenced_e2e.rs#L90).
 
 <a id="review-8"></a>
 
 ### Claim 8 — Stable sorts where the total order permits unstable (scratch allocation per call)
 
-Status: `refuted`. Current risk: —.
+Status: `refuted`. Current risk: `—`.
 
-Stable sort sites remain, but the claimed semantics-identical switch is false. compare equates observably different variants such as Int(5) and Dec(5), so unstable reordering can change array order and the selected representative for median/percentile/mode. compare is also non-transitive at precision boundaries. Scratch allocation is an optimization consideration, not proof that stability is unnecessary.
+Prior-cycle decision: `refuted`.
 
-Evidence: [crates/shamir-funclib/src/arrays.rs:186](../../../../../crates/shamir-funclib/src/arrays.rs#L186); [crates/shamir-funclib/src/arrays.rs:199](../../../../../crates/shamir-funclib/src/arrays.rs#L199); [crates/shamir-funclib/src/agg.rs:435](../../../../../crates/shamir-funclib/src/agg.rs#L435); [crates/shamir-funclib/src/agg.rs:557](../../../../../crates/shamir-funclib/src/agg.rs#L557); [crates/shamir-funclib/src/agg.rs:792](../../../../../crates/shamir-funclib/src/agg.rs#L792); [crates/shamir-funclib/src/compare.rs:119](../../../../../crates/shamir-funclib/src/compare.rs#L119).
+Int(5) and Dec(5) compare Equal but remain distinguishable outputs. Unstable reordering may change array order and median/percentile/mode representatives. Non-transitive numeric comparison further invalidates the equivalence argument.
+
+Evidence: [crates/shamir-funclib/src/arrays.rs:186](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-funclib/src/arrays.rs#L186); [crates/shamir-funclib/src/agg.rs:435](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-funclib/src/agg.rs#L435); [crates/shamir-funclib/src/agg.rs:557](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-funclib/src/agg.rs#L557); [crates/shamir-funclib/src/agg.rs:792](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-funclib/src/agg.rs#L792); [crates/shamir-funclib/src/compare.rs:116](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-funclib/src/compare.rs#L116).
 
 <a id="review-9"></a>
 
@@ -105,9 +123,11 @@ Evidence: [crates/shamir-funclib/src/arrays.rs:186](../../../../../crates/shamir
 
 Status: `confirmed-open`. Current risk: `nit`.
 
-The string branch still calls trim().to_ascii_lowercase(); allocation-free literal comparisons are not implemented. Latency impact was not measured.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-funclib/src/cast.rs:177](../../../../../crates/shamir-funclib/src/cast.rs#L177).
+The string branch uses trim().to_ascii_lowercase before matching literals. Allocation-free comparisons are a valid optional optimization preserving accepted spellings; substantial latency impact is not established.
+
+Evidence: [crates/shamir-funclib/src/cast.rs:173](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-funclib/src/cast.rs#L173).
 
 <a id="review-10"></a>
 
@@ -115,19 +135,19 @@ Evidence: [crates/shamir-funclib/src/cast.rs:177](../../../../../crates/shamir-f
 
 Status: `confirmed-open`. Current risk: `nit`.
 
-The numeric map-step branch still allocates idx.to_string(). A stack formatter or explicit accepted-cost comment remains optional optimization; no significant measured cost is established.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-funclib/src/value_nav.rs:120](../../../../../crates/shamir-funclib/src/value_nav.rs#L120).
+Numeric map lookup calls idx.to_string. This is a present small allocation opportunity, not an incorrect lookup. A 20-byte formatter accommodates signed i64 including its minimum; no measured benefit is claimed.
 
-## Corrections and qualified non-findings
+Evidence: [crates/shamir-funclib/src/value_nav.rs:120](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-funclib/src/value_nav.rs#L120).
 
-- No separate Fix Plan exists; recommendations are assessed in the finding rows and SUMMARY plan.
-- The array hash-set migration establishes expected/amortized linear membership work for fixed-cost keys, not unconditional O(N) for arbitrary nested values or adversarial hash distributions.
-- distinct_large_unique_matches_naive checks 500-element output correctness without comparing against a naive implementation, counting operations, or asserting a timing bound. It cannot detect reintroduction of quadratic complexity.
-- The distinct_arrays benchmark is registered and compares current versus naive implementations, but benches were not run and do not constitute an ordinary behavioral-test complexity gate.
-- Shared root test suites and registry tests under math contradict the claimed universally faithful per-module layout.
-- A populated scc read_sync path is not lock-free. The unpopulated resolver path remains cheap, but neither its cost nor all claimed performance effects were benchmarked.
-- Resolve compare's ordering/equivalence contract before replacing scan dedup with sorting or binary search; do not adopt blanket unstable sorting.
+## Evidence and recipe corrections
+
+- Hash-based array distinct is expected linear membership work for fixed-cost lawful keys, not universal O(N).
+- distinct_large_unique_matches_naive never runs a naive oracle or counts work; a quadratic mutation would retain its expected output.
+- The registered distinct_arrays benchmark covers only arrays, not aggregate dedup, and was not executed.
+- Preserve stable ties and first-occurrence semantics; sorting wrappers before feeding their inner aggregates can change first/last/string_agg/array_agg behavior.
+- The scalar/aggregate registry implementation is Fx-backed std::HashMap, not IndexMap.
 
 ---
 

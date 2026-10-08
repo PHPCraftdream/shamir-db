@@ -1,11 +1,13 @@
-<!-- revalidation:2026-10-08 source:92ad58266bf57ddea1fa3c8a47affba1a3a9a096 -->
-# shamir-transport-ws — style-claude-md revalidation
+<!-- revalidation:2026-10-08 cycle:independent-2 source:e3765c935fc71655ee1ec0160cf180607935d89b -->
+# shamir-transport-ws — style-claude-md independent revalidation (cycle 2)
 
-Source snapshot: `92ad58266bf57ddea1fa3c8a47affba1a3a9a096`. Revalidated 2026-10-08 by read-only XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run; no source fix is part of this update. Test registration/assertions are evidence of an oracle, not proof of a passing run.
+Frozen source snapshot: `e3765c935fc71655ee1ec0160cf180607935d89b`. Independently revalidated 2026-10-08 by a fresh XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run. Source-fixed means the specified mechanism was already removed at this snapshot; this cycle implements no source fix.
 
-This section is authoritative for current status. Original titles/IDs are retained for traceability; a refuted title is not a current assertion. The collapsed historical report below is superseded, including its counts, severity, scenarios and fix instructions. Plan IDs preserve historical numbering, not a current release mandate. [Workspace methodology and status definitions](../SUMMARY.md#status-definitions).
+This section is authoritative for current decisions. Existing IDs and allegation titles are retained for traceability; a refuted title is not a current assertion. Prior-cycle decisions were rechecked, not used as proof. The first cycle is available in repository history at this snapshot. The original historical body below remains preserved once and is superseded, including its counts, severities and recipes. [Workspace scope and status definitions](../SUMMARY.md#status-definitions).
 
-Import placement, unused dependencies, unused constant, and redundant helper remain minor maintenance issues. The missing ws_recv re-export allegation was false even before the review.
+Unrelated external edits began in dependency/toolchain/CI metadata during collection; additional Rust-source edits appeared afterward. They were left untouched. Evidence and decisions are tied to the frozen commit, not those later changes or an installed toolchain. “Current” below means current at that snapshot; no re-audit of the modified working tree is implied.
+
+Source organization broadly follows repository conventions. Import placement and dependency hygiene are minor issues. The root-export allegation was pre-existingly false, not source-fixed, and an unused related constant does not violate one-file-one-group.
 
 ## Current claim decisions
 
@@ -13,7 +15,7 @@ Import placement, unused dependencies, unused constant, and redundant helper rem
 |---:|---:|---:|---:|---:|---:|---:|
 | 6 | 5 | 0 | 0 | 1 | 0 | 0 |
 
-These are decisions on report claims, including repeated roots, bundled observations and non-findings—not a unique-bug census. Closed/N/A rows have no current risk; unverified risk is provisional. Pure style and unmeasured optimization claims do not establish runtime impact.
+These are duplicate-inclusive report decisions, not a unique-bug census. Pure style or structural optimization does not establish a runtime incident; unverified impact remains provisional.
 
 <a id="review-1"></a>
 
@@ -21,19 +23,23 @@ These are decisions on report claims, including repeated roots, bundled observat
 
 Status: `confirmed-open`. Current risk: `nit`.
 
-The integration test still imports futures_util after four test functions. This is a style violation, not a runtime-medium defect; Rust imports are not sensitive to declaration order.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-transport-ws/tests/framing_round_trip.rs:98](../../../../../crates/shamir-transport-ws/tests/framing_round_trip.rs#L98); [CLAUDE.md:610](../../../../../CLAUDE.md#L610).
+The futures_util import follows four tests despite the file-header rule. Rust's module import scope does not depend on declaration order; deleting a banner cannot itself break name resolution.
+
+Evidence: [crates/shamir-transport-ws/tests/framing_round_trip.rs:98](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-transport-ws/tests/framing_round_trip.rs#L98); [CLAUDE.md:610](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/CLAUDE.md#L610).
 
 <a id="review-2"></a>
 
 ### Claim 2 — `lib.rs` re-export set incomplete vs. module public APIs (and vs. sibling transport crate)
 
-Status: `refuted`. Current risk: —.
+Status: `refuted`. Current risk: `—`.
 
-ws_recv is root-exported and was already exported in the initial transport commit. MAX_WS_FRAME_SIZE remains public through framing; AGENTS/CLAUDE do not require every public item to be root-exported.
+Prior-cycle decision: `refuted`.
 
-Evidence: [crates/shamir-transport-ws/src/lib.rs:24](../../../../../crates/shamir-transport-ws/src/lib.rs#L24); [crates/shamir-transport-ws/src/lib.rs:31](../../../../../crates/shamir-transport-ws/src/lib.rs#L31); [crates/shamir-transport-ws/src/framing.rs:26](../../../../../crates/shamir-transport-ws/src/framing.rs#L26); [crates/shamir-server/src/framer.rs:56](../../../../../crates/shamir-server/src/framer.rs#L56).
+ws_recv is exported now and in initial commit 3653540c. MAX_WS_FRAME_SIZE is publicly nameable through framing. Neither repository instructions nor crate documentation require all items at the root.
+
+Evidence: [crates/shamir-transport-ws/src/lib.rs:24](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-transport-ws/src/lib.rs#L24); [crates/shamir-transport-ws/src/lib.rs:31](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-transport-ws/src/lib.rs#L31); [crates/shamir-transport-ws/src/framing.rs:26](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-transport-ws/src/framing.rs#L26).
 
 <a id="review-3"></a>
 
@@ -41,9 +47,11 @@ Evidence: [crates/shamir-transport-ws/src/lib.rs:24](../../../../../crates/shami
 
 Status: `confirmed-open`. Current risk: `nit`.
 
-The exported module constant remains unused and untested internally, while production browser binding uses a literal. The claim that zeros exist only in prose is false.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-transport-ws/src/tls_exporter.rs:25](../../../../../crates/shamir-transport-ws/src/tls_exporter.rs#L25); [crates/shamir-server/src/server/server_launcher.rs:1495](../../../../../crates/shamir-server/src/server/server_launcher.rs#L1495); [crates/shamir-transport-ws/src/lib.rs:35](../../../../../crates/shamir-transport-ws/src/lib.rs#L35).
+Repository non-use is confirmed, but production has an actual zero literal. The helper and constant form a closely related group; neither deadness nor the prose-only allegation proves a runtime defect.
+
+Evidence: [crates/shamir-transport-ws/src/tls_exporter.rs:25](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-transport-ws/src/tls_exporter.rs#L25); [crates/shamir-server/src/server/server_launcher.rs:1495](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-server/src/server/server_launcher.rs#L1495).
 
 <a id="review-4"></a>
 
@@ -51,11 +59,13 @@ Evidence: [crates/shamir-transport-ws/src/tls_exporter.rs:25](../../../../../cra
 
 Status: `confirmed-open`. Current risk: `low`.
 
-The unused direct dependency and incompatible effective/public version remain.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-transport-ws/Cargo.toml:20](../../../../../crates/shamir-transport-ws/Cargo.toml#L20); [crates/shamir-transport-ws/src/framing.rs:22](../../../../../crates/shamir-transport-ws/src/framing.rs#L22); [Cargo.lock:4256](../../../../../Cargo.lock#L4256).
+Direct 0.29.0 remains unused while all WS public types come from effective 0.24.0. The issue is manifest honesty and incompatible type identities.
 
-Grouping/duplicate: `security-crypto.md#1`. This row is not another independent defect.
+Evidence: [crates/shamir-transport-ws/Cargo.toml:20](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-transport-ws/Cargo.toml#L20); [crates/shamir-transport-ws/src/framing.rs:22](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-transport-ws/src/framing.rs#L22); [Cargo.lock:4256](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/Cargo.lock#L4256).
+
+Grouping/duplicate: [security-crypto.md#1](security-crypto.md#review-1). This is not an additional independent defect.
 
 <a id="review-5"></a>
 
@@ -63,9 +73,11 @@ Grouping/duplicate: `security-crypto.md#1`. This row is not another independent 
 
 Status: `confirmed-open`. Current risk: `nit`.
 
-The four entries remain and no crate Rust source/test references them. This is dependency-graph hygiene, not runtime failure.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-transport-ws/Cargo.toml:32](../../../../../crates/shamir-transport-ws/Cargo.toml#L32); [crates/shamir-transport-ws/tests/framing_round_trip.rs:3](../../../../../crates/shamir-transport-ws/tests/framing_round_trip.rs#L3).
+No current crate Rust test or implementation references the four entries. Removing them is scoped dependency hygiene; inventing a parser test solely to justify them is unnecessary.
+
+Evidence: [crates/shamir-transport-ws/Cargo.toml:32](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-transport-ws/Cargo.toml#L32); [crates/shamir-transport-ws/src/tests/mod.rs:1](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-transport-ws/src/tests/mod.rs#L1); [crates/shamir-transport-ws/tests/framing_round_trip.rs:3](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-transport-ws/tests/framing_round_trip.rs#L3).
 
 <a id="review-6"></a>
 
@@ -73,18 +85,18 @@ Evidence: [crates/shamir-transport-ws/Cargo.toml:32](../../../../../crates/shami
 
 Status: `confirmed-open`. Current risk: `nit`.
 
-The redundant private V4/V6 dispatch remains with no observed behavioral defect.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-transport-ws/src/listener.rs:47](../../../../../crates/shamir-transport-ws/src/listener.rs#L47); [crates/shamir-transport-ws/src/tests/listener_tests.rs:62](../../../../../crates/shamir-transport-ws/src/tests/listener_tests.rs#L62).
+The helper uses the same V4/V6 loopback predicates as the inherent operation used by tests. This is optional readability cleanup with no demonstrated behavioral defect.
 
-## Corrections and qualified non-findings
+Evidence: [crates/shamir-transport-ws/src/listener.rs:47](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-transport-ws/src/listener.rs#L47); [crates/shamir-transport-ws/src/tests/listener_tests.rs:62](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-transport-ws/src/tests/listener_tests.rs#L62).
 
-- Hoisting the mid-file import is optional maintenance; moving declarations or deleting a banner does not itself change Rust name resolution.
-- History confirms ws_recv root export in 3653540c and its preservation in f7fed57f. Do not label this as a later fix.
-- Adding MAX_WS_FRAME_SIZE at the root is a consistency preference, not an accessibility fix or documented repository requirement.
-- Source confirms manifest-only tests/mod.rs, parent test registration, no inline test modules, header imports throughout implementation, closely coupled export groups, and thiserror-only library errors.
-- The 10 policy, 9 listener, 3 server, and 7 framing test counts match source registrations. These counts do not prove simultaneous duplex operation or all rejection guarantees.
-- Unused exported constants are not automatically a one-file-one-export violation; this constant and exporter helper form a closely related group.
+## Evidence and recipe corrections
+
+- The SUMMARY current Claim 7.2 still classifies this optional root-export suggestion as open; it should match this report's refuted decision.
+- The 10 policy, 9 listener, 3 server and 7 integration test declarations are registered, but declaration counts establish neither execution nor semantic completeness.
+- No all-public-items-at-root or constant-test requirement was found. Missing ws_recv was never a later fix.
+- No unrelated style sweep or dependency change was performed.
 
 ---
 

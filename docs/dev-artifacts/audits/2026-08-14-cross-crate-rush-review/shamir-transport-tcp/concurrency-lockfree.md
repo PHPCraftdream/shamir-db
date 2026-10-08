@@ -1,11 +1,13 @@
-<!-- revalidation:2026-10-08 source:92ad58266bf57ddea1fa3c8a47affba1a3a9a096 -->
-# shamir-transport-tcp — concurrency-lockfree revalidation
+<!-- revalidation:2026-10-08 cycle:independent-2 source:e3765c935fc71655ee1ec0160cf180607935d89b -->
+# shamir-transport-tcp — concurrency-lockfree independent revalidation (cycle 2)
 
-Source snapshot: `92ad58266bf57ddea1fa3c8a47affba1a3a9a096`. Revalidated 2026-10-08 by read-only XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run; no source fix is part of this update. Test registration/assertions are evidence of an oracle, not proof of a passing run.
+Frozen source snapshot: `e3765c935fc71655ee1ec0160cf180607935d89b`. Independently revalidated 2026-10-08 by a fresh XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run. Source-fixed means the specified mechanism was already removed at this snapshot; this cycle implements no source fix.
 
-This section is authoritative for current status. Original titles/IDs are retained for traceability; a refuted title is not a current assertion. The collapsed historical report below is superseded, including its counts, severity, scenarios and fix instructions. Plan IDs preserve historical numbering, not a current release mandate. [Workspace methodology and status definitions](../SUMMARY.md#status-definitions).
+This section is authoritative for current decisions. Existing IDs and allegation titles are retained for traceability; a refuted title is not a current assertion. Prior-cycle decisions were rechecked, not used as proof. The first cycle is available in repository history at this snapshot. The original historical body below remains preserved once and is superseded, including its counts, severities and recipes. [Workspace scope and status definitions](../SUMMARY.md#status-definitions).
 
-No explicit locks or hash registries exist in this crate's implementation. Both bootstrap-contract and current-thread test scheduling concerns remain; neither establishes a measured stall or existing test failure.
+Unrelated external edits began in dependency/toolchain/CI metadata during collection; additional Rust-source edits appeared afterward. They were left untouched. Evidence and decisions are tied to the frozen commit, not those later changes or an installed toolchain. “Current” below means current at that snapshot; no re-audit of the modified working tree is implied.
+
+The transport implementation has exclusive mutable I/O ownership and no explicit shared-state locks. The scheduling concerns are documentation/test hygiene, not demonstrated stalls or deadlocks.
 
 ## Current claim decisions
 
@@ -13,19 +15,21 @@ No explicit locks or hash registries exist in this crate's implementation. Both 
 |---:|---:|---:|---:|---:|---:|---:|
 | 2 | 2 | 0 | 0 | 0 | 0 | 0 |
 
-These are decisions on report claims, including repeated roots, bundled observations and non-findings—not a unique-bug census. Closed/N/A rows have no current risk; unverified risk is provisional. Pure style and unmeasured optimization claims do not establish runtime impact.
+These are duplicate-inclusive report decisions, not a unique-bug census. Pure style or structural optimization does not establish a runtime incident; unverified impact remains provisional.
 
 <a id="review-1"></a>
 
 ### Claim 1 — Sync CPU-bound bootstrap helpers lack a spawn_blocking / bootstrap-only contract (pillar 2, letter)
 
-Status: `confirmed-open`. Current risk: `low`.
+Status: `confirmed-open`. Current risk: `nit`.
 
-Certificate generation and PEM/config construction remain synchronous without bootstrap-only or spawn_blocking guidance. Current server use is startup initialization, not a demonstrated per-connection hot path.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-transport-tcp/src/tls.rs:22](../../../../../crates/shamir-transport-tcp/src/tls.rs#L22); [crates/shamir-transport-tcp/src/tls.rs:40](../../../../../crates/shamir-transport-tcp/src/tls.rs#L40); [crates/shamir-server/src/server/server_launcher.rs:601](../../../../../crates/shamir-server/src/server/server_launcher.rs#L601).
+Synchronous rcgen/PEM work lacks scheduling guidance, but current production use is startup before listeners. No per-connection regeneration or measured worker starvation exists in the inspected path.
 
-Grouping/duplicate: `SUMMARY.md#2.1`. This row is not another independent defect.
+Evidence: [crates/shamir-transport-tcp/src/tls.rs:28](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-transport-tcp/src/tls.rs#L28); [crates/shamir-server/src/server/server_launcher.rs:601](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-server/src/server/server_launcher.rs#L601).
+
+Grouping/duplicate: [SUMMARY.md#2.1](SUMMARY.md#review-2-1). This is not an additional independent defect.
 
 <a id="review-2"></a>
 
@@ -33,18 +37,19 @@ Grouping/duplicate: `SUMMARY.md#2.1`. This row is not another independent defect
 
 Status: `confirmed-open`. Current risk: `nit`.
 
-Both e2e tests retain default current-thread runtimes and directly call process_challenge, which synchronously derives keys. Their sequential exchange does not prove a present deadlock or timeout.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-transport-tcp/tests/handshake_e2e.rs:113](../../../../../crates/shamir-transport-tcp/tests/handshake_e2e.rs#L113); [crates/shamir-transport-tcp/tests/handshake_e2e.rs:278](../../../../../crates/shamir-transport-tcp/tests/handshake_e2e.rs#L278); [crates/shamir-transport-tcp/tests/echo_e2e.rs:152](../../../../../crates/shamir-transport-tcp/tests/echo_e2e.rs#L152); [crates/shamir-transport-tcp/tests/echo_e2e.rs:376](../../../../../crates/shamir-transport-tcp/tests/echo_e2e.rs#L376); [crates/shamir-connect/src/client/handshake.rs:231](../../../../../crates/shamir-connect/src/client/handshake.rs#L231).
+The synchronous derive occupies the current-thread worker while the server waits for proof. Adding a timeout does not necessarily produce a deadlock; its deadline and scheduling determine behavior.
 
-Grouping/duplicate: `SUMMARY.md#2.2`. This row is not another independent defect.
+Evidence: [crates/shamir-transport-tcp/tests/handshake_e2e.rs:278](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-transport-tcp/tests/handshake_e2e.rs#L278); [crates/shamir-transport-tcp/tests/echo_e2e.rs:376](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-transport-tcp/tests/echo_e2e.rs#L376); [crates/shamir-connect/src/client/handshake.rs:231](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-connect/src/client/handshake.rs#L231).
 
-## Corrections and qualified non-findings
+Grouping/duplicate: [SUMMARY.md#2.2](SUMMARY.md#review-2-2). This is not an additional independent defect.
 
-- Qualify zero-lock claims as properties of this crate's own implementation, not its transitive execution. SessionStore and DashMap use internal locks.
-- The SessionStore::len exclusion remains justified: it delegates to DashMap's shard-counting implementation, not an O(N) scc traversal; see crates/shamir-connect/src/server/session.rs:530 and Cargo.lock:1096. It is not itself lock-free.
-- The stated KDF duration and predicted future SLOW/TIMEOUT behavior are unmeasured hypotheses.
-- Exclusive mutable framing ownership, absence of hash-keyed structures and absence of explicit lock-across-await sites remain source-supported.
+## Evidence and recipe corrections
+
+- DashMap 6.1.0 _len iterates shard read locks and counts; it is O(shards), not lock-free. This independently supports the exclusion from the scc O(N) finding.
+- Changing test runtime flavor supplies parallel workers but does not offload synchronous KDF work.
+- No-lock findings apply to this crate's implementation, not Tokio, rustls, SessionStore or the complete client/server path.
 
 ---
 

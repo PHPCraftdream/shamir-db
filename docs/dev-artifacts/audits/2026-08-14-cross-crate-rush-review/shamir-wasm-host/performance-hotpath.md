@@ -1,23 +1,21 @@
-<!-- revalidation:2026-10-08 source:92ad58266bf57ddea1fa3c8a47affba1a3a9a096 -->
-# shamir-wasm-host — performance-hotpath revalidation
+<!-- revalidation:2026-10-08 cycle:independent-2 source:e3765c935fc71655ee1ec0160cf180607935d89b -->
+# shamir-wasm-host — performance-hotpath independent revalidation (cycle 2)
 
-Source snapshot: `92ad58266bf57ddea1fa3c8a47affba1a3a9a096`. Revalidated 2026-10-08 by read-only XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run; no source fix is part of this update. Test registration/assertions are evidence of an oracle, not proof of a passing run.
+Frozen source snapshot: `e3765c935fc71655ee1ec0160cf180607935d89b`. Independently revalidated 2026-10-08 by a fresh XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run. Source-fixed means the specified mechanism was already removed at this snapshot; this cycle implements no source fix.
 
-This section is authoritative for current status. Original titles/IDs are retained for traceability; a refuted title is not a current assertion. The collapsed historical report below is superseded, including its counts, severity, scenarios and fix instructions. Plan IDs preserve historical numbering, not a current release mandate. [Workspace methodology and status definitions](../SUMMARY.md#status-definitions).
+This section is authoritative for current decisions. Existing IDs and allegation titles are retained for traceability; a refuted title is not a current assertion. Prior-cycle decisions were rechecked, not used as proof. The first cycle is available in repository history at this snapshot. The original historical body below remains preserved once and is superseded, including its counts, severities and recipes. [Workspace scope and status definitions](../SUMMARY.md#status-definitions).
 
-Unbounded globals, compiler buffering, engine retention, and redundant copies remain structurally demonstrated. Latency multipliers and two Wasmtime-specific optimization premises are not verified.
+Unrelated external edits began in dependency/toolchain/CI metadata during collection; additional Rust-source edits appeared afterward. They were left untouched. Evidence and decisions are tied to the frozen commit, not those later changes or an installed toolchain. “Current” below means current at that snapshot; no re-audit of the modified working tree is implied.
+
+Retained globals, compiler diagnostic buffers, engine retention and redundant copies are visible without benchmarking. Dependency inspection refutes linear export scanning and confirms boxed futures are required; neither optional optimization warrants a current defect label.
 
 ## Current claim decisions
 
 | Claim decisions | Open | Source-fixed | Partial | Refuted | Unverified | N/A |
 |---:|---:|---:|---:|---:|---:|---:|
-| 10 | 9 | 0 | 0 | 0 | 0 | 1 |
+| 10 | 8 | 0 | 0 | 0 | 0 | 2 |
 
-These are decisions on report claims, including repeated roots, bundled observations and non-findings—not a unique-bug census. Closed/N/A rows have no current risk; unverified risk is provisional. Pure style and unmeasured optimization claims do not establish runtime impact.
-
-## Parent acceptance refinements
-
-- Pinned Wasmtime's async linker requires boxed futures; do not retain removing Box::pin as a directly implementable fix.
+These are duplicate-inclusive report decisions, not a unique-bug census. Pure style or structural optimization does not establish a runtime incident; unverified impact remains provisional.
 
 <a id="review-1"></a>
 
@@ -25,23 +23,27 @@ These are decisions on report claims, including repeated roots, bundled observat
 
 Status: `confirmed-open`. Current risk: `medium`.
 
-Non-env guest writes reach a shared host map without cardinality or byte quota. The sanctioned ABI has no removal import, and per-Store guest memory limits do not bound retained host entries across invocations.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-wasm-host/src/wasm/host_globals.rs:55](../../../../../crates/shamir-wasm-host/src/wasm/host_globals.rs#L55); [crates/shamir-wasm-host/src/context.rs:164](../../../../../crates/shamir-wasm-host/src/context.rs#L164); [crates/shamir-wasm-host/src/wasm/wasm_sanitizer.rs:87](../../../../../crates/shamir-wasm-host/src/wasm/wasm_sanitizer.rs#L87).
+Distinct non-env writes accumulate in host memory across fresh Store invocations; no quota or guest removal ABI exists.
 
-Grouping/duplicate: `SUMMARY.md#4.1`. This row is not another independent defect.
+Evidence: [crates/shamir-wasm-host/src/wasm/host_globals.rs:55](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-wasm-host/src/wasm/host_globals.rs#L55); [crates/shamir-wasm-host/src/context.rs:164](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-wasm-host/src/context.rs#L164).
+
+Grouping/duplicate: [SUMMARY.md#4.1](SUMMARY.md#review-4-1). This is not an additional independent defect.
 
 <a id="review-2"></a>
 
 ### Claim 2 — Per-invocation input prep: deep params clone + msgpack encode + redundant `.to_vec()` copy
 
-Status: `confirmed-open`. Current risk: `medium`.
+Status: `confirmed-open`. Current risk: `low`.
 
-call still clones the entire parameter map, serializes it into Bytes, and copies those bytes into a Vec before copying into guest memory. Allocation/copy presence is proven; the claimed threefold workload cost is unmeasured.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-wasm-host/src/wasm/wasm_function.rs:407](../../../../../crates/shamir-wasm-host/src/wasm/wasm_function.rs#L407); [crates/shamir-types/src/types/value.rs:33](../../../../../crates/shamir-types/src/types/value.rs#L33); [crates/shamir-types/src/types/value.rs:52](../../../../../crates/shamir-types/src/types/value.rs#L52).
+The parameter map is cloned and encoded Bytes copied to Vec. Allocation structure is proved; quantitative workload cost is not.
 
-Grouping/duplicate: `SUMMARY.md#4.2`. This row is not another independent defect.
+Evidence: [crates/shamir-wasm-host/src/wasm/wasm_function.rs:407](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-wasm-host/src/wasm/wasm_function.rs#L407); [crates/shamir-types/src/types/value.rs:52](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-types/src/types/value.rs#L52).
+
+Grouping/duplicate: [SUMMARY.md#4.2](SUMMARY.md#review-4-2). This is not an additional independent defect.
 
 <a id="review-3"></a>
 
@@ -49,11 +51,13 @@ Grouping/duplicate: `SUMMARY.md#4.2`. This row is not another independent defect
 
 Status: `confirmed-open`. Current risk: `low`.
 
-Both readers accumulate unrestricted Vec buffers and stderr enters an allocated error message. Hostile source can induce large diagnostics; guest-supplied build scripts are not supported by this compile interface.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-wasm-host/src/compile.rs:571](../../../../../crates/shamir-wasm-host/src/compile.rs#L571); [crates/shamir-wasm-host/src/compile.rs:579](../../../../../crates/shamir-wasm-host/src/compile.rs#L579); [crates/shamir-wasm-host/src/compile.rs:619](../../../../../crates/shamir-wasm-host/src/compile.rs#L619).
+Both read_to_end drains retain all diagnostics. Source can generate large errors, but cannot supply its own build script.
 
-Grouping/duplicate: `SUMMARY.md#4.3`. This row is not another independent defect.
+Evidence: [crates/shamir-wasm-host/src/compile.rs:575](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-wasm-host/src/compile.rs#L575); [crates/shamir-wasm-host/src/compile.rs:583](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-wasm-host/src/compile.rs#L583).
+
+Grouping/duplicate: [SUMMARY.md#4.3](SUMMARY.md#review-4-3). This is not an additional independent defect.
 
 <a id="review-4"></a>
 
@@ -61,11 +65,13 @@ Grouping/duplicate: `SUMMARY.md#4.3`. This row is not another independent defect
 
 Status: `confirmed-open`. Current risk: `low`.
 
-Each construction detaches an endless thread holding an Engine clone. Database initialization creates an engine per database; benchmark setup also creates engines repeatedly. Engine resources cannot be released while the ticker retains them.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-wasm-host/src/wasm/wasm_engine.rs:155](../../../../../crates/shamir-wasm-host/src/wasm/wasm_engine.rs#L155); [crates/shamir-db/src/shamir_db/shamir_db/core.rs:165](../../../../../crates/shamir-db/src/shamir_db/shamir_db/core.rs#L165); [crates/shamir-engine/benches/wasm_invoke.rs:153](../../../../../crates/shamir-engine/benches/wasm_invoke.rs#L153).
+The endless thread retains an Engine clone, including after database handles are dropped; repeated construction is supported.
 
-Grouping/duplicate: `SUMMARY.md#4.4`. This row is not another independent defect.
+Evidence: [crates/shamir-wasm-host/src/wasm/wasm_engine.rs:155](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-wasm-host/src/wasm/wasm_engine.rs#L155); [crates/shamir-db/src/shamir_db/shamir_db/core.rs:165](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/shamir_db/core.rs#L165).
+
+Grouping/duplicate: [SUMMARY.md#4.4](SUMMARY.md#review-4-4). This is not an additional independent defect.
 
 <a id="review-5"></a>
 
@@ -73,11 +79,13 @@ Grouping/duplicate: `SUMMARY.md#4.4`. This row is not another independent defect
 
 Status: `confirmed-open`. Current risk: `low`.
 
-host_call clones the existing grants Arc, then iterates cloned Strings into with_secret_grants, which constructs another set and Arc. These allocations are unnecessary for unchanged inherited grants.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-wasm-host/src/wasm/host_call.rs:84](../../../../../crates/shamir-wasm-host/src/wasm/host_call.rs#L84); [crates/shamir-wasm-host/src/wasm/host_call.rs:119](../../../../../crates/shamir-wasm-host/src/wasm/host_call.rs#L119); [crates/shamir-wasm-host/src/context.rs:395](../../../../../crates/shamir-wasm-host/src/context.rs#L395).
+Already-shared immutable grants are cloned string-by-string into a new set and Arc for each nested call.
 
-Grouping/duplicate: `SUMMARY.md#4.5`. This row is not another independent defect.
+Evidence: [crates/shamir-wasm-host/src/wasm/host_call.rs:119](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-wasm-host/src/wasm/host_call.rs#L119); [crates/shamir-wasm-host/src/context.rs:395](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-wasm-host/src/context.rs#L395).
+
+Grouping/duplicate: [SUMMARY.md#4.5](SUMMARY.md#review-4-5). This is not an additional independent defect.
 
 <a id="review-6"></a>
 
@@ -85,11 +93,13 @@ Grouping/duplicate: `SUMMARY.md#4.5`. This row is not another independent defect
 
 Status: `confirmed-open`. Current risk: `low`.
 
-Both writes still perform separate remove and insert lookups, unlike the existing single-entry RMW path. This proves redundant map operations and a visibility gap, not a measured speedup from replacement.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-wasm-host/src/context.rs:52](../../../../../crates/shamir-wasm-host/src/context.rs#L52); [crates/shamir-wasm-host/src/context.rs:166](../../../../../crates/shamir-wasm-host/src/context.rs#L166); [crates/shamir-wasm-host/src/context.rs:228](../../../../../crates/shamir-wasm-host/src/context.rs#L228).
+Each put/set uses two independent operations, with both redundant lookup work and a visibility gap.
 
-Grouping/duplicate: `SUMMARY.md#2.2`. This row is not another independent defect.
+Evidence: [crates/shamir-wasm-host/src/context.rs:52](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-wasm-host/src/context.rs#L52); [crates/shamir-wasm-host/src/context.rs:166](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-wasm-host/src/context.rs#L166).
+
+Grouping/duplicate: [SUMMARY.md#2.2](SUMMARY.md#review-2-2). This is not an additional independent defect.
 
 <a id="review-7"></a>
 
@@ -97,37 +107,41 @@ Grouping/duplicate: `SUMMARY.md#2.2`. This row is not another independent defect
 
 Status: `confirmed-open`. Current risk: `nit`.
 
-Both successful read handlers clone batch and globals handles that are used only in discard expressions. The extra clones remain; absent or denied reads return before reaching them.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-wasm-host/src/wasm/host_batch.rs:54](../../../../../crates/shamir-wasm-host/src/wasm/host_batch.rs#L54); [crates/shamir-wasm-host/src/wasm/host_batch.rs:90](../../../../../crates/shamir-wasm-host/src/wasm/host_batch.rs#L90); [crates/shamir-wasm-host/src/wasm/host_globals.rs:95](../../../../../crates/shamir-wasm-host/src/wasm/host_globals.rs#L95); [crates/shamir-wasm-host/src/wasm/host_globals.rs:130](../../../../../crates/shamir-wasm-host/src/wasm/host_globals.rs#L130).
+Successful getter paths clone handles consumed only by discard expressions; absent/denied paths avoid them.
 
-Grouping/duplicate: `SUMMARY.md#4.6`. This row is not another independent defect.
+Evidence: [crates/shamir-wasm-host/src/wasm/host_batch.rs:54](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-wasm-host/src/wasm/host_batch.rs#L54); [crates/shamir-wasm-host/src/wasm/host_globals.rs:95](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-wasm-host/src/wasm/host_globals.rs#L95).
+
+Grouping/duplicate: [SUMMARY.md#4.6](SUMMARY.md#review-4-6). This is not an additional independent defect.
 
 <a id="review-8"></a>
 
 ### Claim 8 — Host-import export re-resolution + `typed()` rebuild per call
 
-Status: `confirmed-open`. Current risk: `nit`.
+Status: `not-applicable`. Current risk: `—`.
 
-Repeated export resolution and typed-function construction are visible, with no handles cached in HostState. The alleged O(exports) scan and its latency are unverified without resolved Wasmtime implementation evidence.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-wasm-host/src/wasm/wasm_function.rs:333](../../../../../crates/shamir-wasm-host/src/wasm/wasm_function.rs#L333); [crates/shamir-wasm-host/src/wasm/wasm_function.rs:349](../../../../../crates/shamir-wasm-host/src/wasm/wasm_function.rs#L349); [crates/shamir-wasm-host/src/wasm/host_batch.rs:57](../../../../../crates/shamir-wasm-host/src/wasm/host_batch.rs#L57).
+Repetition is real, but Wasmtime 46.0.2 uses mapped lookup and lazy export caching, not the alleged linear scan. Further caching is an unmeasured optional optimization.
 
-Grouping/duplicate: `SUMMARY.md#4.7`. This row is not another independent defect.
+Evidence: [crates/shamir-wasm-host/src/wasm/wasm_function.rs:333](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-wasm-host/src/wasm/wasm_function.rs#L333); [Cargo.lock:4741](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/Cargo.lock#L4741).
+
+Grouping/duplicate: [SUMMARY.md#4.7](SUMMARY.md#review-4-7). This is not an additional independent defect.
 
 <a id="review-9"></a>
 
 ### Claim 9 — `Box<dyn Future>` heap allocation per nested async host import
 
-Status: `not-applicable`. Current risk: —.
+Status: `not-applicable`. Current risk: `—`.
 
-Parent inspection of checksummed Wasmtime 46.0.2 shows Linker::func_wrap_async requires a for<'a> closure returning Box<dyn Future<Output=Args> + Send + 'a>. The visible boxing is required by this pinned API; the proposed direct unboxed closure is incompatible. An alternative API/architecture is optional optimization and has no measured benefit here.
+Prior-cycle decision: `not-applicable`.
 
-Evidence: [crates/shamir-wasm-host/src/wasm/host_call.rs:44](../../../../../crates/shamir-wasm-host/src/wasm/host_call.rs#L44); [crates/shamir-wasm-host/src/wasm/wasm_function.rs:197](../../../../../crates/shamir-wasm-host/src/wasm/wasm_function.rs#L197); [Cargo.lock:4741](../../../../../Cargo.lock#L4741).
+The checksummed Wasmtime 46.0.2 linker requires Box&lt;dyn Future + Send&gt; returns; direct unboxed substitution violates that API.
 
-Pinned dependency evidence: [wasmtime 46.0.2, src/runtime/linker.rs:581](https://docs.rs/crate/wasmtime/46.0.2/source/src/runtime/linker.rs).
+Evidence: [crates/shamir-wasm-host/src/wasm/host_call.rs:44](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-wasm-host/src/wasm/host_call.rs#L44); [crates/shamir-wasm-host/src/wasm/wasm_function.rs:197](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-wasm-host/src/wasm/wasm_function.rs#L197); [Cargo.lock:4741](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/Cargo.lock#L4741).
 
-Grouping/duplicate: `SUMMARY.md#4.8`. This row is not another independent defect.
+Grouping/duplicate: [SUMMARY.md#4.8](SUMMARY.md#review-4-8). This is not an additional independent defect.
 
 <a id="review-10"></a>
 
@@ -135,23 +149,22 @@ Grouping/duplicate: `SUMMARY.md#4.8`. This row is not another independent defect
 
 Status: `confirmed-open`. Current risk: `nit`.
 
-The owned compiled artifact is passed by slice and copied on unavailable/failed optimization paths. Ownership-preserving pass-through remains possible; this is off-hot-path allocation cleanup.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-wasm-host/src/compile.rs:638](../../../../../crates/shamir-wasm-host/src/compile.rs#L638); [crates/shamir-wasm-host/src/compile.rs:655](../../../../../crates/shamir-wasm-host/src/compile.rs#L655); [crates/shamir-wasm-host/src/compile.rs:688](../../../../../crates/shamir-wasm-host/src/compile.rs#L688).
+Unavailable/failed optimizer paths copy the compiled artifact despite upstream ownership being available.
 
-Grouping/duplicate: `SUMMARY.md#4.9`. This row is not another independent defect.
+Evidence: [crates/shamir-wasm-host/src/compile.rs:638](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-wasm-host/src/compile.rs#L638); [crates/shamir-wasm-host/src/compile.rs:655](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-wasm-host/src/compile.rs#L655).
 
-## Corrections and qualified non-findings
+Grouping/duplicate: [SUMMARY.md#4.9](SUMMARY.md#review-4-9). This is not an additional independent defect.
 
-- GlobalVars retention is scoped to the database's shared globals instance, not necessarily one universal process-global map.
-- A removal import alone does not protect against a guest that refuses to remove entries; a quota is necessary for adversarial retention control.
-- read_to_end is unbounded, but arbitrary tenant build scripts cannot be added to the generated crate. Use source-controlled diagnostic volume as the supported threat scenario.
-- String::from_utf8_lossy borrows valid UTF-8 stderr; it does not always allocate a second full-size buffer. Formatting the final error does allocate.
-- The 768-GiB virtual-reservation number is a configuration/comment estimate, not verified allocation or RSS.
-- The benchmark creates fresh engines per iteration in some setup paths, not merely once per scenario.
-- Repeated export lookup is confirmed; linear lookup complexity is not.
-- The impl-Future recommendation must be checked against the exact Wasmtime API before becoming a task.
-- The crate retains InstancePre and pooling/CoW setup, has no in-crate benchmark target, and its invocation path has no identified full-registry scan. Strict aggregate fuel and unconditional wall-clock guarantees are not established.
+## Evidence and recipe corrections
+
+- Wasmtime 46.0.2 src/runtime/instance.rs resolves names through a StringPool and TryIndexMap and caches export objects. The historical O(exports) assertion is refuted, not merely unverified. Published sources: https://docs.rs/crate/wasmtime/46.0.2/source/src/runtime/instance.rs and https://docs.rs/crate/wasmtime-environ/46.0.2/source/src/module.rs.
+- func_wrap_async requires Box, not necessarily Box::pin; this crate's handlers use Box::new. Parent wording should distinguish those spellings.
+- Lowered parameter-copy severity to low: extra allocations are explicit, but a threefold cost or latency regression is unsupported.
+- An added global_remove import is reclamation capability, not adversarial retention control. Quotas must cover all mutation paths.
+- A singleton Engine changes pool-sharing/admission across databases. A per-clone Drop stop flag can disable other live clones.
+- The cold-cache benchmark's fresh engine does not by itself clear a persistent disk cache; its label is not proof of cold compilation. No benchmark was executed.
 
 ---
 

@@ -1,11 +1,13 @@
-<!-- revalidation:2026-10-08 source:92ad58266bf57ddea1fa3c8a47affba1a3a9a096 -->
-# shamir-collections — concurrency-lockfree revalidation
+<!-- revalidation:2026-10-08 cycle:independent-2 source:e3765c935fc71655ee1ec0160cf180607935d89b -->
+# shamir-collections — concurrency-lockfree independent revalidation (cycle 2)
 
-Source snapshot: `92ad58266bf57ddea1fa3c8a47affba1a3a9a096`. Revalidated 2026-10-08 by read-only XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run; no source fix is part of this update. Test registration/assertions are evidence of an oracle, not proof of a passing run.
+Frozen source snapshot: `e3765c935fc71655ee1ec0160cf180607935d89b`. Independently revalidated 2026-10-08 by a fresh XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run. Source-fixed means the specified mechanism was already removed at this snapshot; this cycle implements no source fix.
 
-This section is authoritative for current status. Original titles/IDs are retained for traceability; a refuted title is not a current assertion. The collapsed historical report below is superseded, including its counts, severity, scenarios and fix instructions. Plan IDs preserve historical numbering, not a current release mandate. [Workspace methodology and status definitions](../SUMMARY.md#status-definitions).
+This section is authoritative for current decisions. Existing IDs and allegation titles are retained for traceability; a refuted title is not a current assertion. Prior-cycle decisions were rechecked, not used as proof. The first cycle is available in repository history at this snapshot. The original historical body below remains preserved once and is superseded, including its counts, severities and recipes. [Workspace scope and status definitions](../SUMMARY.md#status-definitions).
 
-The local concurrency non-findings remain valid: no locks, awaits, concurrent registries or synchronization state; all aliases and constructors explicitly select THasher. The capacity-constructor cost guarantee needs qualification.
+Unrelated external edits began in dependency/toolchain/CI metadata during collection; additional Rust-source edits appeared afterward. They were left untouched. Evidence and decisions are tied to the frozen commit, not those later changes or an installed toolchain. “Current” below means current at that snapshot; no re-audit of the modified working tree is implied.
+
+The local synchronization non-finding is supported. Collections are ordinary owned values, not concurrent registries; delegated allocation costs require separate qualification.
 
 ## Current claim decisions
 
@@ -13,17 +15,14 @@ The local concurrency non-findings remain valid: no locks, awaits, concurrent re
 |---:|---:|---:|---:|---:|---:|---:|
 | 0 | 0 | 0 | 0 | 0 | 0 | 0 |
 
-These are decisions on report claims, including repeated roots, bundled observations and non-findings—not a unique-bug census. Closed/N/A rows have no current risk; unverified risk is provisional. Pure style and unmeasured optimization claims do not establish runtime impact.
+These are duplicate-inclusive report decisions, not a unique-bug census. Pure style or structural optimization does not establish a runtime incident; unverified impact remains provisional.
 
-No local defect was established for this lens. The scope and positive-assurance qualifications below still apply.
+## Evidence and recipe corrections
 
-## Corrections and qualified non-findings
-
-- The crate-wide allow remains explicitly sanctioned by clippy.toml:39; narrowing it is optional lint containment, not remediation of a present concurrency violation.
-- The dependency-light guest-facing design still explains the absence of scc/DashMap constructors.
-- No concurrency-specific tests are required by a nonexistent local synchronization surface, but this does not make constructor and serialization contracts untestable.
-- Do not describe every constructor as constant-time: pinned IndexMap documents nonzero capacity construction as O(capacity), and its core allocates both an indices table and an entries vector.
-- RandomState cannot back a value of the exported aliases, but absence of randomization is not an input-trust or HashDoS-safety guarantee.
+- No local locks, awaits, shared counters or concurrent registry mechanisms were found; adding scc/DashMap dependencies is not required for this guest-facing leaf.
+- Nonzero ordered capacity construction is O(capacity) and uses two backing allocations, not universally constant-time.
+- Type-level exclusion of RandomState establishes builder selection, not HashDoS resistance or trusted ingress.
+- The sanctioned broad lint allow is optional containment debt, not a current concurrency-policy violation.
 
 ---
 

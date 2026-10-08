@@ -1,31 +1,35 @@
-<!-- revalidation:2026-10-08 source:92ad58266bf57ddea1fa3c8a47affba1a3a9a096 -->
-# shamir-sdk — performance-hotpath revalidation
+<!-- revalidation:2026-10-08 cycle:independent-2 source:e3765c935fc71655ee1ec0160cf180607935d89b -->
+# shamir-sdk — performance-hotpath independent revalidation (cycle 2)
 
-Source snapshot: `92ad58266bf57ddea1fa3c8a47affba1a3a9a096`. Revalidated 2026-10-08 by read-only XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run; no source fix is part of this update. Test registration/assertions are evidence of an oracle, not proof of a passing run.
+Frozen source snapshot: `e3765c935fc71655ee1ec0160cf180607935d89b`. Independently revalidated 2026-10-08 by a fresh XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run. Source-fixed means the specified mechanism was already removed at this snapshot; this cycle implements no source fix.
 
-This section is authoritative for current status. Original titles/IDs are retained for traceability; a refuted title is not a current assertion. The collapsed historical report below is superseded, including its counts, severity, scenarios and fix instructions. Plan IDs preserve historical numbering, not a current release mandate. [Workspace methodology and status definitions](../SUMMARY.md#status-definitions).
+This section is authoritative for current decisions. Existing IDs and allegation titles are retained for traceability; a refuted title is not a current assertion. Prior-cycle decisions were rechecked, not used as proof. The first cycle is available in repository history at this snapshot. The original historical body below remains preserved once and is superseded, including its counts, severities and recipes. [Workspace scope and status definitions](../SUMMARY.md#status-definitions).
 
-Cumulative guest ABI-buffer retention remains source-proven, as do unpaginated Table queries and avoidable clones. Exact performance and memory multipliers remain unmeasured.
+Unrelated external edits began in dependency/toolchain/CI metadata during collection; additional Rust-source edits appeared afterward. They were left untouched. Evidence and decisions are tied to the frozen commit, not those later changes or an installed toolchain. “Current” below means current at that snapshot; no re-audit of the modified working tree is implied.
+
+Invocation-local retention and full Table materialization are source-proven. Copy/scan facts are real but optional optimization opportunities; quantitative multipliers and mandatory redesign remain unsupported.
 
 ## Current claim decisions
 
 | Claim decisions | Open | Source-fixed | Partial | Refuted | Unverified | N/A |
 |---:|---:|---:|---:|---:|---:|---:|
-| 6 | 5 | 0 | 0 | 0 | 0 | 1 |
+| 6 | 3 | 0 | 0 | 0 | 0 | 3 |
 
-These are decisions on report claims, including repeated roots, bundled observations and non-findings—not a unique-bug census. Closed/N/A rows have no current risk; unverified risk is provisional. Pure style and unmeasured optimization claims do not establish runtime impact.
+These are duplicate-inclusive report decisions, not a unique-bug census. Pure style or structural optimization does not establish a runtime incident; unverified impact remains provisional.
 
 <a id="review-1"></a>
 
 ### Claim 1 — Host-import ABI leaks both directions' buffers on every call — unbounded guest linear-memory growth in loops
 
-Status: `confirmed-open`. Current risk: `high`.
+Status: `confirmed-open`. Current risk: `medium`.
 
-encode_leak forgets request Vecs and response allocations are never freed; all macro allocators forget their Vecs. Growth is cumulative within one invocation and ends when the Store drops or a limit fails. db_execute borrows its request rather than leaking it, and getters without a payload do not leak both directions.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-sdk/src/host_imports.rs:60](../../../../../crates/shamir-sdk/src/host_imports.rs#L60); [crates/shamir-sdk/src/host_imports.rs:96](../../../../../crates/shamir-sdk/src/host_imports.rs#L96); [crates/shamir-sdk/src/host_imports.rs:213](../../../../../crates/shamir-sdk/src/host_imports.rs#L213); [crates/shamir-sdk-macros/src/lib.rs:239](../../../../../crates/shamir-sdk-macros/src/lib.rs#L239); [crates/shamir-wasm-host/src/wasm/wasm_function.rs:474](../../../../../crates/shamir-wasm-host/src/wasm/wasm_function.rs#L474).
+Payload requests and allocated replies remain forgotten until Store destruction. Repeated individually small transfers can exhaust the finite cap despite dropping results. db_execute borrows input; absence replies allocate nothing.
 
-Grouping/duplicate: `SUMMARY.md#4.1`. This row is not another independent defect.
+Evidence: [crates/shamir-sdk/src/host_imports.rs:64](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-sdk/src/host_imports.rs#L64); [crates/shamir-sdk/src/host_imports.rs:213](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-sdk/src/host_imports.rs#L213); [crates/shamir-sdk-macros/src/lib.rs:239](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-sdk-macros/src/lib.rs#L239); [crates/shamir-wasm-host/src/wasm/wasm_function.rs:457](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-wasm-host/src/wasm/wasm_function.rs#L457).
+
+Grouping/duplicate: [SUMMARY.md#4.1](SUMMARY.md#review-4-1). This is not an additional independent defect.
 
 <a id="review-2"></a>
 
@@ -33,11 +37,13 @@ Grouping/duplicate: `SUMMARY.md#4.1`. This row is not another independent defect
 
 Status: `confirmed-open`. Current risk: `medium`.
 
-Table::query still returns a full Vec without pagination, and its gateway requests Pagination::None. Full host result/encoding, guest encoded bytes, and decoded values coexist during transfer. Only guest ABI bytes are necessarily leaked; host temporaries and decoded values can be dropped. Feature-gated Db::execute offers the builder alternative.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-sdk/src/db.rs:98](../../../../../crates/shamir-sdk/src/db.rs#L98); [crates/shamir-sdk/src/db.rs:135](../../../../../crates/shamir-sdk/src/db.rs#L135); [crates/shamir-sdk/src/host_imports.rs:182](../../../../../crates/shamir-sdk/src/host_imports.rs#L182); [crates/shamir-db/src/shamir_db/shamir_db/db_gateway.rs:230](../../../../../crates/shamir-db/src/shamir_db/shamir_db/db_gateway.rs#L230); [crates/shamir-wasm-host/src/wasm/wasm_function.rs:329](../../../../../crates/shamir-wasm-host/src/wasm/wasm_function.rs#L329).
+Gateway Pagination::None and SDK full Vec materialize all matches. Encoded guest bytes remain allocated; decoded values and host temporary buffers do not intrinsically leak. Builder execution supplies another API.
 
-Grouping/duplicate: `SUMMARY.md#4.2`. This row is not another independent defect.
+Evidence: [crates/shamir-sdk/src/db.rs:98](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-sdk/src/db.rs#L98); [crates/shamir-db/src/shamir_db/shamir_db/db_gateway.rs:236](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-db/src/shamir_db/shamir_db/db_gateway.rs#L236); [crates/shamir-sdk/src/db.rs:135](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-sdk/src/db.rs#L135).
+
+Grouping/duplicate: [SUMMARY.md#4.2](SUMMARY.md#review-4-2). This is not an additional independent defect.
 
 <a id="review-3"></a>
 
@@ -45,57 +51,65 @@ Grouping/duplicate: `SUMMARY.md#4.2`. This row is not another independent defect
 
 Status: `confirmed-open`. Current risk: `medium`.
 
-Unresolved futures continuously repoll. A future that later returns Ready completes, and production fuel/epoch/deadline limits bound CPU consumption. SDK host imports do not themselves yield guest Pending.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-sdk/src/__rt.rs:50](../../../../../crates/shamir-sdk/src/__rt.rs#L50); [crates/shamir-sdk/src/__rt.rs:57](../../../../../crates/shamir-sdk/src/__rt.rs#L57); [crates/shamir-wasm-host/src/wasm/wasm_function.rs:477](../../../../../crates/shamir-wasm-host/src/wasm/wasm_function.rs#L477); [crates/shamir-wasm-host/src/wasm/wasm_function.rs:487](../../../../../crates/shamir-wasm-host/src/wasm/wasm_function.rs#L487).
+Always-Pending consumes the execution budget; later Ready completes. Default finite fuel contradicts infinite production CPU cost.
 
-Grouping/duplicate: `SUMMARY.md#2.1`. This row is not another independent defect.
+Evidence: [crates/shamir-sdk/src/__rt.rs:50](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-sdk/src/__rt.rs#L50); [crates/shamir-wasm-host/src/wasm/wasm_function.rs:477](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-wasm-host/src/wasm/wasm_function.rs#L477).
+
+Grouping/duplicate: [SUMMARY.md#2.1](SUMMARY.md#review-2-1). This is not an additional independent defect.
 
 <a id="review-4"></a>
 
 ### Claim 4 — `Params::get` linear-scans the parameter map on every typed access; `bytes()` clones the payload
 
-Status: `confirmed-open`. Current risk: `low`.
+Status: `not-applicable`. Current risk: `—`.
 
-Each accessor still scans the Vec; bytes still allocates/copies Bin or Str payloads. O(P*M) access work and O(payload) copying are structural, but no measured latency or required redesign follows at small P.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-sdk/src/params.rs:26](../../../../../crates/shamir-sdk/src/params.rs#L26); [crates/shamir-sdk/src/params.rs:68](../../../../../crates/shamir-sdk/src/params.rs#L68); [crates/shamir-sdk/src/value.rs:13](../../../../../crates/shamir-sdk/src/value.rs#L13).
+O(P) lookup and owned-byte copying match the documented Vec/Vec-returning design. No measured regression or violated contract requires an index or consuming accessor.
 
-Grouping/duplicate: `SUMMARY.md#4.4`. This row is not another independent defect.
+Evidence: [crates/shamir-sdk/src/params.rs:26](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-sdk/src/params.rs#L26); [crates/shamir-sdk/src/params.rs:68](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-sdk/src/params.rs#L68); [crates/shamir-sdk/src/value.rs:13](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-sdk/src/value.rs#L13).
+
+Grouping/duplicate: [SUMMARY.md#4.4](SUMMARY.md#review-4-4). This is not an additional independent defect.
 
 <a id="review-5"></a>
 
 ### Claim 5 — HTTP path double-copies payloads and triple-scans the response map
 
-Status: `confirmed-open`. Current risk: `low`.
+Status: `not-applicable`. Current risk: `—`.
 
-Ctx consumes HttpRequest but calls borrowed to_value, which clones its body and strings before encoding. from_value performs three field searches and clones body/header data. The overhead is source-proven, not benchmarked; consuming conversion would avoid ownership copies, not MessagePack encoding itself.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-sdk/src/context.rs:116](../../../../../crates/shamir-sdk/src/context.rs#L116); [crates/shamir-sdk/src/http.rs:98](../../../../../crates/shamir-sdk/src/http.rs#L98); [crates/shamir-sdk/src/http.rs:109](../../../../../crates/shamir-sdk/src/http.rs#L109); [crates/shamir-sdk/src/http.rs:130](../../../../../crates/shamir-sdk/src/http.rs#L130); [crates/shamir-sdk/src/http.rs:151](../../../../../crates/shamir-sdk/src/http.rs#L151).
+Borrowed to_value/from_value clone payloads and search fields separately. Consuming alternatives could reduce copies, but changing/removing public borrowed methods is not justified as required defect repair.
 
-Grouping/duplicate: `SUMMARY.md#4.5`. This row is not another independent defect.
+Evidence: [crates/shamir-sdk/src/http.rs:98](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-sdk/src/http.rs#L98); [crates/shamir-sdk/src/http.rs:124](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-sdk/src/http.rs#L124); [crates/shamir-sdk/src/context.rs:116](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-sdk/src/context.rs#L116).
+
+Grouping/duplicate: [SUMMARY.md#4.5](SUMMARY.md#review-4-5). This is not an additional independent defect.
 
 <a id="review-6"></a>
 
 ### Claim 6 — `Db::table` allocates a fresh `String` per handle
 
-Status: `not-applicable`. Current risk: —.
+Status: `not-applicable`. Current risk: `—`.
 
-The allocation remains, but the original report requires no fix and its existing example already hoists the handle. Repeated creation is a caller choice; the owned table name is dropped normally.
+Prior-cycle decision: `not-applicable`.
 
-Evidence: [crates/shamir-sdk/src/db.rs:26](../../../../../crates/shamir-sdk/src/db.rs#L26); [crates/shamir-sdk/src/db.rs:50](../../../../../crates/shamir-sdk/src/db.rs#L50).
+The String is ordinarily dropped and the existing usage example already reuses a table handle. Repeated recreation is a caller choice.
 
-Grouping/duplicate: `SUMMARY.md#4.6`. This row is not another independent defect.
+Evidence: [crates/shamir-sdk/src/db.rs:26](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-sdk/src/db.rs#L26); [crates/shamir-sdk/src/db.rs:52](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-sdk/src/db.rs#L52).
 
-## Corrections and qualified non-findings
+Grouping/duplicate: [SUMMARY.md#4.6](SUMMARY.md#review-4-6). This is not an additional independent defect.
 
-- Every host call leaks both directions is too broad: db_execute borrows its request; getter keys are borrowed; absent responses allocate nothing.
-- Describe growth as unreclaimed guest allocations within an invocation, capped by the host, not a cross-invocation leak.
-- The macro allocator uses leaked ordinary Vec allocations; calling it a resettable bump arena is inaccurate.
-- Host encoding buffers and guest decoded Vec<Value> objects are not intrinsically leaked. Exact 2x or 3–4-copy retained-memory multipliers are not proven.
-- The SDK has a feature-gated paginated builder execution path even though Table::query lacks pagination.
-- A proposed static Cell<Vec<u8>> is not directly a valid synchronized Rust static; reclamation design must address storage, capacity/layout, and reentrancy.
-- A sorted index provides logarithmic lookup, not automatically O(1). No benchmark supports replacing the accepted small-N scans.
+## Evidence and recipe corrections
+
+- Rate retention as bounded invocation-local failure potential, not unbounded host-process leakage; no measured threshold supports an unconditional High deployment verdict.
+- A leaked Vec allocator is not an implemented resettable bump arena.
+- static Cell&lt;Vec&lt;u8&gt;&gt; is not directly a valid shared Rust static; arena/scratch design must account for storage and reentrancy.
+- An exported free taking ptr/len must know the original allocation layout; Vec capacity cannot generally be reconstructed from length.
+- Add consuming conversions without removing existing public borrowed conversions, and preserve duplicate-key/order policy.
+- Sorted indexing offers logarithmic lookup, not automatically O(1); no small-N superiority measurement exists.
+- Builder pagination does not universally bound host scan/sort materialization, as README.md:135 explicitly qualifies.
 
 ---
 

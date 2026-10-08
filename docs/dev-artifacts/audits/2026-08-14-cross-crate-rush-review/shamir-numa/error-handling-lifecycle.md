@@ -1,43 +1,45 @@
-<!-- revalidation:2026-10-08 source:92ad58266bf57ddea1fa3c8a47affba1a3a9a096 -->
-# shamir-numa — error-handling-lifecycle revalidation
+<!-- revalidation:2026-10-08 cycle:independent-2 source:e3765c935fc71655ee1ec0160cf180607935d89b -->
+# shamir-numa — error-handling-lifecycle independent revalidation (cycle 2)
 
-Source snapshot: `92ad58266bf57ddea1fa3c8a47affba1a3a9a096`. Revalidated 2026-10-08 by read-only XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run; no source fix is part of this update. Test registration/assertions are evidence of an oracle, not proof of a passing run.
+Frozen source snapshot: `e3765c935fc71655ee1ec0160cf180607935d89b`. Independently revalidated 2026-10-08 by a fresh XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run. Source-fixed means the specified mechanism was already removed at this snapshot; this cycle implements no source fix.
 
-This section is authoritative for current status. Original titles/IDs are retained for traceability; a refuted title is not a current assertion. The collapsed historical report below is superseded, including its counts, severity, scenarios and fix instructions. Plan IDs preserve historical numbering, not a current release mandate. [Workspace methodology and status definitions](../SUMMARY.md#status-definitions).
+This section is authoritative for current decisions. Existing IDs and allegation titles are retained for traceability; a refuted title is not a current assertion. Prior-cycle decisions were rechecked, not used as proof. The first cycle is available in repository history at this snapshot. The original historical body below remains preserved once and is superseded, including its counts, severities and recipes. [Workspace scope and status definitions](../SUMMARY.md#status-definitions).
 
-Unbounded range expansion, blanket per-node error swallowing, missing deterministic Linux failure tests, and silent degradation remain. CPU_SET outcomes lack exact dependency proof; Unsupported remains context-free.
+Unrelated external edits began in dependency/toolchain/CI metadata during collection; additional Rust-source edits appeared afterward. They were left untouched. Evidence and decisions are tied to the frozen commit, not those later changes or an installed toolchain. “Current” below means current at that snapshot; no re-audit of the modified working tree is implied.
+
+The fixed-mask panic violates a real fallible API contract. Parser expansion and discovery error erasure remain lower-severity, qualified issues; context-free Unsupported is intentional taxonomy rather than a required repair.
 
 ## Current claim decisions
 
 | Claim decisions | Open | Source-fixed | Partial | Refuted | Unverified | N/A |
 |---:|---:|---:|---:|---:|---:|---:|
-| 6 | 6 | 0 | 0 | 0 | 0 | 0 |
+| 6 | 5 | 0 | 0 | 0 | 0 | 1 |
 
-These are decisions on report claims, including repeated roots, bundled observations and non-findings—not a unique-bug census. Closed/N/A rows have no current risk; unverified risk is provisional. Pure style and unmeasured optimization claims do not establish runtime impact.
-
-## Parent acceptance refinements
-
-- Exact Linux libc helper source proves checked-index bounds panic; remove contradictory glibc/musl C-macro outcomes.
+These are duplicate-inclusive report decisions, not a unique-bug census. Pure style or structural optimization does not establish a runtime incident; unverified impact remains provisional.
 
 <a id="review-1"></a>
 
 ### Claim 1 — `parse_cpulist` expands unbounded ranges -- malformed input can panic/abort the process
 
-Status: `confirmed-open`. Current risk: `medium`.
+Status: `confirmed-open`. Current risk: `low`.
 
-A valid ascending range expands without checked span or output limits; best-effort token handling does not prevent excessive allocation. Exact reserve strategy, failure timing, and usize-max examples depend on target/toolchain.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-numa/src/cpulist.rs:20](../../../../../crates/shamir-numa/src/cpulist.rs#L20); [crates/shamir-numa/src/cpulist.rs:38](../../../../../crates/shamir-numa/src/cpulist.rs#L38); [crates/shamir-numa/src/cpulist.rs:40](../../../../../crates/shamir-numa/src/cpulist.rs#L40); [crates/shamir-numa/src/tests/cpulist_tests.rs:47](../../../../../crates/shamir-numa/src/tests/cpulist_tests.rs#L47).
+Valid ascending ranges and repeated tokens expand without budgets. The mechanism is present, but malformed-token skipping does not promise bounded handling of every valid range. Current trusted sysfs callers warrant lower severity than an established service-input DoS.
+
+Evidence: [crates/shamir-numa/src/cpulist.rs:18](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-numa/src/cpulist.rs#L18); [crates/shamir-numa/src/cpulist.rs:38](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-numa/src/cpulist.rs#L38); [crates/shamir-numa/src/cpulist.rs:40](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-numa/src/cpulist.rs#L40).
 
 <a id="review-2"></a>
 
 ### Claim 2 — `probe()` swallows every per-node cpulist I/O error, contradicting its doc and yielding a silently broken topology
 
-Status: `confirmed-open`. Current risk: `medium`.
+Status: `confirmed-open`. Current risk: `low`.
 
-Err(_) still swallows Syscall as well as Unsupported. An all-empty discovered topology is accepted and detect() returns it because node count, not total usable CPUs, is checked.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-numa/src/linux.rs:50](../../../../../crates/shamir-numa/src/linux.rs#L50); [crates/shamir-numa/src/linux.rs:78](../../../../../crates/shamir-numa/src/linux.rs#L78); [crates/shamir-numa/src/linux.rs:92](../../../../../crates/shamir-numa/src/linux.rs#L92); [crates/shamir-numa/src/linux.rs:170](../../../../../crates/shamir-numa/src/linux.rs#L170); [crates/shamir-numa/src/detect.rs:26](../../../../../crates/shamir-numa/src/detect.rs#L26).
+Err(_) discards Syscall errors beyond the documented missing-file exception. An online list with failed CPU-list reads yields an accepted all-empty topology. This proves provenance loss and degraded discovery, not demonstrated record corruption or production pin failure.
+
+Evidence: [crates/shamir-numa/src/linux.rs:50](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-numa/src/linux.rs#L50); [crates/shamir-numa/src/linux.rs:78](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-numa/src/linux.rs#L78); [crates/shamir-numa/src/linux.rs:92](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-numa/src/linux.rs#L92); [crates/shamir-numa/src/linux.rs:170](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-numa/src/linux.rs#L170); [crates/shamir-numa/src/detect.rs:26](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-numa/src/detect.rs#L26).
 
 <a id="review-3"></a>
 
@@ -45,21 +47,23 @@ Evidence: [crates/shamir-numa/src/linux.rs:50](../../../../../crates/shamir-numa
 
 Status: `confirmed-open`. Current risk: `medium`.
 
-Parent inspection of checksummed libc 0.2.186 resolves the Linux helper: cpu_set_t has 1024 storage bits, and CPU_SET indexes bits[cpu / word_bits] with Rust array indexing. A sysfs CPU ID >=1024 therefore reaches bounds panic, not a C-macro out-of-bounds write or silent truncation. The unchecked source route remains a Medium public Linux API defect; no production worker-pinning route or tested target failure was established.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-numa/src/linux.rs:139](../../../../../crates/shamir-numa/src/linux.rs#L139); [crates/shamir-numa/src/linux.rs:143](../../../../../crates/shamir-numa/src/linux.rs#L143); [crates/shamir-numa/src/linux.rs:147](../../../../../crates/shamir-numa/src/linux.rs#L147); [Cargo.lock:1923](../../../../../Cargo.lock#L1923).
+CPU ID 1024 makes libc 0.2.186 published linux_l4re_shared.rs:1531 index outside its 1024-bit storage. Pinning panics before returning Result. Both Linux GNU and musl use this Rust helper; the C truncation/corruption allegations are false. Reject or safely represent the unsupported domain.
 
-Pinned dependency evidence: [libc 0.2.186, src/unix/linux_like/linux_l4re_shared.rs:1531](https://docs.rs/crate/libc/0.2.186/source/src/unix/linux_like/linux_l4re_shared.rs).
+Evidence: [crates/shamir-numa/src/linux.rs:140](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-numa/src/linux.rs#L140); [crates/shamir-numa/src/linux.rs:143](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-numa/src/linux.rs#L143); [Cargo.lock:1923](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/Cargo.lock#L1923); [Cargo.toml:88](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/Cargo.toml#L88).
 
 <a id="review-4"></a>
 
 ### Claim 4 — No error-path tests for the Linux probe layer; error branches never compiled on the primary gate
 
-Status: `confirmed-open`. Current risk: `medium`.
+Status: `confirmed-open`. Current risk: `low`.
 
-There is still no injected-read seam or test asserting probe Unsupported/Syscall mapping. Linux cfg excludes these branches on Windows, but current Ubuntu CI does compile them; the broader CI-noncompilation implication is false.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-numa/src/linux.rs:167](../../../../../crates/shamir-numa/src/linux.rs#L167); [crates/shamir-numa/src/linux.rs:179](../../../../../crates/shamir-numa/src/linux.rs#L179); [crates/shamir-numa/src/lib.rs:47](../../../../../crates/shamir-numa/src/lib.rs#L47); [.github/workflows/numa.yml:29](../../../../../.github/workflows/numa.yml#L29); [.github/workflows/ci.yml:65](../../../../../.github/workflows/ci.yml#L65).
+No production read seam allows deterministic NotFound/Syscall/sparse-node tests. Linux code is selected by configured Ubuntu jobs, contradicting blanket CI noncompilation. Mutating error classification would not be discriminated by the current happy-host assertions.
+
+Evidence: [crates/shamir-numa/src/linux.rs:167](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-numa/src/linux.rs#L167); [crates/shamir-numa/src/linux.rs:179](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-numa/src/linux.rs#L179); [.github/workflows/numa.yml:29](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/.github/workflows/numa.yml#L29); [.github/workflows/ci.yml:65](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/.github/workflows/ci.yml#L65).
 
 <a id="review-5"></a>
 
@@ -67,29 +71,32 @@ Evidence: [crates/shamir-numa/src/linux.rs:167](../../../../../crates/shamir-num
 
 Status: `confirmed-open`. Current risk: `low`.
 
-Linux detect() still discards the probe Err through if let Ok and returns fallback without recording a reason. No diagnostic-returning factory or logging path exists.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-numa/src/detect.rs:25](../../../../../crates/shamir-numa/src/detect.rs#L25); [crates/shamir-numa/src/detect.rs:30](../../../../../crates/shamir-numa/src/detect.rs#L30); [crates/shamir-numa/Cargo.toml:18](../../../../../crates/shamir-numa/Cargo.toml#L18).
+if let Ok discards the probe error before returning fallback. Infallible degradation is intentional and supported; the open issue is operational diagnostic loss, not a failure to return a usable topology.
+
+Evidence: [crates/shamir-numa/src/detect.rs:11](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-numa/src/detect.rs#L11); [crates/shamir-numa/src/detect.rs:25](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-numa/src/detect.rs#L25); [crates/shamir-numa/src/detect.rs:30](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-numa/src/detect.rs#L30).
 
 <a id="review-6"></a>
 
 ### Claim 6 — `AffinityError::Unsupported` is overloaded and carries no source
 
-Status: `confirmed-open`. Current risk: `nit`.
+Status: `not-applicable`. Current risk: `—`.
 
-Unsupported remains a unit variant used for missing discovery files and empty online input. It cannot distinguish those conditions. The claimed live affinity-less-OS use is not present: built-in fallback pinning returns success or NodeOutOfRange.
+Prior-cycle decision: `confirmed-open`.
 
-Evidence: [crates/shamir-numa/src/error.rs:10](../../../../../crates/shamir-numa/src/error.rs#L10); [crates/shamir-numa/src/linux.rs:63](../../../../../crates/shamir-numa/src/linux.rs#L63); [crates/shamir-numa/src/linux.rs:170](../../../../../crates/shamir-numa/src/linux.rs#L170); [crates/shamir-numa/src/fallback.rs:54](../../../../../crates/shamir-numa/src/fallback.rs#L54).
+The variant deliberately classifies unavailable discovery without promising a retained source. Missing files and empty online lists fit that taxonomy; built-in fallback pinning does not return it. More context is optional diagnostics/API design, not an error-contract violation.
 
-## Corrections and qualified non-findings
+Evidence: [crates/shamir-numa/src/error.rs:16](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-numa/src/error.rs#L16); [crates/shamir-numa/src/linux.rs:63](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-numa/src/linux.rs#L63); [crates/shamir-numa/src/linux.rs:170](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-numa/src/linux.rs#L170); [crates/shamir-numa/src/fallback.rs:54](https://github.com/PHPCraftdream/shamir-db/blob/e3765c935fc71655ee1ec0160cf180607935d89b/crates/shamir-numa/src/fallback.rs#L54).
 
-- Confirmed error/lifecycle non-findings: thiserror supplies the library error enum and io::Error source conversion; fallible discovery/pinning return Result; there is no async destructor, task lifecycle, or external connection resource.
-- The crate is not dependency-free: arc-swap, thiserror, and Linux libc/shamir-collections are declared. Missing a tracing dependency does not itself establish absent observability; the actual discarded error does.
-- Rust Vec reservation details and maximum-usize examples should not be universalized across pointer widths or toolchains. Unbounded expansion is the source-proven mechanism.
-- The Linux error branches are compiled by configured Ubuntu jobs, though their failure outcomes remain untested. No CI result was fetched or claimed.
-- A pure cpu_set_t builder is still Linux-specific unless a platform-independent representation is extracted; CPU_ALLOC availability and dynamic-buffer invariants must be checked against the exact pin before recommending an implementation.
-- Reading a file successfully but partially does not inherently produce an I/O error; replace the report's blanket truncated-read example with actual propagated read/UTF-8 errors.
-- Passing an empty affinity mask loses discovery provenance, but exact kernel errno remains reference-unverified in this read-only pass.
+## Evidence and recipe corrections
+
+- The overview's unresolved-helper assertion conflicts with the parent refinement and exact published libc 0.2.186 source.
+- libc 0.2.186 exposes CPU_ALLOC_SIZE but no Linux CPU_ALLOC function. Do not propose calling the C macro as an available Rust API.
+- CPU_SETSIZE is not uniformly 1024 in that package: the musl constant is cfg-dependent, while the shared cpu_set_t storage is 1024 bits. Define the supported domain from the actual representation and target, not a universal constant assertion.
+- A dynamic mask needs checked sizing, initialized word storage, alignment, correct byte length and lifetime through the syscall. Silently filtering unsupported CPUs does not implement a strict rejection contract.
+- Keep legitimate memory-only/empty nodes distinct from failed discovery. An all-empty fallback policy should preserve diagnostics rather than pretend missing CPUs imply a genuine one-node host.
+- Empty or disjoint permitted affinity masks can produce EINVAL; successful pinning remains within the permitted subset. The historical suggestion that omitted high CPUs could remain schedulable outside a successful mask is wrong. [Linux affinity semantics](https://man7.org/linux/man-pages/man2/sched_setaffinity.2.html).
 
 ---
 
