@@ -1,3 +1,167 @@
+<!-- revalidation:2026-10-08 source:92ad58266bf57ddea1fa3c8a47affba1a3a9a096 -->
+# shamir-storage — error-handling-lifecycle revalidation
+
+Source snapshot: `92ad58266bf57ddea1fa3c8a47affba1a3a9a096`. Revalidated 2026-10-08 by read-only XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run; no source fix is part of this update. Test registration/assertions are evidence of an oracle, not proof of a passing run.
+
+This section is authoritative for current status. Original titles/IDs are retained for traceability; a refuted title is not a current assertion. The collapsed historical report below is superseded, including its counts, severity, scenarios and fix instructions. Plan IDs preserve historical numbering, not a current release mandate. [Workspace methodology and status definitions](../SUMMARY.md#status-definitions).
+
+Worker-death liveness, silent drop observability, missing error-path coverage, and copy failure semantics remain. Normal Result failures are surfaced by Cached flush; that does not cover worker panics.
+
+## Current claim decisions
+
+| Claim decisions | Open | Source-fixed | Partial | Refuted | Unverified | N/A |
+|---:|---:|---:|---:|---:|---:|---:|
+| 13 | 8 | 3 | 0 | 1 | 0 | 1 |
+
+These are decisions on report claims, including repeated roots, bundled observations and non-findings—not a unique-bug census. Closed/N/A rows have no current risk; unverified risk is provisional. Pure style and unmeasured optimization claims do not establish runtime impact.
+
+<a id="review-1"></a>
+
+### Claim 1 — CachedStore::flush can hang forever if the async write-worker task dies before draining
+
+Status: `confirmed-open`. Current risk: `high`.
+
+The JoinHandle is discarded; pending decrement/notification occur only after an awaited inner call returns. An unwinding panic or worker cancellation with queued jobs leaves pending nonzero and no death notification. Existing failing-inner tests return Err rather than kill the worker.
+
+Evidence: [crates/shamir-storage/src/storage_cached.rs:68](../../../../../crates/shamir-storage/src/storage_cached.rs#L68); [crates/shamir-storage/src/storage_cached.rs:85](../../../../../crates/shamir-storage/src/storage_cached.rs#L85); [crates/shamir-storage/src/storage_cached.rs:106](../../../../../crates/shamir-storage/src/storage_cached.rs#L106); [crates/shamir-storage/src/storage_cached.rs:243](../../../../../crates/shamir-storage/src/storage_cached.rs#L243); [crates/shamir-storage/src/storage_cached.rs:383](../../../../../crates/shamir-storage/src/storage_cached.rs#L383); [crates/shamir-storage/src/tests/storage_cached_tests.rs:984](../../../../../crates/shamir-storage/src/tests/storage_cached_tests.rs#L984).
+
+<a id="review-2"></a>
+
+### Claim 2 — Blocking SyncSender::send executed directly on tokio executor threads
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+The bounded synchronous send is still directly executed by async submit.
+
+Evidence: [crates/shamir-storage/src/storage_fjall.rs:92](../../../../../crates/shamir-storage/src/storage_fjall.rs#L92); [crates/shamir-storage/src/storage_fjall.rs:199](../../../../../crates/shamir-storage/src/storage_fjall.rs#L199).
+
+Grouping/duplicate: `concurrency-lockfree.md#4`. This row is not another independent defect.
+
+<a id="review-3"></a>
+
+### Claim 3 — MemBufferStore::Drop silently discards a non-empty dirty buffer — zero observability
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+Drop only sets shutdown and notifies; it provides no acknowledged drain or dirty-loss warning. Loss is possible, not inevitable: a flusher already awaiting select holds upgraded state and can execute one drain after the wake because shutdown is checked before select, not afterward.
+
+Evidence: [crates/shamir-storage/src/storage_membuffer.rs:324](../../../../../crates/shamir-storage/src/storage_membuffer.rs#L324); [crates/shamir-storage/src/storage_membuffer.rs:339](../../../../../crates/shamir-storage/src/storage_membuffer.rs#L339); [crates/shamir-storage/src/storage_membuffer.rs:344](../../../../../crates/shamir-storage/src/storage_membuffer.rs#L344); [crates/shamir-storage/src/storage_membuffer.rs:353](../../../../../crates/shamir-storage/src/storage_membuffer.rs#L353); [crates/shamir-storage/src/storage_membuffer.rs:621](../../../../../crates/shamir-storage/src/storage_membuffer.rs#L621).
+
+<a id="review-4"></a>
+
+### Claim 4 — Missing error-path tests; audit-§2.2 telemetry is written but never read
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+flush_errors has initialization/increment sites but no reader. Registered tests do not force MemBuffer drain failures, Cached closed-send branches, Fjall submit failures, or copy_store partial errors. Cached normal background Err paths do have separate tests.
+
+Evidence: [crates/shamir-storage/src/storage_membuffer.rs:192](../../../../../crates/shamir-storage/src/storage_membuffer.rs#L192); [crates/shamir-storage/src/storage_membuffer.rs:355](../../../../../crates/shamir-storage/src/storage_membuffer.rs#L355); [crates/shamir-storage/src/storage_cached.rs:446](../../../../../crates/shamir-storage/src/storage_cached.rs#L446); [crates/shamir-storage/src/storage_cached.rs:499](../../../../../crates/shamir-storage/src/storage_cached.rs#L499); [crates/shamir-storage/src/storage_fjall.rs:199](../../../../../crates/shamir-storage/src/storage_fjall.rs#L199); [crates/shamir-storage/src/types.rs:488](../../../../../crates/shamir-storage/src/types.rs#L488); [crates/shamir-storage/src/tests/mod.rs:1](../../../../../crates/shamir-storage/src/tests/mod.rs#L1).
+
+<a id="review-5"></a>
+
+### Claim 5 — Cache eviction/deletion committed before the fallible backing op is acknowledged
+
+Status: `confirmed-open`. Current risk: `low`.
+
+remove immediately evicts the cache before awaiting/enqueuing the backing delete. Without a negative marker, a later get can read and cache the old backing value even before the delete finishes; a failed delete leaves it available. Worker errors are logged and flush can fail, so 'zero signal' is overstated.
+
+Evidence: [crates/shamir-storage/src/storage_cached.rs:487](../../../../../crates/shamir-storage/src/storage_cached.rs#L487); [crates/shamir-storage/src/storage_cached.rs:469](../../../../../crates/shamir-storage/src/storage_cached.rs#L469); [crates/shamir-storage/src/storage_cached.rs:92](../../../../../crates/shamir-storage/src/storage_cached.rs#L92); [crates/shamir-storage/src/storage_cached.rs:499](../../../../../crates/shamir-storage/src/storage_cached.rs#L499).
+
+<a id="review-6"></a>
+
+### Claim 6 — Repo::copy_store default impl leaves a partially-populated destination on failure
+
+Status: `confirmed-open`. Current risk: `low`.
+
+Streaming or set_many errors propagate after earlier destination writes without rollback. Engine rename copies three stores sequentially. Retrying overwrites matching keys but does not remove stale destination extras.
+
+Evidence: [crates/shamir-storage/src/types.rs:488](../../../../../crates/shamir-storage/src/types.rs#L488); [crates/shamir-storage/src/types.rs:495](../../../../../crates/shamir-storage/src/types.rs#L495); [crates/shamir-storage/src/types.rs:500](../../../../../crates/shamir-storage/src/types.rs#L500); [crates/shamir-engine/src/repo/repo_instance.rs:593](../../../../../crates/shamir-engine/src/repo/repo_instance.rs#L593).
+
+<a id="review-7"></a>
+
+### Claim 7 — FjallRepo::store_get returns a fresh FjallStore per call — fragile per-instance worker lifecycle
+
+Status: `confirmed-open`. Current risk: `low`.
+
+Fresh handles and per-instance lazy workers remain. Worker Drop closes and joins, so the concern is conditional creation/teardown cost and ordering scope, not an established leak. Behavior of surviving handles after delete depends on unavailable fjall internals.
+
+Evidence: [crates/shamir-storage/src/storage_fjall.rs:240](../../../../../crates/shamir-storage/src/storage_fjall.rs#L240); [crates/shamir-storage/src/storage_fjall.rs:289](../../../../../crates/shamir-storage/src/storage_fjall.rs#L289); [crates/shamir-storage/src/storage_fjall.rs:134](../../../../../crates/shamir-storage/src/storage_fjall.rs#L134).
+
+Grouping/duplicate: `correctness-tdd.md#6`. This row is not another independent defect.
+
+<a id="review-8"></a>
+
+### Claim 8 — Error-source chains flattened; thread-spawn failure panics instead of DbResult
+
+Status: `confirmed-open`. Current risk: `nit`.
+
+CodecError and most backend errors are still flattened into String. Worker thread creation still uses expect, whose environmental failure is not an unreachable programmer invariant.
+
+Evidence: [crates/shamir-storage/src/error.rs:92](../../../../../crates/shamir-storage/src/error.rs#L92); [crates/shamir-storage/src/error.rs:37](../../../../../crates/shamir-storage/src/error.rs#L37); [crates/shamir-storage/src/storage_fjall.rs:95](../../../../../crates/shamir-storage/src/storage_fjall.rs#L95); [crates/shamir-storage/src/storage_fjall.rs:98](../../../../../crates/shamir-storage/src/storage_fjall.rs#L98).
+
+<a id="review-nf-panic-surface"></a>
+
+### Claim NF-panic-surface — Every production unwrap/expect is genuinely unreachable with inline justification
+
+Status: `refuted`. Current risk: —.
+
+Worker spawn expect can fail on OS resource exhaustion. Some cited sites are ignored insertion results rather than unwrap/expect, and their 'insert always succeeds after remove' comments are false under concurrency.
+
+Evidence: [crates/shamir-storage/src/storage_fjall.rs:98](../../../../../crates/shamir-storage/src/storage_fjall.rs#L98); [crates/shamir-storage/src/storage_cached.rs:158](../../../../../crates/shamir-storage/src/storage_cached.rs#L158); [crates/shamir-storage/src/storage_cached.rs:409](../../../../../crates/shamir-storage/src/storage_cached.rs#L409); [crates/shamir-storage/src/storage_in_memory.rs:130](../../../../../crates/shamir-storage/src/storage_in_memory.rs#L130).
+
+<a id="review-nf-dirty-cleanup"></a>
+
+### Claim NF-dirty-cleanup — drain_once retains dirty on error and guarded cleanup preserves differing concurrent writes
+
+Status: `fixed`. Current risk: —.
+
+Backing operations propagate errors before cleanup; remove_if deletes only matching slots. The registered transact injection test detects deletion of a differing concurrent dirty value, but not stale cache publication or universal drain ordering.
+
+Evidence: [crates/shamir-storage/src/storage_membuffer.rs:527](../../../../../crates/shamir-storage/src/storage_membuffer.rs#L527); [crates/shamir-storage/src/storage_membuffer.rs:554](../../../../../crates/shamir-storage/src/storage_membuffer.rs#L554); [crates/shamir-storage/src/storage_membuffer.rs:1060](../../../../../crates/shamir-storage/src/storage_membuffer.rs#L1060); [crates/shamir-storage/src/tests/storage_membuffer_tests.rs:799](../../../../../crates/shamir-storage/src/tests/storage_membuffer_tests.rs#L799).
+
+<a id="review-nf-mirror-first"></a>
+
+### Claim NF-mirror-first — MirroredStore mirror-first ordering delivers honest error atomicity
+
+Status: `fixed`. Current risk: —.
+
+Mirror failures occur before primary mutation for set/remove and either transact subset. Registered injected-failure tests check the primary. Whole-mirror rollback additionally requires an error-atomic mirror; arbitrary Store implementations need not provide it.
+
+Evidence: [crates/shamir-storage/src/storage_mirrored.rs:351](../../../../../crates/shamir-storage/src/storage_mirrored.rs#L351); [crates/shamir-storage/src/storage_mirrored.rs:381](../../../../../crates/shamir-storage/src/storage_mirrored.rs#L381); [crates/shamir-storage/src/storage_mirrored.rs:595](../../../../../crates/shamir-storage/src/storage_mirrored.rs#L595); [crates/shamir-storage/src/tests/storage_mirrored_tests.rs:608](../../../../../crates/shamir-storage/src/tests/storage_mirrored_tests.rs#L608); [crates/shamir-storage/src/tests/storage_mirrored_tests.rs:865](../../../../../crates/shamir-storage/src/tests/storage_mirrored_tests.rs#L865); [crates/shamir-storage/src/tests/storage_mirrored_tests.rs:916](../../../../../crates/shamir-storage/src/tests/storage_mirrored_tests.rs#L916).
+
+<a id="review-nf-cached-flush"></a>
+
+### Claim NF-cached-flush — Cached flush always attempts inner.flush and consumes background errors once
+
+Status: `fixed`. Current risk: —.
+
+After the pending wait returns, inner.flush runs regardless of its background result, and write_error.swap(None) consumes the most recent error. Registered tests assert repeat-flush behavior and an inner-flush marker. This does not cover worker death or report every coalesced failure separately.
+
+Evidence: [crates/shamir-storage/src/storage_cached.rs:346](../../../../../crates/shamir-storage/src/storage_cached.rs#L346); [crates/shamir-storage/src/storage_cached.rs:397](../../../../../crates/shamir-storage/src/storage_cached.rs#L397); [crates/shamir-storage/src/tests/storage_cached_tests.rs:1031](../../../../../crates/shamir-storage/src/tests/storage_cached_tests.rs#L1031); [crates/shamir-storage/src/tests/storage_cached_tests.rs:1170](../../../../../crates/shamir-storage/src/tests/storage_cached_tests.rs#L1170).
+
+<a id="review-nf-notify"></a>
+
+### Claim NF-notify — Notify future created before the pending check is race-free with notify_waiters
+
+Status: `not-applicable`. Current risk: —.
+
+The source creates Notified before loading pending and uses notify_waiters. Locally available pinned Tokio documentation confirms creation is sufficient for notify_waiters, unlike notify_one; worker survival remains a separate condition.
+
+Evidence: [crates/shamir-storage/src/storage_cached.rs:109](../../../../../crates/shamir-storage/src/storage_cached.rs#L109); [crates/shamir-storage/src/storage_cached.rs:385](../../../../../crates/shamir-storage/src/storage_cached.rs#L385); [Cargo.lock:4195](../../../../../Cargo.lock#L4195).
+
+## Corrections and qualified non-findings
+
+- Do not describe ordinary allocation failure as necessarily an unwinding panic; the worker-death case is established for unwinding inner panics/cancellation.
+- A per-job decrement guard alone does not discharge queued jobs when the worker dies; flush needs a worker-death signal.
+- Drop does not invariably exit before draining; no completion guarantee and absent observability are the supported claims.
+- Failed async writes are explicitly logged; remove resurrection can also occur before a successful backing delete.
+- Destination cleanup must not delete a pre-existing caller-owned store; copy_store does not currently require a fresh destination.
+
+---
+
+<details>
+<summary>Historical report — preserved for provenance; not current status or instructions</summary>
+
 # shamir-storage -- Error handling & resource lifecycle
 
 ## Summary
@@ -72,3 +236,5 @@ The crate's error discipline is broadly strong and clearly battle-tested: every 
 - `MirroredStore` mirror-first ordering delivers honest error atomicity (primary untouched on mirror failure), and it is thoroughly tested including injected-failure paths and log assertions.
 - `CachedStore::flush` runs `inner.flush()` unconditionally even when background writes failed, and surfaces background failures exactly once — both regression-guarded (#1082 / @oh review tests).
 - The `Notify` before-check pattern in `wait_for_async_writes` follows tokio's documented race-free shape (given the worker stays alive — see finding 1).
+
+</details>

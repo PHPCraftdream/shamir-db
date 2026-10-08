@@ -1,3 +1,76 @@
+<!-- revalidation:2026-10-08 source:92ad58266bf57ddea1fa3c8a47affba1a3a9a096 -->
+# shamir-sdk-macros — style-claude-md revalidation
+
+Source snapshot: `92ad58266bf57ddea1fa3c8a47affba1a3a9a096`. Revalidated 2026-10-08 by read-only XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run; no source fix is part of this update. Test registration/assertions are evidence of an oracle, not proof of a passing run.
+
+This section is authoritative for current status. Original titles/IDs are retained for traceability; a refuted title is not a current assertion. The collapsed historical report below is superseded, including its counts, severity, scenarios and fix instructions. Plan IDs preserve historical numbering, not a current release mandate. [Workspace methodology and status definitions](../SUMMARY.md#status-definitions).
+
+Duplication, absent local tests, divergent validation, and comment incompleteness remain. File splitting is a maintainability choice subject to the closely-coupled-group exception, not a runtime defect.
+
+## Current claim decisions
+
+| Claim decisions | Open | Source-fixed | Partial | Refuted | Unverified | N/A |
+|---:|---:|---:|---:|---:|---:|---:|
+| 4 | 4 | 0 | 0 | 0 | 0 | 0 |
+
+These are decisions on report claims, including repeated roots, bundled observations and non-findings—not a unique-bug census. Closed/N/A rows have no current risk; unverified risk is provisional. Pure style and unmeasured optimization claims do not establish runtime impact.
+
+<a id="review-1"></a>
+
+### Claim 1 — Single lib.rs holds four public exports + two helpers -- "one file = one primary export" violated
+
+Status: `confirmed-open`. Current risk: `low`.
+
+The four emitters remain in one file with duplicated ABI scaffolding. Duplication is positive evidence of maintenance debt; an unconditional rule violation is not established because CLAUDE explicitly permits closely-coupled groups.
+
+Evidence: [crates/shamir-sdk-macros/src/lib.rs:43](../../../../../crates/shamir-sdk-macros/src/lib.rs#L43); [crates/shamir-sdk-macros/src/lib.rs:176](../../../../../crates/shamir-sdk-macros/src/lib.rs#L176); [crates/shamir-sdk-macros/src/lib.rs:307](../../../../../crates/shamir-sdk-macros/src/lib.rs#L307); [crates/shamir-sdk-macros/src/lib.rs:464](../../../../../crates/shamir-sdk-macros/src/lib.rs#L464); [CLAUDE.md:505](../../../../../CLAUDE.md#L505).
+
+<a id="review-2"></a>
+
+### Claim 2 — Zero tests in the crate -- TDD protocol and tests/ layout unfulfilled; purity check untested anywhere
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+The crate still has no registered local tests and neither helper has direct coverage. Function has existing downstream compile/runtime coverage; the absence of a lexical-helper test does not itself demonstrate a purity escape.
+
+Evidence: [crates/shamir-sdk-macros/Cargo.toml:13](../../../../../crates/shamir-sdk-macros/Cargo.toml#L13); [crates/shamir-sdk-macros/src/lib.rs:411](../../../../../crates/shamir-sdk-macros/src/lib.rs#L411); [crates/shamir-sdk-macros/src/lib.rs:425](../../../../../crates/shamir-sdk-macros/src/lib.rs#L425); [crates/shamir-wasm-host/src/tests/compile_tests.rs:19](../../../../../crates/shamir-wasm-host/src/tests/compile_tests.rs#L19).
+
+Grouping/duplicate: `correctness-tdd.md#1`. This row is not another independent defect.
+
+<a id="review-3"></a>
+
+### Claim 3 — Divergent duplicated return-type validation -- `#[function]` bypasses the shared helper
+
+Status: `confirmed-open`. Current risk: `low`.
+
+Function still uses its own literal acceptance set rather than is_result_value_return; procedure/scalar still use the helper.
+
+Evidence: [crates/shamir-sdk-macros/src/lib.rs:197](../../../../../crates/shamir-sdk-macros/src/lib.rs#L197); [crates/shamir-sdk-macros/src/lib.rs:330](../../../../../crates/shamir-sdk-macros/src/lib.rs#L330); [crates/shamir-sdk-macros/src/lib.rs:499](../../../../../crates/shamir-sdk-macros/src/lib.rs#L499).
+
+Grouping/duplicate: `api-wire-protocol.md#1`. This row is not another independent defect.
+
+<a id="review-4"></a>
+
+### Claim 4 — Inline comment under-documents the normalisation chain
+
+Status: `confirmed-open`. Current risk: `nit`.
+
+The inline comment still lists only shamir_sdk:: and crate::, although code also removes core::result::. The adjacent doc mentions core, limiting practical impact.
+
+Evidence: [crates/shamir-sdk-macros/src/lib.rs:408](../../../../../crates/shamir-sdk-macros/src/lib.rs#L408); [crates/shamir-sdk-macros/src/lib.rs:413](../../../../../crates/shamir-sdk-macros/src/lib.rs#L413); [crates/shamir-sdk-macros/src/lib.rs:418](../../../../../crates/shamir-sdk-macros/src/lib.rs#L418).
+
+## Corrections and qualified non-findings
+
+- Do not present related macro exports as automatically violating the closely-coupled-group exception, or assign runtime severity to file organization.
+- A shared private emitter with thin crate-root proc-macro entrypoints is the appropriate extraction shape; do not assume ordinary re-export-only lib.rs works for proc-macro entrypoints without validation.
+- Confirmed compliant areas: no mod.rs exists; implementation imports are at the file header; generated infrastructure uses qualified paths; each generated unsafe slice has a Safety comment; doctests are explicitly disabled.
+- The ABI blocks are similar, not verbatim identical: validator extracts records and returns Validation, while other kinds differ in context construction and Result handling.
+
+---
+
+<details>
+<summary>Historical report — preserved for provenance; not current status or instructions</summary>
+
 # shamir-sdk-macros -- Style & CLAUDE.md structural conformance
 
 Reviewed against `CLAUDE.md` (workspace root), sections "Discipline rules"
@@ -108,3 +181,5 @@ workspace.
   carries a slice tag (lib.rs:251); doc examples are ` ```ignore `-fenced,
   consistent with `doctest = false` in Cargo.toml (whose comment documents
   the project-wide doctest ban).
+
+</details>

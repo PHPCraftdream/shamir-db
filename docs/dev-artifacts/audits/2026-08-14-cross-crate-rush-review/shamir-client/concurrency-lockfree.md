@@ -1,3 +1,153 @@
+<!-- revalidation:2026-10-08 source:92ad58266bf57ddea1fa3c8a47affba1a3a9a096 -->
+# shamir-client — concurrency-lockfree revalidation
+
+Source snapshot: `92ad58266bf57ddea1fa3c8a47affba1a3a9a096`. Revalidated 2026-10-08 by read-only XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run; no source fix is part of this update. Test registration/assertions are evidence of an oracle, not proof of a passing run.
+
+This section is authoritative for current status. Original titles/IDs are retained for traceability; a refuted title is not a current assertion. The collapsed historical report below is superseded, including its counts, severity, scenarios and fix instructions. Plan IDs preserve historical numbering, not a current release mandate. [Workspace methodology and status definitions](../SUMMARY.md#status-definitions).
+
+Both protocol races and mutex-policy drift remain. The claimed truly lock-free scc replacement and cursor mutex-skip guarantee are incorrect.
+
+## Current claim decisions
+
+| Claim decisions | Open | Source-fixed | Partial | Refuted | Unverified | N/A |
+|---:|---:|---:|---:|---:|---:|---:|
+| 10 | 8 | 0 | 0 | 1 | 0 | 1 |
+
+These are decisions on report claims, including repeated roots, bundled observations and non-findings—not a unique-bug census. Closed/N/A rows have no current risk; unverified risk is provisional. Pure style and unmeasured optimization claims do not establish runtime impact.
+
+<a id="review-1"></a>
+
+### Claim 1 — Reader-exit drain races pending registration → permanent hang of an in-flight request
+
+Status: `confirmed-open`. Current risk: `high`.
+
+The sole closed check precedes encoding/insertion. Reader drain can finish before registration; a successful half-open write then leaves an unanswered sender.
+
+Evidence: [crates/shamir-client/src/client.rs:408](../../../../../crates/shamir-client/src/client.rs#L408); [crates/shamir-client/src/client.rs:1240](../../../../../crates/shamir-client/src/client.rs#L1240); [crates/shamir-client/src/client.rs:1271](../../../../../crates/shamir-client/src/client.rs#L1271).
+
+Grouping/duplicate: `SUMMARY.md#2.1`. This row is not another independent defect.
+
+<a id="review-2"></a>
+
+### Claim 2 — `std::sync::Mutex` on the per-request hot path (`PendingMap`) without a sanctioned-category justification
+
+Status: `confirmed-open`. Current risk: `low`.
+
+A global mutex still serializes insertion/removal; comments address await safety, not contention. This proves policy drift, not High runtime impact.
+
+Evidence: [crates/shamir-client/src/client.rs:250](../../../../../crates/shamir-client/src/client.rs#L250); [crates/shamir-client/src/client.rs:390](../../../../../crates/shamir-client/src/client.rs#L390); [crates/shamir-client/src/client.rs:1269](../../../../../crates/shamir-client/src/client.rs#L1269); [CLAUDE.md](../../../../../CLAUDE.md).
+
+Grouping/duplicate: `SUMMARY.md#2.2`. This row is not another independent defect.
+
+<a id="review-3"></a>
+
+### Claim 3 — `std::sync::Mutex` on the push-streaming hot path (`SubscriptionMap`, `EarlyBuffer`)
+
+Status: `confirmed-open`. Current risk: `low`.
+
+Each push takes the registry mutex and misses take the buffer mutex. No contention-model justification or measured degradation establishes medium runtime severity.
+
+Evidence: [crates/shamir-client/src/subscription.rs:28](../../../../../crates/shamir-client/src/subscription.rs#L28); [crates/shamir-client/src/subscription.rs:33](../../../../../crates/shamir-client/src/subscription.rs#L33); [crates/shamir-client/src/client.rs:331](../../../../../crates/shamir-client/src/client.rs#L331).
+
+Grouping/duplicate: `SUMMARY.md#2.2`. This row is not another independent defect.
+
+<a id="review-4"></a>
+
+### Claim 4 — Non-atomic subscriptions/early-buffer handoff: lost push + out-of-order delivery
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+Registration becomes visible before buffered sends finish; lookup misses can append after the flush. Both loss and ordering interleavings remain possible.
+
+Evidence: [crates/shamir-client/src/client.rs:330](../../../../../crates/shamir-client/src/client.rs#L330); [crates/shamir-client/src/client.rs:349](../../../../../crates/shamir-client/src/client.rs#L349); [crates/shamir-client/src/client.rs:1000](../../../../../crates/shamir-client/src/client.rs#L1000); [crates/shamir-client/src/client.rs:1005](../../../../../crates/shamir-client/src/client.rs#L1005).
+
+Grouping/duplicate: `SUMMARY.md#1.3`. This row is not another independent defect.
+
+<a id="review-5"></a>
+
+### Claim 5 — Early buffer cardinality is unbounded for the life of the connection
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+The peer controls distinct sub IDs. Only each vector is capped; no global admission limit or reader-exit clearing exists.
+
+Evidence: [crates/shamir-client/src/client.rs:350](../../../../../crates/shamir-client/src/client.rs#L350); [crates/shamir-client/src/client.rs:407](../../../../../crates/shamir-client/src/client.rs#L407); [crates/shamir-client/src/subscription.rs:30](../../../../../crates/shamir-client/src/subscription.rs#L30).
+
+Grouping/duplicate: `SUMMARY.md#4.3`. This row is not another independent defect.
+
+<a id="review-6"></a>
+
+### Claim 6 — Concurrency-claim test gaps: stampede guard and drain race never exercised concurrently
+
+Status: `confirmed-open`. Current risk: `low`.
+
+The dump test calls sequentially; EOF tests pre-register waiters. Neither test exercises concurrent first initialization or registration after draining.
+
+Evidence: [crates/shamir-client/src/tests/interner_cache_tests.rs:194](../../../../../crates/shamir-client/src/tests/interner_cache_tests.rs#L194); [crates/shamir-client/src/tests/demux_tests.rs:175](../../../../../crates/shamir-client/src/tests/demux_tests.rs#L175); [crates/shamir-client/src/tests/mod.rs:1](../../../../../crates/shamir-client/src/tests/mod.rs#L1).
+
+Grouping/duplicate: `SUMMARY.md#2.3`. This row is not another independent defect.
+
+<a id="review-7"></a>
+
+### Claim 7 — `CursorStream::cursor_id` cell could be a `OnceLock` instead of `StdMutex`
+
+Status: `confirmed-open`. Current risk: `nit`.
+
+The shared cell remains a mutex-protected write-once Option. Importantly, current code still acquires its mutex on every successful yielded record.
+
+Evidence: [crates/shamir-client/src/cursor_stream.rs:221](../../../../../crates/shamir-client/src/cursor_stream.rs#L221); [crates/shamir-client/src/cursor_stream.rs:250](../../../../../crates/shamir-client/src/cursor_stream.rs#L250); [crates/shamir-client/src/cursor_stream.rs:276](../../../../../crates/shamir-client/src/cursor_stream.rs#L276).
+
+Grouping/duplicate: `SUMMARY.md#2.4`. This row is not another independent defect.
+
+<a id="review-8"></a>
+
+### Claim 8 — `next_request_id` wraps silently at `u32::MAX`
+
+Status: `confirmed-open`. Current risk: `nit`.
+
+After a full rid cycle, unconditional insertion can replace an outstanding sender and misroute a late response. Replacement drops the old sender rather than hanging it.
+
+Evidence: [crates/shamir-client/src/client.rs:1259](../../../../../crates/shamir-client/src/client.rs#L1259); [crates/shamir-client/src/client.rs:1271](../../../../../crates/shamir-client/src/client.rs#L1271); [crates/shamir-client/src/client.rs:290](../../../../../crates/shamir-client/src/client.rs#L290).
+
+Grouping/duplicate: `SUMMARY.md#1.13`. This row is not another independent defect.
+
+<a id="review-nf-1"></a>
+
+### Claim NF.1 — `interner_cache.rs` is fully pillar-compliant and lock-free
+
+Status: `refuted`. Current risk: —.
+
+THasher, CAS-max, OnceCell, and len acknowledgment exist, but pinned scc::HashMap entry access uses bucket locks; its synchronous methods can block.
+
+Evidence: [crates/shamir-client/src/interner_cache.rs:39](../../../../../crates/shamir-client/src/interner_cache.rs#L39); [crates/shamir-client/src/interner_cache.rs:88](../../../../../crates/shamir-client/src/interner_cache.rs#L88); [crates/shamir-client/src/interner_cache.rs:146](../../../../../crates/shamir-client/src/interner_cache.rs#L146); [Cargo.lock:3123](../../../../../Cargo.lock#L3123).
+
+Grouping/duplicate: `SUMMARY.md#NF.7`. This row is not another independent defect.
+
+<a id="review-nf-2"></a>
+
+### Claim NF.2 — No lock is held across an await except the sanctioned write-half guard
+
+Status: `not-applicable`. Current risk: —.
+
+Inspected standard-mutex scopes end before await; the async write guard intentionally spans write_frame. OnceCell also coordinates asynchronous initialization.
+
+Evidence: [crates/shamir-client/src/client.rs:389](../../../../../crates/shamir-client/src/client.rs#L389); [crates/shamir-client/src/client.rs:1277](../../../../../crates/shamir-client/src/client.rs#L1277); [crates/shamir-client/src/interner_cache.rs:175](../../../../../crates/shamir-client/src/interner_cache.rs#L175).
+
+Grouping/duplicate: `SUMMARY.md#NF.7`. This row is not another independent defect.
+
+## Corrections and qualified non-findings
+
+- Do not classify mutex-policy drift as runtime High solely because CLAUDE.md bans the primitive.
+- Pinned scc 3.8.4 insert_sync/remove_sync are not lock-free; switching maps does not automatically prove nonblocking execution or solve compound lifecycle races.
+- CursorStream's is_none check occurs after lock acquisition, contradicting the review's first-touch-only locking claim.
+- The registration race is conditional on the write succeeding after reader exit; ordinary write failure already removes the entry.
+- Atomic wrapping never causes a debug overflow panic; collision replaces/drops the previous sender, which makes its receiver resolve ConnectionClosed.
+
+---
+
+<details>
+<summary>Historical report — preserved for provenance; not current status or instructions</summary>
+
 # shamir-client -- Concurrency & lock-free invariants
 
 ## Summary
@@ -60,3 +210,5 @@ The crate is split between two concurrency worlds. `interner_cache.rs` is fully 
 - **Issue:** The lock-free rid allocator relies on rid uniqueness for the demux, but `fetch_add` wraps; after 2^32 requests on one connection a rid can alias an entry still present in `pending`, overwriting a live sender (one caller hangs, another gets a foreign response). Practically unreachable (needs >4·10^9 requests on one TLS session), recorded for completeness.
 - **Suggested fix:** at wrap, return a `Protocol` error or force connection close (`closed.store(true)`), turning a silent cross-delivery into an explicit lifecycle event.
 
+
+</details>

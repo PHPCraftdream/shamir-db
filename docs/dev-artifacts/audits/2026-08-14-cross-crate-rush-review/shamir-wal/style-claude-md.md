@@ -1,3 +1,127 @@
+<!-- revalidation:2026-10-08 source:92ad58266bf57ddea1fa3c8a47affba1a3a9a096 -->
+# shamir-wal — style-claude-md revalidation
+
+Source snapshot: `92ad58266bf57ddea1fa3c8a47affba1a3a9a096`. Revalidated 2026-10-08 by read-only XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run; no source fix is part of this update. Test registration/assertions are evidence of an oracle, not proof of a passing run.
+
+This section is authoritative for current status. Original titles/IDs are retained for traceability; a refuted title is not a current assertion. The collapsed historical report below is superseded, including its counts, severity, scenarios and fix instructions. Plan IDs preserve historical numbering, not a current release mandate. [Workspace methodology and status definitions](../SUMMARY.md#status-definitions).
+
+Structural and stale-documentation debt remains, but it is not runtime High. Coupled MemSink/WalSink types are explicitly allowed by the repository rule.
+
+## Current claim decisions
+
+| Claim decisions | Open | Source-fixed | Partial | Refuted | Unverified | N/A |
+|---:|---:|---:|---:|---:|---:|---:|
+| 9 | 7 | 0 | 0 | 0 | 0 | 2 |
+
+These are decisions on report claims, including repeated roots, bundled observations and non-findings—not a unique-bug census. Closed/N/A rows have no current risk; unverified risk is provisional. Pure style and unmeasured optimization claims do not establish runtime impact.
+
+<a id="review-1"></a>
+
+### Claim 1 — Inline #[cfg(test)] mod tests in an implementation file
+
+Status: `confirmed-open`. Current risk: `low`.
+
+Five tests remain inline in segment_meta. They are registered and discoverable by Rust; the violation concerns repository layout, not missing runtime coverage.
+
+Evidence: [crates/shamir-wal/src/segment_meta.rs:175](../../../../../crates/shamir-wal/src/segment_meta.rs#L175); [crates/shamir-wal/src/tests/mod.rs:1](../../../../../crates/shamir-wal/src/tests/mod.rs#L1); [crates/shamir-wal/src/lib.rs:47](../../../../../crates/shamir-wal/src/lib.rs#L47).
+
+<a id="review-2"></a>
+
+### Claim 2 — Module docs describe the retired KV-marker design as current, with broken intra-doc links
+
+Status: `confirmed-open`. Current risk: `low`.
+
+Entry and segment preambles still reference removed wal_entry/WalManager symbols and KV dispatch. Current manifests and segment construction positively contradict that architecture. No rustdoc execution was performed.
+
+Evidence: [crates/shamir-wal/src/wal_entry_v2.rs:3](../../../../../crates/shamir-wal/src/wal_entry_v2.rs#L3); [crates/shamir-wal/src/wal_entry_v2.rs:14](../../../../../crates/shamir-wal/src/wal_entry_v2.rs#L14); [crates/shamir-wal/src/wal_segment.rs:3](../../../../../crates/shamir-wal/src/wal_segment.rs#L3); [crates/shamir-wal/src/lib.rs:46](../../../../../crates/shamir-wal/src/lib.rs#L46).
+
+Grouping/duplicate: `api-wire-protocol.md#3`. This row is not another independent defect.
+
+<a id="review-3"></a>
+
+### Claim 3 — segment_set.rs module doc claims it is unwired scaffold
+
+Status: `confirmed-open`. Current risk: `low`.
+
+The unwired F6a paragraph remains, while RepoInstance constructs SegmentSet and WalSink::File holds it. This is positively contradicted documentation, not an unwired runtime feature.
+
+Evidence: [crates/shamir-wal/src/segment_set.rs:15](../../../../../crates/shamir-wal/src/segment_set.rs#L15); [crates/shamir-wal/src/wal_sink.rs:86](../../../../../crates/shamir-wal/src/wal_sink.rs#L86); [crates/shamir-engine/src/repo/repo_instance.rs:829](../../../../../crates/shamir-engine/src/repo/repo_instance.rs#L829).
+
+<a id="review-4"></a>
+
+### Claim 4 — WalActiveKey: exported, documented-as-live module with zero production callers
+
+Status: `confirmed-open`. Current risk: `low`.
+
+The export and three-callsites/recovery-scan prose remain despite only own-test code consumers being found. Retaining a legacy helper is defensible if described accurately.
+
+Evidence: [crates/shamir-wal/src/active_key.rs:4](../../../../../crates/shamir-wal/src/active_key.rs#L4); [crates/shamir-wal/src/active_key.rs:8](../../../../../crates/shamir-wal/src/active_key.rs#L8); [crates/shamir-wal/src/lib.rs:54](../../../../../crates/shamir-wal/src/lib.rs#L54); [crates/shamir-wal/src/tests/active_key_tests.rs:1](../../../../../crates/shamir-wal/src/tests/active_key_tests.rs#L1).
+
+Grouping/duplicate: `api-wire-protocol.md#3`. This row is not another independent defect.
+
+<a id="review-5"></a>
+
+### Claim 5 — Mid-function use statements in tests (imports-at-top rule)
+
+Status: `confirmed-open`. Current risk: `nit`.
+
+Four Duration imports remain inside test bodies, with no stated collision or cfg exception. This is style-only.
+
+Evidence: [crates/shamir-wal/src/tests/wal_group_commit_tests.rs:222](../../../../../crates/shamir-wal/src/tests/wal_group_commit_tests.rs#L222); [crates/shamir-wal/src/tests/wal_group_commit_tests.rs:253](../../../../../crates/shamir-wal/src/tests/wal_group_commit_tests.rs#L253); [crates/shamir-wal/src/tests/wal_group_commit_tests.rs:270](../../../../../crates/shamir-wal/src/tests/wal_group_commit_tests.rs#L270); [crates/shamir-wal/src/tests/wal_group_commit_tests.rs:447](../../../../../crates/shamir-wal/src/tests/wal_group_commit_tests.rs#L447).
+
+<a id="review-6"></a>
+
+### Claim 6 — pub mod segment_meta exports nothing public
+
+Status: `confirmed-open`. Current risk: `low`.
+
+The module is public but functions are crate-private or private; public module docs link private read_blocking. Empty surface/private-link debt is source-visible, although a rustdoc warning was not executed.
+
+Evidence: [crates/shamir-wal/src/lib.rs:47](../../../../../crates/shamir-wal/src/lib.rs#L47); [crates/shamir-wal/src/segment_meta.rs:11](../../../../../crates/shamir-wal/src/segment_meta.rs#L11); [crates/shamir-wal/src/segment_meta.rs:120](../../../../../crates/shamir-wal/src/segment_meta.rs#L120); [crates/shamir-wal/src/segment_meta.rs:164](../../../../../crates/shamir-wal/src/segment_meta.rs#L164).
+
+<a id="review-7"></a>
+
+### Claim 7 — Vestigial, unexplained #[allow(dead_code)] on a public type
+
+Status: `confirmed-open`. Current risk: `nit`.
+
+Both blanket allowances remain without justification. Calling them entirely ineffective is too broad: an impl-level allowance can suppress dead private helpers. No current runtime defect follows.
+
+Evidence: [crates/shamir-wal/src/wal_segment.rs:108](../../../../../crates/shamir-wal/src/wal_segment.rs#L108); [crates/shamir-wal/src/wal_segment.rs:132](../../../../../crates/shamir-wal/src/wal_segment.rs#L132); [crates/shamir-wal/src/wal_segment.rs:500](../../../../../crates/shamir-wal/src/wal_segment.rs#L500).
+
+<a id="review-8"></a>
+
+### Claim 8 — wal_sink.rs carries two public types with separate impl blocks (borderline)
+
+Status: `not-applicable`. Current risk: —.
+
+MemSink is directly the payload of WalSink::Mem, fitting the permitted closely-coupled group exception. The enum-versus-trait rationale already appears in item docs; an additional module doc is optional.
+
+Evidence: [crates/shamir-wal/src/wal_sink.rs:17](../../../../../crates/shamir-wal/src/wal_sink.rs#L17); [crates/shamir-wal/src/wal_sink.rs:80](../../../../../crates/shamir-wal/src/wal_sink.rs#L80); [crates/shamir-wal/src/wal_sink.rs:89](../../../../../crates/shamir-wal/src/wal_sink.rs#L89).
+
+<a id="review-conformant-manifests-and-registration"></a>
+
+### Claim Conformant/manifests-and-registration — Manifest-only roots and topic-split test registration conform
+
+Status: `not-applicable`. Current risk: —.
+
+lib.rs contains declarations/reexports rather than implementation logic; cfg(test) wires the six manifest-listed test modules. Coupled WAL entry/operation and coordinator/durability types also fit the structural exception.
+
+Evidence: [crates/shamir-wal/src/lib.rs:43](../../../../../crates/shamir-wal/src/lib.rs#L43); [crates/shamir-wal/src/tests/mod.rs:1](../../../../../crates/shamir-wal/src/tests/mod.rs#L1); [crates/shamir-wal/src/wal_entry_v2.rs:49](../../../../../crates/shamir-wal/src/wal_entry_v2.rs#L49); [crates/shamir-wal/src/wal_group_commit.rs:81](../../../../../crates/shamir-wal/src/wal_group_commit.rs#L81).
+
+## Corrections and qualified non-findings
+
+- Downgrade inline-test layout from High to Low; it does not disable test discovery.
+- Stale architecture documentation is Low unless a concrete runtime consequence is established.
+- The four local test imports are a Nit.
+- doctest=false is not itself why broken links evade detection; rustdoc resolves links independently, while the stated gate does not build documentation.
+- Additional stale links include SegmentSet::recover in lib.rs, where the actual API is replay.
+
+---
+
+<details>
+<summary>Historical report — preserved for provenance; not current status or instructions</summary>
+
 # shamir-wal -- Style & CLAUDE.md structural conformance
 
 ## Summary
@@ -65,3 +189,5 @@ The crate's skeleton largely conforms: `lib.rs`/`tests/mod.rs` are re-export-onl
 - All other imports are at file/module headers, including the sanctioned cfg-gated `#[cfg(test)] use std::sync::atomic::AtomicBool;` (`wal_sink.rs:1-2`) and `use super::*;` inside the (misplaced, see #1) inline test module.
 - Test files are topic-split, contain fixtures + tests only, headers clean; benches (`benches/*.rs`) have no mid-function imports.
 - Per-file primary exports hold elsewhere: `active_key.rs`→`WalActiveKey`, `segment_set.rs`→`SegmentSet` (+private `SealedMeta`/`Inner`), `wal_entry_v2.rs`→`WalEntryV2` (+coupled `WalOpV2`, private legacy/serde helpers), `wal_group_commit.rs`→`WalGroupCommit` (+coupled `WalDurability`, private `Waiter`), `wal_segment.rs`→`WalSegment`, `segment_meta.rs`→ cohesive pub(crate) free-function group.
+
+</details>

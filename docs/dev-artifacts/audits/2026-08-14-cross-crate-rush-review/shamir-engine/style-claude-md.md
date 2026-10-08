@@ -1,3 +1,113 @@
+<!-- revalidation:2026-10-08 source:92ad58266bf57ddea1fa3c8a47affba1a3a9a096 -->
+# shamir-engine — style-claude-md revalidation
+
+Source snapshot: `92ad58266bf57ddea1fa3c8a47affba1a3a9a096`. Revalidated 2026-10-08 by read-only XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run; no source fix is part of this update. Test registration/assertions are evidence of an oracle, not proof of a passing run.
+
+This section is authoritative for current status. Original titles/IDs are retained for traceability; a refuted title is not a current assertion. The collapsed historical report below is superseded, including its counts, severity, scenarios and fix instructions. Plan IDs preserve historical numbering, not a current release mandate. [Workspace methodology and status definitions](../SUMMARY.md#status-definitions).
+
+The concrete structural cleanups were made. Original runtime-like severity escalation was unjustified, and the closely coupled repo_types family is permitted.
+
+## Current claim decisions
+
+| Claim decisions | Open | Source-fixed | Partial | Refuted | Unverified | N/A |
+|---:|---:|---:|---:|---:|---:|---:|
+| 8 | 0 | 7 | 0 | 0 | 0 | 1 |
+
+These are decisions on report claims, including repeated roots, bundled observations and non-findings—not a unique-bug census. Closed/N/A rows have no current risk; unverified risk is provisional. Pure style and unmeasured optimization claims do not establish runtime impact.
+
+<a id="review-1"></a>
+
+### Claim 1 — mod.rs contains a full implementation, not re-exports
+
+Status: `fixed`. Current risk: —.
+
+GroupCommit implementation now lives in group_commit.rs; mod.rs contains declarations and exports.
+
+Evidence: [crates/shamir-engine/src/repo/group_commit/mod.rs:1](../../../../../crates/shamir-engine/src/repo/group_commit/mod.rs#L1).
+
+<a id="review-2"></a>
+
+### Claim 2 — Systemic mid-function use imports
+
+Status: `fixed`. Current risk: —.
+
+Production imports were hoisted. Remaining indented production-source imports are within test-gated blocks or the loom module, matching documented exceptions.
+
+Evidence: [crates/shamir-engine/src/migration/shadow_log.rs:2](../../../../../crates/shamir-engine/src/migration/shadow_log.rs#L2); [crates/shamir-engine/src/tx/commit_phases.rs:614](../../../../../crates/shamir-engine/src/tx/commit_phases.rs#L614); [crates/shamir-engine/src/table/writer_drain_barrier.rs:469](../../../../../crates/shamir-engine/src/table/writer_drain_barrier.rs#L469).
+
+<a id="review-3"></a>
+
+### Claim 3 — Inline cfg(test) mod tests embedded in implementation files
+
+Status: `fixed`. Current risk: —.
+
+Both ordinary inline modules were moved and registered in existing manifests.
+
+Evidence: [crates/shamir-engine/src/table/tests/mod.rs:98](../../../../../crates/shamir-engine/src/table/tests/mod.rs#L98); [crates/shamir-engine/src/query/read/tests/mod.rs:4](../../../../../crates/shamir-engine/src/query/read/tests/mod.rs#L4).
+
+<a id="review-4"></a>
+
+### Claim 4 — Test manifests deviate from pub mod form and duplicate cfg gating
+
+Status: `fixed`. Current risk: —.
+
+Assigned test declarations use pub mod without redundant per-entry test gates; private declarations remain for helper modules.
+
+Evidence: [crates/shamir-engine/src/repo/tests/mod.rs:1](../../../../../crates/shamir-engine/src/repo/tests/mod.rs#L1); [crates/shamir-engine/src/repo/group_commit/tests/mod.rs:1](../../../../../crates/shamir-engine/src/repo/group_commit/tests/mod.rs#L1); [crates/shamir-engine/src/query/batch/tests/executor_tests/mod.rs:2](../../../../../crates/shamir-engine/src/query/batch/tests/executor_tests/mod.rs#L2).
+
+<a id="review-5"></a>
+
+### Claim 5 — Test files missing the _tests suffix
+
+Status: `fixed`. Current risk: —.
+
+All five named files were renamed and their manifest references updated.
+
+Evidence: [crates/shamir-engine/src/tx/tests/mod.rs:22](../../../../../crates/shamir-engine/src/tx/tests/mod.rs#L22); [crates/shamir-engine/src/table/tests/mod.rs:22](../../../../../crates/shamir-engine/src/table/tests/mod.rs#L22).
+
+<a id="review-6"></a>
+
+### Claim 6 — Test file nests redundant cfg(test) mod tests
+
+Status: `fixed`. Current risk: —.
+
+Watchdog test functions are now at file scope under the parent test registration.
+
+Evidence: [crates/shamir-engine/src/query/batch/tests/watchdog_tests.rs:177](../../../../../crates/shamir-engine/src/query/batch/tests/watchdog_tests.rs#L177); [crates/shamir-engine/src/query/batch/tests/mod.rs:23](../../../../../crates/shamir-engine/src/query/batch/tests/mod.rs#L23).
+
+<a id="review-7"></a>
+
+### Claim 7 — Tail-of-file pub use re-exports outside mod.rs
+
+Status: `fixed`. Current risk: —.
+
+The query_runner tail exports were removed; batch/mod.rs owns the executor exports.
+
+Evidence: [crates/shamir-engine/src/query/batch/mod.rs:159](../../../../../crates/shamir-engine/src/query/batch/mod.rs#L159); [crates/shamir-engine/src/query/batch/mod.rs:162](../../../../../crates/shamir-engine/src/query/batch/mod.rs#L162).
+
+<a id="review-8"></a>
+
+### Claim 8 — repo_types.rs stretches one-primary-export rule to eleven public types
+
+Status: `not-applicable`. Current risk: —.
+
+Backend composites and factories form the closely coupled family explicitly allowed by CLAUDE.md; splitting was optional, not a defect fix.
+
+Evidence: [crates/shamir-engine/src/repo/repo_types.rs:30](../../../../../crates/shamir-engine/src/repo/repo_types.rs#L30); [crates/shamir-engine/src/repo/repo_types.rs:310](../../../../../crates/shamir-engine/src/repo/repo_types.rs#L310); [CLAUDE.md:504](../../../../../CLAUDE.md#L504).
+
+## Corrections and qualified non-findings
+
+- Style-only findings are nits, not runtime High/Medium without a demonstrated runtime mechanism.
+- The correct path is src/repo/repo_types.rs.
+- The documented filename and pub-mod examples should not be overstated as independent functional guarantees.
+- The campaign mixed style and substantive edits in 6c286cc9; it was not the promised isolated style-only commit, and its SHA is not in .git-blame-ignore-revs.
+- Do not reuse the old sixteen-mod.rs count as a current structural inventory.
+
+---
+
+<details>
+<summary>Historical report — preserved for provenance; not current status or instructions</summary>
+
 # shamir-engine -- Style & CLAUDE.md structural conformance
 ## Summary
 Structural conformance is strong but not clean: 15 of the crate's 16 `mod.rs` files are re-export-only and the per-module `tests/` layout is otherwise exemplary, yet three explicit CLAUDE.md rules are violated. `repo/group_commit/mod.rs` carries a full 125-line implementation; `#[cfg(test)] mod tests` blocks are embedded inline in two implementation files; and mid-function `use` imports appear systemically (~25 sites across ~15 production files, none fitting the documented exceptions). Remaining findings are naming/manifest-form drift in the test trees.
@@ -64,3 +174,5 @@ Structural conformance is strong but not clean: 15 of the crate's 16 `mod.rs` fi
 **Severity:** nit
 **Issue:** `BoxRepo` + 3 composites + `RepoFactory` trait + 5 factory types/enums live in one file. They form one conceptual family (repo backend + its factory variants), so this is defensible under the "closely-coupled group" clause — but it is the largest export surface in a single non-mod file in the crate, and the composites vs. factories split is a natural seam.
 **Suggested fix:** Optional: split composites (`BoxRepo` + `*RepoComposite`) from factories (`RepoFactory` + `*RepoFactory`) when the file is next touched for substance; not worth a dedicated churn commit.
+
+</details>

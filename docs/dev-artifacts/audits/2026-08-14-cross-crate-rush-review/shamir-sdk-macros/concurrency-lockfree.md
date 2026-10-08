@@ -1,3 +1,55 @@
+<!-- revalidation:2026-10-08 source:92ad58266bf57ddea1fa3c8a47affba1a3a9a096 -->
+# shamir-sdk-macros — concurrency-lockfree revalidation
+
+Source snapshot: `92ad58266bf57ddea1fa3c8a47affba1a3a9a096`. Revalidated 2026-10-08 by read-only XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run; no source fix is part of this update. Test registration/assertions are evidence of an oracle, not proof of a passing run.
+
+This section is authoritative for current status. Original titles/IDs are retained for traceability; a refuted title is not a current assertion. The collapsed historical report below is superseded, including its counts, severity, scenarios and fix instructions. Plan IDs preserve historical numbering, not a current release mandate. [Workspace methodology and status definitions](../SUMMARY.md#status-definitions).
+
+Guest-side busy polling remains open, but the claimed incompatibility with async host imports is refuted by the existing fiber bridge. No macro-owned locking defect was found.
+
+## Current claim decisions
+
+| Claim decisions | Open | Source-fixed | Partial | Refuted | Unverified | N/A |
+|---:|---:|---:|---:|---:|---:|---:|
+| 2 | 2 | 0 | 0 | 0 | 0 | 0 |
+
+These are decisions on report claims, including repeated roots, bundled observations and non-findings—not a unique-bug census. Closed/N/A rows have no current risk; unverified risk is provisional. Pure style and unmeasured optimization claims do not establish runtime impact.
+
+<a id="review-1"></a>
+
+### Claim 1 — Generated guest ABI drives author `async fn` on a spin-on-`Pending` executor -- latent busy-wait/livelock, undocumented and unguarded
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+All four generated entrypoints still use unbounded no-op-waker block_on. Permanently-Pending guest futures busy-poll until host metering interrupts them. Current async host imports already suspend the Wasmtime fiber while appearing synchronous to the SDK; they do not establish the alleged deterministic Pending failure.
+
+Evidence: [crates/shamir-sdk-macros/src/lib.rs:144](../../../../../crates/shamir-sdk-macros/src/lib.rs#L144); [crates/shamir-sdk-macros/src/lib.rs:556](../../../../../crates/shamir-sdk-macros/src/lib.rs#L556); [crates/shamir-sdk/src/__rt.rs:36](../../../../../crates/shamir-sdk/src/__rt.rs#L36); [crates/shamir-sdk/src/host_imports.rs:29](../../../../../crates/shamir-sdk/src/host_imports.rs#L29); [crates/shamir-wasm-host/src/wasm/wasm_function.rs:195](../../../../../crates/shamir-wasm-host/src/wasm/wasm_function.rs#L195); [crates/shamir-wasm-host/src/wasm/wasm_function.rs:449](../../../../../crates/shamir-wasm-host/src/wasm/wasm_function.rs#L449).
+
+<a id="review-2"></a>
+
+### Claim 2 — The concurrency-critical "Ready on first poll" contract of the emitted ABI has zero test coverage in this crate
+
+Status: `confirmed-open`. Current risk: `low`.
+
+No local expansion or Pending-path tests exist. There is an immediate-Ready helper test and a wired generated-function runtime test, but neither checks bounded rejection of a permanently-Pending future.
+
+Evidence: [crates/shamir-sdk-macros/Cargo.toml:13](../../../../../crates/shamir-sdk-macros/Cargo.toml#L13); [crates/shamir-sdk/src/tests/value_tests.rs:414](../../../../../crates/shamir-sdk/src/tests/value_tests.rs#L414); [crates/shamir-wasm-host/src/tests/compile_tests.rs:19](../../../../../crates/shamir-wasm-host/src/tests/compile_tests.rs#L19).
+
+Grouping/duplicate: `correctness-tdd.md#1`. This row is not another independent defect.
+
+## Corrections and qualified non-findings
+
+- The executor tolerates finite Pending sequences by repolling; Ready-on-first-poll is an intended restriction, not a mechanically enforced necessity.
+- The proposed once-Pending-then-Ready test would already complete and would not detect unbounded polling. A bounded-poll or never-ready regression oracle is needed.
+- The blanket statement that nothing exercises any generated ABI is false: crates/shamir-wasm-host/src/tests/compile_tests.rs:35 invokes #[function] output.
+- Host imports are async in the host linker already: crates/shamir-wasm-host/src/wasm/wasm_function.rs:195. Guest SDK extern calls remain synchronous.
+- Confirmed non-finding: macro implementation and generated wrapper infrastructure introduce no lock primitives or guards across their generated await. Author bodies are outside that guarantee.
+
+---
+
+<details>
+<summary>Historical report — preserved for provenance; not current status or instructions</summary>
+
 # shamir-sdk-macros -- Concurrency & lock-free invariants
 
 ## Summary
@@ -21,3 +73,5 @@ The macro crate itself is trivially clean against the 5 pillars: it holds no `Mu
 - **Issue:** The only concurrency invariant this crate establishes -- that the generated `shamir_call` synchronously resolves the author's future and must never encounter `Pending` (finding 1's contract) -- is asserted nowhere at the macro level. The nearest coverage is indirect and Ready-only: `shamir-sdk/src/tests/value_tests.rs::block_on_resolves_immediately` (`:414-415`). Nothing exercises any macro-emitted ABI (`validator`/`function`/`procedure`/`scalar`) or the Pending/`spin_loop` branch, so a regression that makes even the pure path pend (or that silently swaps the executor) would not be caught by any test owned by this crate. CLAUDE.md's test-organisation rules exist so per-module behavior is pinned where it is defined.
 - **Failure scenario:** A future change to the emitted `quote!` body (e.g. the `TODO(slice 4)` Result-envelope rework already flagged at `lib.rs:251`) alters the async lowering; no crate-local test notices, and the first signal is a guest fuel-exhaustion trap or hang in an integration run far from the change.
 - **Suggested fix:** Add a `src/tests/` directory per CLAUDE.md layout with at least: (1) a compile-and-expand test per macro asserting the emitted tokens contain exactly one `__rt::block_on` and no lock primitives; (2) a guest-side test (or a shared fixture with `shamir-sdk`) that a scalar/function whose future pends once then resolves still completes, and that a never-resolving future trips the (post-fix) trap instead of spinning unbounded.
+
+</details>

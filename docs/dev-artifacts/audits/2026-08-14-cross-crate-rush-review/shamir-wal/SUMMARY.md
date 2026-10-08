@@ -1,3 +1,1098 @@
+<!-- revalidation:2026-10-08 source:92ad58266bf57ddea1fa3c8a47affba1a3a9a096 -->
+# shamir-wal — SUMMARY revalidation
+
+Source snapshot: `92ad58266bf57ddea1fa3c8a47affba1a3a9a096`. Revalidated 2026-10-08 by read-only XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run; no source fix is part of this update. Test registration/assertions are evidence of an oracle, not proof of a passing run.
+
+This section is authoritative for current status. Original titles/IDs are retained for traceability; a refuted title is not a current assertion. The collapsed historical report below is superseded, including its counts, severity, scenarios and fix instructions. Plan IDs preserve historical numbering, not a current release mandate. [Workspace methodology and status definitions](../SUMMARY.md#status-definitions).
+
+All 59 consolidated sections and 25 plan items were revalidated. The three distinct runtime High issues remain; style is not a fourth runtime High. Tiny-frame OOM is unverified, deliberate costs are non-findings, and live drainer replay contradicts startup-only safety assumptions.
+
+## Current claim decisions
+
+| Claim decisions | Open | Source-fixed | Partial | Refuted | Unverified | N/A |
+|---:|---:|---:|---:|---:|---:|---:|
+| 63 | 55 | 0 | 0 | 4 | 1 | 3 |
+
+These are decisions on report claims, including repeated roots, bundled observations and non-findings—not a unique-bug census. Closed/N/A rows have no current risk; unverified risk is provisional. Pure style and unmeasured optimization claims do not establish runtime impact.
+
+<a id="review-1-1"></a>
+
+### Claim 1.1 — Circuit breaker can strand parked appenders indefinitely (L1 violation, hang)
+
+Status: `confirmed-open`. Current risk: `high`.
+
+Failure releases flushing without draining pending; parked followers never re-elect.
+
+Evidence: [crates/shamir-wal/src/wal_group_commit.rs:327](../../../../../crates/shamir-wal/src/wal_group_commit.rs#L327); [crates/shamir-wal/src/wal_group_commit.rs:196](../../../../../crates/shamir-wal/src/wal_group_commit.rs#L196).
+
+Grouping/duplicate: `correctness-tdd.md#1`. This row is not another independent defect.
+
+<a id="review-1-2"></a>
+
+### Claim 1.2 — Vacuous §1.5 regression test: the restore-on-failed-fsync branch never executes
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+Registered test restores dirty itself; no production failed sync is induced.
+
+Evidence: [crates/shamir-wal/src/tests/wal_group_commit_tests.rs:327](../../../../../crates/shamir-wal/src/tests/wal_group_commit_tests.rs#L327); [crates/shamir-wal/src/wal_group_commit.rs:398](../../../../../crates/shamir-wal/src/wal_group_commit.rs#L398).
+
+Grouping/duplicate: `correctness-tdd.md#2`. This row is not another independent defect.
+
+<a id="review-1-3"></a>
+
+### Claim 1.3 — §2.4 startup PermissionDenied hard-fail branch has zero coverage
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+Startup flags are strict, but the registered test only reads healthy data.
+
+Evidence: [crates/shamir-wal/src/wal_segment.rs:479](../../../../../crates/shamir-wal/src/wal_segment.rs#L479); [crates/shamir-wal/src/tests/wal_segment_tests.rs:218](../../../../../crates/shamir-wal/src/tests/wal_segment_tests.rs#L218).
+
+Grouping/duplicate: `correctness-tdd.md#3`. This row is not another independent defect.
+
+<a id="review-1-4"></a>
+
+### Claim 1.4 — repair_torn_tail silently amputates the valid suffix on a complete-but-CRC-bad frame, mislabeled torn tail
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+Complete CRC failure still truncates the suffix and only warns during active open.
+
+Evidence: [crates/shamir-wal/src/wal_segment.rs:391](../../../../../crates/shamir-wal/src/wal_segment.rs#L391); [crates/shamir-wal/src/wal_segment.rs:404](../../../../../crates/shamir-wal/src/wal_segment.rs#L404); [crates/shamir-wal/src/wal_segment.rs:419](../../../../../crates/shamir-wal/src/wal_segment.rs#L419).
+
+Grouping/duplicate: `correctness-tdd.md#4`. This row is not another independent defect.
+
+<a id="review-1-5"></a>
+
+### Claim 1.5 — §1.3 file-sink mid-flight failure → rollback → retry-once path untested; the whole File-sink error surface has no fault knob
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+Registered file tests use pre-poisoning or manual tails; live rollback, next-open failure, and corrupt sealed fallback composition remain uncovered.
+
+Evidence: [crates/shamir-wal/src/wal_segment.rs:236](../../../../../crates/shamir-wal/src/wal_segment.rs#L236); [crates/shamir-wal/src/segment_set.rs:317](../../../../../crates/shamir-wal/src/segment_set.rs#L317); [crates/shamir-wal/src/tests/segment_set_tests.rs:876](../../../../../crates/shamir-wal/src/tests/segment_set_tests.rs#L876).
+
+Grouping/duplicate: `correctness-tdd.md#5`. This row is not another independent defect.
+
+<a id="review-1-6"></a>
+
+### Claim 1.6 — Per-segment seq counter restarts at 0 on reopen
+
+Status: `confirmed-open`. Current risk: `low`.
+
+Every new handle resets the unpersisted counter; production does not consume its value.
+
+Evidence: [crates/shamir-wal/src/wal_segment.rs:177](../../../../../crates/shamir-wal/src/wal_segment.rs#L177); [crates/shamir-wal/src/wal_group_commit.rs:294](../../../../../crates/shamir-wal/src/wal_group_commit.rs#L294).
+
+Grouping/duplicate: `SUMMARY.md#5.6`. This row is not another independent defect.
+
+<a id="review-1-7"></a>
+
+### Claim 1.7 — Leader discards the underlying I/O error; a failed retry is logged nowhere
+
+Status: `confirmed-open`. Current risk: `low`.
+
+Cause erasure remains; ordinary retry write failures are already logged by WalSegment, correcting the blanket no-log claim.
+
+Evidence: [crates/shamir-wal/src/wal_group_commit.rs:294](../../../../../crates/shamir-wal/src/wal_group_commit.rs#L294); [crates/shamir-wal/src/wal_segment.rs:277](../../../../../crates/shamir-wal/src/wal_segment.rs#L277).
+
+Grouping/duplicate: `SUMMARY.md#6.3`. This row is not another independent defect.
+
+<a id="review-1-8"></a>
+
+### Claim 1.8 — Corrupt length header overflows usize on 32-bit targets → panic in replay/repair
+
+Status: `confirmed-open`. Current risk: `low`.
+
+Both walkers retain unchecked disk-length arithmetic on usize.
+
+Evidence: [crates/shamir-wal/src/wal_segment.rs:380](../../../../../crates/shamir-wal/src/wal_segment.rs#L380); [crates/shamir-wal/src/wal_segment.rs:535](../../../../../crates/shamir-wal/src/wal_segment.rs#L535).
+
+Grouping/duplicate: `SUMMARY.md#3.4`. This row is not another independent defect.
+
+<a id="review-1-9"></a>
+
+### Claim 1.9 — Inline #[cfg(test)] mod tests in segment_meta.rs
+
+Status: `confirmed-open`. Current risk: `low`.
+
+Five inline tests remain; this is structural debt.
+
+Evidence: [crates/shamir-wal/src/segment_meta.rs:175](../../../../../crates/shamir-wal/src/segment_meta.rs#L175).
+
+Grouping/duplicate: `SUMMARY.md#7.1`. This row is not another independent defect.
+
+<a id="review-1-10"></a>
+
+### Claim 1.10 — sync_now counts failed fsyncs as issued fsyncs
+
+Status: `refuted`. Current risk: —.
+
+Issued counts attempts; both sync paths consistently implement that documented meaning.
+
+Evidence: [crates/shamir-wal/src/wal_group_commit.rs:148](../../../../../crates/shamir-wal/src/wal_group_commit.rs#L148); [crates/shamir-wal/src/wal_group_commit.rs:310](../../../../../crates/shamir-wal/src/wal_group_commit.rs#L310); [crates/shamir-wal/src/wal_group_commit.rs:360](../../../../../crates/shamir-wal/src/wal_group_commit.rs#L360).
+
+Grouping/duplicate: `correctness-tdd.md#10`. This row is not another independent defect.
+
+<a id="review-2-1"></a>
+
+### Claim 2.1 — Circuit-breaker exit strands parked waiters indefinitely
+
+Status: `confirmed-open`. Current risk: `high`.
+
+Failure release leaves already-queued waiters uncompleted.
+
+Evidence: [crates/shamir-wal/src/wal_group_commit.rs:327](../../../../../crates/shamir-wal/src/wal_group_commit.rs#L327).
+
+Grouping/duplicate: `SUMMARY.md#1.1`. This row is not another independent defect.
+
+<a id="review-2-2"></a>
+
+### Claim 2.2 — WalSegment::append_batch rollback and bytes_written accounting are unsafe under concurrent callers, while the bench claims correctness coverage
+
+Status: `confirmed-open`. Current risk: `low`.
+
+Rollback/accounting are outside complete file serialization; synthetic direct callers bypass the production single-leader model. Benchmark assertions do not validate data or injected failures.
+
+Evidence: [crates/shamir-wal/src/wal_segment.rs:220](../../../../../crates/shamir-wal/src/wal_segment.rs#L220); [crates/shamir-wal/src/wal_segment.rs:248](../../../../../crates/shamir-wal/src/wal_segment.rs#L248); [crates/shamir-wal/benches/segment_set_lock.rs:100](../../../../../crates/shamir-wal/benches/segment_set_lock.rs#L100).
+
+Grouping/duplicate: `concurrency-lockfree.md#2`. This row is not another independent defect.
+
+<a id="review-2-3"></a>
+
+### Claim 2.3 — Leader tenure is unbounded under sustained arrival — the leader's own append future cannot resolve
+
+Status: `confirmed-open`. Current risk: `low`.
+
+The elected caller cannot return until the entire queue becomes empty, even after its own completion.
+
+Evidence: [crates/shamir-wal/src/wal_group_commit.rs:185](../../../../../crates/shamir-wal/src/wal_group_commit.rs#L185); [crates/shamir-wal/src/wal_group_commit.rs:273](../../../../../crates/shamir-wal/src/wal_group_commit.rs#L273).
+
+Grouping/duplicate: `concurrency-lockfree.md#3`. This row is not another independent defect.
+
+<a id="review-2-4"></a>
+
+### Claim 2.4 — dirty_since_sync boolean has a clear-race against concurrent Buffered completions
+
+Status: `confirmed-open`. Current risk: `low`.
+
+Post-await clear can erase a newer dirty publication, defeating the advertised timer bound.
+
+Evidence: [crates/shamir-wal/src/wal_group_commit.rs:300](../../../../../crates/shamir-wal/src/wal_group_commit.rs#L300); [crates/shamir-wal/src/wal_group_commit.rs:358](../../../../../crates/shamir-wal/src/wal_group_commit.rs#L358).
+
+Grouping/duplicate: `concurrency-lockfree.md#4`. This row is not another independent defect.
+
+<a id="review-2-5"></a>
+
+### Claim 2.5 — MemSink holds a std::sync::Mutex across O(N) CPU work inside async fns
+
+Status: `confirmed-open`. Current risk: `nit`.
+
+Decode, retain, and probing scan under the synchronous frames lock, without an await.
+
+Evidence: [crates/shamir-wal/src/wal_sink.rs:162](../../../../../crates/shamir-wal/src/wal_sink.rs#L162); [crates/shamir-wal/src/wal_sink.rs:188](../../../../../crates/shamir-wal/src/wal_sink.rs#L188); [crates/shamir-wal/src/wal_sink.rs:205](../../../../../crates/shamir-wal/src/wal_sink.rs#L205).
+
+Grouping/duplicate: `concurrency-lockfree.md#5`. This row is not another independent defect.
+
+<a id="review-3-1"></a>
+
+### Claim 3.1 — Silent, irreversible truncation on a mid-file CRC mismatch in the ACTIVE segment
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+Active repair physically removes the valid suffix after the first complete CRC failure.
+
+Evidence: [crates/shamir-wal/src/wal_segment.rs:391](../../../../../crates/shamir-wal/src/wal_segment.rs#L391); [crates/shamir-wal/src/wal_segment.rs:404](../../../../../crates/shamir-wal/src/wal_segment.rs#L404).
+
+Grouping/duplicate: `SUMMARY.md#1.4`. This row is not another independent defect.
+
+<a id="review-3-2"></a>
+
+### Claim 3.2 — bincode 1.x decodes recovery data with no allocation bounds — a small crafted/corrupt frame can OOM the process
+
+Status: `unverified`. Current risk: `low` (provisional; not a confirmed defect).
+
+Pinned slice-reader and serde allocation guards contradict the claimed ops preallocation mechanism; full ByteBuf proof lacks pinned serde_bytes source. Uncapped whole-file buffering is independently open.
+
+Evidence: [Cargo.lock:413](../../../../../Cargo.lock#L413); [Cargo.lock:3204](../../../../../Cargo.lock#L3204); [Cargo.lock:3214](../../../../../Cargo.lock#L3214); [crates/shamir-wal/src/wal_entry_v2.rs:251](../../../../../crates/shamir-wal/src/wal_entry_v2.rs#L251).
+
+Grouping/duplicate: `security-crypto.md#2`. This row is not another independent defect.
+
+<a id="review-3-2-file-buffering"></a>
+
+### Claim 3.2/file-buffering — Unbounded segment and sidecar read_to_end
+
+Status: `confirmed-open`. Current risk: `low`.
+
+Whole files are buffered without enforced caps; the rotation threshold is not a hard size maximum.
+
+Evidence: [crates/shamir-wal/src/wal_segment.rs:370](../../../../../crates/shamir-wal/src/wal_segment.rs#L370); [crates/shamir-wal/src/wal_segment.rs:527](../../../../../crates/shamir-wal/src/wal_segment.rs#L527); [crates/shamir-wal/src/segment_meta.rs:131](../../../../../crates/shamir-wal/src/segment_meta.rs#L131).
+
+Grouping/duplicate: `security-crypto.md#2/unbounded-file-buffering`. This row is not another independent defect.
+
+<a id="review-3-3"></a>
+
+### Claim 3.3 — Unauthenticated WAL replay is an injection surface; the data directory is trusted assumption is implicit and undocumented
+
+Status: `confirmed-open`. Current risk: `low`.
+
+Unkeyed CRC authenticates neither entries nor maxima. Threat requires control of local WAL files; the missing trust-boundary documentation remains.
+
+Evidence: [crates/shamir-wal/src/wal_segment.rs:230](../../../../../crates/shamir-wal/src/wal_segment.rs#L230); [crates/shamir-wal/src/segment_meta.rs:149](../../../../../crates/shamir-wal/src/segment_meta.rs#L149); [crates/shamir-wal/src/lib.rs:14](../../../../../crates/shamir-wal/src/lib.rs#L14).
+
+Grouping/duplicate: `security-crypto.md#3`. This row is not another independent defect.
+
+<a id="review-3-4"></a>
+
+### Claim 3.4 — Frame-length arithmetic can wrap on 32-bit targets → panic on a crafted 4-byte header
+
+Status: `confirmed-open`. Current risk: `low`.
+
+Unchecked arithmetic remains; four bytes suffice with overflow checks, but wrapping release mode needs sufficient bytes to pass its wrapped-end guard. wasm32 host reach is unverified.
+
+Evidence: [crates/shamir-wal/src/wal_segment.rs:380](../../../../../crates/shamir-wal/src/wal_segment.rs#L380); [crates/shamir-wal/src/wal_segment.rs:535](../../../../../crates/shamir-wal/src/wal_segment.rs#L535).
+
+Grouping/duplicate: `security-crypto.md#4`. This row is not another independent defect.
+
+<a id="review-3-5"></a>
+
+### Claim 3.5 — A single CRC-valid-but-undecodable frame aborts the entire recovery (version skew == corruption)
+
+Status: `confirmed-open`. Current risk: `nit`.
+
+Malformed same-version bodies abort as Internal; unsupported versions already have distinct message text. Fail-closed behavior itself is appropriate.
+
+Evidence: [crates/shamir-wal/src/wal_segment.rs:572](../../../../../crates/shamir-wal/src/wal_segment.rs#L572); [crates/shamir-wal/src/wal_entry_v2.rs:252](../../../../../crates/shamir-wal/src/wal_entry_v2.rs#L252); [crates/shamir-wal/src/wal_entry_v2.rs:253](../../../../../crates/shamir-wal/src/wal_entry_v2.rs#L253).
+
+Grouping/duplicate: `security-crypto.md#5`. This row is not another independent defect.
+
+<a id="review-3-6"></a>
+
+### Claim 3.6 — Error strings embed absolute filesystem paths
+
+Status: `confirmed-open`. Current risk: `nit`.
+
+Configured absolute paths can appear in local Storage errors; a specific WAL-to-client disclosure remains unverified.
+
+Evidence: [crates/shamir-wal/src/wal_segment.rs:155](../../../../../crates/shamir-wal/src/wal_segment.rs#L155); [crates/shamir-wal/src/segment_set.rs:512](../../../../../crates/shamir-wal/src/segment_set.rs#L512); [crates/shamir-server/src/db_handler/handler.rs:611](../../../../../crates/shamir-server/src/db_handler/handler.rs#L611).
+
+Grouping/duplicate: `security-crypto.md#6`. This row is not another independent defect.
+
+<a id="review-4-1"></a>
+
+### Claim 4.1 — has_truncatable on the Mem sink is an O(frames) scan run on every drainer tick
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+Worst-case linear any runs under the frames lock on drainer probe paths; observed CPU impact was not measured.
+
+Evidence: [crates/shamir-wal/src/wal_sink.rs:205](../../../../../crates/shamir-wal/src/wal_sink.rs#L205); [crates/shamir-engine/src/tx/drainer.rs:953](../../../../../crates/shamir-engine/src/tx/drainer.rs#L953).
+
+Grouping/duplicate: `performance-hotpath.md#1`. This row is not another independent defect.
+
+<a id="review-4-2"></a>
+
+### Claim 4.2 — WalEntryV2::encode starts from a 256-byte capacity guess that realistic entries overflow
+
+Status: `confirmed-open`. Current risk: `low`.
+
+The 256-byte-body fixture exceeds the initial capacity after framing fields; exact growth counts and copies are unproven.
+
+Evidence: [crates/shamir-wal/src/wal_entry_v2.rs:215](../../../../../crates/shamir-wal/src/wal_entry_v2.rs#L215); [crates/shamir-wal/benches/wal_startup_open.rs:37](../../../../../crates/shamir-wal/benches/wal_startup_open.rs#L37).
+
+Grouping/duplicate: `performance-hotpath.md#2`. This row is not another independent defect.
+
+<a id="review-4-3"></a>
+
+### Claim 4.3 — Per-window allocation churn in lead_until_drained: pending Vec regrows from capacity 0 every window
+
+Status: `confirmed-open`. Current risk: `low`.
+
+Queue capacity is discarded by mem::take; payload/meta vectors and separate scans remain.
+
+Evidence: [crates/shamir-wal/src/wal_group_commit.rs:277](../../../../../crates/shamir-wal/src/wal_group_commit.rs#L277); [crates/shamir-wal/src/wal_group_commit.rs:280](../../../../../crates/shamir-wal/src/wal_group_commit.rs#L280); [crates/shamir-wal/src/wal_group_commit.rs:308](../../../../../crates/shamir-wal/src/wal_group_commit.rs#L308).
+
+Grouping/duplicate: `performance-hotpath.md#3`. This row is not another independent defect.
+
+<a id="review-4-4"></a>
+
+### Claim 4.4 — Startup sidecar fallback decodes every entry to extract one u64
+
+Status: `confirmed-open`. Current risk: `low`.
+
+Fallback performs complete decode then reads only commit_version for metadata discovery.
+
+Evidence: [crates/shamir-wal/src/segment_set.rs:155](../../../../../crates/shamir-wal/src/segment_set.rs#L155); [crates/shamir-wal/src/segment_set.rs:156](../../../../../crates/shamir-wal/src/segment_set.rs#L156).
+
+Grouping/duplicate: `performance-hotpath.md#4`. This row is not another independent defect.
+
+<a id="review-4-5"></a>
+
+### Claim 4.5 — replay materializes the entire WAL as decoded entries in one Vec
+
+Status: `confirmed-open`. Current risk: `low`.
+
+Whole-corpus output accumulation remains and is reachable during live gap recovery as well as startup.
+
+Evidence: [crates/shamir-wal/src/segment_set.rs:442](../../../../../crates/shamir-wal/src/segment_set.rs#L442); [crates/shamir-engine/src/tx/drainer.rs:368](../../../../../crates/shamir-engine/src/tx/drainer.rs#L368).
+
+Grouping/duplicate: `performance-hotpath.md#5`. This row is not another independent defect.
+
+<a id="review-4-6"></a>
+
+### Claim 4.6 — Full window bytes memcpy'd into the coalescing buffer per append batch
+
+Status: `not-applicable`. Current risk: —.
+
+The copy is an intentional framing/coalescing trade, explicitly not a defect in the original report.
+
+Evidence: [crates/shamir-wal/src/wal_segment.rs:228](../../../../../crates/shamir-wal/src/wal_segment.rs#L228); [crates/shamir-wal/src/wal_segment.rs:232](../../../../../crates/shamir-wal/src/wal_segment.rs#L232).
+
+Grouping/duplicate: `performance-hotpath.md#6`. This row is not another independent defect.
+
+<a id="review-4-7"></a>
+
+### Claim 4.7 — One Arc<Waiter> heap allocation per single append
+
+Status: `not-applicable`. Current risk: —.
+
+A documented design cost without an established regression or requested remedy.
+
+Evidence: [crates/shamir-wal/src/wal_group_commit.rs:175](../../../../../crates/shamir-wal/src/wal_group_commit.rs#L175).
+
+Grouping/duplicate: `performance-hotpath.md#7`. This row is not another independent defect.
+
+<a id="review-5-1"></a>
+
+### Claim 5.1 — Segment-name parser accepts non-canonical names and can silently shadow WAL data
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+Numeric scan discards original names and reconstructs canonical paths without deduplication.
+
+Evidence: [crates/shamir-wal/src/segment_set.rs:74](../../../../../crates/shamir-wal/src/segment_set.rs#L74); [crates/shamir-wal/src/segment_set.rs:132](../../../../../crates/shamir-wal/src/segment_set.rs#L132).
+
+Grouping/duplicate: `api-wire-protocol.md#1`. This row is not another independent defect.
+
+<a id="review-5-2"></a>
+
+### Claim 5.2 — Append path accepts payloads that produce well-formed frames which then hard-fail replay
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+Opaque append permits empty/invalid entries; valid framing survives repair and decode errors abort replay. Normal transaction producer encodes typed entries.
+
+Evidence: [crates/shamir-wal/src/wal_segment.rs:229](../../../../../crates/shamir-wal/src/wal_segment.rs#L229); [crates/shamir-wal/src/wal_segment.rs:572](../../../../../crates/shamir-wal/src/wal_segment.rs#L572); [crates/shamir-tx/src/repo_wal_manager.rs:90](../../../../../crates/shamir-tx/src/repo_wal_manager.rs#L90).
+
+Grouping/duplicate: `api-wire-protocol.md#2`. This row is not another independent defect.
+
+<a id="review-5-3"></a>
+
+### Claim 5.3 — Retired F5c KV-marker wire protocol still exported as public API, with docs describing it as live
+
+Status: `confirmed-open`. Current risk: `low`.
+
+Public legacy helpers and contradictory live-KV prose remain; current production uses SegmentSet.
+
+Evidence: [crates/shamir-wal/src/lib.rs:54](../../../../../crates/shamir-wal/src/lib.rs#L54); [crates/shamir-wal/src/wal_entry_v2.rs:14](../../../../../crates/shamir-wal/src/wal_entry_v2.rs#L14); [crates/shamir-engine/src/repo/repo_instance.rs:829](../../../../../crates/shamir-engine/src/repo/repo_instance.rs#L829).
+
+Grouping/duplicate: `api-wire-protocol.md#3`. This row is not another independent defect.
+
+<a id="review-5-4"></a>
+
+### Claim 5.4 — WalOpV2::IndexPut/IndexDel serialize idx_id as a constant 0 with semantics deferred
+
+Status: `confirmed-open`. Current risk: `low`.
+
+Producer writes zero and docs defer meaning; current replay ignores the field and applies raw posting keys, so current misrouting is not established.
+
+Evidence: [crates/shamir-engine/src/tx/commit.rs:325](../../../../../crates/shamir-engine/src/tx/commit.rs#L325); [crates/shamir-engine/src/tx/recovery.rs:149](../../../../../crates/shamir-engine/src/tx/recovery.rs#L149); [crates/shamir-wal/src/wal_entry_v2.rs:79](../../../../../crates/shamir-wal/src/wal_entry_v2.rs#L79).
+
+Grouping/duplicate: `api-wire-protocol.md#4`. This row is not another independent defect.
+
+<a id="review-5-5"></a>
+
+### Claim 5.5 — Frame format has no per-frame magic/seq and segment files have no header or format version
+
+Status: `confirmed-open`. Current risk: `low`.
+
+Bare frame streams remain; the entry envelope does not version outer framing or support resynchronization.
+
+Evidence: [crates/shamir-wal/src/wal_segment.rs:226](../../../../../crates/shamir-wal/src/wal_segment.rs#L226); [crates/shamir-wal/src/wal_segment.rs:551](../../../../../crates/shamir-wal/src/wal_segment.rs#L551).
+
+Grouping/duplicate: `api-wire-protocol.md#5`. This row is not another independent defect.
+
+<a id="review-5-6"></a>
+
+### Claim 5.6 — append_batch returns a seq that is per-segment, non-persisted, and resets to 0 on every open
+
+Status: `confirmed-open`. Current risk: `low`.
+
+The per-open counter remains undocumented as such and is not persisted or consumed in production.
+
+Evidence: [crates/shamir-wal/src/wal_segment.rs:177](../../../../../crates/shamir-wal/src/wal_segment.rs#L177); [crates/shamir-wal/src/wal_segment.rs:184](../../../../../crates/shamir-wal/src/wal_segment.rs#L184); [crates/shamir-wal/src/wal_group_commit.rs:294](../../../../../crates/shamir-wal/src/wal_group_commit.rs#L294).
+
+Grouping/duplicate: `api-wire-protocol.md#6`. This row is not another independent defect.
+
+<a id="review-5-7"></a>
+
+### Claim 5.7 — No library error enum: all wire failures collapse into DbError::Internal(String)/Storage(String)
+
+Status: `confirmed-open`. Current risk: `low`.
+
+Fine-grained causes remain strings, although the shared DbError is already a thiserror enum and its broad variants are distinguishable.
+
+Evidence: [crates/shamir-wal/src/wal_entry_v2.rs:229](../../../../../crates/shamir-wal/src/wal_entry_v2.rs#L229); [crates/shamir-storage/src/error.rs:6](../../../../../crates/shamir-storage/src/error.rs#L6).
+
+Grouping/duplicate: `SUMMARY.md#6.4`. This row is not another independent defect.
+
+<a id="review-5-8"></a>
+
+### Claim 5.8 — Group-commit waiter transport discards the underlying error
+
+Status: `confirmed-open`. Current risk: `low`.
+
+Waiter transports only a boolean result and APIs return fixed error text.
+
+Evidence: [crates/shamir-wal/src/wal_group_commit.rs:89](../../../../../crates/shamir-wal/src/wal_group_commit.rs#L89); [crates/shamir-wal/src/wal_group_commit.rs:201](../../../../../crates/shamir-wal/src/wal_group_commit.rs#L201).
+
+Grouping/duplicate: `SUMMARY.md#6.3`. This row is not another independent defect.
+
+<a id="review-5-9"></a>
+
+### Claim 5.9 — Frame-length arithmetic overflow on 32-bit/wasm32 targets
+
+Status: `confirmed-open`. Current risk: `low`.
+
+Unchecked arithmetic remains on 32-bit; wasm32 deployment support remains unverified.
+
+Evidence: [crates/shamir-wal/src/wal_segment.rs:380](../../../../../crates/shamir-wal/src/wal_segment.rs#L380); [crates/shamir-wal/src/wal_segment.rs:535](../../../../../crates/shamir-wal/src/wal_segment.rs#L535).
+
+Grouping/duplicate: `SUMMARY.md#3.4`. This row is not another independent defect.
+
+<a id="review-5-10"></a>
+
+### Claim 5.10 — WalSegment::mark_poisoned is an un-gated public test hook
+
+Status: `confirmed-open`. Current risk: `nit`.
+
+The public method still compiles in production without test or documentation gating.
+
+Evidence: [crates/shamir-wal/src/wal_segment.rs:342](../../../../../crates/shamir-wal/src/wal_segment.rs#L342).
+
+Grouping/duplicate: `api-wire-protocol.md#10`. This row is not another independent defect.
+
+<a id="review-5-11"></a>
+
+### Claim 5.11 — Wire-format tests for segment_meta inline in the implementation file
+
+Status: `confirmed-open`. Current risk: `low`.
+
+Five inline tests remain; they are discoverable despite violating layout conventions.
+
+Evidence: [crates/shamir-wal/src/segment_meta.rs:175](../../../../../crates/shamir-wal/src/segment_meta.rs#L175).
+
+Grouping/duplicate: `SUMMARY.md#7.1`. This row is not another independent defect.
+
+<a id="review-5-12"></a>
+
+### Claim 5.12 — Anonymous tuple types in the public wire structs
+
+Status: `confirmed-open`. Current risk: `nit`.
+
+The serialized public pair/triple types remain; no concrete misindexing defect was established.
+
+Evidence: [crates/shamir-wal/src/wal_entry_v2.rs:105](../../../../../crates/shamir-wal/src/wal_entry_v2.rs#L105); [crates/shamir-wal/src/wal_entry_v2.rs:159](../../../../../crates/shamir-wal/src/wal_entry_v2.rs#L159).
+
+Grouping/duplicate: `api-wire-protocol.md#12`. This row is not another independent defect.
+
+<a id="review-6-1"></a>
+
+### Claim 6.1 — Cancellation or panic of the leader task wedges flushing forever — permanent WAL append hang
+
+Status: `confirmed-open`. Current risk: `high`.
+
+WalGroupCommit drains inline without cancellation/panic cleanup. The historical detached-leader fix belongs to a different engine coordinator.
+
+Evidence: [crates/shamir-wal/src/wal_group_commit.rs:185](../../../../../crates/shamir-wal/src/wal_group_commit.rs#L185); [crates/shamir-tx/src/repo_wal_manager.rs:91](../../../../../crates/shamir-tx/src/repo_wal_manager.rs#L91); [crates/shamir-engine/src/repo/group_commit/group_commit.rs:74](../../../../../crates/shamir-engine/src/repo/group_commit/group_commit.rs#L74).
+
+Grouping/duplicate: `error-handling-lifecycle.md#1`. This row is not another independent defect.
+
+<a id="review-6-2"></a>
+
+### Claim 6.2 — Seal-time fsync failure fails an already-successful append whose frames survive — acked-failed tx resurrected on replay
+
+Status: `confirmed-open`. Current risk: `high`.
+
+Rotation fsync Err overrides successful physical append and fails Buffered callers without removing their complete frames.
+
+Evidence: [crates/shamir-wal/src/segment_set.rs:251](../../../../../crates/shamir-wal/src/segment_set.rs#L251); [crates/shamir-wal/src/segment_set.rs:367](../../../../../crates/shamir-wal/src/segment_set.rs#L367); [crates/shamir-wal/src/wal_group_commit.rs:304](../../../../../crates/shamir-wal/src/wal_group_commit.rs#L304).
+
+Grouping/duplicate: `error-handling-lifecycle.md#2`. This row is not another independent defect.
+
+<a id="review-6-3"></a>
+
+### Claim 6.3 — Group-commit layer discards the underlying error — waiters get a context-free generic Err
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+Sink causes still collapse into booleans. Ordinary retry write errors do have WalSegment logs; API fidelity remains absent.
+
+Evidence: [crates/shamir-wal/src/wal_group_commit.rs:294](../../../../../crates/shamir-wal/src/wal_group_commit.rs#L294); [crates/shamir-wal/src/wal_group_commit.rs:311](../../../../../crates/shamir-wal/src/wal_group_commit.rs#L311); [crates/shamir-wal/src/wal_segment.rs:277](../../../../../crates/shamir-wal/src/wal_segment.rs#L277).
+
+Grouping/duplicate: `error-handling-lifecycle.md#3`. This row is not another independent defect.
+
+<a id="review-6-4"></a>
+
+### Claim 6.4 — No thiserror error enum — stringly-typed errors, io::ErrorKind destroyed at the wrap boundary
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+I/O kinds are stringified despite shared DbError::Io. Absence of a dedicated WAL enum is not itself absence of thiserror.
+
+Evidence: [crates/shamir-wal/src/wal_segment.rs:155](../../../../../crates/shamir-wal/src/wal_segment.rs#L155); [crates/shamir-wal/src/wal_segment.rs:315](../../../../../crates/shamir-wal/src/wal_segment.rs#L315); [crates/shamir-storage/src/error.rs:41](../../../../../crates/shamir-storage/src/error.rs#L41).
+
+Grouping/duplicate: `error-handling-lifecycle.md#4`. This row is not another independent defect.
+
+<a id="review-6-5"></a>
+
+### Claim 6.5 — SegmentSet::replay fronts sealed paths with a create-mode open — defeats documented tolerance and side-effect-creates files on a read path
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+Create-mode open and strict replay remain; live drainer recover calls disprove the asserted startup-only protection.
+
+Evidence: [crates/shamir-wal/src/segment_set.rs:435](../../../../../crates/shamir-wal/src/segment_set.rs#L435); [crates/shamir-wal/src/segment_set.rs:442](../../../../../crates/shamir-wal/src/segment_set.rs#L442); [crates/shamir-engine/src/tx/drainer.rs:368](../../../../../crates/shamir-engine/src/tx/drainer.rs#L368).
+
+Grouping/duplicate: `error-handling-lifecycle.md#5`. This row is not another independent defect.
+
+<a id="review-6-6"></a>
+
+### Claim 6.6 — Error-path rollback target is captured outside the file lock
+
+Status: `confirmed-open`. Current risk: `low`.
+
+The unsafe concurrent-direct-appender shape remains, guarded in ordinary production by single-leader append.
+
+Evidence: [crates/shamir-wal/src/wal_segment.rs:220](../../../../../crates/shamir-wal/src/wal_segment.rs#L220); [crates/shamir-wal/src/wal_segment.rs:248](../../../../../crates/shamir-wal/src/wal_segment.rs#L248).
+
+Grouping/duplicate: `SUMMARY.md#2.2`. This row is not another independent defect.
+
+<a id="review-6-7"></a>
+
+### Claim 6.7 — §1.5 dirty-flag-restore regression test is tautological
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+The test directly performs the restoration it claims to verify.
+
+Evidence: [crates/shamir-wal/src/tests/wal_group_commit_tests.rs:327](../../../../../crates/shamir-wal/src/tests/wal_group_commit_tests.rs#L327).
+
+Grouping/duplicate: `SUMMARY.md#1.2`. This row is not another independent defect.
+
+<a id="review-6-8"></a>
+
+### Claim 6.8 — Untested error paths on the File sink
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+All four enumerated gaps remain: actual write/rollback failure, poison next-open failure, startup denial, and corrupt sealed fallback-through-open.
+
+Evidence: [crates/shamir-wal/src/wal_segment.rs:238](../../../../../crates/shamir-wal/src/wal_segment.rs#L238); [crates/shamir-wal/src/segment_set.rs:317](../../../../../crates/shamir-wal/src/segment_set.rs#L317); [crates/shamir-wal/src/tests/wal_segment_tests.rs:218](../../../../../crates/shamir-wal/src/tests/wal_segment_tests.rs#L218); [crates/shamir-wal/src/tests/segment_set_tests.rs:596](../../../../../crates/shamir-wal/src/tests/segment_set_tests.rs#L596).
+
+Grouping/duplicate: `error-handling-lifecycle.md#8`. This row is not another independent defect.
+
+<a id="review-6-9"></a>
+
+### Claim 6.9 — truncate_below partial failure discards progress and strands claimed files until restart
+
+Status: `confirmed-open`. Current risk: `low`.
+
+Early unlink Err occurs after all candidates were removed from tracking, discarding progress and skipping subsequent files.
+
+Evidence: [crates/shamir-wal/src/segment_set.rs:470](../../../../../crates/shamir-wal/src/segment_set.rs#L470); [crates/shamir-wal/src/segment_set.rs:511](../../../../../crates/shamir-wal/src/segment_set.rs#L511).
+
+Grouping/duplicate: `error-handling-lifecycle.md#9`. This row is not another independent defect.
+
+<a id="review-6-10"></a>
+
+### Claim 6.10 — Corrupt on-disk data decoded as DbError::Internal — misclassifies corruption as a code bug
+
+Status: `confirmed-open`. Current risk: `low`.
+
+All envelope/body decode failures still use Internal rather than the available Codec taxonomy.
+
+Evidence: [crates/shamir-wal/src/wal_entry_v2.rs:229](../../../../../crates/shamir-wal/src/wal_entry_v2.rs#L229); [crates/shamir-wal/src/wal_entry_v2.rs:252](../../../../../crates/shamir-wal/src/wal_entry_v2.rs#L252); [crates/shamir-storage/src/error.rs:35](../../../../../crates/shamir-storage/src/error.rs#L35).
+
+Grouping/duplicate: `error-handling-lifecycle.md#10`. This row is not another independent defect.
+
+<a id="review-6-11"></a>
+
+### Claim 6.11 — fsync_parent_dir's DbResult<()> can never return Err
+
+Status: `confirmed-open`. Current risk: `nit`.
+
+Both platform implementations always return Ok; warning-spam impact is unmeasured.
+
+Evidence: [crates/shamir-wal/src/wal_segment.rs:42](../../../../../crates/shamir-wal/src/wal_segment.rs#L42); [crates/shamir-wal/src/wal_segment.rs:67](../../../../../crates/shamir-wal/src/wal_segment.rs#L67); [crates/shamir-wal/src/wal_segment.rs:71](../../../../../crates/shamir-wal/src/wal_segment.rs#L71).
+
+Grouping/duplicate: `error-handling-lifecycle.md#11`. This row is not another independent defect.
+
+<a id="review-7-1"></a>
+
+### Claim 7.1 — Inline #[cfg(test)] mod tests in an implementation file
+
+Status: `confirmed-open`. Current risk: `low`.
+
+Five tests remain inline and registered. The structural rule does not make this a runtime High.
+
+Evidence: [crates/shamir-wal/src/segment_meta.rs:175](../../../../../crates/shamir-wal/src/segment_meta.rs#L175); [crates/shamir-wal/src/lib.rs:47](../../../../../crates/shamir-wal/src/lib.rs#L47).
+
+Grouping/duplicate: `style-claude-md.md#1`. This row is not another independent defect.
+
+<a id="review-7-2"></a>
+
+### Claim 7.2 — Module docs describe the retired KV-marker design as current, with broken intra-doc links
+
+Status: `confirmed-open`. Current risk: `low`.
+
+Removed wal_entry/WalManager references and current-KV prose remain.
+
+Evidence: [crates/shamir-wal/src/wal_entry_v2.rs:3](../../../../../crates/shamir-wal/src/wal_entry_v2.rs#L3); [crates/shamir-wal/src/wal_segment.rs:3](../../../../../crates/shamir-wal/src/wal_segment.rs#L3).
+
+Grouping/duplicate: `SUMMARY.md#5.3`. This row is not another independent defect.
+
+<a id="review-7-3"></a>
+
+### Claim 7.3 — segment_set.rs module doc claims it is unwired scaffold
+
+Status: `confirmed-open`. Current risk: `low`.
+
+The unwired paragraph is contradicted by current RepoInstance construction and WalSink's payload type.
+
+Evidence: [crates/shamir-wal/src/segment_set.rs:15](../../../../../crates/shamir-wal/src/segment_set.rs#L15); [crates/shamir-wal/src/wal_sink.rs:86](../../../../../crates/shamir-wal/src/wal_sink.rs#L86); [crates/shamir-engine/src/repo/repo_instance.rs:829](../../../../../crates/shamir-engine/src/repo/repo_instance.rs#L829).
+
+Grouping/duplicate: `style-claude-md.md#3`. This row is not another independent defect.
+
+<a id="review-7-4"></a>
+
+### Claim 7.4 — WalActiveKey: exported, documented-as-live module with zero production callers
+
+Status: `confirmed-open`. Current risk: `low`.
+
+Export and stale live-flow documentation remain; only own-test code consumers were found.
+
+Evidence: [crates/shamir-wal/src/active_key.rs:4](../../../../../crates/shamir-wal/src/active_key.rs#L4); [crates/shamir-wal/src/lib.rs:54](../../../../../crates/shamir-wal/src/lib.rs#L54).
+
+Grouping/duplicate: `SUMMARY.md#5.3`. This row is not another independent defect.
+
+<a id="review-7-5"></a>
+
+### Claim 7.5 — Mid-function use statements in tests (imports-at-top rule)
+
+Status: `confirmed-open`. Current risk: `nit`.
+
+All four local Duration imports remain.
+
+Evidence: [crates/shamir-wal/src/tests/wal_group_commit_tests.rs:222](../../../../../crates/shamir-wal/src/tests/wal_group_commit_tests.rs#L222); [crates/shamir-wal/src/tests/wal_group_commit_tests.rs:447](../../../../../crates/shamir-wal/src/tests/wal_group_commit_tests.rs#L447).
+
+Grouping/duplicate: `style-claude-md.md#5`. This row is not another independent defect.
+
+<a id="review-7-6"></a>
+
+### Claim 7.6 — pub mod segment_meta exports nothing public
+
+Status: `confirmed-open`. Current risk: `low`.
+
+Public module still contains only crate-private/private functions and private-item doc links.
+
+Evidence: [crates/shamir-wal/src/lib.rs:47](../../../../../crates/shamir-wal/src/lib.rs#L47); [crates/shamir-wal/src/segment_meta.rs:120](../../../../../crates/shamir-wal/src/segment_meta.rs#L120).
+
+Grouping/duplicate: `style-claude-md.md#6`. This row is not another independent defect.
+
+<a id="review-7-7"></a>
+
+### Claim 7.7 — Vestigial, unexplained #[allow(dead_code)] on a public type
+
+Status: `confirmed-open`. Current risk: `nit`.
+
+Both blanket allowances remain; impl suppression can affect private helpers, so entirely ineffective is overstated.
+
+Evidence: [crates/shamir-wal/src/wal_segment.rs:108](../../../../../crates/shamir-wal/src/wal_segment.rs#L108); [crates/shamir-wal/src/wal_segment.rs:132](../../../../../crates/shamir-wal/src/wal_segment.rs#L132).
+
+Grouping/duplicate: `style-claude-md.md#7`. This row is not another independent defect.
+
+<a id="review-7-8"></a>
+
+### Claim 7.8 — wal_sink.rs carries two public types with separate impl blocks (borderline)
+
+Status: `not-applicable`. Current risk: —.
+
+The enum and its Mem payload fit the permitted closely-coupled exception; extra module prose is optional.
+
+Evidence: [crates/shamir-wal/src/wal_sink.rs:17](../../../../../crates/shamir-wal/src/wal_sink.rs#L17); [crates/shamir-wal/src/wal_sink.rs:89](../../../../../crates/shamir-wal/src/wal_sink.rs#L89).
+
+Grouping/duplicate: `style-claude-md.md#8`. This row is not another independent defect.
+
+<a id="review-executive-summary-amortization"></a>
+
+### Claim Executive-summary/amortization — Exactly one write plus at most one fsync per window
+
+Status: `refuted`. Current risk: —.
+
+Normal coordinator call counts are amortized, but write_all, rotation, retry, and background flushing invalidate an exact kernel-syscall guarantee.
+
+Evidence: [crates/shamir-wal/src/wal_segment.rs:236](../../../../../crates/shamir-wal/src/wal_segment.rs#L236); [crates/shamir-wal/src/segment_set.rs:367](../../../../../crates/shamir-wal/src/segment_set.rs#L367); [crates/shamir-wal/src/wal_group_commit.rs:309](../../../../../crates/shamir-wal/src/wal_group_commit.rs#L309).
+
+Grouping/duplicate: `performance-hotpath.md#Theme/core-amortization`. This row is not another independent defect.
+
+<a id="review-2-lock-adjudication"></a>
+
+### Claim 2/lock-adjudication — All lock sites are O(1) and replay/truncate tolerance is correctly wired
+
+Status: `refuted`. Current risk: —.
+
+Sealed-vector clone/retain/scans are linear; actual replay bypasses tolerant variants and has live drainer callers.
+
+Evidence: [crates/shamir-wal/src/segment_set.rs:427](../../../../../crates/shamir-wal/src/segment_set.rs#L427); [crates/shamir-wal/src/segment_set.rs:470](../../../../../crates/shamir-wal/src/segment_set.rs#L470); [crates/shamir-wal/src/segment_set.rs:442](../../../../../crates/shamir-wal/src/segment_set.rs#L442); [crates/shamir-engine/src/tx/drainer.rs:368](../../../../../crates/shamir-engine/src/tx/drainer.rs#L368).
+
+Grouping/duplicate: `concurrency-lockfree.md#Verified/all-lock-sites-O1`. This row is not another independent defect.
+
+<a id="review-finding-counts"></a>
+
+### Claim Finding-counts — 59 lens-tagged findings equal 44 distinct defects with four High defects
+
+Status: `refuted`. Current risk: —.
+
+The original numbered-row count is 59, but the defect census includes deliberate non-findings and an incorrectly High style item. SUMMARY also promotes 2.2 to Medium while retaining the original lens severity totals. Recompute from validated statuses rather than treating old counts as current health.
+
+Evidence: [docs/dev-artifacts/audits/2026-08-14-cross-crate-rush-review/shamir-wal/SUMMARY.md:231](../../../../../docs/dev-artifacts/audits/2026-08-14-cross-crate-rush-review/shamir-wal/SUMMARY.md) (line at source snapshot `92ad5826`, before this revalidation prefix); [docs/dev-artifacts/audits/2026-08-14-cross-crate-rush-review/shamir-wal/SUMMARY.md:956](../../../../../docs/dev-artifacts/audits/2026-08-14-cross-crate-rush-review/shamir-wal/SUMMARY.md) (line at source snapshot `92ad5826`, before this revalidation prefix); [docs/dev-artifacts/audits/2026-08-14-cross-crate-rush-review/shamir-wal/SUMMARY.md:1067](../../../../../docs/dev-artifacts/audits/2026-08-14-cross-crate-rush-review/shamir-wal/SUMMARY.md) (line at source snapshot `92ad5826`, before this revalidation prefix).
+
+## Current fix-plan state
+
+| Claim decisions | Open | Source-fixed | Partial | Refuted | Unverified | N/A |
+|---:|---:|---:|---:|---:|---:|---:|
+| 25 | 25 | 0 | 0 | 0 | 0 | 0 |
+
+A source-fixed item closes only its stated mechanism. Partial items retain the obligations named below; proposed fixes must obey the corrections and current contracts, not merely copy the historical recipe.
+
+<a id="plan-p0-1"></a>
+
+### Plan P0.1 — P0.1
+
+Status: `confirmed-open`. Current risk: —.
+
+Breaker still fails to complete stragglers under coordinated release. Regression coverage needs a deterministic paused-leader interleaving, not only synchronous Mem failure.
+
+Evidence: [crates/shamir-wal/src/wal_group_commit.rs:327](../../../../../crates/shamir-wal/src/wal_group_commit.rs#L327); [crates/shamir-wal/src/wal_sink.rs:120](../../../../../crates/shamir-wal/src/wal_sink.rs#L120).
+
+<a id="plan-p0-2"></a>
+
+### Plan P0.2 — P0.2
+
+Status: `confirmed-open`. Current risk: —.
+
+No cancellation/panic backstop exists. A flag-only RAII guard is not sufficient for taken waiters, parked followers, or still-running blocking writes.
+
+Evidence: [crates/shamir-wal/src/wal_group_commit.rs:185](../../../../../crates/shamir-wal/src/wal_group_commit.rs#L185); [crates/shamir-wal/src/wal_group_commit.rs:277](../../../../../crates/shamir-wal/src/wal_group_commit.rs#L277); [crates/shamir-wal/src/wal_segment.rs:223](../../../../../crates/shamir-wal/src/wal_segment.rs#L223).
+
+<a id="plan-p0-3"></a>
+
+### Plan P0.3 — P0.3
+
+Status: `confirmed-open`. Current risk: —.
+
+Successful append is still overridden by seal/rotation Err. The proposed treatment needs separate handling for fsync versus new-open failure and explicit Synced semantics; sync does not refuse poison.
+
+Evidence: [crates/shamir-wal/src/segment_set.rs:251](../../../../../crates/shamir-wal/src/segment_set.rs#L251); [crates/shamir-wal/src/segment_set.rs:390](../../../../../crates/shamir-wal/src/segment_set.rs#L390); [crates/shamir-wal/src/wal_segment.rs:310](../../../../../crates/shamir-wal/src/wal_segment.rs#L310).
+
+<a id="plan-p1-4"></a>
+
+### Plan P1.4 — P1.4
+
+Status: `confirmed-open`. Current risk: —.
+
+Repair still conflates complete CRC corruption with an incomplete tail; no sensitive repair-corruption regression is registered.
+
+Evidence: [crates/shamir-wal/src/wal_segment.rs:391](../../../../../crates/shamir-wal/src/wal_segment.rs#L391); [crates/shamir-wal/src/wal_segment.rs:419](../../../../../crates/shamir-wal/src/wal_segment.rs#L419); [crates/shamir-wal/src/tests/wal_segment_poison_tests.rs:48](../../../../../crates/shamir-wal/src/tests/wal_segment_poison_tests.rs#L48).
+
+<a id="plan-p1-5"></a>
+
+### Plan P1.5 — P1.5
+
+Status: `confirmed-open`. Current risk: —.
+
+Waiter remains boolean-only and leader discards causes. Existing segment failure logs mean logging work should target missing branches rather than duplicate every I/O message.
+
+Evidence: [crates/shamir-wal/src/wal_group_commit.rs:89](../../../../../crates/shamir-wal/src/wal_group_commit.rs#L89); [crates/shamir-wal/src/wal_group_commit.rs:294](../../../../../crates/shamir-wal/src/wal_group_commit.rs#L294); [crates/shamir-wal/src/wal_segment.rs:277](../../../../../crates/shamir-wal/src/wal_segment.rs#L277).
+
+<a id="plan-p1-6"></a>
+
+### Plan P1.6 — P1.6
+
+Status: `confirmed-open`. Current risk: —.
+
+I/O remains stringified and decode uses Internal. Shared thiserror DbError already exists, so adding a new enum is an option, not the only compliant solution.
+
+Evidence: [crates/shamir-wal/src/wal_segment.rs:155](../../../../../crates/shamir-wal/src/wal_segment.rs#L155); [crates/shamir-wal/src/wal_entry_v2.rs:252](../../../../../crates/shamir-wal/src/wal_entry_v2.rs#L252); [crates/shamir-storage/src/error.rs:6](../../../../../crates/shamir-storage/src/error.rs#L6).
+
+<a id="plan-p1-7"></a>
+
+### Plan P1.7 — P1.7
+
+Status: `confirmed-open`. Current risk: —.
+
+Parser still accepts aliases without deduplication. Canonical validation must match the formatter's minimum-width behavior, not reject every sequence above eight digits.
+
+Evidence: [crates/shamir-wal/src/segment_set.rs:68](../../../../../crates/shamir-wal/src/segment_set.rs#L68); [crates/shamir-wal/src/segment_set.rs:74](../../../../../crates/shamir-wal/src/segment_set.rs#L74); [crates/shamir-wal/src/segment_set.rs:102](../../../../../crates/shamir-wal/src/segment_set.rs#L102).
+
+<a id="plan-p1-8"></a>
+
+### Plan P1.8 — P1.8
+
+Status: `confirmed-open`. Current risk: —.
+
+No empty/invalid-entry validation exists. Empty rejection alone will not prevent nonempty decode traps; recovery policy must not silently erase durable unknown entries.
+
+Evidence: [crates/shamir-wal/src/wal_group_commit.rs:175](../../../../../crates/shamir-wal/src/wal_group_commit.rs#L175); [crates/shamir-wal/src/wal_segment.rs:229](../../../../../crates/shamir-wal/src/wal_segment.rs#L229); [crates/shamir-wal/src/wal_segment.rs:572](../../../../../crates/shamir-wal/src/wal_segment.rs#L572).
+
+<a id="plan-p1-9"></a>
+
+### Plan P1.9 — P1.9
+
+Status: `confirmed-open`. Current risk: —.
+
+Legacy exports, stale entry/segment preambles, broken links, and the unwired SegmentSet paragraph all remain.
+
+Evidence: [crates/shamir-wal/src/lib.rs:54](../../../../../crates/shamir-wal/src/lib.rs#L54); [crates/shamir-wal/src/wal_entry_v2.rs:3](../../../../../crates/shamir-wal/src/wal_entry_v2.rs#L3); [crates/shamir-wal/src/wal_segment.rs:3](../../../../../crates/shamir-wal/src/wal_segment.rs#L3); [crates/shamir-wal/src/segment_set.rs:15](../../../../../crates/shamir-wal/src/segment_set.rs#L15).
+
+<a id="plan-p1-10"></a>
+
+### Plan P1.10 — P1.10
+
+Status: `confirmed-open`. Current risk: —.
+
+Five sidecar tests remain inline. This is a Low structural cleanup, not a shipping-blocking runtime High.
+
+Evidence: [crates/shamir-wal/src/segment_meta.rs:175](../../../../../crates/shamir-wal/src/segment_meta.rs#L175); [crates/shamir-wal/src/tests/mod.rs:1](../../../../../crates/shamir-wal/src/tests/mod.rs#L1).
+
+<a id="plan-p1-11"></a>
+
+### Plan P1.11 — P1.11
+
+Status: `confirmed-open`. Current risk: —.
+
+No failed-sync seam or open-error classifier coverage exists. Registered dirty restoration and startup denial tests still do not exercise their alleged error branches.
+
+Evidence: [crates/shamir-wal/src/wal_sink.rs:142](../../../../../crates/shamir-wal/src/wal_sink.rs#L142); [crates/shamir-wal/src/tests/wal_group_commit_tests.rs:327](../../../../../crates/shamir-wal/src/tests/wal_group_commit_tests.rs#L327); [crates/shamir-wal/src/tests/wal_segment_tests.rs:218](../../../../../crates/shamir-wal/src/tests/wal_segment_tests.rs#L218).
+
+<a id="plan-p1-12"></a>
+
+### Plan P1.12 — P1.12
+
+Status: `confirmed-open`. Current risk: —.
+
+No File write/sync/open fault seam covers the four enumerated paths. Tests must induce actual partial-state behavior; failure before writing does not prove rollback.
+
+Evidence: [crates/shamir-wal/src/wal_segment.rs:236](../../../../../crates/shamir-wal/src/wal_segment.rs#L236); [crates/shamir-wal/src/segment_set.rs:317](../../../../../crates/shamir-wal/src/segment_set.rs#L317); [crates/shamir-wal/src/tests/wal_segment_poison_tests.rs:101](../../../../../crates/shamir-wal/src/tests/wal_segment_poison_tests.rs#L101).
+
+<a id="plan-p1-13"></a>
+
+### Plan P1.13 — P1.13
+
+Status: `confirmed-open`. Current risk: —.
+
+Sealed replay still uses create-mode open and strict startup variants. Live drainer recovery requires an explicit live/startup contract, not deletion of tolerance solely on a false startup-only premise.
+
+Evidence: [crates/shamir-wal/src/segment_set.rs:435](../../../../../crates/shamir-wal/src/segment_set.rs#L435); [crates/shamir-wal/src/segment_set.rs:442](../../../../../crates/shamir-wal/src/segment_set.rs#L442); [crates/shamir-engine/src/tx/drainer.rs:368](../../../../../crates/shamir-engine/src/tx/drainer.rs#L368).
+
+<a id="plan-p1-14"></a>
+
+### Plan P1.14 — P1.14
+
+Status: `confirmed-open`. Current risk: —.
+
+No O(1) truncatability mirror exists. Both Mem frame and File sealed-list probes retain worst-case linear scans.
+
+Evidence: [crates/shamir-wal/src/wal_sink.rs:205](../../../../../crates/shamir-wal/src/wal_sink.rs#L205); [crates/shamir-wal/src/segment_set.rs:559](../../../../../crates/shamir-wal/src/segment_set.rs#L559).
+
+<a id="plan-p2-15"></a>
+
+### Plan P2.15 — P2.15
+
+Status: `confirmed-open`. Current risk: —.
+
+Offset/accounting/rollback remain outside full serialization, and the benchmark still claims correctness without validating data. Existing type-level single-writer prose does not implement concurrent safety.
+
+Evidence: [crates/shamir-wal/src/wal_segment.rs:220](../../../../../crates/shamir-wal/src/wal_segment.rs#L220); [crates/shamir-wal/src/wal_segment.rs:248](../../../../../crates/shamir-wal/src/wal_segment.rs#L248); [crates/shamir-wal/benches/segment_set_lock.rs:96](../../../../../crates/shamir-wal/benches/segment_set_lock.rs#L96).
+
+<a id="plan-p2-16"></a>
+
+### Plan P2.16 — P2.16
+
+Status: `confirmed-open`. Current risk: —.
+
+Returned sequence still resets per handle without clearly documented scope or persisted identity.
+
+Evidence: [crates/shamir-wal/src/wal_segment.rs:177](../../../../../crates/shamir-wal/src/wal_segment.rs#L177); [crates/shamir-wal/src/wal_segment.rs:184](../../../../../crates/shamir-wal/src/wal_segment.rs#L184).
+
+<a id="plan-p2-17"></a>
+
+### Plan P2.17 — P2.17
+
+Status: `confirmed-open`. Current risk: —.
+
+idx_id remains zero/deferred and is ignored during replay. Resolve compatibility/documentation without claiming a present routing bug.
+
+Evidence: [crates/shamir-wal/src/wal_entry_v2.rs:79](../../../../../crates/shamir-wal/src/wal_entry_v2.rs#L79); [crates/shamir-engine/src/tx/commit.rs:325](../../../../../crates/shamir-engine/src/tx/commit.rs#L325); [crates/shamir-engine/src/tx/recovery.rs:149](../../../../../crates/shamir-engine/src/tx/recovery.rs#L149).
+
+<a id="plan-p2-18"></a>
+
+### Plan P2.18 — P2.18
+
+Status: `confirmed-open`. Current risk: —.
+
+Outer segment/frame versioning and sequence markers remain absent. A recovery-resynchronization design needs stronger validation than adding a sequence field alone.
+
+Evidence: [crates/shamir-wal/src/wal_segment.rs:226](../../../../../crates/shamir-wal/src/wal_segment.rs#L226); [crates/shamir-wal/src/wal_segment.rs:551](../../../../../crates/shamir-wal/src/wal_segment.rs#L551).
+
+<a id="plan-p2-19"></a>
+
+### Plan P2.19 — P2.19
+
+Status: `confirmed-open`. Current risk: —.
+
+Application file/frame limits and checked arithmetic remain absent; no requested fuzz target is present in the crate. Tiny-frame exabyte allocation is not verified and must not justify the work as established fact.
+
+Evidence: [crates/shamir-wal/src/wal_segment.rs:370](../../../../../crates/shamir-wal/src/wal_segment.rs#L370); [crates/shamir-wal/src/wal_segment.rs:380](../../../../../crates/shamir-wal/src/wal_segment.rs#L380); [crates/shamir-wal/src/wal_segment.rs:527](../../../../../crates/shamir-wal/src/wal_segment.rs#L527); [crates/shamir-wal/src/wal_entry_v2.rs:251](../../../../../crates/shamir-wal/src/wal_entry_v2.rs#L251).
+
+<a id="plan-p2-20"></a>
+
+### Plan P2.20 — P2.20
+
+Status: `confirmed-open`. Current risk: —.
+
+The crate still does not explicitly document filesystem permissions as its WAL integrity/authentication boundary.
+
+Evidence: [crates/shamir-wal/src/lib.rs:14](../../../../../crates/shamir-wal/src/lib.rs#L14); [crates/shamir-wal/src/segment_set.rs:1](../../../../../crates/shamir-wal/src/segment_set.rs#L1); [crates/shamir-wal/src/wal_segment.rs:230](../../../../../crates/shamir-wal/src/wal_segment.rs#L230).
+
+<a id="plan-p2-21"></a>
+
+### Plan P2.21 — P2.21
+
+Status: `confirmed-open`. Current risk: —.
+
+Leader tenure remains drain-until-empty with no fair handoff; a handoff must guarantee existing waiter progress.
+
+Evidence: [crates/shamir-wal/src/wal_group_commit.rs:269](../../../../../crates/shamir-wal/src/wal_group_commit.rs#L269); [crates/shamir-wal/src/wal_group_commit.rs:273](../../../../../crates/shamir-wal/src/wal_group_commit.rs#L273).
+
+<a id="plan-p2-22"></a>
+
+### Plan P2.22 — P2.22
+
+Status: `confirmed-open`. Current risk: —.
+
+Dirty tracking is still a racy boolean and Mem decoding remains under the synchronous lock. Non-destructive snapshots, not mem::take of WAL contents, are required.
+
+Evidence: [crates/shamir-wal/src/wal_group_commit.rs:151](../../../../../crates/shamir-wal/src/wal_group_commit.rs#L151); [crates/shamir-wal/src/wal_group_commit.rs:358](../../../../../crates/shamir-wal/src/wal_group_commit.rs#L358); [crates/shamir-wal/src/wal_sink.rs:162](../../../../../crates/shamir-wal/src/wal_sink.rs#L162).
+
+<a id="plan-p2-23"></a>
+
+### Plan P2.23 — P2.23
+
+Status: `confirmed-open`. Current risk: —.
+
+Fixed encode guess, discarded pending capacity, full metadata decode, and whole-corpus replay remain. Proposed changes need ordered recovery and measurement of double-pass sizing tradeoffs.
+
+Evidence: [crates/shamir-wal/src/wal_entry_v2.rs:215](../../../../../crates/shamir-wal/src/wal_entry_v2.rs#L215); [crates/shamir-wal/src/wal_group_commit.rs:277](../../../../../crates/shamir-wal/src/wal_group_commit.rs#L277); [crates/shamir-wal/src/segment_set.rs:155](../../../../../crates/shamir-wal/src/segment_set.rs#L155); [crates/shamir-wal/src/segment_set.rs:442](../../../../../crates/shamir-wal/src/segment_set.rs#L442).
+
+<a id="plan-p2-24"></a>
+
+### Plan P2.24 — P2.24
+
+Status: `confirmed-open`. Current risk: —.
+
+Hard unlink failure still returns immediately after candidates were claimed, skipping remaining removals and losing progress count.
+
+Evidence: [crates/shamir-wal/src/segment_set.rs:470](../../../../../crates/shamir-wal/src/segment_set.rs#L470); [crates/shamir-wal/src/segment_set.rs:511](../../../../../crates/shamir-wal/src/segment_set.rs#L511).
+
+<a id="plan-p2-25"></a>
+
+### Plan P2.25 — P2.25
+
+Status: `confirmed-open`. Current risk: —.
+
+Path text, public poison hook, tuples, directory-fsync signature, dead-code allowances, local imports, and empty public module remain. Counter correctness is refuted; splitting coupled sink types/module prose is optional.
+
+Evidence: [crates/shamir-wal/src/wal_segment.rs:155](../../../../../crates/shamir-wal/src/wal_segment.rs#L155); [crates/shamir-wal/src/wal_segment.rs:342](../../../../../crates/shamir-wal/src/wal_segment.rs#L342); [crates/shamir-wal/src/wal_entry_v2.rs:159](../../../../../crates/shamir-wal/src/wal_entry_v2.rs#L159); [crates/shamir-wal/src/wal_segment.rs:42](../../../../../crates/shamir-wal/src/wal_segment.rs#L42); [crates/shamir-wal/src/wal_segment.rs:108](../../../../../crates/shamir-wal/src/wal_segment.rs#L108); [crates/shamir-wal/src/tests/wal_group_commit_tests.rs:222](../../../../../crates/shamir-wal/src/tests/wal_group_commit_tests.rs#L222); [crates/shamir-wal/src/lib.rs:47](../../../../../crates/shamir-wal/src/lib.rs#L47).
+
+## Corrections and qualified non-findings
+
+- Retain three distinct runtime High mechanisms: breaker-stranded followers, cancelled/panicking leader ownership, and successful append overridden by rotation failure. Inline-test placement is not a fourth runtime High.
+- Do not mark historical commit 09d2e215 as fixing WalGroupCommit cancellation; its source change protected the separate engine repo GroupCommit.
+- Replay is not startup-only: live drainer gap recovery and background seeding call recover.
+- Replace exact syscall guarantees with one normal sink append_batch and at most one coordinator-requested sync; rotation, retries, background work, and write_all short writes are exceptions.
+- Replace all-lock-sites-O(1) with an O(1) normal append metadata critical section and explicitly linear sealed-vector operations.
+- Ordinary retry write failures are logged by WalSegment, although their causes are still dropped by the waiter protocol.
+- A shared thiserror DbError exists; preserve I/O kinds and improve decode classification without asserting a nonexistent universal per-crate-enum requirement.
+- Do not carry the unverified tiny-frame OOM scenario as confirmed; separate it from proven uncapped whole-file buffering.
+- Use formatter round-trip canonicality instead of exactly eight numeric digits.
+- Recompute the defect/severity census after excluding non-findings and applying threat-model/style corrections; retain duplicates as provenance, not additional unresolved defects.
+- P0.2's flag-only guard and P0.3's poisoned-sync assumption are insufficient proposed fixes.
+- No version bump, source edit, or test execution is authorized by this revalidation.
+
+## Additional observations from revalidation
+
+These were found while validating the original claims/remediations. They are separate from the original-row counts; cross-module repeats are not extra unique defects.
+
+<a id="new-1"></a>
+
+### Observation NEW.1 — The claimed stale-sidecar fix remains unsafe when sidecar removal fails
+
+Status: `confirmed-open`. Current risk: `high`.
+
+This qualifies the reports' asserted task-#500 safety guarantee. Re-activation and poison rotation call a removal helper that warns and returns success on every unlink failure. A stale CRC-valid low maximum can therefore survive subsequent appends/poison rotation, be trusted on a later open, and permit deletion below the segment's real maximum. Existing regression assertions only cover successful removal. Trigger requires a preexisting stale sidecar plus a concrete filesystem removal failure; it is not a remote-input exploit.
+
+Evidence: [crates/shamir-wal/src/segment_set.rs:187](../../../../../crates/shamir-wal/src/segment_set.rs#L187); [crates/shamir-wal/src/segment_set.rs:307](../../../../../crates/shamir-wal/src/segment_set.rs#L307); [crates/shamir-wal/src/segment_meta.rs:164](../../../../../crates/shamir-wal/src/segment_meta.rs#L164); [crates/shamir-wal/src/segment_meta.rs:169](../../../../../crates/shamir-wal/src/segment_meta.rs#L169); [crates/shamir-wal/src/segment_set.rs:145](../../../../../crates/shamir-wal/src/segment_set.rs#L145); [crates/shamir-wal/src/segment_set.rs:471](../../../../../crates/shamir-wal/src/segment_set.rs#L471); [crates/shamir-wal/src/tests/segment_set_tests.rs:890](../../../../../crates/shamir-wal/src/tests/segment_set_tests.rs#L890).
+
+## Current follow-up order
+
+1. Make failed and cancelled/panicking leadership complete or safely transfer all owned and queued waiters without overlapping still-running writes.
+2. Align successful append outcomes with Buffered/Synced tier semantics across seal fsync and next-segment-open failures.
+3. Handle active complete-frame corruption explicitly; do not silently destroy a valid suffix as an ordinary torn tail.
+4. Prevent stale-sidecar trust after failed invalidation; add error-path-sensitive coverage for the alleged sidecar fix.
+5. Correct live/startup replay routing and remove create-mode opening of sealed snapshot paths.
+6. Preserve actual error causes and add deterministic coverage for failed sync, file rollback/retry, denial, and corrupt sealed fallback.
+7. Fix dirty clear races, canonical filename aliasing, and checked frame arithmetic; bound file buffering without rejecting legitimate batch overshoot.
+8. Address measured allocation/scanning debt and Low/Nit documentation/layout work after durability and liveness mechanisms.
+
+## Coverage and limitations
+
+- All eight documents were read completely; TASK_GROUPS.md is absent. Coverage includes all 59 original numbered findings, all 59 SUMMARY finding sections, relevant asserted guarantees, and all 25 Fix Plan items.
+- Read-only source validation only: no files changed, agents spawned, builds, tests, benchmarks, reproductions, or project programs executed. HEAD equals the supplied base; inspected source has no diff from it.
+- Test registration and assertion sensitivity were inspected, not test execution or historical Red/Green results.
+- Performance complexity and allocation shapes are source-supported; historical timing ratios, exact reallocation counts, and deployment impact remain unmeasured.
+- Cargo.lock pins bincode 1.3.3, serde/serde_core 1.0.228, serde_bytes 0.11.19, bytes 1.11.1, crc32fast 1.5.0, and tokio 1.49.0. Cached pinned bincode and serde sources were inspected; pinned serde_bytes source was unavailable, so the complete small-frame OOM allegation remains unverified.
+- 32-bit arithmetic defects are source-supported conditionally; actual shamir-wal wasm32 support and deployment reachability were not established. WASM-first user modules do not establish a wasm32 database-host target.
+- Path-bearing local errors and generic server error serialization are established; a specific path-bearing WAL error reaching a remote client was not fully traced.
+
+## Reviewed document inventory
+
+- [correctness-tdd.md](./correctness-tdd.md) — 14 claim decisions; 0 explicit plan items.
+- [concurrency-lockfree.md](./concurrency-lockfree.md) — 9 claim decisions; 0 explicit plan items.
+- [security-crypto.md](./security-crypto.md) — 11 claim decisions; 0 explicit plan items.
+- [performance-hotpath.md](./performance-hotpath.md) — 10 claim decisions; 0 explicit plan items.
+- [api-wire-protocol.md](./api-wire-protocol.md) — 14 claim decisions; 0 explicit plan items.
+- [error-handling-lifecycle.md](./error-handling-lifecycle.md) — 16 claim decisions; 0 explicit plan items.
+- [style-claude-md.md](./style-claude-md.md) — 9 claim decisions; 0 explicit plan items.
+- [SUMMARY.md](./SUMMARY.md) — 63 claim decisions; 25 explicit plan items.
+
+---
+
+<details>
+<summary>Historical report — preserved for provenance; not current status or instructions</summary>
+
 # shamir-wal — Cross-Lens Review (all 7 lenses, synthesized)
 
 Crate: `crates/shamir-wal/` — the write-ahead log: group-commit coordinator
@@ -1177,3 +2272,5 @@ carried and the divergence noted inline.
     `#[allow(dead_code)]` (7.7); `wal_sink.rs` module doc (7.8); hoist the
     four test-file `Duration` imports (7.5); demote `pub mod segment_meta`
     (7.6).
+
+</details>

@@ -1,3 +1,167 @@
+<!-- revalidation:2026-10-08 source:92ad58266bf57ddea1fa3c8a47affba1a3a9a096 -->
+# shamir-index — error-handling-lifecycle revalidation
+
+Source snapshot: `92ad58266bf57ddea1fa3c8a47affba1a3a9a096`. Revalidated 2026-10-08 by read-only XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run; no source fix is part of this update. Test registration/assertions are evidence of an oracle, not proof of a passing run.
+
+This section is authoritative for current status. Original titles/IDs are retained for traceability; a refuted title is not a current assertion. The collapsed historical report below is superseded, including its counts, severity, scenarios and fix instructions. Plan IDs preserve historical numbering, not a current release mandate. [Workspace methodology and status definitions](../SUMMARY.md#status-definitions).
+
+Sorted-open swallowing, compaction errors, cleanup omissions, SQ8 observability, and error flattening remain. The persisted-Btree boot-panic claim is refuted. Non-hash fault coverage exists, contrary to the report, but does not cover the entire requested matrix.
+
+## Current claim decisions
+
+| Claim decisions | Open | Source-fixed | Partial | Refuted | Unverified | N/A |
+|---:|---:|---:|---:|---:|---:|---:|
+| 13 | 9 | 0 | 0 | 2 | 0 | 2 |
+
+These are decisions on report claims, including repeated roots, bundled observations and non-findings—not a unique-bug census. Closed/N/A rows have no current risk; unverified risk is provisional. Pure style and unmeasured optimization claims do not establish runtime impact.
+
+<a id="review-1"></a>
+
+### Claim 1 — `SortedIndexManager::load` swallows ALL store errors, silently loading zero sorted definitions
+
+Status: `confirmed-open`. Current risk: `high`.
+
+Metadata get still treats every Err as successful absence. Later persist_defs serializes the empty registry. Existing sorted corruption tests cover decoding, not an injected initial get failure.
+
+Evidence: [crates/shamir-index/src/base_index/sorted_index_manager.rs:2706](../../../../../crates/shamir-index/src/base_index/sorted_index_manager.rs#L2706); [crates/shamir-index/src/base_index/sorted_index_manager.rs:2692](../../../../../crates/shamir-index/src/base_index/sorted_index_manager.rs#L2692); [crates/shamir-index/src/base_index/tests/f72_legacy_state_compat_tests.rs:318](../../../../../crates/shamir-index/src/base_index/tests/f72_legacy_state_compat_tests.rs#L318).
+
+<a id="review-2"></a>
+
+### Claim 2 — Compaction double-write errors silently discarded; an incomplete graph is then swapped in as live
+
+Status: `confirmed-open`. Current risk: `high`.
+
+All shadow result discards remain and swap has no shadow-failure guard. Delete reconciliation exists, so not every discarded delete necessarily creates a permanent hole; failed upserts can still publish missing/stale vectors.
+
+Evidence: [crates/shamir-index/src/vector/vector_backend.rs:296](../../../../../crates/shamir-index/src/vector/vector_backend.rs#L296); [crates/shamir-index/src/vector/vector_backend.rs:512](../../../../../crates/shamir-index/src/vector/vector_backend.rs#L512); [crates/shamir-index/src/vector/vector_backend.rs:1089](../../../../../crates/shamir-index/src/vector/vector_backend.rs#L1089); [crates/shamir-index/src/vector/vector_backend.rs:1102](../../../../../crates/shamir-index/src/vector/vector_backend.rs#L1102).
+
+<a id="review-3"></a>
+
+### Claim 3 — index2 `drop_all` sweeps swallow per-key errors, and `VectorBackend::drop_all` leaks the entire `__vec_snap__` keyspace
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+All three storage-backed drops still discard remove errors; functional drop materializes all entries. Vector drop remains empty, and recovery excludes snapshot keys. Scan errors do propagate, so not all drop error handling is dead.
+
+Evidence: [crates/shamir-index/src/fts_backend.rs:248](../../../../../crates/shamir-index/src/fts_backend.rs#L248); [crates/shamir-index/src/fts_ranked_backend.rs:409](../../../../../crates/shamir-index/src/fts_ranked_backend.rs#L409); [crates/shamir-index/src/functional_backend.rs:298](../../../../../crates/shamir-index/src/functional_backend.rs#L298); [crates/shamir-index/src/vector/vector_backend.rs:739](../../../../../crates/shamir-index/src/vector/vector_backend.rs#L739); [crates/shamir-index/src/persistence.rs:633](../../../../../crates/shamir-index/src/persistence.rs#L633).
+
+<a id="review-4"></a>
+
+### Claim 4 — `try_fit_and_rebuild` failures silently dropped behind comments that falsely claim logging
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+All three fit triggers still discard errors, and no fit logging exists. FitGuard resets single-flight state, allowing later pre-fit retries; permanent unquantized degradation from every one-off failure is not established.
+
+Evidence: [crates/shamir-index/src/vector/hnsw_adapter.rs:946](../../../../../crates/shamir-index/src/vector/hnsw_adapter.rs#L946); [crates/shamir-index/src/vector/hnsw_adapter.rs:2474](../../../../../crates/shamir-index/src/vector/hnsw_adapter.rs#L2474); [crates/shamir-index/src/vector/hnsw_adapter.rs:2712](../../../../../crates/shamir-index/src/vector/hnsw_adapter.rs#L2712); [crates/shamir-index/src/vector/hnsw_adapter.rs:1310](../../../../../crates/shamir-index/src/vector/hnsw_adapter.rs#L1310).
+
+<a id="review-5"></a>
+
+### Claim 5 — `build_index2_backend` panics via `unreachable!` on a persisted (disk-driven) descriptor kind
+
+Status: `refuted`. Current risk: —.
+
+Persisted table-open descriptors are explicitly filtered for Btree before builder dispatch. The builder's direct Btree panic exists, but the report omitted the positive caller guard excluding its claimed boot path.
+
+Evidence: [crates/shamir-engine/src/table/table_manager.rs:660](../../../../../crates/shamir-engine/src/table/table_manager.rs#L660); [crates/shamir-index/src/build_backend.rs:66](../../../../../crates/shamir-index/src/build_backend.rs#L66).
+
+<a id="review-6"></a>
+
+### Claim 6 — `IndexError` is stringly-typed; structured `DbError`s are flattened at every boundary
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+Storage(String) and repeated to_string conversions still discard error variants and source chains. Metadata set errors are still rewrapped as DbError::Internal.
+
+Evidence: [crates/shamir-index/src/backend.rs:59](../../../../../crates/shamir-index/src/backend.rs#L59); [crates/shamir-index/src/write_ops.rs:96](../../../../../crates/shamir-index/src/write_ops.rs#L96); [crates/shamir-index/src/persistence.rs:105](../../../../../crates/shamir-index/src/persistence.rs#L105).
+
+<a id="review-7"></a>
+
+### Claim 7 — Enriched error paths are unit-tested only for the regular-hash family
+
+Status: `refuted`. Current risk: —.
+
+Registered engine tests inject unique/sorted CREATE persist failures, unique DROP failures during RENAME with structured-error assertions, and index2 drop scan failures. Remaining sorted DROP/RENAME and remove-error cases are not thereby covered.
+
+Evidence: [crates/shamir-engine/src/table/tests/index_create_persist_atomicity_tests.rs:195](../../../../../crates/shamir-engine/src/table/tests/index_create_persist_atomicity_tests.rs#L195); [crates/shamir-engine/src/table/tests/p967_ddl_structured_error_tests.rs:191](../../../../../crates/shamir-engine/src/table/tests/p967_ddl_structured_error_tests.rs#L191); [crates/shamir-engine/src/table/tests/r0d_fail_closed_recovery_tests.rs:269](../../../../../crates/shamir-engine/src/table/tests/r0d_fail_closed_recovery_tests.rs#L269); [crates/shamir-engine/src/table/tests/mod.rs:42](../../../../../crates/shamir-engine/src/table/tests/mod.rs#L42); [crates/shamir-engine/src/table/tests/mod.rs:67](../../../../../crates/shamir-engine/src/table/tests/mod.rs#L67); [crates/shamir-engine/src/table/tests/mod.rs:72](../../../../../crates/shamir-engine/src/table/tests/mod.rs#L72).
+
+<a id="review-8"></a>
+
+### Claim 8 — `.unwrap()` on `SystemTime::duration_since(UNIX_EPOCH)` on four DDL success paths
+
+Status: `confirmed-open`. Current risk: `low`.
+
+All four pre-epoch clock unwraps remain. They can panic when their success-status paths are reached with a pre-epoch clock; ordinary sibling timestamp construction uses a fallback.
+
+Evidence: [crates/shamir-index/src/base_index/index_manager.rs:2354](../../../../../crates/shamir-index/src/base_index/index_manager.rs#L2354); [crates/shamir-index/src/base_index/index_manager_unique.rs:892](../../../../../crates/shamir-index/src/base_index/index_manager_unique.rs#L892); [crates/shamir-index/src/base_index/sorted_index_manager.rs:1071](../../../../../crates/shamir-index/src/base_index/sorted_index_manager.rs#L1071); [crates/shamir-index/src/base_index/sorted_index_manager.rs:1566](../../../../../crates/shamir-index/src/base_index/sorted_index_manager.rs#L1566).
+
+<a id="review-9"></a>
+
+### Claim 9 — Read-hot-path `.expect` panics for the "quantized_active but unset" invariant, while sibling sites return errors
+
+Status: `not-applicable`. Current risk: —.
+
+The expects remain, but quantizer and u8 graph publish before is_fitted Release, observed through Acquire. No valid production state reaching an unset value was found; programmer-invariant panics are permitted by project policy.
+
+Evidence: [crates/shamir-index/src/vector/hnsw_adapter.rs:1226](../../../../../crates/shamir-index/src/vector/hnsw_adapter.rs#L1226); [crates/shamir-index/src/vector/hnsw_adapter.rs:1461](../../../../../crates/shamir-index/src/vector/hnsw_adapter.rs#L1461); [crates/shamir-index/src/vector/hnsw_adapter.rs:1531](../../../../../crates/shamir-index/src/vector/hnsw_adapter.rs#L1531); [crates/shamir-index/src/vector/hnsw_adapter.rs:1791](../../../../../crates/shamir-index/src/vector/hnsw_adapter.rs#L1791).
+
+<a id="review-10"></a>
+
+### Claim 10 — Silent degradation fallbacks with no logging
+
+Status: `confirmed-open`. Current risk: `low`.
+
+Corrupt nonempty FTS postings default, undecodable rebuild rows skip, covering encode errors return empty bytes, and stats deletion wraps. These remain separate subcases; wrapping is not a safe degradation.
+
+Evidence: [crates/shamir-index/src/fts_ranked_backend.rs:128](../../../../../crates/shamir-index/src/fts_ranked_backend.rs#L128); [crates/shamir-index/src/fts_ranked_backend.rs:390](../../../../../crates/shamir-index/src/fts_ranked_backend.rs#L390); [crates/shamir-index/src/base_index/sorted_index_manager.rs:2867](../../../../../crates/shamir-index/src/base_index/sorted_index_manager.rs#L2867); [crates/shamir-index/src/bm25.rs:89](../../../../../crates/shamir-index/src/bm25.rs#L89).
+
+<a id="review-11"></a>
+
+### Claim 11 — `QuantMeta::to_quantizer` panics on a checksum-less, corruptible sidecar at table open
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+The loader still invokes synchronous assertions on externally decoded dimension/mins/scales data without validation. Chunk checksums do not cover these metadata fields.
+
+Evidence: [crates/shamir-index/src/vector/snapshot.rs:973](../../../../../crates/shamir-index/src/vector/snapshot.rs#L973); [crates/shamir-index/src/vector/quant_meta.rs:73](../../../../../crates/shamir-index/src/vector/quant_meta.rs#L73).
+
+Grouping/duplicate: `api-wire-protocol.md#7`. This row is not another independent defect.
+
+<a id="review-12"></a>
+
+### Claim 12 — `IndexRegistry::insert` can still return `Err` leaving `by_id` populated (the exact partial publish #1009 closed via pre-check)
+
+Status: `not-applicable`. Current risk: —.
+
+The late error arm lacks rollback, but the documented external admission precondition excludes concurrent same-name insertion; reopen is sequential. This is optional defense against precondition-breaking library use, not a proven supported-path defect.
+
+Evidence: [crates/shamir-index/src/registry.rs:198](../../../../../crates/shamir-index/src/registry.rs#L198); [crates/shamir-index/src/registry.rs:237](../../../../../crates/shamir-index/src/registry.rs#L237); [crates/shamir-index/src/registry.rs:302](../../../../../crates/shamir-index/src/registry.rs#L302); [crates/shamir-engine/src/table/table_manager.rs:1322](../../../../../crates/shamir-engine/src/table/table_manager.rs#L1322).
+
+<a id="review-13"></a>
+
+### Claim 13 — Actor `shutdown` discards the join result (panic payload), and `BruteForceAdapter::shutdown` adds a lock-poisoning expect
+
+Status: `confirmed-open`. Current risk: `nit`.
+
+Both shutdowns still discard JoinError. BruteForce's poisoning expect remains, but its private one-shot take has no demonstrated poisoning source; panic-result observability is the concrete residual issue.
+
+Evidence: [crates/shamir-index/src/actor.rs:100](../../../../../crates/shamir-index/src/actor.rs#L100); [crates/shamir-index/src/vector/brute_force.rs:131](../../../../../crates/shamir-index/src/vector/brute_force.rs#L131).
+
+## Corrections and qualified non-findings
+
+- The Btree guard and non-hash fault tests predate this review; classify these sweeping allegations as refuted, not newly fixed.
+- The index2 scan-failure test cannot detect swallowed per-key remove failures: it fails before any removal. Extend the specific oracle rather than claiming no fault coverage exists.
+- Logging shadow failures is not a correctness fix. Safe compaction cutover must account for in-flight shadow writes and prevent publication of a failed target; a flag checked once before swap still needs synchronization.
+- FitGuard allows retries before fitting activates; remove the unconditional permanent-f32 claim. Post-publication fit failures need state-aware handling, not an assumption that every error leaves an untouched f32 adapter.
+- A query-task panic is not necessarily a process abort under the configured unwind profile.
+- Header/sidecar checks and DDL RAII/tombstone machinery remain present, but sorted initial get errors and per-key removal errors are exceptions to the broad fail-closed praise.
+- Typed storage errors should preserve context and source; changing public error variants requires API compatibility consideration.
+
+---
+
+<details>
+<summary>Historical report — preserved for provenance; not current status or instructions</summary>
+
 # shamir-index -- Error handling & resource lifecycle
 
 ## Summary
@@ -87,3 +251,5 @@ The crate's DDL error paths are unusually disciplined — enriched multi-phase e
 - **Severity:** nit
 - **Issue:** `let _ = join.await;` drops the `JoinError`, so an applier task that panicked mid-op is indistinguishable from a clean drain — a silently-dead actor is only detectable later via `submit`'s `SendError`. `BruteForceAdapter::shutdown` additionally uses `.expect("brute-force join lock")` on a `std::sync::Mutex`, converting poisoning into a panic.
 - **Suggested fix:** Log on `JoinError::is_panic` in both shutdowns; use `lock().unwrap_or_else(|p| p.into_inner())` for the join-handle mutex (the Option inside is still valid under poisoning).
+
+</details>

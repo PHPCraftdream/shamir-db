@@ -1,3 +1,668 @@
+<!-- revalidation:2026-10-08 source:92ad58266bf57ddea1fa3c8a47affba1a3a9a096 -->
+# shamir-numa — SUMMARY revalidation
+
+Source snapshot: `92ad58266bf57ddea1fa3c8a47affba1a3a9a096`. Revalidated 2026-10-08 by read-only XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run; no source fix is part of this update. Test registration/assertions are evidence of an oracle, not proof of a passing run.
+
+This section is authoritative for current status. Original titles/IDs are retained for traceability; a refuted title is not a current assertion. The collapsed historical report below is superseded, including its counts, severity, scenarios and fix instructions. Plan IDs preserve historical numbering, not a current release mandate. [Workspace methodology and status definitions](../SUMMARY.md#status-definitions).
+
+The source-proven mirror race and concurrency oracle gap remain the principal findings. Parser/discovery/API issues remain unchanged. The missing-workflow allegation, identical constructor invariant, and doctest-policy criticism are refuted; CPU_SET outcome claims are unverified against the exact pin. No commit/task completion is treated as fix proof.
+
+## Current claim decisions
+
+| Claim decisions | Open | Source-fixed | Partial | Refuted | Unverified | N/A |
+|---:|---:|---:|---:|---:|---:|---:|
+| 38 | 35 | 0 | 0 | 3 | 0 | 0 |
+
+These are decisions on report claims, including repeated roots, bundled observations and non-findings—not a unique-bug census. Closed/N/A rows have no current risk; unverified risk is provisional. Pure style and unmeasured optimization claims do not establish runtime impact.
+
+## Parent acceptance refinements
+
+- Exact Linux libc helper source proves checked-index bounds panic; remove contradictory glibc/musl C-macro outcomes.
+
+<a id="review-1-1"></a>
+
+### Claim 1.1 — `rcu` mirror loop permanently strands non-node-0 replicas on a stale value
+
+Status: `confirmed-open`. Current risk: `high`.
+
+A delayed X1 mirror can overwrite B's completed X2 mirror; there is no automatic repair after writers finish.
+
+Evidence: [crates/shamir-numa/src/node_replicated.rs:103](../../../../../crates/shamir-numa/src/node_replicated.rs#L103); [crates/shamir-numa/src/node_replicated.rs:105](../../../../../crates/shamir-numa/src/node_replicated.rs#L105).
+
+Grouping/duplicate: `concurrency-lockfree.md#1`. This row is not another independent defect.
+
+<a id="review-1-2"></a>
+
+### Claim 1.2 — Concurrency test asserts node 0 only — the mirror half of `rcu` has zero multi-threaded coverage
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+The registered concurrent test checks only node 0; all-replica tests are sequential and do not detect mirror reordering.
+
+Evidence: [crates/shamir-numa/src/tests/mod.rs:12](../../../../../crates/shamir-numa/src/tests/mod.rs#L12); [crates/shamir-numa/src/tests/node_replicated_tests.rs:116](../../../../../crates/shamir-numa/src/tests/node_replicated_tests.rs#L116).
+
+Grouping/duplicate: `correctness-tdd.md#2`. This row is not another independent defect.
+
+<a id="review-1-3"></a>
+
+### Claim 1.3 — out-of-range `store_node`/`load_node` silently redirect to node 0
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+Explicit-node methods still call the zero-clamping replica helper, including writes. Built-in topology swap/shrink is not present.
+
+Evidence: [crates/shamir-numa/src/node_replicated.rs:116](../../../../../crates/shamir-numa/src/node_replicated.rs#L116); [crates/shamir-numa/src/node_replicated.rs:121](../../../../../crates/shamir-numa/src/node_replicated.rs#L121).
+
+Grouping/duplicate: `api-wire-protocol.md#3`. This row is not another independent defect.
+
+<a id="review-1-4"></a>
+
+### Claim 1.4 — fixed 1024-CPU `cpu_set_t`; CPUs ≥ 1024 pin wrongly, fail, or panic
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+Parent inspection of checksummed libc 0.2.186 resolves the Linux helper: cpu_set_t has 1024 storage bits, and CPU_SET indexes bits[cpu / word_bits] with Rust array indexing. A sysfs CPU ID >=1024 therefore reaches bounds panic, not a C-macro out-of-bounds write or silent truncation. The unchecked source route remains a Medium public Linux API defect; no production worker-pinning route or tested target failure was established.
+
+Evidence: [crates/shamir-numa/src/linux.rs:143](../../../../../crates/shamir-numa/src/linux.rs#L143); [Cargo.lock:1923](../../../../../Cargo.lock#L1923).
+
+Pinned dependency evidence: [libc 0.2.186, src/unix/linux_like/linux_l4re_shared.rs:1531](https://docs.rs/crate/libc/0.2.186/source/src/unix/linux_like/linux_l4re_shared.rs).
+
+Grouping/duplicate: `error-handling-lifecycle.md#3`. This row is not another independent defect.
+
+<a id="review-1-5"></a>
+
+### Claim 1.5 — `LinuxTopology::probe` decision logic is untestable as written
+
+Status: `confirmed-open`. Current risk: `low`.
+
+Hard-coded sysfs reads and host-dependent tests remain; no deterministic sparse-node/error seam exists.
+
+Evidence: [crates/shamir-numa/src/linux.rs:52](../../../../../crates/shamir-numa/src/linux.rs#L52); [crates/shamir-numa/src/linux.rs:179](../../../../../crates/shamir-numa/src/linux.rs#L179).
+
+Grouping/duplicate: `error-handling-lifecycle.md#4`. This row is not another independent defect.
+
+<a id="review-1-6"></a>
+
+### Claim 1.6 — inline `#[cfg(test)] mod tests` inside `linux.rs`
+
+Status: `confirmed-open`. Current risk: `low`.
+
+The inline block remains and violates layout policy, but is registered on Linux.
+
+Evidence: [crates/shamir-numa/src/linux.rs:179](../../../../../crates/shamir-numa/src/linux.rs#L179); [CLAUDE.md:594](../../../../../CLAUDE.md#L594).
+
+Grouping/duplicate: `style-claude-md.md#1`. This row is not another independent defect.
+
+<a id="review-1-7"></a>
+
+### Claim 1.7 — Dead doctest in `cpulist.rs` — assertions never compiled or run
+
+Status: `refuted`. Current risk: —.
+
+Cargo.toml explicitly mandates illustrative, nonexecuted examples and separately registered behavioral tests.
+
+Evidence: [crates/shamir-numa/Cargo.toml:10](../../../../../crates/shamir-numa/Cargo.toml#L10); [crates/shamir-numa/src/tests/mod.rs:9](../../../../../crates/shamir-numa/src/tests/mod.rs#L9); [crates/shamir-numa/src/tests/cpulist_tests.rs:36](../../../../../crates/shamir-numa/src/tests/cpulist_tests.rs#L36).
+
+Grouping/duplicate: `correctness-tdd.md#7`. This row is not another independent defect.
+
+<a id="review-1-8"></a>
+
+### Claim 1.8 — `parse_cpulist` allocates unboundedly on a large range token
+
+Status: `confirmed-open`. Current risk: `low`.
+
+Ascending ranges still materialize without span or aggregate limits; existing production inputs are trusted discovery data.
+
+Evidence: [crates/shamir-numa/src/cpulist.rs:40](../../../../../crates/shamir-numa/src/cpulist.rs#L40); [crates/shamir-numa/src/linux.rs:76](../../../../../crates/shamir-numa/src/linux.rs#L76).
+
+Grouping/duplicate: `error-handling-lifecycle.md#1`. This row is not another independent defect.
+
+<a id="review-1-9"></a>
+
+### Claim 1.9 — Redundant guards in `detect()` / `probe()`
+
+Status: `confirmed-open`. Current risk: `nit`.
+
+Positive node-count checking duplicates probe's invariant; sorting duplicates the parser's ordering guarantee.
+
+Evidence: [crates/shamir-numa/src/detect.rs:26](../../../../../crates/shamir-numa/src/detect.rs#L26); [crates/shamir-numa/src/linux.rs:62](../../../../../crates/shamir-numa/src/linux.rs#L62); [crates/shamir-numa/src/linux.rs:70](../../../../../crates/shamir-numa/src/linux.rs#L70); [crates/shamir-numa/src/cpulist.rs:51](../../../../../crates/shamir-numa/src/cpulist.rs#L51).
+
+Grouping/duplicate: `correctness-tdd.md#9`. This row is not another independent defect.
+
+<a id="review-2-1"></a>
+
+### Claim 2.1 — `rcu`/`store` mirror phase can overwrite newer replicas with a stale value — non-zero nodes diverge from node 0 indefinitely
+
+Status: `confirmed-open`. Current risk: `high`.
+
+Neither publication path orders mirrors across writers. The library counterexample remains valid; current per-table engine DDL admission prevents the inspected normal create/drop operations from racing each other.
+
+Evidence: [crates/shamir-numa/src/node_replicated.rs:82](../../../../../crates/shamir-numa/src/node_replicated.rs#L82); [crates/shamir-numa/src/node_replicated.rs:103](../../../../../crates/shamir-numa/src/node_replicated.rs#L103); [crates/shamir-engine/src/table/table_manager.rs:1322](../../../../../crates/shamir-engine/src/table/table_manager.rs#L1322); [crates/shamir-engine/src/table/table_manager_sorted_index.rs:111](../../../../../crates/shamir-engine/src/table/table_manager_sorted_index.rs#L111).
+
+Grouping/duplicate: `concurrency-lockfree.md#1`. This row is not another independent defect.
+
+<a id="review-2-2"></a>
+
+### Claim 2.2 — concurrency tests never assert mirror convergence
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+No concurrent final assertion covers nonzero replicas or mixed store/rcu writers.
+
+Evidence: [crates/shamir-numa/src/tests/node_replicated_tests.rs:96](../../../../../crates/shamir-numa/src/tests/node_replicated_tests.rs#L96); [crates/shamir-numa/src/tests/node_replicated_tests.rs:116](../../../../../crates/shamir-numa/src/tests/node_replicated_tests.rs#L116).
+
+Grouping/duplicate: `correctness-tdd.md#2`. This row is not another independent defect.
+
+<a id="review-2-3"></a>
+
+### Claim 2.3 — `detect()` re-probes `/sys` on every call — no memoized variant, and consumers already call it per-instance construction
+
+Status: `confirmed-open`. Current risk: `low`.
+
+Linux detection still probes synchronously per construction/deserialization; async SortedIndexManager::new also calls it directly.
+
+Evidence: [crates/shamir-numa/src/detect.rs:25](../../../../../crates/shamir-numa/src/detect.rs#L25); [crates/shamir-index/src/base_index/index_info.rs:142](../../../../../crates/shamir-index/src/base_index/index_info.rs#L142); [crates/shamir-index/src/base_index/sorted_index_manager.rs:296](../../../../../crates/shamir-index/src/base_index/sorted_index_manager.rs#L296).
+
+Grouping/duplicate: `concurrency-lockfree.md#3`. This row is not another independent defect.
+
+<a id="review-3-1"></a>
+
+### Claim 3.1 — `CPU_SET` fed sysfs CPU indices with no `CPU_SETSIZE` bound
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+Parent inspection of checksummed libc 0.2.186 resolves the Linux helper: cpu_set_t has 1024 storage bits, and CPU_SET indexes bits[cpu / word_bits] with Rust array indexing. A sysfs CPU ID >=1024 therefore reaches bounds panic, not a C-macro out-of-bounds write or silent truncation. The unchecked source route remains a Medium public Linux API defect; no production worker-pinning route or tested target failure was established.
+
+Evidence: [crates/shamir-numa/src/linux.rs:143](../../../../../crates/shamir-numa/src/linux.rs#L143); [crates/shamir-numa/tests/linux_topology.rs:17](../../../../../crates/shamir-numa/tests/linux_topology.rs#L17); [Cargo.lock:1923](../../../../../Cargo.lock#L1923).
+
+Pinned dependency evidence: [libc 0.2.186, src/unix/linux_like/linux_l4re_shared.rs:1531](https://docs.rs/crate/libc/0.2.186/source/src/unix/linux_like/linux_l4re_shared.rs).
+
+Grouping/duplicate: `error-handling-lifecycle.md#3`. This row is not another independent defect.
+
+<a id="review-3-2"></a>
+
+### Claim 3.2 — `parse_cpulist` expands ranges with no cap
+
+Status: `confirmed-open`. Current risk: `low`.
+
+The public API permits excessive expansion; a remote exploitation route is not present in current callers.
+
+Evidence: [crates/shamir-numa/src/cpulist.rs:40](../../../../../crates/shamir-numa/src/cpulist.rs#L40); [crates/shamir-numa/src/linux.rs:57](../../../../../crates/shamir-numa/src/linux.rs#L57).
+
+Grouping/duplicate: `error-handling-lifecycle.md#1`. This row is not another independent defect.
+
+<a id="review-3-3"></a>
+
+### Claim 3.3 — `probe` swallows per-node cpulist read errors into an empty node
+
+Status: `confirmed-open`. Current risk: `nit`.
+
+Err(_) still erases discovery provenance, leaving an empty CPU list for later pinning.
+
+Evidence: [crates/shamir-numa/src/linux.rs:78](../../../../../crates/shamir-numa/src/linux.rs#L78); [crates/shamir-numa/src/linux.rs:142](../../../../../crates/shamir-numa/src/linux.rs#L142).
+
+Grouping/duplicate: `error-handling-lifecycle.md#2`. This row is not another independent defect.
+
+<a id="review-4-1"></a>
+
+### Claim 4.1 — `load_local` does not meet its documented "identical to a bare `ArcSwap` — zero overhead" contract
+
+Status: `confirmed-open`. Current risk: `low`.
+
+No single-replica shortcut avoids topology dispatch/index resolution; absolute zero-overhead wording is unsupported, not a measured latency regression.
+
+Evidence: [crates/shamir-numa/src/node_replicated.rs:72](../../../../../crates/shamir-numa/src/node_replicated.rs#L72); [crates/shamir-numa/src/lib.rs:29](../../../../../crates/shamir-numa/src/lib.rs#L29).
+
+Grouping/duplicate: `performance-hotpath.md#1`. This row is not another independent defect.
+
+<a id="review-4-2"></a>
+
+### Claim 4.2 — `parse_cpulist` expands ranges without a span cap
+
+Status: `confirmed-open`. Current risk: `low`.
+
+Materialization still has no token or output budget.
+
+Evidence: [crates/shamir-numa/src/cpulist.rs:40](../../../../../crates/shamir-numa/src/cpulist.rs#L40).
+
+Grouping/duplicate: `error-handling-lifecycle.md#1`. This row is not another independent defect.
+
+<a id="review-4-3"></a>
+
+### Claim 4.3 — `rcu` mirror window documented as "a few nanoseconds" is actually O(nodes) remote stores
+
+Status: `confirmed-open`. Current risk: `nit`.
+
+Mirror store count is linear and scheduling delay is unbounded; remote placement and numerical latency estimates remain unverified.
+
+Evidence: [crates/shamir-numa/src/node_replicated.rs:26](../../../../../crates/shamir-numa/src/node_replicated.rs#L26); [crates/shamir-numa/src/node_replicated.rs:104](../../../../../crates/shamir-numa/src/node_replicated.rs#L104).
+
+Grouping/duplicate: `concurrency-lockfree.md#1`. This row is not another independent defect.
+
+<a id="review-4-4"></a>
+
+### Claim 4.4 — No micro-bench for the `load_local` read path despite two live consumers
+
+Status: `confirmed-open`. Current risk: `nit`.
+
+No in-crate benchmark target exists; both cited registries still use the read path.
+
+Evidence: [crates/shamir-numa/Cargo.toml:18](../../../../../crates/shamir-numa/Cargo.toml#L18); [crates/shamir-index/src/base_index/index_info.rs:288](../../../../../crates/shamir-index/src/base_index/index_info.rs#L288); [crates/shamir-index/src/base_index/sorted_index_manager.rs:530](../../../../../crates/shamir-index/src/base_index/sorted_index_manager.rs#L530).
+
+Grouping/duplicate: `performance-hotpath.md#4`. This row is not another independent defect.
+
+<a id="review-5-1"></a>
+
+### Claim 5.1 — documented consistency contract is wrong under concurrent writers
+
+Status: `confirmed-open`. Current risk: `high`.
+
+Eventual-consistency wording still promises convergence the unversioned mirror implementation does not guarantee.
+
+Evidence: [crates/shamir-numa/src/node_replicated.rs:27](../../../../../crates/shamir-numa/src/node_replicated.rs#L27); [crates/shamir-numa/src/node_replicated.rs:103](../../../../../crates/shamir-numa/src/node_replicated.rs#L103).
+
+Grouping/duplicate: `concurrency-lockfree.md#1`. This row is not another independent defect.
+
+<a id="review-5-2"></a>
+
+### Claim 5.2 — `NodeReplicated` silently clamps out-of-range `NodeId` to node 0, masking caller bugs
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+Invalid explicit reads and writes resolve to slot zero; the behavior is already documented but remains error-silent.
+
+Evidence: [crates/shamir-numa/src/node_replicated.rs:75](../../../../../crates/shamir-numa/src/node_replicated.rs#L75); [crates/shamir-numa/src/node_replicated.rs:114](../../../../../crates/shamir-numa/src/node_replicated.rs#L114); [crates/shamir-numa/src/node_replicated.rs:121](../../../../../crates/shamir-numa/src/node_replicated.rs#L121).
+
+Grouping/duplicate: `api-wire-protocol.md#3`. This row is not another independent defect.
+
+<a id="review-5-3"></a>
+
+### Claim 5.3 — Crate-level docs and README describe the shipped API as future work
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+Future-work prose remains despite LinuxTopology exports, real Linux dispatch, and both index registry migrations.
+
+Evidence: [crates/shamir-numa/src/lib.rs:34](../../../../../crates/shamir-numa/src/lib.rs#L34); [crates/shamir-numa/src/lib.rs:60](../../../../../crates/shamir-numa/src/lib.rs#L60); [crates/shamir-numa/README.md:22](../../../../../crates/shamir-numa/README.md#L22); [crates/shamir-numa/README.md:79](../../../../../crates/shamir-numa/README.md#L79).
+
+Grouping/duplicate: `api-wire-protocol.md#2`. This row is not another independent defect.
+
+<a id="review-5-4"></a>
+
+### Claim 5.4 — Dense-slot `NodeId` discards the kernel's raw NUMA node id with no recovery API
+
+Status: `confirmed-open`. Current risk: `low`.
+
+Raw IDs are not retained in LinuxTopology and cannot be recovered through Topology. Dense NodeId semantics are already explicit.
+
+Evidence: [crates/shamir-numa/src/node.rs:6](../../../../../crates/shamir-numa/src/node.rs#L6); [crates/shamir-numa/src/linux.rs:36](../../../../../crates/shamir-numa/src/linux.rs#L36); [crates/shamir-numa/src/linux.rs:92](../../../../../crates/shamir-numa/src/linux.rs#L92).
+
+Grouping/duplicate: `api-wire-protocol.md#4`. This row is not another independent defect.
+
+<a id="review-5-5"></a>
+
+### Claim 5.5 — Public API returns `arc_swap::Guard`, welding the crate's semver to a foreign dependency type
+
+Status: `confirmed-open`. Current risk: `low`.
+
+Guard remains exposed. This is dependency coupling in an unpublished workspace API, without a demonstrated breaking upgrade.
+
+Evidence: [crates/shamir-numa/src/node_replicated.rs:71](../../../../../crates/shamir-numa/src/node_replicated.rs#L71); [crates/shamir-numa/src/node_replicated.rs:77](../../../../../crates/shamir-numa/src/node_replicated.rs#L77); [crates/shamir-numa/Cargo.toml:4](../../../../../crates/shamir-numa/Cargo.toml#L4).
+
+Grouping/duplicate: `api-wire-protocol.md#5`. This row is not another independent defect.
+
+<a id="review-5-6"></a>
+
+### Claim 5.6 — inline `#[cfg(all(test, ...))] mod tests` in `linux.rs`
+
+Status: `confirmed-open`. Current risk: `low`.
+
+The inline host-test block remains contrary to test layout policy.
+
+Evidence: [crates/shamir-numa/src/linux.rs:179](../../../../../crates/shamir-numa/src/linux.rs#L179); [CLAUDE.md:594](../../../../../CLAUDE.md#L594).
+
+Grouping/duplicate: `style-claude-md.md#1`. This row is not another independent defect.
+
+<a id="review-5-7"></a>
+
+### Claim 5.7 — Test-coverage claims vs reality: `detect()` untested off-Linux, phantom CI workflow in the README
+
+Status: `confirmed-open`. Current risk: `low`.
+
+Dispatch and explicit-node OOB coverage are still missing. Phantom workflow is refuted: the existing workflow registers wrapper jobs and QEMU opt-in.
+
+Evidence: [crates/shamir-numa/src/detect.rs:40](../../../../../crates/shamir-numa/src/detect.rs#L40); [crates/shamir-numa/src/tests/mod.rs:8](../../../../../crates/shamir-numa/src/tests/mod.rs#L8); [.github/workflows/numa.yml:39](../../../../../.github/workflows/numa.yml#L39); [.github/workflows/numa.yml:50](../../../../../.github/workflows/numa.yml#L50).
+
+Grouping/duplicate: `api-wire-protocol.md#7`. This row is not another independent defect.
+
+<a id="review-5-8"></a>
+
+### Claim 5.8 — `parse_cpulist` allocates unboundedly on adversarial range tokens
+
+Status: `confirmed-open`. Current risk: `low`.
+
+Public range expansion remains unconstrained, conditional on the embedding caller accepting hostile strings.
+
+Evidence: [crates/shamir-numa/src/cpulist.rs:29](../../../../../crates/shamir-numa/src/cpulist.rs#L29); [crates/shamir-numa/src/cpulist.rs:40](../../../../../crates/shamir-numa/src/cpulist.rs#L40).
+
+Grouping/duplicate: `error-handling-lifecycle.md#1`. This row is not another independent defect.
+
+<a id="review-5-9"></a>
+
+### Claim 5.9 — Inconsistent out-of-range constructor conventions between the two topology constructors
+
+Status: `refuted`. Current risk: —.
+
+Zero node count and zero CPU count are different invariants. Fallback always reports one node; mock separately permits empty CPU lists. Intentional behaviors are documented and tested.
+
+Evidence: [crates/shamir-numa/src/mock.rs:47](../../../../../crates/shamir-numa/src/mock.rs#L47); [crates/shamir-numa/src/fallback.rs:29](../../../../../crates/shamir-numa/src/fallback.rs#L29); [crates/shamir-numa/src/fallback.rs:38](../../../../../crates/shamir-numa/src/fallback.rs#L38); [crates/shamir-numa/src/tests/fallback_tests.rs:20](../../../../../crates/shamir-numa/src/tests/fallback_tests.rs#L20).
+
+Grouping/duplicate: `api-wire-protocol.md#9`. This row is not another independent defect.
+
+<a id="review-5-10"></a>
+
+### Claim 5.10 — README's "run tests" instruction bypasses the mandated central test entry point
+
+Status: `confirmed-open`. Current risk: `nit`.
+
+README still prescribes raw cargo test, while current authoritative guidance and runner configuration block it.
+
+Evidence: [crates/shamir-numa/README.md:42](../../../../../crates/shamir-numa/README.md#L42); [CLAUDE.md:199](../../../../../CLAUDE.md#L199); [.cargo/config.toml:105](../../../../../.cargo/config.toml#L105).
+
+Grouping/duplicate: `api-wire-protocol.md#10`. This row is not another independent defect.
+
+<a id="review-6-1"></a>
+
+### Claim 6.1 — `parse_cpulist` expands unbounded ranges — malformed input can panic/abort the process
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+No span/aggregate budget precedes materialization. Excessive allocation is established structurally; exact reserve behavior and abort details were not executed or verified against std sources.
+
+Evidence: [crates/shamir-numa/src/cpulist.rs:38](../../../../../crates/shamir-numa/src/cpulist.rs#L38); [crates/shamir-numa/src/cpulist.rs:40](../../../../../crates/shamir-numa/src/cpulist.rs#L40).
+
+Grouping/duplicate: `error-handling-lifecycle.md#1`. This row is not another independent defect.
+
+<a id="review-6-2"></a>
+
+### Claim 6.2 — `probe()` swallows every per-node cpulist I/O error, contradicting its doc and yielding a silently broken topology
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+The blanket catch still erases Syscall errors and permits an all-empty topology; detect checks only node count.
+
+Evidence: [crates/shamir-numa/src/linux.rs:78](../../../../../crates/shamir-numa/src/linux.rs#L78); [crates/shamir-numa/src/linux.rs:92](../../../../../crates/shamir-numa/src/linux.rs#L92); [crates/shamir-numa/src/detect.rs:26](../../../../../crates/shamir-numa/src/detect.rs#L26).
+
+Grouping/duplicate: `error-handling-lifecycle.md#2`. This row is not another independent defect.
+
+<a id="review-6-3"></a>
+
+### Claim 6.3 — `CPU_SET` without a `CPU_SETSIZE` bound: silent mask truncation (glibc) / out-of-bounds write (musl) / bounds panic
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+Parent inspection of checksummed libc 0.2.186 resolves the Linux helper: cpu_set_t has 1024 storage bits, and CPU_SET indexes bits[cpu / word_bits] with Rust array indexing. A sysfs CPU ID >=1024 therefore reaches bounds panic, not a C-macro out-of-bounds write or silent truncation. The unchecked source route remains a Medium public Linux API defect; no production worker-pinning route or tested target failure was established.
+
+Evidence: [crates/shamir-numa/src/linux.rs:143](../../../../../crates/shamir-numa/src/linux.rs#L143); [Cargo.lock:1923](../../../../../Cargo.lock#L1923).
+
+Pinned dependency evidence: [libc 0.2.186, src/unix/linux_like/linux_l4re_shared.rs:1531](https://docs.rs/crate/libc/0.2.186/source/src/unix/linux_like/linux_l4re_shared.rs).
+
+Grouping/duplicate: `error-handling-lifecycle.md#3`. This row is not another independent defect.
+
+<a id="review-6-4"></a>
+
+### Claim 6.4 — No error-path tests for the Linux probe layer; error branches never compiled on the primary gate
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+No deterministic error-mapping tests exist. Windows excludes Linux code, but configured Ubuntu CI does compile it; only the coverage gap is confirmed across CI.
+
+Evidence: [crates/shamir-numa/src/linux.rs:167](../../../../../crates/shamir-numa/src/linux.rs#L167); [crates/shamir-numa/src/linux.rs:179](../../../../../crates/shamir-numa/src/linux.rs#L179); [.github/workflows/numa.yml:29](../../../../../.github/workflows/numa.yml#L29); [.github/workflows/ci.yml:65](../../../../../.github/workflows/ci.yml#L65).
+
+Grouping/duplicate: `error-handling-lifecycle.md#4`. This row is not another independent defect.
+
+<a id="review-6-5"></a>
+
+### Claim 6.5 — `detect()` degrades silently — swallowed probe error has no observability
+
+Status: `confirmed-open`. Current risk: `low`.
+
+Probe failure is discarded without logging or a diagnostic result.
+
+Evidence: [crates/shamir-numa/src/detect.rs:25](../../../../../crates/shamir-numa/src/detect.rs#L25); [crates/shamir-numa/src/detect.rs:30](../../../../../crates/shamir-numa/src/detect.rs#L30).
+
+Grouping/duplicate: `error-handling-lifecycle.md#5`. This row is not another independent defect.
+
+<a id="review-6-6"></a>
+
+### Claim 6.6 — `AffinityError::Unsupported` is overloaded and carries no source
+
+Status: `confirmed-open`. Current risk: `nit`.
+
+Missing-file and empty-online discovery cases share the context-free unit variant; built-in non-Linux pinning does not actually return Unsupported.
+
+Evidence: [crates/shamir-numa/src/error.rs:16](../../../../../crates/shamir-numa/src/error.rs#L16); [crates/shamir-numa/src/linux.rs:63](../../../../../crates/shamir-numa/src/linux.rs#L63); [crates/shamir-numa/src/linux.rs:170](../../../../../crates/shamir-numa/src/linux.rs#L170); [crates/shamir-numa/src/fallback.rs:54](../../../../../crates/shamir-numa/src/fallback.rs#L54).
+
+Grouping/duplicate: `error-handling-lifecycle.md#6`. This row is not another independent defect.
+
+<a id="review-7-1"></a>
+
+### Claim 7.1 — Inline `#[cfg(test)] mod tests` in an implementation file
+
+Status: `confirmed-open`. Current risk: `low`.
+
+Layout violation persists, but Linux includes the implementation module and its tests. Placement alone does not justify medium runtime severity.
+
+Evidence: [crates/shamir-numa/src/linux.rs:179](../../../../../crates/shamir-numa/src/linux.rs#L179); [crates/shamir-numa/src/lib.rs:47](../../../../../crates/shamir-numa/src/lib.rs#L47); [CLAUDE.md:594](../../../../../CLAUDE.md#L594).
+
+Grouping/duplicate: `style-claude-md.md#1`. This row is not another independent defect.
+
+<a id="review-7-2"></a>
+
+### Claim 7.2 — stale "Фаза 1 scope" docs contradict shipped code
+
+Status: `confirmed-open`. Current risk: `low`.
+
+Linux implementation and smoke harness have shipped while scope/roadmap text remains future-facing.
+
+Evidence: [crates/shamir-numa/src/lib.rs:34](../../../../../crates/shamir-numa/src/lib.rs#L34); [crates/shamir-numa/README.md:79](../../../../../crates/shamir-numa/README.md#L79); [scripts/ci-qemu-numa-test.sh:6](../../../../../scripts/ci-qemu-numa-test.sh#L6).
+
+Grouping/duplicate: `api-wire-protocol.md#2`. This row is not another independent defect.
+
+<a id="review-7-3"></a>
+
+### Claim 7.3 — doc example in `cpulist.rs` is never compiled or executed
+
+Status: `refuted`. Current risk: —.
+
+Rendered-only examples are expressly sanctioned; behavioral parser tests are separately wired.
+
+Evidence: [crates/shamir-numa/Cargo.toml:10](../../../../../crates/shamir-numa/Cargo.toml#L10); [crates/shamir-numa/src/tests/mod.rs:9](../../../../../crates/shamir-numa/src/tests/mod.rs#L9); [crates/shamir-numa/src/tests/cpulist_tests.rs:25](../../../../../crates/shamir-numa/src/tests/cpulist_tests.rs#L25).
+
+Grouping/duplicate: `correctness-tdd.md#7`. This row is not another independent defect.
+
+## Current fix-plan state
+
+| Claim decisions | Open | Source-fixed | Partial | Refuted | Unverified | N/A |
+|---:|---:|---:|---:|---:|---:|---:|
+| 12 | 12 | 0 | 0 | 0 | 0 | 0 |
+
+A source-fixed item closes only its stated mechanism. Partial items retain the obligations named below; proposed fixes must obey the corrections and current contracts, not merely copy the historical recipe.
+
+<a id="plan-p0-1"></a>
+
+### Plan P0.1 — P0.1
+
+Status: `confirmed-open`. Current risk: —.
+
+No mirror fix or honest consistency/store documentation landed. A valid fix must cover store/rcu together; epochs must be coupled to publication order, not assigned independently after CAS. Normal engine DDL serialization is not a repair of the public concurrent-writer API.
+
+Evidence: [crates/shamir-numa/src/node_replicated.rs:22](../../../../../crates/shamir-numa/src/node_replicated.rs#L22); [crates/shamir-numa/src/node_replicated.rs:82](../../../../../crates/shamir-numa/src/node_replicated.rs#L82); [crates/shamir-numa/src/node_replicated.rs:103](../../../../../crates/shamir-numa/src/node_replicated.rs#L103); [crates/shamir-engine/src/table/table_manager.rs:1322](../../../../../crates/shamir-engine/src/table/table_manager.rs#L1322).
+
+<a id="plan-p0-2"></a>
+
+### Plan P0.2 — P0.2
+
+Status: `confirmed-open`. Current risk: —.
+
+The node-0-only test remains. Mixed writers, concurrent four-node convergence, and a deterministic forced stale-mirror regression oracle are missing; a probabilistic storm alone is not guaranteed Red.
+
+Evidence: [crates/shamir-numa/src/tests/node_replicated_tests.rs:96](../../../../../crates/shamir-numa/src/tests/node_replicated_tests.rs#L96); [crates/shamir-numa/src/tests/node_replicated_tests.rs:116](../../../../../crates/shamir-numa/src/tests/node_replicated_tests.rs#L116); [crates/shamir-numa/src/tests/mod.rs:12](../../../../../crates/shamir-numa/src/tests/mod.rs#L12).
+
+<a id="plan-p1-3"></a>
+
+### Plan P1.3 — P1.3
+
+Status: `confirmed-open`. Current risk: —.
+
+No range-span or aggregate expansion bound and no oversized-range test were added. Bound aggregate work too: many individually permitted ranges can accumulate excessive materialization.
+
+Evidence: [crates/shamir-numa/src/cpulist.rs:40](../../../../../crates/shamir-numa/src/cpulist.rs#L40); [crates/shamir-numa/src/tests/cpulist_tests.rs:47](../../../../../crates/shamir-numa/src/tests/cpulist_tests.rs#L47); [crates/shamir-numa/src/tests/cpulist_tests.rs:53](../../../../../crates/shamir-numa/src/tests/cpulist_tests.rs#L53).
+
+<a id="plan-p1-4"></a>
+
+### Plan P1.4 — P1.4
+
+Status: `confirmed-open`. Current risk: —.
+
+The fixed-mask/index route is source-proven against libc 0.2.186: out-of-storage indices panic through Rust indexing. No mask-domain guard or a verified dynamically sized Rust builder exists. Return a typed error for unsupported IDs or use a proven ABI-safe dynamic representation; C CPU_ALLOC macros are not established Rust APIs.
+
+Evidence: [crates/shamir-numa/src/linux.rs:129](../../../../../crates/shamir-numa/src/linux.rs#L129); [crates/shamir-numa/src/linux.rs:143](../../../../../crates/shamir-numa/src/linux.rs#L143); [crates/shamir-numa/src/lib.rs:47](../../../../../crates/shamir-numa/src/lib.rs#L47); [Cargo.lock:1923](../../../../../Cargo.lock#L1923).
+
+Pinned dependency evidence: [libc 0.2.186, src/unix/linux_like/linux_l4re_shared.rs:1531](https://docs.rs/crate/libc/0.2.186/source/src/unix/linux_like/linux_l4re_shared.rs).
+
+<a id="plan-p1-5"></a>
+
+### Plan P1.5 — P1.5
+
+Status: `confirmed-open`. Current risk: —.
+
+Per-node reads still swallow all errors; detect still accepts nonempty node lists with zero total discovered CPUs. Neither proposed repair exists.
+
+Evidence: [crates/shamir-numa/src/linux.rs:78](../../../../../crates/shamir-numa/src/linux.rs#L78); [crates/shamir-numa/src/linux.rs:92](../../../../../crates/shamir-numa/src/linux.rs#L92); [crates/shamir-numa/src/detect.rs:26](../../../../../crates/shamir-numa/src/detect.rs#L26).
+
+<a id="plan-p1-6"></a>
+
+### Plan P1.6 — P1.6
+
+Status: `confirmed-open`. Current risk: —.
+
+No pure/injected discovery core or error-mapping tests were added, and Linux host tests remain inline. A genuinely cross-platform test core must not remain inside the Linux-only module.
+
+Evidence: [crates/shamir-numa/src/linux.rs:52](../../../../../crates/shamir-numa/src/linux.rs#L52); [crates/shamir-numa/src/linux.rs:167](../../../../../crates/shamir-numa/src/linux.rs#L167); [crates/shamir-numa/src/linux.rs:179](../../../../../crates/shamir-numa/src/linux.rs#L179); [crates/shamir-numa/src/tests/mod.rs:8](../../../../../crates/shamir-numa/src/tests/mod.rs#L8); [crates/shamir-numa/src/lib.rs:47](../../../../../crates/shamir-numa/src/lib.rs#L47).
+
+<a id="plan-p1-7"></a>
+
+### Plan P1.7 — P1.7
+
+Status: `confirmed-open`. Current risk: —.
+
+Explicit load_node/store_node signatures remain infallible and share the clamp with load_local. Changing them to Result remains proposed API work, not an implemented fix.
+
+Evidence: [crates/shamir-numa/src/node_replicated.rs:77](../../../../../crates/shamir-numa/src/node_replicated.rs#L77); [crates/shamir-numa/src/node_replicated.rs:116](../../../../../crates/shamir-numa/src/node_replicated.rs#L116); [crates/shamir-numa/src/node_replicated.rs:121](../../../../../crates/shamir-numa/src/node_replicated.rs#L121).
+
+<a id="plan-p2-8"></a>
+
+### Plan P2.8 — P2.8
+
+Status: `confirmed-open`. Current risk: —.
+
+Scope/roadmap/tier and zero-overhead prose still need correction. Phantom-workflow repair is refuted because the workflow already exists; executable-example repair is not applicable under rendered-only policy. Mark only demonstrated index migrations done and distinguish shipped QEMU smoke from pending guest Rust integration.
+
+Evidence: [crates/shamir-numa/src/lib.rs:29](../../../../../crates/shamir-numa/src/lib.rs#L29); [crates/shamir-numa/src/lib.rs:34](../../../../../crates/shamir-numa/src/lib.rs#L34); [crates/shamir-numa/README.md:79](../../../../../crates/shamir-numa/README.md#L79); [crates/shamir-numa/src/tests/mod.rs:5](../../../../../crates/shamir-numa/src/tests/mod.rs#L5); [.github/workflows/numa.yml:47](../../../../../.github/workflows/numa.yml#L47); [crates/shamir-numa/Cargo.toml:10](../../../../../crates/shamir-numa/Cargo.toml#L10).
+
+<a id="plan-p2-9"></a>
+
+### Plan P2.9 — P2.9
+
+Status: `confirmed-open`. Current risk: —.
+
+No shared detection cache, migrated factory calls, or fallback diagnostic exists. Memoizing Topology would share discovery state, not registry snapshots; first-use blocking placement also needs consideration.
+
+Evidence: [crates/shamir-numa/src/detect.rs:24](../../../../../crates/shamir-numa/src/detect.rs#L24); [crates/shamir-index/src/base_index/index_info.rs:142](../../../../../crates/shamir-index/src/base_index/index_info.rs#L142); [crates/shamir-index/src/base_index/index_info.rs:340](../../../../../crates/shamir-index/src/base_index/index_info.rs#L340); [crates/shamir-index/src/base_index/sorted_index_manager.rs:300](../../../../../crates/shamir-index/src/base_index/sorted_index_manager.rs#L300).
+
+<a id="plan-p2-10"></a>
+
+### Plan P2.10 — P2.10
+
+Status: `confirmed-open`. Current risk: —.
+
+No single-replica shortcut or in-crate read benchmark exists. A shortcut addresses source dispatch but does not prove literal zero overhead; benchmarks were not run.
+
+Evidence: [crates/shamir-numa/src/node_replicated.rs:71](../../../../../crates/shamir-numa/src/node_replicated.rs#L71); [crates/shamir-numa/Cargo.toml:18](../../../../../crates/shamir-numa/Cargo.toml#L18); [crates/shamir-numa/README.md:74](../../../../../crates/shamir-numa/README.md#L74).
+
+<a id="plan-p2-11"></a>
+
+### Plan P2.11 — P2.11
+
+Status: `confirmed-open`. Current risk: —.
+
+Raw-ID recovery, Guard abstraction, and Unsupported context remain absent; README still uses raw cargo test. Constructor-unification premise is refuted because node and CPU counts differ. Guard abstraction is optional API design, and owned-Arc cost must not be declared negligible without measurement.
+
+Evidence: [crates/shamir-numa/src/linux.rs:36](../../../../../crates/shamir-numa/src/linux.rs#L36); [crates/shamir-numa/src/topology.rs:21](../../../../../crates/shamir-numa/src/topology.rs#L21); [crates/shamir-numa/src/node_replicated.rs:71](../../../../../crates/shamir-numa/src/node_replicated.rs#L71); [crates/shamir-numa/src/error.rs:16](../../../../../crates/shamir-numa/src/error.rs#L16); [crates/shamir-numa/src/mock.rs:47](../../../../../crates/shamir-numa/src/mock.rs#L47); [crates/shamir-numa/src/fallback.rs:29](../../../../../crates/shamir-numa/src/fallback.rs#L29); [crates/shamir-numa/README.md:42](../../../../../crates/shamir-numa/README.md#L42).
+
+<a id="plan-p2-12"></a>
+
+### Plan P2.12 — P2.12
+
+Status: `confirmed-open`. Current risk: —.
+
+Off-Linux detect dispatch and explicit-node bounds behavior remain uncovered; both redundant guards remain. If explicit APIs become fallible, tests should assert rejection without changing node 0, not preserve the old silent-write clamp. load_local defense needs a topology that does not pre-clamp.
+
+Evidence: [crates/shamir-numa/src/detect.rs:40](../../../../../crates/shamir-numa/src/detect.rs#L40); [crates/shamir-numa/src/tests/mod.rs:8](../../../../../crates/shamir-numa/src/tests/mod.rs#L8); [crates/shamir-numa/src/tests/node_replicated_tests.rs:82](../../../../../crates/shamir-numa/src/tests/node_replicated_tests.rs#L82); [crates/shamir-numa/src/detect.rs:26](../../../../../crates/shamir-numa/src/detect.rs#L26); [crates/shamir-numa/src/linux.rs:70](../../../../../crates/shamir-numa/src/linux.rs#L70).
+
+## Corrections and qualified non-findings
+
+- The original 38 lens-tagged rows are all accounted for, but the historical 21-defect census is not a current confirmed-defect count. Recompute using revalidated statuses and downgraded style severity.
+- Relevant history shows NodeReplicated and its writer test unchanged since the skeleton. Linux changes since its introduction concern the Fx-map migration, not the alleged fixes. Completion prose for N1/N2/N3/N4 is not fix evidence.
+- The phantom numa.yml claim is positively refuted by current source and its introduction in the original skeleton, before the reports.
+- The fixed-mask section merges mutually inconsistent outcomes. Exact resolved libc behavior is unverified; inspected neighboring Rust helpers use checked indexing, not C macro stack writes.
+- Normal inspected TableManager create/drop paths hold per-table DDL admission across publication. Keep the library race confirmed, but qualify the reports' unproven production DDL interleaving and resulting persisted/query impact.
+- Confirmed scoped guarantees: no query/wire/crypto/network surface; one documented mock Mutex; immutable Fx reverse map; reachable portable tests; no async-await locking or scc len exposure.
+- Narrow performance guarantees: warm wrapper reads have no explicit allocation or topology-sized loop. ArcSwap first-use bookkeeping, write allocations, callback/destructor progress, hash worst cases, physical placement, and numeric latency are not covered by blanket lock-free/O(1)/allocation-free claims.
+- The explicit-node clamp is documented; topology swapping is not implemented. Dense raw-ID loss remains a tooling limitation rather than a demonstrated configured-worker failure.
+- Illustrative examples intentionally do not execute. Existing parser behavioral tests invalidate the blanket no mechanism catching drift assertion; exact-literal coverage can be strengthened without changing doctest policy.
+- The QEMU workflow exists and invokes a smoke script; it does not run this crate's Rust tests in the guest. Successful execution and PR opt-in behavior were not established.
+- Raw cargo test is now blocked outright by the configured runner; the historical scratch exception must not be repeated.
+- No finding was marked fixed merely from commit messages, task completion, configured CI, or test presence. No tests were run.
+
+## Current follow-up order
+
+1. Close the concurrent store/rcu mirror-ordering defect and add a deterministic stale-mirror regression plus all-replica/mixed-writer coverage.
+2. Bound parser span and aggregate expansion; preserve documented best-effort behavior and add oversized-input assertions.
+3. Guard or safely replace the fixed Linux mask based on exact libc 0.2.186 checked-index behavior; remove C-macro truncation/stack-corruption claims and add discriminating Linux coverage.
+4. Preserve non-NotFound discovery errors, reject or clearly handle unusable discovered topologies, and add an injectable cross-platform discovery core.
+5. Decide explicit-node invalid-input semantics and test wrong-target rejection plus independent load_local defensive behavior.
+6. Share topology discovery and expose fallback diagnostics, accounting for first-use blocking in async construction.
+7. Correct stale shipped-scope/consistency/test-command documentation, relocate inline tests, and remove refuted workflow/doctest/constructor claims from the defect census.
+8. Treat Guard abstraction, raw-node-ID recovery, and single-node optimization/benchmarking as measured API/design work; do not promise physical NUMA locality or latency without evidence.
+
+## Coverage and limitations
+
+- All eight documents were read completely: 38 original findings, 38 SUMMARY finding sections, and all 12 Fix Plan items. No TASK_GROUPS document exists in this directory.
+- Source-only verification; no builds, tests, benchmarks, reproductions, project-program execution, filesystem changes, git mutations, worktrees, or child agents.
+- Cargo.lock resolves arc-swap 1.9.1, libc 0.2.186, and thiserror 2.0.18. Exact arc-swap source was inspected. The parent inspected the checksummed libc 0.2.186 Linux mask/helper source; out-of-storage CPU IDs cause checked-index panic. No alternate-version substitution was used.
+- Hardware latency, generated instruction counts, physical NUMA placement, and cited external research/kernel specifications were not independently verified.
+- The concurrent-writer library defect is source-proven. Current TableManager DDL admission serializes inspected normal create/drop paths; those paths alone do not establish the reports' alleged production race schedule. Direct concurrent library/manager callers remain possible.
+- HEAD remained the requested commit and the checkout was clean at final inspection. No uncovered original finding or Fix Plan row.
+- Parent inspected the exact checksummed libc 0.2.186 Linux helper and resolved its bounds-panic mechanism without execution.
+
+## Reviewed document inventory
+
+- [correctness-tdd.md](./correctness-tdd.md) — 9 claim decisions; 0 explicit plan items.
+- [concurrency-lockfree.md](./concurrency-lockfree.md) — 3 claim decisions; 0 explicit plan items.
+- [security-crypto.md](./security-crypto.md) — 3 claim decisions; 0 explicit plan items.
+- [performance-hotpath.md](./performance-hotpath.md) — 4 claim decisions; 0 explicit plan items.
+- [api-wire-protocol.md](./api-wire-protocol.md) — 10 claim decisions; 0 explicit plan items.
+- [error-handling-lifecycle.md](./error-handling-lifecycle.md) — 6 claim decisions; 0 explicit plan items.
+- [style-claude-md.md](./style-claude-md.md) — 3 claim decisions; 0 explicit plan items.
+- [SUMMARY.md](./SUMMARY.md) — 38 claim decisions; 12 explicit plan items.
+
+---
+
+<details>
+<summary>Historical report — preserved for provenance; not current status or instructions</summary>
+
 # shamir-numa — Cross-Lens Review (all 7 lenses, synthesized)
 
 Crate: `crates/shamir-numa/` — NUMA topology discovery (`detect()`, `LinuxTopology` /
@@ -687,3 +1352,5 @@ bug (replica mirror race); otherwise pillar-clean") matches this synthesis.
 12. **Remaining coverage + guard cleanup:** per-platform `detect()` smoke test and a
     `load_node`/`store_node` clamp test (rest of **5.7**); drop the redundant
     `detect()`/`probe()` guards or cite the enforcing invariants (**1.9**).
+
+</details>

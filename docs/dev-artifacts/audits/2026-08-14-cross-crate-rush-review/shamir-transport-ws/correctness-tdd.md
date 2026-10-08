@@ -1,3 +1,131 @@
+<!-- revalidation:2026-10-08 source:92ad58266bf57ddea1fa3c8a47affba1a3a9a096 -->
+# shamir-transport-ws — correctness-tdd revalidation
+
+Source snapshot: `92ad58266bf57ddea1fa3c8a47affba1a3a9a096`. Revalidated 2026-10-08 by read-only XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run; no source fix is part of this update. Test registration/assertions are evidence of an oracle, not proof of a passing run.
+
+This section is authoritative for current status. Original titles/IDs are retained for traceability; a refuted title is not a current assertion. The collapsed historical report below is superseded, including its counts, severity, scenarios and fix instructions. Plan IDs preserve historical numbering, not a current release mandate. [Workspace methodology and status definitions](../SUMMARY.md#status-definitions).
+
+Malformed-frame and rejection-path test gaps remain. The claim of zero browser-handshake coverage anywhere is refuted by existing conditional TS integration tests. Transport source has no post-review fix.
+
+## Current claim decisions
+
+| Claim decisions | Open | Source-fixed | Partial | Refuted | Unverified | N/A |
+|---:|---:|---:|---:|---:|---:|---:|
+| 9 | 8 | 0 | 0 | 1 | 0 | 0 |
+
+These are decisions on report claims, including repeated roots, bundled observations and non-findings—not a unique-bug census. Closed/N/A rows have no current risk; unverified risk is provisional. Pure style and unmeasured optimization claims do not establish runtime impact.
+
+<a id="review-1"></a>
+
+### Claim 1 — `accept_browser_ws` — the spec §9 Origin enforcement path — has zero test coverage
+
+Status: `refuted`. Current risk: —.
+
+TS connect integration launches a browser-profile listener and authenticates with an allowlisted Origin. This disproves zero handshake coverage, but missing/disallowed/invalid-Origin and wrong-path rejection tests remain absent.
+
+Evidence: [crates/shamir-client-ts/src/__tests__/connect.test.ts:70](../../../../../crates/shamir-client-ts/src/__tests__/connect.test.ts#L70); [crates/shamir-client-ts/src/__tests__/connect.test.ts:194](../../../../../crates/shamir-client-ts/src/__tests__/connect.test.ts#L194); [crates/shamir-client-ts/src/__tests__/connect.test.ts:203](../../../../../crates/shamir-client-ts/src/__tests__/connect.test.ts#L203); [.github/workflows/ts-e2e-nightly.yml:85](../../../../../.github/workflows/ts-e2e-nightly.yml#L85); [crates/shamir-transport-ws/src/tests/server_tests.rs:7](../../../../../crates/shamir-transport-ws/src/tests/server_tests.rs#L7).
+
+<a id="review-2"></a>
+
+### Claim 2 — Framing's malformed-input error paths untested; `rejects_oversized_frame` is under-asserted
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+The registered framing suite still asserts only is_err for oversize and does not exercise short binary, mismatched prefix, TEXT, Close, EOF, or control-frame handling with exact variant assertions.
+
+Evidence: [crates/shamir-transport-ws/tests/framing_round_trip.rs:57](../../../../../crates/shamir-transport-ws/tests/framing_round_trip.rs#L57); [crates/shamir-transport-ws/tests/framing_round_trip.rs:69](../../../../../crates/shamir-transport-ws/tests/framing_round_trip.rs#L69); [crates/shamir-transport-ws/src/framing.rs:148](../../../../../crates/shamir-transport-ws/src/framing.rs#L148); [crates/shamir-transport-ws/src/framing.rs:173](../../../../../crates/shamir-transport-ws/src/framing.rs#L173).
+
+<a id="review-3"></a>
+
+### Claim 3 — `WsAcceptError::WrongPath` never constructed; `OriginRejected(#[from])` unreachable
+
+Status: `confirmed-open`. Current risk: `low`.
+
+Both acceptors return tungstenite callback errors and propagate through the Handshake conversion. Neither typed rejection variant is returned by these APIs.
+
+Evidence: [crates/shamir-transport-ws/src/server.rs:55](../../../../../crates/shamir-transport-ws/src/server.rs#L55); [crates/shamir-transport-ws/src/server.rs:99](../../../../../crates/shamir-transport-ws/src/server.rs#L99); [crates/shamir-transport-ws/src/server.rs:144](../../../../../crates/shamir-transport-ws/src/server.rs#L144).
+
+Grouping/duplicate: `error-handling-lifecycle.md#1`. This row is not another independent defect.
+
+<a id="review-4"></a>
+
+### Claim 4 — `ws_send_sink` has no send-side cap; `payload.len() as u32` silently truncates
+
+Status: `confirmed-open`. Current risk: `low`.
+
+No outbound bound precedes the narrowing cast or allocation. Truncation begins at 2^32 bytes; ordinary oversized sends already violate the intended 16 MiB ceiling.
+
+Evidence: [crates/shamir-transport-ws/src/framing.rs:114](../../../../../crates/shamir-transport-ws/src/framing.rs#L114); [crates/shamir-transport-ws/src/framing.rs:118](../../../../../crates/shamir-transport-ws/src/framing.rs#L118).
+
+Grouping/duplicate: `api-wire-protocol.md#3`. This row is not another independent defect.
+
+<a id="review-5"></a>
+
+### Claim 5 — Wildcard origin matcher is raw string logic — accepts literal `*` and userinfo forms; unvalidated patterns fail silently
+
+Status: `confirmed-open`. Current risk: `low`.
+
+The first-dot suffix comparison accepts the cited literal-star and userinfo strings, and allow performs no validation. These are not ordinary browser-serialized Origins; a browser-origin bypass is not established.
+
+Evidence: [crates/shamir-transport-ws/src/browser.rs:37](../../../../../crates/shamir-transport-ws/src/browser.rs#L37); [crates/shamir-transport-ws/src/browser.rs:59](../../../../../crates/shamir-transport-ws/src/browser.rs#L59); [crates/shamir-transport-ws/src/browser.rs:70](../../../../../crates/shamir-transport-ws/src/browser.rs#L70).
+
+<a id="review-6"></a>
+
+### Claim 6 — Direct `tungstenite = "0.29"` dependency is unused and version-skewed vs the effective 0.24
+
+Status: `confirmed-open`. Current risk: `low`.
+
+The manifest retains unused 0.29 while imports and public errors use tokio-tungstenite's resolved 0.24 types.
+
+Evidence: [crates/shamir-transport-ws/Cargo.toml:20](../../../../../crates/shamir-transport-ws/Cargo.toml#L20); [crates/shamir-transport-ws/src/framing.rs:22](../../../../../crates/shamir-transport-ws/src/framing.rs#L22); [Cargo.lock:4245](../../../../../Cargo.lock#L4245); [Cargo.lock:4487](../../../../../Cargo.lock#L4487).
+
+Grouping/duplicate: `security-crypto.md#1`. This row is not another independent defect.
+
+<a id="review-7"></a>
+
+### Claim 7 — `BrowserOriginPolicy::empty()` doc references a nonexistent `accept_no_origin` mode
+
+Status: `confirmed-open`. Current risk: `nit`.
+
+The stale exception remains documented, while validate_origin unconditionally rejects a missing header and no bypass parameter exists.
+
+Evidence: [crates/shamir-transport-ws/src/browser.rs:28](../../../../../crates/shamir-transport-ws/src/browser.rs#L28); [crates/shamir-transport-ws/src/browser.rs:99](../../../../../crates/shamir-transport-ws/src/browser.rs#L99).
+
+<a id="review-8"></a>
+
+### Claim 8 — `BROWSER_CHANNEL_BINDING` is dead; the zeros invariant is encoded twice
+
+Status: `confirmed-open`. Current risk: `nit`.
+
+The constant has no source consumer; the production browser accept loop still uses its own literal.
+
+Evidence: [crates/shamir-transport-ws/src/tls_exporter.rs:25](../../../../../crates/shamir-transport-ws/src/tls_exporter.rs#L25); [crates/shamir-server/src/server/server_launcher.rs:1495](../../../../../crates/shamir-server/src/server/server_launcher.rs#L1495).
+
+Grouping/duplicate: `style-claude-md.md#3`. This row is not another independent defect.
+
+<a id="review-9"></a>
+
+### Claim 9 — Error-semantics / doc-accuracy warts
+
+Status: `confirmed-open`. Current risk: `nit`.
+
+Short-message actual reports total available bytes despite the payload-length field documentation. The server config documentation still attributes caller-selected pre-auth limits to transport framing.
+
+Evidence: [crates/shamir-transport-ws/src/framing.rs:42](../../../../../crates/shamir-transport-ws/src/framing.rs#L42); [crates/shamir-transport-ws/src/framing.rs:151](../../../../../crates/shamir-transport-ws/src/framing.rs#L151); [crates/shamir-transport-ws/src/server.rs:27](../../../../../crates/shamir-transport-ws/src/server.rs#L27); [crates/shamir-server/src/connection/handshake.rs:717](../../../../../crates/shamir-server/src/connection/handshake.rs#L717).
+
+## Corrections and qualified non-findings
+
+- Replace 'zero coverage anywhere' with 'no targeted browser rejection/status coverage in the transport suite'; existing TS positive coverage predates these reports.
+- TRANSPORT_WS.md:92 and :108 require HTTP 400 for missing browser Origin, not the proposed 403. Current code returns 403 for both missing and disallowed Origins; decide the contract before pinning tests.
+- Malformed patterns do not literally match nothing: exact fallback can match an identical malformed raw header. They fail to match valid browser Origins.
+- Library tests are wired through src/lib.rs:37 and src/tests/mod.rs. The seven framing integration tests are Cargo-discoverable and covered by the full integration CI selector, not the default lib-only runner.
+- The live cap test accepts any error or stream closure, not specifically Capacity; its source demonstrates wiring and rejection coverage, not an executed memory-allocation proof.
+
+---
+
+<details>
+<summary>Historical report — preserved for provenance; not current status or instructions</summary>
+
 # shamir-transport-ws -- Correctness & TDD-coverage
 
 ## Summary
@@ -150,3 +278,5 @@ discrimination it can never deliver.
 - **Suggested fix:** Either special-case the short-message error (new variant or corrected
   `actual`) or amend the field doc; reword the server.rs comment to "enforced by callers of
   `ws_recv_into` via the `max_frame_size` parameter".
+
+</details>

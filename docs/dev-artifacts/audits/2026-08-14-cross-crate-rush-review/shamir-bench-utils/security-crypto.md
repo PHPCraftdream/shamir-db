@@ -1,3 +1,45 @@
+<!-- revalidation:2026-10-08 source:92ad58266bf57ddea1fa3c8a47affba1a3a9a096 -->
+# shamir-bench-utils — security-crypto revalidation
+
+Source snapshot: `92ad58266bf57ddea1fa3c8a47affba1a3a9a096`. Revalidated 2026-10-08 by read-only XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run; no source fix is part of this update. Test registration/assertions are evidence of an oracle, not proof of a passing run.
+
+This section is authoritative for current status. Original titles/IDs are retained for traceability; a refuted title is not a current assertion. The collapsed historical report below is superseded, including its counts, severity, scenarios and fix instructions. Plan IDs preserve historical numbering, not a current release mandate. [Workspace methodology and status definitions](../SUMMARY.md#status-definitions).
+
+No production crypto or remote-input vulnerability is established. The allocator remains a low-severity, process-wide development-tooling side effect.
+
+## Current claim decisions
+
+| Claim decisions | Open | Source-fixed | Partial | Refuted | Unverified | N/A |
+|---:|---:|---:|---:|---:|---:|---:|
+| 1 | 1 | 0 | 0 | 0 | 0 | 0 |
+
+These are decisions on report claims, including repeated roots, bundled observations and non-findings—not a unique-bug census. Closed/N/A rows have no current risk; unverified risk is provisional. Pure style and unmeasured optimization claims do not establish runtime impact.
+
+<a id="review-1"></a>
+
+### Claim 1 — Feature-gated `#[global_allocator]` in a library crate — process-wide side effect
+
+Status: `confirmed-open`. Current risk: `low`.
+
+Enabling peak_mem still places a global allocator in the library. Both current dependency edges are dev-only, but linked fixture-only benches inherit the allocator too. No existing production dependency edge or secret-handling use was found.
+
+Evidence: [crates/shamir-bench-utils/src/peak_mem.rs:39](../../../../../crates/shamir-bench-utils/src/peak_mem.rs#L39); [crates/shamir-engine/Cargo.toml:107](../../../../../crates/shamir-engine/Cargo.toml#L107); [crates/shamir-index/Cargo.toml:64](../../../../../crates/shamir-index/Cargo.toml#L64); [crates/shamir-engine/benches/filtered_vector_search.rs:25](../../../../../crates/shamir-engine/benches/filtered_vector_search.rs#L25).
+
+Grouping/duplicate: `SUMMARY.md#5.1`. This row is not another independent defect.
+
+## Corrections and qualified non-findings
+
+- Own src contains no unsafe/static mut, auth/HMAC/SCRAM/TLS, file/network/process/environment operations, or secret material; this does not audit dependency implementations.
+- Lcg is explicitly non-cryptographic and has only fixture uses. Current ordinary production dependency paths do not include this crate; that is a current graph fact, not an architectural prohibition on future regular dependencies.
+- The checksummed peak_alloc 0.3.0 lockfile pin is confirmed at Cargo.lock:2396; pinning is not evidence of dependency behavioral or memory-safety guarantees.
+- A bench-local allocator macro/snippet is only a design option: measurement helpers must access that same allocator's counters.
+- No compiler diagnostic number or quantitative allocator-overhead claim was verified.
+
+---
+
+<details>
+<summary>Historical report — preserved for provenance; not current status or instructions</summary>
+
 # shamir-bench-utils -- Security & crypto boundary
 
 ## Summary
@@ -43,3 +85,5 @@ process-global allocator from a *library* crate.
   only" warning.
 
 No other findings for this theme.
+
+</details>

@@ -1,3 +1,75 @@
+<!-- revalidation:2026-10-08 source:92ad58266bf57ddea1fa3c8a47affba1a3a9a096 -->
+# shamir-numa — security-crypto revalidation
+
+Source snapshot: `92ad58266bf57ddea1fa3c8a47affba1a3a9a096`. Revalidated 2026-10-08 by read-only XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run; no source fix is part of this update. Test registration/assertions are evidence of an oracle, not proof of a passing run.
+
+This section is authoritative for current status. Original titles/IDs are retained for traceability; a refuted title is not a current assertion. The collapsed historical report below is superseded, including its counts, severity, scenarios and fix instructions. Plan IDs preserve historical numbering, not a current release mandate. [Workspace methodology and status definitions](../SUMMARY.md#status-definitions).
+
+Unbounded parser expansion remains a conditional embedding DoS risk, not an established network vulnerability. Discovery diagnostic loss remains. The exact CPU_SET panic claim is unverified against the resolved libc source.
+
+## Current claim decisions
+
+| Claim decisions | Open | Source-fixed | Partial | Refuted | Unverified | N/A |
+|---:|---:|---:|---:|---:|---:|---:|
+| 3 | 3 | 0 | 0 | 0 | 0 | 0 |
+
+These are decisions on report claims, including repeated roots, bundled observations and non-findings—not a unique-bug census. Closed/N/A rows have no current risk; unverified risk is provisional. Pure style and unmeasured optimization claims do not establish runtime impact.
+
+## Parent acceptance refinements
+
+- Exact Linux libc helper source proves checked-index bounds panic; remove contradictory glibc/musl C-macro outcomes.
+
+<a id="review-1"></a>
+
+### Claim 1 — `CPU_SET` fed sysfs CPU indices with no `CPU_SETSIZE` bound -- panic instead of `Err` on >=1024-CPU hosts
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+Parent inspection of checksummed libc 0.2.186 resolves the Linux helper: cpu_set_t has 1024 storage bits, and CPU_SET indexes bits[cpu / word_bits] with Rust array indexing. A sysfs CPU ID >=1024 therefore reaches bounds panic, not a C-macro out-of-bounds write or silent truncation. The unchecked source route remains a Medium public Linux API defect; no production worker-pinning route or tested target failure was established.
+
+Evidence: [crates/shamir-numa/src/linux.rs:129](../../../../../crates/shamir-numa/src/linux.rs#L129); [crates/shamir-numa/src/linux.rs:143](../../../../../crates/shamir-numa/src/linux.rs#L143); [crates/shamir-numa/tests/linux_topology.rs:17](../../../../../crates/shamir-numa/tests/linux_topology.rs#L17); [Cargo.lock:1923](../../../../../Cargo.lock#L1923).
+
+Pinned dependency evidence: [libc 0.2.186, src/unix/linux_like/linux_l4re_shared.rs:1531](https://docs.rs/crate/libc/0.2.186/source/src/unix/linux_like/linux_l4re_shared.rs).
+
+Grouping/duplicate: `error-handling-lifecycle.md#3`. This row is not another independent defect.
+
+<a id="review-2"></a>
+
+### Claim 2 — `parse_cpulist` expands ranges with no cap -- infallible public API aborts the process on large well-formed input
+
+Status: `confirmed-open`. Current risk: `low`.
+
+The public parser materializes unconstrained ascending ranges. A caller accepting hostile strings can cause excessive allocation; existing production feed points are trusted sysfs, not network/config inputs.
+
+Evidence: [crates/shamir-numa/src/cpulist.rs:29](../../../../../crates/shamir-numa/src/cpulist.rs#L29); [crates/shamir-numa/src/cpulist.rs:40](../../../../../crates/shamir-numa/src/cpulist.rs#L40); [crates/shamir-numa/src/linux.rs:57](../../../../../crates/shamir-numa/src/linux.rs#L57); [crates/shamir-numa/src/linux.rs:76](../../../../../crates/shamir-numa/src/linux.rs#L76).
+
+Grouping/duplicate: `error-handling-lifecycle.md#1`. This row is not another independent defect.
+
+<a id="review-3"></a>
+
+### Claim 3 — `probe` swallows all per-node cpulist read errors into an empty node -- later surfaces as a bare `EINVAL`
+
+Status: `confirmed-open`. Current risk: `nit`.
+
+Err(_) still converts every per-node read failure to an empty CPU list, losing the source error before affinity-mask construction. Discovery provenance is absent from later pin failures; no privilege escalation is established.
+
+Evidence: [crates/shamir-numa/src/linux.rs:75](../../../../../crates/shamir-numa/src/linux.rs#L75); [crates/shamir-numa/src/linux.rs:78](../../../../../crates/shamir-numa/src/linux.rs#L78); [crates/shamir-numa/src/linux.rs:142](../../../../../crates/shamir-numa/src/linux.rs#L142); [crates/shamir-numa/src/linux.rs:153](../../../../../crates/shamir-numa/src/linux.rs#L153).
+
+Grouping/duplicate: `error-handling-lifecycle.md#2`. This row is not another independent defect.
+
+## Corrections and qualified non-findings
+
+- Confirmed scoped non-findings: no authentication, cryptography, secrets, networking, command execution, or environment reads in this crate. Dynamic sysfs path segments are parsed usize values, not arbitrary path text.
+- Numeric CPU keys from trusted discovery do not establish attacker-controlled HashDoS or secret-comparison timing exposure.
+- An unsafe block containing CPU_SET does not establish memory corruption. C musl/glibc macro behavior must not be attributed to Rust helpers.
+- Panic does not necessarily abort the process under an unwinding profile; exact helper behavior and deployment panic strategy were not demonstrated.
+- The alleged startup worker-pinning scenario is hypothetical: the repository-wide caller search found no production use of this crate's pin API.
+
+---
+
+<details>
+<summary>Historical report — preserved for provenance; not current status or instructions</summary>
+
 # shamir-numa -- Security & crypto boundary
 
 ## Summary
@@ -26,3 +98,5 @@ This crate exposes no authentication, crypto, or network surface at all -- no HM
 - **Issue:** Every error from reading a node's cpulist file (permission denied under a hardened container, EIO, ...) is collapsed into "node exists but owns zero CPUs". `pin_current_thread_to_node` on such a node then hands `sched_setaffinity` an all-zero mask, which the kernel rejects with `EINVAL`; the caller sees `AffinityError::Syscall(EINVAL)` with no hint that discovery silently degraded. No memory-safety or privilege impact, but the fail-soft mapping destroys the diagnostic trail on the crate's only external input surface.
 - **Failure scenario:** Container where `/sys/devices/system/node/node1/cpulist` is unreadable: topology reports node 1 with 0 CPUs; a later pin to node 1 fails with a misleading `EINVAL` instead of pointing at the unreadable sysfs file.
 - **Suggested fix:** Map only `Err(NotFound)` to "node with an empty CPU list" (matching the documented container/NUMA-less case); propagate other error kinds (or at least keep them distinguishable) so a pin failure traces back to the unreadable file rather than a syscall misuse.
+
+</details>

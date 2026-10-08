@@ -1,3 +1,141 @@
+<!-- revalidation:2026-10-08 source:92ad58266bf57ddea1fa3c8a47affba1a3a9a096 -->
+# shamir-transport-tcp — correctness-tdd revalidation
+
+Source snapshot: `92ad58266bf57ddea1fa3c8a47affba1a3a9a096`. Revalidated 2026-10-08 by read-only XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run; no source fix is part of this update. Test registration/assertions are evidence of an oracle, not proof of a passing run.
+
+This section is authoritative for current status. Original titles/IDs are retained for traceability; a refuted title is not a current assertion. The collapsed historical report below is superseded, including its counts, severity, scenarios and fix instructions. Plan IDs preserve historical numbering, not a current release mandate. [Workspace methodology and status definitions](../SUMMARY.md#status-definitions).
+
+Framing and TLS boundary findings mostly remain open. The unsafe pooled-read safety endorsement is incorrect; missing provider installation alone does not cause the claimed panic with the current default provider.
+
+## Current claim decisions
+
+| Claim decisions | Open | Source-fixed | Partial | Refuted | Unverified | N/A |
+|---:|---:|---:|---:|---:|---:|---:|
+| 9 | 8 | 0 | 0 | 1 | 0 | 0 |
+
+These are decisions on report claims, including repeated roots, bundled observations and non-findings—not a unique-bug census. Closed/N/A rows have no current risk; unverified risk is provisional. Pure style and unmeasured optimization claims do not establish runtime impact.
+
+<a id="review-1"></a>
+
+### Claim 1 — Zero-length payload write silently emits the close sentinel; module doc claims empty frames are expressible
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+All three data writers still accept empty payloads; both readers interpret length zero exclusively as PeerClose. The contradictory module documentation remains.
+
+Evidence: [crates/shamir-transport-tcp/src/framing.rs:8](../../../../../crates/shamir-transport-tcp/src/framing.rs#L8); [crates/shamir-transport-tcp/src/framing.rs:53](../../../../../crates/shamir-transport-tcp/src/framing.rs#L53); [crates/shamir-transport-tcp/src/framing.rs:153](../../../../../crates/shamir-transport-tcp/src/framing.rs#L153); [crates/shamir-transport-tcp/src/framing.rs:192](../../../../../crates/shamir-transport-tcp/src/framing.rs#L192); [crates/shamir-transport-tcp/src/framing.rs:250](../../../../../crates/shamir-transport-tcp/src/framing.rs#L250).
+
+Grouping/duplicate: `SUMMARY.md#1.1`. This row is not another independent defect.
+
+<a id="review-2"></a>
+
+### Claim 2 — `tls.rs` has zero unit tests; all error branches unexercised (happy-path-only e2e coverage)
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+The unit-test manifest still registers only listener tests. Reviewed integration and server lifecycle tests do not pin malformed PEM, absent PKCS8, certificate/key mismatch or incomplete-handshake exporter failures.
+
+Evidence: [crates/shamir-transport-tcp/src/tests/mod.rs:1](../../../../../crates/shamir-transport-tcp/src/tests/mod.rs#L1); [crates/shamir-transport-tcp/src/tls.rs:45](../../../../../crates/shamir-transport-tcp/src/tls.rs#L45); [crates/shamir-transport-tcp/tests/handshake_e2e.rs:131](../../../../../crates/shamir-transport-tcp/tests/handshake_e2e.rs#L131); [crates/shamir-server/src/tests/tls_tests.rs:33](../../../../../crates/shamir-server/src/tests/tls_tests.rs#L33).
+
+Grouping/duplicate: `SUMMARY.md#1.2`. This row is not another independent defect.
+
+<a id="review-3"></a>
+
+### Claim 3 — `write_frame_prereserved` reports buffers shorter than 4 bytes as `TooLarge { actual: 0 }` — wrong error semantics, enshrined by test, worked around downstream
+
+Status: `confirmed-open`. Current risk: `low`.
+
+Short buffers and prefix/payload mismatches still return TooLarge. Registered integration tests assert that misleading variant, and the TCP adapter forwards it unchanged.
+
+Evidence: [crates/shamir-transport-tcp/src/framing.rs:241](../../../../../crates/shamir-transport-tcp/src/framing.rs#L241); [crates/shamir-transport-tcp/src/framing.rs:250](../../../../../crates/shamir-transport-tcp/src/framing.rs#L250); [crates/shamir-transport-tcp/tests/framing.rs:315](../../../../../crates/shamir-transport-tcp/tests/framing.rs#L315); [crates/shamir-server/src/framer.rs:317](../../../../../crates/shamir-server/src/framer.rs#L317).
+
+Grouping/duplicate: `SUMMARY.md#6.1`. This row is not another independent defect.
+
+<a id="review-4"></a>
+
+### Claim 4 — Write-side frame cap is hardcoded to `MAX_FRAME_SIZE_DEFAULT`; read side takes a caller-supplied max
+
+Status: `confirmed-open`. Current risk: `low`.
+
+Reader limits remain parameterized while every writer uses 16 MiB. This is an API limitation, not proof of a currently implemented negotiated-limit violation; the specification currently defines phase-specific fixed limits.
+
+Evidence: [crates/shamir-transport-tcp/src/framing.rs:47](../../../../../crates/shamir-transport-tcp/src/framing.rs#L47); [crates/shamir-transport-tcp/src/framing.rs:153](../../../../../crates/shamir-transport-tcp/src/framing.rs#L153); [crates/shamir-transport-tcp/src/framing.rs:192](../../../../../crates/shamir-transport-tcp/src/framing.rs#L192); [crates/shamir-transport-tcp/src/framing.rs:250](../../../../../crates/shamir-transport-tcp/src/framing.rs#L250); [docs/guide-docs/client-server-protocol-spec/TRANSPORT_TCP.md:29](../../../../../docs/guide-docs/client-server-protocol-spec/TRANSPORT_TCP.md#L29).
+
+Grouping/duplicate: `SUMMARY.md#5.1`. This row is not another independent defect.
+
+<a id="review-5"></a>
+
+### Claim 5 — Test name promises TLS-bind-on-unspecified coverage the body deliberately doesn't deliver
+
+Status: `confirmed-open`. Current risk: `low`.
+
+The test still binds 127.0.0.1 despite its unspecified-address name. Predicate tests cover unspecified TLS addresses but cannot detect a regression confined to actual binding.
+
+Evidence: [crates/shamir-transport-tcp/src/tests/listener_tests.rs:58](../../../../../crates/shamir-transport-tcp/src/tests/listener_tests.rs#L58); [crates/shamir-transport-tcp/src/tests/listener_tests.rs:101](../../../../../crates/shamir-transport-tcp/src/tests/listener_tests.rs#L101).
+
+Grouping/duplicate: `SUMMARY.md#1.3`. This row is not another independent defect.
+
+<a id="review-6"></a>
+
+### Claim 6 — TLS config constructors panic if no process-level rustls `CryptoProvider` is installed; `make_client_config_no_ca`'s infallible signature hides it
+
+Status: `refuted`. Current risk: —.
+
+The unconditional missing-installation claim is false: pinned rustls 0.23.37 automatically installs an unambiguous built-in provider, and current defaults select AWS-LC. Conditional ambiguous/custom/incompatible-provider panic paths remain open under SUMMARY 6.3.
+
+Evidence: [crates/shamir-transport-tcp/Cargo.toml:18](../../../../../crates/shamir-transport-tcp/Cargo.toml#L18); [Cargo.lock:3048](../../../../../Cargo.lock#L3048); [crates/shamir-transport-tcp/src/tls.rs:54](../../../../../crates/shamir-transport-tcp/src/tls.rs#L54); [crates/shamir-transport-tcp/src/tls.rs:64](../../../../../crates/shamir-transport-tcp/src/tls.rs#L64).
+
+Grouping/duplicate: `SUMMARY.md#6.3`. This row is not another independent defect.
+
+<a id="review-7"></a>
+
+### Claim 7 — Write-path boundary branches and EOF-vs-close distinction untested
+
+Status: `confirmed-open`. Current risk: `low`.
+
+Oversized writer and IPv4-mapped-address cases remain absent. Truncated-payload EOF already has a test, but it checks only is_err plus buffer clearing, not Io(UnexpectedEof) versus PeerClose.
+
+Evidence: [crates/shamir-transport-tcp/tests/framing.rs:226](../../../../../crates/shamir-transport-tcp/tests/framing.rs#L226); [crates/shamir-transport-tcp/tests/framing.rs:240](../../../../../crates/shamir-transport-tcp/tests/framing.rs#L240); [crates/shamir-transport-tcp/tests/framing.rs:309](../../../../../crates/shamir-transport-tcp/tests/framing.rs#L309); [crates/shamir-transport-tcp/src/tests/listener_tests.rs:14](../../../../../crates/shamir-transport-tcp/src/tests/listener_tests.rs#L14).
+
+Grouping/duplicate: `SUMMARY.md#1.4`. This row is not another independent defect.
+
+<a id="review-8"></a>
+
+### Claim 8 — `Box<dyn Error + Send + Sync>` as the public error surface of `tls.rs` constructors
+
+Status: `confirmed-open`. Current risk: `nit`.
+
+Both constructors still expose boxed errors and the missing-key condition remains string-based. Typed exhaustive matching is absent, although boxed concrete errors can be downcast.
+
+Evidence: [crates/shamir-transport-tcp/src/tls.rs:30](../../../../../crates/shamir-transport-tcp/src/tls.rs#L30); [crates/shamir-transport-tcp/src/tls.rs:44](../../../../../crates/shamir-transport-tcp/src/tls.rs#L44); [crates/shamir-transport-tcp/src/tls.rs:50](../../../../../crates/shamir-transport-tcp/src/tls.rs#L50).
+
+Grouping/duplicate: `SUMMARY.md#6.2`. This row is not another independent defect.
+
+<a id="review-9"></a>
+
+### Claim 9 — Redundant `#[allow(dead_code)]` on `pub` consts; unit tests centralized in `src/tests/` instead of per-module
+
+Status: `confirmed-open`. Current risk: `nit`.
+
+Unused public loopback constants retain redundant allowances. Unit tests remain centralized with only listener_tests registered; framing logic tests remain integration tests.
+
+Evidence: [crates/shamir-transport-tcp/src/listener.rs:96](../../../../../crates/shamir-transport-tcp/src/listener.rs#L96); [crates/shamir-transport-tcp/src/tests/mod.rs:1](../../../../../crates/shamir-transport-tcp/src/tests/mod.rs#L1); [crates/shamir-transport-tcp/src/lib.rs:13](../../../../../crates/shamir-transport-tcp/src/lib.rs#L13); [crates/shamir-transport-tcp/tests/framing.rs:203](../../../../../crates/shamir-transport-tcp/tests/framing.rs#L203).
+
+Grouping/duplicate: `SUMMARY.md#7.3, SUMMARY.md#7.4`. This row is not another independent defect.
+
+## Corrections and qualified non-findings
+
+- Remove the assertion that read_frame_into is correctly guarded and Miri-vetted: initialization is claimed before bytes are written, and cancellation bypasses cleanup. Tests named Miri-safe are not proof of soundness or verified execution.
+- Finding 6 overstates provider initialization requirements; automatic default installation is source-proven for the pinned version.
+- Finding 7 must acknowledge existing truncated-payload EOF cleanup coverage while retaining the missing error-kind assertion.
+- Cargo integration tests are discoverable, but the default lib-only test entry point excludes framing and TLS integration files; see scripts/test.sh:177.
+- Boxed errors do not prohibit programmatic inspection: downcasting is possible. The remaining issue is the missing typed public contract.
+
+---
+
+<details>
+<summary>Historical report — preserved for provenance; not current status or instructions</summary>
+
 # shamir-transport-tcp -- Correctness & TDD-coverage
 
 ## Summary
@@ -74,3 +212,5 @@ The crate is small, logically tight, and well-tested for its happy paths: framin
 - **Severity:** nit
 - **Issue:** The `#[allow(dead_code)]` attributes on `pub const` items in a `pub mod` are no-ops (public items are never dead-code-flagged) — likely leftovers from an iteration where they were private, suggesting they never found their consumer. Separately, CLAUDE.md's test-organisation section specifies "one `tests/` directory per module" (`src/<module>/tests/`); this crate centralizes all unit tests in a crate-level `src/tests/` (manifest-only `mod.rs` and correct wiring in `lib.rs:13-14` are otherwise fully compliant, and no inline `#[cfg(test)]` blocks exist — good).
 - **Suggested fix:** Delete the redundant allows or give the consts a real consumer; when the module set grows, split `src/tests/` into per-module `tests/` dirs to match the documented layout.
+
+</details>

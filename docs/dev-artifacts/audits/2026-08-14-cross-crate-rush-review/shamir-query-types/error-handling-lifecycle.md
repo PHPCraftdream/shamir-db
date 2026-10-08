@@ -1,3 +1,142 @@
+<!-- revalidation:2026-10-08 source:92ad58266bf57ddea1fa3c8a47affba1a3a9a096 -->
+# shamir-query-types — error-handling-lifecycle revalidation
+
+Source snapshot: `92ad58266bf57ddea1fa3c8a47affba1a3a9a096`. Revalidated 2026-10-08 by read-only XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run; no source fix is part of this update. Test registration/assertions are evidence of an oracle, not proof of a passing run.
+
+This section is authoritative for current status. Original titles/IDs are retained for traceability; a refuted title is not a current assertion. The collapsed historical report below is superseded, including its counts, severity, scenarios and fix instructions. Plan IDs preserve historical numbering, not a current release mandate. [Workspace methodology and status definitions](../SUMMARY.md#status-definitions).
+
+The crate still owns no I/O resources or task lifecycle and exposes no anyhow/Box<dyn Error> library errors. Recursive graph walks, Null fallback, pagination arithmetic, and local test gaps remain. Hidden FilterValue depth traversal is fixed; the HMAC expect complaint is refuted.
+
+## Current claim decisions
+
+| Claim decisions | Open | Source-fixed | Partial | Refuted | Unverified | N/A |
+|---:|---:|---:|---:|---:|---:|---:|
+| 9 | 5 | 1 | 0 | 2 | 1 | 0 |
+
+These are decisions on report claims, including repeated roots, bundled observations and non-findings—not a unique-bug census. Closed/N/A rows have no current risk; unverified risk is provisional. Pure style and unmeasured optimization claims do not establish runtime impact.
+
+## Parent acceptance refinements
+
+- The pinned MessagePack array visitor rejects unconsumed TableRef elements; local visitor omission alone is not acceptance proof.
+
+<a id="review-1"></a>
+
+### Claim 1 — Unbounded recursion in `detect_cycle` / `calculate_max_depth` — stack overflow aborts the server
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+Both graph algorithms still recurse, and TooDeep is checked only after complete depth calculation. The source proves unbounded traversal relative to a configurable query count, not the stated exact remote crash scenario; defaults and frame size constrain reachability.
+
+Evidence: [crates/shamir-query-types/src/batch/planner.rs:244](../../../../../crates/shamir-query-types/src/batch/planner.rs#L244); [crates/shamir-query-types/src/batch/planner.rs:671](../../../../../crates/shamir-query-types/src/batch/planner.rs#L671); [crates/shamir-query-types/src/batch/planner.rs:721](../../../../../crates/shamir-query-types/src/batch/planner.rs#L721); [crates/shamir-server/src/config.rs:424](../../../../../crates/shamir-server/src/config.rs#L424); [crates/shamir-server/src/db_handler/config.rs:33](../../../../../crates/shamir-server/src/db_handler/config.rs#L33).
+
+Grouping/duplicate: `security-crypto.md#2`. This row is not another independent defect.
+
+<a id="review-2"></a>
+
+### Claim 2 — `check_filter_depth` does not descend into `FilterValue` operands — doc claims `$cond` coverage it doesn't have
+
+Status: `fixed`. Current risk: —.
+
+The combined iterative stack now traverses every current operand-bearing Filter variant and recursive FilterValue shape; registered Array/Cond regressions detect the old omission.
+
+Evidence: [crates/shamir-query-types/src/filter/filter_enum.rs:239](../../../../../crates/shamir-query-types/src/filter/filter_enum.rs#L239); [crates/shamir-query-types/src/filter/filter_enum.rs:271](../../../../../crates/shamir-query-types/src/filter/filter_enum.rs#L271); [crates/shamir-query-types/src/filter/filter_enum.rs:321](../../../../../crates/shamir-query-types/src/filter/filter_enum.rs#L321); [crates/shamir-query-types/src/filter/tests/filter_enum_tests.rs:236](../../../../../crates/shamir-query-types/src/filter/tests/filter_enum_tests.rs#L236).
+
+Grouping/duplicate: `security-crypto.md#3`. This row is not another independent defect.
+
+<a id="review-3"></a>
+
+### Claim 3 — `From<QueryValue> for FilterValue` silently substitutes `Null` in release builds
+
+Status: `confirmed-open`. Current risk: `low`.
+
+The infallible conversion still has codec fallback followed by debug_assert!(false) and Null. An ordinary unsupported map reaches that branch: debug and release behavior differ. Existing literal-conversion tests cannot detect it.
+
+Evidence: [crates/shamir-query-types/src/filter/filter_value.rs:257](../../../../../crates/shamir-query-types/src/filter/filter_value.rs#L257); [crates/shamir-query-types/src/filter/filter_value.rs:270](../../../../../crates/shamir-query-types/src/filter/filter_value.rs#L270); [crates/shamir-query-types/src/filter/tests/filter_value_conv_tests.rs:163](../../../../../crates/shamir-query-types/src/filter/tests/filter_value_conv_tests.rs#L163).
+
+<a id="review-4"></a>
+
+### Claim 4 — Non-saturating arithmetic on client-controlled `u64` pagination fields
+
+Status: `confirmed-open`. Current risk: `low`.
+
+Unchecked multiplication and addition remain. Overflow can panic with checks or wrap without them; no saturation/validation patch or overflow regression is present.
+
+Evidence: [crates/shamir-query-types/src/read/limit.rs:180](../../../../../crates/shamir-query-types/src/read/limit.rs#L180); [crates/shamir-query-types/src/read/limit.rs:294](../../../../../crates/shamir-query-types/src/read/limit.rs#L294).
+
+Grouping/duplicate: `correctness-tdd.md#6`. This row is not another independent defect.
+
+<a id="review-5"></a>
+
+### Claim 5 — Missing in-crate error-path tests: headline planner errors, `QueryReference::parse`, non-finite float rejection
+
+Status: `confirmed-open`. Current risk: `low`.
+
+Local manifests still omit reference tests, and local tests do not exercise ordinary planner headline error paths or QueryRecord NaN/infinity rejection. ForEach's TooManyQueries has local coverage and must not be described as entirely untested.
+
+Evidence: [crates/shamir-query-types/src/batch/tests/mod.rs:1](../../../../../crates/shamir-query-types/src/batch/tests/mod.rs#L1); [crates/shamir-query-types/src/batch/tests/for_each_planner_tests.rs:252](../../../../../crates/shamir-query-types/src/batch/tests/for_each_planner_tests.rs#L252); [crates/shamir-query-types/src/read/query_record.rs:117](../../../../../crates/shamir-query-types/src/read/query_record.rs#L117); [crates/shamir-query-types/src/read/tests/query_record_tests.rs:258](../../../../../crates/shamir-query-types/src/read/tests/query_record_tests.rs#L258).
+
+Grouping/duplicate: `correctness-tdd.md#4`. This row is not another independent defect.
+
+<a id="review-6"></a>
+
+### Claim 6 — thiserror convention deviation: hand-rolled Display/Error impls and `Result<(), String>` public APIs
+
+Status: `confirmed-open`. Current risk: `low`.
+
+Manual error-enum implementations and String-returning validators persist, with no thiserror dependency or documented exception. This is convention/API debt; manual BatchError and ReferenceParseError remain typed and matchable.
+
+Evidence: [crates/shamir-query-types/src/batch/batch_error.rs:245](../../../../../crates/shamir-query-types/src/batch/batch_error.rs#L245); [crates/shamir-query-types/src/batch/reference.rs:243](../../../../../crates/shamir-query-types/src/batch/reference.rs#L243); [crates/shamir-query-types/src/filter/filter_enum.rs:239](../../../../../crates/shamir-query-types/src/filter/filter_enum.rs#L239); [crates/shamir-query-types/src/admin/types/retention.rs:40](../../../../../crates/shamir-query-types/src/admin/types/retention.rs#L40); [crates/shamir-query-types/Cargo.toml:9](../../../../../crates/shamir-query-types/Cargo.toml#L9).
+
+<a id="review-7"></a>
+
+### Claim 7 — `Pagination`'s `PartialEq` can panic via `key_bytes`' `expect`
+
+Status: `unverified`. Current risk: `nit` (provisional; not a confirmed defect).
+
+The expect remains and makes equality panic if encoding returns Err. The alleged encoder depth-limit error at approximately 1024 requires pinned rmp-serde encoder evidence, unavailable locally. No unconditional infallibility or exact failure threshold was established. The pinned serializer's depth field/setter is explicitly unused, so encoder DepthLimitExceeded is not an established trigger; other fallible allocation or Serialize paths require their own proof.
+
+Evidence: [crates/shamir-query-types/src/read/limit.rs:130](../../../../../crates/shamir-query-types/src/read/limit.rs#L130); [Cargo.lock:2949](../../../../../Cargo.lock#L2949).
+
+Pinned dependency evidence: [rmp-serde 1.3.1, src/encode.rs:147](https://docs.rs/crate/rmp-serde/1.3.1/source/src/encode.rs).
+
+<a id="review-8"></a>
+
+### Claim 8 — `expect` in HMAC tag compute/verify (acceptable, but undocumented-as-invariant)
+
+Status: `refuted`. Current risk: —.
+
+Both expect messages already state the invariant. Inspected hmac 0.12.1 new_from_slice returns Ok for arbitrary key lengths and hashes oversized keys rather than rejecting them. The proposed block-size explanation is incorrect; no runtime defect exists here.
+
+Evidence: [crates/shamir-query-types/src/hmac.rs:414](../../../../../crates/shamir-query-types/src/hmac.rs#L414); [crates/shamir-query-types/src/hmac.rs:428](../../../../../crates/shamir-query-types/src/hmac.rs#L428); [Cargo.lock:1638](../../../../../Cargo.lock#L1638); [Cargo.lock:1151](../../../../../Cargo.lock#L1151).
+
+<a id="review-9"></a>
+
+### Claim 9 — `TableRef` deserialization silently ignores trailing seq elements
+
+Status: `refuted`. Current risk: —.
+
+Parent pinned-source check refutes successful trailing-element acceptance: TableRef calls deserialize_any, and rmp-serde 1.3.1's array visitor checks the remaining SeqAccess count after visit_seq, returning LengthMismatch for unconsumed elements. Inspected serde buffered visitors also reject leftovers. The local visitor has no explicit check, but that omission is not this decode defect. A dedicated regression remains coverage debt.
+
+Evidence: [crates/shamir-query-types/src/table_ref.rs:71](../../../../../crates/shamir-query-types/src/table_ref.rs#L71); [Cargo.lock:2949](../../../../../Cargo.lock#L2949); [Cargo.lock:3204](../../../../../Cargo.lock#L3204).
+
+Pinned dependency evidence: [rmp-serde 1.3.1, src/decode.rs:566](https://docs.rs/crate/rmp-serde/1.3.1/source/src/decode.rs).
+
+Grouping/duplicate: `correctness-tdd.md#10`. This row is not another independent defect.
+
+## Corrections and qualified non-findings
+
+- The nesting walker is bounded recursion, not the claimed iterative reference implementation.
+- A specific 500000-entry request must also fit transport limits; the exact abort scenario was not proven.
+- Do not use unwrap_or_default for equality encoding failures: two failures could become equal empty buffers. A structural comparator avoids both encoding and this oracle problem.
+- HMAC accepts arbitrary key lengths; keys exceeding SHA-256's block size are hashed, not rejected.
+- The claim of only three production unwrap/expect sites overlooks invariant unwraps in reference parsing.
+- Manual typed Error implementations are not themselves evidence of faulty runtime error classification.
+
+---
+
+<details>
+<summary>Historical report — preserved for provenance; not current status or instructions</summary>
+
 # shamir-query-types -- Error handling & resource lifecycle
 
 ## Summary
@@ -66,3 +205,5 @@ This is a pure-DTO crate, so there is no I/O resource lifecycle to manage (no fi
 - **Severity:** nit
 - **Issue:** `visit_seq` validates the minimum length (2) but never checks that the sequence ended, so `["repo", "table", "garbage"]` deserializes successfully with the third element dropped — a lenient-accept of malformed input in a crate that is otherwise strict about rejecting ambiguous wire shapes (cf. `de_binary_strict`, `AfterPathIgnored`).
 - **Suggested fix:** Read one more element and error (`invalid_length(2, &"exactly 2"`) if it is `Some`, mirroring the existing minimum-length errors.
+
+</details>

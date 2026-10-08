@@ -1,3 +1,142 @@
+<!-- revalidation:2026-10-08 source:92ad58266bf57ddea1fa3c8a47affba1a3a9a096 -->
+# shamir-engine — correctness-tdd revalidation
+
+Source snapshot: `92ad58266bf57ddea1fa3c8a47affba1a3a9a096`. Revalidated 2026-10-08 by read-only XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run; no source fix is part of this update. Test registration/assertions are evidence of an oracle, not proof of a passing run.
+
+This section is authoritative for current status. Original titles/IDs are retained for traceability; a refuted title is not a current assertion. The collapsed historical report below is superseded, including its counts, severity, scenarios and fix instructions. Plan IDs preserve historical numbering, not a current release mandate. [Workspace methodology and status definitions](../SUMMARY.md#status-definitions).
+
+Most mechanisms were repaired in the September campaign. All three pre-read error-swallowing sites remain open, and their proposed regression file is unregistered.
+
+## Current claim decisions
+
+| Claim decisions | Open | Source-fixed | Partial | Refuted | Unverified | N/A |
+|---:|---:|---:|---:|---:|---:|---:|
+| 10 | 1 | 8 | 0 | 0 | 1 | 0 |
+
+These are decisions on report claims, including repeated roots, bundled observations and non-findings—not a unique-bug census. Closed/N/A rows have no current risk; unverified risk is provisional. Pure style and unmeasured optimization claims do not establish runtime impact.
+
+<a id="review-1"></a>
+
+### Claim 1 — StoreChangelog::range_from streams the ENTIRE journal tail before applying limit
+
+Status: `fixed`. Current risk: —.
+
+Collection stops at limit, handles zero without reading, and propagates stream errors. Registered counting-store assertions detect whole-tail consumption.
+
+Evidence: [crates/shamir-engine/src/repo/changelog_store.rs:47](../../../../../crates/shamir-engine/src/repo/changelog_store.rs#L47); [crates/shamir-engine/src/repo/tests/changelog_store_tests.rs:113](../../../../../crates/shamir-engine/src/repo/tests/changelog_store_tests.rs#L113); [crates/shamir-engine/src/repo/tests/mod.rs:2](../../../../../crates/shamir-engine/src/repo/tests/mod.rs#L2).
+
+<a id="review-2"></a>
+
+### Claim 2 — Drainer Phase B silently drops Put/Delete for tables with no MvccStore — and its justification comment is false
+
+Status: `fixed`. Current risk: —.
+
+Missing registrations now resolve the table and write history or raw data; resolution/write failures prevent finalization. A registered test evicts the map entry and checks recovered data.
+
+Evidence: [crates/shamir-engine/src/tx/drainer.rs:599](../../../../../crates/shamir-engine/src/tx/drainer.rs#L599); [crates/shamir-engine/src/tx/drainer.rs:662](../../../../../crates/shamir-engine/src/tx/drainer.rs#L662); [crates/shamir-engine/src/tx/tests/drainer_tests.rs:371](../../../../../crates/shamir-engine/src/tx/tests/drainer_tests.rs#L371).
+
+<a id="review-3"></a>
+
+### Claim 3 — .ok() on write-path pre-reads swallows real I/O errors and mis-plans index/counter ops
+
+Status: `confirmed-open`. Current risk: `high`.
+
+All three .ok() conversions remain; genuine read/decode errors still select absent-row branches. The added regression file is not registered.
+
+Evidence: [crates/shamir-engine/src/table/table_manager_crud.rs:457](../../../../../crates/shamir-engine/src/table/table_manager_crud.rs#L457); [crates/shamir-engine/src/table/table_manager_crud.rs:537](../../../../../crates/shamir-engine/src/table/table_manager_crud.rs#L537); [crates/shamir-engine/src/table/table_manager_tx_ops.rs:1106](../../../../../crates/shamir-engine/src/table/table_manager_tx_ops.rs#L1106); [crates/shamir-engine/src/table/tests/mod.rs:1](../../../../../crates/shamir-engine/src/table/tests/mod.rs#L1).
+
+Grouping/duplicate: `error-handling-lifecycle.md#1`. This row is not another independent defect.
+
+<a id="review-4"></a>
+
+### Claim 4 — GroupCommit: a panicking leader strands leader_busy = true forever
+
+Status: `fixed`. Current risk: —.
+
+catch_unwind covers closure invocation and future polling; notification and leadership release follow. Registered assertions check settlement and a successful subsequent flush.
+
+Evidence: [crates/shamir-engine/src/repo/group_commit/group_commit.rs:137](../../../../../crates/shamir-engine/src/repo/group_commit/group_commit.rs#L137); [crates/shamir-engine/src/repo/group_commit/group_commit.rs:161](../../../../../crates/shamir-engine/src/repo/group_commit/group_commit.rs#L161); [crates/shamir-engine/src/repo/group_commit/tests/mod.rs:3](../../../../../crates/shamir-engine/src/repo/group_commit/tests/mod.rs#L3).
+
+<a id="review-5"></a>
+
+### Claim 5 — rederive_stale_value_ops_post_stage is quadratic in staged ops (O(R×W) per commit)
+
+Status: `fixed`. Current risk: —.
+
+Dedup maps/sets are built once per table and incrementally updated; row-level lookups no longer rebuild or scan the whole index write-set.
+
+Evidence: [crates/shamir-engine/src/tx/pre_commit.rs:2062](../../../../../crates/shamir-engine/src/tx/pre_commit.rs#L2062); [crates/shamir-engine/src/tx/pre_commit.rs:2152](../../../../../crates/shamir-engine/src/tx/pre_commit.rs#L2152); [crates/shamir-engine/src/tx/pre_commit.rs:2279](../../../../../crates/shamir-engine/src/tx/pre_commit.rs#L2279).
+
+Grouping/duplicate: `performance-hotpath.md#1`. This row is not another independent defect.
+
+<a id="review-6"></a>
+
+### Claim 6 — Stale doc asserts a footprint-ordering invariant the AsyncIndex path no longer has
+
+Status: `fixed`. Current risk: —.
+
+The documentation now identifies pre-publication footprint recording as shared and retains only two genuine divergence axes.
+
+Evidence: [crates/shamir-engine/src/tx/finalize.rs:21](../../../../../crates/shamir-engine/src/tx/finalize.rs#L21); [crates/shamir-engine/src/tx/commit.rs:765](../../../../../crates/shamir-engine/src/tx/commit.rs#L765); [crates/shamir-engine/src/tx/commit.rs:772](../../../../../crates/shamir-engine/src/tx/commit.rs#L772).
+
+<a id="review-7"></a>
+
+### Claim 7 — Dead do-nothing loop and by-construction unwrap()s in SessionPermissions
+
+Status: `fixed`. Current risk: —.
+
+The empty loop is gone and data operations use a dedicated resource helper. RBAC scaffolding is excluded from default production exports.
+
+Evidence: [crates/shamir-engine/src/query/auth/session.rs:166](../../../../../crates/shamir-engine/src/query/auth/session.rs#L166); [crates/shamir-engine/src/query/auth/session.rs:231](../../../../../crates/shamir-engine/src/query/auth/session.rs#L231); [crates/shamir-engine/src/query/auth/mod.rs:19](../../../../../crates/shamir-engine/src/query/auth/mod.rs#L19).
+
+Grouping/duplicate: `security-crypto.md#7`. This row is not another independent defect.
+
+<a id="review-8"></a>
+
+### Claim 8 — Two implementation files embed inline cfg(test) mod tests
+
+Status: `fixed`. Current risk: —.
+
+Both ordinary test modules were moved into existing test directories and registered. The separately gated loom model remains intentionally inline.
+
+Evidence: [crates/shamir-engine/src/table/tests/mod.rs:98](../../../../../crates/shamir-engine/src/table/tests/mod.rs#L98); [crates/shamir-engine/src/query/read/tests/mod.rs:4](../../../../../crates/shamir-engine/src/query/read/tests/mod.rs#L4); [crates/shamir-engine/src/table/writer_drain_barrier.rs:469](../../../../../crates/shamir-engine/src/table/writer_drain_barrier.rs#L469).
+
+Grouping/duplicate: `style-claude-md.md#3`. This row is not another independent defect.
+
+<a id="review-9"></a>
+
+### Claim 9 — RecordCounter::persist dirty-flag race can drop the last persist trigger
+
+Status: `fixed`. Current risk: —.
+
+The dirty boolean was removed; persistence compares cache with the exact last-written value, preserving visibility of racing increments.
+
+Evidence: [crates/shamir-engine/src/table/record_counter.rs:169](../../../../../crates/shamir-engine/src/table/record_counter.rs#L169); [crates/shamir-engine/src/table/record_counter.rs:187](../../../../../crates/shamir-engine/src/table/record_counter.rs#L187); [crates/shamir-engine/src/table/tests/record_counter_tests.rs:337](../../../../../crates/shamir-engine/src/table/tests/record_counter_tests.rs#L337).
+
+Grouping/duplicate: `concurrency-lockfree.md#3`. This row is not another independent defect.
+
+<a id="review-coverage-verdict-tdd-lens"></a>
+
+### Claim Coverage verdict (TDD lens) — No vacuous tests; the remaining gaps align exactly with the findings
+
+Status: `unverified`. Current risk: —.
+
+Drainer and leader-panic tests are now registered. Pre-read tests remain unreachable; blanket non-vacuity is not established. No tests were executed.
+
+Evidence: [crates/shamir-engine/src/tx/tests/drainer_tests.rs:371](../../../../../crates/shamir-engine/src/tx/tests/drainer_tests.rs#L371); [crates/shamir-engine/src/repo/group_commit/tests/mod.rs:3](../../../../../crates/shamir-engine/src/repo/group_commit/tests/mod.rs#L3); [crates/shamir-engine/src/table/tests/mod.rs:1](../../../../../crates/shamir-engine/src/table/tests/mod.rs#L1).
+
+## Corrections and qualified non-findings
+
+- Do not describe the crate as unchanged since August: 6c286cc9 and d2a8a0f6 changed it on September 3.
+- The missing-MVCC test preserves the table while removing its registration; actual DROP also removes catalog/token state. Intentional disposal of a dropped table is not independently proof of permanent loss of a retained table.
+- The original table_ref unwraps were protected by the matched enum variants, not an arbitrary runtime assumption.
+- Inline-test placement is structural debt, not a runtime medium-severity defect.
+
+---
+
+<details>
+<summary>Historical report — preserved for provenance; not current status or instructions</summary>
+
 # shamir-engine -- Correctness & TDD-coverage
 
 ## Summary
@@ -68,3 +207,5 @@ The crate's commit pipeline, drainer, and write paths are unusually well-defende
 ---
 
 **Coverage verdict (TDD lens).** No vacuous tests were found in the current suite; the discipline is demonstrably strong (issue-keyed regression tests, one-shot pause seams with `reached`/`armed` handshakes, `nextest`-process-isolation rationale, and honest self-corrections where a review found a tautological assertion — the F-84 loom-model fixup and the #1003 vacuous-hook fixup are documented in-code). The gaps that remain align exactly with the findings above: no test drives `drain_step` with a data op against a table lacking an `MvccStore` (Finding 2), no test covers a panicking group-commit leader (Finding 4), and no test asserts that a transient pre-read error on `set`/`update_tx`/`delete` surfaces as an error rather than an insert-shaped plan (Finding 3) — each would be a natural Red test under CLAUDE.md's Red/Green/Refactor protocol.
+
+</details>

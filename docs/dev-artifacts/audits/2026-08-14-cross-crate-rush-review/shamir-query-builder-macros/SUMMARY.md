@@ -1,3 +1,451 @@
+<!-- revalidation:2026-10-08 source:92ad58266bf57ddea1fa3c8a47affba1a3a9a096 -->
+# shamir-query-builder-macros — SUMMARY revalidation
+
+Source snapshot: `92ad58266bf57ddea1fa3c8a47affba1a3a9a096`. Revalidated 2026-10-08 by read-only XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run; no source fix is part of this update. Test registration/assertions are evidence of an oracle, not proof of a passing run.
+
+This section is authoritative for current status. Original titles/IDs are retained for traceability; a refuted title is not a current assertion. The collapsed historical report below is superseded, including its counts, severity, scenarios and fix instructions. Plan IDs preserve historical numbering, not a current release mandate. [Workspace methodology and status definitions](../SUMMARY.md#status-definitions).
+
+All consolidated rows and eight plan items remain evaluated at HEAD. The synthesis correctly rejects silent malformed-group truncation, but overstates test-gap/import severity, whitelist test absence, compiler-backend performance proof and deep-input abort proof. No macro-source or consumer-macro-test remediation has landed since the original review-document commit.
+
+## Current claim decisions
+
+| Claim decisions | Open | Source-fixed | Partial | Refuted | Unverified | N/A |
+|---:|---:|---:|---:|---:|---:|---:|
+| 28 | 23 | 0 | 0 | 0 | 3 | 2 |
+
+These are decisions on report claims, including repeated roots, bundled observations and non-findings—not a unique-bug census. Closed/N/A rows have no current risk; unverified risk is provisional. Pure style and unmeasured optimization claims do not establish runtime impact.
+
+## Parent acceptance refinements
+
+- Do not count deliberately supported bulk update as a broken authorization or validation guarantee.
+
+<a id="review-1-1"></a>
+
+### Claim 1.1 — Missing sub-stream exhaustion checks: claimed silent token-drop in doc maps / call args / select-fn args does not occur under syn 2.0.114 — residual issue is diagnostic quality + implicit reliance on syn internals
+
+Status: `confirmed-open`. Current risk: `low`.
+
+The correction is source-proven: syn 2.0.114 rejects leftover scoped tokens before emission. Local exhaustion diagnostics and rejection fixtures are still absent. Only this residual diagnostics/coverage concern remains open.
+
+Evidence: [Cargo.lock:4024](../../../../../Cargo.lock#L4024); [crates/shamir-query-builder-macros/src/query_parse.rs:574](../../../../../crates/shamir-query-builder-macros/src/query_parse.rs#L574); [crates/shamir-query-builder-macros/src/query_parse.rs:687](../../../../../crates/shamir-query-builder-macros/src/query_parse.rs#L687); [crates/shamir-query-builder-macros/src/query_parse.rs:1014](../../../../../crates/shamir-query-builder-macros/src/query_parse.rs#L1014).
+
+<a id="review-1-2"></a>
+
+### Claim 1.2 — `q!(call ...)` hardcodes `repo: "main"` with no grammar to override it
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+Call grammar still has no repository component and emission pins main. That value reaches the function context, but actor/function authorization remains enforced. Existing Batch::call_in_repo avoids the need for raw DTO construction.
+
+Evidence: [crates/shamir-query-builder-macros/src/query_parse.rs:673](../../../../../crates/shamir-query-builder-macros/src/query_parse.rs#L673); [crates/shamir-query-builder-macros/src/query_parse.rs:917](../../../../../crates/shamir-query-builder-macros/src/query_parse.rs#L917); [crates/shamir-query-builder/src/batch/batch.rs:701](../../../../../crates/shamir-query-builder/src/batch/batch.rs#L701); [crates/shamir-db/src/shamir_db/shamir_db/function_management.rs:711](../../../../../crates/shamir-db/src/shamir_db/shamir_db/function_management.rs#L711).
+
+<a id="review-1-3"></a>
+
+### Claim 1.3 — Trailing comma in `group_by`/`select`/`order_by` lists rejected with a confusing clause-order error; `peek_clause_keyword_after_comma` contains dead branches
+
+Status: `confirmed-open`. Current risk: `low`.
+
+The comma is still left unconsumed when lookahead reports end-of-list, causing the generic final query error. The asc/desc conditions are reachable on malformed continuations, not literally dead.
+
+Evidence: [crates/shamir-query-builder-macros/src/query_parse.rs:252](../../../../../crates/shamir-query-builder-macros/src/query_parse.rs#L252); [crates/shamir-query-builder-macros/src/query_parse.rs:300](../../../../../crates/shamir-query-builder-macros/src/query_parse.rs#L300); [crates/shamir-query-builder-macros/src/query_parse.rs:566](../../../../../crates/shamir-query-builder-macros/src/query_parse.rs#L566).
+
+<a id="review-1-4"></a>
+
+### Claim 1.4 — Doc drift: "all 19 predicate calls" (there are 17); `vector_similarity_ef`/`_opts` unreachable from the DSL
+
+Status: `confirmed-open`. Current risk: `low`.
+
+Both the stale count and missing DSL vector-option forms remain. Public builder constructors expose the options; absence from the macro is feature-surface asymmetry, not inability to construct the filters safely.
+
+Evidence: [crates/shamir-query-builder-macros/src/lib.rs:129](../../../../../crates/shamir-query-builder-macros/src/lib.rs#L129); [crates/shamir-query-builder-macros/src/filter_lower.rs:299](../../../../../crates/shamir-query-builder-macros/src/filter_lower.rs#L299); [crates/shamir-query-builder/src/filter/leaf.rs:295](../../../../../crates/shamir-query-builder/src/filter/leaf.rs#L295); [crates/shamir-query-builder/src/filter/leaf.rs:313](../../../../../crates/shamir-query-builder/src/filter/leaf.rs#L313).
+
+<a id="review-2-1"></a>
+
+### Claim 2.1 — Quadratic token-stream accumulation in codegen loops
+
+Status: `unverified`. Current risk: `low` (provisional; not a confirmed defect).
+
+Same three unchanged re-quote loops as 4.1. Compiler-backend O(N²) is not established by the pinned quote/proc-macro2 source alone.
+
+Evidence: [crates/shamir-query-builder-macros/src/query_parse.rs:775](../../../../../crates/shamir-query-builder-macros/src/query_parse.rs#L775); [crates/shamir-query-builder-macros/src/query_parse.rs:809](../../../../../crates/shamir-query-builder-macros/src/query_parse.rs#L809); [crates/shamir-query-builder-macros/src/query_parse.rs:847](../../../../../crates/shamir-query-builder-macros/src/query_parse.rs#L847).
+
+Grouping/duplicate: `SUMMARY.md#4.1`. This row is not another independent defect.
+
+<a id="review-3-1"></a>
+
+### Claim 3.1 — `q!(call ...)` silently pins `repo: "main"` — the security framing
+
+Status: `confirmed-open`. Current risk: `low`.
+
+Repository-context limitation remains, but source shows function authorization and actor propagation. Wrong-context effects require an authorized procedure that uses that default; no authorization bypass is proved.
+
+Evidence: [crates/shamir-query-builder-macros/src/query_parse.rs:917](../../../../../crates/shamir-query-builder-macros/src/query_parse.rs#L917); [crates/shamir-db/src/shamir_db/execute/function_invoker.rs:47](../../../../../crates/shamir-db/src/shamir_db/execute/function_invoker.rs#L47); [crates/shamir-db/src/shamir_db/shamir_db/function_management.rs:711](../../../../../crates/shamir-db/src/shamir_db/shamir_db/function_management.rs#L711).
+
+Grouping/duplicate: `SUMMARY.md#1.2`. This row is not another independent defect.
+
+<a id="review-3-2"></a>
+
+### Claim 3.2 — `q!(update ...)` without `where` generates an unguarded bulk update (`delete` is guarded — asymmetry)
+
+Status: `not-applicable`. Current risk: —.
+
+WHERE-optional bulk update is explicitly documented, accepted by a registered consumer test, and authorized at execution. An accidental omission is a developer footgun, but this is not an input-validation or authorization defect under the current contract. Requiring an all opt-in is a product/API change, not an outstanding mandatory fix.
+
+Evidence: [crates/shamir-query-builder-macros/src/lib.rs:87](../../../../../crates/shamir-query-builder-macros/src/lib.rs#L87); [crates/shamir-query-builder-macros/src/query_parse.rs:614](../../../../../crates/shamir-query-builder-macros/src/query_parse.rs#L614); [crates/shamir-query-builder/src/macros/tests/q_macro_tests.rs:522](../../../../../crates/shamir-query-builder/src/macros/tests/q_macro_tests.rs#L522); [crates/shamir-engine/src/table/write_exec.rs:603](../../../../../crates/shamir-engine/src/table/write_exec.rs#L603).
+
+<a id="review-3-3"></a>
+
+### Claim 3.3 — The predicate-name whitelist invariant is unpinned by any test
+
+Status: `confirmed-open`. Current risk: `low`.
+
+Unknown-name/arity rejection has no negative pin. The broader claim is inaccurate: all 17 accepted predicates and dotted field outputs already have registered wire-equivalence tests.
+
+Evidence: [crates/shamir-query-builder-macros/src/filter_lower.rs:299](../../../../../crates/shamir-query-builder-macros/src/filter_lower.rs#L299); [crates/shamir-query-builder/src/macros/tests/filter_macro_tests.rs:194](../../../../../crates/shamir-query-builder/src/macros/tests/filter_macro_tests.rs#L194); [crates/shamir-query-builder/src/macros/tests/filter_macro_tests.rs:301](../../../../../crates/shamir-query-builder/src/macros/tests/filter_macro_tests.rs#L301); [crates/shamir-query-builder/src/macros/tests/filter_macro_tests.rs:383](../../../../../crates/shamir-query-builder/src/macros/tests/filter_macro_tests.rs#L383).
+
+Grouping/duplicate: `SUMMARY.md#6.1`. This row is not another independent defect.
+
+<a id="review-4-1"></a>
+
+### Claim 4.1 — Quadratic token re-interpolation when accumulating builder chains in loops
+
+Status: `unverified`. Current risk: `medium` (provisional; not a confirmed defect).
+
+Growing-prefix concatenations remain. Pinned quote clones and extends streams; fallback repeatedly traverses prior tokens, while compiler concatenation delegates to rustc. Universal deep-copy complexity and the stated latency/hang effects lack compiler-backend or experimental proof.
+
+Evidence: [crates/shamir-query-builder-macros/src/query_parse.rs:779](../../../../../crates/shamir-query-builder-macros/src/query_parse.rs#L779); [crates/shamir-query-builder-macros/src/query_parse.rs:810](../../../../../crates/shamir-query-builder-macros/src/query_parse.rs#L810); [crates/shamir-query-builder-macros/src/query_parse.rs:849](../../../../../crates/shamir-query-builder-macros/src/query_parse.rs#L849); [Cargo.lock:2538](../../../../../Cargo.lock#L2538); [Cargo.lock:2661](../../../../../Cargo.lock#L2661); [rust-toolchain.toml:15](../../../../../rust-toolchain.toml#L15).
+
+<a id="review-4-2"></a>
+
+### Claim 4.2 — Where-clause tokens captured and re-parsed — 2x token traffic plus a full copy of every group
+
+Status: `confirmed-open`. Current risk: `nit`.
+
+Token capture, encountered-group reconstruction and Expr reparsing remain. Extra processing is visible, but exact traffic/deep-copy multipliers and performance significance are unmeasured.
+
+Evidence: [crates/shamir-query-builder-macros/src/query_parse.rs:493](../../../../../crates/shamir-query-builder-macros/src/query_parse.rs#L493); [crates/shamir-query-builder-macros/src/query_parse.rs:508](../../../../../crates/shamir-query-builder-macros/src/query_parse.rs#L508); [crates/shamir-query-builder-macros/src/query_parse.rs:543](../../../../../crates/shamir-query-builder-macros/src/query_parse.rs#L543).
+
+<a id="review-4-3"></a>
+
+### Claim 4.3 — Per-predicate-call String/Vec micro-allocations in filter lowering
+
+Status: `confirmed-open`. Current risk: `nit`.
+
+The String/Vec constructions and selected identifier reconstruction remain. They establish compile-time allocation shapes only; path/argument counts are input-dependent and no cost was measured.
+
+Evidence: [crates/shamir-query-builder-macros/src/filter_lower.rs:120](../../../../../crates/shamir-query-builder-macros/src/filter_lower.rs#L120); [crates/shamir-query-builder-macros/src/filter_lower.rs:132](../../../../../crates/shamir-query-builder-macros/src/filter_lower.rs#L132); [crates/shamir-query-builder-macros/src/filter_lower.rs:145](../../../../../crates/shamir-query-builder-macros/src/filter_lower.rs#L145); [crates/shamir-query-builder-macros/src/filter_lower.rs:330](../../../../../crates/shamir-query-builder-macros/src/filter_lower.rs#L330).
+
+<a id="review-5-1"></a>
+
+### Claim 5.1 — `q!(call ...)` violates the crate's own emitted-path contract: expansion requires a direct `shamir-query-types` dependency
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+CallOp and argument conversions still use absolute shamir_query_types paths, contradicting the builder-only dependency promise. Root re-exports or a builder-owned constructor have not repaired expansion.
+
+Evidence: [crates/shamir-query-builder-macros/src/lib.rs:3](../../../../../crates/shamir-query-builder-macros/src/lib.rs#L3); [crates/shamir-query-builder-macros/src/query_parse.rs:912](../../../../../crates/shamir-query-builder-macros/src/query_parse.rs#L912); [crates/shamir-query-builder-macros/src/query_parse.rs:915](../../../../../crates/shamir-query-builder-macros/src/query_parse.rs#L915); [crates/shamir-query-builder/src/lib.rs:68](../../../../../crates/shamir-query-builder/src/lib.rs#L68).
+
+<a id="review-5-2"></a>
+
+### Claim 5.2 — `q!(call ...)` bypasses the builder layer and hand-assembles the `CallOp` wire DTO, coupling every expansion site to its exact field set
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+The expansion remains a complete DTO literal. Constructor ownership is absent, so field additions require coordinated macro updates. This is a prospective source-compatibility/architecture risk, not a demonstrated current wire failure.
+
+Evidence: [crates/shamir-query-builder-macros/src/query_parse.rs:911](../../../../../crates/shamir-query-builder-macros/src/query_parse.rs#L911); [crates/shamir-query-types/src/call/mod.rs:32](../../../../../crates/shamir-query-types/src/call/mod.rs#L32).
+
+<a id="review-5-3"></a>
+
+### Claim 5.3 — Clause keywords are silently reserved inside `q!` where/having, contradicting the documented "full `filter!` expression grammar"
+
+Status: `confirmed-open`. Current risk: `low`.
+
+Top-level terminator detection remains position-insensitive and undocumented. Parenthesized groups retain those names; standalone filter! has no collector reservation.
+
+Evidence: [crates/shamir-query-builder-macros/src/query_parse.rs:499](../../../../../crates/shamir-query-builder-macros/src/query_parse.rs#L499); [crates/shamir-query-builder-macros/src/query_parse.rs:547](../../../../../crates/shamir-query-builder-macros/src/query_parse.rs#L547); [crates/shamir-query-builder-macros/src/lib.rs:127](../../../../../crates/shamir-query-builder-macros/src/lib.rs#L127).
+
+<a id="review-5-4"></a>
+
+### Claim 5.4 — Two unaliased `count(*)` items silently produce duplicate `"count"` output keys
+
+Status: `confirmed-open`. Current risk: `low`.
+
+Default aliases collide without validation; the reachable aggregate pipeline inserts both under the same map key. Identical counts collapse redundantly, and mixed duplicate aliases can overwrite output. No per-item WHERE semantics exist.
+
+Evidence: [crates/shamir-query-builder-macros/src/query_parse.rs:958](../../../../../crates/shamir-query-builder-macros/src/query_parse.rs#L958); [crates/shamir-engine/src/query/read/aggregate.rs:826](../../../../../crates/shamir-engine/src/query/read/aggregate.rs#L826); [crates/shamir-engine/src/query/read/aggregate.rs:950](../../../../../crates/shamir-engine/src/query/read/aggregate.rs#L950); [crates/shamir-engine/src/table/read_exec.rs:1201](../../../../../crates/shamir-engine/src/table/read_exec.rs#L1201).
+
+<a id="review-5-5"></a>
+
+### Claim 5.5 — `group_by` / `order_by` accept only bare idents — no dotted paths, no string-literal field names
+
+Status: `confirmed-open`. Current risk: `low`.
+
+Both grammar restrictions remain. Grouping supports nested builder arrays, but existing string ordering constructors create one-segment paths. Repair must preserve segments and provide path-capable ordering construction.
+
+Evidence: [crates/shamir-query-builder-macros/src/query_parse.rs:223](../../../../../crates/shamir-query-builder-macros/src/query_parse.rs#L223); [crates/shamir-query-builder-macros/src/query_parse.rs:265](../../../../../crates/shamir-query-builder-macros/src/query_parse.rs#L265); [crates/shamir-query-builder/src/val/filter_value.rs:18](../../../../../crates/shamir-query-builder/src/val/filter_value.rs#L18); [crates/shamir-query-types/src/read/order_by.rs:48](../../../../../crates/shamir-query-types/src/read/order_by.rs#L48); [crates/shamir-engine/src/query/read/order.rs:401](../../../../../crates/shamir-engine/src/query/read/order.rs#L401).
+
+<a id="review-5-6"></a>
+
+### Claim 5.6 — Doc: "All five forms" — there are six
+
+Status: `confirmed-open`. Current risk: `nit`.
+
+The incorrect count remains unchanged.
+
+Evidence: [crates/shamir-query-builder-macros/src/lib.rs:59](../../../../../crates/shamir-query-builder-macros/src/lib.rs#L59); [crates/shamir-query-builder-macros/src/query_parse.rs:171](../../../../../crates/shamir-query-builder-macros/src/query_parse.rs#L171).
+
+<a id="review-5-7"></a>
+
+### Claim 5.7 — Emitted `::shamir_query_builder` absolute paths break if a downstream renames the dependency
+
+Status: `confirmed-open`. Current risk: `nit`.
+
+Canonical crate-name emission remains. Uniform builder re-exports cannot make that name available when a downstream only declares a renamed dependency.
+
+Evidence: [crates/shamir-query-builder-macros/src/query_parse.rs:725](../../../../../crates/shamir-query-builder-macros/src/query_parse.rs#L725); [crates/shamir-query-builder-macros/src/filter_lower.rs:94](../../../../../crates/shamir-query-builder-macros/src/filter_lower.rs#L94); [crates/shamir-query-builder-macros/Cargo.toml:13](../../../../../crates/shamir-query-builder-macros/Cargo.toml#L13).
+
+<a id="review-6-1"></a>
+
+### Claim 6.1 — No error-path test coverage for any diagnostic branch of `filter!` / `q!`; no `trybuild` anywhere in the workspace
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+Negative macro diagnostic coverage remains absent. Registered positive tests have meaningful oracles but cannot detect rejection-only regressions. A coverage gap without a demonstrated high-impact defect does not substantiate the original high classification.
+
+Evidence: [crates/shamir-query-builder-macros/Cargo.toml:13](../../../../../crates/shamir-query-builder-macros/Cargo.toml#L13); [crates/shamir-query-builder/src/macros/mod.rs:191](../../../../../crates/shamir-query-builder/src/macros/mod.rs#L191); [crates/shamir-query-builder/src/macros/tests/mod.rs:2](../../../../../crates/shamir-query-builder/src/macros/tests/mod.rs#L2); [crates/shamir-query-builder/src/macros/tests/q_macro_tests.rs:234](../../../../../crates/shamir-query-builder/src/macros/tests/q_macro_tests.rs#L234); [crates/shamir-query-builder/src/macros/tests/filter_macro_tests.rs:35](../../../../../crates/shamir-query-builder/src/macros/tests/filter_macro_tests.rs#L35).
+
+<a id="review-6-2"></a>
+
+### Claim 6.2 — Unknown function-like select item produces a misleading clause-order error
+
+Status: `confirmed-open`. Current risk: `low`.
+
+Unknown function-like identifiers still fall through to field parsing, leaving their parentheses for the generic outer-query error.
+
+Evidence: [crates/shamir-query-builder-macros/src/query_parse.rs:433](../../../../../crates/shamir-query-builder-macros/src/query_parse.rs#L433); [crates/shamir-query-builder-macros/src/query_parse.rs:300](../../../../../crates/shamir-query-builder-macros/src/query_parse.rs#L300).
+
+<a id="review-6-3"></a>
+
+### Claim 6.3 — Field-path and alias spans are discarded; downstream errors point at the macro call site
+
+Status: `confirmed-open`. Current risk: `low`.
+
+String conversion still discards input identifier spans before literal generation. Exact hypothetical downstream diagnostic rendering is untested.
+
+Evidence: [crates/shamir-query-builder-macros/src/filter_lower.rs:333](../../../../../crates/shamir-query-builder-macros/src/filter_lower.rs#L333); [crates/shamir-query-builder-macros/src/query_parse.rs:947](../../../../../crates/shamir-query-builder-macros/src/query_parse.rs#L947); [crates/shamir-query-builder-macros/src/query_parse.rs:1003](../../../../../crates/shamir-query-builder-macros/src/query_parse.rs#L1003).
+
+<a id="review-6-4"></a>
+
+### Claim 6.4 — Unbounded recursion in expression lowering; pathological nesting aborts rustc instead of erroring
+
+Status: `unverified`. Current risk: `low` (provisional; not a confirmed defect).
+
+Recursive lowering/field traversal remains uncapped. The structural stack risk is real, but the claimed input acceptance, failure threshold and rustc-abort manifestation were not proven. This is compile-time hardening for authored/generated source, not runtime remote DoS.
+
+Evidence: [crates/shamir-query-builder-macros/src/filter_lower.rs:26](../../../../../crates/shamir-query-builder-macros/src/filter_lower.rs#L26); [crates/shamir-query-builder-macros/src/filter_lower.rs:61](../../../../../crates/shamir-query-builder-macros/src/filter_lower.rs#L61); [crates/shamir-query-builder-macros/src/filter_lower.rs:337](../../../../../crates/shamir-query-builder-macros/src/filter_lower.rs#L337).
+
+<a id="review-6-5"></a>
+
+### Claim 6.5 — Reused diagnostics carry the wrong context at some call sites
+
+Status: `confirmed-open`. Current risk: `nit`.
+
+The WHERE-only empty-expression text and comparison-LHS field text are still reused for HAVING and predicate arguments.
+
+Evidence: [crates/shamir-query-builder-macros/src/query_parse.rs:235](../../../../../crates/shamir-query-builder-macros/src/query_parse.rs#L235); [crates/shamir-query-builder-macros/src/query_parse.rs:540](../../../../../crates/shamir-query-builder-macros/src/query_parse.rs#L540); [crates/shamir-query-builder-macros/src/filter_lower.rs:143](../../../../../crates/shamir-query-builder-macros/src/filter_lower.rs#L143); [crates/shamir-query-builder-macros/src/filter_lower.rs:351](../../../../../crates/shamir-query-builder-macros/src/filter_lower.rs#L351).
+
+<a id="review-7-1"></a>
+
+### Claim 7.1 — Mid-function `use syn::BinOp;` violates "Imports at the top"
+
+Status: `confirmed-open`. Current risk: `nit`.
+
+The policy violation persists, but no runtime consequence warrants medium severity.
+
+Evidence: [crates/shamir-query-builder-macros/src/filter_lower.rs:56](../../../../../crates/shamir-query-builder-macros/src/filter_lower.rs#L56); [CLAUDE.md:615](../../../../../CLAUDE.md#L615).
+
+<a id="review-7-2"></a>
+
+### Claim 7.2 — "19 predicates" doc count
+
+Status: `confirmed-open`. Current risk: `nit`.
+
+The same unchanged stale count as 1.4.
+
+Evidence: [crates/shamir-query-builder-macros/src/lib.rs:129](../../../../../crates/shamir-query-builder-macros/src/lib.rs#L129); [crates/shamir-query-builder-macros/src/filter_lower.rs:134](../../../../../crates/shamir-query-builder-macros/src/filter_lower.rs#L134).
+
+Grouping/duplicate: `SUMMARY.md#1.4`. This row is not another independent defect.
+
+<a id="review-7-3"></a>
+
+### Claim 7.3 — Zero tests in the crate; nothing points readers to the consumer-side coverage
+
+Status: `confirmed-open`. Current risk: `low`.
+
+Local tests and a documentation pointer remain absent. Consumer placement is legitimate and correctly registered; rejection coverage is the substantive gap.
+
+Evidence: [crates/shamir-query-builder-macros/src/lib.rs:1](../../../../../crates/shamir-query-builder-macros/src/lib.rs#L1); [crates/shamir-query-builder/src/macros/tests/mod.rs:2](../../../../../crates/shamir-query-builder/src/macros/tests/mod.rs#L2).
+
+Grouping/duplicate: `SUMMARY.md#6.1`. This row is not another independent defect.
+
+<a id="review-7-4"></a>
+
+### Claim 7.4 — `query_parse.rs` is a 1,019-line, five-role file — strains "one file = one primary export"
+
+Status: `not-applicable`. Current risk: —.
+
+Current organization is a permitted closely coupled private group serving q!. Optional splitting is not a proven policy fix or demonstrated production defect.
+
+Evidence: [crates/shamir-query-builder-macros/src/query_parse.rs:64](../../../../../crates/shamir-query-builder-macros/src/query_parse.rs#L64); [crates/shamir-query-builder-macros/src/query_parse.rs:1013](../../../../../crates/shamir-query-builder-macros/src/query_parse.rs#L1013); [CLAUDE.md:498](../../../../../CLAUDE.md#L498).
+
+<a id="review-7-5"></a>
+
+### Claim 7.5 — Unjustified `pub`, redundant wrapper, duplicated field-path emitter
+
+Status: `confirmed-open`. Current risk: `nit`.
+
+Excess internal visibility and duplicated segment emission remain. The lower_expr seam is optional cleanup; no API leak or actual emitter divergence is shown.
+
+Evidence: [crates/shamir-query-builder-macros/src/lib.rs:9](../../../../../crates/shamir-query-builder-macros/src/lib.rs#L9); [crates/shamir-query-builder-macros/src/filter_lower.rs:20](../../../../../crates/shamir-query-builder-macros/src/filter_lower.rs#L20); [crates/shamir-query-builder-macros/src/filter_lower.rs:317](../../../../../crates/shamir-query-builder-macros/src/filter_lower.rs#L317); [crates/shamir-query-builder-macros/src/query_parse.rs:1003](../../../../../crates/shamir-query-builder-macros/src/query_parse.rs#L1003).
+
+## Current fix-plan state
+
+| Claim decisions | Open | Source-fixed | Partial | Refuted | Unverified | N/A |
+|---:|---:|---:|---:|---:|---:|---:|
+| 8 | 6 | 0 | 0 | 0 | 1 | 1 |
+
+A source-fixed item closes only its stated mechanism. Partial items retain the obligations named below; proposed fixes must obey the corrections and current contracts, not merely copy the historical recipe.
+
+<a id="plan-p0-1"></a>
+
+### Plan P0.1 — P0.1
+
+Status: `confirmed-open`. Current risk: —.
+
+No negative harness or fixtures were added; the three named green edge cases remain uncovered. Whitelist acceptance and dotted-path outputs already have positive pins. Add rejection coverage with a reachable lib harness, or explicitly include integration harnesses through the full test mode; fixture files alone do not satisfy the plan.
+
+Evidence: [crates/shamir-query-builder-macros/Cargo.toml:13](../../../../../crates/shamir-query-builder-macros/Cargo.toml#L13); [crates/shamir-query-builder/src/macros/tests/mod.rs:2](../../../../../crates/shamir-query-builder/src/macros/tests/mod.rs#L2); [crates/shamir-query-builder/src/macros/tests/filter_macro_tests.rs:194](../../../../../crates/shamir-query-builder/src/macros/tests/filter_macro_tests.rs#L194); [scripts/test.sh:177](../../../../../scripts/test.sh#L177).
+
+<a id="plan-p0-2"></a>
+
+### Plan P0.2 — P0.2
+
+Status: `confirmed-open`. Current risk: —.
+
+Repository-qualified call grammar, constructor ownership and builder-path expansion remain absent. Re-exporting DTOs alone is insufficient. The plan's instruction to omit repo from a Rust struct literal is invalid: initialize the default through a constructor; serde defaults act only during decoding. A justification comment alone would not fix dependency or field-set coupling.
+
+Evidence: [crates/shamir-query-builder-macros/src/query_parse.rs:673](../../../../../crates/shamir-query-builder-macros/src/query_parse.rs#L673); [crates/shamir-query-builder-macros/src/query_parse.rs:911](../../../../../crates/shamir-query-builder-macros/src/query_parse.rs#L911); [crates/shamir-query-types/src/call/mod.rs:41](../../../../../crates/shamir-query-types/src/call/mod.rs#L41); [crates/shamir-query-builder/src/lib.rs:68](../../../../../crates/shamir-query-builder/src/lib.rs#L68).
+
+<a id="plan-p1-3"></a>
+
+### Plan P1.3 — P1.3
+
+Status: `unverified`. Current risk: —.
+
+The three growing-prefix loops have not been linearized. A one-pass fragment approach remains a candidate, but the asserted rustc-backend O(N²)-to-linear improvement requires backend proof or later authorized measurement; no numerical benefit is established.
+
+Evidence: [crates/shamir-query-builder-macros/src/query_parse.rs:775](../../../../../crates/shamir-query-builder-macros/src/query_parse.rs#L775); [crates/shamir-query-builder-macros/src/query_parse.rs:809](../../../../../crates/shamir-query-builder-macros/src/query_parse.rs#L809); [crates/shamir-query-builder-macros/src/query_parse.rs:847](../../../../../crates/shamir-query-builder-macros/src/query_parse.rs#L847); [Cargo.lock:2661](../../../../../Cargo.lock#L2661).
+
+<a id="plan-p1-4"></a>
+
+### Plan P1.4 — P1.4
+
+Status: `not-applicable`. Current risk: —.
+
+This proposal changes explicitly documented and tested bulk-update semantics. An all opt-in can be chosen deliberately, but no current contract requires it and it is not mandatory defect remediation.
+
+Evidence: [crates/shamir-query-builder-macros/src/lib.rs:87](../../../../../crates/shamir-query-builder-macros/src/lib.rs#L87); [crates/shamir-query-builder-macros/src/query_parse.rs:614](../../../../../crates/shamir-query-builder-macros/src/query_parse.rs#L614); [crates/shamir-query-builder/src/macros/tests/q_macro_tests.rs:522](../../../../../crates/shamir-query-builder/src/macros/tests/q_macro_tests.rs#L522).
+
+<a id="plan-p1-5"></a>
+
+### Plan P1.5 — P1.5
+
+Status: `confirmed-open`. Current risk: —.
+
+Dotted group/order parsing, terminal-comma consumption, duplicate-count guarding and reserved-keyword documentation/position-aware termination are all absent. Preserve nested field segments; existing order_by_asc/desc strings do not do that. The claimed dead asc/desc checks are reachable on invalid continuations.
+
+Evidence: [crates/shamir-query-builder-macros/src/query_parse.rs:223](../../../../../crates/shamir-query-builder-macros/src/query_parse.rs#L223); [crates/shamir-query-builder-macros/src/query_parse.rs:265](../../../../../crates/shamir-query-builder-macros/src/query_parse.rs#L265); [crates/shamir-query-builder-macros/src/query_parse.rs:499](../../../../../crates/shamir-query-builder-macros/src/query_parse.rs#L499); [crates/shamir-query-builder-macros/src/query_parse.rs:566](../../../../../crates/shamir-query-builder-macros/src/query_parse.rs#L566); [crates/shamir-query-builder-macros/src/query_parse.rs:958](../../../../../crates/shamir-query-builder-macros/src/query_parse.rs#L958); [crates/shamir-query-types/src/read/order_by.rs:48](../../../../../crates/shamir-query-types/src/read/order_by.rs#L48).
+
+<a id="plan-p1-6"></a>
+
+### Plan P1.6 — P1.6
+
+Status: `confirmed-open`. Current risk: —.
+
+BinOp remains imported inside lower_binary. Hoisting is an outstanding style-only nit, not a medium runtime repair.
+
+Evidence: [crates/shamir-query-builder-macros/src/filter_lower.rs:56](../../../../../crates/shamir-query-builder-macros/src/filter_lower.rs#L56).
+
+<a id="plan-p2-7"></a>
+
+### Plan P2.7 — P2.7
+
+Status: `confirmed-open`. Current risk: —.
+
+Local exhaustion diagnostics, unknown-select-function errors, context-sensitive messages, preserved field/alias spans and a lowering depth cap are all absent. Explicit exhaustion checks are diagnostics defense-in-depth, not a silent-data-loss fix; content.parse::<Nothing>() is insufficient. A depth cap is hardening, while the asserted compiler-abort outcome remains unverified.
+
+Evidence: [crates/shamir-query-builder-macros/src/query_parse.rs:433](../../../../../crates/shamir-query-builder-macros/src/query_parse.rs#L433); [crates/shamir-query-builder-macros/src/query_parse.rs:540](../../../../../crates/shamir-query-builder-macros/src/query_parse.rs#L540); [crates/shamir-query-builder-macros/src/query_parse.rs:572](../../../../../crates/shamir-query-builder-macros/src/query_parse.rs#L572); [crates/shamir-query-builder-macros/src/query_parse.rs:947](../../../../../crates/shamir-query-builder-macros/src/query_parse.rs#L947); [crates/shamir-query-builder-macros/src/filter_lower.rs:26](../../../../../crates/shamir-query-builder-macros/src/filter_lower.rs#L26); [crates/shamir-query-builder-macros/src/filter_lower.rs:351](../../../../../crates/shamir-query-builder-macros/src/filter_lower.rs#L351).
+
+<a id="plan-p2-8"></a>
+
+### Plan P2.8 — P2.8
+
+Status: `confirmed-open`. Current risk: —.
+
+The predicate/form counts, vector-option omission note, test-location pointer, renamed-dependency note, visibility cleanup and shared emitter are unchanged. Canonical re-exported paths do not solve dependency renaming. The file split is optional/not-applicable to defect closure; capture and micro-allocation changes remain profile-driven, with no measurements.
+
+Evidence: [crates/shamir-query-builder-macros/src/lib.rs:1](../../../../../crates/shamir-query-builder-macros/src/lib.rs#L1); [crates/shamir-query-builder-macros/src/lib.rs:59](../../../../../crates/shamir-query-builder-macros/src/lib.rs#L59); [crates/shamir-query-builder-macros/src/lib.rs:129](../../../../../crates/shamir-query-builder-macros/src/lib.rs#L129); [crates/shamir-query-builder-macros/src/filter_lower.rs:317](../../../../../crates/shamir-query-builder-macros/src/filter_lower.rs#L317); [crates/shamir-query-builder-macros/src/query_parse.rs:493](../../../../../crates/shamir-query-builder-macros/src/query_parse.rs#L493); [crates/shamir-query-builder-macros/src/query_parse.rs:1003](../../../../../crates/shamir-query-builder-macros/src/query_parse.rs#L1003).
+
+## Corrections and qualified non-findings
+
+- Retain the synthesis's source-proven rejection of malformed scoped groups. Original correctness/API high-severity silent-loss findings are refuted, not fixed.
+- The blanket statement that syn 1 silently ignored leftovers is false: inspected resolved syn 1.0.109 also contains ParseBuffer drop-based unexpected-token tracking.
+- The diagnostic-test gap remains, but classify it as medium unless a concrete high-impact regression is established. The import violation is a nit.
+- Whitelist acceptance and dotted field wire outputs were already tested before these reports; only rejection/arity pins are absent. This is counter-evidence, not a newly landed fix.
+- The own-crate no-lock/no-async/no-crypto/no-unsafe/no-owned-runtime-resource guarantees remain supported. They do not extend automatically to arbitrary quoted RHS code or emitted runtime builders.
+- Registered positive macro coverage extends beyond the builder crate: stored_proc_e2e uses q!(call ...) and enforcement_dml_e2e uses q! statements. No tests were run.
+- Qualify repository-context risks as authorized developer-facing wrong-context behavior; existing function authorization and actor propagation prevent treating the macro default alone as an ACL bypass.
+- Serde defaults cannot fill omitted Rust struct-literal fields; use constructor-owned defaults. Uniform canonical re-exports cannot fix renamed dependencies.
+- Nested-path fixes must emit separate path segments. String grouping/ordering constructors do not split dots.
+- Do not retain numerical latency, universal deep-copy, compiler-hang or rustc-abort assertions without the missing backend/experimental proof.
+- Remove the optional large-file split from mandatory defect counts. Recompute current counts from these statuses and duplicate groups instead of preserving the historical 23-defect severity census.
+
+## Current follow-up order
+
+1. Repair call lowering through a builder-owned constructor with explicit repository support and builder-only generated paths; add a consumer case depending only on the builder.
+2. Add reachable negative coverage for every original diagnostic branch and malformed-group shape, plus default count alias, string-literal write-table and bare-variable RHS cases.
+3. Resolve grammar inconsistencies: preserve nested path segments, handle terminal commas deliberately, clarify keyword collisions and validate duplicate projection aliases.
+4. Decide whether documented bulk updates should require an explicit all opt-in; do not change that contract implicitly.
+5. Improve targeted diagnostics and span preservation; consider a depth cap as compile-time hardening.
+6. Correct stale documentation and small import/visibility nits; keep file splitting optional.
+7. Establish compiler-backend cost evidence before claiming quadratic build latency; keep micro-optimizations profile-driven.
+
+## Coverage and limitations
+
+- All eight assigned documents were read completely; all 32 original findings, 28 SUMMARY finding rows and eight Fix Plan items were evaluated. No TASK_GROUPS file exists in the assigned directory.
+- Read-only source revalidation: no files changed, no child agents or worktrees, and no builds, tests, benchmarks or reproductions executed.
+- Resolved syn 2.0.114, quote 1.0.45 and proc-macro2 1.0.106 sources were inspected. Dependency-source mechanisms are described in reasons; evidence paths remain repository-relative.
+- Compiler-backend quadratic token-copying and reported latency are unverified. Fallback-backend repeated token traversal is source-visible, but the rustc-side concatenation implementation was not available.
+- Uncapped lowering recursion is source-visible; accepted-input depth thresholds and the asserted rustc-abort outcome remain experimentally unverified.
+- Registered test assertions were inspected for relevance and reachability; no claim that they currently pass is made.
+
+## Reviewed document inventory
+
+- [correctness-tdd.md](./correctness-tdd.md) — 7 claim decisions; 0 explicit plan items.
+- [concurrency-lockfree.md](./concurrency-lockfree.md) — 1 claim decisions; 0 explicit plan items.
+- [security-crypto.md](./security-crypto.md) — 3 claim decisions; 0 explicit plan items.
+- [performance-hotpath.md](./performance-hotpath.md) — 3 claim decisions; 0 explicit plan items.
+- [api-wire-protocol.md](./api-wire-protocol.md) — 8 claim decisions; 0 explicit plan items.
+- [error-handling-lifecycle.md](./error-handling-lifecycle.md) — 5 claim decisions; 0 explicit plan items.
+- [style-claude-md.md](./style-claude-md.md) — 5 claim decisions; 0 explicit plan items.
+- [SUMMARY.md](./SUMMARY.md) — 28 claim decisions; 8 explicit plan items.
+
+---
+
+<details>
+<summary>Historical report — preserved for provenance; not current status or instructions</summary>
+
 # shamir-query-builder-macros — Synthesized 7-lens review (consolidation of the 2026-08-14 cross-crate review)
 
 Crate: `crates/shamir-query-builder-macros/` — the proc-macro crate providing the
@@ -758,3 +1206,5 @@ unresolvable from inside this crate.)*
    visibility/dup-emitter cleanup (**7.5**); optional `query_parse.rs` split
    into ast/parse/gen (**7.4**); profile-driven only: where-clause
    re-capture (**4.2**) and predicate-lowering micro-allocations (**4.3**).
+
+</details>

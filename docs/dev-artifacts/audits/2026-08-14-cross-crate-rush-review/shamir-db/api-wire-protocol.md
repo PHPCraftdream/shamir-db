@@ -1,3 +1,161 @@
+<!-- revalidation:2026-10-08 source:92ad58266bf57ddea1fa3c8a47affba1a3a9a096 -->
+# shamir-db — api-wire-protocol revalidation
+
+Source snapshot: `92ad58266bf57ddea1fa3c8a47affba1a3a9a096`. Revalidated 2026-10-08 by read-only XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run; no source fix is part of this update. Test registration/assertions are evidence of an oracle, not proof of a passing run.
+
+This section is authoritative for current status. Original titles/IDs are retained for traceability; a refuted title is not a current assertion. The collapsed historical report below is superseded, including its counts, severity, scenarios and fix instructions. Plan IDs preserve historical numbering, not a current release mandate. [Workspace methodology and status definitions](../SUMMARY.md#status-definitions).
+
+Validator replacement remains a substantive correctness defect. Most other rows describe open API/design hygiene rather than runtime High risks. Actual server routes use the canonical actor-aware batch API; optional error codes and human-readable abort reasons must not be represented as a violated closed-code schema.
+
+## Current claim decisions
+
+| Claim decisions | Open | Source-fixed | Partial | Refuted | Unverified | N/A |
+|---:|---:|---:|---:|---:|---:|---:|
+| 12 | 12 | 0 | 0 | 0 | 0 | 0 |
+
+These are decisions on report claims, including repeated roots, bundled observations and non-findings—not a unique-bug census. Closed/N/A rows have no current risk; unverified risk is provisional. Pure style and unmeasured optimization claims do not establish runtime impact.
+
+<a id="review-1"></a>
+
+### Claim 1 — `replace=true` on a WASM validator destroys persisted binding bookkeeping and can silently re-key its identity
+
+Status: `confirmed-open`. Current risk: `high`.
+
+The facade still chooses identity only from the live registry, writes empty bound_in and removes/re-registers. Registry removal clears its reverse binding set, allowing drop while table-side bindings remain. replace_artifact exists but is not used here.
+
+Evidence: [crates/shamir-db/src/shamir_db/shamir_db/validator_management.rs:249](../../../../../crates/shamir-db/src/shamir_db/shamir_db/validator_management.rs#L249); [crates/shamir-db/src/shamir_db/shamir_db/validator_management.rs:284](../../../../../crates/shamir-db/src/shamir_db/shamir_db/validator_management.rs#L284); [crates/shamir-db/src/shamir_db/shamir_db/validator_management.rs:305](../../../../../crates/shamir-db/src/shamir_db/shamir_db/validator_management.rs#L305); [crates/shamir-engine/src/validator/registry.rs:112](../../../../../crates/shamir-engine/src/validator/registry.rs#L112); [crates/shamir-engine/src/validator/registry.rs:156](../../../../../crates/shamir-engine/src/validator/registry.rs#L156).
+
+<a id="review-2"></a>
+
+### Claim 2 — Dead, exported `api::{Command, Request, Response}` wire shim that no server speaks
+
+Status: `confirmed-open`. Current risk: `low`.
+
+The legacy envelope remains exported and only its own tests consume it; the server imports canonical DbRequest. Its README already identifies it as vestigial and unsupported. Discoverability debt is real, but no current runtime High defect is established.
+
+Evidence: [crates/shamir-db/src/lib.rs:26](../../../../../crates/shamir-db/src/lib.rs#L26); [crates/shamir-db/src/api/types.rs:24](../../../../../crates/shamir-db/src/api/types.rs#L24); [crates/shamir-db/src/api/README.md:1](../../../../../crates/shamir-db/src/api/README.md#L1); [crates/shamir-server/src/db_handler/handler.rs:84](../../../../../crates/shamir-server/src/db_handler/handler.rs#L84).
+
+<a id="review-3"></a>
+
+### Claim 3 — Convenience `execute` / `tx_begin` / `tx_execute` / `tx_commit` default to `Actor::System` (admin bypass)
+
+Status: `confirmed-open`. Current risk: `low`.
+
+The four wrappers remain public System delegates without hiding/deprecation. Current server execute and transaction handlers use *_as, so the observed issue is an embedding footgun rather than an existing wire bypass.
+
+Evidence: [crates/shamir-db/src/shamir_db/execute/db_execute.rs:19](../../../../../crates/shamir-db/src/shamir_db/execute/db_execute.rs#L19); [crates/shamir-db/src/shamir_db/execute/db_tx.rs:41](../../../../../crates/shamir-db/src/shamir_db/execute/db_tx.rs#L41); [crates/shamir-db/src/shamir_db/execute/db_tx.rs:106](../../../../../crates/shamir-db/src/shamir_db/execute/db_tx.rs#L106); [crates/shamir-db/src/shamir_db/execute/db_tx.rs:159](../../../../../crates/shamir-db/src/shamir_db/execute/db_tx.rs#L159); [crates/shamir-server/src/db_handler/tx_handlers.rs:29](../../../../../crates/shamir-server/src/db_handler/tx_handlers.rs#L29).
+
+<a id="review-4"></a>
+
+### Claim 4 — Builder-only query-construction rule bypassed across the facade (30+ hand-assembled wire ops, no exception comments; builder is dev-dep only)
+
+Status: `confirmed-open`. Current risk: `low`.
+
+Typed operation/request literals remain in SystemStore, replication and the gateway without the requested exception rationale; the builder is still dev-only. This is convention/maintenance debt, not evidence of malformed wire or runtime corruption.
+
+Evidence: [CLAUDE.md:516](../../../../../CLAUDE.md#L516); [crates/shamir-db/src/shamir_db/system_store.rs:199](../../../../../crates/shamir-db/src/shamir_db/system_store.rs#L199); [crates/shamir-db/src/shamir_db/execute/admin_replication.rs:87](../../../../../crates/shamir-db/src/shamir_db/execute/admin_replication.rs#L87); [crates/shamir-db/src/shamir_db/shamir_db/db_gateway.rs:130](../../../../../crates/shamir-db/src/shamir_db/shamir_db/db_gateway.rs#L130); [crates/shamir-db/Cargo.toml:102](../../../../../crates/shamir-db/Cargo.toml#L102).
+
+<a id="review-5"></a>
+
+### Claim 5 — Wire error-`code` contract populated unevenly across handler families; `TransactionInfo::aborted` reason mixes stable codes with free text
+
+Status: `confirmed-open`. Current risk: `low`.
+
+Uneven codes and mixed abort strings remain. However, BatchError explicitly permits an optional code and TransactionInfo documents reason as human-readable; requiring a closed abort-code field would be a new contract, not restoration of a proven current guarantee.
+
+Evidence: [crates/shamir-db/src/shamir_db/execute/db_tx.rs:71](../../../../../crates/shamir-db/src/shamir_db/execute/db_tx.rs#L71); [crates/shamir-db/src/shamir_db/execute/db_tx.rs:217](../../../../../crates/shamir-db/src/shamir_db/execute/db_tx.rs#L217); [crates/shamir-query-types/src/batch/batch_error.rs:36](../../../../../crates/shamir-query-types/src/batch/batch_error.rs#L36); [crates/shamir-query-types/src/batch/transaction_info.rs:14](../../../../../crates/shamir-query-types/src/batch/transaction_info.rs#L14).
+
+<a id="review-6"></a>
+
+### Claim 6 — `tx_begin` accepts any isolation string and silently falls back to Snapshot
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+Only the exact serializable string selects Serializable; every other input selects Snapshot. The server forwards the requested string and even reports it back, so an invalid requested isolation can succeed under weaker semantics.
+
+Evidence: [crates/shamir-db/src/shamir_db/execute/db_tx.rs:80](../../../../../crates/shamir-db/src/shamir_db/execute/db_tx.rs#L80); [crates/shamir-server/src/db_handler/tx_handlers.rs:26](../../../../../crates/shamir-server/src/db_handler/tx_handlers.rs#L26); [crates/shamir-server/src/db_handler/tx_handlers.rs:64](../../../../../crates/shamir-server/src/db_handler/tx_handlers.rs#L64).
+
+<a id="review-7"></a>
+
+### Claim 7 — `to_qv` converts serialization failure into `QueryValue::Null` inside Ok responses
+
+Status: `confirmed-open`. Current risk: `low`.
+
+The generic helper still discards encoding/decoding errors and returns Null; ChangesSince maps every event through it. Silent error collapse is source-proven, but an actual currently failing event/DTO serialization was not demonstrated.
+
+Evidence: [crates/shamir-db/src/shamir_db/execute/helpers.rs:73](../../../../../crates/shamir-db/src/shamir_db/execute/helpers.rs#L73); [crates/shamir-db/src/shamir_db/execute/admin_retention.rs:206](../../../../../crates/shamir-db/src/shamir_db/execute/admin_retention.rs#L206).
+
+<a id="review-8"></a>
+
+### Claim 8 — Dead TLS/network dependencies and stale `net` doc kept "so the obsolete code doesn't bit-rot" — but the code is gone
+
+Status: `confirmed-open`. Current risk: `low`.
+
+The unused TLS declarations and lib documentation advertising an absent net module remain. This establishes manifest/documentation debt, not automatically linked reachable TLS attack surface.
+
+Evidence: [crates/shamir-db/Cargo.toml:64](../../../../../crates/shamir-db/Cargo.toml#L64); [crates/shamir-db/src/lib.rs:8](../../../../../crates/shamir-db/src/lib.rs#L8).
+
+Grouping/duplicate: `security-crypto.md#5`. This row is not another independent defect.
+
+<a id="review-9"></a>
+
+### Claim 9 — Malformed client input mapped to `DbError::Internal` in `get_ddl_op_status`
+
+Status: `confirmed-open`. Current risk: `low`.
+
+Invalid RecordId input still becomes Internal, and every table-resolution DbError is string-wrapped into Internal. Validation and underlying NotFound/Storage identity are lost.
+
+Evidence: [crates/shamir-db/src/shamir_db/shamir_db/core.rs:764](../../../../../crates/shamir-db/src/shamir_db/shamir_db/core.rs#L764); [crates/shamir-db/src/shamir_db/shamir_db/core.rs:772](../../../../../crates/shamir-db/src/shamir_db/shamir_db/core.rs#L772).
+
+Grouping/duplicate: `error-handling-lifecycle.md#10`. This row is not another independent defect.
+
+<a id="review-10"></a>
+
+### Claim 10 — Catalogue `wasm_hash` and `version` fields are dead, and the hash is not integrity-grade
+
+Status: `confirmed-open`. Current risk: `low`.
+
+WASM rows still store write-only FxHash metadata; function version remains 1 on replacement. Validators do not write version, contrary to the report. Native rows omit WASM hashes. No active integrity/version enforcement consumer was found.
+
+Evidence: [crates/shamir-db/src/shamir_db/shamir_db/function_management.rs:187](../../../../../crates/shamir-db/src/shamir_db/shamir_db/function_management.rs#L187); [crates/shamir-db/src/shamir_db/shamir_db/function_management.rs:205](../../../../../crates/shamir-db/src/shamir_db/shamir_db/function_management.rs#L205); [crates/shamir-db/src/shamir_db/shamir_db/validator_management.rs:267](../../../../../crates/shamir-db/src/shamir_db/shamir_db/validator_management.rs#L267); [crates/shamir-db/src/shamir_db/shamir_db/validator_management.rs:119](../../../../../crates/shamir-db/src/shamir_db/shamir_db/validator_management.rs#L119); [Cargo.lock:3008](../../../../../Cargo.lock#L3008).
+
+<a id="review-11"></a>
+
+### Claim 11 — `create_db_as` reports success even when the catalogue write fails
+
+Status: `confirmed-open`. Current risk: `high`.
+
+Creation returns DbInstance after warn-only persistence failure, and the wire handler unconditionally reports created. The report's contrasting add_repo_as also swallows its catalogue failures; only other failures propagate there.
+
+Evidence: [crates/shamir-db/src/shamir_db/shamir_db/db_management.rs:58](../../../../../crates/shamir-db/src/shamir_db/shamir_db/db_management.rs#L58); [crates/shamir-db/src/shamir_db/execute/admin_db_repo.rs:67](../../../../../crates/shamir-db/src/shamir_db/execute/admin_db_repo.rs#L67); [crates/shamir-db/src/shamir_db/shamir_db/db_management.rs:396](../../../../../crates/shamir-db/src/shamir_db/shamir_db/db_management.rs#L396).
+
+Grouping/duplicate: `error-handling-lifecycle.md#1`. This row is not another independent defect.
+
+<a id="review-12"></a>
+
+### Claim 12 — Nits
+
+Status: `confirmed-open`. Current risk: `nit`.
+
+Clock unwrap, Debug gateway rendering, codec-demo binary and ports prose typo remain. Debug formatting actually includes QueryError.code; it loses structured access, not necessarily the textual code.
+
+Evidence: [crates/shamir-db/src/shamir_db/execute/helpers.rs:61](../../../../../crates/shamir-db/src/shamir_db/execute/helpers.rs#L61); [crates/shamir-db/src/shamir_db/shamir_db/db_gateway.rs:88](../../../../../crates/shamir-db/src/shamir_db/shamir_db/db_gateway.rs#L88); [crates/shamir-db/src/main.rs:7](../../../../../crates/shamir-db/src/main.rs#L7); [crates/shamir-db/src/shamir_db/ports.rs:6](../../../../../crates/shamir-db/src/shamir_db/ports.rs#L6); [crates/shamir-query-types/src/batch/batch_error.rs:39](../../../../../crates/shamir-query-types/src/batch/batch_error.rs#L39).
+
+## Corrections and qualified non-findings
+
+- The bound-validator replacement defect is confirmed in both durable and live bookkeeping; no relevant registered bound-replace-then-drop regression was found.
+- Native replacement is not a binding-preserving reference implementation: it also writes empty bound_in and removes the old registry entry.
+- Treat the unused legacy API shim as low-severity API hygiene, not runtime High. Removing it may affect external Rust consumers even though no workspace transport uses it.
+- Optional BatchError.code and human-readable TransactionInfo.reason are documented contracts. Standardizing them needs an explicit compatibility/design decision.
+- Only function rows write version: 1; do not claim every validator row does. FxHash remains metadata rather than a verified security control.
+- Debug rendering is unstable/unstructured but does not intrinsically omit the code field.
+- Unit and multi-file integration manifests are wired; public versus private test-module visibility is not required for test discovery.
+
+---
+
+<details>
+<summary>Historical report — preserved for provenance; not current status or instructions</summary>
+
 # shamir-db -- API & wire-protocol design
 
 ## Summary
@@ -93,3 +251,5 @@ The crate's real wire surface (`ShamirDb::execute`/`tx_*` over `BatchRequest`/`B
 ## Coverage notes (test organization conformance)
 
 Test layout follows CLAUDE.md: every unit-test group lives in a `tests/` directory with a manifest-only `mod.rs` (`src/api/tests/`, `src/shamir_db/tests/`, `src/shamir_db/shamir_db/tests/`, `src/shamir_db/execute/tests/`), no inline `#[cfg(test)] mod tests` blocks exist in `src/`, and `tests/ddl_wire_e2e/serde_roundtrip.rs` correctly builds ops through `shamir-query-builder` (a compliant round-trip exception). Wire-surface coverage is broad (30+ integration files: `error_codes`, `idempotency_cascade`, `builder_execute_e2e`, `native_parity_e2e`, `cas_sequenced_e2e`, …). The one themed gap: no test exercises `replace=true` on a table-bound validator (finding 1) — the exact flow where the catalogue round-trip contract breaks.
+
+</details>

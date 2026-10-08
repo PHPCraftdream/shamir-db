@@ -1,3 +1,58 @@
+<!-- revalidation:2026-10-08 source:92ad58266bf57ddea1fa3c8a47affba1a3a9a096 -->
+# shamir-collections — error-handling-lifecycle revalidation
+
+Source snapshot: `92ad58266bf57ddea1fa3c8a47affba1a3a9a096`. Revalidated 2026-10-08 by read-only XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run; no source fix is part of this update. Test registration/assertions are evidence of an oracle, not proof of a passing run.
+
+This section is authoritative for current status. Original titles/IDs are retained for traceability; a refuted title is not a current assertion. The collapsed historical report below is superseded, including its counts, severity, scenarios and fix instructions. Plan IDs preserve historical numbering, not a current release mandate. [Workspace methodology and status definitions](../SUMMARY.md#status-definitions).
+
+The constructors remain infallible and undocumented, with no local tests. The original only-abort wording and trusted-capacity call-site assurance are incorrect: capacity overflow can unwind, and a public decoder already forwards a declared MessagePack map count.
+
+## Current claim decisions
+
+| Claim decisions | Open | Source-fixed | Partial | Refuted | Unverified | N/A |
+|---:|---:|---:|---:|---:|---:|---:|
+| 2 | 2 | 0 | 0 | 0 | 0 | 0 |
+
+These are decisions on report claims, including repeated roots, bundled observations and non-findings—not a unique-bug census. Closed/N/A rows have no current risk; unverified risk is provisional. Pure style and unmeasured optimization claims do not establish runtime impact.
+
+<a id="review-1"></a>
+
+### Claim 1 — Infallible capacity constructors can only abort the process; no fallible counterpart exists
+
+Status: `confirmed-open`. Current risk: `low`.
+
+All four _wc helpers still allocate without returning reservation errors or documenting failure behavior. Pinned hashbrown distinguishes capacity-overflow panic from allocation-failure abort. The existing public MessagePack decoder forwards Map32's declared count to new_map_wc before reading entries; remote production reachability was not established.
+
+Evidence: [crates/shamir-collections/src/lib.rs:29](../../../../../crates/shamir-collections/src/lib.rs#L29); [crates/shamir-collections/src/lib.rs:37](../../../../../crates/shamir-collections/src/lib.rs#L37); [crates/shamir-collections/src/lib.rs:53](../../../../../crates/shamir-collections/src/lib.rs#L53); [crates/shamir-collections/src/lib.rs:61](../../../../../crates/shamir-collections/src/lib.rs#L61); [Cargo.lock:1601](../../../../../Cargo.lock#L1601); [Cargo.toml:88](../../../../../Cargo.toml#L88); [crates/shamir-types/src/codecs/interned/messagepack.rs:251](../../../../../crates/shamir-types/src/codecs/interned/messagepack.rs#L251); [crates/shamir-types/src/codecs/interned/messagepack.rs:318](../../../../../crates/shamir-types/src/codecs/interned/messagepack.rs#L318).
+
+<a id="review-2"></a>
+
+### Claim 2 — Zero tests anywhere in the crate — exported contract has no regression net
+
+Status: `confirmed-open`. Current risk: `low`.
+
+There is still no local regression suite for builder identity, capacity or collection semantics. No Result-based cleanup path exists locally, but delegated capacity-overflow/allocation failure remains an observable boundary condition.
+
+Evidence: [crates/shamir-collections/src/lib.rs:25](../../../../../crates/shamir-collections/src/lib.rs#L25); [crates/shamir-collections/src/lib.rs:63](../../../../../crates/shamir-collections/src/lib.rs#L63); [crates/shamir-collections/Cargo.toml:16](../../../../../crates/shamir-collections/Cargo.toml#L16).
+
+Grouping/duplicate: `correctness-tdd.md#1`. This row is not another independent defect.
+
+## Corrections and qualified non-findings
+
+- Refute the literal only-abort assertion: pinned hashbrown panics on capacity overflow, and the workspace release profile uses panic=unwind. Ordinary allocation failure remains distinct.
+- Refute the all-literals-or-materialized-lengths assurance: decode_map receives a Map16/Map32 header count, not a validated materialized collection length.
+- Value's serde visitor separately clamps size_hint preallocation at value.rs:204 and value.rs:212; that mitigation does not cover the raw decode_map path.
+- The backup manifest example is an existing caller, not hypothetical, although its requested capacity is the length of an already-deserialized vector.
+- Documentation explains allocation policy but does not make hostile declared counts recoverable. Bound or fallibly reserve them at the decoder boundary when that API accepts untrusted bytes.
+- Local absence of explicit unwrap/expect/panic/assert sites, error types, I/O, locks and custom Drop logic remains confirmed. Returned collections still own allocations, so no resources/no fallibility must not be interpreted as a transitive guarantee.
+- Switching an IndexMap hasher alone does not change insertion-order iteration; the proposed failure explanation conflates hasher identity and ordered backing.
+- No error cleanup or test success was verified by execution.
+
+---
+
+<details>
+<summary>Historical report — preserved for provenance; not current status or instructions</summary>
+
 # shamir-collections -- Error handling & resource lifecycle
 
 ## Summary
@@ -97,3 +152,5 @@ No async/runtime needed — pure value-level assertions, ~1 ms runtime.
 `crates/shamir-collections/src/lib.rs` (the entirety of the crate — confirmed via glob,
 no submodules/tests/benches/examples exist), plus read-only grep of the ~100 workspace
 call sites of the four `_wc` constructors. Read-only review; no code modified.*
+
+</details>

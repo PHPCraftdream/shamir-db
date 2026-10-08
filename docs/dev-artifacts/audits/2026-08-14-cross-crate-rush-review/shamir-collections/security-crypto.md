@@ -1,3 +1,57 @@
+<!-- revalidation:2026-10-08 source:92ad58266bf57ddea1fa3c8a47affba1a3a9a096 -->
+# shamir-collections — security-crypto revalidation
+
+Source snapshot: `92ad58266bf57ddea1fa3c8a47affba1a3a9a096`. Revalidated 2026-10-08 by read-only XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run; no source fix is part of this update. Test registration/assertions are evidence of an oracle, not proof of a passing run.
+
+This section is authoritative for current status. Original titles/IDs are retained for traceability; a refuted title is not a current assertion. The collapsed historical report below is superseded, including its counts, severity, scenarios and fix instructions. Plan IDs preserve historical numbering, not a current release mandate. [Workspace methodology and status definitions](../SUMMARY.md#status-definitions).
+
+Deterministic non-keyed hashing of authenticated client-controlled names is source-proven and remains unmitigated at decoding. The report's specific trivial-collision explanation describes the wrong algorithm, so practical HashDoS amplification is unverified rather than established.
+
+## Current claim decisions
+
+| Claim decisions | Open | Source-fixed | Partial | Refuted | Unverified | N/A |
+|---:|---:|---:|---:|---:|---:|---:|
+| 2 | 1 | 0 | 0 | 0 | 1 | 0 |
+
+These are decisions on report claims, including repeated roots, bundled observations and non-findings—not a unique-bug census. Closed/N/A rows have no current risk; unverified risk is provisional. Pure style and unmeasured optimization claims do not establish runtime impact.
+
+<a id="review-1"></a>
+
+### Claim 1 — Unseeded FxHasher exported as THE workspace hasher is fed client-controlled string keys downstream — precomputable HashDoS amplifier
+
+Status: `unverified`. Current risk: `medium` (provisional; not a confirmed defect).
+
+THasher still creates zero-seeded Fx hashers; derived request maps, nested bind maps, return_only sets and transaction interner overlays retain client-controlled strings. However rustc-hash 2.1.2 uses polynomial accumulation, rotated finishing and wyhash-inspired byte hashing, not the alleged multiply-xor string fold. No practical collision family or amplification proof was supplied for that pinned implementation.
+
+Evidence: [crates/shamir-collections/src/lib.rs:17](../../../../../crates/shamir-collections/src/lib.rs#L17); [Cargo.lock:3007](../../../../../Cargo.lock#L3007); [Cargo.lock:3383](../../../../../Cargo.lock#L3383); [crates/shamir-query-types/src/batch/batch_request.rs:87](../../../../../crates/shamir-query-types/src/batch/batch_request.rs#L87); [crates/shamir-query-types/src/batch/sub_batch_op.rs:15](../../../../../crates/shamir-query-types/src/batch/sub_batch_op.rs#L15); [crates/shamir-server/src/db_handler/handler.rs:343](../../../../../crates/shamir-server/src/db_handler/handler.rs#L343); [crates/shamir-engine/src/query/batch/batch_execute.rs:869](../../../../../crates/shamir-engine/src/query/batch/batch_execute.rs#L869); [crates/shamir-tx/src/layered_interner.rs:95](../../../../../crates/shamir-tx/src/layered_interner.rs#L95).
+
+<a id="review-2"></a>
+
+### Claim 2 — Crate-wide `#![allow(clippy::disallowed_types)]` permanently disables a workspace-`deny` lint for all future code in this leaf
+
+Status: `confirmed-open`. Current risk: `nit`.
+
+The broad allow remains and covers future additions by default. It is explicitly sanctioned; no current default-hasher violation is present. This is lint-containment hardening, not a demonstrated security vulnerability.
+
+Evidence: [crates/shamir-collections/src/lib.rs:9](../../../../../crates/shamir-collections/src/lib.rs#L9); [Cargo.toml:34](../../../../../Cargo.toml#L34); [clippy.toml:39](../../../../../clippy.toml#L39); [clippy.toml:44](../../../../../clippy.toml#L44).
+
+## Corrections and qualified non-findings
+
+- Qualify application-map reachability as authenticated-client exposure: session validity and rate limiting precede application decoding; application permissions and query-count caps occur afterward.
+- The 16 MiB frame ceiling and post-auth request-rate gate constrain attacks, but do not establish keyed hashing or prevent collision work during deserialization.
+- PerIpLimiter keys are observed transport peer IP addresses, not arbitrary payload strings. Attacker control and cardinality there require a separate network threat model.
+- Precomputation is not universally portable across every deployment: pointer width and hashing implementation affect outputs.
+- Interning names does not itself close the ingress boundary: the interner/transaction overlay still hashes raw strings while assigning IDs.
+- The manifest and migration commit claim an exact same algorithm, but pinned rustc-hash 2.1.2 does not implement the old fxhash algorithm. Do not treat historical byte-identity assertions as proof.
+- The dependency pins and absence of local crypto, parsing, I/O and unsafe blocks remain confirmed. No current advisory-database audit was performed.
+- The assertion that pure aliases have nothing independently testable is refuted by their accessible hasher, capacity, iteration and serde contracts.
+- An allow for disallowed_types does not suppress the separate disallowed_methods lint.
+
+---
+
+<details>
+<summary>Historical report — preserved for provenance; not current status or instructions</summary>
+
 # shamir-collections -- Security & crypto boundary
 
 ## Summary
@@ -75,3 +129,5 @@ lint assurance.
 No other findings for this theme: the crate defines no secret-bearing comparisons (no constant-time
 questions arise), performs no wire-format or SQL/template assembly, contains no `unsafe`, and adds no
 new third-party attack surface beyond the two small, reputable dependencies pinned above.
+
+</details>

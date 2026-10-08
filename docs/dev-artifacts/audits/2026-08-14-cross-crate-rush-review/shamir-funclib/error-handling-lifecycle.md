@@ -1,3 +1,139 @@
+<!-- revalidation:2026-10-08 source:92ad58266bf57ddea1fa3c8a47affba1a3a9a096 -->
+# shamir-funclib — error-handling-lifecycle revalidation
+
+Source snapshot: `92ad58266bf57ddea1fa3c8a47affba1a3a9a096`. Revalidated 2026-10-08 by read-only XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run; no source fix is part of this update. Test registration/assertions are evidence of an oracle, not proof of a passing run.
+
+This section is authoritative for current status. Original titles/IDs are retained for traceability; a refuted title is not a current assertion. The collapsed historical report below is superseded, including its counts, severity, scenarios and fix instructions. Plan IDs preserve historical numbering, not a current release mandate. [Workspace methodology and status definitions](../SUMMARY.md#status-definitions).
+
+Recursive validation, unchecked allocation/arithmetic, and the native user-scalar replacement contract remain defective. Poison/counter and parser annotations are lower-priority hardening, not proven ordinary-input failures.
+
+## Current claim decisions
+
+| Claim decisions | Open | Source-fixed | Partial | Refuted | Unverified | N/A |
+|---:|---:|---:|---:|---:|---:|---:|
+| 10 | 10 | 0 | 0 | 0 | 0 | 0 |
+
+These are decisions on report claims, including repeated roots, bundled observations and non-findings—not a unique-bug census. Closed/N/A rows have no current risk; unverified risk is provisional. Pure style and unmeasured optimization claims do not establish runtime impact.
+
+<a id="review-1"></a>
+
+### Claim 1 — `validate/is_json` hand-rolled parser recurses without a depth limit — query-reachable stack overflow aborts the process
+
+Status: `confirmed-open`. Current risk: `high`.
+
+The parser still has unbounded mutual recursion and no MAX_JSON_DEPTH. Its registered tests cover only shallow input. Evaluated string content bypasses serde_json's nesting limit; sufficient nesting exhausts stack and is not converted into ScalarError by unwind isolation. Exact depth and universal deployment/privilege assertions remain unverified.
+
+Evidence: [crates/shamir-funclib/src/validate.rs:98](../../../../../crates/shamir-funclib/src/validate.rs#L98); [crates/shamir-funclib/src/validate.rs:123](../../../../../crates/shamir-funclib/src/validate.rs#L123); [crates/shamir-funclib/src/validate.rs:156](../../../../../crates/shamir-funclib/src/validate.rs#L156); [crates/shamir-funclib/src/validate.rs:178](../../../../../crates/shamir-funclib/src/validate.rs#L178); [crates/shamir-funclib/src/validate/tests/validate_tests.rs:183](../../../../../crates/shamir-funclib/src/validate/tests/validate_tests.rs#L183); [Cargo.toml:88](../../../../../Cargo.toml#L88).
+
+<a id="review-2"></a>
+
+### Claim 2 — Unbounded-allocation scalar paths: `strings/repeat`, `strings/pad_left`/`pad_right`, `gen/random_bytes`
+
+Status: `confirmed-open`. Current risk: `high`.
+
+All three implementation families still accept unbounded positive i64 sizes and allocate before returning a result. No ceiling tests exist; existing tests cover small results and negative arguments. Use checked byte-size arithmetic and a per-result byte ceiling, accounting for multi-byte pad characters and intermediate allocations.
+
+Evidence: [crates/shamir-funclib/src/strings.rs:233](../../../../../crates/shamir-funclib/src/strings.rs#L233); [crates/shamir-funclib/src/strings.rs:406](../../../../../crates/shamir-funclib/src/strings.rs#L406); [crates/shamir-funclib/src/gen.rs:75](../../../../../crates/shamir-funclib/src/gen.rs#L75); [crates/shamir-funclib/src/tests/strings_tests.rs:168](../../../../../crates/shamir-funclib/src/tests/strings_tests.rs#L168); [crates/shamir-funclib/src/gen/tests/gen_tests.rs:124](../../../../../crates/shamir-funclib/src/gen/tests/gen_tests.rs#L124).
+
+<a id="review-3"></a>
+
+### Claim 3 — `UserScalarLayer::register` discards scc's `Err` — documented "(or replace)" silently never replaces
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+register still discards insert_sync's result. Pinned scc returns Err on existing keys without changing the stored value, contradicting '(or replace)'. This affects native embedder re-registration; it is not proof that the distinct WASM CREATE OR REPLACE workflow is broken. Existing reopen tests register into a fresh layer, not an occupied name.
+
+Evidence: [crates/shamir-funclib/src/scalar_resolver.rs:39](../../../../../crates/shamir-funclib/src/scalar_resolver.rs#L39); [crates/shamir-funclib/src/scalar_resolver.rs:41](../../../../../crates/shamir-funclib/src/scalar_resolver.rs#L41); [Cargo.lock:3123](../../../../../Cargo.lock#L3123); [crates/shamir-db/src/shamir_db/tests/user_scalar_tests.rs:367](../../../../../crates/shamir-db/src/shamir_db/tests/user_scalar_tests.rs#L367); [crates/shamir-wasm-host/src/registry.rs:50](../../../../../crates/shamir-wasm-host/src/registry.rs#L50).
+
+<a id="review-4"></a>
+
+### Claim 4 — `rust_decimal` arithmetic panics on overflow in agg and array reductions
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+Unchecked Decimal sum/avg, variance mean/squared deviations, range subtraction, and array summation remain. Pinned Decimal operators panic rather than return errors, independent of Rust overflow-check settings. No MAX/MIN overflow regressions are registered in these suites. Current positive-denominator average divisions do not themselves establish an overflow trigger.
+
+Evidence: [crates/shamir-funclib/src/agg.rs:286](../../../../../crates/shamir-funclib/src/agg.rs#L286); [crates/shamir-funclib/src/agg.rs:322](../../../../../crates/shamir-funclib/src/agg.rs#L322); [crates/shamir-funclib/src/agg.rs:514](../../../../../crates/shamir-funclib/src/agg.rs#L514); [crates/shamir-funclib/src/agg.rs:852](../../../../../crates/shamir-funclib/src/agg.rs#L852); [crates/shamir-funclib/src/arrays.rs:276](../../../../../crates/shamir-funclib/src/arrays.rs#L276); [Cargo.lock:2979](../../../../../Cargo.lock#L2979).
+
+<a id="review-5"></a>
+
+### Claim 5 — `datetime/age` performs unchecked `i64` subtraction — inconsistent with the file's own checked discipline
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+age still has unchecked now_ms - then and truncating division, while diff_secs is checked and floored. Its registered test does not use i64::MIN. checked_sub and an explicit rounding contract remain required.
+
+Evidence: [crates/shamir-funclib/src/datetime.rs:78](../../../../../crates/shamir-funclib/src/datetime.rs#L78); [crates/shamir-funclib/src/datetime.rs:264](../../../../../crates/shamir-funclib/src/datetime.rs#L264); [crates/shamir-funclib/src/datetime/tests/datetime_tests.rs:47](../../../../../crates/shamir-funclib/src/datetime/tests/datetime_tests.rs#L47); [crates/shamir-funclib/src/datetime/tests/datetime_tests.rs:177](../../../../../crates/shamir-funclib/src/datetime/tests/datetime_tests.rs#L177).
+
+<a id="review-6"></a>
+
+### Claim 6 — `ScalarError` string-code taxonomy is unpoliced: no code catalog, drifting synonyms, zero context
+
+Status: `confirmed-open`. Current risk: `low`.
+
+Arbitrary String codes, regex synonyms, error allocation, and absent detail remain. A catalog/documentation would improve contract control. The current struct implements Error and Display; thiserror being prescribed for enums does not by itself make this struct incorrect. No actual frontend localization failure was proven.
+
+Evidence: [crates/shamir-funclib/src/registry.rs:20](../../../../../crates/shamir-funclib/src/registry.rs#L20); [crates/shamir-funclib/src/registry.rs:26](../../../../../crates/shamir-funclib/src/registry.rs#L26); [crates/shamir-funclib/src/strings.rs:427](../../../../../crates/shamir-funclib/src/strings.rs#L427); [crates/shamir-funclib/src/validate.rs:342](../../../../../crates/shamir-funclib/src/validate.rs#L342); [crates/shamir-funclib/src/crypto.rs:229](../../../../../crates/shamir-funclib/src/crypto.rs#L229).
+
+<a id="review-7"></a>
+
+### Claim 7 — Argon2id semaphore: poison-propagating `expect`s, and the in-flight counter leaks on panic
+
+Status: `confirmed-open`. Current risk: `nit`.
+
+Both poison expects and manual counter bracketing remain. The production wait critical section has no demonstrated panic source, so poison propagation is conditional hardening. Counter leakage requires unwind during the bracket; normal returned KDF errors decrement correctly. Permit lifetime itself is RAII-safe.
+
+Evidence: [crates/shamir-funclib/src/crypto.rs:139](../../../../../crates/shamir-funclib/src/crypto.rs#L139); [crates/shamir-funclib/src/crypto.rs:141](../../../../../crates/shamir-funclib/src/crypto.rs#L141); [crates/shamir-funclib/src/crypto.rs:177](../../../../../crates/shamir-funclib/src/crypto.rs#L177); [crates/shamir-funclib/src/crypto.rs:225](../../../../../crates/shamir-funclib/src/crypto.rs#L225); [crates/shamir-funclib/src/crypto.rs:230](../../../../../crates/shamir-funclib/src/crypto.rs#L230).
+
+<a id="review-8"></a>
+
+### Claim 8 — Canonical-hash path silently degrades serialization failures to empty key bytes
+
+Status: `confirmed-open`. Current risk: `low`.
+
+The two error-defaulting helpers remain. A native custom key accepted by the public generic API can fail serialization and collapse distinct keys into identical canonical encodings. This is not established as a remote ordinary-String-key CAS exploit. debug_assert nonempty would neither propagate errors nor protect release behavior.
+
+Evidence: [crates/shamir-funclib/src/canonical.rs:187](../../../../../crates/shamir-funclib/src/canonical.rs#L187); [crates/shamir-funclib/src/canonical.rs:193](../../../../../crates/shamir-funclib/src/canonical.rs#L193); [crates/shamir-funclib/src/canonical.rs:199](../../../../../crates/shamir-funclib/src/canonical.rs#L199).
+
+Grouping/duplicate: `security-crypto.md#8`. This row is not another independent defect.
+
+<a id="review-9"></a>
+
+### Claim 9 — `ScalarResolver` / `UserScalarLayer` have zero tests — their error paths are unverified
+
+Status: `confirmed-open`. Current risk: `low`.
+
+Dedicated tests and wiring remain absent. Indirect facade/engine coverage proves ordinary dispatch routes, not collision replacement, shadowing, unknown-function/arity parity, or concurrent layer behavior.
+
+Evidence: [crates/shamir-funclib/src/scalar_resolver.rs:135](../../../../../crates/shamir-funclib/src/scalar_resolver.rs#L135); [crates/shamir-funclib/src/tests/mod.rs:1](../../../../../crates/shamir-funclib/src/tests/mod.rs#L1); [crates/shamir-db/src/shamir_db/tests/user_scalar_tests.rs:51](../../../../../crates/shamir-db/src/shamir_db/tests/user_scalar_tests.rs#L51).
+
+Grouping/duplicate: `style-claude-md.md#1`. This row is not another independent defect.
+
+<a id="review-10"></a>
+
+### Claim 10 — Unannotated panicky/fallible primitives in library code
+
+Status: `confirmed-open`. Current risk: `nit`.
+
+The midnight unwrap, StddevAgg NaN fallback, and arrays reduce unreachable remain. Pinned chrono proves the unwrap infallible; pinned Decimal's valid-value to_f64 implementation always returns Some; Reduce's unmatched branch is excluded by the outer match. These are optional annotation/readability cleanups, not current error paths. The cited agg.rs:268 unreachable does not exist.
+
+Evidence: [crates/shamir-funclib/src/datetime.rs:153](../../../../../crates/shamir-funclib/src/datetime.rs#L153); [crates/shamir-funclib/src/agg.rs:472](../../../../../crates/shamir-funclib/src/agg.rs#L472); [crates/shamir-funclib/src/arrays.rs:268](../../../../../crates/shamir-funclib/src/arrays.rs#L268); [Cargo.lock:655](../../../../../Cargo.lock#L655); [Cargo.lock:2979](../../../../../Cargo.lock#L2979).
+
+## Corrections and qualified non-findings
+
+- No separate Fix Plan exists; all Suggested fixes are assessed in the matching rows and SUMMARY plan.
+- The date panic allegation is refuted, not fixed: no source change was needed to establish the chrono midnight invariant.
+- Use one deliberate stable overflow code with compatibility consideration; the reports inconsistently propose overflow and out_of_range.
+- Replacing a registration with remove-then-insert creates an observable absence/race window. Prefer a single entry-operation replacement with specified concurrent semantics.
+- The resource-abort mechanisms bypass panic=unwind, but ordinary capacity-overflow and Decimal panics generally unwind; do not equate every panic with process termination.
+- Critical recursion severity is recalibrated to high availability risk under established authorized evaluation reachability; exact exploit thresholds and all-deployment assertions were not proven.
+- Root shared tests remain reachable despite organizational nonconformance. Dedicated resolver testing, rather than a test-directory move alone, is the substantive coverage obligation.
+
+---
+
+<details>
+<summary>Historical report — preserved for provenance; not current status or instructions</summary>
+
 # shamir-funclib -- Error handling & resource lifecycle
 
 ## Summary
@@ -75,3 +211,5 @@ The crate's `Result`/`ScalarError` discipline is largely exemplary for its docum
 - Issue: the `.unwrap()` is safe only by the invariant "0:0:0 is always a valid time" — per the project's own convention that deserves an inline `expect("...")` naming the invariant, since nothing else in the file uses `unwrap`. The `unwrap_or(f64::NAN)` in `StddevAgg::finalize` masks a `Decimal→f64` conversion failure into NaN, which only *later* surfaces as `"out_of_range"` from `from_f64_retain` — correct outcome, needlessly obscured failure chain (map the `None` to `"out_of_range"` directly instead).
 - Failure scenario: none today; both are readability/audit-noise issues on error paths.
 - Suggested fix: `expect("0:0:0 is valid for any NaiveDate")`; propagate the `to_f64` failure as `"out_of_range"` immediately.
+
+</details>

@@ -1,3 +1,183 @@
+<!-- revalidation:2026-10-08 source:92ad58266bf57ddea1fa3c8a47affba1a3a9a096 -->
+# shamir-engine — security-crypto revalidation
+
+Source snapshot: `92ad58266bf57ddea1fa3c8a47affba1a3a9a096`. Revalidated 2026-10-08 by read-only XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run; no source fix is part of this update. Test registration/assertions are evidence of an oracle, not proof of a passing run.
+
+This section is authoritative for current status. Original titles/IDs are retained for traceability; a refuted title is not a current assertion. The collapsed historical report below is superseded, including its counts, severity, scenarios and fix instructions. Plan IDs preserve historical numbering, not a current release mandate. [Workspace methodology and status definitions](../SUMMARY.md#status-definitions).
+
+Designated filter surfaces are guarded and condition compilation is cached. Authorization and replication hardening are partial across the full public API; no current server bypass is established.
+
+## Current claim decisions
+
+| Claim decisions | Open | Source-fixed | Partial | Refuted | Unverified | N/A |
+|---:|---:|---:|---:|---:|---:|---:|
+| 15 | 0 | 4 | 3 | 0 | 2 | 6 |
+
+These are decisions on report claims, including repeated roots, bundled observations and non-findings—not a unique-bug census. Closed/N/A rows have no current risk; unverified risk is provisional. Pure style and unmeasured optimization claims do not establish runtime impact.
+
+<a id="review-1"></a>
+
+### Claim 1 — Filter-depth DoS guard misses when, having, and all FilterValue nesting
+
+Status: `fixed`. Current risk: —.
+
+The collector includes when/having, and iterative depth traversal descends through embedded FilterValue/condition trees. Batch and interactive entry paths invoke validation.
+
+Evidence: [crates/shamir-engine/src/query/batch/batch_validate.rs:85](../../../../../crates/shamir-engine/src/query/batch/batch_validate.rs#L85); [crates/shamir-query-types/src/filter/filter_enum.rs:239](../../../../../crates/shamir-query-types/src/filter/filter_enum.rs#L239); [crates/shamir-engine/src/query/batch/interactive_tx.rs:104](../../../../../crates/shamir-engine/src/query/batch/interactive_tx.rs#L104).
+
+<a id="review-1-transport-recursion-assertion"></a>
+
+### Claim 1/transport recursion assertion — Transport-layer serde recursion is equally unbounded
+
+Status: `unverified`. Current risk: —.
+
+No version-specific transport-deserializer proof establishes the asserted remotely reachable 100k-depth payload. Do not infer network exploitability from typed-AST reachability.
+
+Evidence: [Cargo.lock:2949](../../../../../Cargo.lock#L2949); [Cargo.lock:3244](../../../../../Cargo.lock#L3244).
+
+<a id="review-2"></a>
+
+### Claim 2 — Per-row recompile of cond conditions on the WHERE path
+
+Status: `fixed`. Current risk: —.
+
+Unprescanned callers use FilterContext's local compiled-node cache; repeated content hits return the stored Arc rather than compiling again.
+
+Evidence: [crates/shamir-engine/src/query/filter/resolve.rs:410](../../../../../crates/shamir-engine/src/query/filter/resolve.rs#L410); [crates/shamir-engine/src/query/filter/cond_cache.rs:99](../../../../../crates/shamir-engine/src/query/filter/cond_cache.rs#L99); [crates/shamir-engine/src/query/filter/tests/local_cond_cache_tests.rs:214](../../../../../crates/shamir-engine/src/query/filter/tests/local_cond_cache_tests.rs#L214).
+
+<a id="review-2-regex-budget-and-timing-assertions"></a>
+
+### Claim 2/regex budget and timing assertions — Linear regex matching, default 10 MB budget and compile-time estimates
+
+Status: `unverified`. Current risk: —.
+
+The lock pins regex 1.12.3. Exact version-specific limits and historical timing claims lack inspected external implementation evidence or measurements.
+
+Evidence: [Cargo.lock:2844](../../../../../Cargo.lock#L2844).
+
+<a id="review-3"></a>
+
+### Claim 3 — Engine boundary performs no authorization — enforcement is a single upstream wrapper
+
+Status: `partially-fixed`. Current risk: `low`.
+
+Batch/interactive executors now require Authorized minted through AccessGate, wired to real DAC. Raw DbInstance/TableManager APIs remain trusted, actor-less access.
+
+Evidence: [crates/shamir-engine/src/query/batch/authorized.rs:92](../../../../../crates/shamir-engine/src/query/batch/authorized.rs#L92); [crates/shamir-engine/src/query/batch/batch_execute.rs:89](../../../../../crates/shamir-engine/src/query/batch/batch_execute.rs#L89); [crates/shamir-db/src/shamir_db/shamir_db/access_control.rs:1202](../../../../../crates/shamir-db/src/shamir_db/shamir_db/access_control.rs#L1202); [crates/shamir-engine/src/db_instance/db_instance.rs:61](../../../../../crates/shamir-engine/src/db_instance/db_instance.rs#L61).
+
+<a id="review-4"></a>
+
+### Claim 4 — Replication apply is a trusted raw write — no re-validation of leader events
+
+Status: `partially-fixed`. Current risk: `low`.
+
+Trust preconditions and optional ValidatePayload exist. The server still selects Trusted; no schema/DAC rerun exists, and ValidatePayload accepts header-valid malformed maps.
+
+Evidence: [crates/shamir-engine/src/tx/apply_replicated.rs:190](../../../../../crates/shamir-engine/src/tx/apply_replicated.rs#L190); [crates/shamir-server/src/replication/follower_loop.rs:343](../../../../../crates/shamir-server/src/replication/follower_loop.rs#L343); [docs/dev-artifacts/roadmap/REPLICATION.md:272](../../../../../docs/dev-artifacts/roadmap/REPLICATION.md#L272).
+
+<a id="review-5"></a>
+
+### Claim 5 — Pointer-keyed caches expose documentation-only lifetime invariants and stale-hit hazards
+
+Status: `fixed`. Current risk: —.
+
+All three keys now derive from content rather than allocation addresses. QueryRefCache still explicitly requires per-scan freshness.
+
+Evidence: [crates/shamir-engine/src/query/filter/cond_cache.rs:53](../../../../../crates/shamir-engine/src/query/filter/cond_cache.rs#L53); [crates/shamir-engine/src/query/filter/field_path_cache.rs:43](../../../../../crates/shamir-engine/src/query/filter/field_path_cache.rs#L43); [crates/shamir-engine/src/query/filter/query_ref_cache.rs:95](../../../../../crates/shamir-engine/src/query/filter/query_ref_cache.rs#L95).
+
+<a id="review-6"></a>
+
+### Claim 6 — Regex/Like patterns have no size cap and invalid patterns silently compile to False
+
+Status: `partially-fixed`. Current risk: `low`.
+
+Normal batch/interactive paths reject over-64KiB or invalid patterns. Public direct compilation/TableManager paths still bypass this guard and retain False folding.
+
+Evidence: [crates/shamir-engine/src/query/filter/pattern_guard.rs:35](../../../../../crates/shamir-engine/src/query/filter/pattern_guard.rs#L35); [crates/shamir-engine/src/query/batch/batch_execute.rs:177](../../../../../crates/shamir-engine/src/query/batch/batch_execute.rs#L177); [crates/shamir-engine/src/query/filter/compile.rs:108](../../../../../crates/shamir-engine/src/query/filter/compile.rs#L108); [crates/shamir-engine/src/table/write_exec.rs:928](../../../../../crates/shamir-engine/src/table/write_exec.rs#L928).
+
+<a id="review-7"></a>
+
+### Claim 7 — SessionPermissions RBAC remains publicly exported while being test-only scaffolding
+
+Status: `fixed`. Current risk: —.
+
+Exports require test/test-util, the dead loop was removed, and the permission benchmark declares the feature requirement.
+
+Evidence: [crates/shamir-engine/src/query/auth/mod.rs:19](../../../../../crates/shamir-engine/src/query/auth/mod.rs#L19); [crates/shamir-engine/src/query/auth/session.rs:166](../../../../../crates/shamir-engine/src/query/auth/session.rs#L166); [crates/shamir-engine/Cargo.toml:185](../../../../../crates/shamir-engine/Cargo.toml#L185).
+
+<a id="review-positive-observations-no-unsafe"></a>
+
+### Claim Positive observations/No unsafe — No unsafe library implementation or local cryptographic primitives
+
+Status: `not-applicable`. Current risk: —.
+
+Source searches support this scoped inventory; authentication and cryptographic correctness of sibling crates were not audited here.
+
+Evidence: [crates/shamir-engine/src/lib.rs:12](../../../../../crates/shamir-engine/src/lib.rs#L12); [crates/shamir-engine/src/query/auth/mod.rs:27](../../../../../crates/shamir-engine/src/query/auth/mod.rs#L27).
+
+<a id="review-positive-observations-fail-closed-wasm-validator-bridge"></a>
+
+### Claim Positive observations/Fail-closed WASM validator bridge — Invocation and result-decode failures reject with stop=true
+
+Status: `not-applicable`. Current risk: —.
+
+Both error paths produce an error-bearing Validation with stop=true, and FnCtx receives the actor.
+
+Evidence: [crates/shamir-engine/src/validator/wasm_record_validator.rs:55](../../../../../crates/shamir-engine/src/validator/wasm_record_validator.rs#L55); [crates/shamir-engine/src/validator/wasm_record_validator.rs:84](../../../../../crates/shamir-engine/src/validator/wasm_record_validator.rs#L84); [crates/shamir-engine/src/validator/wasm_record_validator.rs:89](../../../../../crates/shamir-engine/src/validator/wasm_record_validator.rs#L89).
+
+<a id="review-positive-observations-corrupt-record-hygiene"></a>
+
+### Claim Positive observations/Corrupt-record hygiene — Corrupt-record reporting exposes references rather than raw bytes
+
+Status: `not-applicable`. Current risk: —.
+
+The reporting interface contains references, not corrupt payload dumps. This does not prove every malformed record is detected by the header-only lens.
+
+Evidence: [crates/shamir-engine/src/table/read_index_scan.rs:336](../../../../../crates/shamir-engine/src/table/read_index_scan.rs#L336); [crates/shamir-types/src/record_view/lens.rs:767](../../../../../crates/shamir-types/src/record_view/lens.rs#L767).
+
+<a id="review-positive-observations-dos-hardening-that-does-exist"></a>
+
+### Claim Positive observations/DoS hardening that does exist — Absolute ForEach cap and cooperative execution deadline
+
+Status: `not-applicable`. Current risk: —.
+
+The server-side iteration clamp and cooperative checkpoints remain; they are not preemptive limits inside every individual operation.
+
+Evidence: [crates/shamir-engine/src/query/batch/query_runner.rs:36](../../../../../crates/shamir-engine/src/query/batch/query_runner.rs#L36); [crates/shamir-engine/src/query/batch/query_runner.rs:45](../../../../../crates/shamir-engine/src/query/batch/query_runner.rs#L45); [crates/shamir-engine/src/query/batch/query_runner.rs:893](../../../../../crates/shamir-engine/src/query/batch/query_runner.rs#L893).
+
+<a id="review-positive-observations-like-conversion"></a>
+
+### Claim Positive observations/LIKE conversion — LIKE conversion escapes regex metacharacters
+
+Status: `not-applicable`. Current risk: —.
+
+The explicit escape arm preserves the asserted pattern-injection boundary.
+
+Evidence: [crates/shamir-engine/src/query/filter/fts.rs:16](../../../../../crates/shamir-engine/src/query/filter/fts.rs#L16).
+
+<a id="review-positive-observations-secret-comparisons"></a>
+
+### Claim Positive observations/Secret comparisons — No local secret or timing-sensitive comparison implementation
+
+Status: `not-applicable`. Current risk: —.
+
+Reviewed engine code delegates the auth types; no local password/token comparison mechanism was found.
+
+Evidence: [crates/shamir-engine/src/query/auth/mod.rs:27](../../../../../crates/shamir-engine/src/query/auth/mod.rs#L27).
+
+## Corrections and qualified non-findings
+
+- Qualify attack reachability: direct typed engine access and compromised/authenticated upstreams are different threat models from an ordinary unauthenticated client.
+- FilterContext's former actor field was unused and has been removed; TASK_GROUPS' assertion that it evaluated functions as System is unsupported by that field alone.
+- Pattern failures currently carry code=None at batch validation, despite the proposed coded-error wording.
+- Cache entry-count assertions alone do not prove one compilation; the registered Arc-identity test and cache-hit branch provide stronger source evidence.
+- Content-derived cache lookup allocates/formats keys per evaluation; do not present this as zero-cost cache lookup.
+
+---
+
+<details>
+<summary>Historical report — preserved for provenance; not current status or instructions</summary>
+
 # shamir-engine -- Security & crypto boundary
 
 ## Summary
@@ -203,3 +383,5 @@ dirs for coverage claims.
   handling (`SecretString`, redacted `Debug`, zeroize) lives in `shamir-types` /
   `shamir-query-types`; `rand` is declared in `Cargo.toml` but unused in `src/`
   (no token/id generation here).
+
+</details>

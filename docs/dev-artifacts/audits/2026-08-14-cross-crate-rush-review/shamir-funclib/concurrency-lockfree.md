@@ -1,3 +1,99 @@
+<!-- revalidation:2026-10-08 source:92ad58266bf57ddea1fa3c8a47affba1a3a9a096 -->
+# shamir-funclib — concurrency-lockfree revalidation
+
+Source snapshot: `92ad58266bf57ddea1fa3c8a47affba1a3a9a096`. Revalidated 2026-10-08 by read-only XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run; no source fix is part of this update. Test registration/assertions are evidence of an oracle, not proof of a passing run.
+
+This section is authoritative for current status. Original titles/IDs are retained for traceability; a refuted title is not a current assertion. The collapsed historical report below is superseded, including its counts, severity, scenarios and fix instructions. Plan IDs preserve historical numbering, not a current release mandate. [Workspace methodology and status definitions](../SUMMARY.md#status-definitions).
+
+Global regex serialization, semaphore lost wakeup, runtime-worker blocking, exclusive resolver lookups, and resolver test gaps remain. Several lock-free and deterministic-test guarantees require correction.
+
+## Current claim decisions
+
+| Claim decisions | Open | Source-fixed | Partial | Refuted | Unverified | N/A |
+|---:|---:|---:|---:|---:|---:|---:|
+| 6 | 6 | 0 | 0 | 0 | 0 | 0 |
+
+These are decisions on report claims, including repeated roots, bundled observations and non-findings—not a unique-bug census. Closed/N/A rows have no current risk; unverified risk is provisional. Pure style and unmeasured optimization claims do not establish runtime impact.
+
+<a id="review-1"></a>
+
+### Claim 1 — Global `std::sync::Mutex` regex cache on the hot filter path — regex compiled while holding the lock
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+Every cached-regex call still takes the process-global mutex; a miss compiles while the guard is held, and reaching 256 entries clears the entire cache. This establishes serialization and churn, not measured milliseconds/seconds or throughput collapse. No contention-model justification or replacement is present.
+
+Evidence: [crates/shamir-funclib/src/strings.rs:418](../../../../../crates/shamir-funclib/src/strings.rs#L418); [crates/shamir-funclib/src/strings.rs:423](../../../../../crates/shamir-funclib/src/strings.rs#L423); [crates/shamir-funclib/src/strings.rs:427](../../../../../crates/shamir-funclib/src/strings.rs#L427); [crates/shamir-funclib/src/strings.rs:429](../../../../../crates/shamir-funclib/src/strings.rs#L429); [crates/shamir-engine/src/query/filter/resolve.rs:374](../../../../../crates/shamir-engine/src/query/filter/resolve.rs#L374).
+
+<a id="review-2"></a>
+
+### Claim 2 — `CountingSemaphore` lost-wakeup: `release()` notifies without holding the mutex spanning the waiter's predicate check
+
+Status: `confirmed-open`. Current risk: `high`.
+
+release still increments the atomic and notifies without acquiring the wait mutex. A release between a failed predicate check and Condvar::wait can leave a waiter asleep with an available permit and no future notification. The registered KDF cap test does not deterministically force this window.
+
+Evidence: [crates/shamir-funclib/src/crypto.rs:139](../../../../../crates/shamir-funclib/src/crypto.rs#L139); [crates/shamir-funclib/src/crypto.rs:140](../../../../../crates/shamir-funclib/src/crypto.rs#L140); [crates/shamir-funclib/src/crypto.rs:145](../../../../../crates/shamir-funclib/src/crypto.rs#L145); [crates/shamir-funclib/src/crypto/tests/crypto_tests.rs:207](../../../../../crates/shamir-funclib/src/crypto/tests/crypto_tests.rs#L207).
+
+<a id="review-3"></a>
+
+### Claim 3 — `argon2id` acquires a blocking semaphore inline on async runtime workers (documented residual risk, still open)
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+Query/filter and computed-write scalar calls remain synchronous; they can execute both Condvar waits and KDF work on a runtime worker. The separate named Argon2idFunction wrapper does use spawn_blocking, but does not protect these scalar-expression paths. Memory admission is bounded; worker occupancy is not.
+
+Evidence: [crates/shamir-funclib/src/crypto.rs:102](../../../../../crates/shamir-funclib/src/crypto.rs#L102); [crates/shamir-funclib/src/crypto.rs:221](../../../../../crates/shamir-funclib/src/crypto.rs#L221); [crates/shamir-engine/src/query/filter/resolve.rs:374](../../../../../crates/shamir-engine/src/query/filter/resolve.rs#L374); [crates/shamir-engine/src/table/write_helpers.rs:314](../../../../../crates/shamir-engine/src/table/write_helpers.rs#L314); [crates/shamir-wasm-host/src/builtin.rs:63](../../../../../crates/shamir-wasm-host/src/builtin.rs#L63).
+
+<a id="review-4"></a>
+
+### Claim 4 — `UserScalarLayer::get` uses `get_sync` (exclusive bucket lock) while its docs claim "read-only hash probes with no locking"
+
+Status: `confirmed-open`. Current risk: `low`.
+
+get still uses get_sync. Pinned scc 3.8.4 obtains optional_writer_sync and returns an exclusively held OccupiedEntry. read_sync would use a shared bucket lock, not a genuinely lock-free read. Empty-map lookup avoids bucket locking; populated-map contention magnitude is unmeasured.
+
+Evidence: [crates/shamir-funclib/src/scalar_resolver.rs:25](../../../../../crates/shamir-funclib/src/scalar_resolver.rs#L25); [crates/shamir-funclib/src/scalar_resolver.rs:46](../../../../../crates/shamir-funclib/src/scalar_resolver.rs#L46); [Cargo.lock:3123](../../../../../Cargo.lock#L3123).
+
+<a id="review-5"></a>
+
+### Claim 5 — The module carrying the crate's concurrency claims has no tests
+
+Status: `confirmed-open`. Current risk: `low`.
+
+There is still no dedicated registered resolver test suite, including concurrent registration/dispatch and same-name replacement. Indirect engine tests do not close those obligations.
+
+Evidence: [crates/shamir-funclib/src/scalar_resolver.rs:145](../../../../../crates/shamir-funclib/src/scalar_resolver.rs#L145); [crates/shamir-funclib/src/tests/mod.rs:1](../../../../../crates/shamir-funclib/src/tests/mod.rs#L1); [crates/shamir-engine/src/query/read/tests/select_projection_tests.rs:284](../../../../../crates/shamir-engine/src/query/read/tests/select_projection_tests.rs#L284).
+
+Grouping/duplicate: `style-claude-md.md#1`. This row is not another independent defect.
+
+<a id="review-6"></a>
+
+### Claim 6 — `A2_IN_FLIGHT` observability counter is not panic-safe (permit itself is)
+
+Status: `confirmed-open`. Current risk: `nit`.
+
+The counter is still incremented/decremented manually around hashing; unwind between them skips decrement. The permit releases through Drop. An ordinary returned KDF error does not leak the counter because decrement precedes res?. No current data-triggered KDF panic was demonstrated.
+
+Evidence: [crates/shamir-funclib/src/crypto.rs:177](../../../../../crates/shamir-funclib/src/crypto.rs#L177); [crates/shamir-funclib/src/crypto.rs:225](../../../../../crates/shamir-funclib/src/crypto.rs#L225); [crates/shamir-funclib/src/crypto.rs:230](../../../../../crates/shamir-funclib/src/crypto.rs#L230).
+
+Grouping/duplicate: `error-handling-lifecycle.md#7`. This row is not another independent defect.
+
+## Corrections and qualified non-findings
+
+- No separate Fix Plan exists; recommendations are assessed in the finding rows and SUMMARY plan.
+- scc HashMap insertion and populated lookup are bucket-locked; only resizing is described as lock-free by pinned dependency source. Replacing get_sync with read_sync reduces exclusivity, not all locking.
+- TFxMap scalar registry cardinality is O(1), and no scc len call is present. AggRegistry has no len/is_empty methods, contrary to the original combined guarantee.
+- UserScalarLayer::is_empty delegates to scc's !has_entry; absence of a banned len call is confirmed, but populated is_empty is not a universal constant-time cardinality guarantee.
+- No async/await, unsafe, parking_lot, RwLock, or static mut occurrence was found in this crate. Existing Fx-backed collections and impure generation metadata are confirmed.
+- The cap's atomic admission and RAII release bound concurrent KDF allocations, but the barrier does not prove simultaneous execution or semaphore wakeup correctness.
+- The sibling Argon2Semaphore still notifies without its wait mutex; this observation settles the suggested mirror check, not a new neighboring-crate audit.
+
+---
+
+<details>
+<summary>Historical report — preserved for provenance; not current status or instructions</summary>
+
 # shamir-funclib -- Concurrency & lock-free invariants
 
 ## Summary
@@ -53,3 +149,5 @@ The crate is mostly pure scalar functions and is pillar-clean where it matters s
 - `UserScalarLayer::is_empty` maps to scc's `!has_entry` (early-exit bucket scan, immediate `true` on the shared empty layer) — not the banned O(N) `scc::*::len()`; no `AtomicUsize` mirror needed at current usage.
 - No lock is held across `.await` anywhere (the crate contains no `async fn`/`.await`); no `parking_lot`, no `RwLock`, no `unsafe`, no `static mut`.
 - Fx pillar holds: `scc::HashMap::with_hasher(THasher::default())` (scalar_resolver.rs:35), `TFxMap` registries, `new_fx_set_wc`/`new_map_wc` in arrays/object; `rand::rng()` (thread-local) in `gen.rs` is thread-safe and correctly registered as impure/non-indexable.
+
+</details>

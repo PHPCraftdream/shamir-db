@@ -1,3 +1,104 @@
+<!-- revalidation:2026-10-08 source:92ad58266bf57ddea1fa3c8a47affba1a3a9a096 -->
+# shamir-types — style-claude-md revalidation
+
+Source snapshot: `92ad58266bf57ddea1fa3c8a47affba1a3a9a096`. Revalidated 2026-10-08 by read-only XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run; no source fix is part of this update. Test registration/assertions are evidence of an oracle, not proof of a passing run.
+
+This section is authoritative for current status. Original titles/IDs are retained for traceability; a refuted title is not a current assertion. The collapsed historical report below is superseded, including its counts, severity, scenarios and fix instructions. Plan IDs preserve historical numbering, not a current release mandate. [Workspace methodology and status definitions](../SUMMARY.md#status-definitions).
+
+The access mega-file, duplicate manual error type, and local imports remain. These are low/nit maintainability issues. The test-wrapper rule violation is refuted: wrappers are inside test files, and more than one file uses that shape.
+
+## Current claim decisions
+
+| Claim decisions | Open | Source-fixed | Partial | Refuted | Unverified | N/A |
+|---:|---:|---:|---:|---:|---:|---:|
+| 7 | 5 | 0 | 0 | 1 | 0 | 1 |
+
+These are decisions on report claims, including repeated roots, bundled observations and non-findings—not a unique-bug census. Closed/N/A rows have no current risk; unverified risk is provisional. Pure style and unmeasured optimization claims do not establish runtime impact.
+
+<a id="review-1"></a>
+
+### Claim 1 — `access.rs` bundles identity, mode-bits, policy and error types into one 716-line file -- one-file-one-export violation
+
+Status: `confirmed-open`. Current risk: `low`.
+
+The file still groups identity, modes, resource paths, metadata, and policy exports. A split can improve compliance with the one-primary-export convention, but there is no runtime failure or severity-Medium mechanism.
+
+Evidence: [crates/shamir-types/src/access.rs:22](../../../../../crates/shamir-types/src/access.rs#L22); [crates/shamir-types/src/access.rs:121](../../../../../crates/shamir-types/src/access.rs#L121); [crates/shamir-types/src/access.rs:197](../../../../../crates/shamir-types/src/access.rs#L197); [crates/shamir-types/src/access.rs:371](../../../../../crates/shamir-types/src/access.rs#L371); [crates/shamir-types/src/access.rs:702](../../../../../crates/shamir-types/src/access.rs#L702); [CLAUDE.md:542](../../../../../CLAUDE.md#L542).
+
+<a id="review-2"></a>
+
+### Claim 2 — Second public `CodecError` enum with manual impls duplicates the crate's thiserror error type
+
+Status: `confirmed-open`. Current risk: `low`.
+
+Both error enums and the manual bincode Display/Error implementations remain; thiserror policy and API naming debt remain.
+
+Evidence: [crates/shamir-types/src/codecs/basic/bincode.rs:8](../../../../../crates/shamir-types/src/codecs/basic/bincode.rs#L8); [crates/shamir-types/src/codecs/basic/bincode.rs:14](../../../../../crates/shamir-types/src/codecs/basic/bincode.rs#L14); [crates/shamir-types/src/codecs/error.rs:4](../../../../../crates/shamir-types/src/codecs/error.rs#L4).
+
+Grouping/duplicate: `error-handling-lifecycle.md:2`. This row is not another independent defect.
+
+<a id="review-3"></a>
+
+### Claim 3 — Mid-function imports in production code violate imports-at-top
+
+Status: `confirmed-open`. Current risk: `nit`.
+
+Two local Entry imports remain, and SeedableRng remains local to thread_local initialization. Entry imports plainly qualify as header-hoisting cleanup; the macro-contained import is stylistic and should be assessed against the documented macro-body exception, not treated as a runtime defect.
+
+Evidence: [crates/shamir-types/src/core/interner/interner.rs:161](../../../../../crates/shamir-types/src/core/interner/interner.rs#L161); [crates/shamir-types/src/core/interner/interner.rs:349](../../../../../crates/shamir-types/src/core/interner/interner.rs#L349); [crates/shamir-types/src/types/record_id.rs:85](../../../../../crates/shamir-types/src/types/record_id.rs#L85); [CLAUDE.md:657](../../../../../CLAUDE.md#L657).
+
+<a id="review-4"></a>
+
+### Claim 4 — `types/tests/value_tests.rs` retains the legacy inline `#[cfg(test)] mod tests { ... }` wrapper shape
+
+Status: `refuted`. Current risk: —.
+
+The wrapper exists inside a dedicated tests file, whereas the rule forbids embedding such tests inside implementation files. record_id_tests.rs also uses a wrapper, refuting the lone-file claim. Flattening remains optional cosmetic cleanup; deprecation allowance is appropriate for UserValue-focused tests.
+
+Evidence: [crates/shamir-types/src/types/tests/value_tests.rs:1](../../../../../crates/shamir-types/src/types/tests/value_tests.rs#L1); [crates/shamir-types/src/types/tests/record_id_tests.rs:1](../../../../../crates/shamir-types/src/types/tests/record_id_tests.rs#L1); [crates/shamir-types/src/types/tests/mod.rs:8](../../../../../crates/shamir-types/src/types/tests/mod.rs#L8); [CLAUDE.md:621](../../../../../CLAUDE.md#L621).
+
+<a id="review-5"></a>
+
+### Claim 5 — Mid-function imports scattered through test files
+
+Status: `confirmed-open`. Current risk: `nit`.
+
+The cited function-local imports still exist, including duplicated RecordView imports in merge tests. These are import-convention cleanup, not runtime risk.
+
+Evidence: [crates/shamir-types/src/tests/access_tests.rs:265](../../../../../crates/shamir-types/src/tests/access_tests.rs#L265); [crates/shamir-types/src/core/interner/tests/interner_tests.rs:534](../../../../../crates/shamir-types/src/core/interner/tests/interner_tests.rs#L534); [crates/shamir-types/src/core/interner/tests/interner_tests.rs:804](../../../../../crates/shamir-types/src/core/interner/tests/interner_tests.rs#L804); [crates/shamir-types/src/codecs/interned/tests/messagepack_tests.rs:667](../../../../../crates/shamir-types/src/codecs/interned/tests/messagepack_tests.rs#L667); [crates/shamir-types/src/codecs/interned/tests/storage_bytes_tests.rs:438](../../../../../crates/shamir-types/src/codecs/interned/tests/storage_bytes_tests.rs#L438); [crates/shamir-types/src/codecs/interned/tests/merge_storage_bytes_tests.rs:296](../../../../../crates/shamir-types/src/codecs/interned/tests/merge_storage_bytes_tests.rs#L296); [crates/shamir-types/src/codecs/interned/tests/merge_storage_bytes_tests.rs:318](../../../../../crates/shamir-types/src/codecs/interned/tests/merge_storage_bytes_tests.rs#L318); [crates/shamir-types/src/record_view/tests/scalar_ref_cmp_tests.rs:193](../../../../../crates/shamir-types/src/record_view/tests/scalar_ref_cmp_tests.rs#L193); [crates/shamir-types/src/macros/tests/mpack_tests.rs:332](../../../../../crates/shamir-types/src/macros/tests/mpack_tests.rs#L332).
+
+<a id="review-6"></a>
+
+### Claim 6 — Dead "Tests" section banner left behind after inline-test extraction
+
+Status: `confirmed-open`. Current risk: `nit`.
+
+The implementation file still ends with an empty Tests divider; actual tests are registered in core/tests.
+
+Evidence: [crates/shamir-types/src/core/sort_codec.rs:152](../../../../../crates/shamir-types/src/core/sort_codec.rs#L152); [crates/shamir-types/src/core/tests/mod.rs:1](../../../../../crates/shamir-types/src/core/tests/mod.rs#L1).
+
+<a id="review-7"></a>
+
+### Claim 7 — Inconsistent test-manifest visibility across `tests/mod.rs` files
+
+Status: `not-applicable`. Current risk: —.
+
+Mixed pub/private module declarations remain, but the policy's example does not require uniform visibility. Registered private modules run normally under the parent test gate; no functional or structural-registration defect follows.
+
+Evidence: [crates/shamir-types/src/tests/mod.rs:1](../../../../../crates/shamir-types/src/tests/mod.rs#L1); [crates/shamir-types/src/types/tests/mod.rs:8](../../../../../crates/shamir-types/src/types/tests/mod.rs#L8); [crates/shamir-types/src/record_view/tests/mod.rs:9](../../../../../crates/shamir-types/src/record_view/tests/mod.rs#L9); [crates/shamir-types/src/core/interner/mod.rs:14](../../../../../crates/shamir-types/src/core/interner/mod.rs#L14).
+
+## Corrections and qualified non-findings
+
+- Module manifests remain declaration/reexport-only, topic tests are reachable through cfg(test), and no implementation-file inline test body was found.
+- The review's fixed count of 21 test-file groups is stale; do not preserve it as a current inventory.
+- Style cleanup must remain separate from substantive fixes and must not inherit runtime High/Medium severity automatically.
+- The claimed sole nested test wrapper and the claimed ban applying to tests-directory files are both incorrect.
+
+---
+
+<details>
+<summary>Historical report — preserved for provenance; not current status or instructions</summary>
+
 # shamir-types -- Style & CLAUDE.md structural conformance
 
 ## Summary
@@ -54,3 +155,5 @@ The crate is largely conformant on the structural conventions: every `mod.rs` (l
 - **Issue:** CLAUDE.md's example shows uniform `pub mod value_tests;` manifests; the crate mixes `pub mod` / private `mod` / `#[cfg(test)] pub mod` freely between sibling manifests (and `core/interner/mod.rs` wires its tests as `pub mod tests` while every other parent uses private `mod tests`). Purely cosmetic -- visibility differences are unobservable given the `#[cfg(test)]` gate at the parent.
 - **Failure scenario:** none functional; a reader comparing modules cannot infer convention.
 - **Suggested fix:** pick one form (plain `pub mod x_tests;` matching the doc example) and normalize all manifests in a style-only sweep committed separately, per CLAUDE.md's style-commit rule.
+
+</details>

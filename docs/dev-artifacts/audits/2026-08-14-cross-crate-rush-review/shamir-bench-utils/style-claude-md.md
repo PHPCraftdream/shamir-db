@@ -1,3 +1,93 @@
+<!-- revalidation:2026-10-08 source:92ad58266bf57ddea1fa3c8a47affba1a3a9a096 -->
+# shamir-bench-utils — style-claude-md revalidation
+
+Source snapshot: `92ad58266bf57ddea1fa3c8a47affba1a3a9a096`. Revalidated 2026-10-08 by read-only XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run; no source fix is part of this update. Test registration/assertions are evidence of an oracle, not proof of a passing run.
+
+This section is authoritative for current status. Original titles/IDs are retained for traceability; a refuted title is not a current assertion. The collapsed historical report below is superseded, including its counts, severity, scenarios and fix instructions. Plan IDs preserve historical numbering, not a current release mandate. [Workspace methodology and status definitions](../SUMMARY.md#status-definitions).
+
+Inline test layout and stale documentation remain, but layout alone is low-severity hygiene, not a runtime High. The unrelated-export objection is refuted by the explicit closely-coupled-group allowance.
+
+## Current claim decisions
+
+| Claim decisions | Open | Source-fixed | Partial | Refuted | Unverified | N/A |
+|---:|---:|---:|---:|---:|---:|---:|
+| 5 | 4 | 0 | 0 | 1 | 0 | 0 |
+
+These are decisions on report claims, including repeated roots, bundled observations and non-findings—not a unique-bug census. Closed/N/A rows have no current risk; unverified risk is provisional. Pure style and unmeasured optimization claims do not establish runtime impact.
+
+<a id="review-1"></a>
+
+### Claim 1 — Entire test module embedded inline in `vector_data.rs`, violating the mandatory `tests/` layout
+
+Status: `confirmed-open`. Current risk: `low`.
+
+The nine-test inline block violates the rule, but lib.rs and cfg(test) register it correctly. No missing discovery or runtime High mechanism follows from placement.
+
+Evidence: [crates/shamir-bench-utils/src/lib.rs:17](../../../../../crates/shamir-bench-utils/src/lib.rs#L17); [crates/shamir-bench-utils/src/vector_data.rs:217](../../../../../crates/shamir-bench-utils/src/vector_data.rs#L217); [CLAUDE.md:594](../../../../../CLAUDE.md#L594).
+
+Grouping/duplicate: `SUMMARY.md#7.1`. This row is not another independent defect.
+
+<a id="review-2"></a>
+
+### Claim 2 — `peak_mem.rs` docs still teach Criterion as the module's usage pattern — the harness the workspace removed and banned
+
+Status: `confirmed-open`. Current risk: `low`.
+
+The ignored Criterion recipe and setup wording remain. Actual consumers use Harness, and measure/measure_async/current_allocated still have no executable callers.
+
+Evidence: [crates/shamir-bench-utils/src/peak_mem.rs:10](../../../../../crates/shamir-bench-utils/src/peak_mem.rs#L10); [crates/shamir-bench-utils/src/peak_mem.rs:44](../../../../../crates/shamir-bench-utils/src/peak_mem.rs#L44); [crates/shamir-index/benches/create_index_streaming.rs:65](../../../../../crates/shamir-index/benches/create_index_streaming.rs#L65); [CLAUDE.md:237](../../../../../CLAUDE.md#L237).
+
+Grouping/duplicate: `SUMMARY.md#7.2`. This row is not another independent defect.
+
+<a id="review-3"></a>
+
+### Claim 3 — Stale "criterion bench" cross-reference in `vector_data.rs` module doc
+
+Status: `confirmed-open`. Current risk: `low`.
+
+The qualifier still contradicts vector_search's Harness import and migration documentation.
+
+Evidence: [crates/shamir-bench-utils/src/vector_data.rs:3](../../../../../crates/shamir-bench-utils/src/vector_data.rs#L3); [crates/shamir-engine/benches/vector_search.rs:46](../../../../../crates/shamir-engine/benches/vector_search.rs#L46); [crates/shamir-engine/benches/vector_search.rs:53](../../../../../crates/shamir-engine/benches/vector_search.rs#L53).
+
+Grouping/duplicate: `SUMMARY.md#7.2`. This row is not another independent defect.
+
+<a id="review-4"></a>
+
+### Claim 4 — `vector_data.rs` carries three public exports (`Lcg`, `ClusteredDataset`, `clustered_vectors`) — borderline against one-file-one-export
+
+Status: `refuted`. Current risk: —.
+
+The rule explicitly permits closely coupled groups. The generator directly instantiates Lcg, consumes its Gaussian method, and returns ClusteredDataset; these constitute one fixture-generation unit. A split is optional organization, not a proven violation.
+
+Evidence: [CLAUDE.md:505](../../../../../CLAUDE.md#L505); [crates/shamir-bench-utils/src/vector_data.rs:185](../../../../../crates/shamir-bench-utils/src/vector_data.rs#L185); [crates/shamir-bench-utils/src/vector_data.rs:204](../../../../../crates/shamir-bench-utils/src/vector_data.rs#L204); [crates/shamir-bench-utils/src/vector_data.rs:209](../../../../../crates/shamir-bench-utils/src/vector_data.rs#L209).
+
+Grouping/duplicate: `SUMMARY.md#7.3`. This row is not another independent defect.
+
+<a id="review-5"></a>
+
+### Claim 5 — Reproducibility key described inconsistently: "(k, σ, seed) triple" vs. five values
+
+Status: `confirmed-open`. Current risk: `nit`.
+
+The module still tells readers to report only a triple, while function documentation requires five inputs. The consumer lists five values but erroneously calls them a triple.
+
+Evidence: [crates/shamir-bench-utils/src/vector_data.rs:29](../../../../../crates/shamir-bench-utils/src/vector_data.rs#L29); [crates/shamir-bench-utils/src/vector_data.rs:158](../../../../../crates/shamir-bench-utils/src/vector_data.rs#L158); [crates/shamir-engine/benches/vector_search.rs:19](../../../../../crates/shamir-engine/benches/vector_search.rs#L19).
+
+Grouping/duplicate: `SUMMARY.md#7.4`. This row is not another independent defect.
+
+## Corrections and qualified non-findings
+
+- Downgrade the original High for inline tests: this is mandatory structural hygiene, not demonstrated behavioral breakage. Stale Criterion documentation is likewise documentation severity.
+- lib.rs remains declaration-only; own imports are at module headers except the permitted test use super::*; no current mod.rs contains implementation.
+- Named bench/example/test references resolve, but lib.rs also contains an external-checkout harness pointer, so the blanket claim that every documentation pointer resolves within the repository is too broad.
+- The historical manifest comment does not disable unit tests or create an authorized layout exception.
+- Do not require unrelated implementation splitting as part of moving tests; the documented coupled-group allowance applies.
+
+---
+
+<details>
+<summary>Historical report — preserved for provenance; not current status or instructions</summary>
+
 # shamir-bench-utils -- Style & CLAUDE.md structural conformance
 
 ## Summary
@@ -123,3 +213,5 @@ workspace-wide and bans reaching for.
   doc and the dataset — hence the recall numbers — is not reproducible.
 - **Suggested fix:** align both doc sites on the five-value key `(n, dim, k_clusters,
   σ, seed)`; fix the downstream mention opportunistically in the owning crate.
+
+</details>

@@ -1,3 +1,167 @@
+<!-- revalidation:2026-10-08 source:92ad58266bf57ddea1fa3c8a47affba1a3a9a096 -->
+# shamir-connect — style-claude-md revalidation
+
+Source snapshot: `92ad58266bf57ddea1fa3c8a47affba1a3a9a096`. Revalidated 2026-10-08 by read-only XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run; no source fix is part of this update. Test registration/assertions are evidence of an oracle, not proof of a passing run.
+
+This section is authoritative for current status. Original titles/IDs are retained for traceability; a refuted title is not a current assertion. The collapsed historical report below is superseded, including its counts, severity, scenarios and fix instructions. Plan IDs preserve historical numbering, not a current release mandate. [Workspace methodology and status definitions](../SUMMARY.md#status-definitions).
+
+Structural conventions largely hold. Documentation and import debt remains, but style labels do not independently justify High severity.
+
+## Current claim decisions
+
+| Claim decisions | Open | Source-fixed | Partial | Refuted | Unverified | N/A |
+|---:|---:|---:|---:|---:|---:|---:|
+| 13 | 7 | 0 | 0 | 1 | 0 | 5 |
+
+These are decisions on report claims, including repeated roots, bundled observations and non-findings—not a unique-bug census. Closed/N/A rows have no current risk; unverified risk is provisional. Pure style and unmeasured optimization claims do not establish runtime impact.
+
+<a id="review-1"></a>
+
+### Claim 1 — dispatch_request_view doc claims functionally identical despite asymmetric rate policy
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+The equivalence claim remains false. Severity comes from the alternate dispatch policy bypass, not comment style alone; the live server uses view dispatch.
+
+Evidence: [crates/shamir-connect/src/server/dispatch.rs:115](../../../../../crates/shamir-connect/src/server/dispatch.rs#L115); [crates/shamir-connect/src/server/dispatch.rs:100](../../../../../crates/shamir-connect/src/server/dispatch.rs#L100); [crates/shamir-connect/src/server/dispatch.rs:153](../../../../../crates/shamir-connect/src/server/dispatch.rs#L153).
+
+Grouping/duplicate: `security-crypto.md#1`. This row is not another independent defect.
+
+<a id="review-2"></a>
+
+### Claim 2 — encode_details_canonical public stub promises encoding it never performs
+
+Status: `confirmed-open`. Current risk: `low`.
+
+The public signature, doc promise, and empty implementation remain inconsistent, with no caller found.
+
+Evidence: [crates/shamir-connect/src/server/audit_chain.rs:351](../../../../../crates/shamir-connect/src/server/audit_chain.rs#L351); [crates/shamir-connect/src/server/audit_chain.rs:355](../../../../../crates/shamir-connect/src/server/audit_chain.rs#L355); [crates/shamir-connect/src/server/audit_chain.rs:360](../../../../../crates/shamir-connect/src/server/audit_chain.rs#L360).
+
+Grouping/duplicate: `api-wire-protocol.md#3`. This row is not another independent defect.
+
+<a id="review-3"></a>
+
+### Claim 3 — Lock sites missing inline contention-model comments
+
+Status: `confirmed-open`. Current risk: `nit`.
+
+The five named sites retain their documentation gaps. Session and audit are active repeated paths; admin's reference directory and bootstrap are rare/setup uses, while the Condvar is specifically a blocking wait surface. They must not all inherit a runtime High classification.
+
+Evidence: [crates/shamir-connect/src/server/session.rs:416](../../../../../crates/shamir-connect/src/server/session.rs#L416); [crates/shamir-connect/src/server/audit_chain.rs:131](../../../../../crates/shamir-connect/src/server/audit_chain.rs#L131); [crates/shamir-connect/src/server/argon2_semaphore.rs:36](../../../../../crates/shamir-connect/src/server/argon2_semaphore.rs#L36); [crates/shamir-connect/src/server/admin.rs:298](../../../../../crates/shamir-connect/src/server/admin.rs#L298); [crates/shamir-connect/src/server/bootstrap.rs:49](../../../../../crates/shamir-connect/src/server/bootstrap.rs#L49).
+
+<a id="review-4"></a>
+
+### Claim 4 — Dead suppressors keeping unused imports alive in server/handshake.rs
+
+Status: `confirmed-open`. Current risk: `nit`.
+
+The no-op function reference and _doc_link_targets suppression remain. Neither performs security work.
+
+Evidence: [crates/shamir-connect/src/server/handshake.rs:232](../../../../../crates/shamir-connect/src/server/handshake.rs#L232); [crates/shamir-connect/src/server/handshake.rs:389](../../../../../crates/shamir-connect/src/server/handshake.rs#L389).
+
+<a id="review-5"></a>
+
+### Claim 5 — Stale doc references to nonexistent artifact paths and old test name
+
+Status: `confirmed-open`. Current risk: `nit`.
+
+auth_v1 directory reference and abbreviated envelope test name remain; the actual flat vectors and owning_and_view test exist.
+
+Evidence: [crates/shamir-connect/src/common/auth_message.rs:6](../../../../../crates/shamir-connect/src/common/auth_message.rs#L6); [crates/shamir-connect/src/common/envelope.rs:90](../../../../../crates/shamir-connect/src/common/envelope.rs#L90); [crates/shamir-connect/tests/integration_session.rs:333](../../../../../crates/shamir-connect/tests/integration_session.rs#L333); [crates/shamir-connect/test-vectors/README.md:11](../../../../../crates/shamir-connect/test-vectors/README.md#L11).
+
+<a id="review-6"></a>
+
+### Claim 6 — finalize_change_password doc header describes verification
+
+Status: `confirmed-open`. Current risk: `nit`.
+
+The stale verification paragraphs remain above a helper that only removes sessions and returns the timestamp. Production explicitly invokes the verifier before finalization.
+
+Evidence: [crates/shamir-connect/src/server/changepw.rs:92](../../../../../crates/shamir-connect/src/server/changepw.rs#L92); [crates/shamir-connect/src/server/changepw.rs:105](../../../../../crates/shamir-connect/src/server/changepw.rs#L105); [crates/shamir-server/src/db_handler/admin.rs:517](../../../../../crates/shamir-server/src/db_handler/admin.rs#L517).
+
+<a id="review-7"></a>
+
+### Claim 7 — Mid-function use statements violate imports-at-top
+
+Status: `confirmed-open`. Current risk: `nit`.
+
+The admin Entry import and test Arc/Barrier/thread imports remain inside functions without a documented exception.
+
+Evidence: [crates/shamir-connect/src/server/admin.rs:324](../../../../../crates/shamir-connect/src/server/admin.rs#L324); [crates/shamir-connect/src/server/tests/post_auth_rate_limit_tests.rs:98](../../../../../crates/shamir-connect/src/server/tests/post_auth_rate_limit_tests.rs#L98).
+
+<a id="review-conforming-mod-rs"></a>
+
+### Claim Conforming.mod.rs — mod.rs manifests contain declarations and re-exports, not implementation logic
+
+Status: `not-applicable`. Current risk: —.
+
+The named common, client, server, and test manifests conform.
+
+Evidence: [crates/shamir-connect/src/common/mod.rs:3](../../../../../crates/shamir-connect/src/common/mod.rs#L3); [crates/shamir-connect/src/client/mod.rs:3](../../../../../crates/shamir-connect/src/client/mod.rs#L3); [crates/shamir-connect/src/server/mod.rs:6](../../../../../crates/shamir-connect/src/server/mod.rs#L6); [crates/shamir-connect/src/server/tests/mod.rs:1](../../../../../crates/shamir-connect/src/server/tests/mod.rs#L1).
+
+<a id="review-conforming-tests-layout"></a>
+
+### Claim Conforming.tests-layout — Topic-split tests and feature-gated registration
+
+Status: `not-applicable`. Current risk: —.
+
+Parent cfg(test) registrations reach the topic manifests. Durable tests are gated by durable-fjall; Cargo auto-discovers the integration files. No inline implementation-file tests block was found.
+
+Evidence: [crates/shamir-connect/src/common/mod.rs:22](../../../../../crates/shamir-connect/src/common/mod.rs#L22); [crates/shamir-connect/src/server/mod.rs:3](../../../../../crates/shamir-connect/src/server/mod.rs#L3); [crates/shamir-connect/src/server/tests/mod.rs:4](../../../../../crates/shamir-connect/src/server/tests/mod.rs#L4); [crates/shamir-connect/src/server/tests/durable_counters_tests.rs:1](../../../../../crates/shamir-connect/src/server/tests/durable_counters_tests.rs#L1); [crates/shamir-connect/Cargo.toml:10](../../../../../crates/shamir-connect/Cargo.toml#L10).
+
+<a id="review-conforming-test-coverage-claims"></a>
+
+### Claim Conforming.test-coverage-claims — All eight vector pairs asserted byte-for-byte
+
+Status: `refuted`. Current risk: —.
+
+TOML fixtures and assertion paths exist, but Rust tests do not compare JSON/TOML equality or demonstrate a second implementation. Registered auth tests and vector metadata contradict the actual tag length, so the assertion cannot support an unqualified healthy-suite claim.
+
+Evidence: [crates/shamir-connect/src/common/tests/test_vectors_tests.rs:37](../../../../../crates/shamir-connect/src/common/tests/test_vectors_tests.rs#L37); [crates/shamir-connect/src/common/tests/auth_message_tests.rs:127](../../../../../crates/shamir-connect/src/common/tests/auth_message_tests.rs#L127); [crates/shamir-connect/test-vectors/auth_message_default.toml:21](../../../../../crates/shamir-connect/test-vectors/auth_message_default.toml#L21).
+
+Grouping/duplicate: `api-wire-protocol.md#Summary.wire-guarantees`. This row is not another independent defect.
+
+<a id="review-conforming-one-file-one-export"></a>
+
+### Claim Conforming.one-file-one-export — Multi-type files are cohesive protocol families
+
+Status: `not-applicable`. Current risk: —.
+
+The named files group related envelopes, sessions, and handshake views. Their multiple exports do not establish a violation of the closely-coupled-group exception.
+
+Evidence: [crates/shamir-connect/src/common/envelope.rs:92](../../../../../crates/shamir-connect/src/common/envelope.rs#L92); [crates/shamir-connect/src/server/session.rs:125](../../../../../crates/shamir-connect/src/server/session.rs#L125); [crates/shamir-connect/src/server/handshake.rs:106](../../../../../crates/shamir-connect/src/server/handshake.rs#L106).
+
+<a id="review-conforming-error-enums"></a>
+
+### Claim Conforming.error-enums — Common and snapshot errors use thiserror
+
+Status: `not-applicable`. Current risk: —.
+
+The named enums retain thiserror derives; the separately reported AuditError exception remains.
+
+Evidence: [crates/shamir-connect/src/common/error.rs:14](../../../../../crates/shamir-connect/src/common/error.rs#L14); [crates/shamir-connect/src/server/rate_limit.rs:136](../../../../../crates/shamir-connect/src/server/rate_limit.rs#L136); [crates/shamir-connect/src/server/lockout.rs:236](../../../../../crates/shamir-connect/src/server/lockout.rs#L236).
+
+<a id="review-conforming-benches"></a>
+
+### Claim Conforming.benches — hot_paths uses bench_scale_tool::Harness
+
+Status: `not-applicable`. Current risk: —.
+
+The benchmark imports and registers the mandated harness. No benchmark was executed.
+
+Evidence: [crates/shamir-connect/benches/hot_paths.rs:41](../../../../../crates/shamir-connect/benches/hot_paths.rs#L41); [crates/shamir-connect/Cargo.toml:69](../../../../../crates/shamir-connect/Cargo.toml#L69).
+
+## Corrections and qualified non-findings
+
+- Do not label style-only findings High; carry the independently established runtime severity where applicable.
+- Do not add a false contention-nil justification to a globally serialized login path. Fix or accurately document its actual access model.
+- The suggested docs-only sweep includes source, manifest, test, and wire-behavior changes; split it by change type.
+
+---
+
+<details>
+<summary>Historical report — preserved for provenance; not current status or instructions</summary>
+
 # shamir-connect -- Style & CLAUDE.md structural conformance
 
 ## Summary
@@ -63,3 +227,5 @@ The crate is strongly conformed on the structural pillars: all three `mod.rs` ma
 - **One-file-one-export:** multi-type files (`envelope.rs`, `types.rs`, `session.rs`, `admin.rs`, `handshake.rs`) are each a single cohesive protocol concern (wire-envelope family, wire-tag family, session family, admin-command layer, handshake family), i.e. legitimate "closely-coupled groups" under the rule; no unrelated-public-type grabs found.
 - **Error-enum style within the theme's scope:** `common/error.rs` and both snapshot-sink error enums (`lockout.rs`, `rate_limit.rs`) use `thiserror` as required. (The hand-rolled `AuditError` display-via-Debug in `audit_chain.rs` is noted here for the error-handling-lens reviewer.)
 - **Benches:** `benches/hot_paths.rs` uses `bench_scale_tool::Harness` per the workspace mandate (header documents the migration; no Criterion APIs).
+
+</details>

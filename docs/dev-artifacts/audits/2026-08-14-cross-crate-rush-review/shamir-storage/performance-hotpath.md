@@ -1,3 +1,126 @@
+<!-- revalidation:2026-10-08 source:92ad58266bf57ddea1fa3c8a47affba1a3a9a096 -->
+# shamir-storage — performance-hotpath revalidation
+
+Source snapshot: `92ad58266bf57ddea1fa3c8a47affba1a3a9a096`. Revalidated 2026-10-08 by read-only XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run; no source fix is part of this update. Test registration/assertions are evidence of an oracle, not proof of a passing run.
+
+This section is authoritative for current status. Original titles/IDs are retained for traceability; a refuted title is not a current assertion. The collapsed historical report below is superseded, including its counts, severity, scenarios and fix instructions. Plan IDs preserve historical numbering, not a current release mandate. [Workspace methodology and status definitions](../SUMMARY.md#status-definitions).
+
+All seven implementation shapes remain. The scan costs and unbounded queue are statically established; original timing, doubled-payload, and exact-reallocation assertions need correction.
+
+## Current claim decisions
+
+| Claim decisions | Open | Source-fixed | Partial | Refuted | Unverified | N/A |
+|---:|---:|---:|---:|---:|---:|---:|
+| 9 | 7 | 0 | 0 | 0 | 0 | 2 |
+
+These are decisions on report claims, including repeated roots, bundled observations and non-findings—not a unique-bug census. Closed/N/A rows have no current risk; unverified risk is provisional. Pure style and unmeasured optimization claims do not establish runtime impact.
+
+<a id="review-1"></a>
+
+### Claim 1 — Reverse range streams drain the ENTIRE range into RAM before reversing; not overridden by InMemory/Cached/Mirrored
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+The default collects every forward batch before yielding. InMemory and Cached inherit it; Mirrored delegates to its primary. Sorted lookup_max requests batch size 1, establishing a real early-exit caller that still pays whole-range collection.
+
+Evidence: [crates/shamir-storage/src/types.rs:376](../../../../../crates/shamir-storage/src/types.rs#L376); [crates/shamir-storage/src/types.rs:397](../../../../../crates/shamir-storage/src/types.rs#L397); [crates/shamir-storage/src/storage_mirrored.rs:431](../../../../../crates/shamir-storage/src/storage_mirrored.rs#L431); [crates/shamir-index/src/base_index/sorted_index_manager.rs:2174](../../../../../crates/shamir-index/src/base_index/sorted_index_manager.rs#L2174).
+
+<a id="review-2"></a>
+
+### Claim 2 — InMemoryStore iter_stream / scan_prefix_stream eagerly materialize the whole corpus before the first yield
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+Collection happens synchronously when constructing the stream, not merely before its first yield. Result-vector memory and cloning are O(N)/O(matches); Bytes clones share payloads. InMemory tests check outputs/batching, not work performed before the first pull.
+
+Evidence: [crates/shamir-storage/src/storage_in_memory.rs:153](../../../../../crates/shamir-storage/src/storage_in_memory.rs#L153); [crates/shamir-storage/src/storage_in_memory.rs:158](../../../../../crates/shamir-storage/src/storage_in_memory.rs#L158); [crates/shamir-storage/src/storage_in_memory.rs:240](../../../../../crates/shamir-storage/src/storage_in_memory.rs#L240); [crates/shamir-storage/src/storage_in_memory.rs:246](../../../../../crates/shamir-storage/src/storage_in_memory.rs#L246); [crates/shamir-storage/src/tests/storage_in_memory_tests.rs:100](../../../../../crates/shamir-storage/src/tests/storage_in_memory_tests.rs#L100); [crates/shamir-storage/src/tests/storage_in_memory_tests.rs:235](../../../../../crates/shamir-storage/src/tests/storage_in_memory_tests.rs#L235).
+
+<a id="review-3"></a>
+
+### Claim 3 — MemBufferStore::transact drains the ENTIRE dirty buffer before every transact
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+Every nonempty transact calls drain_all, whose passes use usize::MAX snapshots. Work and transient entry vectors scale with all dirty entries rather than touched keys. Reducing scope must preserve ordering against background drains, not just cleanup comparisons.
+
+Evidence: [crates/shamir-storage/src/storage_membuffer.rs:1037](../../../../../crates/shamir-storage/src/storage_membuffer.rs#L1037); [crates/shamir-storage/src/storage_membuffer.rs:600](../../../../../crates/shamir-storage/src/storage_membuffer.rs#L600); [crates/shamir-storage/src/storage_membuffer.rs:612](../../../../../crates/shamir-storage/src/storage_membuffer.rs#L612); [crates/shamir-storage/src/storage_membuffer.rs:504](../../../../../crates/shamir-storage/src/storage_membuffer.rs#L504).
+
+<a id="review-4"></a>
+
+### Claim 4 — CachedStore WriteMode::Async uses an UNBOUNDED write-behind channel
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+The unbounded channel has no admission cap or high-watermark action. Queued jobs retain keys and Bytes payload handles/history until one worker drains them. Payload bytes are not necessarily duplicated between queue and cache.
+
+Evidence: [crates/shamir-storage/src/storage_cached.rs:55](../../../../../crates/shamir-storage/src/storage_cached.rs#L55); [crates/shamir-storage/src/storage_cached.rs:242](../../../../../crates/shamir-storage/src/storage_cached.rs#L242); [crates/shamir-storage/src/storage_cached.rs:446](../../../../../crates/shamir-storage/src/storage_cached.rs#L446); [crates/shamir-storage/src/storage_cached.rs:450](../../../../../crates/shamir-storage/src/storage_cached.rs#L450).
+
+<a id="review-5"></a>
+
+### Claim 5 — Trait-default range filter scans PAST the upper bound forever
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+default_range_filter consumes until stream exhaustion despite ascending order and an exceeded upper bound. CachedStore inherits it. 'Forever' means the remaining finite stream, not an established infinite loop.
+
+Evidence: [crates/shamir-storage/src/types.rs:354](../../../../../crates/shamir-storage/src/types.rs#L354); [crates/shamir-storage/src/types.rs:426](../../../../../crates/shamir-storage/src/types.rs#L426); [crates/shamir-storage/src/types.rs:436](../../../../../crates/shamir-storage/src/types.rs#L436); [crates/shamir-storage/src/storage_cached.rs:517](../../../../../crates/shamir-storage/src/storage_cached.rs#L517).
+
+<a id="review-6"></a>
+
+### Claim 6 — FjallStore::submit blocks the async caller thread when the bounded queue fills
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+SyncSender::send remains inside async submit. Saturation can block runtime threads; neither the numeric fan-out example nor resulting latency was measured.
+
+Evidence: [crates/shamir-storage/src/storage_fjall.rs:92](../../../../../crates/shamir-storage/src/storage_fjall.rs#L92); [crates/shamir-storage/src/storage_fjall.rs:199](../../../../../crates/shamir-storage/src/storage_fjall.rs#L199).
+
+Grouping/duplicate: `concurrency-lockfree.md#4`. This row is not another independent defect.
+
+<a id="review-7"></a>
+
+### Claim 7 — Minor allocations/clones on batched paths
+
+Status: `confirmed-open`. Current risk: `nit`.
+
+get_many still clones its miss-key vector, and Fjall forward/prefix scans still allocate initial capacity 256 independently of batch size. Larger batches can require multiple growth steps, not necessarily one.
+
+Evidence: [crates/shamir-storage/src/storage_membuffer.rs:1245](../../../../../crates/shamir-storage/src/storage_membuffer.rs#L1245); [crates/shamir-storage/src/storage_fjall.rs:617](../../../../../crates/shamir-storage/src/storage_fjall.rs#L617); [crates/shamir-storage/src/storage_fjall.rs:682](../../../../../crates/shamir-storage/src/storage_fjall.rs#L682).
+
+<a id="review-nf-fjall-lookups"></a>
+
+### Claim NF-fjall-lookups — Fjall set/remove existence probes and flag-free fast paths
+
+Status: `not-applicable`. Current risk: —.
+
+Flag-bearing paths perform contains_key before mutation; no-flag overrides omit it. Their performance benefit and prior benchmark adjudication are not independently measured here.
+
+Evidence: [crates/shamir-storage/src/storage_fjall.rs:377](../../../../../crates/shamir-storage/src/storage_fjall.rs#L377); [crates/shamir-storage/src/storage_fjall.rs:394](../../../../../crates/shamir-storage/src/storage_fjall.rs#L394); [crates/shamir-storage/src/storage_fjall.rs:565](../../../../../crates/shamir-storage/src/storage_fjall.rs#L565); [crates/shamir-storage/src/storage_fjall.rs:585](../../../../../crates/shamir-storage/src/storage_fjall.rs#L585).
+
+<a id="review-nf-dirty-retention"></a>
+
+### Claim NF-dirty-retention — Dirty values intentionally survive moka eviction; flusher bounds growth under healthy I/O
+
+Status: `not-applicable`. Current risk: —.
+
+Values are independently retained in dirty and removed only after successful backing writes plus matching cleanup. This establishes eviction retention, not a hard dirty-memory bound or proof producers cannot outpace the flusher.
+
+Evidence: [crates/shamir-storage/src/storage_membuffer.rs:143](../../../../../crates/shamir-storage/src/storage_membuffer.rs#L143); [crates/shamir-storage/src/storage_membuffer.rs:527](../../../../../crates/shamir-storage/src/storage_membuffer.rs#L527); [crates/shamir-storage/src/storage_membuffer.rs:554](../../../../../crates/shamir-storage/src/storage_membuffer.rs#L554).
+
+## Corrections and qualified non-findings
+
+- Normalize scan severity to medium absent measured production scale; the resource-cost mechanisms remain proven.
+- Repeated Vec::drain of front batches also shifts the remaining tail; do not describe full consumption as necessarily linear.
+- scc 3.8.4 Range::DoubleEndedIterator support is unverified; do not prescribe that API as confirmed.
+- Queue/cache Bytes clones usually share payload allocations, though queued older versions still retain memory.
+- Only executing runtime workers can be simultaneously blocked; the 4096-task example cannot imply 3072 simultaneously blocked runtime threads.
+- The registered Cached early-termination test checks the first batch and drop, but does not count traversal/cloning and therefore cannot by itself prove laziness.
+
+---
+
+<details>
+<summary>Historical report — preserved for provenance; not current status or instructions</summary>
+
 # shamir-storage -- Performance & O(x->0)
 
 Reviewer: static read-only pass over `crates/shamir-storage/src/**` + `Cargo.toml`
@@ -211,3 +334,5 @@ risk either way. Listed for completeness, not as debt demanding action.
   semantics well, including overlay merges -- but none assert incremental
   yield behavior or memory bounds on the InMemoryStore streams or queue-depth
   caps, matching where findings 1/2/4 hid.
+
+</details>

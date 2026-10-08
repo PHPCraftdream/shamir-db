@@ -1,3 +1,113 @@
+<!-- revalidation:2026-10-08 source:92ad58266bf57ddea1fa3c8a47affba1a3a9a096 -->
+# shamir-index — style-claude-md revalidation
+
+Source snapshot: `92ad58266bf57ddea1fa3c8a47affba1a3a9a096`. Revalidated 2026-10-08 by read-only XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run; no source fix is part of this update. Test registration/assertions are evidence of an oracle, not proof of a passing run.
+
+This section is authoritative for current status. Original titles/IDs are retained for traceability; a refuted title is not a current assertion. The collapsed historical report below is superseded, including its counts, severity, scenarios and fix instructions. Plan IDs preserve historical numbering, not a current release mandate. [Workspace methodology and status definitions](../SUMMARY.md#status-definitions).
+
+Local imports, inline quant_meta tests, stale docs, and comment nits remain. These are non-runtime issues. Task prefixes are not prohibited, and coupled public type groups are allowed by the actual rule.
+
+## Current claim decisions
+
+| Claim decisions | Open | Source-fixed | Partial | Refuted | Unverified | N/A |
+|---:|---:|---:|---:|---:|---:|---:|
+| 8 | 5 | 0 | 0 | 1 | 0 | 2 |
+
+These are decisions on report claims, including repeated roots, bundled observations and non-findings—not a unique-bug census. Closed/N/A rows have no current risk; unverified risk is provisional. Pure style and unmeasured optimization claims do not establish runtime impact.
+
+<a id="review-1"></a>
+
+### Claim 1 — `use` statements inside function/block bodies across six production files
+
+Status: `confirmed-open`. Current risk: `nit`.
+
+The listed local imports remain, including write_ops' redundant IndexWriteOp import. They conflict with the header-import rule but establish no runtime defect.
+
+Evidence: [crates/shamir-index/src/expr.rs:85](../../../../../crates/shamir-index/src/expr.rs#L85); [crates/shamir-index/src/tokenizer.rs:464](../../../../../crates/shamir-index/src/tokenizer.rs#L464); [crates/shamir-index/src/write_ops.rs:166](../../../../../crates/shamir-index/src/write_ops.rs#L166); [crates/shamir-index/src/base_index/index_manager.rs:2794](../../../../../crates/shamir-index/src/base_index/index_manager.rs#L2794); [crates/shamir-index/src/vector/hnsw_adapter.rs:2327](../../../../../crates/shamir-index/src/vector/hnsw_adapter.rs#L2327).
+
+<a id="review-2"></a>
+
+### Claim 2 — Inline `#[cfg(test)] mod tests` inside an implementation file
+
+Status: `confirmed-open`. Current risk: `nit`.
+
+quant_meta's inline test remains and is reachable through vector::quant_meta. Relocation is required by the literal test-layout rule, without changing runtime behavior.
+
+Evidence: [crates/shamir-index/src/vector/quant_meta.rs:83](../../../../../crates/shamir-index/src/vector/quant_meta.rs#L83); [crates/shamir-index/src/vector/mod.rs:7](../../../../../crates/shamir-index/src/vector/mod.rs#L7); [crates/shamir-index/src/vector/tests/mod.rs:9](../../../../../crates/shamir-index/src/vector/tests/mod.rs#L9).
+
+<a id="review-3"></a>
+
+### Claim 3 — `kind.rs` defines eight public types — "one file = one primary export" deviation
+
+Status: `not-applicable`. Current risk: —.
+
+Eight types remain, but all form the IndexKind/configuration vocabulary. CLAUDE permits closely coupled groups; type count alone does not prove a violation. Splitting is an optional organizational judgment.
+
+Evidence: [crates/shamir-index/src/kind.rs:11](../../../../../crates/shamir-index/src/kind.rs#L11); [crates/shamir-index/src/kind.rs:190](../../../../../crates/shamir-index/src/kind.rs#L190); [CLAUDE.md:504](../../../../../CLAUDE.md#L504).
+
+<a id="review-4"></a>
+
+### Claim 4 — Stale crate-root invariant: "NO `std::sync::Mutex` / `RwLock` / `parking_lot`"
+
+Status: `confirmed-open`. Current risk: `low`.
+
+The absolute crate-root ban remains inconsistent with sanctioned DDL mutex fields and BruteForce's shutdown slot. The intended hot-path policy should be stated explicitly.
+
+Evidence: [crates/shamir-index/src/lib.rs:11](../../../../../crates/shamir-index/src/lib.rs#L11); [crates/shamir-index/src/base_index/index_manager.rs:260](../../../../../crates/shamir-index/src/base_index/index_manager.rs#L260); [crates/shamir-index/src/base_index/sorted_index_manager.rs:193](../../../../../crates/shamir-index/src/base_index/sorted_index_manager.rs#L193); [crates/shamir-index/src/vector/brute_force.rs:64](../../../../../crates/shamir-index/src/vector/brute_force.rs#L64).
+
+<a id="review-5"></a>
+
+### Claim 5 — Feature-gated inline loom test module in an implementation file
+
+Status: `confirmed-open`. Current risk: `nit`.
+
+The opt-in loom model remains inline. This is a layout exception/documentation choice, not the ordinary cfg(test) violation or a runtime defect; feature/build wiring is explicit.
+
+Evidence: [crates/shamir-index/src/reader_drain_gate.rs:306](../../../../../crates/shamir-index/src/reader_drain_gate.rs#L306); [crates/shamir-index/Cargo.toml:98](../../../../../crates/shamir-index/Cargo.toml#L98); [crates/shamir-index/build.rs:13](../../../../../crates/shamir-index/build.rs#L13).
+
+<a id="review-6"></a>
+
+### Claim 6 — Task-ID-prefixed test file names drift from topic-based naming
+
+Status: `refuted`. Current risk: —.
+
+Task prefixes remain, but filenames also name their topics and tests are split by subject. The rule requires topical organization, not a ban on provenance prefixes.
+
+Evidence: [AGENTS.md:142](../../../../../AGENTS.md#L142); [crates/shamir-index/src/base_index/tests/mod.rs:8](../../../../../crates/shamir-index/src/base_index/tests/mod.rs#L8); [crates/shamir-index/src/base_index/tests/index_manager_tests/mod.rs:10](../../../../../crates/shamir-index/src/base_index/tests/index_manager_tests/mod.rs#L10).
+
+<a id="review-7"></a>
+
+### Claim 7 — Comment nits: typo and a stale cross-file doc reference
+
+Status: `confirmed-open`. Current risk: `nit`.
+
+The suffient typo and index_write_op.rs::Provenance reference both remain. Provenance actually lives in shamir-tx and is re-exported by write_ops.
+
+Evidence: [crates/shamir-index/src/reader_drain_gate.rs:113](../../../../../crates/shamir-index/src/reader_drain_gate.rs#L113); [crates/shamir-index/src/base_index/index_definition.rs:48](../../../../../crates/shamir-index/src/base_index/index_definition.rs#L48); [crates/shamir-index/src/write_ops.rs:10](../../../../../crates/shamir-index/src/write_ops.rs#L10).
+
+<a id="review-8"></a>
+
+### Claim 8 — Multi-type bundles in `backend.rs` and `bm25.rs` (borderline one-file-one-export)
+
+Status: `not-applicable`. Current risk: —.
+
+The trait's query/result/error vocabulary and BM25 scoring/statistics vocabulary are closely coupled groups explicitly allowed by CLAUDE. No mandatory split or runtime correction follows.
+
+Evidence: [crates/shamir-index/src/backend.rs:20](../../../../../crates/shamir-index/src/backend.rs#L20); [crates/shamir-index/src/backend.rs:69](../../../../../crates/shamir-index/src/backend.rs#L69); [crates/shamir-index/src/bm25.rs:9](../../../../../crates/shamir-index/src/bm25.rs#L9); [crates/shamir-index/src/bm25.rs:53](../../../../../crates/shamir-index/src/bm25.rs#L53).
+
+## Corrections and qualified non-findings
+
+- Downgrade the two original medium style findings to nit; neither has a runtime failure mechanism.
+- Manifest organization and ordinary tests-directory registrations remain conformant apart from the identified inline quant_meta test and optional loom-layout exception.
+- The summary's assertion that every mutex has a local comment overlooks the BruteForce join slot, already separately reported.
+- Do not mandate type splitting or renaming task-prefixed files solely from illustrative examples; the actual rules permit coupled groups and descriptive topic names.
+- Any later style-only work should remain scoped and separate from substantive changes; this read-only revalidation authorizes no edits or commits.
+
+---
+
+<details>
+<summary>Historical report — preserved for provenance; not current status or instructions</summary>
+
 # shamir-index -- Style & CLAUDE.md structural conformance
 
 ## Summary
@@ -69,3 +179,5 @@ The crate is broadly conformant to CLAUDE.md's structural rules: every `mod.rs` 
 - **Issue:** `backend.rs` defines four public enums (`IndexQuery`, `FtsMode`, `IndexResult`, `IndexError`) alongside the `IndexBackend` trait; `bm25.rs` defines `Bm25Params`, `FtsPostingValue`, and `FtsStats` plus two free fns. Both are defensible as closely-coupled groups (the trait's I/O vocabulary; the BM25 scoring family) and are much smaller outliers than `kind.rs` (finding 3) — flagged only so the split decision is made consciously if finding 3 is acted on.
 - **Failure scenario:** None.
 - **Suggested fix:** Optional: if `kind.rs` is split, consider giving `IndexQuery`/`IndexResult`/`IndexError` their own sibling files at the same time; otherwise leave as documented coupled groups.
+
+</details>

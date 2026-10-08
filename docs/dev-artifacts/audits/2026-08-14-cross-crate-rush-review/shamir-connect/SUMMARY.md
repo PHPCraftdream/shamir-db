@@ -1,3 +1,1240 @@
+<!-- revalidation:2026-10-08 source:92ad58266bf57ddea1fa3c8a47affba1a3a9a096 -->
+# shamir-connect — SUMMARY revalidation
+
+Source snapshot: `92ad58266bf57ddea1fa3c8a47affba1a3a9a096`. Revalidated 2026-10-08 by read-only XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run; no source fix is part of this update. Test registration/assertions are evidence of an oracle, not proof of a passing run.
+
+This section is authoritative for current status. Original titles/IDs are retained for traceability; a refuted title is not a current assertion. The collapsed historical report below is superseded, including its counts, severity, scenarios and fix instructions. Plan IDs preserve historical numbering, not a current release mandate. [Workspace methodology and status definitions](../SUMMARY.md#status-definitions).
+
+Most underlying claims remain open, but the headline N-fold post-auth refill race is refuted. Current resume enum handling is fail-closed. Re-rank source defects separately from style, accepted contracts, hypothetical misuse, and unverified timing/storage claims.
+
+## Current claim decisions
+
+| Claim decisions | Open | Source-fixed | Partial | Refuted | Unverified | N/A |
+|---:|---:|---:|---:|---:|---:|---:|
+| 78 | 72 | 0 | 0 | 4 | 0 | 2 |
+
+These are decisions on report claims, including repeated roots, bundled observations and non-findings—not a unique-bug census. Closed/N/A rows have no current risk; unverified risk is provisional. Pure style and unmeasured optimization claims do not establish runtime impact.
+
+<a id="review-executive-summary"></a>
+
+### Claim Executive summary — Multiplicative post-auth limiter defeat and not-shippable verdict
+
+Status: `refuted`. Current risk: —.
+
+The principal N-fold refill mechanism mistakes atomic fetch_max for delayed independent stores. It cannot support the stated 64x defeat or the release verdict. Other independently established findings remain.
+
+Evidence: [crates/shamir-connect/src/server/session.rs:356](../../../../../crates/shamir-connect/src/server/session.rs#L356); [crates/shamir-connect/src/server/session.rs:370](../../../../../crates/shamir-connect/src/server/session.rs#L370).
+
+Grouping/duplicate: `concurrency-lockfree.md#1`. This row is not another independent defect.
+
+<a id="review-1-1"></a>
+
+### Claim 1.1 — TOFU pin callback before identity verification
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+Premature public callback remains; shipped clients retain only local capture until success. Persistent MITM is conditional and not uniquely introduced by callback ordering.
+
+Evidence: [crates/shamir-connect/src/client/handshake.rs:274](../../../../../crates/shamir-connect/src/client/handshake.rs#L274); [crates/shamir-client/src/client.rs:626](../../../../../crates/shamir-client/src/client.rs#L626).
+
+Grouping/duplicate: `correctness-tdd.md#1`. This row is not another independent defect.
+
+<a id="review-1-2"></a>
+
+### Claim 1.2 — Per-subnet refill watermark regression
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+The unconditional timestamp assignment permits re-crediting after out-of-order timestamps.
+
+Evidence: [crates/shamir-connect/src/server/rate_limit.rs:342](../../../../../crates/shamir-connect/src/server/rate_limit.rs#L342).
+
+Grouping/duplicate: `correctness-tdd.md#2`. This row is not another independent defect.
+
+<a id="review-1-3"></a>
+
+### Claim 1.3 — Stale checkpoint incorrectly reported as truncation
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+Terminal-sequence equality rejects valid extensions beyond periodic checkpoints; helper remains dormant in production startup.
+
+Evidence: [crates/shamir-connect/src/server/audit_chain.rs:277](../../../../../crates/shamir-connect/src/server/audit_chain.rs#L277).
+
+Grouping/duplicate: `correctness-tdd.md#3`. This row is not another independent defect.
+
+<a id="review-1-4"></a>
+
+### Claim 1.4 — client-only feature broken
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+Feature/module registration conflicts with unconditional server-type imports.
+
+Evidence: [crates/shamir-connect/Cargo.toml:18](../../../../../crates/shamir-connect/Cargo.toml#L18); [crates/shamir-connect/src/client/handshake.rs:27](../../../../../crates/shamir-connect/src/client/handshake.rs#L27).
+
+Grouping/duplicate: `api-wire-protocol.md#1`. This row is not another independent defect.
+
+<a id="review-1-5"></a>
+
+### Claim 1.5 — Owned dispatch omits rate gate
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+Owned dispatch directly invokes the handler without the sibling's gate.
+
+Evidence: [crates/shamir-connect/src/server/dispatch.rs:100](../../../../../crates/shamir-connect/src/server/dispatch.rs#L100).
+
+Grouping/duplicate: `security-crypto.md#1`. This row is not another independent defect.
+
+<a id="review-1-6"></a>
+
+### Claim 1.6 — Rotation/finalization load-clone-store races
+
+Status: `confirmed-open`. Current risk: `low`.
+
+Snapshot decisions and stores remain non-atomic as a sequence.
+
+Evidence: [crates/shamir-connect/src/server/rotation.rs:169](../../../../../crates/shamir-connect/src/server/rotation.rs#L169); [crates/shamir-connect/src/server/rotation.rs:194](../../../../../crates/shamir-connect/src/server/rotation.rs#L194).
+
+Grouping/duplicate: `concurrency-lockfree.md#7`. This row is not another independent defect.
+
+<a id="review-1-7"></a>
+
+### Claim 1.7 — Password wiping skipped on errors
+
+Status: `confirmed-open`. Current risk: `low`.
+
+Early validation and derivation returns precede explicit wiping.
+
+Evidence: [crates/shamir-connect/src/client/handshake.rs:209](../../../../../crates/shamir-connect/src/client/handshake.rs#L209).
+
+Grouping/duplicate: `error-handling-lifecycle.md#2`. This row is not another independent defect.
+
+<a id="review-1-8"></a>
+
+### Claim 1.8 — changePassword TTL underflow and missing boundaries
+
+Status: `confirmed-open`. Current risk: `low`.
+
+Unchecked subtraction remains; forward expiration already has an integration test.
+
+Evidence: [crates/shamir-connect/src/server/changepw.rs:141](../../../../../crates/shamir-connect/src/server/changepw.rs#L141); [crates/shamir-connect/tests/integration_changepw.rs:195](../../../../../crates/shamir-connect/tests/integration_changepw.rs#L195).
+
+Grouping/duplicate: `error-handling-lifecycle.md#3`. This row is not another independent defect.
+
+<a id="review-1-9"></a>
+
+### Claim 1.9 — Canonical details encoder placeholder
+
+Status: `confirmed-open`. Current risk: `low`.
+
+The public helper returns empty bytes and has no found caller.
+
+Evidence: [crates/shamir-connect/src/server/audit_chain.rs:355](../../../../../crates/shamir-connect/src/server/audit_chain.rs#L355).
+
+Grouping/duplicate: `api-wire-protocol.md#3`. This row is not another independent defect.
+
+<a id="review-1-10"></a>
+
+### Claim 1.10 — Vacuous nonce variant assertions
+
+Status: `confirmed-open`. Current risk: `low`.
+
+Both matches! results are discarded.
+
+Evidence: [crates/shamir-connect/src/common/tests/auth_message_tests.rs:151](../../../../../crates/shamir-connect/src/common/tests/auth_message_tests.rs#L151); [crates/shamir-connect/src/common/tests/auth_message_tests.rs:175](../../../../../crates/shamir-connect/src/common/tests/auth_message_tests.rs#L175).
+
+Grouping/duplicate: `correctness-tdd.md#10`. This row is not another independent defect.
+
+<a id="review-1-11"></a>
+
+### Claim 1.11 — with_rate(0) breaks after warmup
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+Zero reaches subtraction and division without validation.
+
+Evidence: [crates/shamir-connect/src/server/rate_limit.rs:324](../../../../../crates/shamir-connect/src/server/rate_limit.rs#L324); [crates/shamir-connect/src/server/rate_limit.rs:350](../../../../../crates/shamir-connect/src/server/rate_limit.rs#L350).
+
+Grouping/duplicate: `correctness-tdd.md#11`. This row is not another independent defect.
+
+<a id="review-1-12"></a>
+
+### Claim 1.12 — AuthMessage capacity constant off by 2
+
+Status: `confirmed-open`. Current risk: `nit`.
+
+Under-allocation exists, but actual fixed size is 143 rather than claimed 144.
+
+Evidence: [crates/shamir-connect/src/common/domain_tags.rs:17](../../../../../crates/shamir-connect/src/common/domain_tags.rs#L17); [crates/shamir-connect/src/common/auth_message.rs:82](../../../../../crates/shamir-connect/src/common/auth_message.rs#L82).
+
+Grouping/duplicate: `correctness-tdd.md#12.1`. This row is not another independent defect.
+
+<a id="review-1-13"></a>
+
+### Claim 1.13 — Unused unicode-normalization dependency
+
+Status: `confirmed-open`. Current risk: `nit`.
+
+Direct dependency remains unused by connect source.
+
+Evidence: [crates/shamir-connect/Cargo.toml:40](../../../../../crates/shamir-connect/Cargo.toml#L40); [crates/shamir-connect/src/common/username.rs:26](../../../../../crates/shamir-connect/src/common/username.rs#L26).
+
+Grouping/duplicate: `correctness-tdd.md#12.3`. This row is not another independent defect.
+
+<a id="review-1-14"></a>
+
+### Claim 1.14 — Ticket ciphertext length truncates at u16
+
+Status: `confirmed-open`. Current risk: `low`.
+
+Public unrestricted ciphertext length is narrowed and mismatches parsing.
+
+Evidence: [crates/shamir-connect/src/server/ticket.rs:118](../../../../../crates/shamir-connect/src/server/ticket.rs#L118); [crates/shamir-connect/src/server/ticket.rs:134](../../../../../crates/shamir-connect/src/server/ticket.rs#L134).
+
+Grouping/duplicate: `correctness-tdd.md#12.7`. This row is not another independent defect.
+
+<a id="review-1-15"></a>
+
+### Claim 1.15 — Rotation threshold asymmetry
+
+Status: `confirmed-open`. Current risk: `nit`.
+
+Different bounds remain; their differing rationale is not explained.
+
+Evidence: [crates/shamir-connect/src/client/rotation.rs:63](../../../../../crates/shamir-connect/src/client/rotation.rs#L63); [crates/shamir-connect/src/client/rotation.rs:135](../../../../../crates/shamir-connect/src/client/rotation.rs#L135).
+
+Grouping/duplicate: `correctness-tdd.md#12.8`. This row is not another independent defect.
+
+<a id="review-1-16"></a>
+
+### Claim 1.16 — Folded bundle items
+
+Status: `confirmed-open`. Current risk: `nit`.
+
+All four folded source/documentation issues remain; their individual rows follow.
+
+Evidence: [crates/shamir-connect/src/common/auth_message.rs:6](../../../../../crates/shamir-connect/src/common/auth_message.rs#L6); [crates/shamir-connect/src/common/kdf_params.rs:77](../../../../../crates/shamir-connect/src/common/kdf_params.rs#L77); [crates/shamir-connect/src/common/crypto.rs:69](../../../../../crates/shamir-connect/src/common/crypto.rs#L69); [crates/shamir-connect/src/server/handshake.rs:232](../../../../../crates/shamir-connect/src/server/handshake.rs#L232).
+
+<a id="review-1-16-1"></a>
+
+### Claim 1.16.1 — Stale auth_v1 vector path
+
+Status: `confirmed-open`. Current risk: `nit`.
+
+Nonexistent subdirectory reference persists.
+
+Evidence: [crates/shamir-connect/src/common/auth_message.rs:6](../../../../../crates/shamir-connect/src/common/auth_message.rs#L6).
+
+Grouping/duplicate: `style-claude-md.md#5`. This row is not another independent defect.
+
+<a id="review-1-16-2"></a>
+
+### Claim 1.16.2 — Stringly KDF safety error
+
+Status: `confirmed-open`. Current risk: `nit`.
+
+Public String result persists.
+
+Evidence: [crates/shamir-connect/src/common/kdf_params.rs:77](../../../../../crates/shamir-connect/src/common/kdf_params.rs#L77).
+
+Grouping/duplicate: `api-wire-protocol.md#8`. This row is not another independent defect.
+
+<a id="review-1-16-3"></a>
+
+### Claim 1.16.3 — RNG and pre-epoch clock panics
+
+Status: `confirmed-open`. Current risk: `low`.
+
+Environment failures still trigger expect panics.
+
+Evidence: [crates/shamir-connect/src/common/crypto.rs:69](../../../../../crates/shamir-connect/src/common/crypto.rs#L69); [crates/shamir-connect/src/common/time.rs:21](../../../../../crates/shamir-connect/src/common/time.rs#L21).
+
+Grouping/duplicate: `correctness-tdd.md#12.5`. This row is not another independent defect.
+
+<a id="review-1-16-4"></a>
+
+### Claim 1.16.4 — Dead constant_time_eq suppressor
+
+Status: `confirmed-open`. Current risk: `nit`.
+
+The no-op remains.
+
+Evidence: [crates/shamir-connect/src/server/handshake.rs:232](../../../../../crates/shamir-connect/src/server/handshake.rs#L232).
+
+Grouping/duplicate: `style-claude-md.md#4`. This row is not another independent defect.
+
+<a id="review-2-1"></a>
+
+### Claim 2.1 — HEADLINE: concurrent callers multiply pre-fetch_max refill
+
+Status: `refuted`. Current risk: —.
+
+Atomic RMW modification order makes equal-time callers receive the advanced watermark after the first caller. CAS retries do not commit refill repeatedly.
+
+Evidence: [crates/shamir-connect/src/server/session.rs:356](../../../../../crates/shamir-connect/src/server/session.rs#L356); [crates/shamir-connect/src/server/session.rs:370](../../../../../crates/shamir-connect/src/server/session.rs#L370).
+
+Grouping/duplicate: `concurrency-lockfree.md#1`. This row is not another independent defect.
+
+<a id="review-2-2"></a>
+
+### Claim 2.2 — Global cap_lock with all-session scan
+
+Status: `confirmed-open`. Current risk: `high`.
+
+Production capped login still serializes an O(N) map traversal.
+
+Evidence: [crates/shamir-connect/src/server/session.rs:470](../../../../../crates/shamir-connect/src/server/session.rs#L470); [crates/shamir-connect/src/server/session.rs:476](../../../../../crates/shamir-connect/src/server/session.rs#L476); [crates/shamir-server/src/connection/handshake.rs:580](../../../../../crates/shamir-server/src/connection/handshake.rs#L580).
+
+Grouping/duplicate: `performance-hotpath.md#1`. This row is not another independent defect.
+
+<a id="review-2-3"></a>
+
+### Claim 2.3 — Audit mutex contains HMAC, allocations, and clone
+
+Status: `confirmed-open`. Current risk: `low`.
+
+Cost shape remains; actual contention is unmeasured and sink fsync already has runtime-aware offloading.
+
+Evidence: [crates/shamir-connect/src/server/audit_chain.rs:196](../../../../../crates/shamir-connect/src/server/audit_chain.rs#L196); [crates/shamir-server/src/audit_appender.rs:674](../../../../../crates/shamir-server/src/audit_appender.rs#L674).
+
+Grouping/duplicate: `performance-hotpath.md#4`. This row is not another independent defect.
+
+<a id="review-2-4"></a>
+
+### Claim 2.4 — Fsync lock comment contradicts scope
+
+Status: `confirmed-open`. Current risk: `nit`.
+
+The guard spans persist despite the comment.
+
+Evidence: [crates/shamir-connect/src/server/durable_counters.rs:52](../../../../../crates/shamir-connect/src/server/durable_counters.rs#L52); [crates/shamir-connect/src/server/durable_counters.rs:147](../../../../../crates/shamir-connect/src/server/durable_counters.rs#L147).
+
+Grouping/duplicate: `concurrency-lockfree.md#4`. This row is not another independent defect.
+
+<a id="review-2-5"></a>
+
+### Claim 2.5 — Blocking Argon2Semaphore API adoption trap
+
+Status: `confirmed-open`. Current risk: `nit`.
+
+Blocking is already documented, but async module wording lacks a clear off-runtime contract. No active blocking request caller was found.
+
+Evidence: [crates/shamir-connect/src/server/argon2_semaphore.rs:12](../../../../../crates/shamir-connect/src/server/argon2_semaphore.rs#L12); [crates/shamir-connect/src/server/argon2_semaphore.rs:84](../../../../../crates/shamir-connect/src/server/argon2_semaphore.rs#L84).
+
+Grouping/duplicate: `concurrency-lockfree.md#5`. This row is not another independent defect.
+
+<a id="review-2-6"></a>
+
+### Claim 2.6 — Lockout maps use default hasher
+
+Status: `confirmed-open`. Current risk: `nit`.
+
+Convention difference persists; slowdown multiplier is unverified.
+
+Evidence: [crates/shamir-connect/src/server/lockout.rs:256](../../../../../crates/shamir-connect/src/server/lockout.rs#L256).
+
+Grouping/duplicate: `concurrency-lockfree.md#6`. This row is not another independent defect.
+
+<a id="review-2-7"></a>
+
+### Claim 2.7 — Identity rotate/finalize update races
+
+Status: `confirmed-open`. Current risk: `low`.
+
+The mutators still perform non-CAS snapshot updates with a separate version mirror.
+
+Evidence: [crates/shamir-connect/src/server/rotation.rs:169](../../../../../crates/shamir-connect/src/server/rotation.rs#L169); [crates/shamir-connect/src/server/rotation.rs:194](../../../../../crates/shamir-connect/src/server/rotation.rs#L194).
+
+Grouping/duplicate: `concurrency-lockfree.md#7`. This row is not another independent defect.
+
+<a id="review-2-8"></a>
+
+### Claim 2.8 — Stale permissions RwLock Debug label
+
+Status: `confirmed-open`. Current risk: `nit`.
+
+Plain snapshot remains labeled as a lock.
+
+Evidence: [crates/shamir-connect/src/server/session.rs:111](../../../../../crates/shamir-connect/src/server/session.rs#L111).
+
+Grouping/duplicate: `concurrency-lockfree.md#8`. This row is not another independent defect.
+
+<a id="review-3-1"></a>
+
+### Claim 3.1 — Public owned dispatch skips limiter
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+Public alternate entry point remains ungated.
+
+Evidence: [crates/shamir-connect/src/server/dispatch.rs:100](../../../../../crates/shamir-connect/src/server/dispatch.rs#L100); [crates/shamir-connect/src/server/mod.rs:28](../../../../../crates/shamir-connect/src/server/mod.rs#L28).
+
+Grouping/duplicate: `security-crypto.md#1`. This row is not another independent defect.
+
+<a id="review-3-2"></a>
+
+### Claim 3.2 — Long-lived server secrets unzeroized
+
+Status: `confirmed-open`. Current risk: `low`.
+
+Bare secret arrays remain, although Debug redaction is present.
+
+Evidence: [crates/shamir-connect/src/server/config.rs:29](../../../../../crates/shamir-connect/src/server/config.rs#L29); [crates/shamir-connect/src/server/resume.rs:130](../../../../../crates/shamir-connect/src/server/resume.rs#L130).
+
+Grouping/duplicate: `security-crypto.md#2`. This row is not another independent defect.
+
+<a id="review-3-3"></a>
+
+### Claim 3.3 — Password buffers unzeroized on errors
+
+Status: `confirmed-open`. Current risk: `low`.
+
+Validation can return before wiping.
+
+Evidence: [crates/shamir-connect/src/client/handshake.rs:209](../../../../../crates/shamir-connect/src/client/handshake.rs#L209).
+
+Grouping/duplicate: `error-handling-lifecycle.md#2`. This row is not another independent defect.
+
+<a id="review-3-4"></a>
+
+### Claim 3.4 — Identity-state check-then-act races
+
+Status: `confirmed-open`. Current risk: `low`.
+
+Lost updates remain; universal resume rejection is not established.
+
+Evidence: [crates/shamir-connect/src/server/rotation.rs:169](../../../../../crates/shamir-connect/src/server/rotation.rs#L169); [crates/shamir-connect/src/server/rotation.rs:100](../../../../../crates/shamir-connect/src/server/rotation.rs#L100).
+
+Grouping/duplicate: `concurrency-lockfree.md#7`. This row is not another independent defect.
+
+<a id="review-3-5"></a>
+
+### Claim 3.5 — Accepted per-user KDF enumeration distinction
+
+Status: `not-applicable`. Current risk: —.
+
+The code implements an explicitly documented accepted trade-off.
+
+Evidence: [crates/shamir-connect/src/server/handshake.rs:155](../../../../../crates/shamir-connect/src/server/handshake.rs#L155); [docs/guide-docs/client-server-protocol-spec/AUTH_PROTOCOL.md:877](../../../../../docs/guide-docs/client-server-protocol-spec/AUTH_PROTOCOL.md#L877).
+
+Grouping/duplicate: `security-crypto.md#5`. This row is not another independent defect.
+
+<a id="review-3-6"></a>
+
+### Claim 3.6 — Zero changePassword nonce accepted at issuance
+
+Status: `confirmed-open`. Current risk: `nit`.
+
+Issuance does not reject it; verification rejects later.
+
+Evidence: [crates/shamir-connect/src/server/changepw.rs:74](../../../../../crates/shamir-connect/src/server/changepw.rs#L74); [crates/shamir-connect/src/common/changepw.rs:59](../../../../../crates/shamir-connect/src/common/changepw.rs#L59).
+
+Grouping/duplicate: `security-crypto.md#6`. This row is not another independent defect.
+
+<a id="review-3-7"></a>
+
+### Claim 3.7 — Canonical-details placeholder
+
+Status: `confirmed-open`. Current risk: `nit`.
+
+The unused empty encoder remains.
+
+Evidence: [crates/shamir-connect/src/server/audit_chain.rs:355](../../../../../crates/shamir-connect/src/server/audit_chain.rs#L355).
+
+Grouping/duplicate: `api-wire-protocol.md#3`. This row is not another independent defect.
+
+<a id="review-3-8"></a>
+
+### Claim 3.8 — Canonical length prefix truncation
+
+Status: `confirmed-open`. Current risk: `low`.
+
+Unchecked narrowing persists. The asserted collision-safe property and debug-assert detection are false for unrestricted helper inputs.
+
+Evidence: [crates/shamir-connect/src/server/audit_chain.rs:104](../../../../../crates/shamir-connect/src/server/audit_chain.rs#L104); [crates/shamir-connect/src/server/audit_chain.rs:116](../../../../../crates/shamir-connect/src/server/audit_chain.rs#L116).
+
+Grouping/duplicate: `security-crypto.md#8`. This row is not another independent defect.
+
+<a id="review-4-1"></a>
+
+### Claim 4.1 — Capped login O(total-sessions) scan
+
+Status: `confirmed-open`. Current risk: `high`.
+
+Whole-map traversal remains under a global lock.
+
+Evidence: [crates/shamir-connect/src/server/session.rs:476](../../../../../crates/shamir-connect/src/server/session.rs#L476).
+
+Grouping/duplicate: `performance-hotpath.md#1`. This row is not another independent defect.
+
+<a id="review-4-2"></a>
+
+### Claim 4.2 — Unbounded AuditChain retention
+
+Status: `confirmed-open`. Current risk: `high`.
+
+Every emitted event remains retained in memory indefinitely.
+
+Evidence: [crates/shamir-connect/src/server/audit_chain.rs:214](../../../../../crates/shamir-connect/src/server/audit_chain.rs#L214); [crates/shamir-server/src/server/server_launcher.rs:338](../../../../../crates/shamir-server/src/server/server_launcher.rs#L338).
+
+Grouping/duplicate: `performance-hotpath.md#2`. This row is not another independent defect.
+
+<a id="review-4-3"></a>
+
+### Claim 4.3 — Resume bypasses per-user session cap
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+Valid resume inserts without cap enforcement.
+
+Evidence: [crates/shamir-connect/src/server/resume.rs:432](../../../../../crates/shamir-connect/src/server/resume.rs#L432).
+
+Grouping/duplicate: `performance-hotpath.md#3`. This row is not another independent defect.
+
+<a id="review-4-4"></a>
+
+### Claim 4.4 — Audit allocation/HMAC/clone inside mutex
+
+Status: `confirmed-open`. Current risk: `low`.
+
+The critical section shape persists; numerical cost is unmeasured.
+
+Evidence: [crates/shamir-connect/src/server/audit_chain.rs:196](../../../../../crates/shamir-connect/src/server/audit_chain.rs#L196); [crates/shamir-connect/src/server/audit_chain.rs:214](../../../../../crates/shamir-connect/src/server/audit_chain.rs#L214).
+
+Grouping/duplicate: `performance-hotpath.md#4`. This row is not another independent defect.
+
+<a id="review-4-5"></a>
+
+### Claim 4.5 — Owned dispatch wall-clock read
+
+Status: `confirmed-open`. Current risk: `nit`.
+
+The read exists, but view dispatch also performs it and adds another read.
+
+Evidence: [crates/shamir-connect/src/server/dispatch.rs:78](../../../../../crates/shamir-connect/src/server/dispatch.rs#L78); [crates/shamir-connect/src/server/dispatch.rs:131](../../../../../crates/shamir-connect/src/server/dispatch.rs#L131); [crates/shamir-connect/src/server/dispatch.rs:153](../../../../../crates/shamir-connect/src/server/dispatch.rs#L153).
+
+Grouping/duplicate: `performance-hotpath.md#5`. This row is not another independent defect.
+
+<a id="review-5-1"></a>
+
+### Claim 5.1 — Advertised client-only feature configuration inconsistent
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+Independent feature declarations contradict client imports and README recipe.
+
+Evidence: [crates/shamir-connect/Cargo.toml:18](../../../../../crates/shamir-connect/Cargo.toml#L18); [crates/shamir-connect/README.md:24](../../../../../crates/shamir-connect/README.md#L24).
+
+Grouping/duplicate: `api-wire-protocol.md#1`. This row is not another independent defect.
+
+<a id="review-5-2"></a>
+
+### Claim 5.2 — Dispatch twin policy asymmetry
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+Owned path still omits the view path's token gate.
+
+Evidence: [crates/shamir-connect/src/server/dispatch.rs:100](../../../../../crates/shamir-connect/src/server/dispatch.rs#L100); [crates/shamir-connect/src/server/dispatch.rs:153](../../../../../crates/shamir-connect/src/server/dispatch.rs#L153).
+
+Grouping/duplicate: `security-crypto.md#1`. This row is not another independent defect.
+
+<a id="review-5-3"></a>
+
+### Claim 5.3 — Broken public canonical-details encoder
+
+Status: `confirmed-open`. Current risk: `low`.
+
+Wrong value type and empty implementation remain.
+
+Evidence: [crates/shamir-connect/src/server/audit_chain.rs:355](../../../../../crates/shamir-connect/src/server/audit_chain.rs#L355).
+
+Grouping/duplicate: `api-wire-protocol.md#3`. This row is not another independent defect.
+
+<a id="review-5-4"></a>
+
+### Claim 5.4 — Raw handler String errors on wire
+
+Status: `confirmed-open`. Current risk: `low`.
+
+Forwarding remains; authentication-only privacy rules must not be generalized to every application error.
+
+Evidence: [crates/shamir-connect/src/server/dispatch.rs:168](../../../../../crates/shamir-connect/src/server/dispatch.rs#L168); [crates/shamir-server/src/db_handler/handler.rs:344](../../../../../crates/shamir-server/src/db_handler/handler.rs#L344).
+
+Grouping/duplicate: `api-wire-protocol.md#4`. This row is not another independent defect.
+
+<a id="review-5-5"></a>
+
+### Claim 5.5 — Push payload lacks serde_bytes
+
+Status: `confirmed-open`. Current risk: `low`.
+
+Missing byte annotation and inadequate byte-shape test remain; exact encoded ratio is unverified.
+
+Evidence: [crates/shamir-connect/src/common/push_envelope.rs:32](../../../../../crates/shamir-connect/src/common/push_envelope.rs#L32); [crates/shamir-connect/src/common/tests/push_envelope_tests.rs:26](../../../../../crates/shamir-connect/src/common/tests/push_envelope_tests.rs#L26).
+
+Grouping/duplicate: `api-wire-protocol.md#5`. This row is not another independent defect.
+
+<a id="review-5-6"></a>
+
+### Claim 5.6 — Ticket version literal and asymmetric validation
+
+Status: `confirmed-open`. Current risk: `low`.
+
+Public encryption can issue versions decryption rejects.
+
+Evidence: [crates/shamir-connect/src/server/ticket.rs:188](../../../../../crates/shamir-connect/src/server/ticket.rs#L188); [crates/shamir-connect/src/server/ticket.rs:224](../../../../../crates/shamir-connect/src/server/ticket.rs#L224).
+
+Grouping/duplicate: `api-wire-protocol.md#6`. This row is not another independent defect.
+
+<a id="review-5-7"></a>
+
+### Claim 5.7 — Missing changePassword/bootstrap canonical vectors
+
+Status: `confirmed-open`. Current risk: `low`.
+
+Both constructions remain absent from pinned vector coverage.
+
+Evidence: [crates/shamir-connect/test-vectors/README.md:45](../../../../../crates/shamir-connect/test-vectors/README.md#L45); [crates/shamir-connect/src/common/tests/test_vectors_tests.rs:37](../../../../../crates/shamir-connect/src/common/tests/test_vectors_tests.rs#L37).
+
+Grouping/duplicate: `api-wire-protocol.md#7`. This row is not another independent defect.
+
+<a id="review-5-8"></a>
+
+### Claim 5.8 — Stringly KDF validation and discarded diagnostic
+
+Status: `confirmed-open`. Current risk: `nit`.
+
+API shape persists; stricter preceding validation makes the outer-cap runtime diagnostic unreachable today.
+
+Evidence: [crates/shamir-connect/src/common/kdf_params.rs:77](../../../../../crates/shamir-connect/src/common/kdf_params.rs#L77); [crates/shamir-connect/src/client/handshake.rs:209](../../../../../crates/shamir-connect/src/client/handshake.rs#L209).
+
+Grouping/duplicate: `api-wire-protocol.md#8`. This row is not another independent defect.
+
+<a id="review-5-9"></a>
+
+### Claim 5.9 — Zero-init Session id and redundant unchecked changepw id
+
+Status: `confirmed-open`. Current risk: `low`.
+
+Construction protocol and stale doc remain; live caller passes the correct stored id.
+
+Evidence: [crates/shamir-connect/src/server/session.rs:243](../../../../../crates/shamir-connect/src/server/session.rs#L243); [crates/shamir-connect/src/server/changepw.rs:117](../../../../../crates/shamir-connect/src/server/changepw.rs#L117); [crates/shamir-server/src/db_handler/admin.rs:519](../../../../../crates/shamir-server/src/db_handler/admin.rs#L519).
+
+Grouping/duplicate: `api-wire-protocol.md#9`. This row is not another independent defect.
+
+<a id="review-5-10"></a>
+
+### Claim 5.10 — Sliding-window wording for token bucket
+
+Status: `confirmed-open`. Current risk: `nit`.
+
+Incorrect trait wording remains.
+
+Evidence: [crates/shamir-connect/src/server/rate_limit.rs:89](../../../../../crates/shamir-connect/src/server/rate_limit.rs#L89).
+
+Grouping/duplicate: `api-wire-protocol.md#10.3`. This row is not another independent defect.
+
+<a id="review-5-11"></a>
+
+### Claim 5.11 — Ready omitted from local variant round-trip
+
+Status: `confirmed-open`. Current risk: `nit`.
+
+The four-variant loop still excludes Ready.
+
+Evidence: [crates/shamir-connect/src/common/tests/push_envelope_tests.rs:5](../../../../../crates/shamir-connect/src/common/tests/push_envelope_tests.rs#L5).
+
+Grouping/duplicate: `api-wire-protocol.md#10.4`. This row is not another independent defect.
+
+<a id="review-5-12"></a>
+
+### Claim 5.12 — Hard-coded session-id width
+
+Status: `confirmed-open`. Current risk: `nit`.
+
+The literal 32 remains, currently matching the contract.
+
+Evidence: [crates/shamir-connect/src/common/envelope.rs:95](../../../../../crates/shamir-connect/src/common/envelope.rs#L95).
+
+Grouping/duplicate: `api-wire-protocol.md#10.5`. This row is not another independent defect.
+
+<a id="review-5-13"></a>
+
+### Claim 5.13 — Optional Boolean upgrade hint
+
+Status: `not-applicable`. Current risk: —.
+
+It represents an optional wire field; no erroneous consumer behavior is demonstrated.
+
+Evidence: [crates/shamir-connect/src/client/handshake.rs:72](../../../../../crates/shamir-connect/src/client/handshake.rs#L72); [crates/shamir-connect/src/server/handshake.rs:101](../../../../../crates/shamir-connect/src/server/handshake.rs#L101).
+
+Grouping/duplicate: `api-wire-protocol.md#10.6`. This row is not another independent defect.
+
+<a id="review-5-14"></a>
+
+### Claim 5.14 — Capacity 142 versus claimed 144
+
+Status: `confirmed-open`. Current risk: `nit`.
+
+Under-allocation persists, with actual fixed size 143.
+
+Evidence: [crates/shamir-connect/src/common/auth_message.rs:82](../../../../../crates/shamir-connect/src/common/auth_message.rs#L82); [crates/shamir-connect/src/common/domain_tags.rs:17](../../../../../crates/shamir-connect/src/common/domain_tags.rs#L17).
+
+Grouping/duplicate: `correctness-tdd.md#12.1`. This row is not another independent defect.
+
+<a id="review-5-15"></a>
+
+### Claim 5.15 — Stale auth_v1 path
+
+Status: `confirmed-open`. Current risk: `nit`.
+
+The stale source doc remains.
+
+Evidence: [crates/shamir-connect/src/common/auth_message.rs:6](../../../../../crates/shamir-connect/src/common/auth_message.rs#L6).
+
+Grouping/duplicate: `style-claude-md.md#5`. This row is not another independent defect.
+
+<a id="review-6-1"></a>
+
+### Claim 6.1 — Durable counter failures conflated with replay
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+Boolean-only outcomes and silent error branches persist. Exact failed-persist visibility and permanent-family claims are unverified.
+
+Evidence: [crates/shamir-connect/src/server/durable_counters.rs:128](../../../../../crates/shamir-connect/src/server/durable_counters.rs#L128); [crates/shamir-connect/src/server/durable_counters.rs:147](../../../../../crates/shamir-connect/src/server/durable_counters.rs#L147); [Cargo.lock:1332](../../../../../Cargo.lock#L1332).
+
+Grouping/duplicate: `error-handling-lifecycle.md#1`. This row is not another independent defect.
+
+<a id="review-6-2"></a>
+
+### Claim 6.2 — Password wiping skipped on error
+
+Status: `confirmed-open`. Current risk: `low`.
+
+Explicit wiping remains after fallible work.
+
+Evidence: [crates/shamir-connect/src/client/handshake.rs:231](../../../../../crates/shamir-connect/src/client/handshake.rs#L231); [crates/shamir-connect/src/client/bootstrap.rs:96](../../../../../crates/shamir-connect/src/client/bootstrap.rs#L96).
+
+Grouping/duplicate: `error-handling-lifecycle.md#2`. This row is not another independent defect.
+
+<a id="review-6-3"></a>
+
+### Claim 6.3 — Backwards-clock TTL underflow
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+Unchecked u64 subtraction remains in the live verifier.
+
+Evidence: [crates/shamir-connect/src/server/changepw.rs:141](../../../../../crates/shamir-connect/src/server/changepw.rs#L141); [crates/shamir-server/src/db_handler/admin.rs:517](../../../../../crates/shamir-server/src/db_handler/admin.rs#L517).
+
+Grouping/duplicate: `error-handling-lifecycle.md#3`. This row is not another independent defect.
+
+<a id="review-6-4"></a>
+
+### Claim 6.4 — Missing owned dispatch gate and rate-error coverage
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+Asymmetry remains; connect's dispatch integrations do not drain and assert the gate.
+
+Evidence: [crates/shamir-connect/src/server/dispatch.rs:100](../../../../../crates/shamir-connect/src/server/dispatch.rs#L100); [crates/shamir-connect/tests/integration_session.rs:162](../../../../../crates/shamir-connect/tests/integration_session.rs#L162).
+
+Grouping/duplicate: `security-crypto.md#1`. This row is not another independent defect.
+
+<a id="review-6-5"></a>
+
+### Claim 6.5 — Audit sink errors unavailable to writer
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+Void methods remain, but current production adapters already log errors; total silence is refuted.
+
+Evidence: [crates/shamir-connect/src/server/audit_chain.rs:344](../../../../../crates/shamir-connect/src/server/audit_chain.rs#L344); [crates/shamir-server/src/audit_appender.rs:696](../../../../../crates/shamir-server/src/audit_appender.rs#L696).
+
+Grouping/duplicate: `error-handling-lifecycle.md#5`. This row is not another independent defect.
+
+<a id="review-6-6"></a>
+
+### Claim 6.6 — OS RNG and pre-epoch clock panics
+
+Status: `confirmed-open`. Current risk: `low`.
+
+Environment failures retain expect panics.
+
+Evidence: [crates/shamir-connect/src/common/crypto.rs:219](../../../../../crates/shamir-connect/src/common/crypto.rs#L219); [crates/shamir-connect/src/common/time.rs:21](../../../../../crates/shamir-connect/src/common/time.rs#L21).
+
+Grouping/duplicate: `correctness-tdd.md#12.5`. This row is not another independent defect.
+
+<a id="review-6-7"></a>
+
+### Claim 6.7 — Public fjall error coupling
+
+Status: `confirmed-open`. Current risk: `nit`.
+
+The backend API still exposes its dependency error type.
+
+Evidence: [crates/shamir-connect/src/server/durable_counters.rs:70](../../../../../crates/shamir-connect/src/server/durable_counters.rs#L70).
+
+Grouping/duplicate: `error-handling-lifecycle.md#7`. This row is not another independent defect.
+
+<a id="review-6-8"></a>
+
+### Claim 6.8 — Malformed counter decode can panic
+
+Status: `confirmed-open`. Current risk: `low`.
+
+Short values reach unchecked slicing from authentication-path decoding.
+
+Evidence: [crates/shamir-connect/src/server/durable_counters.rs:97](../../../../../crates/shamir-connect/src/server/durable_counters.rs#L97); [crates/shamir-connect/src/server/durable_counters.rs:130](../../../../../crates/shamir-connect/src/server/durable_counters.rs#L130).
+
+Grouping/duplicate: `error-handling-lifecycle.md#8`. This row is not another independent defect.
+
+<a id="review-6-9"></a>
+
+### Claim 6.9 — Resume transport fail-open default
+
+Status: `refuted`. Current risk: —.
+
+Prior validation rejects unknown bytes in the unchanged plaintext; the fallback is unreachable today.
+
+Evidence: [crates/shamir-connect/src/server/resume.rs:276](../../../../../crates/shamir-connect/src/server/resume.rs#L276); [crates/shamir-connect/src/server/resume.rs:389](../../../../../crates/shamir-connect/src/server/resume.rs#L389).
+
+Grouping/duplicate: `error-handling-lifecycle.md#9`. This row is not another independent defect.
+
+<a id="review-6-10"></a>
+
+### Claim 6.10 — Stringly KDF safety error
+
+Status: `confirmed-open`. Current risk: `nit`.
+
+The String API remains.
+
+Evidence: [crates/shamir-connect/src/common/kdf_params.rs:77](../../../../../crates/shamir-connect/src/common/kdf_params.rs#L77).
+
+Grouping/duplicate: `api-wire-protocol.md#8`. This row is not another independent defect.
+
+<a id="review-6-11"></a>
+
+### Claim 6.11 — Unused wire-collapse helper
+
+Status: `confirmed-open`. Current risk: `low`.
+
+No caller or collapse-set test was found; current auth paths collapse explicitly.
+
+Evidence: [crates/shamir-connect/src/common/error.rs:89](../../../../../crates/shamir-connect/src/common/error.rs#L89); [crates/shamir-connect/src/server/resume.rs:272](../../../../../crates/shamir-connect/src/server/resume.rs#L272).
+
+Grouping/duplicate: `error-handling-lifecycle.md#11`. This row is not another independent defect.
+
+<a id="review-6-12"></a>
+
+### Claim 6.12 — Consolidated error-path test gaps
+
+Status: `confirmed-open`. Current risk: `low`.
+
+Sink fixtures always succeed and listed wiping/fault/boundary assertions remain missing.
+
+Evidence: [crates/shamir-connect/src/server/tests/rate_limit_tests.rs:143](../../../../../crates/shamir-connect/src/server/tests/rate_limit_tests.rs#L143); [crates/shamir-connect/src/server/tests/lockout_tests.rs:187](../../../../../crates/shamir-connect/src/server/tests/lockout_tests.rs#L187).
+
+Grouping/duplicate: `error-handling-lifecycle.md#12`. This row is not another independent defect.
+
+<a id="review-6-13"></a>
+
+### Claim 6.13 — Hand-rolled AuditError
+
+Status: `confirmed-open`. Current risk: `nit`.
+
+Display still renders Debug manually.
+
+Evidence: [crates/shamir-connect/src/server/audit_chain.rs:328](../../../../../crates/shamir-connect/src/server/audit_chain.rs#L328).
+
+Grouping/duplicate: `error-handling-lifecycle.md#13`. This row is not another independent defect.
+
+<a id="review-7-1"></a>
+
+### Claim 7.1 — Functionally identical dispatch doc masks rate asymmetry
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+The public security-policy asymmetry remains; comment style does not independently elevate it to High.
+
+Evidence: [crates/shamir-connect/src/server/dispatch.rs:115](../../../../../crates/shamir-connect/src/server/dispatch.rs#L115); [crates/shamir-connect/src/server/dispatch.rs:153](../../../../../crates/shamir-connect/src/server/dispatch.rs#L153).
+
+Grouping/duplicate: `security-crypto.md#1`. This row is not another independent defect.
+
+<a id="review-7-2"></a>
+
+### Claim 7.2 — Canonical-details stub contradicts documentation
+
+Status: `confirmed-open`. Current risk: `low`.
+
+The promised encoding is still absent.
+
+Evidence: [crates/shamir-connect/src/server/audit_chain.rs:351](../../../../../crates/shamir-connect/src/server/audit_chain.rs#L351); [crates/shamir-connect/src/server/audit_chain.rs:360](../../../../../crates/shamir-connect/src/server/audit_chain.rs#L360).
+
+Grouping/duplicate: `api-wire-protocol.md#3`. This row is not another independent defect.
+
+<a id="review-7-3"></a>
+
+### Claim 7.3 — Missing contention-model comments at five sites
+
+Status: `confirmed-open`. Current risk: `nit`.
+
+The sites retain documentation debt, with different hot, rare, setup, and blocking-wait access models.
+
+Evidence: [crates/shamir-connect/src/server/session.rs:416](../../../../../crates/shamir-connect/src/server/session.rs#L416); [crates/shamir-connect/src/server/audit_chain.rs:131](../../../../../crates/shamir-connect/src/server/audit_chain.rs#L131); [crates/shamir-connect/src/server/argon2_semaphore.rs:36](../../../../../crates/shamir-connect/src/server/argon2_semaphore.rs#L36); [crates/shamir-connect/src/server/admin.rs:298](../../../../../crates/shamir-connect/src/server/admin.rs#L298); [crates/shamir-connect/src/server/bootstrap.rs:49](../../../../../crates/shamir-connect/src/server/bootstrap.rs#L49).
+
+Grouping/duplicate: `style-claude-md.md#3`. This row is not another independent defect.
+
+<a id="review-7-4"></a>
+
+### Claim 7.4 — Dead handshake suppressors
+
+Status: `confirmed-open`. Current risk: `nit`.
+
+Both no-op suppressors remain.
+
+Evidence: [crates/shamir-connect/src/server/handshake.rs:232](../../../../../crates/shamir-connect/src/server/handshake.rs#L232); [crates/shamir-connect/src/server/handshake.rs:389](../../../../../crates/shamir-connect/src/server/handshake.rs#L389).
+
+Grouping/duplicate: `style-claude-md.md#4`. This row is not another independent defect.
+
+<a id="review-7-5"></a>
+
+### Claim 7.5 — Stale vector path and envelope test reference
+
+Status: `confirmed-open`. Current risk: `nit`.
+
+The named references remain stale while their real artifacts exist.
+
+Evidence: [crates/shamir-connect/src/common/auth_message.rs:6](../../../../../crates/shamir-connect/src/common/auth_message.rs#L6); [crates/shamir-connect/src/common/envelope.rs:90](../../../../../crates/shamir-connect/src/common/envelope.rs#L90).
+
+Grouping/duplicate: `style-claude-md.md#5`. This row is not another independent defect.
+
+<a id="review-7-6"></a>
+
+### Claim 7.6 — Finalize doc describes verification
+
+Status: `confirmed-open`. Current risk: `nit`.
+
+The helper still carries verification text it does not implement.
+
+Evidence: [crates/shamir-connect/src/server/changepw.rs:92](../../../../../crates/shamir-connect/src/server/changepw.rs#L92); [crates/shamir-connect/src/server/changepw.rs:105](../../../../../crates/shamir-connect/src/server/changepw.rs#L105).
+
+Grouping/duplicate: `style-claude-md.md#6`. This row is not another independent defect.
+
+<a id="review-7-7"></a>
+
+### Claim 7.7 — Mid-function imports
+
+Status: `confirmed-open`. Current risk: `nit`.
+
+The named imports remain inside functions.
+
+Evidence: [crates/shamir-connect/src/server/admin.rs:324](../../../../../crates/shamir-connect/src/server/admin.rs#L324); [crates/shamir-connect/src/server/tests/post_auth_rate_limit_tests.rs:98](../../../../../crates/shamir-connect/src/server/tests/post_auth_rate_limit_tests.rs#L98).
+
+Grouping/duplicate: `style-claude-md.md#7`. This row is not another independent defect.
+
+<a id="review-finding-counts"></a>
+
+### Claim Finding counts — 75 lens-tagged findings, 53 distinct defects, seven High defects
+
+Status: `refuted`. Current risk: —.
+
+Raw labels may remain useful provenance, but they are not a current defect census: the refill headline and fail-open transport claim are refuted, accepted KDF behavior is not a defect, and several labels concern only style or conditional API misuse.
+
+Evidence: [crates/shamir-connect/src/server/session.rs:356](../../../../../crates/shamir-connect/src/server/session.rs#L356); [crates/shamir-connect/src/server/resume.rs:276](../../../../../crates/shamir-connect/src/server/resume.rs#L276); [docs/guide-docs/client-server-protocol-spec/AUTH_PROTOCOL.md:877](../../../../../docs/guide-docs/client-server-protocol-spec/AUTH_PROTOCOL.md#L877).
+
+## Current fix-plan state
+
+| Claim decisions | Open | Source-fixed | Partial | Refuted | Unverified | N/A |
+|---:|---:|---:|---:|---:|---:|---:|
+| 21 | 20 | 0 | 0 | 0 | 0 | 1 |
+
+A source-fixed item closes only its stated mechanism. Partial items retain the obligations named below; proposed fixes must obey the corrections and current contracts, not merely copy the historical recipe.
+
+<a id="plan-p0-1"></a>
+
+### Plan P0.1 — P0.1
+
+Status: `confirmed-open`. Current risk: —.
+
+Defer the public TOFU callback until all checks succeed and add the failure/no-callback assertion. This closes premature side effects, not first-use TOFU's general MITM trust limitation.
+
+Evidence: [crates/shamir-connect/src/client/handshake.rs:274](../../../../../crates/shamir-connect/src/client/handshake.rs#L274); [crates/shamir-connect/tests/integration_full_auth.rs:444](../../../../../crates/shamir-connect/tests/integration_full_auth.rs#L444).
+
+<a id="plan-p0-2"></a>
+
+### Plan P0.2 — P0.2
+
+Status: `confirmed-open`. Current risk: —.
+
+Only the subnet-watermark portion is justified: keep its watermark monotonic and add a subsequent-newer-call regression assertion. Remove the refuted N-fold PostAuthBucket rewrite requirement; moving a watermark load into a CAS closure is not a proved substitute.
+
+Evidence: [crates/shamir-connect/src/server/rate_limit.rs:342](../../../../../crates/shamir-connect/src/server/rate_limit.rs#L342); [crates/shamir-connect/src/server/session.rs:356](../../../../../crates/shamir-connect/src/server/session.rs#L356); [crates/shamir-connect/src/server/tests/post_auth_rate_limit_tests.rs:175](../../../../../crates/shamir-connect/src/server/tests/post_auth_rate_limit_tests.rs#L175).
+
+<a id="plan-p0-3"></a>
+
+### Plan P0.3 — P0.3
+
+Status: `confirmed-open`. Current risk: —.
+
+Unify the dispatch policy and test both entry points against a depleted bucket. Delegating alone does not remove clock reads; view dispatch currently samples twice.
+
+Evidence: [crates/shamir-connect/src/server/dispatch.rs:100](../../../../../crates/shamir-connect/src/server/dispatch.rs#L100); [crates/shamir-connect/src/server/dispatch.rs:131](../../../../../crates/shamir-connect/src/server/dispatch.rs#L131); [crates/shamir-connect/src/server/dispatch.rs:153](../../../../../crates/shamir-connect/src/server/dispatch.rs#L153).
+
+<a id="plan-p0-4"></a>
+
+### Plan P0.4 — P0.4
+
+Status: `confirmed-open`. Current risk: —.
+
+The whole-map capped-insert scan and uncapped resume remain. A per-user index must preserve consistency through all insert/remove/eviction paths and enforce the cap on resume.
+
+Evidence: [crates/shamir-connect/src/server/session.rs:476](../../../../../crates/shamir-connect/src/server/session.rs#L476); [crates/shamir-connect/src/server/resume.rs:432](../../../../../crates/shamir-connect/src/server/resume.rs#L432).
+
+<a id="plan-p0-5"></a>
+
+### Plan P0.5 — P0.5
+
+Status: `confirmed-open`. Current risk: —.
+
+Differentiate/log storage failures and reject malformed values. Validate fjall's uncertain-persist semantics before considering rollback; restoring a counter can weaken replay protection.
+
+Evidence: [crates/shamir-connect/src/server/durable_counters.rs:97](../../../../../crates/shamir-connect/src/server/durable_counters.rs#L97); [crates/shamir-connect/src/server/durable_counters.rs:128](../../../../../crates/shamir-connect/src/server/durable_counters.rs#L128); [crates/shamir-connect/src/server/durable_counters.rs:147](../../../../../crates/shamir-connect/src/server/durable_counters.rs#L147); [Cargo.lock:1332](../../../../../Cargo.lock#L1332).
+
+<a id="plan-p0-6"></a>
+
+### Plan P0.6 — P0.6
+
+Status: `confirmed-open`. Current risk: —.
+
+Audit retention remains unbounded. Arc entries alone do not close growth; provide finite retention or no-retention production operation.
+
+Evidence: [crates/shamir-connect/src/server/audit_chain.rs:140](../../../../../crates/shamir-connect/src/server/audit_chain.rs#L140); [crates/shamir-connect/src/server/audit_chain.rs:214](../../../../../crates/shamir-connect/src/server/audit_chain.rs#L214).
+
+<a id="plan-p0-7"></a>
+
+### Plan P0.7 — P0.7
+
+Status: `confirmed-open`. Current risk: —.
+
+The client-only configuration remains inconsistent. Either encode the dependency and correct documentation or genuinely move shared types; executable feature verification was forbidden here.
+
+Evidence: [crates/shamir-connect/Cargo.toml:18](../../../../../crates/shamir-connect/Cargo.toml#L18); [crates/shamir-connect/src/client/bootstrap.rs:17](../../../../../crates/shamir-connect/src/client/bootstrap.rs#L17); [crates/shamir-connect/README.md:24](../../../../../crates/shamir-connect/README.md#L24).
+
+<a id="plan-p1-8"></a>
+
+### Plan P1.8 — P1.8
+
+Status: `confirmed-open`. Current risk: —.
+
+Void audit interfaces, placeholder encoding, large critical sections, and stale lock comments remain. The production sink already logs errors. Any reserve/publish redesign must preserve chain and durable ordering.
+
+Evidence: [crates/shamir-connect/src/server/audit_chain.rs:344](../../../../../crates/shamir-connect/src/server/audit_chain.rs#L344); [crates/shamir-connect/src/server/audit_chain.rs:355](../../../../../crates/shamir-connect/src/server/audit_chain.rs#L355); [crates/shamir-connect/src/server/audit_chain.rs:196](../../../../../crates/shamir-connect/src/server/audit_chain.rs#L196); [crates/shamir-server/src/audit_appender.rs:696](../../../../../crates/shamir-server/src/audit_appender.rs#L696).
+
+<a id="plan-p1-9"></a>
+
+### Plan P1.9 — P1.9
+
+Status: `confirmed-open`. Current risk: —.
+
+Password scope-exit wiping and assertions on early validation/derivation errors remain absent.
+
+Evidence: [crates/shamir-connect/src/client/handshake.rs:209](../../../../../crates/shamir-connect/src/client/handshake.rs#L209); [crates/shamir-connect/src/client/bootstrap.rs:93](../../../../../crates/shamir-connect/src/client/bootstrap.rs#L93); [crates/shamir-connect/src/client/changepw.rs:43](../../../../../crates/shamir-connect/src/client/changepw.rs#L43).
+
+<a id="plan-p1-10"></a>
+
+### Plan P1.10 — P1.10
+
+Status: `confirmed-open`. Current risk: —.
+
+Use explicit clock-regression policy and checked TTL arithmetic. Preserve the existing forward-expiration test and add exact boundaries and future-issued timestamps.
+
+Evidence: [crates/shamir-connect/src/server/changepw.rs:141](../../../../../crates/shamir-connect/src/server/changepw.rs#L141); [crates/shamir-connect/tests/integration_changepw.rs:195](../../../../../crates/shamir-connect/tests/integration_changepw.rs#L195).
+
+<a id="plan-p1-11"></a>
+
+### Plan P1.11 — P1.11
+
+Status: `confirmed-open`. Current risk: —.
+
+Stale-checkpoint rejection remains. The suggested tail-only comparison is insufficient: verify the authenticated checkpoint entry within the extended log rather than ignore its HMAC.
+
+Evidence: [crates/shamir-connect/src/server/audit_chain.rs:277](../../../../../crates/shamir-connect/src/server/audit_chain.rs#L277); [crates/shamir-connect/src/server/audit_chain.rs:283](../../../../../crates/shamir-connect/src/server/audit_chain.rs#L283).
+
+<a id="plan-p1-12"></a>
+
+### Plan P1.12 — P1.12
+
+Status: `confirmed-open`. Current risk: —.
+
+Raw handler diagnostics and unused collapse helper remain. Define authentication versus application disclosure policy first; forcing all handler errors into AUTH §14 vocabulary would change the application contract.
+
+Evidence: [crates/shamir-connect/src/server/dispatch.rs:30](../../../../../crates/shamir-connect/src/server/dispatch.rs#L30); [crates/shamir-connect/src/common/error.rs:89](../../../../../crates/shamir-connect/src/common/error.rs#L89); [docs/guide-docs/client-server-protocol-spec/AUTH_PROTOCOL.md:898](../../../../../docs/guide-docs/client-server-protocol-spec/AUTH_PROTOCOL.md#L898).
+
+<a id="plan-p1-13"></a>
+
+### Plan P1.13 — P1.13
+
+Status: `confirmed-open`. Current risk: —.
+
+Byte annotation and byte-shape oracle remain missing. Treat the proposed serialization change as a compatibility migration and inspect the pinned encoder before asserting its overhead.
+
+Evidence: [crates/shamir-connect/src/common/push_envelope.rs:32](../../../../../crates/shamir-connect/src/common/push_envelope.rs#L32); [crates/shamir-connect/src/common/tests/push_envelope_tests.rs:26](../../../../../crates/shamir-connect/src/common/tests/push_envelope_tests.rs#L26); [Cargo.lock:2949](../../../../../Cargo.lock#L2949).
+
+<a id="plan-p1-14"></a>
+
+### Plan P1.14 — P1.14
+
+Status: `confirmed-open`. Current risk: —.
+
+Rotation/finalization updates remain non-CAS. A fix must coordinate the version mirror as well as snapshot publication; an extra independent mirror store alone does not prove coherence.
+
+Evidence: [crates/shamir-connect/src/server/rotation.rs:169](../../../../../crates/shamir-connect/src/server/rotation.rs#L169); [crates/shamir-connect/src/server/rotation.rs:173](../../../../../crates/shamir-connect/src/server/rotation.rs#L173); [crates/shamir-connect/src/server/rotation.rs:194](../../../../../crates/shamir-connect/src/server/rotation.rs#L194).
+
+<a id="plan-p1-15"></a>
+
+### Plan P1.15 — P1.15
+
+Status: `confirmed-open`. Current risk: —.
+
+Both explicit-rate constructors still accept zero; post-warmup arithmetic remains invalid.
+
+Evidence: [crates/shamir-connect/src/server/rate_limit.rs:203](../../../../../crates/shamir-connect/src/server/rate_limit.rs#L203); [crates/shamir-connect/src/server/rate_limit.rs:243](../../../../../crates/shamir-connect/src/server/rate_limit.rs#L243); [crates/shamir-connect/src/server/rate_limit.rs:350](../../../../../crates/shamir-connect/src/server/rate_limit.rs#L350).
+
+<a id="plan-p2-16"></a>
+
+### Plan P2.16 — P2.16
+
+Status: `confirmed-open`. Current risk: —.
+
+Long-lived raw arrays remain without wiping. Include cipher/key copies in the lifecycle analysis; do not promise live-memory secrecy from Drop wiping.
+
+Evidence: [crates/shamir-connect/src/server/config.rs:29](../../../../../crates/shamir-connect/src/server/config.rs#L29); [crates/shamir-connect/src/server/resume.rs:130](../../../../../crates/shamir-connect/src/server/resume.rs#L130).
+
+<a id="plan-p2-17"></a>
+
+### Plan P2.17 — P2.17
+
+Status: `not-applicable`. Current risk: —.
+
+The KDF enumeration trade-off is already expressly recorded in AUTH §13.5 and the implementation comment. A new timing-padding policy requires a deliberate contract decision, not correction of an undocumented bug.
+
+Evidence: [docs/guide-docs/client-server-protocol-spec/AUTH_PROTOCOL.md:877](../../../../../docs/guide-docs/client-server-protocol-spec/AUTH_PROTOCOL.md#L877); [crates/shamir-connect/src/server/handshake.rs:155](../../../../../crates/shamir-connect/src/server/handshake.rs#L155).
+
+<a id="plan-p2-18"></a>
+
+### Plan P2.18 — P2.18
+
+Status: `confirmed-open`. Current risk: —.
+
+Version validation, missing vectors, String errors, session-id construction, upstream error coupling, RNG/clock panics, and manual AuditError all remain. Separate real failures from optional API/style changes and first reconcile contradictory auth-vector lengths.
+
+Evidence: [crates/shamir-connect/src/server/ticket.rs:188](../../../../../crates/shamir-connect/src/server/ticket.rs#L188); [crates/shamir-connect/src/common/kdf_params.rs:77](../../../../../crates/shamir-connect/src/common/kdf_params.rs#L77); [crates/shamir-connect/src/server/session.rs:243](../../../../../crates/shamir-connect/src/server/session.rs#L243); [crates/shamir-connect/src/server/durable_counters.rs:70](../../../../../crates/shamir-connect/src/server/durable_counters.rs#L70); [crates/shamir-connect/src/common/crypto.rs:69](../../../../../crates/shamir-connect/src/common/crypto.rs#L69); [crates/shamir-connect/src/server/audit_chain.rs:328](../../../../../crates/shamir-connect/src/server/audit_chain.rs#L328).
+
+<a id="plan-p2-19"></a>
+
+### Plan P2.19 — P2.19
+
+Status: `confirmed-open`. Current risk: —.
+
+Blocking-API guidance and hasher convention changes remain optional cleanup. The transport fallback is redundant but currently protected by validation; do not portray removing it as closing a live fail-open vulnerability.
+
+Evidence: [crates/shamir-connect/src/server/argon2_semaphore.rs:84](../../../../../crates/shamir-connect/src/server/argon2_semaphore.rs#L84); [crates/shamir-connect/src/server/lockout.rs:256](../../../../../crates/shamir-connect/src/server/lockout.rs#L256); [crates/shamir-connect/src/server/resume.rs:276](../../../../../crates/shamir-connect/src/server/resume.rs#L276); [crates/shamir-connect/src/server/resume.rs:389](../../../../../crates/shamir-connect/src/server/resume.rs#L389).
+
+<a id="plan-p2-20"></a>
+
+### Plan P2.20 — P2.20
+
+Status: `confirmed-open`. Current risk: —.
+
+Discarded matches!, always-successful sink fixtures, missing error-buffer assertions, and omitted Ready remain. Also strengthen the #1090 oracle with a call after the stale timestamp.
+
+Evidence: [crates/shamir-connect/src/common/tests/auth_message_tests.rs:151](../../../../../crates/shamir-connect/src/common/tests/auth_message_tests.rs#L151); [crates/shamir-connect/src/server/tests/rate_limit_tests.rs:143](../../../../../crates/shamir-connect/src/server/tests/rate_limit_tests.rs#L143); [crates/shamir-connect/src/common/tests/push_envelope_tests.rs:5](../../../../../crates/shamir-connect/src/common/tests/push_envelope_tests.rs#L5); [crates/shamir-connect/src/server/tests/post_auth_rate_limit_tests.rs:175](../../../../../crates/shamir-connect/src/server/tests/post_auth_rate_limit_tests.rs#L175).
+
+<a id="plan-p2-21"></a>
+
+### Plan P2.21 — P2.21
+
+Status: `confirmed-open`. Current risk: —.
+
+Most listed cleanup remains. This is not a docs-only pass: it includes source, manifest, tests, and wire behavior. Correct capacity to actual tag-based size, prefer release-enforced length errors over debug assertions, and retain optional Boolean semantics unless changing the contract.
+
+Evidence: [crates/shamir-connect/src/common/auth_message.rs:82](../../../../../crates/shamir-connect/src/common/auth_message.rs#L82); [crates/shamir-connect/src/common/domain_tags.rs:17](../../../../../crates/shamir-connect/src/common/domain_tags.rs#L17); [crates/shamir-connect/src/server/ticket.rs:118](../../../../../crates/shamir-connect/src/server/ticket.rs#L118); [crates/shamir-connect/src/server/audit_chain.rs:104](../../../../../crates/shamir-connect/src/server/audit_chain.rs#L104); [crates/shamir-connect/src/client/handshake.rs:72](../../../../../crates/shamir-connect/src/client/handshake.rs#L72).
+
+## Corrections and qualified non-findings
+
+- Delete the multiplicative fetch_max headline, associated numerical throughput scenario, and mandatory packed-atomic remedy.
+- Separate confirmed findings from duplicate provenance; duplicates are not a disposition.
+- Do not retain the seven-High/53-defect census as a validated current score.
+- Treat source-proven test contradictions as unresolved evidence, not as an executed test failure or an assertion that historical test reports were false.
+- Qualify TOFU, secret-memory exposure, rotation reachability, malformed storage, and oversized public encoder inputs by their actual threat models.
+- Retain the independent subnet-watermark, capped-login complexity, uncapped-resume, unbounded audit retention, and durable-error-handling actions.
+- No assigned finding was marked fixed solely from a commit or task label; the inspected implementations do not show a post-review fix for these open mechanisms.
+
+## Additional observations from revalidation
+
+These were found while validating the original claims/remediations. They are separate from the original-row counts; cross-module repeats are not extra unique defects.
+
+<a id="new-1"></a>
+
+### Observation NEW.1 — #1090 out-of-order watermark test does not detect reverting fetch_max to swap
+
+Status: `confirmed-open`. Current risk: `low`.
+
+Needed to qualify the reports' claimed fix proof: the final stale call computes zero elapsed with either operation and is rejected in both. The test ends before a subsequent newer call can expose the regressed watermark. Source shows fetch_max fixes regression, but this test does not establish that specific negative control.
+
+Evidence: [crates/shamir-connect/src/server/tests/post_auth_rate_limit_tests.rs:144](../../../../../crates/shamir-connect/src/server/tests/post_auth_rate_limit_tests.rs#L144); [crates/shamir-connect/src/server/tests/post_auth_rate_limit_tests.rs:175](../../../../../crates/shamir-connect/src/server/tests/post_auth_rate_limit_tests.rs#L175); [crates/shamir-connect/src/server/session.rs:356](../../../../../crates/shamir-connect/src/server/session.rs#L356).
+
+<a id="new-2"></a>
+
+### Observation NEW.2 — Registered auth-message header and length oracles contradict the actual domain tag
+
+Status: `confirmed-open`. Current risk: `low`.
+
+Needed to correct the proposed capacity fix and claimed healthy vector coverage: SHAMIR-AUTH-v1 is 13 bytes. The builder produces 143 fixed bytes and 148 for alice, while registered tests compare a 14-byte slice to that 13-byte literal and assert 149 bytes. Vector metadata also declares 149. These are source-level contradictions; no test was executed.
+
+Evidence: [crates/shamir-connect/src/common/domain_tags.rs:17](../../../../../crates/shamir-connect/src/common/domain_tags.rs#L17); [crates/shamir-connect/src/common/auth_message.rs:84](../../../../../crates/shamir-connect/src/common/auth_message.rs#L84); [crates/shamir-connect/src/common/tests/auth_message_tests.rs:127](../../../../../crates/shamir-connect/src/common/tests/auth_message_tests.rs#L127); [crates/shamir-connect/src/common/tests/auth_message_tests.rs:200](../../../../../crates/shamir-connect/src/common/tests/auth_message_tests.rs#L200); [crates/shamir-connect/test-vectors/auth_message_default.toml:21](../../../../../crates/shamir-connect/test-vectors/auth_message_default.toml#L21); [crates/shamir-connect/src/common/tests/mod.rs:1](../../../../../crates/shamir-connect/src/common/tests/mod.rs#L1).
+
+## Current follow-up order
+
+1. Correct the review's refuted atomic-refill headline and unsupported severity/measurement claims before updating its remediation plan.
+2. Bound production AuditChain retention and replace the globally serialized all-session capped-insert scan; enforce the same session cap during resume.
+3. Fix the subnet watermark regression, zero-rate validation, and dispatch policy asymmetry with defect-sensitive assertions.
+4. Expose durable-counter storage failures, fail closed on malformed counter values, and obtain fjall 3.1.6 failure-semantics evidence before designing retry or rollback.
+5. Defer TOFU callback side effects, wipe client passwords on all exits, and use checked changePassword TTL arithmetic.
+6. Repair client-only feature separation and reconcile auth-message test/vector length contradictions.
+7. Fix checkpoint authentication semantics and identity-state update coordination; then address wire compatibility and remaining API/documentation nits.
+
+## Coverage and limitations
+
+- Read-only source validation; no builds, tests, benchmarks, reproductions, agents, or file changes. HEAD matched the requested base.
+- All eight assigned documents were read completely. TASK_GROUPS.md was not present.
+- Read repository AGENTS.md and CLAUDE.md, relevant implementations, callers, test registration, contracts, and history. Existing commit messages were not treated as proof.
+- Cargo.lock resolves arc-swap 1.9.1, argon2 0.5.3, dashmap 6.1.0, ed25519-dalek 2.2.0, fjall 3.1.6, rand 0.9.4, rmp-serde 1.3.1, serde 1.0.228, serde_bytes 0.11.19, subtle 2.6.1, and zeroize 1.8.2.
+- The exact fjall 3.1.6 implementation was unavailable locally; visibility and restart outcomes following failed persist remain unverified.
+- The exact rmp-serde 1.3.1 implementation was unavailable locally; the missing byte annotation and Serde sequence representation are established, but exact encoded overhead is unverified.
+- Timing multipliers, syscall costs, latency predictions, and constant-time behavior were not measured. External RFC and upstream cryptographic guarantees were not independently revalidated.
+
+## Reviewed document inventory
+
+- [correctness-tdd.md](./correctness-tdd.md) — 19 claim decisions; 0 explicit plan items.
+- [concurrency-lockfree.md](./concurrency-lockfree.md) — 9 claim decisions; 0 explicit plan items.
+- [security-crypto.md](./security-crypto.md) — 11 claim decisions; 0 explicit plan items.
+- [performance-hotpath.md](./performance-hotpath.md) — 7 claim decisions; 0 explicit plan items.
+- [api-wire-protocol.md](./api-wire-protocol.md) — 17 claim decisions; 0 explicit plan items.
+- [error-handling-lifecycle.md](./error-handling-lifecycle.md) — 15 claim decisions; 0 explicit plan items.
+- [style-claude-md.md](./style-claude-md.md) — 13 claim decisions; 0 explicit plan items.
+- [SUMMARY.md](./SUMMARY.md) — 78 claim decisions; 21 explicit plan items.
+
+---
+
+<details>
+<summary>Historical report — preserved for provenance; not current status or instructions</summary>
+
 # shamir-connect — Cross-Lens Review (all 7 lenses, synthesized)
 
 Crate: `crates/shamir-connect/` — the ShamirDB connection-protocol library: SCRAM-Argon2id
@@ -470,3 +1707,5 @@ Dedup accounting: **75 lens-tagged findings → 53 distinct defects** (22 folded
 19. **Concurrency-p behavioral fixes:** rename/guard/delete `Argon2Semaphore::acquire*` (**2.5**); Fx hasher for `lockout.rs` maps (**2.6**); delete the `unwrap_or(Tcp)` re-parse in `process_resume` (**6.9**).
 20. **Test-gap sweep:** vacuous `matches!` assertions → `assert!` (**1.10**); fault-injection snapshot-sink tests + Argon2-failure branch coverage (**6.12**); exercise `PushKind::Ready` (**5.11**).
 21. **Style/doc sweep (one docs-only pass):** stale `auth_v1`/envelope-test references (**7.5**); dead suppressors + unused imports in `server/handshake.rs` (**7.4**); mid-function `use` hoists (**7.7**); capacity const fix (**1.12**); unused `unicode-normalization` dep (**1.13**); `u16` ticket-length `debug_assert!` (**1.14**); rotation threshold asymmetry note (**1.15**); `Debug` label (**2.8**); zero-`nonce_cp` fail-fast (**3.6**); canonical-bytes length rejection (**3.8**); owning-variant doc/syscall note (**4.5**); "sliding-window" wording (**5.10**); `SESSION_ID_BYTES` constant (**5.12**); `Option<bool>` → typed (**5.13**); delete-or-implement `encode_details_canonical` is already covered by P1 item 8.
+
+</details>

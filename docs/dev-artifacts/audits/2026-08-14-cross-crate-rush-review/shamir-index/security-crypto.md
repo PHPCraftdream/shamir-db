@@ -1,3 +1,118 @@
+<!-- revalidation:2026-10-08 source:92ad58266bf57ddea1fa3c8a47affba1a3a9a096 -->
+# shamir-index — security-crypto revalidation
+
+Source snapshot: `92ad58266bf57ddea1fa3c8a47affba1a3a9a096`. Revalidated 2026-10-08 by read-only XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run; no source fix is part of this update. Test registration/assertions are evidence of an oracle, not proof of a passing run.
+
+This section is authoritative for current status. Original titles/IDs are retained for traceability; a refuted title is not a current assertion. The collapsed historical report below is superseded, including its counts, severity, scenarios and fix instructions. Plan IDs preserve historical numbering, not a current release mandate. [Workspace methodology and status definitions](../SUMMARY.md#status-definitions).
+
+Hash identity and dispatch-boundary risks remain, with privilege-qualified reachability. Plain serialization and unsanitized snapshot names are confirmed. Cheap collision construction and NEON UB are not proven by repository evidence.
+
+## Current claim decisions
+
+| Claim decisions | Open | Source-fixed | Partial | Refuted | Unverified | N/A |
+|---:|---:|---:|---:|---:|---:|---:|
+| 8 | 6 | 0 | 0 | 1 | 1 | 0 |
+
+These are decisions on report claims, including repeated roots, bundled observations and non-findings—not a unique-bug census. Closed/N/A rows have no current risk; unverified risk is provisional. Pure style and unmeasured optimization claims do not establish runtime impact.
+
+<a id="review-1"></a>
+
+### Claim 1 — Regular + unique index keys use two correlated FxHasher streams as "collision resistance"; unique constraints are enforced on hash alone
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+Both public-seeded streams remain non-keyed; unique postings contain only RecordId and hits are not value-verified. Integrity risk conditional on a full-pair collision is confirmed; cheap simultaneous collision construction is unverified.
+
+Evidence: [crates/shamir-index/src/base_index/index_keys.rs:191](../../../../../crates/shamir-index/src/base_index/index_keys.rs#L191); [crates/shamir-index/src/base_index/index_manager_unique.rs:384](../../../../../crates/shamir-index/src/base_index/index_manager_unique.rs#L384); [crates/shamir-index/src/base_index/index_manager_unique.rs:440](../../../../../crates/shamir-index/src/base_index/index_manager_unique.rs#L440); [docs/guide-docs/architecture/ARCHITECTURE.md:354](../../../../../docs/guide-docs/architecture/ARCHITECTURE.md#L354).
+
+<a id="review-2"></a>
+
+### Claim 2 — FTS posting keys hash untrusted token text with unkeyed `FxHasher` (`token_hash`)
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+Tokens remain identified solely by an unkeyed u64 hash; postings do not preserve text for collision verification. Document writers can influence inputs. Collision-driven poisoning is conditional, not a demonstrated authentication or tenant-isolation bypass.
+
+Evidence: [crates/shamir-index/src/tokenizer.rs:462](../../../../../crates/shamir-index/src/tokenizer.rs#L462); [crates/shamir-index/src/fts_ranked_backend.rs:88](../../../../../crates/shamir-index/src/fts_ranked_backend.rs#L88); [crates/shamir-index/src/fts_ranked_backend.rs:123](../../../../../crates/shamir-index/src/fts_ranked_backend.rs#L123); [crates/shamir-engine/src/table/read_planner.rs:56](../../../../../crates/shamir-engine/src/table/read_planner.rs#L56).
+
+<a id="review-3"></a>
+
+### Claim 3 — `trusted_pure` scalar gate is documented here but not enforced at this crate's dispatch boundary
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+Evaluation still uses unrestricted resolver.call without is_indexable. Normal engine DDL checks trust; bypass requires persisted metadata manipulation, direct library construction, or host scalar replacement—not arbitrary remote closure installation.
+
+Evidence: [crates/shamir-index/src/expr.rs:178](../../../../../crates/shamir-index/src/expr.rs#L178); [crates/shamir-funclib/src/scalar_resolver.rs:110](../../../../../crates/shamir-funclib/src/scalar_resolver.rs#L110); [crates/shamir-engine/src/table/table_manager_index_mgmt.rs:262](../../../../../crates/shamir-engine/src/table/table_manager_index_mgmt.rs#L262); [crates/shamir-index/src/functional_backend.rs:303](../../../../../crates/shamir-index/src/functional_backend.rs#L303).
+
+<a id="review-4"></a>
+
+### Claim 4 — External vector-backend API key persisted in cleartext inside the index-metadata blob
+
+Status: `confirmed-open`. Current risk: `low`.
+
+SecretString serialization remains pass-through, and External descriptors can be persisted through the library API. Shipped engine CREATE constructs InProcessHnsw; at-rest confidentiality is explicitly delegated to operator encryption.
+
+Evidence: [crates/shamir-index/src/kind.rs:195](../../../../../crates/shamir-index/src/kind.rs#L195); [crates/shamir-types/src/secret.rs:54](../../../../../crates/shamir-types/src/secret.rs#L54); [crates/shamir-index/src/persistence.rs:97](../../../../../crates/shamir-index/src/persistence.rs#L97); [crates/shamir-engine/src/table/table_manager_index_mgmt.rs:348](../../../../../crates/shamir-engine/src/table/table_manager_index_mgmt.rs#L348); [docs/guide-docs/security/data-protection.md:68](../../../../../docs/guide-docs/security/data-protection.md#L68).
+
+<a id="review-5"></a>
+
+### Claim 5 — Snapshot load joins persisted `basename`/`qbasename` into temp file paths unsanitized; manifest/sidecar carry no integrity check
+
+Status: `confirmed-open`. Current risk: `low`.
+
+Persisted names still feed path joins and create/truncate calls without validation. Exploitation requires metadata-write capability and a writable destination; CRC32 is corruption detection, not an attacker-authentication boundary.
+
+Evidence: [crates/shamir-index/src/vector/snapshot.rs:907](../../../../../crates/shamir-index/src/vector/snapshot.rs#L907); [crates/shamir-index/src/vector/snapshot.rs:912](../../../../../crates/shamir-index/src/vector/snapshot.rs#L912); [crates/shamir-index/src/vector/snapshot.rs:983](../../../../../crates/shamir-index/src/vector/snapshot.rs#L983); [crates/shamir-index/src/vector/snapshot.rs:989](../../../../../crates/shamir-index/src/vector/snapshot.rs#L989).
+
+<a id="review-6"></a>
+
+### Claim 6 — `NgramTokenizer` output is unbounded — indexing-time memory/write amplification from one long token
+
+Status: `confirmed-open`. Current risk: `low`.
+
+Tokenization allocates O(text length) grams without an index-local budget. Posting planning deduplicates by token hash, so one op per gram is false for repeated grams. Network framing bounds individual remote requests.
+
+Evidence: [crates/shamir-index/src/tokenizer.rs:152](../../../../../crates/shamir-index/src/tokenizer.rs#L152); [crates/shamir-index/src/fts_ranked_backend.rs:84](../../../../../crates/shamir-index/src/fts_ranked_backend.rs#L84); [crates/shamir-index/src/fts_ranked_backend.rs:169](../../../../../crates/shamir-index/src/fts_ranked_backend.rs#L169); [crates/shamir-connect/src/common/types.rs:111](../../../../../crates/shamir-connect/src/common/types.rs#L111).
+
+<a id="review-7"></a>
+
+### Claim 7 — NEON kernels read `u32` through `*const u8`-derived pointers — aligned-load safety contract violated (aarch64 only, untested on CI)
+
+Status: `unverified`. Current risk: `nit` (provisional; not a confirmed defect).
+
+The casts and lane loads remain, with four-byte bounds established. Pointer casting alone does not prove UB; the alleged intrinsic alignment requirement lacks a cited toolchain-specific contract or experimental proof.
+
+Evidence: [crates/shamir-index/src/vector/simd.rs:920](../../../../../crates/shamir-index/src/vector/simd.rs#L920); [crates/shamir-index/src/vector/simd.rs:932](../../../../../crates/shamir-index/src/vector/simd.rs#L932); [crates/shamir-index/src/vector/simd.rs:1101](../../../../../crates/shamir-index/src/vector/simd.rs#L1101); [crates/shamir-index/src/vector/simd.rs:1250](../../../../../crates/shamir-index/src/vector/simd.rs#L1250).
+
+<a id="review-8"></a>
+
+### Claim 8 — `unreachable!` on a data-derived `IndexKind::Btree` descriptor panics at table open
+
+Status: `refuted`. Current risk: —.
+
+TableManager's persisted-descriptor loop explicitly skips Btree before calling the builder. Direct misuse of the public builder can panic, but the alleged persisted table-open crash path is positively excluded.
+
+Evidence: [crates/shamir-engine/src/table/table_manager.rs:661](../../../../../crates/shamir-engine/src/table/table_manager.rs#L661); [crates/shamir-engine/src/table/table_manager.rs:665](../../../../../crates/shamir-engine/src/table/table_manager.rs#L665); [crates/shamir-index/src/build_backend.rs:66](../../../../../crates/shamir-index/src/build_backend.rs#L66).
+
+Grouping/duplicate: `error-handling-lifecycle.md#5`. This row is not another independent defect.
+
+## Corrections and qualified non-findings
+
+- Do not describe dual-FxHash attacks as cheap or trivial without a collision construction for pinned rustc-hash 2.1.2 and the actual typed input encoding.
+- Hash collision integrity risks do not establish cross-table, authorization, or tenant-isolation bypass.
+- External credentials are plaintext at the serialization layer, but external-service CREATE is not exposed by the inspected engine handler and encrypted storage/backups are the documented deployment contract.
+- A checksum does not protect manifests from a metadata-writing attacker; path validation remains necessary regardless of checksum choice.
+- N-gram doc_len is cast to u32, not saturated, and repeated grams do not each create separate posting operations.
+- Confirmed clean scope: executable unsafe blocks are confined to vector/simd.rs; PostingKeyRef decoding is bounds-checked. Committed vector query/batch dimensions and limits are checked, but staged merge dimensions are not universally checked.
+- Malformed chunk checksum handling is present; this does not prove all decodable sidecar metadata fails closed.
+- No secret-comparison timing claim is needed for distance/hash calculations. SecretString Debug redaction and drop zeroization are source-visible, not protection for serialized copies.
+
+---
+
+<details>
+<summary>Historical report — preserved for provenance; not current status or instructions</summary>
+
 # shamir-index -- Security & crypto boundary
 
 ## Summary
@@ -65,3 +180,5 @@
 ---
 
 **Areas examined and clean (for the record):** all `unsafe` is confined to `vector/simd.rs` with runtime feature detection and documented invariants (except finding 7); `PostingKeyRef::decode` and the sorted-index key decoders are bounds-checked and `Option`-returning; `posting_layout`, `ddl_op_log` (versioned), `decode_covering_projection`, `IndexInfo::decode_bytes`, and the snapshot chunk reassembly all fail closed on malformed input; vector search inputs are consistently clamped (`MAX_TOPK`, `MAX_EF_SEARCH`, dim checks, atomic batch dim validation); `FtsPostingValue` decode falls back rather than panicking; no secret-dependent comparisons or timing-sensitive branches exist in this crate (distances/keys are not secrets); `RecordId::system` key-collision hazards are explicitly documented and byte-verified at every new system key (persistence.rs:297-304, 426-437, index_manager.rs:1054-1072, sorted_index_manager.rs:680-685, 1232-1237); CRC32 (not a MAC) as the snapshot integrity mechanism matches CLAUDE.md's "Checksums everywhere" corruption-detection pillar rather than contradicting it.
+
+</details>

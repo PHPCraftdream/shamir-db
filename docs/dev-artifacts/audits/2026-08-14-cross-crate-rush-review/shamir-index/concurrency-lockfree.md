@@ -1,3 +1,136 @@
+<!-- revalidation:2026-10-08 source:92ad58266bf57ddea1fa3c8a47affba1a3a9a096 -->
+# shamir-index — concurrency-lockfree revalidation
+
+Source snapshot: `92ad58266bf57ddea1fa3c8a47affba1a3a9a096`. Revalidated 2026-10-08 by read-only XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run; no source fix is part of this update. Test registration/assertions are evidence of an oracle, not proof of a passing run.
+
+This section is authoritative for current status. Original titles/IDs are retained for traceability; a refuted title is not a current assertion. The collapsed historical report below is superseded, including its counts, severity, scenarios and fix instructions. Plan IDs preserve historical numbering, not a current release mandate. [Workspace methodology and status definitions](../SUMMARY.md#status-definitions).
+
+Snapshot coordination, planner inconsistency, shadow-write errors, and structural cost debt remain. The claimed production Phase-D dirty-set race is excluded by caller barriers. Some architectural praise needs narrower dependency and timing claims.
+
+## Current claim decisions
+
+| Claim decisions | Open | Source-fixed | Partial | Refuted | Unverified | N/A |
+|---:|---:|---:|---:|---:|---:|---:|
+| 10 | 9 | 0 | 0 | 1 | 0 | 0 |
+
+These are decisions on report claims, including repeated roots, bundled observations and non-findings—not a unique-bug census. Closed/N/A rows have no current risk; unverified risk is provisional. Pure style and unmeasured optimization claims do not establish runtime impact.
+
+<a id="review-1"></a>
+
+### Claim 1 — Background vector snapshot dumps the live adapter without quiescing; the multi-map sidecar scan is not atomic across maps (torn capture → permanent zombie graph node)
+
+Status: `confirmed-open`. Current risk: `high`.
+
+The dump remains unquiesced and scans maps separately. The stated zombie schedule reverses actual scan order; however, durable deltas precede graph promotion and can be incorrectly absorbed/pruned, establishing snapshot-loss risk.
+
+Evidence: [crates/shamir-index/src/vector/snapshot.rs:529](../../../../../crates/shamir-index/src/vector/snapshot.rs#L529); [crates/shamir-index/src/vector/vector_backend.rs:919](../../../../../crates/shamir-index/src/vector/vector_backend.rs#L919); [crates/shamir-engine/src/tx/commit_phases.rs:939](../../../../../crates/shamir-engine/src/tx/commit_phases.rs#L939); [crates/shamir-engine/src/tx/materialize.rs:214](../../../../../crates/shamir-engine/src/tx/materialize.rs#L214).
+
+<a id="review-2"></a>
+
+### Claim 2 — `plan_records_created_batch` bypasses the in-flight-online-build dirty-set capture that every other write path performs
+
+Status: `confirmed-open`. Current risk: `low`.
+
+The batch planner still emits direct postings for Building definitions without the single-row capture predicate. Engine batch staging reaches it. The original future update/delete consequence is hypothetical, not a demonstrated current corruption.
+
+Evidence: [crates/shamir-index/src/base_index/index_manager.rs:2458](../../../../../crates/shamir-index/src/base_index/index_manager.rs#L2458); [crates/shamir-index/src/base_index/index_manager.rs:2525](../../../../../crates/shamir-index/src/base_index/index_manager.rs#L2525); [crates/shamir-engine/src/table/table_manager_tx_ops.rs:836](../../../../../crates/shamir-engine/src/table/table_manager_tx_ops.rs#L836).
+
+<a id="review-3"></a>
+
+### Claim 3 — TOCTOU between lock-free `is_build_in_flight` check and Mutex-guarded dirty-set insert can leak an orphan dirty-set entry at Phase D
+
+Status: `refuted`. Current risk: —.
+
+The primitive check/insert is separate, but production Phase D first raises admission, drains writers, and holds the write lock through clear_build_in_flight. The alleged racing writer cannot overlap that clear under this protocol.
+
+Evidence: [crates/shamir-index/src/base_index/index_manager.rs:1022](../../../../../crates/shamir-index/src/base_index/index_manager.rs#L1022); [crates/shamir-engine/src/table/table_manager_index_mgmt.rs:2906](../../../../../crates/shamir-engine/src/table/table_manager_index_mgmt.rs#L2906); [crates/shamir-engine/src/table/table_manager_index_mgmt.rs:2947](../../../../../crates/shamir-engine/src/table/table_manager_index_mgmt.rs#L2947); [crates/shamir-engine/src/table/table_manager.rs:1322](../../../../../crates/shamir-engine/src/table/table_manager.rs#L1322).
+
+<a id="review-4"></a>
+
+### Claim 4 — `lease_by_field_and_kind` is an O(N) full-registry scan on every index2 read dispatch
+
+Status: `confirmed-open`. Current risk: `low`.
+
+Lookup still scans by_id under the read lease. The descriptor is borrowed, not cloned; only the selected backend Arc is cloned. The uniqueness/multi-id design decision remains documented.
+
+Evidence: [crates/shamir-index/src/registry.rs:609](../../../../../crates/shamir-index/src/registry.rs#L609); [crates/shamir-index/src/registry.rs:659](../../../../../crates/shamir-index/src/registry.rs#L659); [crates/shamir-index/src/registry.rs:666](../../../../../crates/shamir-index/src/registry.rs#L666).
+
+<a id="review-5"></a>
+
+### Claim 5 — Compaction double-write silently swallows upsert failures on the compaction target — a failed double-write becomes a permanent hole in the post-swap graph
+
+Status: `confirmed-open`. Current risk: `high`.
+
+Shadow upsert/batch errors are discarded, with no failure latch or upsert reconciliation before swap. A failed update after S0 capture can leave a missing or stale target vector.
+
+Evidence: [crates/shamir-index/src/vector/vector_backend.rs:296](../../../../../crates/shamir-index/src/vector/vector_backend.rs#L296); [crates/shamir-index/src/vector/vector_backend.rs:512](../../../../../crates/shamir-index/src/vector/vector_backend.rs#L512); [crates/shamir-index/src/vector/vector_backend.rs:1102](../../../../../crates/shamir-index/src/vector/vector_backend.rs#L1102).
+
+Grouping/duplicate: `error-handling-lifecycle.md#2`. This row is not another independent defect.
+
+<a id="review-6"></a>
+
+### Claim 6 — DROP-sweep paths materialize the entire index key list before removing (O(index-size) memory spike, one giant batch)
+
+Status: `confirmed-open`. Current risk: `low`.
+
+Regular and sorted sweeps still accumulate all keys before remove_many; FTS sweeps still await individual removes. These are distinct cold-path memory and batching issues, not one identical root defect.
+
+Evidence: [crates/shamir-index/src/base_index/index_manager.rs:1250](../../../../../crates/shamir-index/src/base_index/index_manager.rs#L1250); [crates/shamir-index/src/base_index/sorted_index_manager.rs:799](../../../../../crates/shamir-index/src/base_index/sorted_index_manager.rs#L799); [crates/shamir-index/src/fts_backend.rs:247](../../../../../crates/shamir-index/src/fts_backend.rs#L247).
+
+<a id="review-7"></a>
+
+### Claim 7 — `BruteForceAdapter::search` runs an O(N·dim) exact scan inline on the async runtime (pillar 2: CPU-bound → `spawn_blocking`)
+
+Status: `confirmed-open`. Current risk: `low`.
+
+Distance scanning and heap maintenance remain inline. Public adapter injection permits use beyond tests, but the shipped backend builder selects HNSW; no tens-of-milliseconds measurement was established.
+
+Evidence: [crates/shamir-index/src/vector/brute_force.rs:262](../../../../../crates/shamir-index/src/vector/brute_force.rs#L262); [crates/shamir-index/src/vector/brute_force.rs:297](../../../../../crates/shamir-index/src/vector/brute_force.rs#L297); [crates/shamir-index/src/build_backend.rs:53](../../../../../crates/shamir-index/src/build_backend.rs#L53).
+
+<a id="review-8"></a>
+
+### Claim 8 — `ReaderDrainGate` doc invariant ("Never acquire any other lock while holding a `ReadGuard`") is contradicted in letter by `lookup_by_index`'s DashMap access inside the guard scope
+
+Status: `confirmed-open`. Current risk: `nit`.
+
+Absolute wording still conflicts with guarded DashMap cache accesses. The shown cache guards are short-lived and released before awaits; no lock-order cycle is established by these accesses.
+
+Evidence: [crates/shamir-index/src/reader_drain_gate.rs:85](../../../../../crates/shamir-index/src/reader_drain_gate.rs#L85); [crates/shamir-index/src/base_index/index_manager.rs:2808](../../../../../crates/shamir-index/src/base_index/index_manager.rs#L2808); [crates/shamir-index/src/base_index/index_manager.rs:2826](../../../../../crates/shamir-index/src/base_index/index_manager.rs#L2826); [crates/shamir-index/src/base_index/index_manager.rs:2874](../../../../../crates/shamir-index/src/base_index/index_manager.rs#L2874).
+
+<a id="review-9"></a>
+
+### Claim 9 — `BruteForceAdapter::join: std::sync::Mutex<Option<JoinHandle>>` lacks the inline contention-model comment CLAUDE.md requires per instance
+
+Status: `confirmed-open`. Current risk: `nit`.
+
+The private one-shot shutdown slot still lacks its local justification. Its guard is dropped before awaiting the JoinHandle, so this is documentation conformance, not an await-held lock defect.
+
+Evidence: [crates/shamir-index/src/vector/brute_force.rs:64](../../../../../crates/shamir-index/src/vector/brute_force.rs#L64); [crates/shamir-index/src/vector/brute_force.rs:131](../../../../../crates/shamir-index/src/vector/brute_force.rs#L131).
+
+<a id="review-10"></a>
+
+### Claim 10 — `FtsStats::on_delete` uses bare `fetch_sub` — underflow wraps to a huge `doc_count` with no saturating guard
+
+Status: `confirmed-open`. Current risk: `low`.
+
+Both counters still use wrapping subtraction. Invalid/double delete accounting can wrap; zero-length update transitions provide an existing source of spurious delete bumps.
+
+Evidence: [crates/shamir-index/src/bm25.rs:87](../../../../../crates/shamir-index/src/bm25.rs#L87); [crates/shamir-index/src/fts_ranked_backend.rs:223](../../../../../crates/shamir-index/src/fts_ranked_backend.rs#L223).
+
+## Corrections and qualified non-findings
+
+- Snapshot scans are forward map, reverse map, tombstones, then vectors—not tombstones before forward map. Remove the claimed proven zombie timeline; retain the coordination defect and applied-watermark requirement.
+- Phase-D production reachability must include the writer-drain/admission protocol; an isolated helper TOCTOU is not sufficient proof.
+- Registry lookup does not deep-clone descriptors or paths.
+- Do not deduplicate the base-index all-keys sweep into the index2 per-key/error-swallowing sweep; preserve both residual work items.
+- ReaderDrainGate's SeqCst protocol and RAII decrements are present. Its docs explicitly disclaim formal starvation freedom; the opt-in loom model is not an execution result or a complete memory-model proof.
+- Concurrent scc registry usage and annotated len calls are source-visible; describing every scc HashMap operation as formally lock-free requires dependency-level evidence.
+
+---
+
+<details>
+<summary>Historical report — preserved for provenance; not current status or instructions</summary>
+
 # shamir-index -- Concurrency & lock-free invariants
 
 ## Summary
@@ -76,3 +209,5 @@ The crate is, on the whole, an exemplary implementation of CLAUDE.md's five pill
 - **Severity:** nit
 - **Issue:** `doc_count`/`sum_doc_len` are two independent `AtomicU64`s updated with non-atomic pairs (fine for a derived BM25 average, which is approximate by design), but `on_delete`'s `fetch_sub` wraps silently on underflow. Any accounting bug that applies a `BumpFtsStats{sign: -1}` twice for one document (the double-count class `apply_index_ops_at_commit`'s provenance grouping exists to prevent) flips `doc_count` to ~2^64, and every subsequent `idf`/`avg_doc_len` becomes garbage with no error signal. The sibling `HnswAdapter::live_count` (`hnsw_adapter.rs:659-673`) already demonstrates the `saturating_sub` discipline for exactly this reason.
 - **Suggested fix:** Use `fetch_update` with `saturating_sub` semantics (or clamp at 0) in `on_delete`, mirroring `live_count`'s documented stance that transient underflow must degrade to 0, never wrap.
+
+</details>

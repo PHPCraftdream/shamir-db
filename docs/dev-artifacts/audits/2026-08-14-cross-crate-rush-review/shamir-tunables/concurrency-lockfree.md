@@ -1,3 +1,67 @@
+<!-- revalidation:2026-10-08 source:92ad58266bf57ddea1fa3c8a47affba1a3a9a096 -->
+# shamir-tunables — concurrency-lockfree revalidation
+
+Source snapshot: `92ad58266bf57ddea1fa3c8a47affba1a3a9a096`. Revalidated 2026-10-08 by read-only XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run; no source fix is part of this update. Test registration/assertions are evidence of an oracle, not proof of a passing run.
+
+This section is authoritative for current status. Original titles/IDs are retained for traceability; a refuted title is not a current assertion. The collapsed historical report below is superseded, including its counts, severity, scenarios and fix instructions. Plan IDs preserve historical numbering, not a current release mandate. [Workspace methodology and status definitions](../SUMMARY.md#status-definitions).
+
+Independent relaxed atomics remain structurally appropriate. Wiring, value-domain documentation, and cross-thread coverage are still absent; the original zero-channel and guaranteed-starvation scenarios are inaccurate.
+
+## Current claim decisions
+
+| Claim decisions | Open | Source-fixed | Partial | Refuted | Unverified | N/A |
+|---:|---:|---:|---:|---:|---:|---:|
+| 3 | 3 | 0 | 0 | 0 | 0 | 0 |
+
+These are decisions on report claims, including repeated roots, bundled observations and non-findings—not a unique-bug census. Closed/N/A rows have no current risk; unverified risk is provisional. Pure style and unmeasured optimization claims do not establish runtime impact.
+
+<a id="review-1"></a>
+
+### Claim 1 — `RuntimeTunables` override path has zero live consumers — all hot paths read the compile-time consts, so a runtime override is a silent no-op
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+The object is still constructed and exposed without any production getter calls; server consumers retain constant reads.
+
+Evidence: [crates/shamir-server/src/server/server_handle.rs:100](../../../../../crates/shamir-server/src/server/server_handle.rs#L100); [crates/shamir-server/src/server/server_launcher.rs:985](../../../../../crates/shamir-server/src/server/server_launcher.rs#L985); [crates/shamir-server/src/server/server_launcher.rs:1048](../../../../../crates/shamir-server/src/server/server_launcher.rs#L1048); [crates/shamir-server/src/server/server_launcher.rs:1098](../../../../../crates/shamir-server/src/server/server_launcher.rs#L1098).
+
+Grouping/duplicate: `correctness-tdd.md#1`. This row is not another independent defect.
+
+<a id="review-2"></a>
+
+### Claim 2 — Setters accept concurrency-breaking values (0 / sub-millisecond) with no validation or documented floor
+
+Status: `confirmed-open`. Current risk: `low`.
+
+Unchecked zero and quantized interval stores remain. This is latent boundary hardening, not a current deadlock: there are no runtime readers and the actual request-loop consumer floors its cap at one.
+
+Evidence: [crates/shamir-tunables/src/runtime.rs:56](../../../../../crates/shamir-tunables/src/runtime.rs#L56); [crates/shamir-tunables/src/runtime.rs:63](../../../../../crates/shamir-tunables/src/runtime.rs#L63); [crates/shamir-tunables/src/runtime.rs:73](../../../../../crates/shamir-tunables/src/runtime.rs#L73); [crates/shamir-server/src/connection/request_loop.rs:153](../../../../../crates/shamir-server/src/connection/request_loop.rs#L153).
+
+Grouping/duplicate: `correctness-tdd.md#2`. This row is not another independent defect.
+
+<a id="review-3"></a>
+
+### Claim 3 — No test pins cross-thread visibility of an override; `reads_are_shared_ref` runs single-threaded
+
+Status: `confirmed-open`. Current risk: `nit`.
+
+reads_are_shared_ref still clones and accesses Arc on one thread. No spawn/join test or explicit Send + Sync assertion exists. This is missing regression coverage, not evidence of broken atomic visibility.
+
+Evidence: [crates/shamir-tunables/src/tests/runtime_tests.rs:52](../../../../../crates/shamir-tunables/src/tests/runtime_tests.rs#L52); [crates/shamir-tunables/src/runtime.rs:18](../../../../../crates/shamir-tunables/src/runtime.rs#L18); [crates/shamir-tunables/src/runtime.rs:46](../../../../../crates/shamir-tunables/src/runtime.rs#L46).
+
+## Corrections and qualified non-findings
+
+- Positive guarantees remain source-supported: production code has only constants and three independent atomic fields; no locks, awaits, maps, or scc cardinality calls exist. Fx hashing is not applicable (crates/shamir-tunables/src/runtime.rs:8,18; crates/shamir-tunables/Cargo.toml:1).
+- Relaxed ordering is suitable for independent values without publication or multi-knob snapshot guarantees. 'Next read' must not be interpreted as a stronger unsynchronized cross-thread freshness guarantee.
+- The rendezvous claim is refuted by pinned Tokio 1.49 source: bounded channel creation asserts buffer > 0 (Cargo.lock:4196). Current max(1) protects both request primitives regardless of the input's origin (crates/shamir-server/src/connection/request_loop.rs:153).
+- Tokio Sleep uses cooperative-budget polling and millisecond timer rounding; zero sleep does not establish guaranteed worker monopolization. CPU claims remain unmeasured.
+- A debug_assert alone is not an adequate release-mode domain policy; use documented checked or clamped behavior if validation is added.
+
+---
+
+<details>
+<summary>Historical report — preserved for provenance; not current status or instructions</summary>
+
 # shamir-tunables -- Concurrency & lock-free invariants
 
 ## Summary
@@ -32,3 +96,5 @@ The crate is exemplary on the five-pillar checklist: it is a pure-`const` module
 ---
 
 *Scope: only `crates/shamir-tunables/` (`Cargo.toml`, `src/lib.rs`, `src/runtime.rs`, `src/tests/`) plus consumer tracing in `shamir-server` to ground failure scenarios. No `scc::*::len()` call sites exist in the crate; no `Mutex`/`RwLock`/`parking_lot`, no `.await`, no hash-keyed structure — pillar 1/2/3/5 are satisfied trivially, pillar 4 (Fx hash) is not applicable.*
+
+</details>

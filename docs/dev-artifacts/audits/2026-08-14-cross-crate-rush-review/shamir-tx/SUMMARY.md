@@ -1,3 +1,1102 @@
+<!-- revalidation:2026-10-08 source:92ad58266bf57ddea1fa3c8a47affba1a3a9a096 -->
+# shamir-tx — SUMMARY revalidation
+
+Source snapshot: `92ad58266bf57ddea1fa3c8a47affba1a3a9a096`. Revalidated 2026-10-08 by read-only XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run; no source fix is part of this update. Test registration/assertions are evidence of an oracle, not proof of a passing run.
+
+This section is authoritative for current status. Original titles/IDs are retained for traceability; a refuted title is not a current assertion. The collapsed historical report below is superseded, including its counts, severity, scenarios and fix instructions. Plan IDs preserve historical numbering, not a current release mandate. [Workspace methodology and status definitions](../SUMMARY.md#status-definitions).
+
+The principal MVCC and journal-integrity mechanisms remain unresolved. The original 7-High/51-defect census should not be carried forward unchanged: it includes style inflation, refuted panic scenarios, unsupported threat assertions and optional recommendations. No assigned finding has a verified source-level fix at this base.
+
+## Current claim decisions
+
+| Claim decisions | Open | Source-fixed | Partial | Refuted | Unverified | N/A |
+|---:|---:|---:|---:|---:|---:|---:|
+| 67 | 58 | 0 | 0 | 5 | 1 | 3 |
+
+These are decisions on report claims, including repeated roots, bundled observations and non-findings—not a unique-bug census. Closed/N/A rows have no current risk; unverified risk is provisional. Pure style and unmeasured optimization claims do not establish runtime impact.
+
+<a id="review-1-1"></a>
+
+### Claim 1.1 — finalize_reservation is not max-monotonic
+
+Status: `confirmed-open`. Current risk: `high`.
+
+Ack publication still unconditionally overwrites the cell; plain Snapshot publication may be concurrent.
+
+Evidence: [crates/shamir-tx/src/mvcc_store/mod.rs:668](../../../../../crates/shamir-tx/src/mvcc_store/mod.rs#L668); [crates/shamir-engine/src/tx/commit.rs:921](../../../../../crates/shamir-engine/src/tx/commit.rs#L921).
+
+Grouping/duplicate: `correctness-tdd.md#1`. This row is not another independent defect.
+
+<a id="review-1-2"></a>
+
+### Claim 1.2 — prune_version_cache can evict a live SSI reservation
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+The retain predicate ignores ownership. The primitive violation remains; production Serializable commit_lock excludes the claimed simultaneous two-committer scenario.
+
+Evidence: [crates/shamir-tx/src/mvcc_store/mvcc_gc.rs:533](../../../../../crates/shamir-tx/src/mvcc_store/mvcc_gc.rs#L533); [crates/shamir-engine/src/tx/commit.rs:921](../../../../../crates/shamir-engine/src/tx/commit.rs#L921).
+
+Grouping/duplicate: `correctness-tdd.md#2`. This row is not another independent defect.
+
+<a id="review-1-3"></a>
+
+### Claim 1.3 — ts_index_rebuild marks ready after scan errors
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+Skipped error batches are followed by unconditional ready publication; no production fallback exists.
+
+Evidence: [crates/shamir-tx/src/mvcc_store/mod.rs:408](../../../../../crates/shamir-tx/src/mvcc_store/mod.rs#L408); [crates/shamir-tx/src/mvcc_store/mod.rs:428](../../../../../crates/shamir-tx/src/mvcc_store/mod.rs#L428).
+
+Grouping/duplicate: `correctness-tdd.md#3`. This row is not another independent defect.
+
+<a id="review-1-4"></a>
+
+### Claim 1.4 — write_committed_batch_to_history trusts ascending pass
+
+Status: `confirmed-open`. Current risk: `low`.
+
+pass.last is still assumed maximum; current drainer ordering satisfies the documented precondition.
+
+Evidence: [crates/shamir-tx/src/mvcc_store/mvcc_history.rs:394](../../../../../crates/shamir-tx/src/mvcc_store/mvcc_history.rs#L394); [crates/shamir-engine/src/tx/drainer.rs:347](../../../../../crates/shamir-engine/src/tx/drainer.rs#L347).
+
+Grouping/duplicate: `correctness-tdd.md#5`. This row is not another independent defect.
+
+<a id="review-1-5"></a>
+
+### Claim 1.5 — min_alive check-then-scan-then-read TOCTOU
+
+Status: `confirmed-open`. Current risk: `low`.
+
+A completed registration after traversal can be older than the fallback floor; a counter-only second check is insufficient.
+
+Evidence: [crates/shamir-tx/src/repo_tx_gate.rs:659](../../../../../crates/shamir-tx/src/repo_tx_gate.rs#L659); [crates/shamir-tx/src/repo_tx_gate.rs:666](../../../../../crates/shamir-tx/src/repo_tx_gate.rs#L666).
+
+Grouping/duplicate: `correctness-tdd.md#6`. This row is not another independent defect.
+
+<a id="review-1-6"></a>
+
+### Claim 1.6 — predicate_conflicts non-tx floor rationale is stale
+
+Status: `confirmed-open`. Current risk: `nit`.
+
+The comment remains inconsistent with non-tx VersionGuard floor advancement.
+
+Evidence: [crates/shamir-tx/src/repo_tx_gate.rs:793](../../../../../crates/shamir-tx/src/repo_tx_gate.rs#L793); [crates/shamir-tx/src/version_guard.rs:96](../../../../../crates/shamir-tx/src/version_guard.rs#L96).
+
+Grouping/duplicate: `correctness-tdd.md#8`. This row is not another independent defect.
+
+<a id="review-1-7"></a>
+
+### Claim 1.7 — publish_committed plain-store regression
+
+Status: `confirmed-open`. Current risk: `low`.
+
+The public plain store remains; all observed callers are tests.
+
+Evidence: [crates/shamir-tx/src/repo_tx_gate.rs:586](../../../../../crates/shamir-tx/src/repo_tx_gate.rs#L586).
+
+Grouping/duplicate: `SUMMARY.md#2.1`. This row is not another independent defect.
+
+<a id="review-1-8"></a>
+
+### Claim 1.8 — release_locks retains empty KeyLock entries
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+Release edits holders but retains each distinct key's lock allocation.
+
+Evidence: [crates/shamir-tx/src/mvcc_store/mvcc_locks.rs:225](../../../../../crates/shamir-tx/src/mvcc_store/mvcc_locks.rs#L225).
+
+Grouping/duplicate: `SUMMARY.md#2.2`. This row is not another independent defect.
+
+<a id="review-1-9"></a>
+
+### Claim 1.9 — Result<_, String> on apply_id_remap
+
+Status: `confirmed-open`. Current risk: `low`.
+
+The shifted method still returns String errors.
+
+Evidence: [crates/shamir-tx/src/tx_context.rs:942](../../../../../crates/shamir-tx/src/tx_context.rs#L942).
+
+Grouping/duplicate: `SUMMARY.md#6.4`. This row is not another independent defect.
+
+<a id="review-2-1"></a>
+
+### Claim 2.1 — publish_committed plain store can regress last_committed_version
+
+Status: `confirmed-open`. Current risk: `low`.
+
+Independent fetch_max publishers invalidate its lock-based safety rationale; no live plain-store caller exists.
+
+Evidence: [crates/shamir-tx/src/repo_tx_gate.rs:578](../../../../../crates/shamir-tx/src/repo_tx_gate.rs#L578); [crates/shamir-tx/src/repo_tx_gate.rs:587](../../../../../crates/shamir-tx/src/repo_tx_gate.rs#L587); [crates/shamir-tx/src/version_guard.rs:96](../../../../../crates/shamir-tx/src/version_guard.rs#L96).
+
+Grouping/duplicate: `concurrency-lockfree.md#1`. This row is not another independent defect.
+
+<a id="review-2-2"></a>
+
+### Claim 2.2 — MvccStore::locks registry never evicts empty entries
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+Map cardinality grows with distinct pessimistic keys. Safe reclamation must account for all outstanding clones.
+
+Evidence: [crates/shamir-tx/src/mvcc_store/mvcc_locks.rs:75](../../../../../crates/shamir-tx/src/mvcc_store/mvcc_locks.rs#L75); [crates/shamir-tx/src/mvcc_store/mvcc_locks.rs:223](../../../../../crates/shamir-tx/src/mvcc_store/mvcc_locks.rs#L223).
+
+Grouping/duplicate: `concurrency-lockfree.md#2`. This row is not another independent defect.
+
+<a id="review-2-3"></a>
+
+### Claim 2.3 — range(..).count traversals lack len-style acknowledgement
+
+Status: `confirmed-open`. Current risk: `nit`.
+
+Counting and range removal remain separate traversals; telemetry already documents its traversal, so this is hygiene/optimization only.
+
+Evidence: [crates/shamir-tx/src/repo_tx_gate.rs:893](../../../../../crates/shamir-tx/src/repo_tx_gate.rs#L893); [crates/shamir-tx/src/repo_tx_gate.rs:900](../../../../../crates/shamir-tx/src/repo_tx_gate.rs#L900).
+
+Grouping/duplicate: `concurrency-lockfree.md#5`. This row is not another independent defect.
+
+<a id="review-2-4"></a>
+
+### Claim 2.4 — A10 barrier can starve GC under snapshot-open churn
+
+Status: `confirmed-open`. Current risk: `low`.
+
+Overlapping openers can continuously force a zero reclamation floor; actual occurrence was not measured.
+
+Evidence: [crates/shamir-tx/src/repo_tx_gate.rs:655](../../../../../crates/shamir-tx/src/repo_tx_gate.rs#L655); [crates/shamir-engine/src/repo/repo_instance.rs:1722](../../../../../crates/shamir-engine/src/repo/repo_instance.rs#L1722).
+
+Grouping/duplicate: `concurrency-lockfree.md#7`. This row is not another independent defect.
+
+<a id="review-2-5"></a>
+
+### Claim 2.5 — validate_read_set cannot-early-return comment is stale
+
+Status: `confirmed-open`. Current risk: `nit`.
+
+The callback stops on the visit after detecting a conflict, contrary to the full-scan comment.
+
+Evidence: [crates/shamir-tx/src/tx_context.rs:796](../../../../../crates/shamir-tx/src/tx_context.rs#L796); [crates/shamir-tx/src/tx_context.rs:803](../../../../../crates/shamir-tx/src/tx_context.rs#L803).
+
+Grouping/duplicate: `concurrency-lockfree.md#9`. This row is not another independent defect.
+
+<a id="review-2-6"></a>
+
+### Claim 2.6 — record_conflicts linear interval scan under commit_lock
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+Nested validation still linearly scans posting vectors.
+
+Evidence: [crates/shamir-tx/src/repo_tx_gate.rs:876](../../../../../crates/shamir-tx/src/repo_tx_gate.rs#L876); [crates/shamir-tx/src/repo_tx_gate.rs:1015](../../../../../crates/shamir-tx/src/repo_tx_gate.rs#L1015).
+
+Grouping/duplicate: `SUMMARY.md#4.4`. This row is not another independent defect.
+
+<a id="review-2-7"></a>
+
+### Claim 2.7 — vacuum_key duplicates lookup_ts on reclaim
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+With an age cap, eligibility and reclamation independently fetch the same timestamp.
+
+Evidence: [crates/shamir-tx/src/mvcc_store/mvcc_gc.rs:229](../../../../../crates/shamir-tx/src/mvcc_store/mvcc_gc.rs#L229); [crates/shamir-tx/src/mvcc_store/mvcc_gc.rs:245](../../../../../crates/shamir-tx/src/mvcc_store/mvcc_gc.rs#L245).
+
+Grouping/duplicate: `SUMMARY.md#4.1`. This row is not another independent defect.
+
+<a id="review-2-8"></a>
+
+### Claim 2.8 — min_alive full-map traversal
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+The minimum is still recomputed by iter_sync per scan-path vacuum.
+
+Evidence: [crates/shamir-tx/src/repo_tx_gate.rs:659](../../../../../crates/shamir-tx/src/repo_tx_gate.rs#L659); [crates/shamir-tx/src/mvcc_store/mvcc_gc.rs:156](../../../../../crates/shamir-tx/src/mvcc_store/mvcc_gc.rs#L156).
+
+Grouping/duplicate: `SUMMARY.md#4.3`. This row is not another independent defect.
+
+<a id="review-2-9"></a>
+
+### Claim 2.9 — history_of sequential timestamp gets
+
+Status: `confirmed-open`. Current risk: `low`.
+
+Each timeline entry still independently awaits lookup_ts.
+
+Evidence: [crates/shamir-tx/src/mvcc_store/mvcc_history.rs:212](../../../../../crates/shamir-tx/src/mvcc_store/mvcc_history.rs#L212).
+
+Grouping/duplicate: `SUMMARY.md#4.7`. This row is not another independent defect.
+
+<a id="review-3-1"></a>
+
+### Claim 3.1 — LayeredInterner::touch_sync panic versus recoverable merge failure
+
+Status: `refuted`. Current risk: —.
+
+touch_ind has only Ok return paths; no current input-conditioned Err reaches the expect.
+
+Evidence: [crates/shamir-types/src/core/interner/interner.rs:146](../../../../../crates/shamir-types/src/core/interner/interner.rs#L146); [crates/shamir-types/src/core/interner/interner.rs:166](../../../../../crates/shamir-types/src/core/interner/interner.rs#L166); [crates/shamir-types/src/core/interner/interner.rs:176](../../../../../crates/shamir-types/src/core/interner/interner.rs#L176).
+
+Grouping/duplicate: `security-crypto.md#2`. This row is not another independent defect.
+
+<a id="review-3-2"></a>
+
+### Claim 3.2 — VERSION_SEP documentation, generators and vacuum prefix guard
+
+Status: `confirmed-open`. Current risk: `low`.
+
+The real conditional integrity flaw remains: vacuum discards decoded orig and uses one key's current guard for every prefix match.
+
+Evidence: [crates/shamir-tx/src/mvcc_store/mvcc_gc.rs:175](../../../../../crates/shamir-tx/src/mvcc_store/mvcc_gc.rs#L175); [crates/shamir-tx/src/mvcc_store/mvcc_gc.rs:214](../../../../../crates/shamir-tx/src/mvcc_store/mvcc_gc.rs#L214); [crates/shamir-tx/src/version_codec.rs:20](../../../../../crates/shamir-tx/src/version_codec.rs#L20).
+
+Grouping/duplicate: `security-crypto.md#3`. This row is not another independent defect.
+
+<a id="review-3-3"></a>
+
+### Claim 3.3 — StagedRow::as_inner panic on unvalidated staged bytes
+
+Status: `refuted`. Current risk: —.
+
+No caller invokes as_inner; private StagedRow storage is not exposed by the public read APIs.
+
+Evidence: [crates/shamir-tx/src/staging_store.rs:32](../../../../../crates/shamir-tx/src/staging_store.rs#L32); [crates/shamir-tx/src/staging_store.rs:81](../../../../../crates/shamir-tx/src/staging_store.rs#L81); [crates/shamir-tx/src/staging_store.rs:141](../../../../../crates/shamir-tx/src/staging_store.rs#L141); [crates/shamir-tx/src/staging_store.rs:165](../../../../../crates/shamir-tx/src/staging_store.rs#L165).
+
+Grouping/duplicate: `security-crypto.md#4`. This row is not another independent defect.
+
+<a id="review-3-4"></a>
+
+### Claim 3.4 — Changefeed journal lacks repo namespace
+
+Status: `not-applicable`. Current risk: —.
+
+Sharing a store violates its documented per-repo contract; production selects a repository-scoped journal store.
+
+Evidence: [crates/shamir-tx/src/changefeed.rs:147](../../../../../crates/shamir-tx/src/changefeed.rs#L147); [crates/shamir-engine/src/repo/repo_instance.rs:1207](../../../../../crates/shamir-engine/src/repo/repo_instance.rs#L1207).
+
+Grouping/duplicate: `security-crypto.md#5`. This row is not another independent defect.
+
+<a id="review-3-5"></a>
+
+### Claim 3.5 — THasher no-untrusted-input premise is upstream
+
+Status: `confirmed-open`. Current risk: `nit`.
+
+Non-keyed hashers remain; public keys and field-name Strings prevent a blanket trusted-input assurance. Practical collision attack cost is unverified.
+
+Evidence: [crates/shamir-tx/src/mvcc_store/mod.rs:138](../../../../../crates/shamir-tx/src/mvcc_store/mod.rs#L138); [crates/shamir-tx/src/layered_interner.rs:95](../../../../../crates/shamir-tx/src/layered_interner.rs#L95).
+
+Grouping/duplicate: `security-crypto.md#6`. This row is not another independent defect.
+
+<a id="review-3-6"></a>
+
+### Claim 3.6 — Corrupt journal entries silently skipped
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+Decode failure still warns without affecting gap_at.
+
+Evidence: [crates/shamir-tx/src/changefeed.rs:411](../../../../../crates/shamir-tx/src/changefeed.rs#L411); [crates/shamir-tx/src/changefeed.rs:416](../../../../../crates/shamir-tx/src/changefeed.rs#L416).
+
+Grouping/duplicate: `SUMMARY.md#5.1`. This row is not another independent defect.
+
+<a id="review-4-1"></a>
+
+### Claim 4.1 — vacuum_key unbatched and duplicated per-version I/O
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+Reclaim still separately fetches timestamps and awaits removals; age-capped reclaim duplicates the get. No timing measurements establish High latency impact.
+
+Evidence: [crates/shamir-tx/src/mvcc_store/mvcc_gc.rs:105](../../../../../crates/shamir-tx/src/mvcc_store/mvcc_gc.rs#L105); [crates/shamir-tx/src/mvcc_store/mvcc_gc.rs:245](../../../../../crates/shamir-tx/src/mvcc_store/mvcc_gc.rs#L245); [crates/shamir-tx/src/mvcc_store/mvcc_gc.rs:246](../../../../../crates/shamir-tx/src/mvcc_store/mvcc_gc.rs#L246).
+
+Grouping/duplicate: `performance-hotpath.md#1`. This row is not another independent defect.
+
+<a id="review-4-2"></a>
+
+### Claim 4.2 — gc_below and purge materialise history before deleting
+
+Status: `confirmed-open`. Current risk: `high`.
+
+Global maps buffer eligible gc_below rows or all purge rows before reclamation; memory scales with buffered history.
+
+Evidence: [crates/shamir-tx/src/mvcc_store/mvcc_gc.rs:309](../../../../../crates/shamir-tx/src/mvcc_store/mvcc_gc.rs#L309); [crates/shamir-tx/src/mvcc_store/mvcc_gc.rs:405](../../../../../crates/shamir-tx/src/mvcc_store/mvcc_gc.rs#L405).
+
+Grouping/duplicate: `performance-hotpath.md#2`. This row is not another independent defect.
+
+<a id="review-4-3"></a>
+
+### Claim 4.3 — min_alive full-map iteration on write tail
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+Scan-path writes still traverse distinct snapshot versions to compute the minimum.
+
+Evidence: [crates/shamir-tx/src/repo_tx_gate.rs:659](../../../../../crates/shamir-tx/src/repo_tx_gate.rs#L659); [crates/shamir-tx/src/mvcc_store/mvcc_gc.rs:156](../../../../../crates/shamir-tx/src/mvcc_store/mvcc_gc.rs#L156).
+
+Grouping/duplicate: `performance-hotpath.md#3`. This row is not another independent defect.
+
+<a id="review-4-4"></a>
+
+### Claim 4.4 — record_conflicts linear interval scan in commit critical section
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+Sorted vectors still use iter().any under nested window/dependency validation.
+
+Evidence: [crates/shamir-tx/src/repo_tx_gate.rs:1015](../../../../../crates/shamir-tx/src/repo_tx_gate.rs#L1015); [crates/shamir-tx/src/repo_tx_gate.rs:1089](../../../../../crates/shamir-tx/src/repo_tx_gate.rs#L1089).
+
+Grouping/duplicate: `performance-hotpath.md#4`. This row is not another independent defect.
+
+<a id="review-4-5"></a>
+
+### Claim 4.5 — Stream group-by key copy per row and shift_remove
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+Key copying precedes group comparison and order-preserving removal remains; exact dependency implementation costs are not independently verified.
+
+Evidence: [crates/shamir-tx/src/mvcc_store/version_entry.rs:193](../../../../../crates/shamir-tx/src/mvcc_store/version_entry.rs#L193); [crates/shamir-tx/src/mvcc_store/version_entry.rs:124](../../../../../crates/shamir-tx/src/mvcc_store/version_entry.rs#L124).
+
+Grouping/duplicate: `performance-hotpath.md#5`. This row is not another independent defect.
+
+<a id="review-4-6"></a>
+
+### Claim 4.6 — Vectored reads sequential fallback and redundant re-probe
+
+Status: `confirmed-open`. Current risk: `low`.
+
+Fallback current-version re-probe and cold/floor-exceeded sequential awaits remain.
+
+Evidence: [crates/shamir-tx/src/mvcc_store/mod.rs:1203](../../../../../crates/shamir-tx/src/mvcc_store/mod.rs#L1203); [crates/shamir-tx/src/mvcc_store/mod.rs:1607](../../../../../crates/shamir-tx/src/mvcc_store/mod.rs#L1607).
+
+Grouping/duplicate: `performance-hotpath.md#8`. This row is not another independent defect.
+
+<a id="review-4-7"></a>
+
+### Claim 4.7 — history_of sequential timestamp reads
+
+Status: `confirmed-open`. Current risk: `low`.
+
+No timestamp get_many batch is used.
+
+Evidence: [crates/shamir-tx/src/mvcc_store/mvcc_history.rs:211](../../../../../crates/shamir-tx/src/mvcc_store/mvcc_history.rs#L211).
+
+Grouping/duplicate: `performance-hotpath.md#7`. This row is not another independent defect.
+
+<a id="review-4-8"></a>
+
+### Claim 4.8 — VersionedOverlay::gc_upto full-tree collect-then-remove
+
+Status: `confirmed-open`. Current risk: `low`.
+
+Key-major ordering forces a full version filter; removals remain separately collected and executed.
+
+Evidence: [crates/shamir-tx/src/versioned_overlay.rs:178](../../../../../crates/shamir-tx/src/versioned_overlay.rs#L178); [crates/shamir-tx/src/versioned_overlay.rs:192](../../../../../crates/shamir-tx/src/versioned_overlay.rs#L192).
+
+Grouping/duplicate: `performance-hotpath.md#9`. This row is not another independent defect.
+
+<a id="review-4-9"></a>
+
+### Claim 4.9 — project_event clones table String per record
+
+Status: `confirmed-open`. Current risk: `low`.
+
+Borrowed staging iteration leaves both per-change table.clone calls intact.
+
+Evidence: [crates/shamir-tx/src/changefeed.rs:459](../../../../../crates/shamir-tx/src/changefeed.rs#L459); [crates/shamir-tx/src/changefeed.rs:462](../../../../../crates/shamir-tx/src/changefeed.rs#L462); [crates/shamir-tx/src/changefeed.rs:470](../../../../../crates/shamir-tx/src/changefeed.rs#L470).
+
+Grouping/duplicate: `performance-hotpath.md#10`. This row is not another independent defect.
+
+<a id="review-4-10"></a>
+
+### Claim 4.10 — Journal writer sequential put per event
+
+Status: `confirmed-open`. Current risk: `low`.
+
+The receive batch still performs an awaited single-event put for every item.
+
+Evidence: [crates/shamir-tx/src/changefeed.rs:602](../../../../../crates/shamir-tx/src/changefeed.rs#L602); [crates/shamir-tx/src/changefeed.rs:645](../../../../../crates/shamir-tx/src/changefeed.rs#L645).
+
+Grouping/duplicate: `performance-hotpath.md#11`. This row is not another independent defect.
+
+<a id="review-4-11"></a>
+
+### Claim 4.11 — Remap re-encodes unchanged rows
+
+Status: `confirmed-open`. Current risk: `low`.
+
+Nonempty remaps still decode/remap/encode every staged Set, independently of the A8 captured-ID improvement.
+
+Evidence: [crates/shamir-tx/src/id_remap.rs:77](../../../../../crates/shamir-tx/src/id_remap.rs#L77); [crates/shamir-tx/src/tx_context.rs:946](../../../../../crates/shamir-tx/src/tx_context.rs#L946).
+
+Grouping/duplicate: `performance-hotpath.md#13`. This row is not another independent defect.
+
+<a id="review-4-12"></a>
+
+### Claim 4.12 — Batch setters allocate duplicate keys vector
+
+Status: `confirmed-open`. Current risk: `nit`.
+
+Both setters retain their redundant cloned key collections.
+
+Evidence: [crates/shamir-tx/src/mvcc_store/mod.rs:880](../../../../../crates/shamir-tx/src/mvcc_store/mod.rs#L880); [crates/shamir-tx/src/mvcc_store/mod.rs:982](../../../../../crates/shamir-tx/src/mvcc_store/mod.rs#L982).
+
+Grouping/duplicate: `performance-hotpath.md#12`. This row is not another independent defect.
+
+<a id="review-4-13"></a>
+
+### Claim 4.13 — Pessimistic lock registry retains empty entries
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+Released key entries are still retained for the store lifetime.
+
+Evidence: [crates/shamir-tx/src/mvcc_store/mvcc_locks.rs:223](../../../../../crates/shamir-tx/src/mvcc_store/mvcc_locks.rs#L223).
+
+Grouping/duplicate: `SUMMARY.md#2.2`. This row is not another independent defect.
+
+<a id="review-5-1"></a>
+
+### Claim 5.1 — Journal lacks schema envelope and skips decode failures
+
+Status: `confirmed-open`. Current risk: `high`.
+
+Bare event serialization and warning-only skips remain. range_from returns payloads only, disproving the proposed availability of corrupt keys.
+
+Evidence: [crates/shamir-tx/src/changefeed.rs:157](../../../../../crates/shamir-tx/src/changefeed.rs#L157); [crates/shamir-tx/src/changefeed.rs:411](../../../../../crates/shamir-tx/src/changefeed.rs#L411); [crates/shamir-tx/src/changefeed.rs:543](../../../../../crates/shamir-tx/src/changefeed.rs#L543).
+
+Grouping/duplicate: `api-wire-protocol.md#1`. This row is not another independent defect.
+
+<a id="review-5-2"></a>
+
+### Claim 5.2 — SORTED_TAG duplicated with illusory local pin
+
+Status: `confirmed-open`. Current risk: `low`.
+
+Local pin is still not cross-crate, but actual manager bounds are exercised by registered engine round-trip tests and current layouts agree.
+
+Evidence: [crates/shamir-tx/src/tests/predicate_set_tests.rs:195](../../../../../crates/shamir-tx/src/tests/predicate_set_tests.rs#L195); [crates/shamir-index/src/base_index/sorted_index_definition.rs:29](../../../../../crates/shamir-index/src/base_index/sorted_index_definition.rs#L29); [crates/shamir-engine/src/tx/tests/predicate_range_tests.rs:236](../../../../../crates/shamir-engine/src/tx/tests/predicate_range_tests.rs#L236).
+
+Grouping/duplicate: `api-wire-protocol.md#2`. This row is not another independent defect.
+
+<a id="review-5-3"></a>
+
+### Claim 5.3 — CF-1 volatile gap marker and absent contiguity check
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+Known event-loss markers are not durable; numeric commit-version gaps can also be legitimate and cannot safely serve as the proposed completeness oracle.
+
+Evidence: [crates/shamir-tx/src/changefeed.rs:246](../../../../../crates/shamir-tx/src/changefeed.rs#L246); [crates/shamir-tx/src/changefeed.rs:479](../../../../../crates/shamir-tx/src/changefeed.rs#L479); [crates/shamir-tx/src/version_guard.rs:107](../../../../../crates/shamir-tx/src/version_guard.rs#L107).
+
+Grouping/duplicate: `api-wire-protocol.md#3`. This row is not another independent defect.
+
+<a id="review-5-4"></a>
+
+### Claim 5.4 — read_from has no error channel
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+Store errors remain empty successful-looking JournalRead values and decoder errors are omitted.
+
+Evidence: [crates/shamir-tx/src/changefeed.rs:397](../../../../../crates/shamir-tx/src/changefeed.rs#L397); [crates/shamir-engine/src/repo/repo_instance.rs:1245](../../../../../crates/shamir-engine/src/repo/repo_instance.rs#L1245).
+
+Grouping/duplicate: `api-wire-protocol.md#4`. This row is not another independent defect.
+
+<a id="review-5-5"></a>
+
+### Claim 5.5 — read_from requires another store handle
+
+Status: `confirmed-open`. Current risk: `low`.
+
+The public API allows the wrong store, although the production handle supplies the same Arc correctly.
+
+Evidence: [crates/shamir-tx/src/changefeed.rs:392](../../../../../crates/shamir-tx/src/changefeed.rs#L392); [crates/shamir-engine/src/repo/repo_instance.rs:1211](../../../../../crates/shamir-engine/src/repo/repo_instance.rs#L1211).
+
+Grouping/duplicate: `api-wire-protocol.md#5`. This row is not another independent defect.
+
+<a id="review-5-6"></a>
+
+### Claim 5.6 — Empty Bytes tombstone sentinel unguarded on setters
+
+Status: `confirmed-open`. Current risk: `low`.
+
+Setters still accept empty values and reads suppress them as tombstones.
+
+Evidence: [crates/shamir-tx/src/mvcc_store/mod.rs:766](../../../../../crates/shamir-tx/src/mvcc_store/mod.rs#L766); [crates/shamir-tx/src/mvcc_store/mod.rs:724](../../../../../crates/shamir-tx/src/mvcc_store/mod.rs#L724).
+
+Grouping/duplicate: `api-wire-protocol.md#7`. This row is not another independent defect.
+
+<a id="review-5-7"></a>
+
+### Claim 5.7 — Zero transaction-id sentinel unenforced in allocators
+
+Status: `confirmed-open`. Current risk: `low`.
+
+Public zero seeds remain possible; normal recovery defaults to one and implicit event ID zero is intentional.
+
+Evidence: [crates/shamir-tx/src/repo_wal_manager.rs:30](../../../../../crates/shamir-tx/src/repo_wal_manager.rs#L30); [crates/shamir-tx/src/changefeed.rs:494](../../../../../crates/shamir-tx/src/changefeed.rs#L494); [crates/shamir-engine/src/repo/repo_instance.rs:779](../../../../../crates/shamir-engine/src/repo/repo_instance.rs#L779).
+
+Grouping/duplicate: `api-wire-protocol.md#9`. This row is not another independent defect.
+
+<a id="review-5-8"></a>
+
+### Claim 5.8 — Dead public group-commit exports remain
+
+Status: `confirmed-open`. Current risk: `nit`.
+
+Public exports remain, explicitly marked dead scaffolding; surface reduction is maintenance hygiene.
+
+Evidence: [crates/shamir-tx/src/lib.rs:69](../../../../../crates/shamir-tx/src/lib.rs#L69); [crates/shamir-tx/src/repo_tx_gate.rs:742](../../../../../crates/shamir-tx/src/repo_tx_gate.rs#L742).
+
+Grouping/duplicate: `api-wire-protocol.md#10`. This row is not another independent defect.
+
+<a id="review-5-9"></a>
+
+### Claim 5.9 — serde_bytes_compat alternate sequence acceptance
+
+Status: `unverified`. Current risk: `nit` (provisional; not a confirmed defect).
+
+The asymmetric serde calls remain, but exact pinned MessagePack acceptance and any canonical-only requirement were not established.
+
+Evidence: [crates/shamir-tx/src/changefeed.rs:108](../../../../../crates/shamir-tx/src/changefeed.rs#L108); [crates/shamir-tx/src/changefeed.rs:112](../../../../../crates/shamir-tx/src/changefeed.rs#L112); [Cargo.lock:2949](../../../../../Cargo.lock#L2949).
+
+Grouping/duplicate: `api-wire-protocol.md#11`. This row is not another independent defect.
+
+<a id="review-5-10"></a>
+
+### Claim 5.10 — Stringly typed public errors
+
+Status: `confirmed-open`. Current risk: `low`.
+
+The changelog trait and retention/remap seams retain String errors.
+
+Evidence: [crates/shamir-tx/src/changefeed.rs:154](../../../../../crates/shamir-tx/src/changefeed.rs#L154); [crates/shamir-tx/src/tx_context.rs:942](../../../../../crates/shamir-tx/src/tx_context.rs#L942).
+
+Grouping/duplicate: `SUMMARY.md#6.4`. This row is not another independent defect.
+
+<a id="review-5-11"></a>
+
+### Claim 5.11 — VERSION_SEP invariant documentation and restricted prop tests
+
+Status: `confirmed-open`. Current risk: `nit`.
+
+Documentation and generators remain inaccurate; rejecting embedded separator bytes is unnecessary for suffix-based round-trip.
+
+Evidence: [crates/shamir-tx/src/version_codec.rs:20](../../../../../crates/shamir-tx/src/version_codec.rs#L20); [crates/shamir-tx/src/version_codec.rs:57](../../../../../crates/shamir-tx/src/version_codec.rs#L57); [crates/shamir-tx/src/tests/version_codec_tests.rs:65](../../../../../crates/shamir-tx/src/tests/version_codec_tests.rs#L65).
+
+Grouping/duplicate: `SUMMARY.md#3.2`. This row is not another independent defect.
+
+<a id="review-6-1"></a>
+
+### Claim 6.1 — Failed transact leaves advanced cell and masks prior version
+
+Status: `confirmed-open`. Current risk: `high`.
+
+Early error propagation does not restore the cell; exact-version reads treat the nonexistent aborted value as absent.
+
+Evidence: [crates/shamir-tx/src/mvcc_store/mod.rs:785](../../../../../crates/shamir-tx/src/mvcc_store/mod.rs#L785); [crates/shamir-tx/src/mvcc_store/mod.rs:799](../../../../../crates/shamir-tx/src/mvcc_store/mod.rs#L799); [crates/shamir-tx/src/mvcc_store/mod.rs:1294](../../../../../crates/shamir-tx/src/mvcc_store/mod.rs#L1294).
+
+Grouping/duplicate: `error-handling-lifecycle.md#1`. This row is not another independent defect.
+
+<a id="review-6-2"></a>
+
+### Claim 6.2 — vacuum scan errors silently swallowed
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+Partial input still drives reclaim and anchor choice; blanket over-retention-only safety is not proven.
+
+Evidence: [crates/shamir-tx/src/mvcc_store/mvcc_gc.rs:174](../../../../../crates/shamir-tx/src/mvcc_store/mvcc_gc.rs#L174); [crates/shamir-tx/src/mvcc_store/mvcc_gc.rs:193](../../../../../crates/shamir-tx/src/mvcc_store/mvcc_gc.rs#L193).
+
+Grouping/duplicate: `error-handling-lifecycle.md#2`. This row is not another independent defect.
+
+<a id="review-6-3"></a>
+
+### Claim 6.3 — Journal persist failures omit gap signal
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+Failed puts only warn; Closed sends are ignored and later successes advance the max persisted version.
+
+Evidence: [crates/shamir-tx/src/changefeed.rs:336](../../../../../crates/shamir-tx/src/changefeed.rs#L336); [crates/shamir-tx/src/changefeed.rs:645](../../../../../crates/shamir-tx/src/changefeed.rs#L645); [crates/shamir-tx/src/changefeed.rs:653](../../../../../crates/shamir-tx/src/changefeed.rs#L653).
+
+Grouping/duplicate: `error-handling-lifecycle.md#3`. This row is not another independent defect.
+
+<a id="review-6-4"></a>
+
+### Claim 6.4 — thiserror unused and public String errors remain
+
+Status: `confirmed-open`. Current risk: `low`.
+
+The declared dependency is unused and identified public boundaries remain stringly typed.
+
+Evidence: [crates/shamir-tx/Cargo.toml:23](../../../../../crates/shamir-tx/Cargo.toml#L23); [crates/shamir-tx/src/staging_store.rs:329](../../../../../crates/shamir-tx/src/staging_store.rs#L329); [crates/shamir-tx/src/tx_context.rs:942](../../../../../crates/shamir-tx/src/tx_context.rs#L942).
+
+Grouping/duplicate: `error-handling-lifecycle.md#4`. This row is not another independent defect.
+
+<a id="review-6-5"></a>
+
+### Claim 6.5 — Error-path test gaps for prior keys, batches, drain and vectored reads
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+Relevant assertions remain absent; four registered fresh-key injection tests exist, not three, and none proves late-operation transactional rollback.
+
+Evidence: [crates/shamir-tx/src/tests/mvcc_store_tests/error_tests.rs:43](../../../../../crates/shamir-tx/src/tests/mvcc_store_tests/error_tests.rs#L43); [crates/shamir-tx/src/tests/mvcc_store_tests/ts_atomicity_tests.rs:237](../../../../../crates/shamir-tx/src/tests/mvcc_store_tests/ts_atomicity_tests.rs#L237); [crates/shamir-tx/src/tests/mvcc_store_tests/test_stores.rs:92](../../../../../crates/shamir-tx/src/tests/mvcc_store_tests/test_stores.rs#L92).
+
+Grouping/duplicate: `error-handling-lifecycle.md#5`. This row is not another independent defect.
+
+<a id="review-6-6"></a>
+
+### Claim 6.6 — apply_committed_ops ordering documentation contradicts code
+
+Status: `confirmed-open`. Current risk: `nit`.
+
+History-first prose remains above visible-first code.
+
+Evidence: [crates/shamir-tx/src/mvcc_store/mvcc_history.rs:413](../../../../../crates/shamir-tx/src/mvcc_store/mvcc_history.rs#L413); [crates/shamir-tx/src/mvcc_store/mvcc_history.rs:427](../../../../../crates/shamir-tx/src/mvcc_store/mvcc_history.rs#L427).
+
+Grouping/duplicate: `error-handling-lifecycle.md#9`. This row is not another independent defect.
+
+<a id="review-6-7"></a>
+
+### Claim 6.7 — lookup_ts silently converts storage errors to unknown age
+
+Status: `confirmed-open`. Current risk: `nit`.
+
+Error arm still returns None without diagnostics.
+
+Evidence: [crates/shamir-tx/src/mvcc_store/mod.rs:1634](../../../../../crates/shamir-tx/src/mvcc_store/mod.rs#L1634).
+
+Grouping/duplicate: `error-handling-lifecycle.md#10`. This row is not another independent defect.
+
+<a id="review-6-8"></a>
+
+### Claim 6.8 — RepoChangefeed::new runtime panic and detached writer
+
+Status: `confirmed-open`. Current risk: `nit`.
+
+spawn and discarded handle remain; production invocation is runtime-hosted, so the concern is public constructor/lifecycle contract.
+
+Evidence: [crates/shamir-tx/src/changefeed.rs:249](../../../../../crates/shamir-tx/src/changefeed.rs#L249); [crates/shamir-engine/src/repo/repo_instance.rs:1204](../../../../../crates/shamir-engine/src/repo/repo_instance.rs#L1204); [Cargo.lock:4195](../../../../../Cargo.lock#L4195).
+
+Grouping/duplicate: `error-handling-lifecycle.md#11`. This row is not another independent defect.
+
+<a id="review-6-9"></a>
+
+### Claim 6.9 — ts_index_rebuild swallows errors and marks ready
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+Error skipping followed by unconditional ready publication remains.
+
+Evidence: [crates/shamir-tx/src/mvcc_store/mod.rs:408](../../../../../crates/shamir-tx/src/mvcc_store/mod.rs#L408); [crates/shamir-tx/src/mvcc_store/mod.rs:428](../../../../../crates/shamir-tx/src/mvcc_store/mod.rs#L428).
+
+Grouping/duplicate: `SUMMARY.md#1.3`. This row is not another independent defect.
+
+<a id="review-6-10"></a>
+
+### Claim 6.10 — touch_sync expect versus propagated sibling
+
+Status: `refuted`. Current risk: —.
+
+The common current interner operation has no Err return branch.
+
+Evidence: [crates/shamir-types/src/core/interner/interner.rs:138](../../../../../crates/shamir-types/src/core/interner/interner.rs#L138); [crates/shamir-types/src/core/interner/interner.rs:176](../../../../../crates/shamir-types/src/core/interner/interner.rs#L176).
+
+Grouping/duplicate: `SUMMARY.md#3.1`. This row is not another independent defect.
+
+<a id="review-6-11"></a>
+
+### Claim 6.11 — StagedRow panic on malformed staged bytes
+
+Status: `refuted`. Current risk: —.
+
+The expect method is unused and its row object is not exposed through public staging accessors.
+
+Evidence: [crates/shamir-tx/src/staging_store.rs:32](../../../../../crates/shamir-tx/src/staging_store.rs#L32); [crates/shamir-tx/src/staging_store.rs:81](../../../../../crates/shamir-tx/src/staging_store.rs#L81); [crates/shamir-tx/src/staging_store.rs:165](../../../../../crates/shamir-tx/src/staging_store.rs#L165).
+
+Grouping/duplicate: `SUMMARY.md#3.3`. This row is not another independent defect.
+
+<a id="review-7-1"></a>
+
+### Claim 7.1 — mvcc_store/mod.rs contains full implementation
+
+Status: `confirmed-open`. Current risk: `low`.
+
+The manifest-only convention remains violated; this is structural maintenance debt, not runtime High.
+
+Evidence: [crates/shamir-tx/src/mvcc_store/mod.rs:125](../../../../../crates/shamir-tx/src/mvcc_store/mod.rs#L125); [CLAUDE.md:503](../../../../../CLAUDE.md#L503).
+
+Grouping/duplicate: `style-claude-md.md#1`. This row is not another independent defect.
+
+<a id="review-7-2"></a>
+
+### Claim 7.2 — Mid-function use statements
+
+Status: `confirmed-open`. Current risk: `nit`.
+
+Local imports remain; the placement violation has no demonstrated runtime consequence.
+
+Evidence: [crates/shamir-tx/src/mvcc_store/mod.rs:399](../../../../../crates/shamir-tx/src/mvcc_store/mod.rs#L399); [crates/shamir-tx/src/tx_context.rs:538](../../../../../crates/shamir-tx/src/tx_context.rs#L538); [crates/shamir-tx/src/layered_interner.rs:96](../../../../../crates/shamir-tx/src/layered_interner.rs#L96).
+
+Grouping/duplicate: `style-claude-md.md#2`. This row is not another independent defect.
+
+<a id="review-7-3"></a>
+
+### Claim 7.3 — Tests differ from per-module directory convention
+
+Status: `confirmed-open`. Current risk: `nit`.
+
+Root nesting remains, but lib and module manifests register the suites correctly.
+
+Evidence: [crates/shamir-tx/src/lib.rs:33](../../../../../crates/shamir-tx/src/lib.rs#L33); [crates/shamir-tx/src/tests/mod.rs:5](../../../../../crates/shamir-tx/src/tests/mod.rs#L5).
+
+Grouping/duplicate: `style-claude-md.md#3`. This row is not another independent defect.
+
+<a id="review-7-4"></a>
+
+### Claim 7.4 — Stale and contradictory documentation
+
+Status: `confirmed-open`. Current risk: `nit`.
+
+Status, cache vocabulary and removed-link references remain stale.
+
+Evidence: [crates/shamir-tx/src/lib.rs:10](../../../../../crates/shamir-tx/src/lib.rs#L10); [crates/shamir-tx/src/lib.rs:29](../../../../../crates/shamir-tx/src/lib.rs#L29); [crates/shamir-tx/src/mvcc_store/version_entry.rs:27](../../../../../crates/shamir-tx/src/mvcc_store/version_entry.rs#L27).
+
+Grouping/duplicate: `style-claude-md.md#4`. This row is not another independent defect.
+
+<a id="review-7-5"></a>
+
+### Claim 7.5 — One-file-one-export stretched in feed and gate files
+
+Status: `not-applicable`. Current risk: —.
+
+Closely coupled groups are allowed; the report presents this as an optional future split, not an actual defect.
+
+Evidence: [CLAUDE.md:505](../../../../../CLAUDE.md#L505); [crates/shamir-tx/src/changefeed.rs:166](../../../../../crates/shamir-tx/src/changefeed.rs#L166); [crates/shamir-tx/src/repo_tx_gate.rs:779](../../../../../crates/shamir-tx/src/repo_tx_gate.rs#L779).
+
+Grouping/duplicate: `style-claude-md.md#5`. This row is not another independent defect.
+
+<a id="review-7-6"></a>
+
+### Claim 7.6 — metrics.rs lacks tests in this crate
+
+Status: `confirmed-open`. Current risk: `nit`.
+
+No tx-local metric suite exists, although upstream registered tests exercise increments and snapshots; no diff method exists.
+
+Evidence: [crates/shamir-tx/src/tests/mod.rs:1](../../../../../crates/shamir-tx/src/tests/mod.rs#L1); [crates/shamir-tx/src/metrics.rs:75](../../../../../crates/shamir-tx/src/metrics.rs#L75); [crates/shamir-engine/src/tx/tests/commit_tests.rs:465](../../../../../crates/shamir-engine/src/tx/tests/commit_tests.rs#L465).
+
+Grouping/duplicate: `style-claude-md.md#6`. This row is not another independent defect.
+
+<a id="review-executive-summary-positive-guarantees"></a>
+
+### Claim Executive summary: positive guarantees — Strong TDD, sanctioned coordination and lock-free structure
+
+Status: `not-applicable`. Current risk: —.
+
+Registered A10/D2 tests and RAII mechanisms support bounded assertions; scc HashMap bucket locking prevents treating this as a formal lock-free or exhaustive concurrency proof.
+
+Evidence: [crates/shamir-tx/src/tests/mvcc_store_tests/a10_toctou_tests.rs:423](../../../../../crates/shamir-tx/src/tests/mvcc_store_tests/a10_toctou_tests.rs#L423); [crates/shamir-tx/src/tests/mvcc_store_tests/overlay_ordering_tests.rs:77](../../../../../crates/shamir-tx/src/tests/mvcc_store_tests/overlay_ordering_tests.rs#L77); [crates/shamir-tx/src/mvcc_store/mod.rs:528](../../../../../crates/shamir-tx/src/mvcc_store/mod.rs#L528).
+
+<a id="review-finding-counts"></a>
+
+### Claim Finding counts — 65 lens findings and 51 distinct defects, including seven High
+
+Status: `refuted`. Current risk: —.
+
+The historical row count is correct, but the current defect/severity census is not: panic scenarios are refuted, shared-store misuse and optional splits are non-applicable, and style/API risks require demotion.
+
+Evidence: [crates/shamir-types/src/core/interner/interner.rs:176](../../../../../crates/shamir-types/src/core/interner/interner.rs#L176); [crates/shamir-tx/src/staging_store.rs:81](../../../../../crates/shamir-tx/src/staging_store.rs#L81); [crates/shamir-engine/src/repo/repo_instance.rs:1207](../../../../../crates/shamir-engine/src/repo/repo_instance.rs#L1207); [CLAUDE.md:505](../../../../../CLAUDE.md#L505).
+
+## Current fix-plan state
+
+| Claim decisions | Open | Source-fixed | Partial | Refuted | Unverified | N/A |
+|---:|---:|---:|---:|---:|---:|---:|
+| 23 | 20 | 0 | 0 | 0 | 0 | 3 |
+
+A source-fixed item closes only its stated mechanism. Partial items retain the obligations named below; proposed fixes must obey the corrections and current contracts, not merely copy the historical recipe.
+
+<a id="plan-p0-1"></a>
+
+### Plan P0.1 — P0.1
+
+Status: `confirmed-open`. Current risk: —.
+
+Restore failed-write readability and add prior-key failure assertions. The suggested unconditional old-version assignment is unsafe against concurrent successful writers; use ownership-aware recovery and define partial-transact behavior.
+
+Evidence: [crates/shamir-tx/src/mvcc_store/mod.rs:785](../../../../../crates/shamir-tx/src/mvcc_store/mod.rs#L785); [crates/shamir-tx/src/mvcc_store/mod.rs:799](../../../../../crates/shamir-tx/src/mvcc_store/mod.rs#L799); [crates/shamir-storage/src/types.rs:243](../../../../../crates/shamir-storage/src/types.rs#L243).
+
+<a id="plan-p0-2"></a>
+
+### Plan P0.2 — P0.2
+
+Status: `confirmed-open`. Current risk: —.
+
+The ack publisher still lacks the max guard and registered tests lack out-of-order finalize coverage. Reservation clearing also requires an ownership audit rather than assuming unconditional clearing is always safe.
+
+Evidence: [crates/shamir-tx/src/mvcc_store/mod.rs:668](../../../../../crates/shamir-tx/src/mvcc_store/mod.rs#L668); [crates/shamir-tx/src/mvcc_store/mod.rs:669](../../../../../crates/shamir-tx/src/mvcc_store/mod.rs#L669); [crates/shamir-tx/src/tests/mvcc_store_tests/publish_monotonic_tests.rs:47](../../../../../crates/shamir-tx/src/tests/mvcc_store_tests/publish_monotonic_tests.rs#L47).
+
+<a id="plan-p0-3"></a>
+
+### Plan P0.3 — P0.3
+
+Status: `confirmed-open`. Current risk: —.
+
+Plain publication and its unsafe rationale remain. Delegating to max publication is appropriate API hardening, but this is not a current production-path emergency.
+
+Evidence: [crates/shamir-tx/src/repo_tx_gate.rs:578](../../../../../crates/shamir-tx/src/repo_tx_gate.rs#L578); [crates/shamir-tx/src/repo_tx_gate.rs:586](../../../../../crates/shamir-tx/src/repo_tx_gate.rs#L586).
+
+<a id="plan-p0-4"></a>
+
+### Plan P0.4 — P0.4
+
+Status: `confirmed-open`. Current risk: —.
+
+Envelope, decode-error signaling, durable loss evidence, persist-failure markers and Closed accounting remain absent. Replace numeric contiguity with an event-completeness protocol; return keys if key-derived corruption markers are required.
+
+Evidence: [crates/shamir-tx/src/changefeed.rs:157](../../../../../crates/shamir-tx/src/changefeed.rs#L157); [crates/shamir-tx/src/changefeed.rs:246](../../../../../crates/shamir-tx/src/changefeed.rs#L246); [crates/shamir-tx/src/changefeed.rs:336](../../../../../crates/shamir-tx/src/changefeed.rs#L336); [crates/shamir-tx/src/changefeed.rs:411](../../../../../crates/shamir-tx/src/changefeed.rs#L411); [crates/shamir-tx/src/changefeed.rs:645](../../../../../crates/shamir-tx/src/changefeed.rs#L645).
+
+<a id="plan-p0-5"></a>
+
+### Plan P0.5 — P0.5
+
+Status: `confirmed-open`. Current risk: —.
+
+Duplicate timestamp reads and separate removals remain. Folding deletion into incoming writes needs snapshot/anchor concurrency proof and preservation of best-effort vacuum error semantics.
+
+Evidence: [crates/shamir-tx/src/mvcc_store/mvcc_gc.rs:105](../../../../../crates/shamir-tx/src/mvcc_store/mvcc_gc.rs#L105); [crates/shamir-tx/src/mvcc_store/mvcc_gc.rs:229](../../../../../crates/shamir-tx/src/mvcc_store/mvcc_gc.rs#L229); [crates/shamir-tx/src/mvcc_store/mvcc_gc.rs:245](../../../../../crates/shamir-tx/src/mvcc_store/mvcc_gc.rs#L245).
+
+<a id="plan-p1-6"></a>
+
+### Plan P1.6 — P1.6
+
+Status: `confirmed-open`. Current risk: —.
+
+Reserved cells are not retained and claim-GC-reclaim tests are absent. Keep the reservation invariant objective, but remove the unsupported simultaneous production Serializable double-commit explanation.
+
+Evidence: [crates/shamir-tx/src/mvcc_store/mvcc_gc.rs:533](../../../../../crates/shamir-tx/src/mvcc_store/mvcc_gc.rs#L533); [crates/shamir-tx/src/tests/mvcc_store_tests/mod.rs:7](../../../../../crates/shamir-tx/src/tests/mvcc_store_tests/mod.rs#L7); [crates/shamir-engine/src/tx/commit.rs:921](../../../../../crates/shamir-engine/src/tx/commit.rs#L921).
+
+<a id="plan-p1-7"></a>
+
+### Plan P1.7 — P1.7
+
+Status: `confirmed-open`. Current risk: —.
+
+Both GC paths still materialize global maps. Streaming should explicitly establish contiguous logical grouping for supported keyspaces, not infer it solely from sorted physical keys.
+
+Evidence: [crates/shamir-tx/src/mvcc_store/mvcc_gc.rs:309](../../../../../crates/shamir-tx/src/mvcc_store/mvcc_gc.rs#L309); [crates/shamir-tx/src/mvcc_store/mvcc_gc.rs:405](../../../../../crates/shamir-tx/src/mvcc_store/mvcc_gc.rs#L405); [crates/shamir-storage/src/types.rs:295](../../../../../crates/shamir-storage/src/types.rs#L295).
+
+<a id="plan-p1-8"></a>
+
+### Plan P1.8 — P1.8
+
+Status: `confirmed-open`. Current risk: —.
+
+Known-bad timestamp rebuilds are cached and partial vacuum scans remain silent. Skip reclamation after an incomplete scan; retry/report rebuild errors without asserting the partial index is trustworthy.
+
+Evidence: [crates/shamir-tx/src/mvcc_store/mod.rs:408](../../../../../crates/shamir-tx/src/mvcc_store/mod.rs#L408); [crates/shamir-tx/src/mvcc_store/mod.rs:428](../../../../../crates/shamir-tx/src/mvcc_store/mod.rs#L428); [crates/shamir-tx/src/mvcc_store/mvcc_gc.rs:174](../../../../../crates/shamir-tx/src/mvcc_store/mvcc_gc.rs#L174).
+
+<a id="plan-p1-9"></a>
+
+### Plan P1.9 — P1.9
+
+Status: `confirmed-open`. Current risk: —.
+
+Failed-batch watermark, drain failure/guard release and vectored-read propagation assertions remain absent. Include a failure after earlier backend operations, not only fail-first injection.
+
+Evidence: [crates/shamir-tx/src/tests/mvcc_store_tests/error_tests.rs:43](../../../../../crates/shamir-tx/src/tests/mvcc_store_tests/error_tests.rs#L43); [crates/shamir-tx/src/tests/mvcc_store_tests/test_stores.rs:92](../../../../../crates/shamir-tx/src/tests/mvcc_store_tests/test_stores.rs#L92); [crates/shamir-tx/src/mvcc_store/drain.rs:55](../../../../../crates/shamir-tx/src/mvcc_store/drain.rs#L55); [crates/shamir-tx/src/mvcc_store/drain.rs:110](../../../../../crates/shamir-tx/src/mvcc_store/drain.rs#L110).
+
+<a id="plan-p1-10"></a>
+
+### Plan P1.10 — P1.10
+
+Status: `confirmed-open`. Current risk: —.
+
+Typed changelog, retention and remap errors remain unimplemented. thiserror is an ergonomic convention, not a prerequisite for returning Result from read_from.
+
+Evidence: [crates/shamir-tx/src/changefeed.rs:154](../../../../../crates/shamir-tx/src/changefeed.rs#L154); [crates/shamir-tx/src/mvcc_store/retention.rs:60](../../../../../crates/shamir-tx/src/mvcc_store/retention.rs#L60); [crates/shamir-tx/src/tx_context.rs:942](../../../../../crates/shamir-tx/src/tx_context.rs#L942).
+
+<a id="plan-p1-11"></a>
+
+### Plan P1.11 — P1.11
+
+Status: `confirmed-open`. Current risk: —.
+
+read_from still swallows store/decode errors and requires another store handle. Engine binding is currently correct; the public read API remains improvable.
+
+Evidence: [crates/shamir-tx/src/changefeed.rs:392](../../../../../crates/shamir-tx/src/changefeed.rs#L392); [crates/shamir-tx/src/changefeed.rs:397](../../../../../crates/shamir-tx/src/changefeed.rs#L397); [crates/shamir-engine/src/repo/repo_instance.rs:1245](../../../../../crates/shamir-engine/src/repo/repo_instance.rs#L1245).
+
+<a id="plan-p1-12"></a>
+
+### Plan P1.12 — P1.12
+
+Status: `confirmed-open`. Current risk: —.
+
+Constants remain duplicated and the named pin remains local. Registered engine round trips already provide some drift detection; no current prefix mismatch is present.
+
+Evidence: [crates/shamir-tx/src/predicate_set.rs:164](../../../../../crates/shamir-tx/src/predicate_set.rs#L164); [crates/shamir-index/src/base_index/sorted_index_definition.rs:29](../../../../../crates/shamir-index/src/base_index/sorted_index_definition.rs#L29); [crates/shamir-engine/src/tx/tests/predicate_range_tests.rs:236](../../../../../crates/shamir-engine/src/tx/tests/predicate_range_tests.rs#L236).
+
+<a id="plan-p1-13"></a>
+
+### Plan P1.13 — P1.13
+
+Status: `confirmed-open`. Current risk: —.
+
+Linear posting validation and snapshot-min traversal remain. A binary-search implementation must handle multiple index prefixes; cached minima need conservative concurrent registration semantics.
+
+Evidence: [crates/shamir-tx/src/repo_tx_gate.rs:1015](../../../../../crates/shamir-tx/src/repo_tx_gate.rs#L1015); [crates/shamir-tx/src/repo_tx_gate.rs:659](../../../../../crates/shamir-tx/src/repo_tx_gate.rs#L659); [crates/shamir-tx/src/repo_tx_gate.rs:1078](../../../../../crates/shamir-tx/src/repo_tx_gate.rs#L1078).
+
+<a id="plan-p1-14"></a>
+
+### Plan P1.14 — P1.14
+
+Status: `not-applicable`. Current risk: —.
+
+The claimed current input-conditioned panic is refuted: touch_ind is unconditionally Ok. Signature hardening or an infallibility test is optional future-proofing, not removal of an existing remote DoS.
+
+Evidence: [crates/shamir-types/src/core/interner/interner.rs:146](../../../../../crates/shamir-types/src/core/interner/interner.rs#L146); [crates/shamir-types/src/core/interner/interner.rs:166](../../../../../crates/shamir-types/src/core/interner/interner.rs#L166); [crates/shamir-types/src/core/interner/interner.rs:176](../../../../../crates/shamir-types/src/core/interner/interner.rs#L176).
+
+<a id="plan-p1-15"></a>
+
+### Plan P1.15 — P1.15
+
+Status: `confirmed-open`. Current risk: —.
+
+Implementation remains in mod.rs. A mechanical split addresses the stated convention only; it should not be prioritized as runtime High.
+
+Evidence: [crates/shamir-tx/src/mvcc_store/mod.rs:125](../../../../../crates/shamir-tx/src/mvcc_store/mod.rs#L125); [CLAUDE.md:503](../../../../../CLAUDE.md#L503).
+
+<a id="plan-p1-16"></a>
+
+### Plan P1.16 — P1.16
+
+Status: `confirmed-open`. Current risk: —.
+
+The listed stale status, ordering, cache and early-return documentation remains. Correct probability and production-fallback claims in the same scoped documentation work.
+
+Evidence: [crates/shamir-tx/src/lib.rs:10](../../../../../crates/shamir-tx/src/lib.rs#L10); [crates/shamir-tx/src/mvcc_store/mvcc_history.rs:413](../../../../../crates/shamir-tx/src/mvcc_store/mvcc_history.rs#L413); [crates/shamir-tx/src/repo_tx_gate.rs:793](../../../../../crates/shamir-tx/src/repo_tx_gate.rs#L793); [crates/shamir-tx/src/tx_context.rs:796](../../../../../crates/shamir-tx/src/tx_context.rs#L796).
+
+<a id="plan-p2-17"></a>
+
+### Plan P2.17 — P2.17
+
+Status: `confirmed-open`. Current risk: —.
+
+No lock eviction exists. Parked-waiter counting alone is insufficient: requesters can already hold an Arc before acquiring state or parking. Reclamation must coordinate identity with every external user.
+
+Evidence: [crates/shamir-tx/src/mvcc_store/mvcc_locks.rs:76](../../../../../crates/shamir-tx/src/mvcc_store/mvcc_locks.rs#L76); [crates/shamir-tx/src/mvcc_store/mvcc_locks.rs:93](../../../../../crates/shamir-tx/src/mvcc_store/mvcc_locks.rs#L93); [crates/shamir-tx/src/mvcc_store/mvcc_locks.rs:225](../../../../../crates/shamir-tx/src/mvcc_store/mvcc_locks.rs#L225).
+
+<a id="plan-p2-18"></a>
+
+### Plan P2.18 — P2.18
+
+Status: `confirmed-open`. Current risk: —.
+
+Documentation/generator and vacuum-prefix issues remain. Replace the proposed separator-byte rejection with unrestricted round-trip tests and exact orig filtering; valid fixed-width keys may contain 0xFF.
+
+Evidence: [crates/shamir-tx/src/version_codec.rs:42](../../../../../crates/shamir-tx/src/version_codec.rs#L42); [crates/shamir-tx/src/version_codec.rs:57](../../../../../crates/shamir-tx/src/version_codec.rs#L57); [crates/shamir-tx/src/tests/version_codec_tests.rs:65](../../../../../crates/shamir-tx/src/tests/version_codec_tests.rs#L65); [crates/shamir-tx/src/mvcc_store/mvcc_gc.rs:175](../../../../../crates/shamir-tx/src/mvcc_store/mvcc_gc.rs#L175).
+
+<a id="plan-p2-19"></a>
+
+### Plan P2.19 — P2.19
+
+Status: `not-applicable`. Current risk: —.
+
+The cited panic method is unused and inaccessible through normal public staging accessors. Removing dead decoding API or validating before future use is optional hygiene, not a current reachable panic fix.
+
+Evidence: [crates/shamir-tx/src/staging_store.rs:32](../../../../../crates/shamir-tx/src/staging_store.rs#L32); [crates/shamir-tx/src/staging_store.rs:81](../../../../../crates/shamir-tx/src/staging_store.rs#L81); [crates/shamir-tx/src/staging_store.rs:141](../../../../../crates/shamir-tx/src/staging_store.rs#L141); [crates/shamir-tx/src/staging_store.rs:165](../../../../../crates/shamir-tx/src/staging_store.rs#L165).
+
+<a id="plan-p2-20"></a>
+
+### Plan P2.20 — P2.20
+
+Status: `not-applicable`. Current risk: —.
+
+The per-repo store contract and repository-scoped production selection already establish the supported keyspace boundary. Extra namespace enforcement protects deliberate/mistaken contract violations, not a proven supported cross-tenant path.
+
+Evidence: [crates/shamir-tx/src/changefeed.rs:147](../../../../../crates/shamir-tx/src/changefeed.rs#L147); [crates/shamir-engine/src/repo/repo_instance.rs:1207](../../../../../crates/shamir-engine/src/repo/repo_instance.rs#L1207).
+
+<a id="plan-p2-21"></a>
+
+### Plan P2.21 — P2.21
+
+Status: `confirmed-open`. Current risk: —.
+
+All enumerated allocation/batching opportunities remain. A single String clone cannot serve multiple owned fields, overlay version bounds require another ordering, and changing leftover order needs a contract decision.
+
+Evidence: [crates/shamir-tx/src/mvcc_store/version_entry.rs:193](../../../../../crates/shamir-tx/src/mvcc_store/version_entry.rs#L193); [crates/shamir-tx/src/mvcc_store/mod.rs:1203](../../../../../crates/shamir-tx/src/mvcc_store/mod.rs#L1203); [crates/shamir-tx/src/versioned_overlay.rs:40](../../../../../crates/shamir-tx/src/versioned_overlay.rs#L40); [crates/shamir-tx/src/changefeed.rs:462](../../../../../crates/shamir-tx/src/changefeed.rs#L462); [crates/shamir-tx/src/id_remap.rs:77](../../../../../crates/shamir-tx/src/id_remap.rs#L77); [crates/shamir-tx/src/mvcc_store/mod.rs:880](../../../../../crates/shamir-tx/src/mvcc_store/mod.rs#L880).
+
+<a id="plan-p2-22"></a>
+
+### Plan P2.22 — P2.22
+
+Status: `confirmed-open`. Current risk: —.
+
+Barrier progress, min_alive race and pass precondition hardening remain. Floor-before-protection and counter-only rechecks do not safely resolve the described registration race.
+
+Evidence: [crates/shamir-tx/src/repo_tx_gate.rs:457](../../../../../crates/shamir-tx/src/repo_tx_gate.rs#L457); [crates/shamir-tx/src/repo_tx_gate.rs:655](../../../../../crates/shamir-tx/src/repo_tx_gate.rs#L655); [crates/shamir-tx/src/repo_tx_gate.rs:666](../../../../../crates/shamir-tx/src/repo_tx_gate.rs#L666); [crates/shamir-tx/src/mvcc_store/mvcc_history.rs:394](../../../../../crates/shamir-tx/src/mvcc_store/mvcc_history.rs#L394).
+
+<a id="plan-p2-23"></a>
+
+### Plan P2.23 — P2.23
+
+Status: `confirmed-open`. Current risk: —.
+
+Empty-value/id guards, dead-export cleanup, diagnostics, runtime contract, local metric tests and structural hygiene remain. Bin-only deserialization is unverified; family splitting is optional; debug_assert guards do not reject invalid release inputs.
+
+Evidence: [crates/shamir-tx/src/mvcc_store/mod.rs:766](../../../../../crates/shamir-tx/src/mvcc_store/mod.rs#L766); [crates/shamir-tx/src/repo_wal_manager.rs:30](../../../../../crates/shamir-tx/src/repo_wal_manager.rs#L30); [crates/shamir-tx/src/lib.rs:69](../../../../../crates/shamir-tx/src/lib.rs#L69); [crates/shamir-tx/src/changefeed.rs:112](../../../../../crates/shamir-tx/src/changefeed.rs#L112); [crates/shamir-tx/src/mvcc_store/mod.rs:1634](../../../../../crates/shamir-tx/src/mvcc_store/mod.rs#L1634); [crates/shamir-tx/src/changefeed.rs:249](../../../../../crates/shamir-tx/src/changefeed.rs#L249); [crates/shamir-tx/src/tests/mod.rs:1](../../../../../crates/shamir-tx/src/tests/mod.rs#L1).
+
+## Corrections and qualified non-findings
+
+- Preserve all original IDs and duplicate relationships; do not use deduplication as a status or retain the historical severity census as the current verdict.
+- The September staging-iteration/A8 change improves adjacent allocations and ID scanning but does not repair any assigned root mechanism.
+- Remove current interner-input DoS and StagedRow read-path panic assertions using the positive counter-evidence above.
+- Treat shared-store cross-repo disclosure as contract-violating misconfiguration under current wiring.
+- Correct journal key availability, sparse-version contiguity, codec probabilities, timestamp-prefix RecordIds, partial-scan anchor safety, unconditional rollback races and lock-eviction safety before implementing the plan.
+- Source inspection establishes existing registration and assertion limitations, not execution success or exhaustive concurrency proofs.
+
+## Current follow-up order
+
+1. Repair failed non-tx write readability with concurrency-aware cell recovery and prior-key/late-operation failure assertions.
+2. Make ack-path cell publication max-monotonic and cover out-of-order publication through the actual publisher.
+3. Prevent incomplete scans from establishing timestamp-index readiness or driving unsafe snapshot-anchor reclamation; make min_alive conservative across completed concurrent registrations.
+4. Surface journal store/decode/persist failures and retain durable completeness evidence using sparse event semantics, not consecutive commit-version assumptions.
+5. Retain reserved cells during pruning; distinguish the reservation invariant from the production Serializable lock-protected scenario.
+6. Bound GC buffering and safely reclaim idle pessimistic lock entries; then profile and batch the proven vacuum/validation costs.
+7. Update stale review assurances and severity counts before pursuing structural/style cleanup.
+
+## Coverage and limitations
+
+- Source-only validation: no builds, tests, benchmarks, reproductions, or file mutations. HEAD matched the requested base and the checkout was clean.
+- All 65 thematic findings, all 65 SUMMARY finding rows, and all 23 SUMMARY Fix Plan items were classified. TASK_GROUPS.md was absent.
+- Cargo.lock pins inspected: tokio 1.49.0, scc 3.8.4, serde 1.0.228, rmp-serde 1.3.1, indexmap 2.14.0, bytes 1.11.1, arc-swap 1.9.1, futures 0.3.32, thiserror 2.0.18, proptest 1.11.0.
+- Pinned rmp-serde, scc, and indexmap implementation sources were unavailable in the inspected local registry; exact alternate MessagePack acceptance and upgrade-compatibility scenarios remain unverified. Tokio's off-runtime spawn panic was corroborated in its locally available pinned source.
+- Performance classifications establish source-level traversal, allocation, and storage-call shapes, not measured latency, throughput, RSS, or starvation frequency.
+- No exhaustive upstream attacker-input, authentication, or storage-checksum audit was performed; security conclusions distinguish supported production wiring from caller misuse and hypothetical extensions.
+
+## Reviewed document inventory
+
+- [correctness-tdd.md](./correctness-tdd.md) — 10 claim decisions; 0 explicit plan items.
+- [concurrency-lockfree.md](./concurrency-lockfree.md) — 11 claim decisions; 0 explicit plan items.
+- [api-wire-protocol.md](./api-wire-protocol.md) — 12 claim decisions; 0 explicit plan items.
+- [performance-hotpath.md](./performance-hotpath.md) — 14 claim decisions; 0 explicit plan items.
+- [error-handling-lifecycle.md](./error-handling-lifecycle.md) — 12 claim decisions; 0 explicit plan items.
+- [security-crypto.md](./security-crypto.md) — 9 claim decisions; 0 explicit plan items.
+- [style-claude-md.md](./style-claude-md.md) — 7 claim decisions; 0 explicit plan items.
+- [SUMMARY.md](./SUMMARY.md) — 67 claim decisions; 23 explicit plan items.
+
+---
+
+<details>
+<summary>Historical report — preserved for provenance; not current status or instructions</summary>
+
 # shamir-tx — Consolidated 7-lens review (synthesis of the 2026-08-14 cross-crate review)
 
 Crate: `crates/shamir-tx/` (MVCC transactional store — cells/version registry, history log +
@@ -1016,3 +2115,5 @@ distinct defect.
     `metrics_tests.rs` (**7.6**), imports-at-top hoist (**7.2**), test-layout migration or
     CLAUDE.md amendment (**7.3**), opportunistic `changefeed`/`repo_tx_gate` family split
     (**7.5**).
+
+</details>

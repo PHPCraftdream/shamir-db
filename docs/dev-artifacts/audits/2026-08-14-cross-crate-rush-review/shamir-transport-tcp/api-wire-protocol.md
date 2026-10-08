@@ -1,3 +1,178 @@
+<!-- revalidation:2026-10-08 source:92ad58266bf57ddea1fa3c8a47affba1a3a9a096 -->
+# shamir-transport-tcp — api-wire-protocol revalidation
+
+Source snapshot: `92ad58266bf57ddea1fa3c8a47affba1a3a9a096`. Revalidated 2026-10-08 by read-only XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run; no source fix is part of this update. Test registration/assertions are evidence of an oracle, not proof of a passing run.
+
+This section is authoritative for current status. Original titles/IDs are retained for traceability; a refuted title is not a current assertion. The collapsed historical report below is superseded, including its counts, severity, scenarios and fix instructions. Plan IDs preserve historical numbering, not a current release mandate. [Workspace methodology and status definitions](../SUMMARY.md#status-definitions).
+
+All original API and documentation conditions remain, with negotiated-limit and security consequences qualified. The 32-byte exporter contract is already documented; its error erasure remains open.
+
+## Current claim decisions
+
+| Claim decisions | Open | Source-fixed | Partial | Refuted | Unverified | N/A |
+|---:|---:|---:|---:|---:|---:|---:|
+| 12 | 12 | 0 | 0 | 0 | 0 | 0 |
+
+These are decisions on report claims, including repeated roots, bundled observations and non-findings—not a unique-bug census. Closed/N/A rows have no current risk; unverified risk is provisional. Pure style and unmeasured optimization claims do not establish runtime impact.
+
+<a id="review-1"></a>
+
+### Claim 1 — Write API can emit the reserved close marker as a data frame; module doc contradicts spec §2
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+Generic data writers accept zero-length input while readers reserve zero for PeerClose; the contradictory documentation remains.
+
+Evidence: [crates/shamir-transport-tcp/src/framing.rs:8](../../../../../crates/shamir-transport-tcp/src/framing.rs#L8); [crates/shamir-transport-tcp/src/framing.rs:153](../../../../../crates/shamir-transport-tcp/src/framing.rs#L153); [crates/shamir-transport-tcp/src/framing.rs:250](../../../../../crates/shamir-transport-tcp/src/framing.rs#L250); [docs/guide-docs/client-server-protocol-spec/TRANSPORT_TCP.md:28](../../../../../docs/guide-docs/client-server-protocol-spec/TRANSPORT_TCP.md#L28).
+
+Grouping/duplicate: `SUMMARY.md#1.1`. This row is not another independent defect.
+
+<a id="review-2"></a>
+
+### Claim 2 — Library error APIs use `Box<dyn Error + Send + Sync>` instead of a `thiserror` enum
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+Both public TLS setup functions still return boxed errors rather than an enumerable typed error surface.
+
+Evidence: [crates/shamir-transport-tcp/src/tls.rs:30](../../../../../crates/shamir-transport-tcp/src/tls.rs#L30); [crates/shamir-transport-tcp/src/tls.rs:44](../../../../../crates/shamir-transport-tcp/src/tls.rs#L44).
+
+Grouping/duplicate: `SUMMARY.md#6.2`. This row is not another independent defect.
+
+<a id="review-3"></a>
+
+### Claim 3 — `FrameError::TooLarge` is overloaded for non-size violations in `write_frame_prereserved`
+
+Status: `confirmed-open`. Current risk: `low`.
+
+Too-short and mismatched-prefix inputs still use TooLarge, yielding false size-comparison diagnostics.
+
+Evidence: [crates/shamir-transport-tcp/src/framing.rs:24](../../../../../crates/shamir-transport-tcp/src/framing.rs#L24); [crates/shamir-transport-tcp/src/framing.rs:241](../../../../../crates/shamir-transport-tcp/src/framing.rs#L241); [crates/shamir-transport-tcp/src/framing.rs:250](../../../../../crates/shamir-transport-tcp/src/framing.rs#L250).
+
+Grouping/duplicate: `SUMMARY.md#6.1`. This row is not another independent defect.
+
+<a id="review-4"></a>
+
+### Claim 4 — Write-side frame cap is hardcoded to `MAX_FRAME_SIZE_DEFAULT`; reader/writer API asymmetry
+
+Status: `confirmed-open`. Current risk: `low`.
+
+No capped writer companion or writer limit parameter exists. Future negotiation is hypothetical; current phase-specific limits are defined by the protocol.
+
+Evidence: [crates/shamir-transport-tcp/src/framing.rs:47](../../../../../crates/shamir-transport-tcp/src/framing.rs#L47); [crates/shamir-transport-tcp/src/framing.rs:153](../../../../../crates/shamir-transport-tcp/src/framing.rs#L153); [crates/shamir-transport-tcp/src/framing.rs:192](../../../../../crates/shamir-transport-tcp/src/framing.rs#L192); [crates/shamir-transport-tcp/src/framing.rs:250](../../../../../crates/shamir-transport-tcp/src/framing.rs#L250).
+
+Grouping/duplicate: `SUMMARY.md#5.1`. This row is not another independent defect.
+
+<a id="review-5"></a>
+
+### Claim 5 — Normative loopback predicate is not reusable, so shamir-server duplicates spec §2.2 policy
+
+Status: `confirmed-open`. Current risk: `low`.
+
+The transport predicate remains private and server configuration retains an equivalent independent predicate. They currently agree; divergence is maintenance risk, not an observed policy bypass.
+
+Evidence: [crates/shamir-transport-tcp/src/listener.rs:51](../../../../../crates/shamir-transport-tcp/src/listener.rs#L51); [crates/shamir-server/src/config.rs:820](../../../../../crates/shamir-server/src/config.rs#L820); [crates/shamir-server/src/config.rs:873](../../../../../crates/shamir-server/src/config.rs#L873).
+
+Grouping/duplicate: `SUMMARY.md#5.2`. This row is not another independent defect.
+
+<a id="review-6"></a>
+
+### Claim 6 — `extract_tls_exporter` collapses failure causes into `Option`
+
+Status: `confirmed-open`. Current risk: `low`.
+
+The rustls error is still erased into None. The accompanying claim that fixed output length lacks documentation is contradicted by the function's opening documentation.
+
+Evidence: [crates/shamir-transport-tcp/src/tls.rs:71](../../../../../crates/shamir-transport-tcp/src/tls.rs#L71); [crates/shamir-transport-tcp/src/tls.rs:77](../../../../../crates/shamir-transport-tcp/src/tls.rs#L77); [crates/shamir-transport-tcp/src/tls.rs:81](../../../../../crates/shamir-transport-tcp/src/tls.rs#L81).
+
+Grouping/duplicate: `SUMMARY.md#3.3`. This row is not another independent defect.
+
+<a id="review-7"></a>
+
+### Claim 7 — Uneven crate-root re-exports: the recommended pooled API is not at the root
+
+Status: `confirmed-open`. Current risk: `low`.
+
+Root exports still omit pooled framing helpers, write_close and the exporter adapter/constants. Repository callers use module paths; this is discoverability/consistency debt.
+
+Evidence: [crates/shamir-transport-tcp/src/lib.rs:12](../../../../../crates/shamir-transport-tcp/src/lib.rs#L12); [crates/shamir-transport-tcp/src/lib.rs:16](../../../../../crates/shamir-transport-tcp/src/lib.rs#L16); [crates/shamir-client/src/client.rs:39](../../../../../crates/shamir-client/src/client.rs#L39).
+
+Grouping/duplicate: `SUMMARY.md#7.1`. This row is not another independent defect.
+
+<a id="review-8"></a>
+
+### Claim 8 — Stale doc: `extract_tls_exporter` claims to be generic over `rustls::ConnectionTrait`
+
+Status: `confirmed-open`. Current risk: `nit`.
+
+The documentation names a different trait than the actual crate-local ConnectionExporter parameter.
+
+Evidence: [crates/shamir-transport-tcp/src/tls.rs:73](../../../../../crates/shamir-transport-tcp/src/tls.rs#L73); [crates/shamir-transport-tcp/src/tls.rs:77](../../../../../crates/shamir-transport-tcp/src/tls.rs#L77).
+
+Grouping/duplicate: `SUMMARY.md#5.4`. This row is not another independent defect.
+
+<a id="review-9"></a>
+
+### Claim 9 — Docs advertise Unix-domain-socket binds for `Plain`; the API is `SocketAddr`/TCP-only
+
+Status: `confirmed-open`. Current risk: `nit`.
+
+UDS clauses remain without a qualification that this crate's validator and binder accept TCP socket addresses only. The broader protocol's UDS allowance itself is legitimate.
+
+Evidence: [crates/shamir-transport-tcp/src/listener.rs:4](../../../../../crates/shamir-transport-tcp/src/listener.rs#L4); [crates/shamir-transport-tcp/src/listener.rs:30](../../../../../crates/shamir-transport-tcp/src/listener.rs#L30); [crates/shamir-transport-tcp/src/listener.rs:75](../../../../../crates/shamir-transport-tcp/src/listener.rs#L75).
+
+Grouping/duplicate: `SUMMARY.md#5.3`. This row is not another independent defect.
+
+<a id="review-10"></a>
+
+### Claim 10 — Speculative public constants carry vestigial `#[allow(dead_code)]`
+
+Status: `confirmed-open`. Current risk: `nit`.
+
+Public loopback constants and redundant allowances remain; no repository Rust consumer references them.
+
+Evidence: [crates/shamir-transport-tcp/src/listener.rs:96](../../../../../crates/shamir-transport-tcp/src/listener.rs#L96).
+
+Grouping/duplicate: `SUMMARY.md#7.3`. This row is not another independent defect.
+
+<a id="review-11"></a>
+
+### Claim 11 — `tokio` dependency pulls `features = ["full"]` in a library crate
+
+Status: `confirmed-open`. Current risk: `nit`.
+
+The manifest still enables full Tokio features. Feature breadth is source-proven; binary-size or compile-time savings from trimming are not measured and depend on downstream feature unification.
+
+Evidence: [crates/shamir-transport-tcp/Cargo.toml:14](../../../../../crates/shamir-transport-tcp/Cargo.toml#L14).
+
+Grouping/duplicate: `SUMMARY.md#5.5`. This row is not another independent defect.
+
+<a id="review-12"></a>
+
+### Claim 12 — Transport wire structs and fixtures duplicated across the two e2e test files
+
+Status: `confirmed-open`. Current risk: `nit`.
+
+Both integration files retain independent copies of all four handshake Wire structs, fast_kdf and make_user.
+
+Evidence: [crates/shamir-transport-tcp/tests/handshake_e2e.rs:41](../../../../../crates/shamir-transport-tcp/tests/handshake_e2e.rs#L41); [crates/shamir-transport-tcp/tests/handshake_e2e.rs:85](../../../../../crates/shamir-transport-tcp/tests/handshake_e2e.rs#L85); [crates/shamir-transport-tcp/tests/echo_e2e.rs:57](../../../../../crates/shamir-transport-tcp/tests/echo_e2e.rs#L57); [crates/shamir-transport-tcp/tests/echo_e2e.rs:122](../../../../../crates/shamir-transport-tcp/tests/echo_e2e.rs#L122).
+
+Grouping/duplicate: `SUMMARY.md#5.6`. This row is not another independent defect.
+
+## Corrections and qualified non-findings
+
+- TLS 1.3-only builder configuration and registered negative negotiation tests remain source-supported, not execution-verified.
+- No raw serde_json query construction exists in this crate; test-local Wire structs remain wire-format fixtures.
+- The exporter length contract already exists at src/tls.rs:71; its TCP specification location is TRANSPORT_TCP.md:41.
+- Tokio-rustls streams genuinely implement ConnectionExporter through this crate's impls. The WS helper forwards through those impls rather than providing its own.
+- The wire-equivalence tests do not establish a single underlying write or a TLS-record count.
+- Deleting public root exports or constants is an API change even when no repository caller uses them; completing or clarifying exports avoids that assumption.
+
+---
+
+<details>
+<summary>Historical report — preserved for provenance; not current status or instructions</summary>
+
 # shamir-transport-tcp -- API & wire-protocol design
 
 ## Summary
@@ -89,3 +264,5 @@ The crate's public surface is clean and consistent with the spec's shape: TLS 1.
 - Issue: `WireAuthInit`/`WireChallenge`/`WireClientProof`/`WireAuthOk`, `fast_kdf()`, and `make_user()` are copy-pasted between the two integration tests; each file independently defines what it asserts to be the transport-local wire format.
 - Failure scenario: a spec §6 envelope change updated in one file but not the other leaves both tests green while they encode two different wire formats.
 - Suggested fix: share the `Wire*` structs and fixtures via a `tests/common/mod.rs`-style helper (or move them into a `#[cfg(test)]` unit module under `src/tests/`), so the wire shapes are defined once.
+
+</details>

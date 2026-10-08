@@ -1,3 +1,104 @@
+<!-- revalidation:2026-10-08 source:92ad58266bf57ddea1fa3c8a47affba1a3a9a096 -->
+# shamir-query-builder — error-handling-lifecycle revalidation
+
+Source snapshot: `92ad58266bf57ddea1fa3c8a47affba1a3a9a096`. Revalidated 2026-10-08 by read-only XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run; no source fix is part of this update. Test registration/assertions are evidence of an oracle, not proof of a passing run.
+
+This section is authoritative for current status. Original titles/IDs are retained for traceability; a refuted title is not a current assertion. The collapsed historical report below is superseded, including its counts, severity, scenarios and fix instructions. Plan IDs preserve historical numbering, not a current release mandate. [Workspace methodology and status definitions](../SUMMARY.md#status-definitions).
+
+Silent mutator loss and documented DDL validation gaps remain. Hand-written error implementations remain convention debt. Public expects are present, but the reports do not establish a current codec-error trigger. Guarded CreateIndex unwraps satisfy the invariant exception.
+
+## Current claim decisions
+
+| Claim decisions | Open | Source-fixed | Partial | Refuted | Unverified | N/A |
+|---:|---:|---:|---:|---:|---:|---:|
+| 6 | 5 | 0 | 0 | 0 | 0 | 1 |
+
+These are decisions on report claims, including repeated roots, bundled observations and non-findings—not a unique-bug census. Closed/N/A rows have no current risk; unverified risk is provisional. Pure style and unmeasured optimization claims do not establish runtime impact.
+
+## Parent acceptance refinements
+
+- Parent dependency inspection supplies the previously missing deep-owned-value / decode-budget counterexample; no runtime test was executed.
+
+<a id="review-1"></a>
+
+### Claim 1 — `Batch::to_request_via_msgpack` panics on codec error -- public API, contradicts the crate's own stated ideology
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+The parent can now identify a constructible codec failure without executing it: owned Array/Map values can be nested beyond rmp-serde 1.3.1's default 1024-container decode budget. Serialization has no active depth counter; decoding those bytes returns DepthLimitExceeded, and the public helper's expect converts that Result to panic. This is a programmatic deep-input API defect, not proof of a normal network request or a measured target stack threshold; existing network decoder bounds do not cap locally built values.
+
+Evidence: [crates/shamir-query-builder/src/batch/batch.rs:872](../../../../../crates/shamir-query-builder/src/batch/batch.rs#L872); [crates/shamir-query-builder/src/batch/batch.rs:878](../../../../../crates/shamir-query-builder/src/batch/batch.rs#L878); [crates/shamir-query-builder/src/batch/build_error.rs:29](../../../../../crates/shamir-query-builder/src/batch/build_error.rs#L29); [crates/shamir-types/src/types/value.rs:71](../../../../../crates/shamir-types/src/types/value.rs#L71); [crates/shamir-query-builder/src/batch/tests/batch_tests.rs:417](../../../../../crates/shamir-query-builder/src/batch/tests/batch_tests.rs#L417); [Cargo.lock:2949](../../../../../Cargo.lock#L2949).
+
+Pinned dependency evidence: [rmp-serde 1.3.1, src/decode.rs:294](https://docs.rs/crate/rmp-serde/1.3.1/source/src/decode.rs); [rmp-serde 1.3.1, src/decode.rs:566](https://docs.rs/crate/rmp-serde/1.3.1/source/src/decode.rs); [rmp-serde 1.3.1, src/encode.rs:147](https://docs.rs/crate/rmp-serde/1.3.1/source/src/encode.rs).
+
+<a id="review-2"></a>
+
+### Claim 2 — `Batch::after` / `Batch::when` silently no-op on an unknown alias -- a misuse path `try_build` cannot catch
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+The absent-target branches still silently return self. Existing negative tests insert invalid references into existing entries and therefore cannot detect this lost-intent path.
+
+Evidence: [crates/shamir-query-builder/src/batch/batch.rs:1003](../../../../../crates/shamir-query-builder/src/batch/batch.rs#L1003); [crates/shamir-query-builder/src/batch/batch.rs:1025](../../../../../crates/shamir-query-builder/src/batch/batch.rs#L1025); [crates/shamir-query-builder/src/batch/tests/after_tests.rs:64](../../../../../crates/shamir-query-builder/src/batch/tests/after_tests.rs#L64); [crates/shamir-query-builder/src/batch/tests/when_tests.rs:81](../../../../../crates/shamir-query-builder/src/batch/tests/when_tests.rs#L81).
+
+Grouping/duplicate: `correctness-tdd.md#2`. This row is not another independent defect.
+
+<a id="review-3"></a>
+
+### Claim 3 — Fallible-build pattern not applied to builders with self-documented required fields (`CreateFunction`, `CreateValidator`, `BindValidator` priority)
+
+Status: `confirmed-open`. Current risk: `low`.
+
+CreateFunction/CreateValidator still finalize without implementation; conditional HMAC, priority range, and empty FieldBuilder type are unchecked locally. Server function/validator handlers reject missing implementation, and validator management rejects priority. These are local feedback/contract gaps, not evidence that server checks disappeared.
+
+Evidence: [crates/shamir-query-builder/src/ddl/function.rs:95](../../../../../crates/shamir-query-builder/src/ddl/function.rs#L95); [crates/shamir-query-builder/src/ddl/validator.rs:48](../../../../../crates/shamir-query-builder/src/ddl/validator.rs#L48); [crates/shamir-query-builder/src/ddl/validator.rs:162](../../../../../crates/shamir-query-builder/src/ddl/validator.rs#L162); [crates/shamir-query-builder/src/ddl/schema.rs:377](../../../../../crates/shamir-query-builder/src/ddl/schema.rs#L377); [crates/shamir-query-builder/src/write/builder_error.rs:20](../../../../../crates/shamir-query-builder/src/write/builder_error.rs#L20); [crates/shamir-query-builder/src/batch/try_into_batch_op.rs:29](../../../../../crates/shamir-query-builder/src/batch/try_into_batch_op.rs#L29); [crates/shamir-db/src/shamir_db/execute/admin_function.rs:90](../../../../../crates/shamir-db/src/shamir_db/execute/admin_function.rs#L90); [crates/shamir-db/src/shamir_db/execute/admin_validator.rs:68](../../../../../crates/shamir-db/src/shamir_db/execute/admin_validator.rs#L68); [crates/shamir-db/src/shamir_db/shamir_db/validator_management.rs:477](../../../../../crates/shamir-db/src/shamir_db/shamir_db/validator_management.rs#L477).
+
+<a id="review-4"></a>
+
+### Claim 4 — Five error enums hand-roll `Display` + `std::error::Error` despite the workspace thiserror rule
+
+Status: `confirmed-open`. Current risk: `low`.
+
+All five still use manual Display/Error implementations and the crate has no thiserror dependency. Matches are exhaustive, and ResponseError preserves source(), so this is structural maintenance debt without an identified behavioral error.
+
+Evidence: [CLAUDE.md](../../../../../CLAUDE.md); [crates/shamir-query-builder/Cargo.toml:15](../../../../../crates/shamir-query-builder/Cargo.toml#L15); [crates/shamir-query-builder/src/batch/build_error.rs:45](../../../../../crates/shamir-query-builder/src/batch/build_error.rs#L45); [crates/shamir-query-builder/src/write/builder_error.rs:45](../../../../../crates/shamir-query-builder/src/write/builder_error.rs#L45); [crates/shamir-query-builder/src/query/query_build_error.rs:40](../../../../../crates/shamir-query-builder/src/query/query_build_error.rs#L40); [crates/shamir-query-builder/src/ddl/create_index_build_error.rs:131](../../../../../crates/shamir-query-builder/src/ddl/create_index_build_error.rs#L131); [crates/shamir-query-builder/src/response/batch_response_ext.rs:39](../../../../../crates/shamir-query-builder/src/response/batch_response_ext.rs#L39).
+
+<a id="review-5"></a>
+
+### Claim 5 — `Doc::set` `.expect()`s the `FilterValue` -> `QueryValue` msgpack round-trip in a public setter
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+The parent can now identify a constructible codec failure without executing it: owned Array/Map values can be nested beyond rmp-serde 1.3.1's default 1024-container decode budget. Serialization has no active depth counter; decoding those bytes returns DepthLimitExceeded, and the public helper's expect converts that Result to panic. This is a programmatic deep-input API defect, not proof of a normal network request or a measured target stack threshold; existing network decoder bounds do not cap locally built values.
+
+Evidence: [crates/shamir-query-builder/src/write/doc.rs:47](../../../../../crates/shamir-query-builder/src/write/doc.rs#L47); [crates/shamir-query-types/src/filter/filter_value.rs:322](../../../../../crates/shamir-query-types/src/filter/filter_value.rs#L322); [crates/shamir-types/src/types/value.rs:71](../../../../../crates/shamir-types/src/types/value.rs#L71); [Cargo.lock:2949](../../../../../Cargo.lock#L2949).
+
+Pinned dependency evidence: [rmp-serde 1.3.1, src/decode.rs:294](https://docs.rs/crate/rmp-serde/1.3.1/source/src/decode.rs); [rmp-serde 1.3.1, src/decode.rs:566](https://docs.rs/crate/rmp-serde/1.3.1/source/src/decode.rs); [rmp-serde 1.3.1, src/encode.rs:147](https://docs.rs/crate/rmp-serde/1.3.1/source/src/encode.rs).
+
+<a id="review-6"></a>
+
+### Claim 6 — Guarded `unwrap()`/`expect()` cluster in `TryFrom<&CreateIndex>` is sound but could be total
+
+Status: `not-applicable`. Current risk: —.
+
+Positive guards still establish Some index type, positive vector dimension, and exactly one sorted field before these unwraps. They satisfy the documented programmer-invariant exception. Collapsing the double expect remains optional cosmetic work, not an outstanding runtime defect.
+
+Evidence: [crates/shamir-query-builder/src/ddl/create_index.rs:759](../../../../../crates/shamir-query-builder/src/ddl/create_index.rs#L759); [crates/shamir-query-builder/src/ddl/create_index.rs:782](../../../../../crates/shamir-query-builder/src/ddl/create_index.rs#L782); [crates/shamir-query-builder/src/ddl/create_index.rs:826](../../../../../crates/shamir-query-builder/src/ddl/create_index.rs#L826); [crates/shamir-query-builder/src/ddl/create_index.rs:838](../../../../../crates/shamir-query-builder/src/ddl/create_index.rs#L838); [crates/shamir-query-builder/src/ddl/create_index.rs:862](../../../../../crates/shamir-query-builder/src/ddl/create_index.rs#L862); [crates/shamir-query-builder/src/ddl/tests/index_spec_tests.rs:161](../../../../../crates/shamir-query-builder/src/ddl/tests/index_spec_tests.rs#L161).
+
+## Corrections and qualified non-findings
+
+- No owned files, sockets, tasks, or locks requiring error-path cleanup were identified. Secret-bearing DTOs nevertheless have transitive Drop behavior; 'no Drop glue/resources at all' is too broad.
+- BuilderError's six variants, QueryBuildError's three, ResponseError's three, and index validation paths have reachable assertions. ConflictingBuilderState coverage also resides in integration tests/create_index_typed.rs, not exclusively src/*/tests/.
+- SerializationFailed's constructed Display test does not exercise propagation. Source proves ?-based propagation in the fallback only; it does not justify a blanket no-panic claim for recursive processing.
+- The original near-exhaustive error coverage excludes the unregistered-handle and overwrite paths, zero-case switch boundary, and proposed DDL validation errors.
+- Non-finite f64 is directly serialized by QueryValue; map keys in QueryValue are Strings. Do not reuse these as established encode-failure examples.
+- A thiserror migration and invariant unwrap cleanup should not be represented as runtime reliability fixes absent a concrete behavioral mechanism.
+
+---
+
+<details>
+<summary>Historical report — preserved for provenance; not current status or instructions</summary>
+
 # shamir-query-builder -- Error handling & resource lifecycle
 
 ## Summary
@@ -65,3 +166,5 @@ Coverage of the error paths that exist is genuinely strong, judged against the s
 - `BuildError` -- `UnknownAlias`/`SelfReference`/`AfterPathIgnored` triggered end-to-end; `SerializationFailed` is honestly documented as untriggerable through valid builder inputs, so only its `Display` is tested (`batch_tests.rs:414-440`) -- an acceptable, explicit gap.
 
 The only error-path behavior with zero coverage is the silent no-op of finding 2, which is itself the finding. No resource-cleanup tests are needed: the crate holds no resources across any fallible boundary.
+
+</details>

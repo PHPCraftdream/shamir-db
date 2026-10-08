@@ -1,3 +1,180 @@
+<!-- revalidation:2026-10-08 source:92ad58266bf57ddea1fa3c8a47affba1a3a9a096 -->
+# shamir-index — correctness-tdd revalidation
+
+Source snapshot: `92ad58266bf57ddea1fa3c8a47affba1a3a9a096`. Revalidated 2026-10-08 by read-only XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run; no source fix is part of this update. Test registration/assertions are evidence of an oracle, not proof of a passing run.
+
+This section is authoritative for current status. Original titles/IDs are retained for traceability; a refuted title is not a current assertion. The collapsed historical report below is superseded, including its counts, severity, scenarios and fix instructions. Plan IDs preserve historical numbering, not a current release mandate. [Workspace methodology and status definitions](../SUMMARY.md#status-definitions).
+
+Most value-level defects remain open. The sorted-range allegation is refuted, and the hypothetical future in-memory-op loss is not a current defect. Existing registered tests miss the principal failing boundaries.
+
+## Current claim decisions
+
+| Claim decisions | Open | Source-fixed | Partial | Refuted | Unverified | N/A |
+|---:|---:|---:|---:|---:|---:|---:|
+| 14 | 12 | 0 | 0 | 1 | 0 | 1 |
+
+These are decisions on report claims, including repeated roots, bundled observations and non-findings—not a unique-bug census. Closed/N/A rows have no current risk; unverified risk is provisional. Pure style and unmeasured optimization claims do not establish runtime impact.
+
+<a id="review-1"></a>
+
+### Claim 1 — FunctionalBackend hash collapses every Dec/Big/Bin value to an identical posting hash
+
+Status: `confirmed-open`. Current risk: `high`.
+
+The catch-all hashes only 255; Dec, Big, Bin, and Set content is omitted. Point lookup trusts the resulting hash. Registered functional tests do not exercise these computed leaves.
+
+Evidence: [crates/shamir-index/src/functional_backend.rs:138](../../../../../crates/shamir-index/src/functional_backend.rs#L138); [crates/shamir-index/src/functional_backend.rs:173](../../../../../crates/shamir-index/src/functional_backend.rs#L173); [crates/shamir-types/src/types/value.rs:34](../../../../../crates/shamir-types/src/types/value.rs#L34); [crates/shamir-index/src/tests/mod.rs:8](../../../../../crates/shamir-index/src/tests/mod.rs#L8).
+
+<a id="review-2"></a>
+
+### Claim 2 — Whitespace/Full tokenizers never case-fold words whose uppercase letters are all non-ASCII (Russian/Greek FTS broken)
+
+Status: `confirmed-open`. Current risk: `high`.
+
+Both borrowed-token predicates inspect ASCII bytes and preserve non-ASCII uppercase words. FullTokenizer has lowercase Russian tests, but neither affected tokenizer has the required uppercase/lowercase equivalence oracle.
+
+Evidence: [crates/shamir-index/src/tokenizer.rs:55](../../../../../crates/shamir-index/src/tokenizer.rs#L55); [crates/shamir-index/src/tokenizer.rs:277](../../../../../crates/shamir-index/src/tokenizer.rs#L277); [crates/shamir-index/src/tests/tokenizer_tests.rs:70](../../../../../crates/shamir-index/src/tests/tokenizer_tests.rs#L70); [crates/shamir-index/src/tests/tokenizer_tests.rs:89](../../../../../crates/shamir-index/src/tests/tokenizer_tests.rs#L89).
+
+<a id="review-3"></a>
+
+### Claim 3 — Vector delta-replay failure is warned away, then permanently baked in by the next background snapshot
+
+Status: `confirmed-open`. Current risk: `high`.
+
+Replay errors still only warn; restore succeeds with an incomplete adapter. Later snapshots serialize that adapter and prune deltas below their watermark, without re-deriving missing vectors.
+
+Evidence: [crates/shamir-index/src/vector/vector_backend.rs:683](../../../../../crates/shamir-index/src/vector/vector_backend.rs#L683); [crates/shamir-index/src/vector/vector_backend.rs:919](../../../../../crates/shamir-index/src/vector/vector_backend.rs#L919); [crates/shamir-index/src/vector/snapshot.rs:1314](../../../../../crates/shamir-index/src/vector/snapshot.rs#L1314).
+
+<a id="review-4"></a>
+
+### Claim 4 — `FtsRankedBackend::plan_update` emits unguarded BumpFtsStats on empty↔non-empty transitions — permanent doc_count/avg_doc_len drift
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+Update emits both bumps even for zero-token sides, unlike insert/delete. Rebuild also accumulates without resetting. Registered tests have no plan_update case and manually reset counters before rebuild.
+
+Evidence: [crates/shamir-index/src/fts_ranked_backend.rs:223](../../../../../crates/shamir-index/src/fts_ranked_backend.rs#L223); [crates/shamir-index/src/fts_ranked_backend.rs:382](../../../../../crates/shamir-index/src/fts_ranked_backend.rs#L382); [crates/shamir-index/src/tests/fts_ranked_backend_tests.rs:215](../../../../../crates/shamir-index/src/tests/fts_ranked_backend_tests.rs#L215).
+
+<a id="review-5"></a>
+
+### Claim 5 — `lookup_by_index` posting-cache miss→scan→insert race can pin a stale entry past the writer's invalidation
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+Scan results are inserted without publication/version validation; commit invalidates independently after storage apply. ReaderDrainGate excludes DROP, not ordinary writes. The existing pause hook is before scanning, not between scan and insertion.
+
+Evidence: [crates/shamir-index/src/base_index/index_manager.rs:2835](../../../../../crates/shamir-index/src/base_index/index_manager.rs#L2835); [crates/shamir-index/src/base_index/index_manager.rs:2847](../../../../../crates/shamir-index/src/base_index/index_manager.rs#L2847); [crates/shamir-index/src/base_index/index_manager.rs:2879](../../../../../crates/shamir-index/src/base_index/index_manager.rs#L2879); [crates/shamir-engine/src/tx/commit_phases.rs:769](../../../../../crates/shamir-engine/src/tx/commit_phases.rs#L769).
+
+<a id="review-6"></a>
+
+### Claim 6 — DROP INDEX of a vector index leaks the entire `__vec_snap__<id>` snapshot keyspace
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+Vector drop_all remains a no-op; recovery sweeps only the binary descriptor-id posting prefix. Neither path removes the string-keyed snapshot/delta namespace. Normal ids are monotonic; resurrection requires explicit id reuse.
+
+Evidence: [crates/shamir-index/src/vector/vector_backend.rs:739](../../../../../crates/shamir-index/src/vector/vector_backend.rs#L739); [crates/shamir-index/src/persistence.rs:633](../../../../../crates/shamir-index/src/persistence.rs#L633); [crates/shamir-index/src/vector/snapshot.rs:151](../../../../../crates/shamir-index/src/vector/snapshot.rs#L151).
+
+Grouping/duplicate: `error-handling-lifecycle.md#3`. This row is not another independent defect.
+
+<a id="review-7"></a>
+
+### Claim 7 — Staged vectors bypass dim validation on the in-tx merge paths (debug panic / silent truncation)
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+staged_vector returns extraction without dimension validation. Both general merge loops score unchecked staged slices; SIMD asserts dimensions in debug and truncates in release. Existing merge tests use valid dimensions.
+
+Evidence: [crates/shamir-index/src/vector/vector_backend.rs:451](../../../../../crates/shamir-index/src/vector/vector_backend.rs#L451); [crates/shamir-index/src/vector/hnsw_adapter.rs:2952](../../../../../crates/shamir-index/src/vector/hnsw_adapter.rs#L2952); [crates/shamir-index/src/vector/brute_force.rs:309](../../../../../crates/shamir-index/src/vector/brute_force.rs#L309); [crates/shamir-index/src/vector/simd.rs:105](../../../../../crates/shamir-index/src/vector/simd.rs#L105); [crates/shamir-index/src/vector/tests/hnsw_adapter_tests.rs:376](../../../../../crates/shamir-index/src/vector/tests/hnsw_adapter_tests.rs#L376).
+
+<a id="review-8"></a>
+
+### Claim 8 — `build_index2_backend` silently discards the persisted HNSW config (`m`, `ef_construct`)
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+The builder still hardcodes m=16 and ef_construction=200; compaction build_config does likewise. Successful snapshot loading can restore graph parameters, so tuning loss is not universal across every reopen.
+
+Evidence: [crates/shamir-index/src/build_backend.rs:52](../../../../../crates/shamir-index/src/build_backend.rs#L52); [crates/shamir-index/src/vector/hnsw_adapter.rs:952](../../../../../crates/shamir-index/src/vector/hnsw_adapter.rs#L952); [crates/shamir-index/src/vector/snapshot.rs:879](../../../../../crates/shamir-index/src/vector/snapshot.rs#L879).
+
+Grouping/duplicate: `api-wire-protocol.md#1`. This row is not another independent defect.
+
+<a id="review-9"></a>
+
+### Claim 9 — FunctionalBackend Map hashing is insertion-order dependent (byte-identity floor violation)
+
+Status: `confirmed-open`. Current risk: `low`.
+
+Functional hashing streams map entries in IndexMap insertion order, unlike the base-index order-independent scheme. Equivalent maps can receive different functional posting hashes.
+
+Evidence: [crates/shamir-index/src/functional_backend.rs:164](../../../../../crates/shamir-index/src/functional_backend.rs#L164); [crates/shamir-collections/src/lib.rs:20](../../../../../crates/shamir-collections/src/lib.rs#L20); [crates/shamir-index/src/base_index/index_keys.rs:161](../../../../../crates/shamir-index/src/base_index/index_keys.rs#L161).
+
+<a id="review-10"></a>
+
+### Claim 10 — `Dot` metric silently clamps distances to 0 for unnormalized vectors in HNSW (inconsistent with BruteForce)
+
+Status: `confirmed-open`. Current risk: `low`.
+
+HNSW and quantized scoring clamp 1-dot; BruteForceAdapter uses -dot. Normalization is documented but unenforced. HNSW's own small-index branch also uses the clamp, so the alleged 256-row crossover is inaccurate.
+
+Evidence: [crates/shamir-index/src/vector/hnsw_adapter.rs:150](../../../../../crates/shamir-index/src/vector/hnsw_adapter.rs#L150); [crates/shamir-index/src/vector/hnsw_adapter.rs:2850](../../../../../crates/shamir-index/src/vector/hnsw_adapter.rs#L2850); [crates/shamir-index/src/vector/brute_force.rs:125](../../../../../crates/shamir-index/src/vector/brute_force.rs#L125); [crates/shamir-index/src/vector/quantized_dist.rs:274](../../../../../crates/shamir-index/src/vector/quantized_dist.rs#L274).
+
+<a id="review-11"></a>
+
+### Claim 11 — `FtsStats`: torn (count, sum) reads and a divide-by-zero window in `avg_doc_len`
+
+Status: `confirmed-open`. Current risk: `low`.
+
+Independent Relaxed updates/readbacks permit count>0 with sum=0; avg_doc_len only guards count=0. Positive document lengths then score zero, while zero-length combinations can produce NaN.
+
+Evidence: [crates/shamir-index/src/bm25.rs:72](../../../../../crates/shamir-index/src/bm25.rs#L72); [crates/shamir-index/src/bm25.rs:80](../../../../../crates/shamir-index/src/bm25.rs#L80); [crates/shamir-index/src/bm25.rs:38](../../../../../crates/shamir-index/src/bm25.rs#L38).
+
+<a id="review-12"></a>
+
+### Claim 12 — Unbounded sorted-range upper bound `prefix \|\| 0xFF×64` excludes values with ≥64 leading 0xFF encoded bytes
+
+Status: `refuted`. Current risk: —.
+
+Every supported encoded value begins with a type tag below 0xFF. Bin begins with 0x60 before its raw bytes; therefore even arbitrarily long 0xFF payloads compare below this upper bound.
+
+Evidence: [crates/shamir-index/src/base_index/sorted_index_manager.rs:2627](../../../../../crates/shamir-index/src/base_index/sorted_index_manager.rs#L2627); [crates/shamir-index/src/base_index/sorted_index_manager.rs:2940](../../../../../crates/shamir-index/src/base_index/sorted_index_manager.rs#L2940); [crates/shamir-types/src/core/sort_codec.rs:39](../../../../../crates/shamir-types/src/core/sort_codec.rs#L39); [crates/shamir-types/src/core/sort_codec.rs:135](../../../../../crates/shamir-types/src/core/sort_codec.rs#L135).
+
+<a id="review-13"></a>
+
+### Claim 13 — `apply_index_ops_at_commit` silently drops any non-`BumpFtsStats` in-memory op
+
+Status: `not-applicable`. Current risk: —.
+
+IndexWriteOp currently has exactly SetPosting, RemovePosting, and BumpFtsStats. No other in-memory variant exists to lose. Exhaustive routing would be useful future-change hardening, not a current runtime fix.
+
+Evidence: [crates/shamir-tx/src/index_write_op.rs:90](../../../../../crates/shamir-tx/src/index_write_op.rs#L90); [crates/shamir-tx/src/index_write_op.rs:127](../../../../../crates/shamir-tx/src/index_write_op.rs#L127); [crates/shamir-index/src/write_ops.rs:170](../../../../../crates/shamir-index/src/write_ops.rs#L170).
+
+<a id="review-14"></a>
+
+### Claim 14 — Inline `#[cfg(test)] mod tests` in `quant_meta.rs` violates the documented test layout
+
+Status: `confirmed-open`. Current risk: `nit`.
+
+The round-trip test remains inline. It is reachable through the registered quant_meta module, but does not test malformed metadata; relocating it is structural cleanup.
+
+Evidence: [crates/shamir-index/src/vector/quant_meta.rs:83](../../../../../crates/shamir-index/src/vector/quant_meta.rs#L83); [crates/shamir-index/src/vector/mod.rs:7](../../../../../crates/shamir-index/src/vector/mod.rs#L7).
+
+Grouping/duplicate: `style-claude-md.md#2`. This row is not another independent defect.
+
+## Corrections and qualified non-findings
+
+- Finding 1's lower(price) example is unsuitable: Lower expects a string and decimal type errors become Null. A Field expression establishes the real content-hashing defect. Any hash-format change needs old-posting migration/rebuild.
+- Finding 2's claim that every FullTokenizer test uses ASCII is false; Russian lowercase stemming and stopword tests exist but cannot detect uppercase case-fold failure.
+- Finding 4's paired update bumps normally cancel the document-count wrapping before returning; permanent count drift remains, but permanent u64::MAX is not established by that paired update alone.
+- A check-before-cache-insert alone still has a check-to-insert race. Use epoch-tagged entries validated on hits or a publication protocol synchronized with invalidation.
+- Replace the sorted-range defect and its proposed successor-bound task with the positive type-tag ordering proof.
+- Registered test presence is source evidence only; no test results are claimed.
+
+---
+
+<details>
+<summary>Historical report — preserved for provenance; not current status or instructions</summary>
+
 # shamir-index — Correctness & TDD-coverage
 
 ## Summary
@@ -97,3 +274,5 @@ The crate's infrastructure layers (reader-drain gates, lifecycle tombstones, bin
 - **Severity:** nit
 - **Issue:** CLAUDE.md's test-organisation rules ("Never embed `#[cfg(test)] mod tests { ... }` inline inside implementation files. Move them to the `tests/` directory") — this is the only production file in the crate with an inline test module (every other module uses the `tests/` directory layout).
 - **Suggested fix:** Move the round-trip test to `vector/tests/quant_meta_tests.rs` and wire it via `vector/tests/mod.rs`.
+
+</details>

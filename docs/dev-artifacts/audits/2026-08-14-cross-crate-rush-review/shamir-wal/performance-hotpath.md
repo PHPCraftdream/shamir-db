@@ -1,3 +1,134 @@
+<!-- revalidation:2026-10-08 source:92ad58266bf57ddea1fa3c8a47affba1a3a9a096 -->
+# shamir-wal — performance-hotpath revalidation
+
+Source snapshot: `92ad58266bf57ddea1fa3c8a47affba1a3a9a096`. Revalidated 2026-10-08 by read-only XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run; no source fix is part of this update. Test registration/assertions are evidence of an oracle, not proof of a passing run.
+
+This section is authoritative for current status. Original titles/IDs are retained for traceability; a refuted title is not a current assertion. The collapsed historical report below is superseded, including its counts, severity, scenarios and fix instructions. Plan IDs preserve historical numbering, not a current release mandate. [Workspace methodology and status definitions](../SUMMARY.md#status-definitions).
+
+The linear scans, buffering, and allocation shapes remain. Exact timing and allocation-count claims are unverified. The two explicitly deliberate allocation/copy costs are not defects, and the exact-one-syscall guarantee is overstated.
+
+## Current claim decisions
+
+| Claim decisions | Open | Source-fixed | Partial | Refuted | Unverified | N/A |
+|---:|---:|---:|---:|---:|---:|---:|
+| 10 | 5 | 0 | 0 | 1 | 1 | 3 |
+
+These are decisions on report claims, including repeated roots, bundled observations and non-findings—not a unique-bug census. Closed/N/A rows have no current risk; unverified risk is provisional. Pure style and unmeasured optimization claims do not establish runtime impact.
+
+<a id="review-1"></a>
+
+### Claim 1 — has_truncatable on the Mem sink is an O(frames) scan run on every drainer tick
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+The probe performs any under the frames mutex, giving O(frames) worst-case work when no frame qualifies. Drainer invokes it on the idle and completed-pass paths. File probing is likewise O(sealed segments), not universally bounded.
+
+Evidence: [crates/shamir-wal/src/wal_sink.rs:205](../../../../../crates/shamir-wal/src/wal_sink.rs#L205); [crates/shamir-wal/src/segment_set.rs:559](../../../../../crates/shamir-wal/src/segment_set.rs#L559); [crates/shamir-engine/src/tx/drainer.rs:337](../../../../../crates/shamir-engine/src/tx/drainer.rs#L337); [crates/shamir-engine/src/tx/drainer.rs:953](../../../../../crates/shamir-engine/src/tx/drainer.rs#L953).
+
+<a id="review-2"></a>
+
+### Claim 2 — WalEntryV2::encode starts from a 256-byte capacity guess that realistic entries overflow
+
+Status: `confirmed-open`. Current risk: `low`.
+
+Encode reserves 256 bytes; the startup benchmark's 256-byte body plus headers necessarily exceeds it. Growth is source-supported, but five reallocations, mandatory memcpy, and a universal common-case impact are not established.
+
+Evidence: [crates/shamir-wal/src/wal_entry_v2.rs:215](../../../../../crates/shamir-wal/src/wal_entry_v2.rs#L215); [crates/shamir-wal/src/wal_entry_v2.rs:218](../../../../../crates/shamir-wal/src/wal_entry_v2.rs#L218); [crates/shamir-wal/benches/wal_startup_open.rs:37](../../../../../crates/shamir-wal/benches/wal_startup_open.rs#L37); [crates/shamir-wal/benches/wal_startup_open.rs:45](../../../../../crates/shamir-wal/benches/wal_startup_open.rs#L45).
+
+<a id="review-3"></a>
+
+### Claim 3 — Per-window allocation churn in lead_until_drained: pending Vec regrows from capacity 0 every window
+
+Status: `confirmed-open`. Current risk: `low`.
+
+mem::take replaces pending with an empty zero-capacity vector; each window also allocates payload and metadata vectors and scans metadata twice. No capacity recycling exists. Exact allocation counts and bottleneck significance are unmeasured.
+
+Evidence: [crates/shamir-wal/src/wal_group_commit.rs:158](../../../../../crates/shamir-wal/src/wal_group_commit.rs#L158); [crates/shamir-wal/src/wal_group_commit.rs:277](../../../../../crates/shamir-wal/src/wal_group_commit.rs#L277); [crates/shamir-wal/src/wal_group_commit.rs:280](../../../../../crates/shamir-wal/src/wal_group_commit.rs#L280); [crates/shamir-wal/src/wal_group_commit.rs:298](../../../../../crates/shamir-wal/src/wal_group_commit.rs#L298); [crates/shamir-wal/src/segment_set.rs:242](../../../../../crates/shamir-wal/src/segment_set.rs#L242).
+
+<a id="review-4"></a>
+
+### Claim 4 — Startup sidecar fallback decodes every entry to extract one u64
+
+Status: `confirmed-open`. Current risk: `low`.
+
+Missing or invalid sidecar invokes full sealed replay, constructs complete entries, scans commit_version, then drops them. This is unnecessary decode/allocation work for metadata discovery, although CRC validation still requires reading payload bytes.
+
+Evidence: [crates/shamir-wal/src/segment_set.rs:147](../../../../../crates/shamir-wal/src/segment_set.rs#L147); [crates/shamir-wal/src/segment_set.rs:155](../../../../../crates/shamir-wal/src/segment_set.rs#L155); [crates/shamir-wal/src/wal_segment.rs:527](../../../../../crates/shamir-wal/src/wal_segment.rs#L527); [crates/shamir-wal/src/wal_segment.rs:572](../../../../../crates/shamir-wal/src/wal_segment.rs#L572).
+
+<a id="review-5"></a>
+
+### Claim 5 — replay materializes the entire WAL as decoded entries in one Vec
+
+Status: `confirmed-open`. Current risk: `low`.
+
+SegmentSet accumulates all sealed and active entries; Mem does the same under its mutex. Memory grows with the untruncated corpus. This also occurs on live drainer gap-recovery, not just cold boot.
+
+Evidence: [crates/shamir-wal/src/segment_set.rs:433](../../../../../crates/shamir-wal/src/segment_set.rs#L433); [crates/shamir-wal/src/segment_set.rs:442](../../../../../crates/shamir-wal/src/segment_set.rs#L442); [crates/shamir-wal/src/wal_sink.rs:163](../../../../../crates/shamir-wal/src/wal_sink.rs#L163); [crates/shamir-engine/src/tx/drainer.rs:368](../../../../../crates/shamir-engine/src/tx/drainer.rs#L368); [crates/shamir-engine/src/tx/recovery.rs:335](../../../../../crates/shamir-engine/src/tx/recovery.rs#L335).
+
+<a id="review-6"></a>
+
+### Claim 6 — Full window bytes memcpy'd into the coalescing buffer per append batch
+
+Status: `not-applicable`. Current risk: —.
+
+The copy exists and deliberately coalesces framing into one write_all call. The report itself identifies it as a sound trade and not a defect. Moving owned Vecs through pending and payload collections does not copy their contents.
+
+Evidence: [crates/shamir-wal/src/wal_segment.rs:228](../../../../../crates/shamir-wal/src/wal_segment.rs#L228); [crates/shamir-wal/src/wal_segment.rs:232](../../../../../crates/shamir-wal/src/wal_segment.rs#L232); [crates/shamir-wal/src/wal_segment.rs:236](../../../../../crates/shamir-wal/src/wal_segment.rs#L236); [crates/shamir-wal/src/wal_group_commit.rs:283](../../../../../crates/shamir-wal/src/wal_group_commit.rs#L283).
+
+<a id="review-7"></a>
+
+### Claim 7 — One Arc<Waiter> heap allocation per single append
+
+Status: `not-applicable`. Current risk: —.
+
+The allocation exists and is an explicit coordination design choice. No correctness failure or measured current regression is alleged; historical alternative-performance percentages were not revalidated.
+
+Evidence: [crates/shamir-wal/src/wal_group_commit.rs:175](../../../../../crates/shamir-wal/src/wal_group_commit.rs#L175); [crates/shamir-wal/src/wal_group_commit.rs:44](../../../../../crates/shamir-wal/src/wal_group_commit.rs#L44).
+
+<a id="review-theme-core-amortization"></a>
+
+### Claim Theme/core-amortization — Exactly one write and at most one fsync per window
+
+Status: `refuted`. Current risk: —.
+
+There is one normal sink append_batch and at most one coordinator-requested sync per window. write_all may issue multiple OS writes; rotation performs its own fsync, Synced rotation can add another, and failure retry adds another append.
+
+Evidence: [crates/shamir-wal/src/wal_group_commit.rs:290](../../../../../crates/shamir-wal/src/wal_group_commit.rs#L290); [crates/shamir-wal/src/wal_group_commit.rs:309](../../../../../crates/shamir-wal/src/wal_group_commit.rs#L309); [crates/shamir-wal/src/wal_segment.rs:236](../../../../../crates/shamir-wal/src/wal_segment.rs#L236); [crates/shamir-wal/src/segment_set.rs:270](../../../../../crates/shamir-wal/src/segment_set.rs#L270); [crates/shamir-wal/src/segment_set.rs:367](../../../../../crates/shamir-wal/src/segment_set.rs#L367).
+
+<a id="review-theme-sidecar-startup-saving"></a>
+
+### Claim Theme/sidecar-startup-saving — Sidecar removed O(total WAL bytes) startup replay
+
+Status: `not-applicable`. Current risk: —.
+
+Valid sidecars avoid sealed data decoding during maximum discovery, demonstrated by a sensitive registered corrupt-data test. Active repair still scans its file; actual recovery still reads the corpus, and segment discovery sorts filenames.
+
+Evidence: [crates/shamir-wal/src/segment_set.rs:106](../../../../../crates/shamir-wal/src/segment_set.rs#L106); [crates/shamir-wal/src/segment_set.rs:145](../../../../../crates/shamir-wal/src/segment_set.rs#L145); [crates/shamir-wal/src/segment_set.rs:173](../../../../../crates/shamir-wal/src/segment_set.rs#L173); [crates/shamir-wal/src/tests/segment_set_tests.rs:557](../../../../../crates/shamir-wal/src/tests/segment_set_tests.rs#L557); [crates/shamir-tx/src/repo_wal_manager.rs:135](../../../../../crates/shamir-tx/src/repo_wal_manager.rs#L135).
+
+<a id="review-theme-measured-performance"></a>
+
+### Claim Theme/measured-performance — Historical 4.4× scaling, 63× fsync dominance, and lock-cost measurements
+
+Status: `unverified`. Current risk: —.
+
+Relevant benchmark targets are registered and source contains historical measurements, but none was executed. The direct SegmentSet benchmark times the entire append path and cannot isolate the inner mutex.
+
+Evidence: [crates/shamir-wal/Cargo.toml:26](../../../../../crates/shamir-wal/Cargo.toml#L26); [crates/shamir-wal/Cargo.toml:34](../../../../../crates/shamir-wal/Cargo.toml#L34); [crates/shamir-wal/benches/segment_set_lock.rs:131](../../../../../crates/shamir-wal/benches/segment_set_lock.rs#L131); [crates/shamir-wal/src/wal_segment.rs:90](../../../../../crates/shamir-wal/src/wal_segment.rs#L90).
+
+## Corrections and qualified non-findings
+
+- Use worst-case O(N), because any short-circuits when a qualifying frame occurs early.
+- Neither an 8 MiB threshold nor a single append leader bounds the sealed-segment count.
+- Large serialize_into writes can grow a Vec directly to fit; the proposed five-reallocation ladder is not proven.
+- CRC scanning remains O(payload bytes) even if a header-only metadata decoder eliminates entry materialization.
+- Streaming recovery must retain global commit-version ordering; filename order alone does not establish it.
+- Benchmarks and fsync-count tests do not prove an exact count of kernel write/fsync syscalls.
+
+---
+
+<details>
+<summary>Historical report — preserved for provenance; not current status or instructions</summary>
+
 # shamir-wal -- Performance & O(x->0)
 
 ## Summary
@@ -56,3 +187,5 @@ The crate's core amortization story is sound and unusually well documented: grou
 ## Theme-coverage note (no action)
 
 The two sanctioned mutexes on the append path (`WalGroupCommit::pending`, `SegmentSet::inner`) are concurrency-theme items and were explicitly investigated and closed in CLAUDE.md (#1095/#1109, architectural single-writer argument) — not re-litigated here. `MemSink.frames` growing without bound until `truncate_below` is WAL-by-definition (cannot drop before durability), not a buffering bug. Test/bench coverage for this theme is good: `benches/wal_append.rs` (contention × tier), `benches/wal_startup_open.rs` (sidecar vs full-replay startup), `benches/segment_set_lock.rs` (lock cost), plus `synced_fsyncs_are_batched` / `buffered_only_window_issues_no_fsync` asserting the syscall amortization the design claims.
+
+</details>

@@ -1,3 +1,203 @@
+<!-- revalidation:2026-10-08 source:92ad58266bf57ddea1fa3c8a47affba1a3a9a096 -->
+# shamir-client — correctness-tdd revalidation
+
+Source snapshot: `92ad58266bf57ddea1fa3c8a47affba1a3a9a096`. Revalidated 2026-10-08 by read-only XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run; no source fix is part of this update. Test registration/assertions are evidence of an oracle, not proof of a passing run.
+
+This section is authoritative for current status. Original titles/IDs are retained for traceability; a refuted title is not a current assertion. The collapsed historical report below is superseded, including its counts, severity, scenarios and fix instructions. Plan IDs preserve historical numbering, not a current release mandate. [Workspace methodology and status definitions](../SUMMARY.md#status-definitions).
+
+The principal lifecycle, reference-detection, dump, and multi-repo defects remain open. The atomic debug-overflow allegation is false; several coverage claims need qualification.
+
+## Current claim decisions
+
+| Claim decisions | Open | Source-fixed | Partial | Refuted | Unverified | N/A |
+|---:|---:|---:|---:|---:|---:|---:|
+| 14 | 13 | 0 | 0 | 1 | 0 | 0 |
+
+These are decisions on report claims, including repeated roots, bundled observations and non-findings—not a unique-bug census. Closed/N/A rows have no current risk; unverified risk is provisional. Pure style and unmeasured optimization claims do not establish runtime impact.
+
+<a id="review-1"></a>
+
+### Claim 1 — Connection death never closes subscription channels -- `SubscriptionHandle::next()` hangs forever
+
+Status: `confirmed-open`. Current risk: `high`.
+
+Reader exit drains only pending requests. Handles retain the sender registry; after queued pushes drain, recv remains pending.
+
+Evidence: [crates/shamir-client/src/client.rs:407](../../../../../crates/shamir-client/src/client.rs#L407); [crates/shamir-client/src/subscription.rs:36](../../../../../crates/shamir-client/src/subscription.rs#L36); [crates/shamir-client/src/subscription.rs:54](../../../../../crates/shamir-client/src/subscription.rs#L54).
+
+Grouping/duplicate: `SUMMARY.md#1.1`. This row is not another independent defect.
+
+<a id="review-2"></a>
+
+### Claim 2 — `batch_has_refs` misses two ref carriers: `QueryEntry.when` guards and `BatchOp::ForEach`
+
+Status: `confirmed-open`. Current risk: `high`.
+
+The walk ignores entry.when and ForEach. IdBytes intermediates remain opaque to engine reference resolution; existing tests do not cover these combinations.
+
+Evidence: [crates/shamir-client/src/interner_cache_ops.rs:513](../../../../../crates/shamir-client/src/interner_cache_ops.rs#L513); [crates/shamir-engine/src/query/batch/query_runner.rs:136](../../../../../crates/shamir-engine/src/query/batch/query_runner.rs#L136); [crates/shamir-engine/src/query/batch/query_runner.rs:758](../../../../../crates/shamir-engine/src/query/batch/query_runner.rs#L758); [crates/shamir-query-types/src/read/query_record.rs:195](../../../../../crates/shamir-query-types/src/read/query_record.rs#L195).
+
+Grouping/duplicate: `SUMMARY.md#1.2`. This row is not another independent defect.
+
+<a id="review-3"></a>
+
+### Claim 3 — `resume()` never verifies server identity -- `server_pub_key_pin()` returns unverified caller input
+
+Status: `confirmed-open`. Current risk: `high`.
+
+Accept-any-cert TLS precedes ticket disclosure; resume validates only session-id length and stores the supplied pin without authentication.
+
+Evidence: [crates/shamir-client/src/client.rs:866](../../../../../crates/shamir-client/src/client.rs#L866); [crates/shamir-client/src/client.rs:890](../../../../../crates/shamir-client/src/client.rs#L890); [crates/shamir-client/src/client.rs:937](../../../../../crates/shamir-client/src/client.rs#L937); [crates/shamir-client/src/wire_frames.rs:51](../../../../../crates/shamir-client/src/wire_frames.rs#L51).
+
+Grouping/duplicate: `SUMMARY.md#3.1`. This row is not another independent defect.
+
+<a id="review-4"></a>
+
+### Claim 4 — `subscribe_push` / early-buffer routing race strands pushes
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+Registry lookup/insertion and early-buffer append/removal remain separate critical sections, permitting stranded pushes and flush-versus-direct-send reordering.
+
+Evidence: [crates/shamir-client/src/client.rs:330](../../../../../crates/shamir-client/src/client.rs#L330); [crates/shamir-client/src/client.rs:349](../../../../../crates/shamir-client/src/client.rs#L349); [crates/shamir-client/src/client.rs:998](../../../../../crates/shamir-client/src/client.rs#L998).
+
+Grouping/duplicate: `SUMMARY.md#1.3`. This row is not another independent defect.
+
+<a id="review-5"></a>
+
+### Claim 5 — `dump_repo`: failed dump poisons the OnceCell as "populated" and later calls never re-dump
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+Both error branches resolve unit; get_or_init therefore initializes populated. Subsequent calls skip the closure and return success.
+
+Evidence: [crates/shamir-client/src/interner_cache_ops.rs:191](../../../../../crates/shamir-client/src/interner_cache_ops.rs#L191); [crates/shamir-client/src/interner_cache_ops.rs:211](../../../../../crates/shamir-client/src/interner_cache_ops.rs#L211); [crates/shamir-client/src/interner_cache.rs:175](../../../../../crates/shamir-client/src/interner_cache.rs#L175).
+
+Grouping/duplicate: `SUMMARY.md#1.4`. This row is not another independent defect.
+
+<a id="review-6"></a>
+
+### Claim 6 — Multi-repo v2 de-intern: first-match FieldMap can silently attach wrong field names
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+Results discard alias-to-repo provenance and probe every candidate map. Overlapping repo-local IDs can resolve successfully using another repo's names.
+
+Evidence: [crates/shamir-client/src/interner_cache_ops.rs:638](../../../../../crates/shamir-client/src/interner_cache_ops.rs#L638); [crates/shamir-client/src/interner_cache_ops.rs:702](../../../../../crates/shamir-client/src/interner_cache_ops.rs#L702); [crates/shamir-client/src/interner_cache_ops.rs:728](../../../../../crates/shamir-client/src/interner_cache_ops.rs#L728).
+
+Grouping/duplicate: `SUMMARY.md#1.5`. This row is not another independent defect.
+
+<a id="review-7"></a>
+
+### Claim 7 — Vacuous test: `atomic_u8_plumbing_stores_and_reads_correctly` tests std, not the client
+
+Status: `confirmed-open`. Current risk: `low`.
+
+The registered test constructs standalone atomics, never Client. V2 integration tests can early-return when version plumbing regresses.
+
+Evidence: [crates/shamir-client/src/tests/wire_version_tests.rs:135](../../../../../crates/shamir-client/src/tests/wire_version_tests.rs#L135); [crates/shamir-client/src/tests/v2_passthrough_tests.rs:154](../../../../../crates/shamir-client/src/tests/v2_passthrough_tests.rs#L154); [crates/shamir-client/src/tests/mod.rs:9](../../../../../crates/shamir-client/src/tests/mod.rs#L9).
+
+Grouping/duplicate: `SUMMARY.md#1.6`. This row is not another independent defect.
+
+<a id="review-8"></a>
+
+### Claim 8 — `get_ddl_op_status`: comment contradicts behavior; method has zero test coverage
+
+Status: `confirmed-open`. Current risk: `low`.
+
+The special-case arm is unreachable: roundtrip converts DbResponse::Error into Err(Db) before the method matches. No client test calls the method.
+
+Evidence: [crates/shamir-client/src/client.rs:1207](../../../../../crates/shamir-client/src/client.rs#L1207); [crates/shamir-client/src/client.rs:1293](../../../../../crates/shamir-client/src/client.rs#L1293); [crates/shamir-client/src/tests/mod.rs:1](../../../../../crates/shamir-client/src/tests/mod.rs#L1).
+
+Grouping/duplicate: `SUMMARY.md#1.7`. This row is not another independent defect.
+
+<a id="review-9"></a>
+
+### Claim 9 — Duplicate `subscribe_push(sub_id)`: dropping the first handle closes the second
+
+Status: `confirmed-open`. Current risk: `low`.
+
+Registration overwrites by sub_id; the stale handle's unconditional Drop removal deletes the replacement sender.
+
+Evidence: [crates/shamir-client/src/client.rs:1000](../../../../../crates/shamir-client/src/client.rs#L1000); [crates/shamir-client/src/subscription.rs:59](../../../../../crates/shamir-client/src/subscription.rs#L59).
+
+Grouping/duplicate: `SUMMARY.md#1.8`. This row is not another independent defect.
+
+<a id="review-10"></a>
+
+### Claim 10 — `collect_map_keys` skips `Value::Set` (asymmetric with `qv_has_fn_marker`)
+
+Status: `confirmed-open`. Current risk: `low`.
+
+Collection omits sets, while storage encoding recursively interns maps inside sets. Cold nested keys can fail despite pre-touch.
+
+Evidence: [crates/shamir-client/src/interner_cache_ops.rs:468](../../../../../crates/shamir-client/src/interner_cache_ops.rs#L468); [crates/shamir-client/src/interner_cache_ops.rs:499](../../../../../crates/shamir-client/src/interner_cache_ops.rs#L499); [crates/shamir-types/src/codecs/interned/messagepack.rs:965](../../../../../crates/shamir-types/src/codecs/interned/messagepack.rs#L965).
+
+Grouping/duplicate: `SUMMARY.md#1.9`. This row is not another independent defect.
+
+<a id="review-11"></a>
+
+### Claim 11 — TDD-coverage gaps: untested public paths
+
+Status: `confirmed-open`. Current risk: `low`.
+
+Client-local tests still lack full resume, subscribe_push flushing, Client close/Drop reader-liveness, and when/ForEach smart-path coverage.
+
+Evidence: [crates/shamir-client/src/tests/mod.rs:1](../../../../../crates/shamir-client/src/tests/mod.rs#L1); [crates/shamir-client/src/tests/resume_wire_tests.rs:1](../../../../../crates/shamir-client/src/tests/resume_wire_tests.rs#L1); [crates/shamir-client/src/tests/demux_tests.rs:314](../../../../../crates/shamir-client/src/tests/demux_tests.rs#L314); [crates/shamir-client/tests/batch_when_e2e.rs:219](../../../../../crates/shamir-client/tests/batch_when_e2e.rs#L219).
+
+Grouping/duplicate: `SUMMARY.md#1.10`. This row is not another independent defect.
+
+<a id="review-12"></a>
+
+### Claim 12 — `connect_timeout_fires` depends on 10.255.255.1:9 being a silent black hole
+
+Status: `confirmed-open`. Current risk: `nit`.
+
+Both TCP timeout tests assume externally dependent SYN behavior. Fast refusal/unreachability invalidates their expected timeout outcomes.
+
+Evidence: [crates/shamir-client/src/tests/timeout_tests.rs:26](../../../../../crates/shamir-client/src/tests/timeout_tests.rs#L26); [crates/shamir-client/src/tests/timeout_tests.rs:37](../../../../../crates/shamir-client/src/tests/timeout_tests.rs#L37); [crates/shamir-client/src/tests/timeout_tests.rs:67](../../../../../crates/shamir-client/src/tests/timeout_tests.rs#L67).
+
+Grouping/duplicate: `SUMMARY.md#1.11`. This row is not another independent defect.
+
+<a id="review-13"></a>
+
+### Claim 13 — `close()` never sets the `closed` flag though `ConnectionClosed`'s doc lists "explicit close()" as a trigger
+
+Status: `confirmed-open`. Current risk: `nit`.
+
+Close aborts the reader and shuts down writing without updating closed. Consuming self makes this mainly bookkeeping/documentation inconsistency.
+
+Evidence: [crates/shamir-client/src/client.rs:1306](../../../../../crates/shamir-client/src/client.rs#L1306); [crates/shamir-client/src/error.rs:41](../../../../../crates/shamir-client/src/error.rs#L41).
+
+Grouping/duplicate: `SUMMARY.md#1.12`. This row is not another independent defect.
+
+<a id="review-14"></a>
+
+### Claim 14 — `next_request_id` u32 `fetch_add` overflow panics in debug builds
+
+Status: `refuted`. Current risk: —.
+
+AtomicU32::fetch_add has wrapping arithmetic in debug and release. The separate outstanding-rid collision risk remains, but this panic mechanism does not.
+
+Evidence: [crates/shamir-client/src/client.rs:1259](../../../../../crates/shamir-client/src/client.rs#L1259); [crates/shamir-client/src/client.rs:1271](../../../../../crates/shamir-client/src/client.rs#L1271).
+
+Grouping/duplicate: `SUMMARY.md#1.13`. This row is not another independent defect.
+
+## Corrections and qualified non-findings
+
+- No standalone Fix Plan or TASK_GROUPS is present; suggested fixes are evaluated through the finding rows and SUMMARY Fix Plan.
+- Correctness #7 is a coverage weakness, not a demonstrated medium-severity runtime defect.
+- For correctness #2, scanning entry.when is insufficient unless filter_has_refs also handles Filter::ValueCompare.left/right.
+- An accepted-but-silent loopback listener cannot test connect_tcp's TCP-establishment timeout; use a controllable pending connect abstraction.
+- The dump test starts with an already warm cache and cannot prove an actual dump populated it: crates/shamir-client/src/tests/interner_cache_tests.rs:194.
+- The alleged cold-cache refresh test is masked by ambient delta merging before de-interning: crates/shamir-client/src/client.rs:1077 and crates/shamir-db/src/shamir_db/execute/ambient_interner.rs:30.
+- A signed resume_ok received after ticket transmission would not prevent ticket theft; authenticate before disclosing the ticket.
+
+---
+
+<details>
+<summary>Historical report — preserved for provenance; not current status or instructions</summary>
+
 # shamir-client -- Correctness & TDD-coverage
 
 ## Summary
@@ -224,3 +424,5 @@ with active subscriptions).
   rid 0 is harmless (rid is echoed opaquely and the pending map is keyed by it).
 - Suggested fix: `fetch_update` with a documented wrap, or `Wrapping` semantics comment.
 
+
+</details>

@@ -1,3 +1,56 @@
+<!-- revalidation:2026-10-08 source:92ad58266bf57ddea1fa3c8a47affba1a3a9a096 -->
+# shamir-transport-tcp — concurrency-lockfree revalidation
+
+Source snapshot: `92ad58266bf57ddea1fa3c8a47affba1a3a9a096`. Revalidated 2026-10-08 by read-only XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run; no source fix is part of this update. Test registration/assertions are evidence of an oracle, not proof of a passing run.
+
+This section is authoritative for current status. Original titles/IDs are retained for traceability; a refuted title is not a current assertion. The collapsed historical report below is superseded, including its counts, severity, scenarios and fix instructions. Plan IDs preserve historical numbering, not a current release mandate. [Workspace methodology and status definitions](../SUMMARY.md#status-definitions).
+
+No explicit locks or hash registries exist in this crate's implementation. Both bootstrap-contract and current-thread test scheduling concerns remain; neither establishes a measured stall or existing test failure.
+
+## Current claim decisions
+
+| Claim decisions | Open | Source-fixed | Partial | Refuted | Unverified | N/A |
+|---:|---:|---:|---:|---:|---:|---:|
+| 2 | 2 | 0 | 0 | 0 | 0 | 0 |
+
+These are decisions on report claims, including repeated roots, bundled observations and non-findings—not a unique-bug census. Closed/N/A rows have no current risk; unverified risk is provisional. Pure style and unmeasured optimization claims do not establish runtime impact.
+
+<a id="review-1"></a>
+
+### Claim 1 — Sync CPU-bound bootstrap helpers lack a spawn_blocking / bootstrap-only contract (pillar 2, letter)
+
+Status: `confirmed-open`. Current risk: `low`.
+
+Certificate generation and PEM/config construction remain synchronous without bootstrap-only or spawn_blocking guidance. Current server use is startup initialization, not a demonstrated per-connection hot path.
+
+Evidence: [crates/shamir-transport-tcp/src/tls.rs:22](../../../../../crates/shamir-transport-tcp/src/tls.rs#L22); [crates/shamir-transport-tcp/src/tls.rs:40](../../../../../crates/shamir-transport-tcp/src/tls.rs#L40); [crates/shamir-server/src/server/server_launcher.rs:601](../../../../../crates/shamir-server/src/server/server_launcher.rs#L601).
+
+Grouping/duplicate: `SUMMARY.md#2.1`. This row is not another independent defect.
+
+<a id="review-2"></a>
+
+### Claim 2 — e2e tests run Argon2id inline on the test runtime thread while a peer task is spawned (fragile, no live failure)
+
+Status: `confirmed-open`. Current risk: `nit`.
+
+Both e2e tests retain default current-thread runtimes and directly call process_challenge, which synchronously derives keys. Their sequential exchange does not prove a present deadlock or timeout.
+
+Evidence: [crates/shamir-transport-tcp/tests/handshake_e2e.rs:113](../../../../../crates/shamir-transport-tcp/tests/handshake_e2e.rs#L113); [crates/shamir-transport-tcp/tests/handshake_e2e.rs:278](../../../../../crates/shamir-transport-tcp/tests/handshake_e2e.rs#L278); [crates/shamir-transport-tcp/tests/echo_e2e.rs:152](../../../../../crates/shamir-transport-tcp/tests/echo_e2e.rs#L152); [crates/shamir-transport-tcp/tests/echo_e2e.rs:376](../../../../../crates/shamir-transport-tcp/tests/echo_e2e.rs#L376); [crates/shamir-connect/src/client/handshake.rs:231](../../../../../crates/shamir-connect/src/client/handshake.rs#L231).
+
+Grouping/duplicate: `SUMMARY.md#2.2`. This row is not another independent defect.
+
+## Corrections and qualified non-findings
+
+- Qualify zero-lock claims as properties of this crate's own implementation, not its transitive execution. SessionStore and DashMap use internal locks.
+- The SessionStore::len exclusion remains justified: it delegates to DashMap's shard-counting implementation, not an O(N) scc traversal; see crates/shamir-connect/src/server/session.rs:530 and Cargo.lock:1096. It is not itself lock-free.
+- The stated KDF duration and predicted future SLOW/TIMEOUT behavior are unmeasured hypotheses.
+- Exclusive mutable framing ownership, absence of hash-keyed structures and absence of explicit lock-across-await sites remain source-supported.
+
+---
+
+<details>
+<summary>Historical report — preserved for provenance; not current status or instructions</summary>
+
 # shamir-transport-tcp -- Concurrency & lock-free invariants
 
 ## Summary
@@ -21,3 +74,5 @@ The crate is essentially clean under all five pillars. Full read + grep confirm 
 - Suggested fix: switch these two tests to `#[tokio::test(flavor = "multi_thread")]`, or wrap the KDF step in `tokio::task::spawn_blocking` (which also matches pillar 2 and makes the tests independent of task-scheduling order). Test-only; no production code change.
 
 No findings for the remaining theme items: no `scc::*::len()` anywhere in the crate (the single store-`len()` call is `DashMap::len`, constant over shards, test-only, not disallowed); no `std::sync::Mutex`/`RwLock`/`parking_lot` on any path; no locks held across `.await` (no locks exist); no hidden O(N)/O(N^2) helpers (per-frame costs are linear in frame bytes, which is inherent, and the O(1) `write_frame_prereserved` validation is explicitly commented).
+
+</details>

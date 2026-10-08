@@ -1,3 +1,145 @@
+<!-- revalidation:2026-10-08 source:92ad58266bf57ddea1fa3c8a47affba1a3a9a096 -->
+# shamir-bench-utils — api-wire-protocol revalidation
+
+Source snapshot: `92ad58266bf57ddea1fa3c8a47affba1a3a9a096`. Revalidated 2026-10-08 by read-only XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run; no source fix is part of this update. Test registration/assertions are evidence of an oracle, not proof of a passing run.
+
+This section is authoritative for current status. Original titles/IDs are retained for traceability; a refuted title is not a current assertion. The collapsed historical report below is superseded, including its counts, severity, scenarios and fix instructions. Plan IDs preserve historical numbering, not a current release mandate. [Workspace methodology and status definitions](../SUMMARY.md#status-definitions).
+
+Feature plumbing, artifact metadata, mirror enforcement, versioning, and documentation remain unresolved. The blanket all-dev-binaries allocator claim is narrowed to binaries actually linking the helper.
+
+## Current claim decisions
+
+| Claim decisions | Open | Source-fixed | Partial | Refuted | Unverified | N/A |
+|---:|---:|---:|---:|---:|---:|---:|
+| 9 | 9 | 0 | 0 | 0 | 0 | 0 |
+
+These are decisions on report claims, including repeated roots, bundled observations and non-findings—not a unique-bug census. Closed/N/A rows have no current risk; unverified risk is provisional. Pure style and unmeasured optimization claims do not establish runtime impact.
+
+<a id="review-1"></a>
+
+### Claim 1 — `peak_mem`'s global allocator is silently active for every bench/example/test binary of shamir-engine and shamir-index, contradicting the documented "off by default" contract
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+Both dev dependencies still unconditionally enable peak_mem; importing only vector_data therefore also links a crate containing PeakAlloc. This proves the timing-only fixture consumers are affected, not that every unused dev dependency is linked into every test/bench/example binary.
+
+Evidence: [crates/shamir-engine/Cargo.toml:107](../../../../../crates/shamir-engine/Cargo.toml#L107); [crates/shamir-index/Cargo.toml:64](../../../../../crates/shamir-index/Cargo.toml#L64); [crates/shamir-bench-utils/src/peak_mem.rs:39](../../../../../crates/shamir-bench-utils/src/peak_mem.rs#L39); [crates/shamir-engine/benches/filtered_vector_search.rs:25](../../../../../crates/shamir-engine/benches/filtered_vector_search.rs#L25).
+
+Grouping/duplicate: `SUMMARY.md#5.1`. This row is not another independent defect.
+
+<a id="review-2"></a>
+
+### Claim 2 — `ClusteredDataset` doc claims "(k, σ) parameters are recoverable from the artefact alone" — σ never is, and k is clamped
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+Only vectors and centroids are stored. Requested k, sigma, and seed cannot be recovered exactly; k() returns effective centroid count. The report still maintains separate requested parameters.
+
+Evidence: [crates/shamir-bench-utils/src/vector_data.rs:111](../../../../../crates/shamir-bench-utils/src/vector_data.rs#L111); [crates/shamir-bench-utils/src/vector_data.rs:113](../../../../../crates/shamir-bench-utils/src/vector_data.rs#L113); [crates/shamir-bench-utils/src/vector_data.rs:179](../../../../../crates/shamir-bench-utils/src/vector_data.rs#L179); [crates/shamir-engine/examples/vector_report.rs:184](../../../../../crates/shamir-engine/examples/vector_report.rs#L184).
+
+Grouping/duplicate: `SUMMARY.md#5.2`. This row is not another independent defect.
+
+<a id="review-3"></a>
+
+### Claim 3 — The cross-crate LCG "lineage" contract is prose-only: ~13 hand-maintained mirrors, zero enforcement, and the stated justification for the duplication is stale
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+The named local generators still duplicate constants/formulas without canonical comparison tests; sq8's no-dev-dependency justification is false. However, several named uniform helpers intentionally use a different float mapping, and the stated lineage contract requires shared constants, not identical Gaussian datasets at every site.
+
+Evidence: [crates/shamir-index/src/vector/tests/sq8_tests.rs:16](../../../../../crates/shamir-index/src/vector/tests/sq8_tests.rs#L16); [crates/shamir-index/src/vector/tests/sq8_tests.rs:33](../../../../../crates/shamir-index/src/vector/tests/sq8_tests.rs#L33); [crates/shamir-index/src/vector/tests/hnsw_rs_contract_tests.rs:43](../../../../../crates/shamir-index/src/vector/tests/hnsw_rs_contract_tests.rs#L43); [crates/shamir-index/src/vector/tests/mod.rs:14](../../../../../crates/shamir-index/src/vector/tests/mod.rs#L14); [crates/shamir-index/Cargo.toml:64](../../../../../crates/shamir-index/Cargo.toml#L64).
+
+Grouping/duplicate: `SUMMARY.md#5.3`. This row is not another independent defect.
+
+<a id="review-4"></a>
+
+### Claim 4 — Reproducibility key excludes any generator/dataset-format version
+
+Status: `confirmed-open`. Current risk: `low`.
+
+The public artifact and generator contain no algorithm-version identifier, and the report prints the five input parameters without a generator version or source revision.
+
+Evidence: [crates/shamir-bench-utils/src/vector_data.rs:158](../../../../../crates/shamir-bench-utils/src/vector_data.rs#L158); [crates/shamir-bench-utils/src/vector_data.rs:113](../../../../../crates/shamir-bench-utils/src/vector_data.rs#L113); [crates/shamir-engine/examples/vector_report.rs:336](../../../../../crates/shamir-engine/examples/vector_report.rs#L336).
+
+Grouping/duplicate: `SUMMARY.md#5.4`. This row is not another independent defect.
+
+<a id="review-5"></a>
+
+### Claim 5 — `peak_mem` module docs still teach the removed Criterion API
+
+Status: `confirmed-open`. Current risk: `low`.
+
+Ignored examples and setup documentation still use the removed integration; doctests remain disabled, and actual benches use Harness.
+
+Evidence: [crates/shamir-bench-utils/src/peak_mem.rs:10](../../../../../crates/shamir-bench-utils/src/peak_mem.rs#L10); [crates/shamir-bench-utils/src/peak_mem.rs:44](../../../../../crates/shamir-bench-utils/src/peak_mem.rs#L44); [crates/shamir-bench-utils/Cargo.toml:11](../../../../../crates/shamir-bench-utils/Cargo.toml#L11).
+
+Grouping/duplicate: `SUMMARY.md#7.2`. This row is not another independent defect.
+
+<a id="review-6"></a>
+
+### Claim 6 — `clustered_vectors` panics on `k_clusters == 0` / `dim == 0` instead of returning `Result`
+
+Status: `confirmed-open`. Current risk: `low`.
+
+Both asserts remain. Contrary to the original all-constant-caller premise, vector_report accepts zero VR_K_CLUSTERS through parsing and passes it to the helper. This is local report-tool validation, not remote production reachability.
+
+Evidence: [crates/shamir-bench-utils/src/vector_data.rs:171](../../../../../crates/shamir-bench-utils/src/vector_data.rs#L171); [crates/shamir-engine/examples/vector_report.rs:110](../../../../../crates/shamir-engine/examples/vector_report.rs#L110); [crates/shamir-engine/examples/vector_report.rs:212](../../../../../crates/shamir-engine/examples/vector_report.rs#L212); [crates/shamir-engine/examples/vector_report.rs:406](../../../../../crates/shamir-engine/examples/vector_report.rs#L406).
+
+Grouping/duplicate: `SUMMARY.md#6.1`. This row is not another independent defect.
+
+<a id="review-7"></a>
+
+### Claim 7 — Cargo.toml `description` advertises the removed BENCH_QUICK tier feature
+
+Status: `confirmed-open`. Current risk: `low`.
+
+The removed tier feature remains in package metadata despite its absence from current implementation.
+
+Evidence: [crates/shamir-bench-utils/Cargo.toml:6](../../../../../crates/shamir-bench-utils/Cargo.toml#L6); [crates/shamir-bench-utils/src/lib.rs:9](../../../../../crates/shamir-bench-utils/src/lib.rs#L9).
+
+Grouping/duplicate: `SUMMARY.md#5.5`. This row is not another independent defect.
+
+<a id="review-8"></a>
+
+### Claim 8 — `Lcg::next_f32` can return exactly 1.0, violating its documented `[0, 1)` range
+
+Status: `confirmed-open`. Current risk: `nit`.
+
+The unchanged u32-to-f32 conversion rounds the top 128 high-word values to 2^32 before division. The issue is source-proven, not merely a hypothetical endpoint.
+
+Evidence: [crates/shamir-bench-utils/src/vector_data.rs:71](../../../../../crates/shamir-bench-utils/src/vector_data.rs#L71); [crates/shamir-bench-utils/src/vector_data.rs:75](../../../../../crates/shamir-bench-utils/src/vector_data.rs#L75).
+
+Grouping/duplicate: `SUMMARY.md#1.3`. This row is not another independent defect.
+
+<a id="review-9"></a>
+
+### Claim 9 — `peak_mem::measure`/`measure_async` have an undocumented process-global single-flight contract; `setup()`'s stated rationale is dubious; tuple return
+
+Status: `confirmed-open`. Current risk: `nit`.
+
+No process-wide single-measurement contract or ownership exists. setup has no activation operation, only a static reference. The documented tuple is not itself a correctness defect; a named return type is optional API polish.
+
+Evidence: [crates/shamir-bench-utils/src/peak_mem.rs:48](../../../../../crates/shamir-bench-utils/src/peak_mem.rs#L48); [crates/shamir-bench-utils/src/peak_mem.rs:74](../../../../../crates/shamir-bench-utils/src/peak_mem.rs#L74); [crates/shamir-bench-utils/src/peak_mem.rs:89](../../../../../crates/shamir-bench-utils/src/peak_mem.rs#L89); [crates/shamir-bench-utils/src/peak_mem.rs:106](../../../../../crates/shamir-bench-utils/src/peak_mem.rs#L106).
+
+Grouping/duplicate: `SUMMARY.md#2.1`. This row is not another independent defect.
+
+## Corrections and qualified non-findings
+
+- No serde, wire operations, or query construction exist in this crate; builder-only compliance is confirmed. Dependency-free means default configuration only: peak_alloc is optional.
+- Feature resolution is not proof of linkage. No helper imports occur in the engine/index library test sources; do not claim every unit-test binary runs under PeakAlloc.
+- Consumer passthrough features remain invocation-wide: required-features controls target eligibility, not allocator isolation when several targets share an enabled invocation.
+- Canonical imports are shamir_bench_utils::vector_data::{Lcg, clustered_vectors}; the proposed root imports do not match lib.rs exports.
+- All named mirror sites and their test registrations were inspected. Shared-state constants, uniform mappings, Gaussian generators, and deletion selection are distinct contracts; migration must preserve intended variants.
+- The original brief requests the same multiplier and seeded reproducibility, not byte identity with every uniform contract-test helper.
+- The endpoint probability over uniformly distributed high words is 128/2^32, approximately 2^-25, not 2^-32.
+- Reading current_peak alone does not corrupt counters; overlapping reset operations invalidate measurement ownership.
+- A pure layout change preserving draw order need not change generator output or require an algorithm-version bump.
+
+---
+
+<details>
+<summary>Historical report — preserved for provenance; not current status or instructions</summary>
+
 # shamir-bench-utils -- API & wire-protocol design
 
 ## Summary
@@ -68,3 +210,5 @@ Tiny, dependency-free public surface: `vector_data` (deterministic clustered-dat
 - Issue: `reset()` clobbers one process-wide counter, so two concurrent `measure` calls (or any concurrent `current_peak()`) corrupt each other's readings — acceptable for today's sequential bench cells but nowhere stated (the `measure_async` doc only warns about interleaved allocations, `:98-101`). `setup()`'s justification — "so the linker doesn't strip the global allocator in LTO builds" (`:49-50`) — is not how `#[global_allocator]` registration works (it is applied whenever the crate is linked, referenced or not); the function is an honest no-op but the doc mis-explains it. `measure` returns an anonymous `(R, usize)` tuple; a named struct would be self-documenting at call sites.
 - Failure scenario: A future parallel bench harness measures two workloads concurrently and gets garbage peaks; readers of `setup()` inherit a cargo-cult linker superstition.
 - Suggested fix: Document "at most one measurement in flight per process" on `reset`/`current_peak`/`measure`; simplify `setup()` to a plain documentation anchor without the linker claim (or remove it); consider `struct Measurement<R> { result: R, peak_bytes: usize }`.
+
+</details>

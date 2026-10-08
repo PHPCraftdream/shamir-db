@@ -1,3 +1,208 @@
+<!-- revalidation:2026-10-08 source:92ad58266bf57ddea1fa3c8a47affba1a3a9a096 -->
+# shamir-connect — api-wire-protocol revalidation
+
+Source snapshot: `92ad58266bf57ddea1fa3c8a47affba1a3a9a096`. Revalidated 2026-10-08 by read-only XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run; no source fix is part of this update. Test registration/assertions are evidence of an oracle, not proof of a passing run.
+
+This section is authoritative for current status. Original titles/IDs are retained for traceability; a refuted title is not a current assertion. The collapsed historical report below is superseded, including its counts, severity, scenarios and fix instructions. Plan IDs preserve historical numbering, not a current release mandate. [Workspace methodology and status definitions](../SUMMARY.md#status-definitions).
+
+Feature separation, dispatch policy, placeholder encoding, and several API hygiene gaps remain. Missing byte annotations are proven; wire-size multipliers and blanket auth-error collapse are not.
+
+## Current claim decisions
+
+| Claim decisions | Open | Source-fixed | Partial | Refuted | Unverified | N/A |
+|---:|---:|---:|---:|---:|---:|---:|
+| 17 | 14 | 0 | 0 | 1 | 0 | 2 |
+
+These are decisions on report claims, including repeated roots, bundled observations and non-findings—not a unique-bug census. Closed/N/A rows have no current risk; unverified risk is provisional. Pure style and unmeasured optimization claims do not establish runtime impact.
+
+<a id="review-1"></a>
+
+### Claim 1 — client feature cannot build without server
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+The documented client-only feature recipe removes server registration while client modules import server types unconditionally. Source proves the inconsistency; no compiler was run.
+
+Evidence: [crates/shamir-connect/Cargo.toml:18](../../../../../crates/shamir-connect/Cargo.toml#L18); [crates/shamir-connect/src/lib.rs:29](../../../../../crates/shamir-connect/src/lib.rs#L29); [crates/shamir-connect/src/client/changepw.rs:11](../../../../../crates/shamir-connect/src/client/changepw.rs#L11); [crates/shamir-connect/README.md:24](../../../../../crates/shamir-connect/README.md#L24).
+
+<a id="review-2"></a>
+
+### Claim 2 — dispatch_request lacks its documented twin's rate-limit gate
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+Policy asymmetry remains public; the live server chooses the protected variant.
+
+Evidence: [crates/shamir-connect/src/server/dispatch.rs:100](../../../../../crates/shamir-connect/src/server/dispatch.rs#L100); [crates/shamir-connect/src/server/dispatch.rs:153](../../../../../crates/shamir-connect/src/server/dispatch.rs#L153).
+
+Grouping/duplicate: `security-crypto.md#1`. This row is not another independent defect.
+
+<a id="review-3"></a>
+
+### Claim 3 — encode_details_canonical is a broken placeholder public API
+
+Status: `confirmed-open`. Current risk: `low`.
+
+The signature uses DefaultConfig and the body returns empty bytes. No production caller was found.
+
+Evidence: [crates/shamir-connect/src/server/audit_chain.rs:355](../../../../../crates/shamir-connect/src/server/audit_chain.rs#L355); [crates/shamir-connect/src/server/audit_chain.rs:360](../../../../../crates/shamir-connect/src/server/audit_chain.rs#L360).
+
+<a id="review-4"></a>
+
+### Claim 4 — RequestHandler::handle Err(String) flows verbatim onto the wire
+
+Status: `confirmed-open`. Current risk: `low`.
+
+The raw String contract and forwarding remain; production includes formatted decoder errors. An embedder can leak internal diagnostics. However, AUTH §14 concerns authentication privacy and does not require every application error to become AuthFailed.
+
+Evidence: [crates/shamir-connect/src/server/dispatch.rs:30](../../../../../crates/shamir-connect/src/server/dispatch.rs#L30); [crates/shamir-connect/src/server/dispatch.rs:168](../../../../../crates/shamir-connect/src/server/dispatch.rs#L168); [crates/shamir-server/src/db_handler/handler.rs:344](../../../../../crates/shamir-server/src/db_handler/handler.rs#L344); [docs/guide-docs/client-server-protocol-spec/AUTH_PROTOCOL.md:898](../../../../../docs/guide-docs/client-server-protocol-spec/AUTH_PROTOCOL.md#L898).
+
+<a id="review-5"></a>
+
+### Claim 5 — PushEnvelope.data is not serde_bytes-wrapped
+
+Status: `confirmed-open`. Current risk: `low`.
+
+Option<Vec<u8>> lacks byte serialization, while neighboring byte fields explicitly opt in. Production serializes this envelope and the local round-trip test cannot pin array versus bin. The exact pinned encoder behavior and 3–5x claim remain unverified.
+
+Evidence: [crates/shamir-connect/src/common/push_envelope.rs:32](../../../../../crates/shamir-connect/src/common/push_envelope.rs#L32); [crates/shamir-connect/src/common/envelope.rs:100](../../../../../crates/shamir-connect/src/common/envelope.rs#L100); [crates/shamir-connect/src/common/tests/push_envelope_tests.rs:26](../../../../../crates/shamir-connect/src/common/tests/push_envelope_tests.rs#L26); [crates/shamir-server/src/subscriptions/push.rs:95](../../../../../crates/shamir-server/src/subscriptions/push.rs#L95); [Cargo.lock:2949](../../../../../Cargo.lock#L2949).
+
+<a id="review-6"></a>
+
+### Claim 6 — Ticket wire version is a magic literal with asymmetric encrypt/decrypt validation
+
+Status: `confirmed-open`. Current risk: `low`.
+
+Encryption accepts the supplied version; decryption rejects non-v2. Production issuers explicitly use 2, so unusable tickets require a different public caller or a future migration mistake.
+
+Evidence: [crates/shamir-connect/src/server/ticket.rs:176](../../../../../crates/shamir-connect/src/server/ticket.rs#L176); [crates/shamir-connect/src/server/ticket.rs:188](../../../../../crates/shamir-connect/src/server/ticket.rs#L188); [crates/shamir-connect/src/server/ticket.rs:224](../../../../../crates/shamir-connect/src/server/ticket.rs#L224); [crates/shamir-connect/src/server/resume.rs:467](../../../../../crates/shamir-connect/src/server/resume.rs#L467).
+
+<a id="review-7"></a>
+
+### Claim 7 — No byte-exact vectors for auth_message_cp and bootstrap payload
+
+Status: `confirmed-open`. Current risk: `low`.
+
+Neither construction appears in the vector manifest or registered vector assertions. Existing round-trip/signature tests are not independent cross-language byte oracles.
+
+Evidence: [crates/shamir-connect/src/common/changepw.rs:54](../../../../../crates/shamir-connect/src/common/changepw.rs#L54); [crates/shamir-connect/src/common/bootstrap_message.rs:21](../../../../../crates/shamir-connect/src/common/bootstrap_message.rs#L21); [crates/shamir-connect/test-vectors/README.md:45](../../../../../crates/shamir-connect/test-vectors/README.md#L45); [crates/shamir-connect/src/common/tests/test_vectors_tests.rs:37](../../../../../crates/shamir-connect/src/common/tests/test_vectors_tests.rs#L37).
+
+<a id="review-8"></a>
+
+### Claim 8 — validate_client_kdf_safe returns String; its diagnostic is discarded
+
+Status: `confirmed-open`. Current risk: `nit`.
+
+String error and discarded message remain. Current stricter memory/time validation precedes this outer cap, so the claimed runtime loss of distinct outer-cap diagnostics is not currently reachable in handshake.
+
+Evidence: [crates/shamir-connect/src/common/kdf_params.rs:77](../../../../../crates/shamir-connect/src/common/kdf_params.rs#L77); [crates/shamir-connect/src/common/kdf_params.rs:72](../../../../../crates/shamir-connect/src/common/kdf_params.rs#L72); [crates/shamir-connect/src/client/handshake.rs:209](../../../../../crates/shamir-connect/src/client/handshake.rs#L209).
+
+<a id="review-9"></a>
+
+### Claim 9 — Session id is zero-initialized and stamped externally; changepw takes an unchecked second id
+
+Status: `confirmed-open`. Current risk: `low`.
+
+The construction/stamping protocol and stale explanation remain. The verifier does not compare its sid argument to session.session_id. Production passes the stored id, so mismatches concern direct API misuse.
+
+Evidence: [crates/shamir-connect/src/server/session.rs:243](../../../../../crates/shamir-connect/src/server/session.rs#L243); [crates/shamir-connect/src/server/session.rs:440](../../../../../crates/shamir-connect/src/server/session.rs#L440); [crates/shamir-connect/src/server/changepw.rs:117](../../../../../crates/shamir-connect/src/server/changepw.rs#L117); [crates/shamir-connect/src/server/changepw.rs:147](../../../../../crates/shamir-connect/src/server/changepw.rs#L147); [crates/shamir-server/src/db_handler/admin.rs:519](../../../../../crates/shamir-server/src/db_handler/admin.rs#L519).
+
+<a id="review-10-1"></a>
+
+### Claim 10.1 — AuthMessage fixed-capacity arithmetic
+
+Status: `confirmed-open`. Current risk: `nit`.
+
+Requested capacity is 142 plus username length; actual fixed bytes are 143, not the report's 144.
+
+Evidence: [crates/shamir-connect/src/common/auth_message.rs:82](../../../../../crates/shamir-connect/src/common/auth_message.rs#L82); [crates/shamir-connect/src/common/domain_tags.rs:17](../../../../../crates/shamir-connect/src/common/domain_tags.rs#L17).
+
+Grouping/duplicate: `correctness-tdd.md#12.1`. This row is not another independent defect.
+
+<a id="review-10-2"></a>
+
+### Claim 10.2 — Stale test-vectors/auth_v1 path
+
+Status: `confirmed-open`. Current risk: `nit`.
+
+The nonexistent directory reference remains.
+
+Evidence: [crates/shamir-connect/src/common/auth_message.rs:6](../../../../../crates/shamir-connect/src/common/auth_message.rs#L6).
+
+Grouping/duplicate: `style-claude-md.md#5`. This row is not another independent defect.
+
+<a id="review-10-3"></a>
+
+### Claim 10.3 — RateLimiter trait doc says sliding-window
+
+Status: `confirmed-open`. Current risk: `nit`.
+
+The trait label remains inconsistent with the token-bucket implementation.
+
+Evidence: [crates/shamir-connect/src/server/rate_limit.rs:89](../../../../../crates/shamir-connect/src/server/rate_limit.rs#L89); [crates/shamir-connect/src/server/rate_limit.rs:148](../../../../../crates/shamir-connect/src/server/rate_limit.rs#L148).
+
+<a id="review-10-4"></a>
+
+### Claim 10.4 — PushKind round-trip omits Ready
+
+Status: `confirmed-open`. Current risk: `nit`.
+
+The local variant loop still lists four of five variants. Ready is used in production; this is a narrow local coverage omission, not proof of repository-wide absence.
+
+Evidence: [crates/shamir-connect/src/common/tests/push_envelope_tests.rs:5](../../../../../crates/shamir-connect/src/common/tests/push_envelope_tests.rs#L5); [crates/shamir-server/src/subscriptions/bridge.rs:380](../../../../../crates/shamir-server/src/subscriptions/bridge.rs#L380).
+
+<a id="review-10-5"></a>
+
+### Claim 10.5 — RequestEnvelopeRef hard-codes 32 instead of SESSION_ID_BYTES
+
+Status: `confirmed-open`. Current risk: `nit`.
+
+The literal array width remains. It currently matches the protocol width; this is maintenance consistency debt.
+
+Evidence: [crates/shamir-connect/src/common/envelope.rs:95](../../../../../crates/shamir-connect/src/common/envelope.rs#L95).
+
+<a id="review-10-6"></a>
+
+### Claim 10.6 — kdf_upgrade_required Option<bool> has three states
+
+Status: `not-applicable`. Current risk: —.
+
+The fields deliberately represent an optional wire hint; absence and a present Boolean are representable states. No ambiguous consumer behavior is shown. Simplifying the type is a preference, not a demonstrated defect.
+
+Evidence: [crates/shamir-connect/src/client/handshake.rs:72](../../../../../crates/shamir-connect/src/client/handshake.rs#L72); [crates/shamir-connect/src/server/handshake.rs:101](../../../../../crates/shamir-connect/src/server/handshake.rs#L101); [docs/guide-docs/client-server-protocol-spec/AUTH_PROTOCOL.md:872](../../../../../docs/guide-docs/client-server-protocol-spec/AUTH_PROTOCOL.md#L872).
+
+<a id="review-summary-wire-guarantees"></a>
+
+### Claim Summary.wire-guarantees — Eight byte-exact vectors and owning/borrowed/view compatibility
+
+Status: `refuted`. Current risk: —.
+
+Vector files and compatibility assertions are registered, but the blanket strong-corpus claim misses contradictions: the auth vector declares 149 bytes while the actual tag/layout yields 148 for alice, and a header test compares 14 bytes with a 13-byte literal. Compatibility tests exist; no execution result is claimed.
+
+Evidence: [crates/shamir-connect/src/common/tests/mod.rs:10](../../../../../crates/shamir-connect/src/common/tests/mod.rs#L10); [crates/shamir-connect/src/common/tests/auth_message_tests.rs:127](../../../../../crates/shamir-connect/src/common/tests/auth_message_tests.rs#L127); [crates/shamir-connect/src/common/tests/auth_message_tests.rs:200](../../../../../crates/shamir-connect/src/common/tests/auth_message_tests.rs#L200); [crates/shamir-connect/test-vectors/auth_message_default.toml:21](../../../../../crates/shamir-connect/test-vectors/auth_message_default.toml#L21); [crates/shamir-connect/tests/integration_session.rs:333](../../../../../crates/shamir-connect/tests/integration_session.rs#L333).
+
+<a id="review-summary-builder-only"></a>
+
+### Claim Summary.builder-only — No serde_json or constructed queries in connect
+
+Status: `not-applicable`. Current risk: —.
+
+Connect forwards opaque request bytes and no serde_json use was found in its source. Query-building rules are not implicated by these envelopes.
+
+Evidence: [crates/shamir-connect/src/server/dispatch.rs:163](../../../../../crates/shamir-connect/src/server/dispatch.rs#L163); [crates/shamir-connect/Cargo.toml:34](../../../../../crates/shamir-connect/Cargo.toml#L34).
+
+## Corrections and qualified non-findings
+
+- Use a real value type such as a typed serializable map; rmp_serde::Value is not established as an available API.
+- Changing push serialization is a wire-compatibility change, not merely a local allocation optimization. Validate existing clients before migration.
+- Do not apply authentication-only error vocabulary wholesale to application/query errors.
+- The auth header and fixed-size arithmetic are off by one, not two; reconcile tests and metadata without changing established wire bytes accidentally.
+
+---
+
+<details>
+<summary>Historical report — preserved for provenance; not current status or instructions</summary>
+
 # shamir-connect -- API & wire-protocol design
 
 ## Summary
@@ -76,3 +281,5 @@ The wire layer is in strong shape overall: canonical byte strings (`auth_message
 - `src/common/tests/push_envelope_tests.rs:4-10` — round-trip iterates 4 of 5 `PushKind` variants; `Ready` is never exercised.
 - `src/common/envelope.rs:95` — `RequestEnvelopeRef.session_id: &'a [u8; 32]` hard-codes `32` while the rest of the crate uses `limits::SESSION_ID_BYTES`.
 - `src/client/handshake.rs:73` / `src/server/handshake.rs:103` — `kdf_upgrade_required: Option<bool>` models a boolean flag in three states; plain `bool` (or an enum) would remove the `Some(false)` ambiguity.
+
+</details>

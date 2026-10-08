@@ -1,3 +1,138 @@
+<!-- revalidation:2026-10-08 source:92ad58266bf57ddea1fa3c8a47affba1a3a9a096 -->
+# shamir-funclib — security-crypto revalidation
+
+Source snapshot: `92ad58266bf57ddea1fa3c8a47affba1a3a9a096`. Revalidated 2026-10-08 by read-only XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run; no source fix is part of this update. Test registration/assertions are evidence of an oracle, not proof of a passing run.
+
+This section is authoritative for current status. Original titles/IDs are retained for traceability; a refuted title is not a current assertion. The collapsed historical report below is superseded, including its counts, severity, scenarios and fix instructions. Plan IDs preserve historical numbering, not a current release mandate. [Workspace methodology and status definitions](../SUMMARY.md#status-definitions).
+
+Authenticated scalar-expression availability risks remain in recursion, allocations, regex compilation, decimal reductions, and inline KDF execution. The value_nav overflow claim is false; length-dependent ct_eq is intentional.
+
+## Current claim decisions
+
+| Claim decisions | Open | Source-fixed | Partial | Refuted | Unverified | N/A |
+|---:|---:|---:|---:|---:|---:|---:|
+| 9 | 8 | 0 | 0 | 0 | 0 | 1 |
+
+These are decisions on report claims, including repeated roots, bundled observations and non-findings—not a unique-bug census. Closed/N/A rows have no current risk; unverified risk is provisional. Pure style and unmeasured optimization claims do not establish runtime impact.
+
+<a id="review-1"></a>
+
+### Claim 1 — `validate/is_json` hand-rolled parser recurses without a depth cap — stack-overflow abort from a ~20 KB query string
+
+Status: `confirmed-open`. Current risk: `high`.
+
+TextFormatParser still recursively descends arrays/objects without a depth counter. Its input is a string, so the transport's structural nesting limit does not bound this inner parser. A sufficiently deep evaluated input exhausts native stack; the quoted 20 KB threshold is unverified. Reachability requires an authorized operation that evaluates the scalar.
+
+Evidence: [crates/shamir-funclib/src/validate.rs:87](../../../../../crates/shamir-funclib/src/validate.rs#L87); [crates/shamir-funclib/src/validate.rs:123](../../../../../crates/shamir-funclib/src/validate.rs#L123); [crates/shamir-funclib/src/validate.rs:169](../../../../../crates/shamir-funclib/src/validate.rs#L169); [crates/shamir-funclib/src/validate.rs:351](../../../../../crates/shamir-funclib/src/validate.rs#L351); [crates/shamir-engine/src/query/filter/resolve.rs:374](../../../../../crates/shamir-engine/src/query/filter/resolve.rs#L374).
+
+Grouping/duplicate: `error-handling-lifecycle.md#1`. This row is not another independent defect.
+
+<a id="review-2"></a>
+
+### Claim 2 — Unbounded attacker-sized allocations → allocator abort in `strings/repeat`, `strings/pad_left`, `strings/pad_right`, `gen/random_bytes`
+
+Status: `confirmed-open`. Current risk: `high`.
+
+There are still no pre-allocation caps on these lengths. Query-controlled output amplification is independent of input message size. Allocation failure can abort; capacity overflow is generally an unwindable panic under this release profile and must not be described as automatically equivalent to abort.
+
+Evidence: [crates/shamir-funclib/src/gen.rs:75](../../../../../crates/shamir-funclib/src/gen.rs#L75); [crates/shamir-funclib/src/strings.rs:237](../../../../../crates/shamir-funclib/src/strings.rs#L237); [crates/shamir-funclib/src/strings.rs:406](../../../../../crates/shamir-funclib/src/strings.rs#L406); [Cargo.toml:88](../../../../../Cargo.toml#L88).
+
+Grouping/duplicate: `error-handling-lifecycle.md#2`. This row is not another independent defect.
+
+<a id="review-3"></a>
+
+### Claim 3 — `validate/matches` recompiles the user-supplied regex on every call — per-row CPU amplification; ignores the crate's own caching convention
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+Regex::new remains inside the per-call closure with no reuse. Repeated row evaluations rebuild the same pattern. This proves repeated compilation work, not a measured exhaustion threshold. Pinned regex also has compiled-size limits; its matching guarantees are not a universal O(haystack length) statement for all iterator APIs.
+
+Evidence: [crates/shamir-funclib/src/validate.rs:342](../../../../../crates/shamir-funclib/src/validate.rs#L342); [crates/shamir-funclib/src/strings.rs:417](../../../../../crates/shamir-funclib/src/strings.rs#L417); [crates/shamir-engine/src/query/filter/resolve.rs:374](../../../../../crates/shamir-engine/src/query/filter/resolve.rs#L374); [Cargo.lock:2844](../../../../../Cargo.lock#L2844).
+
+Grouping/duplicate: `performance-hotpath.md#2`. This row is not another independent defect.
+
+<a id="review-4"></a>
+
+### Claim 4 — Attacker-triggerable `rust_decimal` overflow panics in the numeric reductions — violates the "avoid panic / return Result" rule
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+Sum/avg, variance arithmetic, range subtraction, and arrays reductions still use panicking operators. Pinned rust_decimal 1.40.0 confirms panic-on-overflow. Reachability includes native Decimal inputs and convertible query numeric values through array/generic aggregate routes; typed engine Sum/Avg are separate implementations. Variance depends on deviations/spread, not merely absolute magnitude.
+
+Evidence: [crates/shamir-funclib/src/agg.rs:286](../../../../../crates/shamir-funclib/src/agg.rs#L286); [crates/shamir-funclib/src/agg.rs:322](../../../../../crates/shamir-funclib/src/agg.rs#L322); [crates/shamir-funclib/src/agg.rs:514](../../../../../crates/shamir-funclib/src/agg.rs#L514); [crates/shamir-funclib/src/agg.rs:852](../../../../../crates/shamir-funclib/src/agg.rs#L852); [crates/shamir-funclib/src/arrays.rs:276](../../../../../crates/shamir-funclib/src/arrays.rs#L276); [Cargo.lock:2979](../../../../../Cargo.lock#L2979); [crates/shamir-engine/src/query/read/aggregate.rs:889](../../../../../crates/shamir-engine/src/query/read/aggregate.rs#L889).
+
+Grouping/duplicate: `error-handling-lifecycle.md#4`. This row is not another independent defect.
+
+<a id="review-5"></a>
+
+### Claim 5 — Plain `i64` arithmetic on extremes: debug-panic / wrong-in-release
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+The age half remains open. The value_nav half is refuted: for a representable nonnegative list length and negative idx, len + idx lies within i64 range, including idx == i64::MIN, and correctly yields a miss. There is no overflow, wrapping, or release mis-navigation in the cited expression.
+
+Evidence: [crates/shamir-funclib/src/datetime.rs:78](../../../../../crates/shamir-funclib/src/datetime.rs#L78); [crates/shamir-funclib/src/value_nav.rs:109](../../../../../crates/shamir-funclib/src/value_nav.rs#L109); [crates/shamir-funclib/src/value_nav.rs:111](../../../../../crates/shamir-funclib/src/value_nav.rs#L111).
+
+Grouping/duplicate: `error-handling-lifecycle.md#5`. This row is not another independent defect.
+
+<a id="review-6"></a>
+
+### Claim 6 — `crypto/ct_eq` length short-circuit leaks operand length (documented; acceptable for its intended MAC-tag use)
+
+Status: `not-applicable`. Current risk: —.
+
+The equal-length content comparison still uses subtle and length mismatch still returns immediately. Length is public for fixed-size MAC tags, so this is not a defect under the stated use. Variable-length, length-sensitive secrets would require a different contract; no such caller was established.
+
+Evidence: [crates/shamir-funclib/src/crypto.rs:303](../../../../../crates/shamir-funclib/src/crypto.rs#L303); [crates/shamir-funclib/src/crypto.rs:305](../../../../../crates/shamir-funclib/src/crypto.rs#L305); [Cargo.lock:4000](../../../../../Cargo.lock#L4000).
+
+<a id="review-7"></a>
+
+### Claim 7 — `argon2id` blocking semaphore acquire runs inline on async runtime workers (documented residual risk — tracked, listed for completeness)
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+Scalar query dispatch remains inline despite the separate offloaded named-function wrapper. Per-call dimensions and 16-permit admission still bound KDF concurrency. The statement 'no deadlock' must exclude the independently confirmed lost-wakeup hang.
+
+Evidence: [crates/shamir-funclib/src/crypto.rs:102](../../../../../crates/shamir-funclib/src/crypto.rs#L102); [crates/shamir-funclib/src/crypto.rs:221](../../../../../crates/shamir-funclib/src/crypto.rs#L221); [crates/shamir-engine/src/query/filter/resolve.rs:374](../../../../../crates/shamir-engine/src/query/filter/resolve.rs#L374); [crates/shamir-wasm-host/src/builtin.rs:63](../../../../../crates/shamir-wasm-host/src/builtin.rs#L63).
+
+Grouping/duplicate: `concurrency-lockfree.md#3`. This row is not another independent defect.
+
+<a id="review-8"></a>
+
+### Claim 8 — `canonical.rs` key serialization swallows failure (`unwrap_or_default`) on an integrity-critical path
+
+Status: `confirmed-open`. Current risk: `low`.
+
+Error suppression remains. Ordinary query String keys do not exercise a fallible custom Serialize implementation, but the public generic canonical APIs already permit native custom keys that return serialization errors; this need not await a future code change. The asserted universal upstream nesting protection is also unsupported for directly constructed native Values.
+
+Evidence: [crates/shamir-funclib/src/canonical.rs:187](../../../../../crates/shamir-funclib/src/canonical.rs#L187); [crates/shamir-funclib/src/canonical.rs:199](../../../../../crates/shamir-funclib/src/canonical.rs#L199); [crates/shamir-funclib/src/canonical.rs:213](../../../../../crates/shamir-funclib/src/canonical.rs#L213); [crates/shamir-types/src/types/value.rs:33](../../../../../crates/shamir-types/src/types/value.rs#L33).
+
+<a id="review-9"></a>
+
+### Claim 9 — Robustness nits in parsers
+
+Status: `confirmed-open`. Current risk: `nit`.
+
+Both cited annotation/hardening opportunities remain. TextFormatParser maintains i <= input length, and eat is called only after a successful byte probe, so its current slice is safe. Pinned chrono proves midnight conversion infallible. Neither cited site establishes a current attacker-triggerable panic.
+
+Evidence: [crates/shamir-funclib/src/validate.rs:115](../../../../../crates/shamir-funclib/src/validate.rs#L115); [crates/shamir-funclib/src/validate.rs:123](../../../../../crates/shamir-funclib/src/validate.rs#L123); [crates/shamir-funclib/src/datetime.rs:153](../../../../../crates/shamir-funclib/src/datetime.rs#L153); [Cargo.lock:655](../../../../../Cargo.lock#L655).
+
+## Corrections and qualified non-findings
+
+- No separate Fix Plan exists; all Suggested fixes are assessed in their finding rows and SUMMARY plan.
+- Downgrade universal/unauthenticated exploit wording to authorized scalar-expression availability exposure; precise stack byte/frame thresholds remain unverified.
+- Registration into builtin_scalars is not itself proof of a direct WASM import for every scalar. The named-function registry preloads Argon2 only; other scalar exposure through guest-issued database queries depends on gateway authorization.
+- The scalar field-rule bridge passes exactly one argument, so it can directly reach is_json but not repeat/pad or password-and-salt Argon2 calls. Query/computed-write paths establish those separate routes.
+- SHA/HMAC/BLAKE3 KAT literals and error tests are registered; the Argon2 reference test uses the same Argon2 dependency, not an independent cryptographic implementation.
+- Zero crate unsafe, rand 0.9.4 OsRng-seeded ThreadRng use, impure generation metadata, parameter ceilings, and RAII semaphore release are source-supported. The cap test's claimed deterministic saturation is not.
+- encode/parse_json retains serde_json 1.0.149's default recursion limit. That does not establish a bound for the bespoke validator or arbitrary native Value constructors.
+- Do not infer an actual WASM/FFI panic crossing or deployment-wide process abort from the decimal reduction findings; release unwinding ordinarily isolates such panics.
+
+---
+
+<details>
+<summary>Historical report — preserved for provenance; not current status or instructions</summary>
+
 # shamir-funclib -- Security & crypto boundary
 
 ## Summary
@@ -74,3 +209,5 @@ This crate has no auth/SCRAM/TLS surface of its own — it is the crypto-*primit
 - The argon2id aggregate-cap design (capped params + process-wide counting semaphore + RAII permit + peak-in-flight regression test) matches the audit trail it cites (§2b).
 - `gen/uuid_v4`, `gen/random_bytes` use `rand::rng()` (OsRng-seeded thread CSPRNG) — appropriate randomness source; `gen` fns correctly registered `pure:false, deterministic:false`, so they can never back a functional index.
 - Error handling elsewhere is disciplined: every extractor/coercion path returns machine-coded `ScalarError`s; `encode/parse_json` inherits `serde_json`'s 128-depth recursion limit; `datetime` pre-validates strftime patterns to avoid chrono's panicking `DelayedFormat`.
+
+</details>

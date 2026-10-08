@@ -1,3 +1,142 @@
+<!-- revalidation:2026-10-08 source:92ad58266bf57ddea1fa3c8a47affba1a3a9a096 -->
+# shamir-types — error-handling-lifecycle revalidation
+
+Source snapshot: `92ad58266bf57ddea1fa3c8a47affba1a3a9a096`. Revalidated 2026-10-08 by read-only XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run; no source fix is part of this update. Test registration/assertions are evidence of an oracle, not proof of a passing run.
+
+This section is authoritative for current status. Original titles/IDs are retained for traceability; a refuted title is not a current assertion. The collapsed historical report below is superseded, including its counts, severity, scenarios and fix instructions. Plan IDs preserve historical numbering, not a current release mandate. [Workspace methodology and status definitions](../SUMMARY.md#status-definitions).
+
+Header allocation, malformed-mode fallback, conflicting hydration, and conditional cross-API divergence remain. Duplicate errors and stringly results are API hygiene. Several lifecycle and diagnostic claims need qualification.
+
+## Current claim decisions
+
+| Claim decisions | Open | Source-fixed | Partial | Refuted | Unverified | N/A |
+|---:|---:|---:|---:|---:|---:|---:|
+| 10 | 9 | 0 | 0 | 0 | 0 | 1 |
+
+These are decisions on report claims, including repeated roots, bundled observations and non-findings—not a unique-bug census. Closed/N/A rows have no current risk; unverified risk is provisional. Pure style and unmeasured optimization claims do not establish runtime impact.
+
+<a id="review-1"></a>
+
+### Claim 1 — Unbounded preallocation from attacker-controlled msgpack headers -- allocator abort, unlike the capped tree visitor
+
+Status: `confirmed-open`. Current risk: `high`.
+
+Array/map custom decoding and merge entries/id maps still allocate directly from unvalidated counts. Source proves pathological requested capacity; allocation failure depends on platform/allocator. No huge-count short-body regression covers these sites. The current reachable S-write validator conversion separately preallocates from view.len().
+
+Evidence: [crates/shamir-types/src/codecs/interned/messagepack.rs:305](../../../../../crates/shamir-types/src/codecs/interned/messagepack.rs#L305); [crates/shamir-types/src/codecs/interned/messagepack.rs:318](../../../../../crates/shamir-types/src/codecs/interned/messagepack.rs#L318); [crates/shamir-types/src/codecs/interned/messagepack.rs:581](../../../../../crates/shamir-types/src/codecs/interned/messagepack.rs#L581); [crates/shamir-types/src/codecs/interned/messagepack.rs:585](../../../../../crates/shamir-types/src/codecs/interned/messagepack.rs#L585); [crates/shamir-types/src/types/value.rs:191](../../../../../crates/shamir-types/src/types/value.rs#L191); [crates/shamir-types/src/codecs/interned/codec.rs:154](../../../../../crates/shamir-types/src/codecs/interned/codec.rs#L154); [crates/shamir-engine/src/table/write_exec.rs:382](../../../../../crates/shamir-engine/src/table/write_exec.rs#L382).
+
+<a id="review-2"></a>
+
+### Claim 2 — Two public, rival `CodecError` enums; the basic/bincode one is hand-rolled, violating the documented thiserror rule
+
+Status: `confirmed-open`. Current risk: `low`.
+
+The manual Serialize/Deserialize enum still differs from the thiserror Encode/Decode enum adjacent to convenience reexports. No conversion joins them. This is a source/API consistency issue, not a runtime High defect.
+
+Evidence: [crates/shamir-types/src/codecs/basic/bincode.rs:8](../../../../../crates/shamir-types/src/codecs/basic/bincode.rs#L8); [crates/shamir-types/src/codecs/basic/bincode.rs:22](../../../../../crates/shamir-types/src/codecs/basic/bincode.rs#L22); [crates/shamir-types/src/codecs/error.rs:4](../../../../../crates/shamir-types/src/codecs/error.rs#L4); [crates/shamir-types/src/codecs/mod.rs:12](../../../../../crates/shamir-types/src/codecs/mod.rs#L12).
+
+<a id="review-3"></a>
+
+### Claim 3 — `Interner::touch_ind` returns a `Result` with no reachable `Err`; `touch_with_id` returns stringly-typed errors
+
+Status: `confirmed-open`. Current risk: `low`.
+
+touch_ind's production return branches are both Ok; touch_with_id's conflicts remain formatted strings. intern_string_key's error mapper is therefore dead under current implementation, not a mechanism that can actually emit fake decode errors. Inspected recovery callers uniformly propagate conflicts rather than substring-classify them.
+
+Evidence: [crates/shamir-types/src/core/interner/interner.rs:146](../../../../../crates/shamir-types/src/core/interner/interner.rs#L146); [crates/shamir-types/src/core/interner/interner.rs:166](../../../../../crates/shamir-types/src/core/interner/interner.rs#L166); [crates/shamir-types/src/core/interner/interner.rs:348](../../../../../crates/shamir-types/src/core/interner/interner.rs#L348); [crates/shamir-types/src/codecs/interned/common.rs:17](../../../../../crates/shamir-types/src/codecs/interned/common.rs#L17); [crates/shamir-engine/src/tx/recovery.rs:491](../../../../../crates/shamir-engine/src/tx/recovery.rs#L491).
+
+<a id="review-4"></a>
+
+### Claim 4 — `ResourceMeta::from_record` fails open: invalid `mode` silently becomes `Mode::OPEN` (0o777)
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+The parser still conflates invalid present metadata with intentionally compatible absent metadata and selects OPEN. Existing types tests cover absent and valid modes, not invalid-present modes.
+
+Evidence: [crates/shamir-types/src/access.rs:275](../../../../../crates/shamir-types/src/access.rs#L275); [crates/shamir-types/src/tests/access_tests.rs:238](../../../../../crates/shamir-types/src/tests/access_tests.rs#L238); [crates/shamir-types/src/tests/access_tests.rs:257](../../../../../crates/shamir-types/src/tests/access_tests.rs#L257).
+
+Grouping/duplicate: `security-crypto.md:2`. This row is not another independent defect.
+
+<a id="review-5"></a>
+
+### Claim 5 — `Interner::with_state` silently collapses duplicate ids/names in hydrated state
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+Conflicting mappings are not validated. Forward insert is last-wins; reverse OnceLock is first-wins, contrary to the report's later-name claim. Production hydration concatenates persisted chunks then calls with_state. Identical repeated pairs are legitimate under gap recapture and must remain idempotent.
+
+Evidence: [crates/shamir-types/src/core/interner/interner.rs:121](../../../../../crates/shamir-types/src/core/interner/interner.rs#L121); [crates/shamir-types/src/core/interner/interner.rs:124](../../../../../crates/shamir-types/src/core/interner/interner.rs#L124); [crates/shamir-types/src/core/interner/interner.rs:126](../../../../../crates/shamir-types/src/core/interner/interner.rs#L126); [crates/shamir-types/src/core/interner/interner.rs:509](../../../../../crates/shamir-types/src/core/interner/interner.rs#L509); [crates/shamir-engine/src/table/interner_manager.rs:207](../../../../../crates/shamir-engine/src/table/interner_manager.rs#L207); [crates/shamir-engine/src/table/interner_manager.rs:220](../../../../../crates/shamir-engine/src/table/interner_manager.rs#L220).
+
+<a id="review-6"></a>
+
+### Claim 6 — `RecordId::system` truncates names to 12 bytes with no collision detection
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+Constructor truncation and its aliasing test remain. Some caller-level collision fixes do not change this public constructor; arbitrary distinct string names are not injectively encoded.
+
+Evidence: [crates/shamir-types/src/types/record_id.rs:100](../../../../../crates/shamir-types/src/types/record_id.rs#L100); [crates/shamir-types/src/types/tests/record_id_tests.rs:48](../../../../../crates/shamir-types/src/types/tests/record_id_tests.rs#L48); [crates/shamir-index/src/persistence.rs:529](../../../../../crates/shamir-index/src/persistence.rs#L529).
+
+Grouping/duplicate: `api-wire-protocol.md:3`. This row is not another independent defect.
+
+<a id="review-7"></a>
+
+### Claim 7 — Race-between-touch_ind-and-touch_with_id guarded only by `debug_assert!` -- release path silently drops the write
+
+Status: `confirmed-open`. Current risk: `low`.
+
+A losing reverse OnceLock set remains silent in release while the forward map retains the new mapping. The invariant is not enforced by a release-time verdict. Production collision reachability remains conditional; the live drainer means startup-only exclusion cannot simply be assumed.
+
+Evidence: [crates/shamir-types/src/core/interner/interner.rs:223](../../../../../crates/shamir-types/src/core/interner/interner.rs#L223); [crates/shamir-types/src/core/interner/interner.rs:224](../../../../../crates/shamir-types/src/core/interner/interner.rs#L224); [crates/shamir-engine/src/tx/drainer.rs:1116](../../../../../crates/shamir-engine/src/tx/drainer.rs#L1116).
+
+Grouping/duplicate: `correctness-tdd.md:8`. This row is not another independent defect.
+
+<a id="review-8"></a>
+
+### Claim 8 — `SecretString::Drop` uses hand-written `unsafe` where the safe std/trait path exists; lifecycle behaviour untested
+
+Status: `confirmed-open`. Current risk: `low`.
+
+The current feature-gated Drop still zeroizes an exclusive mutable byte slice; lifecycle tests remain absent. into_inner transfers its buffer using mem::take, so source supports ownership handoff. A freed-buffer inspection would be invalid evidence; use a safe controlled lifecycle oracle. Exact zeroize 1.8.2 String replacement source was unavailable.
+
+Evidence: [crates/shamir-types/src/secret.rs:40](../../../../../crates/shamir-types/src/secret.rs#L40); [crates/shamir-types/src/secret.rs:67](../../../../../crates/shamir-types/src/secret.rs#L67); [crates/shamir-types/src/secret.rs:72](../../../../../crates/shamir-types/src/secret.rs#L72); [crates/shamir-types/src/tests/secret_tests.rs:1](../../../../../crates/shamir-types/src/tests/secret_tests.rs#L1); [Cargo.lock:5473](../../../../../Cargo.lock#L5473).
+
+Grouping/duplicate: `security-crypto.md:6`. This row is not another independent defect.
+
+<a id="review-9"></a>
+
+### Claim 9 — `trace_access` -- a `Result` that is always `Ok`, with an error type the crate itself never constructs
+
+Status: `not-applicable`. Current risk: —.
+
+Always-Ok observability is an explicit, extensively cross-linked contract, not a missing error path. Real AccessError construction exists in the facade. Returning unit would be optional API simplification.
+
+Evidence: [crates/shamir-types/src/access.rs:632](../../../../../crates/shamir-types/src/access.rs#L632); [crates/shamir-types/src/access.rs:640](../../../../../crates/shamir-types/src/access.rs#L640); [crates/shamir-types/src/access.rs:657](../../../../../crates/shamir-types/src/access.rs#L657); [crates/shamir-db/src/shamir_db/shamir_db/access_control.rs:863](../../../../../crates/shamir-db/src/shamir_db/shamir_db/access_control.rs#L863).
+
+<a id="review-10"></a>
+
+### Claim 10 — `pos + len` unchecked additions in the tree decoder's `read_str`/`read_bin`
+
+Status: `confirmed-open`. Current risk: `low`.
+
+Both unchecked additions remain. Header lengths fit u32, so the alleged overflow is not reachable on normal 64-bit slices; on 32-bit targets a large Str32/Bin32 length plus cursor can overflow before the bounds check and panic. No source-test coverage pins that target case.
+
+Evidence: [crates/shamir-types/src/codecs/interned/messagepack.rs:133](../../../../../crates/shamir-types/src/codecs/interned/messagepack.rs#L133); [crates/shamir-types/src/codecs/interned/messagepack.rs:147](../../../../../crates/shamir-types/src/codecs/interned/messagepack.rs#L147); [crates/shamir-types/src/codecs/interned/messagepack.rs:215](../../../../../crates/shamir-types/src/codecs/interned/messagepack.rs#L215); [crates/shamir-types/src/codecs/interned/messagepack.rs:230](../../../../../crates/shamir-types/src/codecs/interned/messagepack.rs#L230); [crates/shamir-types/src/record_view/lens.rs:208](../../../../../crates/shamir-types/src/record_view/lens.rs#L208).
+
+## Corrections and qualified non-findings
+
+- with_state's reverse winner is the first name, not the last. Reject conflicts, not harmless identical repeated pairs.
+- A Result with an impossible error branch cannot currently generate phantom runtime errors, and String errors do not inherently allocate on success.
+- Wrong CodecError imports cause type errors; they do not silently bypass exhaustive matching.
+- The bincode rustdoc examples are stale unfenced text, not executable doctests masked only by doctest=false.
+- The lens's checked reads and depth cap are source-supported, but index allocation and silent iterator termination qualify the broad untrusted-input guarantee.
+- Do not inspect memory after SecretString destruction as a zeroization test oracle.
+
+---
+
+<details>
+<summary>Historical report — preserved for provenance; not current status or instructions</summary>
+
 # shamir-types -- Error handling & resource lifecycle
 
 ## Summary
@@ -88,3 +227,5 @@ The crate's error-type hygiene is largely exemplary: `ValueError`, `Base58Error`
 
 Good: `record_view/tests/error_tests.rs` (11 targeted tests incl. depth cap, reserved marker, mid-skip truncation, garbage-bytes no-panic); `codecs/interned/tests/messagepack_tests.rs` error section (`:604-644`: truncated/empty input, non-string key, depth rejection); `bincode_tests.rs` (`:136,:148` decode/serialize failures); `base_tests.rs` (`Base58Error` variants); `sort_codec_tests.rs:82` (NaN refusal); `value_api_tests.rs` (`ValueError::NotAMap`/`TypeMismatch` shapes); `validate_keys` unresolved-id suite; `interner_tests.rs:872-885` (`touch_with_id` remap/collision errors) plus the load-bearing concurrent-growth stress (`:922`).
 Gaps found: malformed/oversized `mode` in `ResourceMeta::from_record` (finding 4), huge-header/short-body allocations (finding 1), `SecretString` lifecycle (finding 8), post-error rollback state after `touch_with_id` raced collisions (finding 7), duplicate-id hydration (finding 5).
+
+</details>

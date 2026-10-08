@@ -1,3 +1,139 @@
+<!-- revalidation:2026-10-08 source:92ad58266bf57ddea1fa3c8a47affba1a3a9a096 -->
+# shamir-funclib — performance-hotpath revalidation
+
+Source snapshot: `92ad58266bf57ddea1fa3c8a47affba1a3a9a096`. Revalidated 2026-10-08 by read-only XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run; no source fix is part of this update. Test registration/assertions are evidence of an oracle, not proof of a passing run.
+
+This section is authoritative for current status. Original titles/IDs are retained for traceability; a refuted title is not a current assertion. The collapsed historical report below is superseded, including its counts, severity, scenarios and fix instructions. Plan IDs preserve historical numbering, not a current release mandate. [Workspace methodology and status definitions](../SUMMARY.md#status-definitions).
+
+Both aggregate dedup scans, repeated regex compilation, global cache serialization, and variance buffering remain. Allocation nits are present, but the proposed blanket stable-to-unstable sort equivalence is refuted.
+
+## Current claim decisions
+
+| Claim decisions | Open | Source-fixed | Partial | Refuted | Unverified | N/A |
+|---:|---:|---:|---:|---:|---:|---:|
+| 10 | 9 | 0 | 0 | 1 | 0 | 0 |
+
+These are decisions on report claims, including repeated roots, bundled observations and non-findings—not a unique-bug census. Closed/N/A rows have no current risk; unverified risk is provisional. Pure style and unmeasured optimization claims do not establish runtime impact.
+
+<a id="review-1"></a>
+
+### Claim 1 — `count_distinct` aggregator is O(N·C) -- the exact legacy pattern `arrays::distinct` was fixed to remove
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+Each non-null input still scans seen using compare and clones unseen values. All-unique input performs N(N-1)/2 comparisons; comparison cost can additionally depend on value size. Engine AggregateFn reaches count_distinct, whereas typed Count{distinct:true} is rejected. Existing tests are small and there is no aggregate scale bench. Sort-based replacement cannot promise identical semantics until non-transitive compare equality is resolved.
+
+Evidence: [crates/shamir-funclib/src/agg.rs:202](../../../../../crates/shamir-funclib/src/agg.rs#L202); [crates/shamir-funclib/src/agg/tests/agg_tests.rs:68](../../../../../crates/shamir-funclib/src/agg/tests/agg_tests.rs#L68); [crates/shamir-funclib/benches/distinct_arrays.rs:75](../../../../../crates/shamir-funclib/benches/distinct_arrays.rs#L75); [crates/shamir-engine/src/query/read/aggregate.rs:861](../../../../../crates/shamir-engine/src/query/read/aggregate.rs#L861); [crates/shamir-engine/src/query/read/aggregate.rs:889](../../../../../crates/shamir-engine/src/query/read/aggregate.rs#L889).
+
+<a id="review-2"></a>
+
+### Claim 2 — `validate/matches` recompiles the regex on every call
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+Regex::new remains per invocation rather than in a reusable pattern cache. Per-row callers therefore repeat compilation structurally. No timings or global-allocator serialization measurements support the report's numeric latency claims.
+
+Evidence: [crates/shamir-funclib/src/validate.rs:342](../../../../../crates/shamir-funclib/src/validate.rs#L342); [crates/shamir-engine/src/query/filter/resolve.rs:374](../../../../../crates/shamir-engine/src/query/filter/resolve.rs#L374); [crates/shamir-funclib/src/validate/tests/validate_tests.rs:164](../../../../../crates/shamir-funclib/src/validate/tests/validate_tests.rs#L164).
+
+<a id="review-3"></a>
+
+### Claim 3 — `DistinctWrapper` dedup is O(N·C) per wrapped aggregate
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+The wrapper still scans its growing seen Vec on every non-null row; its 'bounded-cardinality cold path' assertion has no enforced bound. Sorted Vec insertion still has O(C) movement and requires a valid order, so the proposed binary-search change is not a complete asymptotic repair. Preserve order-sensitive inner-aggregate semantics.
+
+Evidence: [crates/shamir-funclib/src/agg.rs:223](../../../../../crates/shamir-funclib/src/agg.rs#L223); [crates/shamir-funclib/src/agg.rs:245](../../../../../crates/shamir-funclib/src/agg.rs#L245); [crates/shamir-engine/src/query/read/aggregate.rs:996](../../../../../crates/shamir-engine/src/query/read/aggregate.rs#L996); [crates/shamir-funclib/src/agg/tests/agg_tests.rs:555](../../../../../crates/shamir-funclib/src/agg/tests/agg_tests.rs#L555).
+
+<a id="review-4"></a>
+
+### Claim 4 — `stddev`/`variance` buffer the entire column though an O(1)-state algorithm exists
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+Both still retain Vec<Decimal> and compute two-pass variance at finalize, establishing O(N) scratch per instance. Welford is not implemented. Any streaming replacement must specify checked arithmetic and Decimal rounding/accuracy; adjusting test tolerance alone does not establish equivalence.
+
+Evidence: [crates/shamir-funclib/src/agg.rs:448](../../../../../crates/shamir-funclib/src/agg.rs#L448); [crates/shamir-funclib/src/agg.rs:467](../../../../../crates/shamir-funclib/src/agg.rs#L467); [crates/shamir-funclib/src/agg.rs:484](../../../../../crates/shamir-funclib/src/agg.rs#L484); [crates/shamir-funclib/src/agg.rs:512](../../../../../crates/shamir-funclib/src/agg.rs#L512).
+
+<a id="review-5"></a>
+
+### Claim 5 — `gen/random_bytes` performs an attacker-controlled unbounded allocation
+
+Status: `confirmed-open`. Current risk: `high`.
+
+The argument still has no positive upper bound before vec allocation. This is scalar-expression output amplification, not merely unmeasured performance debt.
+
+Evidence: [crates/shamir-funclib/src/gen.rs:71](../../../../../crates/shamir-funclib/src/gen.rs#L71); [crates/shamir-funclib/src/gen.rs:75](../../../../../crates/shamir-funclib/src/gen.rs#L75).
+
+Grouping/duplicate: `error-handling-lifecycle.md#2`. This row is not another independent defect.
+
+<a id="review-6"></a>
+
+### Claim 6 — `/strings` regex cache: process-global `std::sync::Mutex` on the per-row hot path
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+The mutex, compilation under guard, and clear-all eviction remain. Serialization/churn are source-proven; throughput impact is unmeasured. scc read_sync would be shared-bucket-locked rather than lock-free.
+
+Evidence: [crates/shamir-funclib/src/strings.rs:418](../../../../../crates/shamir-funclib/src/strings.rs#L418); [crates/shamir-funclib/src/strings.rs:427](../../../../../crates/shamir-funclib/src/strings.rs#L427); [crates/shamir-funclib/src/strings.rs:429](../../../../../crates/shamir-funclib/src/strings.rs#L429); [Cargo.lock:3123](../../../../../Cargo.lock#L3123).
+
+Grouping/duplicate: `concurrency-lockfree.md#1`. This row is not another independent defect.
+
+<a id="review-7"></a>
+
+### Claim 7 — canonical `encode` re-serialises the reserved-key constant for every top-level map key
+
+Status: `confirmed-open`. Current risk: `low`.
+
+key_is_prev_hash still serializes _prev_hash separately for each top-level key. Hoisting would remove repeated allocation/encoding. The claim that this runs on every sequenced production write is not established: the located CAS validator is an integration-test implementation.
+
+Evidence: [crates/shamir-funclib/src/canonical.rs:156](../../../../../crates/shamir-funclib/src/canonical.rs#L156); [crates/shamir-funclib/src/canonical.rs:193](../../../../../crates/shamir-funclib/src/canonical.rs#L193); [crates/shamir-db/tests/cas_sequenced_e2e.rs:53](../../../../../crates/shamir-db/tests/cas_sequenced_e2e.rs#L53); [crates/shamir-db/tests/cas_sequenced_e2e.rs:90](../../../../../crates/shamir-db/tests/cas_sequenced_e2e.rs#L90).
+
+<a id="review-8"></a>
+
+### Claim 8 — Stable sorts where the total order permits unstable (scratch allocation per call)
+
+Status: `refuted`. Current risk: —.
+
+Stable sort sites remain, but the claimed semantics-identical switch is false. compare equates observably different variants such as Int(5) and Dec(5), so unstable reordering can change array order and the selected representative for median/percentile/mode. compare is also non-transitive at precision boundaries. Scratch allocation is an optimization consideration, not proof that stability is unnecessary.
+
+Evidence: [crates/shamir-funclib/src/arrays.rs:186](../../../../../crates/shamir-funclib/src/arrays.rs#L186); [crates/shamir-funclib/src/arrays.rs:199](../../../../../crates/shamir-funclib/src/arrays.rs#L199); [crates/shamir-funclib/src/agg.rs:435](../../../../../crates/shamir-funclib/src/agg.rs#L435); [crates/shamir-funclib/src/agg.rs:557](../../../../../crates/shamir-funclib/src/agg.rs#L557); [crates/shamir-funclib/src/agg.rs:792](../../../../../crates/shamir-funclib/src/agg.rs#L792); [crates/shamir-funclib/src/compare.rs:119](../../../../../crates/shamir-funclib/src/compare.rs#L119).
+
+<a id="review-9"></a>
+
+### Claim 9 — `cast/to_bool` allocates a lowercased copy of the input per call
+
+Status: `confirmed-open`. Current risk: `nit`.
+
+The string branch still calls trim().to_ascii_lowercase(); allocation-free literal comparisons are not implemented. Latency impact was not measured.
+
+Evidence: [crates/shamir-funclib/src/cast.rs:177](../../../../../crates/shamir-funclib/src/cast.rs#L177).
+
+<a id="review-10"></a>
+
+### Claim 10 — `value_nav` int-step-into-map allocates a key `String` per step
+
+Status: `confirmed-open`. Current risk: `nit`.
+
+The numeric map-step branch still allocates idx.to_string(). A stack formatter or explicit accepted-cost comment remains optional optimization; no significant measured cost is established.
+
+Evidence: [crates/shamir-funclib/src/value_nav.rs:120](../../../../../crates/shamir-funclib/src/value_nav.rs#L120).
+
+## Corrections and qualified non-findings
+
+- No separate Fix Plan exists; recommendations are assessed in the finding rows and SUMMARY plan.
+- The array hash-set migration establishes expected/amortized linear membership work for fixed-cost keys, not unconditional O(N) for arbitrary nested values or adversarial hash distributions.
+- distinct_large_unique_matches_naive checks 500-element output correctness without comparing against a naive implementation, counting operations, or asserting a timing bound. It cannot detect reintroduction of quadratic complexity.
+- The distinct_arrays benchmark is registered and compares current versus naive implementations, but benches were not run and do not constitute an ordinary behavioral-test complexity gate.
+- Shared root test suites and registry tests under math contradict the claimed universally faithful per-module layout.
+- A populated scc read_sync path is not lock-free. The unpopulated resolver path remains cheap, but neither its cost nor all claimed performance effects were benchmarked.
+- Resolve compare's ordering/equivalence contract before replacing scan dedup with sorting or binary search; do not adopt blanket unstable sorting.
+
+---
+
+<details>
+<summary>Historical report — preserved for provenance; not current status or instructions</summary>
+
 # shamir-funclib -- Performance & O(x->0)
 
 ## Summary
@@ -76,3 +212,5 @@ The crate's hot paths are largely clean: both registries are Fx-hashed `TFxMap`s
 ## Test-coverage note (theme-relevant)
 
 The crate follows the workspace `tests/` layout faithfully (one directory per module, `mod.rs` manifests), and `arrays::distinct` has both a scale test (`arrays_tests.rs:254-296`) and an old-vs-new bench (`benches/distinct_arrays.rs`) pinning its O(N) behaviour. The aggregate dedup paths (findings 1 and 3) have neither a scale test nor a bench arm -- `agg_tests.rs` exercises them only at toy sizes -- so their O(N·C) cost is currently invisible to every gate in the repo.
+
+</details>

@@ -1,3 +1,130 @@
+<!-- revalidation:2026-10-08 source:92ad58266bf57ddea1fa3c8a47affba1a3a9a096 -->
+# shamir-transport-ws — security-crypto revalidation
+
+Source snapshot: `92ad58266bf57ddea1fa3c8a47affba1a3a9a096`. Revalidated 2026-10-08 by read-only XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run; no source fix is part of this update. Test registration/assertions are evidence of an oracle, not proof of a passing run.
+
+This section is authoritative for current status. Original titles/IDs are retained for traceability; a refuted title is not a current assertion. The collapsed historical report below is superseded, including its counts, severity, scenarios and fix instructions. Plan IDs preserve historical numbering, not a current release mandate. [Workspace methodology and status definitions](../SUMMARY.md#status-definitions).
+
+Origin rejection remains before upgrade, framing validation remains fail-closed, and the TLS configuration remains TLS-1.3-only. Several security consequences require narrowing: positive browser tests exist, queue growth is unverified, and zero exporter fallback does not change binding_mode.
+
+## Current claim decisions
+
+| Claim decisions | Open | Source-fixed | Partial | Refuted | Unverified | N/A |
+|---:|---:|---:|---:|---:|---:|---:|
+| 8 | 7 | 0 | 0 | 1 | 0 | 0 |
+
+These are decisions on report claims, including repeated roots, bundled observations and non-findings—not a unique-bug census. Closed/N/A rows have no current risk; unverified risk is provisional. Pure style and unmeasured optimization claims do not establish runtime impact.
+
+## Parent acceptance refinements
+
+- Source inspection resolves Pong handling: single pending Pong and read-time flushing coexist with an uncapped encoded write buffer under sustained WouldBlock.
+
+<a id="review-1"></a>
+
+### Claim 1 — Phantom `tungstenite = "0.29"` dependency -- two WS parsers compiled, the live one is the older
+
+Status: `confirmed-open`. Current risk: `low`.
+
+Unused 0.29 remains resolved beside effective 0.24. Direct rustls/tokio-rustls dependencies are also unused by this crate's source. A specific vulnerability or second parser retained in the final executable is not proven.
+
+Evidence: [crates/shamir-transport-ws/Cargo.toml:19](../../../../../crates/shamir-transport-ws/Cargo.toml#L19); [crates/shamir-transport-ws/Cargo.toml:23](../../../../../crates/shamir-transport-ws/Cargo.toml#L23); [Cargo.lock:3781](../../../../../Cargo.lock#L3781); [Cargo.lock:4256](../../../../../Cargo.lock#L4256).
+
+<a id="review-2"></a>
+
+### Claim 2 — `accept_browser_ws` Origin enforcement has no live-wiring test coverage
+
+Status: `refuted`. Current risk: —.
+
+Registered TS live tests connect to the browser endpoint with an allowlisted Origin and perform authentication/requests. They do not cover removing the Origin check or its negative/status branches.
+
+Evidence: [crates/shamir-client-ts/src/__tests__/connect.test.ts:203](../../../../../crates/shamir-client-ts/src/__tests__/connect.test.ts#L203); [crates/shamir-client-ts/src/__tests__/e2e.test.ts:44](../../../../../crates/shamir-client-ts/src/__tests__/e2e.test.ts#L44); [crates/shamir-client-ts/src/core/client.ts:190](../../../../../crates/shamir-client-ts/src/core/client.ts#L190); [.github/workflows/ts-e2e-nightly.yml:85](../../../../../.github/workflows/ts-e2e-nightly.yml#L85).
+
+Grouping/duplicate: `correctness-tdd.md#1`. This row is not another independent defect.
+
+<a id="review-3"></a>
+
+### Claim 3 — Attacker-controlled `Origin` echoed into the HTTP 403 response body
+
+Status: `confirmed-open`. Current risk: `low`.
+
+NotAllowed stores the header string and the callback interpolates it into the rejection body. Arbitrary-header clients can reach reflection; browser XSS or effective log injection is not established.
+
+Evidence: [crates/shamir-transport-ws/src/browser.rs:103](../../../../../crates/shamir-transport-ws/src/browser.rs#L103); [crates/shamir-transport-ws/src/server.rs:136](../../../../../crates/shamir-transport-ws/src/server.rs#L136); [crates/shamir-server/src/server/server_launcher.rs:1502](../../../../../crates/shamir-server/src/server/server_launcher.rs#L1502).
+
+<a id="review-4"></a>
+
+### Claim 4 — Unbounded control-frame loop in `ws_recv_into_stream` (ping-flood liveness)
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+The adapter has no control-frame budget. Parent pinned-source inspection corrects the mechanism: tungstenite 0.24 tries flushing during read and has a single replaceable additional_send Pong, so 'only the writer flushes' is false. However FrameCodec appends a Pong into its Vec before attempting the write; read ignores WouldBlock, and the default max_write_buffer_size is usize::MAX. A peer that keeps supplying Pings while refusing replies can grow that outgoing byte buffer. The SCRAM client_proof read has no surrounding timeout after the bounded AuthInit read. These are source-visible conditional backpressure/liveness risks; no CPU/RSS measurement or reproduction was performed.
+
+Evidence: [crates/shamir-transport-ws/src/framing.rs:176](../../../../../crates/shamir-transport-ws/src/framing.rs#L176); [crates/shamir-transport-ws/src/framing.rs:183](../../../../../crates/shamir-transport-ws/src/framing.rs#L183); [crates/shamir-server/src/connection/handshake.rs:291](../../../../../crates/shamir-server/src/connection/handshake.rs#L291); [crates/shamir-server/src/connection/request_loop.rs:297](../../../../../crates/shamir-server/src/connection/request_loop.rs#L297).
+
+Pinned dependency evidence: [tungstenite 0.24.0, src/protocol/mod.rs:387](https://docs.rs/crate/tungstenite/0.24.0/source/src/protocol/mod.rs); [tungstenite 0.24.0, src/protocol/mod.rs:729](https://docs.rs/crate/tungstenite/0.24.0/source/src/protocol/mod.rs); [tungstenite 0.24.0, src/protocol/frame/mod.rs:1](https://docs.rs/crate/tungstenite/0.24.0/source/src/protocol/frame/mod.rs).
+
+<a id="review-5"></a>
+
+### Claim 5 — `Option`-returning exporter API + public all-zeros constant invites silent zero-substitution on the native path
+
+Status: `confirmed-open`. Current risk: `low`.
+
+Extraction discards its error and native WSS still substitutes zeros. This is a fail-closed/diagnostic API defect, not a demonstrated remote downgrade: listener binding_mode stays TlsExporter and participates in the proof transcript.
+
+Evidence: [crates/shamir-transport-ws/src/tls_exporter.rs:20](../../../../../crates/shamir-transport-ws/src/tls_exporter.rs#L20); [crates/shamir-transport-tcp/src/tls.rs:81](../../../../../crates/shamir-transport-tcp/src/tls.rs#L81); [crates/shamir-server/src/server/server_launcher.rs:1391](../../../../../crates/shamir-server/src/server/server_launcher.rs#L1391); [crates/shamir-connect/src/server/handshake.rs:135](../../../../../crates/shamir-connect/src/server/handshake.rs#L135); [crates/shamir-connect/src/server/handshake.rs:265](../../../../../crates/shamir-connect/src/server/handshake.rs#L265).
+
+<a id="review-6"></a>
+
+### Claim 6 — Doc misattributes the 4 KiB pre-auth cap to this crate's framing layer
+
+Status: `confirmed-open`. Current risk: `nit`.
+
+The transport uses its caller's max_frame_size; the 4 KiB argument is supplied by server handshake code.
+
+Evidence: [crates/shamir-transport-ws/src/server.rs:27](../../../../../crates/shamir-transport-ws/src/server.rs#L27); [crates/shamir-transport-ws/src/framing.rs:163](../../../../../crates/shamir-transport-ws/src/framing.rs#L163); [crates/shamir-server/src/connection/handshake.rs:717](../../../../../crates/shamir-server/src/connection/handshake.rs#L717).
+
+Grouping/duplicate: `performance-hotpath.md#4`. This row is not another independent defect.
+
+<a id="review-7"></a>
+
+### Claim 7 — `ws_send_sink` truncates the length prefix for payloads >= 4 GiB
+
+Status: `confirmed-open`. Current risk: `nit`.
+
+Unchecked usize-to-u32 conversion remains. The extreme requires a huge caller-owned buffer; the ordinary missing outbound size guard is the actionable defect.
+
+Evidence: [crates/shamir-transport-ws/src/framing.rs:118](../../../../../crates/shamir-transport-ws/src/framing.rs#L118); [crates/shamir-transport-ws/src/framing.rs:157](../../../../../crates/shamir-transport-ws/src/framing.rs#L157).
+
+Grouping/duplicate: `api-wire-protocol.md#3`. This row is not another independent defect.
+
+<a id="review-8"></a>
+
+### Claim 8 — `BrowserOriginPolicy::allow` accepts malformed patterns that silently never match
+
+Status: `confirmed-open`. Current risk: `nit`.
+
+Construction still validates no scheme or wildcard syntax, and production rejects only an empty allowlist. Malformed entries can silently exclude intended valid browser Origins.
+
+Evidence: [crates/shamir-transport-ws/src/browser.rs:37](../../../../../crates/shamir-transport-ws/src/browser.rs#L37); [crates/shamir-transport-ws/src/browser.rs:59](../../../../../crates/shamir-transport-ws/src/browser.rs#L59); [crates/shamir-server/src/server/server_launcher.rs:1014](../../../../../crates/shamir-server/src/server/server_launcher.rs#L1014).
+
+Grouping/duplicate: `correctness-tdd.md#5`. This row is not another independent defect.
+
+## Corrections and qualified non-findings
+
+- The effective parser is 0.24.0, but age/version skew is not proof of a vulnerability. Lockfile membership does not establish executable bloat or an additional reachable parser.
+- Origin matching is not secret comparison. No unsafe or cryptographic implementation exists in this crate; actual TLS/exporter work delegates to the TCP transport.
+- Source confirms path checks, length equality, TEXT-content nonreflection, Origin validation before acceptance, and TLS-1.3-only configuration. The named endpoints are string literals, not shared constants.
+- The 16 MiB setting is a WS message/frame ceiling, not a 4 KiB pre-auth allocation ceiling. Logical framing runs after message assembly; the inner four-byte prefix also occupies that message ceiling.
+- Zero fallback does not switch mode 0x01 to 0x02. The listener policy rejects a different binding_mode and includes mode/exporter in authentication. The cited Rust-client fail-closed paths are TCP paths, not universal WSS-client proof.
+- The broad claim that production reads are timeout-protected is false for the directly awaited client_proof read.
+- Malformed Origin examples require a non-browser header sender. No exploit through normal browser-serialized Origins or ambient-cookie authentication was established.
+- Multi-star patterns containing //*. enter wildcard logic rather than necessarily falling back to exact comparison; malformed exact entries can match identical malformed raw headers.
+
+---
+
+<details>
+<summary>Historical report — preserved for provenance; not current status or instructions</summary>
+
 # shamir-transport-ws -- Security & crypto boundary
 
 ## Summary
@@ -71,3 +198,5 @@ Wildcard detection is a bare `find("//*.")`; entries like `https://*.*.example.c
 - **Injection:** endpoint paths exact-match against constants; Origin comparisons are non-wildcard exact or single-component wildcard with apex/deep-subdomain/port mismatches all rejecting (fail-closed, test-covered in `browser_tests.rs`); non-ASCII Origin headers classify as `Missing` (fail-closed).
 - **Ordering:** browser Origin check runs inside the handshake callback, before 101 Switching Protocols -- correct.
 - **TLS 1.3-only:** enforced at the rustls config layer in `shamir-transport-tcp` (`make_server_config_from_pem` / `make_client_config_no_ca`, `builder_with_protocol_versions(&[TLS13])`), which this crate correctly delegates to rather than duplicating.
+
+</details>

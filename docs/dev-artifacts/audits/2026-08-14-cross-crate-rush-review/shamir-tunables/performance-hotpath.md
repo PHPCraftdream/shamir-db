@@ -1,3 +1,58 @@
+<!-- revalidation:2026-10-08 source:92ad58266bf57ddea1fa3c8a47affba1a3a9a096 -->
+# shamir-tunables — performance-hotpath revalidation
+
+Source snapshot: `92ad58266bf57ddea1fa3c8a47affba1a3a9a096`. Revalidated 2026-10-08 by read-only XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run; no source fix is part of this update. Test registration/assertions are evidence of an oracle, not proof of a passing run.
+
+This section is authoritative for current status. Original titles/IDs are retained for traceability; a refuted title is not a current assertion. The collapsed historical report below is superseded, including its counts, severity, scenarios and fix instructions. Plan IDs preserve historical numbering, not a current release mandate. [Workspace methodology and status definitions](../SUMMARY.md#status-definitions).
+
+Production tunable operations remain constant-work and allocation-free by inspection. The two findings remain latent API issues, not measured performance regressions.
+
+## Current claim decisions
+
+| Claim decisions | Open | Source-fixed | Partial | Refuted | Unverified | N/A |
+|---:|---:|---:|---:|---:|---:|---:|
+| 2 | 2 | 0 | 0 | 0 | 0 | 0 |
+
+These are decisions on report claims, including repeated roots, bundled observations and non-findings—not a unique-bug census. Closed/N/A rows have no current risk; unverified risk is provisional. Pure style and unmeasured optimization claims do not establish runtime impact.
+
+<a id="review-1"></a>
+
+### Claim 1 — Runtime setters accept degenerate values with no clamping — latent busy-spin / zero-permit stall once the cascade goes live
+
+Status: `confirmed-open`. Current risk: `low`.
+
+Raw values and narrowing duration conversion remain. Shortened error backoff and oversized allocations are conditional future risks; current consumers are disconnected and the request cap is defensively floored.
+
+Evidence: [crates/shamir-tunables/src/runtime.rs:56](../../../../../crates/shamir-tunables/src/runtime.rs#L56); [crates/shamir-tunables/src/runtime.rs:63](../../../../../crates/shamir-tunables/src/runtime.rs#L63); [crates/shamir-server/src/connection/request_loop.rs:153](../../../../../crates/shamir-server/src/connection/request_loop.rs#L153); [crates/shamir-server/src/server/server_launcher.rs:1098](../../../../../crates/shamir-server/src/server/server_launcher.rs#L1098).
+
+Grouping/duplicate: `correctness-tdd.md#2`. This row is not another independent defect.
+
+<a id="review-2"></a>
+
+### Claim 2 — `RuntimeTunables` is dead-wired: constructed and carried, but zero production readers — advertised runtime tuning is a no-op
+
+Status: `confirmed-open`. Current risk: `low`.
+
+Changing the exposed object cannot change the server's two initial buffer allocations or five constant-backed accept-error sleeps. Any claimed benchmark improvement from those setters would lack this causal mechanism.
+
+Evidence: [crates/shamir-server/src/server/server_launcher.rs:985](../../../../../crates/shamir-server/src/server/server_launcher.rs#L985); [crates/shamir-server/src/connection/handshake.rs:706](../../../../../crates/shamir-server/src/connection/handshake.rs#L706); [crates/shamir-server/src/connection/handshake.rs:708](../../../../../crates/shamir-server/src/connection/handshake.rs#L708); [crates/shamir-server/src/server/server_launcher.rs:1442](../../../../../crates/shamir-server/src/server/server_launcher.rs#L1442).
+
+Grouping/duplicate: `correctness-tdd.md#1`. This row is not another independent defect.
+
+## Corrections and qualified non-findings
+
+- Qualify 'no allocations under src': production implementation allocates nothing, but reads_are_shared_ref allocates an Arc (crates/shamir-tunables/src/tests/runtime_tests.rs:53).
+- Single atomic load/store and no loops establish bounded structural work, not literally zero hardware overhead or unchanged cost versus a compiled constant. Those latency claims are unverified.
+- The five sleeps run on accept failures, not periodic idle housekeeping. A cadence acceptance test needs a deterministic error-path seam.
+- The no-lock/no-map/no-hidden-traversal guarantees remain source-supported. Scan batch constants bound individual batches, not total scan complexity or total system growth.
+- The claimed universal sub-second vector restart replay is not substantiated by source or permitted measurements (crates/shamir-tunables/src/lib.rs:145). Snapshot thresholds trigger asynchronous work and are not hard replay/orphan-size caps.
+- Existing max(1) defeats the claimed automatic zero-permit stall. Tokio timer rounding and cooperative polling prevent concluding mandatory 100%-core starvation from sleep(0) alone.
+
+---
+
+<details>
+<summary>Historical report — preserved for provenance; not current status or instructions</summary>
+
 # shamir-tunables -- Performance & O(x->0)
 
 ## Summary
@@ -99,3 +154,5 @@ the anti-unbounded-growth bounding the theme asks about. Test coverage
 (`src/tests/runtime_tests.rs`, 5 tests) pins defaults-vs-consts and set/read
 round-trips for all three runtime knobs plus `Arc`-shareability; no test
 covers degenerate/clamped inputs (gap noted in finding 1).
+
+</details>

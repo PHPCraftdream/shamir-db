@@ -1,3 +1,138 @@
+<!-- revalidation:2026-10-08 source:92ad58266bf57ddea1fa3c8a47affba1a3a9a096 -->
+# shamir-storage — api-wire-protocol revalidation
+
+Source snapshot: `92ad58266bf57ddea1fa3c8a47affba1a3a9a096`. Revalidated 2026-10-08 by read-only XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run; no source fix is part of this update. Test registration/assertions are evidence of an oracle, not proof of a passing run.
+
+This section is authoritative for current status. Original titles/IDs are retained for traceability; a refuted title is not a current assertion. The collapsed historical report below is superseded, including its counts, severity, scenarios and fix instructions. Plan IDs preserve historical numbering, not a current release mandate. [Workspace methodology and status definitions](../SUMMARY.md#status-definitions).
+
+Most contract/documentation gaps remain. Buffer persistence now has an envelope, but the retrofit rejects old raw configurations. Self-copy and Unicode claims elsewhere do not justify API fixes here.
+
+## Current claim decisions
+
+| Claim decisions | Open | Source-fixed | Partial | Refuted | Unverified | N/A |
+|---:|---:|---:|---:|---:|---:|---:|
+| 10 | 6 | 0 | 2 | 1 | 0 | 1 |
+
+These are decisions on report claims, including repeated roots, bundled observations and non-findings—not a unique-bug census. Closed/N/A rows have no current risk; unverified risk is provisional. Pure style and unmeasured optimization claims do not establish runtime impact.
+
+<a id="review-1"></a>
+
+### Claim 1 — Persisted MemBufferConfig wire format has no versioning guardrails despite a stable wire-format claim
+
+Status: `partially-fixed`. Current risk: `medium`.
+
+Engine persistence now writes/reads MetaEnvelope with magic/version checks; history shows the September retrofit. MemBufferConfig still lacks schema defaults/golden fixtures or migration dispatch. The reader deliberately rejects pre-envelope raw configurations, so backward compatibility is not fixed.
+
+Evidence: [crates/shamir-storage/src/storage_membuffer.rs:92](../../../../../crates/shamir-storage/src/storage_membuffer.rs#L92); [crates/shamir-engine/src/table/buffer_config.rs:40](../../../../../crates/shamir-engine/src/table/buffer_config.rs#L40); [crates/shamir-engine/src/table/buffer_config.rs:56](../../../../../crates/shamir-engine/src/table/buffer_config.rs#L56); [crates/shamir-index/src/meta_envelope.rs:54](../../../../../crates/shamir-index/src/meta_envelope.rs#L54); [crates/shamir-engine/src/table/tests/buffer_config_tests.rs:314](../../../../../crates/shamir-engine/src/table/tests/buffer_config_tests.rs#L314); [crates/shamir-engine/src/table/tests/buffer_config_tests.rs:334](../../../../../crates/shamir-engine/src/table/tests/buffer_config_tests.rs#L334).
+
+<a id="review-2"></a>
+
+### Claim 2 — batch_size == 0 is unspecified: InMemoryStore yields empty batches forever; fjall/cached silently return zero results
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+The zero-size loops/take behavior remain and trait methods lack a zero policy. MemBuffer clamps only merge output capacity, still forwarding zero to its inner stream, so its wrapper is not globally protected.
+
+Evidence: [crates/shamir-storage/src/types.rs:305](../../../../../crates/shamir-storage/src/types.rs#L305); [crates/shamir-storage/src/storage_in_memory.rs:163](../../../../../crates/shamir-storage/src/storage_in_memory.rs#L163); [crates/shamir-storage/src/storage_in_memory.rs:251](../../../../../crates/shamir-storage/src/storage_in_memory.rs#L251); [crates/shamir-storage/src/storage_cached.rs:559](../../../../../crates/shamir-storage/src/storage_cached.rs#L559); [crates/shamir-storage/src/storage_fjall.rs:620](../../../../../crates/shamir-storage/src/storage_fjall.rs#L620); [crates/shamir-storage/src/storage_membuffer.rs:661](../../../../../crates/shamir-storage/src/storage_membuffer.rs#L661); [crates/shamir-storage/src/storage_membuffer.rs:923](../../../../../crates/shamir-storage/src/storage_membuffer.rs#L923).
+
+<a id="review-3"></a>
+
+### Claim 3 — set/remove created/existed flag precision varies by backend and write mode, with no capability disclosure
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+set and batch flag contracts remain strict while MemBuffer uses local state and Cached Async uses cache state. Fjall's existence probe is separate from mutation. The remove method itself has no explicit existed sentence, but remove_many and remove_no_flag document that meaning.
+
+Evidence: [crates/shamir-storage/src/types.rs:36](../../../../../crates/shamir-storage/src/types.rs#L36); [crates/shamir-storage/src/types.rs:77](../../../../../crates/shamir-storage/src/types.rs#L77); [crates/shamir-storage/src/types.rs:168](../../../../../crates/shamir-storage/src/types.rs#L168); [crates/shamir-storage/src/storage_membuffer.rs:763](../../../../../crates/shamir-storage/src/storage_membuffer.rs#L763); [crates/shamir-storage/src/storage_cached.rs:435](../../../../../crates/shamir-storage/src/storage_cached.rs#L435); [crates/shamir-storage/src/storage_cached.rs:487](../../../../../crates/shamir-storage/src/storage_cached.rs#L487).
+
+<a id="review-4"></a>
+
+### Claim 4 — Cross-crate wire-format literal duplicated privately: [0,0,0,0] system-record prefix re-encoded in storage_mirrored
+
+Status: `confirmed-open`. Current risk: `low`.
+
+The private constants remain duplicated. Current values and RecordId::system construction agree, and registered classifier tests exercise the real constructor. This is future-maintenance coupling, not present demonstrated durability loss.
+
+Evidence: [crates/shamir-storage/src/storage_mirrored.rs:44](../../../../../crates/shamir-storage/src/storage_mirrored.rs#L44); [crates/shamir-types/src/types/record_id.rs:18](../../../../../crates/shamir-types/src/types/record_id.rs#L18); [crates/shamir-types/src/types/record_id.rs:98](../../../../../crates/shamir-types/src/types/record_id.rs#L98); [crates/shamir-storage/src/tests/storage_mirrored_tests.rs:244](../../../../../crates/shamir-storage/src/tests/storage_mirrored_tests.rs#L244).
+
+<a id="review-5"></a>
+
+### Claim 5 — Public-API rustdoc drift: prefetch promise, phantom engines, stale KeyBytes status
+
+Status: `confirmed-open`. Current risk: `low`.
+
+The prefetch sentence, removed-backend references, stale KeyBytes alias narrative, and Fjall hard-coded line reference remain. Actual scans do not start background prefetch.
+
+Evidence: [crates/shamir-storage/src/types.rs:291](../../../../../crates/shamir-storage/src/types.rs#L291); [crates/shamir-storage/src/types.rs:185](../../../../../crates/shamir-storage/src/types.rs#L185); [crates/shamir-storage/src/types.rs:343](../../../../../crates/shamir-storage/src/types.rs#L343); [crates/shamir-storage/src/key_bytes.rs:7](../../../../../crates/shamir-storage/src/key_bytes.rs#L7); [crates/shamir-storage/src/storage_fjall.rs:655](../../../../../crates/shamir-storage/src/storage_fjall.rs#L655); [crates/shamir-storage/Cargo.toml:16](../../../../../crates/shamir-storage/Cargo.toml#L16).
+
+<a id="review-6"></a>
+
+### Claim 6 — Shared backend-conformance suite skipped by CachedStore and MirroredStore
+
+Status: `confirmed-open`. Current risk: `low`.
+
+Neither registered wrapper test module invokes the helper. Mirrored's dedicated batch test does assert some flags and routing, so the claim is missing shared coverage, not no batch coverage.
+
+Evidence: [crates/shamir-storage/src/tests/types_tests.rs:38](../../../../../crates/shamir-storage/src/tests/types_tests.rs#L38); [crates/shamir-storage/src/tests/mod.rs:3](../../../../../crates/shamir-storage/src/tests/mod.rs#L3); [crates/shamir-storage/src/tests/mod.rs:6](../../../../../crates/shamir-storage/src/tests/mod.rs#L6); [crates/shamir-storage/src/tests/storage_mirrored_tests.rs:168](../../../../../crates/shamir-storage/src/tests/storage_mirrored_tests.rs#L168).
+
+Grouping/duplicate: `correctness-tdd.md#5`. This row is not another independent defect.
+
+<a id="review-7"></a>
+
+### Claim 7 — Repo::store_get create-on-read semantics make typos durably materialize
+
+Status: `refuted`. Current risk: —.
+
+store_get intentionally creates by documented contract, but the assertion that callers cannot validate existence without mutation is false: stores_list is available. Normal table reads also check the configured-table catalogue before opening physical stores. A convenience open-existing API is optional design work.
+
+Evidence: [crates/shamir-storage/src/types.rs:465](../../../../../crates/shamir-storage/src/types.rs#L465); [crates/shamir-storage/src/types.rs:475](../../../../../crates/shamir-storage/src/types.rs#L475); [crates/shamir-storage/src/storage_fjall.rs:265](../../../../../crates/shamir-storage/src/storage_fjall.rs#L265); [crates/shamir-engine/src/repo/repo_instance.rs:337](../../../../../crates/shamir-engine/src/repo/repo_instance.rs#L337).
+
+<a id="review-8"></a>
+
+### Claim 8 — Interface polish nits
+
+Status: `confirmed-open`. Current risk: `nit`.
+
+RecordStream remains private with two duplicate aliases; bounds remain Bytes; copy_store uses &str; KeyExists double-prefixing, dangling banners, and engine-domain String variants remain. Explicit expanded stream return types already implement Store, so alias privacy is ergonomic rather than an implementation blocker.
+
+Evidence: [crates/shamir-storage/src/types.rs:11](../../../../../crates/shamir-storage/src/types.rs#L11); [crates/shamir-storage/src/storage_membuffer.rs:628](../../../../../crates/shamir-storage/src/storage_membuffer.rs#L628); [crates/shamir-storage/src/tests/types_tests.rs:12](../../../../../crates/shamir-storage/src/tests/types_tests.rs#L12); [crates/shamir-storage/src/types.rs:336](../../../../../crates/shamir-storage/src/types.rs#L336); [crates/shamir-storage/src/types.rs:488](../../../../../crates/shamir-storage/src/types.rs#L488); [crates/shamir-storage/src/storage_in_memory.rs:111](../../../../../crates/shamir-storage/src/storage_in_memory.rs#L111); [crates/shamir-storage/src/error.rs:13](../../../../../crates/shamir-storage/src/error.rs#L13); [crates/shamir-storage/src/error.rs:103](../../../../../crates/shamir-storage/src/error.rs#L103); [crates/shamir-storage/src/storage_cached.rs:720](../../../../../crates/shamir-storage/src/storage_cached.rs#L720).
+
+<a id="review-nf-layout-and-serde"></a>
+
+### Claim NF-layout-and-serde — Registered external test trees and KeyBytes byte-identity suite
+
+Status: `not-applicable`. Current risk: —.
+
+Both test manifests are wired. Byte-identity, round-trip, and bincode cross-decode assertions compare against a local reference helper that currently matches the real WAL helper. rmp cross-decode in both directions is not asserted.
+
+Evidence: [crates/shamir-storage/src/lib.rs:32](../../../../../crates/shamir-storage/src/lib.rs#L32); [crates/shamir-storage/src/key_bytes.rs:315](../../../../../crates/shamir-storage/src/key_bytes.rs#L315); [crates/shamir-storage/src/key_bytes/tests/mod.rs:10](../../../../../crates/shamir-storage/src/key_bytes/tests/mod.rs#L10); [crates/shamir-storage/src/key_bytes/tests/serde_byte_identity_tests.rs:73](../../../../../crates/shamir-storage/src/key_bytes/tests/serde_byte_identity_tests.rs#L73); [crates/shamir-storage/src/key_bytes/tests/serde_byte_identity_tests.rs:129](../../../../../crates/shamir-storage/src/key_bytes/tests/serde_byte_identity_tests.rs#L129); [crates/shamir-wal/src/wal_entry_v2.rs:118](../../../../../crates/shamir-wal/src/wal_entry_v2.rs#L118).
+
+<a id="review-nf-atomic-capability"></a>
+
+### Claim NF-atomic-capability — supports_atomic_transact discloses atomicity capability honestly
+
+Status: `partially-fixed`. Current risk: `medium`.
+
+InMemory/Mirrored correctly report false, but Cached/MemBuffer forward inner's answer while publishing visible cache entries per operation. True for an atomic inner therefore does not establish wrapper-wide visibility atomicity. The registered F-77 test asserts forwarding, not observed atomic publication.
+
+Evidence: [crates/shamir-storage/src/types.rs:256](../../../../../crates/shamir-storage/src/types.rs#L256); [crates/shamir-storage/src/storage_cached.rs:675](../../../../../crates/shamir-storage/src/storage_cached.rs#L675); [crates/shamir-storage/src/storage_cached.rs:684](../../../../../crates/shamir-storage/src/storage_cached.rs#L684); [crates/shamir-storage/src/storage_membuffer.rs:1045](../../../../../crates/shamir-storage/src/storage_membuffer.rs#L1045); [crates/shamir-storage/src/storage_membuffer.rs:1092](../../../../../crates/shamir-storage/src/storage_membuffer.rs#L1092); [crates/shamir-storage/src/tests/storage_mirrored_tests.rs:1285](../../../../../crates/shamir-storage/src/tests/storage_mirrored_tests.rs#L1285).
+
+## Corrections and qualified non-findings
+
+- Per-field serde defaults do not make appended fields in old bincode tuples backward-compatible; the pinned decoder attempts each expected field and propagates EOF.
+- Validate envelope headers before schema-specific payload decoding when implementing version dispatch; the current generic open decodes the payload first.
+- Use fixed-timestamp fixtures for envelope golden bytes.
+- debug_assert is not a release-build solution to zero batch sizes.
+- An impl AsRef/generic prefix method would compromise Store's dyn compatibility; retain an object-safe signature or put generic conveniences elsewhere.
+- Current duplicated constants are equal; do not report speculative future migration loss as a current runtime medium.
+- Trait remove lacks the exact sentence quoted by the original report.
+- Separate optional API polish from runtime/security findings.
+
+---
+
+<details>
+<summary>Historical report — preserved for provenance; not current status or instructions</summary>
+
 # shamir-storage -- API & wire-protocol design
 
 ## Summary
@@ -68,3 +203,5 @@ The `Store`/`Repo` trait surface is unusually well documented for a KV abstracti
 - Layout conforms to CLAUDE.md: per-module `tests/` dirs (`src/tests/`, `src/key_bytes/tests/`) with manifest-only `mod.rs`; no inline `#[cfg(test)] mod tests` in impl files; test-only seams properly `#[cfg(test)]`-gated (`membuffer_clear_race_hook.rs`).
 - `key_bytes/tests/serde_byte_identity_tests.rs` is exemplary for a wire-format suite: bincode + rmp-serde byte-identity against a local mirror of the WAL encoder, spanning INLINE_CAP boundaries, round-trips, and cross-decode in both directions.
 - Backend suites are deep on their specific hazards (overlay-scan merges, async-write FIFO ordering, flush error surfacing, mirror-first F-41/F-59 atomicity, classifier drift); the gap is only finding #6.
+
+</details>

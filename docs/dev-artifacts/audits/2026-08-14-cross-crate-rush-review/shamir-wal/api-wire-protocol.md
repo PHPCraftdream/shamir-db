@@ -1,3 +1,182 @@
+<!-- revalidation:2026-10-08 source:92ad58266bf57ddea1fa3c8a47affba1a3a9a096 -->
+# shamir-wal — api-wire-protocol revalidation
+
+Source snapshot: `92ad58266bf57ddea1fa3c8a47affba1a3a9a096`. Revalidated 2026-10-08 by read-only XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run; no source fix is part of this update. Test registration/assertions are evidence of an oracle, not proof of a passing run.
+
+This section is authoritative for current status. Original titles/IDs are retained for traceability; a refuted title is not a current assertion. The collapsed historical report below is superseded, including its counts, severity, scenarios and fix instructions. Plan IDs preserve historical numbering, not a current release mandate. [Workspace methodology and status definitions](../SUMMARY.md#status-definitions).
+
+The parser, byte-opaque append trap, stale public surface, and ambiguous sequence semantics remain. idx_id is ignored by current replay, so its unresolved schema is compatibility/documentation debt rather than demonstrated posting misrouting.
+
+## Current claim decisions
+
+| Claim decisions | Open | Source-fixed | Partial | Refuted | Unverified | N/A |
+|---:|---:|---:|---:|---:|---:|---:|
+| 14 | 12 | 0 | 0 | 0 | 0 | 2 |
+
+These are decisions on report claims, including repeated roots, bundled observations and non-findings—not a unique-bug census. Closed/N/A rows have no current risk; unverified risk is provisional. Pure style and unmeasured optimization claims do not establish runtime impact.
+
+<a id="review-1"></a>
+
+### Claim 1 — Segment-name parser accepts non-canonical names and can silently shadow WAL data
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+Directory scan retains only parsed numbers, then reconstructs paths with the formatter and never deduplicates. Distinct names mapping to one number alias a canonical file; a noncanonical-only file can instead lead to creating an empty canonical replacement.
+
+Evidence: [crates/shamir-wal/src/segment_set.rs:68](../../../../../crates/shamir-wal/src/segment_set.rs#L68); [crates/shamir-wal/src/segment_set.rs:74](../../../../../crates/shamir-wal/src/segment_set.rs#L74); [crates/shamir-wal/src/segment_set.rs:100](../../../../../crates/shamir-wal/src/segment_set.rs#L100); [crates/shamir-wal/src/segment_set.rs:132](../../../../../crates/shamir-wal/src/segment_set.rs#L132); [crates/shamir-wal/src/segment_set.rs:165](../../../../../crates/shamir-wal/src/segment_set.rs#L165).
+
+<a id="review-2"></a>
+
+### Claim 2 — Append path accepts payloads that produce well-formed frames which then hard-fail replay
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+Empty or non-entry payloads are framed without validation; repair checks framing/CRC only, while replay propagates decode errors. Production RepoWalManager encodes typed entries, so the demonstrated trap requires direct API misuse or forged corpus, not the ordinary transaction producer.
+
+Evidence: [crates/shamir-wal/src/wal_segment.rs:206](../../../../../crates/shamir-wal/src/wal_segment.rs#L206); [crates/shamir-wal/src/wal_segment.rs:229](../../../../../crates/shamir-wal/src/wal_segment.rs#L229); [crates/shamir-wal/src/wal_segment.rs:391](../../../../../crates/shamir-wal/src/wal_segment.rs#L391); [crates/shamir-wal/src/wal_segment.rs:572](../../../../../crates/shamir-wal/src/wal_segment.rs#L572); [crates/shamir-tx/src/repo_wal_manager.rs:90](../../../../../crates/shamir-tx/src/repo_wal_manager.rs#L90).
+
+<a id="review-3"></a>
+
+### Claim 3 — Retired F5c KV-marker wire protocol still exported as public API, with docs describing it as live
+
+Status: `confirmed-open`. Current risk: `low`.
+
+WalActiveKey and looks_like_v2 remain public, with only own-test code consumers found. Entry and segment docs still cite removed modules/types and live KV-marker dispatch, contradicting crate architecture and actual SegmentSet construction.
+
+Evidence: [crates/shamir-wal/src/lib.rs:15](../../../../../crates/shamir-wal/src/lib.rs#L15); [crates/shamir-wal/src/lib.rs:54](../../../../../crates/shamir-wal/src/lib.rs#L54); [crates/shamir-wal/src/wal_entry_v2.rs:3](../../../../../crates/shamir-wal/src/wal_entry_v2.rs#L3); [crates/shamir-wal/src/wal_entry_v2.rs:259](../../../../../crates/shamir-wal/src/wal_entry_v2.rs#L259); [crates/shamir-wal/src/wal_segment.rs:3](../../../../../crates/shamir-wal/src/wal_segment.rs#L3).
+
+<a id="review-4"></a>
+
+### Claim 4 — WalOpV2::IndexPut/IndexDel serialize idx_id as a constant 0 with semantics deferred
+
+Status: `confirmed-open`. Current risk: `low`.
+
+The transaction producer emits zero and WAL docs still defer its meaning. Current replay ignores idx_id and routes raw key/value by table token; it does not need to decode every key's first four bytes. No current misrouting by this field was established.
+
+Evidence: [crates/shamir-wal/src/wal_entry_v2.rs:71](../../../../../crates/shamir-wal/src/wal_entry_v2.rs#L71); [crates/shamir-engine/src/tx/commit.rs:325](../../../../../crates/shamir-engine/src/tx/commit.rs#L325); [crates/shamir-engine/src/tx/commit.rs:333](../../../../../crates/shamir-engine/src/tx/commit.rs#L333); [crates/shamir-engine/src/tx/recovery.rs:149](../../../../../crates/shamir-engine/src/tx/recovery.rs#L149); [crates/shamir-tx/src/index_write_op.rs:58](../../../../../crates/shamir-tx/src/index_write_op.rs#L58).
+
+<a id="review-5"></a>
+
+### Claim 5 — Frame format has no per-frame magic/seq and segment files have no header or format version
+
+Status: `confirmed-open`. Current risk: `low`.
+
+Files remain bare length/payload/CRC streams, with versioning only inside entry envelopes and sidecars. No supported frame resynchronization exists. A header/sequence alone would not establish safe recovery past an arbitrary corrupt frame.
+
+Evidence: [crates/shamir-wal/src/wal_segment.rs:226](../../../../../crates/shamir-wal/src/wal_segment.rs#L226); [crates/shamir-wal/src/wal_segment.rs:231](../../../../../crates/shamir-wal/src/wal_segment.rs#L231); [crates/shamir-wal/src/wal_segment.rs:551](../../../../../crates/shamir-wal/src/wal_segment.rs#L551); [crates/shamir-wal/src/segment_meta.rs:55](../../../../../crates/shamir-wal/src/segment_meta.rs#L55).
+
+<a id="review-6"></a>
+
+### Claim 6 — append_batch returns a seq that is per-segment, non-persisted, and resets to 0 on every open
+
+Status: `confirmed-open`. Current risk: `low`.
+
+The counter initializes at zero for every handle and is absent from frames. API docs do not clearly state per-open scope. Production only checks success, so the risk is future LSN-style misuse.
+
+Evidence: [crates/shamir-wal/src/wal_segment.rs:177](../../../../../crates/shamir-wal/src/wal_segment.rs#L177); [crates/shamir-wal/src/wal_segment.rs:184](../../../../../crates/shamir-wal/src/wal_segment.rs#L184); [crates/shamir-wal/src/segment_set.rs:212](../../../../../crates/shamir-wal/src/segment_set.rs#L212); [crates/shamir-wal/src/wal_group_commit.rs:294](../../../../../crates/shamir-wal/src/wal_group_commit.rs#L294).
+
+<a id="review-7"></a>
+
+### Claim 7 — No library error enum: all wire failures collapse into DbError::Internal(String) / DbError::Storage(String)
+
+Status: `confirmed-open`. Current risk: `low`.
+
+WAL errors lose fine-grained causes in strings. However, DbError itself is already a shared thiserror enum; using it is not inherently a mandate violation, and Storage versus Internal remains programmatically distinguishable.
+
+Evidence: [crates/shamir-wal/src/wal_entry_v2.rs:229](../../../../../crates/shamir-wal/src/wal_entry_v2.rs#L229); [crates/shamir-wal/src/wal_segment.rs:155](../../../../../crates/shamir-wal/src/wal_segment.rs#L155); [crates/shamir-storage/src/error.rs:6](../../../../../crates/shamir-storage/src/error.rs#L6); [crates/shamir-storage/src/error.rs:41](../../../../../crates/shamir-storage/src/error.rs#L41).
+
+Grouping/duplicate: `error-handling-lifecycle.md#4`. This row is not another independent defect.
+
+<a id="review-8"></a>
+
+### Claim 8 — Group-commit waiter transport discards the underlying error
+
+Status: `confirmed-open`. Current risk: `low`.
+
+Waiter carries only done/ok and Notify; sink errors are reduced to booleans, so append APIs return fixed causeless messages.
+
+Evidence: [crates/shamir-wal/src/wal_group_commit.rs:89](../../../../../crates/shamir-wal/src/wal_group_commit.rs#L89); [crates/shamir-wal/src/wal_group_commit.rs:201](../../../../../crates/shamir-wal/src/wal_group_commit.rs#L201); [crates/shamir-wal/src/wal_group_commit.rs:294](../../../../../crates/shamir-wal/src/wal_group_commit.rs#L294).
+
+Grouping/duplicate: `error-handling-lifecycle.md#3`. This row is not another independent defect.
+
+<a id="review-9"></a>
+
+### Claim 9 — Frame-length arithmetic can overflow usize on 32-bit / wasm32 targets
+
+Status: `confirmed-open`. Current risk: `low`.
+
+Both disk walkers use unchecked usize addition. The 32-bit condition is established mathematically; actual wasm32 host support is not established by the project's WASM-module goal.
+
+Evidence: [crates/shamir-wal/src/wal_segment.rs:380](../../../../../crates/shamir-wal/src/wal_segment.rs#L380); [crates/shamir-wal/src/wal_segment.rs:535](../../../../../crates/shamir-wal/src/wal_segment.rs#L535).
+
+Grouping/duplicate: `security-crypto.md#4`. This row is not another independent defect.
+
+<a id="review-10"></a>
+
+### Claim 10 — WalSegment::mark_poisoned is an un-gated public test hook
+
+Status: `confirmed-open`. Current risk: `nit`.
+
+The method remains fully public and lacks cfg(test), doc-hidden, or deprecation annotations, unlike the crate-private test accessors. Misuse requires an in-process consumer with a segment handle.
+
+Evidence: [crates/shamir-wal/src/wal_segment.rs:339](../../../../../crates/shamir-wal/src/wal_segment.rs#L339); [crates/shamir-wal/src/segment_set.rs:568](../../../../../crates/shamir-wal/src/segment_set.rs#L568).
+
+<a id="review-11"></a>
+
+### Claim 11 — Wire-format tests for segment_meta are inline in the implementation file
+
+Status: `confirmed-open`. Current risk: `low`.
+
+Five inline tests remain; the sibling test manifest has no segment_meta_tests module.
+
+Evidence: [crates/shamir-wal/src/segment_meta.rs:175](../../../../../crates/shamir-wal/src/segment_meta.rs#L175); [crates/shamir-wal/src/tests/mod.rs:1](../../../../../crates/shamir-wal/src/tests/mod.rs#L1).
+
+Grouping/duplicate: `style-claude-md.md#1`. This row is not another independent defect.
+
+<a id="review-12"></a>
+
+### Claim 12 — Anonymous tuple types in the public wire structs
+
+Status: `confirmed-open`. Current risk: `nit`.
+
+Interner pairs and delta triples remain public serialized tuples. Named types could improve clarity, but no actual positional consumer defect was established; compatibility must be preserved.
+
+Evidence: [crates/shamir-wal/src/wal_entry_v2.rs:105](../../../../../crates/shamir-wal/src/wal_entry_v2.rs#L105); [crates/shamir-wal/src/wal_entry_v2.rs:159](../../../../../crates/shamir-wal/src/wal_entry_v2.rs#L159).
+
+<a id="review-coverage-versioned-envelope-and-sidecar"></a>
+
+### Claim Coverage/versioned-envelope-and-sidecar — Wire-format tests pin envelope versions and the sidecar fallback matrix
+
+Status: `not-applicable`. Current risk: —.
+
+Registered tests exercise current/version-1-with-commit_version decoding, all operation variants, rejection guards, and sidecar fallbacks. The constructed legacy fixture does not prove compatibility with every earlier historical version-1 schema.
+
+Evidence: [crates/shamir-wal/src/lib.rs:43](../../../../../crates/shamir-wal/src/lib.rs#L43); [crates/shamir-wal/src/tests/mod.rs:3](../../../../../crates/shamir-wal/src/tests/mod.rs#L3); [crates/shamir-wal/src/tests/wal_entry_v2_tests.rs:158](../../../../../crates/shamir-wal/src/tests/wal_entry_v2_tests.rs#L158); [crates/shamir-wal/src/tests/segment_set_tests.rs:596](../../../../../crates/shamir-wal/src/tests/segment_set_tests.rs#L596).
+
+<a id="review-summary-builder-only"></a>
+
+### Claim Summary/builder-only — Builder-only query-construction rule is compliant
+
+Status: `not-applicable`. Current risk: —.
+
+This crate constructs typed WAL entries rather than queries and has no serde_json query-construction surface.
+
+Evidence: [crates/shamir-wal/Cargo.toml:9](../../../../../crates/shamir-wal/Cargo.toml#L9); [crates/shamir-wal/src/wal_entry_v2.rs:182](../../../../../crates/shamir-wal/src/wal_entry_v2.rs#L182); [crates/shamir-wal/src/wal_entry_v2.rs:201](../../../../../crates/shamir-wal/src/wal_entry_v2.rs#L201).
+
+## Corrections and qualified non-findings
+
+- Canonical validation should round-trip through seg_file_name, not require exactly eight digits: :08 is a minimum width and legitimately emits longer names for larger u64 sequences.
+- Current index recovery ignores idx_id and applies raw keys; the report's universal four-byte-prefix decoder assertion is incorrect.
+- Rejecting only empty payloads does not reject all nonempty undecodable payloads.
+- Do not silently skip undecodable durable entries merely to make recovery open successfully.
+- Retained public legacy helpers can be documented/deprecated instead of removed; absence of in-repository consumers does not prove absence of external consumers.
+- A shared thiserror DbError satisfies the error-enum mechanism; the actual problem is loss of typed WAL/I/O detail.
+
+---
+
+<details>
+<summary>Historical report — preserved for provenance; not current status or instructions</summary>
+
 # shamir-wal — API & wire-protocol design
 
 ## Summary
@@ -85,3 +264,5 @@ The crate's versioned surfaces are genuinely well-engineered: the V2 entry envel
 ---
 
 **Test-coverage note (context for the findings above):** wire-format coverage is a strength — `wal_entry_v2_tests.rs` pins the envelope (magic, version byte, short/bad-magic/unknown-version rejection, v2 round-trip with delta, v1-legacy decode, size bound); `wal_segment_tests.rs` pins frame semantics (round-trip, torn tail, CRC detection, sealed-loud vs active-tolerant, per-segment seq); `segment_set_tests.rs` covers the full sidecar matrix (seal-writes, valid-skips-replay, absent/corrupt/truncated → replay fallback, crash-between-fsync-and-sidecar, truncate-removes, reactivation/poison sheds stale sidecar); `wal_group_commit_tests.rs` covers the `WalDurability` tier contract including `append_many` atomicity under injected write failure. The gaps that matter for this theme are exactly findings 1–2: no test for non-canonical segment names, and no test for an empty/undecodable payload entering the frame stream.
+
+</details>

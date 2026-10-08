@@ -1,3 +1,66 @@
+<!-- revalidation:2026-10-08 source:92ad58266bf57ddea1fa3c8a47affba1a3a9a096 -->
+# shamir-query-builder — security-crypto revalidation
+
+Source snapshot: `92ad58266bf57ddea1fa3c8a47affba1a3a9a096`. Revalidated 2026-10-08 by read-only XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run; no source fix is part of this update. Test registration/assertions are evidence of an oracle, not proof of a passing run.
+
+This section is authoritative for current status. Original titles/IDs are retained for traceability; a refuted title is not a current assertion. The collapsed historical report below is superseded, including its counts, severity, scenarios and fix instructions. Plan IDs preserve historical numbering, not a current release mandate. [Workspace methodology and status definitions](../SUMMARY.md#status-definitions).
+
+The zeroize-disabled deployment claim is refuted by an overlooked transitive default-feature edge. Bare-String builder lifetime and missing local HMAC affordances remain low-severity concerns, not demonstrated remote security bypasses.
+
+## Current claim decisions
+
+| Claim decisions | Open | Source-fixed | Partial | Refuted | Unverified | N/A |
+|---:|---:|---:|---:|---:|---:|---:|
+| 3 | 2 | 0 | 0 | 1 | 0 | 0 |
+
+These are decisions on report claims, including repeated roots, bundled observations and non-findings—not a unique-bug census. Closed/N/A rows have no current risk; unverified risk is provisional. Pure style and unmeasured optimization claims do not establish runtime impact.
+
+<a id="review-1"></a>
+
+### Claim 1 — Plaintext password's zeroize-on-drop is silently disabled by this crate's own dependency profile
+
+Status: `refuted`. Current risk: —.
+
+Although the builder directly disables shamir-types defaults, shamir-query-types depends on shamir-types without disabling defaults. That edge enables shamir-types' default crypto feature and zeroize Drop even when query-types' own defaults are disabled. This mechanism predates the audit; it is not a later fix.
+
+Evidence: [crates/shamir-query-builder/Cargo.toml:17](../../../../../crates/shamir-query-builder/Cargo.toml#L17); [crates/shamir-query-builder/Cargo.toml:20](../../../../../crates/shamir-query-builder/Cargo.toml#L20); [crates/shamir-query-types/Cargo.toml:11](../../../../../crates/shamir-query-types/Cargo.toml#L11); [crates/shamir-types/Cargo.toml:53](../../../../../crates/shamir-types/Cargo.toml#L53); [crates/shamir-types/src/secret.rs:67](../../../../../crates/shamir-types/src/secret.rs#L67); [Cargo.lock:5473](../../../../../Cargo.lock#L5473).
+
+<a id="review-2"></a>
+
+### Claim 2 — Builder holds the plaintext password in a bare `String` until `build()`
+
+Status: `confirmed-open`. Current risk: `low`.
+
+CreateUser still stores String and wraps it only when producing CreateUserOp. Dropping the unbuilt builder bypasses SecretString's wipe. The field is private and the builder lacks Debug/Clone, so the report's implication that ordinary downstream code can directly log or clone that field is overstated.
+
+Evidence: [crates/shamir-query-builder/src/ddl/auth.rs:8](../../../../../crates/shamir-query-builder/src/ddl/auth.rs#L8); [crates/shamir-query-builder/src/ddl/auth.rs:19](../../../../../crates/shamir-query-builder/src/ddl/auth.rs#L19); [crates/shamir-query-builder/src/ddl/auth.rs:52](../../../../../crates/shamir-query-builder/src/ddl/auth.rs#L52); [crates/shamir-types/src/secret.rs:68](../../../../../crates/shamir-types/src/secret.rs#L68).
+
+<a id="review-3"></a>
+
+### Claim 3 — "HMAC-gated" builders all build successfully without a tag -- gating is advisory-only client-side
+
+Status: `confirmed-open`. Current risk: `low`.
+
+Gated builders still carry optional tags and perform no local presence check; conditional CreateFunction requirements remain unenforced locally. The inspected network handler rejects absent/invalid tags for covered top-level ops. This is construction-time feedback/documentation debt, not proof of authorization bypass; embedded execution has a different trust boundary.
+
+Evidence: [crates/shamir-query-builder/src/ddl/auth.rs:49](../../../../../crates/shamir-query-builder/src/ddl/auth.rs#L49); [crates/shamir-query-builder/src/ddl/access_control.rs:92](../../../../../crates/shamir-query-builder/src/ddl/access_control.rs#L92); [crates/shamir-query-builder/src/ddl/function.rs:86](../../../../../crates/shamir-query-builder/src/ddl/function.rs#L86); [crates/shamir-query-builder/src/ddl/function.rs:95](../../../../../crates/shamir-query-builder/src/ddl/function.rs#L95); [crates/shamir-server/src/db_handler/admin.rs:637](../../../../../crates/shamir-server/src/db_handler/admin.rs#L637); [crates/shamir-server/src/db_handler/admin.rs:740](../../../../../crates/shamir-server/src/db_handler/admin.rs#L740); [crates/shamir-server/src/db_handler/handler.rs:549](../../../../../crates/shamir-server/src/db_handler/handler.rs#L549); [crates/shamir-server/src/db_handler/tx_handlers.rs:119](../../../../../crates/shamir-server/src/db_handler/tx_handlers.rs#L119).
+
+## Corrections and qualified non-findings
+
+- Dependency comments promising that guest builds skip zeroize are stale relative to the actual transitive dependency edge; default-features=false does not recursively disable another dependency's defaults.
+- Memory-residue exposure requires access to process/WASM memory. Neither indefinite retention nor automatic appearance in JS heap snapshots was established.
+- No unsafe code, secret/tag comparison, or textual-query interpolation was found in builder implementation. DTO construction avoids that injection mechanism, not every possible downstream security flaw.
+- The claimed single format! occurrence is false: handle/path construction also uses format!, without creating command/query text. ASCII-delimiter path slicing is boundary-safe.
+- Response extraction uses checked lookups and typed errors in crates/shamir-query-builder/src/response/batch_response_ext.rs:176. No malformed-response panic was identified in that code; arbitrary user Deserialize implementations are outside this guarantee.
+- The assertion that all remaining codec expects are current input-unreachable invariants is unverified. Non-finite floats are serialized directly; they are not established codec-error examples.
+- SecretString's redacting Debug is source-proven and checked by crates/shamir-query-types/src/wire/tests/db_message_tests.rs:168. Those tests do not prove zeroization of all plaintext copies or abandoned builders.
+- The msgpack fallback is not correctly conservative in every case: nested scope and literal-marker false positives remain.
+
+---
+
+<details>
+<summary>Historical report — preserved for provenance; not current status or instructions</summary>
+
 # shamir-query-builder -- Security & crypto boundary
 
 ## Summary
@@ -38,3 +101,5 @@ This crate is a pure client-side builder: it constructs typed wire DTOs and neve
 - **Untrusted input**: response extraction (`response/batch_response_ext.rs`) is fully `Result`-based -- missing alias, out-of-range row, and deserialize failures are typed errors, no panics/indexing on malformed server data. `try_build`'s `$query`-ref validation reuses typed walks plus a conservative msgpack fallback (`collect_op_query_refs`), correctly preferring over-validation for the ~75 unaudited op variants.
 - **Panics on caller input**: the remaining `unwrap`/`expect` sites (`ddl/create_index.rs:772-862`, `batch/batch.rs:879-880`, `write/doc.rs:48-50`) are all guarded by immediately-preceding checks or documented-infallible codec round-trips with inline justifications -- invariants, not input-reachable.
 - **Test coverage of this surface**: `ddl/tests/access_ddl_tests.rs` covers create_user wire shape (incl. `password` field), hmac attach/detach for chmod/chown/chgrp/groups/grant/revoke; `ddl/tests/schema_ddl_tests.rs` covers hmac on drop_db/drop_table/drop_index; macros/filter/subscribe tests confirm typed-only construction. No test asserts SecretString redaction here, but that invariant is tested at its definition site (`shamir-query-types` wire tests).
+
+</details>

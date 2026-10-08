@@ -1,3 +1,181 @@
+<!-- revalidation:2026-10-08 source:92ad58266bf57ddea1fa3c8a47affba1a3a9a096 -->
+# shamir-wasm-host — error-handling-lifecycle revalidation
+
+Source snapshot: `92ad58266bf57ddea1fa3c8a47affba1a3a9a096`. Revalidated 2026-10-08 by read-only XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run; no source fix is part of this update. Test registration/assertions are evidence of an oracle, not proof of a passing run.
+
+This section is authoritative for current status. Original titles/IDs are retained for traceability; a refuted title is not a current assertion. The collapsed historical report below is superseded, including its counts, severity, scenarios and fix instructions. Plan IDs preserve historical numbering, not a current release mandate. [Workspace methodology and status definitions](../SUMMARY.md#status-definitions).
+
+Cancellation under-accounting, ticker failure, compile teardown, panic classification, and test gaps remain. The original cancellation capacity-loss scenario reverses the actual accounting effect.
+
+## Current claim decisions
+
+| Claim decisions | Open | Source-fixed | Partial | Refuted | Unverified | N/A |
+|---:|---:|---:|---:|---:|---:|---:|
+| 12 | 12 | 0 | 0 | 0 | 0 | 0 |
+
+These are decisions on report claims, including repeated roots, bundled observations and non-findings—not a unique-bug census. Closed/N/A rows have no current risk; unverified risk is provisional. Pure style and unmeasured optimization claims do not establish runtime impact.
+
+<a id="review-1"></a>
+
+### Claim 1 — Aggregate fuel-budget debit is skipped when the call future is cancelled (cancelled task permanently leaks budget)
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+Dropped futures skip the post-await fetch_sub because no Drop accounting exists. This leaves consumed instructions uncharged and remaining fuel too high; it does not permanently reserve or exhaust capacity as the report claims.
+
+Evidence: [crates/shamir-wasm-host/src/wasm/wasm_function.rs:581](../../../../../crates/shamir-wasm-host/src/wasm/wasm_function.rs#L581); [crates/shamir-wasm-host/src/wasm/wasm_function.rs:587](../../../../../crates/shamir-wasm-host/src/wasm/wasm_function.rs#L587).
+
+Grouping/duplicate: `SUMMARY.md#6.1`. This row is not another independent defect.
+
+<a id="review-2"></a>
+
+### Claim 2 — Epoch-ticker thread spawn failure is swallowed with `.ok()` -- wall-clock pre-emption silently disabled, nothing logged
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+Ticker construction still discards thread-spawn failure and returns an apparently usable engine. Epoch advancement can be absent; finite Store fuel remains enabled.
+
+Evidence: [crates/shamir-wasm-host/src/wasm/wasm_engine.rs:129](../../../../../crates/shamir-wasm-host/src/wasm/wasm_engine.rs#L129); [crates/shamir-wasm-host/src/wasm/wasm_engine.rs:162](../../../../../crates/shamir-wasm-host/src/wasm/wasm_engine.rs#L162).
+
+Grouping/duplicate: `SUMMARY.md#6.2`. This row is not another independent defect.
+
+<a id="review-3"></a>
+
+### Claim 3 — No test coverage for any host-import trap/error path (db/http/batch/global imports, depth limit, OOB result pointers, missing exports)
+
+Status: `confirmed-open`. Current risk: `low`.
+
+The named local trap/codec/ABI boundary matrices remain absent. The blanket claim that no guest import is invoked is false: actor tests invoke call, and recursion may invoke it depending on fuel consumption.
+
+Evidence: [crates/shamir-wasm-host/src/tests/mod.rs:1](../../../../../crates/shamir-wasm-host/src/tests/mod.rs#L1); [crates/shamir-wasm-host/src/tests/nested_actor_tests.rs:85](../../../../../crates/shamir-wasm-host/src/tests/nested_actor_tests.rs#L85); [crates/shamir-wasm-host/src/tests/wasm_sanitizer_tests.rs:93](../../../../../crates/shamir-wasm-host/src/tests/wasm_sanitizer_tests.rs#L93).
+
+Grouping/duplicate: `SUMMARY.md#6.3`. This row is not another independent defect.
+
+<a id="review-4"></a>
+
+### Claim 4 — Public gateway traits and net-guard functions return `Result<_, String>` instead of a typed thiserror error
+
+Status: `confirmed-open`. Current risk: `low`.
+
+String errors remain the public gateway/guard contract, with flattened trap messages. Typed classification and source chains are unavailable across that boundary.
+
+Evidence: [crates/shamir-wasm-host/src/db_gateway.rs:86](../../../../../crates/shamir-wasm-host/src/db_gateway.rs#L86); [crates/shamir-wasm-host/src/net_gateway.rs:60](../../../../../crates/shamir-wasm-host/src/net_gateway.rs#L60); [crates/shamir-wasm-host/src/net_gateway.rs:160](../../../../../crates/shamir-wasm-host/src/net_gateway.rs#L160).
+
+Grouping/duplicate: `SUMMARY.md#5.3`. This row is not another independent defect.
+
+<a id="review-5"></a>
+
+### Claim 5 — Panic inside the Argon2id blocking task is collapsed into `FunctionError::Cancelled`, discarding the panic payload
+
+Status: `confirmed-open`. Current risk: `low`.
+
+The JoinError is still discarded without checking is_panic. FunctionError's comment explicitly includes panic, but its display says cancelled and the returned error loses the payload; a panic hook may still log it.
+
+Evidence: [crates/shamir-wasm-host/src/builtin.rs:83](../../../../../crates/shamir-wasm-host/src/builtin.rs#L83); [crates/shamir-wasm-host/src/error.rs:36](../../../../../crates/shamir-wasm-host/src/error.rs#L36).
+
+Grouping/duplicate: `SUMMARY.md#6.5`. This row is not another independent defect.
+
+<a id="review-6"></a>
+
+### Claim 6 — `map_wasm_error` classifies traps by substring-matching the error message
+
+Status: `confirmed-open`. Current risk: `low`.
+
+Fuel/epoch classification still searches Display strings, including strings originating in host errors. The fuel test checks only Compute, so it does not pin classification text or mechanism.
+
+Evidence: [crates/shamir-wasm-host/src/wasm/wasm_function.rs:593](../../../../../crates/shamir-wasm-host/src/wasm/wasm_function.rs#L593); [crates/shamir-wasm-host/src/tests/wasm_tests.rs:212](../../../../../crates/shamir-wasm-host/src/tests/wasm_tests.rs#L212).
+
+Grouping/duplicate: `SUMMARY.md#6.6`. This row is not another independent defect.
+
+<a id="review-7"></a>
+
+### Claim 7 — `compile.rs` degrades invalid-UTF-8 temp paths into `unwrap_or("")` arguments for cargo instead of a typed error
+
+Status: `confirmed-open`. Current risk: `low`.
+
+Both cargo path arguments still use to_str().unwrap_or(""). Non-Unicode paths become unrelated empty arguments rather than being preserved as OS paths or reported explicitly.
+
+Evidence: [crates/shamir-wasm-host/src/compile.rs:542](../../../../../crates/shamir-wasm-host/src/compile.rs#L542); [crates/shamir-wasm-host/src/compile.rs:544](../../../../../crates/shamir-wasm-host/src/compile.rs#L544).
+
+Grouping/duplicate: `SUMMARY.md#6.7`. This row is not another independent defect.
+
+<a id="review-8"></a>
+
+### Claim 8 — Timeout kill path: ignored `kill()` result followed by an unbounded `child.wait()` can hang past the very timeout being enforced
+
+Status: `confirmed-open`. Current risk: `low`.
+
+Timeout still ignores kill failure and uses an unbounded wait, followed by unbounded reader joins. A cargo-only kill also does not establish pipe EOF while descendants retain handles.
+
+Evidence: [crates/shamir-wasm-host/src/compile.rs:598](../../../../../crates/shamir-wasm-host/src/compile.rs#L598); [crates/shamir-wasm-host/src/compile.rs:599](../../../../../crates/shamir-wasm-host/src/compile.rs#L599); [crates/shamir-wasm-host/src/compile.rs:600](../../../../../crates/shamir-wasm-host/src/compile.rs#L600).
+
+Grouping/duplicate: `SUMMARY.md#6.8`. This row is not another independent defect.
+
+<a id="review-9"></a>
+
+### Claim 9 — `FunctionRegistry::rename`'s error-path rollback insert can itself fail silently, dropping the function
+
+Status: `confirmed-open`. Current risk: `low`.
+
+The restoration insert still discards its failure, while the returned AlreadyExists error identifies only the target collision. Concurrent reoccupation of the source can lose the original registry entry.
+
+Evidence: [crates/shamir-wasm-host/src/registry.rs:83](../../../../../crates/shamir-wasm-host/src/registry.rs#L83).
+
+Grouping/duplicate: `SUMMARY.md#2.3`. This row is not another independent defect.
+
+<a id="review-10"></a>
+
+### Claim 10 — Nit: one leaked OS thread per `WasmEngine`, and tests instantiate engines freely
+
+Status: `confirmed-open`. Current risk: `low`.
+
+Every successful ticker spawn loops forever and retains an Engine clone; neither singleton construction nor shutdown is enforced. Tests and database creation construct engines independently.
+
+Evidence: [crates/shamir-wasm-host/src/wasm/wasm_engine.rs:155](../../../../../crates/shamir-wasm-host/src/wasm/wasm_engine.rs#L155); [crates/shamir-wasm-host/src/tests/wasm_tests.rs:155](../../../../../crates/shamir-wasm-host/src/tests/wasm_tests.rs#L155).
+
+Grouping/duplicate: `SUMMARY.md#4.4`. This row is not another independent defect.
+
+<a id="review-11"></a>
+
+### Claim 11 — Nit: forbidden-macro scanner fails open (`unwrap_or_default`) on an invariant break
+
+Status: `confirmed-open`. Current risk: `nit`.
+
+The fallback still returns empty cleaned source on UTF-8 conversion failure. Current complete-token blanking preserves UTF-8, so the fallback is unreachable for current valid input; this is defensive-maintenance preference, not a demonstrated bypass.
+
+Evidence: [crates/shamir-wasm-host/src/compile.rs:151](../../../../../crates/shamir-wasm-host/src/compile.rs#L151); [crates/shamir-wasm-host/src/compile.rs:252](../../../../../crates/shamir-wasm-host/src/compile.rs#L252).
+
+Grouping/duplicate: `SUMMARY.md#6.11`. This row is not another independent defect.
+
+<a id="review-12"></a>
+
+### Claim 12 — Nit: `FunctionMeta::from_record` silently coerces malformed persisted catalogue fields to defaults
+
+Status: `confirmed-open`. Current risk: `low`.
+
+Parsing failures and non-string grant entries still disappear without a warning. Missing-field compatibility and malformed-field corruption remain observationally indistinguishable.
+
+Evidence: [crates/shamir-wasm-host/src/meta.rs:113](../../../../../crates/shamir-wasm-host/src/meta.rs#L113); [crates/shamir-wasm-host/src/meta.rs:129](../../../../../crates/shamir-wasm-host/src/meta.rs#L129); [crates/shamir-wasm-host/src/meta.rs:138](../../../../../crates/shamir-wasm-host/src/meta.rs#L138).
+
+Grouping/duplicate: `SUMMARY.md#5.7`. This row is not another independent defect.
+
+## Corrections and qualified non-findings
+
+- Cancellation causes undercharging, not lost fuel capacity. Fresh top-level FnCtx calls receive independent locally created counters, so permanent depletion across reuse of that ordinary context is not supported.
+- A top-level tokio timeout can drop nested Store futures and thereby skip their accounting even while the outer call reaches its own final debit.
+- Do not prefer silently skipping an uncertain charge as a security fix; that would preserve under-accounting. Cancellation-safe accounting needs an explicit conservative policy.
+- Fuel does stop CPU guests once exhausted. Epoch interruption adds an independent wall-clock bound; u64::MAX is currently not a working unlimited configuration.
+- There are ten sanctioned imports, not eight, and actor probes do call a real import.
+- Reader joins need lifecycle bounds too. A bounded child reap alone does not make compile teardown bounded.
+- Argon2 panic details are lost from the returned FunctionError, not necessarily from all process logs because panic hooks may emit them.
+- Use the exact resolved Wasmtime trap API when planning typed classification; the review's TrapCode spelling was not verified.
+- No unsafe or unguarded production unwrap was identified in this crate, but the stated graceful-degradation properties do not cover ticker spawn or all process teardown paths.
+
+---
+
+<details>
+<summary>Historical report — preserved for provenance; not current status or instructions</summary>
+
 # shamir-wasm-host -- Error handling & resource lifecycle
 
 ## Summary
@@ -98,3 +276,5 @@ Overall this crate holds the line well against the CLAUDE.md error-handling rule
 - **Severity:** nit
 - **Issue:** Unknown `visibility`/`security` strings parse-fail into `Private`/`Invoker` and non-string grant entries are dropped by `filter_map`, all silently. The direction is fail-closed (most restrictive), which is the right bias, but a present-but-unparseable value almost certainly signals catalogue corruption or a version-skew from a newer writer, and that signal is invisible -- as are silently truncated grant lists.
 - **Suggested fix:** Keep the fail-closed defaults but `log::warn!` once per discarded/unparsed field (name + raw value) so operators can detect a damaged or forward-compat catalogue row.
+
+</details>

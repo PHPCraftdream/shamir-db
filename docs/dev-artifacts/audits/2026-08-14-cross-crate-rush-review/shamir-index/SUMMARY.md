@@ -1,3 +1,1152 @@
+<!-- revalidation:2026-10-08 source:92ad58266bf57ddea1fa3c8a47affba1a3a9a096 -->
+# shamir-index — SUMMARY revalidation
+
+Source snapshot: `92ad58266bf57ddea1fa3c8a47affba1a3a9a096`. Revalidated 2026-10-08 by read-only XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run; no source fix is part of this update. Test registration/assertions are evidence of an oracle, not proof of a passing run.
+
+This section is authoritative for current status. Original titles/IDs are retained for traceability; a refuted title is not a current assertion. The collapsed historical report below is superseded, including its counts, severity, scenarios and fix instructions. Plan IDs preserve historical numbering, not a current release mandate. [Workspace methodology and status definitions](../SUMMARY.md#status-definitions).
+
+Every consolidated row and Fix Plan item was revalidated. Most source defects remain; several sweeping allegations are refuted or optional hardening. The original deduplicated census must be recalculated after these status/severity and duplicate corrections.
+
+## Current claim decisions
+
+| Claim decisions | Open | Source-fixed | Partial | Refuted | Unverified | N/A |
+|---:|---:|---:|---:|---:|---:|---:|
+| 70 | 58 | 0 | 0 | 5 | 1 | 6 |
+
+These are decisions on report claims, including repeated roots, bundled observations and non-findings—not a unique-bug census. Closed/N/A rows have no current risk; unverified risk is provisional. Pure style and unmeasured optimization claims do not establish runtime impact.
+
+<a id="review-1-1"></a>
+
+### Claim 1.1 — FunctionalBackend hash collapses every Dec/Big/Bin value to an identical posting hash
+
+Status: `confirmed-open`. Current risk: `high`.
+
+Unsupported leaves still hash only the common tag; lookup trusts that identity.
+
+Evidence: [crates/shamir-index/src/functional_backend.rs:173](../../../../../crates/shamir-index/src/functional_backend.rs#L173).
+
+Grouping/duplicate: `correctness-tdd.md#1`. This row is not another independent defect.
+
+<a id="review-1-2"></a>
+
+### Claim 1.2 — Whitespace/Full tokenizers never case-fold words whose uppercase letters are all non-ASCII (Russian/Greek FTS broken)
+
+Status: `confirmed-open`. Current risk: `high`.
+
+Both ASCII-only borrowed-token predicates remain; lowercase-only Russian tests miss the defect.
+
+Evidence: [crates/shamir-index/src/tokenizer.rs:55](../../../../../crates/shamir-index/src/tokenizer.rs#L55); [crates/shamir-index/src/tokenizer.rs:277](../../../../../crates/shamir-index/src/tokenizer.rs#L277).
+
+Grouping/duplicate: `correctness-tdd.md#2`. This row is not another independent defect.
+
+<a id="review-1-3"></a>
+
+### Claim 1.3 — Vector delta-replay failure is warned away, then permanently baked in by the next background snapshot
+
+Status: `confirmed-open`. Current risk: `high`.
+
+Restore continues after replay error; later snapshot/prune can discard missing mutations.
+
+Evidence: [crates/shamir-index/src/vector/vector_backend.rs:683](../../../../../crates/shamir-index/src/vector/vector_backend.rs#L683); [crates/shamir-index/src/vector/snapshot.rs:1314](../../../../../crates/shamir-index/src/vector/snapshot.rs#L1314).
+
+Grouping/duplicate: `correctness-tdd.md#3`. This row is not another independent defect.
+
+<a id="review-1-4"></a>
+
+### Claim 1.4 — `FtsRankedBackend::plan_update` emits unguarded BumpFtsStats on empty↔non-empty transitions — permanent doc_count/avg_doc_len drift
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+Unconditional update bumps and non-resetting rebuild remain; registered tests miss update transitions.
+
+Evidence: [crates/shamir-index/src/fts_ranked_backend.rs:223](../../../../../crates/shamir-index/src/fts_ranked_backend.rs#L223); [crates/shamir-index/src/fts_ranked_backend.rs:382](../../../../../crates/shamir-index/src/fts_ranked_backend.rs#L382).
+
+Grouping/duplicate: `correctness-tdd.md#4`. This row is not another independent defect.
+
+<a id="review-1-5"></a>
+
+### Claim 1.5 — `lookup_by_index` posting-cache miss→scan→insert race can pin a stale entry past the writer's invalidation
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+Cache publication and writer invalidation remain unsynchronized; existing hook precedes scanning.
+
+Evidence: [crates/shamir-index/src/base_index/index_manager.rs:2835](../../../../../crates/shamir-index/src/base_index/index_manager.rs#L2835); [crates/shamir-index/src/base_index/index_manager.rs:2879](../../../../../crates/shamir-index/src/base_index/index_manager.rs#L2879).
+
+Grouping/duplicate: `correctness-tdd.md#5`. This row is not another independent defect.
+
+<a id="review-1-6"></a>
+
+### Claim 1.6 — Staged vectors bypass dim validation on the in-tx merge paths (debug panic / silent truncation)
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+Staging and both general staged merge loops lack dimension checks.
+
+Evidence: [crates/shamir-index/src/vector/vector_backend.rs:456](../../../../../crates/shamir-index/src/vector/vector_backend.rs#L456); [crates/shamir-index/src/vector/hnsw_adapter.rs:2953](../../../../../crates/shamir-index/src/vector/hnsw_adapter.rs#L2953); [crates/shamir-index/src/vector/brute_force.rs:315](../../../../../crates/shamir-index/src/vector/brute_force.rs#L315).
+
+Grouping/duplicate: `correctness-tdd.md#7`. This row is not another independent defect.
+
+<a id="review-1-7"></a>
+
+### Claim 1.7 — FunctionalBackend Map hashing is insertion-order dependent (byte-identity floor violation)
+
+Status: `confirmed-open`. Current risk: `low`.
+
+Functional hashing still streams IndexMap entries in insertion order.
+
+Evidence: [crates/shamir-index/src/functional_backend.rs:167](../../../../../crates/shamir-index/src/functional_backend.rs#L167); [crates/shamir-collections/src/lib.rs:20](../../../../../crates/shamir-collections/src/lib.rs#L20).
+
+Grouping/duplicate: `correctness-tdd.md#9`. This row is not another independent defect.
+
+<a id="review-1-8"></a>
+
+### Claim 1.8 — `Dot` metric silently clamps distances to 0 for unnormalized vectors in HNSW (inconsistent with BruteForce)
+
+Status: `confirmed-open`. Current risk: `low`.
+
+Unenforced normalization and clamped scoring remain; HNSW small-index search also clamps.
+
+Evidence: [crates/shamir-index/src/vector/hnsw_adapter.rs:150](../../../../../crates/shamir-index/src/vector/hnsw_adapter.rs#L150); [crates/shamir-index/src/vector/hnsw_adapter.rs:2850](../../../../../crates/shamir-index/src/vector/hnsw_adapter.rs#L2850).
+
+Grouping/duplicate: `correctness-tdd.md#10`. This row is not another independent defect.
+
+<a id="review-1-9"></a>
+
+### Claim 1.9 — `FtsStats`: torn (count, sum) reads and a divide-by-zero window in `avg_doc_len`
+
+Status: `confirmed-open`. Current risk: `low`.
+
+Separate Relaxed counters permit a zero average despite a positive count.
+
+Evidence: [crates/shamir-index/src/bm25.rs:72](../../../../../crates/shamir-index/src/bm25.rs#L72); [crates/shamir-index/src/bm25.rs:80](../../../../../crates/shamir-index/src/bm25.rs#L80).
+
+Grouping/duplicate: `correctness-tdd.md#11`. This row is not another independent defect.
+
+<a id="review-1-10"></a>
+
+### Claim 1.10 — Unbounded sorted-range upper bound `prefix \|\| 0xFF×64` excludes values with ≥64 leading 0xFF encoded bytes
+
+Status: `refuted`. Current risk: —.
+
+Bin encoding starts with 0x60; every supported leading type tag is below 0xFF.
+
+Evidence: [crates/shamir-types/src/core/sort_codec.rs:45](../../../../../crates/shamir-types/src/core/sort_codec.rs#L45); [crates/shamir-types/src/core/sort_codec.rs:135](../../../../../crates/shamir-types/src/core/sort_codec.rs#L135).
+
+Grouping/duplicate: `correctness-tdd.md#12`. This row is not another independent defect.
+
+<a id="review-1-11"></a>
+
+### Claim 1.11 — `apply_index_ops_at_commit` silently drops any non-`BumpFtsStats` in-memory op
+
+Status: `not-applicable`. Current risk: —.
+
+No such variant exists in the current three-variant IndexWriteOp enum.
+
+Evidence: [crates/shamir-tx/src/index_write_op.rs:90](../../../../../crates/shamir-tx/src/index_write_op.rs#L90); [crates/shamir-tx/src/index_write_op.rs:127](../../../../../crates/shamir-tx/src/index_write_op.rs#L127).
+
+Grouping/duplicate: `correctness-tdd.md#13`. This row is not another independent defect.
+
+<a id="review-2-1"></a>
+
+### Claim 2.1 — Background vector snapshot dumps the live adapter without quiescing; the multi-map sidecar scan is not atomic across maps (torn capture → permanent zombie graph node)
+
+Status: `confirmed-open`. Current risk: `high`.
+
+Unquiesced capture remains; zombie chronology is unsupported, but durable-before-promote watermark pruning supplies a concrete persistence-loss mechanism.
+
+Evidence: [crates/shamir-index/src/vector/snapshot.rs:529](../../../../../crates/shamir-index/src/vector/snapshot.rs#L529); [crates/shamir-index/src/vector/vector_backend.rs:919](../../../../../crates/shamir-index/src/vector/vector_backend.rs#L919); [crates/shamir-engine/src/tx/commit_phases.rs:939](../../../../../crates/shamir-engine/src/tx/commit_phases.rs#L939).
+
+Grouping/duplicate: `concurrency-lockfree.md#1`. This row is not another independent defect.
+
+<a id="review-2-2"></a>
+
+### Claim 2.2 — `plan_records_created_batch` bypasses the in-flight-online-build dirty-set capture that every other write path performs
+
+Status: `confirmed-open`. Current risk: `low`.
+
+Batch planner omits capture; the alleged future update/delete failure is not current runtime proof.
+
+Evidence: [crates/shamir-index/src/base_index/index_manager.rs:2525](../../../../../crates/shamir-index/src/base_index/index_manager.rs#L2525); [crates/shamir-engine/src/table/table_manager_tx_ops.rs:836](../../../../../crates/shamir-engine/src/table/table_manager_tx_ops.rs#L836).
+
+Grouping/duplicate: `concurrency-lockfree.md#2`. This row is not another independent defect.
+
+<a id="review-2-3"></a>
+
+### Claim 2.3 — TOCTOU between lock-free `is_build_in_flight` check and Mutex-guarded dirty-set insert can leak an orphan dirty-set entry at Phase D
+
+Status: `refuted`. Current risk: —.
+
+Phase D drains and excludes writers before clearing the build registry and dirty set.
+
+Evidence: [crates/shamir-engine/src/table/table_manager_index_mgmt.rs:2906](../../../../../crates/shamir-engine/src/table/table_manager_index_mgmt.rs#L2906); [crates/shamir-engine/src/table/table_manager_index_mgmt.rs:2947](../../../../../crates/shamir-engine/src/table/table_manager_index_mgmt.rs#L2947).
+
+Grouping/duplicate: `concurrency-lockfree.md#3`. This row is not another independent defect.
+
+<a id="review-2-4"></a>
+
+### Claim 2.4 — `lease_by_field_and_kind` is an O(N) full-registry scan on every index2 read dispatch
+
+Status: `confirmed-open`. Current risk: `low`.
+
+Documented registry scan remains; descriptors are borrowed, not deep-cloned.
+
+Evidence: [crates/shamir-index/src/registry.rs:659](../../../../../crates/shamir-index/src/registry.rs#L659); [crates/shamir-index/src/registry.rs:666](../../../../../crates/shamir-index/src/registry.rs#L666).
+
+Grouping/duplicate: `concurrency-lockfree.md#4`. This row is not another independent defect.
+
+<a id="review-2-5"></a>
+
+### Claim 2.5 — `BruteForceAdapter::search` runs an O(N·dim) exact scan inline on the async runtime (pillar 2: CPU-bound → `spawn_blocking`)
+
+Status: `confirmed-open`. Current risk: `low`.
+
+Inline scan remains; standard production builder uses HNSW and latency estimates are unmeasured.
+
+Evidence: [crates/shamir-index/src/vector/brute_force.rs:297](../../../../../crates/shamir-index/src/vector/brute_force.rs#L297); [crates/shamir-index/src/build_backend.rs:53](../../../../../crates/shamir-index/src/build_backend.rs#L53).
+
+Grouping/duplicate: `concurrency-lockfree.md#7`. This row is not another independent defect.
+
+<a id="review-2-6"></a>
+
+### Claim 2.6 — `ReaderDrainGate` doc invariant ("Never acquire any other lock while holding a `ReadGuard`") is contradicted in letter by `lookup_by_index`'s DashMap access inside the guard scope
+
+Status: `confirmed-open`. Current risk: `nit`.
+
+Absolute wording conflicts with short-lived leaf cache locks; no deadlock is established.
+
+Evidence: [crates/shamir-index/src/reader_drain_gate.rs:85](../../../../../crates/shamir-index/src/reader_drain_gate.rs#L85); [crates/shamir-index/src/base_index/index_manager.rs:2826](../../../../../crates/shamir-index/src/base_index/index_manager.rs#L2826).
+
+Grouping/duplicate: `concurrency-lockfree.md#8`. This row is not another independent defect.
+
+<a id="review-2-7"></a>
+
+### Claim 2.7 — `BruteForceAdapter::join: std::sync::Mutex<Option<JoinHandle>>` lacks the inline contention-model comment CLAUDE.md requires per instance
+
+Status: `confirmed-open`. Current risk: `nit`.
+
+One-shot teardown mutex still lacks its local contention justification.
+
+Evidence: [crates/shamir-index/src/vector/brute_force.rs:64](../../../../../crates/shamir-index/src/vector/brute_force.rs#L64).
+
+Grouping/duplicate: `concurrency-lockfree.md#9`. This row is not another independent defect.
+
+<a id="review-2-8"></a>
+
+### Claim 2.8 — `FtsStats::on_delete` uses bare `fetch_sub` — underflow wraps to a huge `doc_count` with no saturating guard
+
+Status: `confirmed-open`. Current risk: `low`.
+
+Both deletion counters still wrap on underflow.
+
+Evidence: [crates/shamir-index/src/bm25.rs:89](../../../../../crates/shamir-index/src/bm25.rs#L89); [crates/shamir-index/src/bm25.rs:91](../../../../../crates/shamir-index/src/bm25.rs#L91).
+
+Grouping/duplicate: `concurrency-lockfree.md#10`. This row is not another independent defect.
+
+<a id="review-3-1"></a>
+
+### Claim 3.1 — Regular + unique index keys use two correlated FxHasher streams as "collision resistance"; unique constraints are enforced on hash alone
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+Hash-only unique hits remain; inexpensive full-pair collision attacks are not proven.
+
+Evidence: [crates/shamir-index/src/base_index/index_keys.rs:191](../../../../../crates/shamir-index/src/base_index/index_keys.rs#L191); [crates/shamir-index/src/base_index/index_manager_unique.rs:384](../../../../../crates/shamir-index/src/base_index/index_manager_unique.rs#L384).
+
+Grouping/duplicate: `security-crypto.md#1`. This row is not another independent defect.
+
+<a id="review-3-2"></a>
+
+### Claim 3.2 — FTS posting keys hash untrusted token text with unkeyed `FxHasher` (`token_hash`)
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+Unkeyed u64 identity has no token-text collision verification; poisoning requires a collision and document-write privilege.
+
+Evidence: [crates/shamir-index/src/tokenizer.rs:462](../../../../../crates/shamir-index/src/tokenizer.rs#L462); [crates/shamir-index/src/fts_ranked_backend.rs:123](../../../../../crates/shamir-index/src/fts_ranked_backend.rs#L123).
+
+Grouping/duplicate: `security-crypto.md#2`. This row is not another independent defect.
+
+<a id="review-3-3"></a>
+
+### Claim 3.3 — `trusted_pure` scalar gate is documented here but not enforced at this crate's dispatch boundary
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+Evaluation dispatch remains unrestricted despite normal DDL trust checks.
+
+Evidence: [crates/shamir-index/src/expr.rs:178](../../../../../crates/shamir-index/src/expr.rs#L178); [crates/shamir-engine/src/table/table_manager_index_mgmt.rs:262](../../../../../crates/shamir-engine/src/table/table_manager_index_mgmt.rs#L262).
+
+Grouping/duplicate: `security-crypto.md#3`. This row is not another independent defect.
+
+<a id="review-3-4"></a>
+
+### Claim 3.4 — External vector-backend API key persisted in cleartext inside the index-metadata blob
+
+Status: `confirmed-open`. Current risk: `low`.
+
+Library serialization exposes raw secret bytes; normal engine CREATE is in-process and at-rest encryption is operator-delegated.
+
+Evidence: [crates/shamir-types/src/secret.rs:54](../../../../../crates/shamir-types/src/secret.rs#L54); [crates/shamir-index/src/kind.rs:198](../../../../../crates/shamir-index/src/kind.rs#L198); [docs/guide-docs/security/data-protection.md:68](../../../../../docs/guide-docs/security/data-protection.md#L68).
+
+Grouping/duplicate: `security-crypto.md#4`. This row is not another independent defect.
+
+<a id="review-3-5"></a>
+
+### Claim 3.5 — Snapshot load joins persisted `basename`/`qbasename` into temp file paths unsanitized; manifest/sidecar carry no integrity check
+
+Status: `confirmed-open`. Current risk: `low`.
+
+Persisted names still reach create/truncate paths; threat requires metadata-write access.
+
+Evidence: [crates/shamir-index/src/vector/snapshot.rs:907](../../../../../crates/shamir-index/src/vector/snapshot.rs#L907); [crates/shamir-index/src/vector/snapshot.rs:983](../../../../../crates/shamir-index/src/vector/snapshot.rs#L983).
+
+Grouping/duplicate: `security-crypto.md#5`. This row is not another independent defect.
+
+<a id="review-3-6"></a>
+
+### Claim 3.6 — `NgramTokenizer` output is unbounded — indexing-time memory/write amplification from one long token
+
+Status: `confirmed-open`. Current risk: `low`.
+
+No local gram budget exists; allocation grows with input, but postings deduplicate repeated grams.
+
+Evidence: [crates/shamir-index/src/tokenizer.rs:164](../../../../../crates/shamir-index/src/tokenizer.rs#L164); [crates/shamir-index/src/fts_ranked_backend.rs:86](../../../../../crates/shamir-index/src/fts_ranked_backend.rs#L86).
+
+Grouping/duplicate: `security-crypto.md#6`. This row is not another independent defect.
+
+<a id="review-3-7"></a>
+
+### Claim 3.7 — NEON kernels read `u32` through `*const u8`-derived pointers — aligned-load safety contract violated (aarch64 only, untested on CI)
+
+Status: `unverified`. Current risk: `nit` (provisional; not a confirmed defect).
+
+Lane loads remain; the claimed alignment requirement and resulting UB lack authoritative proof.
+
+Evidence: [crates/shamir-index/src/vector/simd.rs:932](../../../../../crates/shamir-index/src/vector/simd.rs#L932); [crates/shamir-index/src/vector/simd.rs:1250](../../../../../crates/shamir-index/src/vector/simd.rs#L1250).
+
+Grouping/duplicate: `security-crypto.md#7`. This row is not another independent defect.
+
+<a id="review-4-1"></a>
+
+### Claim 4.1 — Per-row deep-clone of the whole index-definition set in every write planner
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+Definition cloning is structural; High latency impact and blanket every-row claims are unmeasured.
+
+Evidence: [crates/shamir-index/src/base_index/index_info.rs:314](../../../../../crates/shamir-index/src/base_index/index_info.rs#L314); [crates/shamir-index/src/base_index/sorted_index_manager.rs:549](../../../../../crates/shamir-index/src/base_index/sorted_index_manager.rs#L549).
+
+Grouping/duplicate: `performance-hotpath.md#1`. This row is not another independent defect.
+
+<a id="review-4-2"></a>
+
+### Claim 4.2 — Sorted/unique apply paths issue one store round-trip per posting — the transact batching landed only for the regular-hash family
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+Direct per-key awaited calls remain; backend-specific fsync/latency multipliers are not proven.
+
+Evidence: [crates/shamir-index/src/base_index/sorted_index_manager.rs:1847](../../../../../crates/shamir-index/src/base_index/sorted_index_manager.rs#L1847); [crates/shamir-index/src/base_index/index_manager_unique.rs:524](../../../../../crates/shamir-index/src/base_index/index_manager_unique.rs#L524).
+
+Grouping/duplicate: `performance-hotpath.md#2`. This row is not another independent defect.
+
+<a id="review-4-3"></a>
+
+### Claim 4.3 — FTS lookup materializes every matching posting list and sorts all results — no top-k bound
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+Full materialization remains, but FTS currently requests complete membership, not k results.
+
+Evidence: [crates/shamir-index/src/fts_ranked_backend.rs:309](../../../../../crates/shamir-index/src/fts_ranked_backend.rs#L309); [crates/shamir-index/src/backend.rs:29](../../../../../crates/shamir-index/src/backend.rs#L29).
+
+Grouping/duplicate: `performance-hotpath.md#3`. This row is not another independent defect.
+
+<a id="review-4-4"></a>
+
+### Claim 4.4 — `FtsRankedBackend::plan_update` tokenizes the old record twice
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+Old text is tokenized through tokenize_set and again for old_doc_len.
+
+Evidence: [crates/shamir-index/src/fts_ranked_backend.rs:193](../../../../../crates/shamir-index/src/fts_ranked_backend.rs#L193); [crates/shamir-index/src/fts_ranked_backend.rs:195](../../../../../crates/shamir-index/src/fts_ranked_backend.rs#L195).
+
+Grouping/duplicate: `performance-hotpath.md#4`. This row is not another independent defect.
+
+<a id="review-4-5"></a>
+
+### Claim 4.5 — `IndexExpr::Scalar` evaluation constructs a fresh `Interner` per row
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+Every scalar evaluation still constructs allocating interner state.
+
+Evidence: [crates/shamir-index/src/expr.rs:172](../../../../../crates/shamir-index/src/expr.rs#L172); [crates/shamir-types/src/core/interner/interner.rs:90](../../../../../crates/shamir-types/src/core/interner/interner.rs#L90).
+
+Grouping/duplicate: `performance-hotpath.md#5`. This row is not another independent defect.
+
+<a id="review-4-6"></a>
+
+### Claim 4.6 — Vector snapshot dump/load fully materializes the graph and sidecar in RAM
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+Whole files, chunk batches, and sidecar copies remain; exact RSS multiples are unmeasured.
+
+Evidence: [crates/shamir-index/src/vector/snapshot.rs:422](../../../../../crates/shamir-index/src/vector/snapshot.rs#L422); [crates/shamir-index/src/vector/snapshot.rs:884](../../../../../crates/shamir-index/src/vector/snapshot.rs#L884).
+
+Grouping/duplicate: `performance-hotpath.md#6`. This row is not another independent defect.
+
+<a id="review-4-7"></a>
+
+### Claim 4.7 — Vector delta-log replay on restart applies ops one at a time
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+Replay still awaits every upsert/delete individually.
+
+Evidence: [crates/shamir-index/src/vector/snapshot.rs:1251](../../../../../crates/shamir-index/src/vector/snapshot.rs#L1251).
+
+Grouping/duplicate: `performance-hotpath.md#8`. This row is not another independent defect.
+
+<a id="review-4-8"></a>
+
+### Claim 4.8 — Posting cache is bounded by entry count, not bytes
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+Count-only admission permits arbitrarily large cached posting slices.
+
+Evidence: [crates/shamir-index/src/base_index/index_manager.rs:2868](../../../../../crates/shamir-index/src/base_index/index_manager.rs#L2868); [crates/shamir-index/src/base_index/index_manager.rs:2878](../../../../../crates/shamir-index/src/base_index/index_manager.rs#L2878).
+
+Grouping/duplicate: `performance-hotpath.md#9`. This row is not another independent defect.
+
+<a id="review-4-9"></a>
+
+### Claim 4.9 — `HnswAdapter` f32 small-index search clones every vector per query
+
+Status: `confirmed-open`. Current risk: `low`.
+
+The f32 small-index scan still allocates a clone per candidate vector.
+
+Evidence: [crates/shamir-index/src/vector/hnsw_adapter.rs:2833](../../../../../crates/shamir-index/src/vector/hnsw_adapter.rs#L2833).
+
+Grouping/duplicate: `performance-hotpath.md#10`. This row is not another independent defect.
+
+<a id="review-4-10"></a>
+
+### Claim 4.10 — SQ8 fit runs inline on the threshold-crossing write — O(N) stall on one upsert
+
+Status: `confirmed-open`. Current risk: `low`.
+
+Crossing caller awaits fit; major CPU stages are offloaded and tail-latency values are unmeasured.
+
+Evidence: [crates/shamir-index/src/vector/hnsw_adapter.rs:2474](../../../../../crates/shamir-index/src/vector/hnsw_adapter.rs#L2474); [crates/shamir-index/src/vector/hnsw_adapter.rs:1364](../../../../../crates/shamir-index/src/vector/hnsw_adapter.rs#L1364).
+
+Grouping/duplicate: `performance-hotpath.md#13`. This row is not another independent defect.
+
+<a id="review-4-11"></a>
+
+### Claim 4.11 — `BruteForceAdapter` deep-clones the whole snapshot on every drained write batch
+
+Status: `confirmed-open`. Current risk: `low`.
+
+Each drained publish deep-clones vector state; bursts may amortize it.
+
+Evidence: [crates/shamir-index/src/vector/brute_force.rs:92](../../../../../crates/shamir-index/src/vector/brute_force.rs#L92); [crates/shamir-index/src/vector/brute_force.rs:178](../../../../../crates/shamir-index/src/vector/brute_force.rs#L178).
+
+Grouping/duplicate: `performance-hotpath.md#14`. This row is not another independent defect.
+
+<a id="review-4-12"></a>
+
+### Claim 4.12 — `apply_index_ops_at_commit` does a linear backend find per provenance group
+
+Status: `confirmed-open`. Current risk: `nit`.
+
+Per-group linear backend matching remains.
+
+Evidence: [crates/shamir-index/src/write_ops.rs:188](../../../../../crates/shamir-index/src/write_ops.rs#L188).
+
+Grouping/duplicate: `performance-hotpath.md#15`. This row is not another independent defect.
+
+<a id="review-5-1"></a>
+
+### Claim 5.1 — Persisted `VectorConfig.backend` is ignored on the reopen/rebuild path
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+Shared builder ignores backend selection/tuning; snapshot graph restoration can preserve parameters.
+
+Evidence: [crates/shamir-index/src/build_backend.rs:52](../../../../../crates/shamir-index/src/build_backend.rs#L52); [crates/shamir-index/src/vector/snapshot.rs:879](../../../../../crates/shamir-index/src/vector/snapshot.rs#L879).
+
+Grouping/duplicate: `api-wire-protocol.md#1`. This row is not another independent defect.
+
+<a id="review-5-2"></a>
+
+### Claim 5.2 — SQ8 quantization opt-in has no durable carrier and is lost on most restarts
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+Only fitted snapshots preserve SQ8; descriptor and pre-fit/rebuild intent remain absent.
+
+Evidence: [crates/shamir-index/src/kind.rs:185](../../../../../crates/shamir-index/src/kind.rs#L185); [crates/shamir-index/src/vector/hnsw_adapter.rs:549](../../../../../crates/shamir-index/src/vector/hnsw_adapter.rs#L549).
+
+Grouping/duplicate: `api-wire-protocol.md#2`. This row is not another independent defect.
+
+<a id="review-5-3"></a>
+
+### Claim 5.3 — Vector snapshot v1 back-compat is claimed but has no working decode path, and the only test is vacuous
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+Historical v1 layouts differ; current reader has no fallback and the test only relabels current bytes.
+
+Evidence: [crates/shamir-index/src/vector/snapshot.rs:279](../../../../../crates/shamir-index/src/vector/snapshot.rs#L279); [crates/shamir-index/src/vector/tests/quantization_snapshot_tests.rs:384](../../../../../crates/shamir-index/src/vector/tests/quantization_snapshot_tests.rs#L384).
+
+Grouping/duplicate: `api-wire-protocol.md#3`. This row is not another independent defect.
+
+<a id="review-5-4"></a>
+
+### Claim 5.4 — Persisted posting keys depend on FxHasher output stability, with no version coupling and a caret-pinned dependency
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+Caret dependency and uncoupled hash-format identity remain; current output change is not demonstrated.
+
+Evidence: [crates/shamir-index/Cargo.toml:30](../../../../../crates/shamir-index/Cargo.toml#L30); [Cargo.lock:3007](../../../../../Cargo.lock#L3007); [crates/shamir-index/src/persistence.rs:37](../../../../../crates/shamir-index/src/persistence.rs#L37).
+
+Grouping/duplicate: `api-wire-protocol.md#4`. This row is not another independent defect.
+
+<a id="review-5-5"></a>
+
+### Claim 5.5 — `flip_generation` never prunes the old generation's `qgraph`/`qdata` chunks
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+Old quantized section counts are absent from caller state and prune signature.
+
+Evidence: [crates/shamir-index/src/vector/vector_backend.rs:906](../../../../../crates/shamir-index/src/vector/vector_backend.rs#L906); [crates/shamir-index/src/vector/snapshot.rs:1287](../../../../../crates/shamir-index/src/vector/snapshot.rs#L1287).
+
+Grouping/duplicate: `api-wire-protocol.md#5`. This row is not another independent defect.
+
+<a id="review-5-6"></a>
+
+### Claim 5.6 — `MetaEnvelope::open` validates magic/version only after deserializing the payload
+
+Status: `confirmed-open`. Current risk: `low`.
+
+Payload deserialization still precedes header validation.
+
+Evidence: [crates/shamir-index/src/meta_envelope.rs:54](../../../../../crates/shamir-index/src/meta_envelope.rs#L54).
+
+Grouping/duplicate: `api-wire-protocol.md#6`. This row is not another independent defect.
+
+<a id="review-5-7"></a>
+
+### Claim 5.7 — Snapshot load path can panic on corrupt-but-decodable persisted data; the sidecar carries no checksum
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+Unvalidated sidecar quantizer dimensions reach synchronous assertions.
+
+Evidence: [crates/shamir-index/src/vector/snapshot.rs:973](../../../../../crates/shamir-index/src/vector/snapshot.rs#L973); [crates/shamir-index/src/vector/quant_meta.rs:73](../../../../../crates/shamir-index/src/vector/quant_meta.rs#L73).
+
+Grouping/duplicate: `api-wire-protocol.md#7`. This row is not another independent defect.
+
+<a id="review-5-8"></a>
+
+### Claim 5.8 — Bincode ordinal-stability contract is documented on some persisted enums but missing on others
+
+Status: `confirmed-open`. Current risk: `low`.
+
+Persisted IndexKind, TokenizerKind, and IndexExpr lack explicit append-only contracts.
+
+Evidence: [crates/shamir-index/src/kind.rs:11](../../../../../crates/shamir-index/src/kind.rs#L11); [crates/shamir-index/src/expr.rs:21](../../../../../crates/shamir-index/src/expr.rs#L21).
+
+Grouping/duplicate: `api-wire-protocol.md#8`. This row is not another independent defect.
+
+<a id="review-5-9"></a>
+
+### Claim 5.9 — `IndexDescriptor.options` is dead public API
+
+Status: `not-applicable`. Current risk: —.
+
+Unused opaque extension bytes do not themselves violate the documented API.
+
+Evidence: [crates/shamir-index/src/descriptor.rs:26](../../../../../crates/shamir-index/src/descriptor.rs#L26); [crates/shamir-index/src/persistence.rs:212](../../../../../crates/shamir-index/src/persistence.rs#L212).
+
+Grouping/duplicate: `api-wire-protocol.md#9`. This row is not another independent defect.
+
+<a id="review-5-10"></a>
+
+### Claim 5.10 — Corrupt FTS posting values are silently replaced with `tf=1, doc_len=1`
+
+Status: `confirmed-open`. Current risk: `low`.
+
+Nonempty decode failure still silently defaults scoring inputs.
+
+Evidence: [crates/shamir-index/src/fts_ranked_backend.rs:128](../../../../../crates/shamir-index/src/fts_ranked_backend.rs#L128).
+
+Grouping/duplicate: `api-wire-protocol.md#10`. This row is not another independent defect.
+
+<a id="review-5-11"></a>
+
+### Claim 5.11 — Stale lifecycle doc contradicts the shipped `IndexState` wire enum; minor `IndexRecordKey` API warts
+
+Status: `confirmed-open`. Current risk: `nit`.
+
+Failed-state documentation, String decode errors, permissive length, and public helper remain.
+
+Evidence: [crates/shamir-index/src/lifecycle.rs:31](../../../../../crates/shamir-index/src/lifecycle.rs#L31); [crates/shamir-index/src/state.rs:73](../../../../../crates/shamir-index/src/state.rs#L73); [crates/shamir-index/src/base_index/index_record_key.rs:104](../../../../../crates/shamir-index/src/base_index/index_record_key.rs#L104).
+
+Grouping/duplicate: `api-wire-protocol.md#11`. This row is not another independent defect.
+
+<a id="review-6-1"></a>
+
+### Claim 6.1 — `SortedIndexManager::load` swallows ALL store errors, silently loading zero sorted definitions
+
+Status: `confirmed-open`. Current risk: `high`.
+
+Initial get still returns Ok for every error; later persistence can replace definitions with empty metadata.
+
+Evidence: [crates/shamir-index/src/base_index/sorted_index_manager.rs:2706](../../../../../crates/shamir-index/src/base_index/sorted_index_manager.rs#L2706); [crates/shamir-index/src/base_index/sorted_index_manager.rs:2692](../../../../../crates/shamir-index/src/base_index/sorted_index_manager.rs#L2692).
+
+Grouping/duplicate: `error-handling-lifecycle.md#1`. This row is not another independent defect.
+
+<a id="review-6-2"></a>
+
+### Claim 6.2 — Compaction double-write errors silently discarded; an incomplete graph is then swapped in as live
+
+Status: `confirmed-open`. Current risk: `high`.
+
+Failed shadow upserts are neither surfaced nor reconciled before unconditional swap.
+
+Evidence: [crates/shamir-index/src/vector/vector_backend.rs:512](../../../../../crates/shamir-index/src/vector/vector_backend.rs#L512); [crates/shamir-index/src/vector/vector_backend.rs:1102](../../../../../crates/shamir-index/src/vector/vector_backend.rs#L1102).
+
+Grouping/duplicate: `error-handling-lifecycle.md#2`. This row is not another independent defect.
+
+<a id="review-6-3"></a>
+
+### Claim 6.3 — `VectorBackend::drop_all` leaks the entire `__vec_snap__<id>` snapshot keyspace
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+No-op vector drop and binary-only recovery sweep leave snapshot/delta storage untouched.
+
+Evidence: [crates/shamir-index/src/vector/vector_backend.rs:739](../../../../../crates/shamir-index/src/vector/vector_backend.rs#L739); [crates/shamir-index/src/persistence.rs:633](../../../../../crates/shamir-index/src/persistence.rs#L633).
+
+Grouping/duplicate: `error-handling-lifecycle.md#3`. This row is not another independent defect.
+
+<a id="review-6-4"></a>
+
+### Claim 6.4 — index2 `drop_all` sweeps: per-key unbatched round-trips with errors swallowed, and FunctionalBackend buffers the whole index first
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+Per-key removal errors and full functional materialization remain; base-index all-keys batching is a separate issue.
+
+Evidence: [crates/shamir-index/src/fts_ranked_backend.rs:409](../../../../../crates/shamir-index/src/fts_ranked_backend.rs#L409); [crates/shamir-index/src/functional_backend.rs:294](../../../../../crates/shamir-index/src/functional_backend.rs#L294).
+
+Grouping/duplicate: `error-handling-lifecycle.md#3`. This row is not another independent defect.
+
+<a id="review-6-5"></a>
+
+### Claim 6.5 — `try_fit_and_rebuild` failures silently dropped behind comments that falsely claim logging
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+Three result discards remain; FitGuard permits pre-fit retries, contradicting unconditional permanent degradation.
+
+Evidence: [crates/shamir-index/src/vector/hnsw_adapter.rs:946](../../../../../crates/shamir-index/src/vector/hnsw_adapter.rs#L946); [crates/shamir-index/src/vector/hnsw_adapter.rs:1310](../../../../../crates/shamir-index/src/vector/hnsw_adapter.rs#L1310); [crates/shamir-index/src/vector/hnsw_adapter.rs:2474](../../../../../crates/shamir-index/src/vector/hnsw_adapter.rs#L2474).
+
+Grouping/duplicate: `error-handling-lifecycle.md#4`. This row is not another independent defect.
+
+<a id="review-6-6"></a>
+
+### Claim 6.6 — `build_index2_backend` panics via `unreachable!` on a persisted (disk-driven) descriptor kind
+
+Status: `refuted`. Current risk: —.
+
+Persisted Btree descriptors are skipped before builder dispatch at table open.
+
+Evidence: [crates/shamir-engine/src/table/table_manager.rs:661](../../../../../crates/shamir-engine/src/table/table_manager.rs#L661).
+
+Grouping/duplicate: `error-handling-lifecycle.md#5`. This row is not another independent defect.
+
+<a id="review-6-7"></a>
+
+### Claim 6.7 — `IndexError` is stringly-typed; structured `DbError`s are flattened at every boundary
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+Storage errors remain String payloads; metadata set also loses its original variant.
+
+Evidence: [crates/shamir-index/src/backend.rs:59](../../../../../crates/shamir-index/src/backend.rs#L59); [crates/shamir-index/src/persistence.rs:105](../../../../../crates/shamir-index/src/persistence.rs#L105).
+
+Grouping/duplicate: `error-handling-lifecycle.md#6`. This row is not another independent defect.
+
+<a id="review-6-8"></a>
+
+### Claim 6.8 — Enriched error paths are unit-tested only for the regular-hash family
+
+Status: `refuted`. Current risk: —.
+
+Registered unique/sorted persist, unique structured-error, and index2 scan-failure tests provide positive counterexamples; narrower matrix gaps remain.
+
+Evidence: [crates/shamir-engine/src/table/tests/index_create_persist_atomicity_tests.rs:195](../../../../../crates/shamir-engine/src/table/tests/index_create_persist_atomicity_tests.rs#L195); [crates/shamir-engine/src/table/tests/p967_ddl_structured_error_tests.rs:191](../../../../../crates/shamir-engine/src/table/tests/p967_ddl_structured_error_tests.rs#L191); [crates/shamir-engine/src/table/tests/r0d_fail_closed_recovery_tests.rs:269](../../../../../crates/shamir-engine/src/table/tests/r0d_fail_closed_recovery_tests.rs#L269).
+
+Grouping/duplicate: `error-handling-lifecycle.md#7`. This row is not another independent defect.
+
+<a id="review-6-9"></a>
+
+### Claim 6.9 — `.unwrap()` on `SystemTime::duration_since(UNIX_EPOCH)` on four DDL success paths
+
+Status: `confirmed-open`. Current risk: `low`.
+
+All four pre-epoch timestamp unwraps remain.
+
+Evidence: [crates/shamir-index/src/base_index/index_manager.rs:2355](../../../../../crates/shamir-index/src/base_index/index_manager.rs#L2355); [crates/shamir-index/src/base_index/index_manager_unique.rs:893](../../../../../crates/shamir-index/src/base_index/index_manager_unique.rs#L893); [crates/shamir-index/src/base_index/sorted_index_manager.rs:1072](../../../../../crates/shamir-index/src/base_index/sorted_index_manager.rs#L1072); [crates/shamir-index/src/base_index/sorted_index_manager.rs:1567](../../../../../crates/shamir-index/src/base_index/sorted_index_manager.rs#L1567).
+
+Grouping/duplicate: `error-handling-lifecycle.md#8`. This row is not another independent defect.
+
+<a id="review-6-10"></a>
+
+### Claim 6.10 — Read-hot-path `.expect` panics for the "quantized_active but unset" invariant, while sibling sites return errors
+
+Status: `not-applicable`. Current risk: —.
+
+Current publication ordering establishes the asserted programmer invariant; no supported-path violation was found.
+
+Evidence: [crates/shamir-index/src/vector/hnsw_adapter.rs:1461](../../../../../crates/shamir-index/src/vector/hnsw_adapter.rs#L1461); [crates/shamir-index/src/vector/hnsw_adapter.rs:1531](../../../../../crates/shamir-index/src/vector/hnsw_adapter.rs#L1531); [crates/shamir-index/src/vector/hnsw_adapter.rs:1226](../../../../../crates/shamir-index/src/vector/hnsw_adapter.rs#L1226).
+
+Grouping/duplicate: `error-handling-lifecycle.md#9`. This row is not another independent defect.
+
+<a id="review-6-11"></a>
+
+### Claim 6.11 — Silent degradation fallbacks with no logging (rebuild-skip + covering-projection residue)
+
+Status: `confirmed-open`. Current risk: `low`.
+
+Undecodable rebuild rows and covering encode failures remain silent; covering failure is a fallback, not established data loss.
+
+Evidence: [crates/shamir-index/src/fts_ranked_backend.rs:390](../../../../../crates/shamir-index/src/fts_ranked_backend.rs#L390); [crates/shamir-index/src/base_index/sorted_index_manager.rs:2867](../../../../../crates/shamir-index/src/base_index/sorted_index_manager.rs#L2867).
+
+Grouping/duplicate: `error-handling-lifecycle.md#10`. This row is not another independent defect.
+
+<a id="review-6-12"></a>
+
+### Claim 6.12 — `IndexRegistry::insert` can still return `Err` leaving `by_id` populated (the exact partial publish #1009 closed via pre-check)
+
+Status: `not-applicable`. Current risk: —.
+
+Late rollback is absent but the documented admission precondition excludes the alleged supported-path collision.
+
+Evidence: [crates/shamir-index/src/registry.rs:198](../../../../../crates/shamir-index/src/registry.rs#L198); [crates/shamir-index/src/registry.rs:302](../../../../../crates/shamir-index/src/registry.rs#L302).
+
+Grouping/duplicate: `error-handling-lifecycle.md#12`. This row is not another independent defect.
+
+<a id="review-6-13"></a>
+
+### Claim 6.13 — Actor `shutdown` discards the join result (panic payload), and `BruteForceAdapter::shutdown` adds a lock-poisoning expect
+
+Status: `confirmed-open`. Current risk: `nit`.
+
+Shutdown join errors remain discarded; a real poisoning source was not established.
+
+Evidence: [crates/shamir-index/src/actor.rs:103](../../../../../crates/shamir-index/src/actor.rs#L103); [crates/shamir-index/src/vector/brute_force.rs:133](../../../../../crates/shamir-index/src/vector/brute_force.rs#L133).
+
+Grouping/duplicate: `error-handling-lifecycle.md#13`. This row is not another independent defect.
+
+<a id="review-7-1"></a>
+
+### Claim 7.1 — `use` statements inside function/block bodies across six production files
+
+Status: `confirmed-open`. Current risk: `nit`.
+
+Listed local/redundant imports remain; this is non-runtime style drift.
+
+Evidence: [crates/shamir-index/src/write_ops.rs:166](../../../../../crates/shamir-index/src/write_ops.rs#L166); [crates/shamir-index/src/expr.rs:85](../../../../../crates/shamir-index/src/expr.rs#L85).
+
+Grouping/duplicate: `style-claude-md.md#1`. This row is not another independent defect.
+
+<a id="review-7-2"></a>
+
+### Claim 7.2 — Inline `#[cfg(test)] mod tests` inside an implementation file
+
+Status: `confirmed-open`. Current risk: `nit`.
+
+The reachable quant_meta round-trip test remains inline.
+
+Evidence: [crates/shamir-index/src/vector/quant_meta.rs:83](../../../../../crates/shamir-index/src/vector/quant_meta.rs#L83).
+
+Grouping/duplicate: `style-claude-md.md#2`. This row is not another independent defect.
+
+<a id="review-7-3"></a>
+
+### Claim 7.3 — `kind.rs` defines eight public types — "one file = one primary export" deviation
+
+Status: `not-applicable`. Current risk: —.
+
+Type count alone does not violate the allowed closely coupled configuration-group exception.
+
+Evidence: [crates/shamir-index/src/kind.rs:11](../../../../../crates/shamir-index/src/kind.rs#L11); [crates/shamir-index/src/kind.rs:190](../../../../../crates/shamir-index/src/kind.rs#L190).
+
+Grouping/duplicate: `style-claude-md.md#3`. This row is not another independent defect.
+
+<a id="review-7-4"></a>
+
+### Claim 7.4 — Stale crate-root invariant: "NO `std::sync::Mutex` / `RwLock` / `parking_lot`"
+
+Status: `confirmed-open`. Current risk: `low`.
+
+Absolute wording still contradicts sanctioned runtime-struct teardown/DDL mutexes.
+
+Evidence: [crates/shamir-index/src/lib.rs:11](../../../../../crates/shamir-index/src/lib.rs#L11); [crates/shamir-index/src/vector/brute_force.rs:64](../../../../../crates/shamir-index/src/vector/brute_force.rs#L64).
+
+Grouping/duplicate: `style-claude-md.md#4`. This row is not another independent defect.
+
+<a id="review-7-5"></a>
+
+### Claim 7.5 — Feature-gated inline loom test module in an implementation file
+
+Status: `confirmed-open`. Current risk: `nit`.
+
+Inline opt-in model remains; this is an optional layout-exception clarification, not runtime severity.
+
+Evidence: [crates/shamir-index/src/reader_drain_gate.rs:306](../../../../../crates/shamir-index/src/reader_drain_gate.rs#L306); [crates/shamir-index/build.rs:13](../../../../../crates/shamir-index/build.rs#L13).
+
+Grouping/duplicate: `style-claude-md.md#5`. This row is not another independent defect.
+
+<a id="review-7-6"></a>
+
+### Claim 7.6 — Task-ID-prefixed test file names drift from topic-based naming
+
+Status: `refuted`. Current risk: —.
+
+Descriptive topic filenames retain provenance prefixes; the actual rule does not prohibit those prefixes.
+
+Evidence: [crates/shamir-index/src/base_index/tests/mod.rs:8](../../../../../crates/shamir-index/src/base_index/tests/mod.rs#L8); [crates/shamir-index/src/base_index/tests/index_manager_tests/mod.rs:10](../../../../../crates/shamir-index/src/base_index/tests/index_manager_tests/mod.rs#L10).
+
+Grouping/duplicate: `style-claude-md.md#6`. This row is not another independent defect.
+
+<a id="review-7-7"></a>
+
+### Claim 7.7 — Comment nits: typo and a stale cross-file doc reference
+
+Status: `confirmed-open`. Current risk: `nit`.
+
+Both typo and obsolete Provenance file reference remain.
+
+Evidence: [crates/shamir-index/src/reader_drain_gate.rs:113](../../../../../crates/shamir-index/src/reader_drain_gate.rs#L113); [crates/shamir-index/src/base_index/index_definition.rs:48](../../../../../crates/shamir-index/src/base_index/index_definition.rs#L48).
+
+Grouping/duplicate: `style-claude-md.md#7`. This row is not another independent defect.
+
+<a id="review-7-8"></a>
+
+### Claim 7.8 — Multi-type bundles in `backend.rs` and `bm25.rs` (borderline one-file-one-export)
+
+Status: `not-applicable`. Current risk: —.
+
+These are permitted closely coupled vocabulary/scoring groups; splitting is optional.
+
+Evidence: [crates/shamir-index/src/backend.rs:69](../../../../../crates/shamir-index/src/backend.rs#L69); [crates/shamir-index/src/bm25.rs:53](../../../../../crates/shamir-index/src/bm25.rs#L53).
+
+Grouping/duplicate: `style-claude-md.md#8`. This row is not another independent defect.
+
+## Current fix-plan state
+
+| Claim decisions | Open | Source-fixed | Partial | Refuted | Unverified | N/A |
+|---:|---:|---:|---:|---:|---:|---:|
+| 22 | 20 | 0 | 1 | 1 | 0 | 0 |
+
+A source-fixed item closes only its stated mechanism. Partial items retain the obligations named below; proposed fixes must obey the corrections and current contracts, not merely copy the historical recipe.
+
+<a id="plan-p0-1"></a>
+
+### Plan P0.1 — P0.1
+
+Status: `confirmed-open`. Current risk: —.
+
+Content-hashing/rejection and unsupported-leaf regression oracles are absent. Include Set and a persisted-posting migration when changing hashes.
+
+Evidence: [crates/shamir-index/src/functional_backend.rs:173](../../../../../crates/shamir-index/src/functional_backend.rs#L173); [crates/shamir-index/src/tests/functional_backend_tests.rs:73](../../../../../crates/shamir-index/src/tests/functional_backend_tests.rs#L73).
+
+<a id="plan-p0-2"></a>
+
+### Plan P0.2 — P0.2
+
+Status: `confirmed-open`. Current risk: —.
+
+Both predicates remain ASCII-only; registered tests lack affected-tokenizer uppercase/lowercase equivalence.
+
+Evidence: [crates/shamir-index/src/tokenizer.rs:55](../../../../../crates/shamir-index/src/tokenizer.rs#L55); [crates/shamir-index/src/tokenizer.rs:277](../../../../../crates/shamir-index/src/tokenizer.rs#L277); [crates/shamir-index/src/tests/tokenizer_tests.rs:70](../../../../../crates/shamir-index/src/tests/tokenizer_tests.rs#L70).
+
+<a id="plan-p0-3"></a>
+
+### Plan P0.3 — P0.3
+
+Status: `confirmed-open`. Current risk: —.
+
+Sorted initial get still swallows all errors; the existing FaultyStore delegates get and cannot detect this.
+
+Evidence: [crates/shamir-index/src/base_index/sorted_index_manager.rs:2706](../../../../../crates/shamir-index/src/base_index/sorted_index_manager.rs#L2706); [crates/shamir-index/src/base_index/tests/p12_ddl_partial_error_tests.rs:75](../../../../../crates/shamir-index/src/base_index/tests/p12_ddl_partial_error_tests.rs#L75).
+
+<a id="plan-p0-4"></a>
+
+### Plan P0.4 — P0.4
+
+Status: `confirmed-open`. Current risk: —.
+
+Replay failure does not rebuild. Rebuilding must replace/reset the partially replayed adapter, not merely upsert rows into possibly stale state.
+
+Evidence: [crates/shamir-index/src/vector/vector_backend.rs:683](../../../../../crates/shamir-index/src/vector/vector_backend.rs#L683); [crates/shamir-index/src/vector/vector_backend.rs:554](../../../../../crates/shamir-index/src/vector/vector_backend.rs#L554).
+
+<a id="plan-p0-5"></a>
+
+### Plan P0.5 — P0.5
+
+Status: `confirmed-open`. Current risk: —.
+
+Shadow error tracking is absent. Logging alone is insufficient; failure tracking must be synchronized with in-flight shadow writes and cutover.
+
+Evidence: [crates/shamir-index/src/vector/vector_backend.rs:512](../../../../../crates/shamir-index/src/vector/vector_backend.rs#L512); [crates/shamir-index/src/vector/vector_backend.rs:1102](../../../../../crates/shamir-index/src/vector/vector_backend.rs#L1102).
+
+<a id="plan-p1-6"></a>
+
+### Plan P1.6 — P1.6
+
+Status: `confirmed-open`. Current risk: —.
+
+No coherent capture barrier exists. The task must also couple pruning to an applied graph watermark; quiescing maps alone does not prove durable deltas were applied.
+
+Evidence: [crates/shamir-index/src/vector/snapshot.rs:524](../../../../../crates/shamir-index/src/vector/snapshot.rs#L524); [crates/shamir-index/src/vector/vector_backend.rs:919](../../../../../crates/shamir-index/src/vector/vector_backend.rs#L919); [crates/shamir-engine/src/tx/materialize.rs:214](../../../../../crates/shamir-engine/src/tx/materialize.rs#L214).
+
+<a id="plan-p1-7"></a>
+
+### Plan P1.7 — P1.7
+
+Status: `confirmed-open`. Current risk: —.
+
+Backend tuning and durable SQ8 intent are not restored on rebuild/pre-fit paths. options is a possible carrier, not a separately broken API requiring removal.
+
+Evidence: [crates/shamir-index/src/build_backend.rs:52](../../../../../crates/shamir-index/src/build_backend.rs#L52); [crates/shamir-index/src/kind.rs:185](../../../../../crates/shamir-index/src/kind.rs#L185); [crates/shamir-index/src/vector/hnsw_adapter.rs:549](../../../../../crates/shamir-index/src/vector/hnsw_adapter.rs#L549).
+
+<a id="plan-p1-8"></a>
+
+### Plan P1.8 — P1.8
+
+Status: `confirmed-open`. Current risk: —.
+
+Snapshot DROP sweep, old q-section pruning, and bounded error-propagating index2 removal are all absent. Retire/drain background snapshot writers before final cleanup.
+
+Evidence: [crates/shamir-index/src/vector/vector_backend.rs:739](../../../../../crates/shamir-index/src/vector/vector_backend.rs#L739); [crates/shamir-index/src/vector/snapshot.rs:1300](../../../../../crates/shamir-index/src/vector/snapshot.rs#L1300); [crates/shamir-index/src/functional_backend.rs:294](../../../../../crates/shamir-index/src/functional_backend.rs#L294).
+
+<a id="plan-p1-9"></a>
+
+### Plan P1.9 — P1.9
+
+Status: `confirmed-open`. Current risk: —.
+
+Zero-side update guards, saturating deletion, positive-average guard, and rebuild reset remain absent; all need discriminating registered tests.
+
+Evidence: [crates/shamir-index/src/fts_ranked_backend.rs:223](../../../../../crates/shamir-index/src/fts_ranked_backend.rs#L223); [crates/shamir-index/src/bm25.rs:72](../../../../../crates/shamir-index/src/bm25.rs#L72); [crates/shamir-index/src/bm25.rs:87](../../../../../crates/shamir-index/src/bm25.rs#L87); [crates/shamir-index/src/fts_ranked_backend.rs:382](../../../../../crates/shamir-index/src/fts_ranked_backend.rs#L382).
+
+<a id="plan-p1-10"></a>
+
+### Plan P1.10 — P1.10
+
+Status: `confirmed-open`. Current risk: —.
+
+Staged dimension validation and safe cache publication remain absent. A pre-insert epoch recheck alone leaves another race; hit validation/publication synchronization is required.
+
+Evidence: [crates/shamir-index/src/vector/hnsw_adapter.rs:2952](../../../../../crates/shamir-index/src/vector/hnsw_adapter.rs#L2952); [crates/shamir-index/src/base_index/index_manager.rs:2879](../../../../../crates/shamir-index/src/base_index/index_manager.rs#L2879).
+
+<a id="plan-p1-11"></a>
+
+### Plan P1.11 — P1.11
+
+Status: `confirmed-open`. Current risk: —.
+
+Fit errors remain unlogged and triggering callers still await fitting. Background conversion needs adapter lifetime/shutdown and publication analysis; measured tail latency is unavailable.
+
+Evidence: [crates/shamir-index/src/vector/hnsw_adapter.rs:946](../../../../../crates/shamir-index/src/vector/hnsw_adapter.rs#L946); [crates/shamir-index/src/vector/hnsw_adapter.rs:2474](../../../../../crates/shamir-index/src/vector/hnsw_adapter.rs#L2474); [crates/shamir-index/src/vector/hnsw_adapter.rs:2712](../../../../../crates/shamir-index/src/vector/hnsw_adapter.rs#L2712).
+
+<a id="plan-p1-12"></a>
+
+### Plan P1.12 — P1.12
+
+Status: `refuted`. Current risk: —.
+
+The alleged persisted-Btree table-open panic is already excluded by an explicit caller filter. A Result-returning public builder would be optional additional hardening.
+
+Evidence: [crates/shamir-engine/src/table/table_manager.rs:661](../../../../../crates/shamir-engine/src/table/table_manager.rs#L661); [crates/shamir-index/src/build_backend.rs:66](../../../../../crates/shamir-index/src/build_backend.rs#L66).
+
+<a id="plan-p1-13"></a>
+
+### Plan P1.13 — P1.13
+
+Status: `confirmed-open`. Current risk: —.
+
+Definition cloning and direct sorted/unique per-key writes remain. Structural optimization is warranted; original High impact and fsync multipliers are not measured.
+
+Evidence: [crates/shamir-index/src/base_index/index_info.rs:314](../../../../../crates/shamir-index/src/base_index/index_info.rs#L314); [crates/shamir-index/src/base_index/sorted_index_manager.rs:1847](../../../../../crates/shamir-index/src/base_index/sorted_index_manager.rs#L1847); [crates/shamir-index/src/base_index/index_manager_unique.rs:524](../../../../../crates/shamir-index/src/base_index/index_manager_unique.rs#L524).
+
+<a id="plan-p1-14"></a>
+
+### Plan P1.14 — P1.14
+
+Status: `confirmed-open`. Current risk: —.
+
+FTS materialization remains, but the proposed unconditional top-k fix is incompatible with the current complete-membership API. Design limit-aware or streaming semantics first.
+
+Evidence: [crates/shamir-index/src/backend.rs:29](../../../../../crates/shamir-index/src/backend.rs#L29); [crates/shamir-index/src/fts_ranked_backend.rs:309](../../../../../crates/shamir-index/src/fts_ranked_backend.rs#L309); [crates/shamir-engine/src/table/read_planner.rs:46](../../../../../crates/shamir-engine/src/table/read_planner.rs#L46).
+
+<a id="plan-p1-15"></a>
+
+### Plan P1.15 — P1.15
+
+Status: `confirmed-open`. Current risk: —.
+
+Scalar trust is not rechecked at evaluation, and External secret serialization remains raw. Credential work must respect the restricted reachability and delegated encryption contract.
+
+Evidence: [crates/shamir-index/src/expr.rs:178](../../../../../crates/shamir-index/src/expr.rs#L178); [crates/shamir-types/src/secret.rs:54](../../../../../crates/shamir-types/src/secret.rs#L54); [docs/guide-docs/security/data-protection.md:68](../../../../../docs/guide-docs/security/data-protection.md#L68).
+
+<a id="plan-p1-16"></a>
+
+### Plan P1.16 — P1.16
+
+Status: `partially-fixed`. Current risk: —.
+
+Source already contains registered unique/sorted persist, unique structured-error, and index2 scan-failure tests. Missing targeted sorted DROP/RENAME phases and per-key removal failures still need coverage.
+
+Evidence: [crates/shamir-engine/src/table/tests/index_create_persist_atomicity_tests.rs:195](../../../../../crates/shamir-engine/src/table/tests/index_create_persist_atomicity_tests.rs#L195); [crates/shamir-engine/src/table/tests/p967_ddl_structured_error_tests.rs:191](../../../../../crates/shamir-engine/src/table/tests/p967_ddl_structured_error_tests.rs#L191); [crates/shamir-engine/src/table/tests/r0d_fail_closed_recovery_tests.rs:269](../../../../../crates/shamir-engine/src/table/tests/r0d_fail_closed_recovery_tests.rs#L269); [crates/shamir-engine/src/table/tests/mod.rs:72](../../../../../crates/shamir-engine/src/table/tests/mod.rs#L72).
+
+<a id="plan-p2-17"></a>
+
+### Plan P2.17 — P2.17
+
+Status: `confirmed-open`. Current risk: —.
+
+Value-verification/hash-format coupling, genuine v1 decoding, and ordinal documentation remain absent. Cheap collision claims require proof; exact pinning alone is not a complete persisted-format contract.
+
+Evidence: [crates/shamir-index/src/base_index/index_manager_unique.rs:384](../../../../../crates/shamir-index/src/base_index/index_manager_unique.rs#L384); [crates/shamir-index/Cargo.toml:30](../../../../../crates/shamir-index/Cargo.toml#L30); [crates/shamir-index/src/vector/snapshot.rs:723](../../../../../crates/shamir-index/src/vector/snapshot.rs#L723); [crates/shamir-index/src/kind.rs:11](../../../../../crates/shamir-index/src/kind.rs#L11).
+
+<a id="plan-p2-18"></a>
+
+### Plan P2.18 — P2.18
+
+Status: `confirmed-open`. Current risk: —.
+
+Persisted-name validation, fallible quantizer reconstruction, metadata checksum coverage, and header-first decoding are absent. CRC must not be presented as protection against malicious metadata modification.
+
+Evidence: [crates/shamir-index/src/vector/snapshot.rs:907](../../../../../crates/shamir-index/src/vector/snapshot.rs#L907); [crates/shamir-index/src/vector/quant_meta.rs:73](../../../../../crates/shamir-index/src/vector/quant_meta.rs#L73); [crates/shamir-index/src/meta_envelope.rs:54](../../../../../crates/shamir-index/src/meta_envelope.rs#L54).
+
+<a id="plan-p2-19"></a>
+
+### Plan P2.19 — P2.19
+
+Status: `confirmed-open`. Current risk: —.
+
+Interner allocation, snapshot materialization, replay fan-out, cache byte budgeting, f32 candidate clones, BruteForce copy/inline scan, backend matching, registry scan, and base-index all-key sweeps remain.
+
+Evidence: [crates/shamir-index/src/expr.rs:172](../../../../../crates/shamir-index/src/expr.rs#L172); [crates/shamir-index/src/vector/snapshot.rs:440](../../../../../crates/shamir-index/src/vector/snapshot.rs#L440); [crates/shamir-index/src/vector/snapshot.rs:1251](../../../../../crates/shamir-index/src/vector/snapshot.rs#L1251); [crates/shamir-index/src/base_index/index_manager.rs:2868](../../../../../crates/shamir-index/src/base_index/index_manager.rs#L2868); [crates/shamir-index/src/vector/hnsw_adapter.rs:2833](../../../../../crates/shamir-index/src/vector/hnsw_adapter.rs#L2833); [crates/shamir-index/src/vector/brute_force.rs:175](../../../../../crates/shamir-index/src/vector/brute_force.rs#L175); [crates/shamir-index/src/vector/brute_force.rs:297](../../../../../crates/shamir-index/src/vector/brute_force.rs#L297); [crates/shamir-index/src/write_ops.rs:188](../../../../../crates/shamir-index/src/write_ops.rs#L188); [crates/shamir-index/src/registry.rs:659](../../../../../crates/shamir-index/src/registry.rs#L659); [crates/shamir-index/src/base_index/index_manager.rs:1250](../../../../../crates/shamir-index/src/base_index/index_manager.rs#L1250).
+
+<a id="plan-p2-20"></a>
+
+### Plan P2.20 — P2.20
+
+Status: `confirmed-open`. Current risk: —.
+
+Typed storage sources, clock fallback, and shutdown error logging remain useful residual work. Quantized invariant expects and admission-precondition registry rollback are optional hardening, not proven supported-path bugs.
+
+Evidence: [crates/shamir-index/src/backend.rs:59](../../../../../crates/shamir-index/src/backend.rs#L59); [crates/shamir-index/src/base_index/index_manager.rs:2355](../../../../../crates/shamir-index/src/base_index/index_manager.rs#L2355); [crates/shamir-index/src/actor.rs:103](../../../../../crates/shamir-index/src/actor.rs#L103); [crates/shamir-index/src/vector/hnsw_adapter.rs:1531](../../../../../crates/shamir-index/src/vector/hnsw_adapter.rs#L1531); [crates/shamir-index/src/registry.rs:198](../../../../../crates/shamir-index/src/registry.rs#L198).
+
+<a id="plan-p2-21"></a>
+
+### Plan P2.21 — P2.21
+
+Status: `confirmed-open`. Current risk: —.
+
+Map hashing, Dot policy, fallback logging, and gram budgets remain open. Remove the refuted sorted bound task; residual-op handling is future hardening, and NEON alignment remains unverified.
+
+Evidence: [crates/shamir-index/src/functional_backend.rs:167](../../../../../crates/shamir-index/src/functional_backend.rs#L167); [crates/shamir-index/src/vector/hnsw_adapter.rs:150](../../../../../crates/shamir-index/src/vector/hnsw_adapter.rs#L150); [crates/shamir-index/src/fts_ranked_backend.rs:390](../../../../../crates/shamir-index/src/fts_ranked_backend.rs#L390); [crates/shamir-index/src/tokenizer.rs:164](../../../../../crates/shamir-index/src/tokenizer.rs#L164); [crates/shamir-types/src/core/sort_codec.rs:135](../../../../../crates/shamir-types/src/core/sort_codec.rs#L135); [crates/shamir-tx/src/index_write_op.rs:90](../../../../../crates/shamir-tx/src/index_write_op.rs#L90); [crates/shamir-index/src/vector/simd.rs:932](../../../../../crates/shamir-index/src/vector/simd.rs#L932).
+
+<a id="plan-p2-22"></a>
+
+### Plan P2.22 — P2.22
+
+Status: `confirmed-open`. Current risk: —.
+
+Local imports, quant_meta relocation, stale invariant/comments, and loom-exception clarification remain. Type splitting and task-prefix renaming are not mandatory violations; no style commit is authorized here.
+
+Evidence: [crates/shamir-index/src/write_ops.rs:166](../../../../../crates/shamir-index/src/write_ops.rs#L166); [crates/shamir-index/src/vector/quant_meta.rs:83](../../../../../crates/shamir-index/src/vector/quant_meta.rs#L83); [crates/shamir-index/src/lib.rs:11](../../../../../crates/shamir-index/src/lib.rs#L11); [crates/shamir-index/src/reader_drain_gate.rs:306](../../../../../crates/shamir-index/src/reader_drain_gate.rs#L306); [crates/shamir-index/src/reader_drain_gate.rs:113](../../../../../crates/shamir-index/src/reader_drain_gate.rs#L113); [crates/shamir-index/src/base_index/index_definition.rs:48](../../../../../crates/shamir-index/src/base_index/index_definition.rs#L48).
+
+## Corrections and qualified non-findings
+
+- Keep 79 original finding rows and 70 consolidated rows as historical coverage counts, not a current census of confirmed defects. Refuted/not-applicable/unverified rows and recalibrated severities invalidate the original 10-high/25-medium/24-low/11-nit conclusion.
+- The SUMMARY dedup of concurrency #6 into 6.4 is incomplete: regular/sorted all-key materialization is separate from index2 per-key removal and error swallowing.
+- 5.1 and 5.2 are medium configuration/feature-preservation issues absent measured runtime High impact; successful fitted snapshots preserve some state. 4.1/4.2 are medium structural performance debt. 7.1/7.2 are nit style issues.
+- 6.6's table-open crash allegation and 1.10's sorted-bound allegation are positively refuted. 2.3's Phase-D race is excluded by writer admission/draining. 6.8's blanket negative test claim has registered counterexamples.
+- 1.11, 5.9, 6.10, 6.12, 7.3, and 7.8 should be described as extension/precondition/invariant or optional design hardening, not established current runtime defects.
+- 3.7 remains unverified, not confirmed UB. Cheap dual-hash collision construction, exact memory multipliers, and latency estimates must not be retained as proven facts.
+- 2.1 requires corrected scan chronology and an applied-delta watermark. The additional watermark row below is necessary to explain why the alleged durable-delta safety net does not prevent snapshot loss.
+- Fix Plan numbering above retains the original global numbers within P0/P1/P2; no task completion or historical commit message was treated as execution/fix proof.
+- Positive guarantees retained with scope: typed queries/ops, direct serde_json absence, bounds-checked posting decoding, SeqCst reader admission and RAII cleanup, registered ordinary tests, explicit opt-in loom wiring, chunk CRC checks, base-index compatibility fallbacks, and exact hnsw_rs pin. None proves all metadata is validated or all runtime paths are formally lock-free.
+- No code or Markdown was changed; parent consolidation remains separate.
+
+## Additional observations from revalidation
+
+These were found while validating the original claims/remediations. They are separate from the original-row counts; cross-module repeats are not extra unique defects.
+
+<a id="new-1"></a>
+
+### Observation NEW.1 — Snapshot absorption watermark counts durable delta appends before their graph promotions have completed
+
+Status: `confirmed-open`. Current risk: `high`.
+
+Necessary correction to the original snapshot-loss claim and its assumed delta safety net. Commit appends deltas and triggers snapshot work before post-lock graph promotion. The snapshot reads next_delta_idx as already absorbed, without an applied-graph barrier, then prunes every lower delta. A snapshot can therefore omit a committed mutation whose durable recovery chunk it deletes. The original zombie timeline is unnecessary to establish this persistence-loss mechanism.
+
+Evidence: [crates/shamir-engine/src/tx/materialize.rs:214](../../../../../crates/shamir-engine/src/tx/materialize.rs#L214); [crates/shamir-engine/src/tx/commit_phases.rs:939](../../../../../crates/shamir-engine/src/tx/commit_phases.rs#L939); [crates/shamir-engine/src/tx/commit.rs:811](../../../../../crates/shamir-engine/src/tx/commit.rs#L811); [crates/shamir-index/src/vector/vector_backend.rs:774](../../../../../crates/shamir-index/src/vector/vector_backend.rs#L774); [crates/shamir-index/src/vector/vector_backend.rs:919](../../../../../crates/shamir-index/src/vector/vector_backend.rs#L919); [crates/shamir-index/src/vector/snapshot.rs:1314](../../../../../crates/shamir-index/src/vector/snapshot.rs#L1314).
+
+## Current follow-up order
+
+1. Prevent snapshot pruning beyond a coherently captured applied-graph watermark; correct the original zombie chronology.
+2. Rebuild into fresh adapter state on delta-replay failure and prevent publication of failed compaction targets.
+3. Fix functional unsupported-leaf hashing, Unicode case-folding, and sorted initial-read error propagation, with discriminating registered tests when execution is authorized.
+4. Fix BM25 zero-token transitions/rebuild reset and staged-vector dimensions; implement race-safe posting-cache publication/hit validation.
+5. Preserve vector tuning/SQ8 intent across rebuild and pre-fit reopen; repair genuine v1 compatibility, quantizer validation, persisted-name handling, and snapshot DROP/q-chunk cleanup.
+6. Preserve typed error sources and propagate per-key cleanup failures; extend the specifically missing fault-injection matrix.
+7. Address proven allocation/batching costs with semantics-preserving designs; obtain measurements before retaining latency/RSS severity claims.
+8. Remove refuted and hypothetical runtime claims, preserve optional hardening separately, and resolve the NEON contract/collision-construction evidence gaps.
+9. Keep later style cleanup scoped; no edits, tests, worktrees, commits, or pushes were performed or authorized by this revalidation.
+
+## Coverage and limitations
+
+- All eight assigned documents were read completely; all 79 original findings, 70 SUMMARY rows, and 22 Fix Plan items are addressed. No TASK_GROUPS file exists in this directory.
+- Read-only source, caller, registration, contract, lockfile, and history inspection only. No files changed; no builds, tests, benchmarks, reproductions, or child agents ran.
+- Latency, RSS multipliers, exploit construction costs, and historical execution claims were not experimentally validated.
+- The NEON intrinsic alignment requirement and inexpensive simultaneous dual-FxHasher collision construction lack authoritative proof in the inspected repository.
+- The original snapshot zombie-node interleaving contradicts the actual scan order; its specific duplicate-result consequence remains unverified. A separate source-proven snapshot watermark defect explains persistence-loss risk.
+- HEAD remained 92ad58266bf57ddea1fa3c8a47affba1a3a9a096 and the checkout was clean at inspection.
+
+## Reviewed document inventory
+
+- [correctness-tdd.md](./correctness-tdd.md) — 14 claim decisions; 0 explicit plan items.
+- [concurrency-lockfree.md](./concurrency-lockfree.md) — 10 claim decisions; 0 explicit plan items.
+- [security-crypto.md](./security-crypto.md) — 8 claim decisions; 0 explicit plan items.
+- [performance-hotpath.md](./performance-hotpath.md) — 15 claim decisions; 0 explicit plan items.
+- [api-wire-protocol.md](./api-wire-protocol.md) — 11 claim decisions; 0 explicit plan items.
+- [error-handling-lifecycle.md](./error-handling-lifecycle.md) — 13 claim decisions; 0 explicit plan items.
+- [style-claude-md.md](./style-claude-md.md) — 8 claim decisions; 0 explicit plan items.
+- [SUMMARY.md](./SUMMARY.md) — 70 claim decisions; 22 explicit plan items.
+
+---
+
+<details>
+<summary>Historical report — preserved for provenance; not current status or instructions</summary>
+
 # shamir-index — Cross-Lens Review (all 7 lenses, synthesized)
 
 Crate: `crates/shamir-index/` — the secondary-index engine of S.H.A.M.I.R. DB: regular-hash /
@@ -560,3 +1709,5 @@ Dedup ledger — 10 cross-lens dedup groups absorbing 10 lens-tagged findings (5
 20. **Error-typed cleanup (6.7 + 6.10 + 6.9 + 6.12 + 6.13):** `#[from] DbError` on `IndexError`, expect→`VectorError::Internal` on the quantized read path, `unwrap_or(0)` clock fallbacks, registry rollback on late name-collision, shutdown join logging + poisoning-tolerant lock. Closes **6.7, 6.10, 6.9, 6.12, 6.13**.
 21. **Value-semantics leftovers:** order-independent Map/Set hashing in `hash_inner` (1.7), Dot-metric normalization enforcement (1.8), true successor bound for unbounded sorted ranges (1.10), explicit residual handling in `apply_index_ops_at_commit` (1.11), degradation-fallback logging (6.11), FTS n-gram caps (3.6), NEON aligned loads (3.7). Closes **1.7, 1.8, 1.10, 1.11, 6.11, 3.6, 3.7**.
 22. **One style sweep commit (7.1 + 7.2 + 7.3 + 7.4 + 7.5 + 7.6 + 7.7):** hoist the 15 local `use`s, move the `quant_meta` inline test, split/reword per findings, topic-name new test files, fix the two comment nits. Closes **7.1, 7.2, 7.3, 7.4, 7.5, 7.6, 7.7**; 7.8 is a conscious-decision note, no action required.
+
+</details>

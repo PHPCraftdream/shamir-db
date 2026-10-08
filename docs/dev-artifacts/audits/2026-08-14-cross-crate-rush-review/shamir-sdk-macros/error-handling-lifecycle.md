@@ -1,3 +1,114 @@
+<!-- revalidation:2026-10-08 source:92ad58266bf57ddea1fa3c8a47affba1a3a9a096 -->
+# shamir-sdk-macros — error-handling-lifecycle revalidation
+
+Source snapshot: `92ad58266bf57ddea1fa3c8a47affba1a3a9a096`. Revalidated 2026-10-08 by read-only XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run; no source fix is part of this update. Test registration/assertions are evidence of an oracle, not proof of a passing run.
+
+This section is authoritative for current status. Original titles/IDs are retained for traceability; a refuted title is not a current assertion. The collapsed historical report below is superseded, including its counts, severity, scenarios and fix instructions. Plan IDs preserve historical numbering, not a current release mandate. [Workspace methodology and status definitions](../SUMMARY.md#status-definitions).
+
+Panic diagnostics, lost user-error classification, fail-quiet decoding, unchecked ABI inputs, and unbounded guest polling remain open. Existing function happy-path coverage and deliberate per-call memory reclamation must be acknowledged.
+
+## Current claim decisions
+
+| Claim decisions | Open | Source-fixed | Partial | Refuted | Unverified | N/A |
+|---:|---:|---:|---:|---:|---:|---:|
+| 7 | 7 | 0 | 0 | 0 | 0 | 0 |
+
+These are decisions on report claims, including repeated roots, bundled observations and non-findings—not a unique-bug census. Closed/N/A rows have no current risk; unverified risk is provisional. Pure style and unmeasured optimization claims do not establish runtime impact.
+
+<a id="review-1"></a>
+
+### Claim 1 — All signature validation panics via `assert!`/`panic!` instead of `syn::Error::to_compile_error()`
+
+Status: `confirmed-open`. Current risk: `low`.
+
+Semantic rejection paths remain assert/panic-based; parse_macro_input remains the exception. No spanned semantic-validation helper was introduced.
+
+Evidence: [crates/shamir-sdk-macros/src/lib.rs:45](../../../../../crates/shamir-sdk-macros/src/lib.rs#L45); [crates/shamir-sdk-macros/src/lib.rs:51](../../../../../crates/shamir-sdk-macros/src/lib.rs#L51); [crates/shamir-sdk-macros/src/lib.rs:81](../../../../../crates/shamir-sdk-macros/src/lib.rs#L81); [crates/shamir-sdk-macros/src/lib.rs:513](../../../../../crates/shamir-sdk-macros/src/lib.rs#L513).
+
+<a id="review-2"></a>
+
+### Claim 2 — Generated `Err` path flattens typed user errors into a panic-trap the host misclassifies as `FunctionError::Compute`
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+All three Result-returning emitters still trap on Err; map_wasm_error only returns Compute. Error::user deliberately denotes user-facing failure, but the guest Error type itself contains only a message, not the reported thiserror variant taxonomy.
+
+Evidence: [crates/shamir-sdk-macros/src/lib.rs:272](../../../../../crates/shamir-sdk-macros/src/lib.rs#L272); [crates/shamir-sdk-macros/src/lib.rs:399](../../../../../crates/shamir-sdk-macros/src/lib.rs#L399); [crates/shamir-sdk-macros/src/lib.rs:564](../../../../../crates/shamir-sdk-macros/src/lib.rs#L564); [crates/shamir-sdk/src/error.rs:13](../../../../../crates/shamir-sdk/src/error.rs#L13); [crates/shamir-wasm-host/src/wasm/wasm_function.rs:593](../../../../../crates/shamir-wasm-host/src/wasm/wasm_function.rs#L593).
+
+<a id="review-3"></a>
+
+### Claim 3 — Zero tests in-crate; no error-path coverage for any validation branch anywhere in the workspace
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+No local tests or macro signature-rejection tests exist, and generated Err/decode/invalid-length behavior lacks identified coverage. The narrower error-path gap remains despite an existing generated-function success test.
+
+Evidence: [crates/shamir-sdk-macros/Cargo.toml:13](../../../../../crates/shamir-sdk-macros/Cargo.toml#L13); [crates/shamir-sdk-macros/src/lib.rs:51](../../../../../crates/shamir-sdk-macros/src/lib.rs#L51); [crates/shamir-wasm-host/src/tests/compile_tests.rs:19](../../../../../crates/shamir-wasm-host/src/tests/compile_tests.rs#L19).
+
+Grouping/duplicate: `correctness-tdd.md#1`. This row is not another independent defect.
+
+<a id="review-4"></a>
+
+### Claim 4 — `#[validator]` generated code silently swallows param-extraction errors -- missing vs malformed payload indistinguishable
+
+Status: `confirmed-open`. Current risk: `low`.
+
+Malformed decoding still becomes an empty map before getter fallback. Params::get only reports missing keys, so the lost decode cause is primarily in decode_params rather than a separately recoverable getter error.
+
+Evidence: [crates/shamir-sdk/src/__rt.rs:11](../../../../../crates/shamir-sdk/src/__rt.rs#L11); [crates/shamir-sdk/src/params.rs:26](../../../../../crates/shamir-sdk/src/params.rs#L26); [crates/shamir-sdk-macros/src/lib.rs:129](../../../../../crates/shamir-sdk-macros/src/lib.rs#L129); [crates/shamir-sdk-macros/src/lib.rs:135](../../../../../crates/shamir-sdk-macros/src/lib.rs#L135).
+
+Grouping/duplicate: `security-crypto.md#1`. This row is not another independent defect.
+
+<a id="review-5"></a>
+
+### Claim 5 — Return-type validation is inconsistent across the four macros; equivalent spellings are spuriously rejected
+
+Status: `confirmed-open`. Current risk: `low`.
+
+Validator/function exact-string checks and procedure/scalar normalization remain distinct; std::result:: remains omitted.
+
+Evidence: [crates/shamir-sdk-macros/src/lib.rs:66](../../../../../crates/shamir-sdk-macros/src/lib.rs#L66); [crates/shamir-sdk-macros/src/lib.rs:197](../../../../../crates/shamir-sdk-macros/src/lib.rs#L197); [crates/shamir-sdk-macros/src/lib.rs:411](../../../../../crates/shamir-sdk-macros/src/lib.rs#L411).
+
+Grouping/duplicate: `api-wire-protocol.md#1`. This row is not another independent defect.
+
+<a id="review-6"></a>
+
+### Claim 6 — Generated ABI functions trust `i32` inputs unvalidated: negative `len` yields alloc-abort or UB
+
+Status: `confirmed-open`. Current risk: `low`.
+
+Signed lengths still reach allocation and slice construction unchecked. The production host checks length conversion and guest range, so invalid calls require an abnormal host/ABI caller; exact allocator failure behavior was not reproduced.
+
+Evidence: [crates/shamir-sdk-macros/src/lib.rs:110](../../../../../crates/shamir-sdk-macros/src/lib.rs#L110); [crates/shamir-sdk-macros/src/lib.rs:123](../../../../../crates/shamir-sdk-macros/src/lib.rs#L123); [crates/shamir-wasm-host/src/wasm/wasm_function.rs:518](../../../../../crates/shamir-wasm-host/src/wasm/wasm_function.rs#L518); [crates/shamir-wasm-host/src/wasm/wasm_function.rs:533](../../../../../crates/shamir-wasm-host/src/wasm/wasm_function.rs#L533).
+
+Grouping/duplicate: `security-crypto.md#2`. This row is not another independent defect.
+
+<a id="review-7"></a>
+
+### Claim 7 — Generated `block_on` has no deadline/fuel guard: a genuinely-Pending future spins hot forever on the failure path
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+No guest-side poll bound exists. Production host fuel, epoch interruption, and request timeout do exist, so an indefinite production hang is not established. Existing async host imports suspend the fiber rather than automatically triggering guest Poll::Pending.
+
+Evidence: [crates/shamir-sdk/src/__rt.rs:50](../../../../../crates/shamir-sdk/src/__rt.rs#L50); [crates/shamir-wasm-host/src/wasm/wasm_function.rs:195](../../../../../crates/shamir-wasm-host/src/wasm/wasm_function.rs#L195); [crates/shamir-wasm-host/src/wasm/wasm_function.rs:477](../../../../../crates/shamir-wasm-host/src/wasm/wasm_function.rs#L477); [crates/shamir-wasm-host/src/wasm/wasm_function.rs:487](../../../../../crates/shamir-wasm-host/src/wasm/wasm_function.rs#L487); [crates/shamir-wasm-host/src/wasm/wasm_function.rs:551](../../../../../crates/shamir-wasm-host/src/wasm/wasm_function.rs#L551).
+
+Grouping/duplicate: `concurrency-lockfree.md#1`. This row is not another independent defect.
+
+## Corrections and qualified non-findings
+
+- Confirmed non-findings: all four parsers use parse_macro_input; macro-owned code contains no unwrap/expect; wrapper Result returns preserve SDK compatibility before the explicit Err-to-trap conversion.
+- Intentional leaks are reclaimed by destruction of a fresh Store per invocation, not by a guest free operation: crates/shamir-wasm-host/src/wasm/wasm_function.rs:474.
+- The claim that function is compiled by no test is refuted by crates/shamir-wasm-host/src/tests/compile_tests.rs:19.
+- Replace references to Error::MissingParam and a thiserror taxonomy with the actual message-only Error::user API.
+- Negative-length guards improve defense in depth but do not validate every raw-pointer precondition.
+- No client retry policy or metric consequence was traced; those are possible downstream consequences, not demonstrated behavior.
+
+---
+
+<details>
+<summary>Historical report — preserved for provenance; not current status or instructions</summary>
+
 # shamir-sdk-macros -- Error handling & resource lifecycle
 
 ## Summary
@@ -67,3 +178,5 @@ The crate's entire error surface is compile-time validation of consumer signatur
 - `parse_macro_input!` is used correctly at all four entry points (graceful spanned errors for parse failures).
 - The intentional `shamir_alloc`/`leak_result` leaks are deliberate bump-allocator design, documented at each emission site; no cleanup is expected on those paths in short-lived WASM guests.
 - The generated wrapper bodies otherwise propagate `Result` faithfully and use `?`-friendly signatures (`shamir_sdk::Result<Value>`); no `unwrap()`/`expect()` appears in macro or generated code.
+
+</details>

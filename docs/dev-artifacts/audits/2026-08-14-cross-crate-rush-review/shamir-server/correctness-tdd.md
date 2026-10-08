@@ -1,3 +1,143 @@
+<!-- revalidation:2026-10-08 source:92ad58266bf57ddea1fa3c8a47affba1a3a9a096 -->
+# shamir-server — correctness-tdd revalidation
+
+Source snapshot: `92ad58266bf57ddea1fa3c8a47affba1a3a9a096`. Revalidated 2026-10-08 by read-only XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run; no source fix is part of this update. Test registration/assertions are evidence of an oracle, not proof of a passing run.
+
+This section is authoritative for current status. Original titles/IDs are retained for traceability; a refuted title is not a current assertion. The collapsed historical report below is superseded, including its counts, severity, scenarios and fix instructions. Plan IDs preserve historical numbering, not a current release mandate. [Workspace methodology and status definitions](../SUMMARY.md#status-definitions).
+
+Nine numbered observations remain open, with narrower reachability or impact qualifications; the namespace-prefix defect is refuted by the documented contract. The replica bypass remains conditional on explicitly configuring the handler ReadOnly.
+
+## Current claim decisions
+
+| Claim decisions | Open | Source-fixed | Partial | Refuted | Unverified | N/A |
+|---:|---:|---:|---:|---:|---:|---:|
+| 11 | 9 | 0 | 0 | 2 | 0 | 0 |
+
+These are decisions on report claims, including repeated roots, bundled observations and non-findings—not a unique-bug census. Closed/N/A rows have no current risk; unverified risk is provisional. Pure style and unmeasured optimization claims do not establish runtime impact.
+
+<a id="review-1"></a>
+
+### Claim 1 — Interactive-tx path bypasses the read-only-replica gate entirely
+
+Status: `confirmed-open`. Current risk: `high`.
+
+TxExecute reaches tx_execute_as without the Execute-only NodeMode gate, and TxCommit applies the transaction. Existing DB/table ACLs still apply: this is not available to every authenticated principal. The stock launcher never sets ReadOnly; exploitation requires an explicitly ReadOnly handler deployment.
+
+Evidence: [crates/shamir-server/src/db_handler/handler.rs:529](../../../../../crates/shamir-server/src/db_handler/handler.rs#L529); [crates/shamir-server/src/db_handler/handler.rs:379](../../../../../crates/shamir-server/src/db_handler/handler.rs#L379); [crates/shamir-server/src/db_handler/tx_handlers.rs:168](../../../../../crates/shamir-server/src/db_handler/tx_handlers.rs#L168); [crates/shamir-server/src/db_handler/tx_handlers.rs:247](../../../../../crates/shamir-server/src/db_handler/tx_handlers.rs#L247); [crates/shamir-db/src/shamir_db/execute/db_tx.rs:126](../../../../../crates/shamir-db/src/shamir_db/execute/db_tx.rs#L126); [crates/shamir-db/src/shamir_db/execute/db_tx.rs:171](../../../../../crates/shamir-db/src/shamir_db/execute/db_tx.rs#L171); [crates/shamir-server/src/server/server_launcher.rs:461](../../../../../crates/shamir-server/src/server/server_launcher.rs#L461); [crates/shamir-server/src/db_handler/tests/mod.rs:5](../../../../../crates/shamir-server/src/db_handler/tests/mod.rs#L5).
+
+<a id="review-2"></a>
+
+### Claim 2 — Dead follower-loop registry entries block resubscription after a journal gap
+
+Status: `confirmed-open`. Current risk: `high`.
+
+Task exits do not clear registry entries or test join liveness. However, reconcile removes entries for every non-active row, including resync_required; the 10-second production tick therefore normally clears journal-gap entries. Stalling remains possible for terminal errors leaving state active, or resuming before an intervening inactive-state reconciliation. The original permanent-gap scenario is overstated.
+
+Evidence: [crates/shamir-server/src/replication/supervisor.rs:213](../../../../../crates/shamir-server/src/replication/supervisor.rs#L213); [crates/shamir-server/src/replication/supervisor.rs:223](../../../../../crates/shamir-server/src/replication/supervisor.rs#L223); [crates/shamir-server/src/replication/supervisor.rs:231](../../../../../crates/shamir-server/src/replication/supervisor.rs#L231); [crates/shamir-server/src/replication/supervisor.rs:286](../../../../../crates/shamir-server/src/replication/supervisor.rs#L286); [crates/shamir-server/src/replication/tests/supervisor_tests.rs:398](../../../../../crates/shamir-server/src/replication/tests/supervisor_tests.rs#L398); [crates/shamir-server/src/server/server_launcher.rs:962](../../../../../crates/shamir-server/src/server/server_launcher.rs#L962); [crates/shamir-server/src/server/server_launcher.rs:1526](../../../../../crates/shamir-server/src/server/server_launcher.rs#L1526).
+
+<a id="review-3"></a>
+
+### Claim 3 — `close_all()` / `attach_handle()` race can leak a bridge task past connection teardown
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+close_all can remove the handle-less placeholder before attach_handle; a missing-key update then drops the still-running JoinHandle without aborting it. Teardown closes subscriptions before aborting/draining dispatch, allowing this interleaving. The registered late-attach test checks cardinality, not cancellation of a live bridge.
+
+Evidence: [crates/shamir-server/src/subscriptions/registry.rs:134](../../../../../crates/shamir-server/src/subscriptions/registry.rs#L134); [crates/shamir-server/src/subscriptions/registry.rs:150](../../../../../crates/shamir-server/src/subscriptions/registry.rs#L150); [crates/shamir-server/src/db_handler/subscribe_handler.rs:87](../../../../../crates/shamir-server/src/db_handler/subscribe_handler.rs#L87); [crates/shamir-server/src/db_handler/subscribe_handler.rs:93](../../../../../crates/shamir-server/src/db_handler/subscribe_handler.rs#L93); [crates/shamir-server/src/connection/request_loop.rs:413](../../../../../crates/shamir-server/src/connection/request_loop.rs#L413); [crates/shamir-server/src/subscriptions/tests/registry_tests.rs:48](../../../../../crates/shamir-server/src/subscriptions/tests/registry_tests.rs#L48); [docs/guide-docs/client-server-protocol-spec/SUBSCRIPTIONS.md:38](../../../../../docs/guide-docs/client-server-protocol-spec/SUBSCRIPTIONS.md#L38); [Cargo.lock:4195](../../../../../Cargo.lock#L4195).
+
+<a id="review-4"></a>
+
+### Claim 4 — Follower loop busy-loops on an unexpected `Hello` reply (missing backoff)
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+A non-regressing Hello reply to Pull logs and immediately continues without sleeping. A repeatedly malformed source can drive rapid retries; actual CPU cost depends on source and transport latency and was not measured.
+
+Evidence: [crates/shamir-server/src/replication/follower_loop.rs:281](../../../../../crates/shamir-server/src/replication/follower_loop.rs#L281); [crates/shamir-server/src/replication/follower_loop.rs:287](../../../../../crates/shamir-server/src/replication/follower_loop.rs#L287); [crates/shamir-server/src/replication/follower_loop.rs:278](../../../../../crates/shamir-server/src/replication/follower_loop.rs#L278).
+
+<a id="review-5"></a>
+
+### Claim 5 — `try_join_next()` swallows non-panic `JoinError`s silently
+
+Status: `confirmed-open`. Current risk: `low`.
+
+The drain still logs only panics. This is a latent diagnostics gap, not a demonstrated currently reachable lost-request path: the visible cancellation producer is abort_all after leaving the reader loop.
+
+Evidence: [crates/shamir-server/src/connection/request_loop.rs:240](../../../../../crates/shamir-server/src/connection/request_loop.rs#L240); [crates/shamir-server/src/connection/request_loop.rs:242](../../../../../crates/shamir-server/src/connection/request_loop.rs#L242); [crates/shamir-server/src/connection/request_loop.rs:415](../../../../../crates/shamir-server/src/connection/request_loop.rs#L415).
+
+<a id="review-6"></a>
+
+### Claim 6 — Vacuous dead-code discard of `ConnectError::AuthFailed`
+
+Status: `confirmed-open`. Current risk: `nit`.
+
+The otherwise unused import and discarded enum value remain. This has no runtime effect; the alleged unmet historical error-handling obligation is unsupported.
+
+Evidence: [crates/shamir-server/src/connection/request_loop.rs:42](../../../../../crates/shamir-server/src/connection/request_loop.rs#L42); [crates/shamir-server/src/connection/request_loop.rs:431](../../../../../crates/shamir-server/src/connection/request_loop.rs#L431).
+
+<a id="review-7"></a>
+
+### Claim 7 — Log-mask override matching is a raw substring/prefix test, not a namespace-segment match
+
+Status: `refuted`. Current risk: —.
+
+Raw longest-prefix matching is already the documented contract, and registered tests deliberately require matches across underscore boundaries. Requiring :: would change that contract. A walnut example could clarify behavior but does not demonstrate a defect.
+
+Evidence: [crates/shamir-server/src/logging.rs:107](../../../../../crates/shamir-server/src/logging.rs#L107); [crates/shamir-server/src/logging.rs:135](../../../../../crates/shamir-server/src/logging.rs#L135); [crates/shamir-server/src/logging.rs:142](../../../../../crates/shamir-server/src/logging.rs#L142); [crates/shamir-server/src/logging/tests/log_mask_tests.rs:32](../../../../../crates/shamir-server/src/logging/tests/log_mask_tests.rs#L32); [crates/shamir-server/src/logging/tests/log_mask_tests.rs:64](../../../../../crates/shamir-server/src/logging/tests/log_mask_tests.rs#L64); [docs/guide-docs/guide/07-operations.md:321](../../../../../docs/guide-docs/guide/07-operations.md#L321).
+
+<a id="review-8"></a>
+
+### Claim 8 — `Scheduler::shutdown()` regression test has no timeout bound on the documented race it guards against
+
+Status: `confirmed-open`. Current risk: `low`.
+
+The auto-discovered integration test still awaits shutdown without a local timeout. The implementation synchronously subscribes receivers before spawning, closing the documented race; this finding concerns failure localization, not a current shutdown bug. Nextest default timeout is 180 seconds, while its CI profile permits 600 seconds.
+
+Evidence: [crates/shamir-server/tests/scheduler.rs:153](../../../../../crates/shamir-server/tests/scheduler.rs#L153); [crates/shamir-server/tests/scheduler.rs:156](../../../../../crates/shamir-server/tests/scheduler.rs#L156); [crates/shamir-server/src/scheduler.rs:126](../../../../../crates/shamir-server/src/scheduler.rs#L126); [.config/nextest.toml:49](../../../../../.config/nextest.toml#L49); [.config/nextest.toml:63](../../../../../.config/nextest.toml#L63).
+
+<a id="review-9"></a>
+
+### Claim 9 — `safe_run`'s panic-survival contract is never actually exercised by a panicking tick
+
+Status: `confirmed-open`. Current risk: `low`.
+
+safe_run still catches unwinding panics, but the registered integration mocks only increment counters. None forces a tick panic and verifies a subsequent invocation.
+
+Evidence: [crates/shamir-server/src/scheduler.rs:140](../../../../../crates/shamir-server/src/scheduler.rs#L140); [crates/shamir-server/src/scheduler.rs:314](../../../../../crates/shamir-server/src/scheduler.rs#L314); [crates/shamir-server/tests/scheduler.rs:44](../../../../../crates/shamir-server/tests/scheduler.rs#L44); [crates/shamir-server/tests/scheduler.rs:174](../../../../../crates/shamir-server/tests/scheduler.rs#L174); [crates/shamir-server/tests/scheduler.rs:218](../../../../../crates/shamir-server/tests/scheduler.rs#L218).
+
+<a id="review-10"></a>
+
+### Claim 10 — `/readyz` is never observed returning "not ready" through the real boot path
+
+Status: `confirmed-open`. Current risk: `low`.
+
+The HTTP integration test observes only post-launch 200. False state and the 503 handler exist, but no HTTP assertion exercises them. Observability is spawned after data listeners bind, so the report's proposed pre-listener window does not exist in the stock launch order.
+
+Evidence: [crates/shamir-server/tests/observability_http.rs:133](../../../../../crates/shamir-server/tests/observability_http.rs#L133); [crates/shamir-server/tests/observability_http.rs:149](../../../../../crates/shamir-server/tests/observability_http.rs#L149); [crates/shamir-server/src/observability.rs:75](../../../../../crates/shamir-server/src/observability.rs#L75); [crates/shamir-server/src/observability.rs:557](../../../../../crates/shamir-server/src/observability.rs#L557); [crates/shamir-server/src/server/server_launcher.rs:878](../../../../../crates/shamir-server/src/server/server_launcher.rs#L878); [crates/shamir-server/src/server/server_launcher.rs:936](../../../../../crates/shamir-server/src/server/server_launcher.rs#L936).
+
+<a id="review-no-findings-for-other-reviewed-areas"></a>
+
+### Claim No findings for other reviewed areas — Other areas are free of logic bugs and vacuous tests
+
+Status: `refuted`. Current risk: —.
+
+The blanket guarantee is too strong: registry_insert_and_remove never inserts or removes, and the late-attach test checks counts without checking live-task cancellation. The assigned teardown defect also contradicts a clean lifecycle guarantee. Remaining unrelated modules were not freshly audited.
+
+Evidence: [crates/shamir-server/src/subscriptions/tests/registry_tests.rs:4](../../../../../crates/shamir-server/src/subscriptions/tests/registry_tests.rs#L4); [crates/shamir-server/src/subscriptions/tests/registry_tests.rs:48](../../../../../crates/shamir-server/src/subscriptions/tests/registry_tests.rs#L48); [crates/shamir-server/src/connection/request_loop.rs:413](../../../../../crates/shamir-server/src/connection/request_loop.rs#L413).
+
+## Corrections and qualified non-findings
+
+- Replace the unconditional critical/any-authenticated-client framing with an ACL-authorized, explicitly ReadOnly-handler threat model.
+- NodeMode documentation is in db_handler/config.rs, not the top-level deployment Config; the stock launcher does not configure it.
+- A reconciliation observing resync_required, paused or deletion removes the stale supervisor entry; restart is not the only recovery.
+- Subscription teardown must also prevent dispatch from creating subscriptions after close_all; merely fixing missing-key attachment is not a complete lifetime barrier.
+- Remove the assertion that a discarded ConnectError proves an unmet historical obligation.
+
+---
+
+<details>
+<summary>Historical report — preserved for provenance; not current status or instructions</summary>
+
 # shamir-server -- Correctness & TDD-coverage
 
 ## Summary
@@ -86,3 +226,5 @@ teardown, plus a handful of self-admitted or newly-identified TDD gaps.
 ## No findings for other reviewed areas
 
 `cursor_registry.rs`, `tx_registry.rs`, `byte_budget.rs`, `registry.rs`'s cardinality tracking (`AtomicUsize` mirror, no banned `scc::*::len()` on the hot path), `access_tree.rs`, `backup.rs`/`restore.rs` (streaming SHA-256 manifest verification), `bootstrap.rs`, `config.rs`, `server_meta.rs`, `tables_registry.rs`, `tls.rs`, `user_directory.rs`, `version.rs`, `conn_limiter.rs`, `framer.rs`, `in_flight_guard.rs`, `push_sink.rs`, `connection_context.rs`, `user_state_lookup.rs`, `wire.rs`, and the `server/` boot-orchestration files were reviewed and found free of logic bugs and vacuous tests under this lens — these areas carry dense doc comments citing specific prior incidents (F-12, F-19, N-6, W-5, CR-A6, F-38, #439, #513, #527, etc.) and tests that force real failure conditions (corrupted msgpack, Windows sharing-violation locks, hand-crafted principal64 collisions) rather than tautological assertions.
+
+</details>

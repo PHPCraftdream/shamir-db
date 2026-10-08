@@ -1,3 +1,54 @@
+<!-- revalidation:2026-10-08 source:92ad58266bf57ddea1fa3c8a47affba1a3a9a096 -->
+# shamir-transport-ws — concurrency-lockfree revalidation
+
+Source snapshot: `92ad58266bf57ddea1fa3c8a47affba1a3a9a096`. Revalidated 2026-10-08 by read-only XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run; no source fix is part of this update. Test registration/assertions are evidence of an oracle, not proof of a passing run.
+
+This section is authoritative for current status. Original titles/IDs are retained for traceability; a refuted title is not a current assertion. The collapsed historical report below is superseded, including its counts, severity, scenarios and fix instructions. Plan IDs preserve historical numbering, not a current release mandate. [Workspace methodology and status definitions](../SUMMARY.md#status-definitions).
+
+Both allocation findings remain structurally true. Absence of crate-owned locks is confirmed, but complete-stack lock freedom, zero-allocation receive behavior, and simultaneous bidirectional test coverage were overstated.
+
+## Current claim decisions
+
+| Claim decisions | Open | Source-fixed | Partial | Refuted | Unverified | N/A |
+|---:|---:|---:|---:|---:|---:|---:|
+| 2 | 2 | 0 | 0 | 0 | 0 | 0 |
+
+These are decisions on report claims, including repeated roots, bundled observations and non-findings—not a unique-bug census. Closed/N/A rows have no current risk; unverified risk is provisional. Pure style and unmeasured optimization claims do not establish runtime impact.
+
+<a id="review-1"></a>
+
+### Claim 1 — Send framing ships only the allocating variant — production send path allocates + memcpys per message while recv is zero-alloc
+
+Status: `confirmed-open`. Current risk: `low`.
+
+ws_send_sink allocates and copies every payload. Production WS writers still use it and inherit the borrowed prereserved default. Receive scratch reuse is only conditional adapter-level reuse.
+
+Evidence: [crates/shamir-transport-ws/src/framing.rs:119](../../../../../crates/shamir-transport-ws/src/framing.rs#L119); [crates/shamir-server/src/framer.rs:110](../../../../../crates/shamir-server/src/framer.rs#L110); [crates/shamir-server/src/framer.rs:357](../../../../../crates/shamir-server/src/framer.rs#L357).
+
+Grouping/duplicate: `performance-hotpath.md#1`. This row is not another independent defect.
+
+<a id="review-2"></a>
+
+### Claim 2 — `accept_browser_ws` deep-clones the entire origin allowlist per accepted connection
+
+Status: `confirmed-open`. Current risk: `low`.
+
+The policy remains Vec<String> with derived Clone. Transport accept clones it, and the production listener separately clones it before spawning each connection.
+
+Evidence: [crates/shamir-transport-ws/src/browser.rs:22](../../../../../crates/shamir-transport-ws/src/browser.rs#L22); [crates/shamir-transport-ws/src/server.rs:118](../../../../../crates/shamir-transport-ws/src/server.rs#L118); [crates/shamir-server/src/server/server_launcher.rs:1472](../../../../../crates/shamir-server/src/server/server_launcher.rs#L1472).
+
+## Corrections and qualified non-findings
+
+- Source confirms no crate-owned Mutex/RwLock/parking_lot, atomics, concurrent maps, synchronous socket I/O, or spawned production tasks. This does not prove underlying futures split or WebSocket dependencies are lock-free.
+- split_halves_concurrent_send_recv runs a client sender against a server reader; server_sink only closes afterward. It does not test simultaneous server send and receive.
+- Receive scratch capacity reuse is established by source and assertions for fitting payloads, not end-to-end zero allocation. The production concurrent request loop creates a fresh frame Vec per request at request_loop.rs:278.
+- The source proves allocation/copy structure, not contention or latency. An ownership-taking send API also needs an ownership-capable production writer/caller interface.
+
+---
+
+<details>
+<summary>Historical report — preserved for provenance; not current status or instructions</summary>
+
 # shamir-transport-ws — Concurrency & lock-free invariants
 
 ## Summary
@@ -75,3 +126,5 @@ claims this crate makes — split-half duplex under real tokio tasks
 No further findings for this theme: no `Mutex`/`RwLock`/`parking_lot` anywhere in the crate, no
 locks (hence none across `.await`), no `scc`/`dashmap` maps (hence no `scc::*::len()` call sites
 and no Fx-hash default to violate), and no sync I/O on async paths.
+
+</details>

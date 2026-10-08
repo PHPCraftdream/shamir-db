@@ -1,3 +1,112 @@
+<!-- revalidation:2026-10-08 source:92ad58266bf57ddea1fa3c8a47affba1a3a9a096 -->
+# Приоритет крейтов — актуальная повторная проверка
+
+Срез: `92ad58266bf57ddea1fa3c8a47affba1a3a9a096`, 2026-10-08. Все 25 ранее рассмотренных модулей и 189 Markdown-файлов ревью обновлены после read-only XS-проверок и принятия результатов. Это порядок последующей инженерной работы, а не разрешение на изменения кода или заявление о пройденных тестах. Сборки, компиляции, тесты, бенчмарки и воспроизведения не запускались; source, версии, commit и push не менялись.
+
+[Общий свод и статусы](./SUMMARY.md#status-definitions) — основа этого документа. Старые raw-счётчики, style Critical/High и общие вердикты «не поставлять» не используются как формула ранжирования. Актуальный census уникальных багов не заявляется: строки линз, summary и групп часто повторяют один механизм.
+
+## 1. Сложность последующей работы
+
+Качественная оценка связанных состояний/контрактов и необходимости согласования. Она не равна числу исторических находок и не измеряет время.
+
+| Крейт | Сложность | Причина |
+|---|---|---|
+| [shamir-engine](./shamir-engine/SUMMARY.md) | Высокая | Связанные commit/drain/A8/migration состояния и частично закрытые группы. |
+| [shamir-index](./shamir-index/SUMMARY.md) | Высокая | Graph/delta/snapshot/compaction concurrency и durable форматы. |
+| [shamir-tx](./shamir-tx/SUMMARY.md) | Высокая | MVCC publication, sparse versions, rollback/GC и lock lifecycle. |
+| [shamir-wal](./shamir-wal/SUMMARY.md) | Высокая | Leader/cancellation/fsync/append/replay и метаданные сегментов. |
+| [shamir-storage](./shamir-storage/SUMMARY.md) | Высокая | Несколько wrapper/cache backend контрактов, batch visibility и worker lifecycle. |
+| [shamir-wasm-host](./shamir-wasm-host/SUMMARY.md) | Высокая | Реентерабельный fuel, host/guest ABI, compiler и teardown; координация SDK. |
+| [shamir-db](./shamir-db/SUMMARY.md) | Высокая | Многошаговый каталог/DDL, durability и actor права. |
+| [shamir-client](./shamir-client/SUMMARY.md) | Средняя–высокая | Resume/auth и конкурентное завершение запросов/подписок. |
+| [shamir-connect](./shamir-connect/SUMMARY.md) | Средняя–высокая | Protocol/session/counter/audit контракты; часть old claims опровергнута. |
+| [shamir-types](./shamir-types/SUMMARY.md) | Средняя–высокая | Общие codec/value/hash и legacy/typed wire контракты. |
+| [shamir-query-types](./shamir-query-types/SUMMARY.md) | Средняя | Planner графы и nested confirmation gates; post-parse walk bounds. |
+| [shamir-sdk](./shamir-sdk/SUMMARY.md) | Средняя | Guest ABI ownership/decode defaults; согласование с host/macros. |
+| [shamir-server](./shamir-server/SUMMARY.md) | Средняя | Узкие gates/lifecycle, но важны handler mode, actor ACL и supervisor states. |
+| [shamir-query-builder](./shamir-query-builder/SUMMARY.md) | Средняя | Nested alias scopes, mutator intent, exported macros и variant semantics. |
+| [shamir-client-node](./shamir-client-node/SUMMARY.md) | Средняя | Адреса/таймауты/close ownership; alleged dead wrapper не требует fix. |
+| [shamir-numa](./shamir-numa/SUMMARY.md) | Средняя | Mirror linearization и Linux mask, с учётом сериализованных live DDL. |
+| [shamir-transport-ws](./shamir-transport-ws/SUMMARY.md) | Средняя | Config/upgrade/control backpressure и caller deadlines. |
+| [shamir-transport-tcp](./shamir-transport-tcp/SUMMARY.md) | Средняя | Малый unsafe участок; обязательны initialization/cancellation контракты. |
+| [shamir-transport-ipc](./shamir-transport-ipc/SUMMARY.md) | Средняя | Windows accept state и platform security/cleanup. |
+| [shamir-sdk-macros](./shamir-sdk-macros/SUMMARY.md) | Средняя | Pattern/signature/diagnostics и guest error ABI. |
+| [shamir-query-builder-macros](./shamir-query-builder-macros/SUMMARY.md) | Средняя | Call paths/grammar/diagnostics; performance backend-dependent. |
+| [shamir-funclib](./shamir-funclib/SUMMARY.md) | Средняя | Input/output caps и semaphore predicate/wait; метрики не измерялись. |
+| [shamir-collections](./shamir-collections/SUMMARY.md) | Низкая–средняя | Delegated contracts, прямые oracle тесты и qualified hashing boundary. |
+| [shamir-tunables](./shamir-tunables/SUMMARY.md) | Низкая–средняя | Честный inert/live контракт, domain policy и sampling semantics. |
+| [shamir-bench-utils](./shamir-bench-utils/SUMMARY.md) | Низкая–средняя | Dev measurement ownership, parameters/reproducibility и layout. |
+
+## 2. Архитектурная важность
+
+Ориентир по радиусу воздействия, а не утверждение, что каждый лист зависит от каждого фундаментального крейта. Опциональные транспорты/клиенты и прямые library API имеют отдельную область применимости; инфраструктурный крейт тоже может влиять на корректность.
+
+- Фундамент: [shamir-types](./shamir-types/SUMMARY.md), [shamir-collections](./shamir-collections/SUMMARY.md).
+- Хранение и durability: [shamir-storage](./shamir-storage/SUMMARY.md), [shamir-wal](./shamir-wal/SUMMARY.md).
+- Транзакционное ядро: [shamir-tx](./shamir-tx/SUMMARY.md), [shamir-engine](./shamir-engine/SUMMARY.md).
+- Запросы/индексы/скаляры: [shamir-query-types](./shamir-query-types/SUMMARY.md), [shamir-query-builder](./shamir-query-builder/SUMMARY.md), [shamir-query-builder-macros](./shamir-query-builder-macros/SUMMARY.md), [shamir-index](./shamir-index/SUMMARY.md), [shamir-funclib](./shamir-funclib/SUMMARY.md).
+- Каталог/DDL: [shamir-db](./shamir-db/SUMMARY.md).
+- Сетевой и auth периметр: [shamir-connect](./shamir-connect/SUMMARY.md), [shamir-server](./shamir-server/SUMMARY.md), [shamir-transport-tcp](./shamir-transport-tcp/SUMMARY.md), [shamir-transport-ws](./shamir-transport-ws/SUMMARY.md), [shamir-transport-ipc](./shamir-transport-ipc/SUMMARY.md).
+- WASM host: [shamir-wasm-host](./shamir-wasm-host/SUMMARY.md).
+- Клиенты и guest SDK: [shamir-client](./shamir-client/SUMMARY.md), [shamir-client-node](./shamir-client-node/SUMMARY.md), [shamir-sdk](./shamir-sdk/SUMMARY.md), [shamir-sdk-macros](./shamir-sdk-macros/SUMMARY.md).
+- Поддержка: [shamir-numa](./shamir-numa/SUMMARY.md), [shamir-tunables](./shamir-tunables/SUMMARY.md), [shamir-bench-utils](./shamir-bench-utils/SUMMARY.md).
+
+## 3. Рекомендуемый порядок — механизм и риск, не raw totals
+
+Первые позиции объединяют видимость/сохранность данных, незавершающиеся операции, раскрытие bearer credential и unsafe boundary. Условные API/конфигурации, legacy policy и отсутствие измерений остаются частью оценки. Пункты можно вести параллельно, если изменения не делят контракт или файлы.
+
+| # | Крейт | Актуальная причина | Open-H строк summary | Дополнительных строк |
+|---:|---|---|---:|---:|
+| 1 | [shamir-wal](./shamir-wal/SUMMARY.md) | Commit liveness and failed-append/replay semantics remain open; stale sidecar unlink failures can invalidate truncation safety. | 4 | 1 |
+| 2 | [shamir-storage](./shamir-storage/SUMMARY.md) | Read-fill/cache-publication races and worker-death flush hangs remain; version envelopes are partial compatibility remediation. | 4 | 2 |
+| 3 | [shamir-tx](./shamir-tx/SUMMARY.md) | Live cell-version regression, failed history writes masking older values, journal error handling and GC costs remain. | 4 | 0 |
+| 4 | [shamir-engine](./shamir-engine/SUMMARY.md) | Many August mechanisms are source-fixed; pre-read, A8, migration replay/page, orphan-test and initialization-lifecycle residuals remain. | 3 | 8 |
+| 5 | [shamir-index](./shamir-index/SUMMARY.md) | Functional hash collapse, Unicode tokenization, metadata error swallowing and vector persistence/compaction remain; snapshot absorption lacks an applied-graph barrier. | 6 | 1 |
+| 6 | [shamir-client](./shamir-client/SUMMARY.md) | Resume discloses a bearer ticket before peer identity verification; disconnect/request/subscription and reference-walk defects remain. | 5 | 2 |
+| 7 | [shamir-funclib](./shamir-funclib/SUMMARY.md) | Authorized scalar paths retain uncapped recursion/output allocation and a semaphore lost wakeup; universal deployment and numerical claims are qualified. | 8 | 1 |
+| 8 | [shamir-transport-tcp](./shamir-transport-tcp/SUMMARY.md) | Fresh/grown receive-buffer initialization is unsound; cancelled production buffers are dropped, so remote disclosure is not proven. | 1 | 0 |
+| 9 | [shamir-db](./shamir-db/SUMMARY.md) | Wrong-database cascade and catalogue error/order defects remain; ACL dedup is fixed, while arbitrary curl-directive injection is unverified. | 7 | 0 |
+| 10 | [shamir-wasm-host](./shamir-wasm-host/SUMMARY.md) | Aggregate fuel, compiler scanning/offloading and duplicate HTTP headers remain. Async imports already suspend fibers; boxed handlers are required by the pin. | 8 | 0 |
+| 11 | [shamir-types](./shamir-types/SUMMARY.md) | Signed-zero Hash/Eq and header-driven allocation remain. Lossy string/list projection is deliberate; typed-RHS/docs concerns are not blanket wire corruption. | 5 | 0 |
+| 12 | [shamir-server](./shamir-server/SUMMARY.md) | ReadOnly handler transaction writes lack the gate, conditional on explicit mode/write ACLs; stock launcher is ReadWrite. Supervisor scenarios are narrower. | 2 | 1 |
+| 13 | [shamir-connect](./shamir-connect/SUMMARY.md) | N-racer fetch_max refill allegation is refuted. Subnet watermark, login scans, resume/session/audit retention and API-gate discrepancies remain. | 3 | 2 |
+| 14 | [shamir-transport-ipc](./shamir-transport-ipc/SUMMARY.md) | Windows retry panics after accept leaves next=None; the supposed 255-instance cap is false. Platform cleanup/security guarantees need qualification. | 1 | 0 |
+| 15 | [shamir-transport-ws](./shamir-transport-ws/SUMMARY.md) | Configured paths are not wired; subprotocol/control-frame/backpressure gaps remain. Browser coverage exists; exporter fallback is not a browser-mode downgrade. | 1 | 0 |
+| 16 | [shamir-query-builder](./shamir-query-builder/SUMMARY.md) | Nested validation, alias-state loss and macro hygiene remain. Zeroize-disabled framing is refuted; deep-input codec-to-panic paths are source-proven. | 2 | 0 |
+| 17 | [shamir-query-types](./shamir-query-types/SUMMARY.md) | Combined filter/value depth checks are fixed; unlimited decoding and trailing TableRef acceptance are refuted. Nested gates, IDs and API gaps remain. | 0 | 0 |
+| 18 | [shamir-sdk](./shamir-sdk/SUMMARY.md) | Encoded buffers persist within an invocation, but fresh host Stores reclaim them between calls. Decode defaults and polling need narrower contracts/oracles. | 1 | 0 |
+| 19 | [shamir-client-node](./shamir-client-node/SUMMARY.md) | Dead-wrapper critical is refuted by exact N-API source. Address, timeout, request/close locking and typed API gaps remain; raw repl errors are intentional. | 2 | 0 |
+| 20 | [shamir-numa](./shamir-numa/SUMMARY.md) | Concurrent library mirror writers can diverge; inspected normal engine DDL is serialized. Exact CPU_SET bounds panic is proven; workflow/doctest false positives are removed. | 3 | 0 |
+| 21 | [shamir-query-builder-macros](./shamir-query-builder-macros/SUMMARY.md) | Silent malformed-group truncation is refuted by syn. Call lowering and diagnostic/grammar gaps remain; compiler-backend timing is unverified. | 0 | 0 |
+| 22 | [shamir-sdk-macros](./shamir-sdk-macros/SUMMARY.md) | Patterns, qualified returns, decode/error classification and UI/boundary gaps remain. Existing function ABI coverage and host metering are acknowledged. | 0 | 0 |
+| 23 | [shamir-collections](./shamir-collections/SUMMARY.md) | Contract/docs/removal coverage remains. Practical FxHash collision amplification is unverified; constructor/test-oracle explanations are corrected. | 0 | 0 |
+| 24 | [shamir-tunables](./shamir-tunables/SUMMARY.md) | Runtime foundation remains unwired and the environment promise phantom. Domain/docs need work; zero-cap deadlock and mandatory layout/symmetry claims are refuted. | 0 | 0 |
+| 25 | [shamir-bench-utils](./shamir-bench-utils/SUMMARY.md) | Dev allocator/fixture/metadata/test gaps remain. Exact reset race is proven; cancellation carry-over and mandatory coupled-export splitting are refuted. | 0 | 0 |
+
+Open-H — подтверждённые/частично исправленные High/Critical строки утверждений; повторы не становятся новыми багами, unverified не входит в счётчик. Дополнительные строки тоже могут повторять cross-module root. Число строк не определяет порядок, сложность или одинаковую production-экспозицию.
+
+## Ограничения и изменения к старому порядку
+
+- Node больше не ранжируется по alleged critical «мёртвая обёртка»: точные N-API исходники создают через JS receiver конструктора. Raw repl Error — существующий контракт, а не обязательный exception fix.
+- Silent token-drop в macros опровергнут pinned syn. Negative diagnostics и call lowering актуальны, но это другой риск.
+- rmp-serde decoder имеет 1024-container depth counter, без универсальной гарантии stack safety. Encoder depth поле не активно: глубокие локально построенные значения могут дать decode-error → panic в builder roundtrip.
+- Session fetch_max — атомарный RMW; N-racer refill multiplication неверен. Отдельные subnet watermark, audit retention и session-cap scan этим не закрываются.
+- Engine: 14 из 31 групп source-fixed, 16 partial, 1 open. Historical verification notes не означают актуальные прогоны; два добавленных regression файла не зарегистрированы.
+- ReadOnly bypass требует handler mode и write ACL; обычный launcher остаётся ReadWrite. Journal-gap обычно чистится periodic reconciliation, но active-state exit/early resume требуют отдельного решения.
+- Legacy buffer-config rejection — выбранное breaking fail-closed поведение, а не случайное silent corruption. Для обновления существующих данных нужен migration/notice контракт; envelope сам его не доказывает.
+- Guest leaks ограничены жизнью свежего Store, finite Pending может завершиться, async imports уже используют fiber suspension. Это не закрывает intra-call growth и polling/fuel accounting.
+- Boxed future нужен Wasmtime 46.0.2; простой unboxed closure несовместим. Не планировать этот fix без альтернативного доказанного API.
+- NUMA library race подтверждена, но inspected normal engine DDL сериализован. libc CPU_SET вне 1024 storage bits вызывает Rust bounds panic, не заявленный C macro stack overwrite.
+- IndexMap remove/swap/shift, QueryRecord batching, restore_cell и parent fuel reservation должны сохранять свои семантики. Исторические рецепты в свёрнутых разделах не являются актуальными инструкциями.
+- Style/coverage откалиброваны: closely-coupled groups и downstream тесты учтены. Версии проекта/библиотек не повышались и не подразумеваются этим планом.
+
+Каждый модульный SUMMARY.md содержит актуальный ledger утверждений и планов, доказательства, контр-доказательства и ограничения. Для исправлений берётся текущая часть, не старые P0/P1/P2 рецепты.
+
+---
+
+<details>
+<summary>Исторический порядок — сохранён для происхождения; не текущий приоритет</summary>
+
 # Crate priority — сложность, важность, порядок разбора
 
 Рабочий документ для похода по крейтам после cross-crate rush-review (23 крейта из
@@ -123,3 +232,6 @@ high/critical находками, затем периферийные/чисты
 Каждый `<крейт>/SUMMARY.md` уже содержит executive summary, находки по 7 линзам
 с severity/file:line/failure-scenario, таблицу счётчиков и Fix Plan (P0/P1/P2) —
 именно по нему и идти при разборе конкретного крейта из списка 3.
+
+
+</details>

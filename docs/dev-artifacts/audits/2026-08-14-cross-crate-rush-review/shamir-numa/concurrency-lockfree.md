@@ -1,3 +1,67 @@
+<!-- revalidation:2026-10-08 source:92ad58266bf57ddea1fa3c8a47affba1a3a9a096 -->
+# shamir-numa — concurrency-lockfree revalidation
+
+Source snapshot: `92ad58266bf57ddea1fa3c8a47affba1a3a9a096`. Revalidated 2026-10-08 by read-only XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run; no source fix is part of this update. Test registration/assertions are evidence of an oracle, not proof of a passing run.
+
+This section is authoritative for current status. Original titles/IDs are retained for traceability; a refuted title is not a current assertion. The collapsed historical report below is superseded, including its counts, severity, scenarios and fix instructions. Plan IDs preserve historical numbering, not a current release mandate. [Workspace methodology and status definitions](../SUMMARY.md#status-definitions).
+
+The unversioned mirror race, missing concurrent convergence assertions, and repeated topology probing all remain. Lock-free and constant-cost guarantees require narrower wording.
+
+## Current claim decisions
+
+| Claim decisions | Open | Source-fixed | Partial | Refuted | Unverified | N/A |
+|---:|---:|---:|---:|---:|---:|---:|
+| 3 | 3 | 0 | 0 | 0 | 0 | 0 |
+
+These are decisions on report claims, including repeated roots, bundled observations and non-findings—not a unique-bug census. Closed/N/A rows have no current risk; unverified risk is provisional. Pure style and unmeasured optimization claims do not establish runtime impact.
+
+<a id="review-1"></a>
+
+### Claim 1 — `rcu`/`store` mirror phase can overwrite newer replicas with a stale value — non-zero nodes diverge from node 0 indefinitely
+
+Status: `confirmed-open`. Current risk: `high`.
+
+rcu() snapshots node 0 once and blindly mirrors it; store() independently walks all cells. Concurrent completed publications can leave nonzero replicas stale indefinitely. No epoch, serialization, or convergence retry was added.
+
+Evidence: [crates/shamir-numa/src/node_replicated.rs:82](../../../../../crates/shamir-numa/src/node_replicated.rs#L82); [crates/shamir-numa/src/node_replicated.rs:96](../../../../../crates/shamir-numa/src/node_replicated.rs#L96); [crates/shamir-numa/src/node_replicated.rs:103](../../../../../crates/shamir-numa/src/node_replicated.rs#L103); [crates/shamir-index/src/base_index/sorted_index_manager.rs:633](../../../../../crates/shamir-index/src/base_index/sorted_index_manager.rs#L633).
+
+<a id="review-2"></a>
+
+### Claim 2 — Concurrency tests never assert mirror convergence — finding 1 is invisible to CI
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+The only concurrent writer test checks node 0 after joining threads. The registered suite has no concurrent store/rcu convergence oracle or four-node concurrent storm.
+
+Evidence: [crates/shamir-numa/src/tests/mod.rs:12](../../../../../crates/shamir-numa/src/tests/mod.rs#L12); [crates/shamir-numa/src/tests/node_replicated_tests.rs:96](../../../../../crates/shamir-numa/src/tests/node_replicated_tests.rs#L96); [crates/shamir-numa/src/tests/node_replicated_tests.rs:116](../../../../../crates/shamir-numa/src/tests/node_replicated_tests.rs#L116).
+
+Grouping/duplicate: `correctness-tdd.md#2`. This row is not another independent defect.
+
+<a id="review-3"></a>
+
+### Claim 3 — `detect()` re-probes `/sys` on every call — no memoized variant, and consumers already call it per-instance construction
+
+Status: `confirmed-open`. Current risk: `low`.
+
+Every Linux detect() performs probe(); constructors, deserialization, and IndexInfo cloning still invoke it. SortedIndexManager::new is async and synchronously probes. No shared detection cache exists.
+
+Evidence: [crates/shamir-numa/src/detect.rs:24](../../../../../crates/shamir-numa/src/detect.rs#L24); [crates/shamir-numa/src/linux.rs:55](../../../../../crates/shamir-numa/src/linux.rs#L55); [crates/shamir-numa/src/linux.rs:75](../../../../../crates/shamir-numa/src/linux.rs#L75); [crates/shamir-index/src/base_index/index_info.rs:142](../../../../../crates/shamir-index/src/base_index/index_info.rs#L142); [crates/shamir-index/src/base_index/index_info.rs:340](../../../../../crates/shamir-index/src/base_index/index_info.rs#L340); [crates/shamir-index/src/base_index/sorted_index_manager.rs:296](../../../../../crates/shamir-index/src/base_index/sorted_index_manager.rs#L296).
+
+## Corrections and qualified non-findings
+
+- Confirmed non-findings: the sole crate Mutex is the documented MockTopology fixture; there are no async functions, map guards across await, or scc cardinality calls. CPU reverse lookup uses immutable TFxMap.
+- Cargo.toml's arc-swap 1.7 is a range, not the resolved version. Cargo.lock pins 1.9.1; its inspected rcu implementation is a load/CAS retry loop.
+- The CAS primitive does not lock the callback, but arbitrary f, allocation, and T destruction can block. Fully lock-free for arbitrary f is an overclaim.
+- Current TableManager::begin_write_barrier holds per-table DDL admission and a write guard. Inspected sorted create/drop bodies hold these across publication, so merely listing several DDL sites does not prove concurrent publication on normal engine paths.
+- Node 0's per-cell publication remains atomic; this is not a blanket guarantee against arbitrary store replacement or store_node divergence.
+- Sharing a detected Topology would eliminate repeated discovery, not automatically share unrelated registries. SortedIndexManager clones already share their NodeReplicated through Arc.
+- current_node's Fx-map lookup is expected O(1), not a universal worst-case hash-table bound. Actual vDSO dispatch was not independently verified.
+
+---
+
+<details>
+<summary>Historical report — preserved for provenance; not current status or instructions</summary>
+
 # shamir-numa — Concurrency & lock-free invariants
 
 ## Summary
@@ -41,3 +105,5 @@ The crate is otherwise a faithful implementation of CLAUDE.md's five pillars: `N
 - **Pillar 4 (Fx hash):** `cpu_to_node: TFxMap` (`linux.rs:40`); immutable after probe, so lock-free concurrent reads are sound.
 - **Pillar 3:** no `scc::*::len()` anywhere; `num_replicas()` is a `Box` slice `len()` (O(1)); `load_local` documented and implemented O(1).
 - **Async/pinning:** no locks held across `.await` (no async in the crate); all `/sys` I/O is confined to one-shot probe code (but see finding 3 for the consumer-driven leak).
+
+</details>

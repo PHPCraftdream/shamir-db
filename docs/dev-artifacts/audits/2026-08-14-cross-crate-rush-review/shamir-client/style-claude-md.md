@@ -1,3 +1,127 @@
+<!-- revalidation:2026-10-08 source:92ad58266bf57ddea1fa3c8a47affba1a3a9a096 -->
+# shamir-client — style-claude-md revalidation
+
+Source snapshot: `92ad58266bf57ddea1fa3c8a47affba1a3a9a096`. Revalidated 2026-10-08 by read-only XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run; no source fix is part of this update. Test registration/assertions are evidence of an oracle, not proof of a passing run.
+
+This section is authoritative for current status. Original titles/IDs are retained for traceability; a refuted title is not a current assertion. The collapsed historical report below is superseded, including its counts, severity, scenarios and fix instructions. Plan IDs preserve historical numbering, not a current release mandate. [Workspace methodology and status definitions](../SUMMARY.md#status-definitions).
+
+All three style findings remain; they are documentation/style issues, not runtime High defects. Module registration and structural organization remain conforming.
+
+## Current claim decisions
+
+| Claim decisions | Open | Source-fixed | Partial | Refuted | Unverified | N/A |
+|---:|---:|---:|---:|---:|---:|---:|
+| 8 | 3 | 0 | 0 | 0 | 1 | 4 |
+
+These are decisions on report claims, including repeated roots, bundled observations and non-findings—not a unique-bug census. Closed/N/A rows have no current risk; unverified risk is provisional. Pure style and unmeasured optimization claims do not establish runtime impact.
+
+<a id="review-1"></a>
+
+### Claim 1 — Crate-level doc example no longer compiles against `ConnectOptions`; drift is invisible because doctests are disabled
+
+Status: `confirmed-open`. Current risk: `low`.
+
+The example omits both required timeout fields; disabled doctests prevent automatic checking.
+
+Evidence: [crates/shamir-client/src/lib.rs:10](../../../../../crates/shamir-client/src/lib.rs#L10); [crates/shamir-client/src/client.rs:85](../../../../../crates/shamir-client/src/client.rs#L85); [crates/shamir-client/Cargo.toml:52](../../../../../crates/shamir-client/Cargo.toml#L52).
+
+Grouping/duplicate: `SUMMARY.md#7.1`. This row is not another independent defect.
+
+<a id="review-2"></a>
+
+### Claim 2 — `use rand::RngCore;` inside the body of `Client::resume`
+
+Status: `confirmed-open`. Current risk: `low`.
+
+The import remains inside an ordinary block without a documented exception. This is source-style conformance only.
+
+Evidence: [crates/shamir-client/src/client.rs:883](../../../../../crates/shamir-client/src/client.rs#L883); [CLAUDE.md](../../../../../CLAUDE.md).
+
+Grouping/duplicate: `SUMMARY.md#7.2`. This row is not another independent defect.
+
+<a id="review-3"></a>
+
+### Claim 3 — Mid-body `use` statements in three `src/tests/` files
+
+Status: `confirmed-open`. Current risk: `nit`.
+
+All three cited body-local imports remain; none needs collision/cfg handling.
+
+Evidence: [crates/shamir-client/src/tests/batch_has_refs_tests.rs:18](../../../../../crates/shamir-client/src/tests/batch_has_refs_tests.rs#L18); [crates/shamir-client/src/tests/demux_tests.rs:408](../../../../../crates/shamir-client/src/tests/demux_tests.rs#L408); [crates/shamir-client/src/tests/wire_version_tests.rs:137](../../../../../crates/shamir-client/src/tests/wire_version_tests.rs#L137).
+
+Grouping/duplicate: `SUMMARY.md#7.3`. This row is not another independent defect.
+
+<a id="review-nf-1"></a>
+
+### Claim NF.1 — `lib.rs` and `src/tests/mod.rs` are re-export/manifest-only
+
+Status: `not-applicable`. Current risk: —.
+
+The crate root contains module declarations/reexports, and tests/mod.rs only declares the nine test modules.
+
+Evidence: [crates/shamir-client/src/lib.rs:30](../../../../../crates/shamir-client/src/lib.rs#L30); [crates/shamir-client/src/tests/mod.rs:1](../../../../../crates/shamir-client/src/tests/mod.rs#L1).
+
+Grouping/duplicate: `SUMMARY.md#NF.6`. This row is not another independent defect.
+
+<a id="review-nf-2"></a>
+
+### Claim NF.2 — Tests wired from crate root; zero inline implementation test modules
+
+Status: `not-applicable`. Current risk: —.
+
+Root cfg(test) loads tests/mod.rs; no inline implementation test blocks were found.
+
+Evidence: [crates/shamir-client/src/lib.rs:38](../../../../../crates/shamir-client/src/lib.rs#L38); [crates/shamir-client/src/tests/mod.rs:1](../../../../../crates/shamir-client/src/tests/mod.rs#L1).
+
+Grouping/duplicate: `SUMMARY.md#NF.6`. This row is not another independent defect.
+
+<a id="review-nf-3"></a>
+
+### Claim NF.3 — One-file-one-export or closely-coupled group
+
+Status: `not-applicable`. Current risk: —.
+
+Client/options/demux, wire mirrors, cache types, and individual stream/subscription modules remain closely coupled groups.
+
+Evidence: [crates/shamir-client/src/client.rs:58](../../../../../crates/shamir-client/src/client.rs#L58); [crates/shamir-client/src/wire_frames.rs:13](../../../../../crates/shamir-client/src/wire_frames.rs#L13); [crates/shamir-client/src/interner_cache.rs:39](../../../../../crates/shamir-client/src/interner_cache.rs#L39).
+
+Grouping/duplicate: `SUMMARY.md#NF.6`. This row is not another independent defect.
+
+<a id="review-nf-4"></a>
+
+### Claim NF.4 — Builder-only query construction
+
+Status: `not-applicable`. Current risk: —.
+
+No serde_json/json construction exists; typed builders create query bodies and transport wrappers construct only their enclosing requests.
+
+Evidence: [crates/shamir-client/src/interner_cache_ops.rs:24](../../../../../crates/shamir-client/src/interner_cache_ops.rs#L24); [crates/shamir-client/src/cursor_stream.rs:41](../../../../../crates/shamir-client/src/cursor_stream.rs#L41).
+
+Grouping/duplicate: `SUMMARY.md#NF.5`. This row is not another independent defect.
+
+<a id="review-nf-5"></a>
+
+### Claim NF.5 — Test coverage claims in module docs match tests present
+
+Status: `unverified`. Current risk: `low` (provisional; not a confirmed defect).
+
+Named modules and many behavioral tests exist, but broad coverage assurance is not justified: AtomicU8 is vacuous and refresh coverage is masked by ambient sync.
+
+Evidence: [crates/shamir-client/src/tests/mod.rs:1](../../../../../crates/shamir-client/src/tests/mod.rs#L1); [crates/shamir-client/src/tests/wire_version_tests.rs:135](../../../../../crates/shamir-client/src/tests/wire_version_tests.rs#L135); [crates/shamir-client/src/tests/v2_passthrough_tests.rs:405](../../../../../crates/shamir-client/src/tests/v2_passthrough_tests.rs#L405).
+
+Grouping/duplicate: `SUMMARY.md#NF.6`. This row is not another independent defect.
+
+## Corrections and qualified non-findings
+
+- Readability/style violations do not establish runtime severity.
+- The crate now has an additional smoke_local integration test; the historical seven-file integration-test count is stale.
+- The cursor close/cancel test registration and assertions are genuine; this does not validate every unrelated module-doc coverage claim.
+
+---
+
+<details>
+<summary>Historical report — preserved for provenance; not current status or instructions</summary>
+
 # shamir-client -- Style & CLAUDE.md structural conformance
 
 ## Summary
@@ -85,3 +209,5 @@ stale, never-compiled doc example that has drifted out of sync with
   versioning, v2 passthrough, interner cache, ambient sync, `batch_has_refs`
   regression, resume wire roundtrip, cursor close/cancel, plus seven
   crate-root e2e files).
+
+</details>

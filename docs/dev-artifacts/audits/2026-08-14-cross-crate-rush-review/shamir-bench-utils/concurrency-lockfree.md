@@ -1,3 +1,87 @@
+<!-- revalidation:2026-10-08 source:92ad58266bf57ddea1fa3c8a47affba1a3a9a096 -->
+# shamir-bench-utils — concurrency-lockfree revalidation
+
+Source snapshot: `92ad58266bf57ddea1fa3c8a47affba1a3a9a096`. Revalidated 2026-10-08 by read-only XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run; no source fix is part of this update. Test registration/assertions are evidence of an oracle, not proof of a passing run.
+
+This section is authoritative for current status. Original titles/IDs are retained for traceability; a refuted title is not a current assertion. The collapsed historical report below is superseded, including its counts, severity, scenarios and fix instructions. Plan IDs preserve historical numbering, not a current release mandate. [Workspace methodology and status definitions](../SUMMARY.md#status-definitions).
+
+Own-source lock/map guarantees hold. Process-global measurement overlap and documentation gaps remain; the dependency-internal reset race cannot be independently verified.
+
+## Current claim decisions
+
+| Claim decisions | Open | Source-fixed | Partial | Refuted | Unverified | N/A |
+|---:|---:|---:|---:|---:|---:|---:|
+| 4 | 4 | 0 | 0 | 0 | 0 | 0 |
+
+These are decisions on report claims, including repeated roots, bundled observations and non-findings—not a unique-bug census. Closed/N/A rows have no current risk; unverified risk is provisional. Pure style and unmeasured optimization claims do not establish runtime impact.
+
+## Parent acceptance refinements
+
+- The pinned peak_alloc source is available: reset's two-atomic interleaving is confirmed; the separate cancellation carry-over claim remains refuted.
+
+<a id="review-1"></a>
+
+### Claim 1 — `reset()` TOCTOU silently loses concurrent allocations from the peak watermark
+
+Status: `confirmed-open`. Current risk: `low`.
+
+Parent inspection of checksummed peak_alloc 0.3.0 proves reset_peak_usage is PEAK.store(CURRENT.load(Relaxed), Relaxed), while allocation uses CURRENT.fetch_add and PEAK.fetch_max. An allocation between the reset load and store can have its new high watermark overwritten by the older baseline; no later allocation need repair it. This is source-proven measurement correctness, not measured production overhead.
+
+Evidence: [crates/shamir-bench-utils/src/peak_mem.rs:57](../../../../../crates/shamir-bench-utils/src/peak_mem.rs#L57); [Cargo.lock:2396](../../../../../Cargo.lock#L2396).
+
+Pinned dependency evidence: [peak_alloc 0.3.0, src/lib.rs:108](https://docs.rs/crate/peak_alloc/0.3.0/source/src/lib.rs); [peak_alloc 0.3.0, src/lib.rs:125](https://docs.rs/crate/peak_alloc/0.3.0/source/src/lib.rs).
+
+Grouping/duplicate: `SUMMARY.md#2.1`. This row is not another independent defect.
+
+<a id="review-2"></a>
+
+### Claim 2 — Concurrent `measure`/`measure_async` calls cross-contaminate with no detection
+
+Status: `confirmed-open`. Current risk: `low`.
+
+Both helpers reset and read the same global allocator watermark with no ownership or reentry check. Overlapping resets invalidate another measurement window. Neither helper has an executable workspace caller; live raw-reset samples are sequential.
+
+Evidence: [crates/shamir-bench-utils/src/peak_mem.rs:40](../../../../../crates/shamir-bench-utils/src/peak_mem.rs#L40); [crates/shamir-bench-utils/src/peak_mem.rs:89](../../../../../crates/shamir-bench-utils/src/peak_mem.rs#L89); [crates/shamir-bench-utils/src/peak_mem.rs:106](../../../../../crates/shamir-bench-utils/src/peak_mem.rs#L106); [crates/shamir-engine/benches/streaming_topk.rs:143](../../../../../crates/shamir-engine/benches/streaming_topk.rs#L143).
+
+Grouping/duplicate: `SUMMARY.md#2.1`. This row is not another independent defect.
+
+<a id="review-3"></a>
+
+### Claim 3 — Doc asymmetry: `measure` carries none of the concurrency caveats `measure_async` has
+
+Status: `confirmed-open`. Current risk: `nit`.
+
+The synchronous helper still lacks process-global/concurrent-use warnings. The asynchronous warning still incorrectly suggests current_thread alone provides accurate per-task isolation.
+
+Evidence: [crates/shamir-bench-utils/src/peak_mem.rs:71](../../../../../crates/shamir-bench-utils/src/peak_mem.rs#L71); [crates/shamir-bench-utils/src/peak_mem.rs:98](../../../../../crates/shamir-bench-utils/src/peak_mem.rs#L98).
+
+Grouping/duplicate: `SUMMARY.md#2.1`. This row is not another independent defect.
+
+<a id="review-4"></a>
+
+### Claim 4 — `#[global_allocator]` shipped from a library crate
+
+Status: `confirmed-open`. Current risk: `nit`.
+
+The feature-gated library still defines the allocator globally. Linking it affects the entire binary and cannot coexist with another global allocator; the relevant constraint is absent from its module documentation.
+
+Evidence: [crates/shamir-bench-utils/src/peak_mem.rs:39](../../../../../crates/shamir-bench-utils/src/peak_mem.rs#L39); [crates/shamir-bench-utils/src/lib.rs:14](../../../../../crates/shamir-bench-utils/src/lib.rs#L14); [crates/shamir-db/benches/bench_allocator.rs:8](../../../../../crates/shamir-db/benches/bench_allocator.rs#L8).
+
+Grouping/duplicate: `SUMMARY.md#5.1`. This row is not another independent defect.
+
+## Corrections and qualified non-findings
+
+- Own source contains no Mutex/RwLock, concurrent map, hash-keyed structure, or scc len call. Its Vec lengths are constant-time. The dependency's exact atomics/orderings were not verified.
+- Calling the crate compliant with all five pillars overlooks the separately confirmed per-point allocation loop.
+- A measurement-in-flight guard prevents overlapping cooperating measurements, not arbitrary allocator activity or a dependency-internal reset TOCTOU.
+- current_thread does not exclude unrelated tasks, other process threads, or spawn_blocking. Sequential call sites are source-proven; universally sound published peaks are not.
+- The duplicate-allocator diagnostic number was not compiler-verified; do not assert E0152/E0159.
+
+---
+
+<details>
+<summary>Historical report — preserved for provenance; not current status or instructions</summary>
+
 # shamir-bench-utils -- Concurrency & lock-free invariants
 
 ## Summary
@@ -33,3 +117,5 @@ The crate is compliant with all five pillars: it contains no `Mutex`/`RwLock`/`p
 - **Issue:** enabling the off-by-default `peak_mem` feature (already done by dev-deps in `crates/shamir-index/Cargo.toml:64` and `crates/shamir-engine/Cargo.toml:107`) installs `PeakAlloc` as the process allocator for every final binary that links this crate, and conflicts at compile time (duplicate `#[global_allocator]`, E0152) with any consumer binary defining its own — e.g. the workspace's allocator switch `crates/shamir-db/benches/bench_allocator.rs:8-25` (sefer/mimalloc). Today the conflict is dodged only by convention, noted in each consumer (`create_index_streaming.rs:24`) rather than where the allocator is defined.
 - **Failure scenario:** a future bench combining the `bench_allocator.rs` include! switch with peak-RSS sampling fails to link (loud); more subtly, feature unification could enable the allocator for an unintended binary in the dev-dep graph and perturb its allocation profile.
 - **Suggested fix:** state the constraint in `peak_mem`'s module docs — "installs the process allocator for any binary that links this crate with the feature on; never combine with another `#[global_allocator]`" — so the allocator definition is the single source of truth instead of per-consumer NOTES.
+
+</details>

@@ -1,3 +1,176 @@
+<!-- revalidation:2026-10-08 source:92ad58266bf57ddea1fa3c8a47affba1a3a9a096 -->
+# shamir-tx — performance-hotpath revalidation
+
+Source snapshot: `92ad58266bf57ddea1fa3c8a47affba1a3a9a096`. Revalidated 2026-10-08 by read-only XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run; no source fix is part of this update. Test registration/assertions are evidence of an oracle, not proof of a passing run.
+
+This section is authoritative for current status. Original titles/IDs are retained for traceability; a refuted title is not a current assertion. The collapsed historical report below is superseded, including its counts, severity, scenarios and fix instructions. Plan IDs preserve historical numbering, not a current release mandate. [Workspace methodology and status definitions](../SUMMARY.md#status-definitions).
+
+All reported storage-call, allocation and traversal shapes remain. The later borrowed-staging change removed a different intermediate vector, not these findings. Timing and scale-dependent harm remain unmeasured.
+
+## Current claim decisions
+
+| Claim decisions | Open | Source-fixed | Partial | Refuted | Unverified | N/A |
+|---:|---:|---:|---:|---:|---:|---:|
+| 14 | 13 | 0 | 0 | 0 | 0 | 1 |
+
+These are decisions on report claims, including repeated roots, bundled observations and non-findings—not a unique-bug census. Closed/N/A rows have no current risk; unverified risk is provisional. Pure style and unmeasured optimization claims do not establish runtime impact.
+
+<a id="review-1"></a>
+
+### Claim 1 — vacuum_key: unbatched and duplicated per-version I/O on the write hot path
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+Fast reclaim performs a timestamp get and two removals after the write; scan reclaim adds a duplicate timestamp get only with an age cap. Backend round-trips and timing vary.
+
+Evidence: [crates/shamir-tx/src/mvcc_store/mvcc_gc.rs:105](../../../../../crates/shamir-tx/src/mvcc_store/mvcc_gc.rs#L105); [crates/shamir-tx/src/mvcc_store/mvcc_gc.rs:109](../../../../../crates/shamir-tx/src/mvcc_store/mvcc_gc.rs#L109); [crates/shamir-tx/src/mvcc_store/mvcc_gc.rs:229](../../../../../crates/shamir-tx/src/mvcc_store/mvcc_gc.rs#L229); [crates/shamir-tx/src/mvcc_store/mvcc_gc.rs:245](../../../../../crates/shamir-tx/src/mvcc_store/mvcc_gc.rs#L245); [crates/shamir-tx/src/mvcc_store/mod.rs:830](../../../../../crates/shamir-tx/src/mvcc_store/mod.rs#L830).
+
+<a id="review-2"></a>
+
+### Claim 2 — gc_below and purge_below_ts materialise history before deleting
+
+Status: `confirmed-open`. Current risk: `high`.
+
+Both accumulate global per-key maps before deletion. gc_below stores below-threshold entries; purge stores all decoded versions. Memory scales with buffered history, although no RSS magnitude was measured.
+
+Evidence: [crates/shamir-tx/src/mvcc_store/mvcc_gc.rs:309](../../../../../crates/shamir-tx/src/mvcc_store/mvcc_gc.rs#L309); [crates/shamir-tx/src/mvcc_store/mvcc_gc.rs:314](../../../../../crates/shamir-tx/src/mvcc_store/mvcc_gc.rs#L314); [crates/shamir-tx/src/mvcc_store/mvcc_gc.rs:405](../../../../../crates/shamir-tx/src/mvcc_store/mvcc_gc.rs#L405); [crates/shamir-tx/src/mvcc_store/mvcc_gc.rs:410](../../../../../crates/shamir-tx/src/mvcc_store/mvcc_gc.rs#L410).
+
+<a id="review-3"></a>
+
+### Claim 3 — min_alive: full-map iteration on the write tail and GC paths
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+Every scan-path vacuum computes the minimum by traversing distinct snapshot-version entries. No minimum cache or ordered replacement exists.
+
+Evidence: [crates/shamir-tx/src/repo_tx_gate.rs:659](../../../../../crates/shamir-tx/src/repo_tx_gate.rs#L659); [crates/shamir-tx/src/mvcc_store/mvcc_gc.rs:156](../../../../../crates/shamir-tx/src/mvcc_store/mvcc_gc.rs#L156).
+
+<a id="review-4"></a>
+
+### Claim 4 — record_conflicts: linear interval scan over already-sorted keys inside commit critical section
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+Sorted posting vectors are still scanned with iter().any inside the nested commit-window validation. Worst-case work is proportional to window × dependencies × postings.
+
+Evidence: [crates/shamir-tx/src/repo_tx_gate.rs:1015](../../../../../crates/shamir-tx/src/repo_tx_gate.rs#L1015); [crates/shamir-tx/src/repo_tx_gate.rs:1089](../../../../../crates/shamir-tx/src/repo_tx_gate.rs#L1089); [crates/shamir-tx/src/repo_tx_gate.rs:876](../../../../../crates/shamir-tx/src/repo_tx_gate.rs#L876).
+
+<a id="review-5"></a>
+
+### Claim 5 — Stream group-by: per-version-row key allocation and shift_remove per group
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+Each eligible decoded row copies its original key before detecting a group change, and flushing uses order-preserving shift_remove. Exact pinned IndexMap implementation costs were not independently inspected.
+
+Evidence: [crates/shamir-tx/src/mvcc_store/version_entry.rs:193](../../../../../crates/shamir-tx/src/mvcc_store/version_entry.rs#L193); [crates/shamir-tx/src/mvcc_store/version_entry.rs:194](../../../../../crates/shamir-tx/src/mvcc_store/version_entry.rs#L194); [crates/shamir-tx/src/mvcc_store/version_entry.rs:124](../../../../../crates/shamir-tx/src/mvcc_store/version_entry.rs#L124); [Cargo.lock:1782](../../../../../Cargo.lock#L1782).
+
+<a id="review-6"></a>
+
+### Claim 6 — Pessimistic locks registry never evicts empty entries — unbounded growth
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+Released locks retain map entries for all distinct acquired keys. The suggested unconditional remove would break lock identity for outstanding requesters.
+
+Evidence: [crates/shamir-tx/src/mvcc_store/mvcc_locks.rs:75](../../../../../crates/shamir-tx/src/mvcc_store/mvcc_locks.rs#L75); [crates/shamir-tx/src/mvcc_store/mvcc_locks.rs:223](../../../../../crates/shamir-tx/src/mvcc_store/mvcc_locks.rs#L223).
+
+Grouping/duplicate: `concurrency-lockfree.md#2`. This row is not another independent defect.
+
+<a id="review-7"></a>
+
+### Claim 7 — history_of: N sequential lookup_ts point-reads
+
+Status: `confirmed-open`. Current risk: `low`.
+
+Timestamp resolution remains an awaited point lookup per timeline entry; get_many is not used on this administrative path.
+
+Evidence: [crates/shamir-tx/src/mvcc_store/mvcc_history.rs:211](../../../../../crates/shamir-tx/src/mvcc_store/mvcc_history.rs#L211); [crates/shamir-tx/src/mvcc_store/mod.rs:1625](../../../../../crates/shamir-tx/src/mvcc_store/mod.rs#L1625).
+
+<a id="review-8"></a>
+
+### Claim 8 — Vectored reads: sequential fallback/cold awaits and redundant re-probe
+
+Status: `confirmed-open`. Current risk: `low`.
+
+Fallback slots resolve sequentially; get_at_many rereads current_version. Cold-heavy startup can exercise every fallback, but its prevalence and timings were not measured.
+
+Evidence: [crates/shamir-tx/src/mvcc_store/mod.rs:1203](../../../../../crates/shamir-tx/src/mvcc_store/mod.rs#L1203); [crates/shamir-tx/src/mvcc_store/mod.rs:1607](../../../../../crates/shamir-tx/src/mvcc_store/mod.rs#L1607); [crates/shamir-tx/src/mvcc_store/mod.rs:1611](../../../../../crates/shamir-tx/src/mvcc_store/mod.rs#L1611).
+
+<a id="review-9"></a>
+
+### Claim 9 — VersionedOverlay::gc_upto: full-tree collect-then-remove
+
+Status: `confirmed-open`. Current risk: `low`.
+
+The key-major tree is fully iterated, qualifying keys are cloned into a vector, then separately removed. A version-only upper bound cannot be applied to this existing ordering.
+
+Evidence: [crates/shamir-tx/src/versioned_overlay.rs:40](../../../../../crates/shamir-tx/src/versioned_overlay.rs#L40); [crates/shamir-tx/src/versioned_overlay.rs:178](../../../../../crates/shamir-tx/src/versioned_overlay.rs#L178); [crates/shamir-tx/src/versioned_overlay.rs:192](../../../../../crates/shamir-tx/src/versioned_overlay.rs#L192).
+
+<a id="review-10"></a>
+
+### Claim 10 — project_event: per-record heap clone of the table-name String
+
+Status: `confirmed-open`. Current risk: `low`.
+
+Each RecordChange still owns a cloned String. Borrowed iter_ops removes the staging snapshot vector, not these clones; one clone per token cannot populate multiple owned String fields.
+
+Evidence: [crates/shamir-tx/src/changefeed.rs:459](../../../../../crates/shamir-tx/src/changefeed.rs#L459); [crates/shamir-tx/src/changefeed.rs:462](../../../../../crates/shamir-tx/src/changefeed.rs#L462); [crates/shamir-tx/src/changefeed.rs:470](../../../../../crates/shamir-tx/src/changefeed.rs#L470); [crates/shamir-tx/src/changefeed.rs:60](../../../../../crates/shamir-tx/src/changefeed.rs#L60).
+
+<a id="review-11"></a>
+
+### Claim 11 — Changefeed journal writer: one sequential put await per event
+
+Status: `confirmed-open`. Current risk: `low`.
+
+WRITER_BATCH bounds a receive loop whose individual events each await put. The trait has no batch seam; overflow rate and resulting throughput impact were not measured.
+
+Evidence: [crates/shamir-tx/src/changefeed.rs:154](../../../../../crates/shamir-tx/src/changefeed.rs#L154); [crates/shamir-tx/src/changefeed.rs:599](../../../../../crates/shamir-tx/src/changefeed.rs#L599); [crates/shamir-tx/src/changefeed.rs:602](../../../../../crates/shamir-tx/src/changefeed.rs#L602); [crates/shamir-tx/src/changefeed.rs:645](../../../../../crates/shamir-tx/src/changefeed.rs#L645).
+
+<a id="review-12"></a>
+
+### Claim 12 — set_versioned_many and append_only: duplicate key vector
+
+Status: `confirmed-open`. Current risk: `nit`.
+
+Both methods still clone keys into a separate vector used by trailing vacuum, while their items vectors remain available.
+
+Evidence: [crates/shamir-tx/src/mvcc_store/mod.rs:880](../../../../../crates/shamir-tx/src/mvcc_store/mod.rs#L880); [crates/shamir-tx/src/mvcc_store/mod.rs:934](../../../../../crates/shamir-tx/src/mvcc_store/mod.rs#L934); [crates/shamir-tx/src/mvcc_store/mod.rs:982](../../../../../crates/shamir-tx/src/mvcc_store/mod.rs#L982).
+
+<a id="review-13"></a>
+
+### Claim 13 — remap_inner_value_bytes re-encodes rows that changed nothing
+
+Status: `confirmed-open`. Current risk: `low`.
+
+A nonempty remap still transforms every staged Set using decode, recursive remap and encode without detecting unchanged rows. A8 captured-ID optimization does not change this path.
+
+Evidence: [crates/shamir-tx/src/id_remap.rs:77](../../../../../crates/shamir-tx/src/id_remap.rs#L77); [crates/shamir-tx/src/id_remap.rs:80](../../../../../crates/shamir-tx/src/id_remap.rs#L80); [crates/shamir-tx/src/tx_context.rs:943](../../../../../crates/shamir-tx/src/tx_context.rs#L943); [crates/shamir-tx/src/staging_store.rs:333](../../../../../crates/shamir-tx/src/staging_store.rs#L333).
+
+<a id="review-summary-positive-hot-path-guarantees"></a>
+
+### Claim Summary: positive hot-path guarantees — Batched writes, vectored reads and atomic cardinality mirrors
+
+Status: `not-applicable`. Current risk: —.
+
+These mechanisms exist, but one transact call is not universally one atomic durable backend transaction: Store's default implementation is sequential and capabilities are separately documented.
+
+Evidence: [crates/shamir-tx/src/mvcc_store/mod.rs:898](../../../../../crates/shamir-tx/src/mvcc_store/mod.rs#L898); [crates/shamir-tx/src/mvcc_store/mod.rs:1189](../../../../../crates/shamir-tx/src/mvcc_store/mod.rs#L1189); [crates/shamir-tx/src/predicate_set.rs:117](../../../../../crates/shamir-tx/src/predicate_set.rs#L117); [crates/shamir-storage/src/types.rs:243](../../../../../crates/shamir-storage/src/types.rs#L243).
+
+## Corrections and qualified non-findings
+
+- Retain source-level cost findings without claiming measured write-latency, throughput or IOPS changes.
+- gc_below scans all history but buffers only eligible below-threshold versions; its physical keys are moved/conversion-preserved, not universally newly allocated copies.
+- The duplicate lookup_ts requires max_age_secs; keep_history with neither cap returns immediately.
+- One-key streaming requires a keyspace grouping guarantee in addition to sorted physical iteration; arbitrary variable-length key namespaces can interleave.
+- swap_remove changes leftover ordering. Existing reverse emission does not by itself prove the new order is unobservable.
+- The September borrowed-staging/A8 commit does not fix table-name clones or unchanged-row remapping.
+
+---
+
+<details>
+<summary>Historical report — preserved for provenance; not current status or instructions</summary>
+
 # shamir-tx -- Performance & O(x->0)
 
 ## Summary
@@ -206,3 +379,5 @@ several are half-acknowledged in the code's own comments as future work.
 - **Suggested fix:** Have `remap_value` report whether any key was rewritten and
   return the original `Bytes` untouched when not (or pre-scan the remap's id set
   against the row's u64 keys before committing to a re-encode).
+
+</details>

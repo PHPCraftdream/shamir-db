@@ -1,3 +1,136 @@
+<!-- revalidation:2026-10-08 source:92ad58266bf57ddea1fa3c8a47affba1a3a9a096 -->
+# shamir-query-types — style-claude-md revalidation
+
+Source snapshot: `92ad58266bf57ddea1fa3c8a47affba1a3a9a096`. Revalidated 2026-10-08 by read-only XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run; no source fix is part of this update. Test registration/assertions are evidence of an oracle, not proof of a passing run.
+
+This section is authoritative for current status. Original titles/IDs are retained for traceability; a refuted title is not a current assertion. The collapsed historical report below is superseded, including its counts, severity, scenarios and fix instructions. Plan IDs preserve historical numbering, not a current release mandate. [Workspace methodology and status definitions](../SUMMARY.md#status-definitions).
+
+Most cited structural/import/doc inconsistencies remain, but their severity is organizational rather than runtime High. The generic types buckets fall within the explicit closely-coupled-group exception, so that alleged rule violation is refuted.
+
+## Current claim decisions
+
+| Claim decisions | Open | Source-fixed | Partial | Refuted | Unverified | N/A |
+|---:|---:|---:|---:|---:|---:|---:|
+| 10 | 9 | 0 | 0 | 1 | 0 | 0 |
+
+These are decisions on report claims, including repeated roots, bundled observations and non-findings—not a unique-bug census. Closed/N/A rows have no current risk; unverified risk is provisional. Pure style and unmeasured optimization claims do not establish runtime impact.
+
+<a id="review-1"></a>
+
+### Claim 1 — Types defined inside mod.rs (re-export-only rule breach)
+
+Status: `confirmed-open`. Current risk: `low`.
+
+validator/mod.rs still defines WriteOp and ValidationError; call/mod.rs still defines CallOp/default_repo. This violates the explicit module-layout rule, without a demonstrated runtime/security impact.
+
+Evidence: [crates/shamir-query-types/src/validator/mod.rs:9](../../../../../crates/shamir-query-types/src/validator/mod.rs#L9); [crates/shamir-query-types/src/validator/mod.rs:23](../../../../../crates/shamir-query-types/src/validator/mod.rs#L23); [crates/shamir-query-types/src/call/mod.rs:13](../../../../../crates/shamir-query-types/src/call/mod.rs#L13); [crates/shamir-query-types/src/call/mod.rs:31](../../../../../crates/shamir-query-types/src/call/mod.rs#L31); [CLAUDE.md:487](../../../../../CLAUDE.md#L487).
+
+<a id="review-2"></a>
+
+### Claim 2 — Inline `#[cfg(test)] mod tests { ... }` embedded in implementation files
+
+Status: `confirmed-open`. Current risk: `low`.
+
+Both inline modules remain alongside wired sibling files. Tests are reachable; the defect is split/overlapping organization, not lost coverage or runtime High severity.
+
+Evidence: [crates/shamir-query-types/src/read/query_record.rs:302](../../../../../crates/shamir-query-types/src/read/query_record.rs#L302); [crates/shamir-query-types/src/write/inserted_record.rs:135](../../../../../crates/shamir-query-types/src/write/inserted_record.rs#L135); [crates/shamir-query-types/src/read/tests/mod.rs:3](../../../../../crates/shamir-query-types/src/read/tests/mod.rs#L3); [crates/shamir-query-types/src/write/tests/mod.rs:2](../../../../../crates/shamir-query-types/src/write/tests/mod.rs#L2).
+
+<a id="review-3"></a>
+
+### Claim 3 — Mid-function `use` statements in implementation files (imports-at-top breach)
+
+Status: `confirmed-open`. Current risk: `low`.
+
+All originally cited function-local imports remain without qualifying collision/cfg explanations. This is convention debt; the report's count mixes imported functions and individual use statements.
+
+Evidence: [crates/shamir-query-types/src/hmac.rs:79](../../../../../crates/shamir-query-types/src/hmac.rs#L79); [crates/shamir-query-types/src/hmac.rs:412](../../../../../crates/shamir-query-types/src/hmac.rs#L412); [crates/shamir-query-types/src/batch/planner.rs:372](../../../../../crates/shamir-query-types/src/batch/planner.rs#L372); [crates/shamir-query-types/src/batch/batch_op.rs:260](../../../../../crates/shamir-query-types/src/batch/batch_op.rs#L260); [crates/shamir-query-types/src/table_ref.rs:52](../../../../../crates/shamir-query-types/src/table_ref.rs#L52); [CLAUDE.md:615](../../../../../CLAUDE.md#L615).
+
+<a id="review-4"></a>
+
+### Claim 4 — Mid-function `use` statements in standalone test files
+
+Status: `confirmed-open`. Current risk: `low`.
+
+The twelve cited local imports remain in the six test files. Their manifests remain wired; no runtime effect is shown.
+
+Evidence: [crates/shamir-query-types/src/batch/tests/planner_tests.rs:456](../../../../../crates/shamir-query-types/src/batch/tests/planner_tests.rs#L456); [crates/shamir-query-types/src/read/tests/query_record_tests.rs:78](../../../../../crates/shamir-query-types/src/read/tests/query_record_tests.rs#L78); [crates/shamir-query-types/src/filter/tests/filter_value_conv_tests.rs:113](../../../../../crates/shamir-query-types/src/filter/tests/filter_value_conv_tests.rs#L113); [crates/shamir-query-types/src/wire/tests/repl_tests.rs:22](../../../../../crates/shamir-query-types/src/wire/tests/repl_tests.rs#L22); [crates/shamir-query-types/src/read/tests/pagination_after_tests.rs:120](../../../../../crates/shamir-query-types/src/read/tests/pagination_after_tests.rs#L120); [crates/shamir-query-types/src/write/tests/insert_op_tests.rs:25](../../../../../crates/shamir-query-types/src/write/tests/insert_op_tests.rs#L25).
+
+<a id="review-5"></a>
+
+### Claim 5 — `FieldPath` type alias defined in `filter/mod.rs`
+
+Status: `confirmed-open`. Current risk: `low`.
+
+The alias is still defined rather than re-exported in mod.rs. The module-layout violation is source-proven and purely structural.
+
+Evidence: [crates/shamir-query-types/src/filter/mod.rs:21](../../../../../crates/shamir-query-types/src/filter/mod.rs#L21); [CLAUDE.md:487](../../../../../CLAUDE.md#L487).
+
+<a id="review-6"></a>
+
+### Claim 6 — `is_false` helper defined four times with three visibilities and two referencing conventions
+
+Status: `confirmed-open`. Current risk: `low`.
+
+All four identical helpers and visibility/reference differences persist. No current behavioral divergence is present; this is maintainability duplication.
+
+Evidence: [crates/shamir-query-types/src/admin/types/db_ops.rs:6](../../../../../crates/shamir-query-types/src/admin/types/db_ops.rs#L6); [crates/shamir-query-types/src/admin/types/schema_ops.rs:162](../../../../../crates/shamir-query-types/src/admin/types/schema_ops.rs#L162); [crates/shamir-query-types/src/admin/types/repl_ops.rs:43](../../../../../crates/shamir-query-types/src/admin/types/repl_ops.rs#L43); [crates/shamir-query-types/src/read/read_query.rs:52](../../../../../crates/shamir-query-types/src/read/read_query.rs#L52).
+
+<a id="review-7"></a>
+
+### Claim 7 — Duplicated `fk_restrict` entry in `DbResponse::Error` doc vocabulary
+
+Status: `confirmed-open`. Current risk: `nit`.
+
+The error-code comment still lists fk_restrict twice; emitted codes are unaffected.
+
+Evidence: [crates/shamir-query-types/src/wire/db_message.rs:330](../../../../../crates/shamir-query-types/src/wire/db_message.rs#L330); [crates/shamir-query-types/src/wire/db_message.rs:332](../../../../../crates/shamir-query-types/src/wire/db_message.rs#L332).
+
+Grouping/duplicate: `api-wire-protocol.md#17`. This row is not another independent defect.
+
+<a id="review-8"></a>
+
+### Claim 8 — `hmac.rs` module doc: second half of the canonical-input table is an orphaned headerless block
+
+Status: `confirmed-open`. Current risk: `nit`.
+
+Prose still separates the initial header-bearing table from later pipe rows without a new table header.
+
+Evidence: [crates/shamir-query-types/src/hmac.rs:28](../../../../../crates/shamir-query-types/src/hmac.rs#L28); [crates/shamir-query-types/src/hmac.rs:44](../../../../../crates/shamir-query-types/src/hmac.rs#L44); [crates/shamir-query-types/src/hmac.rs:61](../../../../../crates/shamir-query-types/src/hmac.rs#L61).
+
+Grouping/duplicate: `api-wire-protocol.md#17`. This row is not another independent defect.
+
+<a id="review-9"></a>
+
+### Claim 9 — Inconsistent `//!` module-doc headers
+
+Status: `confirmed-open`. Current risk: `nit`.
+
+The cited subscribe implementation files and test files still begin with imports rather than purpose headers. This is a convention inconsistency, not a mandatory runtime requirement.
+
+Evidence: [crates/shamir-query-types/src/subscribe/deliver_mode.rs:1](../../../../../crates/shamir-query-types/src/subscribe/deliver_mode.rs#L1); [crates/shamir-query-types/src/subscribe/event_mask.rs:1](../../../../../crates/shamir-query-types/src/subscribe/event_mask.rs#L1); [crates/shamir-query-types/src/subscribe/source.rs:1](../../../../../crates/shamir-query-types/src/subscribe/source.rs#L1); [crates/shamir-query-types/src/subscribe/subscribe_op.rs:1](../../../../../crates/shamir-query-types/src/subscribe/subscribe_op.rs#L1); [crates/shamir-query-types/src/subscribe/unsubscribe_op.rs:1](../../../../../crates/shamir-query-types/src/subscribe/unsubscribe_op.rs#L1); [crates/shamir-query-types/src/tests/hmac_tests.rs:1](../../../../../crates/shamir-query-types/src/tests/hmac_tests.rs#L1); [crates/shamir-query-types/src/validator/tests/write_op_tests.rs:1](../../../../../crates/shamir-query-types/src/validator/tests/write_op_tests.rs#L1); [crates/shamir-query-types/src/wire/tests/db_message_tests.rs:1](../../../../../crates/shamir-query-types/src/wire/tests/db_message_tests.rs#L1).
+
+<a id="review-10"></a>
+
+### Claim 10 — Inconsistent per-file granularity: `types.rs` multi-type buckets vs. per-family splits
+
+Status: `refuted`. Current risk: —.
+
+CLAUDE explicitly permits closely-coupled groups. The cited files group related DML/config and auth DTO families, and the report itself concedes that justification. No rule requires uniform re-export/test-registration ordering.
+
+Evidence: [CLAUDE.md:489](../../../../../CLAUDE.md#L489); [crates/shamir-query-types/src/write/types.rs:1](../../../../../crates/shamir-query-types/src/write/types.rs#L1); [crates/shamir-query-types/src/auth/types.rs:1](../../../../../crates/shamir-query-types/src/auth/types.rs#L1).
+
+## Corrections and qualified non-findings
+
+- Findings 1 and 2 are Low structural debt, not runtime High; finding 3 is likewise convention-only.
+- The originally cited implementation sites contain thirteen individual use statements, not ten; twelve cited test-file statements is consistent.
+- Closely-coupled type families and module declaration ordering do not establish a mandatory-rule breach.
+- The crate skeleton is not universally one-tests-directory-per-module: call has no local test module.
+
+---
+
+<details>
+<summary>Historical report — preserved for provenance; not current status or instructions</summary>
+
 # shamir-query-types -- Style & CLAUDE.md structural conformance
 
 ## Summary
@@ -71,3 +204,5 @@ File: `crates/shamir-query-types/src/write/types.rs:17-172`; `crates/shamir-quer
 Severity: nit
 Issue: "One file = one primary export … closely-coupled group" is applied unevenly. The same crate that gives `admin/types/` fourteen per-family files (db_ops, table_ops, index_ops, …) and splits `write/` into single-type files (`inserted_record.rs`, `write_result.rs`) lumps eight public DML types plus three select-config types into `write/types.rs` and ten public auth types into `auth/types.rs`. The families are defensible as "closely coupled", but the generic `types.rs` bucket names hide the split points the admin layout makes explicit, and per-op diffs are less atomic than the sibling convention. (Related micro-inconsistency: `#[cfg(test)] mod tests;` sits before the re-exports in wire/batch/filter/write mod.rs but after them in read/subscribe/admin-types mod.rs, and `lib.rs` places its four `pub use` re-exports at the bottom, after `mod tests;`, unlike every mod.rs header.)
 Suggested fix: Next time either file is materially touched, split along the family seams already proven in `admin/types/` (e.g. `write/insert_op.rs`, `write/update_op.rs`, `write/select_configs.rs`); no urgent action required.
+
+</details>

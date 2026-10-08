@@ -1,3 +1,171 @@
+<!-- revalidation:2026-10-08 source:92ad58266bf57ddea1fa3c8a47affba1a3a9a096 -->
+# shamir-query-builder — api-wire-protocol revalidation
+
+Source snapshot: `92ad58266bf57ddea1fa3c8a47affba1a3a9a096`. Revalidated 2026-10-08 by read-only XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run; no source fix is part of this update. Test registration/assertions are evidence of an oracle, not proof of a passing run.
+
+This section is authoritative for current status. Original titles/IDs are retained for traceability; a refuted title is not a current assertion. The collapsed historical report below is superseded, including its counts, severity, scenarios and fix instructions. Plan IDs preserve historical numbering, not a current release mandate. [Workspace methodology and status definitions](../SUMMARY.md#status-definitions).
+
+Nested scoping, alias-state loss, macro dependency leakage, and local validation/documentation gaps remain. Numeric ordering is not simply absent: scalar comparisons have exact Big/String support, while range/set and decimal-string paths require narrower guarantees. Public codec-panic reachability remains unverified.
+
+## Current claim decisions
+
+| Claim decisions | Open | Source-fixed | Partial | Refuted | Unverified | N/A |
+|---:|---:|---:|---:|---:|---:|---:|
+| 12 | 12 | 0 | 0 | 0 | 0 | 0 |
+
+These are decisions on report claims, including repeated roots, bundled observations and non-findings—not a unique-bug census. Closed/N/A rows have no current risk; unverified risk is provisional. Pure style and unmeasured optimization claims do not establish runtime impact.
+
+## Parent acceptance refinements
+
+- Parent dependency inspection supplies the previously missing deep-owned-value / decode-budget counterexample; no runtime test was executed.
+
+<a id="review-1"></a>
+
+### Claim 1 — `Batch::try_build` false-rejects valid nested `sub_batch` / `for_each` batches with inner `$query` refs
+
+Status: `confirmed-open`. Current risk: `high`.
+
+Whole-op fallback traverses inner aliases and validates them in the outer namespace, unlike planner and recursive executor scoping.
+
+Evidence: [crates/shamir-query-builder/src/batch/batch.rs:1313](../../../../../crates/shamir-query-builder/src/batch/batch.rs#L1313); [crates/shamir-query-types/src/batch/planner.rs:308](../../../../../crates/shamir-query-types/src/batch/planner.rs#L308); [crates/shamir-engine/src/query/batch/query_runner.rs:680](../../../../../crates/shamir-engine/src/query/batch/query_runner.rs#L680); [crates/shamir-engine/src/query/batch/query_runner.rs:880](../../../../../crates/shamir-engine/src/query/batch/query_runner.rs#L880).
+
+Grouping/duplicate: `correctness-tdd.md#1`. This row is not another independent defect.
+
+<a id="review-2"></a>
+
+### Claim 2 — `Batch::after` / `Batch::when` silently no-op when the handle's alias is not registered
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+Missing target aliases still silently discard mutations. Foreign handles with matching local aliases instead modify the local entry; replaced handles do not automatically become lookup misses.
+
+Evidence: [crates/shamir-query-builder/src/batch/batch.rs:1003](../../../../../crates/shamir-query-builder/src/batch/batch.rs#L1003); [crates/shamir-query-builder/src/batch/batch.rs:1025](../../../../../crates/shamir-query-builder/src/batch/batch.rs#L1025); [crates/shamir-query-builder/src/batch/handle.rs:11](../../../../../crates/shamir-query-builder/src/batch/handle.rs#L11).
+
+Grouping/duplicate: `correctness-tdd.md#2`. This row is not another independent defect.
+
+<a id="review-3"></a>
+
+### Claim 3 — Re-registering an alias silently replaces the earlier op — a database operation vanishes
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+add_entry_after still ignores the replaced value returned by map insertion and constructs fresh after/when fields. No collision state survives for try_build to diagnose.
+
+Evidence: [crates/shamir-query-builder/src/batch/batch.rs:1089](../../../../../crates/shamir-query-builder/src/batch/batch.rs#L1089); [crates/shamir-query-builder/src/batch/batch.rs:1096](../../../../../crates/shamir-query-builder/src/batch/batch.rs#L1096); [crates/shamir-query-builder/src/batch/batch.rs:1110](../../../../../crates/shamir-query-builder/src/batch/batch.rs#L1110).
+
+<a id="review-4"></a>
+
+### Claim 4 — `subscribe!` / `bind!` macros hardcode foreign crate paths, breaking the crate's dependency-hiding contract
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+Exported expansions still contain call-site shamir_collections and shamir_query_types paths. The builder-only re-export contract and existing $crate-based macros provide positive contrast. Internal macro tests already have those dependencies, so they cannot detect a builder-only downstream failure.
+
+Evidence: [crates/shamir-query-builder/src/macros/mod.rs:63](../../../../../crates/shamir-query-builder/src/macros/mod.rs#L63); [crates/shamir-query-builder/src/macros/mod.rs:87](../../../../../crates/shamir-query-builder/src/macros/mod.rs#L87); [crates/shamir-query-builder/src/macros/mod.rs:100](../../../../../crates/shamir-query-builder/src/macros/mod.rs#L100); [crates/shamir-query-builder/src/macros/mod.rs:162](../../../../../crates/shamir-query-builder/src/macros/mod.rs#L162); [crates/shamir-query-builder/src/lib.rs:66](../../../../../crates/shamir-query-builder/src/lib.rs#L66); [crates/shamir-query-builder/src/macros/tests/mod.rs:4](../../../../../crates/shamir-query-builder/src/macros/tests/mod.rs#L4); [crates/shamir-query-builder/Cargo.toml:17](../../../../../crates/shamir-query-builder/Cargo.toml#L17).
+
+<a id="review-5"></a>
+
+### Claim 5 — `try_build` does not validate `return_only` aliases
+
+Status: `confirmed-open`. Current risk: `low`.
+
+No return_only membership check exists; execution filters away results for unknown names. Explicit return_only overrides return_result flags, so rejecting silent aliases is not justified by the current executor.
+
+Evidence: [crates/shamir-query-builder/src/batch/batch.rs:912](../../../../../crates/shamir-query-builder/src/batch/batch.rs#L912); [crates/shamir-engine/src/query/batch/batch_execute.rs:868](../../../../../crates/shamir-engine/src/query/batch/batch_execute.rs#L868).
+
+Grouping/duplicate: `correctness-tdd.md#4`. This row is not another independent defect.
+
+<a id="review-6"></a>
+
+### Claim 6 — `Query` pagination setters silently clobber each other
+
+Status: `confirmed-open`. Current risk: `low`.
+
+Setters still replace pagination families; limit/offset reset incompatible state. try_build validates only final page values and HAVING, and setter docs do not explain cross-family replacement.
+
+Evidence: [crates/shamir-query-builder/src/query/query.rs:154](../../../../../crates/shamir-query-builder/src/query/query.rs#L154); [crates/shamir-query-builder/src/query/query.rs:182](../../../../../crates/shamir-query-builder/src/query/query.rs#L182); [crates/shamir-query-builder/src/query/query.rs:207](../../../../../crates/shamir-query-builder/src/query/query.rs#L207); [crates/shamir-query-builder/src/query/query.rs:355](../../../../../crates/shamir-query-builder/src/query/query.rs#L355).
+
+<a id="review-7"></a>
+
+### Claim 7 — Public API leaks `rmp_serde` error types; decode errors are re-labeled as encode errors
+
+Status: `confirmed-open`. Current risk: `low`.
+
+Public encoding methods still return codec enums, ResponseError carries decode::Error, and to_query_value maps decoding failures into encode::Error::Syntax. This is API coupling/phase attribution debt, not proof that a compatible dependency release breaks callers.
+
+Evidence: [crates/shamir-query-builder/src/wire/mod.rs:31](../../../../../crates/shamir-query-builder/src/wire/mod.rs#L31); [crates/shamir-query-builder/src/wire/mod.rs:37](../../../../../crates/shamir-query-builder/src/wire/mod.rs#L37); [crates/shamir-query-builder/src/batch/batch.rs:868](../../../../../crates/shamir-query-builder/src/batch/batch.rs#L868); [crates/shamir-query-builder/src/response/batch_response_ext.rs:30](../../../../../crates/shamir-query-builder/src/response/batch_response_ext.rs#L30); [Cargo.lock:2949](../../../../../Cargo.lock#L2949).
+
+<a id="review-8"></a>
+
+### Claim 8 — `Batch::to_request_via_msgpack` panics in a library API
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+The parent can now identify a constructible codec failure without executing it: owned Array/Map values can be nested beyond rmp-serde 1.3.1's default 1024-container decode budget. Serialization has no active depth counter; decoding those bytes returns DepthLimitExceeded, and the public helper's expect converts that Result to panic. This is a programmatic deep-input API defect, not proof of a normal network request or a measured target stack threshold; existing network decoder bounds do not cap locally built values.
+
+Evidence: [crates/shamir-query-builder/src/batch/batch.rs:878](../../../../../crates/shamir-query-builder/src/batch/batch.rs#L878); [crates/shamir-query-builder/src/batch/tests/to_request_via_msgpack_tests.rs:12](../../../../../crates/shamir-query-builder/src/batch/tests/to_request_via_msgpack_tests.rs#L12); [Cargo.lock:2949](../../../../../Cargo.lock#L2949).
+
+Pinned dependency evidence: [rmp-serde 1.3.1, src/decode.rs:294](https://docs.rs/crate/rmp-serde/1.3.1/source/src/decode.rs); [rmp-serde 1.3.1, src/decode.rs:566](https://docs.rs/crate/rmp-serde/1.3.1/source/src/decode.rs); [rmp-serde 1.3.1, src/encode.rs:147](https://docs.rs/crate/rmp-serde/1.3.1/source/src/encode.rs).
+
+Grouping/duplicate: `error-handling-lifecycle.md#1`. This row is not another independent defect.
+
+<a id="review-9"></a>
+
+### Claim 9 — `lit_u64`'s decimal-`String` encoding for `u64 > i64::MAX` is only specified for equality
+
+Status: `confirmed-open`. Current risk: `low`.
+
+The builder rustdoc remains equality-focused, but exact Big/Str ordering is implemented and documented for Compare, refuting the proposed missing-gt mechanism. Remaining caveats are concrete: Str/Str ordering is lexical, and Between/InSet require scalar_at without Compare's Big/raw-u64 materialization fallback.
+
+Evidence: [crates/shamir-query-builder/src/val/filter_value.rs:62](../../../../../crates/shamir-query-builder/src/val/filter_value.rs#L62); [crates/shamir-engine/src/query/filter/resolve.rs:161](../../../../../crates/shamir-engine/src/query/filter/resolve.rs#L161); [crates/shamir-engine/src/query/filter/resolve.rs:193](../../../../../crates/shamir-engine/src/query/filter/resolve.rs#L193); [crates/shamir-engine/src/query/filter/filter_node.rs:670](../../../../../crates/shamir-engine/src/query/filter/filter_node.rs#L670); [crates/shamir-engine/src/query/filter/filter_node.rs:952](../../../../../crates/shamir-engine/src/query/filter/filter_node.rs#L952); [docs/guide-docs/client-server-protocol-spec/NUMERIC_WIRE_SEMANTICS.md:69](../../../../../docs/guide-docs/client-server-protocol-spec/NUMERIC_WIRE_SEMANTICS.md#L69); [crates/shamir-engine/src/query/filter/tests/eval_tests/u64_big_filter_match_tests.rs:133](../../../../../crates/shamir-engine/src/query/filter/tests/eval_tests/u64_big_filter_match_tests.rs#L133).
+
+<a id="review-10"></a>
+
+### Claim 10 — Doc drift: nonexistent `val::query_ref` referenced; `mpak!` typo
+
+Status: `confirmed-open`. Current risk: `nit`.
+
+Both stale references remain. The query_ref example is a plain implementation comment, not an executable rustdoc example; constructors are qref/qref_all.
+
+Evidence: [crates/shamir-query-builder/src/filter/leaf.rs:83](../../../../../crates/shamir-query-builder/src/filter/leaf.rs#L83); [crates/shamir-query-builder/src/val/filter_value.rs:166](../../../../../crates/shamir-query-builder/src/val/filter_value.rs#L166); [crates/shamir-query-builder/src/write/insert.rs:44](../../../../../crates/shamir-query-builder/src/write/insert.rs#L44).
+
+Grouping/duplicate: `correctness-tdd.md#8`. This row is not another independent defect.
+
+<a id="review-11"></a>
+
+### Claim 11 — `val::func`/`val::expr` collide by name with `select::func`/`select::expr` for glob-import users
+
+Status: `confirmed-open`. Current risk: `nit`.
+
+Both modules still export both names. Using both globs and calling an unqualified conflicting name is ambiguous; module-qualified calls remain valid. This is an ergonomics issue, not a wire defect.
+
+Evidence: [crates/shamir-query-builder/src/val/filter_value.rs:116](../../../../../crates/shamir-query-builder/src/val/filter_value.rs#L116); [crates/shamir-query-builder/src/val/expr.rs:15](../../../../../crates/shamir-query-builder/src/val/expr.rs#L15); [crates/shamir-query-builder/src/select/select_item.rs:42](../../../../../crates/shamir-query-builder/src/select/select_item.rs#L42); [crates/shamir-query-builder/src/select/select_item.rs:76](../../../../../crates/shamir-query-builder/src/select/select_item.rs#L76).
+
+<a id="review-12"></a>
+
+### Claim 12 — `Batch`'s ~40 named DDL/DML methods do not constrain the op family
+
+Status: `confirmed-open`. Current risk: `nit`.
+
+Named methods still accept broad IntoBatchOp inputs and forward the actual variant. Their family names provide no enforcement. A mismatched name alone does not cause a server failure: the serialized variant, not the convenience-method name, determines execution.
+
+Evidence: [crates/shamir-query-builder/src/batch/batch.rs:180](../../../../../crates/shamir-query-builder/src/batch/batch.rs#L180); [crates/shamir-query-builder/src/batch/batch.rs:355](../../../../../crates/shamir-query-builder/src/batch/batch.rs#L355); [crates/shamir-query-builder/src/batch/batch.rs:372](../../../../../crates/shamir-query-builder/src/batch/batch.rs#L372); [crates/shamir-query-builder/src/batch/into_batch_op.rs:13](../../../../../crates/shamir-query-builder/src/batch/into_batch_op.rs#L13).
+
+## Corrections and qualified non-findings
+
+- Wire and matrix assertions are registered and compare actual encoded output. Integration tests require the integration/full scope; doctests are disabled by Cargo.toml:13.
+- The universal tests/ directory claim excludes cursor, which uses cursor/tests.rs but is wired.
+- Finding 9's gt(u64::MAX) example is a poor oracle: no valid u64 value exceeds that threshold. Use distinguishing values and explicit storage representations when adding coverage.
+- Do not infer absence of ordering support from equality-only constructor rustdocs. Existing Compare support predates this review; range/set support and decimal-string semantics must be assessed independently.
+- Duplicate-alias replacement preserves alias lookup identity but changes the referenced operation and resets attached state. It is not inherently a later no-op.
+- Changing convenience method names or matching the correct op family is independent of server authorization. The examples establish API permissiveness, not security bypass.
+- Codec wrapping is a design option; a future compatible release causing a breaking error-type change was not demonstrated.
+
+---
+
+<details>
+<summary>Historical report — preserved for provenance; not current status or instructions</summary>
+
 # shamir-query-builder -- API & wire-protocol design
 
 ## Summary
@@ -92,3 +260,5 @@ The crate is a disciplined, thin builder layer over `shamir-query-types`: every 
 
 ---
 *Scope note: reviewed against CLAUDE.md's documented standards (builder-only query construction, `Result`-based error handling, three-family error split, test organization, surgical-style module layout). Test-coverage claim verified: `wire`, `batch` (11 test files incl. msgpack round-trip, `after`, `when`/`switch`, sub-batch, call, for-each, try_into_batch_op), `query`, `select`, `filter`, `val`, `write`, `ddl`, `macros`, `cursor`, `response` all have `tests/` directories per convention, plus cross-language fixtures (`tests/repl_ddl_msgpack.rs`, `tests/create_index_matrix.rs`). No builder-rule violations (raw `json!`/`Value` query assembly) found inside the crate itself; the msgpack round-trips present are the wire-format-under-test exception documented in CLAUDE.md.*
+
+</details>

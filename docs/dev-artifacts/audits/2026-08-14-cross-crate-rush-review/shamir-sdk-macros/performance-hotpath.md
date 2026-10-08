@@ -1,3 +1,78 @@
+<!-- revalidation:2026-10-08 source:92ad58266bf57ddea1fa3c8a47affba1a3a9a096 -->
+# shamir-sdk-macros — performance-hotpath revalidation
+
+Source snapshot: `92ad58266bf57ddea1fa3c8a47affba1a3a9a096`. Revalidated 2026-10-08 by read-only XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run; no source fix is part of this update. Test registration/assertions are evidence of an oracle, not proof of a passing run.
+
+This section is authoritative for current status. Original titles/IDs are retained for traceability; a refuted title is not a current assertion. The collapsed historical report below is superseded, including its counts, severity, scenarios and fix instructions. Plan IDs preserve historical numbering, not a current release mandate. [Workspace methodology and status definitions](../SUMMARY.md#status-definitions).
+
+Validator deep copies and retained ownership are source-proven. Cross-call leakage is not a current production defect, and numerical cost/latency claims are unmeasured.
+
+## Current claim decisions
+
+| Claim decisions | Open | Source-fixed | Partial | Refuted | Unverified | N/A |
+|---:|---:|---:|---:|---:|---:|---:|
+| 4 | 3 | 0 | 0 | 0 | 0 | 1 |
+
+These are decisions on report claims, including repeated roots, bundled observations and non-findings—not a unique-bug census. Closed/N/A rows have no current risk; unverified risk is provisional. Pure style and unmeasured optimization claims do not establish runtime impact.
+
+<a id="review-1"></a>
+
+### Claim 1 — `#[validator]` `shamir_call`: full decoded payload retained across the entire await + redundant deep copies of `record`/`old_record`
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+Validator still clones owned recursive Value data from borrowed getters and keeps Params in the enclosing scope through block_on. There is no take/move-out API or early drop. Additional ownership and allocations are structural; a universal 3x byte multiplier is not proven.
+
+Evidence: [crates/shamir-sdk-macros/src/lib.rs:126](../../../../../crates/shamir-sdk-macros/src/lib.rs#L126); [crates/shamir-sdk-macros/src/lib.rs:130](../../../../../crates/shamir-sdk-macros/src/lib.rs#L130); [crates/shamir-sdk-macros/src/lib.rs:137](../../../../../crates/shamir-sdk-macros/src/lib.rs#L137); [crates/shamir-sdk-macros/src/lib.rs:144](../../../../../crates/shamir-sdk-macros/src/lib.rs#L144); [crates/shamir-sdk/src/params.rs:26](../../../../../crates/shamir-sdk/src/params.rs#L26); [crates/shamir-sdk/src/value.rs:26](../../../../../crates/shamir-sdk/src/value.rs#L26).
+
+<a id="review-2"></a>
+
+### Claim 2 — `shamir_alloc` leaks every allocation; the "module is short-lived" contract is documented only here and enforced nowhere in this crate
+
+Status: `not-applicable`. Current risk: —.
+
+Intentional within-invocation leaks remain, but every production call creates a fresh Store and instance, reclaiming guest memory on return. SDK host-import documentation also explicitly names Store destruction. Future instance reuse is a conditional design risk, not a present cross-call leak.
+
+Evidence: [crates/shamir-sdk-macros/src/lib.rs:112](../../../../../crates/shamir-sdk-macros/src/lib.rs#L112); [crates/shamir-sdk/src/__rt.rs:28](../../../../../crates/shamir-sdk/src/__rt.rs#L28); [crates/shamir-sdk/src/host_imports.rs:60](../../../../../crates/shamir-sdk/src/host_imports.rs#L60); [crates/shamir-wasm-host/src/wasm/wasm_function.rs:474](../../../../../crates/shamir-wasm-host/src/wasm/wasm_function.rs#L474); [crates/shamir-wasm-host/src/wasm/wasm_function.rs:498](../../../../../crates/shamir-wasm-host/src/wasm/wasm_function.rs#L498); [crates/shamir-wasm-host/src/wasm/host_call.rs:149](../../../../../crates/shamir-wasm-host/src/wasm/host_call.rs#L149).
+
+<a id="review-3"></a>
+
+### Claim 3 — Generated `shamir_call` busy-spins at 100% CPU if the author's future ever yields `Pending`
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+A persistently-Pending guest future is repeatedly polled without yielding or a guest poll limit. Finite Pending does not imply exhausting the host budget. Async host imports already use fiber suspension; the claimed unavoidable I/O-induced spin is false.
+
+Evidence: [crates/shamir-sdk/src/__rt.rs:50](../../../../../crates/shamir-sdk/src/__rt.rs#L50); [crates/shamir-wasm-host/src/wasm/wasm_function.rs:195](../../../../../crates/shamir-wasm-host/src/wasm/wasm_function.rs#L195); [crates/shamir-wasm-host/src/wasm/wasm_function.rs:477](../../../../../crates/shamir-wasm-host/src/wasm/wasm_function.rs#L477); [crates/shamir-wasm-host/src/wasm/wasm_function.rs:487](../../../../../crates/shamir-wasm-host/src/wasm/wasm_function.rs#L487).
+
+Grouping/duplicate: `concurrency-lockfree.md#1`. This row is not another independent defect.
+
+<a id="review-4"></a>
+
+### Claim 4 — `shamir_alloc` zero-fills O(len) bytes the host immediately overwrites, and does not reject negative `len`
+
+Status: `confirmed-open`. Current risk: `nit`.
+
+Allocator semantics still request initialized len bytes, and the host overwrites that range. The negative-length guard is absent. Whether allocation emits a separate linear memset and whether eliminating it helps latency are unmeasured.
+
+Evidence: [crates/shamir-sdk-macros/src/lib.rs:110](../../../../../crates/shamir-sdk-macros/src/lib.rs#L110); [crates/shamir-wasm-host/src/wasm/wasm_function.rs:540](../../../../../crates/shamir-wasm-host/src/wasm/wasm_function.rs#L540).
+
+Grouping/duplicate: `security-crypto.md#2`. This row is not another independent defect.
+
+## Corrections and qualified non-findings
+
+- Drop exact 3x/1x memory claims. Encoded bytes, decoded owned structures, and clones have different sizes, and the clone phase temporarily overlaps even with a later drop(params).
+- Pooling reuses allocation slots, not this call's live guest Store/heap. Fresh Store creation is the positive lifetime mechanism.
+- The lifetime contract is not documented only in the macro: crates/shamir-sdk/src/host_imports.rs:60 names Store destruction.
+- Guest-local spin can occupy a runtime worker until fuel/epoch interruption, but no measured CPU percentage or latency regression is available.
+- No macro-implementation runtime hot path exists. Parsing/string operations do scale with authored token input, so the literal claim of no unbounded-input work is too strong; no practical compile-time performance defect was established.
+- An uninitialized-buffer optimization must not create initialized u8 slices before initialization; benefit and safe representation need validation.
+
+---
+
+<details>
+<summary>Historical report — preserved for provenance; not current status or instructions</summary>
+
 # shamir-sdk-macros -- Performance & O(x->0)
 
 ## Summary
@@ -128,3 +203,5 @@ once per annotated function per build (compile-time), has no loops over
 unbounded input (argument iteration is capped at the fixed 1-3-arity
 validation), and its string `replace`/`to_string` work in the return-type
 checks is negligible at that call frequency.
+
+</details>

@@ -1,3 +1,155 @@
+<!-- revalidation:2026-10-08 source:92ad58266bf57ddea1fa3c8a47affba1a3a9a096 -->
+# shamir-storage — correctness-tdd revalidation
+
+Source snapshot: `92ad58266bf57ddea1fa3c8a47affba1a3a9a096`. Revalidated 2026-10-08 by read-only XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run; no source fix is part of this update. Test registration/assertions are evidence of an oracle, not proof of a passing run.
+
+This section is authoritative for current status. Original titles/IDs are retained for traceability; a refuted title is not a current assertion. The collapsed historical report below is superseded, including its counts, severity, scenarios and fix instructions. Plan IDs preserve historical numbering, not a current release mandate. [Workspace methodology and status definitions](../SUMMARY.md#status-definitions).
+
+The principal cache and scan defects remain. Shared tests cover ordinary MemBuffer get_many behavior, but not its reader/writer race. Self-copy record doubling is refuted.
+
+## Current claim decisions
+
+| Claim decisions | Open | Source-fixed | Partial | Refuted | Unverified | N/A |
+|---:|---:|---:|---:|---:|---:|---:|
+| 12 | 9 | 0 | 0 | 3 | 0 | 0 |
+
+These are decisions on report claims, including repeated roots, bundled observations and non-findings—not a unique-bug census. Closed/N/A rows have no current risk; unverified risk is provisional. Pure style and unmeasured optimization claims do not establish runtime impact.
+
+<a id="review-1"></a>
+
+### Claim 1 — MemBufferStore::get_many cache-fill can poison a Tombstone over a concurrent write — the #539 bug class survives in the vectored read
+
+Status: `confirmed-open`. Current risk: `high`.
+
+After awaiting inner.get_many, every returned Live/Tombstone is inserted without a dirty recheck. Cache-first subsequent reads can retain the stale result after a concurrent buffered write and its eventual drain.
+
+Evidence: [crates/shamir-storage/src/storage_membuffer.rs:790](../../../../../crates/shamir-storage/src/storage_membuffer.rs#L790); [crates/shamir-storage/src/storage_membuffer.rs:1231](../../../../../crates/shamir-storage/src/storage_membuffer.rs#L1231); [crates/shamir-storage/src/storage_membuffer.rs:1246](../../../../../crates/shamir-storage/src/storage_membuffer.rs#L1246); [crates/shamir-storage/src/storage_membuffer.rs:1258](../../../../../crates/shamir-storage/src/storage_membuffer.rs#L1258).
+
+<a id="review-2"></a>
+
+### Claim 2 — MemBufferStore::transact post-commit cache republish clobbers a concurrent writer's fresher value — lasting stale read
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+Cache republish remains unconditional; remove_if protects only dirty cleanup. The registered regression checks real_inner after flush, not buffered reads, so it cannot detect cache/inner disagreement.
+
+Evidence: [crates/shamir-storage/src/storage_membuffer.rs:1048](../../../../../crates/shamir-storage/src/storage_membuffer.rs#L1048); [crates/shamir-storage/src/storage_membuffer.rs:1060](../../../../../crates/shamir-storage/src/storage_membuffer.rs#L1060); [crates/shamir-storage/src/storage_membuffer.rs:1071](../../../../../crates/shamir-storage/src/storage_membuffer.rs#L1071); [crates/shamir-storage/src/tests/storage_membuffer_tests.rs:799](../../../../../crates/shamir-storage/src/tests/storage_membuffer_tests.rs#L799); [crates/shamir-storage/src/tests/storage_membuffer_tests.rs:832](../../../../../crates/shamir-storage/src/tests/storage_membuffer_tests.rs#L832).
+
+<a id="review-3"></a>
+
+### Claim 3 — InMemoryStore::iter_range_stream resumes inclusive + blind-skip instead of the mandated Bound::Excluded cursor
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+An inclusive range is followed by an unconditional first-item skip. Removing the previous cursor between pulls makes that skip consume the unseen successor. Existing batching tests do not interleave cursor deletion.
+
+Evidence: [crates/shamir-storage/src/storage_in_memory.rs:196](../../../../../crates/shamir-storage/src/storage_in_memory.rs#L196); [crates/shamir-storage/src/storage_in_memory.rs:201](../../../../../crates/shamir-storage/src/storage_in_memory.rs#L201); [crates/shamir-storage/src/storage_in_memory.rs:205](../../../../../crates/shamir-storage/src/storage_in_memory.rs#L205); [crates/shamir-storage/src/tests/storage_in_memory_tests.rs:235](../../../../../crates/shamir-storage/src/tests/storage_in_memory_tests.rs#L235).
+
+<a id="review-4"></a>
+
+### Claim 4 — MemBufferStore::remove / remove_many misreport the existed flag for keys resident only in inner
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+Both implementations return false on dirty/cache misses without consulting inner. remove_many explicitly promises an existed flag. Table::delete forwards remove's result, and the non-MVCC manager uses it to gate counter/index cleanup; shared-suite removal targets were previously populated through the wrapper.
+
+Evidence: [crates/shamir-storage/src/storage_membuffer.rs:886](../../../../../crates/shamir-storage/src/storage_membuffer.rs#L886); [crates/shamir-storage/src/storage_membuffer.rs:1183](../../../../../crates/shamir-storage/src/storage_membuffer.rs#L1183); [crates/shamir-storage/src/types.rs:168](../../../../../crates/shamir-storage/src/types.rs#L168); [crates/shamir-storage/src/tests/types_tests.rs:97](../../../../../crates/shamir-storage/src/tests/types_tests.rs#L97); [crates/shamir-engine/src/table/table.rs:182](../../../../../crates/shamir-engine/src/table/table.rs#L182); [crates/shamir-engine/src/table/table_manager_crud.rs:472](../../../../../crates/shamir-engine/src/table/table_manager_crud.rs#L472).
+
+<a id="review-5"></a>
+
+### Claim 5 — TDD gap: CachedStore (both write modes) never runs the backend-agnostic batch contract suite
+
+Status: `confirmed-open`. Current risk: `low`.
+
+The helper still has only InMemory, MemBuffer, and feature-gated Fjall callers. CachedStore's registered dedicated tests do not invoke it.
+
+Evidence: [crates/shamir-storage/src/tests/types_tests.rs:38](../../../../../crates/shamir-storage/src/tests/types_tests.rs#L38); [crates/shamir-storage/src/tests/storage_in_memory_tests.rs:77](../../../../../crates/shamir-storage/src/tests/storage_in_memory_tests.rs#L77); [crates/shamir-storage/src/tests/storage_membuffer_tests.rs:33](../../../../../crates/shamir-storage/src/tests/storage_membuffer_tests.rs#L33); [crates/shamir-storage/src/tests/storage_fjall_tests.rs:125](../../../../../crates/shamir-storage/src/tests/storage_fjall_tests.rs#L125); [crates/shamir-storage/src/tests/mod.rs:3](../../../../../crates/shamir-storage/src/tests/mod.rs#L3).
+
+<a id="review-6"></a>
+
+### Claim 6 — FjallStore write-worker ordering claim holds only per handle-instance; Repo::store_get hands out a new instance per call
+
+Status: `confirmed-open`. Current risk: `low`.
+
+Each store_get constructs a fresh OnceLock worker. insert/transact use that worker, while set/remove use spawn_blocking even within the same handle. The transact comment overstates ordering; thread lifecycle is already documented and joined on drop, so this is not a proven thread leak.
+
+Evidence: [crates/shamir-storage/src/storage_fjall.rs:240](../../../../../crates/shamir-storage/src/storage_fjall.rs#L240); [crates/shamir-storage/src/storage_fjall.rs:312](../../../../../crates/shamir-storage/src/storage_fjall.rs#L312); [crates/shamir-storage/src/storage_fjall.rs:337](../../../../../crates/shamir-storage/src/storage_fjall.rs#L337); [crates/shamir-storage/src/storage_fjall.rs:494](../../../../../crates/shamir-storage/src/storage_fjall.rs#L494); [crates/shamir-storage/src/storage_fjall.rs:134](../../../../../crates/shamir-storage/src/storage_fjall.rs#L134).
+
+<a id="review-7"></a>
+
+### Claim 7 — InMemoryStore::set update path can resurrect an older value under concurrent same-key writers
+
+Status: `confirmed-open`. Current risk: `low`.
+
+The non-atomic remove/reinsert path and ignored duplicate result remain. However, final-state ordering between overlapping calls is not determined by their completion order; the original later-finishing-writer argument is not a valid standalone oracle.
+
+Evidence: [crates/shamir-storage/src/storage_in_memory.rs:120](../../../../../crates/shamir-storage/src/storage_in_memory.rs#L120); [crates/shamir-storage/src/storage_in_memory.rs:129](../../../../../crates/shamir-storage/src/storage_in_memory.rs#L129); [crates/shamir-storage/src/storage_in_memory.rs:130](../../../../../crates/shamir-storage/src/storage_in_memory.rs#L130).
+
+Grouping/duplicate: `concurrency-lockfree.md#3`. This row is not another independent defect.
+
+<a id="review-8"></a>
+
+### Claim 8 — Nit — size-counter drift paths in CachedStore
+
+Status: `confirmed-open`. Current risk: `nit`.
+
+insert increments size regardless of insert_sync success. reload clears the tree and resets/refills the counter independently of live writes. Fresh generated IDs do not exclude a concurrent lazy fill of the same newly inserted inner key.
+
+Evidence: [crates/shamir-storage/src/storage_cached.rs:306](../../../../../crates/shamir-storage/src/storage_cached.rs#L306); [crates/shamir-storage/src/storage_cached.rs:311](../../../../../crates/shamir-storage/src/storage_cached.rs#L311); [crates/shamir-storage/src/storage_cached.rs:420](../../../../../crates/shamir-storage/src/storage_cached.rs#L420); [crates/shamir-storage/src/storage_cached.rs:423](../../../../../crates/shamir-storage/src/storage_cached.rs#L423); [crates/shamir-storage/src/storage_cached.rs:480](../../../../../crates/shamir-storage/src/storage_cached.rs#L480).
+
+<a id="review-9"></a>
+
+### Claim 9 — Nit — Repo::copy_store default has no from == to self-copy guard
+
+Status: `refuted`. Current risk: —.
+
+The missing guard is real, but the alleged record doubling is false: copy_store calls set_many with the original keys, not insert/insert_many. Quiescent self-copy overwrites the same entries and generates no new keys.
+
+Evidence: [crates/shamir-storage/src/types.rs:488](../../../../../crates/shamir-storage/src/types.rs#L488); [crates/shamir-storage/src/types.rs:500](../../../../../crates/shamir-storage/src/types.rs#L500); [crates/shamir-storage/src/types.rs:160](../../../../../crates/shamir-storage/src/types.rs#L160); [crates/shamir-storage/src/storage_in_memory.rs:120](../../../../../crates/shamir-storage/src/storage_in_memory.rs#L120).
+
+<a id="review-10"></a>
+
+### Claim 10 — Nit — stale narration of retired mechanisms in #535 test/hook docs and mid-body imports
+
+Status: `confirmed-open`. Current risk: `nit`.
+
+The main ClearRaceHook documentation already explains the counter redesign, but the batch-hook and test narration still describe boolean clear/republish mechanisms. Listed function-local imports also remain.
+
+Evidence: [crates/shamir-storage/src/membuffer_clear_race_hook.rs:1](../../../../../crates/shamir-storage/src/membuffer_clear_race_hook.rs#L1); [crates/shamir-storage/src/membuffer_clear_race_hook.rs:61](../../../../../crates/shamir-storage/src/membuffer_clear_race_hook.rs#L61); [crates/shamir-storage/src/tests/storage_membuffer_tests.rs:845](../../../../../crates/shamir-storage/src/tests/storage_membuffer_tests.rs#L845); [crates/shamir-storage/src/types.rs:489](../../../../../crates/shamir-storage/src/types.rs#L489).
+
+<a id="review-nf-get-many-coverage"></a>
+
+### Claim NF-get_many-coverage — Summary assertion that MemBuffer get_many lacks coverage
+
+Status: `refuted`. Current risk: —.
+
+The registered buffered shared-suite test exercises get_many hits, misses, ordering, and empty input. The missing coverage is specifically concurrent stale cache-fill.
+
+Evidence: [crates/shamir-storage/src/tests/mod.rs:5](../../../../../crates/shamir-storage/src/tests/mod.rs#L5); [crates/shamir-storage/src/tests/storage_membuffer_tests.rs:28](../../../../../crates/shamir-storage/src/tests/storage_membuffer_tests.rs#L28); [crates/shamir-storage/src/tests/types_tests.rs:124](../../../../../crates/shamir-storage/src/tests/types_tests.rs#L124).
+
+<a id="review-nf-fjall-deleted-cursor"></a>
+
+### Claim NF-fjall-deleted-cursor — Praised fjall deleted-cursor regression
+
+Status: `refuted`. Current risk: —.
+
+The test deletes k2 before creating/pulling the stream. Its first two live entries are k1 and k3, so k2 is never the emitted cursor. It does not detect deletion of a cursor between batch pulls.
+
+Evidence: [crates/shamir-storage/src/tests/storage_fjall_tests.rs:204](../../../../../crates/shamir-storage/src/tests/storage_fjall_tests.rs#L204); [crates/shamir-storage/src/tests/storage_fjall_tests.rs:220](../../../../../crates/shamir-storage/src/tests/storage_fjall_tests.rs#L220); [crates/shamir-storage/src/tests/storage_fjall_tests.rs:229](../../../../../crates/shamir-storage/src/tests/storage_fjall_tests.rs#L229).
+
+## Corrections and qualified non-findings
+
+- Finding 3's quoted Excluded contract is specifically documented on scan_prefix_stream; the range implementation nevertheless demonstrably drops an unseen successor.
+- MemBuffer(Fjall) is the default buffered disk stack, not the hybrid data-store implementation. Hybrid data/history stores are plain in-memory.
+- Do not treat TableManager dispatch as unconditional same-key serialization: its write lock is conditional.
+- Porting the single-get dirty recheck narrows, but does not fully close, the async cache-insertion race.
+- Preserve the two facets of finding 8 and the two facets of finding 10 when deduplicating.
+
+---
+
+<details>
+<summary>Historical report — preserved for provenance; not current status or instructions</summary>
+
 # shamir-storage -- Correctness & TDD-coverage
 
 ## Summary
@@ -68,3 +220,5 @@ The crate's test culture is genuinely strong where it has been attacked (determi
 - **Severity:** nit
 - **Suggested fix:** Trim the dead mechanism narrative to one line pointing at #539; hoist the imports (no collision exceptions apply).
 
+
+</details>

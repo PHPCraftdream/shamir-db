@@ -1,3 +1,158 @@
+<!-- revalidation:2026-10-08 source:92ad58266bf57ddea1fa3c8a47affba1a3a9a096 -->
+# shamir-client — performance-hotpath revalidation
+
+Source snapshot: `92ad58266bf57ddea1fa3c8a47affba1a3a9a096`. Revalidated 2026-10-08 by read-only XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run; no source fix is part of this update. Test registration/assertions are evidence of an oracle, not proof of a passing run.
+
+This section is authoritative for current status. Original titles/IDs are retained for traceability; a refuted title is not a current assertion. The collapsed historical report below is superseded, including its counts, severity, scenarios and fix instructions. Plan IDs preserve historical numbering, not a current release mandate. [Workspace methodology and status definitions](../SUMMARY.md#status-definitions).
+
+Copying, per-row allocations, cancellation retention, and global buffer growth remain source-proven. Latency assertions and exact allocation totals were overstated.
+
+## Current claim decisions
+
+| Claim decisions | Open | Source-fixed | Partial | Refuted | Unverified | N/A |
+|---:|---:|---:|---:|---:|---:|---:|
+| 10 | 10 | 0 | 0 | 0 | 0 | 0 |
+
+These are decisions on report claims, including repeated roots, bundled observations and non-findings—not a unique-bug census. Closed/N/A rows have no current risk; unverified risk is provisional. Pure style and unmeasured optimization claims do not establish runtime impact.
+
+<a id="review-1"></a>
+
+### Claim 1 — `roundtrip` clones the whole serialized request per call and ignores the zero-copy envelope built for exactly this path
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+Scratch is cloned, owning envelope allocates sid and serializes body again, and write_frame copies the envelope. No benchmark establishes High impact.
+
+Evidence: [crates/shamir-client/src/client.rs:1256](../../../../../crates/shamir-client/src/client.rs#L1256); [crates/shamir-connect/src/common/envelope.rs:43](../../../../../crates/shamir-connect/src/common/envelope.rs#L43); [crates/shamir-transport-tcp/src/framing.rs:160](../../../../../crates/shamir-transport-tcp/src/framing.rs#L160).
+
+Grouping/duplicate: `SUMMARY.md#4.1`. This row is not another independent defect.
+
+<a id="review-2"></a>
+
+### Claim 2 — v2 read path: per-row `ByteBuf` clone and per-row×repo `get_or_create` key allocations in de-intern
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+Every IdBytes row is cloned; each candidate-repo attempt allocates registry key strings before cache lookup. Maps are not hoisted.
+
+Evidence: [crates/shamir-client/src/interner_cache_ops.rs:654](../../../../../crates/shamir-client/src/interner_cache_ops.rs#L654); [crates/shamir-client/src/interner_cache_ops.rs:729](../../../../../crates/shamir-client/src/interner_cache_ops.rs#L729); [crates/shamir-client/src/interner_cache.rs:207](../../../../../crates/shamir-client/src/interner_cache.rs#L207).
+
+Grouping/duplicate: `SUMMARY.md#4.2`. This row is not another independent defect.
+
+<a id="review-3"></a>
+
+### Claim 3 — `early_buffer` key cardinality is server-controlled and unbounded
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+Per-key caps do not bound total entries or bytes; every new peer-supplied unknown sub ID creates a retained vector.
+
+Evidence: [crates/shamir-client/src/client.rs:350](../../../../../crates/shamir-client/src/client.rs#L350); [crates/shamir-client/src/subscription.rs:30](../../../../../crates/shamir-client/src/subscription.rs#L30).
+
+Grouping/duplicate: `SUMMARY.md#4.3`. This row is not another independent defect.
+
+<a id="review-4"></a>
+
+### Claim 4 — Orphaned `pending` entries when the caller's future is cancelled (no drop guard)
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+After registration, cancellation bypasses write-failure and local-timeout cleanup. Entries survive until response arrival or connection death.
+
+Evidence: [crates/shamir-client/src/client.rs:1267](../../../../../crates/shamir-client/src/client.rs#L1267); [crates/shamir-client/src/client.rs:1277](../../../../../crates/shamir-client/src/client.rs#L1277); [crates/shamir-client/src/client.rs:1290](../../../../../crates/shamir-client/src/client.rs#L1290).
+
+Grouping/duplicate: `SUMMARY.md#4.4`. This row is not another independent defect.
+
+<a id="review-5"></a>
+
+### Claim 5 — `std::sync::Mutex` on per-request/per-frame hot paths without the required contention-model justification
+
+Status: `confirmed-open`. Current risk: `low`.
+
+Global map mutexes and insufficient contention comments remain. Serialization is structural; a throughput degradation curve was not measured.
+
+Evidence: [crates/shamir-client/src/client.rs:250](../../../../../crates/shamir-client/src/client.rs#L250); [crates/shamir-client/src/client.rs:331](../../../../../crates/shamir-client/src/client.rs#L331); [crates/shamir-client/src/client.rs:1269](../../../../../crates/shamir-client/src/client.rs#L1269).
+
+Grouping/duplicate: `SUMMARY.md#2.2`. This row is not another independent defect.
+
+<a id="review-6"></a>
+
+### Claim 6 — Ambient interner sync runs on every `execute` regardless of server version or cache state
+
+Status: `confirmed-open`. Current risk: `low`.
+
+Empty epoch maps trigger query traversal and map creation without version gating; execute_with_touch collects/touches before checking version. Cold v2 sync is useful, however.
+
+Evidence: [crates/shamir-client/src/client.rs:1053](../../../../../crates/shamir-client/src/client.rs#L1053); [crates/shamir-client/src/interner_cache_ops.rs:357](../../../../../crates/shamir-client/src/interner_cache_ops.rs#L357); [crates/shamir-client/src/interner_cache_ops.rs:389](../../../../../crates/shamir-client/src/interner_cache_ops.rs#L389).
+
+Grouping/duplicate: `SUMMARY.md#4.5`. This row is not another independent defect.
+
+<a id="review-7"></a>
+
+### Claim 7 — `encode_record_idmsgpack` pays an avoidable full-record copy per INSERT (`Bytes::to_vec`)
+
+Status: `confirmed-open`. Current risk: `low`.
+
+Storage encoding returns owned Bytes and the client copies it into Vec. Pinned bytes supports consuming From<Bytes> for Vec, not a public into_vec method.
+
+Evidence: [crates/shamir-client/src/interner_cache_ops.rs:611](../../../../../crates/shamir-client/src/interner_cache_ops.rs#L611); [crates/shamir-types/src/codecs/interned/messagepack.rs:873](../../../../../crates/shamir-types/src/codecs/interned/messagepack.rs#L873); [Cargo.lock:571](../../../../../Cargo.lock#L571).
+
+Grouping/duplicate: `SUMMARY.md#4.6`. This row is not another independent defect.
+
+<a id="review-8"></a>
+
+### Claim 8 — `collect_field_names` clones every field-name key of every record before dedup
+
+Status: `confirmed-open`. Current risk: `low`.
+
+Every visited key is cloned into per-repo vectors before sorting and deduplication, making allocation proportional to occurrences rather than distinct names.
+
+Evidence: [crates/shamir-client/src/interner_cache_ops.rs:471](../../../../../crates/shamir-client/src/interner_cache_ops.rs#L471); [crates/shamir-client/src/interner_cache_ops.rs:377](../../../../../crates/shamir-client/src/interner_cache_ops.rs#L377).
+
+Grouping/duplicate: `SUMMARY.md#4.7`. This row is not another independent defect.
+
+<a id="review-9"></a>
+
+### Claim 9 — Push frames pay up to two failed envelope parses before `PushEnvelope` decode
+
+Status: `confirmed-open`. Current risk: `low`.
+
+Reader attempts ResponseEnvelope, ErrorEnvelope, then PushEnvelope. Three attempts are structural, but the cited response-side sid allocation does not exist.
+
+Evidence: [crates/shamir-client/src/client.rs:194](../../../../../crates/shamir-client/src/client.rs#L194); [crates/shamir-client/src/client.rs:329](../../../../../crates/shamir-client/src/client.rs#L329); [crates/shamir-connect/src/common/envelope.rs:178](../../../../../crates/shamir-connect/src/common/envelope.rs#L178).
+
+Grouping/duplicate: `SUMMARY.md#5.6`. This row is not another independent defect.
+
+<a id="review-10"></a>
+
+### Claim 10 — Perf claims are unmeasured: no benches, no allocation-behaviour tests
+
+Status: `confirmed-open`. Current risk: `nit`.
+
+No client benchmarks or allocation-counter tests exist; existing timeout/channel tests do not cover cancellation retention or global early-buffer growth.
+
+Evidence: [crates/shamir-client/Cargo.toml:43](../../../../../crates/shamir-client/Cargo.toml#L43); [crates/shamir-client/src/tests/mod.rs:1](../../../../../crates/shamir-client/src/tests/mod.rs#L1); [crates/shamir-client/src/tests/timeout_tests.rs:111](../../../../../crates/shamir-client/src/tests/timeout_tests.rs#L111).
+
+Grouping/duplicate: `SUMMARY.md#4.8`. This row is not another independent defect.
+
+## Corrections and qualified non-findings
+
+- Request scratch reuse still avoids repeated scratch growth; buf.clone does not nullify every benefit of reuse.
+- The stated three allocations/two payload copies exclude write_frame's additional vector/copy and possible output-vector reallocations.
+- RequestEnvelopeRef eliminates owning sid/body staging, not copying body bytes into serialized output; 'single allocation' is not established by to_vec_named.
+- The proposed Bytes::into_vec call is unavailable in pinned bytes 1.11.1; use its consuming Vec conversion or an appropriate encoding API.
+- Do not suppress cold-v2 ambient sync indiscriminately: it actually populates caches and is asserted by crates/shamir-client/src/tests/ambient_sync_tests.rs:143.
+- V1 pre-touch also follows the public method's explicit pre-touch contract; avoiding it requires an intentional contract decision, not a blanket assertion that it is always pointless.
+- The existing demux tests cover channel saturation and one unknown-sub insertion, not the claimed EARLY_BUFFER_CAP saturation.
+- The v2 refresh test does not isolate refresh_repo, because execute merges ambient deltas first.
+- Pinned scc synchronous operations use bucket locks; proposed replacements are not automatically lock-free.
+- Cursor mutex-skip performance claims are contradicted by lock-before-is_none at crates/shamir-client/src/cursor_stream.rs:250.
+
+---
+
+<details>
+<summary>Historical report — preserved for provenance; not current status or instructions</summary>
+
 # shamir-client -- Performance & O(x->0)
 
 ## Summary
@@ -74,3 +229,5 @@ The crate is mostly disciplined about its own hot paths (`read_frame_into` buffe
 - **Severity:** nit
 - **Issue:** The crate documents deliberate hot-path optimizations ("T-tcp-1" buffer reuse at client.rs:218-223, "T-cl-1" thread-local encode buffer at :970-977, the per-yield mutex-skip guard in cursor_stream.rs:237-244) but has no bench (workspace convention: `bench_scale_tool::Harness`) and no test observing allocation counts or map growth — so regressions like finding 1's clone (which silently nullifies T-cl-1) or findings 3/4's growth vectors are invisible to the suite. Behavioural coverage itself is good: demux ordering/garbage/EOF-drain, timeout cleanup, early-buffer full-drop, v2 passthrough + refresh, ambient delta, cursor close/cancel are all tested.
 - **Suggested fix:** Add one `benches/roundtrip.rs` (request encode + demux decode, per CLAUDE.md bench conventions) and a unit test asserting `pending`/early-buffer invariants after cancellation/misbehaving-server scenarios — that alone would have caught findings 1, 3, and 4.
+
+</details>

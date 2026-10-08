@@ -1,3 +1,35 @@
+<!-- revalidation:2026-10-08 source:92ad58266bf57ddea1fa3c8a47affba1a3a9a096 -->
+# shamir-query-builder — concurrency-lockfree revalidation
+
+Source snapshot: `92ad58266bf57ddea1fa3c8a47affba1a3a9a096`. Revalidated 2026-10-08 by read-only XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run; no source fix is part of this update. Test registration/assertions are evidence of an oracle, not proof of a passing run.
+
+This section is authoritative for current status. Original titles/IDs are retained for traceability; a refuted title is not a current assertion. The collapsed historical report below is superseded, including its counts, severity, scenarios and fix instructions. Plan IDs preserve historical numbering, not a current release mandate. [Workspace methodology and status definitions](../SUMMARY.md#status-definitions).
+
+The no-concurrency-finding conclusion is upheld for the builder itself: owned state, synchronous construction, no locks, atomics, mutable globals, runtime tasks, or unsafe code. Hash-keyed builder collections use the Fx-backed aliases. Complexity and codec correctness require the qualifications below.
+
+## Current claim decisions
+
+| Claim decisions | Open | Source-fixed | Partial | Refuted | Unverified | N/A |
+|---:|---:|---:|---:|---:|---:|---:|
+| 0 | 0 | 0 | 0 | 0 | 0 | 0 |
+
+These are decisions on report claims, including repeated roots, bundled observations and non-findings—not a unique-bug census. Closed/N/A rows have no current risk; unverified risk is provisional. Pure style and unmeasured optimization claims do not establish runtime impact.
+
+No local defect was established for this lens. The scope and positive-assurance qualifications below still apply.
+
+## Corrections and qualified non-findings
+
+- Ownership and collection guarantees are source-supported by crates/shamir-query-builder/src/batch/batch.rs:27, crates/shamir-query-builder/src/write/doc.rs:19, and crates/shamir-collections/src/lib.rs:18. Test-only BTreeMap fixture maps are not hash-keyed.
+- Hash-map membership is expected/amortized constant-time, not an unconditional adversarial worst-case O(1) guarantee.
+- The fallback is documented but not unconditionally correct: it violates nested scoping and exact marker recognition. See correctness-tdd.md#1 and correctness-tdd.md#3.
+- switch construction and output are quadratic in case count, weighted by condition-tree sizes; this is inherent to the current complementary-guard encoding, not a concurrency defect.
+- The crate has no benchmark harness. Its synchronous API is appropriate for in-memory construction; absence of concurrency tests is not a defect.
+
+---
+
+<details>
+<summary>Historical report — preserved for provenance; not current status or instructions</summary>
+
 # shamir-query-builder -- Concurrency & lock-free invariants
 
 ## Summary
@@ -7,3 +39,5 @@ This crate is a pure, single-owner fluent builder over wire DTOs: it contains no
 ## Findings
 
 No findings for this theme.
+
+</details>

@@ -1,3 +1,206 @@
+<!-- revalidation:2026-10-08 source:92ad58266bf57ddea1fa3c8a47affba1a3a9a096 -->
+# shamir-wasm-host — api-wire-protocol revalidation
+
+Source snapshot: `92ad58266bf57ddea1fa3c8a47affba1a3a9a096`. Revalidated 2026-10-08 by read-only XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run; no source fix is part of this update. Test registration/assertions are evidence of an oracle, not proof of a passing run.
+
+This section is authoritative for current status. Original titles/IDs are retained for traceability; a refuted title is not a current assertion. The collapsed historical report below is superseded, including its counts, severity, scenarios and fix instructions. Plan IDs preserve historical numbering, not a current release mandate. [Workspace methodology and status definitions](../SUMMARY.md#status-definitions).
+
+Header loss and permissive request decoding remain. Contract/documentation drift and string-only errors remain; the pin sentinel is documented optional API design, not a demonstrated defect.
+
+## Current claim decisions
+
+| Claim decisions | Open | Source-fixed | Partial | Refuted | Unverified | N/A |
+|---:|---:|---:|---:|---:|---:|---:|
+| 14 | 13 | 0 | 0 | 0 | 0 | 1 |
+
+These are decisions on report claims, including repeated roots, bundled observations and non-findings—not a unique-bug census. Closed/N/A rows have no current risk; unverified risk is provisional. Pure style and unmeasured optimization claims do not establish runtime impact.
+
+<a id="review-1"></a>
+
+### Claim 1 — HTTP wire codec collapses duplicate headers (`Set-Cookie` loss on both directions)
+
+Status: `confirmed-open`. Current risk: `high`.
+
+Host response encoding overwrites identical header names. SDK requests preserve duplicate entries in a Vec-backed Map, but host QueryValue map deserialization overwrites duplicate keys before request decoding.
+
+Evidence: [crates/shamir-wasm-host/src/wasm/host_http.rs:89](../../../../../crates/shamir-wasm-host/src/wasm/host_http.rs#L89); [crates/shamir-sdk/src/http.rs:99](../../../../../crates/shamir-sdk/src/http.rs#L99); [crates/shamir-sdk/src/value.rs:58](../../../../../crates/shamir-sdk/src/value.rs#L58); [crates/shamir-types/src/types/value.rs:269](../../../../../crates/shamir-types/src/types/value.rs#L269).
+
+Grouping/duplicate: `SUMMARY.md#5.1`. This row is not another independent defect.
+
+<a id="review-2"></a>
+
+### Claim 2 — `CreateFunctionOptions` doc states the opposite of the actual empty-`net_grants` semantics
+
+Status: `confirmed-open`. Current risk: `low`.
+
+The options comment still states permissive inheritance; current user-function enforcement denies explicit empty grants. The downstream denial test already exists, with a toolchain-dependent skip path.
+
+Evidence: [crates/shamir-wasm-host/src/meta.rs:189](../../../../../crates/shamir-wasm-host/src/meta.rs#L189); [crates/shamir-db/src/shamir_db/shamir_db/core.rs:841](../../../../../crates/shamir-db/src/shamir_db/shamir_db/core.rs#L841); [crates/shamir-db/tests/functions_lifecycle.rs:907](../../../../../crates/shamir-db/tests/functions_lifecycle.rs#L907).
+
+Grouping/duplicate: `SUMMARY.md#3.2`. This row is not another independent defect.
+
+<a id="review-3"></a>
+
+### Claim 3 — `FnCtx` docs promise secret-grant gating on `global_get` that only the WASM host import enforces
+
+Status: `confirmed-open`. Current risk: `low`.
+
+FnCtx's type/builder documentation still attributes grant enforcement to global_get, while that native method directly reads globals. The guest import checks grants; trusted native code is outside that bytecode threat boundary.
+
+Evidence: [crates/shamir-wasm-host/src/context.rs:289](../../../../../crates/shamir-wasm-host/src/context.rs#L289); [crates/shamir-wasm-host/src/context.rs:392](../../../../../crates/shamir-wasm-host/src/context.rs#L392); [crates/shamir-wasm-host/src/context.rs:426](../../../../../crates/shamir-wasm-host/src/context.rs#L426); [crates/shamir-wasm-host/src/wasm/host_globals.rs:79](../../../../../crates/shamir-wasm-host/src/wasm/host_globals.rs#L79).
+
+Grouping/duplicate: `SUMMARY.md#5.2`. This row is not another independent defect.
+
+<a id="review-4"></a>
+
+### Claim 4 — Stringly-typed errors across the public gateway traits and egress guards
+
+Status: `confirmed-open`. Current risk: `low`.
+
+Public gateway methods and guards still return String errors, and host imports convert them into trap prose. Native callers lack structured discrimination/source chains; this is API/error-design debt rather than a demonstrated runtime failure.
+
+Evidence: [crates/shamir-wasm-host/src/db_gateway.rs:65](../../../../../crates/shamir-wasm-host/src/db_gateway.rs#L65); [crates/shamir-wasm-host/src/net_gateway.rs:60](../../../../../crates/shamir-wasm-host/src/net_gateway.rs#L60); [crates/shamir-wasm-host/src/net_gateway.rs:160](../../../../../crates/shamir-wasm-host/src/net_gateway.rs#L160).
+
+Grouping/duplicate: `SUMMARY.md#5.3`. This row is not another independent defect.
+
+<a id="review-5"></a>
+
+### Claim 5 — Inconsistent guest-facing error contract across sibling host imports (envelope vs uncatchable trap)
+
+Status: `confirmed-open`. Current risk: `low`.
+
+HTTP gateway errors become envelopes, while DB/call errors become traps. The asymmetry is deliberate/documented but prevents guest recovery from DB gateway failures. BatchResponse itself has no existing error-envelope field.
+
+Evidence: [crates/shamir-wasm-host/src/wasm/host_http.rs:145](../../../../../crates/shamir-wasm-host/src/wasm/host_http.rs#L145); [crates/shamir-wasm-host/src/wasm/host_db.rs:187](../../../../../crates/shamir-wasm-host/src/wasm/host_db.rs#L187); [crates/shamir-db/src/shamir_db/shamir_db/db_gateway.rs:292](../../../../../crates/shamir-db/src/shamir_db/shamir_db/db_gateway.rs#L292); [crates/shamir-query-types/src/batch/batch_response.rs:30](../../../../../crates/shamir-query-types/src/batch/batch_response.rs#L30).
+
+Grouping/duplicate: `SUMMARY.md#5.4`. This row is not another independent defect.
+
+<a id="review-6"></a>
+
+### Claim 6 — `decode_http_request` silently coerces malformed `headers`/`body` to empty while `method`/`url` are strict
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+Wrong-shaped headers and non-Bin bodies still default to empty. method/url reject wrong types but accept absence as empty strings. Header entries inside accepted Map/List containers do receive type/shape validation.
+
+Evidence: [crates/shamir-wasm-host/src/wasm/host_http.rs:26](../../../../../crates/shamir-wasm-host/src/wasm/host_http.rs#L26); [crates/shamir-wasm-host/src/wasm/host_http.rs:39](../../../../../crates/shamir-wasm-host/src/wasm/host_http.rs#L39); [crates/shamir-wasm-host/src/wasm/host_http.rs:67](../../../../../crates/shamir-wasm-host/src/wasm/host_http.rs#L67).
+
+Grouping/duplicate: `SUMMARY.md#5.5`. This row is not another independent defect.
+
+<a id="review-7"></a>
+
+### Claim 7 — `compile_rust_source` hardwires the SDK path to the build machine's `CARGO_MANIFEST_DIR`
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+SDK lookup still canonicalizes a build-time manifest-relative path without override. Source compilation therefore requires that layout. The guide already describes compilation as an optional development facility, so this is not a failure of binary-only guest deployment.
+
+Evidence: [crates/shamir-wasm-host/src/compile.rs:485](../../../../../crates/shamir-wasm-host/src/compile.rs#L485); [docs/guide-docs/guide/05-functions.md:136](../../../../../docs/guide-docs/guide/05-functions.md#L136); [docs/guide-docs/guide/05-functions.md:369](../../../../../docs/guide-docs/guide/05-functions.md#L369).
+
+Grouping/duplicate: `SUMMARY.md#5.6`. This row is not another independent defect.
+
+<a id="review-8"></a>
+
+### Claim 8 — `ResolvedPin::pinned_ips` uses an empty-Vec sentinel for "do not pin"
+
+Status: `not-applicable`. Current risk: —.
+
+The sentinel is explicitly documented, emitted only on the exact-match bypass, correctly consumed by the current curl caller, and tested. Option would be an optional type refinement; no current misuse is demonstrated.
+
+Evidence: [crates/shamir-wasm-host/src/net_gateway.rs:125](../../../../../crates/shamir-wasm-host/src/net_gateway.rs#L125); [crates/shamir-wasm-host/src/net_gateway.rs:169](../../../../../crates/shamir-wasm-host/src/net_gateway.rs#L169); [crates/shamir-db/src/shamir_db/curl_gateway.rs:195](../../../../../crates/shamir-db/src/shamir_db/curl_gateway.rs#L195); [crates/shamir-wasm-host/src/tests/net_gateway_tests.rs:159](../../../../../crates/shamir-wasm-host/src/tests/net_gateway_tests.rs#L159).
+
+Grouping/duplicate: `SUMMARY.md#5.8`. This row is not another independent defect.
+
+<a id="review-9"></a>
+
+### Claim 9 — `glob_matches` duplicated in two security-relevant matchers
+
+Status: `confirmed-open`. Current risk: `low`.
+
+Environment and egress matching still have separate implementations. No present divergence is shown, but fixes can drift and the egress comment misleadingly describes reuse.
+
+Evidence: [crates/shamir-wasm-host/src/env_policy.rs:75](../../../../../crates/shamir-wasm-host/src/env_policy.rs#L75); [crates/shamir-wasm-host/src/net_gateway.rs:483](../../../../../crates/shamir-wasm-host/src/net_gateway.rs#L483).
+
+Grouping/duplicate: `SUMMARY.md#7.2`. This row is not another independent defect.
+
+<a id="review-10"></a>
+
+### Claim 10 — Catalogue record decoding has silent fallbacks and no format versioning
+
+Status: `confirmed-open`. Current risk: `low`.
+
+Malformed/unknown metadata values still silently default or disappear, and metadata injection adds no format version. Dropping grants narrows those sets; the security impact of Invoker fallback is actor-dependent.
+
+Evidence: [crates/shamir-wasm-host/src/meta.rs:113](../../../../../crates/shamir-wasm-host/src/meta.rs#L113); [crates/shamir-wasm-host/src/meta.rs:129](../../../../../crates/shamir-wasm-host/src/meta.rs#L129); [crates/shamir-wasm-host/src/meta.rs:151](../../../../../crates/shamir-wasm-host/src/meta.rs#L151).
+
+Grouping/duplicate: `SUMMARY.md#5.7`. This row is not another independent defect.
+
+<a id="review-11"></a>
+
+### Claim 11 — Wire codecs, `db_*` host imports, and the `call` depth limit have no in-crate tests
+
+Status: `confirmed-open`. Current risk: `low`.
+
+No registered local test directly exercises HTTP codecs, DB guest imports, or a specifically asserted depth-limit trap. Existing actor probes do invoke call successfully; the recursive fuel test accepts any error.
+
+Evidence: [crates/shamir-wasm-host/src/tests/mod.rs:1](../../../../../crates/shamir-wasm-host/src/tests/mod.rs#L1); [crates/shamir-wasm-host/src/tests/nested_actor_tests.rs:85](../../../../../crates/shamir-wasm-host/src/tests/nested_actor_tests.rs#L85); [crates/shamir-wasm-host/src/tests/wasm_tests.rs:313](../../../../../crates/shamir-wasm-host/src/tests/wasm_tests.rs#L313).
+
+Grouping/duplicate: `SUMMARY.md#6.3`. This row is not another independent defect.
+
+<a id="review-12"></a>
+
+### Claim 12 — Internal audit-tracking references leaked into public API docs
+
+Status: `confirmed-open`. Current risk: `nit`.
+
+Public guard/pin documentation still references finding 2c without a consumer-facing reference. The substantive DNS-pinning explanation remains useful; this is documentation cleanup only.
+
+Evidence: [crates/shamir-wasm-host/src/net_gateway.rs:109](../../../../../crates/shamir-wasm-host/src/net_gateway.rs#L109); [crates/shamir-wasm-host/src/net_gateway.rs:118](../../../../../crates/shamir-wasm-host/src/net_gateway.rs#L118); [crates/shamir-wasm-host/src/net_gateway.rs:148](../../../../../crates/shamir-wasm-host/src/net_gateway.rs#L148).
+
+Grouping/duplicate: `SUMMARY.md#5.9`. This row is not another independent defect.
+
+<a id="review-13"></a>
+
+### Claim 13 — Duplicated doc-comment block on `host_call`
+
+Status: `confirmed-open`. Current risk: `nit`.
+
+The identifying six-line host-call documentation block still appears twice consecutively.
+
+Evidence: [crates/shamir-wasm-host/src/wasm/host_call.rs:16](../../../../../crates/shamir-wasm-host/src/wasm/host_call.rs#L16); [crates/shamir-wasm-host/src/wasm/host_call.rs:22](../../../../../crates/shamir-wasm-host/src/wasm/host_call.rs#L22).
+
+Grouping/duplicate: `SUMMARY.md#7.3`. This row is not another independent defect.
+
+<a id="review-14"></a>
+
+### Claim 14 — Unused `serde` dependency in Cargo.toml
+
+Status: `confirmed-open`. Current risk: `nit`.
+
+serde remains a direct dependency without source usage. This does not establish extra project-wide proc-macro compilation, since workspace/transitive consumers already use serde.
+
+Evidence: [crates/shamir-wasm-host/Cargo.toml:14](../../../../../crates/shamir-wasm-host/Cargo.toml#L14); [crates/shamir-wasm-host/src/lib.rs:20](../../../../../crates/shamir-wasm-host/src/lib.rs#L20).
+
+Grouping/duplicate: `SUMMARY.md#7.5`. This row is not another independent defect.
+
+## Corrections and qualified non-findings
+
+- Request duplicates are not lost inside the SDK's Vec-backed Value::Map; loss occurs when host QueryValue deserialization inserts duplicate keys into its unique-key map.
+- A header-shape migration must update SDK HttpResponse::from_value as well as host response encoding and SDK request encoding; otherwise List responses decode to empty headers.
+- Missing method/url are not currently strict.
+- HTTP malformed-input and memory errors also trap. The statement that only missing gateway traps is too broad; only successfully decoded gateway runtime errors are enveloped.
+- DB not-found is not uniformly fatal: db_get's normal absence is returned as 0.
+- BatchResponse at crates/shamir-query-types/src/batch/batch_response.rs:30 has no existing error channel. A catchable db_execute convention requires coordinated host/SDK protocol work.
+- The pin sentinel already meets the original alternative of documenting its meaning; no actual bad consumer was found.
+- The guide already recommends precompiled WASM in production. Source compilation is not promised to require no external toolchain.
+- Packed ptr/len and absence conventions agree for the inspected host/SDK paths; sanitizer/linker name equality is meaningfully tested. This is not universal value-format conformance proof.
+- No serde_json or raw JSON query construction was found in this crate.
+
+---
+
+<details>
+<summary>Historical report — preserved for provenance; not current status or instructions</summary>
+
 # shamir-wasm-host -- API & wire-protocol design
 
 ## Summary
@@ -96,3 +299,5 @@ The guest ABI (packed `ptr<<32|len` returns, `0 = absent`, msgpack `QueryValue` 
 - **Severity:** nit
 - **Issue:** `serde = { version = "1.0.217", features = ["derive"] }` is declared but no source file references `serde`; the wire format is msgpack via `shamir-types::QueryValue`. (For the record: the absence of `serde_json`/`json!` anywhere in the crate also means the builder-only query-construction rule is satisfied by construction.)
 - **Suggested fix:** drop the dependency (or annotate why it must stay).
+
+</details>

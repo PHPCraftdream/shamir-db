@@ -1,3 +1,134 @@
+<!-- revalidation:2026-10-08 source:92ad58266bf57ddea1fa3c8a47affba1a3a9a096 -->
+# shamir-bench-utils — correctness-tdd revalidation
+
+Source snapshot: `92ad58266bf57ddea1fa3c8a47affba1a3a9a096`. Revalidated 2026-10-08 by read-only XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run; no source fix is part of this update. Test registration/assertions are evidence of an oracle, not proof of a passing run.
+
+This section is authoritative for current status. Original titles/IDs are retained for traceability; a refuted title is not a current assertion. The collapsed historical report below is superseded, including its counts, severity, scenarios and fix instructions. Plan IDs preserve historical numbering, not a current release mandate. [Workspace methodology and status definitions](../SUMMARY.md#status-definitions).
+
+Coverage gaps, the floating-point endpoint violation, and documentation defects remain. The Gaussian formula is currently correct; the alleged portability flake is unverified. No remediation is source-proven complete.
+
+## Current claim decisions
+
+| Claim decisions | Open | Source-fixed | Partial | Refuted | Unverified | N/A |
+|---:|---:|---:|---:|---:|---:|---:|
+| 9 | 8 | 0 | 0 | 0 | 1 | 0 |
+
+These are decisions on report claims, including repeated roots, bundled observations and non-findings—not a unique-bug census. Closed/N/A rows have no current risk; unverified risk is provisional. Pure style and unmeasured optimization claims do not establish runtime impact.
+
+<a id="review-1"></a>
+
+### Claim 1 — peak_mem has zero test coverage, unpinned dependency semantics, and dead public API
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+peak_mem has no registered tests; doctests are disabled. measure, measure_async, and current_allocated have no executable workspace callers. Wrapper reset semantics have no regression oracle, although the dependency version itself is locked.
+
+Evidence: [crates/shamir-bench-utils/src/peak_mem.rs:54](../../../../../crates/shamir-bench-utils/src/peak_mem.rs#L54); [crates/shamir-bench-utils/src/peak_mem.rs:85](../../../../../crates/shamir-bench-utils/src/peak_mem.rs#L85); [crates/shamir-bench-utils/Cargo.toml:11](../../../../../crates/shamir-bench-utils/Cargo.toml#L11); [Cargo.lock:2396](../../../../../Cargo.lock#L2396).
+
+<a id="review-2"></a>
+
+### Claim 2 — Box-Muller scale is unpinned — a transcription bug in `next_gaussian` would pass the entire suite
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+The correct sqrt(-2*ln(s)/s) formula remains, but registered tests contain neither Gaussian golden values nor moment bounds. Comparing two calls to the same implementation cannot detect stable algorithm drift. The proposed mutation's complete-suite outcome was not executed.
+
+Evidence: [crates/shamir-bench-utils/src/vector_data.rs:96](../../../../../crates/shamir-bench-utils/src/vector_data.rs#L96); [crates/shamir-bench-utils/src/vector_data.rs:234](../../../../../crates/shamir-bench-utils/src/vector_data.rs#L234); [crates/shamir-bench-utils/src/vector_data.rs:290](../../../../../crates/shamir-bench-utils/src/vector_data.rs#L290).
+
+<a id="review-3"></a>
+
+### Claim 3 — `Lcg::next_f32` violates its documented `[0, 1)` contract — can return exactly 1.0
+
+Status: `confirmed-open`. Current risk: `low`.
+
+The high-u32-to-f32 conversion can round to 2^32, yielding 1.0 after division. The odd multiplier makes such successor states reachable. No boundary test exists; Gaussian rejection prevents accepting the resulting unit-disk endpoint.
+
+Evidence: [crates/shamir-bench-utils/src/vector_data.rs:67](../../../../../crates/shamir-bench-utils/src/vector_data.rs#L67); [crates/shamir-bench-utils/src/vector_data.rs:75](../../../../../crates/shamir-bench-utils/src/vector_data.rs#L75); [crates/shamir-bench-utils/src/vector_data.rs:95](../../../../../crates/shamir-bench-utils/src/vector_data.rs#L95).
+
+<a id="review-4"></a>
+
+### Claim 4 — Stale Criterion-era docs contradict CLAUDE.md's normative bench convention
+
+Status: `confirmed-open`. Current risk: `low`.
+
+The module still demonstrates iter_custom and criterion_main, and vector_data still calls its consumer a Criterion bench. Live consumers import Harness.
+
+Evidence: [crates/shamir-bench-utils/src/peak_mem.rs:10](../../../../../crates/shamir-bench-utils/src/peak_mem.rs#L10); [crates/shamir-bench-utils/src/peak_mem.rs:44](../../../../../crates/shamir-bench-utils/src/peak_mem.rs#L44); [crates/shamir-bench-utils/src/vector_data.rs:3](../../../../../crates/shamir-bench-utils/src/vector_data.rs#L3); [CLAUDE.md:237](../../../../../CLAUDE.md#L237).
+
+Grouping/duplicate: `SUMMARY.md#7.2`. This row is not another independent defect.
+
+<a id="review-5"></a>
+
+### Claim 5 — k-clamp asymmetry breaks the "(k, sigma) recoverable from the artefact" claim
+
+Status: `confirmed-open`. Current risk: `low`.
+
+For positive n, requested k is discarded by min(k,n); for n=0, all requested centroids survive. The blanket clamp documentation omits that exception, and the artifact stores neither sigma nor requested parameters.
+
+Evidence: [crates/shamir-bench-utils/src/vector_data.rs:111](../../../../../crates/shamir-bench-utils/src/vector_data.rs#L111); [crates/shamir-bench-utils/src/vector_data.rs:153](../../../../../crates/shamir-bench-utils/src/vector_data.rs#L153); [crates/shamir-bench-utils/src/vector_data.rs:179](../../../../../crates/shamir-bench-utils/src/vector_data.rs#L179).
+
+Grouping/duplicate: `SUMMARY.md#5.2`. This row is not another independent defect.
+
+<a id="review-6"></a>
+
+### Claim 6 — Inline `#[cfg(test)] mod tests` violates CLAUDE.md test-organisation rule 5
+
+Status: `confirmed-open`. Current risk: `low`.
+
+All nine tests remain inline, contrary to the explicit layout rule. They are registered through lib.rs and vector_data's cfg(test) block; placement does not prevent discovery.
+
+Evidence: [crates/shamir-bench-utils/src/lib.rs:17](../../../../../crates/shamir-bench-utils/src/lib.rs#L17); [crates/shamir-bench-utils/src/vector_data.rs:217](../../../../../crates/shamir-bench-utils/src/vector_data.rs#L217); [CLAUDE.md:594](../../../../../CLAUDE.md#L594).
+
+Grouping/duplicate: `SUMMARY.md#7.1`. This row is not another independent defect.
+
+<a id="review-7"></a>
+
+### Claim 7 — `clustered_vectors` Panics section omits the `dim == 0` assert; `sigma` domain undocumented
+
+Status: `confirmed-open`. Current risk: `nit`.
+
+The Panics section still lists only zero clusters, while zero dimension also asserts. No zero-dimension test or finite/nonnegative sigma contract exists; sigma is multiplied into every generated coordinate without validation.
+
+Evidence: [crates/shamir-bench-utils/src/vector_data.rs:163](../../../../../crates/shamir-bench-utils/src/vector_data.rs#L163); [crates/shamir-bench-utils/src/vector_data.rs:172](../../../../../crates/shamir-bench-utils/src/vector_data.rs#L172); [crates/shamir-bench-utils/src/vector_data.rs:204](../../../../../crates/shamir-bench-utils/src/vector_data.rs#L204); [crates/shamir-bench-utils/src/vector_data.rs:341](../../../../../crates/shamir-bench-utils/src/vector_data.rs#L341).
+
+Grouping/duplicate: `SUMMARY.md#6.1`. This row is not another independent defect.
+
+<a id="review-8"></a>
+
+### Claim 8 — Cargo.toml description advertises removed functionality
+
+Status: `confirmed-open`. Current risk: `nit`.
+
+The description still advertises BENCH_QUICK, but current exports provide only vector_data and optional peak_mem; lib.rs explicitly records removal of tier tuning.
+
+Evidence: [crates/shamir-bench-utils/Cargo.toml:6](../../../../../crates/shamir-bench-utils/Cargo.toml#L6); [crates/shamir-bench-utils/src/lib.rs:9](../../../../../crates/shamir-bench-utils/src/lib.rs#L9); [crates/shamir-bench-utils/src/lib.rs:14](../../../../../crates/shamir-bench-utils/src/lib.rs#L14).
+
+Grouping/duplicate: `SUMMARY.md#5.5`. This row is not another independent defect.
+
+<a id="review-9"></a>
+
+### Claim 9 — `round_robin_balances_clusters` asserts a statistical property as an exact equality
+
+Status: `unverified`. Current risk: `nit` (provisional; not a confirmed defect).
+
+The test does infer assignments by nearest centroid rather than observing i%k. However, its fixed seed and small sigma may give ample separation; no near-tie bound, affected target, or observed failure establishes the alleged portability flake.
+
+Evidence: [crates/shamir-bench-utils/src/vector_data.rs:201](../../../../../crates/shamir-bench-utils/src/vector_data.rs#L201); [crates/shamir-bench-utils/src/vector_data.rs:271](../../../../../crates/shamir-bench-utils/src/vector_data.rs#L271); [crates/shamir-bench-utils/src/vector_data.rs:285](../../../../../crates/shamir-bench-utils/src/vector_data.rs#L285).
+
+## Corrections and qualified non-findings
+
+- peak_mem measures tracked live heap bytes, not OS RSS; vector_report samples RSS separately through memory-stats.
+- The manifest's version requirement 0.3 does not automatically admit 0.4, and Cargo.lock pins 0.3.0. The open issue is absent behavioral tests, not an absent version pin.
+- The nine inline tests are wired. same_seed_is_byte_identical uses f32 equality, not byte/bit comparisons or historical golden output.
+- The Gaussian coverage gap is proven; a current wrong distribution and the claim that a particular mutation passes every test are not experimentally established.
+- A 24-bit conversion changes the float stream and needs an explicit compatibility decision. Cross-target exact transcendental golden values need the existing target caveat.
+- Moving tests is a layout correction, not a prerequisite for adding missing error-path or peak-memory tests.
+
+---
+
+<details>
+<summary>Historical report — preserved for provenance; not current status or instructions</summary>
+
 # shamir-bench-utils -- Correctness & TDD-coverage
 
 ## Summary
@@ -62,3 +193,5 @@ The crate is two small modules: `vector_data` (seeded LCG + clustered fixture ge
 - **Severity:** nit
 - **Issue:** The test requires every point's nearest centroid to equal its generating cluster (otherwise `counts != n / k`). The module doc itself (`:27-29`) says cross-target `f32` `ln`/`sqrt` identity is "not promised", so a near-tie in inter-centroid distances could flip one point's assignment on a different target and fail the exact assertion. Deterministic on a fixed target; brittleness is theoretical, but the test silently conflates "round-robin assigns balanced" with "nearest-centroid recovers the assignment".
 - **Suggested fix:** assert balance within a tolerance (e.g. every cluster count within 2 of `n / k`), or keep exact and note the cross-target caveat in the test.
+
+</details>

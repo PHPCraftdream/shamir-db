@@ -1,3 +1,87 @@
+<!-- revalidation:2026-10-08 source:92ad58266bf57ddea1fa3c8a47affba1a3a9a096 -->
+# shamir-types — concurrency-lockfree revalidation
+
+Source snapshot: `92ad58266bf57ddea1fa3c8a47affba1a3a9a096`. Revalidated 2026-10-08 by read-only XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run; no source fix is part of this update. Test registration/assertions are evidence of an oracle, not proof of a passing run.
+
+This section is authoritative for current status. Original titles/IDs are retained for traceability; a refuted title is not a current assertion. The collapsed historical report below is superseded, including its counts, severity, scenarios and fix instructions. Plan IDs preserve historical numbering, not a current release mandate. [Workspace methodology and status definitions](../SUMMARY.md#status-definitions).
+
+Reverse reads remain RCU-based and the registered write mutex remains sanctioned. Publication windows and leaked reservations remain. The report overstates lock-freedom, production use of for_each_field, and universal lens allocation safety.
+
+## Current claim decisions
+
+| Claim decisions | Open | Source-fixed | Partial | Refuted | Unverified | N/A |
+|---:|---:|---:|---:|---:|---:|---:|
+| 5 | 4 | 0 | 0 | 0 | 0 | 1 |
+
+These are decisions on report claims, including repeated roots, bundled observations and non-findings—not a unique-bug census. Closed/N/A rows have no current risk; unverified risk is provisional. Pure style and unmeasured optimization claims do not establish runtime impact.
+
+<a id="review-1"></a>
+
+### Claim 1 — `RecordRef::for_each_field` (lens impl) is O(fields²) — repeated full-scan lookups plus double decode of every value
+
+Status: `confirmed-open`. Current risk: `low`.
+
+The rescan mechanism remains, but the 34+ general RecordView/RecordRef consumers do not establish use of this particular method. Only types tests currently call for_each_field.
+
+Evidence: [crates/shamir-types/src/record_view/record_ref.rs:338](../../../../../crates/shamir-types/src/record_view/record_ref.rs#L338); [crates/shamir-types/src/record_view/lens.rs:1139](../../../../../crates/shamir-types/src/record_view/lens.rs#L1139); [crates/shamir-types/src/record_view/tests/record_ref_tests.rs:969](../../../../../crates/shamir-types/src/record_view/tests/record_ref_tests.rs#L969).
+
+Grouping/duplicate: `performance-hotpath.md:2`. This row is not another independent defect.
+
+<a id="review-2"></a>
+
+### Claim 2 — Header-driven unbounded preallocation in the zerocopy decoder and merge encoder (allocation abort on malformed input)
+
+Status: `confirmed-open`. Current risk: `high`.
+
+The four designated capacity allocations remain header-driven and uncapped. The custom decoder accepts string keys and has no current production caller found; merge consumes storage bytes. The claimed direct id-msgpack-to-custom-decoder route is incorrect, although reachable lens de-interning also trusts a header count.
+
+Evidence: [crates/shamir-types/src/codecs/interned/messagepack.rs:305](../../../../../crates/shamir-types/src/codecs/interned/messagepack.rs#L305); [crates/shamir-types/src/codecs/interned/messagepack.rs:318](../../../../../crates/shamir-types/src/codecs/interned/messagepack.rs#L318); [crates/shamir-types/src/codecs/interned/messagepack.rs:581](../../../../../crates/shamir-types/src/codecs/interned/messagepack.rs#L581); [crates/shamir-types/src/codecs/interned/messagepack.rs:585](../../../../../crates/shamir-types/src/codecs/interned/messagepack.rs#L585); [crates/shamir-types/src/codecs/interned/codec.rs:154](../../../../../crates/shamir-types/src/codecs/interned/codec.rs#L154); [crates/shamir-engine/src/table/write_exec.rs:382](../../../../../crates/shamir-engine/src/table/write_exec.rs#L382).
+
+Grouping/duplicate: `error-handling-lifecycle.md:1`. This row is not another independent defect.
+
+<a id="review-3"></a>
+
+### Claim 3 — Sanctioned `reverse_write_lock` also held across the doubling-growth clone-forward — write-stall grows with spine length
+
+Status: `not-applicable`. Current risk: —.
+
+O(N) work under the growth lock is real but already documented as the sanctioned correctness tradeoff. Dense monotonic growth has logarithmically many resizes and O(N) total clone work, not N full-spine clones. No measured unacceptable stall establishes a defect.
+
+Evidence: [crates/shamir-types/src/core/interner/interner.rs:18](../../../../../crates/shamir-types/src/core/interner/interner.rs#L18); [crates/shamir-types/src/core/interner/interner.rs:73](../../../../../crates/shamir-types/src/core/interner/interner.rs#L73); [crates/shamir-types/src/core/interner/interner.rs:209](../../../../../crates/shamir-types/src/core/interner/interner.rs#L209); [crates/shamir-types/src/core/interner/interner.rs:250](../../../../../crates/shamir-types/src/core/interner/interner.rs#L250); [CLAUDE.md:429](../../../../../CLAUDE.md#L429).
+
+<a id="review-4"></a>
+
+### Claim 4 — Transient forward-before-reverse publication window (and rollback window) visible to racing third-party readers
+
+Status: `confirmed-open`. Current risk: `low`.
+
+Forward insertion precedes reverse publication; racing get_ind or touch_ind's Exists path can return an id before reverse resolution succeeds. Collision rollback exposes a temporary mapping to the other name's id. Window duration is unmeasured; New's postcondition does not protect Exists callers.
+
+Evidence: [crates/shamir-types/src/core/interner/interner.rs:145](../../../../../crates/shamir-types/src/core/interner/interner.rs#L145); [crates/shamir-types/src/core/interner/interner.rs:169](../../../../../crates/shamir-types/src/core/interner/interner.rs#L169); [crates/shamir-types/src/core/interner/interner.rs:175](../../../../../crates/shamir-types/src/core/interner/interner.rs#L175); [crates/shamir-types/src/core/interner/interner.rs:404](../../../../../crates/shamir-types/src/core/interner/interner.rs#L404); [crates/shamir-types/src/core/interner/interner.rs:445](../../../../../crates/shamir-types/src/core/interner/interner.rs#L445).
+
+<a id="review-5"></a>
+
+### Claim 5 — README describes an obsolete locking model for `Interner`
+
+Status: `confirmed-open`. Current risk: `nit`.
+
+README still names a reverse DashMap and Mutex<u64>, while source uses ArcSwap/OnceLock, AtomicU64, and a reverse-write Mutex<()>. Its forward DashMap lock-free-read claim is also incorrect.
+
+Evidence: [crates/shamir-types/src/core/README.md:64](../../../../../crates/shamir-types/src/core/README.md#L64); [crates/shamir-types/src/core/README.md:83](../../../../../crates/shamir-types/src/core/README.md#L83); [crates/shamir-types/src/core/interner/interner.rs:59](../../../../../crates/shamir-types/src/core/interner/interner.rs#L59); [Cargo.lock:1096](../../../../../Cargo.lock#L1096).
+
+## Corrections and qualified non-findings
+
+- DashMap is sharded and locking; only the interner's reverse-read direction is lock-free. The crate is not wholly lock-free.
+- The sanctioned mutex, absence of executable async/await and scc len calls, immutable LazyLock sentinel, and thread-local RNG remain source-supported.
+- The claim of no std::collections references is now false: validate_keys.rs:78 exposes a documented hasher-generic HashMap boundary. This does not prove a default-RandomState violation.
+- Concurrent-growth and gap tests are registered and assert both directions, uniqueness, and gap capture. They do not deterministically test the forward-publication window or cross-API collision.
+- The blanket claim that the lens is safe from header allocation is false for RecordView::index at crates/shamir-types/src/record_view/lens.rs:1064.
+
+---
+
+<details>
+<summary>Historical report — preserved for provenance; not current status or instructions</summary>
+
 # shamir-types -- Concurrency & lock-free invariants
 
 ## Summary
@@ -52,3 +136,5 @@ Suggested fix: refresh §Interner / Thread Safety sections to name `ArcSwap` spi
 
 ---
 Notes (no violations found): the sole blocking lock is the registered exception (#3); zero `async fn`/`.await` in the crate so no guard-across-await exists; no `parking_lot`; no `std::collections`/`RandomState` anywhere — every hash structure goes through `THasher`; `DashMap::len()` (not scc, not clippy-banned) backs `Interner::len/is_empty`; `QUERY_VALUE_NULL` (`LazyLock`) is immutable; test coverage for the concurrency-sensitive core is strong (`test_concurrent_growth_no_lost_touches_no_dup_ids` 32×400 stress asserting both directions + unique ids, gap-semantics and trailing-capacity regressions).
+
+</details>

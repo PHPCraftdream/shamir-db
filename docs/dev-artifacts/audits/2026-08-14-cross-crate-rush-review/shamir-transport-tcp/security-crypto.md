@@ -1,3 +1,95 @@
+<!-- revalidation:2026-10-08 source:92ad58266bf57ddea1fa3c8a47affba1a3a9a096 -->
+# shamir-transport-tcp — security-crypto revalidation
+
+Source snapshot: `92ad58266bf57ddea1fa3c8a47affba1a3a9a096`. Revalidated 2026-10-08 by read-only XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run; no source fix is part of this update. Test registration/assertions are evidence of an oracle, not proof of a passing run.
+
+This section is authoritative for current status. Original titles/IDs are retained for traceability; a refuted title is not a current assertion. The collapsed historical report below is superseded, including its counts, severity, scenarios and fix instructions. Plan IDs preserve historical numbering, not a current release mandate. [Workspace methodology and status definitions](../SUMMARY.md#status-definitions).
+
+The unsafe pooled-read defect remains high priority. TLS 1.3 restriction, protocol-layer authentication and returned PEM zeroization are source-supported, but the public verifier still skips CertificateVerify and exporter diagnostics remain erased.
+
+## Current claim decisions
+
+| Claim decisions | Open | Source-fixed | Partial | Refuted | Unverified | N/A |
+|---:|---:|---:|---:|---:|---:|---:|
+| 5 | 5 | 0 | 0 | 0 | 0 | 0 |
+
+These are decisions on report claims, including repeated roots, bundled observations and non-findings—not a unique-bug census. Closed/N/A rows have no current risk; unverified risk is provisional. Pure style and unmeasured optimization claims do not establish runtime impact.
+
+<a id="review-1"></a>
+
+### Claim 1 — `read_frame_into`: unsafe `set_len` before `.await` — formal UB on `&mut [u8]` over uninit memory, and cancellation leaves `buf.len()` covering uninitialized bytes
+
+Status: `confirmed-open`. Current risk: `high`.
+
+Fresh or grown capacity is exposed as initialized before read_exact, whose pinned Tokio implementation constructs ReadBuf::new. Cancellation skips buf.clear. Production timeout/select paths reach this code but discard cancelled buffers; remote disclosure is not established.
+
+Evidence: [crates/shamir-transport-tcp/src/framing.rs:124](../../../../../crates/shamir-transport-tcp/src/framing.rs#L124); [crates/shamir-transport-tcp/src/framing.rs:129](../../../../../crates/shamir-transport-tcp/src/framing.rs#L129); [crates/shamir-transport-tcp/src/framing.rs:134](../../../../../crates/shamir-transport-tcp/src/framing.rs#L134); [crates/shamir-server/src/framer.rs:224](../../../../../crates/shamir-server/src/framer.rs#L224); [crates/shamir-server/src/connection/handshake.rs:717](../../../../../crates/shamir-server/src/connection/handshake.rs#L717); [crates/shamir-server/src/connection/request_loop.rs:280](../../../../../crates/shamir-server/src/connection/request_loop.rs#L280); [Cargo.lock:4195](../../../../../Cargo.lock#L4195).
+
+Grouping/duplicate: `SUMMARY.md#3.1`. This row is not another independent defect.
+
+<a id="review-2"></a>
+
+### Claim 2 — `NoCaVerify` disables all server authentication — chain, CertificateVerify proof-of-possession, and hostname — guarded only by a doc comment
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+Certificate and TLS 1.3 signature callbacks still return unconditional assertions. This public configuration is unauthenticated until protocol checks succeed; the production Rust client does perform SCRAM, identity-pin and exporter-bound signature checks before returning a connection.
+
+Evidence: [crates/shamir-transport-tcp/src/tls.rs:138](../../../../../crates/shamir-transport-tcp/src/tls.rs#L138); [crates/shamir-transport-tcp/src/tls.rs:158](../../../../../crates/shamir-transport-tcp/src/tls.rs#L158); [crates/shamir-client/src/client.rs:484](../../../../../crates/shamir-client/src/client.rs#L484); [crates/shamir-client/src/client.rs:614](../../../../../crates/shamir-client/src/client.rs#L614); [crates/shamir-connect/src/client/handshake.rs:258](../../../../../crates/shamir-connect/src/client/handshake.rs#L258).
+
+Grouping/duplicate: `SUMMARY.md#3.2`. This row is not another independent defect.
+
+<a id="review-3"></a>
+
+### Claim 3 — `extract_tls_exporter` collapses all errors (incl. incomplete handshake) into `None`, inviting constant/absent channel binding
+
+Status: `confirmed-open`. Current risk: `low`.
+
+The helper still discards rustls errors. Contrary to the report, production TCP and native-WS server callers already use a zero fallback; they call after successful TLS handshakes, so a trigger for None with normal pinned TLS 1.3 is not established. The Rust client fails closed.
+
+Evidence: [crates/shamir-transport-tcp/src/tls.rs:77](../../../../../crates/shamir-transport-tcp/src/tls.rs#L77); [crates/shamir-server/src/server/server_launcher.rs:1163](../../../../../crates/shamir-server/src/server/server_launcher.rs#L1163); [crates/shamir-server/src/server/server_launcher.rs:1391](../../../../../crates/shamir-server/src/server/server_launcher.rs#L1391); [crates/shamir-client/src/client.rs:480](../../../../../crates/shamir-client/src/client.rs#L480).
+
+Grouping/duplicate: `SUMMARY.md#3.3`. This row is not another independent defect.
+
+<a id="review-4"></a>
+
+### Claim 4 — Public library API returns `Box<dyn Error + Send + Sync>` instead of a `thiserror` enum
+
+Status: `confirmed-open`. Current risk: `low`.
+
+TLS constructors retain boxed errors and an untyped missing-key error; no TlsConfigError exists.
+
+Evidence: [crates/shamir-transport-tcp/src/tls.rs:30](../../../../../crates/shamir-transport-tcp/src/tls.rs#L30); [crates/shamir-transport-tcp/src/tls.rs:44](../../../../../crates/shamir-transport-tcp/src/tls.rs#L44); [crates/shamir-transport-tcp/src/tls.rs:50](../../../../../crates/shamir-transport-tcp/src/tls.rs#L50).
+
+Grouping/duplicate: `SUMMARY.md#6.2`. This row is not another independent defect.
+
+<a id="review-5"></a>
+
+### Claim 5 — Write-side frame cap is hardcoded, and the too-short-buffer error uses a misleading sentinel
+
+Status: `confirmed-open`. Current risk: `nit`.
+
+Both bundled conditions remain: hardcoded writer limits and TooLarge for malformed prefixes. These are API/diagnostic limitations, not independently demonstrated remote exploits.
+
+Evidence: [crates/shamir-transport-tcp/src/framing.rs:153](../../../../../crates/shamir-transport-tcp/src/framing.rs#L153); [crates/shamir-transport-tcp/src/framing.rs:192](../../../../../crates/shamir-transport-tcp/src/framing.rs#L192); [crates/shamir-transport-tcp/src/framing.rs:241](../../../../../crates/shamir-transport-tcp/src/framing.rs#L241); [crates/shamir-transport-tcp/src/framing.rs:250](../../../../../crates/shamir-transport-tcp/src/framing.rs#L250).
+
+Grouping/duplicate: `SUMMARY.md#5.1, SUMMARY.md#6.1`. This row is not another independent defect.
+
+## Corrections and qualified non-findings
+
+- Replace UB on every call with an unsound API reachable when the accepted payload covers uninitialized capacity. Early close/oversize returns and wholly previously initialized storage are different cases.
+- A Drop guard fixes cancellation cleanup only; it does not repair passing uninitialized storage through ReadBuf::new.
+- Current cancelled server reads discard their buffers. Potential disclosure through a caller inspecting a cancelled buffer is not a demonstrated remote production exploit.
+- Skipping CertificateVerify does not make post-handshake certificate/SPKI pinning impossible; it omits proof-of-possession verification. Restoring that proof does not replace protocol identity authentication.
+- Do not claim constant exporter bytes alone permit recorded-proof replay: auth_message also includes fresh client and server nonces; see crates/shamir-connect/src/common/auth_message.rs:87. The relevant weakening is loss of channel separation and relay resistance.
+- The 32-byte exporter contract is already documented at crates/shamir-transport-tcp/src/tls.rs:71 and specified at docs/guide-docs/client-server-protocol-spec/TRANSPORT_TCP.md:41.
+- Pinned rustls 0.23.37 has no dangerous_configuration feature; the danger API usage is not a missing-feature defect. Negative TLS-version tests are registered but were not executed.
+
+---
+
+<details>
+<summary>Historical report — preserved for provenance; not current status or instructions</summary>
+
 # shamir-transport-tcp -- Security & crypto boundary
 
 ## Summary
@@ -41,3 +133,5 @@ This crate is the TLS/framing boundary, not the SCRAM implementation (HMAC/SCRAM
 
 ### Coverage note (test-organization conformance)
 Tests follow the mandated layout (`src/tests/mod.rs` manifest-only, sibling `listener_tests.rs`; integration tests split by topic: `framing.rs`, `tls13_only.rs`, `handshake_e2e.rs`, `echo_e2e.rs`) and are genuinely strong for this theme: TLS 1.3-only refusal in **both** directions, exporter equality across ends, full SCRAM/pin e2e, and loopback-policy refusals covering `0.0.0.0`/`::`. The one gap relevant to this theme is the missing cancellation-path test for the unsafe pooled read (Finding 1).
+
+</details>

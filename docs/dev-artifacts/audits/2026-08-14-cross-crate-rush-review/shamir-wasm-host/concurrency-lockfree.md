@@ -1,3 +1,106 @@
+<!-- revalidation:2026-10-08 source:92ad58266bf57ddea1fa3c8a47affba1a3a9a096 -->
+# shamir-wasm-host — concurrency-lockfree revalidation
+
+Source snapshot: `92ad58266bf57ddea1fa3c8a47affba1a3a9a096`. Revalidated 2026-10-08 by read-only XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run; no source fix is part of this update. Test registration/assertions are evidence of an oracle, not proof of a passing run.
+
+This section is authoritative for current status. Original titles/IDs are retained for traceability; a refuted title is not a current assertion. The collapsed historical report below is superseded, including its counts, severity, scenarios and fix instructions. Plan IDs preserve historical numbering, not a current release mandate. [Workspace methodology and status definitions](../SUMMARY.md#status-definitions).
+
+Fuel descent and runtime-blocking compilation remain open, as do overwrite and rename races. Explicit lock absence is confirmed, but dependency internals should not be described as proven lock-free.
+
+## Current claim decisions
+
+| Claim decisions | Open | Source-fixed | Partial | Refuted | Unverified | N/A |
+|---:|---:|---:|---:|---:|---:|---:|
+| 6 | 6 | 0 | 0 | 0 | 0 | 0 |
+
+These are decisions on report claims, including repeated roots, bundled observations and non-findings—not a unique-bug census. Closed/N/A rows have no current risk; unverified risk is provisional. Pure style and unmeasured optimization claims do not establish runtime impact.
+
+<a id="review-1"></a>
+
+### Claim 1 — Aggregate cross-Store fuel budget does not bound the nested-call descent (grant loaded before ancestors debit)
+
+Status: `confirmed-open`. Current risk: `high`.
+
+The shared counter is loaded without reservation and charged only after the awaited invocation finishes. Ancestors' outstanding grants are invisible to descendant admission.
+
+Evidence: [crates/shamir-wasm-host/src/wasm/wasm_function.rs:438](../../../../../crates/shamir-wasm-host/src/wasm/wasm_function.rs#L438); [crates/shamir-wasm-host/src/wasm/wasm_function.rs:587](../../../../../crates/shamir-wasm-host/src/wasm/wasm_function.rs#L587).
+
+Grouping/duplicate: `SUMMARY.md#1.1`. This row is not another independent defect.
+
+<a id="review-2"></a>
+
+### Claim 2 — `compile_rust_source` blocks up to 120 s and is called directly on tokio workers (pillar 2)
+
+Status: `confirmed-open`. Current risk: `high`.
+
+Both async DDL paths invoke synchronous source compilation and Module compilation inline. Neither path offloads the expensive operations, and subprocess stages outside cargo's wait have no corresponding deadline.
+
+Evidence: [crates/shamir-db/src/shamir_db/shamir_db/function_management.rs:172](../../../../../crates/shamir-db/src/shamir_db/shamir_db/function_management.rs#L172); [crates/shamir-db/src/shamir_db/shamir_db/function_management.rs:183](../../../../../crates/shamir-db/src/shamir_db/shamir_db/function_management.rs#L183); [crates/shamir-db/src/shamir_db/shamir_db/validator_management.rs:221](../../../../../crates/shamir-db/src/shamir_db/shamir_db/validator_management.rs#L221).
+
+Grouping/duplicate: `SUMMARY.md#2.1`. This row is not another independent defect.
+
+<a id="review-3"></a>
+
+### Claim 3 — Non-atomic remove-then-insert overwrite in `replace` / `put` / `set`
+
+Status: `confirmed-open`. Current risk: `low`.
+
+All three overwrite operations retain the two-operation gap and ignore insertion failures. The review's specific interleaving is inaccurate: after B inserts, A's insert fails rather than replacing B.
+
+Evidence: [crates/shamir-wasm-host/src/registry.rs:52](../../../../../crates/shamir-wasm-host/src/registry.rs#L52); [crates/shamir-wasm-host/src/context.rs:52](../../../../../crates/shamir-wasm-host/src/context.rs#L52); [crates/shamir-wasm-host/src/context.rs:166](../../../../../crates/shamir-wasm-host/src/context.rs#L166).
+
+Grouping/duplicate: `SUMMARY.md#2.2`. This row is not another independent defect.
+
+<a id="review-4"></a>
+
+### Claim 4 — `FunctionRegistry::rename` rollback can silently drop the function
+
+Status: `confirmed-open`. Current risk: `low`.
+
+After removing from, a target collision triggers restoration whose insertion error is discarded. A racing registration of from can therefore prevent restoration and drop the captured artifact.
+
+Evidence: [crates/shamir-wasm-host/src/registry.rs:79](../../../../../crates/shamir-wasm-host/src/registry.rs#L79); [crates/shamir-wasm-host/src/registry.rs:84](../../../../../crates/shamir-wasm-host/src/registry.rs#L84); [crates/shamir-wasm-host/src/registry.rs:86](../../../../../crates/shamir-wasm-host/src/registry.rs#L86).
+
+Grouping/duplicate: `SUMMARY.md#2.3`. This row is not another independent defect.
+
+<a id="review-5"></a>
+
+### Claim 5 — Epoch-ticker spawn failure silently disables pure-CPU guest preemption
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+Ticker spawn errors are still discarded and engine creation succeeds. This removes independent wall-clock interruption; finite fuel remains an instruction-count bound, so CPU execution is not literally unbounded.
+
+Evidence: [crates/shamir-wasm-host/src/wasm/wasm_engine.rs:129](../../../../../crates/shamir-wasm-host/src/wasm/wasm_engine.rs#L129); [crates/shamir-wasm-host/src/wasm/wasm_engine.rs:162](../../../../../crates/shamir-wasm-host/src/wasm/wasm_engine.rs#L162).
+
+Grouping/duplicate: `SUMMARY.md#6.2`. This row is not another independent defect.
+
+<a id="review-6"></a>
+
+### Claim 6 — Nit: cargo child not killed on the `wait_timeout` error path
+
+Status: `confirmed-open`. Current risk: `low`.
+
+The wait error arm joins pipe readers without first killing or reaping cargo. Those joins can themselves block until the running process tree closes its pipe handles.
+
+Evidence: [crates/shamir-wasm-host/src/compile.rs:607](../../../../../crates/shamir-wasm-host/src/compile.rs#L607).
+
+Grouping/duplicate: `SUMMARY.md#6.8`. This row is not another independent defect.
+
+## Corrections and qualified non-findings
+
+- No explicit Mutex, RwLock, parking_lot lock, or guard held across await was found in this crate. scc::HashMap plus synchronous entry operations is not, by itself, proof of end-to-end lock-free progress.
+- Every inspected scc len use has its O(N) acknowledgement; registry invocation clones the Arc before awaiting.
+- Argon2 offloading is source-proven at crates/shamir-wasm-host/src/builtin.rs:63. The worker test at crates/shamir-wasm-host/src/tests/argon2id_tests.rs:92 is not a deterministic proof: its spawned task can run independently before an inline hash.
+- Overlapping writers have no natural total last-writer order. The concrete defects are transient absence and ignored failed insertion, not the report's asserted overwrite interleaving.
+- A top-level local fuel budget is not written back into the caller's FnCtx.
+- Compilation can take longer than 120 seconds because probes, teardown joins, and wasm-opt are outside the bounded cargo wait.
+
+---
+
+<details>
+<summary>Historical report — preserved for provenance; not current status or instructions</summary>
+
 # shamir-wasm-host -- Concurrency & lock-free invariants
 
 ## Summary
@@ -52,3 +155,5 @@ The crate is, with two exceptions, a model citizen of CLAUDE.md's five pillars: 
 - **Severity:** nit
 - **Issue:** The `Err(e)` arm of `child.wait_timeout(timeout)` joins the pipe-reader threads and returns, but never `kill()`s/`wait()`s the child. The timed-out path (`Ok(None)`) handles this correctly; the error path can orphan a running `cargo`/`rustc` process that keeps writing into the `TempDir` (and blocks its deletion on Windows).
 - **Suggested fix:** Mirror the timeout arm: `let _ = child.kill(); let _ = child.wait();` before returning the error.
+
+</details>

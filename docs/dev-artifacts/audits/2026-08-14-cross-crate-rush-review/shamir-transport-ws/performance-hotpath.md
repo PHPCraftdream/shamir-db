@@ -1,3 +1,97 @@
+<!-- revalidation:2026-10-08 source:92ad58266bf57ddea1fa3c8a47affba1a3a9a096 -->
+# shamir-transport-ws — performance-hotpath revalidation
+
+Source snapshot: `92ad58266bf57ddea1fa3c8a47affba1a3a9a096`. Revalidated 2026-10-08 by read-only XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run; no source fix is part of this update. Test registration/assertions are evidence of an oracle, not proof of a passing run.
+
+This section is authoritative for current status. Original titles/IDs are retained for traceability; a refuted title is not a current assertion. The collapsed historical report below is superseded, including its counts, severity, scenarios and fix instructions. Plan IDs preserve historical numbering, not a current release mandate. [Workspace methodology and status definitions](../SUMMARY.md#status-definitions).
+
+Per-send allocation/copy and per-accept policy cloning remain source-proven. Receive reuse and queue-growth guarantees need correction; measured runtime impact remains unknown.
+
+## Current claim decisions
+
+| Claim decisions | Open | Source-fixed | Partial | Refuted | Unverified | N/A |
+|---:|---:|---:|---:|---:|---:|---:|
+| 5 | 5 | 0 | 0 | 0 | 0 | 0 |
+
+These are decisions on report claims, including repeated roots, bundled observations and non-findings—not a unique-bug census. Closed/N/A rows have no current risk; unverified risk is provisional. Pure style and unmeasured optimization claims do not establish runtime impact.
+
+## Parent acceptance refinements
+
+- Source inspection resolves Pong handling: single pending Pong and read-time flushing coexist with an uncapped encoded write buffer under sustained WouldBlock.
+
+<a id="review-1"></a>
+
+### Claim 1 — WSS send hot path: fresh heap alloc + full-payload copy per frame; TCP's prereserved zero-copy path is silently defeated
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+The request writer supplies prefixed bytes, WS inherits the default that strips the prefix, and ws_send_sink allocates/copies them again. No owned-buffer send or WS prereserved override exists.
+
+Evidence: [crates/shamir-server/src/connection/request_loop.rs:198](../../../../../crates/shamir-server/src/connection/request_loop.rs#L198); [crates/shamir-server/src/framer.rs:123](../../../../../crates/shamir-server/src/framer.rs#L123); [crates/shamir-server/src/framer.rs:357](../../../../../crates/shamir-server/src/framer.rs#L357); [crates/shamir-transport-ws/src/framing.rs:119](../../../../../crates/shamir-transport-ws/src/framing.rs#L119).
+
+<a id="review-2"></a>
+
+### Claim 2 — Receive loop consumes unbounded consecutive control frames; auto-pong write queue is uncapped
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+The adapter has no control-frame budget. Parent pinned-source inspection corrects the mechanism: tungstenite 0.24 tries flushing during read and has a single replaceable additional_send Pong, so 'only the writer flushes' is false. However FrameCodec appends a Pong into its Vec before attempting the write; read ignores WouldBlock, and the default max_write_buffer_size is usize::MAX. A peer that keeps supplying Pings while refusing replies can grow that outgoing byte buffer. The SCRAM client_proof read has no surrounding timeout after the bounded AuthInit read. These are source-visible conditional backpressure/liveness risks; no CPU/RSS measurement or reproduction was performed.
+
+Evidence: [crates/shamir-transport-ws/src/framing.rs:176](../../../../../crates/shamir-transport-ws/src/framing.rs#L176); [crates/shamir-transport-ws/src/server.rs:43](../../../../../crates/shamir-transport-ws/src/server.rs#L43); [Cargo.lock:4245](../../../../../Cargo.lock#L4245); [Cargo.lock:4467](../../../../../Cargo.lock#L4467).
+
+Pinned dependency evidence: [tungstenite 0.24.0, src/protocol/mod.rs:387](https://docs.rs/crate/tungstenite/0.24.0/source/src/protocol/mod.rs); [tungstenite 0.24.0, src/protocol/mod.rs:729](https://docs.rs/crate/tungstenite/0.24.0/source/src/protocol/mod.rs); [tungstenite 0.24.0, src/protocol/frame/mod.rs:1](https://docs.rs/crate/tungstenite/0.24.0/source/src/protocol/frame/mod.rs).
+
+Grouping/duplicate: `security-crypto.md#4`. This row is not another independent defect.
+
+<a id="review-3"></a>
+
+### Claim 3 — Dead direct dependency `tungstenite = "0.29"` compiles a second, unused copy of tungstenite
+
+Status: `confirmed-open`. Current risk: `low`.
+
+The redundant dependency remains in the resolved graph. Build-time waste is structurally plausible; exact compilation cost and final binary bloat were not measured.
+
+Evidence: [crates/shamir-transport-ws/Cargo.toml:20](../../../../../crates/shamir-transport-ws/Cargo.toml#L20); [Cargo.lock:3781](../../../../../Cargo.lock#L3781); [Cargo.lock:4487](../../../../../Cargo.lock#L4487).
+
+Grouping/duplicate: `security-crypto.md#1`. This row is not another independent defect.
+
+<a id="review-4"></a>
+
+### Claim 4 — Doc drift: `server_ws_config` claims a "4 KiB pre-auth logical check … enforced in `crate::framing::ws_recv_into`" — no such enforcement exists in this crate
+
+Status: `confirmed-open`. Current risk: `nit`.
+
+The misleading attribution remains. Transport framing enforces a supplied cap; the server chooses MAX_PRE_AUTH_FRAME.
+
+Evidence: [crates/shamir-transport-ws/src/server.rs:27](../../../../../crates/shamir-transport-ws/src/server.rs#L27); [crates/shamir-transport-ws/src/framing.rs:163](../../../../../crates/shamir-transport-ws/src/framing.rs#L163); [crates/shamir-server/src/connection/handshake.rs:717](../../../../../crates/shamir-server/src/connection/handshake.rs#L717).
+
+<a id="review-5"></a>
+
+### Claim 5 — `accept_browser_ws` deep-clones the origin policy per connection accept
+
+Status: `confirmed-open`. Current risk: `nit`.
+
+Both transport accept and its production spawn site still clone the Vec<String> policy.
+
+Evidence: [crates/shamir-transport-ws/src/server.rs:118](../../../../../crates/shamir-transport-ws/src/server.rs#L118); [crates/shamir-server/src/server/server_launcher.rs:1472](../../../../../crates/shamir-server/src/server/server_launcher.rs#L1472).
+
+Grouping/duplicate: `concurrency-lockfree.md#2`. This row is not another independent defect.
+
+## Corrections and qualified non-findings
+
+- Receive validation is constant-time in payload length, but successful reception copies O(payload bytes). Only fitting caller scratch avoids adapter reallocation; WebSocket message assembly is separate.
+- The current concurrent production request loop allocates a fresh frame_buf at request_loop.rs:278. The report's claim that this loop reuses receive scratch is refuted.
+- The capacity test checks the supplied Vec, not all transport allocations.
+- One adapter allocation and one payload copy are proven. Exact tungstenite internal copies, two extra 16 MiB traversals, and throughput/latency penalties are unverified.
+- The proposed Vec sender cannot take ownership through the current &[u8] prereserved trait contract without coordinated caller/interface changes. Cloning scratch into Message::Binary does not remove the copy.
+- Do not retain the claimed 0.26 write-buffer API transition or unlimited Pong queue as established facts without checking effective 0.24 source.
+- No crate-owned locks or scc len calls exist. Allowlist matching is O(pattern count and compared string bytes), per handshake, rather than globally constant-time.
+
+---
+
+<details>
+<summary>Historical report — preserved for provenance; not current status or instructions</summary>
+
 # shamir-transport-ws — Performance & O(x→0)
 
 Scope: `crates/shamir-transport-ws/` (lib.rs, framing.rs, browser.rs, listener.rs, server.rs, tls_exporter.rs, Cargo.toml), judged against CLAUDE.md pillar 3 (O(x→0): no hidden O(N)/O(N²), no allocations in loops, no unbounded growth/buffering) and pillar 1 (no hot-path locks). Consumer context checked: `shamir-server/src/framer.rs` + `connection/request_loop.rs`, which drive `ws_send_sink` / `ws_recv_into_stream` once per request/response frame on the WSS path.
@@ -47,3 +141,5 @@ The receive path is genuinely O(x→0)-clean: `ws_recv_into_stream` recycles the
 - **Recv path allocation:** `ws_recv_into_stream` writes into the caller buffer with `clear` + `extend_from_slice`; capacity reuse is asserted by `tests/framing_round_trip.rs::round_trip_into_buffer_reuses_capacity`. The allocating `ws_recv` is the documented convenience variant and is not used by the server request loop (it uses `read_frame_into` with a reused `frame_buf`).
 - **Hidden O(N) scans:** `BrowserOriginPolicy::allows` is a linear scan but over an operator-config allowlist (constant, per-connection) — O(1) w.r.t. traffic. No `scc::*::len()`, no `Mutex`/`RwLock` anywhere in the crate (pillars 1/3/5 clean).
 - **Error-path allocations only:** `format!`/`to_string()` in `OriginRejected`/`WsFrameError` variants fire on rejection paths, not steady state.
+
+</details>

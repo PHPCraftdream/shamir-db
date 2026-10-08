@@ -1,3 +1,542 @@
+<!-- revalidation:2026-10-08 source:92ad58266bf57ddea1fa3c8a47affba1a3a9a096 -->
+# shamir-transport-tcp — SUMMARY revalidation
+
+Source snapshot: `92ad58266bf57ddea1fa3c8a47affba1a3a9a096`. Revalidated 2026-10-08 by read-only XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run; no source fix is part of this update. Test registration/assertions are evidence of an oracle, not proof of a passing run.
+
+This section is authoritative for current status. Original titles/IDs are retained for traceability; a refuted title is not a current assertion. The collapsed historical report below is superseded, including its counts, severity, scenarios and fix instructions. Plan IDs preserve historical numbering, not a current release mandate. [Workspace methodology and status definitions](../SUMMARY.md#status-definitions).
+
+The headline pooled-read soundness defect remains open, along with close-marker handling, TLS/API diagnostics and test gaps. No listed remediation is source-proven complete. The synthesis needs factual corrections for provider initialization, exporter fallback, replay, memory retention, measurements and style severity.
+
+## Current claim decisions
+
+| Claim decisions | Open | Source-fixed | Partial | Refuted | Unverified | N/A |
+|---:|---:|---:|---:|---:|---:|---:|
+| 30 | 29 | 0 | 0 | 0 | 1 | 0 |
+
+These are decisions on report claims, including repeated roots, bundled observations and non-findings—not a unique-bug census. Closed/N/A rows have no current risk; unverified risk is provisional. Pure style and unmeasured optimization claims do not establish runtime impact.
+
+<a id="review-1-1"></a>
+
+### Claim 1.1 — Zero-length payload write silently emits the close sentinel; module doc contradicts spec §2
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+All three data writers still accept zero-length payloads; both readers return PeerClose and the contradictory empty-data documentation remains.
+
+Evidence: [crates/shamir-transport-tcp/src/framing.rs:8](../../../../../crates/shamir-transport-tcp/src/framing.rs#L8); [crates/shamir-transport-tcp/src/framing.rs:53](../../../../../crates/shamir-transport-tcp/src/framing.rs#L53); [crates/shamir-transport-tcp/src/framing.rs:192](../../../../../crates/shamir-transport-tcp/src/framing.rs#L192); [crates/shamir-transport-tcp/src/framing.rs:250](../../../../../crates/shamir-transport-tcp/src/framing.rs#L250).
+
+<a id="review-1-2"></a>
+
+### Claim 1.2 — `tls.rs` has zero unit tests; all error branches unexercised (happy-path-only e2e coverage)
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+Only listener_tests is registered as a unit module. Reviewed transport integration and server lifecycle tests do not assert the specified PEM/key/mismatch/exporter failure branches.
+
+Evidence: [crates/shamir-transport-tcp/src/tests/mod.rs:1](../../../../../crates/shamir-transport-tcp/src/tests/mod.rs#L1); [crates/shamir-transport-tcp/src/tls.rs:45](../../../../../crates/shamir-transport-tcp/src/tls.rs#L45); [crates/shamir-transport-tcp/tests/handshake_e2e.rs:131](../../../../../crates/shamir-transport-tcp/tests/handshake_e2e.rs#L131).
+
+<a id="review-1-3"></a>
+
+### Claim 1.3 — Test name promises TLS-bind-on-unspecified coverage the body deliberately doesn't deliver
+
+Status: `confirmed-open`. Current risk: `low`.
+
+The named unspecified bind test still uses 127.0.0.1; predicate coverage does not test bind-time pass-through for an unspecified TLS address.
+
+Evidence: [crates/shamir-transport-tcp/src/tests/listener_tests.rs:58](../../../../../crates/shamir-transport-tcp/src/tests/listener_tests.rs#L58); [crates/shamir-transport-tcp/src/tests/listener_tests.rs:101](../../../../../crates/shamir-transport-tcp/src/tests/listener_tests.rs#L101).
+
+<a id="review-1-4"></a>
+
+### Claim 1.4 — Write-path boundary branches, EOF-vs-close distinction, and IPv4-mapped-IPv6 edge untested
+
+Status: `confirmed-open`. Current risk: `low`.
+
+Writer oversize and mapped-address pins remain absent. A truncated EOF cleanup test exists but lacks the claimed Io(UnexpectedEof) versus PeerClose assertion.
+
+Evidence: [crates/shamir-transport-tcp/tests/framing.rs:226](../../../../../crates/shamir-transport-tcp/tests/framing.rs#L226); [crates/shamir-transport-tcp/tests/framing.rs:240](../../../../../crates/shamir-transport-tcp/tests/framing.rs#L240); [crates/shamir-transport-tcp/tests/framing.rs:309](../../../../../crates/shamir-transport-tcp/tests/framing.rs#L309); [crates/shamir-transport-tcp/src/tests/listener_tests.rs:14](../../../../../crates/shamir-transport-tcp/src/tests/listener_tests.rs#L14).
+
+<a id="review-2-1"></a>
+
+### Claim 2.1 — Sync CPU-bound bootstrap helpers lack a spawn_blocking / bootstrap-only contract
+
+Status: `confirmed-open`. Current risk: `low`.
+
+The synchronous TLS helpers still lack runtime/bootstrap guidance. Current production invocation is startup initialization; a hot-path stall is hypothetical.
+
+Evidence: [crates/shamir-transport-tcp/src/tls.rs:22](../../../../../crates/shamir-transport-tcp/src/tls.rs#L22); [crates/shamir-transport-tcp/src/tls.rs:40](../../../../../crates/shamir-transport-tcp/src/tls.rs#L40); [crates/shamir-server/src/server/server_launcher.rs:601](../../../../../crates/shamir-server/src/server/server_launcher.rs#L601).
+
+<a id="review-2-2"></a>
+
+### Claim 2.2 — e2e tests run Argon2id inline on the test runtime thread while a peer task is spawned
+
+Status: `confirmed-open`. Current risk: `nit`.
+
+Both tests retain current-thread runtimes and direct synchronous challenge derivation. Blocking the worker is structural; the forecast future timeout is not demonstrated.
+
+Evidence: [crates/shamir-transport-tcp/tests/handshake_e2e.rs:113](../../../../../crates/shamir-transport-tcp/tests/handshake_e2e.rs#L113); [crates/shamir-transport-tcp/tests/handshake_e2e.rs:278](../../../../../crates/shamir-transport-tcp/tests/handshake_e2e.rs#L278); [crates/shamir-transport-tcp/tests/echo_e2e.rs:152](../../../../../crates/shamir-transport-tcp/tests/echo_e2e.rs#L152); [crates/shamir-transport-tcp/tests/echo_e2e.rs:376](../../../../../crates/shamir-transport-tcp/tests/echo_e2e.rs#L376).
+
+<a id="review-3-1"></a>
+
+### Claim 3.1 — `read_frame_into`: unsafe `set_len` before `.await` — formal UB on uninit memory, and cancellation leaves `buf.len()` covering uninitialized bytes
+
+Status: `confirmed-open`. Current risk: `high`.
+
+Accepted fresh/grown buffers expose uninitialized bytes through read_exact's initialized ReadBuf contract. Cancellation skips clearing. Production adapters and timeout/select callers reach it, but discard cancelled buffers; no remote disclosure was established.
+
+Evidence: [crates/shamir-transport-tcp/src/framing.rs:124](../../../../../crates/shamir-transport-tcp/src/framing.rs#L124); [crates/shamir-transport-tcp/src/framing.rs:129](../../../../../crates/shamir-transport-tcp/src/framing.rs#L129); [crates/shamir-server/src/framer.rs:224](../../../../../crates/shamir-server/src/framer.rs#L224); [crates/shamir-server/src/connection/handshake.rs:717](../../../../../crates/shamir-server/src/connection/handshake.rs#L717); [crates/shamir-server/src/connection/request_loop.rs:280](../../../../../crates/shamir-server/src/connection/request_loop.rs#L280).
+
+<a id="review-3-2"></a>
+
+### Claim 3.2 — `NoCaVerify` disables all server authentication — chain, CertificateVerify proof-of-possession, and hostname — guarded only by a doc comment
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+Both verifier assertions remain unconditional. Missing CertificateVerify validation is an API hardening concern; current Rust client protocol authentication checks the pin, SCRAM signature and exporter-bound identity signature.
+
+Evidence: [crates/shamir-transport-tcp/src/tls.rs:138](../../../../../crates/shamir-transport-tcp/src/tls.rs#L138); [crates/shamir-transport-tcp/src/tls.rs:158](../../../../../crates/shamir-transport-tcp/src/tls.rs#L158); [crates/shamir-client/src/client.rs:614](../../../../../crates/shamir-client/src/client.rs#L614); [crates/shamir-connect/src/client/handshake.rs:258](../../../../../crates/shamir-connect/src/client/handshake.rs#L258).
+
+<a id="review-3-3"></a>
+
+### Claim 3.3 — `extract_tls_exporter` collapses all errors (incl. incomplete handshake) into `None`, inviting constant/absent channel binding
+
+Status: `confirmed-open`. Current risk: `low`.
+
+Error erasure remains. Production server TCP/native-WS callers already fall back to zeros after successful TLS handshakes, while the client returns an error. None reachability in normal established TLS 1.3 is not demonstrated; output length is already documented.
+
+Evidence: [crates/shamir-transport-tcp/src/tls.rs:71](../../../../../crates/shamir-transport-tcp/src/tls.rs#L71); [crates/shamir-transport-tcp/src/tls.rs:81](../../../../../crates/shamir-transport-tcp/src/tls.rs#L81); [crates/shamir-server/src/server/server_launcher.rs:1163](../../../../../crates/shamir-server/src/server/server_launcher.rs#L1163); [crates/shamir-server/src/server/server_launcher.rs:1391](../../../../../crates/shamir-server/src/server/server_launcher.rs#L1391); [crates/shamir-client/src/client.rs:480](../../../../../crates/shamir-client/src/client.rs#L480).
+
+<a id="review-4-1"></a>
+
+### Claim 4.1 — Full-size allocation on declared length before any payload byte arrives (16 MiB amplification per connection)
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+Readers still allocate accepted declared length before payload arrival. Server pre-authentication allocation is capped at 4 KiB; post-authentication uses 16 MiB with an idle deadline. Capacity amplification is proven, resident totals are not.
+
+Evidence: [crates/shamir-transport-tcp/src/framing.rs:67](../../../../../crates/shamir-transport-tcp/src/framing.rs#L67); [crates/shamir-transport-tcp/src/framing.rs:124](../../../../../crates/shamir-transport-tcp/src/framing.rs#L124); [crates/shamir-server/src/connection/handshake.rs:714](../../../../../crates/shamir-server/src/connection/handshake.rs#L714); [crates/shamir-server/src/connection/request_loop.rs:297](../../../../../crates/shamir-server/src/connection/request_loop.rs#L297).
+
+<a id="review-4-2"></a>
+
+### Claim 4.2 — Pooled scratch buffers grow monotonically to the frame high-water mark; the documented `shrink_to_fit` mitigation is implemented by nobody
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+Helpers and persistent client reader retain high-water capacity without shrink policy. Server requests use fresh owned buffers and prereserved replies, so the synthesis's universal 32 MiB server lifetime-retention scenario is unsupported.
+
+Evidence: [crates/shamir-transport-tcp/src/framing.rs:89](../../../../../crates/shamir-transport-tcp/src/framing.rs#L89); [crates/shamir-transport-tcp/src/framing.rs:199](../../../../../crates/shamir-transport-tcp/src/framing.rs#L199); [crates/shamir-client/src/client.rs:312](../../../../../crates/shamir-client/src/client.rs#L312); [crates/shamir-server/src/connection/request_loop.rs:278](../../../../../crates/shamir-server/src/connection/request_loop.rs#L278); [crates/shamir-server/src/connection/request_loop.rs:198](../../../../../crates/shamir-server/src/connection/request_loop.rs#L198).
+
+<a id="review-4-3"></a>
+
+### Claim 4.3 — Two `read_exact` calls per frame: extra read round-trip on unbuffered plain-TCP streams
+
+Status: `unverified`. Current risk: `low` (provisional; not a confirmed defect).
+
+Two separate read operations and absent buffering guidance are source-supported; universal syscall counts, approximately doubled overhead and latency effects lack measurement.
+
+Evidence: [crates/shamir-transport-tcp/src/framing.rs:50](../../../../../crates/shamir-transport-tcp/src/framing.rs#L50); [crates/shamir-transport-tcp/src/framing.rs:68](../../../../../crates/shamir-transport-tcp/src/framing.rs#L68); [crates/shamir-transport-tcp/src/framing.rs:104](../../../../../crates/shamir-transport-tcp/src/framing.rs#L104); [crates/shamir-transport-tcp/src/framing.rs:129](../../../../../crates/shamir-transport-tcp/src/framing.rs#L129).
+
+<a id="review-4-4"></a>
+
+### Claim 4.4 — Allocating `read_frame`/`write_frame` remain the ergonomic defaults and are still on a production per-request hot path
+
+Status: `confirmed-open`. Current risk: `low`.
+
+The client request path still invokes write_frame, causing a combined-buffer allocation and payload copy. No measured latency or contention impact is claimed.
+
+Evidence: [crates/shamir-client/src/client.rs:1278](../../../../../crates/shamir-client/src/client.rs#L1278); [crates/shamir-transport-tcp/src/framing.rs:160](../../../../../crates/shamir-transport-tcp/src/framing.rs#L160).
+
+<a id="review-5-1"></a>
+
+### Claim 5.1 — Write-side frame cap is hardcoded to `MAX_FRAME_SIZE_DEFAULT`; reader/writer API asymmetry
+
+Status: `confirmed-open`. Current risk: `low`.
+
+Writers remain fixed at 16 MiB and readers remain parameterized. Current spec has phase-specific fixed limits; negotiated-limit failures remain hypothetical.
+
+Evidence: [crates/shamir-transport-tcp/src/framing.rs:47](../../../../../crates/shamir-transport-tcp/src/framing.rs#L47); [crates/shamir-transport-tcp/src/framing.rs:153](../../../../../crates/shamir-transport-tcp/src/framing.rs#L153); [crates/shamir-transport-tcp/src/framing.rs:192](../../../../../crates/shamir-transport-tcp/src/framing.rs#L192); [crates/shamir-transport-tcp/src/framing.rs:250](../../../../../crates/shamir-transport-tcp/src/framing.rs#L250).
+
+<a id="review-5-2"></a>
+
+### Claim 5.2 — Normative loopback predicate is not reusable, so shamir-server duplicates spec §2.2 policy
+
+Status: `confirmed-open`. Current risk: `low`.
+
+Both private predicates remain, currently equivalent. No shared exported predicate or actual policy disagreement exists.
+
+Evidence: [crates/shamir-transport-tcp/src/listener.rs:51](../../../../../crates/shamir-transport-tcp/src/listener.rs#L51); [crates/shamir-server/src/config.rs:877](../../../../../crates/shamir-server/src/config.rs#L877).
+
+<a id="review-5-3"></a>
+
+### Claim 5.3 — Docs advertise Unix-domain-socket binds for `Plain`; the API is `SocketAddr`/TCP-only
+
+Status: `confirmed-open`. Current risk: `nit`.
+
+UDS wording remains unqualified despite a TCP-only enforcement surface. The broader specification legitimately permits UDS.
+
+Evidence: [crates/shamir-transport-tcp/src/listener.rs:4](../../../../../crates/shamir-transport-tcp/src/listener.rs#L4); [crates/shamir-transport-tcp/src/listener.rs:30](../../../../../crates/shamir-transport-tcp/src/listener.rs#L30); [crates/shamir-transport-tcp/src/listener.rs:75](../../../../../crates/shamir-transport-tcp/src/listener.rs#L75).
+
+<a id="review-5-4"></a>
+
+### Claim 5.4 — Exporter doc cluster misdescribes the adapter abstraction
+
+Status: `confirmed-open`. Current risk: `nit`.
+
+Function docs still name rustls::ConnectionTrait and trait docs claim unsupported direct rustls implementations/version independence. Tokio-rustls streams do implement the local trait through the explicit impls, contrary to the synthesis's wording.
+
+Evidence: [crates/shamir-transport-tcp/src/tls.rs:73](../../../../../crates/shamir-transport-tcp/src/tls.rs#L73); [crates/shamir-transport-tcp/src/tls.rs:85](../../../../../crates/shamir-transport-tcp/src/tls.rs#L85); [crates/shamir-transport-tcp/src/tls.rs:98](../../../../../crates/shamir-transport-tcp/src/tls.rs#L98); [crates/shamir-transport-ws/src/tls_exporter.rs:20](../../../../../crates/shamir-transport-ws/src/tls_exporter.rs#L20).
+
+<a id="review-5-5"></a>
+
+### Claim 5.5 — `tokio` dependency pulls `features = ["full"]` in a library crate
+
+Status: `confirmed-open`. Current risk: `nit`.
+
+Full Tokio features remain enabled. Dependency breadth is proven, binary/compile savings are not measured.
+
+Evidence: [crates/shamir-transport-tcp/Cargo.toml:14](../../../../../crates/shamir-transport-tcp/Cargo.toml#L14).
+
+<a id="review-5-6"></a>
+
+### Claim 5.6 — Transport wire structs and fixtures duplicated across the two e2e test files
+
+Status: `confirmed-open`. Current risk: `nit`.
+
+Both integration files still duplicate handshake wire shapes and KDF/user fixtures.
+
+Evidence: [crates/shamir-transport-tcp/tests/handshake_e2e.rs:41](../../../../../crates/shamir-transport-tcp/tests/handshake_e2e.rs#L41); [crates/shamir-transport-tcp/tests/echo_e2e.rs:57](../../../../../crates/shamir-transport-tcp/tests/echo_e2e.rs#L57).
+
+<a id="review-6-1"></a>
+
+### Claim 6.1 — `write_frame_prereserved` reports every contract violation as `TooLarge`
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+Malformed prefix inputs remain misclassified, the integration test asserts the wrong variant, and TCP forwarding preserves it.
+
+Evidence: [crates/shamir-transport-tcp/src/framing.rs:241](../../../../../crates/shamir-transport-tcp/src/framing.rs#L241); [crates/shamir-transport-tcp/src/framing.rs:250](../../../../../crates/shamir-transport-tcp/src/framing.rs#L250); [crates/shamir-transport-tcp/tests/framing.rs:309](../../../../../crates/shamir-transport-tcp/tests/framing.rs#L309); [crates/shamir-server/src/framer.rs:317](../../../../../crates/shamir-server/src/framer.rs#L317).
+
+<a id="review-6-2"></a>
+
+### Claim 6.2 — `Box<dyn Error + Send + Sync>` in library APIs instead of a `thiserror` enum
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+Boxed TLS constructor errors and the missing-key string remain. Server lifecycle code flattens them, although concrete boxed errors can be downcast.
+
+Evidence: [crates/shamir-transport-tcp/src/tls.rs:30](../../../../../crates/shamir-transport-tcp/src/tls.rs#L30); [crates/shamir-transport-tcp/src/tls.rs:44](../../../../../crates/shamir-transport-tcp/src/tls.rs#L44); [crates/shamir-transport-tcp/src/tls.rs:50](../../../../../crates/shamir-transport-tcp/src/tls.rs#L50); [crates/shamir-server/src/tls.rs:116](../../../../../crates/shamir-server/src/tls.rs#L116).
+
+<a id="review-6-3"></a>
+
+### Claim 6.3 — TLS config builders can panic on missing/ambiguous rustls crypto provider
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+Convenience builders retain ambient-provider panic paths for ambiguity/custom-provider selection or incompatible suites. Pinned rustls automatically installs a unique default; missing explicit installation alone is not a defect under current AWS-LC defaults.
+
+Evidence: [crates/shamir-transport-tcp/src/tls.rs:54](../../../../../crates/shamir-transport-tcp/src/tls.rs#L54); [crates/shamir-transport-tcp/src/tls.rs:64](../../../../../crates/shamir-transport-tcp/src/tls.rs#L64); [crates/shamir-transport-tcp/Cargo.toml:18](../../../../../crates/shamir-transport-tcp/Cargo.toml#L18); [Cargo.lock:3048](../../../../../Cargo.lock#L3048).
+
+<a id="review-6-4"></a>
+
+### Claim 6.4 — Post-error stream state is undocumented (`TooLarge` desyncs the stream)
+
+Status: `confirmed-open`. Current risk: `low`.
+
+Header consumption before TooLarge and potentially partial I/O reads remain undocumented at the transport API. The server discards the connection on error.
+
+Evidence: [crates/shamir-transport-tcp/src/framing.rs:36](../../../../../crates/shamir-transport-tcp/src/framing.rs#L36); [crates/shamir-transport-tcp/src/framing.rs:56](../../../../../crates/shamir-transport-tcp/src/framing.rs#L56); [crates/shamir-server/src/connection/request_loop.rs:283](../../../../../crates/shamir-server/src/connection/request_loop.rs#L283).
+
+<a id="review-6-5"></a>
+
+### Claim 6.5 — Cancel-safety contract lives in the consumer, not the crate
+
+Status: `confirmed-open`. Current risk: `low`.
+
+Read futures still lack a cancellation/stream-discard contract. Server cancellation teardown is documented locally, not in the generic transport API.
+
+Evidence: [crates/shamir-transport-tcp/src/framing.rs:45](../../../../../crates/shamir-transport-tcp/src/framing.rs#L45); [crates/shamir-transport-tcp/src/framing.rs:98](../../../../../crates/shamir-transport-tcp/src/framing.rs#L98); [crates/shamir-server/src/connection/request_loop.rs:231](../../../../../crates/shamir-server/src/connection/request_loop.rs#L231).
+
+<a id="review-7-1"></a>
+
+### Claim 7.1 — Crate-root re-exports are partial, stale, and used by nobody
+
+Status: `confirmed-open`. Current risk: `low`.
+
+Root exports remain partial and unused by repository Rust consumers. This is API consistency debt, not a medium runtime defect or proof of no external consumers.
+
+Evidence: [crates/shamir-transport-tcp/src/lib.rs:12](../../../../../crates/shamir-transport-tcp/src/lib.rs#L12); [crates/shamir-transport-tcp/src/lib.rs:16](../../../../../crates/shamir-transport-tcp/src/lib.rs#L16).
+
+<a id="review-7-2"></a>
+
+### Claim 7.2 — Function-local `use` statements violate the imports-at-top rule (5 sites)
+
+Status: `confirmed-open`. Current risk: `nit`.
+
+All listed local imports remain; the actual count is six statements in four bodies. Placement is convention-only and has no established runtime impact.
+
+Evidence: [crates/shamir-transport-tcp/tests/framing.rs:50](../../../../../crates/shamir-transport-tcp/tests/framing.rs#L50); [crates/shamir-transport-tcp/tests/framing.rs:155](../../../../../crates/shamir-transport-tcp/tests/framing.rs#L155); [crates/shamir-transport-tcp/tests/tls13_only.rs:36](../../../../../crates/shamir-transport-tcp/tests/tls13_only.rs#L36); [crates/shamir-transport-tcp/tests/echo_e2e.rs:208](../../../../../crates/shamir-transport-tcp/tests/echo_e2e.rs#L208).
+
+<a id="review-7-3"></a>
+
+### Claim 7.3 — Speculative dead public consts with cargo-cult `#[allow(dead_code)]`
+
+Status: `confirmed-open`. Current risk: `nit`.
+
+Both public constants and redundant allowances remain without repository consumers; this is public-surface/style noise.
+
+Evidence: [crates/shamir-transport-tcp/src/listener.rs:96](../../../../../crates/shamir-transport-tcp/src/listener.rs#L96).
+
+<a id="review-7-4"></a>
+
+### Claim 7.4 — In-src `tests/` layout covers only one of three modules
+
+Status: `confirmed-open`. Current risk: `low`.
+
+Only listener unit tests are registered. Pure framing tests remain integration tests and no TLS unit error suite exists.
+
+Evidence: [crates/shamir-transport-tcp/src/tests/mod.rs:1](../../../../../crates/shamir-transport-tcp/src/tests/mod.rs#L1); [crates/shamir-transport-tcp/tests/framing.rs:203](../../../../../crates/shamir-transport-tcp/tests/framing.rs#L203).
+
+<a id="review-7-5"></a>
+
+### Claim 7.5 — Spec wire constant duplicated from a direct dependency
+
+Status: `confirmed-open`. Current risk: `low`.
+
+The identical exporter label remains independently defined and exporter context remains public. Current wire values agree; future divergence is maintenance risk.
+
+Evidence: [crates/shamir-transport-tcp/src/tls.rs:18](../../../../../crates/shamir-transport-tcp/src/tls.rs#L18); [crates/shamir-transport-tcp/src/tls.rs:20](../../../../../crates/shamir-transport-tcp/src/tls.rs#L20); [crates/shamir-connect/src/common/domain_tags.rs:35](../../../../../crates/shamir-connect/src/common/domain_tags.rs#L35).
+
+<a id="review-7-6"></a>
+
+### Claim 7.6 — Mixed spellings of the same upstream crate in one import block
+
+Status: `confirmed-open`. Current risk: `nit`.
+
+TLS imports still mix the direct pki-types crate and rustls's re-export; no functional type mismatch is shown.
+
+Evidence: [crates/shamir-transport-tcp/src/tls.rs:10](../../../../../crates/shamir-transport-tcp/src/tls.rs#L10); [crates/shamir-transport-tcp/src/tls.rs:12](../../../../../crates/shamir-transport-tcp/src/tls.rs#L12).
+
+## Current fix-plan state
+
+| Claim decisions | Open | Source-fixed | Partial | Refuted | Unverified | N/A |
+|---:|---:|---:|---:|---:|---:|---:|
+| 16 | 16 | 0 | 0 | 0 | 0 | 0 |
+
+A source-fixed item closes only its stated mechanism. Partial items retain the obligations named below; proposed fixes must obey the corrections and current contracts, not merely copy the historical recipe.
+
+<a id="plan-p0-1"></a>
+
+### Plan P0.1 — P0.1
+
+Status: `confirmed-open`. Current risk: —.
+
+No uninitialized ReadBuf/spare-capacity implementation, cancellation guard, cancellation documentation or cancellation regression test exists. A Drop guard alone would not repair the initialized-buffer precondition violation.
+
+Evidence: [crates/shamir-transport-tcp/src/framing.rs:124](../../../../../crates/shamir-transport-tcp/src/framing.rs#L124); [crates/shamir-transport-tcp/src/framing.rs:129](../../../../../crates/shamir-transport-tcp/src/framing.rs#L129); [crates/shamir-transport-tcp/tests/framing.rs:189](../../../../../crates/shamir-transport-tcp/tests/framing.rs#L189).
+
+<a id="plan-p0-2"></a>
+
+### Plan P0.2 — P0.2
+
+Status: `confirmed-open`. Current risk: —.
+
+No empty-data error or rejection exists in any writer; the false empty-data documentation remains and no empty-writer regression test is present.
+
+Evidence: [crates/shamir-transport-tcp/src/framing.rs:8](../../../../../crates/shamir-transport-tcp/src/framing.rs#L8); [crates/shamir-transport-tcp/src/framing.rs:153](../../../../../crates/shamir-transport-tcp/src/framing.rs#L153); [crates/shamir-transport-tcp/src/framing.rs:192](../../../../../crates/shamir-transport-tcp/src/framing.rs#L192); [crates/shamir-transport-tcp/src/framing.rs:250](../../../../../crates/shamir-transport-tcp/src/framing.rs#L250).
+
+<a id="plan-p0-3"></a>
+
+### Plan P0.3 — P0.3
+
+Status: `confirmed-open`. Current risk: —.
+
+TLS constructors remain boxed/infallible and use ambient-provider convenience builders. Explicit fallible provider configuration is absent; treating absence of a preinstalled default as an error would unnecessarily reject rustls's valid automatic-provider case.
+
+Evidence: [crates/shamir-transport-tcp/src/tls.rs:30](../../../../../crates/shamir-transport-tcp/src/tls.rs#L30); [crates/shamir-transport-tcp/src/tls.rs:44](../../../../../crates/shamir-transport-tcp/src/tls.rs#L44); [crates/shamir-transport-tcp/src/tls.rs:54](../../../../../crates/shamir-transport-tcp/src/tls.rs#L54); [crates/shamir-transport-tcp/src/tls.rs:63](../../../../../crates/shamir-transport-tcp/src/tls.rs#L63).
+
+<a id="plan-p1-4"></a>
+
+### Plan P1.4 — P1.4
+
+Status: `confirmed-open`. Current risk: —.
+
+No staged allocation, max_prealloc or buffered-byte deployment contract has been added. The practical 16 MiB production threat requires post-authentication access; pre-authentication reads already use 4 KiB.
+
+Evidence: [crates/shamir-transport-tcp/src/framing.rs:67](../../../../../crates/shamir-transport-tcp/src/framing.rs#L67); [crates/shamir-transport-tcp/src/framing.rs:124](../../../../../crates/shamir-transport-tcp/src/framing.rs#L124); [crates/shamir-server/src/connection/handshake.rs:714](../../../../../crates/shamir-server/src/connection/handshake.rs#L714).
+
+<a id="plan-p1-5"></a>
+
+### Plan P1.5 — P1.5
+
+Status: `confirmed-open`. Current risk: —.
+
+No shrink/hysteresis wrapper or large-growth reclamation test exists. Apply any policy to genuinely persistent buffers, particularly the client reader, rather than assuming server requests reuse scratch.
+
+Evidence: [crates/shamir-transport-tcp/src/framing.rs:89](../../../../../crates/shamir-transport-tcp/src/framing.rs#L89); [crates/shamir-transport-tcp/src/framing.rs:199](../../../../../crates/shamir-transport-tcp/src/framing.rs#L199); [crates/shamir-client/src/client.rs:312](../../../../../crates/shamir-client/src/client.rs#L312); [crates/shamir-server/src/connection/request_loop.rs:278](../../../../../crates/shamir-server/src/connection/request_loop.rs#L278).
+
+<a id="plan-p1-6"></a>
+
+### Plan P1.6 — P1.6
+
+Status: `confirmed-open`. Current risk: —.
+
+Malformed-prefix variants and updated assertions are absent; server default prechecks and TCP error forwarding remain.
+
+Evidence: [crates/shamir-transport-tcp/src/framing.rs:241](../../../../../crates/shamir-transport-tcp/src/framing.rs#L241); [crates/shamir-transport-tcp/tests/framing.rs:309](../../../../../crates/shamir-transport-tcp/tests/framing.rs#L309); [crates/shamir-server/src/framer.rs:118](../../../../../crates/shamir-server/src/framer.rs#L118); [crates/shamir-server/src/framer.rs:317](../../../../../crates/shamir-server/src/framer.rs#L317).
+
+<a id="plan-p1-7"></a>
+
+### Plan P1.7 — P1.7
+
+Status: `confirmed-open`. Current risk: —.
+
+TLS error tests, writer oversize tests, exact EOF error-kind assertions, mapped-address pin and real unspecified TLS bind coverage remain absent. Existing EOF cleanup coverage is not new remediation.
+
+Evidence: [crates/shamir-transport-tcp/src/tests/mod.rs:1](../../../../../crates/shamir-transport-tcp/src/tests/mod.rs#L1); [crates/shamir-transport-tcp/tests/framing.rs:226](../../../../../crates/shamir-transport-tcp/tests/framing.rs#L226); [crates/shamir-transport-tcp/src/tests/listener_tests.rs:101](../../../../../crates/shamir-transport-tcp/src/tests/listener_tests.rs#L101).
+
+<a id="plan-p1-8"></a>
+
+### Plan P1.8 — P1.8
+
+Status: `confirmed-open`. Current risk: —.
+
+CertificateVerify still returns an assertion and no explicit security-obligations section or enforcing variant exists. Optional certificate/SPKI pinning must not be confused with the protocol's separate Ed25519 identity pin.
+
+Evidence: [crates/shamir-transport-tcp/src/tls.rs:60](../../../../../crates/shamir-transport-tcp/src/tls.rs#L60); [crates/shamir-transport-tcp/src/tls.rs:158](../../../../../crates/shamir-transport-tcp/src/tls.rs#L158); [crates/shamir-client/src/client.rs:486](../../../../../crates/shamir-client/src/client.rs#L486).
+
+<a id="plan-p1-9"></a>
+
+### Plan P1.9 — P1.9
+
+Status: `confirmed-open`. Current risk: —.
+
+Exporter extraction still returns Option and erases errors; no fatal-on-failure contract exists. Fixed output length is already documented. Consumer follow-through must remove server zero fallbacks, not merely change e2e expect calls.
+
+Evidence: [crates/shamir-transport-tcp/src/tls.rs:71](../../../../../crates/shamir-transport-tcp/src/tls.rs#L71); [crates/shamir-transport-tcp/src/tls.rs:77](../../../../../crates/shamir-transport-tcp/src/tls.rs#L77); [crates/shamir-server/src/server/server_launcher.rs:1163](../../../../../crates/shamir-server/src/server/server_launcher.rs#L1163).
+
+<a id="plan-p1-10"></a>
+
+### Plan P1.10 — P1.10
+
+Status: `confirmed-open`. Current risk: —.
+
+Both public read contracts still omit cancellation and post-error stream-discard guidance. Describe possible partial consumption rather than assert that every error necessarily desynchronizes.
+
+Evidence: [crates/shamir-transport-tcp/src/framing.rs:36](../../../../../crates/shamir-transport-tcp/src/framing.rs#L36); [crates/shamir-transport-tcp/src/framing.rs:72](../../../../../crates/shamir-transport-tcp/src/framing.rs#L72); [crates/shamir-server/src/connection/request_loop.rs:231](../../../../../crates/shamir-server/src/connection/request_loop.rs#L231).
+
+<a id="plan-p2-11"></a>
+
+### Plan P2.11 — P2.11
+
+Status: `confirmed-open`. Current risk: —.
+
+Writer limit parameters/FrameLimits and a shared exported loopback predicate are absent; the server copy remains. Future negotiated limits should not be presented as an existing protocol feature.
+
+Evidence: [crates/shamir-transport-tcp/src/framing.rs:153](../../../../../crates/shamir-transport-tcp/src/framing.rs#L153); [crates/shamir-transport-tcp/src/framing.rs:250](../../../../../crates/shamir-transport-tcp/src/framing.rs#L250); [crates/shamir-transport-tcp/src/listener.rs:51](../../../../../crates/shamir-transport-tcp/src/listener.rs#L51); [crates/shamir-server/src/config.rs:877](../../../../../crates/shamir-server/src/config.rs#L877).
+
+<a id="plan-p2-12"></a>
+
+### Plan P2.12 — P2.12
+
+Status: `confirmed-open`. Current risk: —.
+
+Root exports remain partial and test wiring interleaved. Prefer completing/clarifying the public surface unless removal's compatibility impact is accepted.
+
+Evidence: [crates/shamir-transport-tcp/src/lib.rs:12](../../../../../crates/shamir-transport-tcp/src/lib.rs#L12); [crates/shamir-transport-tcp/src/lib.rs:13](../../../../../crates/shamir-transport-tcp/src/lib.rs#L13); [crates/shamir-transport-tcp/src/lib.rs:16](../../../../../crates/shamir-transport-tcp/src/lib.rs#L16).
+
+<a id="plan-p2-13"></a>
+
+### Plan P2.13 — P2.13
+
+Status: `confirmed-open`. Current risk: —.
+
+The listed function-local imports remain. Correct the task count to six use statements in four bodies; this is style-only cleanup.
+
+Evidence: [crates/shamir-transport-tcp/tests/framing.rs:50](../../../../../crates/shamir-transport-tcp/tests/framing.rs#L50); [crates/shamir-transport-tcp/tests/framing.rs:155](../../../../../crates/shamir-transport-tcp/tests/framing.rs#L155); [crates/shamir-transport-tcp/tests/tls13_only.rs:36](../../../../../crates/shamir-transport-tcp/tests/tls13_only.rs#L36); [crates/shamir-transport-tcp/tests/echo_e2e.rs:208](../../../../../crates/shamir-transport-tcp/tests/echo_e2e.rs#L208).
+
+<a id="plan-p2-14"></a>
+
+### Plan P2.14 — P2.14
+
+Status: `confirmed-open`. Current risk: —.
+
+No bootstrap/spawn_blocking documentation was added and both transport e2e KDF calls remain inline on current-thread runtimes.
+
+Evidence: [crates/shamir-transport-tcp/src/tls.rs:22](../../../../../crates/shamir-transport-tcp/src/tls.rs#L22); [crates/shamir-transport-tcp/src/tls.rs:40](../../../../../crates/shamir-transport-tcp/src/tls.rs#L40); [crates/shamir-transport-tcp/tests/handshake_e2e.rs:278](../../../../../crates/shamir-transport-tcp/tests/handshake_e2e.rs#L278); [crates/shamir-transport-tcp/tests/echo_e2e.rs:376](../../../../../crates/shamir-transport-tcp/tests/echo_e2e.rs#L376).
+
+<a id="plan-p2-15"></a>
+
+### Plan P2.15 — P2.15
+
+Status: `confirmed-open`. Current risk: —.
+
+Exporter constants remain duplicated/public, both loopback constants remain, and source test layout still registers listener_tests only. All bundled cleanup items are outstanding.
+
+Evidence: [crates/shamir-transport-tcp/src/tls.rs:18](../../../../../crates/shamir-transport-tcp/src/tls.rs#L18); [crates/shamir-transport-tcp/src/tls.rs:20](../../../../../crates/shamir-transport-tcp/src/tls.rs#L20); [crates/shamir-transport-tcp/src/listener.rs:96](../../../../../crates/shamir-transport-tcp/src/listener.rs#L96); [crates/shamir-transport-tcp/src/tests/mod.rs:1](../../../../../crates/shamir-transport-tcp/src/tests/mod.rs#L1).
+
+<a id="plan-p2-16"></a>
+
+### Plan P2.16 — P2.16
+
+Status: `confirmed-open`. Current risk: —.
+
+No BufReader guidance, pooled client writer migration, UDS qualification, exporter-doc correction, Tokio feature trim, shared e2e fixture or import-spelling unification has landed. The proposed syscall/latency payoff remains unverified.
+
+Evidence: [crates/shamir-transport-tcp/src/framing.rs:36](../../../../../crates/shamir-transport-tcp/src/framing.rs#L36); [crates/shamir-client/src/client.rs:1278](../../../../../crates/shamir-client/src/client.rs#L1278); [crates/shamir-transport-tcp/src/listener.rs:30](../../../../../crates/shamir-transport-tcp/src/listener.rs#L30); [crates/shamir-transport-tcp/src/tls.rs:73](../../../../../crates/shamir-transport-tcp/src/tls.rs#L73); [crates/shamir-transport-tcp/Cargo.toml:14](../../../../../crates/shamir-transport-tcp/Cargo.toml#L14); [crates/shamir-transport-tcp/tests/handshake_e2e.rs:41](../../../../../crates/shamir-transport-tcp/tests/handshake_e2e.rs#L41); [crates/shamir-transport-tcp/tests/echo_e2e.rs:57](../../../../../crates/shamir-transport-tcp/tests/echo_e2e.rs#L57).
+
+## Corrections and qualified non-findings
+
+- Keep the unsafe pooled-read headline, but remove UB on every call and unqualified remote-disclosure language. Fresh/grown uninitialized storage is the mechanism; production cancellation paths discard their buffers.
+- Historical Miri-test and commit-completion wording is not fix proof. The reviewed Miri-named tests cover successful reads and error cleanup, not cancellation or arbitrary legal AsyncRead observation.
+- The provider panic is conditional. Pinned rustls auto-installs an unambiguous provider; current manifests/defaults select AWS-LC. Test install_default calls do not prove missing installation must panic.
+- All current exporter callers expect is false: production server TCP/native-WS paths use unwrap_or zeros, while the Rust client returns an error. Their calls follow successful TLS handshakes, so fallback-trigger reachability is not established for normal pinned TLS 1.3.
+- The fixed 32-byte exporter contract is already documented; constant binding does not by itself enable recorded-proof replay because fresh nonces are included. It weakens channel separation/relay resistance.
+- Qualify 16 MiB amplification as accepted-length capacity allocation, primarily post-authentication in this server. Do not assert measured RSS or ignore pre-authentication limits, connection caps and read deadlines.
+- Refute the universal server lifetime-retention example: request buffers are freshly allocated and owned by dispatch tasks, and replies are prereserved owned buffers. Persistent client reader retention remains open.
+- Two read operations do not establish a universal syscall ratio or latency penalty. Single write_all does not prove one underlying write/TLS record. Bench setup recreates pooled scratch rather than retaining it across iterations.
+- Existing truncated EOF cleanup coverage must be acknowledged; the missing exact error-kind oracle remains. Default lib-only test execution excludes the framing/TLS integration files.
+- No explicit locks in this crate is source-supported, not a transitive lock-free guarantee. SessionStore::len uses DashMap shard locks/counts, not banned O(N) scc traversal.
+- Tokio-rustls streams genuinely implement ConnectionExporter through the local impls; the WS helper reuses them. The actual doc defects are the named generic trait, standalone rustls-connection claim and version-decoupling rationale.
+- Recalibrate root-export consistency to low and local-import/dead-constant cleanup to nit. There are six local use statements across four bodies, not five.
+- Boxed errors allow downcasting; server string flattening is a caller decision. Typed public variants remain absent.
+- Post-error stream documentation should say partial consumption may occur and require conservative discard, rather than claim every Err necessarily desynchronizes.
+- Original 49 lens rows and 30 synthesis entries are historical coverage counts, not counts of currently confirmed unresolved defects after corrections.
+- Fix Plan item 1 incorrectly references item 9 for cancel-safety documentation; the stream-contract item is 10.
+
+## Current follow-up order
+
+1. P0.1: repair pooled-read initialization soundness and cancellation-buffer safety; add registered cancellation and adversarial-reader oracles.
+2. P0.2: reserve zero-length wire output for explicit close and pin all three data-writer rejections.
+3. P0.3 and P1.7: add typed, explicitly fallible TLS configuration and genuine error-path coverage; preserve valid automatic-provider behavior.
+4. P1.9: retain exporter error diagnostics and fail closed in server consumers instead of substituting zeros.
+5. P1.4–P1.5: bound declared-length allocation and address genuinely persistent client capacity; do not base prioritization on unmeasured RSS totals.
+6. P1.6, P1.8 and P1.10: correct malformed-prefix diagnostics, CertificateVerify/security obligations and partial-read stream contracts.
+7. P2.16: remove source-proven per-request client framing allocation; measure plain-TCP buffering benefits before asserting syscall/latency gains.
+8. Remaining API consistency, fixture deduplication, test layout, import placement and documentation cleanup are lower-priority maintenance work.
+
+## Coverage and limitations
+
+- All 49 original findings, 30 consolidated findings and 16 numbered Fix Plan items are addressed; no TASK_GROUPS file exists in the assigned directory.
+- Read-only inspection only: no files changed, worktrees, agents, builds, tests, Miri, benchmarks or reproductions. Historical execution/pass claims remain independently unverified.
+- Runtime latency, syscall ratios, resident-memory totals and exploitability were not measured. Structural facts and conditional threat models are distinguished below.
+- Pinned upstream source was inspected read-only for rustls 0.23.37, Tokio 1.49.0 and DashMap 6.1.0; evidence references below remain repository-relative.
+- HEAD remained the requested revision with no relevant working-tree differences. Existing-claim revalidation is not a fresh whole-repository audit.
+
+## Reviewed document inventory
+
+- [correctness-tdd.md](./correctness-tdd.md) — 9 claim decisions; 0 explicit plan items.
+- [concurrency-lockfree.md](./concurrency-lockfree.md) — 2 claim decisions; 0 explicit plan items.
+- [security-crypto.md](./security-crypto.md) — 5 claim decisions; 0 explicit plan items.
+- [performance-hotpath.md](./performance-hotpath.md) — 4 claim decisions; 0 explicit plan items.
+- [api-wire-protocol.md](./api-wire-protocol.md) — 12 claim decisions; 0 explicit plan items.
+- [error-handling-lifecycle.md](./error-handling-lifecycle.md) — 9 claim decisions; 0 explicit plan items.
+- [style-claude-md.md](./style-claude-md.md) — 8 claim decisions; 0 explicit plan items.
+- [SUMMARY.md](./SUMMARY.md) — 30 claim decisions; 16 explicit plan items.
+
+---
+
+<details>
+<summary>Historical report — preserved for provenance; not current status or instructions</summary>
+
 # shamir-transport-tcp — Synthesized 7-lens review (consolidated single-file follow-up to the 2026-08-14 cross-crate review)
 
 Crate reviewed: `crates/shamir-transport-tcp/` — the TLS 1.3 (rustls) + length-prefix msgpack
@@ -410,3 +949,5 @@ error-handling #4 split across 1.2 and 1.4 — each half merged into its matchin
     `write_frame_into` (primary remediation lives in that crate); drop or implement the UDS doc
     clause; fix the exporter doc cluster; trim tokio features; share the e2e `Wire*` fixtures;
     pick one `rustls_pki_types` spelling. Closes **4.3**, **4.4**, **5.3**–**5.6**, **7.6**.
+
+</details>

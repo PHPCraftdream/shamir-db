@@ -1,3 +1,56 @@
+<!-- revalidation:2026-10-08 source:92ad58266bf57ddea1fa3c8a47affba1a3a9a096 -->
+# shamir-collections — performance-hotpath revalidation
+
+Source snapshot: `92ad58266bf57ddea1fa3c8a47affba1a3a9a096`. Revalidated 2026-10-08 by read-only XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run; no source fix is part of this update. Test registration/assertions are evidence of an oracle, not proof of a passing run.
+
+This section is authoritative for current status. Original titles/IDs are retained for traceability; a refuted title is not a current assertion. The collapsed historical report below is superseded, including its counts, severity, scenarios and fix instructions. Plan IDs preserve historical numbering, not a current release mandate. [Workspace methodology and status definitions](../SUMMARY.md#status-definitions).
+
+The removal-cost documentation gap and unsupported percentage remain open. The cited MVCC merge still performs repeated shift_remove calls, proving possible superlinear shifting work; no latency measurement was performed.
+
+## Current claim decisions
+
+| Claim decisions | Open | Source-fixed | Partial | Refuted | Unverified | N/A |
+|---:|---:|---:|---:|---:|---:|---:|
+| 2 | 2 | 0 | 0 | 0 | 0 | 0 |
+
+These are decisions on report claims, including repeated roots, bundled observations and non-findings—not a unique-bug census. Closed/N/A rows have no current risk; unverified risk is provisional. Pure style and unmeasured optimization claims do not establish runtime impact.
+
+<a id="review-1"></a>
+
+### Claim 1 — TMap/TSet docs omit the O(N) order-preserving-removal asymmetry; consumers hit it on hot paths via the alias invisibly
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+Alias rustdoc still omits removal costs. OverlayWinners remains a TMap and flush_group still calls shift_remove once per matched history group; repeated early-position removals can incur quadratic aggregate shifting. The consumer mechanism remains, not merely a stale citation.
+
+Evidence: [crates/shamir-collections/src/lib.rs:19](../../../../../crates/shamir-collections/src/lib.rs#L19); [crates/shamir-collections/src/lib.rs:22](../../../../../crates/shamir-collections/src/lib.rs#L22); [Cargo.lock:1783](../../../../../Cargo.lock#L1783); [crates/shamir-tx/src/mvcc_store/version_entry.rs:42](../../../../../crates/shamir-tx/src/mvcc_store/version_entry.rs#L42); [crates/shamir-tx/src/mvcc_store/version_entry.rs:124](../../../../../crates/shamir-tx/src/mvcc_store/version_entry.rs#L124); [crates/shamir-tx/src/mvcc_store/version_entry.rs:197](../../../../../crates/shamir-tx/src/mvcc_store/version_entry.rs#L197).
+
+<a id="review-2"></a>
+
+### Claim 2 — "~15–20% faster than TMap/TSet" claim on TFxMap/TFxSet has no benchmark anywhere in the workspace
+
+Status: `confirmed-open`. Current risk: `nit`.
+
+The numeric claim remains. Collection-using workspace benches were searched, but no comparative measurement supporting it was found; existing planner/filter benches do not establish this alias-family delta.
+
+Evidence: [crates/shamir-collections/src/lib.rs:41](../../../../../crates/shamir-collections/src/lib.rs#L41); [crates/shamir-collections/src/lib.rs:45](../../../../../crates/shamir-collections/src/lib.rs#L45); [crates/shamir-query-types/benches/batch_planner.rs:22](../../../../../crates/shamir-query-types/benches/batch_planner.rs#L22); [docs/dev-artifacts/audits/shamir-collections.md:38](../../../../../docs/dev-artifacts/audits/shamir-collections.md#L38).
+
+Grouping/duplicate: `correctness-tdd.md#2`. This row is not another independent defect.
+
+## Corrections and qualified non-findings
+
+- Constructor non-findings need correction: nonzero IndexMap/IndexSet capacity construction is O(capacity) and allocates an indices table plus dense entries, not one allocation and constant work.
+- The crate remains free of local loops, locks and async surfaces; delegated allocation costs still count.
+- Removal costs are average-case hash-table bounds: shift_remove shifts later entries, whereas swap_remove changes order. Deprecated remove is swap-removal.
+- The MVCC claim establishes structural worst-case work, not measured production slowdown or proof that every consumer selects removals blindly.
+- Changing the MVCC caller to swap_remove requires checking overlay-only output ordering; the documentation fix alone does not remove its shifting cost.
+- Suggested replacement wording must not say measurably faster without evidence. Use an explicitly unmeasured qualitative description or cite an actual comparative run.
+
+---
+
+<details>
+<summary>Historical report — preserved for provenance; not current status or instructions</summary>
+
 # shamir-collections -- Performance & O(x->0)
 
 ## Summary
@@ -25,3 +78,5 @@ The crate is a 64-line leaf: `THasher` plus five type aliases (`TMap`/`TSet` ove
 - Crate-wide `#![allow(clippy::disallowed_types)]` (lib.rs:9) is required for `TFxMap`/`TFxSet` and is sanctioned verbatim by workspace `clippy.toml` ("The ONE sanctioned allow-site") — documented design, not lint drift.
 - No locks, no async surfaces, no unbounded buffering owned by this crate.
 - Test-coverage note (for the record): the crate contains no `tests/` directory at all; given it exports pure type aliases + thin constructors, behavioral-test surface is near-zero, though finding #2 shows the perf claim would benefit from a bench rather than a unit test.
+
+</details>

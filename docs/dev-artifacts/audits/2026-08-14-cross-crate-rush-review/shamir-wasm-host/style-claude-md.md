@@ -1,3 +1,118 @@
+<!-- revalidation:2026-10-08 source:92ad58266bf57ddea1fa3c8a47affba1a3a9a096 -->
+# shamir-wasm-host — style-claude-md revalidation
+
+Source snapshot: `92ad58266bf57ddea1fa3c8a47affba1a3a9a096`. Revalidated 2026-10-08 by read-only XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run; no source fix is part of this update. Test registration/assertions are evidence of an oracle, not proof of a passing run.
+
+This section is authoritative for current status. Original titles/IDs are retained for traceability; a refuted title is not a current assertion. The collapsed historical report below is superseded, including its counts, severity, scenarios and fix instructions. Plan IDs preserve historical numbering, not a current release mandate. [Workspace methodology and status definitions](../SUMMARY.md#status-definitions).
+
+The seven mid-body imports and documentary/manifest nits remain. Structural layout is compliant; the optional net-guard split is not an objectively established convention violation.
+
+## Current claim decisions
+
+| Claim decisions | Open | Source-fixed | Partial | Refuted | Unverified | N/A |
+|---:|---:|---:|---:|---:|---:|---:|
+| 7 | 6 | 0 | 0 | 0 | 0 | 1 |
+
+These are decisions on report claims, including repeated roots, bundled observations and non-findings—not a unique-bug census. Closed/N/A rows have no current risk; unverified risk is provisional. Pure style and unmeasured optimization claims do not establish runtime impact.
+
+<a id="review-1"></a>
+
+### Claim 1 — Mid-body `use` statements violate the documented "Imports at the top" rule (7 sites)
+
+Status: `confirmed-open`. Current risk: `nit`.
+
+Both pipe-reader closures and five compile tests still contain the identified local imports, without a collision or other documented exception. This is convention-only debt, not runtime Medium or High.
+
+Evidence: [crates/shamir-wasm-host/src/compile.rs:574](../../../../../crates/shamir-wasm-host/src/compile.rs#L574); [crates/shamir-wasm-host/src/compile.rs:582](../../../../../crates/shamir-wasm-host/src/compile.rs#L582); [crates/shamir-wasm-host/src/tests/compile_tests.rs:111](../../../../../crates/shamir-wasm-host/src/tests/compile_tests.rs#L111); [crates/shamir-wasm-host/src/tests/compile_tests.rs:128](../../../../../crates/shamir-wasm-host/src/tests/compile_tests.rs#L128); [crates/shamir-wasm-host/src/tests/compile_tests.rs:140](../../../../../crates/shamir-wasm-host/src/tests/compile_tests.rs#L140); [crates/shamir-wasm-host/src/tests/compile_tests.rs:153](../../../../../crates/shamir-wasm-host/src/tests/compile_tests.rs#L153); [crates/shamir-wasm-host/src/tests/compile_tests.rs:169](../../../../../crates/shamir-wasm-host/src/tests/compile_tests.rs#L169).
+
+Grouping/duplicate: `SUMMARY.md#7.1`. This row is not another independent defect.
+
+<a id="review-2"></a>
+
+### Claim 2 — `glob_matches` duplicated in `net_gateway.rs` under a doc comment falsely claiming reuse
+
+Status: `confirmed-open`. Current risk: `low`.
+
+Both implementations remain separate and egress documentation still claims reuse. The demonstrated issue is duplication/drift risk; no current runtime policy divergence was established.
+
+Evidence: [crates/shamir-wasm-host/src/net_gateway.rs:483](../../../../../crates/shamir-wasm-host/src/net_gateway.rs#L483); [crates/shamir-wasm-host/src/env_policy.rs:75](../../../../../crates/shamir-wasm-host/src/env_policy.rs#L75).
+
+Grouping/duplicate: `SUMMARY.md#7.2`. This row is not another independent defect.
+
+<a id="review-3"></a>
+
+### Claim 3 — Verbatim-duplicated doc-comment block on `host_call`
+
+Status: `confirmed-open`. Current risk: `nit`.
+
+The same host-call summary remains repeated consecutively in the doc comment.
+
+Evidence: [crates/shamir-wasm-host/src/wasm/host_call.rs:16](../../../../../crates/shamir-wasm-host/src/wasm/host_call.rs#L16); [crates/shamir-wasm-host/src/wasm/host_call.rs:22](../../../../../crates/shamir-wasm-host/src/wasm/host_call.rs#L22).
+
+Grouping/duplicate: `SUMMARY.md#7.3`. This row is not another independent defect.
+
+<a id="review-4"></a>
+
+### Claim 4 — `net_gateway.rs` carries two primary concerns (one-file-one-export, borderline)
+
+Status: `not-applicable`. Current risk: —.
+
+CLAUDE permits closely coupled groups, and the gateway documentation explicitly requires these egress guards. Separating DTOs/trait from guard helpers is optional organization, not a proven structural or behavioral defect.
+
+Evidence: [CLAUDE.md:509](../../../../../CLAUDE.md#L509); [crates/shamir-wasm-host/src/net_gateway.rs:7](../../../../../crates/shamir-wasm-host/src/net_gateway.rs#L7); [crates/shamir-wasm-host/src/net_gateway.rs:58](../../../../../crates/shamir-wasm-host/src/net_gateway.rs#L58).
+
+Grouping/duplicate: `SUMMARY.md#7.4`. This row is not another independent defect.
+
+<a id="review-5"></a>
+
+### Claim 5 — Unused direct dependency `serde` in Cargo.toml
+
+Status: `confirmed-open`. Current risk: `nit`.
+
+The direct serde declaration remains unused by this crate's source. Removing it is manifest cleanup; extra compilation cost is not established under workspace feature unification.
+
+Evidence: [crates/shamir-wasm-host/Cargo.toml:14](../../../../../crates/shamir-wasm-host/Cargo.toml#L14).
+
+Grouping/duplicate: `SUMMARY.md#7.5`. This row is not another independent defect.
+
+<a id="review-6"></a>
+
+### Claim 6 — Security-bearing host imports untested in this crate's own `tests/` (test-locality)
+
+Status: `confirmed-open`. Current risk: `low`.
+
+Local env tests exercise native GlobalVars, not guest global imports. Actual grant/write-protection guest tests remain downstream and can skip when source compilation is unavailable.
+
+Evidence: [crates/shamir-wasm-host/src/tests/env_globals_tests.rs:54](../../../../../crates/shamir-wasm-host/src/tests/env_globals_tests.rs#L54); [crates/shamir-db/tests/functions_lifecycle.rs:1116](../../../../../crates/shamir-db/tests/functions_lifecycle.rs#L1116); [crates/shamir-db/tests/functions_lifecycle.rs:1228](../../../../../crates/shamir-db/tests/functions_lifecycle.rs#L1228).
+
+Grouping/duplicate: `SUMMARY.md#6.3`. This row is not another independent defect.
+
+<a id="review-7"></a>
+
+### Claim 7 — `wasm/mod.rs` doc list omits the sanitizer re-exports
+
+Status: `confirmed-open`. Current risk: `nit`.
+
+The documented public-surface list still names only engine/limits/function, while the module also reexports the sanitizer and sanctioned import list.
+
+Evidence: [crates/shamir-wasm-host/src/wasm/mod.rs:3](../../../../../crates/shamir-wasm-host/src/wasm/mod.rs#L3); [crates/shamir-wasm-host/src/wasm/mod.rs:18](../../../../../crates/shamir-wasm-host/src/wasm/mod.rs#L18).
+
+Grouping/duplicate: `SUMMARY.md#7.7`. This row is not another independent defect.
+
+## Corrections and qualified non-findings
+
+- Imports and duplicated prose are nits; duplicated security-policy implementations are maintainability risk without a demonstrated runtime divergence.
+- The crate's two mod.rs files and lib.rs remain manifests/reexports with test registration; all ten topic files are registered, and no inline test module or TODO/FIXME debris was found.
+- The one-file rule explicitly permits closely coupled groups, so the proposed net_guard split is optional.
+- Direct lock absence and acknowledged scc len calls are confirmed; dependence on scc is not proof of lock-free progress.
+- Unused serde does not necessarily add an additional proc-macro build in this workspace.
+- The SUMMARY census incorrectly puts this report's two original Medium findings in the High column.
+
+---
+
+<details>
+<summary>Historical report — preserved for provenance; not current status or instructions</summary>
+
 # shamir-wasm-host -- Style & CLAUDE.md structural conformance
 
 ## Summary
@@ -85,3 +200,5 @@ The crate is strongly conformant on the structural conventions: every `mod.rs` (
 **Failure scenario:** none; minor doc drift.
 
 **Suggested fix:** add a `* verify_wasm_module / SANCTIONED_HOST_IMPORTS — import-allowlist sanitizer (wasm_sanitizer).` bullet.
+
+</details>

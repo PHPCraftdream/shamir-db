@@ -1,3 +1,138 @@
+<!-- revalidation:2026-10-08 source:92ad58266bf57ddea1fa3c8a47affba1a3a9a096 -->
+# shamir-query-types — performance-hotpath revalidation
+
+Source snapshot: `92ad58266bf57ddea1fa3c8a47affba1a3a9a096`. Revalidated 2026-10-08 by read-only XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run; no source fix is part of this update. Test registration/assertions are evidence of an oracle, not proof of a passing run.
+
+This section is authoritative for current status. Original titles/IDs are retained for traceability; a refuted title is not a current assertion. The collapsed historical report below is superseded, including its counts, severity, scenarios and fix instructions. Plan IDs preserve historical numbering, not a current release mandate. [Workspace methodology and status definitions](../SUMMARY.md#status-definitions).
+
+Codec passes, row sorting, scalar-accessor cloning, and planner allocations are structurally confirmed, but latency/multiplier estimates are not measured. Neighbor remediation removed per-iteration replanning and deduplicates authorization checks. The operand-depth omission is fixed.
+
+## Current claim decisions
+
+| Claim decisions | Open | Source-fixed | Partial | Refuted | Unverified | N/A |
+|---:|---:|---:|---:|---:|---:|---:|
+| 10 | 8 | 1 | 1 | 0 | 0 | 0 |
+
+These are decisions on report claims, including repeated roots, bundled observations and non-findings—not a unique-bug census. Closed/N/A rows have no current risk; unverified risk is provisional. Pure style and unmeasured optimization claims do not establish runtime impact.
+
+<a id="review-1"></a>
+
+### Claim 1 — `BatchOp::deserialize` — triple codec round-trip + key clones + linear dispatch chain per op
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+QueryValue buffering, key String clones, full re-encode, and typed re-decode remain. Discriminator probes repeatedly scan cloned keys. The only registered crate bench still measures planning, not decoding. This proves allocation/traversal costs, not High latency or the numerical workload estimates.
+
+Evidence: [crates/shamir-query-types/src/batch/batch_op.rs:262](../../../../../crates/shamir-query-types/src/batch/batch_op.rs#L262); [crates/shamir-query-types/src/batch/batch_op.rs:266](../../../../../crates/shamir-query-types/src/batch/batch_op.rs#L266); [crates/shamir-query-types/src/batch/batch_op.rs:277](../../../../../crates/shamir-query-types/src/batch/batch_op.rs#L277); [crates/shamir-query-types/src/batch/batch_op.rs:287](../../../../../crates/shamir-query-types/src/batch/batch_op.rs#L287); [crates/shamir-query-types/Cargo.toml:47](../../../../../crates/shamir-query-types/Cargo.toml#L47).
+
+<a id="review-2"></a>
+
+### Claim 2 — `InsertedRecord::serialize` — per-record `Vec` collect + sort + base58, contradicting the "allocation-free" module claim
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+Map serialization still allocates a pairs Vec and sorts O(F log F); present ids also create base58 strings. No cached sorted order exists. The zero-intermediate-map construction claim is narrower than allocation-free serialization; replication fan-out multipliers were not traced.
+
+Evidence: [crates/shamir-query-types/src/write/inserted_record.rs:1](../../../../../crates/shamir-query-types/src/write/inserted_record.rs#L1); [crates/shamir-query-types/src/write/inserted_record.rs:32](../../../../../crates/shamir-query-types/src/write/inserted_record.rs#L32); [crates/shamir-query-types/src/write/inserted_record.rs:39](../../../../../crates/shamir-query-types/src/write/inserted_record.rs#L39); [crates/shamir-query-types/src/write/inserted_record.rs:40](../../../../../crates/shamir-query-types/src/write/inserted_record.rs#L40).
+
+<a id="review-3"></a>
+
+### Claim 3 — Filter depth guard does not cover `FilterValue::Cond` nesting — unbounded deserialize-time recursion
+
+Status: `fixed`. Current risk: —.
+
+The combined iterative Filter/FilterValue depth checker now covers Cond conditions and branches with registered Array/Cond regressions. The separate unlimited-codec claim is refuted by pinned rmp-serde 1.3.1's container counter, not a later fix. Neither result establishes stack safety at every permitted codec depth on every target.
+
+Evidence: [crates/shamir-query-types/src/filter/filter_enum.rs:321](../../../../../crates/shamir-query-types/src/filter/filter_enum.rs#L321); [crates/shamir-query-types/src/filter/filter_enum.rs:342](../../../../../crates/shamir-query-types/src/filter/filter_enum.rs#L342); [crates/shamir-query-types/src/filter/tests/filter_enum_tests.rs:256](../../../../../crates/shamir-query-types/src/filter/tests/filter_enum_tests.rs#L256); [Cargo.lock:2949](../../../../../Cargo.lock#L2949).
+
+Pinned dependency evidence: [rmp-serde 1.3.1, src/decode.rs:294](https://docs.rs/crate/rmp-serde/1.3.1/source/src/decode.rs); [rmp-serde 1.3.1, src/decode.rs:566](https://docs.rs/crate/rmp-serde/1.3.1/source/src/decode.rs).
+
+Grouping/duplicate: `security-crypto.md#1,#3`. This row is not another independent defect.
+
+<a id="review-4"></a>
+
+### Claim 4 — `FilterValue` — 13-variant `#[serde(untagged)]` enum: content buffering + ~6 failed map-shaped trials per marker value
+
+Status: `confirmed-open`. Current risk: `low`.
+
+The 13-variant untagged enum and ordered trial decoding remain. Cached serde confirms buffering/trials. Failed map-shaped trial count varies by selected variant, from zero preceding marker variants for FieldRef to five for Param; no sevenfold latency claim is proven.
+
+Evidence: [crates/shamir-query-types/src/filter/filter_value.rs:9](../../../../../crates/shamir-query-types/src/filter/filter_value.rs#L9); [crates/shamir-query-types/src/filter/filter_value.rs:48](../../../../../crates/shamir-query-types/src/filter/filter_value.rs#L48); [crates/shamir-query-types/src/filter/filter_value.rs:77](../../../../../crates/shamir-query-types/src/filter/filter_value.rs#L77); [Cargo.lock:3233](../../../../../Cargo.lock#L3233).
+
+<a id="review-5"></a>
+
+### Claim 5 — `QueryRecord::get_value_{i64,u64,bool}` — deep-clones the whole `Inserted` record per scalar lookup
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+All three Inserted scalar accessor arms still call get_value_owned, which calls as_value and clones all fields before cloning the selected value. The string accessor already borrows directly. The O(record-size) per lookup mechanism is unchanged.
+
+Evidence: [crates/shamir-query-types/src/read/query_record.rs:192](../../../../../crates/shamir-query-types/src/read/query_record.rs#L192); [crates/shamir-query-types/src/read/query_record.rs:218](../../../../../crates/shamir-query-types/src/read/query_record.rs#L218); [crates/shamir-query-types/src/read/query_record.rs:246](../../../../../crates/shamir-query-types/src/read/query_record.rs#L246); [crates/shamir-query-types/src/read/query_record.rs:261](../../../../../crates/shamir-query-types/src/read/query_record.rs#L261); [crates/shamir-query-types/src/read/query_record.rs:277](../../../../../crates/shamir-query-types/src/read/query_record.rs#L277).
+
+<a id="review-6"></a>
+
+### Claim 6 — Batch planner — redundant alias-set clone and repeated String re-cloning through the plan
+
+Status: `confirmed-open`. Current risk: `low`.
+
+Redundant aliases/alias_order collections, provenance/dependency clones, and deps[k] lookups remain. The engine now plans each ForEach body once before its loop, so the report's per-iteration replanning multiplier is stale.
+
+Evidence: [crates/shamir-query-types/src/batch/planner.rs:163](../../../../../crates/shamir-query-types/src/batch/planner.rs#L163); [crates/shamir-query-types/src/batch/planner.rs:226](../../../../../crates/shamir-query-types/src/batch/planner.rs#L226); [crates/shamir-query-types/src/batch/planner.rs:816](../../../../../crates/shamir-query-types/src/batch/planner.rs#L816); [crates/shamir-engine/src/query/batch/query_runner.rs:882](../../../../../crates/shamir-engine/src/query/batch/query_runner.rs#L882).
+
+<a id="review-7"></a>
+
+### Claim 7 — Three separate full-tree recursive walks per request: `is_write`, `distinct_repos`, `collect_required_access`
+
+Status: `partially-fixed`. Current risk: `low`.
+
+Separate recursive walkers and duplicate result/path allocations remain. Authorized::authorize now deduplicates requirements before gate.check, refuting repeated authorization-check cost. Three passes alone are linear; repeated nested-level scans are O(ND), not inherently quadratic at fixed depth.
+
+Evidence: [crates/shamir-query-types/src/batch/batch_op.rs:764](../../../../../crates/shamir-query-types/src/batch/batch_op.rs#L764); [crates/shamir-query-types/src/batch/query_entry.rs:102](../../../../../crates/shamir-query-types/src/batch/query_entry.rs#L102); [crates/shamir-query-types/src/batch/query_entry.rs:140](../../../../../crates/shamir-query-types/src/batch/query_entry.rs#L140); [crates/shamir-engine/src/query/batch/authorized.rs:102](../../../../../crates/shamir-engine/src/query/batch/authorized.rs#L102).
+
+<a id="review-8"></a>
+
+### Claim 8 — `Pagination::eq` (`After`) — two msgpack encodes per equality comparison
+
+Status: `confirmed-open`. Current risk: `low`.
+
+When limit and after_id match, After equality still encodes both key tuples into newly allocated buffers. No production cache-key hot-path caller or measured latency was established.
+
+Evidence: [crates/shamir-query-types/src/read/limit.rs:123](../../../../../crates/shamir-query-types/src/read/limit.rs#L123); [crates/shamir-query-types/src/read/limit.rs:130](../../../../../crates/shamir-query-types/src/read/limit.rs#L130).
+
+<a id="review-9"></a>
+
+### Claim 9 — Plan-time marker decode pays a msgpack round-trip per `$query`/`$fn`/`$cond`/`$expr` marker
+
+Status: `confirmed-open`. Current risk: `low`.
+
+Recognized marker maps still undergo to_vec_named/from_slice to reuse FilterValue extraction. The codec work remains, but ForEach body planning is now hoisted outside the iteration loop.
+
+Evidence: [crates/shamir-query-types/src/batch/planner.rs:392](../../../../../crates/shamir-query-types/src/batch/planner.rs#L392); [crates/shamir-query-types/src/batch/planner.rs:395](../../../../../crates/shamir-query-types/src/batch/planner.rs#L395); [crates/shamir-engine/src/query/batch/query_runner.rs:882](../../../../../crates/shamir-engine/src/query/batch/query_runner.rs#L882).
+
+<a id="review-10"></a>
+
+### Claim 10 — Per-construction `"main"` String allocations
+
+Status: `confirmed-open`. Current risk: `nit`.
+
+TableRef::new and default_repo helpers still allocate owned default strings. This is a source-confirmed construction cost, with no demonstrated throughput significance.
+
+Evidence: [crates/shamir-query-types/src/table_ref.rs:21](../../../../../crates/shamir-query-types/src/table_ref.rs#L21); [crates/shamir-query-types/src/call/mod.rs:13](../../../../../crates/shamir-query-types/src/call/mod.rs#L13); [crates/shamir-query-types/src/admin/types/table_ops.rs:9](../../../../../crates/shamir-query-types/src/admin/types/table_ops.rs#L9); [crates/shamir-query-types/src/admin/types/index_ops.rs:9](../../../../../crates/shamir-query-types/src/admin/types/index_ops.rs#L9).
+
+## Corrections and qualified non-findings
+
+- Keep structural cost evidence separate from unmeasured latency, allocation-count estimates, and replication subscriber multipliers.
+- ForEach body plan/validation is now performed once before iteration, not up to max_iterations times.
+- Authorization consumers now deduplicate requirements before checking permissions.
+- Three tree walks are not by themselves O(N²); fixed-depth repeated scans remain linear in N with a depth factor.
+- Untagged marker trial counts depend on variant position; a universal approximately six failed map trials or sevenfold cost is not supported.
+- Planner nesting remains bounded recursion, despite its iterative-worklist comments.
+
+---
+
+<details>
+<summary>Historical report — preserved for provenance; not current status or instructions</summary>
+
 # shamir-query-types — Performance & O(x→0)
 
 ## Summary
@@ -72,3 +207,5 @@ This is a pure-DTO crate, so its hot paths are wire (de)serialization, the batch
 ## Coverage note
 
 Functional tests are extensive (~350 `#[test]`s across module `tests/` dirs, matching the repo's test-organization rules), but the only benchmark is `benches/batch_planner.rs` (planner only). The two hottest paths identified here — `BatchOp` deserialization (finding 1) and `InsertedRecord` serialization (finding 2) — have correctness round-trip tests but zero bench coverage, so their constants cannot regress visibly. Any fix for findings 1/2 should land with a `bench_scale_tool::Harness` bench first (baseline), per the repo's /opti workflow.
+
+</details>

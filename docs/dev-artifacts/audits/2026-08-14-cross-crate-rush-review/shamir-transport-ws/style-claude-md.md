@@ -1,3 +1,96 @@
+<!-- revalidation:2026-10-08 source:92ad58266bf57ddea1fa3c8a47affba1a3a9a096 -->
+# shamir-transport-ws — style-claude-md revalidation
+
+Source snapshot: `92ad58266bf57ddea1fa3c8a47affba1a3a9a096`. Revalidated 2026-10-08 by read-only XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run; no source fix is part of this update. Test registration/assertions are evidence of an oracle, not proof of a passing run.
+
+This section is authoritative for current status. Original titles/IDs are retained for traceability; a refuted title is not a current assertion. The collapsed historical report below is superseded, including its counts, severity, scenarios and fix instructions. Plan IDs preserve historical numbering, not a current release mandate. [Workspace methodology and status definitions](../SUMMARY.md#status-definitions).
+
+Import placement, unused dependencies, unused constant, and redundant helper remain minor maintenance issues. The missing ws_recv re-export allegation was false even before the review.
+
+## Current claim decisions
+
+| Claim decisions | Open | Source-fixed | Partial | Refuted | Unverified | N/A |
+|---:|---:|---:|---:|---:|---:|---:|
+| 6 | 5 | 0 | 0 | 1 | 0 | 0 |
+
+These are decisions on report claims, including repeated roots, bundled observations and non-findings—not a unique-bug census. Closed/N/A rows have no current risk; unverified risk is provisional. Pure style and unmeasured optimization claims do not establish runtime impact.
+
+<a id="review-1"></a>
+
+### Claim 1 — Mid-file `use` statement violates the "imports at the top" rule
+
+Status: `confirmed-open`. Current risk: `nit`.
+
+The integration test still imports futures_util after four test functions. This is a style violation, not a runtime-medium defect; Rust imports are not sensitive to declaration order.
+
+Evidence: [crates/shamir-transport-ws/tests/framing_round_trip.rs:98](../../../../../crates/shamir-transport-ws/tests/framing_round_trip.rs#L98); [CLAUDE.md:610](../../../../../CLAUDE.md#L610).
+
+<a id="review-2"></a>
+
+### Claim 2 — `lib.rs` re-export set incomplete vs. module public APIs (and vs. sibling transport crate)
+
+Status: `refuted`. Current risk: —.
+
+ws_recv is root-exported and was already exported in the initial transport commit. MAX_WS_FRAME_SIZE remains public through framing; AGENTS/CLAUDE do not require every public item to be root-exported.
+
+Evidence: [crates/shamir-transport-ws/src/lib.rs:24](../../../../../crates/shamir-transport-ws/src/lib.rs#L24); [crates/shamir-transport-ws/src/lib.rs:31](../../../../../crates/shamir-transport-ws/src/lib.rs#L31); [crates/shamir-transport-ws/src/framing.rs:26](../../../../../crates/shamir-transport-ws/src/framing.rs#L26); [crates/shamir-server/src/framer.rs:56](../../../../../crates/shamir-server/src/framer.rs#L56).
+
+<a id="review-3"></a>
+
+### Claim 3 — `BROWSER_CHANNEL_BINDING` is dead public API; the zero placeholder exists only in prose elsewhere
+
+Status: `confirmed-open`. Current risk: `nit`.
+
+The exported module constant remains unused and untested internally, while production browser binding uses a literal. The claim that zeros exist only in prose is false.
+
+Evidence: [crates/shamir-transport-ws/src/tls_exporter.rs:25](../../../../../crates/shamir-transport-ws/src/tls_exporter.rs#L25); [crates/shamir-server/src/server/server_launcher.rs:1495](../../../../../crates/shamir-server/src/server/server_launcher.rs#L1495); [crates/shamir-transport-ws/src/lib.rs:35](../../../../../crates/shamir-transport-ws/src/lib.rs#L35).
+
+<a id="review-4"></a>
+
+### Claim 4 — Unused direct dependency `tungstenite = "0.29"` (version-mismatched with tokio-tungstenite)
+
+Status: `confirmed-open`. Current risk: `low`.
+
+The unused direct dependency and incompatible effective/public version remain.
+
+Evidence: [crates/shamir-transport-ws/Cargo.toml:20](../../../../../crates/shamir-transport-ws/Cargo.toml#L20); [crates/shamir-transport-ws/src/framing.rs:22](../../../../../crates/shamir-transport-ws/src/framing.rs#L22); [Cargo.lock:4256](../../../../../Cargo.lock#L4256).
+
+Grouping/duplicate: `security-crypto.md#1`. This row is not another independent defect.
+
+<a id="review-5"></a>
+
+### Claim 5 — Unused `[dev-dependencies]`: `hex`, `serde`, `serde_bytes`, `rmp-serde`
+
+Status: `confirmed-open`. Current risk: `nit`.
+
+The four entries remain and no crate Rust source/test references them. This is dependency-graph hygiene, not runtime failure.
+
+Evidence: [crates/shamir-transport-ws/Cargo.toml:32](../../../../../crates/shamir-transport-ws/Cargo.toml#L32); [crates/shamir-transport-ws/tests/framing_round_trip.rs:3](../../../../../crates/shamir-transport-ws/tests/framing_round_trip.rs#L3).
+
+<a id="review-6"></a>
+
+### Claim 6 — Redundant `is_loopback` helper duplicates `IpAddr::is_loopback`
+
+Status: `confirmed-open`. Current risk: `nit`.
+
+The redundant private V4/V6 dispatch remains with no observed behavioral defect.
+
+Evidence: [crates/shamir-transport-ws/src/listener.rs:47](../../../../../crates/shamir-transport-ws/src/listener.rs#L47); [crates/shamir-transport-ws/src/tests/listener_tests.rs:62](../../../../../crates/shamir-transport-ws/src/tests/listener_tests.rs#L62).
+
+## Corrections and qualified non-findings
+
+- Hoisting the mid-file import is optional maintenance; moving declarations or deleting a banner does not itself change Rust name resolution.
+- History confirms ws_recv root export in 3653540c and its preservation in f7fed57f. Do not label this as a later fix.
+- Adding MAX_WS_FRAME_SIZE at the root is a consistency preference, not an accessibility fix or documented repository requirement.
+- Source confirms manifest-only tests/mod.rs, parent test registration, no inline test modules, header imports throughout implementation, closely coupled export groups, and thiserror-only library errors.
+- The 10 policy, 9 listener, 3 server, and 7 framing test counts match source registrations. These counts do not prove simultaneous duplex operation or all rejection guarantees.
+- Unused exported constants are not automatically a one-file-one-export violation; this constant and exporter helper form a closely related group.
+
+---
+
+<details>
+<summary>Historical report — preserved for provenance; not current status or instructions</summary>
+
 # shamir-transport-ws -- Style & CLAUDE.md structural conformance
 
 ## Summary
@@ -55,3 +148,5 @@ The crate is largely exemplary against CLAUDE.md's structural rules: `lib.rs` is
 - **tests/ layout:** `src/tests/` split by topic (`browser_tests.rs`, `listener_tests.rs`, `server_tests.rs`) per the documented `<topic>_tests.rs` convention; the crate-root `tests/framing_round_trip.rs` mirrors the established sibling pattern (`shamir-transport-tcp/tests/framing.rs`) and is a genuine public-API integration test, so its placement conforms. Coverage is reasonable for the claims: 10 origin-policy tests, 9 listener-profile tests, 3 accept-path tests (including live-handshake wiring of the 16 MiB cap), 7 framing round-trip/negative tests.
 - **Imports at top:** all `src/` files hoist every `use` to the header; grep finds zero indented (function-body) `use` statements crate-wide. Inline `#[allow(clippy::result_large_err)]` attributes at `server.rs:87` and `server.rs:122` each carry the required one-line justification comment.
 - **Error handling:** all four error enums derive `thiserror::Error` with `#[from]` where natural; no `anyhow`, no `panic!` outside tests.
+
+</details>

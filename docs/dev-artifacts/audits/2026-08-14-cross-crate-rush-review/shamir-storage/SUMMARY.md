@@ -1,3 +1,1088 @@
+<!-- revalidation:2026-10-08 source:92ad58266bf57ddea1fa3c8a47affba1a3a9a096 -->
+# shamir-storage — SUMMARY revalidation
+
+Source snapshot: `92ad58266bf57ddea1fa3c8a47affba1a3a9a096`. Revalidated 2026-10-08 by read-only XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run; no source fix is part of this update. Test registration/assertions are evidence of an oracle, not proof of a passing run.
+
+This section is authoritative for current status. Original titles/IDs are retained for traceability; a refuted title is not a current assertion. The collapsed historical report below is superseded, including its counts, severity, scenarios and fix instructions. Plan IDs preserve historical numbering, not a current release mandate. [Workspace methodology and status definitions](../SUMMARY.md#status-definitions).
+
+All 53 original consolidated rows and all 22 plan items are classified below. The main cache/liveness defects remain. Envelope remediation is partial and introduces an explicit legacy-config rejection; self-copy doubling and unavoidable create-on-read validation are refuted. Original security premises and severity census require qualification.
+
+## Current claim decisions
+
+| Claim decisions | Open | Source-fixed | Partial | Refuted | Unverified | N/A |
+|---:|---:|---:|---:|---:|---:|---:|
+| 64 | 49 | 4 | 2 | 3 | 1 | 5 |
+
+These are decisions on report claims, including repeated roots, bundled observations and non-findings—not a unique-bug census. Closed/N/A rows have no current risk; unverified risk is provisional. Pure style and unmeasured optimization claims do not establish runtime impact.
+
+<a id="review-1-1"></a>
+
+### Claim 1.1 — MemBufferStore::get_many cache-fill can poison a Tombstone over a concurrent write
+
+Status: `confirmed-open`. Current risk: `high`.
+
+Post-inner cache fills remain unconditional; subsequent cache-first reads can persistently mask an acknowledged buffered write.
+
+Evidence: [crates/shamir-storage/src/storage_membuffer.rs:1246](../../../../../crates/shamir-storage/src/storage_membuffer.rs#L1246); [crates/shamir-storage/src/storage_membuffer.rs:1258](../../../../../crates/shamir-storage/src/storage_membuffer.rs#L1258).
+
+Grouping/duplicate: `correctness-tdd.md#1`. This row is not another independent defect.
+
+<a id="review-1-2"></a>
+
+### Claim 1.2 — MemBufferStore::transact post-commit cache republish clobbers a concurrent writer's fresher value
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+remove_if protects dirty, not cache publication; the regression only checks the backing value after flush.
+
+Evidence: [crates/shamir-storage/src/storage_membuffer.rs:1048](../../../../../crates/shamir-storage/src/storage_membuffer.rs#L1048); [crates/shamir-storage/src/tests/storage_membuffer_tests.rs:832](../../../../../crates/shamir-storage/src/tests/storage_membuffer_tests.rs#L832).
+
+Grouping/duplicate: `correctness-tdd.md#2`. This row is not another independent defect.
+
+<a id="review-1-3"></a>
+
+### Claim 1.3 — InMemoryStore::iter_range_stream resumes inclusive + blind-skip instead of Bound::Excluded
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+Deleting an emitted cursor between pulls makes the unconditional skip discard its unseen successor.
+
+Evidence: [crates/shamir-storage/src/storage_in_memory.rs:196](../../../../../crates/shamir-storage/src/storage_in_memory.rs#L196); [crates/shamir-storage/src/storage_in_memory.rs:205](../../../../../crates/shamir-storage/src/storage_in_memory.rs#L205).
+
+Grouping/duplicate: `correctness-tdd.md#3`. This row is not another independent defect.
+
+<a id="review-1-4"></a>
+
+### Claim 1.4 — MemBufferStore::remove/remove_many misreport existed for inner-only keys
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+Both use dirty/cache only. Non-MVCC TableManager deletion can consume this false flag to skip bookkeeping.
+
+Evidence: [crates/shamir-storage/src/storage_membuffer.rs:886](../../../../../crates/shamir-storage/src/storage_membuffer.rs#L886); [crates/shamir-storage/src/storage_membuffer.rs:1183](../../../../../crates/shamir-storage/src/storage_membuffer.rs#L1183); [crates/shamir-engine/src/table/table_manager_crud.rs:472](../../../../../crates/shamir-engine/src/table/table_manager_crud.rs#L472).
+
+Grouping/duplicate: `correctness-tdd.md#4`. This row is not another independent defect.
+
+<a id="review-1-5"></a>
+
+### Claim 1.5 — CachedStore and MirroredStore never run the backend-agnostic batch contract suite
+
+Status: `confirmed-open`. Current risk: `low`.
+
+The helper still has only InMemory, MemBuffer, and Fjall call sites; bespoke wrapper batch coverage is not the full shared suite.
+
+Evidence: [crates/shamir-storage/src/tests/types_tests.rs:38](../../../../../crates/shamir-storage/src/tests/types_tests.rs#L38); [crates/shamir-storage/src/tests/mod.rs:3](../../../../../crates/shamir-storage/src/tests/mod.rs#L3); [crates/shamir-storage/src/tests/storage_mirrored_tests.rs:168](../../../../../crates/shamir-storage/src/tests/storage_mirrored_tests.rs#L168).
+
+Grouping/duplicate: `api-wire-protocol.md#6`. This row is not another independent defect.
+
+<a id="review-1-6"></a>
+
+### Claim 1.6 — FjallStore write-ordering claim holds only per handle-instance; store_get creates fresh workers
+
+Status: `confirmed-open`. Current risk: `low`.
+
+Workers are per handle and only order insert/transact submissions; set/remove bypass them. Workers are joined on drop, not leaked by construction.
+
+Evidence: [crates/shamir-storage/src/storage_fjall.rs:240](../../../../../crates/shamir-storage/src/storage_fjall.rs#L240); [crates/shamir-storage/src/storage_fjall.rs:337](../../../../../crates/shamir-storage/src/storage_fjall.rs#L337); [crates/shamir-storage/src/storage_fjall.rs:494](../../../../../crates/shamir-storage/src/storage_fjall.rs#L494); [crates/shamir-storage/src/storage_fjall.rs:134](../../../../../crates/shamir-storage/src/storage_fjall.rs#L134).
+
+Grouping/duplicate: `correctness-tdd.md#6`. This row is not another independent defect.
+
+<a id="review-1-7"></a>
+
+### Claim 1.7 — InMemoryStore::set can resurrect an older value under concurrent same-key writers
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+Non-atomic removal/reinsertion and ignored Duplicate remain; later completion alone does not mandate winning an overlapping-write race.
+
+Evidence: [crates/shamir-storage/src/storage_in_memory.rs:129](../../../../../crates/shamir-storage/src/storage_in_memory.rs#L129); [crates/shamir-storage/src/storage_in_memory.rs:130](../../../../../crates/shamir-storage/src/storage_in_memory.rs#L130).
+
+Grouping/duplicate: `concurrency-lockfree.md#3`. This row is not another independent defect.
+
+<a id="review-1-8"></a>
+
+### Claim 1.8 — CachedStore size-counter drift: increment on rejected duplicate insert
+
+Status: `confirmed-open`. Current risk: `nit`.
+
+size is incremented unconditionally after an ignored insertion result.
+
+Evidence: [crates/shamir-storage/src/storage_cached.rs:422](../../../../../crates/shamir-storage/src/storage_cached.rs#L422); [crates/shamir-storage/src/storage_cached.rs:423](../../../../../crates/shamir-storage/src/storage_cached.rs#L423).
+
+Grouping/duplicate: `correctness-tdd.md#8`. This row is not another independent defect.
+
+<a id="review-1-9"></a>
+
+### Claim 1.9 — Repo::copy_store has no from == to self-copy guard
+
+Status: `refuted`. Current risk: —.
+
+The claimed doubling is contradicted by set_many preserving original keys. Missing an optional no-op guard is not the alleged corruption.
+
+Evidence: [crates/shamir-storage/src/types.rs:500](../../../../../crates/shamir-storage/src/types.rs#L500); [crates/shamir-storage/src/types.rs:160](../../../../../crates/shamir-storage/src/types.rs#L160).
+
+Grouping/duplicate: `correctness-tdd.md#9`. This row is not another independent defect.
+
+<a id="review-1-10"></a>
+
+### Claim 1.10 — Stale narration of the retired #535 mechanism in race-hook docs
+
+Status: `confirmed-open`. Current risk: `nit`.
+
+The main hook header is updated, but batch-hook and test narration still describe the retired boolean mechanism.
+
+Evidence: [crates/shamir-storage/src/membuffer_clear_race_hook.rs:61](../../../../../crates/shamir-storage/src/membuffer_clear_race_hook.rs#L61); [crates/shamir-storage/src/tests/storage_membuffer_tests.rs:845](../../../../../crates/shamir-storage/src/tests/storage_membuffer_tests.rs#L845).
+
+Grouping/duplicate: `correctness-tdd.md#10`. This row is not another independent defect.
+
+<a id="review-2-1"></a>
+
+### Claim 2.1 — CachedStore unordered, non-atomic cache mutation leaves cache behind inner
+
+Status: `confirmed-open`. Current risk: `high`.
+
+Commit/publication order is unsynchronized; remove/reinsert cache updates ignore duplicates and can retain stale values after backing writes finish.
+
+Evidence: [crates/shamir-storage/src/storage_cached.rs:403](../../../../../crates/shamir-storage/src/storage_cached.rs#L403); [crates/shamir-storage/src/storage_cached.rs:431](../../../../../crates/shamir-storage/src/storage_cached.rs#L431); [crates/shamir-storage/src/storage_cached.rs:471](../../../../../crates/shamir-storage/src/storage_cached.rs#L471).
+
+Grouping/duplicate: `concurrency-lockfree.md#1`. This row is not another independent defect.
+
+<a id="review-2-2"></a>
+
+### Claim 2.2 — MemBufferStore::get_many missing the #539 tombstone-poisoning guard
+
+Status: `confirmed-open`. Current risk: `high`.
+
+The reader-fill race remains; ordinary shared-suite get_many coverage does exist.
+
+Evidence: [crates/shamir-storage/src/storage_membuffer.rs:1258](../../../../../crates/shamir-storage/src/storage_membuffer.rs#L1258); [crates/shamir-storage/src/tests/types_tests.rs:124](../../../../../crates/shamir-storage/src/tests/types_tests.rs#L124).
+
+Grouping/duplicate: `SUMMARY.md#1.1`. This row is not another independent defect.
+
+<a id="review-2-3"></a>
+
+### Claim 2.3 — InMemoryStore::set remove/reinsert swallows a racing Duplicate
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+The implementation still has a transient absence and ignored reinsert result. Pinned upsert API support is unverified; completion-last tests would be invalid.
+
+Evidence: [crates/shamir-storage/src/storage_in_memory.rs:124](../../../../../crates/shamir-storage/src/storage_in_memory.rs#L124); [crates/shamir-storage/src/storage_in_memory.rs:130](../../../../../crates/shamir-storage/src/storage_in_memory.rs#L130); [Cargo.lock:3123](../../../../../Cargo.lock#L3123).
+
+Grouping/duplicate: `concurrency-lockfree.md#3`. This row is not another independent defect.
+
+<a id="review-2-4"></a>
+
+### Claim 2.4 — FjallStore::submit blocks tokio when its 1024-slot queue fills
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+Bounded SyncSender::send runs directly in async submit.
+
+Evidence: [crates/shamir-storage/src/storage_fjall.rs:92](../../../../../crates/shamir-storage/src/storage_fjall.rs#L92); [crates/shamir-storage/src/storage_fjall.rs:199](../../../../../crates/shamir-storage/src/storage_fjall.rs#L199).
+
+Grouping/duplicate: `concurrency-lockfree.md#4`. This row is not another independent defect.
+
+<a id="review-2-5"></a>
+
+### Claim 2.5 — moka cache uses default hasher instead of THasher
+
+Status: `confirmed-open`. Current risk: `low`.
+
+Plain build remains. Exact default algorithm, replacement API, and speed benefit require unavailable pinned dependency proof.
+
+Evidence: [crates/shamir-storage/src/storage_membuffer.rs:255](../../../../../crates/shamir-storage/src/storage_membuffer.rs#L255); [Cargo.lock:2221](../../../../../Cargo.lock#L2221).
+
+Grouping/duplicate: `concurrency-lockfree.md#5`. This row is not another independent defect.
+
+<a id="review-2-6"></a>
+
+### Claim 2.6 — InMemoryStore streams eagerly materialize all results under one Guard
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+Both eager collections remain; Guard scope ends before stream yielding.
+
+Evidence: [crates/shamir-storage/src/storage_in_memory.rs:153](../../../../../crates/shamir-storage/src/storage_in_memory.rs#L153); [crates/shamir-storage/src/storage_in_memory.rs:240](../../../../../crates/shamir-storage/src/storage_in_memory.rs#L240).
+
+Grouping/duplicate: `SUMMARY.md#4.2`. This row is not another independent defect.
+
+<a id="review-2-7"></a>
+
+### Claim 2.7 — CachedStore::reload is non-atomic clear/refill against live traffic
+
+Status: `confirmed-open`. Current risk: `low`.
+
+Clear, counter reset, awaited refill, and live writes are unordered; a stale cache hit need not fall through to inner.
+
+Evidence: [crates/shamir-storage/src/storage_cached.rs:311](../../../../../crates/shamir-storage/src/storage_cached.rs#L311); [crates/shamir-storage/src/storage_cached.rs:318](../../../../../crates/shamir-storage/src/storage_cached.rs#L318); [crates/shamir-storage/src/storage_cached.rs:471](../../../../../crates/shamir-storage/src/storage_cached.rs#L471).
+
+Grouping/duplicate: `concurrency-lockfree.md#7`. This row is not another independent defect.
+
+<a id="review-2-8"></a>
+
+### Claim 2.8 — Cross-path Fjall ordering rests on journal arrival order
+
+Status: `confirmed-open`. Current risk: `nit`.
+
+Worker and spawn_blocking paths remain independent; journal internals were not independently inspected.
+
+Evidence: [crates/shamir-storage/src/storage_fjall.rs:337](../../../../../crates/shamir-storage/src/storage_fjall.rs#L337); [crates/shamir-storage/src/storage_fjall.rs:494](../../../../../crates/shamir-storage/src/storage_fjall.rs#L494).
+
+Grouping/duplicate: `SUMMARY.md#1.6`. This row is not another independent defect.
+
+<a id="review-3-1"></a>
+
+### Claim 3.1 — Store names passed to the durable engine unvalidated
+
+Status: `unverified`. Current risk: `low` (provisional; not a confirmed defect).
+
+Shim validation is absent, but backend acceptance and alleged path/namespace exploitation are unverified; reachable DDL is authorization-gated.
+
+Evidence: [crates/shamir-storage/src/storage_fjall.rs:229](../../../../../crates/shamir-storage/src/storage_fjall.rs#L229); [crates/shamir-db/src/shamir_db/execute/admin_table_index.rs:40](../../../../../crates/shamir-db/src/shamir_db/execute/admin_table_index.rs#L40); [Cargo.lock:1332](../../../../../Cargo.lock#L1332).
+
+Grouping/duplicate: `security-crypto.md#1`. This row is not another independent defect.
+
+<a id="review-3-2"></a>
+
+### Claim 3.2 — Fresh random 128-bit id collision-probe justification is false
+
+Status: `confirmed-open`. Current risk: `low`.
+
+Comments still overstate randomness; source uses timestamp plus 64-bit Xoshiro tail, not a secret token.
+
+Evidence: [crates/shamir-storage/src/storage_fjall.rs:154](../../../../../crates/shamir-storage/src/storage_fjall.rs#L154); [crates/shamir-types/src/types/record_id.rs:41](../../../../../crates/shamir-types/src/types/record_id.rs#L41).
+
+Grouping/duplicate: `security-crypto.md#2`. This row is not another independent defect.
+
+<a id="review-3-3"></a>
+
+### Claim 3.3 — User-influenced keys enter non-keyed FxHash maps
+
+Status: `confirmed-open`. Current risk: `low`.
+
+The blanket trusted-input premise is unsupported by public key/name inputs. Legacy postings hash values; sorted keys encode them. Practical collision exploitation is unverified.
+
+Evidence: [crates/shamir-storage/src/storage_membuffer.rs:763](../../../../../crates/shamir-storage/src/storage_membuffer.rs#L763); [crates/shamir-types/src/types/common.rs:8](../../../../../crates/shamir-types/src/types/common.rs#L8); [crates/shamir-index/src/base_index/index_record_key.rs:102](../../../../../crates/shamir-index/src/base_index/index_record_key.rs#L102); [crates/shamir-index/src/base_index/sorted_index_manager.rs:2687](../../../../../crates/shamir-index/src/base_index/sorted_index_manager.rs#L2687).
+
+Grouping/duplicate: `security-crypto.md#3`. This row is not another independent defect.
+
+<a id="review-3-4"></a>
+
+### Claim 3.4 — Raw key bytes embedded in error messages
+
+Status: `confirmed-open`. Current risk: `low`.
+
+Full-key output remains, but numeric byte-array Debug positively refutes the claimed Unicode/BiDi rendering mechanism. Tenant-crossing leakage is unverified.
+
+Evidence: [crates/shamir-storage/src/storage_fjall.rs:419](../../../../../crates/shamir-storage/src/storage_fjall.rs#L419); [crates/shamir-storage/src/key_bytes.rs:237](../../../../../crates/shamir-storage/src/key_bytes.rs#L237).
+
+Grouping/duplicate: `security-crypto.md#4`. This row is not another independent defect.
+
+<a id="review-3-5"></a>
+
+### Claim 3.5 — KeyBytes::Deserialize allocates before any size check
+
+Status: `confirmed-open`. Current risk: `nit`.
+
+The generic decoder materializes ByteBuf without a cap. Storage alias cutover does not itself establish remote decoder reachability; WAL still uses Bytes.
+
+Evidence: [crates/shamir-storage/src/key_bytes.rs:310](../../../../../crates/shamir-storage/src/key_bytes.rs#L310); [crates/shamir-wal/src/wal_entry_v2.rs:87](../../../../../crates/shamir-wal/src/wal_entry_v2.rs#L87).
+
+Grouping/duplicate: `security-crypto.md#5`. This row is not another independent defect.
+
+<a id="review-4-1"></a>
+
+### Claim 4.1 — Reverse range streams drain entire ranges into RAM
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+The collecting default is inherited by InMemory/Cached and delegated by Mirrored; lookup_max requests one result but incurs whole-range work.
+
+Evidence: [crates/shamir-storage/src/types.rs:397](../../../../../crates/shamir-storage/src/types.rs#L397); [crates/shamir-storage/src/storage_mirrored.rs:431](../../../../../crates/shamir-storage/src/storage_mirrored.rs#L431); [crates/shamir-index/src/base_index/sorted_index_manager.rs:2174](../../../../../crates/shamir-index/src/base_index/sorted_index_manager.rs#L2174).
+
+Grouping/duplicate: `performance-hotpath.md#1`. This row is not another independent defect.
+
+<a id="review-4-2"></a>
+
+### Claim 4.2 — InMemoryStore eagerly materializes corpus/prefix matches before first yield
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+Synchronous full collection remains. Vector/handle allocations scale with matches; payload duplication and timing are not established.
+
+Evidence: [crates/shamir-storage/src/storage_in_memory.rs:153](../../../../../crates/shamir-storage/src/storage_in_memory.rs#L153); [crates/shamir-storage/src/storage_in_memory.rs:246](../../../../../crates/shamir-storage/src/storage_in_memory.rs#L246).
+
+Grouping/duplicate: `performance-hotpath.md#2`. This row is not another independent defect.
+
+<a id="review-4-3"></a>
+
+### Claim 4.3 — MemBufferStore::transact drains the entire dirty buffer
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+Nonempty transactions still call drain_all and snapshot with usize::MAX.
+
+Evidence: [crates/shamir-storage/src/storage_membuffer.rs:1037](../../../../../crates/shamir-storage/src/storage_membuffer.rs#L1037); [crates/shamir-storage/src/storage_membuffer.rs:600](../../../../../crates/shamir-storage/src/storage_membuffer.rs#L600).
+
+Grouping/duplicate: `performance-hotpath.md#3`. This row is not another independent defect.
+
+<a id="review-4-4"></a>
+
+### Claim 4.4 — CachedStore Async uses an unbounded write-behind channel
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+Queue admission is unbounded; retained historical payloads grow with backlog, but queue/cache payload handles often share one allocation.
+
+Evidence: [crates/shamir-storage/src/storage_cached.rs:242](../../../../../crates/shamir-storage/src/storage_cached.rs#L242); [crates/shamir-storage/src/storage_cached.rs:450](../../../../../crates/shamir-storage/src/storage_cached.rs#L450).
+
+Grouping/duplicate: `performance-hotpath.md#4`. This row is not another independent defect.
+
+<a id="review-4-5"></a>
+
+### Claim 4.5 — Trait-default range filter scans past the upper bound
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+It continues consuming the remaining ordered stream rather than terminating at the first exceeded upper bound.
+
+Evidence: [crates/shamir-storage/src/types.rs:426](../../../../../crates/shamir-storage/src/types.rs#L426); [crates/shamir-storage/src/types.rs:436](../../../../../crates/shamir-storage/src/types.rs#L436).
+
+Grouping/duplicate: `performance-hotpath.md#5`. This row is not another independent defect.
+
+<a id="review-4-6"></a>
+
+### Claim 4.6 — FjallStore::submit blocks the async caller on full queue
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+The synchronous bounded send is unchanged.
+
+Evidence: [crates/shamir-storage/src/storage_fjall.rs:199](../../../../../crates/shamir-storage/src/storage_fjall.rs#L199).
+
+Grouping/duplicate: `SUMMARY.md#2.4`. This row is not another independent defect.
+
+<a id="review-4-7"></a>
+
+### Claim 4.7 — Minor allocations/clones on batched paths
+
+Status: `confirmed-open`. Current risk: `nit`.
+
+Miss-key vector clone and fixed 256 capacities remain.
+
+Evidence: [crates/shamir-storage/src/storage_membuffer.rs:1245](../../../../../crates/shamir-storage/src/storage_membuffer.rs#L1245); [crates/shamir-storage/src/storage_fjall.rs:617](../../../../../crates/shamir-storage/src/storage_fjall.rs#L617); [crates/shamir-storage/src/storage_fjall.rs:682](../../../../../crates/shamir-storage/src/storage_fjall.rs#L682).
+
+Grouping/duplicate: `performance-hotpath.md#7`. This row is not another independent defect.
+
+<a id="review-5-1"></a>
+
+### Claim 5.1 — Persisted MemBufferConfig has no versioning guardrails
+
+Status: `partially-fixed`. Current risk: `medium`.
+
+Persistence now uses a checked envelope, but lacks schema migration/golden compatibility and deliberately rejects raw legacy blobs.
+
+Evidence: [crates/shamir-engine/src/table/buffer_config.rs:44](../../../../../crates/shamir-engine/src/table/buffer_config.rs#L44); [crates/shamir-engine/src/table/buffer_config.rs:57](../../../../../crates/shamir-engine/src/table/buffer_config.rs#L57); [crates/shamir-index/src/meta_envelope.rs:54](../../../../../crates/shamir-index/src/meta_envelope.rs#L54); [crates/shamir-engine/src/table/tests/buffer_config_tests.rs:334](../../../../../crates/shamir-engine/src/table/tests/buffer_config_tests.rs#L334).
+
+Grouping/duplicate: `api-wire-protocol.md#1`. This row is not another independent defect.
+
+<a id="review-5-2"></a>
+
+### Claim 5.2 — batch_size == 0 is unspecified and divergent
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+InMemory emits endless empty batches; Cached/Fjall emit none. MemBuffer only clamps output capacity while forwarding zero inward.
+
+Evidence: [crates/shamir-storage/src/storage_in_memory.rs:164](../../../../../crates/shamir-storage/src/storage_in_memory.rs#L164); [crates/shamir-storage/src/storage_cached.rs:559](../../../../../crates/shamir-storage/src/storage_cached.rs#L559); [crates/shamir-storage/src/storage_membuffer.rs:923](../../../../../crates/shamir-storage/src/storage_membuffer.rs#L923).
+
+Grouping/duplicate: `api-wire-protocol.md#2`. This row is not another independent defect.
+
+<a id="review-5-3"></a>
+
+### Claim 5.3 — set/remove flag precision varies without capability disclosure
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+Strict documented set/batch flags coexist with local-only MemBuffer/Cached Async answers and separate Fjall existence probes.
+
+Evidence: [crates/shamir-storage/src/types.rs:36](../../../../../crates/shamir-storage/src/types.rs#L36); [crates/shamir-storage/src/types.rs:168](../../../../../crates/shamir-storage/src/types.rs#L168); [crates/shamir-storage/src/storage_membuffer.rs:763](../../../../../crates/shamir-storage/src/storage_membuffer.rs#L763); [crates/shamir-storage/src/storage_cached.rs:435](../../../../../crates/shamir-storage/src/storage_cached.rs#L435).
+
+Grouping/duplicate: `api-wire-protocol.md#3`. This row is not another independent defect.
+
+<a id="review-5-4"></a>
+
+### Claim 5.4 — Private system-record prefix literal duplicated across crates
+
+Status: `confirmed-open`. Current risk: `low`.
+
+Duplication persists, but constants currently agree and constructor-based classifier tests cover current encoding.
+
+Evidence: [crates/shamir-storage/src/storage_mirrored.rs:44](../../../../../crates/shamir-storage/src/storage_mirrored.rs#L44); [crates/shamir-types/src/types/record_id.rs:18](../../../../../crates/shamir-types/src/types/record_id.rs#L18); [crates/shamir-storage/src/tests/storage_mirrored_tests.rs:244](../../../../../crates/shamir-storage/src/tests/storage_mirrored_tests.rs#L244).
+
+Grouping/duplicate: `api-wire-protocol.md#4`. This row is not another independent defect.
+
+<a id="review-5-5"></a>
+
+### Claim 5.5 — Public-API rustdoc drift: prefetch promise and phantom engines
+
+Status: `confirmed-open`. Current risk: `low`.
+
+Prefetch and removed-engine claims remain in trait documentation.
+
+Evidence: [crates/shamir-storage/src/types.rs:291](../../../../../crates/shamir-storage/src/types.rs#L291); [crates/shamir-storage/src/types.rs:343](../../../../../crates/shamir-storage/src/types.rs#L343); [crates/shamir-storage/Cargo.toml:16](../../../../../crates/shamir-storage/Cargo.toml#L16).
+
+Grouping/duplicate: `api-wire-protocol.md#5`. This row is not another independent defect.
+
+<a id="review-5-6"></a>
+
+### Claim 5.6 — Shared backend-conformance suite skipped by CachedStore and MirroredStore
+
+Status: `confirmed-open`. Current risk: `low`.
+
+Neither wrapper invokes the helper.
+
+Evidence: [crates/shamir-storage/src/tests/types_tests.rs:38](../../../../../crates/shamir-storage/src/tests/types_tests.rs#L38); [crates/shamir-storage/src/tests/mod.rs:3](../../../../../crates/shamir-storage/src/tests/mod.rs#L3); [crates/shamir-storage/src/tests/mod.rs:6](../../../../../crates/shamir-storage/src/tests/mod.rs#L6).
+
+Grouping/duplicate: `SUMMARY.md#1.5`. This row is not another independent defect.
+
+<a id="review-5-7"></a>
+
+### Claim 5.7 — Repo::store_get create-on-read makes typos durable
+
+Status: `refuted`. Current risk: —.
+
+Creation is intentional; stores_list permits nonmutating existence checks and engine reads reject unconfigured tables before store_get.
+
+Evidence: [crates/shamir-storage/src/types.rs:465](../../../../../crates/shamir-storage/src/types.rs#L465); [crates/shamir-storage/src/types.rs:475](../../../../../crates/shamir-storage/src/types.rs#L475); [crates/shamir-engine/src/repo/repo_instance.rs:337](../../../../../crates/shamir-engine/src/repo/repo_instance.rs#L337).
+
+Grouping/duplicate: `api-wire-protocol.md#7`. This row is not another independent defect.
+
+<a id="review-5-8"></a>
+
+### Claim 5.8 — Interface polish bundle
+
+Status: `confirmed-open`. Current risk: `nit`.
+
+Bytes bounds, &str copy signature, double KeyExists prefix, and engine-domain errors remain. Generic replacements must preserve dyn Store compatibility.
+
+Evidence: [crates/shamir-storage/src/types.rs:336](../../../../../crates/shamir-storage/src/types.rs#L336); [crates/shamir-storage/src/types.rs:488](../../../../../crates/shamir-storage/src/types.rs#L488); [crates/shamir-storage/src/storage_in_memory.rs:111](../../../../../crates/shamir-storage/src/storage_in_memory.rs#L111); [crates/shamir-storage/src/error.rs:13](../../../../../crates/shamir-storage/src/error.rs#L13); [crates/shamir-storage/src/error.rs:51](../../../../../crates/shamir-storage/src/error.rs#L51).
+
+Grouping/duplicate: `api-wire-protocol.md#8`. This row is not another independent defect.
+
+<a id="review-6-1"></a>
+
+### Claim 6.1 — CachedStore::flush hangs if the async worker dies
+
+Status: `confirmed-open`. Current risk: `high`.
+
+No worker-death observation exists; pending count/Notify depend exclusively on normal worker completion.
+
+Evidence: [crates/shamir-storage/src/storage_cached.rs:106](../../../../../crates/shamir-storage/src/storage_cached.rs#L106); [crates/shamir-storage/src/storage_cached.rs:243](../../../../../crates/shamir-storage/src/storage_cached.rs#L243); [crates/shamir-storage/src/storage_cached.rs:383](../../../../../crates/shamir-storage/src/storage_cached.rs#L383).
+
+Grouping/duplicate: `error-handling-lifecycle.md#1`. This row is not another independent defect.
+
+<a id="review-6-2"></a>
+
+### Claim 6.2 — Blocking SyncSender::send on tokio executor threads
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+Direct synchronous send remains.
+
+Evidence: [crates/shamir-storage/src/storage_fjall.rs:199](../../../../../crates/shamir-storage/src/storage_fjall.rs#L199).
+
+Grouping/duplicate: `SUMMARY.md#2.4`. This row is not another independent defect.
+
+<a id="review-6-3"></a>
+
+### Claim 6.3 — MemBufferStore::Drop silently discards dirty data
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+No drain acknowledgment or dirty-loss warning. An already-waiting flusher may still perform one final drain, so unconditional discard wording is incorrect.
+
+Evidence: [crates/shamir-storage/src/storage_membuffer.rs:339](../../../../../crates/shamir-storage/src/storage_membuffer.rs#L339); [crates/shamir-storage/src/storage_membuffer.rs:353](../../../../../crates/shamir-storage/src/storage_membuffer.rs#L353); [crates/shamir-storage/src/storage_membuffer.rs:621](../../../../../crates/shamir-storage/src/storage_membuffer.rs#L621).
+
+Grouping/duplicate: `error-handling-lifecycle.md#3`. This row is not another independent defect.
+
+<a id="review-6-4"></a>
+
+### Claim 6.4 — Missing error-path tests and unread flush telemetry
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+The counter is never read; target drain/channel/submit/copy failures are not forced by registered tests.
+
+Evidence: [crates/shamir-storage/src/storage_membuffer.rs:355](../../../../../crates/shamir-storage/src/storage_membuffer.rs#L355); [crates/shamir-storage/src/storage_cached.rs:446](../../../../../crates/shamir-storage/src/storage_cached.rs#L446); [crates/shamir-storage/src/storage_fjall.rs:199](../../../../../crates/shamir-storage/src/storage_fjall.rs#L199); [crates/shamir-storage/src/types.rs:488](../../../../../crates/shamir-storage/src/types.rs#L488).
+
+Grouping/duplicate: `error-handling-lifecycle.md#4`. This row is not another independent defect.
+
+<a id="review-6-5"></a>
+
+### Claim 6.5 — Cache deletion committed before fallible backing acknowledgment
+
+Status: `confirmed-open`. Current risk: `low`.
+
+Immediate eviction plus read-through can restore old data during or after an unsuccessful async delete; no tombstone persists.
+
+Evidence: [crates/shamir-storage/src/storage_cached.rs:487](../../../../../crates/shamir-storage/src/storage_cached.rs#L487); [crates/shamir-storage/src/storage_cached.rs:476](../../../../../crates/shamir-storage/src/storage_cached.rs#L476).
+
+Grouping/duplicate: `error-handling-lifecycle.md#5`. This row is not another independent defect.
+
+<a id="review-6-6"></a>
+
+### Claim 6.6 — copy_store leaves partially populated destination on failure
+
+Status: `confirmed-open`. Current risk: `low`.
+
+Earlier batches persist after later errors; retries do not remove destination extras.
+
+Evidence: [crates/shamir-storage/src/types.rs:495](../../../../../crates/shamir-storage/src/types.rs#L495); [crates/shamir-storage/src/types.rs:500](../../../../../crates/shamir-storage/src/types.rs#L500); [crates/shamir-engine/src/repo/repo_instance.rs:593](../../../../../crates/shamir-engine/src/repo/repo_instance.rs#L593).
+
+Grouping/duplicate: `error-handling-lifecycle.md#6`. This row is not another independent defect.
+
+<a id="review-6-7"></a>
+
+### Claim 6.7 — Fresh FjallStore handles have fragile per-instance worker lifecycle
+
+Status: `confirmed-open`. Current risk: `low`.
+
+Potential churn remains conditional on worker-using calls; Drop explicitly joins, and deleted-handle behavior is dependency-unverified.
+
+Evidence: [crates/shamir-storage/src/storage_fjall.rs:240](../../../../../crates/shamir-storage/src/storage_fjall.rs#L240); [crates/shamir-storage/src/storage_fjall.rs:134](../../../../../crates/shamir-storage/src/storage_fjall.rs#L134).
+
+Grouping/duplicate: `SUMMARY.md#1.6`. This row is not another independent defect.
+
+<a id="review-6-8"></a>
+
+### Claim 6.8 — Flattened error sources and panicking thread-spawn failure
+
+Status: `confirmed-open`. Current risk: `nit`.
+
+String conversion and spawn expect remain; OS spawn failure is not a programmer-only invariant.
+
+Evidence: [crates/shamir-storage/src/error.rs:94](../../../../../crates/shamir-storage/src/error.rs#L94); [crates/shamir-storage/src/storage_fjall.rs:98](../../../../../crates/shamir-storage/src/storage_fjall.rs#L98).
+
+Grouping/duplicate: `error-handling-lifecycle.md#8`. This row is not another independent defect.
+
+<a id="review-7-1"></a>
+
+### Claim 7.1 — Function-local imports violate Imports at the top
+
+Status: `confirmed-open`. Current risk: `nit`.
+
+All thirteen listed sites remain; no runtime defect is established by placement.
+
+Evidence: [crates/shamir-storage/src/types.rs:395](../../../../../crates/shamir-storage/src/types.rs#L395); [crates/shamir-storage/src/storage_cached.rs:218](../../../../../crates/shamir-storage/src/storage_cached.rs#L218); [crates/shamir-storage/src/storage_fjall.rs:451](../../../../../crates/shamir-storage/src/storage_fjall.rs#L451); [crates/shamir-storage/src/tests/storage_mirrored_tests.rs:1289](../../../../../crates/shamir-storage/src/tests/storage_mirrored_tests.rs#L1289).
+
+Grouping/duplicate: `style-claude-md.md#1`. This row is not another independent defect.
+
+<a id="review-7-2"></a>
+
+### Claim 7.2 — KeyBytes module doc claims unused RecordKey = Bytes
+
+Status: `confirmed-open`. Current risk: `low`.
+
+The header contradicts the live alias.
+
+Evidence: [crates/shamir-storage/src/key_bytes.rs:7](../../../../../crates/shamir-storage/src/key_bytes.rs#L7); [crates/shamir-storage/src/types.rs:9](../../../../../crates/shamir-storage/src/types.rs#L9).
+
+Grouping/duplicate: `style-claude-md.md#2`. This row is not another independent defect.
+
+<a id="review-7-3"></a>
+
+### Claim 7.3 — Orphaned Tests ending banners
+
+Status: `confirmed-open`. Current risk: `nit`.
+
+All three remain; tests are actually external and registered.
+
+Evidence: [crates/shamir-storage/src/storage_in_memory.rs:260](../../../../../crates/shamir-storage/src/storage_in_memory.rs#L260); [crates/shamir-storage/src/storage_cached.rs:719](../../../../../crates/shamir-storage/src/storage_cached.rs#L719); [crates/shamir-storage/src/storage_fjall.rs:726](../../../../../crates/shamir-storage/src/storage_fjall.rs#L726).
+
+Grouping/duplicate: `style-claude-md.md#3`. This row is not another independent defect.
+
+<a id="review-7-4"></a>
+
+### Claim 7.4 — Duplicate private RecordStream aliases
+
+Status: `confirmed-open`. Current risk: `nit`.
+
+Local aliases remain despite internal access to the canonical alias. Public naming is ergonomic, not necessary for external implementation.
+
+Evidence: [crates/shamir-storage/src/types.rs:11](../../../../../crates/shamir-storage/src/types.rs#L11); [crates/shamir-storage/src/storage_membuffer.rs:628](../../../../../crates/shamir-storage/src/storage_membuffer.rs#L628); [crates/shamir-storage/src/tests/types_tests.rs:12](../../../../../crates/shamir-storage/src/tests/types_tests.rs#L12).
+
+Grouping/duplicate: `style-claude-md.md#4`. This row is not another independent defect.
+
+<a id="review-7-5"></a>
+
+### Claim 7.5 — Shared conformance suite missing CachedStore/MirroredStore
+
+Status: `confirmed-open`. Current risk: `low`.
+
+Shared wrapper invocations remain absent.
+
+Evidence: [crates/shamir-storage/src/tests/types_tests.rs:38](../../../../../crates/shamir-storage/src/tests/types_tests.rs#L38); [crates/shamir-storage/src/tests/mod.rs:3](../../../../../crates/shamir-storage/src/tests/mod.rs#L3).
+
+Grouping/duplicate: `SUMMARY.md#1.5`. This row is not another independent defect.
+
+<a id="review-7-6"></a>
+
+### Claim 7.6 — MemBuffer fixture topics remain nested inline modules
+
+Status: `confirmed-open`. Current risk: `nit`.
+
+The three fixture groups remain inside the registered external test file.
+
+Evidence: [crates/shamir-storage/src/tests/storage_membuffer_tests.rs:728](../../../../../crates/shamir-storage/src/tests/storage_membuffer_tests.rs#L728); [crates/shamir-storage/src/tests/storage_membuffer_tests.rs:867](../../../../../crates/shamir-storage/src/tests/storage_membuffer_tests.rs#L867); [crates/shamir-storage/src/tests/storage_membuffer_tests.rs:974](../../../../../crates/shamir-storage/src/tests/storage_membuffer_tests.rs#L974).
+
+Grouping/duplicate: `style-claude-md.md#6`. This row is not another independent defect.
+
+<a id="review-7-7"></a>
+
+### Claim 7.7 — Drifted hard-coded line-number reference
+
+Status: `confirmed-open`. Current risk: `nit`.
+
+The approximately-line-323 reference still points to a method starting at 596.
+
+Evidence: [crates/shamir-storage/src/storage_fjall.rs:655](../../../../../crates/shamir-storage/src/storage_fjall.rs#L655); [crates/shamir-storage/src/storage_fjall.rs:596](../../../../../crates/shamir-storage/src/storage_fjall.rs#L596).
+
+Grouping/duplicate: `style-claude-md.md#7`. This row is not another independent defect.
+
+<a id="review-2-pillar-verdict"></a>
+
+### Claim 2.pillar-verdict — Concurrency pillar verdict
+
+Status: `not-applicable`. Current risk: —.
+
+Direct production lock absence, no scc len calls, THasher on dirty, ArcSwap, and atomic fields hold; they are not proof of lock-free dependency internals.
+
+Evidence: [crates/shamir-storage/src/storage_membuffer.rs:142](../../../../../crates/shamir-storage/src/storage_membuffer.rs#L142); [crates/shamir-storage/src/storage_membuffer.rs:154](../../../../../crates/shamir-storage/src/storage_membuffer.rs#L154); [crates/shamir-storage/src/storage_cached.rs:194](../../../../../crates/shamir-storage/src/storage_cached.rs#L194).
+
+Grouping/duplicate: `concurrency-lockfree.md#NF-pillar-compliance`. This row is not another independent defect.
+
+<a id="review-3-boundary-verdict"></a>
+
+### Claim 3.boundary-verdict — Security boundary verdict and hydration filtering
+
+Status: `fixed`. Current risk: —.
+
+No local crypto/unsafe implementation; hydration skips/warns on classifier rejection. Allowed-key values are not authenticated, and classifier exhaustiveness is a manually copied inventory.
+
+Evidence: [crates/shamir-storage/src/key_bytes.rs:250](../../../../../crates/shamir-storage/src/key_bytes.rs#L250); [crates/shamir-storage/src/storage_mirrored.rs:276](../../../../../crates/shamir-storage/src/storage_mirrored.rs#L276); [crates/shamir-storage/src/tests/storage_mirrored_tests.rs:214](../../../../../crates/shamir-storage/src/tests/storage_mirrored_tests.rs#L214); [crates/shamir-storage/src/tests/storage_mirrored_tests.rs:1029](../../../../../crates/shamir-storage/src/tests/storage_mirrored_tests.rs#L1029).
+
+Grouping/duplicate: `security-crypto.md#NF-hydration`. This row is not another independent defect.
+
+<a id="review-4-non-findings"></a>
+
+### Claim 4.non-findings — Flag-free Fjall paths and eviction-safe dirty retention
+
+Status: `not-applicable`. Current risk: —.
+
+Source supports the omitted existence probes and independent dirty-value retention. No measured speedup or hard dirty-memory bound is established.
+
+Evidence: [crates/shamir-storage/src/storage_fjall.rs:394](../../../../../crates/shamir-storage/src/storage_fjall.rs#L394); [crates/shamir-storage/src/storage_fjall.rs:585](../../../../../crates/shamir-storage/src/storage_fjall.rs#L585); [crates/shamir-storage/src/storage_membuffer.rs:143](../../../../../crates/shamir-storage/src/storage_membuffer.rs#L143).
+
+Grouping/duplicate: `performance-hotpath.md#NF-dirty-retention`. This row is not another independent defect.
+
+<a id="review-5-surface-verdict"></a>
+
+### Claim 5.surface-verdict — Honest supports_atomic_transact capability
+
+Status: `partially-fixed`. Current risk: `medium`.
+
+False for InMemory/Mirrored is honest; forwarding true through per-key visible Cached/MemBuffer cache publication is not.
+
+Evidence: [crates/shamir-storage/src/storage_cached.rs:675](../../../../../crates/shamir-storage/src/storage_cached.rs#L675); [crates/shamir-storage/src/storage_cached.rs:684](../../../../../crates/shamir-storage/src/storage_cached.rs#L684); [crates/shamir-storage/src/storage_membuffer.rs:1045](../../../../../crates/shamir-storage/src/storage_membuffer.rs#L1045); [crates/shamir-storage/src/storage_membuffer.rs:1092](../../../../../crates/shamir-storage/src/storage_membuffer.rs#L1092).
+
+Grouping/duplicate: `api-wire-protocol.md#NF-atomic-capability`. This row is not another independent defect.
+
+<a id="review-5-test-coverage-notes"></a>
+
+### Claim 5.test-coverage-notes — Registered layout and KeyBytes byte-identity coverage
+
+Status: `not-applicable`. Current risk: —.
+
+Registration and byte-equality/round-trip assertions hold; cross-decoding both directions is tested only for bincode, and local-reference drift still requires maintenance.
+
+Evidence: [crates/shamir-storage/src/lib.rs:32](../../../../../crates/shamir-storage/src/lib.rs#L32); [crates/shamir-storage/src/key_bytes/tests/mod.rs:10](../../../../../crates/shamir-storage/src/key_bytes/tests/mod.rs#L10); [crates/shamir-storage/src/key_bytes/tests/serde_byte_identity_tests.rs:129](../../../../../crates/shamir-storage/src/key_bytes/tests/serde_byte_identity_tests.rs#L129); [crates/shamir-wal/src/wal_entry_v2.rs:118](../../../../../crates/shamir-wal/src/wal_entry_v2.rs#L118).
+
+Grouping/duplicate: `api-wire-protocol.md#NF-layout-and-serde`. This row is not another independent defect.
+
+<a id="review-6-panic-verdict"></a>
+
+### Claim 6.panic-verdict — All production panics are unreachable invariant violations
+
+Status: `refuted`. Current risk: —.
+
+Thread creation can fail environmentally; the worker spawn expect is not an unreachable programmer invariant.
+
+Evidence: [crates/shamir-storage/src/storage_fjall.rs:98](../../../../../crates/shamir-storage/src/storage_fjall.rs#L98).
+
+Grouping/duplicate: `error-handling-lifecycle.md#NF-panic-surface`. This row is not another independent defect.
+
+<a id="review-6-dirty-cleanup-verdict"></a>
+
+### Claim 6.dirty-cleanup-verdict — Guarded dirty cleanup retains errors and concurrent writes
+
+Status: `fixed`. Current risk: —.
+
+Error propagation precedes cleanup and differing snapshots survive remove_if; this does not repair the separate cache republish race.
+
+Evidence: [crates/shamir-storage/src/storage_membuffer.rs:527](../../../../../crates/shamir-storage/src/storage_membuffer.rs#L527); [crates/shamir-storage/src/storage_membuffer.rs:554](../../../../../crates/shamir-storage/src/storage_membuffer.rs#L554); [crates/shamir-storage/src/tests/storage_membuffer_tests.rs:832](../../../../../crates/shamir-storage/src/tests/storage_membuffer_tests.rs#L832).
+
+Grouping/duplicate: `error-handling-lifecycle.md#NF-dirty-cleanup`. This row is not another independent defect.
+
+<a id="review-6-mirror-first-verdict"></a>
+
+### Claim 6.mirror-first-verdict — Mirror-first primary error atomicity
+
+Status: `fixed`. Current risk: —.
+
+Fallible mirror steps precede all primary mutation; complete mirror rollback depends on the chosen backing implementation.
+
+Evidence: [crates/shamir-storage/src/storage_mirrored.rs:351](../../../../../crates/shamir-storage/src/storage_mirrored.rs#L351); [crates/shamir-storage/src/storage_mirrored.rs:595](../../../../../crates/shamir-storage/src/storage_mirrored.rs#L595); [crates/shamir-storage/src/tests/storage_mirrored_tests.rs:608](../../../../../crates/shamir-storage/src/tests/storage_mirrored_tests.rs#L608).
+
+Grouping/duplicate: `error-handling-lifecycle.md#NF-mirror-first`. This row is not another independent defect.
+
+<a id="review-6-flush-verdict"></a>
+
+### Claim 6.flush-verdict — Cached flush propagates inner flush and reports background errors once
+
+Status: `fixed`. Current risk: —.
+
+Source attempts inner.flush after a completed pending wait and consumes the most recent stored error; relevant assertions are registered. Worker death remains open.
+
+Evidence: [crates/shamir-storage/src/storage_cached.rs:346](../../../../../crates/shamir-storage/src/storage_cached.rs#L346); [crates/shamir-storage/src/storage_cached.rs:397](../../../../../crates/shamir-storage/src/storage_cached.rs#L397); [crates/shamir-storage/src/tests/storage_cached_tests.rs:1170](../../../../../crates/shamir-storage/src/tests/storage_cached_tests.rs#L1170).
+
+Grouping/duplicate: `error-handling-lifecycle.md#NF-cached-flush`. This row is not another independent defect.
+
+<a id="review-6-notify-verdict"></a>
+
+### Claim 6.Notify-verdict — Create-Notified-before-check pattern
+
+Status: `not-applicable`. Current risk: —.
+
+The notify_waiters pattern is supported by pinned Tokio documentation inspected locally; it does not detect worker death.
+
+Evidence: [crates/shamir-storage/src/storage_cached.rs:109](../../../../../crates/shamir-storage/src/storage_cached.rs#L109); [crates/shamir-storage/src/storage_cached.rs:385](../../../../../crates/shamir-storage/src/storage_cached.rs#L385); [Cargo.lock:4195](../../../../../Cargo.lock#L4195).
+
+Grouping/duplicate: `error-handling-lifecycle.md#NF-notify`. This row is not another independent defect.
+
+<a id="review-7-structure-verdict"></a>
+
+### Claim 7.structure-verdict — Manifest and external-test structural conformance
+
+Status: `not-applicable`. Current risk: —.
+
+External test trees and Fjall gating are correctly registered; manifests contain declarations and DbError uses thiserror.
+
+Evidence: [crates/shamir-storage/src/tests/mod.rs:1](../../../../../crates/shamir-storage/src/tests/mod.rs#L1); [crates/shamir-storage/src/lib.rs:32](../../../../../crates/shamir-storage/src/lib.rs#L32); [crates/shamir-storage/src/key_bytes.rs:315](../../../../../crates/shamir-storage/src/key_bytes.rs#L315); [crates/shamir-storage/src/error.rs:6](../../../../../crates/shamir-storage/src/error.rs#L6).
+
+Grouping/duplicate: `style-claude-md.md#NF-structure`. This row is not another independent defect.
+
+## Current fix-plan state
+
+| Claim decisions | Open | Source-fixed | Partial | Refuted | Unverified | N/A |
+|---:|---:|---:|---:|---:|---:|---:|
+| 22 | 20 | 0 | 1 | 0 | 1 | 0 |
+
+A source-fixed item closes only its stated mechanism. Partial items retain the obligations named below; proposed fixes must obey the corrections and current contracts, not merely copy the historical recipe.
+
+<a id="plan-p0-1"></a>
+
+### Plan P0.1 — P0.1
+
+Status: `confirmed-open`. Current risk: —.
+
+The get_many dirty recheck and controlled reader-fill regression remain absent. Recheck alone narrows rather than fully closes async insertion races.
+
+Evidence: [crates/shamir-storage/src/storage_membuffer.rs:1258](../../../../../crates/shamir-storage/src/storage_membuffer.rs#L1258); [crates/shamir-storage/src/storage_membuffer.rs:859](../../../../../crates/shamir-storage/src/storage_membuffer.rs#L859).
+
+<a id="plan-p0-2"></a>
+
+### Plan P0.2 — P0.2
+
+Status: `confirmed-open`. Current risk: —.
+
+No shared ordered commit/cache protocol exists. A tree upsert or cache-only helper alone cannot establish backing/cache order.
+
+Evidence: [crates/shamir-storage/src/storage_cached.rs:403](../../../../../crates/shamir-storage/src/storage_cached.rs#L403); [crates/shamir-storage/src/storage_cached.rs:431](../../../../../crates/shamir-storage/src/storage_cached.rs#L431); [crates/shamir-storage/src/storage_cached.rs:675](../../../../../crates/shamir-storage/src/storage_cached.rs#L675).
+
+<a id="plan-p0-3"></a>
+
+### Plan P0.3 — P0.3
+
+Status: `confirmed-open`. Current risk: —.
+
+Worker death is not observed. A per-job Drop guard alone cannot settle queued jobs; flush needs terminal worker-state handling.
+
+Evidence: [crates/shamir-storage/src/storage_cached.rs:106](../../../../../crates/shamir-storage/src/storage_cached.rs#L106); [crates/shamir-storage/src/storage_cached.rs:243](../../../../../crates/shamir-storage/src/storage_cached.rs#L243); [crates/shamir-storage/src/storage_cached.rs:383](../../../../../crates/shamir-storage/src/storage_cached.rs#L383).
+
+<a id="plan-p0-4"></a>
+
+### Plan P0.4 — P0.4
+
+Status: `partially-fixed`. Current risk: —.
+
+A versioned envelope now exists. Schema/golden/migration coverage does not; legacy raw blobs are explicitly rejected. Serde defaults are not sufficient bincode compatibility.
+
+Evidence: [crates/shamir-engine/src/table/buffer_config.rs:44](../../../../../crates/shamir-engine/src/table/buffer_config.rs#L44); [crates/shamir-index/src/meta_envelope.rs:54](../../../../../crates/shamir-index/src/meta_envelope.rs#L54); [crates/shamir-engine/src/table/tests/buffer_config_tests.rs:334](../../../../../crates/shamir-engine/src/table/tests/buffer_config_tests.rs#L334); [crates/shamir-storage/src/storage_membuffer.rs:94](../../../../../crates/shamir-storage/src/storage_membuffer.rs#L94).
+
+<a id="plan-p1-5"></a>
+
+### Plan P1.5 — P1.5
+
+Status: `confirmed-open`. Current risk: —.
+
+Inclusive/blind-skip range resumption, eager InMemory streams, and collecting reverse defaults all remain. Verify pinned reverse-iterator support before choosing the suggested implementation.
+
+Evidence: [crates/shamir-storage/src/storage_in_memory.rs:196](../../../../../crates/shamir-storage/src/storage_in_memory.rs#L196); [crates/shamir-storage/src/storage_in_memory.rs:153](../../../../../crates/shamir-storage/src/storage_in_memory.rs#L153); [crates/shamir-storage/src/types.rs:397](../../../../../crates/shamir-storage/src/types.rs#L397); [Cargo.lock:3123](../../../../../Cargo.lock#L3123).
+
+<a id="plan-p1-6"></a>
+
+### Plan P1.6 — P1.6
+
+Status: `confirmed-open`. Current risk: —.
+
+Full drain and unbounded snapshots remain. A touched-key replacement must also prove ordering against concurrent/background drains.
+
+Evidence: [crates/shamir-storage/src/storage_membuffer.rs:1037](../../../../../crates/shamir-storage/src/storage_membuffer.rs#L1037); [crates/shamir-storage/src/storage_membuffer.rs:600](../../../../../crates/shamir-storage/src/storage_membuffer.rs#L600).
+
+<a id="plan-p1-7"></a>
+
+### Plan P1.7 — P1.7
+
+Status: `confirmed-open`. Current risk: —.
+
+The async cache queue remains unbounded with no high-watermark admission action.
+
+Evidence: [crates/shamir-storage/src/storage_cached.rs:242](../../../../../crates/shamir-storage/src/storage_cached.rs#L242); [crates/shamir-storage/src/storage_cached.rs:446](../../../../../crates/shamir-storage/src/storage_cached.rs#L446).
+
+<a id="plan-p1-8"></a>
+
+### Plan P1.8 — P1.8
+
+Status: `confirmed-open`. Current risk: —.
+
+Fjall submission still uses blocking send directly in async context.
+
+Evidence: [crates/shamir-storage/src/storage_fjall.rs:199](../../../../../crates/shamir-storage/src/storage_fjall.rs#L199).
+
+<a id="plan-p1-9"></a>
+
+### Plan P1.9 — P1.9
+
+Status: `confirmed-open`. Current risk: —.
+
+MemBuffer transact republish is unguarded and InMemory still removes/reinserts. Proposed upsert API and completion-last test oracle must not be assumed valid.
+
+Evidence: [crates/shamir-storage/src/storage_membuffer.rs:1048](../../../../../crates/shamir-storage/src/storage_membuffer.rs#L1048); [crates/shamir-storage/src/storage_in_memory.rs:129](../../../../../crates/shamir-storage/src/storage_in_memory.rs#L129); [Cargo.lock:3123](../../../../../Cargo.lock#L3123).
+
+<a id="plan-p1-10"></a>
+
+### Plan P1.10 — P1.10
+
+Status: `confirmed-open`. Current risk: —.
+
+No zero-batch policy, inner-only removal-flag repair, or trait-level flag precision disclosure exists. debug_assert alone is insufficient.
+
+Evidence: [crates/shamir-storage/src/types.rs:305](../../../../../crates/shamir-storage/src/types.rs#L305); [crates/shamir-storage/src/storage_in_memory.rs:164](../../../../../crates/shamir-storage/src/storage_in_memory.rs#L164); [crates/shamir-storage/src/storage_membuffer.rs:886](../../../../../crates/shamir-storage/src/storage_membuffer.rs#L886); [crates/shamir-storage/src/types.rs:36](../../../../../crates/shamir-storage/src/types.rs#L36).
+
+<a id="plan-p1-11"></a>
+
+### Plan P1.11 — P1.11
+
+Status: `confirmed-open`. Current risk: —.
+
+Drop-with-dirty warning/acknowledged shutdown and readable flush_errors remain absent; target failure branches remain untested.
+
+Evidence: [crates/shamir-storage/src/storage_membuffer.rs:621](../../../../../crates/shamir-storage/src/storage_membuffer.rs#L621); [crates/shamir-storage/src/storage_membuffer.rs:355](../../../../../crates/shamir-storage/src/storage_membuffer.rs#L355); [crates/shamir-storage/src/storage_cached.rs:446](../../../../../crates/shamir-storage/src/storage_cached.rs#L446).
+
+<a id="plan-p1-12"></a>
+
+### Plan P1.12 — P1.12
+
+Status: `confirmed-open`. Current risk: —.
+
+Cached both modes and Mirrored still do not invoke the shared suite; dedicated Mirrored batch assertions cover only a subset.
+
+Evidence: [crates/shamir-storage/src/tests/types_tests.rs:38](../../../../../crates/shamir-storage/src/tests/types_tests.rs#L38); [crates/shamir-storage/src/tests/mod.rs:3](../../../../../crates/shamir-storage/src/tests/mod.rs#L3); [crates/shamir-storage/src/tests/storage_mirrored_tests.rs:168](../../../../../crates/shamir-storage/src/tests/storage_mirrored_tests.rs#L168).
+
+<a id="plan-p2-13"></a>
+
+### Plan P2.13 — P2.13
+
+Status: `confirmed-open`. Current risk: —.
+
+No explicit THasher is supplied to moka. Verify the pinned builder API and reconcile the untrusted-input hashing premise before changing it.
+
+Evidence: [crates/shamir-storage/src/storage_membuffer.rs:255](../../../../../crates/shamir-storage/src/storage_membuffer.rs#L255); [Cargo.lock:2221](../../../../../Cargo.lock#L2221).
+
+<a id="plan-p2-14"></a>
+
+### Plan P2.14 — P2.14
+
+Status: `unverified`. Current risk: —.
+
+Backend invalid-name behavior/security impact remains unverified. The claimed inability to check existence is refuted by stores_list; store_exists and creation logs would be optional convenience/observability.
+
+Evidence: [crates/shamir-storage/src/storage_fjall.rs:234](../../../../../crates/shamir-storage/src/storage_fjall.rs#L234); [crates/shamir-storage/src/types.rs:475](../../../../../crates/shamir-storage/src/types.rs#L475); [crates/shamir-engine/src/repo/repo_instance.rs:337](../../../../../crates/shamir-engine/src/repo/repo_instance.rs#L337); [Cargo.lock:1332](../../../../../Cargo.lock#L1332).
+
+<a id="plan-p2-15"></a>
+
+### Plan P2.15 — P2.15
+
+Status: `confirmed-open`. Current risk: —.
+
+Prefix constants remain private/duplicated; current real-constructor behavioral tests already cover equality indirectly. This is low-priority coupling, not current data loss.
+
+Evidence: [crates/shamir-storage/src/storage_mirrored.rs:44](../../../../../crates/shamir-storage/src/storage_mirrored.rs#L44); [crates/shamir-types/src/types/record_id.rs:18](../../../../../crates/shamir-types/src/types/record_id.rs#L18); [crates/shamir-storage/src/tests/storage_mirrored_tests.rs:244](../../../../../crates/shamir-storage/src/tests/storage_mirrored_tests.rs#L244).
+
+<a id="plan-p2-16"></a>
+
+### Plan P2.16 — P2.16
+
+Status: `confirmed-open`. Current risk: —.
+
+Randomness narration and unbounded full-key formatting remain. Hash exploitability is unverified; BiDi rendering is refuted. Any size policy must reject before allocation, and remote KeyBytes decode reachability must be identified rather than inferred from alias cutover.
+
+Evidence: [crates/shamir-storage/src/storage_fjall.rs:154](../../../../../crates/shamir-storage/src/storage_fjall.rs#L154); [crates/shamir-storage/src/storage_membuffer.rs:154](../../../../../crates/shamir-storage/src/storage_membuffer.rs#L154); [crates/shamir-storage/src/key_bytes.rs:237](../../../../../crates/shamir-storage/src/key_bytes.rs#L237); [crates/shamir-storage/src/key_bytes.rs:310](../../../../../crates/shamir-storage/src/key_bytes.rs#L310); [crates/shamir-wal/src/wal_entry_v2.rs:87](../../../../../crates/shamir-wal/src/wal_entry_v2.rs#L87).
+
+<a id="plan-p2-17"></a>
+
+### Plan P2.17 — P2.17
+
+Status: `confirmed-open`. Current risk: —.
+
+Partial-copy failure policy remains open, but self-copy record doubling is refuted. Cleanup must preserve pre-existing destinations rather than blindly deleting them.
+
+Evidence: [crates/shamir-storage/src/types.rs:488](../../../../../crates/shamir-storage/src/types.rs#L488); [crates/shamir-storage/src/types.rs:500](../../../../../crates/shamir-storage/src/types.rs#L500); [crates/shamir-engine/src/repo/repo_instance.rs:593](../../../../../crates/shamir-engine/src/repo/repo_instance.rs#L593).
+
+<a id="plan-p2-18"></a>
+
+### Plan P2.18 — P2.18
+
+Status: `confirmed-open`. Current risk: —.
+
+Broad transact ordering wording remains wrong; per-handle lazy lifetime is already documented and joined. Sharing workers is optional architecture unless cross-handle submission order is required.
+
+Evidence: [crates/shamir-storage/src/storage_fjall.rs:289](../../../../../crates/shamir-storage/src/storage_fjall.rs#L289); [crates/shamir-storage/src/storage_fjall.rs:494](../../../../../crates/shamir-storage/src/storage_fjall.rs#L494); [crates/shamir-storage/src/storage_fjall.rs:134](../../../../../crates/shamir-storage/src/storage_fjall.rs#L134).
+
+<a id="plan-p2-19"></a>
+
+### Plan P2.19 — P2.19
+
+Status: `confirmed-open`. Current risk: —.
+
+No negative cache marker, reload quiescence contract, or conditional insert counter exists. Ordinary worker failures already log, so a resurrection log is not the only missing signal.
+
+Evidence: [crates/shamir-storage/src/storage_cached.rs:487](../../../../../crates/shamir-storage/src/storage_cached.rs#L487); [crates/shamir-storage/src/storage_cached.rs:306](../../../../../crates/shamir-storage/src/storage_cached.rs#L306); [crates/shamir-storage/src/storage_cached.rs:423](../../../../../crates/shamir-storage/src/storage_cached.rs#L423); [crates/shamir-storage/src/storage_cached.rs:92](../../../../../crates/shamir-storage/src/storage_cached.rs#L92).
+
+<a id="plan-p2-20"></a>
+
+### Plan P2.20 — P2.20
+
+Status: `confirmed-open`. Current risk: —.
+
+Codec sources remain flattened and thread spawning still expects success.
+
+Evidence: [crates/shamir-storage/src/error.rs:94](../../../../../crates/shamir-storage/src/error.rs#L94); [crates/shamir-storage/src/storage_fjall.rs:98](../../../../../crates/shamir-storage/src/storage_fjall.rs#L98).
+
+<a id="plan-p2-21"></a>
+
+### Plan P2.21 — P2.21
+
+Status: `confirmed-open`. Current risk: —.
+
+All listed import/doc/banner/alias/topic-file issues remain, including 5.8 polish. Keep this low/nit and preserve Store object safety; no commit was authorized or performed.
+
+Evidence: [crates/shamir-storage/src/types.rs:395](../../../../../crates/shamir-storage/src/types.rs#L395); [crates/shamir-storage/src/key_bytes.rs:7](../../../../../crates/shamir-storage/src/key_bytes.rs#L7); [crates/shamir-storage/src/storage_cached.rs:719](../../../../../crates/shamir-storage/src/storage_cached.rs#L719); [crates/shamir-storage/src/storage_membuffer.rs:628](../../../../../crates/shamir-storage/src/storage_membuffer.rs#L628); [crates/shamir-storage/src/storage_fjall.rs:655](../../../../../crates/shamir-storage/src/storage_fjall.rs#L655); [crates/shamir-storage/src/tests/storage_membuffer_tests.rs:728](../../../../../crates/shamir-storage/src/tests/storage_membuffer_tests.rs#L728).
+
+<a id="plan-p2-22"></a>
+
+### Plan P2.22 — P2.22
+
+Status: `confirmed-open`. Current risk: —.
+
+The miss-key clone and fixed 256 initial scan capacities remain; any timing benefit is unmeasured.
+
+Evidence: [crates/shamir-storage/src/storage_membuffer.rs:1245](../../../../../crates/shamir-storage/src/storage_membuffer.rs#L1245); [crates/shamir-storage/src/storage_fjall.rs:617](../../../../../crates/shamir-storage/src/storage_fjall.rs#L617); [crates/shamir-storage/src/storage_fjall.rs:682](../../../../../crates/shamir-storage/src/storage_fjall.rs#L682).
+
+## Corrections and qualified non-findings
+
+- Retain the 53-row historical census as provenance, not as a current confirmed-defect/severity count. Recompute current counts after refutations, partial remediation, threat-model qualification, and style/performance severity normalization.
+- The executive summary's unconditional not-shippable verdict is not independently established by static revalidation; retain the three concrete high cache/liveness risks and their trigger conditions.
+- Remove self-copy doubling, Unicode/BiDi Debug spoofing, no ordinary MemBuffer get_many coverage, and no possible nonmutating existence check assertions.
+- Replace the unconditional engine same-key serialization premise with conditional locking evidence.
+- The buffer envelope change is proven by source and the 6c286cc9 diff, not merely its task/commit description; it does not preserve old database configuration compatibility.
+- Do not claim per-field defaults repair bincode schema evolution, that a cache-only upsert repairs commit ordering, or that a per-job guard repairs all worker-death backlog.
+- The praised Fjall cursor-deletion test removes a key before scanning and cannot detect deletion of an emitted cursor between pulls.
+- Forwarded atomicity capability is not universally honest for cache wrappers.
+- Mirrored error-atomicity guarantees apply to primary publication; mirror rollback depends on the actual mirror implementation.
+- No tests or benchmarks were executed, and no private absolute machine paths are included in proposed review text.
+
+## Additional observations from revalidation
+
+These were found while validating the original claims/remediations. They are separate from the original-row counts; cross-module repeats are not extra unique defects.
+
+<a id="new-1"></a>
+
+### Observation NEW.1 — Buffer-config envelope retrofit rejects previously valid persisted raw configurations
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+The alleged versioning remediation replaced raw-bincode loading with MetaEnvelope::open without a legacy decoder/migration. A registered test explicitly expects rejection of a raw MemBufferConfig written by the former format. TableManager::create propagates that Codec error, preventing such a table from opening. This is an intentional compatibility consequence, not proof the original compatibility concern was fixed. Parent qualification: legacy rejection is deliberate and regression-tested, so classify this as an upgrade/compatibility-policy consequence requiring migration or explicit notice, not an accidental decode bug or proof all deployments fail.
+
+Evidence: [crates/shamir-engine/src/table/buffer_config.rs:34](../../../../../crates/shamir-engine/src/table/buffer_config.rs#L34); [crates/shamir-engine/src/table/buffer_config.rs:44](../../../../../crates/shamir-engine/src/table/buffer_config.rs#L44); [crates/shamir-engine/src/table/tests/buffer_config_tests.rs:334](../../../../../crates/shamir-engine/src/table/tests/buffer_config_tests.rs#L334); [crates/shamir-engine/src/table/table_manager.rs:632](../../../../../crates/shamir-engine/src/table/table_manager.rs#L632).
+
+<a id="new-2"></a>
+
+### Observation NEW.2 — Cache wrappers forward whole-batch visibility atomicity without atomic cache publication
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+This explains the review's alleged F-77 capability guarantee: CachedStore and MemBufferStore report inner.supports_atomic_transact, yet their read-visible caches are updated per key after the inner batch commits. Concurrent reads can observe mixed old/new cache values even when inner reports true. The registered capability test asserts forwarding through a mock rather than detecting mixed visibility.
+
+Evidence: [crates/shamir-storage/src/types.rs:256](../../../../../crates/shamir-storage/src/types.rs#L256); [crates/shamir-storage/src/storage_cached.rs:675](../../../../../crates/shamir-storage/src/storage_cached.rs#L675); [crates/shamir-storage/src/storage_cached.rs:684](../../../../../crates/shamir-storage/src/storage_cached.rs#L684); [crates/shamir-storage/src/storage_membuffer.rs:1045](../../../../../crates/shamir-storage/src/storage_membuffer.rs#L1045); [crates/shamir-storage/src/storage_membuffer.rs:1092](../../../../../crates/shamir-storage/src/storage_membuffer.rs#L1092); [crates/shamir-storage/src/tests/storage_mirrored_tests.rs:1285](../../../../../crates/shamir-storage/src/tests/storage_mirrored_tests.rs#L1285).
+
+## Current follow-up order
+
+1. Repair cache authority/publication ordering for MemBuffer get_many/transact and Cached mutation paths; add controlled tests asserting wrapper reads as well as backing state.
+2. Make Cached flush terminate with an error on worker death, and bound async queue admission without blocking runtime threads.
+3. Resolve legacy buffer-config migration/rejection policy before treating the envelope retrofit as compatibility remediation.
+4. Fix exclusive scan resumption and zero-batch behavior; then remove whole-range/eager scan allocation where supported by verified pinned APIs.
+5. Repair or accurately disclose inner-only removal flags and wrapper visibility-atomicity capabilities.
+6. Define dirty shutdown and partial-copy failure policies, expose flush telemetry, and register missing shared/error-path tests.
+7. Keep dependency-unverified security hypotheses separate from confirmed mechanisms; perform style/docs/nit cleanup at lower priority.
+
+## Coverage and limitations
+
+- All eight assigned documents were read completely; TASK_GROUPS.md is absent.
+- HEAD equals the supplied base; no files were changed and no builds, tests, benchmarks, reproductions, project programs, or agents were run.
+- Pinned scc 3.8.4, fjall/lsm-tree 3.1.6, moka 0.12.15, and rustc-hash 2.1.2 sources were unavailable in the inspected checkout/cache. Their external API, name-validation, hashing, and internal-lock claims remain unverified where noted. Cargo.lock pins were checked.
+- Performance conclusions establish source-level traversal, allocation, and queue shapes, not measured latency, throughput, or RSS.
+- Remote exploitation, cross-tenant disclosure, collision-farming practicality, and the stated Xoshiro recovery threshold were not established.
+- Test registration and assertions were inspected statically; no passing-test claim is made.
+
+## Reviewed document inventory
+
+- [correctness-tdd.md](./correctness-tdd.md) — 12 claim decisions; 0 explicit plan items.
+- [concurrency-lockfree.md](./concurrency-lockfree.md) — 9 claim decisions; 0 explicit plan items.
+- [security-crypto.md](./security-crypto.md) — 8 claim decisions; 0 explicit plan items.
+- [performance-hotpath.md](./performance-hotpath.md) — 9 claim decisions; 0 explicit plan items.
+- [api-wire-protocol.md](./api-wire-protocol.md) — 10 claim decisions; 0 explicit plan items.
+- [error-handling-lifecycle.md](./error-handling-lifecycle.md) — 13 claim decisions; 0 explicit plan items.
+- [style-claude-md.md](./style-claude-md.md) — 8 claim decisions; 0 explicit plan items.
+- [SUMMARY.md](./SUMMARY.md) — 64 claim decisions; 22 explicit plan items.
+
+---
+
+<details>
+<summary>Historical report — preserved for provenance; not current status or instructions</summary>
+
 # shamir-storage — Consolidated 7-lens review (synthesis of the 2026-08-14 cross-crate sweep)
 
 Crate: `crates/shamir-storage/` — the storage spine: the `Store`/`Repo` KV abstraction
@@ -1150,3 +2235,5 @@ own defects):
     the `:655` line ref (7.7); trim the retired-#535 narration (1.10 remainder); split the
     membuffer test mods into topic files (7.6); apply 5.8's remaining API-polish bullets.
 22. Cosmetic batch-path allocations (`miss_keys.clone()`, hardcoded 256) (4.7).
+
+</details>

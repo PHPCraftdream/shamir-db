@@ -1,3 +1,190 @@
+<!-- revalidation:2026-10-08 source:92ad58266bf57ddea1fa3c8a47affba1a3a9a096 -->
+# shamir-client — api-wire-protocol revalidation
+
+Source snapshot: `92ad58266bf57ddea1fa3c8a47affba1a3a9a096`. Revalidated 2026-10-08 by read-only XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run; no source fix is part of this update. Test registration/assertions are evidence of an oracle, not proof of a passing run.
+
+This section is authoritative for current status. Original titles/IDs are retained for traceability; a refuted title is not a current assertion. The collapsed historical report below is superseded, including its counts, severity, scenarios and fix instructions. Plan IDs preserve historical numbering, not a current release mandate. [Workspace methodology and status definitions](../SUMMARY.md#status-definitions).
+
+Version fallback, resume asymmetry, and API hygiene issues remain. DDL errors already retain machine-readable Db codes despite the unreachable reshaping arm.
+
+## Current claim decisions
+
+| Claim decisions | Open | Source-fixed | Partial | Refuted | Unverified | N/A |
+|---:|---:|---:|---:|---:|---:|---:|
+| 13 | 12 | 0 | 0 | 0 | 0 | 1 |
+
+These are decisions on report claims, including repeated roots, bundled observations and non-findings—not a unique-bug census. Closed/N/A rows have no current risk; unverified risk is provisional. Pure style and unmeasured optimization claims do not establish runtime impact.
+
+<a id="review-1"></a>
+
+### Claim 1 — `query_version: 2` stamped unconditionally -- the `server_query_version` negotiation is parsed but never applied to the request version
+
+Status: `confirmed-open`. Current risk: `high`.
+
+Execute stamps CURRENT=2; cursor creation uses the same constant. Historical pre-v2 server dispatch supported only 1, so negotiated fallback is not implemented.
+
+Evidence: [crates/shamir-client/src/client.rs:1061](../../../../../crates/shamir-client/src/client.rs#L1061); [crates/shamir-client/src/cursor_stream.rs:126](../../../../../crates/shamir-client/src/cursor_stream.rs#L126); [crates/shamir-query-builder/src/cursor.rs:43](../../../../../crates/shamir-query-builder/src/cursor.rs#L43); [crates/shamir-server/src/version.rs:45](../../../../../crates/shamir-server/src/version.rs#L45).
+
+Grouping/duplicate: `SUMMARY.md#5.1`. This row is not another independent defect.
+
+<a id="review-2"></a>
+
+### Claim 2 — Handshake/resume frames are positional (array) msgpack while everything post-handshake is named-map -- order is load-bearing, enforced only by duplicated struct definitions
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+Client/server positional mirrors remain duplicated and ResumeInit lacks version. Current layouts match; this is evolution fragility, not current peer incompatibility.
+
+Evidence: [crates/shamir-client/src/client.rs:504](../../../../../crates/shamir-client/src/client.rs#L504); [crates/shamir-client/src/client.rs:895](../../../../../crates/shamir-client/src/client.rs#L895); [crates/shamir-client/src/wire_frames.rs:40](../../../../../crates/shamir-client/src/wire_frames.rs#L40); [crates/shamir-server/src/connection/wire.rs:65](../../../../../crates/shamir-server/src/connection/wire.rs#L65).
+
+Grouping/duplicate: `SUMMARY.md#5.2`. This row is not another independent defect.
+
+<a id="review-3"></a>
+
+### Claim 3 — `resume()` accepts `pinned_hash` but never verifies the server against it -- the pin is dead bookkeeping on the resume path
+
+Status: `confirmed-open`. Current risk: `high`.
+
+Resume stores the pin without comparison. The report's exporter-binding non-exploitability assurance is false: server checks strength, not old/new exporter equality.
+
+Evidence: [crates/shamir-client/src/client.rs:937](../../../../../crates/shamir-client/src/client.rs#L937); [crates/shamir-connect/src/server/resume.rs:310](../../../../../crates/shamir-connect/src/server/resume.rs#L310); [crates/shamir-connect/src/server/resume.rs:324](../../../../../crates/shamir-connect/src/server/resume.rs#L324).
+
+Grouping/duplicate: `SUMMARY.md#3.1`. This row is not another independent defect.
+
+<a id="review-4"></a>
+
+### Claim 4 — `ResumeOptions` has no `connect_timeout`/`request_timeout` -- resumed clients silently revert to unbounded waits
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+ResumeOptions still lacks deadline fields; resume passes None to connect_tcp and stores request_timeout=None. History confirms intentional scope, not a fix.
+
+Evidence: [crates/shamir-client/src/client.rs:99](../../../../../crates/shamir-client/src/client.rs#L99); [crates/shamir-client/src/client.rs:872](../../../../../crates/shamir-client/src/client.rs#L872); [crates/shamir-client/src/client.rs:949](../../../../../crates/shamir-client/src/client.rs#L949).
+
+Grouping/duplicate: `SUMMARY.md#5.3`. This row is not another independent defect.
+
+<a id="review-5"></a>
+
+### Claim 5 — Envelope-level server errors are stringly-typed into `ClientError::Protocol` -- spec §14 codes are not machine-readable
+
+Status: `confirmed-open`. Current risk: `low`.
+
+ErrorEnvelope codes become formatted Protocol strings rather than structured error fields; the registered test explicitly relies on substring matching.
+
+Evidence: [crates/shamir-client/src/client.rs:374](../../../../../crates/shamir-client/src/client.rs#L374); [crates/shamir-client/src/tests/demux_tests.rs:235](../../../../../crates/shamir-client/src/tests/demux_tests.rs#L235).
+
+Grouping/duplicate: `SUMMARY.md#5.4`. This row is not another independent defect.
+
+<a id="review-6"></a>
+
+### Claim 6 — Dead public API: `ClientError::RequestIdMismatch` is never constructed anywhere in the workspace
+
+Status: `confirmed-open`. Current risk: `low`.
+
+The declaration remains; unknown response IDs are logged/dropped and no construction site was found.
+
+Evidence: [crates/shamir-client/src/error.rs:29](../../../../../crates/shamir-client/src/error.rs#L29); [crates/shamir-client/src/client.rs:400](../../../../../crates/shamir-client/src/client.rs#L400).
+
+Grouping/duplicate: `SUMMARY.md#5.5`. This row is not another independent defect.
+
+<a id="review-7"></a>
+
+### Claim 7 — Frame demux is shape-sniffing with no discriminator -- routing correctness relies on field-name disjointness
+
+Status: `confirmed-open`. Current risk: `low`.
+
+The reader tries serde shapes in sequence without a mandatory kind. Current shapes are distinct; overlapping future shapes remain a conditional extension hazard.
+
+Evidence: [crates/shamir-client/src/client.rs:194](../../../../../crates/shamir-client/src/client.rs#L194); [crates/shamir-client/src/client.rs:329](../../../../../crates/shamir-client/src/client.rs#L329); [crates/shamir-connect/src/common/push_envelope.rs:25](../../../../../crates/shamir-connect/src/common/push_envelope.rs#L25).
+
+Grouping/duplicate: `SUMMARY.md#5.6`. This row is not another independent defect.
+
+<a id="review-8"></a>
+
+### Claim 8 — Crate-root doc example no longer compiles: `ConnectOptions` literal missing `connect_timeout` / `request_timeout`
+
+Status: `confirmed-open`. Current risk: `low`.
+
+The example still supplies six fields for an eight-field struct; doctests are disabled. This mismatch is source-proven without compiling.
+
+Evidence: [crates/shamir-client/src/lib.rs:10](../../../../../crates/shamir-client/src/lib.rs#L10); [crates/shamir-client/src/client.rs:85](../../../../../crates/shamir-client/src/client.rs#L85); [crates/shamir-client/Cargo.toml:52](../../../../../crates/shamir-client/Cargo.toml#L52).
+
+Grouping/duplicate: `SUMMARY.md#7.1`. This row is not another independent defect.
+
+<a id="review-9"></a>
+
+### Claim 9 — `get_ddl_op_status`: comment says "feature unavailable rather than a hard error", code returns an error in both branches
+
+Status: `confirmed-open`. Current risk: `low`.
+
+The contradiction remains, but both branches are unreachable after roundtrip's error conversion; actual not_supported errors already expose Db.code.
+
+Evidence: [crates/shamir-client/src/client.rs:1207](../../../../../crates/shamir-client/src/client.rs#L1207); [crates/shamir-client/src/client.rs:1210](../../../../../crates/shamir-client/src/client.rs#L1210); [crates/shamir-client/src/client.rs:1293](../../../../../crates/shamir-client/src/client.rs#L1293).
+
+Grouping/duplicate: `SUMMARY.md#1.7`. This row is not another independent defect.
+
+<a id="review-10"></a>
+
+### Claim 10 — Ambient interner-epoch advertisement is all-or-nothing per batch
+
+Status: `confirmed-open`. Current risk: `nit`.
+
+Any caller-supplied epoch entry disables automatic insertion for every other referenced repo because the entire map must be empty.
+
+Evidence: [crates/shamir-client/src/client.rs:1053](../../../../../crates/shamir-client/src/client.rs#L1053).
+
+Grouping/duplicate: `SUMMARY.md#5.7`. This row is not another independent defect.
+
+<a id="review-11"></a>
+
+### Claim 11 — `ConnectOptions` has no `Default` impl -- every call site must spell out 8 fields
+
+Status: `confirmed-open`. Current risk: `nit`.
+
+No Default or partial-options constructor exists. This is optional ergonomics; mandatory endpoint/credentials make a blanket default questionable.
+
+Evidence: [crates/shamir-client/src/client.rs:58](../../../../../crates/shamir-client/src/client.rs#L58); [crates/shamir-client-node/src/lib.rs:123](../../../../../crates/shamir-client-node/src/lib.rs#L123).
+
+Grouping/duplicate: `SUMMARY.md#5.8`. This row is not another independent defect.
+
+<a id="review-12"></a>
+
+### Claim 12 — Tautological test: `atomic_u8_plumbing_stores_and_reads_correctly` asserts on a locally created `AtomicU8`, not on any crate code
+
+Status: `confirmed-open`. Current risk: `nit`.
+
+The reachable test checks only standard-library loads and never invokes Client's getter or handshake wiring.
+
+Evidence: [crates/shamir-client/src/tests/wire_version_tests.rs:135](../../../../../crates/shamir-client/src/tests/wire_version_tests.rs#L135); [crates/shamir-client/src/tests/mod.rs:9](../../../../../crates/shamir-client/src/tests/mod.rs#L9).
+
+Grouping/duplicate: `SUMMARY.md#1.6`. This row is not another independent defect.
+
+<a id="review-nf-1"></a>
+
+### Claim NF.1 — Builder-only public query construction
+
+Status: `not-applicable`. Current risk: —.
+
+Typed query/cursor builders are used; direct DbRequest construction wraps transport/session operations. No serde_json/json construction exists in this crate.
+
+Evidence: [crates/shamir-query-builder/src/lib.rs:12](../../../../../crates/shamir-query-builder/src/lib.rs#L12); [crates/shamir-client/src/interner_cache_ops.rs:24](../../../../../crates/shamir-client/src/interner_cache_ops.rs#L24); [crates/shamir-client/src/cursor_stream.rs:41](../../../../../crates/shamir-client/src/cursor_stream.rs#L41).
+
+Grouping/duplicate: `SUMMARY.md#NF.5`. This row is not another independent defect.
+
+## Corrections and qualified non-findings
+
+- Current server supports [1,2]; the unconditional-version defect concerns supported fallback to historical/older servers, not current-server rejection.
+- Named wire-version tests establish map-field defaults, not complete positional cross-version handshake compatibility.
+- DDL unsupported is distinguishable through ClientError::Db.code today; claims requiring Protocol-string matching describe an unreachable branch.
+- An unknown operation ID and an unsupported protocol operation are different conditions; docs do not inherently require treating both as Ok(None).
+- Default is an optional API design choice; prefer safe constructor/options-builder ergonomics over silently defaulting credentials or enabling TOFU.
+- The TypeScript client is an independent implementation, not a wrapper around this Rust Client.
+
+---
+
+<details>
+<summary>Historical report — preserved for provenance; not current status or instructions</summary>
+
 # shamir-client -- API & wire-protocol design
 
 ## Summary
@@ -87,3 +274,5 @@ The crate's public surface is clean and the CLAUDE.md "builder only" query-const
 - **Issue:** The test creates its own `AtomicU8`, stores 2, loads, asserts equality -- it exercises `std` semantics, not `Client::server_query_version` plumbing, despite its doc claiming to verify "the AtomicU8 plumbing". It inflates the apparent coverage of the `server_query_version` field path (whose real wiring -- `client.rs:573`, `674` -- is only covered by live-server e2e).
 - **Suggested fix:** Delete it or replace with a real assertion against a `Client` (e.g. via the existing live-server e2e asserting `client.server_query_version() == 2` after connect).
 
+
+</details>

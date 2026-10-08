@@ -1,3 +1,94 @@
+<!-- revalidation:2026-10-08 source:92ad58266bf57ddea1fa3c8a47affba1a3a9a096 -->
+# shamir-bench-utils — error-handling-lifecycle revalidation
+
+Source snapshot: `92ad58266bf57ddea1fa3c8a47affba1a3a9a096`. Revalidated 2026-10-08 by read-only XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run; no source fix is part of this update. Test registration/assertions are evidence of an oracle, not proof of a passing run.
+
+This section is authoritative for current status. Original titles/IDs are retained for traceability; a refuted title is not a current assertion. The collapsed historical report below is superseded, including its counts, severity, scenarios and fix instructions. Plan IDs preserve historical numbering, not a current release mandate. [Workspace methodology and status definitions](../SUMMARY.md#status-definitions).
+
+The externally reachable zero-cluster panic, missing zero-dimension documentation/test, allocator activation documentation, and inline layout remain. Cancellation carry-over into the next reset-based measurement is refuted.
+
+## Current claim decisions
+
+| Claim decisions | Open | Source-fixed | Partial | Refuted | Unverified | N/A |
+|---:|---:|---:|---:|---:|---:|---:|
+| 5 | 4 | 0 | 0 | 1 | 0 | 0 |
+
+These are decisions on report claims, including repeated roots, bundled observations and non-findings—not a unique-bug census. Closed/N/A rows have no current risk; unverified risk is provisional. Pure style and unmeasured optimization claims do not establish runtime impact.
+
+<a id="review-1"></a>
+
+### Claim 1 — `clustered_vectors` validates arguments with `assert!` instead of `Result`/`thiserror`, and one caller feeds it externally-controlled input
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+vector_report parses zero as a valid usize, stores it without validation, and calls clustered_vectors, which asserts. Reachability is through the local example's environment, not database requests.
+
+Evidence: [crates/shamir-engine/examples/vector_report.rs:110](../../../../../crates/shamir-engine/examples/vector_report.rs#L110); [crates/shamir-engine/examples/vector_report.rs:406](../../../../../crates/shamir-engine/examples/vector_report.rs#L406); [crates/shamir-engine/examples/vector_report.rs:427](../../../../../crates/shamir-engine/examples/vector_report.rs#L427); [crates/shamir-bench-utils/src/vector_data.rs:171](../../../../../crates/shamir-bench-utils/src/vector_data.rs#L171).
+
+Grouping/duplicate: `SUMMARY.md#6.1`. This row is not another independent defect.
+
+<a id="review-2"></a>
+
+### Claim 2 — Second panic path (`dim == 0`) is missing from the `# Panics` doc and has no test
+
+Status: `confirmed-open`. Current risk: `low`.
+
+Zero dimension still asserts, but only zero clusters are documented and covered by should_panic. The missing error-path coverage is confirmed; vector_report itself filters zero dimensions.
+
+Evidence: [crates/shamir-bench-utils/src/vector_data.rs:163](../../../../../crates/shamir-bench-utils/src/vector_data.rs#L163); [crates/shamir-bench-utils/src/vector_data.rs:172](../../../../../crates/shamir-bench-utils/src/vector_data.rs#L172); [crates/shamir-bench-utils/src/vector_data.rs:342](../../../../../crates/shamir-bench-utils/src/vector_data.rs#L342); [crates/shamir-engine/examples/vector_report.rs:130](../../../../../crates/shamir-engine/examples/vector_report.rs#L130).
+
+Grouping/duplicate: `SUMMARY.md#6.1`. This row is not another independent defect.
+
+<a id="review-3"></a>
+
+### Claim 3 — `measure` / `measure_async` have no drop-guard: global peak counter is left perturbed on panic or future cancellation; module has zero tests
+
+Status: `refuted`. Current risk: —.
+
+Every subsequent helper measurement resets before executing its workload, so an aborted window's historical peak is not inherited merely because no drop guard exists. Allocations still live at the next reset are legitimate process baseline; continuing foreign work is the separate contamination issue. Zero tests remain true.
+
+Evidence: [crates/shamir-bench-utils/src/peak_mem.rs:54](../../../../../crates/shamir-bench-utils/src/peak_mem.rs#L54); [crates/shamir-bench-utils/src/peak_mem.rs:89](../../../../../crates/shamir-bench-utils/src/peak_mem.rs#L89); [crates/shamir-bench-utils/src/peak_mem.rs:106](../../../../../crates/shamir-bench-utils/src/peak_mem.rs#L106).
+
+Grouping/duplicate: `SUMMARY.md#2.1`. This row is not another independent defect.
+
+<a id="review-4"></a>
+
+### Claim 4 — `peak_mem` feature silently installs a `#[global_allocator]` into every consumer test/bench/example binary; `setup()` misrepresents the activation model
+
+Status: `confirmed-open`. Current risk: `low`.
+
+The allocator still activates for linked consumers independently of setup, and both manifests enable its feature unconditionally. The claim about every test binary overstates linkage; actual fixture and memory consumers are source-proven.
+
+Evidence: [crates/shamir-bench-utils/src/peak_mem.rs:34](../../../../../crates/shamir-bench-utils/src/peak_mem.rs#L34); [crates/shamir-bench-utils/src/peak_mem.rs:39](../../../../../crates/shamir-bench-utils/src/peak_mem.rs#L39); [crates/shamir-bench-utils/src/peak_mem.rs:48](../../../../../crates/shamir-bench-utils/src/peak_mem.rs#L48); [crates/shamir-engine/Cargo.toml:107](../../../../../crates/shamir-engine/Cargo.toml#L107); [crates/shamir-index/Cargo.toml:64](../../../../../crates/shamir-index/Cargo.toml#L64).
+
+Grouping/duplicate: `SUMMARY.md#5.1`. This row is not another independent defect.
+
+<a id="review-5"></a>
+
+### Claim 5 — Tests are embedded inline contrary to the documented layout, which is where the error-path gap lives
+
+Status: `confirmed-open`. Current risk: `nit`.
+
+The inline cfg(test) module and misleading manifest comment remain. All existing tests are registered; inline placement does not technically prevent adding the missing tests.
+
+Evidence: [crates/shamir-bench-utils/src/vector_data.rs:217](../../../../../crates/shamir-bench-utils/src/vector_data.rs#L217); [crates/shamir-bench-utils/Cargo.toml:10](../../../../../crates/shamir-bench-utils/Cargo.toml#L10); [CLAUDE.md:594](../../../../../CLAUDE.md#L594).
+
+Grouping/duplicate: `SUMMARY.md#7.1`. This row is not another independent defect.
+
+## Corrections and qualified non-findings
+
+- The named cargo-run reproduction was not performed; the configured runner also restricts ordinary example execution. The environment-to-assert source path is nevertheless established.
+- The cited caller filters dim=0, so its zero-dimension failure scenario is not demonstrated. Missing library documentation and coverage remain.
+- reset is documented as reset-to-current, not reset-to-zero; the proposed reset-zeroes-counter test contradicts the contract.
+- There is no armed/disarmed measurement state to restore today. RAII release becomes necessary if a new single-flight claim is introduced, but resetting on cancellation does not isolate outstanding allocations.
+- A boundary validation fix can remove the demonstrated user-input panic without necessarily replacing every bench-helper assert with a Result API.
+- Allocation failure remains possible; an API lacking Result is not an unconditional no-failure guarantee.
+
+---
+
+<details>
+<summary>Historical report — preserved for provenance; not current status or instructions</summary>
+
 # shamir-bench-utils -- Error handling & resource lifecycle
 
 ## Summary
@@ -44,3 +135,5 @@ The crate is tiny and almost entirely infallible-by-construction: no `Result`, `
 - **Severity:** nit
 - **Issue:** CLAUDE.md "Test organisation" §5 mandates "Never embed `#[cfg(test)] mod tests { ... }` inline inside implementation files. Move them to the `tests/` directory." The inline block is institutionalized by the Cargo.toml comment rather than treated as a deviation. The substantive cost is to this theme: there is no `tests/` home for the missing `dim == 0` error-path test (finding 2) or for `peak_mem` coverage (finding 3), and the coverage claim rests on a single `#[should_panic]` case inside an implementation file.
 - **Suggested fix:** When findings 2/3 are addressed, move the tests to `src/vector_data/tests/` (+ `src/peak_mem/tests/` under the feature gate) per the documented layout, and drop the Cargo.toml comment that codifies the exception.
+
+</details>

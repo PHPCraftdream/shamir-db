@@ -1,3 +1,105 @@
+<!-- revalidation:2026-10-08 source:92ad58266bf57ddea1fa3c8a47affba1a3a9a096 -->
+# shamir-query-builder — style-claude-md revalidation
+
+Source snapshot: `92ad58266bf57ddea1fa3c8a47affba1a3a9a096`. Revalidated 2026-10-08 by read-only XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run; no source fix is part of this update. Test registration/assertions are evidence of an oracle, not proof of a passing run.
+
+This section is authoritative for current status. Original titles/IDs are retained for traceability; a refuted title is not a current assertion. The collapsed historical report below is superseded, including its counts, severity, scenarios and fix instructions. Plan IDs preserve historical numbering, not a current release mandate. [Workspace methodology and status definitions](../SUMMARY.md#status-definitions).
+
+The structural deviations remain unchanged. Their impact is maintenance/documentation, not runtime Medium/High severity. Several blanket positive conformance claims are contradicted by the same source tree.
+
+## Current claim decisions
+
+| Claim decisions | Open | Source-fixed | Partial | Refuted | Unverified | N/A |
+|---:|---:|---:|---:|---:|---:|---:|
+| 7 | 7 | 0 | 0 | 0 | 0 | 0 |
+
+These are decisions on report claims, including repeated roots, bundled observations and non-findings—not a unique-bug census. Closed/N/A rows have no current risk; unverified risk is provisional. Pure style and unmeasured optimization claims do not establish runtime impact.
+
+<a id="review-1"></a>
+
+### Claim 1 — `ToWire` trait + blanket impl live directly in `wire/mod.rs`
+
+Status: `confirmed-open`. Current risk: `low`.
+
+wire/mod.rs still owns ToWire methods and blanket implementation rather than sibling-file wiring, contrary to the manifest-only rule. No functional defect is established.
+
+Evidence: [AGENTS.md](../../../../../AGENTS.md); [CLAUDE.md](../../../../../CLAUDE.md); [crates/shamir-query-builder/src/wire/mod.rs:24](../../../../../crates/shamir-query-builder/src/wire/mod.rs#L24); [crates/shamir-query-builder/src/wire/mod.rs:48](../../../../../crates/shamir-query-builder/src/wire/mod.rs#L48).
+
+<a id="review-2"></a>
+
+### Claim 2 — All four `macro_rules!` definitions live inline in `macros/mod.rs`
+
+Status: `confirmed-open`. Current risk: `low`.
+
+All four exported declarative macros remain in mod.rs; no documented macro exception was found in the current project rules. File separation is structural, independent of the macro hygiene defect.
+
+Evidence: [CLAUDE.md](../../../../../CLAUDE.md); [crates/shamir-query-builder/src/macros/mod.rs:25](../../../../../crates/shamir-query-builder/src/macros/mod.rs#L25); [crates/shamir-query-builder/src/macros/mod.rs:47](../../../../../crates/shamir-query-builder/src/macros/mod.rs#L47); [crates/shamir-query-builder/src/macros/mod.rs:63](../../../../../crates/shamir-query-builder/src/macros/mod.rs#L63); [crates/shamir-query-builder/src/macros/mod.rs:86](../../../../../crates/shamir-query-builder/src/macros/mod.rs#L86).
+
+<a id="review-3"></a>
+
+### Claim 3 — `ddl/` applies one-file-one-export inconsistently — family files bundle many unrelated public builders
+
+Status: `confirmed-open`. Current risk: `low`.
+
+Schema and access-control files still bundle independently exposed builders. Auth, validator, replication, list, migration, buffer-config, retention, and function family files remain. Whether a particular family qualifies as closely coupled is a policy judgment; their existence does not imply runtime risk.
+
+Evidence: [CLAUDE.md](../../../../../CLAUDE.md); [crates/shamir-query-builder/src/ddl/schema.rs:36](../../../../../crates/shamir-query-builder/src/ddl/schema.rs#L36); [crates/shamir-query-builder/src/ddl/schema.rs:408](../../../../../crates/shamir-query-builder/src/ddl/schema.rs#L408); [crates/shamir-query-builder/src/ddl/access_control.rs:22](../../../../../crates/shamir-query-builder/src/ddl/access_control.rs#L22); [crates/shamir-query-builder/src/ddl/access_control.rs:77](../../../../../crates/shamir-query-builder/src/ddl/access_control.rs#L77); [crates/shamir-query-builder/src/ddl/auth.rs:19](../../../../../crates/shamir-query-builder/src/ddl/auth.rs#L19); [crates/shamir-query-builder/src/ddl/validator.rs:21](../../../../../crates/shamir-query-builder/src/ddl/validator.rs#L21); [crates/shamir-query-builder/src/ddl/replication.rs:35](../../../../../crates/shamir-query-builder/src/ddl/replication.rs#L35); [crates/shamir-query-builder/src/ddl/list.rs:24](../../../../../crates/shamir-query-builder/src/ddl/list.rs#L24); [crates/shamir-query-builder/src/ddl/migration.rs](../../../../../crates/shamir-query-builder/src/ddl/migration.rs); [crates/shamir-query-builder/src/ddl/buffer_config.rs:18](../../../../../crates/shamir-query-builder/src/ddl/buffer_config.rs#L18); [crates/shamir-query-builder/src/ddl/retention.rs:20](../../../../../crates/shamir-query-builder/src/ddl/retention.rs#L20); [crates/shamir-query-builder/src/ddl/function.rs:24](../../../../../crates/shamir-query-builder/src/ddl/function.rs#L24).
+
+<a id="review-4"></a>
+
+### Claim 4 — Imports not at top: one production-code site + a pervasive function-local `use` pattern in tests
+
+Status: `confirmed-open`. Current risk: `low`.
+
+The redundant function-local QueryValue import and the reported test-local imports remain. No relevant collision exception is documented. This is a convention issue, not a functional or performance defect.
+
+Evidence: [crates/shamir-query-builder/src/batch/batch.rs:10](../../../../../crates/shamir-query-builder/src/batch/batch.rs#L10); [crates/shamir-query-builder/src/batch/batch.rs:1123](../../../../../crates/shamir-query-builder/src/batch/batch.rs#L1123); [crates/shamir-query-builder/src/batch/tests/after_tests.rs:24](../../../../../crates/shamir-query-builder/src/batch/tests/after_tests.rs#L24); [crates/shamir-query-builder/src/batch/tests/batch_tests.rs:448](../../../../../crates/shamir-query-builder/src/batch/tests/batch_tests.rs#L448); [crates/shamir-query-builder/src/macros/tests/q_macro_tests.rs:298](../../../../../crates/shamir-query-builder/src/macros/tests/q_macro_tests.rs#L298); [crates/shamir-query-builder/src/select/tests/select_tests.rs:123](../../../../../crates/shamir-query-builder/src/select/tests/select_tests.rs#L123); [crates/shamir-query-builder/src/query/tests/query_tests.rs:1036](../../../../../crates/shamir-query-builder/src/query/tests/query_tests.rs#L1036); [crates/shamir-query-builder/src/ddl/tests/replication_ddl_tests.rs:268](../../../../../crates/shamir-query-builder/src/ddl/tests/replication_ddl_tests.rs#L268).
+
+<a id="review-5"></a>
+
+### Claim 5 — `cursor` module's tests use a bare `tests.rs` instead of the documented `tests/` directory + manifest
+
+Status: `confirmed-open`. Current risk: `low`.
+
+cursor still wires a single cursor/tests.rs file. Its tests are reachable; only the prescribed directory/manifest layout is missing.
+
+Evidence: [crates/shamir-query-builder/src/cursor.rs:81](../../../../../crates/shamir-query-builder/src/cursor.rs#L81); [crates/shamir-query-builder/src/cursor/tests.rs:1](../../../../../crates/shamir-query-builder/src/cursor/tests.rs#L1); [crates/shamir-query-builder/src/lib.rs:50](../../../../../crates/shamir-query-builder/src/lib.rs#L50).
+
+<a id="review-6"></a>
+
+### Claim 6 — Duplicate re-exports: the same items re-exported in both a sibling file and its `mod.rs`
+
+Status: `confirmed-open`. Current risk: `nit`.
+
+AggFunc/AggregateField and UpdateReturnMode still have sibling and manifest re-exports. They resolve to identical items, so no ambiguity/runtime defect exists. Removing sibling pub use requires retaining ordinary imports used by implementation.
+
+Evidence: [crates/shamir-query-builder/src/select/select_item.rs:8](../../../../../crates/shamir-query-builder/src/select/select_item.rs#L8); [crates/shamir-query-builder/src/select/mod.rs:9](../../../../../crates/shamir-query-builder/src/select/mod.rs#L9); [crates/shamir-query-builder/src/select/mod.rs:12](../../../../../crates/shamir-query-builder/src/select/mod.rs#L12); [crates/shamir-query-builder/src/write/update.rs:10](../../../../../crates/shamir-query-builder/src/write/update.rs#L10); [crates/shamir-query-builder/src/write/mod.rs:69](../../../../../crates/shamir-query-builder/src/write/mod.rs#L69).
+
+<a id="review-7"></a>
+
+### Claim 7 — Doc-comment drift: crate-level module list and one stale macro name
+
+Status: `confirmed-open`. Current risk: `nit`.
+
+The module inventory still omits wire and bind!/subscribe!, and Insert::row still says mpak! rather than mpack!.
+
+Evidence: [crates/shamir-query-builder/src/lib.rs:33](../../../../../crates/shamir-query-builder/src/lib.rs#L33); [crates/shamir-query-builder/src/lib.rs:42](../../../../../crates/shamir-query-builder/src/lib.rs#L42); [crates/shamir-query-builder/src/write/insert.rs:44](../../../../../crates/shamir-query-builder/src/write/insert.rs#L44).
+
+## Corrections and qualified non-findings
+
+- The original Medium ratings for findings 1–3 describe structural policy debt; no runtime Medium impact is established.
+- The opening assertion that implementation imports all live at the top contradicts finding 4 and current batch.rs:1123.
+- Not every module uses a tests/ directory: cursor is the explicit exception.
+- The universal multiline mpack literal claim is false, for example crates/shamir-query-builder/src/response/tests/response_tests.rs:115 and crates/shamir-query-builder/src/batch/tests/to_request_via_msgpack_tests.rs:17.
+- No inline test module or raw serde_json query construction was found in builder src/. Integration fixture serde_json parsing is a wire-fixture exception, not raw query construction.
+- The exact original import-site count should not be treated as a stable invariant; the reported production and listed test sites were found.
+- A family-file exception is a policy choice under the closely-coupled-group provision, not automatically a correctness fix.
+
+---
+
+<details>
+<summary>Historical report — preserved for provenance; not current status or instructions</summary>
+
 # shamir-query-builder — Style & CLAUDE.md structural conformance
 
 ## Summary
@@ -162,3 +264,5 @@ production code plus ~37 times inside test functions.
 - **Suggested fix:** add `wire` to the lib.rs module list and extend the macros line to
   "`doc!` / `vals!` / `bind!` / `subscribe!` declarative macros; `filter!` / `q!`
   proc-macro re-exports"; fix `mpak!` → `mpack!` in `insert.rs:44`. Comments-only change.
+
+</details>

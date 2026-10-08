@@ -1,3 +1,159 @@
+<!-- revalidation:2026-10-08 source:92ad58266bf57ddea1fa3c8a47affba1a3a9a096 -->
+# shamir-db — correctness-tdd revalidation
+
+Source snapshot: `92ad58266bf57ddea1fa3c8a47affba1a3a9a096`. Revalidated 2026-10-08 by read-only XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run; no source fix is part of this update. Test registration/assertions are evidence of an oracle, not proof of a passing run.
+
+This section is authoritative for current status. Original titles/IDs are retained for traceability; a refuted title is not a current assertion. The collapsed historical report below is superseded, including its counts, severity, scenarios and fix instructions. Plan IDs preserve historical numbering, not a current release mandate. [Workspace methodology and status definitions](../SUMMARY.md#status-definitions).
+
+The principal catalogue and identity defects remain open. Registered ACL, schema-rollback and group-concurrency tests have meaningful assertions, but do not cover the reported lifecycle edge cases. Several failure scenarios and suggested fixes require correction.
+
+## Current claim decisions
+
+| Claim decisions | Open | Source-fixed | Partial | Refuted | Unverified | N/A |
+|---:|---:|---:|---:|---:|---:|---:|
+| 12 | 12 | 0 | 0 | 0 | 0 | 0 |
+
+These are decisions on report claims, including repeated roots, bundled observations and non-findings—not a unique-bug census. Closed/N/A rows have no current risk; unverified risk is provisional. Pure style and unmeasured optimization claims do not establish runtime impact.
+
+<a id="review-1"></a>
+
+### Claim 1 — `DROP DATABASE ... CASCADE` executed against a different database destroys the *batch's* database's tables
+
+Status: `confirmed-open`. Current risk: `high`.
+
+The loop enumerates op.drop_db but still passes self.db_name to validator cleanup and table deletion. Database-read access to the batch database plus delete permission on the named database can reach this mismatch; System is not required.
+
+Evidence: [crates/shamir-db/src/shamir_db/execute/admin_db_repo.rs:113](../../../../../crates/shamir-db/src/shamir_db/execute/admin_db_repo.rs#L113); [crates/shamir-db/src/shamir_db/execute/admin_db_repo.rs:133](../../../../../crates/shamir-db/src/shamir_db/execute/admin_db_repo.rs#L133); [crates/shamir-db/src/shamir_db/shamir_db/table_management.rs:125](../../../../../crates/shamir-db/src/shamir_db/shamir_db/table_management.rs#L125).
+
+<a id="review-2"></a>
+
+### Claim 2 — `remove_group_member` on a nonexistent group *creates* a phantom group record (and the wire remove path lacks the existence guard the add path has)
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+Missing records still become empty-name/System-owned records through unconditional save_group. Numeric wire removal lacks the add-path existence check. Root-manage/System/Admin reachability is established; this is not an unauthenticated privilege-escalation proof.
+
+Evidence: [crates/shamir-db/src/shamir_db/system_store.rs:742](../../../../../crates/shamir-db/src/shamir_db/system_store.rs#L742); [crates/shamir-db/src/shamir_db/execute/admin_access.rs:454](../../../../../crates/shamir-db/src/shamir_db/execute/admin_access.rs#L454); [crates/shamir-db/src/shamir_db/tests/admin_access_validation_tests.rs:570](../../../../../crates/shamir-db/src/shamir_db/tests/admin_access_validation_tests.rs#L570).
+
+<a id="review-3"></a>
+
+### Claim 3 — `save_database` / `remove_database` (and all replication-catalogue writes) skip the "Durable DDL" flush; a test comment asserts they don't skip it
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+Explicit flushes remain absent from database creation/removal and replication mutations; the reopen test still adds flush_all. save_database_meta already flushes. Current writes use Buffered WAL and deferred history materialization, so data_store.flush alone is not sufficient proof of immediate DDL durability.
+
+Evidence: [crates/shamir-db/src/shamir_db/system_store.rs:204](../../../../../crates/shamir-db/src/shamir_db/system_store.rs#L204); [crates/shamir-db/src/shamir_db/system_store.rs:221](../../../../../crates/shamir-db/src/shamir_db/system_store.rs#L221); [crates/shamir-db/src/shamir_db/system_store.rs:909](../../../../../crates/shamir-db/src/shamir_db/system_store.rs#L909); [crates/shamir-db/src/shamir_db/execute/admin_replication.rs:94](../../../../../crates/shamir-db/src/shamir_db/execute/admin_replication.rs#L94); [crates/shamir-engine/src/tx/commit.rs:971](../../../../../crates/shamir-engine/src/tx/commit.rs#L971); [crates/shamir-db/tests/rename_db_e2e.rs:312](../../../../../crates/shamir-db/tests/rename_db_e2e.rs#L312).
+
+<a id="review-4"></a>
+
+### Claim 4 — Boot silently skips repository rows whose database row is missing -- no warning, data invisible forever
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+The missing-database branch still has no else, diagnostic or reattachment. Subsequent create_db does not revisit orphan rows. Invisibility persists until catalogue repair or explicit reattachment, not literally forever.
+
+Evidence: [crates/shamir-db/src/shamir_db/shamir_db/core.rs:219](../../../../../crates/shamir-db/src/shamir_db/shamir_db/core.rs#L219); [crates/shamir-db/src/shamir_db/shamir_db/core.rs:274](../../../../../crates/shamir-db/src/shamir_db/shamir_db/core.rs#L274); [crates/shamir-db/src/shamir_db/shamir_db/db_management.rs:37](../../../../../crates/shamir-db/src/shamir_db/shamir_db/db_management.rs#L37).
+
+<a id="review-5"></a>
+
+### Claim 5 — Boot "skipping" a builtin-name-colliding function row still overwrites its `function_meta`, and the live artifact diverges from the catalogue after restart
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+Create-or-replace can replace argon2id, but boot register rejects the occupied builtin name and nevertheless inserts catalogue metadata. effective_fn_actor independently reads that row. Artifact/metadata divergence is proven; exploitation depends on the builtin and grants actually consumed.
+
+Evidence: [crates/shamir-db/src/shamir_db/shamir_db/core.rs:324](../../../../../crates/shamir-db/src/shamir_db/shamir_db/core.rs#L324); [crates/shamir-db/src/shamir_db/shamir_db/core.rs:332](../../../../../crates/shamir-db/src/shamir_db/shamir_db/core.rs#L332); [crates/shamir-db/src/shamir_db/shamir_db/function_management.rs:249](../../../../../crates/shamir-db/src/shamir_db/shamir_db/function_management.rs#L249); [crates/shamir-wasm-host/src/registry.rs:33](../../../../../crates/shamir-wasm-host/src/registry.rs#L33); [crates/shamir-db/src/shamir_db/shamir_db/access_control.rs:995](../../../../../crates/shamir-db/src/shamir_db/shamir_db/access_control.rs#L995).
+
+<a id="review-6"></a>
+
+### Claim 6 — `rename_function_as` / `rename_validator_as` re-key the catalogue remove-first, contrary to the crate's write-before-remove crash-safety convention
+
+Status: `confirmed-open`. Current risk: `high`.
+
+Both renames still remove the old catalogue row before saving the replacement, after changing the live registry. Save failure can leave neither catalogue name; no compensating transaction restores the old row.
+
+Evidence: [crates/shamir-db/src/shamir_db/shamir_db/function_management.rs:337](../../../../../crates/shamir-db/src/shamir_db/shamir_db/function_management.rs#L337); [crates/shamir-db/src/shamir_db/shamir_db/function_management.rs:344](../../../../../crates/shamir-db/src/shamir_db/shamir_db/function_management.rs#L344); [crates/shamir-db/src/shamir_db/shamir_db/validator_management.rs:375](../../../../../crates/shamir-db/src/shamir_db/shamir_db/validator_management.rs#L375).
+
+Grouping/duplicate: `error-handling-lifecycle.md#2`. This row is not another independent defect.
+
+<a id="review-7"></a>
+
+### Claim 7 — `create_db_as` / `create_db` silently overwrite an existing live `DbInstance`
+
+Status: `confirmed-open`. Current risk: `low`.
+
+Public facade creation still uses unconditional dbs.insert without its own duplicate guard. Only the wire handler holds db_create_lock. Existing handles may remain alive, but subsequent registry lookups resolve the replacement empty instance.
+
+Evidence: [crates/shamir-db/src/shamir_db/shamir_db/db_management.rs:37](../../../../../crates/shamir-db/src/shamir_db/shamir_db/db_management.rs#L37); [crates/shamir-db/src/shamir_db/shamir_db/db_management.rs:39](../../../../../crates/shamir-db/src/shamir_db/shamir_db/db_management.rs#L39); [crates/shamir-db/src/shamir_db/execute/admin_db_repo.rs:52](../../../../../crates/shamir-db/src/shamir_db/execute/admin_db_repo.rs#L52).
+
+<a id="review-8"></a>
+
+### Claim 8 — `drop_function_as` returns `existed = false` while deleting a durable catalogue-only function
+
+Status: `confirmed-open`. Current risk: `low`.
+
+existed remains registry-only, and IF EXISTS returns before catalogue deletion when the artifact is absent. Native catalogue rows are skipped at boot. The report's claim that normal function listing shows such rows is inaccurate: listing is also registry-driven.
+
+Evidence: [crates/shamir-db/src/shamir_db/shamir_db/function_management.rs:284](../../../../../crates/shamir-db/src/shamir_db/shamir_db/function_management.rs#L284); [crates/shamir-db/src/shamir_db/execute/admin_function.rs:138](../../../../../crates/shamir-db/src/shamir_db/execute/admin_function.rs#L138); [crates/shamir-db/src/shamir_db/shamir_db/core.rs:290](../../../../../crates/shamir-db/src/shamir_db/shamir_db/core.rs#L290); [crates/shamir-db/src/shamir_db/shamir_db/function_management.rs:375](../../../../../crates/shamir-db/src/shamir_db/shamir_db/function_management.rs#L375).
+
+<a id="review-9"></a>
+
+### Claim 9 — `create_validator_inner` replace path resets `bound_in` and can mint `RecordId::default()` for catalogue-only validators
+
+Status: `confirmed-open`. Current risk: `high`.
+
+Replacement still ignores catalogue identity when the live name is absent, saves empty bound_in, and removes/re-registers the artifact. Registry removal also clears live bindings, contrary to the original correctness report's live-bindings claim.
+
+Evidence: [crates/shamir-db/src/shamir_db/shamir_db/validator_management.rs:249](../../../../../crates/shamir-db/src/shamir_db/shamir_db/validator_management.rs#L249); [crates/shamir-db/src/shamir_db/shamir_db/validator_management.rs:282](../../../../../crates/shamir-db/src/shamir_db/shamir_db/validator_management.rs#L282); [crates/shamir-db/src/shamir_db/shamir_db/validator_management.rs:305](../../../../../crates/shamir-db/src/shamir_db/shamir_db/validator_management.rs#L305); [crates/shamir-engine/src/validator/registry.rs:156](../../../../../crates/shamir-engine/src/validator/registry.rs#L156).
+
+Grouping/duplicate: `api-wire-protocol.md#1`. This row is not another independent defect.
+
+<a id="review-10"></a>
+
+### Claim 10 — Panic paths in library code: `.expect("interner touch_ind")` and `.unwrap()` on `SystemTime`
+
+Status: `confirmed-open`. Current risk: `low`.
+
+The pre-epoch clock panic remains reachable. The expect remains stylistically, but current touch_ind returns Ok in every explicit branch; the advertised poisoned/full-interner Err-to-panic scenario is refuted by its implementation.
+
+Evidence: [crates/shamir-db/src/shamir_db/execute/helpers.rs:61](../../../../../crates/shamir-db/src/shamir_db/execute/helpers.rs#L61); [crates/shamir-db/src/shamir_db/execute/admin_schema.rs:1038](../../../../../crates/shamir-db/src/shamir_db/execute/admin_schema.rs#L1038); [crates/shamir-types/src/core/interner/interner.rs:138](../../../../../crates/shamir-types/src/core/interner/interner.rs#L138).
+
+<a id="review-11"></a>
+
+### Claim 11 — `foreign_key_dto_from_qv` silently coerces unknown `on_delete`/`on_update` strings to `NoAction` -- and then re-persists them
+
+Status: `confirmed-open`. Current risk: `low`.
+
+Both DTO action parsers retain wildcard defaults; ADD/REMOVE serialize this DTO list before strict parse_schema, which therefore sees already-normalized actions. The strict boot parser does not protect the RMW conversion.
+
+Evidence: [crates/shamir-db/src/shamir_db/execute/admin_schema.rs:1343](../../../../../crates/shamir-db/src/shamir_db/execute/admin_schema.rs#L1343); [crates/shamir-db/src/shamir_db/execute/admin_schema.rs:1352](../../../../../crates/shamir-db/src/shamir_db/execute/admin_schema.rs#L1352); [crates/shamir-db/src/shamir_db/execute/admin_schema.rs:864](../../../../../crates/shamir-db/src/shamir_db/execute/admin_schema.rs#L864); [crates/shamir-db/src/shamir_db/shamir_db/schema_management.rs:390](../../../../../crates/shamir-db/src/shamir_db/shamir_db/schema_management.rs#L390).
+
+<a id="review-12"></a>
+
+### Claim 12 — Nits
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+(a) Unknown isolation still silently becomes Snapshot: substantive contract defect, not merely a nit. (b) No-op rule removal still increments/persists schema_version. (c) The namespace/doc mismatch exists, but no current production username-lock consumer exists, refuting the stated live false-sharing scenario.
+
+Evidence: [crates/shamir-db/src/shamir_db/execute/db_tx.rs:80](../../../../../crates/shamir-db/src/shamir_db/execute/db_tx.rs#L80); [crates/shamir-db/src/shamir_db/execute/admin_schema.rs:862](../../../../../crates/shamir-db/src/shamir_db/execute/admin_schema.rs#L862); [crates/shamir-db/src/shamir_db/execute/admin_schema.rs:876](../../../../../crates/shamir-db/src/shamir_db/execute/admin_schema.rs#L876); [crates/shamir-db/src/shamir_db/execute/admin_users_roles.rs:137](../../../../../crates/shamir-db/src/shamir_db/execute/admin_users_roles.rs#L137).
+
+## Corrections and qualified non-findings
+
+- Use complete repo-relative crate paths; several original SystemStore references incorrectly insert an extra shamir_db directory.
+- Finding 3 must exclude save_database_meta from missing-flush methods and assess WAL/history durability rather than treating a main-data-store flush as a complete fix.
+- Finding 9 must state that live bindings are erased too. The native replacement sibling also resets bound_in and removes/re-registers; it is a reference for catalogue identity fallback, not binding preservation.
+- Finding 10's interner Err scenario is unsupported by current touch_ind; the clock half remains open.
+- Finding 12(c)'s current username contention is refuted; only schema production callers populate this map.
+- The group barrier test has meaningful final-state assertions but synchronizes operation starts, not a forced stale-read/write interleaving. Do not call it a deterministic pre-fix race reproduction.
+- No registered cross-database cascade, missing-group removal, builtin-collision reopen, bound-validator replacement or lifecycle save-failure regression was found in the relevant test trees.
+
+---
+
+<details>
+<summary>Historical report — preserved for provenance; not current status or instructions</summary>
+
 # shamir-db -- Correctness & TDD-coverage
 
 ## Summary
@@ -93,3 +249,5 @@ The facade is large but internally disciplined: the Red/Green/Refactor conventio
 
 - **Strong:** barrier-synchronised concurrency regressions with deterministic post-fix assertions (`group_tests.rs:262-347`); honest "currently unenforced" pins that turn red when the gap closes (`coverage_matrix_tests.rs:480-508`); uniformly applied and *tested* auth-before-existence ordering (#995 comments across drop/rename/index handlers); phantom-group coverage for the **add** path (`admin_access_validation_tests.rs:451-475`); schema activation rollback symmetry (`schema_rollback_tests.rs`, F-24/F-27b) and keyset-safe barrier tests (`keyset_safe_write_barrier_tests.rs`).
 - **Gaps (mirroring findings above, none currently tested):** cross-db `DropDb` cascade (finding 1); remove-from-nonexistent-group phantom write (finding 2); catalogue durability *without* an external `flush_all` for the `databases` table + replication catalogues (finding 3, including the factually wrong comment in `rename_db_e2e.rs`); boot with an orphan repo row (finding 4); builtin-name-colliding function row across restart (finding 5); fault-injected rename save failure (finding 6); catalogue-only (native) function drop semantics (finding 8).
+
+</details>

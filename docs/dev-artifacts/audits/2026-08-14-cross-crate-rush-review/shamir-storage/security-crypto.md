@@ -1,3 +1,114 @@
+<!-- revalidation:2026-10-08 source:92ad58266bf57ddea1fa3c8a47affba1a3a9a096 -->
+# shamir-storage — security-crypto revalidation
+
+Source snapshot: `92ad58266bf57ddea1fa3c8a47affba1a3a9a096`. Revalidated 2026-10-08 by read-only XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run; no source fix is part of this update. Test registration/assertions are evidence of an oracle, not proof of a passing run.
+
+This section is authoritative for current status. Original titles/IDs are retained for traceability; a refuted title is not a current assertion. The collapsed historical report below is superseded, including its counts, severity, scenarios and fix instructions. Plan IDs preserve historical numbering, not a current release mandate. [Workspace methodology and status definitions](../SUMMARY.md#status-definitions).
+
+No local crypto/unsafe implementation was found. Name handling and hash-input trust assumptions need qualification; raw-key rendering exists, but the alleged Unicode spoofing mechanism is positively refuted.
+
+## Current claim decisions
+
+| Claim decisions | Open | Source-fixed | Partial | Refuted | Unverified | N/A |
+|---:|---:|---:|---:|---:|---:|---:|
+| 8 | 4 | 1 | 0 | 1 | 1 | 1 |
+
+These are decisions on report claims, including repeated roots, bundled observations and non-findings—not a unique-bug census. Closed/N/A rows have no current risk; unverified risk is provisional. Pure style and unmeasured optimization claims do not establish runtime impact.
+
+<a id="review-1"></a>
+
+### Claim 1 — Store names passed to the durable engine unvalidated
+
+Status: `unverified`. Current risk: `low` (provisional; not a confirmed defect).
+
+The shim forwards names without validation, and authorized table DDL preserves caller names. However, whether pinned fjall accepts pathological names, panics, rejects them, or permits namespace/path exploitation is unverified. This is not an established remote traversal or authorization bypass.
+
+Evidence: [crates/shamir-storage/src/storage_fjall.rs:229](../../../../../crates/shamir-storage/src/storage_fjall.rs#L229); [crates/shamir-storage/src/storage_fjall.rs:247](../../../../../crates/shamir-storage/src/storage_fjall.rs#L247); [crates/shamir-db/src/shamir_db/execute/admin_table_index.rs:40](../../../../../crates/shamir-db/src/shamir_db/execute/admin_table_index.rs#L40); [crates/shamir-db/src/shamir_db/shamir_db/table_management.rs:36](../../../../../crates/shamir-db/src/shamir_db/shamir_db/table_management.rs#L36); [crates/shamir-engine/src/table/table_config.rs:8](../../../../../crates/shamir-engine/src/table/table_config.rs#L8); [Cargo.lock:1332](../../../../../Cargo.lock#L1332).
+
+<a id="review-2"></a>
+
+### Claim 2 — Fresh random 128-bit id claim behind skipping the insert collision probe is false
+
+Status: `confirmed-open`. Current risk: `low`.
+
+The comments still claim random 128-bit IDs and approximately 2^-128 collisions. RecordId::new instead uses wall-clock timestamp bytes plus a 64-bit Xoshiro tail. No local authentication relies on secrecy; the report's exact PRNG-recovery threshold is unverified.
+
+Evidence: [crates/shamir-storage/src/storage_fjall.rs:154](../../../../../crates/shamir-storage/src/storage_fjall.rs#L154); [crates/shamir-storage/src/storage_fjall.rs:326](../../../../../crates/shamir-storage/src/storage_fjall.rs#L326); [crates/shamir-storage/benches/storage_fjall_pump.rs:96](../../../../../crates/shamir-storage/benches/storage_fjall_pump.rs#L96); [crates/shamir-types/src/types/record_id.rs:24](../../../../../crates/shamir-types/src/types/record_id.rs#L24); [crates/shamir-types/src/types/record_id.rs:41](../../../../../crates/shamir-types/src/types/record_id.rs#L41); [crates/shamir-types/src/types/record_id.rs:80](../../../../../crates/shamir-types/src/types/record_id.rs#L80).
+
+<a id="review-3"></a>
+
+### Claim 3 — User-influenced keys enter non-keyed FxHash maps despite the documented no untrusted hash inputs premise
+
+Status: `confirmed-open`. Current risk: `low`.
+
+dirty accepts caller-supplied keys and the repository map accepts caller-derived names through THasher. This contradicts the blanket trust premise. Legacy posting keys contain hashes rather than verbatim values; sorted keys contain encoded values. Collision-farming practicality and the claimed remote latency amplifier remain unverified.
+
+Evidence: [crates/shamir-storage/src/storage_membuffer.rs:154](../../../../../crates/shamir-storage/src/storage_membuffer.rs#L154); [crates/shamir-storage/src/storage_membuffer.rs:763](../../../../../crates/shamir-storage/src/storage_membuffer.rs#L763); [crates/shamir-storage/src/storage_in_memory.rs:42](../../../../../crates/shamir-storage/src/storage_in_memory.rs#L42); [crates/shamir-types/src/types/common.rs:8](../../../../../crates/shamir-types/src/types/common.rs#L8); [crates/shamir-collections/src/lib.rs:17](../../../../../crates/shamir-collections/src/lib.rs#L17); [crates/shamir-index/src/base_index/index_record_key.rs:102](../../../../../crates/shamir-index/src/base_index/index_record_key.rs#L102); [crates/shamir-index/src/base_index/sorted_index_manager.rs:2687](../../../../../crates/shamir-index/src/base_index/sorted_index_manager.rs#L2687); [Cargo.lock:3007](../../../../../Cargo.lock#L3007).
+
+<a id="review-4"></a>
+
+### Claim 4 — Raw key bytes — including attacker-influenced indexed values — embedded in error messages
+
+Status: `confirmed-open`. Current risk: `low`.
+
+Errors still include the entire key, making unbounded key disclosure/log volume a real hygiene concern. KeyBytes Debug renders numeric byte arrays, not decoded Unicode, so BiDi/newline spoofing through the alleged rendering mechanism is refuted. Cross-tenant disclosure was not demonstrated.
+
+Evidence: [crates/shamir-storage/src/storage_fjall.rs:419](../../../../../crates/shamir-storage/src/storage_fjall.rs#L419); [crates/shamir-storage/src/storage_in_memory.rs:140](../../../../../crates/shamir-storage/src/storage_in_memory.rs#L140); [crates/shamir-storage/src/storage_membuffer.rs:797](../../../../../crates/shamir-storage/src/storage_membuffer.rs#L797); [crates/shamir-storage/src/key_bytes.rs:233](../../../../../crates/shamir-storage/src/key_bytes.rs#L233); [crates/shamir-storage/src/key_bytes/tests/debug_tests.rs:17](../../../../../crates/shamir-storage/src/key_bytes/tests/debug_tests.rs#L17).
+
+<a id="review-4-bidi"></a>
+
+### Claim 4.BiDi — Printable Unicode/BiDi characters survive raw-key Debug rendering
+
+Status: `refuted`. Current risk: —.
+
+Debug explicitly delegates to &[u8] formatting, and a registered test compares its output to byte-slice Debug. UTF-8 bytes are printed as numeric elements, not terminal control characters.
+
+Evidence: [crates/shamir-storage/src/key_bytes.rs:237](../../../../../crates/shamir-storage/src/key_bytes.rs#L237); [crates/shamir-storage/src/key_bytes/tests/debug_tests.rs:17](../../../../../crates/shamir-storage/src/key_bytes/tests/debug_tests.rs#L17); [crates/shamir-storage/src/key_bytes/tests/mod.rs:7](../../../../../crates/shamir-storage/src/key_bytes/tests/mod.rs#L7).
+
+<a id="review-5"></a>
+
+### Claim 5 — Nit: KeyBytes::Deserialize allocates an unbounded blob before any size check
+
+Status: `confirmed-open`. Current risk: `nit`.
+
+ByteBuf is fully deserialized before from_slice, with no key-size policy; long inputs are then copied into a second heap buffer. The alias has already flipped, but inspected WAL serialization still uses Bytes, so a direct remote KeyBytes decoder exposure was not established.
+
+Evidence: [crates/shamir-storage/src/key_bytes.rs:308](../../../../../crates/shamir-storage/src/key_bytes.rs#L308); [crates/shamir-storage/src/key_bytes.rs:310](../../../../../crates/shamir-storage/src/key_bytes.rs#L310); [crates/shamir-storage/src/key_bytes.rs:111](../../../../../crates/shamir-storage/src/key_bytes.rs#L111); [crates/shamir-storage/src/types.rs:9](../../../../../crates/shamir-storage/src/types.rs#L9); [crates/shamir-wal/src/wal_entry_v2.rs:87](../../../../../crates/shamir-wal/src/wal_entry_v2.rs#L87); [crates/shamir-wal/src/wal_entry_v2.rs:121](../../../../../crates/shamir-wal/src/wal_entry_v2.rs#L121).
+
+<a id="review-nf-boundary"></a>
+
+### Claim NF-boundary — No auth/crypto/TLS surface, no unsafe blocks, and no local secret comparison
+
+Status: `not-applicable`. Current risk: —.
+
+These local observations hold. Ordinary byte equality is not a demonstrated secret-dependent security boundary in this crate.
+
+Evidence: [crates/shamir-storage/src/lib.rs:16](../../../../../crates/shamir-storage/src/lib.rs#L16); [crates/shamir-storage/src/key_bytes.rs:43](../../../../../crates/shamir-storage/src/key_bytes.rs#L43); [crates/shamir-storage/src/key_bytes.rs:250](../../../../../crates/shamir-storage/src/key_bytes.rs#L250).
+
+<a id="review-nf-hydration"></a>
+
+### Claim NF-hydration — MirroredStore hydration re-filters classifier drift/tampered mirror entries
+
+Status: `fixed`. Current risk: —.
+
+Source reclassifies each hydrated key and skips/warns on rejection. Registered tests check excluded entries and captured warnings. This protects classification only, not authenticity or validity of allowed-key values; the tag inventory is manually maintained.
+
+Evidence: [crates/shamir-storage/src/storage_mirrored.rs:276](../../../../../crates/shamir-storage/src/storage_mirrored.rs#L276); [crates/shamir-storage/src/tests/storage_mirrored_tests.rs:244](../../../../../crates/shamir-storage/src/tests/storage_mirrored_tests.rs#L244); [crates/shamir-storage/src/tests/storage_mirrored_tests.rs:1029](../../../../../crates/shamir-storage/src/tests/storage_mirrored_tests.rs#L1029); [crates/shamir-storage/src/tests/mod.rs:6](../../../../../crates/shamir-storage/src/tests/mod.rs#L6).
+
+## Corrections and qualified non-findings
+
+- Threat model: direct Store callers or callers with relevant DDL/write authorization, not an unauthenticated client.
+- Name validation is O(name length), not O(1), when scanning characters.
+- Do not describe timestamp-prefixed randomized IDs as monotonic or unique-by-construction.
+- Legacy posting values are hashed, not stored verbatim; the classifier comment/test uses a different illustrative key shape.
+- A post-allocation length rejection does not prevent the pre-allocation DoS alleged in finding 5.
+- The safe-today claim based on KeyBytes being unused is stale; the inspected WAL/client boundary does not automatically deserialize RecordKey.
+
+---
+
+<details>
+<summary>Historical report — preserved for provenance; not current status or instructions</summary>
+
 # shamir-storage -- Security & crypto boundary
 
 ## Summary
@@ -39,3 +150,5 @@ The crate holds no auth / crypto / TLS surface (SCRAM, HMAC and session handling
 **Severity:** nit
 **Issue:** Deserialization goes through `serde_bytes::ByteBuf::deserialize`, materializing the entire input allocation before `from_slice` runs; there is no maximum-length guard. Today safe (callers are WAL/bincode/rmp-serde boundaries that own frame limits, and the type is unused by production per module docs), but plan doc section 5.3 anticipates flipping `RecordKey` to `KeyBytes` across the WAL/client-wire paths -- at that point a hostile frame chooses the pre-allocation size subject only to upstream framing.
 **Suggested fix:** When the alias flip lands, gate the constructor: deserialize, then reject `len > MAX_RECORD_KEY_BYTES` (tie to schema/tunable constants) returning a `de::Error::invalid_length`.
+
+</details>

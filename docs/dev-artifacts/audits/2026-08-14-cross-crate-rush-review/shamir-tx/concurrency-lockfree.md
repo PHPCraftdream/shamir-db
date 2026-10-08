@@ -1,3 +1,150 @@
+<!-- revalidation:2026-10-08 source:92ad58266bf57ddea1fa3c8a47affba1a3a9a096 -->
+# shamir-tx — concurrency-lockfree revalidation
+
+Source snapshot: `92ad58266bf57ddea1fa3c8a47affba1a3a9a096`. Revalidated 2026-10-08 by read-only XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run; no source fix is part of this update. Test registration/assertions are evidence of an oracle, not proof of a passing run.
+
+This section is authoritative for current status. Original titles/IDs are retained for traceability; a refuted title is not a current assertion. The collapsed historical report below is superseded, including its counts, severity, scenarios and fix instructions. Plan IDs preserve historical numbering, not a current release mandate. [Workspace methodology and status definitions](../SUMMARY.md#status-definitions).
+
+The monotonicity footgun, retained lock registry, and traversal/storage-call costs remain. Sync accessor discipline is supported, but formal lock-free and universal bounded-wait language is too strong.
+
+## Current claim decisions
+
+| Claim decisions | Open | Source-fixed | Partial | Refuted | Unverified | N/A |
+|---:|---:|---:|---:|---:|---:|---:|
+| 11 | 9 | 0 | 0 | 1 | 0 | 1 |
+
+These are decisions on report claims, including repeated roots, bundled observations and non-findings—not a unique-bug census. Closed/N/A rows have no current risk; unverified risk is provisional. Pure style and unmeasured optimization claims do not establish runtime impact.
+
+<a id="review-1"></a>
+
+### Claim 1 — publish_committed plain store can regress last_committed_version; its safety contract is unsound
+
+Status: `confirmed-open`. Current risk: `low`.
+
+commit_lock does not serialize VersionGuard's independent fetch_max. The plain store can regress the floor, but no production caller currently invokes it.
+
+Evidence: [crates/shamir-tx/src/repo_tx_gate.rs:578](../../../../../crates/shamir-tx/src/repo_tx_gate.rs#L578); [crates/shamir-tx/src/repo_tx_gate.rs:587](../../../../../crates/shamir-tx/src/repo_tx_gate.rs#L587); [crates/shamir-tx/src/version_guard.rs:96](../../../../../crates/shamir-tx/src/version_guard.rs#L96).
+
+<a id="review-2"></a>
+
+### Claim 2 — MvccStore::locks registry never evicts empty entries — unbounded growth under pessimistic workloads
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+Insertion clones a shared lock and release only edits its holder vector. Lifetime storage grows with distinct locked keys; naive eviction can create two independent locks.
+
+Evidence: [crates/shamir-tx/src/mvcc_store/mvcc_locks.rs:75](../../../../../crates/shamir-tx/src/mvcc_store/mvcc_locks.rs#L75); [crates/shamir-tx/src/mvcc_store/mvcc_locks.rs:93](../../../../../crates/shamir-tx/src/mvcc_store/mvcc_locks.rs#L93); [crates/shamir-tx/src/mvcc_store/mvcc_locks.rs:225](../../../../../crates/shamir-tx/src/mvcc_store/mvcc_locks.rs#L225).
+
+<a id="review-3"></a>
+
+### Claim 3 — Predicate-conflict validation is O(window × deps × postings) with linear scans, under commit_lock
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+Nested window/dependency iteration calls a linear posting scan while Serializable commits retain commit_lock. Worst-case comparison shape is proven; throughput impact is unmeasured.
+
+Evidence: [crates/shamir-tx/src/repo_tx_gate.rs:876](../../../../../crates/shamir-tx/src/repo_tx_gate.rs#L876); [crates/shamir-tx/src/repo_tx_gate.rs:1015](../../../../../crates/shamir-tx/src/repo_tx_gate.rs#L1015); [crates/shamir-engine/src/tx/commit.rs:921](../../../../../crates/shamir-engine/src/tx/commit.rs#L921).
+
+Grouping/duplicate: `performance-hotpath.md#4`. This row is not another independent defect.
+
+<a id="review-4"></a>
+
+### Claim 4 — vacuum_key scan path issues a duplicate lookup_ts history read per reclaimed version
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+Age-based eligibility and reclaim bookkeeping each await lookup_ts for the same version. The duplicate occurs with an age cap, not every non-default policy.
+
+Evidence: [crates/shamir-tx/src/mvcc_store/mvcc_gc.rs:229](../../../../../crates/shamir-tx/src/mvcc_store/mvcc_gc.rs#L229); [crates/shamir-tx/src/mvcc_store/mvcc_gc.rs:245](../../../../../crates/shamir-tx/src/mvcc_store/mvcc_gc.rs#L245).
+
+Grouping/duplicate: `performance-hotpath.md#1`. This row is not another independent defect.
+
+<a id="review-5"></a>
+
+### Claim 5 — O(N) tree traversals use range(..).count — sidesteps the len disallowed-methods gate without the ack attribute
+
+Status: `confirmed-open`. Current risk: `nit`.
+
+Counting traversal and subsequent range removal remain separate. Telemetry traversal is already documented; the asserted lint evasion is hygiene, not a runtime or demonstrated lint failure.
+
+Evidence: [crates/shamir-tx/src/repo_tx_gate.rs:893](../../../../../crates/shamir-tx/src/repo_tx_gate.rs#L893); [crates/shamir-tx/src/repo_tx_gate.rs:894](../../../../../crates/shamir-tx/src/repo_tx_gate.rs#L894); [crates/shamir-tx/src/repo_tx_gate.rs:900](../../../../../crates/shamir-tx/src/repo_tx_gate.rs#L900).
+
+<a id="review-6"></a>
+
+### Claim 6 — min_alive is a full active_snapshots traversal per call
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+iter_sync visits distinct registered snapshot versions and vacuum's scan path calls it per write. Actual contention and latency were not measured.
+
+Evidence: [crates/shamir-tx/src/repo_tx_gate.rs:659](../../../../../crates/shamir-tx/src/repo_tx_gate.rs#L659); [crates/shamir-tx/src/mvcc_store/mvcc_gc.rs:156](../../../../../crates/shamir-tx/src/mvcc_store/mvcc_gc.rs#L156).
+
+Grouping/duplicate: `performance-hotpath.md#3`. This row is not another independent defect.
+
+<a id="review-7"></a>
+
+### Claim 7 — A10 in-flight barrier can starve GC under sustained snapshot-open churn
+
+Status: `confirmed-open`. Current risk: `low`.
+
+A nonzero opener count forces floor zero and defers reclamation. There is no progress bound under overlapping openers; practical sustained-churn frequency remains unmeasured.
+
+Evidence: [crates/shamir-tx/src/repo_tx_gate.rs:655](../../../../../crates/shamir-tx/src/repo_tx_gate.rs#L655); [crates/shamir-tx/src/mvcc_store/mvcc_gc.rs:236](../../../../../crates/shamir-tx/src/mvcc_store/mvcc_gc.rs#L236); [crates/shamir-engine/src/repo/repo_instance.rs:1722](../../../../../crates/shamir-engine/src/repo/repo_instance.rs#L1722).
+
+<a id="review-8"></a>
+
+### Claim 8 — history_of resolves commit timestamps with N sequential awaited gets
+
+Status: `confirmed-open`. Current risk: `low`.
+
+Each collected version awaits lookup_ts independently. This remains an administrative-path batching opportunity, not measured production slowdown.
+
+Evidence: [crates/shamir-tx/src/mvcc_store/mvcc_history.rs:211](../../../../../crates/shamir-tx/src/mvcc_store/mvcc_history.rs#L211); [crates/shamir-tx/src/mvcc_store/mod.rs:1625](../../../../../crates/shamir-tx/src/mvcc_store/mod.rs#L1625).
+
+Grouping/duplicate: `performance-hotpath.md#7`. This row is not another independent defect.
+
+<a id="review-9"></a>
+
+### Claim 9 — Stale cannot early-return comment on validate_read_set iter_sync
+
+Status: `confirmed-open`. Current risk: `nit`.
+
+The comment denies early stopping; the callback returns false on the visit after recording a conflict, avoiding a full traversal.
+
+Evidence: [crates/shamir-tx/src/tx_context.rs:796](../../../../../crates/shamir-tx/src/tx_context.rs#L796); [crates/shamir-tx/src/tx_context.rs:803](../../../../../crates/shamir-tx/src/tx_context.rs#L803).
+
+<a id="review-positive-observations"></a>
+
+### Claim Positive observations — Sync accessor discipline, sanctioned mutexes and O(1) mirrors
+
+Status: `not-applicable`. Current risk: —.
+
+Production map access uses synchronous coordination; the dead queue is explicitly sanctioned, drain serialization is async, and predicate/overlay cardinalities use atomic mirrors.
+
+Evidence: [crates/shamir-tx/src/mvcc_store/mod.rs:546](../../../../../crates/shamir-tx/src/mvcc_store/mod.rs#L546); [crates/shamir-tx/src/repo_tx_gate.rs:244](../../../../../crates/shamir-tx/src/repo_tx_gate.rs#L244); [crates/shamir-tx/src/repo_tx_gate.rs:742](../../../../../crates/shamir-tx/src/repo_tx_gate.rs#L742); [crates/shamir-tx/src/mvcc_store/drain.rs:55](../../../../../crates/shamir-tx/src/mvcc_store/drain.rs#L55); [crates/shamir-tx/src/predicate_set.rs:117](../../../../../crates/shamir-tx/src/predicate_set.rs#L117); [crates/shamir-tx/src/versioned_overlay.rs:59](../../../../../crates/shamir-tx/src/versioned_overlay.rs#L59).
+
+<a id="review-summary-lock-free-guarantees"></a>
+
+### Claim Summary: lock-free guarantees — Every concurrent map is CAS-based and every sync wait is bounded
+
+Status: `refuted`. Current risk: —.
+
+The crate itself documents per-bucket locks and OS-thread parking for scc HashMap synchronous access. Avoiding async lock handoff does not establish formal lock-freedom or a universal wait bound.
+
+Evidence: [crates/shamir-tx/src/mvcc_store/mod.rs:528](../../../../../crates/shamir-tx/src/mvcc_store/mod.rs#L528); [crates/shamir-tx/src/mvcc_store/mod.rs:540](../../../../../crates/shamir-tx/src/mvcc_store/mod.rs#L540); [crates/shamir-tx/src/mvcc_store/mvcc_locks.rs:93](../../../../../crates/shamir-tx/src/mvcc_store/mvcc_locks.rs#L93).
+
+## Corrections and qualified non-findings
+
+- Demote finding 1 from runtime High to latent public-API Low; the harmful store remains but live callers are absent.
+- Waiter-only accounting does not protect requesters that cloned the old lock but have not parked. Eviction must atomically exclude all outstanding old-lock users.
+- One table footprint can contain postings from multiple index IDs; binary-search optimization must intersect the requested prefix with the bounds.
+- Do not implement the suggested barrier by capturing a floor before protection: the current implementation intentionally increments the barrier before reading the floor.
+
+---
+
+<details>
+<summary>Historical report — preserved for provenance; not current status or instructions</summary>
+
 # shamir-tx — Concurrency & lock-free invariants
 
 ## Summary
@@ -222,3 +369,5 @@ inline #589-class rationale and H1/H2 regression tests; `PredicateSet` and
 model; `drain_exclusive`'s try-lock back-off keeps the drainer's loop immune
 to a stuck admin drain (#1032); and all four `scc::*::len()` call sites in
 `mvcc_store/mod.rs` carry the sanctioned `O(N) ack` annotations.
+
+</details>

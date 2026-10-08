@@ -1,3 +1,183 @@
+<!-- revalidation:2026-10-08 source:92ad58266bf57ddea1fa3c8a47affba1a3a9a096 -->
+# shamir-wal — correctness-tdd revalidation
+
+Source snapshot: `92ad58266bf57ddea1fa3c8a47affba1a3a9a096`. Revalidated 2026-10-08 by read-only XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run; no source fix is part of this update. Test registration/assertions are evidence of an oracle, not proof of a passing run.
+
+This section is authoritative for current status. Original titles/IDs are retained for traceability; a refuted title is not a current assertion. The collapsed historical report below is superseded, including its counts, severity, scenarios and fix instructions. Plan IDs preserve historical numbering, not a current release mandate. [Workspace methodology and status definitions](../SUMMARY.md#status-definitions).
+
+The circuit-breaker hang and specified coverage gaps remain. CRC repair remains destructive. The claimed dirty-flag safety is false, while failed-fsync counting is consistent with an attempts/issued counter.
+
+## Current claim decisions
+
+| Claim decisions | Open | Source-fixed | Partial | Refuted | Unverified | N/A |
+|---:|---:|---:|---:|---:|---:|---:|
+| 14 | 9 | 0 | 1 | 2 | 0 | 2 |
+
+These are decisions on report claims, including repeated roots, bundled observations and non-findings—not a unique-bug census. Closed/N/A rows have no current risk; unverified risk is provisional. Pure style and unmeasured optimization claims do not establish runtime impact.
+
+<a id="review-1"></a>
+
+### Claim 1 — Circuit breaker can strand parked appenders indefinitely (L1 violation, hang)
+
+Status: `confirmed-open`. Current risk: `high`.
+
+Failure releases flushing without locking or draining pending. Followers queued during the failed await already lost election and only await their own Notify; without a later append they never complete.
+
+Evidence: [crates/shamir-wal/src/wal_group_commit.rs:176](../../../../../crates/shamir-wal/src/wal_group_commit.rs#L176); [crates/shamir-wal/src/wal_group_commit.rs:189](../../../../../crates/shamir-wal/src/wal_group_commit.rs#L189); [crates/shamir-wal/src/wal_group_commit.rs:277](../../../../../crates/shamir-wal/src/wal_group_commit.rs#L277); [crates/shamir-wal/src/wal_group_commit.rs:327](../../../../../crates/shamir-wal/src/wal_group_commit.rs#L327).
+
+<a id="review-2"></a>
+
+### Claim 2 — Vacuous §1.5 regression test — the restore-on-failed-fsync branch never executes
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+The registered test manually calls set_dirty to simulate restoration and never starts the background error branch. Removing production restoration would not invalidate its assertions. Mem sync always succeeds; no sync fault seam exists.
+
+Evidence: [crates/shamir-wal/src/tests/mod.rs:4](../../../../../crates/shamir-wal/src/tests/mod.rs#L4); [crates/shamir-wal/src/tests/wal_group_commit_tests.rs:294](../../../../../crates/shamir-wal/src/tests/wal_group_commit_tests.rs#L294); [crates/shamir-wal/src/tests/wal_group_commit_tests.rs:327](../../../../../crates/shamir-wal/src/tests/wal_group_commit_tests.rs#L327); [crates/shamir-wal/src/wal_group_commit.rs:394](../../../../../crates/shamir-wal/src/wal_group_commit.rs#L394); [crates/shamir-wal/src/wal_sink.rs:142](../../../../../crates/shamir-wal/src/wal_sink.rs#L142).
+
+<a id="review-3"></a>
+
+### Claim 3 — §2.4 startup PermissionDenied hard-fail branch has zero coverage
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+Startup variants pass false and correctly return an error on PermissionDenied, but the registered API-surface test only reads a healthy file. It cannot detect changing either startup flag to true.
+
+Evidence: [crates/shamir-wal/src/wal_segment.rs:479](../../../../../crates/shamir-wal/src/wal_segment.rs#L479); [crates/shamir-wal/src/wal_segment.rs:486](../../../../../crates/shamir-wal/src/wal_segment.rs#L486); [crates/shamir-wal/src/wal_segment.rs:512](../../../../../crates/shamir-wal/src/wal_segment.rs#L512); [crates/shamir-wal/src/tests/wal_segment_tests.rs:218](../../../../../crates/shamir-wal/src/tests/wal_segment_tests.rs#L218); [crates/shamir-wal/src/tests/mod.rs:6](../../../../../crates/shamir-wal/src/tests/mod.rs#L6).
+
+<a id="review-4"></a>
+
+### Claim 4 — repair_torn_tail silently amputates the valid suffix on a complete-but-CRC-bad frame, mislabeled as torn tail
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+Active open invokes repair before replay. Complete CRC mismatch and incomplete tail both break to set_len(pos), then emit the same torn-tail warning. A valid suffix can be permanently removed without an error returned.
+
+Evidence: [crates/shamir-wal/src/segment_set.rs:173](../../../../../crates/shamir-wal/src/segment_set.rs#L173); [crates/shamir-wal/src/wal_segment.rs:391](../../../../../crates/shamir-wal/src/wal_segment.rs#L391); [crates/shamir-wal/src/wal_segment.rs:402](../../../../../crates/shamir-wal/src/wal_segment.rs#L402); [crates/shamir-wal/src/wal_segment.rs:419](../../../../../crates/shamir-wal/src/wal_segment.rs#L419).
+
+<a id="review-5"></a>
+
+### Claim 5 — §1.3 file-sink mid-flight append failure → rotate → retry-once path is untested
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+Registered file tests manually poison or append a torn tail; none induces write_all failure. Rollback, error-arm rotation/retry, and conservative pre-write max_committed overstatement remain unasserted.
+
+Evidence: [crates/shamir-wal/src/wal_segment.rs:214](../../../../../crates/shamir-wal/src/wal_segment.rs#L214); [crates/shamir-wal/src/wal_segment.rs:236](../../../../../crates/shamir-wal/src/wal_segment.rs#L236); [crates/shamir-wal/src/segment_set.rs:255](../../../../../crates/shamir-wal/src/segment_set.rs#L255); [crates/shamir-wal/src/tests/wal_segment_poison_tests.rs:101](../../../../../crates/shamir-wal/src/tests/wal_segment_poison_tests.rs#L101); [crates/shamir-wal/src/tests/segment_set_tests.rs:876](../../../../../crates/shamir-wal/src/tests/segment_set_tests.rs#L876).
+
+<a id="review-6"></a>
+
+### Claim 6 — Per-segment seq counter restarts at 0 on reopen — returned last_seq can collide with pre-existing frames
+
+Status: `confirmed-open`. Current risk: `low`.
+
+Open seeds byte length but initializes next_seq to zero. Returned ordinals repeat across handles; they are not persisted frame identifiers. Production discards them, so this is API ambiguity rather than demonstrated live record loss.
+
+Evidence: [crates/shamir-wal/src/wal_segment.rs:177](../../../../../crates/shamir-wal/src/wal_segment.rs#L177); [crates/shamir-wal/src/wal_segment.rs:179](../../../../../crates/shamir-wal/src/wal_segment.rs#L179); [crates/shamir-wal/src/wal_segment.rs:213](../../../../../crates/shamir-wal/src/wal_segment.rs#L213); [crates/shamir-wal/src/wal_group_commit.rs:294](../../../../../crates/shamir-wal/src/wal_group_commit.rs#L294).
+
+Grouping/duplicate: `api-wire-protocol.md#6`. This row is not another independent defect.
+
+<a id="review-7"></a>
+
+### Claim 7 — Leader discards the underlying I/O error; a failed retry-on-fresh-segment is logged nowhere
+
+Status: `confirmed-open`. Current risk: `low`.
+
+Leader still erases errors into booleans and returns generic Storage text. The blanket logging allegation is too strong: ordinary retry write_all failures are logged inside WalSegment; early poison rejection and join failures can propagate without that log.
+
+Evidence: [crates/shamir-wal/src/wal_group_commit.rs:294](../../../../../crates/shamir-wal/src/wal_group_commit.rs#L294); [crates/shamir-wal/src/wal_group_commit.rs:311](../../../../../crates/shamir-wal/src/wal_group_commit.rs#L311); [crates/shamir-wal/src/wal_group_commit.rs:201](../../../../../crates/shamir-wal/src/wal_group_commit.rs#L201); [crates/shamir-wal/src/wal_segment.rs:277](../../../../../crates/shamir-wal/src/wal_segment.rs#L277); [crates/shamir-wal/src/segment_set.rs:270](../../../../../crates/shamir-wal/src/segment_set.rs#L270).
+
+Grouping/duplicate: `error-handling-lifecycle.md#3`. This row is not another independent defect.
+
+<a id="review-8"></a>
+
+### Claim 8 — Corrupt length header overflows usize on 32-bit targets → panic in replay/repair
+
+Status: `confirmed-open`. Current risk: `low`.
+
+Both walkers add a disk-controlled u32 length using unchecked usize arithmetic. This can overflow on 32-bit and subsequently invalidate slicing; ordinary 64-bit targets do not have this length-induced overflow.
+
+Evidence: [crates/shamir-wal/src/wal_segment.rs:380](../../../../../crates/shamir-wal/src/wal_segment.rs#L380); [crates/shamir-wal/src/wal_segment.rs:384](../../../../../crates/shamir-wal/src/wal_segment.rs#L384); [crates/shamir-wal/src/wal_segment.rs:535](../../../../../crates/shamir-wal/src/wal_segment.rs#L535); [crates/shamir-wal/src/wal_segment.rs:539](../../../../../crates/shamir-wal/src/wal_segment.rs#L539).
+
+Grouping/duplicate: `security-crypto.md#4`. This row is not another independent defect.
+
+<a id="review-9"></a>
+
+### Claim 9 — Inline #[cfg(test)] mod tests in segment_meta.rs violates the documented test layout
+
+Status: `confirmed-open`. Current risk: `low`.
+
+Five tests remain in the implementation module, reachable through the exported segment_meta module under cfg(test). This is structural debt, not a runtime High.
+
+Evidence: [crates/shamir-wal/src/segment_meta.rs:175](../../../../../crates/shamir-wal/src/segment_meta.rs#L175); [crates/shamir-wal/src/lib.rs:47](../../../../../crates/shamir-wal/src/lib.rs#L47); [crates/shamir-wal/src/tests/mod.rs:1](../../../../../crates/shamir-wal/src/tests/mod.rs#L1).
+
+Grouping/duplicate: `style-claude-md.md#1`. This row is not another independent defect.
+
+<a id="review-10"></a>
+
+### Claim 10 — sync_now counts failed fsyncs as issued fsyncs
+
+Status: `refuted`. Current risk: —.
+
+The documented counter counts fsyncs issued, not successful durability events. Both leader and sync_now count attempts consistently. The named tests use healthy sinks and do not infer success from a failed attempt.
+
+Evidence: [crates/shamir-wal/src/wal_group_commit.rs:148](../../../../../crates/shamir-wal/src/wal_group_commit.rs#L148); [crates/shamir-wal/src/wal_group_commit.rs:310](../../../../../crates/shamir-wal/src/wal_group_commit.rs#L310); [crates/shamir-wal/src/wal_group_commit.rs:355](../../../../../crates/shamir-wal/src/wal_group_commit.rs#L355); [crates/shamir-wal/src/tests/wal_group_commit_tests.rs:151](../../../../../crates/shamir-wal/src/tests/wal_group_commit_tests.rs#L151).
+
+<a id="review-notes-notify-and-success-l1"></a>
+
+### Claim Notes/Notify-and-success-L1 — Notify enable-before-check, successful leadership release, and append_many queue atomicity are correct
+
+Status: `not-applicable`. Current risk: —.
+
+These source-level guarantees hold: subscription precedes done-check, empty release occurs under pending lock, and append_many pushes its entire batch under one lock. They do not establish cancellation safety or failure-path liveness.
+
+Evidence: [crates/shamir-wal/src/wal_group_commit.rs:189](../../../../../crates/shamir-wal/src/wal_group_commit.rs#L189); [crates/shamir-wal/src/wal_group_commit.rs:237](../../../../../crates/shamir-wal/src/wal_group_commit.rs#L237); [crates/shamir-wal/src/wal_group_commit.rs:272](../../../../../crates/shamir-wal/src/wal_group_commit.rs#L272).
+
+<a id="review-notes-dirty-flag-interleavings"></a>
+
+### Claim Notes/dirty-flag-interleavings — Background-fsync dirty-flag interleavings are safe
+
+Status: `refuted`. Current risk: —.
+
+The file mutex protects the filesystem operation, not the coordinator's later false store. A newer Buffered write can set dirty after the fsync and before that store, losing the next timer flush.
+
+Evidence: [crates/shamir-wal/src/wal_group_commit.rs:300](../../../../../crates/shamir-wal/src/wal_group_commit.rs#L300); [crates/shamir-wal/src/wal_group_commit.rs:356](../../../../../crates/shamir-wal/src/wal_group_commit.rs#L356); [crates/shamir-wal/src/wal_group_commit.rs:358](../../../../../crates/shamir-wal/src/wal_group_commit.rs#L358).
+
+Grouping/duplicate: `concurrency-lockfree.md#4`. This row is not another independent defect.
+
+<a id="review-notes-memsink-truncation-parity"></a>
+
+### Claim Notes/MemSink-truncation-parity — MemSink batch-max tagging and engine truncation coverage
+
+Status: `not-applicable`. Current risk: —.
+
+Frames carry batch maximums and are retained above the durable ceiling; zero-tag batches remain pinned. Registered engine tests assert WAL collapse and retained readable values. This is conservative positive-version batching, not per-entry exact reclamation.
+
+Evidence: [crates/shamir-wal/src/wal_sink.rs:136](../../../../../crates/shamir-wal/src/wal_sink.rs#L136); [crates/shamir-wal/src/wal_sink.rs:188](../../../../../crates/shamir-wal/src/wal_sink.rs#L188); [crates/shamir-engine/src/tx/tests/mod.rs:38](../../../../../crates/shamir-engine/src/tx/tests/mod.rs#L38); [crates/shamir-engine/src/tx/tests/truncation_tests.rs:120](../../../../../crates/shamir-engine/src/tx/tests/truncation_tests.rs#L120).
+
+<a id="review-notes-stale-sidecar-handling"></a>
+
+### Claim Notes/stale-sidecar-handling — Stale-sidecar handling is thoroughly tested and safe
+
+Status: `partially-fixed`. Current risk: `medium`.
+
+Successful removal and absent/corrupt/torn fallbacks have sensitive registered assertions. Removal errors are nevertheless swallowed, so a stale valid sidecar can survive the alleged fix; these failure cases are not covered.
+
+Evidence: [crates/shamir-wal/src/tests/segment_set_tests.rs:791](../../../../../crates/shamir-wal/src/tests/segment_set_tests.rs#L791); [crates/shamir-wal/src/tests/segment_set_tests.rs:890](../../../../../crates/shamir-wal/src/tests/segment_set_tests.rs#L890); [crates/shamir-wal/src/tests/segment_set_tests.rs:924](../../../../../crates/shamir-wal/src/tests/segment_set_tests.rs#L924); [crates/shamir-wal/src/segment_meta.rs:164](../../../../../crates/shamir-wal/src/segment_meta.rs#L164).
+
+## Corrections and qualified non-findings
+
+- Count five inline segment_meta tests, not four.
+- Do not describe all retry I/O failures as unlogged: WalSegment logs failed write_all and fsync outcomes.
+- The dirty-interleaving non-finding contradicts the actual coordinator clear race.
+- A merely synchronous failing Mem append does not deterministically create the stranded-follower interleaving; a test needs an explicit leader pause/release seam.
+- All proof here is source-level; no test execution or historical Red phase was verified.
+
+---
+
+<details>
+<summary>Historical report — preserved for provenance; not current status or instructions</summary>
+
 # shamir-wal — Correctness & TDD-coverage
 
 ## Summary
@@ -248,3 +428,5 @@ given a corrupt length header.
 - Stale-sidecar handling (re-activation shed in `open`, poison-rotation shed, corrupt /
   torn / absent fallbacks) is thoroughly tested — task #500's coverage is a model of the
   Red/Green discipline this review found lacking on the §1.5/§2.4/§1.3-file paths.
+
+</details>

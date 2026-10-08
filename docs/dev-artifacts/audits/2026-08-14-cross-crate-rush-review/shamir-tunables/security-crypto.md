@@ -1,3 +1,57 @@
+<!-- revalidation:2026-10-08 source:92ad58266bf57ddea1fa3c8a47affba1a3a9a096 -->
+# shamir-tunables — security-crypto revalidation
+
+Source snapshot: `92ad58266bf57ddea1fa3c8a47affba1a3a9a096`. Revalidated 2026-10-08 by read-only XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run; no source fix is part of this update. Test registration/assertions are evidence of an oracle, not proof of a passing run.
+
+This section is authoritative for current status. Original titles/IDs are retained for traceability; a refuted title is not a current assertion. The collapsed historical report below is superseded, including its counts, severity, scenarios and fix instructions. Plan IDs preserve historical numbering, not a current release mandate. [Workspace methodology and status definitions](../SUMMARY.md#status-definitions).
+
+No direct cryptographic or remotely reachable setter surface was found. Both existing findings remain low-severity API/hardening issues, with substantial threat-model qualifications.
+
+## Current claim decisions
+
+| Claim decisions | Open | Source-fixed | Partial | Refuted | Unverified | N/A |
+|---:|---:|---:|---:|---:|---:|---:|
+| 2 | 2 | 0 | 0 | 0 | 0 | 0 |
+
+These are decisions on report claims, including repeated roots, bundled observations and non-findings—not a unique-bug census. Closed/N/A rows have no current risk; unverified risk is provisional. Pure style and unmeasured optimization claims do not establish runtime impact.
+
+<a id="review-1"></a>
+
+### Claim 1 — `RuntimeTunables` setters accept unvalidated values that can disable security-relevant resource bounds
+
+Status: `confirmed-open`. Current risk: `low`.
+
+The setters accept arbitrary values and lossy durations, but only trusted in-process code can currently call them and production consumes none. The claimed zero-cap outage is blocked by the existing consumer floor; upper bounds matter if wiring is introduced.
+
+Evidence: [crates/shamir-tunables/src/runtime.rs:56](../../../../../crates/shamir-tunables/src/runtime.rs#L56); [crates/shamir-tunables/src/runtime.rs:63](../../../../../crates/shamir-tunables/src/runtime.rs#L63); [crates/shamir-tunables/src/runtime.rs:73](../../../../../crates/shamir-tunables/src/runtime.rs#L73); [crates/shamir-server/src/connection/request_loop.rs:153](../../../../../crates/shamir-server/src/connection/request_loop.rs#L153).
+
+Grouping/duplicate: `correctness-tdd.md#2`. This row is not another independent defect.
+
+<a id="review-2"></a>
+
+### Claim 2 — Runtime-override layer is dead code — every security-relevant consumer reads the consts, so the "override takes effect" contract is false
+
+Status: `confirmed-open`. Current risk: `low`.
+
+The exposed atomic object remains disconnected from connection concurrency, initial buffers, and error backoff. Existing constant-based controls still operate; this is not their bypass. RuntimeTunables has no idle-timeout field or setter.
+
+Evidence: [crates/shamir-tunables/src/runtime.rs:18](../../../../../crates/shamir-tunables/src/runtime.rs#L18); [crates/shamir-server/src/server/server_handle.rs:100](../../../../../crates/shamir-server/src/server/server_handle.rs#L100); [crates/shamir-server/src/server/server_launcher.rs:1048](../../../../../crates/shamir-server/src/server/server_launcher.rs#L1048); [crates/shamir-server/src/connection/handshake.rs:706](../../../../../crates/shamir-server/src/connection/handshake.rs#L706).
+
+Grouping/duplicate: `correctness-tdd.md#1`. This row is not another independent defect.
+
+## Corrections and qualified non-findings
+
+- Retain the clean narrow boundary observation: no unsafe, I/O, parsing, secrets, cryptographic operations, or sensitive comparisons exist in this dependency-free crate. This is not a whole-server security guarantee.
+- Remove the scenario of tuning idle timeout through ServerHandle::tunables: that API does not exist. The idle constant is independently passed to ConnectionContext and used by the request-loop timer (crates/shamir-server/src/server/server_launcher.rs:1049; crates/shamir-server/src/connection/request_loop.rs:297).
+- IO_FRAME_BUFFER_CAP is initial Vec capacity, not a frame-size security ceiling (crates/shamir-tunables/src/lib.rs:34; crates/shamir-server/src/connection/handshake.rs:710).
+- No network/config/admin route currently reaches these setters. Any DoS scenario requires future wiring and a caller permitted to change the values.
+- Do not describe zero-cap stalls or 100%-CPU/starvation as inevitable: the cap floor is present, and timer/runtime behavior contradicts the asserted unconditional spin mechanism.
+
+---
+
+<details>
+<summary>Historical report — preserved for provenance; not current status or instructions</summary>
+
 # shamir-tunables -- Security & crypto boundary
 
 ## Summary
@@ -63,3 +117,5 @@ security-relevant knob it mirrors (idle timeout, per-connection concurrency, pol
   mark the runtime layer/docs explicitly as not-yet-wired so no one treats the knobs as live
   controls. Cheapest honest option today: a doc-comment note on `RuntimeTunables` naming the
   concrete consumers that must be switched before overrides mean anything.
+
+</details>

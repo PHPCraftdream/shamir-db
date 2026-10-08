@@ -1,3 +1,186 @@
+<!-- revalidation:2026-10-08 source:92ad58266bf57ddea1fa3c8a47affba1a3a9a096 -->
+# shamir-sdk — security-crypto revalidation
+
+Source snapshot: `92ad58266bf57ddea1fa3c8a47affba1a3a9a096`. Revalidated 2026-10-08 by read-only XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run; no source fix is part of this update. Test registration/assertions are evidence of an oracle, not proof of a passing run.
+
+This section is authoritative for current status. Original titles/IDs are retained for traceability; a refuted title is not a current assertion. The collapsed historical report below is superseded, including its counts, severity, scenarios and fix instructions. Plan IDs preserve historical numbering, not a current release mandate. [Workspace methodology and status definitions](../SUMMARY.md#status-definitions).
+
+Boundary-hardening omissions remain. Several proposed exploit narratives require stronger evidence, and the scalar alias example is invalid although the purity guarantee is still unenforced.
+
+## Current claim decisions
+
+| Claim decisions | Open | Source-fixed | Partial | Refuted | Unverified | N/A |
+|---:|---:|---:|---:|---:|---:|---:|
+| 13 | 10 | 0 | 0 | 0 | 1 | 2 |
+
+These are decisions on report claims, including repeated roots, bundled observations and non-findings—not a unique-bug census. Closed/N/A rows have no current risk; unverified risk is provisional. Pure style and unmeasured optimization claims do not establish runtime impact.
+
+<a id="review-1"></a>
+
+### Claim 1 — `block_on` spin-loops forever on any `Poll::Pending` future (DoS / hang at the untrusted-guest boundary)
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+An unresolved future still busy-polls and can exhaust its execution budget; native helper use has no built-in timeout. Any-Pending forever is false because subsequent polls can return Ready. WASM budget enforcement contains the resource abuse; this is not a sandbox escape.
+
+Evidence: [crates/shamir-sdk/src/__rt.rs:50](../../../../../crates/shamir-sdk/src/__rt.rs#L50); [crates/shamir-wasm-host/src/wasm/wasm_function.rs:477](../../../../../crates/shamir-wasm-host/src/wasm/wasm_function.rs#L477); [crates/shamir-wasm-host/src/wasm/wasm_function.rs:487](../../../../../crates/shamir-wasm-host/src/wasm/wasm_function.rs#L487); [crates/shamir-wasm-host/src/wasm/wasm_engine.rs:230](../../../../../crates/shamir-wasm-host/src/wasm/wasm_engine.rs#L230).
+
+Grouping/duplicate: `SUMMARY.md#2.1`. This row is not another independent defect.
+
+<a id="review-2"></a>
+
+### Claim 2 — `HttpRequest` performs zero validation of method / URL / header name / header value (CRLF & token-injection source at the egress boundary)
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+SDK construction still accepts control characters, host decoding forwards strings, and curl escaping handles only backslash and quote. CR/LF propagation into config is source-proven. Actual curl directive/header/request injection is unverified; URL allowlist/SSRF checks run before config generation.
+
+Evidence: [crates/shamir-sdk/src/http.rs:60](../../../../../crates/shamir-sdk/src/http.rs#L60); [crates/shamir-sdk/src/http.rs:80](../../../../../crates/shamir-sdk/src/http.rs#L80); [crates/shamir-sdk/src/http.rs:86](../../../../../crates/shamir-sdk/src/http.rs#L86); [crates/shamir-wasm-host/src/wasm/host_http.rs:36](../../../../../crates/shamir-wasm-host/src/wasm/host_http.rs#L36); [crates/shamir-db/src/shamir_db/curl_gateway.rs:49](../../../../../crates/shamir-db/src/shamir_db/curl_gateway.rs#L49); [crates/shamir-db/src/shamir_db/curl_gateway.rs:210](../../../../../crates/shamir-db/src/shamir_db/curl_gateway.rs#L210).
+
+Grouping/duplicate: `SUMMARY.md#3.1`. This row is not another independent defect.
+
+<a id="review-3"></a>
+
+### Claim 3 — Guest ABI builds slices from host-returned `(ptr, len)` with no sanity check (undocumented unsafe trust assumption)
+
+Status: `confirmed-open`. Current risk: `low`.
+
+Eight response paths still construct unchecked slices after signed unpacking. Host writers currently check length, allocator pointer, and memory range; the residual issue requires a trusted-host contract bug or incompatible replacement. Signed low bits are not a legitimate negative-length wire field.
+
+Evidence: [crates/shamir-sdk/src/host_imports.rs:70](../../../../../crates/shamir-sdk/src/host_imports.rs#L70); [crates/shamir-sdk/src/host_imports.rs:96](../../../../../crates/shamir-sdk/src/host_imports.rs#L96); [crates/shamir-sdk/src/host_imports.rs:224](../../../../../crates/shamir-sdk/src/host_imports.rs#L224); [crates/shamir-wasm-host/src/wasm/wasm_function.rs:339](../../../../../crates/shamir-wasm-host/src/wasm/wasm_function.rs#L339); [crates/shamir-wasm-host/src/wasm/wasm_function.rs:355](../../../../../crates/shamir-wasm-host/src/wasm/wasm_function.rs#L355).
+
+Grouping/duplicate: `SUMMARY.md#3.2`. This row is not another independent defect.
+
+<a id="review-4"></a>
+
+### Claim 4 — Encode/decode failures are silently swallowed, fail-open: a failed filter encode degrades to "query ALL rows"
+
+Status: `confirmed-open`. Current risk: `low`.
+
+The conditional chain remains: encode error becomes empty bytes; db_query treats empty filter bytes as None. No triggering serialization failure was established. Decode fallback remains too, but HTTP/insert fallback Null produces public errors rather than successful data exposure.
+
+Evidence: [crates/shamir-sdk/src/__rt.rs:20](../../../../../crates/shamir-sdk/src/__rt.rs#L20); [crates/shamir-sdk/src/host_imports.rs:60](../../../../../crates/shamir-sdk/src/host_imports.rs#L60); [crates/shamir-sdk/src/host_imports.rs:170](../../../../../crates/shamir-sdk/src/host_imports.rs#L170); [crates/shamir-wasm-host/src/wasm/host_db.rs:136](../../../../../crates/shamir-wasm-host/src/wasm/host_db.rs#L136); [crates/shamir-sdk/src/http.rs:27](../../../../../crates/shamir-sdk/src/http.rs#L27).
+
+Grouping/duplicate: `SUMMARY.md#6.1`. This row is not another independent defect.
+
+<a id="review-5"></a>
+
+### Claim 5 — Documented scalar "purity guarantee" is a token-match lint, trivially bypassed by a type alias
+
+Status: `confirmed-open`. Current risk: `low`.
+
+Purity remains unenforced because scalar bodies can construct the public Ctx::new. The stated two-argument alias example is refuted: scalar requires one argument and generates a Params-only wrapper, not Ctx::new. Access still depends on actual host gateways; no privilege escalation is established.
+
+Evidence: [crates/shamir-sdk/src/context.rs:15](../../../../../crates/shamir-sdk/src/context.rs#L15); [crates/shamir-sdk/src/context.rs:64](../../../../../crates/shamir-sdk/src/context.rs#L64); [crates/shamir-sdk-macros/src/lib.rs:476](../../../../../crates/shamir-sdk-macros/src/lib.rs#L476); [crates/shamir-sdk-macros/src/lib.rs:525](../../../../../crates/shamir-sdk-macros/src/lib.rs#L525); [crates/shamir-sdk-macros/src/lib.rs:556](../../../../../crates/shamir-sdk-macros/src/lib.rs#L556); [crates/shamir-wasm-host/src/wasm/wasm_function.rs:423](../../../../../crates/shamir-wasm-host/src/wasm/wasm_function.rs#L423).
+
+Grouping/duplicate: `SUMMARY.md#3.4`. This row is not another independent defect.
+
+<a id="review-6"></a>
+
+### Claim 6 — User `Err` results surface as WASM panics mapped to `FunctionError::Compute`, blurring crash vs. user error
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+Function/procedure/scalar Err arms still invoke panic-based trap, and the host maps traps to Compute. The User variant exists on the host but no guest result-envelope transport selects it. Validators return Validation directly, so the report's validator-Err example is not the validator macro contract.
+
+Evidence: [crates/shamir-sdk/src/__rt.rs:64](../../../../../crates/shamir-sdk/src/__rt.rs#L64); [crates/shamir-sdk-macros/src/lib.rs:271](../../../../../crates/shamir-sdk-macros/src/lib.rs#L271); [crates/shamir-sdk-macros/src/lib.rs:398](../../../../../crates/shamir-sdk-macros/src/lib.rs#L398); [crates/shamir-sdk-macros/src/lib.rs:563](../../../../../crates/shamir-sdk-macros/src/lib.rs#L563); [crates/shamir-wasm-host/src/error.rs:30](../../../../../crates/shamir-wasm-host/src/error.rs#L30); [crates/shamir-wasm-host/src/wasm/wasm_function.rs:593](../../../../../crates/shamir-wasm-host/src/wasm/wasm_function.rs#L593).
+
+Grouping/duplicate: `SUMMARY.md#6.2`. This row is not another independent defect.
+
+<a id="review-7"></a>
+
+### Claim 7 — `leak_result` truncates pointers on 64-bit host targets (latent UB in the host-testing ABI path)
+
+Status: `confirmed-open`. Current risk: `low`.
+
+The public helper still shifts a native pointer into a 32-bit pointer field without target gating. Native high bits are lost; the helper itself does not dereference the result. UB requires an unsupported native ABI consumer to dereference it; the production consumer is WASM-only.
+
+Evidence: [crates/shamir-sdk/src/__rt.rs:25](../../../../../crates/shamir-sdk/src/__rt.rs#L25); [crates/shamir-sdk/src/lib.rs:18](../../../../../crates/shamir-sdk/src/lib.rs#L18); [crates/shamir-wasm-host/src/wasm/wasm_function.rs:567](../../../../../crates/shamir-wasm-host/src/wasm/wasm_function.rs#L567).
+
+Grouping/duplicate: `SUMMARY.md#3.6`. This row is not another independent defect.
+
+<a id="review-8"></a>
+
+### Claim 8 — Unbounded per-call buffer leaks in the guest ABI are undocumented as a resource budget
+
+Status: `confirmed-open`. Current risk: `nit`.
+
+Request encodings and guest-allocated response bytes remain unreclaimed until Store destruction. Internal comments acknowledge invocation lifetime but public authoring docs do not explain cumulative loop cost. Default memory/fuel limits contain growth, not eliminate it.
+
+Evidence: [crates/shamir-sdk/src/host_imports.rs:55](../../../../../crates/shamir-sdk/src/host_imports.rs#L55); [crates/shamir-sdk/src/host_imports.rs:64](../../../../../crates/shamir-sdk/src/host_imports.rs#L64); [crates/shamir-sdk-macros/src/lib.rs:239](../../../../../crates/shamir-sdk-macros/src/lib.rs#L239); [crates/shamir-sdk/src/context.rs:116](../../../../../crates/shamir-sdk/src/context.rs#L116); [crates/shamir-wasm-host/src/wasm/wasm_engine.rs:234](../../../../../crates/shamir-wasm-host/src/wasm/wasm_engine.rs#L234).
+
+Grouping/duplicate: `SUMMARY.md#4.1`. This row is not another independent defect.
+
+<a id="review-9"></a>
+
+### Claim 9 — `HttpResponse::from_value` truncating status cast and lenient header/body parsing
+
+Status: `confirmed-open`. Current risk: `low`.
+
+Unchecked status conversion and lossy parsing remain. Normal host encoding supplies the expected types; this is protocol-drift hardening, not a demonstrated remote-input type confusion.
+
+Evidence: [crates/shamir-sdk/src/http.rs:134](../../../../../crates/shamir-sdk/src/http.rs#L134); [crates/shamir-sdk/src/http.rs:142](../../../../../crates/shamir-sdk/src/http.rs#L142); [crates/shamir-sdk/src/http.rs:150](../../../../../crates/shamir-sdk/src/http.rs#L150); [crates/shamir-wasm-host/src/wasm/host_http.rs:93](../../../../../crates/shamir-wasm-host/src/wasm/host_http.rs#L93).
+
+Grouping/duplicate: `SUMMARY.md#1.6`. This row is not another independent defect.
+
+<a id="review-10"></a>
+
+### Claim 10 — Security-relevant HTTP envelope decoding has zero test coverage
+
+Status: `confirmed-open`. Current risk: `low`.
+
+SDK-local malformed-envelope and response-shape tests remain absent. Workspace e2e tests do exercise catchable denial and nominal response bodies, so literal zero coverage is false. The nominal test accepts some error strings and cannot reliably detect a broken success path.
+
+Evidence: [crates/shamir-sdk/src/tests/mod.rs:1](../../../../../crates/shamir-sdk/src/tests/mod.rs#L1); [crates/shamir-sdk/src/http.rs:24](../../../../../crates/shamir-sdk/src/http.rs#L24); [crates/shamir-db/tests/functions_lifecycle.rs:762](../../../../../crates/shamir-db/tests/functions_lifecycle.rs#L762); [crates/shamir-db/tests/functions_lifecycle.rs:833](../../../../../crates/shamir-db/tests/functions_lifecycle.rs#L833); [crates/shamir-db/tests/functions_lifecycle.rs:873](../../../../../crates/shamir-db/tests/functions_lifecycle.rs#L873).
+
+Grouping/duplicate: `SUMMARY.md#1.1`. This row is not another independent defect.
+
+<a id="review-notes-1"></a>
+
+### Claim Notes.1 — No timing side-channels: the crate never compares secrets or credential material
+
+Status: `not-applicable`. Current risk: —.
+
+Non-finding supported narrowly: no authentication or secret-comparison mechanism is implemented here; Params compares parameter names. This is not a universal side-channel proof for guest functions or host dependencies.
+
+Evidence: [crates/shamir-sdk/src/params.rs:29](../../../../../crates/shamir-sdk/src/params.rs#L29); [crates/shamir-sdk/src/lib.rs:19](../../../../../crates/shamir-sdk/src/lib.rs#L19); [crates/shamir-sdk/Cargo.toml:8](../../../../../crates/shamir-sdk/Cargo.toml#L8).
+
+<a id="review-notes-2"></a>
+
+### Claim Notes.2 — `Value`'s recursive `Deserialize` is depth-bounded by rmp-serde's default recursion limit
+
+Status: `unverified`. Current risk: —.
+
+The SDK recursively invokes the deserializer without its own explicit limit. The lockfile identifies rmp-serde 1.3.1, but the pinned implementation was unavailable; neither exact default-depth enforcement on deserialize_any nor the stronger no-stack-overflow conclusion was source-proven.
+
+Evidence: [Cargo.lock:2949](../../../../../Cargo.lock#L2949); [crates/shamir-sdk/src/value.rs:121](../../../../../crates/shamir-sdk/src/value.rs#L121); [crates/shamir-sdk/src/value.rs:129](../../../../../crates/shamir-sdk/src/value.rs#L129); [crates/shamir-sdk/src/value.rs:140](../../../../../crates/shamir-sdk/src/value.rs#L140).
+
+<a id="review-notes-3"></a>
+
+### Claim Notes.3 — The host side of the ABI is properly defensive in both directions
+
+Status: `not-applicable`. Current risk: —.
+
+The cited memory-range guarantee is supported: host reads reject negative/range-invalid inputs, writers validate allocation ranges, and result unpacking checks against memory size. This supports host-side slice safety, not complete protocol validity or guest allocator provenance.
+
+Evidence: [crates/shamir-wasm-host/src/wasm/wasm_function.rs:297](../../../../../crates/shamir-wasm-host/src/wasm/wasm_function.rs#L297); [crates/shamir-wasm-host/src/wasm/wasm_function.rs:343](../../../../../crates/shamir-wasm-host/src/wasm/wasm_function.rs#L343); [crates/shamir-wasm-host/src/wasm/wasm_function.rs:355](../../../../../crates/shamir-wasm-host/src/wasm/wasm_function.rs#L355); [crates/shamir-wasm-host/src/wasm/wasm_function.rs:567](../../../../../crates/shamir-wasm-host/src/wasm/wasm_function.rs#L567).
+
+## Corrections and qualified non-findings
+
+- Qualify DoS as execution-budget consumption by an unresolved authored future, not inevitable infinite production execution.
+- Reject controls at the host security boundary as well as optionally in the SDK; guest authors can bypass SDK constructors with custom WASM.
+- The scalar alias example cannot compile as described; public Ctx::new in a scalar body explains the real guarantee gap.
+- Host gateway presence/absence is an invocation capability restriction, not proof of enforced function-kind purity.
+- Packed pointer and length fields are unsigned bit fields; checking only signed negativity is not a complete guest memory-range or allocation-validity check.
+- Explicit as-u32 casts merely declare truncation and do not make native pointer packing correct. A target-gated implementation needs a native stub for macro compile-pass targets.
+- Default rmp-serde depth bounding, even if verified, would not alone prove guest-stack safety.
+- HTTP payloads are normalized by the host before SDK parsing; remote servers do not directly supply SDK Value variants.
+
+---
+
+<details>
+<summary>Historical report — preserved for provenance; not current status or instructions</summary>
+
 # shamir-sdk -- Security & crypto boundary
 
 ## Summary
@@ -78,3 +261,5 @@ This crate contains no auth, HMAC, SCRAM, or TLS code (those live in `shamir-con
 - No timing side-channels: the crate never compares secrets or credential material (nothing to constant-time); `Params::get`'s linear string scan handles only non-secret parameter names.
 - `Value`'s recursive `Deserialize` is depth-bounded by rmp-serde's default recursion limit, so deeply nested host payloads cannot blow the guest stack via this path.
 - The host side of the ABI is properly defensive in both directions (`read_guest_mem` bounds checks guest-provided `ptr`/`len`, `wasm_function.rs:567-574` validates the guest result pointer against memory size before slicing) -- the guest-side gap in Finding 3 is the mirror image, not a live hole.
+
+</details>

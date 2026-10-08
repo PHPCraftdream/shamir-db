@@ -1,3 +1,102 @@
+<!-- revalidation:2026-10-08 source:92ad58266bf57ddea1fa3c8a47affba1a3a9a096 -->
+# shamir-connect — performance-hotpath revalidation
+
+Source snapshot: `92ad58266bf57ddea1fa3c8a47affba1a3a9a096`. Revalidated 2026-10-08 by read-only XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run; no source fix is part of this update. Test registration/assertions are evidence of an oracle, not proof of a passing run.
+
+This section is authoritative for current status. Original titles/IDs are retained for traceability; a refuted title is not a current assertion. The collapsed historical report below is superseded, including its counts, severity, scenarios and fix instructions. Plan IDs preserve historical numbering, not a current release mandate. [Workspace methodology and status definitions](../SUMMARY.md#status-definitions).
+
+The all-session capped-insert scan and permanently retained audit entries are proven cost defects. Clock and latency comparisons are overstated; both dispatch variants sample time.
+
+## Current claim decisions
+
+| Claim decisions | Open | Source-fixed | Partial | Refuted | Unverified | N/A |
+|---:|---:|---:|---:|---:|---:|---:|
+| 7 | 5 | 0 | 0 | 1 | 0 | 1 |
+
+These are decisions on report claims, including repeated roots, bundled observations and non-findings—not a unique-bug census. Closed/N/A rows have no current risk; unverified risk is provisional. Pure style and unmeasured optimization claims do not establish runtime impact.
+
+<a id="review-1"></a>
+
+### Claim 1 — Per-user session-cap insert does an O(total-sessions) scan under a global mutex
+
+Status: `confirmed-open`. Current risk: `high`.
+
+Capped insertion traverses the whole map and sorts matching sessions under a global mutex. Production login calls it. Cost includes O(N) traversal and O(U log U) sorting; exact latency is unmeasured.
+
+Evidence: [crates/shamir-connect/src/server/session.rs:470](../../../../../crates/shamir-connect/src/server/session.rs#L470); [crates/shamir-connect/src/server/session.rs:476](../../../../../crates/shamir-connect/src/server/session.rs#L476); [crates/shamir-connect/src/server/session.rs:484](../../../../../crates/shamir-connect/src/server/session.rs#L484); [crates/shamir-server/src/connection/handshake.rs:580](../../../../../crates/shamir-server/src/connection/handshake.rs#L580).
+
+<a id="review-2"></a>
+
+### Claim 2 — AuditChain accumulates every audit event in an ever-growing in-memory Vec
+
+Status: `confirmed-open`. Current risk: `high`.
+
+Every append deep-clones into retained entries; neither appender use nor checkpointing removes entries. The production launcher builds this chain. Memory scales with total emitted events, even when a durable sink is configured.
+
+Evidence: [crates/shamir-connect/src/server/audit_chain.rs:140](../../../../../crates/shamir-connect/src/server/audit_chain.rs#L140); [crates/shamir-connect/src/server/audit_chain.rs:214](../../../../../crates/shamir-connect/src/server/audit_chain.rs#L214); [crates/shamir-connect/src/server/audit_chain.rs:427](../../../../../crates/shamir-connect/src/server/audit_chain.rs#L427); [crates/shamir-server/src/server/server_launcher.rs:338](../../../../../crates/shamir-server/src/server/server_launcher.rs#L338).
+
+<a id="review-3"></a>
+
+### Claim 3 — Resume path bypasses MAX_SESSIONS_PER_USER
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+Successful resume still calls uncapped insert, and the live wrapper adds no cap. It can exceed 16 through valid successive tickets; replaying the same consumed ticket is rejected and is not the amplification mechanism.
+
+Evidence: [crates/shamir-connect/src/server/resume.rs:366](../../../../../crates/shamir-connect/src/server/resume.rs#L366); [crates/shamir-connect/src/server/resume.rs:432](../../../../../crates/shamir-connect/src/server/resume.rs#L432); [crates/shamir-server/src/connection/handshake.rs:128](../../../../../crates/shamir-server/src/connection/handshake.rs#L128).
+
+<a id="review-4"></a>
+
+### Claim 4 — AuditChain::append holds the mutex across allocations, HMAC, and a deep clone
+
+Status: `confirmed-open`. Current risk: `low`.
+
+These operations remain under the chain lock. Required serialization and unnecessary materialization should be distinguished; the microsecond and throughput estimates are not verified.
+
+Evidence: [crates/shamir-connect/src/server/audit_chain.rs:196](../../../../../crates/shamir-connect/src/server/audit_chain.rs#L196); [crates/shamir-connect/src/server/audit_chain.rs:210](../../../../../crates/shamir-connect/src/server/audit_chain.rs#L210); [crates/shamir-connect/src/server/audit_chain.rs:214](../../../../../crates/shamir-connect/src/server/audit_chain.rs#L214).
+
+<a id="review-5"></a>
+
+### Claim 5 — Owning-envelope dispatch_request still pays a wall-clock syscall per request
+
+Status: `confirmed-open`. Current risk: `nit`.
+
+Owned dispatch samples time via lookup/touch. However, view dispatch uses the same lookup and samples time again for its rate gate; it does not implement the claimed avoidance. A syscall implementation and 100 ns cost are unverified.
+
+Evidence: [crates/shamir-connect/src/server/dispatch.rs:78](../../../../../crates/shamir-connect/src/server/dispatch.rs#L78); [crates/shamir-connect/src/server/dispatch.rs:131](../../../../../crates/shamir-connect/src/server/dispatch.rs#L131); [crates/shamir-connect/src/server/dispatch.rs:153](../../../../../crates/shamir-connect/src/server/dispatch.rs#L153); [crates/shamir-connect/src/server/session.rs:297](../../../../../crates/shamir-connect/src/server/session.rs#L297).
+
+<a id="review-summary-optimizations"></a>
+
+### Claim Summary.optimizations — Cached ciphers/HMAC keys, borrowed envelopes, atomics, Fx hashing, and exact capacities
+
+Status: `refuted`. Current risk: —.
+
+Cipher and HMAC caches, borrowed envelopes, and atomic buckets exist. The bundled universal claims are false: lockout maps use the default hasher, and AuthMessage's requested capacity is smaller than its actual output. No performance gain was measured.
+
+Evidence: [crates/shamir-connect/src/server/resume.rs:164](../../../../../crates/shamir-connect/src/server/resume.rs#L164); [crates/shamir-connect/src/server/session.rs:284](../../../../../crates/shamir-connect/src/server/session.rs#L284); [crates/shamir-connect/src/common/envelope.rs:122](../../../../../crates/shamir-connect/src/common/envelope.rs#L122); [crates/shamir-connect/src/server/lockout.rs:256](../../../../../crates/shamir-connect/src/server/lockout.rs#L256); [crates/shamir-connect/src/common/auth_message.rs:82](../../../../../crates/shamir-connect/src/common/auth_message.rs#L82).
+
+<a id="review-test-coverage-note"></a>
+
+### Claim Test-coverage note — Capped insertion has LRU tests but no scale benchmark; audit append is unbenchmarked
+
+Status: `not-applicable`. Current risk: —.
+
+Registered integration tests cover capped-insert LRU behavior, and hot_paths benchmarks omit capped insertion and audit append. Their absence does not itself prove the reported latency estimates.
+
+Evidence: [crates/shamir-connect/tests/integration_session.rs:381](../../../../../crates/shamir-connect/tests/integration_session.rs#L381); [crates/shamir-connect/tests/integration_session.rs:416](../../../../../crates/shamir-connect/tests/integration_session.rs#L416); [crates/shamir-connect/benches/hot_paths.rs:299](../../../../../crates/shamir-connect/benches/hot_paths.rs#L299).
+
+## Corrections and qualified non-findings
+
+- Arc<AuditEntry> reduces clone cost but does not bound retention; a ring, drain, or retention-free mode is still required.
+- AuditEntry has five Strings, not six.
+- View dispatch does not currently avoid lookup's clock read.
+- Do not call resume the measured hottest creation path or attach numeric latency estimates without measurements.
+
+---
+
+<details>
+<summary>Historical report — preserved for provenance; not current status or instructions</summary>
+
 # shamir-connect -- Performance & O(x->0)
 
 ## Summary
@@ -43,3 +142,5 @@ The crate is largely exemplary on this axis — the documented "Optim #2..#9" wo
 
 ### Test-coverage note (claims check)
 Unit coverage is thorough for the hot paths that matter (`src/server/tests/`: session, rate_limit, post_auth_rate_limit, lockout, audit_chain, durable_counters, argon2_semaphore, changepw_challenge; `src/common/tests/`: 12 topic files; 9 `tests/integration_*.rs`). `insert_with_per_user_cap` has behavioral LRU tests (`tests/integration_session.rs:381-448`) but nothing at scale, and `benches/hot_paths.rs` benches only raw lookup/validity/hmac_key — neither the capped insert nor `AuditChain::append` is measured, which is consistent with findings 1-2 going unnoticed.
+
+</details>

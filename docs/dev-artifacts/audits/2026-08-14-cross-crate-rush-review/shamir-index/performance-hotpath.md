@@ -1,3 +1,190 @@
+<!-- revalidation:2026-10-08 source:92ad58266bf57ddea1fa3c8a47affba1a3a9a096 -->
+# shamir-index — performance-hotpath revalidation
+
+Source snapshot: `92ad58266bf57ddea1fa3c8a47affba1a3a9a096`. Revalidated 2026-10-08 by read-only XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run; no source fix is part of this update. Test registration/assertions are evidence of an oracle, not proof of a passing run.
+
+This section is authoritative for current status. Original titles/IDs are retained for traceability; a refuted title is not a current assertion. The collapsed historical report below is superseded, including its counts, severity, scenarios and fix instructions. Plan IDs preserve historical numbering, not a current release mandate. [Workspace methodology and status definitions](../SUMMARY.md#status-definitions).
+
+The structural allocation, materialization, and sequential-call costs remain. Original latency/RSS estimates are unmeasured; the two performance highs are calibrated to medium. FTS has no top-k request contract today.
+
+## Current claim decisions
+
+| Claim decisions | Open | Source-fixed | Partial | Refuted | Unverified | N/A |
+|---:|---:|---:|---:|---:|---:|---:|
+| 15 | 15 | 0 | 0 | 0 | 0 | 0 |
+
+These are decisions on report claims, including repeated roots, bundled observations and non-findings—not a unique-bug census. Closed/N/A rows have no current risk; unverified risk is provisional. Pure style and unmeasured optimization claims do not establish runtime impact.
+
+<a id="review-1"></a>
+
+### Claim 1 — Per-row deep-clone of the whole index-definition set in every write planner
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+IndexInfo::iter clones yielded definitions; sorted iter_indexes clones the whole definition vector. Singular planners/validators use these APIs. Some batch paths already amortize snapshots; allocation structure is proven, workload latency is not.
+
+Evidence: [crates/shamir-index/src/base_index/index_info.rs:310](../../../../../crates/shamir-index/src/base_index/index_info.rs#L310); [crates/shamir-index/src/base_index/sorted_index_manager.rs:544](../../../../../crates/shamir-index/src/base_index/sorted_index_manager.rs#L544); [crates/shamir-index/src/base_index/index_manager.rs:2457](../../../../../crates/shamir-index/src/base_index/index_manager.rs#L2457); [crates/shamir-index/src/base_index/index_manager_unique.rs:473](../../../../../crates/shamir-index/src/base_index/index_manager_unique.rs#L473).
+
+<a id="review-2"></a>
+
+### Claim 2 — Sorted/unique apply paths issue one store round-trip per posting — the transact batching landed only for the regular-hash family
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+Direct sorted apply and unique handlers still await per-key calls; regular apply batches transact. Engine direct CRUD reaches unique handlers. Actual fsync count and latency depend on backend/durability policy.
+
+Evidence: [crates/shamir-index/src/base_index/sorted_index_manager.rs:1847](../../../../../crates/shamir-index/src/base_index/sorted_index_manager.rs#L1847); [crates/shamir-index/src/base_index/index_manager_unique.rs:478](../../../../../crates/shamir-index/src/base_index/index_manager_unique.rs#L478); [crates/shamir-index/src/base_index/index_manager_unique.rs:524](../../../../../crates/shamir-index/src/base_index/index_manager_unique.rs#L524); [crates/shamir-engine/src/table/table_manager_crud.rs:592](../../../../../crates/shamir-engine/src/table/table_manager_crud.rs#L592).
+
+<a id="review-3"></a>
+
+### Claim 3 — FTS lookup materializes every matching posting list and sorts all results — no top-k bound
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+Full token postings, intersections, scores, and ranked sorting remain. However IndexQuery::Fts has no k, and FTS is used as a membership filter; unconditional truncation would change semantics.
+
+Evidence: [crates/shamir-index/src/fts_ranked_backend.rs:309](../../../../../crates/shamir-index/src/fts_ranked_backend.rs#L309); [crates/shamir-index/src/fts_ranked_backend.rs:319](../../../../../crates/shamir-index/src/fts_ranked_backend.rs#L319); [crates/shamir-index/src/fts_ranked_backend.rs:369](../../../../../crates/shamir-index/src/fts_ranked_backend.rs#L369); [crates/shamir-index/src/backend.rs:29](../../../../../crates/shamir-index/src/backend.rs#L29); [crates/shamir-engine/src/table/read_planner.rs:46](../../../../../crates/shamir-engine/src/table/read_planner.rs#L46).
+
+<a id="review-4"></a>
+
+### Claim 4 — `FtsRankedBackend::plan_update` tokenizes the old record twice
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+tokenize_set calls tokenize_with_freq, then plan_update calls tokenize_with_freq(old) again. Two old-document pipeline executions are source-proven; an exact throughput penalty is not measured.
+
+Evidence: [crates/shamir-index/src/fts_ranked_backend.rs:96](../../../../../crates/shamir-index/src/fts_ranked_backend.rs#L96); [crates/shamir-index/src/fts_ranked_backend.rs:193](../../../../../crates/shamir-index/src/fts_ranked_backend.rs#L193); [crates/shamir-index/src/fts_ranked_backend.rs:195](../../../../../crates/shamir-index/src/fts_ranked_backend.rs#L195).
+
+<a id="review-5"></a>
+
+### Claim 5 — `IndexExpr::Scalar` evaluation constructs a fresh `Interner` per row
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+Every scalar evaluation constructs an Interner even for scalar leaves. Its constructor creates a capacity-64 concurrent map and an allocated reverse snapshot; two value conversions also remain.
+
+Evidence: [crates/shamir-index/src/expr.rs:172](../../../../../crates/shamir-index/src/expr.rs#L172); [crates/shamir-types/src/core/interner/interner.rs:90](../../../../../crates/shamir-types/src/core/interner/interner.rs#L90).
+
+<a id="review-6"></a>
+
+### Claim 6 — Vector snapshot dump/load fully materializes the graph and sidecar in RAM
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+Whole dump reads, accumulated chunk operations, vector copies, whole-file reassembly, and owned-sidecar clones remain. O(index-size) transient allocation is proven; 2–3× RSS and OOM thresholds are not measured.
+
+Evidence: [crates/shamir-index/src/vector/snapshot.rs:422](../../../../../crates/shamir-index/src/vector/snapshot.rs#L422); [crates/shamir-index/src/vector/snapshot.rs:440](../../../../../crates/shamir-index/src/vector/snapshot.rs#L440); [crates/shamir-index/src/vector/snapshot.rs:539](../../../../../crates/shamir-index/src/vector/snapshot.rs#L539); [crates/shamir-index/src/vector/snapshot.rs:884](../../../../../crates/shamir-index/src/vector/snapshot.rs#L884).
+
+<a id="review-7"></a>
+
+### Claim 7 — index2 `drop_all` sweeps postings key-by-key; FunctionalBackend buffers the whole index first
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+Both FTS backends still remove per key; functional drop first buffers every posting pair. The sequential-call and full-index allocation mechanisms remain, without evidence for claimed hours or per-key fsyncs.
+
+Evidence: [crates/shamir-index/src/fts_backend.rs:248](../../../../../crates/shamir-index/src/fts_backend.rs#L248); [crates/shamir-index/src/fts_ranked_backend.rs:409](../../../../../crates/shamir-index/src/fts_ranked_backend.rs#L409); [crates/shamir-index/src/functional_backend.rs:115](../../../../../crates/shamir-index/src/functional_backend.rs#L115); [crates/shamir-index/src/functional_backend.rs:294](../../../../../crates/shamir-index/src/functional_backend.rs#L294).
+
+Grouping/duplicate: `error-handling-lifecycle.md#3`. This row is not another independent defect.
+
+<a id="review-8"></a>
+
+### Claim 8 — Vector delta-log replay on restart applies ops one at a time
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+Each decoded delta operation is awaited individually; unquantized upsert performs a blocking-pool graph insertion. Replay batching is absent and must preserve delete/upsert and repeated-rid order.
+
+Evidence: [crates/shamir-index/src/vector/snapshot.rs:1251](../../../../../crates/shamir-index/src/vector/snapshot.rs#L1251); [crates/shamir-index/src/vector/hnsw_adapter.rs:2383](../../../../../crates/shamir-index/src/vector/hnsw_adapter.rs#L2383).
+
+<a id="review-9"></a>
+
+### Claim 9 — Posting cache is bounded by entry count, not bytes
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+Eviction compares only map entry count against 512; cached RecordId slices have no size admission or total-byte budget. Large low-cardinality posting lists can remain pinned.
+
+Evidence: [crates/shamir-index/src/base_index/index_manager.rs:60](../../../../../crates/shamir-index/src/base_index/index_manager.rs#L60); [crates/shamir-index/src/base_index/index_manager.rs:2868](../../../../../crates/shamir-index/src/base_index/index_manager.rs#L2868); [crates/shamir-index/src/base_index/index_manager.rs:2878](../../../../../crates/shamir-index/src/base_index/index_manager.rs#L2878).
+
+<a id="review-10"></a>
+
+### Claim 10 — `HnswAdapter` f32 small-index search clones every vector per query
+
+Status: `confirmed-open`. Current risk: `low`.
+
+The f32 exact-search branch still clones each stored Vec before scoring. This allocation mechanism remains despite the quantized branch's separate optimization.
+
+Evidence: [crates/shamir-index/src/vector/hnsw_adapter.rs:2826](../../../../../crates/shamir-index/src/vector/hnsw_adapter.rs#L2826); [crates/shamir-index/src/vector/hnsw_adapter.rs:2831](../../../../../crates/shamir-index/src/vector/hnsw_adapter.rs#L2831).
+
+<a id="review-11"></a>
+
+### Claim 11 — `build_index2_backend` hardcodes HNSW parameters and ignores the persisted vector config
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+The builder still ignores backend tuning and uses fixed capacity/defaults. Successful snapshot loads restore graph parameters; claims about resizing cost or universal restart tuning loss are not established.
+
+Evidence: [crates/shamir-index/src/build_backend.rs:56](../../../../../crates/shamir-index/src/build_backend.rs#L56); [crates/shamir-index/src/vector/snapshot.rs:879](../../../../../crates/shamir-index/src/vector/snapshot.rs#L879).
+
+Grouping/duplicate: `api-wire-protocol.md#1`. This row is not another independent defect.
+
+<a id="review-12"></a>
+
+### Claim 12 — `IndexRegistry::lease_by_field_and_kind` is an O(N) scan per read dispatch — documented, still open
+
+Status: `confirmed-open`. Current risk: `low`.
+
+The registry traversal remains and its design blocker is documented. Descriptor access borrows metadata; no per-entry deep clone is performed.
+
+Evidence: [crates/shamir-index/src/registry.rs:609](../../../../../crates/shamir-index/src/registry.rs#L609); [crates/shamir-index/src/registry.rs:659](../../../../../crates/shamir-index/src/registry.rs#L659).
+
+Grouping/duplicate: `concurrency-lockfree.md#4`. This row is not another independent defect.
+
+<a id="review-13"></a>
+
+### Claim 13 — SQ8 fit runs inline on the threshold-crossing write — O(N) stall on one upsert
+
+Status: `confirmed-open`. Current risk: `low`.
+
+Threshold-triggering writes still await training, graph construction, and catch-up. Major CPU work is offloaded, so this is caller latency rather than entirely blocking a runtime worker. Duration and percentile effects are unmeasured.
+
+Evidence: [crates/shamir-index/src/vector/hnsw_adapter.rs:2470](../../../../../crates/shamir-index/src/vector/hnsw_adapter.rs#L2470); [crates/shamir-index/src/vector/hnsw_adapter.rs:1364](../../../../../crates/shamir-index/src/vector/hnsw_adapter.rs#L1364); [crates/shamir-index/src/vector/hnsw_adapter.rs:1641](../../../../../crates/shamir-index/src/vector/hnsw_adapter.rs#L1641).
+
+<a id="review-14"></a>
+
+### Claim 14 — `BruteForceAdapter` deep-clones the whole snapshot on every drained write batch
+
+Status: `confirmed-open`. Current risk: `low`.
+
+Each publish calls clone_snap, which deep-clones vecs and other arrays. Coalescing amortizes bursts; quadratic setup applies only when publication occurs repeatedly during growth, not necessarily to every bulk setup.
+
+Evidence: [crates/shamir-index/src/vector/brute_force.rs:84](../../../../../crates/shamir-index/src/vector/brute_force.rs#L84); [crates/shamir-index/src/vector/brute_force.rs:175](../../../../../crates/shamir-index/src/vector/brute_force.rs#L175).
+
+<a id="review-15"></a>
+
+### Claim 15 — `apply_index_ops_at_commit` does a linear backend find per provenance group
+
+Status: `confirmed-open`. Current risk: `nit`.
+
+Each provenance group still performs backends.iter().find by name. O(groups×backends) structure is present; significance at current counts is unmeasured.
+
+Evidence: [crates/shamir-index/src/write_ops.rs:184](../../../../../crates/shamir-index/src/write_ops.rs#L184); [crates/shamir-index/src/write_ops.rs:188](../../../../../crates/shamir-index/src/write_ops.rs#L188).
+
+## Corrections and qualified non-findings
+
+- Findings 1 and 2 establish structural costs, not measured runtime High impact.
+- FTS top-k requires an explicit bounded-search contract or limit propagation that preserves filter, pagination, count, and aggregate semantics; the existing FTS request contains no k.
+- Do not promise one fsync per Store call or one fsync per transact without the selected backend's durability contract.
+- Moving SQ8 fit to a background task needs ownership, cancellation, shutdown, and publication reasoning; spawn_blocking already protects the major training/build CPU portions.
+- Current benches are registered for posting-cache hits, posting representation, streaming backfill, SQ8 scoring, and reader-drain behavior. They do not measure the identified definition-clone, FTS-materialization, sweep, or snapshot-allocation costs.
+- Streaming snapshot chunks must preserve coherent capture and manifest publication; reducing memory alone does not resolve the snapshot correctness defects.
+
+---
+
+<details>
+<summary>Historical report — preserved for provenance; not current status or instructions</summary>
+
 # shamir-index — Performance & O(x→0)
 
 ## Summary
@@ -153,3 +340,5 @@ The crate's hot paths show strong, well-documented O(x→0) work in places (batc
 ---
 
 **Coverage note (test/bench claims verified):** the crate's benches honestly measure the already-fixed paths (`posting_cache_hit` — Arc-hit flatness; `create_index_streaming` — F-78 O(batch) peak heap with peak-RSS methodology; `sq8_hot_path`; `reader_drain_gate` with a gate-absent control). None of findings 1-9 have a bench or test exercising their cost; the FTS lookup path, the per-row def-clone, the sorted/unique apply fan-out, and the snapshot dump memory spike are all currently unmeasured.
+
+</details>

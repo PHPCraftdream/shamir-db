@@ -1,3 +1,405 @@
+<!-- revalidation:2026-10-08 source:92ad58266bf57ddea1fa3c8a47affba1a3a9a096 -->
+# shamir-collections — SUMMARY revalidation
+
+Source snapshot: `92ad58266bf57ddea1fa3c8a47affba1a3a9a096`. Revalidated 2026-10-08 by read-only XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run; no source fix is part of this update. Test registration/assertions are evidence of an oracle, not proof of a passing run.
+
+This section is authoritative for current status. Original titles/IDs are retained for traceability; a refuted title is not a current assertion. The collapsed historical report below is superseded, including its counts, severity, scenarios and fix instructions. Plan IDs preserve historical numbering, not a current release mandate. [Workspace methodology and status definitions](../SUMMARY.md#status-definitions).
+
+No original item is source-proven fixed. Ten distinct coverage/documentation/ergonomics observations remain open; the specific HashDoS amplification claim is unverified despite confirmed client-controlled deterministic hashing. Remove the unsupported runtime-High framing and correct algorithm, removal, capacity and test-oracle explanations.
+
+## Current claim decisions
+
+| Claim decisions | Open | Source-fixed | Partial | Refuted | Unverified | N/A |
+|---:|---:|---:|---:|---:|---:|---:|
+| 19 | 17 | 0 | 0 | 0 | 1 | 1 |
+
+These are decisions on report claims, including repeated roots, bundled observations and non-findings—not a unique-bug census. Closed/N/A rows have no current risk; unverified risk is provisional. Pure style and unmeasured optimization claims do not establish runtime impact.
+
+<a id="review-1-1"></a>
+
+### Claim 1.1 — Entirely untested crate: every documented behavioral contract has zero regression protection
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+No local suite or registration exists. Direct contract coverage is missing, but existing downstream tests and unchanged thin constructors do not justify a demonstrated runtime High.
+
+Evidence: [crates/shamir-collections/src/lib.rs:63](../../../../../crates/shamir-collections/src/lib.rs#L63); [crates/shamir-collections/Cargo.toml:16](../../../../../crates/shamir-collections/Cargo.toml#L16); [scripts/test.sh:104](../../../../../scripts/test.sh#L104); [crates/shamir-types/src/types/tests/value_tests.rs:52](../../../../../crates/shamir-types/src/types/tests/value_tests.rs#L52).
+
+Grouping/duplicate: `correctness-tdd.md#1`. This row is not another independent defect.
+
+<a id="review-1-2"></a>
+
+### Claim 1.2 — Unverifiable "~15-20% faster" performance claim stated as fact in stable rustdoc
+
+Status: `confirmed-open`. Current risk: `low`.
+
+The number remains without supporting comparative benchmark evidence; historical commit prose is not a measurement.
+
+Evidence: [crates/shamir-collections/src/lib.rs:41](../../../../../crates/shamir-collections/src/lib.rs#L41); [crates/shamir-collections/src/lib.rs:45](../../../../../crates/shamir-collections/src/lib.rs#L45); [docs/dev-artifacts/audits/shamir-collections.md:38](../../../../../docs/dev-artifacts/audits/shamir-collections.md#L38).
+
+Grouping/duplicate: `correctness-tdd.md#2`. This row is not another independent defect.
+
+<a id="review-1-3"></a>
+
+### Claim 1.3 — Redundant `use std::cmp::Eq` import
+
+Status: `confirmed-open`. Current risk: `nit`.
+
+Eq remains redundantly imported; Hash is not in the prelude.
+
+Evidence: [crates/shamir-collections/src/lib.rs:13](../../../../../crates/shamir-collections/src/lib.rs#L13); [crates/shamir-collections/src/lib.rs:15](../../../../../crates/shamir-collections/src/lib.rs#L15).
+
+Grouping/duplicate: `correctness-tdd.md#3`. This row is not another independent defect.
+
+<a id="review-2"></a>
+
+### Claim 2 — concurrency-lockfree
+
+Status: `not-applicable`. Current risk: —.
+
+The clean local synchronization assessment stands: no locks, awaits or concurrent state and all helpers select THasher. Capacity construction is not universally O(1).
+
+Evidence: [crates/shamir-collections/src/lib.rs:17](../../../../../crates/shamir-collections/src/lib.rs#L17); [crates/shamir-collections/src/lib.rs:30](../../../../../crates/shamir-collections/src/lib.rs#L30); [crates/shamir-collections/Cargo.toml:9](../../../../../crates/shamir-collections/Cargo.toml#L9); [clippy.toml:39](../../../../../clippy.toml#L39).
+
+<a id="review-3-1"></a>
+
+### Claim 3.1 — Unseeded FxHasher exported as THE workspace hasher is fed client-controlled string keys downstream — precomputable HashDoS amplifier
+
+Status: `unverified`. Current risk: `medium` (provisional; not a confirmed defect).
+
+Authenticated request decoding still builds zero-seeded Fx maps from client names before query limits/permissions. The pinned algorithm contradicts the claimed multiply-xor mechanism, and practical collision amplification was not demonstrated.
+
+Evidence: [crates/shamir-collections/src/lib.rs:17](../../../../../crates/shamir-collections/src/lib.rs#L17); [Cargo.lock:3008](../../../../../Cargo.lock#L3008); [crates/shamir-server/src/db_handler/handler.rs:343](../../../../../crates/shamir-server/src/db_handler/handler.rs#L343); [crates/shamir-server/src/db_handler/handler.rs:502](../../../../../crates/shamir-server/src/db_handler/handler.rs#L502); [crates/shamir-connect/src/server/dispatch.rs:131](../../../../../crates/shamir-connect/src/server/dispatch.rs#L131); [crates/shamir-engine/src/query/batch/batch_execute.rs:869](../../../../../crates/shamir-engine/src/query/batch/batch_execute.rs#L869).
+
+Grouping/duplicate: `security-crypto.md#1`. This row is not another independent defect.
+
+<a id="review-3-2"></a>
+
+### Claim 3.2 — Crate-wide `#![allow(clippy::disallowed_types)]`: right to exist, wrong scope, no local justification
+
+Status: `confirmed-open`. Current risk: `nit`.
+
+The sanctioned broad allow and missing local explanation remain. This is future lint containment, not evidence of a present security/runtime defect.
+
+Evidence: [crates/shamir-collections/src/lib.rs:9](../../../../../crates/shamir-collections/src/lib.rs#L9); [clippy.toml:39](../../../../../clippy.toml#L39).
+
+Grouping/duplicate: `security-crypto.md#2`. This row is not another independent defect.
+
+<a id="review-4-1"></a>
+
+### Claim 4.1 — `TMap`/`TSet` docs omit the O(N) order-preserving-removal asymmetry; 100+ consumer sites pick a removal strategy blind
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+The alias documentation is unchanged and the cited MVCC flush still repeatedly shift-removes from TMap. Worst-case aggregate shifting is superlinear; production latency was not measured.
+
+Evidence: [crates/shamir-collections/src/lib.rs:19](../../../../../crates/shamir-collections/src/lib.rs#L19); [crates/shamir-collections/src/lib.rs:22](../../../../../crates/shamir-collections/src/lib.rs#L22); [crates/shamir-tx/src/mvcc_store/version_entry.rs:42](../../../../../crates/shamir-tx/src/mvcc_store/version_entry.rs#L42); [crates/shamir-tx/src/mvcc_store/version_entry.rs:124](../../../../../crates/shamir-tx/src/mvcc_store/version_entry.rs#L124).
+
+Grouping/duplicate: `performance-hotpath.md#1`. This row is not another independent defect.
+
+<a id="review-4-2"></a>
+
+### Claim 4.2 — the "~15-20% faster" bench claim
+
+Status: `confirmed-open`. Current risk: `nit`.
+
+Same unsupported quantitative rustdoc; no independent defect or supporting comparative run was found.
+
+Evidence: [crates/shamir-collections/src/lib.rs:41](../../../../../crates/shamir-collections/src/lib.rs#L41); [crates/shamir-collections/src/lib.rs:45](../../../../../crates/shamir-collections/src/lib.rs#L45).
+
+Grouping/duplicate: `SUMMARY.md#1.2`. This row is not another independent defect.
+
+<a id="review-5-1"></a>
+
+### Claim 5.1 — No documented serialization/wire contract for `TMap`-backed protocol fields
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+Derived DTO maps retain insertion-order-dependent planning and duplicate coalescing without a leaf contract. Canonical serialization is not required merely to checksum transmitted bytes.
+
+Evidence: [crates/shamir-collections/src/lib.rs:1](../../../../../crates/shamir-collections/src/lib.rs#L1); [crates/shamir-query-types/src/batch/batch_request.rs:87](../../../../../crates/shamir-query-types/src/batch/batch_request.rs#L87); [crates/shamir-query-types/src/batch/sub_batch_op.rs:15](../../../../../crates/shamir-query-types/src/batch/sub_batch_op.rs#L15); [crates/shamir-query-types/src/batch/planner.rs:164](../../../../../crates/shamir-query-types/src/batch/planner.rs#L164); [docs/guide-docs/client-server-protocol-spec/AUTH_PROTOCOL.md:904](../../../../../docs/guide-docs/client-server-protocol-spec/AUTH_PROTOCOL.md#L904).
+
+Grouping/duplicate: `api-wire-protocol.md#1`. This row is not another independent defect.
+
+<a id="review-5-2"></a>
+
+### Claim 5.2 — Public API mostly undocumented; `_wc` naming cryptic; doctests disabled
+
+Status: `confirmed-open`. Current risk: `low`.
+
+THasher, constructor docs and a doctest rationale remain absent; naming is unchanged. No functional failure is established.
+
+Evidence: [crates/shamir-collections/src/lib.rs:17](../../../../../crates/shamir-collections/src/lib.rs#L17); [crates/shamir-collections/src/lib.rs:25](../../../../../crates/shamir-collections/src/lib.rs#L25); [crates/shamir-collections/Cargo.toml:16](../../../../../crates/shamir-collections/Cargo.toml#L16).
+
+Grouping/duplicate: `api-wire-protocol.md#2`. This row is not another independent defect.
+
+<a id="review-5-3"></a>
+
+### Claim 5.3 — Constructor surface is partially redundant and inconsistently adopted
+
+Status: `confirmed-open`. Current risk: `low`.
+
+Multiple valid idioms remain without canonical documentation. The claimed custom-hasher TMap::with_capacity shortcut is not available in pinned IndexMap.
+
+Evidence: [crates/shamir-collections/src/lib.rs:30](../../../../../crates/shamir-collections/src/lib.rs#L30); [Cargo.lock:1783](../../../../../Cargo.lock#L1783); [crates/shamir-query-builder/src/batch/batch.rs:56](../../../../../crates/shamir-query-builder/src/batch/batch.rs#L56); [crates/shamir-types/src/record_view/lens.rs:1064](../../../../../crates/shamir-types/src/record_view/lens.rs#L1064).
+
+Grouping/duplicate: `api-wire-protocol.md#3`. This row is not another independent defect.
+
+<a id="review-5-4"></a>
+
+### Claim 5.4 — Half the API missing from the shared façade re-export
+
+Status: `confirmed-open`. Current risk: `low`.
+
+The seven-item façade still omits six Fx items. Collections already exports thirteen public items; this is optional shamir-types façade consistency work.
+
+Evidence: [crates/shamir-types/src/types/common.rs:5](../../../../../crates/shamir-types/src/types/common.rs#L5); [crates/shamir-types/src/record_view/lens.rs:33](../../../../../crates/shamir-types/src/record_view/lens.rs#L33); [crates/shamir-types/src/record_view/lens.rs:34](../../../../../crates/shamir-types/src/record_view/lens.rs#L34); [crates/shamir-collections/src/lib.rs:49](../../../../../crates/shamir-collections/src/lib.rs#L49).
+
+Grouping/duplicate: `api-wire-protocol.md#4`. This row is not another independent defect.
+
+<a id="review-5-5"></a>
+
+### Claim 5.5 — zero in-crate tests, including no serde/ordering pinning
+
+Status: `confirmed-open`. Current risk: `low`.
+
+Same missing local suite. Downstream map equality and deterministic ordered iteration are insufficient oracles for order and builder identity.
+
+Evidence: [crates/shamir-collections/src/lib.rs:63](../../../../../crates/shamir-collections/src/lib.rs#L63); [crates/shamir-query-types/src/batch/tests/batch_types_tests.rs:687](../../../../../crates/shamir-query-types/src/batch/tests/batch_types_tests.rs#L687).
+
+Grouping/duplicate: `SUMMARY.md#1.1`. This row is not another independent defect.
+
+<a id="review-5-6"></a>
+
+### Claim 5.6 — blanket allow without justification comment
+
+Status: `confirmed-open`. Current risk: `nit`.
+
+The attribute still lacks local explanation, although clippy.toml explicitly sanctions it.
+
+Evidence: [crates/shamir-collections/src/lib.rs:9](../../../../../crates/shamir-collections/src/lib.rs#L9); [clippy.toml:39](../../../../../clippy.toml#L39).
+
+Grouping/duplicate: `SUMMARY.md#3.2`. This row is not another independent defect.
+
+<a id="review-6-1"></a>
+
+### Claim 6.1 — Infallible capacity constructors can only abort the process; no fallible counterpart exists
+
+Status: `confirmed-open`. Current risk: `low`.
+
+Infallible undocumented allocation remains. Only-abort is false for capacity overflow, and the public raw decoder already forwards attacker-declared counts; remote production reachability remains unverified.
+
+Evidence: [crates/shamir-collections/src/lib.rs:30](../../../../../crates/shamir-collections/src/lib.rs#L30); [crates/shamir-collections/src/lib.rs:54](../../../../../crates/shamir-collections/src/lib.rs#L54); [Cargo.toml:88](../../../../../Cargo.toml#L88); [crates/shamir-types/src/codecs/interned/messagepack.rs:251](../../../../../crates/shamir-types/src/codecs/interned/messagepack.rs#L251); [crates/shamir-types/src/codecs/interned/messagepack.rs:318](../../../../../crates/shamir-types/src/codecs/interned/messagepack.rs#L318).
+
+Grouping/duplicate: `error-handling-lifecycle.md#1`. This row is not another independent defect.
+
+<a id="review-6-2"></a>
+
+### Claim 6.2 — zero tests, no error-path surface to test
+
+Status: `confirmed-open`. Current risk: `low`.
+
+No local suite exists. There is no returned error path, but capacity failure is delegated rather than nonexistent.
+
+Evidence: [crates/shamir-collections/src/lib.rs:29](../../../../../crates/shamir-collections/src/lib.rs#L29); [crates/shamir-collections/src/lib.rs:63](../../../../../crates/shamir-collections/src/lib.rs#L63).
+
+Grouping/duplicate: `SUMMARY.md#1.1`. This row is not another independent defect.
+
+<a id="review-7-1"></a>
+
+### Claim 7.1 — no tests anywhere in the pillar-4 anchor crate
+
+Status: `confirmed-open`. Current risk: `low`.
+
+Same local coverage gap; no existing-test layout violation is present.
+
+Evidence: [crates/shamir-collections/src/lib.rs:63](../../../../../crates/shamir-collections/src/lib.rs#L63); [crates/shamir-collections/Cargo.toml:16](../../../../../crates/shamir-collections/Cargo.toml#L16).
+
+Grouping/duplicate: `SUMMARY.md#1.1`. This row is not another independent defect.
+
+<a id="review-7-2"></a>
+
+### Claim 7.2 — redundant prelude import `std::cmp::Eq`
+
+Status: `confirmed-open`. Current risk: `nit`.
+
+The redundant import remains; speculative future lint failures were not verified.
+
+Evidence: [crates/shamir-collections/src/lib.rs:13](../../../../../crates/shamir-collections/src/lib.rs#L13).
+
+Grouping/duplicate: `SUMMARY.md#1.3`. This row is not another independent defect.
+
+<a id="review-7-3"></a>
+
+### Claim 7.3 — doc/comment coverage inconsistent within lib.rs
+
+Status: `confirmed-open`. Current risk: `nit`.
+
+Both missing public rustdoc and the unexplained local allow remain. Its allow facet separately duplicates 3.2.
+
+Evidence: [crates/shamir-collections/src/lib.rs:9](../../../../../crates/shamir-collections/src/lib.rs#L9); [crates/shamir-collections/src/lib.rs:17](../../../../../crates/shamir-collections/src/lib.rs#L17); [crates/shamir-collections/src/lib.rs:25](../../../../../crates/shamir-collections/src/lib.rs#L25).
+
+Grouping/duplicate: `SUMMARY.md#5.2`. This row is not another independent defect.
+
+## Current fix-plan state
+
+| Claim decisions | Open | Source-fixed | Partial | Refuted | Unverified | N/A |
+|---:|---:|---:|---:|---:|---:|---:|
+| 10 | 10 | 0 | 0 | 0 | 0 | 0 |
+
+A source-fixed item closes only its stated mechanism. Partial items retain the obligations named below; proposed fixes must obey the corrections and current contracts, not merely copy the historical recipe.
+
+<a id="plan-p0-1"></a>
+
+### Plan P0.1 — P0.1
+
+Status: `confirmed-open`. Current risk: —.
+
+No pinning suite was added. Correct the proposed remove oracle, assert builder identity directly, and compare explicit key sequences for serde order; equal maps/shared-reference encoders do not establish it.
+
+Evidence: [crates/shamir-collections/src/lib.rs:63](../../../../../crates/shamir-collections/src/lib.rs#L63); [crates/shamir-collections/Cargo.toml:16](../../../../../crates/shamir-collections/Cargo.toml#L16); [crates/shamir-types/src/codecs/interned/tests/storage_bytes_tests.rs:344](../../../../../crates/shamir-types/src/codecs/interned/tests/storage_bytes_tests.rs#L344); [crates/shamir-types/src/codecs/interned/tests/storage_bytes_tests.rs:361](../../../../../crates/shamir-types/src/codecs/interned/tests/storage_bytes_tests.rs#L361).
+
+<a id="plan-p0-2"></a>
+
+### Plan P0.2 — P0.2
+
+Status: `confirmed-open`. Current risk: —.
+
+Both proposed documentation contracts remain absent. Distinguish TMap map semantics from TSet sequence semantics and require duplicate rejection before coalescing; do not imply canonical bytes are necessary for ordinary checksums.
+
+Evidence: [crates/shamir-collections/src/lib.rs:1](../../../../../crates/shamir-collections/src/lib.rs#L1); [crates/shamir-collections/src/lib.rs:19](../../../../../crates/shamir-collections/src/lib.rs#L19); [crates/shamir-collections/src/lib.rs:22](../../../../../crates/shamir-collections/src/lib.rs#L22); [crates/shamir-query-types/src/batch/batch_request.rs:87](../../../../../crates/shamir-query-types/src/batch/batch_request.rs#L87).
+
+<a id="plan-p1-3"></a>
+
+### Plan P1.3 — P1.3
+
+Status: `confirmed-open`. Current risk: —.
+
+No keyed ingress builder or revised trust premise is present. Practical exploit severity needs validation against the pinned algorithm; interning alone is insufficient because raw names are hashed during ID assignment.
+
+Evidence: [CLAUDE.md:345](../../../../../CLAUDE.md#L345); [CLAUDE.md:351](../../../../../CLAUDE.md#L351); [crates/shamir-collections/src/lib.rs:17](../../../../../crates/shamir-collections/src/lib.rs#L17); [crates/shamir-server/src/db_handler/handler.rs:343](../../../../../crates/shamir-server/src/db_handler/handler.rs#L343); [crates/shamir-tx/src/layered_interner.rs:95](../../../../../crates/shamir-tx/src/layered_interner.rs#L95).
+
+<a id="plan-p1-4"></a>
+
+### Plan P1.4 — P1.4
+
+Status: `confirmed-open`. Current risk: —.
+
+The allow remains crate-wide and unexplained locally; clippy.toml still describes the same sanctioned blanket site. Optional containment work remains.
+
+Evidence: [crates/shamir-collections/src/lib.rs:9](../../../../../crates/shamir-collections/src/lib.rs#L9); [clippy.toml:39](../../../../../clippy.toml#L39).
+
+<a id="plan-p1-5"></a>
+
+### Plan P1.5 — P1.5
+
+Status: `confirmed-open`. Current risk: —.
+
+THasher and constructor rustdoc remain absent; doctests remain disabled without a local rationale. A capacity-name rename is optional breaking-window work, not required for runtime safety.
+
+Evidence: [crates/shamir-collections/src/lib.rs:17](../../../../../crates/shamir-collections/src/lib.rs#L17); [crates/shamir-collections/src/lib.rs:25](../../../../../crates/shamir-collections/src/lib.rs#L25); [crates/shamir-collections/Cargo.toml:16](../../../../../crates/shamir-collections/Cargo.toml#L16).
+
+<a id="plan-p1-6"></a>
+
+### Plan P1.6 — P1.6
+
+Status: `confirmed-open`. Current risk: —.
+
+Allocation contracts remain undocumented. Correct panic-versus-OOM wording; the claimed no-untrusted-bound-caller condition is false at the public raw decoder, so docs alone do not bound its declared-count allocation.
+
+Evidence: [crates/shamir-collections/src/lib.rs:29](../../../../../crates/shamir-collections/src/lib.rs#L29); [Cargo.toml:88](../../../../../Cargo.toml#L88); [crates/shamir-types/src/codecs/interned/messagepack.rs:251](../../../../../crates/shamir-types/src/codecs/interned/messagepack.rs#L251); [crates/shamir-types/src/codecs/interned/messagepack.rs:318](../../../../../crates/shamir-types/src/codecs/interned/messagepack.rs#L318).
+
+<a id="plan-p2-7"></a>
+
+### Plan P2.7 — P2.7
+
+Status: `confirmed-open`. Current risk: —.
+
+No canonical construction idiom is documented. Keep _wc helpers or spell with_capacity_and_hasher explicitly; the proposed TMap::with_capacity fallback is not equivalent or available.
+
+Evidence: [crates/shamir-collections/src/lib.rs:1](../../../../../crates/shamir-collections/src/lib.rs#L1); [crates/shamir-collections/src/lib.rs:30](../../../../../crates/shamir-collections/src/lib.rs#L30); [crates/shamir-query-builder/src/batch/batch.rs:56](../../../../../crates/shamir-query-builder/src/batch/batch.rs#L56); [crates/shamir-types/src/record_view/lens.rs:1064](../../../../../crates/shamir-types/src/record_view/lens.rs#L1064).
+
+<a id="plan-p2-8"></a>
+
+### Plan P2.8 — P2.8
+
+Status: `confirmed-open`. Current risk: —.
+
+The partial façade remains unchanged. Completing or retiring it is a shamir-types ergonomics decision; the complete collection surface contains thirteen items.
+
+Evidence: [crates/shamir-types/src/types/common.rs:5](../../../../../crates/shamir-types/src/types/common.rs#L5); [crates/shamir-collections/src/lib.rs:17](../../../../../crates/shamir-collections/src/lib.rs#L17); [crates/shamir-collections/src/lib.rs:61](../../../../../crates/shamir-collections/src/lib.rs#L61).
+
+<a id="plan-p2-9"></a>
+
+### Plan P2.9 — P2.9
+
+Status: `confirmed-open`. Current risk: —.
+
+Neither alias's quantitative wording was softened and no supporting comparative benchmark was found. No benchmark was executed in this revalidation.
+
+Evidence: [crates/shamir-collections/src/lib.rs:41](../../../../../crates/shamir-collections/src/lib.rs#L41); [crates/shamir-collections/src/lib.rs:45](../../../../../crates/shamir-collections/src/lib.rs#L45); [docs/dev-artifacts/audits/shamir-collections.md:38](../../../../../docs/dev-artifacts/audits/shamir-collections.md#L38).
+
+<a id="plan-p2-10"></a>
+
+### Plan P2.10 — P2.10
+
+Status: `confirmed-open`. Current risk: —.
+
+The redundant Eq import remains; retain the necessary Hash import.
+
+Evidence: [crates/shamir-collections/src/lib.rs:13](../../../../../crates/shamir-collections/src/lib.rs#L13); [crates/shamir-collections/src/lib.rs:15](../../../../../crates/shamir-collections/src/lib.rs#L15).
+
+## Corrections and qualified non-findings
+
+- Retain every original row and its duplicate relationships, but recompute severity/status counts; the old High count and health ranking are not current evidence.
+- No item is fixed merely because extraction, lint enforcement, dependency migration or historical gate commits were completed.
+- Eight constant-time constructors and one allocation are incorrect blanket guarantees: nonzero ordered-family capacity construction performs O(capacity) work and allocates two backing structures.
+- Correct remove to deprecated swap-removal; only shift_remove/shift_take preserve relative order.
+- Correct Hash-is-in-prelude, twelve-public-items, top-level-bind and old batch/batch.rs assertions.
+- Separate the confirmed deterministic/client-key boundary from unverified practical HashDoS amplification; replace the incorrect pinned-algorithm explanation.
+- Qualify the threat model with authentication, rate gating, the frame ceiling, application decoding before query-count checks, and restricted peer-IP control.
+- Interning is not a complete HashDoS fix unless its own raw-name hashing boundary is protected.
+- Distinguish capacity-overflow unwind from OOM abort. The current raw decoder already violates the all-materialized-capacities premise, but no remote production path was established.
+- Existing @types tests are reachable through shamir-types registrations. Their equality and shared-encoder oracles do not independently prove collection builder identity or order.
+- The absence of canonical application maps does not prevent checksumming exact transmitted bytes; protocol authentication has its own canonical representation.
+- The no-local-locks/no-unsafe/no-I/O/no-query-construction observations remain valid. They do not establish transitive allocation, input-trust or dependency-security guarantees.
+- There are no standalone Fix Plan sections in the seven lens reports; their suggested-fix qualifications are covered by the corresponding finding corrections and all ten SUMMARY plan rows.
+
+## Current follow-up order
+
+1. Clarify wire ordering and duplicate handling, with duplicate rejection before map coalescing.
+2. Document removal costs and evaluate the remaining repeated MVCC shift_remove path while preserving its output-order contract.
+3. Add direct hasher, constructor-capacity, insertion/removal/dedup and serde-order guards with discriminating oracles.
+4. Resolve the authenticated-client hashing threat model against rustc-hash 2.1.2; do not claim a demonstrated collision attack or treat interning alone as a complete mitigation.
+5. Document allocation failure accurately and bound or fallibly reserve declared counts when the public raw decoder receives untrusted bytes.
+6. Remove or substantiate the 15–20% claim, then address public rustdoc, optional façade/lint containment and the Eq nit.
+
+## Coverage and limitations
+
+- All eight documents were read completely; all 18 original findings, SUMMARY finding entries, relevant non-findings and all ten Fix Plan items were reviewed. No TASK_GROUPS document exists for this module.
+- Static inspection only: no files changed, child agents launched, git mutations, builds, tests, benchmarks or reproductions performed.
+- Pinned indexmap 2.14.0, rustc-hash 2.1.2 and hashbrown 0.17.1 implementations were inspected. Dependency-cache paths are deliberately omitted from evidence.
+- Practical collision construction and resource amplification against rustc-hash 2.1.2 were not demonstrated; the specific HashDoS exploit claim remains unverified.
+- No supporting committed benchmark was found for the 15–20% lookup claim; actual latency differences remain unverified.
+- Exact standard-library source for the repository-pinned Rust 1.94.0 was unavailable. Allocation-failure distinctions are supported by the pinned IndexMap/hashbrown path, not execution of the std-backed constructors.
+- No in-tree production caller of the public raw MessagePack decoder was found; its attacker-declared preallocation is source-proven, but remote exploit reachability is unverified.
+
+## Reviewed document inventory
+
+- [correctness-tdd.md](./correctness-tdd.md) — 3 claim decisions; 0 explicit plan items.
+- [concurrency-lockfree.md](./concurrency-lockfree.md) — 0 claim decisions; 0 explicit plan items.
+- [security-crypto.md](./security-crypto.md) — 2 claim decisions; 0 explicit plan items.
+- [performance-hotpath.md](./performance-hotpath.md) — 2 claim decisions; 0 explicit plan items.
+- [api-wire-protocol.md](./api-wire-protocol.md) — 6 claim decisions; 0 explicit plan items.
+- [error-handling-lifecycle.md](./error-handling-lifecycle.md) — 2 claim decisions; 0 explicit plan items.
+- [style-claude-md.md](./style-claude-md.md) — 3 claim decisions; 0 explicit plan items.
+- [SUMMARY.md](./SUMMARY.md) — 19 claim decisions; 10 explicit plan items.
+
+---
+
+<details>
+<summary>Historical report — preserved for provenance; not current status or instructions</summary>
+
 # shamir-collections — Cross-Lens Review (all 7 lenses, synthesized)
 
 Crate: `crates/shamir-collections/` — the workspace's foundational leaf: `THasher`
@@ -423,3 +825,5 @@ crates' behavior).
    `benches/fx_vs_index_lookup.rs` run via `bench_scale_tool::Harness` with the isolated
    bench target dir.
 10. **Style residue:** delete the redundant `use std::cmp::Eq;` (closes **1.3, 7.2**).
+
+</details>

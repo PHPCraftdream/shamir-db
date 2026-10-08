@@ -1,3 +1,148 @@
+<!-- revalidation:2026-10-08 source:92ad58266bf57ddea1fa3c8a47affba1a3a9a096 -->
+# shamir-connect — security-crypto revalidation
+
+Source snapshot: `92ad58266bf57ddea1fa3c8a47affba1a3a9a096`. Revalidated 2026-10-08 by read-only XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run; no source fix is part of this update. Test registration/assertions are evidence of an oracle, not proof of a passing run.
+
+This section is authoritative for current status. Original titles/IDs are retained for traceability; a refuted title is not a current assertion. The collapsed historical report below is superseded, including its counts, severity, scenarios and fix instructions. Plan IDs preserve historical numbering, not a current release mandate. [Workspace methodology and status definitions](../SUMMARY.md#status-definitions).
+
+Dispatch asymmetry and secret-hygiene issues remain. The KDF distinction is explicitly accepted by contract. Several exploit and canonical-encoding guarantees require correction.
+
+## Current claim decisions
+
+| Claim decisions | Open | Source-fixed | Partial | Refuted | Unverified | N/A |
+|---:|---:|---:|---:|---:|---:|---:|
+| 11 | 7 | 0 | 0 | 1 | 0 | 3 |
+
+These are decisions on report claims, including repeated roots, bundled observations and non-findings—not a unique-bug census. Closed/N/A rows have no current risk; unverified risk is provisional. Pure style and unmeasured optimization claims do not establish runtime impact.
+
+<a id="review-1"></a>
+
+### Claim 1 — Public dispatch_request silently skips the post-auth rate limit
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+Owned dispatch lacks the gate present in view dispatch. Alternate embedders can bypass it; the shipped server uses the gated path.
+
+Evidence: [crates/shamir-connect/src/server/dispatch.rs:100](../../../../../crates/shamir-connect/src/server/dispatch.rs#L100); [crates/shamir-connect/src/server/dispatch.rs:153](../../../../../crates/shamir-connect/src/server/dispatch.rs#L153); [crates/shamir-server/src/connection/request_loop.rs:340](../../../../../crates/shamir-server/src/connection/request_loop.rs#L340).
+
+<a id="review-2"></a>
+
+### Claim 2 — Long-lived server secrets are plain arrays outside the zeroization policy
+
+Status: `confirmed-open`. Current risk: `low`.
+
+Server secrets and ticket keys remain ordinary arrays without wiping Drop implementations. Debug is already redacted. Wiping would reduce residual copies, not protect live secrets from a process-memory compromise.
+
+Evidence: [crates/shamir-connect/src/server/config.rs:26](../../../../../crates/shamir-connect/src/server/config.rs#L26); [crates/shamir-connect/src/server/config.rs:29](../../../../../crates/shamir-connect/src/server/config.rs#L29); [crates/shamir-connect/src/server/config.rs:34](../../../../../crates/shamir-connect/src/server/config.rs#L34); [crates/shamir-connect/src/server/resume.rs:130](../../../../../crates/shamir-connect/src/server/resume.rs#L130).
+
+<a id="review-3"></a>
+
+### Claim 3 — Client password buffers are not zeroized on early-error paths
+
+Status: `confirmed-open`. Current risk: `low`.
+
+Fallible validation and derivation precede wiping. This is a reachable hygiene violation, not standalone remote password extraction.
+
+Evidence: [crates/shamir-connect/src/client/handshake.rs:209](../../../../../crates/shamir-connect/src/client/handshake.rs#L209); [crates/shamir-connect/src/client/bootstrap.rs:93](../../../../../crates/shamir-connect/src/client/bootstrap.rs#L93); [crates/shamir-connect/src/client/changepw.rs:60](../../../../../crates/shamir-connect/src/client/changepw.rs#L60).
+
+Grouping/duplicate: `error-handling-lifecycle.md#2`. This row is not another independent defect.
+
+<a id="review-4"></a>
+
+### Claim 4 — ServerIdentityState::rotate / try_finalize are non-atomic check-then-act
+
+Status: `confirmed-open`. Current risk: `low`.
+
+Snapshot-based mutators can overwrite concurrent state. The claim that every ticket then fails is too strong: acceptance compares the ticket to the atomic mirror, so matching versions can still pass.
+
+Evidence: [crates/shamir-connect/src/server/rotation.rs:100](../../../../../crates/shamir-connect/src/server/rotation.rs#L100); [crates/shamir-connect/src/server/rotation.rs:169](../../../../../crates/shamir-connect/src/server/rotation.rs#L169); [crates/shamir-connect/src/server/rotation.rs:194](../../../../../crates/shamir-connect/src/server/rotation.rs#L194); [crates/shamir-connect/src/server/resume.rs:290](../../../../../crates/shamir-connect/src/server/resume.rs#L290).
+
+Grouping/duplicate: `concurrency-lockfree.md#7`. This row is not another independent defect.
+
+<a id="review-5"></a>
+
+### Claim 5 — Known-user challenge exposes per-user KDF params — accepted residual enumeration
+
+Status: `not-applicable`. Current risk: —.
+
+Different stored/current parameter tuples are directly distinguishable. AUTH_PROTOCOL §13.5 explicitly accepts this trade-off, and the implementation names it. Timing examples are unnecessary and unmeasured.
+
+Evidence: [crates/shamir-connect/src/server/handshake.rs:155](../../../../../crates/shamir-connect/src/server/handshake.rs#L155); [crates/shamir-connect/src/server/handshake.rs:182](../../../../../crates/shamir-connect/src/server/handshake.rs#L182); [docs/guide-docs/client-server-protocol-spec/AUTH_PROTOCOL.md:877](../../../../../docs/guide-docs/client-server-protocol-spec/AUTH_PROTOCOL.md#L877).
+
+<a id="review-6"></a>
+
+### Claim 6 — start_change_password_challenge accepts an all-zero client_nonce_cp
+
+Status: `confirmed-open`. Current risk: `nit`.
+
+Issuance still stores the nonce without validating it; verification's canonical builder rejects it later. This is fail-fast consistency debt, not a replay bypass.
+
+Evidence: [crates/shamir-connect/src/server/changepw.rs:64](../../../../../crates/shamir-connect/src/server/changepw.rs#L64); [crates/shamir-connect/src/server/changepw.rs:74](../../../../../crates/shamir-connect/src/server/changepw.rs#L74); [crates/shamir-connect/src/server/changepw.rs:145](../../../../../crates/shamir-connect/src/server/changepw.rs#L145); [crates/shamir-connect/src/common/changepw.rs:59](../../../../../crates/shamir-connect/src/common/changepw.rs#L59).
+
+<a id="review-7"></a>
+
+### Claim 7 — encode_details_canonical is a dead placeholder with a broken signature
+
+Status: `confirmed-open`. Current risk: `nit`.
+
+The unused public helper still ignores its input and returns empty bytes.
+
+Evidence: [crates/shamir-connect/src/server/audit_chain.rs:355](../../../../../crates/shamir-connect/src/server/audit_chain.rs#L355); [crates/shamir-connect/src/server/audit_chain.rs:360](../../../../../crates/shamir-connect/src/server/audit_chain.rs#L360).
+
+Grouping/duplicate: `api-wire-protocol.md#3`. This row is not another independent defect.
+
+<a id="review-8"></a>
+
+### Claim 8 — canonical_bytes length prefixes truncate silently
+
+Status: `confirmed-open`. Current risk: `low`.
+
+Public arbitrary Strings and details bytes are narrowed without checks. Normal production fields are bounded by their producers, but the helper has no such input contract enforcement.
+
+Evidence: [crates/shamir-connect/src/server/audit_chain.rs:102](../../../../../crates/shamir-connect/src/server/audit_chain.rs#L102); [crates/shamir-connect/src/server/audit_chain.rs:104](../../../../../crates/shamir-connect/src/server/audit_chain.rs#L104); [crates/shamir-connect/src/server/audit_chain.rs:113](../../../../../crates/shamir-connect/src/server/audit_chain.rs#L113).
+
+<a id="review-8-guarantee"></a>
+
+### Claim 8.guarantee — Raw bytes preserve HMAC collision-safety and debug_assert catches oversized fields
+
+Status: `refuted`. Current risk: —.
+
+The assertion compares actual output size with a capacity computed from the same full lengths, so truncation does not trigger it. Encoding is non-injective for unrestricted fields: transport=256 NUL bytes,user=empty and transport=empty,user=256 NUL bytes have identical encoded segments. This is encoding ambiguity, not a cryptographic HMAC collision or a demonstrated network exploit.
+
+Evidence: [crates/shamir-connect/src/server/audit_chain.rs:91](../../../../../crates/shamir-connect/src/server/audit_chain.rs#L91); [crates/shamir-connect/src/server/audit_chain.rs:104](../../../../../crates/shamir-connect/src/server/audit_chain.rs#L104); [crates/shamir-connect/src/server/audit_chain.rs:106](../../../../../crates/shamir-connect/src/server/audit_chain.rs#L106); [crates/shamir-connect/src/server/audit_chain.rs:116](../../../../../crates/shamir-connect/src/server/audit_chain.rs#L116).
+
+<a id="review-summary-crypto-core"></a>
+
+### Claim Summary.crypto-core — Constant-time comparisons, unconditional fake derivation, strict verification, and no unsafe
+
+Status: `not-applicable`. Current risk: —.
+
+The wrapper calls ConstantTimeEq and verify_strict, and fake material is derived before choosing the real/fake path. No unsafe code was found. These establish implementation choices, not measured whole-handshake timing equivalence.
+
+Evidence: [crates/shamir-connect/src/common/crypto.rs:131](../../../../../crates/shamir-connect/src/common/crypto.rs#L131); [crates/shamir-connect/src/common/crypto.rs:254](../../../../../crates/shamir-connect/src/common/crypto.rs#L254); [crates/shamir-connect/src/server/handshake.rs:146](../../../../../crates/shamir-connect/src/server/handshake.rs#L146); [crates/shamir-connect/src/common/scram.rs:102](../../../../../crates/shamir-connect/src/common/scram.rs#L102).
+
+<a id="review-summary-injection"></a>
+
+### Claim Summary.injection — Opaque request bodies and exact-match directory lookups
+
+Status: `not-applicable`. Current risk: —.
+
+Connect dispatch forwards opaque bytes and its reference directory performs exact keyed lookup. This scoped observation must not become a claim that application handlers have no injection or disclosure surfaces.
+
+Evidence: [crates/shamir-connect/src/server/dispatch.rs:163](../../../../../crates/shamir-connect/src/server/dispatch.rs#L163); [crates/shamir-connect/src/server/admin.rs:317](../../../../../crates/shamir-connect/src/server/admin.rs#L317).
+
+## Corrections and qualified non-findings
+
+- Zeroization does not prevent exposure of still-live keys in core dumps; distinguish residual memory hygiene from process compromise.
+- Known-user KDF parameters are a documented accepted distinction, not an unclosed normative defect.
+- Remove both the canonical-byte collision-safe assurance and the assertion-catches-overflow claim.
+- Rotation races do not imply universal ticket-resume rejection, and no live server rotate invocation was found.
+
+---
+
+<details>
+<summary>Historical report — preserved for provenance; not current status or instructions</summary>
+
 # shamir-connect -- Security & crypto boundary
 
 ## Summary
@@ -58,3 +203,5 @@ The auth core is disciplined: SCRAM-Argon2id with `subtle` constant-time proof c
 - **Severity:** nit
 - **Issue:** `transport`/`user`/`ip_subnet`/`result` longer than 255 bytes (or `event` > 65535) corrupt the canonical form's length prefix. The raw bytes still follow, so the HMAC remains collision-safe, but cross-language canonical re-derivation breaks and the `debug_assert_eq!` fires in debug builds.
 - **Suggested fix:** Reject over-long fields with an error instead of casting.
+
+</details>

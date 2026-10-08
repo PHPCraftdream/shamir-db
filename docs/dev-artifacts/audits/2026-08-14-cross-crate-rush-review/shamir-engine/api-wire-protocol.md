@@ -1,3 +1,125 @@
+<!-- revalidation:2026-10-08 source:92ad58266bf57ddea1fa3c8a47affba1a3a9a096 -->
+# shamir-engine — api-wire-protocol revalidation
+
+Source snapshot: `92ad58266bf57ddea1fa3c8a47affba1a3a9a096`. Revalidated 2026-10-08 by read-only XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run; no source fix is part of this update. Test registration/assertions are evidence of an oracle, not proof of a passing run.
+
+This section is authoritative for current status. Original titles/IDs are retained for traceability; a refuted title is not a current assertion. The collapsed historical report below is superseded, including its counts, severity, scenarios and fix instructions. Plan IDs preserve historical numbering, not a current release mandate. [Workspace methodology and status definitions](../SUMMARY.md#status-definitions).
+
+The legacy parser family was removed and validator stop decoding is strict. Version tags now exist at all three assigned persistence sites, with significant legacy-compatibility caveats.
+
+## Current claim decisions
+
+| Claim decisions | Open | Source-fixed | Partial | Refuted | Unverified | N/A |
+|---:|---:|---:|---:|---:|---:|---:|
+| 9 | 0 | 8 | 0 | 0 | 0 | 1 |
+
+These are decisions on report claims, including repeated roots, bundled observations and non-findings—not a unique-bug census. Closed/N/A rows have no current risk; unverified risk is provisional. Pure style and unmeasured optimization claims do not establish runtime impact.
+
+<a id="review-1"></a>
+
+### Claim 1 — Exported hand-written query parser speaks a dead wire dialect
+
+Status: `fixed`. Current risk: —.
+
+The parser implementations and exports were deleted; read DTOs now expose the canonical query-types surface.
+
+Evidence: [crates/shamir-engine/src/query/read/mod.rs:18](../../../../../crates/shamir-engine/src/query/read/mod.rs#L18); [crates/shamir-engine/src/query/mod.rs:13](../../../../../crates/shamir-engine/src/query/mod.rs#L13).
+
+<a id="review-2"></a>
+
+### Claim 2 — pagination_from_value coerces invalid wire input instead of rejecting it
+
+Status: `fixed`. Current risk: —.
+
+The handwritten pagination parser was removed with query/common; its coercion path is no longer callable.
+
+Evidence: [crates/shamir-engine/src/query/mod.rs:1](../../../../../crates/shamir-engine/src/query/mod.rs#L1); [crates/shamir-engine/src/query/read/mod.rs:18](../../../../../crates/shamir-engine/src/query/read/mod.rs#L18).
+
+<a id="review-3"></a>
+
+### Claim 3 — MetaEnvelope convention not applied to three persisted bincode blobs
+
+Status: `fixed`. Current risk: —.
+
+Buffer config uses MetaEnvelope; shadow entries and index2-drop tombstones carry version bytes. Legacy buffer/shadow migration support is not supplied.
+
+Evidence: [crates/shamir-engine/src/table/buffer_config.rs:44](../../../../../crates/shamir-engine/src/table/buffer_config.rs#L44); [crates/shamir-engine/src/migration/shadow_log.rs:41](../../../../../crates/shamir-engine/src/migration/shadow_log.rs#L41); [crates/shamir-index/src/persistence.rs:339](../../../../../crates/shamir-index/src/persistence.rs#L339).
+
+<a id="review-4"></a>
+
+### Claim 4 — order_by parser silently swallows invalid nulls values
+
+Status: `fixed`. Current risk: —.
+
+The parallel handwritten order parser was removed; canonical DTO decoding owns the enum grammar.
+
+Evidence: [crates/shamir-engine/src/query/read/mod.rs:18](../../../../../crates/shamir-engine/src/query/read/mod.rs#L18).
+
+<a id="review-5"></a>
+
+### Claim 5 — filter_stream_tests constructs filters from raw wire maps, not the builder
+
+Status: `fixed`. Current risk: —.
+
+The suite imports typed filter builders; remaining mpack literals are record fixtures, not filter construction.
+
+Evidence: [crates/shamir-engine/src/table/tests/filter_stream_tests.rs:16](../../../../../crates/shamir-engine/src/table/tests/filter_stream_tests.rs#L16); [crates/shamir-engine/src/table/tests/filter_stream_tests.rs:33](../../../../../crates/shamir-engine/src/table/tests/filter_stream_tests.rs#L33).
+
+<a id="review-6"></a>
+
+### Claim 6 — Validator-result decoder is strict on code but silently lenient on stop
+
+Status: `fixed`. Current risk: —.
+
+Present non-bool stop returns BadStopType; absence alone defaults false. The registered decoder test checks that error variant.
+
+Evidence: [crates/shamir-engine/src/validator/decode.rs:61](../../../../../crates/shamir-engine/src/validator/decode.rs#L61); [crates/shamir-engine/src/validator/tests/decode_tests.rs:124](../../../../../crates/shamir-engine/src/validator/tests/decode_tests.rs#L124); [crates/shamir-engine/src/validator/tests/mod.rs:2](../../../../../crates/shamir-engine/src/validator/tests/mod.rs#L2).
+
+<a id="review-7"></a>
+
+### Claim 7 — ShadowKey/MigrationShadowLog constructors do not enforce the documented id constraint
+
+Status: `fixed`. Current risk: —.
+
+Length-prefixed IDs make underscore-bearing identifiers unambiguous. Registered isolation tests cover adversarial prefix-related IDs.
+
+Evidence: [crates/shamir-engine/src/migration/shadow_key.rs:47](../../../../../crates/shamir-engine/src/migration/shadow_key.rs#L47); [crates/shamir-engine/src/migration/shadow_key.rs:63](../../../../../crates/shamir-engine/src/migration/shadow_key.rs#L63); [crates/shamir-engine/src/migration/tests/shadow_log_tests.rs:223](../../../../../crates/shamir-engine/src/migration/tests/shadow_log_tests.rs#L223).
+
+<a id="review-8"></a>
+
+### Claim 8 — repo/group_commit/mod.rs contains full implementation logic
+
+Status: `fixed`. Current risk: —.
+
+The manifest delegates to a sibling implementation file.
+
+Evidence: [crates/shamir-engine/src/repo/group_commit/mod.rs:1](../../../../../crates/shamir-engine/src/repo/group_commit/mod.rs#L1).
+
+Grouping/duplicate: `style-claude-md.md#1`. This row is not another independent defect.
+
+<a id="review-summary-canonical-wire-guarantees"></a>
+
+### Claim Summary/canonical wire guarantees — Canonical serde DTOs and fail-closed DDL version byte
+
+Status: `not-applicable`. Current risk: —.
+
+The canonical DTO export and explicit DDL-version rejection remain. This is not an exhaustive proof of all wire compatibility.
+
+Evidence: [crates/shamir-engine/src/query/read/mod.rs:18](../../../../../crates/shamir-engine/src/query/read/mod.rs#L18); [crates/shamir-index/src/base_index/ddl_op_log.rs:85](../../../../../crates/shamir-index/src/base_index/ddl_op_log.rs#L85).
+
+## Corrections and qualified non-findings
+
+- Use the actual public export path, not the old query/mod.rs:13 parser-export citation.
+- Index2 persistence and DDL-op logging are owned by shamir-index and re-exported by engine.
+- Buffer config intentionally rejects pre-envelope valid blobs; shadow keys changed without a legacy-key reader.
+- MigrationShadowLog::recover reads key LSNs, not ShadowEntry payloads, and has no identified production caller.
+- Pinned bincode is 1.3.3; new envelope/version tags are source-proven, but no compatibility test was executed.
+
+---
+
+<details>
+<summary>Historical report — preserved for provenance; not current status or instructions</summary>
+
 # shamir-engine -- API & wire-protocol design
 
 ## Summary
@@ -57,3 +179,5 @@ The production wire path (BatchOp → serde-derived DTOs in `shamir-query-types`
 - **Severity:** nit
 - **Issue:** CLAUDE.md: "*`mod.rs` files contain re-exports only; logic lives in sibling files*". `GroupCommit` (struct + leader loop + `recv`) is implemented entirely in the `mod.rs`; every other module in this crate follows the rule (spot-checked: `query/*`, `meta/*`, `validator/mod.rs`, `table/mod.rs` are re-export-only).
 - **Suggested fix:** Move `GroupCommit` to `group_commit.rs` (sibling) with `tests/` alongside; keep `mod.rs` as the manifest.
+
+</details>

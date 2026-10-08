@@ -1,3 +1,117 @@
+<!-- revalidation:2026-10-08 source:92ad58266bf57ddea1fa3c8a47affba1a3a9a096 -->
+# shamir-types — security-crypto revalidation
+
+Source snapshot: `92ad58266bf57ddea1fa3c8a47affba1a3a9a096`. Revalidated 2026-10-08 by read-only XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run; no source fix is part of this update. Test registration/assertions are evidence of an oracle, not proof of a passing run.
+
+This section is authoritative for current status. Original titles/IDs are retained for traceability; a refuted title is not a current assertion. The collapsed historical report below is superseded, including its counts, severity, scenarios and fix instructions. Plan IDs preserve historical numbering, not a current release mandate. [Workspace methodology and status definitions](../SUMMARY.md#status-definitions).
+
+Allocation hardening and malformed-mode handling remain open. The username-hash production identity bridge is source-proven retired. Other findings are conditional boundary risks or hygiene, not demonstrated remote exploits.
+
+## Current claim decisions
+
+| Claim decisions | Open | Source-fixed | Partial | Refuted | Unverified | N/A |
+|---:|---:|---:|---:|---:|---:|---:|
+| 8 | 7 | 1 | 0 | 0 | 0 | 0 |
+
+These are decisions on report claims, including repeated roots, bundled observations and non-findings—not a unique-bug census. Closed/N/A rows have no current risk; unverified risk is provisional. Pure style and unmeasured optimization claims do not establish runtime impact.
+
+<a id="review-1"></a>
+
+### Claim 1 — Unbounded preallocation from attacker-controlled msgpack array/map headers (zerocopy decoder)
+
+Status: `confirmed-open`. Current risk: `high`.
+
+Header counts still reach uncapped custom-decoder and merge allocations. A five-byte header proves an enormous allocation request, not an experimentally observed abort. Current S-write uses the lens rather than this custom decoder; validator de-interning has its own uncapped top-level map allocation.
+
+Evidence: [crates/shamir-types/src/codecs/interned/messagepack.rs:305](../../../../../crates/shamir-types/src/codecs/interned/messagepack.rs#L305); [crates/shamir-types/src/codecs/interned/messagepack.rs:318](../../../../../crates/shamir-types/src/codecs/interned/messagepack.rs#L318); [crates/shamir-types/src/codecs/interned/messagepack.rs:581](../../../../../crates/shamir-types/src/codecs/interned/messagepack.rs#L581); [crates/shamir-types/src/codecs/interned/codec.rs:154](../../../../../crates/shamir-types/src/codecs/interned/codec.rs#L154); [crates/shamir-engine/src/table/write_exec.rs:362](../../../../../crates/shamir-engine/src/table/write_exec.rs#L362); [crates/shamir-engine/src/table/write_exec.rs:382](../../../../../crates/shamir-engine/src/table/write_exec.rs#L382).
+
+Grouping/duplicate: `error-handling-lifecycle.md:1`. This row is not another independent defect.
+
+<a id="review-2"></a>
+
+### Claim 2 — Fail-open mode fallback in `ResourceMeta::from_record`
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+Negative, oversized, wrong-type, and absent modes all collapse to OPEN. Current facade metadata reads use this parser. Broad access requires the remaining ancestor checks to allow traversal and does not grant non-owner Manage; malformed values must be distinguished from intentionally compatible absent fields.
+
+Evidence: [crates/shamir-types/src/access.rs:275](../../../../../crates/shamir-types/src/access.rs#L275); [crates/shamir-types/src/access.rs:702](../../../../../crates/shamir-types/src/access.rs#L702); [crates/shamir-db/src/shamir_db/shamir_db/access_control.rs:57](../../../../../crates/shamir-db/src/shamir_db/shamir_db/access_control.rs#L57); [crates/shamir-db/src/shamir_db/shamir_db/access_control.rs:850](../../../../../crates/shamir-db/src/shamir_db/shamir_db/access_control.rs#L850).
+
+<a id="review-3"></a>
+
+### Claim 3 — Append-only interner accepts unlimited untrusted key names; FxHash rationale inverted
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+No distinct-name quota exists in Interner. The live InternerTouch handler interns and persists caller-supplied names after Store Write authorization. Thus cumulative growth is reachable by a principal permitted to write that store, not an arbitrary unauthenticated client. FxHash collision construction speed is unverified.
+
+Evidence: [crates/shamir-types/src/core/interner/interner.rs:138](../../../../../crates/shamir-types/src/core/interner/interner.rs#L138); [crates/shamir-types/src/types/common.rs:8](../../../../../crates/shamir-types/src/types/common.rs#L8); [crates/shamir-db/src/shamir_db/execute/admin_interner.rs:129](../../../../../crates/shamir-db/src/shamir_db/execute/admin_interner.rs#L129); [crates/shamir-db/src/shamir_db/execute/admin_interner.rs:159](../../../../../crates/shamir-db/src/shamir_db/execute/admin_interner.rs#L159); [crates/shamir-db/src/shamir_db/execute/admin_interner.rs:168](../../../../../crates/shamir-db/src/shamir_db/execute/admin_interner.rs#L168); [CLAUDE.md:351](../../../../../CLAUDE.md#L351).
+
+<a id="review-4"></a>
+
+### Claim 4 — `principal64_from_username` mints principal ids with seedless FxHasher
+
+Status: `fixed`. Current risk: —.
+
+The helper remains for fixtures, but no non-test/non-bench production caller was found. Both alleged live bridge sites now resolve directory-minted principal ids through PrincipalResolver; server session actors use principal64(session.user_id). Directory minting rejects zero and occupied projections. The helper's rustdoc is stale.
+
+Evidence: [crates/shamir-db/src/shamir_db/shamir_db/access_control.rs:195](../../../../../crates/shamir-db/src/shamir_db/shamir_db/access_control.rs#L195); [crates/shamir-db/src/shamir_db/shamir_db/access_control.rs:1056](../../../../../crates/shamir-db/src/shamir_db/shamir_db/access_control.rs#L1056); [crates/shamir-server/src/db_handler/handler.rs:128](../../../../../crates/shamir-server/src/db_handler/handler.rs#L128); [crates/shamir-server/src/ports.rs:45](../../../../../crates/shamir-server/src/ports.rs#L45); [crates/shamir-server/src/user_directory.rs:526](../../../../../crates/shamir-server/src/user_directory.rs#L526); [crates/shamir-types/src/access.rs:47](../../../../../crates/shamir-types/src/access.rs#L47).
+
+<a id="review-5"></a>
+
+### Claim 5 — Generic `bincode::from_bytes` helper lacks the depth caps its sibling decoders have
+
+Status: `confirmed-open`. Current risk: `low`.
+
+The pinned bincode 1.3.3 helper has no wrapper depth/size policy; compatible recursive types remain a conditional stack risk. Inspected production callers decode bounded-shape counters or interner entries from storage. The proposed QueryValue nested-list exploit is refuted: Value requests deserialize_any, unsupported by bincode 1.3.3.
+
+Evidence: [crates/shamir-types/src/codecs/basic/bincode.rs:51](../../../../../crates/shamir-types/src/codecs/basic/bincode.rs#L51); [crates/shamir-types/src/types/value.rs:283](../../../../../crates/shamir-types/src/types/value.rs#L283); [Cargo.lock:413](../../../../../Cargo.lock#L413); [crates/shamir-engine/src/table/interner_manager.rs:200](../../../../../crates/shamir-engine/src/table/interner_manager.rs#L200); [crates/shamir-engine/src/table/record_counter.rs:201](../../../../../crates/shamir-engine/src/table/record_counter.rs#L201).
+
+<a id="review-6"></a>
+
+### Claim 6 — `SecretString`: constant-time-comparison footgun plus avoidable `unsafe`
+
+Status: `confirmed-open`. Current risk: `low`.
+
+Derived equality is not a constant-time contract; unsafe UTF-8-preserving zeroization and missing lifecycle tests remain. The current inspected password consumer derives SCRAM material, not a cleartext equality check. Exact first-byte timing, remote prefix extraction, and the pinned replacement trait implementation were not established.
+
+Evidence: [crates/shamir-types/src/secret.rs:21](../../../../../crates/shamir-types/src/secret.rs#L21); [crates/shamir-types/src/secret.rs:40](../../../../../crates/shamir-types/src/secret.rs#L40); [crates/shamir-types/src/secret.rs:67](../../../../../crates/shamir-types/src/secret.rs#L67); [crates/shamir-types/src/tests/secret_tests.rs:1](../../../../../crates/shamir-types/src/tests/secret_tests.rs#L1); [crates/shamir-server/src/db_handler/admin.rs:183](../../../../../crates/shamir-server/src/db_handler/admin.rs#L183); [Cargo.lock:5473](../../../../../Cargo.lock#L5473).
+
+<a id="review-7"></a>
+
+### Claim 7 — Predictable RecordId random tail and embedded timestamps — invariant undocumented
+
+Status: `confirmed-open`. Current risk: `low`.
+
+RecordId still embeds timestamps and uses Xoshiro rather than a cryptographic RNG, without a non-capability warning. No possession-only authorization path was established. Exact recovery from a handful of ids, especially truncated from_ts_seq tails and interleaved threads, remains unverified.
+
+Evidence: [crates/shamir-types/src/types/record_id.rs:45](../../../../../crates/shamir-types/src/types/record_id.rs#L45); [crates/shamir-types/src/types/record_id.rs:48](../../../../../crates/shamir-types/src/types/record_id.rs#L48); [crates/shamir-types/src/types/record_id.rs:74](../../../../../crates/shamir-types/src/types/record_id.rs#L74); [crates/shamir-types/src/types/record_id.rs:84](../../../../../crates/shamir-types/src/types/record_id.rs#L84); [Cargo.lock:2749](../../../../../Cargo.lock#L2749).
+
+<a id="review-8"></a>
+
+### Claim 8 — Log-forging surface: raw resource names rendered into trace/denial lines
+
+Status: `confirmed-open`. Current risk: `low`.
+
+ResourcePath accepts arbitrary strings and Display/trace interpolate them without control-character escaping. Exploitability depends on the construction path: database/repository and function-folder creation already apply restrictive name validation. Ordinary quotes are not themselves fabricated log-line proof.
+
+Evidence: [crates/shamir-types/src/access.rs:565](../../../../../crates/shamir-types/src/access.rs#L565); [crates/shamir-types/src/access.rs:622](../../../../../crates/shamir-types/src/access.rs#L622); [crates/shamir-types/src/access.rs:658](../../../../../crates/shamir-types/src/access.rs#L658); [crates/shamir-db/src/shamir_db/execute/helpers.rs:84](../../../../../crates/shamir-db/src/shamir_db/execute/helpers.rs#L84); [crates/shamir-db/src/shamir_db/execute/admin_db_repo.rs:28](../../../../../crates/shamir-db/src/shamir_db/execute/admin_db_repo.rs#L28).
+
+## Corrections and qualified non-findings
+
+- The #559 migration predates this review. The old two-live-call-sites claim was already stale, not merely a subsequently completed task.
+- Security severity must reflect authorized Store Write access for interner growth and conditional recursive-type exposure for bincode.
+- Bincode 2.x configuration is not evidence of a recursion limit; that migration recommendation needs a pinned reference before making such a guarantee.
+- The sole executable unsafe block is feature-gated and source-sound under its current exclusive borrow and zero-byte UTF-8 preservation. Its existence is hygiene debt, not proven undefined behavior.
+- SecretString has no zeroizing Drop without crypto. Cargo.toml documents that feature contract; this is not an unexpected runtime downgrade.
+- Depth caps and checked lens reads exist, but universal panic-free/allocation-safe claims are too broad: index preallocation is uncapped, and fields() silently terminates on malformed entries.
+- validate_keys_resolve rejects unresolved ids that its iterators yield; because malformed iteration can terminate silently, it is not proof of complete structural validation of every input.
+
+---
+
+<details>
+<summary>Historical report — preserved for provenance; not current status or instructions</summary>
+
 # shamir-types -- Security & crypto boundary
 
 ## Summary
@@ -73,3 +187,5 @@ Security posture is strong overall: the crate contains exactly one `unsafe` bloc
 ---
 
 Notes for the reviewer: read-only static review per constraints — nothing was built, tested, or linted; severities are relative to this crate's trust boundaries as documented in-source. Findings 3 and 5 depend partly on out-of-crate call sites (engine/server gates feeding these APIs); they are framed conditional on those boundaries holding as the doc comments claim.
+
+</details>

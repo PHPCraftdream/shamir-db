@@ -1,3 +1,132 @@
+<!-- revalidation:2026-10-08 source:92ad58266bf57ddea1fa3c8a47affba1a3a9a096 -->
+# shamir-funclib — api-wire-protocol revalidation
+
+Source snapshot: `92ad58266bf57ddea1fa3c8a47affba1a3a9a096`. Revalidated 2026-10-08 by read-only XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run; no source fix is part of this update. Test registration/assertions are evidence of an oracle, not proof of a passing run.
+
+This section is authoritative for current status. Original titles/IDs are retained for traceability; a refuted title is not a current assertion. The collapsed historical report below is superseded, including its counts, severity, scenarios and fix instructions. Plan IDs preserve historical numbering, not a current release mandate. [Workspace methodology and status definitions](../SUMMARY.md#status-definitions).
+
+Public ABI and production folder names remain coherent, but docs, error vocabulary, canonical-format contract, and conversion edges remain unresolved. Several findings are documentation/API ergonomics rather than runtime security defects.
+
+## Current claim decisions
+
+| Claim decisions | Open | Source-fixed | Partial | Refuted | Unverified | N/A |
+|---:|---:|---:|---:|---:|---:|---:|
+| 9 | 9 | 0 | 0 | 0 | 0 | 0 |
+
+These are decisions on report claims, including repeated roots, bundled observations and non-findings—not a unique-bug census. Closed/N/A rows have no current risk; unverified risk is provisional. Pure style and unmeasured optimization claims do not establish runtime impact.
+
+<a id="review-1"></a>
+
+### Claim 1 — Query-reachable scalars allocate unbounded memory (`random_bytes`, `repeat`, `pad`)
+
+Status: `confirmed-open`. Current risk: `high`.
+
+All cited scalar functions remain registered and uncapped. Evaluated query/computed-write expressions reach allocation directly. The one-argument field-rule bridge cannot invoke all members of this family; builtin registry exposure alone is not direct WASM reachability proof.
+
+Evidence: [crates/shamir-funclib/src/lib.rs:53](../../../../../crates/shamir-funclib/src/lib.rs#L53); [crates/shamir-funclib/src/lib.rs:60](../../../../../crates/shamir-funclib/src/lib.rs#L60); [crates/shamir-funclib/src/gen.rs:75](../../../../../crates/shamir-funclib/src/gen.rs#L75); [crates/shamir-funclib/src/strings.rs:237](../../../../../crates/shamir-funclib/src/strings.rs#L237); [crates/shamir-engine/src/table/write_helpers.rs:314](../../../../../crates/shamir-engine/src/table/write_helpers.rs#L314); [crates/shamir-engine/src/validator/schema/field_rule.rs:476](../../../../../crates/shamir-engine/src/validator/schema/field_rule.rs#L476).
+
+Grouping/duplicate: `error-handling-lifecycle.md#2`. This row is not another independent defect.
+
+<a id="review-2"></a>
+
+### Claim 2 — `canonical_hash` key ordering is msgpack-dependent but documented as name order; byte format has no version tag
+
+Status: `confirmed-open`. Current risk: `low`.
+
+Keys are still sorted by rmp-serde encoding, whose length prefix makes b sort before aa; docs still assert raw-name ordering. canonical_bytes still has no format-version prefix. Existing tests establish insertion-order invariance and selected Dec/Big roundtrips, not cross-language byte vectors or migration. No actual format change or persisted-hash migration failure was demonstrated.
+
+Evidence: [crates/shamir-funclib/src/canonical.rs:28](../../../../../crates/shamir-funclib/src/canonical.rs#L28); [crates/shamir-funclib/src/canonical.rs:161](../../../../../crates/shamir-funclib/src/canonical.rs#L161); [crates/shamir-funclib/src/canonical.rs:187](../../../../../crates/shamir-funclib/src/canonical.rs#L187); [crates/shamir-funclib/src/canonical.rs:203](../../../../../crates/shamir-funclib/src/canonical.rs#L203); [crates/shamir-types/src/types/value.rs:72](../../../../../crates/shamir-types/src/types/value.rs#L72); [Cargo.lock:2949](../../../../../Cargo.lock#L2949).
+
+<a id="review-3"></a>
+
+### Claim 3 — Machine error-code vocabulary is free-form and inconsistent across categories
+
+Status: `confirmed-open`. Current risk: `low`.
+
+ScalarError remains an arbitrary String with no common catalog; regex invalid-pattern synonyms remain and tests pin both. cast_failed versus extractor out_of_range and the documented broad parse code are not intrinsically erroneous. No frontend localization implementation was located to prove the claimed concrete UX failure.
+
+Evidence: [crates/shamir-funclib/src/registry.rs:20](../../../../../crates/shamir-funclib/src/registry.rs#L20); [crates/shamir-funclib/src/strings.rs:427](../../../../../crates/shamir-funclib/src/strings.rs#L427); [crates/shamir-funclib/src/validate.rs:342](../../../../../crates/shamir-funclib/src/validate.rs#L342); [crates/shamir-funclib/src/datetime.rs:19](../../../../../crates/shamir-funclib/src/datetime.rs#L19).
+
+Grouping/duplicate: `error-handling-lifecycle.md#6`. This row is not another independent defect.
+
+<a id="review-4"></a>
+
+### Claim 4 — Module docs advertise plain unqualified names; the wire protocol dispatches folder-qualified names
+
+Status: `confirmed-open`. Current risk: `low`.
+
+Eleven headers still omit production qualification and the crate front door still says stubs. Direct category registration genuinely accepts plain names, so those behavioral tests are valid API tests, not tests of nonexistent APIs. Production-name wiring remains sample-covered rather than comprehensively covered.
+
+Evidence: [crates/shamir-funclib/src/math.rs:4](../../../../../crates/shamir-funclib/src/math.rs#L4); [crates/shamir-funclib/src/lib.rs:12](../../../../../crates/shamir-funclib/src/lib.rs#L12); [crates/shamir-funclib/src/lib.rs:51](../../../../../crates/shamir-funclib/src/lib.rs#L51); [crates/shamir-funclib/src/registry.rs:126](../../../../../crates/shamir-funclib/src/registry.rs#L126); [crates/shamir-funclib/src/tests/register_builtins_tests.rs:24](../../../../../crates/shamir-funclib/src/tests/register_builtins_tests.rs#L24); [crates/shamir-query-types/src/read/select.rs:102](../../../../../crates/shamir-query-types/src/read/select.rs#L102).
+
+<a id="review-5"></a>
+
+### Claim 5 — Same public name `get_path` in two folders with opposite miss semantics
+
+Status: `confirmed-open`. Current risk: `nit`.
+
+The distinct miss and accepted-step semantics remain. Each module already documents its own behavior and tests it; there is no contract requiring these differently qualified functions to agree. What remains is optional cross-reference/disambiguation, not a proven algorithmic defect. Filter .ok() still turns object errors into unresolved values.
+
+Evidence: [crates/shamir-funclib/src/object.rs:10](../../../../../crates/shamir-funclib/src/object.rs#L10); [crates/shamir-funclib/src/object.rs:94](../../../../../crates/shamir-funclib/src/object.rs#L94); [crates/shamir-funclib/src/value_nav.rs:11](../../../../../crates/shamir-funclib/src/value_nav.rs#L11); [crates/shamir-funclib/src/value_nav.rs:120](../../../../../crates/shamir-funclib/src/value_nav.rs#L120); [crates/shamir-engine/src/query/filter/resolve.rs:374](../../../../../crates/shamir-engine/src/query/filter/resolve.rs#L374).
+
+<a id="review-6"></a>
+
+### Claim 6 — `trusted_pure` gate: pub fields make the "explicit opt-in" convention-only; docs claim indexability the gate forbids
+
+Status: `confirmed-open`. Current risk: `low`.
+
+FnEntry metadata remains public and builtin FnEntry::pure entries remain unvouched despite indexability claims. The engine still checks is_indexable. A native embedder setting fields explicitly is already the trusted authority; privacy does not prove semantic purity or close an untrusted wire bypass. Specialized lower/upper/trim/length indexes are a separate supported path.
+
+Evidence: [crates/shamir-funclib/src/registry.rs:54](../../../../../crates/shamir-funclib/src/registry.rs#L54); [crates/shamir-funclib/src/registry.rs:79](../../../../../crates/shamir-funclib/src/registry.rs#L79); [crates/shamir-funclib/src/arrays.rs:28](../../../../../crates/shamir-funclib/src/arrays.rs#L28); [crates/shamir-funclib/src/cast.rs:18](../../../../../crates/shamir-funclib/src/cast.rs#L18); [crates/shamir-engine/src/table/table_manager_index_mgmt.rs:249](../../../../../crates/shamir-engine/src/table/table_manager_index_mgmt.rs#L249); [crates/shamir-engine/src/table/table_manager_index_mgmt.rs:262](../../../../../crates/shamir-engine/src/table/table_manager_index_mgmt.rs#L262).
+
+<a id="review-7"></a>
+
+### Claim 7 — `f64 → i64` extraction accepts values above `i64::MAX` due to a float-rounded bound
+
+Status: `confirmed-open`. Current risk: `low`.
+
+Both range predicates retain the inclusive rounded upper bound, so F64(2^63) still saturates instead of failing. Big-to-Int tests do not cover this separate F64 edge.
+
+Evidence: [crates/shamir-funclib/src/registry.rs:218](../../../../../crates/shamir-funclib/src/registry.rs#L218); [crates/shamir-funclib/src/cast.rs:121](../../../../../crates/shamir-funclib/src/cast.rs#L121); [crates/shamir-funclib/src/cast/tests/cast_tests.rs:219](../../../../../crates/shamir-funclib/src/cast/tests/cast_tests.rs#L219).
+
+Grouping/duplicate: `correctness-tdd.md#3`. This row is not another independent defect.
+
+<a id="review-8"></a>
+
+### Claim 8 — `ScalarError` has no structured detail slot
+
+Status: `confirmed-open`. Current risk: `nit`.
+
+The error still contains only code: String. Machine-safe detail is absent, but the documented code-only contract is intentional; adding detail is an API enhancement rather than correction of a demonstrated failure.
+
+Evidence: [crates/shamir-funclib/src/registry.rs:17](../../../../../crates/shamir-funclib/src/registry.rs#L17); [crates/shamir-funclib/src/registry.rs:20](../../../../../crates/shamir-funclib/src/registry.rs#L20).
+
+<a id="review-9"></a>
+
+### Claim 9 — `ScalarRegistry::register` collision policy undocumented
+
+Status: `confirmed-open`. Current risk: `nit`.
+
+IndexMap insertion still overwrites, but the scalar register doc still does not state last-wins, unlike AggRegistry. No overwrite log or collision test is present. Logging is optional and could add noise to intentional replacement.
+
+Evidence: [crates/shamir-funclib/src/registry.rs:126](../../../../../crates/shamir-funclib/src/registry.rs#L126); [crates/shamir-funclib/src/registry.rs:135](../../../../../crates/shamir-funclib/src/registry.rs#L135); [crates/shamir-funclib/src/agg.rs:72](../../../../../crates/shamir-funclib/src/agg.rs#L72).
+
+## Corrections and qualified non-findings
+
+- No separate Fix Plan exists; recommendations are assessed in the finding rows and SUMMARY plan.
+- Builder-only compliance is supported: serde_json use constructs/inspects values and codec tests, not database queries; the registered benchmark uses bench_scale_tool.
+- Do not silently change canonical key sorting or add a prefix to the existing format: either document/freeze current bytes or define an explicit versioned migration and compatibility contract.
+- Canonical content equivalence intentionally aliases Dec/Big with their serialized strings and normalizes float zeros/NaNs. The phrase 'any change to data changes the hash' is not literal typed-value injectivity.
+- The located native CAS validator is in an integration test. Claims of automatic hashing on every production sequenced write are unsupported.
+- Do not merge stable machine codes merely because they describe related conditions; assess backward compatibility and retain the extractor/conversion distinction where intentional.
+- The published-vector literals, selected canonical roundtrip tests, and aggregate empty-input tests are reachable, but their presence is not proof that every module has its own tests directory or that all contracts are exhaustively tested.
+- All source filenames should be prefixed with crates/shamir-funclib; the extra crates/shamir-db prefix in the original date finding is erroneous.
+
+---
+
+<details>
+<summary>Historical report — preserved for provenance; not current status or instructions</summary>
+
 # shamir-funclib -- API & wire-protocol design
 
 ## Summary
@@ -197,3 +326,5 @@ invariance (`canonical/tests/canonical_tests.rs:25-241`), and argon2id has known
 tests plus a concurrency-cap regression (`crypto/tests/crypto_tests.rs:207-269`). Gaps: no
 bound test for `random_bytes`/`repeat`/`pad` (finding 1), and the plain-name registration
 in per-category suites leaves the production name spelling only sample-covered (finding 4).
+
+</details>

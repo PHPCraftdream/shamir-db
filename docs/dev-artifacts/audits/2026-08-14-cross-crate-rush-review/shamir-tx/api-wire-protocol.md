@@ -1,3 +1,158 @@
+<!-- revalidation:2026-10-08 source:92ad58266bf57ddea1fa3c8a47affba1a3a9a096 -->
+# shamir-tx — api-wire-protocol revalidation
+
+Source snapshot: `92ad58266bf57ddea1fa3c8a47affba1a3a9a096`. Revalidated 2026-10-08 by read-only XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run; no source fix is part of this update. Test registration/assertions are evidence of an oracle, not proof of a passing run.
+
+This section is authoritative for current status. Original titles/IDs are retained for traceability; a refuted title is not a current assertion. The collapsed historical report below is superseded, including its counts, severity, scenarios and fix instructions. Plan IDs preserve historical numbering, not a current release mandate. [Workspace methodology and status definitions](../SUMMARY.md#status-definitions).
+
+Journal error signaling and format identification remain weak. Several proposed safeguards assume dense commit versions or access to journal keys that the current API does not provide.
+
+## Current claim decisions
+
+| Claim decisions | Open | Source-fixed | Partial | Refuted | Unverified | N/A |
+|---:|---:|---:|---:|---:|---:|---:|
+| 12 | 10 | 0 | 0 | 0 | 1 | 1 |
+
+These are decisions on report claims, including repeated roots, bundled observations and non-findings—not a unique-bug census. Closed/N/A rows have no current risk; unverified risk is provisional. Pure style and unmeasured optimization claims do not establish runtime impact.
+
+<a id="review-1"></a>
+
+### Claim 1 — Durable journal events have no schema/version envelope; decode failures are silently skipped
+
+Status: `confirmed-open`. Current risk: `high`.
+
+The durable payload is a bare ChangelogEvent and decoding errors only warn. Schema-change compatibility examples are unverified; silent omission after a decode failure is directly established.
+
+Evidence: [crates/shamir-tx/src/changefeed.rs:87](../../../../../crates/shamir-tx/src/changefeed.rs#L87); [crates/shamir-tx/src/changefeed.rs:409](../../../../../crates/shamir-tx/src/changefeed.rs#L409); [crates/shamir-tx/src/changefeed.rs:543](../../../../../crates/shamir-tx/src/changefeed.rs#L543).
+
+<a id="review-2"></a>
+
+### Claim 2 — SORTED_TAG posting-key layout duplicated across crates with an illusory test pin
+
+Status: `confirmed-open`. Current risk: `low`.
+
+The local test only pins 0x80 and constants remain duplicated. Current layouts match, and registered engine round-trip tests provide additional cross-crate coverage, contradicting inevitable silent test-suite success.
+
+Evidence: [crates/shamir-tx/src/predicate_set.rs:164](../../../../../crates/shamir-tx/src/predicate_set.rs#L164); [crates/shamir-tx/src/tests/predicate_set_tests.rs:195](../../../../../crates/shamir-tx/src/tests/predicate_set_tests.rs#L195); [crates/shamir-index/src/base_index/sorted_index_definition.rs:29](../../../../../crates/shamir-index/src/base_index/sorted_index_definition.rs#L29); [crates/shamir-index/src/base_index/sorted_index_manager.rs:2670](../../../../../crates/shamir-index/src/base_index/sorted_index_manager.rs#L2670); [crates/shamir-engine/src/tx/tests/predicate_range_tests.rs:236](../../../../../crates/shamir-engine/src/tx/tests/predicate_range_tests.rs#L236); [crates/shamir-engine/src/tx/tests/mod.rs:28](../../../../../crates/shamir-engine/src/tx/tests/mod.rs#L28).
+
+<a id="review-3"></a>
+
+### Claim 3 — CF-1 gap signal is volatile; read_from never checks contiguity
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+The overflow marker resets in new and is not persisted. Lost emitted events remain undetectable after restart, but numeric version discontinuities are not sufficient evidence of lost events.
+
+Evidence: [crates/shamir-tx/src/changefeed.rs:246](../../../../../crates/shamir-tx/src/changefeed.rs#L246); [crates/shamir-tx/src/changefeed.rs:416](../../../../../crates/shamir-tx/src/changefeed.rs#L416); [crates/shamir-tx/src/changefeed.rs:479](../../../../../crates/shamir-tx/src/changefeed.rs#L479); [crates/shamir-tx/src/mvcc_store/mod.rs:883](../../../../../crates/shamir-tx/src/mvcc_store/mod.rs#L883); [crates/shamir-tx/src/version_guard.rs:107](../../../../../crates/shamir-tx/src/version_guard.rs#L107).
+
+<a id="review-4"></a>
+
+### Claim 4 — read_from has no error channel — store failure and corruption are indistinguishable from empty
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+Store failure returns empty events with gap_at None; decode failures disappear from the result. Engine wraps that result in Ok, preserving the ambiguity.
+
+Evidence: [crates/shamir-tx/src/changefeed.rs:397](../../../../../crates/shamir-tx/src/changefeed.rs#L397); [crates/shamir-tx/src/changefeed.rs:411](../../../../../crates/shamir-tx/src/changefeed.rs#L411); [crates/shamir-engine/src/repo/repo_instance.rs:1245](../../../../../crates/shamir-engine/src/repo/repo_instance.rs#L1245).
+
+<a id="review-5"></a>
+
+### Claim 5 — read_from re-demands the store the constructor already consumed; no same-store guarantee
+
+Status: `confirmed-open`. Current risk: `low`.
+
+Self does not retain the store, so public callers can read another store. Production ChangefeedHandle retains and supplies the same Arc, preventing the alleged current wiring error.
+
+Evidence: [crates/shamir-tx/src/changefeed.rs:249](../../../../../crates/shamir-tx/src/changefeed.rs#L249); [crates/shamir-tx/src/changefeed.rs:392](../../../../../crates/shamir-tx/src/changefeed.rs#L392); [crates/shamir-engine/src/repo/repo_instance.rs:1211](../../../../../crates/shamir-engine/src/repo/repo_instance.rs#L1211); [crates/shamir-engine/src/repo/repo_instance.rs:1245](../../../../../crates/shamir-engine/src/repo/repo_instance.rs#L1245).
+
+<a id="review-6"></a>
+
+### Claim 6 — Stringly-typed Result<_, String> across the public API
+
+Status: `confirmed-open`. Current risk: `low`.
+
+Trait, retention, and remap boundaries still use String errors; the declared thiserror dependency has no use in this crate.
+
+Evidence: [crates/shamir-tx/src/changefeed.rs:154](../../../../../crates/shamir-tx/src/changefeed.rs#L154); [crates/shamir-tx/src/mvcc_store/retention.rs:60](../../../../../crates/shamir-tx/src/mvcc_store/retention.rs#L60); [crates/shamir-tx/src/staging_store.rs:329](../../../../../crates/shamir-tx/src/staging_store.rs#L329); [crates/shamir-tx/src/tx_context.rs:942](../../../../../crates/shamir-tx/src/tx_context.rs#L942); [crates/shamir-tx/Cargo.toml:23](../../../../../crates/shamir-tx/Cargo.toml#L23).
+
+Grouping/duplicate: `error-handling-lifecycle.md#4`. This row is not another independent defect.
+
+<a id="review-7"></a>
+
+### Claim 7 — Empty Bytes as tombstone sentinel is unguarded on the public write path
+
+Status: `confirmed-open`. Current risk: `low`.
+
+Write entry points accept empty values and reads interpret them as deletion. Record encoders are nonempty; this is an undocumented/reusable raw-Bytes API boundary, not a demonstrated record-write failure.
+
+Evidence: [crates/shamir-tx/src/mvcc_store/mod.rs:766](../../../../../crates/shamir-tx/src/mvcc_store/mod.rs#L766); [crates/shamir-tx/src/mvcc_store/mod.rs:724](../../../../../crates/shamir-tx/src/mvcc_store/mod.rs#L724); [crates/shamir-tx/src/mvcc_store/mod.rs:1058](../../../../../crates/shamir-tx/src/mvcc_store/mod.rs#L1058); [crates/shamir-tx/src/mvcc_store/mvcc_history.rs:470](../../../../../crates/shamir-tx/src/mvcc_store/mvcc_history.rs#L470).
+
+<a id="review-8"></a>
+
+### Claim 8 — VERSION_SEP invariant is probabilistic, self-contradictory in its doc, and dodged by its prop tests
+
+Status: `confirmed-open`. Current risk: `nit`.
+
+Documentation and restricted generators remain inaccurate. Encoding/decoding is suffix-length based and round-trips arbitrary key bytes; fixed-width key grouping, not exclusion of 0xFF, is the useful safety property.
+
+Evidence: [crates/shamir-tx/src/version_codec.rs:20](../../../../../crates/shamir-tx/src/version_codec.rs#L20); [crates/shamir-tx/src/version_codec.rs:57](../../../../../crates/shamir-tx/src/version_codec.rs#L57); [crates/shamir-tx/src/tests/version_codec_tests.rs:65](../../../../../crates/shamir-tx/src/tests/version_codec_tests.rs#L65); [crates/shamir-types/src/types/record_id.rs:46](../../../../../crates/shamir-types/src/types/record_id.rs#L46).
+
+Grouping/duplicate: `security-crypto.md#3`. This row is not another independent defect.
+
+<a id="review-9"></a>
+
+### Claim 9 — tx_id = 0 non-tx write sentinel is unenforced against zero-seeded id allocators
+
+Status: `confirmed-open`. Current risk: `low`.
+
+RepoWalManager and RepoTxGate accept zero seeds and can allocate zero. Normal construction defaults to one; project_event also intentionally maps implicit transactions to external ID zero.
+
+Evidence: [crates/shamir-tx/src/repo_wal_manager.rs:30](../../../../../crates/shamir-tx/src/repo_wal_manager.rs#L30); [crates/shamir-tx/src/repo_wal_manager.rs:39](../../../../../crates/shamir-tx/src/repo_wal_manager.rs#L39); [crates/shamir-tx/src/repo_tx_gate.rs:294](../../../../../crates/shamir-tx/src/repo_tx_gate.rs#L294); [crates/shamir-tx/src/changefeed.rs:494](../../../../../crates/shamir-tx/src/changefeed.rs#L494); [crates/shamir-engine/src/repo/repo_instance.rs:775](../../../../../crates/shamir-engine/src/repo/repo_instance.rs#L775).
+
+<a id="review-10"></a>
+
+### Claim 10 — Dead public group-commit API remains in the exported surface
+
+Status: `confirmed-open`. Current risk: `nit`.
+
+PendingCommit and both queue accessors remain public with no callers. Their dead-scaffolding status is now explicitly documented; reducing the surface remains optional hygiene.
+
+Evidence: [crates/shamir-tx/src/lib.rs:69](../../../../../crates/shamir-tx/src/lib.rs#L69); [crates/shamir-tx/src/repo_tx_gate.rs:742](../../../../../crates/shamir-tx/src/repo_tx_gate.rs#L742); [crates/shamir-tx/src/repo_tx_gate.rs:752](../../../../../crates/shamir-tx/src/repo_tx_gate.rs#L752).
+
+<a id="review-11"></a>
+
+### Claim 11 — serde_bytes_compat deserializer accepts sequences, not just byte arrays
+
+Status: `unverified`. Current risk: `nit` (provisional; not a confirmed defect).
+
+serialize_bytes versus Vec<u8>::deserialize is confirmed, but exact bin/array acceptance was not verified against pinned rmp-serde. No canonical-bin-only contract establishes a defect merely from accepting another encoding.
+
+Evidence: [crates/shamir-tx/src/changefeed.rs:108](../../../../../crates/shamir-tx/src/changefeed.rs#L108); [crates/shamir-tx/src/changefeed.rs:112](../../../../../crates/shamir-tx/src/changefeed.rs#L112); [Cargo.lock:2949](../../../../../Cargo.lock#L2949); [crates/shamir-tx/src/changefeed/tests/changefeed_tests.rs:233](../../../../../crates/shamir-tx/src/changefeed/tests/changefeed_tests.rs#L233).
+
+<a id="review-positive-notes"></a>
+
+### Claim Positive notes — Builder-only rule, isolation wire names, physical codecs and journal round-trip tests
+
+Status: `not-applicable`. Current risk: —.
+
+No query-construction JSON surface was found. Wire-name, codec and journal assertions are registered; they verify their selected domains, not arbitrary schema evolution or malformed inputs.
+
+Evidence: [crates/shamir-tx/src/tests/mod.rs:11](../../../../../crates/shamir-tx/src/tests/mod.rs#L11); [crates/shamir-tx/src/tests/types_tests.rs:23](../../../../../crates/shamir-tx/src/tests/types_tests.rs#L23); [crates/shamir-tx/src/tests/version_codec_tests.rs:73](../../../../../crates/shamir-tx/src/tests/version_codec_tests.rs#L73); [crates/shamir-tx/src/changefeed.rs:657](../../../../../crates/shamir-tx/src/changefeed.rs#L657); [crates/shamir-tx/src/changefeed/tests/changefeed_tests.rs:233](../../../../../crates/shamir-tx/src/changefeed/tests/changefeed_tests.rs#L233); [crates/shamir-tx/src/mvcc_store/mod.rs:68](../../../../../crates/shamir-tx/src/mvcc_store/mod.rs#L68).
+
+## Corrections and qualified non-findings
+
+- ChangelogStore::range_from returns values only. The allegedly always-available corrupt entry key has already been discarded; returning keys or a separate integrity marker requires an API change.
+- Commit versions are sparse: aborted allocations, index/counter-only transactions and multi-record non-tx batches legitimately omit event versions. A simple consecutive-version check would produce false gaps and cannot detect missing terminal tails.
+- Bare to_vec does not establish that field renaming changes the encoded layout. Specific upgrade/rollback failure examples require pinned serializer and schema compatibility evidence.
+- SORTED_TAG now lives in shamir-index, not the historical engine implementation location. Engine round-trip tests do combine manager-generated bounds with tx predicate checking.
+- Rejecting key[len-9] == 0xFF is unnecessary for codec round-trip correctness and can reject legitimate fixed-width RecordIds.
+- A deserialize_byte_buf visitor alone is not proof of bin-only acceptance; deserializer behavior must be checked.
+
+---
+
+<details>
+<summary>Historical report — preserved for provenance; not current status or instructions</summary>
+
 # shamir-tx -- API & wire-protocol design
 
 ## Summary
@@ -85,3 +240,5 @@ shamir-tx's physical key codecs (`version_codec`, ts-key namespace, changefeed j
 - `IsolationLevel`'s wire names are snake_case *and* pinned by test (`types_tests.rs:23-29`), including the exact strings the `shamir-db` tx match arms consume.
 - `version_codec`'s property suite is genuinely thorough for the invariant-respecting domain (round-trip, sort-order equivalence, monotonicity, prefix dominance), and the ts-key namespace split (`TS_TAG = 0x00`, 9 bytes vs ≥10-byte version keys, `mvcc_store/mod.rs:52-88`) is a clean, well-argued collision-free design; ts values are consistently LE on both write and read.
 - The changefeed journal key (`version_key`, BE-8) ordering and msgpack round-trip both have direct tests.
+
+</details>

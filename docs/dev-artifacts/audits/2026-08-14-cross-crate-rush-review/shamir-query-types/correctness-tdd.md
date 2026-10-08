@@ -1,3 +1,143 @@
+<!-- revalidation:2026-10-08 source:92ad58266bf57ddea1fa3c8a47affba1a3a9a096 -->
+# shamir-query-types — correctness-tdd revalidation
+
+Source snapshot: `92ad58266bf57ddea1fa3c8a47affba1a3a9a096`. Revalidated 2026-10-08 by read-only XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run; no source fix is part of this update. Test registration/assertions are evidence of an oracle, not proof of a passing run.
+
+This section is authoritative for current status. Original titles/IDs are retained for traceability; a refuted title is not a current assertion. The collapsed historical report below is superseded, including its counts, severity, scenarios and fix instructions. Plan IDs preserve historical numbering, not a current release mandate. [Workspace methodology and status definitions](../SUMMARY.md#status-definitions).
+
+Most source mechanisms and local test gaps remain. The FilterValue depth-walk omission is fixed elsewhere in the review set. Coarse-admin bypass must be qualified by downstream DAC; InsertedRecord failures do not affect every normal BatchResponse client.
+
+## Current claim decisions
+
+| Claim decisions | Open | Source-fixed | Partial | Refuted | Unverified | N/A |
+|---:|---:|---:|---:|---:|---:|---:|
+| 10 | 9 | 0 | 0 | 1 | 0 | 0 |
+
+These are decisions on report claims, including repeated roots, bundled observations and non-findings—not a unique-bug census. Closed/N/A rows have no current risk; unverified risk is provisional. Pure style and unmeasured optimization claims do not establish runtime impact.
+
+## Parent acceptance refinements
+
+- The pinned MessagePack array visitor rejects unconsumed TableRef elements; local visitor omission alone is not acceptance proof.
+
+<a id="review-1"></a>
+
+### Claim 1 — `BatchOp::ForEach` missing from `is_admin()` while `Batch` is included — gate-bypass-shaped classification asymmetry, unpinned by any test
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+ForEach remains absent from matches!, and both server gates inspect only top-level entries. This bypasses the coarse superuser policy, but execute_as preserves the actor and individual admin handlers enforce DAC; arbitrary privilege escalation is not established.
+
+Evidence: [crates/shamir-query-types/src/batch/batch_op.rs:577](../../../../../crates/shamir-query-types/src/batch/batch_op.rs#L577); [crates/shamir-server/src/db_handler/handler.rs:512](../../../../../crates/shamir-server/src/db_handler/handler.rs#L512); [crates/shamir-server/src/db_handler/tx_handlers.rs:109](../../../../../crates/shamir-server/src/db_handler/tx_handlers.rs#L109); [crates/shamir-db/src/shamir_db/execute/admin_db_repo.rs:95](../../../../../crates/shamir-db/src/shamir_db/execute/admin_db_repo.rs#L95).
+
+<a id="review-2"></a>
+
+### Claim 2 — `QueryResult::op_id` / `DdlOpStatus.op_id` / `request_id` serialize `RecordId` as raw `bin`, contradicting the crate's own base58-string wire convention and the `String`-typed poll request
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+All four cited fields still use RecordId serde without a base58 adapter. Polling requires String; the TS result type also promises string and forwards opId unchanged. Rust-only round trips do not detect the mismatch.
+
+Evidence: [crates/shamir-query-types/src/read/query_result.rs:190](../../../../../crates/shamir-query-types/src/read/query_result.rs#L190); [crates/shamir-query-types/src/read/ddl.rs:14](../../../../../crates/shamir-query-types/src/read/ddl.rs#L14); [crates/shamir-query-types/src/admin/types/index_ops.rs:125](../../../../../crates/shamir-query-types/src/admin/types/index_ops.rs#L125); [crates/shamir-query-types/src/admin/types/index_ops.rs:154](../../../../../crates/shamir-query-types/src/admin/types/index_ops.rs#L154); [crates/shamir-types/src/types/record_id.rs:158](../../../../../crates/shamir-types/src/types/record_id.rs#L158); [crates/shamir-client-ts/src/core/types/batch.ts:269](../../../../../crates/shamir-client-ts/src/core/types/batch.ts#L269); [crates/shamir-client-ts/src/core/client.ts:1276](../../../../../crates/shamir-client-ts/src/core/client.ts#L1276).
+
+<a id="review-3"></a>
+
+### Claim 3 — `InsertedRecord` deserialization never restores `id`, and `get_value_owned("_id")` ignores the `_id` entry in `fields` — data silently inaccessible after a round-trip
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+The visitor still sets id=None while retaining wire _id in fields; the accessor returns only self.id. Registered tests inspect ordinary fields after decoding, not the broken accessor. Normal QueryRecord decoding instead produces Direct, so the scope is narrower than all wire clients.
+
+Evidence: [crates/shamir-query-types/src/write/inserted_record.rs:95](../../../../../crates/shamir-query-types/src/write/inserted_record.rs#L95); [crates/shamir-query-types/src/write/inserted_record.rs:114](../../../../../crates/shamir-query-types/src/write/inserted_record.rs#L114); [crates/shamir-query-types/src/write/inserted_record.rs:157](../../../../../crates/shamir-query-types/src/write/inserted_record.rs#L157); [crates/shamir-query-types/src/read/query_record.rs:151](../../../../../crates/shamir-query-types/src/read/query_record.rs#L151).
+
+Grouping/duplicate: `api-wire-protocol.md#1`. This row is not another independent defect.
+
+<a id="review-4"></a>
+
+### Claim 4 — Planner error paths, `PaginationInfo::compute`, `QueryReference::parse`, and `collect_required_access` are owned here but tested only in other crates
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+Local manifests still lack parser, compute, and recursive access-collector suites. Local planner tests cover other errors and ForEach TooManyQueries, but not the ordinary query-count, unknown-alias, cycle, and dependency-depth paths. Neighboring suites are registered and exercise these functions.
+
+Evidence: [crates/shamir-query-types/src/batch/tests/mod.rs:1](../../../../../crates/shamir-query-types/src/batch/tests/mod.rs#L1); [crates/shamir-query-types/src/read/tests/mod.rs:1](../../../../../crates/shamir-query-types/src/read/tests/mod.rs#L1); [crates/shamir-engine/src/query/batch/tests/planner_tests.rs:106](../../../../../crates/shamir-engine/src/query/batch/tests/planner_tests.rs#L106); [crates/shamir-engine/src/query/batch/tests/reference_tests.rs:7](../../../../../crates/shamir-engine/src/query/batch/tests/reference_tests.rs#L7); [crates/shamir-engine/src/query/read/tests/pagination_tests.rs:72](../../../../../crates/shamir-engine/src/query/read/tests/pagination_tests.rs#L72); [crates/shamir-db/tests/enforcement_dml_e2e.rs:395](../../../../../crates/shamir-db/tests/enforcement_dml_e2e.rs#L395).
+
+<a id="review-5"></a>
+
+### Claim 5 — Vacuous test: `fts_default_mode_is_and` asserts a value the test itself supplies
+
+Status: `confirmed-open`. Current risk: `low`.
+
+The registered test still supplies mode="and" and asserts it without deserialization. Changing or removing the serde default would not affect that assertion.
+
+Evidence: [crates/shamir-query-types/src/filter/tests/filter_enum_tests.rs:29](../../../../../crates/shamir-query-types/src/filter/tests/filter_enum_tests.rs#L29); [crates/shamir-query-types/src/filter/filter_enum.rs:162](../../../../../crates/shamir-query-types/src/filter/filter_enum.rs#L162); [crates/shamir-query-types/src/filter/tests/mod.rs:1](../../../../../crates/shamir-query-types/src/filter/tests/mod.rs#L1).
+
+<a id="review-6"></a>
+
+### Claim 6 — `Pagination::resolve` multiplication can overflow; `page: 0` silently behaves as page 1 while `current_page` echoes 0
+
+Status: `confirmed-open`. Current risk: `low`.
+
+Unchecked multiplication remains, as does unchecked addition in compute. Zero resolves to skip=0 but metadata echoes zero. Neighboring tests already cover zero's resolve behavior, not metadata consistency or overflow.
+
+Evidence: [crates/shamir-query-types/src/read/limit.rs:180](../../../../../crates/shamir-query-types/src/read/limit.rs#L180); [crates/shamir-query-types/src/read/limit.rs:294](../../../../../crates/shamir-query-types/src/read/limit.rs#L294); [crates/shamir-query-types/src/read/limit.rs:296](../../../../../crates/shamir-query-types/src/read/limit.rs#L296); [crates/shamir-engine/src/query/read/tests/pagination_tests.rs:55](../../../../../crates/shamir-engine/src/query/read/tests/pagination_tests.rs#L55).
+
+<a id="review-7"></a>
+
+### Claim 7 — Inline `#[cfg(test)] mod tests` blocks violate the crate's own test-layout convention
+
+Status: `confirmed-open`. Current risk: `low`.
+
+Both implementation files still contain reachable inline test modules alongside registered sibling test files. This is layout debt, not a runtime defect.
+
+Evidence: [crates/shamir-query-types/src/read/query_record.rs:302](../../../../../crates/shamir-query-types/src/read/query_record.rs#L302); [crates/shamir-query-types/src/write/inserted_record.rs:135](../../../../../crates/shamir-query-types/src/write/inserted_record.rs#L135); [CLAUDE.md:598](../../../../../CLAUDE.md#L598).
+
+Grouping/duplicate: `style-claude-md.md#2`. This row is not another independent defect.
+
+<a id="review-8"></a>
+
+### Claim 8 — Four newest `hmac::canonical_*` helpers have zero tests; `create_scram_user` doc shows a trailing `\0` the implementation does not emit
+
+Status: `confirmed-open`. Current risk: `low`.
+
+The four helpers remain absent from the local byte-layout suite. join_null inserts separators only between parts, while the module table still depicts a trailing separator for create_scram_user.
+
+Evidence: [crates/shamir-query-types/src/hmac.rs:68](../../../../../crates/shamir-query-types/src/hmac.rs#L68); [crates/shamir-query-types/src/hmac.rs:89](../../../../../crates/shamir-query-types/src/hmac.rs#L89); [crates/shamir-query-types/src/hmac.rs:357](../../../../../crates/shamir-query-types/src/hmac.rs#L357); [crates/shamir-query-types/src/hmac.rs:402](../../../../../crates/shamir-query-types/src/hmac.rs#L402); [crates/shamir-query-types/src/tests/hmac_tests.rs:2](../../../../../crates/shamir-query-types/src/tests/hmac_tests.rs#L2); [crates/shamir-query-types/src/tests/mod.rs:1](../../../../../crates/shamir-query-types/src/tests/mod.rs#L1).
+
+<a id="review-9"></a>
+
+### Claim 9 — `check_filter_depth` boundary (exactly `MAX_FILTER_DEPTH` passes, +1 fails) is not pinned
+
+Status: `confirmed-open`. Current risk: `nit`.
+
+New Array/Cond regression tests reject well-above-limit trees, but exact combined-node depth 64/65 remains untested. The proposed count of Not wrappers is incorrect because roots, leaves, and now FilterValue nodes also count.
+
+Evidence: [crates/shamir-query-types/src/filter/filter_enum.rs:240](../../../../../crates/shamir-query-types/src/filter/filter_enum.rs#L240); [crates/shamir-query-types/src/filter/filter_enum.rs:242](../../../../../crates/shamir-query-types/src/filter/filter_enum.rs#L242); [crates/shamir-query-types/src/filter/tests/filter_enum_tests.rs:213](../../../../../crates/shamir-query-types/src/filter/tests/filter_enum_tests.rs#L213); [crates/shamir-query-types/src/filter/tests/filter_enum_tests.rs:236](../../../../../crates/shamir-query-types/src/filter/tests/filter_enum_tests.rs#L236).
+
+<a id="review-10"></a>
+
+### Claim 10 — `TableRef` deserialization silently accepts arrays longer than 2 elements
+
+Status: `refuted`. Current risk: —.
+
+Parent pinned-source check refutes successful trailing-element acceptance: TableRef calls deserialize_any, and rmp-serde 1.3.1's array visitor checks the remaining SeqAccess count after visit_seq, returning LengthMismatch for unconsumed elements. Inspected serde buffered visitors also reject leftovers. The local visitor has no explicit check, but that omission is not this decode defect. A dedicated regression remains coverage debt.
+
+Evidence: [crates/shamir-query-types/src/table_ref.rs:71](../../../../../crates/shamir-query-types/src/table_ref.rs#L71); [Cargo.lock:2949](../../../../../Cargo.lock#L2949); [Cargo.lock:3204](../../../../../Cargo.lock#L3204).
+
+Pinned dependency evidence: [rmp-serde 1.3.1, src/decode.rs:566](https://docs.rs/crate/rmp-serde/1.3.1/source/src/decode.rs).
+
+## Corrections and qualified non-findings
+
+- Downgrade finding 1 from an unqualified High privilege-escalation implication to a coarse-policy inconsistency contained by actor-aware DAC.
+- The InsertedRecord defect affects that type's accessor/round-trip contract; ordinary BatchResponse rows deserialize as QueryRecord::Direct.
+- A page-zero resolve test already exists in the registered engine suite.
+- For depth boundaries, count actual Filter and FilterValue nodes. Changing > to >= is a stricter boundary, not a relaxation.
+- The neighboring reference suite covers six parse-error variants; it does not provide an UnexpectedChar assertion.
+
+---
+
+<details>
+<summary>Historical report — preserved for provenance; not current status or instructions</summary>
+
 # shamir-query-types -- Correctness & TDD-coverage
 
 ## Summary
@@ -68,3 +208,5 @@ The crate's serde/wire DTOs and the dependency-extraction half of the planner ar
 - **Severity:** nit
 - **Issue:** `["db", "repo", "table", "extra"]` deserializes successfully as `repo="db", table="repo"`, silently discarding the tail — a mis-shaped payload becomes a *different valid-looking* target table rather than an error. No direct `TableRef` wire tests exist in this crate (only indirect coverage via `BatchOp` payloads).
 - **Suggested fix:** After reading the second element, assert `seq.next_element::<serde::de::IgnoredAny>()?.is_none()` (error on extras), and add a small `table_ref` test file covering both wire forms plus the too-short/too-long rejections.
+
+</details>

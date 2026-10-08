@@ -1,3 +1,42 @@
+<!-- revalidation:2026-10-08 source:92ad58266bf57ddea1fa3c8a47affba1a3a9a096 -->
+# shamir-query-builder-macros — concurrency-lockfree revalidation
+
+Source snapshot: `92ad58266bf57ddea1fa3c8a47affba1a3a9a096`. Revalidated 2026-10-08 by read-only XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run; no source fix is part of this update. Test registration/assertions are evidence of an oracle, not proof of a passing run.
+
+This section is authoritative for current status. Original titles/IDs are retained for traceability; a refuted title is not a current assertion. The collapsed historical report below is superseded, including its counts, severity, scenarios and fix instructions. Plan IDs preserve historical numbering, not a current release mandate. [Workspace methodology and status definitions](../SUMMARY.md#status-definitions).
+
+Own-crate concurrency guarantees remain clean: function-local expansion state, no locks, atomics, tasks, I/O or shared mutable registries. The codegen concern is compile-time and backend-dependent, not a runtime lock-free defect.
+
+## Current claim decisions
+
+| Claim decisions | Open | Source-fixed | Partial | Refuted | Unverified | N/A |
+|---:|---:|---:|---:|---:|---:|---:|
+| 1 | 0 | 0 | 0 | 0 | 1 | 0 |
+
+These are decisions on report claims, including repeated roots, bundled observations and non-findings—not a unique-bug census. Closed/N/A rows have no current risk; unverified risk is provisional. Pure style and unmeasured optimization claims do not establish runtime impact.
+
+<a id="review-1"></a>
+
+### Claim 1 — Quadratic token-stream accumulation in `chain = quote! { #chain … }` loops (pillar 3: O(x → 0) — allocation in loops)
+
+Status: `unverified`. Current risk: `low` (provisional; not a confirmed defect).
+
+All three growing-prefix re-quote loops remain. Pinned quote interpolates TokenStream using clone plus stream extension, not universal recursive deep copying. proc-macro2 fallback traverses accumulated tokens; its compiler backend delegates concatenation to rustc. Compiler-backend O(N²), build-hang behavior and interruptibility assertions are not proven.
+
+Evidence: [crates/shamir-query-builder-macros/src/query_parse.rs:775](../../../../../crates/shamir-query-builder-macros/src/query_parse.rs#L775); [crates/shamir-query-builder-macros/src/query_parse.rs:809](../../../../../crates/shamir-query-builder-macros/src/query_parse.rs#L809); [crates/shamir-query-builder-macros/src/query_parse.rs:847](../../../../../crates/shamir-query-builder-macros/src/query_parse.rs#L847); [Cargo.lock:2538](../../../../../Cargo.lock#L2538); [Cargo.lock:2661](../../../../../Cargo.lock#L2661); [rust-toolchain.toml:15](../../../../../rust-toolchain.toml#L15).
+
+Grouping/duplicate: `SUMMARY.md#4.1`. This row is not another independent defect.
+
+## Corrections and qualified non-findings
+
+- No own-crate concurrency, await-held-lock, scc cardinality, hash-policy or resource-lifecycle surface was found; those guarantees remain not-applicable by construction.
+- Retain growing-prefix concatenation as an optimization candidate, but do not describe compiler-backend quadratic deep copying, an uninterruptible server or a hung build as established facts.
+
+---
+
+<details>
+<summary>Historical report — preserved for provenance; not current status or instructions</summary>
+
 # shamir-query-builder-macros — Concurrency & lock-free invariants
 
 ## Summary
@@ -22,3 +61,5 @@ This proc-macro crate contains no concurrency primitives at all: no `std::sync::
   Single linear pass; apply the same treatment to the `.set(...)` pairs in `lower_doc_map` and the `order_by` items.
 
 No other findings for this theme: no lock of any kind on any path (pillars 1/5 trivially clean), no `.await` anywhere, no `scc::*::len()` (the crate has no `scc` dependency at all), no hash-keyed structures so pillar 4 (`THasher`/Fx) does not apply, no global/static mutable state, and every operation is O(tokens-in) except the loops flagged above.
+
+</details>

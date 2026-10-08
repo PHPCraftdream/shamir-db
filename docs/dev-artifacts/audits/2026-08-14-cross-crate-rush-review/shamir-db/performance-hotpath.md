@@ -1,3 +1,126 @@
+<!-- revalidation:2026-10-08 source:92ad58266bf57ddea1fa3c8a47affba1a3a9a096 -->
+# shamir-db — performance-hotpath revalidation
+
+Source snapshot: `92ad58266bf57ddea1fa3c8a47affba1a3a9a096`. Revalidated 2026-10-08 by read-only XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run; no source fix is part of this update. Test registration/assertions are evidence of an oracle, not proof of a passing run.
+
+This section is authoritative for current status. Original titles/IDs are retained for traceability; a refuted title is not a current assertion. The collapsed historical report below is superseded, including its counts, severity, scenarios and fix instructions. Plan IDs preserve historical numbering, not a current release mandate. [Workspace methodology and status definitions](../SUMMARY.md#status-definitions).
+
+Batch ACL deduplication is fixed, but unindexed catalogue scans and repeated function/list/FK lookups remain. Current byte-level prefilters make the original claim of fully decoding and de-interning every scanned row inaccurate. No latency conclusions were measured.
+
+## Current claim decisions
+
+| Claim decisions | Open | Source-fixed | Partial | Refuted | Unverified | N/A |
+|---:|---:|---:|---:|---:|---:|---:|
+| 9 | 7 | 1 | 1 | 0 | 0 | 0 |
+
+These are decisions on report claims, including repeated roots, bundled observations and non-findings—not a unique-bug census. Closed/N/A rows have no current risk; unverified risk is provisional. Pure style and unmeasured optimization claims do not establish runtime impact.
+
+<a id="review-1"></a>
+
+### Claim 1 — ACL gate runs full catalogue scans per ancestor per op — O(ops × ancestors × catalogue) per request
+
+Status: `partially-fixed`. Current risk: `medium`.
+
+System lookup filters still scan unindexed catalogues, but Authorized now deduplicates repeated action/path pairs. Cost is per distinct check, across differently sized ancestor catalogues; byte-level prefiltering avoids full de-interning of every rejected row.
+
+Evidence: [crates/shamir-db/src/shamir_db/system_store.rs:97](../../../../../crates/shamir-db/src/shamir_db/system_store.rs#L97); [crates/shamir-db/src/shamir_db/system_store.rs:813](../../../../../crates/shamir-db/src/shamir_db/system_store.rs#L813); [crates/shamir-engine/src/query/batch/authorized.rs:102](../../../../../crates/shamir-engine/src/query/batch/authorized.rs#L102); [crates/shamir-engine/src/table/read_exec.rs:895](../../../../../crates/shamir-engine/src/table/read_exec.rs#L895); [crates/shamir-engine/src/table/table.rs:318](../../../../../crates/shamir-engine/src/table/table.rs#L318).
+
+<a id="review-2"></a>
+
+### Claim 2 — `execute_as` re-authorizes every op in a batch without dedupe (the inline ACL cache exists only in `tx_execute_as`)
+
+Status: `fixed`. Current risk: —.
+
+Both entry points now use Authorized's set-based deduplication before execution. The original N-identical-operations/N-traversals mechanism no longer exists.
+
+Evidence: [crates/shamir-db/src/shamir_db/execute/db_execute.rs:40](../../../../../crates/shamir-db/src/shamir_db/execute/db_execute.rs#L40); [crates/shamir-db/src/shamir_db/execute/db_tx.rs:126](../../../../../crates/shamir-db/src/shamir_db/execute/db_tx.rs#L126); [crates/shamir-engine/src/query/batch/authorized.rs:104](../../../../../crates/shamir-engine/src/query/batch/authorized.rs#L104).
+
+Grouping/duplicate: `concurrency-lockfree.md#1`. This row is not another independent defect.
+
+<a id="review-3"></a>
+
+### Claim 3 — Function invocation scans the function catalogue twice plus two settings scans per call
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+User invocation still resolves the function through authorization and loads it again in effective_fn_actor. Root/namespace and any folder ancestors add their own reads; System/Admin skip authorization but effective_fn_actor still loads.
+
+Evidence: [crates/shamir-db/src/shamir_db/shamir_db/function_management.rs:711](../../../../../crates/shamir-db/src/shamir_db/shamir_db/function_management.rs#L711); [crates/shamir-db/src/shamir_db/shamir_db/function_management.rs:720](../../../../../crates/shamir-db/src/shamir_db/shamir_db/function_management.rs#L720); [crates/shamir-db/src/shamir_db/shamir_db/access_control.rs:93](../../../../../crates/shamir-db/src/shamir_db/shamir_db/access_control.rs#L93); [crates/shamir-db/src/shamir_db/shamir_db/access_control.rs:995](../../../../../crates/shamir-db/src/shamir_db/shamir_db/access_control.rs#L995).
+
+<a id="review-4"></a>
+
+### Claim 4 — False "O(1) point lookup" comments encode a scan-based cost model (and hide an O(N²) introspection path)
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+The comments remain false for current unindexed filtered reads. Listing performs one scan per live function/validator, structurally O(live registrations × catalogue rows), quadratic when both scale together.
+
+Evidence: [crates/shamir-db/src/shamir_db/execute/admin_access.rs:21](../../../../../crates/shamir-db/src/shamir_db/execute/admin_access.rs#L21); [crates/shamir-db/src/shamir_db/shamir_db/function_management.rs:377](../../../../../crates/shamir-db/src/shamir_db/shamir_db/function_management.rs#L377); [crates/shamir-db/src/shamir_db/shamir_db/function_management.rs:382](../../../../../crates/shamir-db/src/shamir_db/shamir_db/function_management.rs#L382); [crates/shamir-db/src/shamir_db/shamir_db/validator_management.rs:418](../../../../../crates/shamir-db/src/shamir_db/shamir_db/validator_management.rs#L418).
+
+<a id="review-5"></a>
+
+### Claim 5 — `InternerTouch` computes the epoch via a full interner traversal per touch
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+all_entries still allocates/materializes the dictionary before max. The interner already has an allocation counter, but IDs can have gaps and concurrent publication holes. Max of this request's mappings is not the global epoch, especially for retouches or an empty request.
+
+Evidence: [crates/shamir-db/src/shamir_db/execute/admin_interner.rs:170](../../../../../crates/shamir-db/src/shamir_db/execute/admin_interner.rs#L170); [crates/shamir-types/src/core/interner/interner.rs:157](../../../../../crates/shamir-types/src/core/interner/interner.rs#L157); [crates/shamir-types/src/core/interner/interner.rs:328](../../../../../crates/shamir-types/src/core/interner/interner.rs#L328); [crates/shamir-types/src/core/interner/interner.rs:522](../../../../../crates/shamir-types/src/core/interner/interner.rs#L522).
+
+<a id="review-6"></a>
+
+### Claim 6 — Boot path pairs repos with their tables via an O(repos × tables) nested scan
+
+Status: `confirmed-open`. Current risk: `low`.
+
+Every repository still filters the entire table_records list. One-pass grouping would remove the product term; this is startup structural work, not a measured restart delay.
+
+Evidence: [crates/shamir-db/src/shamir_db/shamir_db/core.rs:210](../../../../../crates/shamir-db/src/shamir_db/shamir_db/core.rs#L210); [crates/shamir-db/src/shamir_db/shamir_db/core.rs:230](../../../../../crates/shamir-db/src/shamir_db/shamir_db/core.rs#L230).
+
+<a id="review-7"></a>
+
+### Claim 7 — DDL FK guards re-scan the table catalogue once per sibling table — O(tables²) per rename/drop
+
+Status: `confirmed-open`. Current risk: `low`.
+
+Both guards still call load_table_record per sibling, and that lookup scans the global table catalogue. Exact structural cost is O(repo siblings × global catalogue rows), not necessarily the square of one count.
+
+Evidence: [crates/shamir-db/src/shamir_db/shamir_db/table_management.rs:258](../../../../../crates/shamir-db/src/shamir_db/shamir_db/table_management.rs#L258); [crates/shamir-db/src/shamir_db/execute/admin_table_index.rs:165](../../../../../crates/shamir-db/src/shamir_db/execute/admin_table_index.rs#L165); [crates/shamir-db/src/shamir_db/system_store.rs:870](../../../../../crates/shamir-db/src/shamir_db/system_store.rs#L870).
+
+<a id="review-8"></a>
+
+### Claim 8 — Per-invocation gateway construction allocates and intersects allowlists via `Vec::contains`
+
+Status: `confirmed-open`. Current risk: `low`.
+
+Function metadata is cloned, a fresh effective Vec is built using linear contains, and a gateway Arc is allocated per invocation. Allocation/product complexity is proven; list sizes, material latency and benefits of caching are not measured.
+
+Evidence: [crates/shamir-db/src/shamir_db/shamir_db/core.rs:832](../../../../../crates/shamir-db/src/shamir_db/shamir_db/core.rs#L832); [crates/shamir-db/src/shamir_db/shamir_db/core.rs:847](../../../../../crates/shamir-db/src/shamir_db/shamir_db/core.rs#L847); [crates/shamir-db/src/shamir_db/shamir_db/core.rs:851](../../../../../crates/shamir-db/src/shamir_db/shamir_db/core.rs#L851).
+
+<a id="review-9"></a>
+
+### Claim 9 — Nit: intentionally-leaked per-key lock maps are the only unbounded-growth sites — documented, but key count is unbounded by unique-name volume
+
+Status: `confirmed-open`. Current risk: `nit`.
+
+Per-key lock entries remain non-evicting and document rare mutation contention. The 'only unbounded-growth sites' claim is unsupported: catalogues/registries also grow. The admin_user_locks production key family is currently schema-only.
+
+Evidence: [crates/shamir-db/src/shamir_db/shamir_db/core.rs:55](../../../../../crates/shamir-db/src/shamir_db/shamir_db/core.rs#L55); [crates/shamir-db/src/shamir_db/shamir_db/core.rs:66](../../../../../crates/shamir-db/src/shamir_db/shamir_db/core.rs#L66); [crates/shamir-db/src/shamir_db/shamir_db/core.rs:99](../../../../../crates/shamir-db/src/shamir_db/shamir_db/core.rs#L99); [crates/shamir-db/src/shamir_db/execute/admin_schema.rs:93](../../../../../crates/shamir-db/src/shamir_db/execute/admin_schema.rs#L93).
+
+## Corrections and qualified non-findings
+
+- Replace per-op ACL cost with per-distinct-(action,path) cost after Authorized deduplication; do not call a two-variable product inherently quadratic.
+- Remove the 5 × 10k full-decodes example: ancestors use different catalogue tables, and byte-level prefiltering rejects rows without full de-interning.
+- authorize_gate still sets up one database/repository/table and has no catalogue-cardinality axis; it does not validate the reported scaling or latency multipliers.
+- A Filter::Eq substitution is not a keyed storage shortcut. Current SetOp key semantics do not by themselves prove an efficient facade get-by-key read exists.
+- InternerTouch's suggested mappings-max fix is incorrect. A replacement epoch accessor must respect global published-entry and gap semantics.
+- Per-key lock retention is documented admin/schema design debt, not an established request-hot-path leak or exclusive source of unbounded growth.
+
+---
+
+<details>
+<summary>Historical report — preserved for provenance; not current status or instructions</summary>
+
 # shamir-db -- Performance & O(x->0)
 
 ## Summary
@@ -67,3 +190,5 @@ Severity: nit
 Issue: Entries "leak by design" (documented inline at each field): one `Arc<Mutex<()>>` per unique user/group/db-name/schema-key forever. All are gated by rare admin/DDL ops, so memory growth is slow and small per entry; the contention model is documented per the CLAUDE.md exception categories. Recorded here only so the theme is complete: no eviction exists, and `admin_user_locks` has additionally accreted a second duty (schema-DDL keys, `admin_schema.rs:73-93`) beyond its original per-user RMW role while `GrantRole`/`RevokeRole` no longer take it (`admin_users_roles.rs:137-141`) — worth a periodic re-audit that every remaining key family is still DDL-only.
 Failure scenario: none at current op frequencies.
 Suggested fix: none required now; if a family ever migrates to a per-request path, replace with weak-value entries or an LRU under the same documented-contention discipline.
+
+</details>

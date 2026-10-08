@@ -1,3 +1,359 @@
+<!-- revalidation:2026-10-08 source:92ad58266bf57ddea1fa3c8a47affba1a3a9a096 -->
+# shamir-transport-ipc — SUMMARY revalidation
+
+Source snapshot: `92ad58266bf57ddea1fa3c8a47affba1a3a9a096`. Revalidated 2026-10-08 by read-only XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run; no source fix is part of this update. Test registration/assertions are evidence of an oracle, not proof of a passing run.
+
+This section is authoritative for current status. Original titles/IDs are retained for traceability; a refuted title is not a current assertion. The collapsed historical report below is superseded, including its counts, severity, scenarios and fix instructions. Plan IDs preserve historical numbering, not a current release mandate. [Workspace methodology and status definitions](../SUMMARY.md#status-definitions).
+
+The IPC crate is unchanged from its introduction in 74e64493. All 18 numbered entries were revalidated; 3.1 duplicates 1.4, leaving 17 unique items. No source-proven fixes exist. The Windows accept-state defect, Unix cleanup/restart defects, missing endpoint resolution, test gaps, and API/documentation debt remain. Several original reachability and non-finding guarantees require qualification.
+
+## Current claim decisions
+
+| Claim decisions | Open | Source-fixed | Partial | Refuted | Unverified | N/A |
+|---:|---:|---:|---:|---:|---:|---:|
+| 18 | 18 | 0 | 0 | 0 | 0 | 0 |
+
+These are decisions on report claims, including repeated roots, bundled observations and non-findings—not a unique-bug census. Closed/N/A rows have no current risk; unverified risk is provisional. Pure style and unmeasured optimization claims do not establish runtime impact.
+
+<a id="review-1-1"></a>
+
+### Claim 1.1 — `accept()` error path leaves `next = None`; next call panics via `expect` and silently kills the accept loop
+
+Status: `confirmed-open`. Current risk: `high`.
+
+take() precedes both fallible operations and restoration. Either error leaves next=None; the server retries, reaches expect, and loses its listener task. JoinHandle errors are ignored at shutdown. Exhaustion-class reachability remains conditional; the claimed deterministic 255-instance cap is false because pinned Tokio defaults to unlimited instances.
+
+Evidence: [crates/shamir-transport-ipc/src/windows.rs:83](../../../../../crates/shamir-transport-ipc/src/windows.rs#L83); [crates/shamir-transport-ipc/src/windows.rs:113](../../../../../crates/shamir-transport-ipc/src/windows.rs#L113); [crates/shamir-server/src/server/server_launcher.rs:671](../../../../../crates/shamir-server/src/server/server_launcher.rs#L671); [crates/shamir-server/src/server/server_launcher.rs:1271](../../../../../crates/shamir-server/src/server/server_launcher.rs#L1271); [crates/shamir-server/src/server/server_handle.rs:114](../../../../../crates/shamir-server/src/server/server_handle.rs#L114); [Cargo.lock:4195](../../../../../Cargo.lock#L4195).
+
+<a id="review-1-2"></a>
+
+### Claim 1.2 — Unix `bind()`: `set_permissions` failure leaks the socket file — with default (wide) permissions — and poisons the next start
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+chmod failure returns before Self construction, so the listener fd closes but its pathname is not removed by IpcListener::Drop. Subsequent bind encounters the residue. Its mode depends on umask; universally wide permissions and a live-channel security bypass are not established.
+
+Evidence: [crates/shamir-transport-ipc/src/unix.rs:48](../../../../../crates/shamir-transport-ipc/src/unix.rs#L48); [crates/shamir-transport-ipc/src/unix.rs:67](../../../../../crates/shamir-transport-ipc/src/unix.rs#L67); [crates/shamir-server/src/server/server_launcher.rs:645](../../../../../crates/shamir-server/src/server/server_launcher.rs#L645).
+
+<a id="review-1-3"></a>
+
+### Claim 1.3 — No recovery from a crash-left stale socket path (unclean exit bricks the listener until manual rm)
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+bind directly delegates to Tokio without stale-path reclamation; cleanup exists only in Drop. A process exit that skips destructors can therefore prevent restart. Ordinary unwinding panics do not necessarily leave residue. Probe-then-unlink alone is not race-safe between concurrent reclaimers.
+
+Evidence: [crates/shamir-transport-ipc/src/unix.rs:50](../../../../../crates/shamir-transport-ipc/src/unix.rs#L50); [crates/shamir-transport-ipc/src/unix.rs:68](../../../../../crates/shamir-transport-ipc/src/unix.rs#L68); [crates/shamir-server/src/server/server_launcher.rs:645](../../../../../crates/shamir-server/src/server/server_launcher.rs#L645).
+
+<a id="review-1-4"></a>
+
+### Claim 1.4 — chmod-after-bind race window (documented, spec-prescribed — report as accepted risk with a structural option)
+
+Status: `confirmed-open`. Current risk: `low`.
+
+Socket publication still precedes chmod, as the normative contract prescribes. Cross-user reachability depends on initial mode, directory access, and platform permission enforcement; SCRAM or authenticated-ticket validation still follows. No await does not exclude other runtime threads or OS preemption, and microsecond timing is unmeasured.
+
+Evidence: [crates/shamir-transport-ipc/src/unix.rs:3](../../../../../crates/shamir-transport-ipc/src/unix.rs#L3); [crates/shamir-transport-ipc/src/unix.rs:50](../../../../../crates/shamir-transport-ipc/src/unix.rs#L50); [docs/guide-docs/client-server-protocol-spec/TRANSPORT_UNIX.md:49](../../../../../docs/guide-docs/client-server-protocol-spec/TRANSPORT_UNIX.md#L49); [docs/guide-docs/client-server-protocol-spec/TRANSPORT_UNIX.md:56](../../../../../docs/guide-docs/client-server-protocol-spec/TRANSPORT_UNIX.md#L56); [crates/shamir-server/src/connection/handshake.rs:735](../../../../../crates/shamir-server/src/connection/handshake.rs#L735).
+
+<a id="review-1-5"></a>
+
+### Claim 1.5 — Windows test gaps: DACL content and first-instance exclusivity are untested (spec §11 checklist items)
+
+Status: `confirmed-open`. Current risk: `low`.
+
+The registered Windows module contains only byte round-trip and second-client tests. Neither inspects the created DACL nor attempts a competing listener bind. Source construction matches the intended SID-based DACL, but these tests cannot detect its widening or removal of first-instance exclusivity.
+
+Evidence: [crates/shamir-transport-ipc/src/lib.rs:34](../../../../../crates/shamir-transport-ipc/src/lib.rs#L34); [crates/shamir-transport-ipc/src/tests/mod.rs:3](../../../../../crates/shamir-transport-ipc/src/tests/mod.rs#L3); [crates/shamir-transport-ipc/src/tests/windows_tests.rs:16](../../../../../crates/shamir-transport-ipc/src/tests/windows_tests.rs#L16); [crates/shamir-transport-ipc/src/tests/windows_tests.rs:41](../../../../../crates/shamir-transport-ipc/src/tests/windows_tests.rs#L41); [crates/shamir-transport-ipc/src/windows.rs:148](../../../../../crates/shamir-transport-ipc/src/windows.rs#L148); [docs/guide-docs/client-server-protocol-spec/TRANSPORT_UNIX.md:157](../../../../../docs/guide-docs/client-server-protocol-spec/TRANSPORT_UNIX.md#L157).
+
+<a id="review-1-6"></a>
+
+### Claim 1.6 — No test drives `accept()` through an error, and no Unix test pins bind-on-existing-path semantics
+
+Status: `confirmed-open`. Current risk: `low`.
+
+Reachable unit tests exercise successful accept, permissions, and clean Unix Drop only. Neighbor IPC integration tests exercise successful authentication/resumption, not injected accept errors, stale/live bind collisions, or nonexistent-endpoint errors. Unit clients also bypass the crate's public connect wrapper.
+
+Evidence: [crates/shamir-transport-ipc/src/tests/mod.rs:1](../../../../../crates/shamir-transport-ipc/src/tests/mod.rs#L1); [crates/shamir-transport-ipc/src/tests/unix_tests.rs:8](../../../../../crates/shamir-transport-ipc/src/tests/unix_tests.rs#L8); [crates/shamir-transport-ipc/src/tests/windows_tests.rs:16](../../../../../crates/shamir-transport-ipc/src/tests/windows_tests.rs#L16); [crates/shamir-server/tests/ipc_e2e.rs:125](../../../../../crates/shamir-server/tests/ipc_e2e.rs#L125); [crates/shamir-server/tests/ipc_resume_e2e.rs:218](../../../../../crates/shamir-server/tests/ipc_resume_e2e.rs#L218); [crates/shamir-client/tests/smoke_local.rs:98](../../../../../crates/shamir-client/tests/smoke_local.rs#L98).
+
+<a id="review-2-1"></a>
+
+### Claim 2.1 — Rotation leaves a no-pending-instance window → concurrent second client gets `ERROR_PIPE_BUSY`; the client does no BUSY retry
+
+Status: `confirmed-open`. Current risk: `low`.
+
+The replacement instance is created only after connect completes; public connect performs one open and the SDK only adds an optional timeout. Pinned Tokio documents BUSY retry as necessary. Reordering reduces the rotation gap but does not eliminate busy states when clients consume pending instances faster than the server replenishes them.
+
+Evidence: [crates/shamir-transport-ipc/src/windows.rs:51](../../../../../crates/shamir-transport-ipc/src/windows.rs#L51); [crates/shamir-transport-ipc/src/windows.rs:88](../../../../../crates/shamir-transport-ipc/src/windows.rs#L88); [crates/shamir-client/src/client.rs:234](../../../../../crates/shamir-client/src/client.rs#L234); [Cargo.lock:4195](../../../../../Cargo.lock#L4195).
+
+<a id="review-3-1"></a>
+
+### Claim 3.1 — Unix bind→chmod window is the only transport-reachable security gap; consider the atomic-rename hardening
+
+Status: `confirmed-open`. Current risk: `low`.
+
+Same unchanged publication-before-chmod mechanism as 1.4. The assertion that this is the only security gap is unverified, not a source-proven exhaustive guarantee. Dependency reuse is verified: IPC and socket2 both use windows-sys 0.60.2, which existed before IPC introduction.
+
+Evidence: [crates/shamir-transport-ipc/src/unix.rs:50](../../../../../crates/shamir-transport-ipc/src/unix.rs#L50); [crates/shamir-transport-ipc/Cargo.toml:25](../../../../../crates/shamir-transport-ipc/Cargo.toml#L25); [Cargo.lock:3735](../../../../../Cargo.lock#L3735); [Cargo.lock:3953](../../../../../Cargo.lock#L3953); [Cargo.lock:5182](../../../../../Cargo.lock#L5182).
+
+Grouping/duplicate: `SUMMARY.md#1.4`. This row is not another independent defect.
+
+<a id="review-3-2"></a>
+
+### Claim 3.2 — Stale doc: "reject_remote_clients … is left at its default" while the code explicitly pins it
+
+Status: `confirmed-open`. Current risk: `nit`.
+
+The module documentation still describes reliance on a default, while create_instance explicitly sets reject_remote_clients(true). This is documentation drift, not a missing remote-client rejection setting.
+
+Evidence: [crates/shamir-transport-ipc/src/windows.rs:11](../../../../../crates/shamir-transport-ipc/src/windows.rs#L11); [crates/shamir-transport-ipc/src/windows.rs:117](../../../../../crates/shamir-transport-ipc/src/windows.rs#L117).
+
+<a id="review-4-1"></a>
+
+### Claim 4.1 — `tokio features = ["full"]` pulls subsystems this crate never uses
+
+Status: `confirmed-open`. Current risk: `nit`.
+
+The manifest still enables full, including process/signal/fs facilities unused by the shim. Runtime/macros/io-util are also used by tests. Feature breadth is source-proven; additional build cost is unmeasured and may already be unified through consumers. No runtime-performance severity is established.
+
+Evidence: [crates/shamir-transport-ipc/Cargo.toml:14](../../../../../crates/shamir-transport-ipc/Cargo.toml#L14); [crates/shamir-transport-ipc/src/tests/windows_tests.rs:1](../../../../../crates/shamir-transport-ipc/src/tests/windows_tests.rs#L1); [crates/shamir-client/Cargo.toml:19](../../../../../crates/shamir-client/Cargo.toml#L19); [crates/shamir-server/Cargo.toml:56](../../../../../crates/shamir-server/Cargo.toml#L56); [Cargo.lock:4195](../../../../../Cargo.lock#L4195).
+
+<a id="review-5-1"></a>
+
+### Claim 5.1 — Spec §9 logical endpoint names are unimplemented — and fail *differently* per OS
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+Both transport implementations pass addresses verbatim; server validation accepts any nonempty IPC address and the SDK performs no resolution. Thus the specified Windows logical-name mapping and client documentation promise remain unmet. Unix relative paths are accepted rather than resolved to a defined logical namespace. An existing stale/live pathname prevents server bind; the original successful-bind-to-existing-socket scenario is incorrect.
+
+Evidence: [crates/shamir-transport-ipc/src/unix.rs:39](../../../../../crates/shamir-transport-ipc/src/unix.rs#L39); [crates/shamir-transport-ipc/src/windows.rs:51](../../../../../crates/shamir-transport-ipc/src/windows.rs#L51); [crates/shamir-server/src/config.rs:772](../../../../../crates/shamir-server/src/config.rs#L772); [crates/shamir-client/src/client.rs:119](../../../../../crates/shamir-client/src/client.rs#L119); [crates/shamir-client/src/client.rs:680](../../../../../crates/shamir-client/src/client.rs#L680); [docs/guide-docs/client-server-protocol-spec/TRANSPORT_UNIX.md:131](../../../../../docs/guide-docs/client-server-protocol-spec/TRANSPORT_UNIX.md#L131); [crates/shamir-client/tests/smoke_local.rs:45](../../../../../crates/shamir-client/tests/smoke_local.rs#L45).
+
+<a id="review-5-2"></a>
+
+### Claim 5.2 — Platform-divergent public signatures: `connect`/`bind`/`path()` differ across `cfg`
+
+Status: `confirmed-open`. Current risk: `low`.
+
+Unix still accepts AsRef<Path> and returns &Path; Windows connect accepts &str, bind accepts Into<String>, and path returns &str. Current string-based callers fit both, but Path-based generic callers are not portable. This is API portability debt, not a demonstrated failure of current consumers.
+
+Evidence: [crates/shamir-transport-ipc/src/unix.rs:39](../../../../../crates/shamir-transport-ipc/src/unix.rs#L39); [crates/shamir-transport-ipc/src/unix.rs:48](../../../../../crates/shamir-transport-ipc/src/unix.rs#L48); [crates/shamir-transport-ipc/src/unix.rs:62](../../../../../crates/shamir-transport-ipc/src/unix.rs#L62); [crates/shamir-transport-ipc/src/windows.rs:51](../../../../../crates/shamir-transport-ipc/src/windows.rs#L51); [crates/shamir-transport-ipc/src/windows.rs:68](../../../../../crates/shamir-transport-ipc/src/windows.rs#L68); [crates/shamir-transport-ipc/src/windows.rs:98](../../../../../crates/shamir-transport-ipc/src/windows.rs#L98).
+
+<a id="review-5-3"></a>
+
+### Claim 5.3 — `IpcStream`/`IpcClientStream` are transparent aliases — OS-specific inherent methods leak through the "unified" surface
+
+Status: `confirmed-open`. Current risk: `low`.
+
+The public streams remain transparent aliases to different Tokio types. Shared callers currently use generic I/O, but platform-specific inherent methods remain available, and lib.rs does not document an AsyncRead/AsyncWrite-only portability rule. Newtypes are an optional enforcement choice rather than proof of a present runtime defect.
+
+Evidence: [crates/shamir-transport-ipc/src/unix.rs:30](../../../../../crates/shamir-transport-ipc/src/unix.rs#L30); [crates/shamir-transport-ipc/src/windows.rs:39](../../../../../crates/shamir-transport-ipc/src/windows.rs#L39); [crates/shamir-transport-ipc/src/lib.rs:3](../../../../../crates/shamir-transport-ipc/src/lib.rs#L3); [crates/shamir-client/src/client.rs:150](../../../../../crates/shamir-client/src/client.rs#L150); [crates/shamir-server/src/framer.rs:275](../../../../../crates/shamir-server/src/framer.rs#L275).
+
+<a id="review-5-4"></a>
+
+### Claim 5.4 — Bind-collision error text is OS-asymmetric and unmapped
+
+Status: `confirmed-open`. Current risk: `nit`.
+
+Unix delegates bind errors; Windows uses first_pipe_instance(true) and propagates raw creation errors. Pinned Tokio documents competing first-instance creation as PermissionDenied. No mapping or explanatory collision note exists. AccessDenied can also represent genuine permission failures, so blanket remapping would be misleading.
+
+Evidence: [crates/shamir-transport-ipc/src/unix.rs:50](../../../../../crates/shamir-transport-ipc/src/unix.rs#L50); [crates/shamir-transport-ipc/src/windows.rs:71](../../../../../crates/shamir-transport-ipc/src/windows.rs#L71); [crates/shamir-transport-ipc/src/windows.rs:116](../../../../../crates/shamir-transport-ipc/src/windows.rs#L116); [Cargo.lock:4195](../../../../../Cargo.lock#L4195).
+
+<a id="review-6-1"></a>
+
+### Claim 6.1 — Declared-but-unused `thiserror` dependency — the typed error this crate needs was never written
+
+Status: `confirmed-open`. Current risk: `low`.
+
+thiserror remains declared but unused; the crate exposes io::Result and no IpcError. The unused dependency is confirmed, but the assertion that an enum would force correct lifecycle handling is unsupported. Repairing listener invariants does not inherently require replacing io::Error; removing the unused dependency is a valid alternative.
+
+Evidence: [crates/shamir-transport-ipc/Cargo.toml:17](../../../../../crates/shamir-transport-ipc/Cargo.toml#L17); [crates/shamir-transport-ipc/src/windows.rs:83](../../../../../crates/shamir-transport-ipc/src/windows.rs#L83); [crates/shamir-transport-ipc/src/unix.rs:48](../../../../../crates/shamir-transport-ipc/src/unix.rs#L48); [Cargo.lock:3739](../../../../../Cargo.lock#L3739).
+
+<a id="review-6-2"></a>
+
+### Claim 6.2 — No lifecycle tests for the Windows listener; Unix-only `Drop` coverage
+
+Status: `confirmed-open`. Current risk: `low`.
+
+No registered Windows test explicitly binds, drops the final instance, and rebinds the same name. Existing tests cannot pin this lifecycle property. The intended test must have no surviving accepted server streams: dropping the listener alone need not release a name still retained by another pipe instance.
+
+Evidence: [crates/shamir-transport-ipc/src/tests/windows_tests.rs:16](../../../../../crates/shamir-transport-ipc/src/tests/windows_tests.rs#L16); [crates/shamir-transport-ipc/src/tests/windows_tests.rs:41](../../../../../crates/shamir-transport-ipc/src/tests/windows_tests.rs#L41); [crates/shamir-transport-ipc/src/tests/unix_tests.rs:47](../../../../../crates/shamir-transport-ipc/src/tests/unix_tests.rs#L47); [crates/shamir-transport-ipc/src/windows.rs:57](../../../../../crates/shamir-transport-ipc/src/windows.rs#L57).
+
+<a id="review-7-1"></a>
+
+### Claim 7.1 — Crate-level `src/tests/` instead of per-module `tests/` directories
+
+Status: `confirmed-open`. Current risk: `nit`.
+
+Tests remain grouped beneath the crate root rather than beside each implementation module. The root manifest and platform registration are correct; this is only the original literal-layout policy concern. The review's no-action recommendation remains reasonable for this small public API test group.
+
+Evidence: [CLAUDE.md:575](../../../../../CLAUDE.md#L575); [crates/shamir-transport-ipc/src/lib.rs:34](../../../../../crates/shamir-transport-ipc/src/lib.rs#L34); [crates/shamir-transport-ipc/src/tests/mod.rs:1](../../../../../crates/shamir-transport-ipc/src/tests/mod.rs#L1).
+
+<a id="review-7-2"></a>
+
+### Claim 7.2 — CLAUDE.md's workspace roster predates this crate (repo-level drift)
+
+Status: `confirmed-open`. Current risk: `nit`.
+
+CLAUDE.md still lists 23 crates without IPC, while the workspace glob includes IPC as the 24th default Rust member. AGENTS.md has the same omission. This is repository-context drift only.
+
+Evidence: [CLAUDE.md:30](../../../../../CLAUDE.md#L30); [CLAUDE.md:39](../../../../../CLAUDE.md#L39); [AGENTS.md:34](../../../../../AGENTS.md#L34); [Cargo.toml:2](../../../../../Cargo.toml#L2); [Cargo.toml:14](../../../../../Cargo.toml#L14); [crates/shamir-transport-ipc/Cargo.toml:2](../../../../../crates/shamir-transport-ipc/Cargo.toml#L2).
+
+## Current fix-plan state
+
+| Claim decisions | Open | Source-fixed | Partial | Refuted | Unverified | N/A |
+|---:|---:|---:|---:|---:|---:|---:|
+| 11 | 11 | 0 | 0 | 0 | 0 | 0 |
+
+A source-fixed item closes only its stated mechanism. Partial items retain the obligations named below; proposed fixes must obey the corrections and current contracts, not merely copy the historical recipe.
+
+<a id="plan-p0-1"></a>
+
+### Plan P0.1 — P0.1
+
+Status: `confirmed-open`. Current risk: —.
+
+No invariant repair or error redesign exists. Preserve listener ownership across every failure before replacing the instance; simple reordering after take can still poison state. Early replenishment alone does not fully close BUSY failures under bursts.
+
+Evidence: [crates/shamir-transport-ipc/src/windows.rs:83](../../../../../crates/shamir-transport-ipc/src/windows.rs#L83); [crates/shamir-transport-ipc/src/windows.rs:89](../../../../../crates/shamir-transport-ipc/src/windows.rs#L89); [crates/shamir-transport-ipc/src/windows.rs:51](../../../../../crates/shamir-transport-ipc/src/windows.rs#L51).
+
+<a id="plan-p0-2"></a>
+
+### Plan P0.2 — P0.2
+
+Status: `confirmed-open`. Current risk: —.
+
+Neither accept-error recovery nor same-name bind/drop/rebind tests are registered. Cover each fallible branch deterministically; a client closing immediately is not verified to induce an accept error. Add the Unix collision/nonexistent-endpoint cases too before claiming all of 1.6 closed.
+
+Evidence: [crates/shamir-transport-ipc/src/lib.rs:34](../../../../../crates/shamir-transport-ipc/src/lib.rs#L34); [crates/shamir-transport-ipc/src/tests/mod.rs:1](../../../../../crates/shamir-transport-ipc/src/tests/mod.rs#L1); [crates/shamir-transport-ipc/src/tests/windows_tests.rs:16](../../../../../crates/shamir-transport-ipc/src/tests/windows_tests.rs#L16); [crates/shamir-transport-ipc/src/tests/unix_tests.rs:8](../../../../../crates/shamir-transport-ipc/src/tests/unix_tests.rs#L8).
+
+<a id="plan-p0-3"></a>
+
+### Plan P0.3 — P0.3
+
+Status: `confirmed-open`. Current risk: —.
+
+chmod failure still returns directly without pathname cleanup. An unlink attempt must be added and its failure semantics considered; silently ignoring a failed unlink cannot guarantee absence of residue.
+
+Evidence: [crates/shamir-transport-ipc/src/unix.rs:51](../../../../../crates/shamir-transport-ipc/src/unix.rs#L51); [crates/shamir-transport-ipc/src/unix.rs:74](../../../../../crates/shamir-transport-ipc/src/unix.rs#L74).
+
+<a id="plan-p1-4"></a>
+
+### Plan P1.4 — P1.4
+
+Status: `confirmed-open`. Current risk: —.
+
+No stale-path recovery exists. The proposed connect-probe/unlink sequence additionally needs ownership and concurrent-reclaimer safety; a prior refusal does not authorize deleting a pathname subsequently rebound by another process.
+
+Evidence: [crates/shamir-transport-ipc/src/unix.rs:48](../../../../../crates/shamir-transport-ipc/src/unix.rs#L48); [crates/shamir-transport-ipc/src/unix.rs:68](../../../../../crates/shamir-transport-ipc/src/unix.rs#L68); [crates/shamir-server/src/server/server_launcher.rs:645](../../../../../crates/shamir-server/src/server/server_launcher.rs#L645).
+
+<a id="plan-p1-5"></a>
+
+### Plan P1.5 — P1.5
+
+Status: `confirmed-open`. Current risk: —.
+
+There is neither shared endpoint resolution nor validation forbidding logical names; the client promise is unchanged. Specify Unix logical-name semantics and distinguish URI parsing from raw endpoint resolution before implementing; alternatively consistently require explicit platform endpoints.
+
+Evidence: [docs/guide-docs/client-server-protocol-spec/TRANSPORT_UNIX.md:131](../../../../../docs/guide-docs/client-server-protocol-spec/TRANSPORT_UNIX.md#L131); [crates/shamir-server/src/config.rs:772](../../../../../crates/shamir-server/src/config.rs#L772); [crates/shamir-client/src/client.rs:119](../../../../../crates/shamir-client/src/client.rs#L119); [crates/shamir-transport-ipc/src/windows.rs:51](../../../../../crates/shamir-transport-ipc/src/windows.rs#L51).
+
+<a id="plan-p1-6"></a>
+
+### Plan P1.6 — P1.6
+
+Status: `confirmed-open`. Current risk: —.
+
+DACL inspection and competing-bind tests remain absent. Assertions should check effective ACE membership/protection and exclusion of unintended principals, not merely accept an SDDL prefix that permits extra ACEs.
+
+Evidence: [crates/shamir-transport-ipc/src/tests/windows_tests.rs:16](../../../../../crates/shamir-transport-ipc/src/tests/windows_tests.rs#L16); [crates/shamir-transport-ipc/src/windows.rs:148](../../../../../crates/shamir-transport-ipc/src/windows.rs#L148); [crates/shamir-transport-ipc/src/windows.rs:116](../../../../../crates/shamir-transport-ipc/src/windows.rs#L116).
+
+<a id="plan-p1-7"></a>
+
+### Plan P1.7 — P1.7
+
+Status: `confirmed-open`. Current risk: —.
+
+No typed IPC error enum was introduced and the unused dependency remains. The enum is an optional API design, not a required lifecycle mechanism; retaining io::Result with restored state and removing thiserror also addresses the actionable dependency claim.
+
+Evidence: [crates/shamir-transport-ipc/Cargo.toml:17](../../../../../crates/shamir-transport-ipc/Cargo.toml#L17); [crates/shamir-transport-ipc/src/windows.rs:83](../../../../../crates/shamir-transport-ipc/src/windows.rs#L83); [crates/shamir-transport-ipc/src/unix.rs:48](../../../../../crates/shamir-transport-ipc/src/unix.rs#L48).
+
+<a id="plan-p1-8"></a>
+
+### Plan P1.8 — P1.8
+
+Status: `confirmed-open`. Current risk: —.
+
+connect, bind, and path signatures are still different. A common endpoint contract remains necessary if signature parity is desired; existing string consumers are not proof of generic portability.
+
+Evidence: [crates/shamir-transport-ipc/src/unix.rs:39](../../../../../crates/shamir-transport-ipc/src/unix.rs#L39); [crates/shamir-transport-ipc/src/unix.rs:62](../../../../../crates/shamir-transport-ipc/src/unix.rs#L62); [crates/shamir-transport-ipc/src/windows.rs:51](../../../../../crates/shamir-transport-ipc/src/windows.rs#L51); [crates/shamir-transport-ipc/src/windows.rs:98](../../../../../crates/shamir-transport-ipc/src/windows.rs#L98).
+
+<a id="plan-p2-9"></a>
+
+### Plan P2.9 — P2.9
+
+Status: `confirmed-open`. Current risk: —.
+
+Optional pre-publication permission hardening is absent. Temporary bind/chmod/rename requires a protected directory and collision-safe publication; ordinary replacing rename can overwrite an existing endpoint and is not an unconditional security fix.
+
+Evidence: [crates/shamir-transport-ipc/src/unix.rs:50](../../../../../crates/shamir-transport-ipc/src/unix.rs#L50); [docs/guide-docs/client-server-protocol-spec/TRANSPORT_UNIX.md:56](../../../../../docs/guide-docs/client-server-protocol-spec/TRANSPORT_UNIX.md#L56).
+
+<a id="plan-p2-10"></a>
+
+### Plan P2.10 — P2.10
+
+Status: `confirmed-open`. Current risk: —.
+
+Neither newtypes nor the proposed portability-only usage documentation exist. Current consumers use generic I/O, so this remains optional abstraction hardening.
+
+Evidence: [crates/shamir-transport-ipc/src/lib.rs:3](../../../../../crates/shamir-transport-ipc/src/lib.rs#L3); [crates/shamir-transport-ipc/src/unix.rs:30](../../../../../crates/shamir-transport-ipc/src/unix.rs#L30); [crates/shamir-transport-ipc/src/windows.rs:39](../../../../../crates/shamir-transport-ipc/src/windows.rs#L39).
+
+<a id="plan-p2-11"></a>
+
+### Plan P2.11 — P2.11
+
+Status: `confirmed-open`. Current risk: —.
+
+All three requested documentation corrections remain outstanding: explicit remote rejection, collision diagnostics, and the workspace roster. Item 7.1 was explicitly assigned no action; item 4.1 likewise remains optional feature trimming.
+
+Evidence: [crates/shamir-transport-ipc/src/windows.rs:11](../../../../../crates/shamir-transport-ipc/src/windows.rs#L11); [crates/shamir-transport-ipc/src/windows.rs:66](../../../../../crates/shamir-transport-ipc/src/windows.rs#L66); [crates/shamir-transport-ipc/src/unix.rs:44](../../../../../crates/shamir-transport-ipc/src/unix.rs#L44); [CLAUDE.md:30](../../../../../CLAUDE.md#L30).
+
+## Corrections and qualified non-findings
+
+- Counts: the report contains 18 numbered entries, not 17; deduplicating 3.1 against 1.4 yields 17 unique items: 1 high, 3 medium, 8 low, and 5 nits. The original table omitted 4.1.
+- Executive summary and 1.1: retain the error-to-poison-to-panic mechanism, but remove the deterministic accept-255 failure scenario. Pinned Tokio defaults to PIPE_UNLIMITED_INSTANCES, not a finite 255-instance quota. IPC also shares a loopback per-IP limiter defaulting to 100, so max_active_connections alone never establishes the claimed concurrency scenario. Evidence: crates/shamir-transport-ipc/src/windows.rs:113; crates/shamir-server/src/server/server_launcher.rs:1246; crates/shamir-server/src/server/server_launcher.rs:1291; crates/shamir-server/src/config.rs:480; Cargo.lock:4195.
+- 1.1: the immediate-client-death absorption claim is unverified against pinned mio 1.1.1, whose source was unavailable. Do not substitute cached neighboring versions. The absent error-regression test is 1.6, not 1.3.
+- 1.2–1.4 and concurrency overview: pre-chmod permissions are umask-dependent; 0755 does not universally imply cross-user connect permission. No await only excludes cooperative suspension of this task, not concurrent runtime workers or OS scheduling delays. Neither microsecond duration nor exploit success was measured. Evidence: crates/shamir-transport-ipc/src/unix.rs:3; crates/shamir-transport-ipc/src/unix.rs:50.
+- Concurrency non-finding: the shim itself contains no Mutex/RwLock/parking_lot and accept remains single-owner through &mut self. This does not prove the dependency path is lock-free. Pinned Tokio registration takes an internal lock. Evidence: crates/shamir-transport-ipc/src/windows.rs:83; crates/shamir-transport-ipc/src/unix.rs:56; Cargo.lock:4195.
+- Security non-findings: the protected single-user SID SDDL, synchronous security-attribute borrow, explicit remote rejection, non-inheritable handle flag, and normal Result-path LocalFree/CloseHandle ownership remain source-supported. Account parity is not logon-session parity and does not exclude privileged OS principals. Blanket unsafe soundness remains unverified because Vec<u8> does not itself establish TOKEN_USER alignment. Evidence: crates/shamir-transport-ipc/src/windows.rs:108; crates/shamir-transport-ipc/src/windows.rs:117; crates/shamir-transport-ipc/src/windows.rs:148; crates/shamir-transport-ipc/src/windows.rs:172; crates/shamir-transport-ipc/src/windows.rs:226; crates/shamir-transport-ipc/src/windows.rs:246; crates/shamir-transport-ipc/src/windows.rs:269; crates/shamir-transport-ipc/src/windows.rs:277.
+- Performance non-finding: descriptor/SDDL construction is still once per Windows bind and the shim has no connection-count-dependent loop. However, the absolute zero-allocation/no-lock claim for Unix accept/connect is refuted by inspected pinned Tokio registration, which allocates Arc<ScheduledIo> and locks registration state. Windows instance creation also includes runtime registration/name conversion, not only one OS call. No latency or allocation-size measurements were performed. Evidence: crates/shamir-transport-ipc/src/windows.rs:70; crates/shamir-transport-ipc/src/windows.rs:103; crates/shamir-transport-ipc/src/unix.rs:40; crates/shamir-transport-ipc/src/unix.rs:57; Cargo.lock:4195.
+- API/wire non-finding: compile-time public-name dispatch and generic framing remain valid for current callers, not identical signatures or platform-independent addressing. Both SDK and server use the common transport I/O traits without OS branches. Evidence: crates/shamir-transport-ipc/src/lib.rs:24; crates/shamir-client/src/client.rs:150; crates/shamir-server/src/framer.rs:275; crates/shamir-server/src/server/server_launcher.rs:1305.
+- 5.1: an existing stale or live Unix socket makes server bind fail; it does not let that bind succeed against the existing inode. A client-only relative-path connection to an unintended live endpoint remains a valid possibility. Spec §9 does not define a Unix logical-name mapping sufficiently to infer one automatically. Evidence: crates/shamir-transport-ipc/src/unix.rs:50; docs/guide-docs/client-server-protocol-spec/TRANSPORT_UNIX.md:131.
+- Lifecycle/style non-findings: public errors still use io::Result with clean consumer conversion; descriptors and owned Tokio handles have normal Drop ownership. Windows name release requires the last relevant pipe instance to close, not necessarily listener Drop while streams survive. Test manifests remain registered, with top-level imports and no inline test modules. These guarantees do not close any missing behavioral test. Evidence: crates/shamir-client/src/error.rs:7; crates/shamir-server/src/server/boot_error.rs:25; crates/shamir-transport-ipc/src/windows.rs:182; crates/shamir-transport-ipc/src/tests/mod.rs:1; crates/shamir-transport-ipc/src/lib.rs:34.
+- History establishes absence of an IPC fix, not behavioral correctness: git diff from 74e64493 to the requested HEAD is empty for the crate, and SUMMARY.md was added in 6df2afa9 without changing IPC implementation. No completed-task or commit message was treated as fix proof.
+
+## Current follow-up order
+
+1. P0: restore Windows listener state on every accept error and add deterministic, registered error-recovery/lifecycle regressions; address BUSY retry separately from replenishment ordering.
+2. P0: clean up Unix pathname residue after chmod failure, with explicit cleanup-failure handling.
+3. P1: choose race-safe stale-path recovery semantics and a consistent logical-name versus explicit-endpoint contract.
+4. P1: add effective Windows DACL/exclusivity tests; resolve signature portability and remove the unused dependency or deliberately define an error API.
+5. P2: correct review counts, reachability claims, allocation/lock guarantees, and outstanding documentation; retain layout/feature/newtype/atomic-publication changes as scoped optional work.
+
+## Coverage and limitations
+
+- Only SUMMARY.md exists in the assigned directory; there are no separate lens reports or TASK_GROUPS.md.
+- Read-only source/history validation only; no compilation, tests, benchmarks, reproductions, or modifications.
+- Pinned Tokio 1.49.0 sources were available and inspected; pinned mio 1.1.1 sources were unavailable, so the original ERROR_NO_DATA/ERROR_PIPE_CONNECTED absorption assertion remains unverified.
+- Actual error frequencies, scheduling-window durations, OS access denials, and latency were not experimentally verified.
+- The review's blanket Windows unsafe-soundness guarantee is not established: the TOKEN_USER reference is formed from a Vec<u8> without an explicit typed-alignment guarantee.
+
+## Reviewed document inventory
+
+- [SUMMARY.md](./SUMMARY.md) — 18 claim decisions; 11 explicit plan items.
+
+---
+
+<details>
+<summary>Historical report — preserved for provenance; not current status or instructions</summary>
+
 # shamir-transport-ipc — Synthesized 7-lens review (lean single-file follow-up to the 2026-08-14 cross-crate review)
 
 Crate reviewed: `crates/shamir-transport-ipc/` (new since the 2026-08-14 sweep; commit `74e64493`).
@@ -195,3 +551,5 @@ Lifecycle verdicts per OS: Windows has no stale-name problem (the namespace entr
 9. **Atomic-rename hardening for the Unix bind→chmod window (1.4/3.1)** — optional; spec accepts the current approach.
 10. **Consider newtyping `IpcStream`/`IpcClientStream` (5.3)** or, minimally, document the aliases-are-transparent rule in `lib.rs`. Closes: 5.3.
 11. **Doc nits:** fix the `reject_remote_clients` doc (3.2); add the EADDRINUSE↔ACCESS_DENIED bind-collision note (5.4); refresh CLAUDE.md's crate roster (7.2). Closes: 3.2, 5.4, 7.2; 7.1 needs no action.
+
+</details>

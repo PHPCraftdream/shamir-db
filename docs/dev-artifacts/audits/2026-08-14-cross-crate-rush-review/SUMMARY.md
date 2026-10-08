@@ -1,3 +1,128 @@
+<!-- revalidation:2026-10-08 source:92ad58266bf57ddea1fa3c8a47affba1a3a9a096 -->
+# Cross-Crate Review — current source revalidation
+
+Revalidated 2026-10-08 at `92ad58266bf57ddea1fa3c8a47affba1a3a9a096`. Coverage is all 25 previously reviewed modules: 161 thematic reports for the original 23 modules, 25 module summaries (including Node and IPC), the engine task-group document, and these two global documents: **189 Markdown files**. The historical “1,610 passes” statement was a typo: 23 × 7 is **161**.
+
+Twenty-five read-only XS module reviews were collected and accepted. No compiler, build, test, benchmark, reproduction, source modification, version change, commit or push was performed. Parent acceptance checked coverage, selected disputed/high-impact source paths, and exact dependency implementations. This is source-level revalidation, not a fresh full-workspace audit or execution certification.
+
+## Current outcome
+
+Most original roots remain open, but the original severity census and unconditional shipping verdicts are not current evidence. Many engine remediations and combined filter/value depth checks are source-fixed. Positive counter-evidence refutes several old headlines; intentional contracts and optional design choices are distinguished from defects.
+
+Priorities are data visibility/durability and lifecycle correctness, credential disclosure during resume, input/unsafe boundaries, then qualified performance/API work. ReadOnly bypass requires explicit handler mode and ordinary write permissions; uncapped scalars require a permitted evaluated path. No precise crash threshold, latency multiplier, target-wide stack-safety guarantee, or all-deployment exploit claim is established.
+
+## Status definitions
+
+- `confirmed-open`: the claimed mechanism or specifically stated residual is present in current source; preconditions and scope are part of the decision.
+- `fixed`: the original mechanism was changed/removed and source/caller/test registration supports closure. It does not mean tests ran or every adjacent defect is fixed.
+- `partially-fixed`: some obligations are source-fixed while named residuals remain; a commit/task completion label is insufficient.
+- `refuted`: positive source/contract/dependency counter-evidence contradicts the claim. This is not a later fix.
+- `unverified`: a necessary dependency, reachability, measurement, target behavior or oracle proof is missing. It is neither confirmed nor certified safe.
+- `not-applicable`: no remediation obligation exists for the current scope/contract, or a proposal is optional design rather than defect repair.
+
+Closed/N/A rows have no current risk. Unverified risk is provisional; style and unmeasured optimization claims do not establish runtime severity. Original titles/plan IDs are provenance, not live assertions or release mandates. Each report's current section supersedes its collapsed historical counts, scenarios and fix recipes.
+
+## Decision accounting — not a unique-bug census
+
+| Ledger | Decisions | Open | Source-fixed | Partial | Refuted | Unverified | N/A |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| Thematic claims/non-findings | 1363 | 1034 | 78 | 24 | 83 | 31 | 113 |
+| Module-summary claims/non-findings | 1239 | 996 | 77 | 23 | 67 | 23 | 53 |
+| Engine group + verification claims | 33 | 1 | 14 | 17 | 1 | 0 | 0 |
+| All claim decisions | 2635 | 2031 | 169 | 64 | 151 | 54 | 166 |
+| Explicit summary fix-plan items (separate) | 447 | 391 | 9 | 22 | 3 | 7 | 15 |
+
+The 2635 decisions include repeated roots, split/bundled observations and non-finding assurances. The 447 explicit plan items are separate; the 31 engine groups are in the task-group ledger, not counted again as summary plan rows. There are 18 additional revalidation observation rows, some cross-module duplicates/corrected mechanisms, outside the original-row counts. Do not add thematic and summary rows to obtain unique defects or compare this ledger directly with the historical 1220 lens-tagged census.
+
+The module-summary ledger contains 0 confirmed/partial Critical rows; that is claim-level calibration, not a safety verdict. High rows below include repeats and qualified library/API/performance concerns. A new unique-root census would require explicit consolidation; none is fabricated here.
+
+## Per-module current ledger
+
+Open-H counts only confirmed/partial High/Critical rows in the module summary. Additional rows are separate. Counts do not determine the recommended order.
+
+| Module | Docs | Summary decisions | Open | Fixed | Partial | Refuted | Unverified | N/A | Open-H rows | Additional rows |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| [shamir-wal](./shamir-wal/SUMMARY.md) | 8 | 63 | 55 | 0 | 0 | 4 | 1 | 3 | 4 | 1 |
+| [shamir-storage](./shamir-storage/SUMMARY.md) | 8 | 64 | 49 | 4 | 2 | 3 | 1 | 5 | 4 | 2 |
+| [shamir-tx](./shamir-tx/SUMMARY.md) | 8 | 67 | 58 | 0 | 0 | 5 | 1 | 3 | 4 | 0 |
+| [shamir-engine](./shamir-engine/SUMMARY.md) | 9 | 93 | 4 | 67 | 15 | 3 | 3 | 1 | 3 | 8 |
+| [shamir-index](./shamir-index/SUMMARY.md) | 8 | 70 | 58 | 0 | 0 | 5 | 1 | 6 | 6 | 1 |
+| [shamir-client](./shamir-client/SUMMARY.md) | 8 | 54 | 45 | 0 | 0 | 3 | 1 | 5 | 5 | 2 |
+| [shamir-funclib](./shamir-funclib/SUMMARY.md) | 8 | 64 | 60 | 0 | 0 | 2 | 0 | 2 | 8 | 1 |
+| [shamir-transport-tcp](./shamir-transport-tcp/SUMMARY.md) | 8 | 30 | 29 | 0 | 0 | 0 | 1 | 0 | 1 | 0 |
+| [shamir-db](./shamir-db/SUMMARY.md) | 8 | 72 | 66 | 2 | 1 | 0 | 1 | 2 | 7 | 0 |
+| [shamir-wasm-host](./shamir-wasm-host/SUMMARY.md) | 8 | 69 | 65 | 0 | 0 | 1 | 0 | 3 | 8 | 0 |
+| [shamir-types](./shamir-types/SUMMARY.md) | 8 | 65 | 54 | 1 | 1 | 4 | 0 | 5 | 5 | 0 |
+| [shamir-server](./shamir-server/SUMMARY.md) | 8 | 27 | 19 | 0 | 0 | 6 | 2 | 0 | 2 | 1 |
+| [shamir-connect](./shamir-connect/SUMMARY.md) | 8 | 78 | 72 | 0 | 0 | 4 | 0 | 2 | 3 | 2 |
+| [shamir-transport-ipc](./shamir-transport-ipc/SUMMARY.md) | 1 | 18 | 18 | 0 | 0 | 0 | 0 | 0 | 1 | 0 |
+| [shamir-transport-ws](./shamir-transport-ws/SUMMARY.md) | 8 | 49 | 47 | 0 | 0 | 2 | 0 | 0 | 1 | 0 |
+| [shamir-query-builder](./shamir-query-builder/SUMMARY.md) | 8 | 39 | 36 | 0 | 0 | 1 | 0 | 2 | 2 | 0 |
+| [shamir-query-types](./shamir-query-types/SUMMARY.md) | 8 | 67 | 51 | 3 | 2 | 9 | 1 | 1 | 0 | 0 |
+| [shamir-sdk](./shamir-sdk/SUMMARY.md) | 8 | 51 | 43 | 0 | 1 | 1 | 1 | 5 | 1 | 0 |
+| [shamir-client-node](./shamir-client-node/SUMMARY.md) | 1 | 32 | 18 | 0 | 1 | 7 | 2 | 4 | 2 | 0 |
+| [shamir-numa](./shamir-numa/SUMMARY.md) | 8 | 38 | 35 | 0 | 0 | 3 | 0 | 0 | 3 | 0 |
+| [shamir-query-builder-macros](./shamir-query-builder-macros/SUMMARY.md) | 8 | 28 | 23 | 0 | 0 | 0 | 3 | 2 | 0 | 0 |
+| [shamir-sdk-macros](./shamir-sdk-macros/SUMMARY.md) | 8 | 43 | 39 | 0 | 0 | 1 | 2 | 1 | 0 | 0 |
+| [shamir-collections](./shamir-collections/SUMMARY.md) | 8 | 19 | 17 | 0 | 0 | 0 | 1 | 1 | 0 | 0 |
+| [shamir-tunables](./shamir-tunables/SUMMARY.md) | 8 | 22 | 20 | 0 | 0 | 2 | 0 | 0 | 0 | 0 |
+| [shamir-bench-utils](./shamir-bench-utils/SUMMARY.md) | 8 | 17 | 15 | 0 | 0 | 1 | 1 | 0 | 0 | 0 |
+
+## Material corrections to the historical synthesis
+
+| Historical claim | Accepted current conclusion | Detailed evidence |
+|---|---|---|
+| Malformed macro groups silently lose write fields | Refuted by pinned syn scoped leftover tracking; diagnostics/negative coverage remain. | [Report](./shamir-query-builder-macros/correctness-tdd.md#review-1) |
+| Node connect cannot use wrapper overrides | Refuted: exact napi factory preserves the JS constructor receiver. | [Report](./shamir-client-node/SUMMARY.md#review-1-1) |
+| Session fetch_max racers multiply one refill span | Refuted for atomic RMW; separate subnet watermark defects remain. | [Report](./shamir-connect/SUMMARY.md) |
+| DTO/client/server MessagePack decode is arbitrarily deep | Refuted by rmp-serde 1.3.1 default 1024-container counter; target stack safety is unproven. | [Report](./shamir-query-types/security-crypto.md#review-1) |
+| TableRef accepts trailing array elements | Refuted by pinned decoder/serde completion checks; dedicated coverage is useful. | [Report](./shamir-query-types/correctness-tdd.md#review-10) |
+| Builder disables password zeroization | Refuted by the transitive query-types → types default-feature edge; unbuilt bare String remains. | [Report](./shamir-query-builder/security-crypto.md#review-1) |
+| No generated function ABI test exists | Refuted by registered compile-and-invoke coverage; UI/validator/error gaps remain. | [Report](./shamir-sdk-macros/security-crypto.md#review-3) |
+| Wasmtime handlers can simply return unboxed async blocks | Not applicable: pinned async linker requires Box<dyn Future>. | [Report](./shamir-wasm-host/performance-hotpath.md#review-9) |
+| Any Pending guest future hangs; async imports break it | Finite Pending can complete; host imports suspend fibers. Persistently-Pending polling remains host-budget bounded. | [Report](./shamir-sdk-macros/concurrency-lockfree.md#review-1) |
+| Guest buffers leak process memory across calls | Fresh Stores reclaim guest heaps; one invocation can still exhaust its quota. | [Report](./shamir-sdk/SUMMARY.md#review-4-1) |
+| Scratch-buffer handoff is accidental reuse breakage | Refuted: zero-copy ownership transfer and capacity reset are documented/tested. | [Report](./shamir-types/performance-hotpath.md#review-4) |
+| ReadOnly bypass applies to every client/default launcher | Open High with explicit handler mode and write ACLs; stock launcher is ReadWrite. | [Report](./shamir-server/SUMMARY.md#review-1-1) |
+| Engine GroupCommit fixes prove WAL liveness fixed | Different coordinators: WalGroupCommit failure/cancellation remains open. | [Report](./shamir-wal/SUMMARY.md#review-6-1) |
+| Every added remediation regression runs | Two engine files are orphaned; one alleged get injector is not used. | [Report](./shamir-engine/SUMMARY.md#new-1) |
+| Persistence envelope proves upgrade compatibility | Partial: legacy raw configs deliberately fail closed; migration/notice is a policy obligation. | [Report](./shamir-storage/SUMMARY.md#new-1) |
+| Style Highs/local test absence imply production Critical | Recalibrated; allowed coupled groups and legitimate downstream placement are honored. | [Report](./CRATE_PRIORITY.md) |
+
+## Source-fixed versus residual engine work
+
+The 31 groups have 14 source-fixed groups (1, 3, 4, 5, 6, 9, 11, 13, 14, 15, 18, 22, 29, 31), one open group (2), and 16 partial groups (7, 8, 10, 12, 16, 17, 19–21, 23–28, 30). Two extra verification/spot-check claims are separate. Bounded changelog consumption, missing-MVCC drain fallback, cloned-out DashMap guards, replanning/FK discovery and parser removal are real source changes. Pre-read `.ok()` sites remain; lazy staging scans and registration/format/A8/migration/snapshot residuals do not inherit adjacent completion claims. [Task-group decisions](./shamir-engine/TASK_GROUPS.md).
+
+## Risk-first follow-up
+
+These recommendations are for a later authorized implementation task, not fixes performed here.
+
+1. Close WAL/cache/MVCC failure and publication mechanisms: drain/wake on all exits, prevent stale fill/publication, preserve prior visible values on failed history writes, and keep versions monotonic.
+2. Authenticate the peer before client resume discloses its ticket; preserve full-handshake SCRAM/pin checks and settle pending/subscription channels on all shutdown paths.
+3. Repair engine pre-read propagation and all-record A8 ID coverage; wire discriminating regressions. Do not duplicate already source-fixed mechanisms as new tasks.
+4. Make snapshots absorb graph-applied deltas, preserve recovery after replay/compaction error, and correct functional hashes/Unicode tokenization.
+5. Correct authorized cascade targeting and fail-closed catalogue persistence ordering; verify durability completion rather than merely adding data-store flush.
+6. Bound scalar/decoder/output allocation and repair TCP initialized-buffer soundness; permission/frame/meters qualify exposure but do not make unsafe code valid.
+7. Repair reentrant fuel accounting, compiler scanning/offloading and host/guest HTTP contracts; do not reserve the parent's full grant in a way that starves children.
+8. Address explicit ReadOnly mode, proof-read deadlines, Windows accept retry state, WS paths and control-frame/backpressure bounds.
+9. Then handle scoped DTO/builder/SDK defects and visible costs; measure numerical perf claims. Intentional bulk operations/wire projections and optional style splits are decisions, not exploits.
+
+See [CRATE_PRIORITY.md](./CRATE_PRIORITY.md) for all-module order/architectural context. Every module summary has its complete current plan ledger, corrections, evidence and limits.
+
+## Methodology and remaining proof limits
+
+- All assigned reports, summaries, group claims, positive assurances and fix instructions were evaluated through read-only source/history/caller/contract/test-registration inspection.
+- Parent acceptance checked selected storage/WAL/MVCC/client/server/DDL/migration/vector paths and disputed dependencies. Archive hashes for rmp-serde 1.3.1, peak_alloc 0.3.0, libc 0.2.186, Wasmtime 46.0.2 and tungstenite 0.24.0 match Cargo.lock. Exact napi 3.10.5/derive 3.5.10/backend 5.1.2 sources were checked against binding manifest pins; that excluded binding has no committed Cargo.lock.
+- Registered tests can be weak, masked, target-gated, skip-capable or integration-only. File existence, task labels and historical green notes are not current execution proof.
+- No numerical latency/CPU/RSS/crash-depth/allocation threshold, practical collision attack, unpublished-package state or universal architecture guarantee was inferred from a lockfile/test name. Unverified dependency/target/reachability facets stay explicit.
+- Test-oracle contradictions are documented, not repaired in Rust: this task authorizes review-document updates only. No observed test failure was postponed because no test ran.
+- Source citations use unchanged source-snapshot lines. Citations to edited review documents refer explicitly to pre-prefix lines. Historical text is collapsed for provenance and has no current authority.
+
+---
+
+<details>
+<summary>Historical global synthesis — superseded; counts, scenarios and roadmap are not current</summary>
+
 # Cross-Crate Review Summary
 
 Consolidated result of the 2026-08-14 cross-crate rush review: 23 crates x 7 themed lenses = 161 individual reports under `docs/dev-artifacts/audits/2026-08-14-cross-crate-rush-review/<crate>/<theme>.md`, all read in full and synthesized read-only (no builds, tests, or code execution; no source files modified).
@@ -732,3 +857,6 @@ Identical violations were rated differently by different style reviewers: inline
 ### Non-gaps (checked, genuinely clean)
 
 The other "No findings" reports are legitimate, not under-investigation: shamir-collections/concurrency, shamir-query-types/concurrency, and shamir-query-builder/concurrency are pure-DTO/leaf crates with zero concurrency surface, and each of those reviewers documented exhaustive verification evidence (grep matrices, dependency-listing proofs) rather than bare assertions.
+
+
+</details>

@@ -1,3 +1,151 @@
+<!-- revalidation:2026-10-08 source:92ad58266bf57ddea1fa3c8a47affba1a3a9a096 -->
+# shamir-engine — concurrency-lockfree revalidation
+
+Source snapshot: `92ad58266bf57ddea1fa3c8a47affba1a3a9a096`. Revalidated 2026-10-08 by read-only XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run; no source fix is part of this update. Test registration/assertions are evidence of an oracle, not proof of a passing run.
+
+This section is authoritative for current status. Original titles/IDs are retained for traceability; a refuted title is not a current assertion. The collapsed historical report below is superseded, including its counts, severity, scenarios and fix instructions. Plan IDs preserve historical numbering, not a current release mandate. [Workspace methodology and status definitions](../SUMMARY.md#status-definitions).
+
+The guard, binding, counter and watchdog findings are repaired. FK-cache retry now yields but remains unbounded under invalidation.
+
+## Current claim decisions
+
+| Claim decisions | Open | Source-fixed | Partial | Refuted | Unverified | N/A |
+|---:|---:|---:|---:|---:|---:|---:|
+| 12 | 0 | 5 | 1 | 0 | 1 | 5 |
+
+These are decisions on report claims, including repeated roots, bundled observations and non-findings—not a unique-bug census. Closed/N/A rows have no current risk; unverified risk is provisional. Pure style and unmeasured optimization claims do not establish runtime impact.
+
+<a id="review-1"></a>
+
+### Claim 1 — DashMap shard read-guard held across await in DbInstance accessors
+
+Status: `fixed`. Current risk: —.
+
+All eight awaited accessors clone RepoInstance before awaiting, ending the shard guard's lifetime at the lookup statement.
+
+Evidence: [crates/shamir-engine/src/db_instance/db_instance.rs:70](../../../../../crates/shamir-engine/src/db_instance/db_instance.rs#L70); [crates/shamir-engine/src/db_instance/db_instance.rs:191](../../../../../crates/shamir-engine/src/db_instance/db_instance.rs#L191); [crates/shamir-engine/src/db_instance/db_instance.rs:298](../../../../../crates/shamir-engine/src/db_instance/db_instance.rs#L298).
+
+<a id="review-2"></a>
+
+### Claim 2 — ValidatorRegistry::add_binding — check-then-act lost update on a lock-free map
+
+Status: `fixed`. Current risk: —.
+
+One entry_sync/or_default/get_mut operation inserts into the existing set without a separate losing insert.
+
+Evidence: [crates/shamir-engine/src/validator/registry.rs:190](../../../../../crates/shamir-engine/src/validator/registry.rs#L190); [crates/shamir-engine/src/validator/tests/registry_tests.rs:43](../../../../../crates/shamir-engine/src/validator/tests/registry_tests.rs#L43); [crates/shamir-engine/src/validator/tests/mod.rs:8](../../../../../crates/shamir-engine/src/validator/tests/mod.rs#L8).
+
+<a id="review-3"></a>
+
+### Claim 3 — RecordCounter — dirty flag clobbered by concurrent increment during set/persist awaits
+
+Status: `fixed`. Current risk: —.
+
+No independent dirty flag remains. set/persist record only their written count; later cache divergence causes another persist.
+
+Evidence: [crates/shamir-engine/src/table/record_counter.rs:103](../../../../../crates/shamir-engine/src/table/record_counter.rs#L103); [crates/shamir-engine/src/table/record_counter.rs:169](../../../../../crates/shamir-engine/src/table/record_counter.rs#L169); [crates/shamir-engine/src/table/tests/record_counter_tests.rs:374](../../../../../crates/shamir-engine/src/table/tests/record_counter_tests.rs#L374).
+
+<a id="review-4"></a>
+
+### Claim 4 — Watchdog thread runs log::warn! inside iter_sync
+
+Status: `fixed`. Current risk: —.
+
+The iterator collects warning data; log calls run after iter_sync returns.
+
+Evidence: [crates/shamir-engine/src/query/batch/op_watchdog.rs:139](../../../../../crates/shamir-engine/src/query/batch/op_watchdog.rs#L139); [crates/shamir-engine/src/query/batch/op_watchdog.rs:156](../../../../../crates/shamir-engine/src/query/batch/op_watchdog.rs#L156).
+
+<a id="review-5"></a>
+
+### Claim 5 — MigrationCoordinator::drain_until_caught_up — unbounded catch-up loop under sustained writes
+
+Status: `fixed`. Current risk: —.
+
+The loop has a 32-pass cap and returns residual lag. Its admin caller currently ignores that residual result.
+
+Evidence: [crates/shamir-engine/src/migration/coordinator.rs:126](../../../../../crates/shamir-engine/src/migration/coordinator.rs#L126); [crates/shamir-engine/src/migration/coordinator.rs:288](../../../../../crates/shamir-engine/src/migration/coordinator.rs#L288); [crates/shamir-db/src/shamir_db/execute/admin_migration.rs:178](../../../../../crates/shamir-db/src/shamir_db/execute/admin_migration.rs#L178).
+
+<a id="review-6"></a>
+
+### Claim 6 — FkReverseCache::get_or_build_by_parent — unbounded CAS-loss retry while holding build_lock
+
+Status: `partially-fixed`. Current risk: `nit`.
+
+CAS losses now yield cooperatively, but retries remain unlimited and build_lock remains held; continuous invalidation can still starve waiters.
+
+Evidence: [crates/shamir-engine/src/repo/fk_reverse_cache.rs:354](../../../../../crates/shamir-engine/src/repo/fk_reverse_cache.rs#L354); [crates/shamir-engine/src/repo/fk_reverse_cache.rs:369](../../../../../crates/shamir-engine/src/repo/fk_reverse_cache.rs#L369); [crates/shamir-engine/src/repo/fk_reverse_cache.rs:384](../../../../../crates/shamir-engine/src/repo/fk_reverse_cache.rs#L384).
+
+<a id="review-positive-conformance-notes-lock-inventory"></a>
+
+### Claim Positive conformance notes/Lock inventory — Only sanctioned explicit synchronous mutexes
+
+Status: `not-applicable`. Current risk: —.
+
+Explicit synchronous mutex fields remain DDL-only or test-gated. This does not make DashMap or scc operations structurally lock-free.
+
+Evidence: [crates/shamir-engine/src/table/in_flight_create_guard.rs:79](../../../../../crates/shamir-engine/src/table/in_flight_create_guard.rs#L79); [crates/shamir-engine/src/tx/pre_commit.rs:1037](../../../../../crates/shamir-engine/src/tx/pre_commit.rs#L1037); [crates/shamir-engine/src/table/table_manager_streaming.rs:77](../../../../../crates/shamir-engine/src/table/table_manager_streaming.rs#L77).
+
+<a id="review-positive-conformance-notes-lock-ordering"></a>
+
+### Claim Positive conformance notes/Lock ordering — Canonical token ordering and DDL drain-before-lock protocol
+
+Status: `not-applicable`. Current risk: —.
+
+Sorted/deduplicated table tokens and the centralized barrier protocol remain present; this is source conformance, not executed concurrency proof.
+
+Evidence: [crates/shamir-engine/src/tx/pre_commit.rs:527](../../../../../crates/shamir-engine/src/tx/pre_commit.rs#L527); [crates/shamir-engine/src/table/writer_drain_barrier.rs:74](../../../../../crates/shamir-engine/src/table/writer_drain_barrier.rs#L74).
+
+<a id="review-positive-conformance-notes-memory-model"></a>
+
+### Claim Positive conformance notes/Memory model — SeqCst proof and loom coverage
+
+Status: `unverified`. Current risk: —.
+
+The proof, packed flag and opt-in model exist. The model samples drain-return state but explicitly does not distinguish production atomic orderings; external loom behavior was not verified.
+
+Evidence: [crates/shamir-engine/src/table/writer_drain_barrier.rs:448](../../../../../crates/shamir-engine/src/table/writer_drain_barrier.rs#L448); [crates/shamir-engine/src/table/writer_drain_barrier.rs:550](../../../../../crates/shamir-engine/src/table/writer_drain_barrier.rs#L550); [crates/shamir-engine/build.rs:12](../../../../../crates/shamir-engine/build.rs#L12).
+
+<a id="review-positive-conformance-notes-scc-len-discipline"></a>
+
+### Claim Positive conformance notes/scc len() discipline — Annotated traversals and atomic cardinality mirrors
+
+Status: `not-applicable`. Current risk: —.
+
+The relevant remaining traversals are annotated/test-only; validator len/is_empty now use an atomic mirror.
+
+Evidence: [crates/shamir-engine/src/tx/drainer.rs:260](../../../../../crates/shamir-engine/src/tx/drainer.rs#L260); [crates/shamir-engine/src/validator/registry.rs:249](../../../../../crates/shamir-engine/src/validator/registry.rs#L249); [crates/shamir-engine/src/tx/commit.rs:306](../../../../../crates/shamir-engine/src/tx/commit.rs#L306).
+
+<a id="review-positive-conformance-notes-fx-hash-pillar"></a>
+
+### Claim Positive conformance notes/Fx-hash pillar — THasher-backed concurrent collections
+
+Status: `not-applicable`. Current risk: —.
+
+Reviewed registries retain THasher, including the new local condition cache; no production RandomState/default HashMap construction was found.
+
+Evidence: [crates/shamir-engine/src/db_instance/db_instance.rs:29](../../../../../crates/shamir-engine/src/db_instance/db_instance.rs#L29); [crates/shamir-engine/src/validator/registry.rs:55](../../../../../crates/shamir-engine/src/validator/registry.rs#L55); [crates/shamir-engine/src/query/filter/cond_cache.rs:77](../../../../../crates/shamir-engine/src/query/filter/cond_cache.rs#L77).
+
+<a id="review-positive-conformance-notes-o-x-0"></a>
+
+### Claim Positive conformance notes/O(x→0) — Batch snapshots and coalesced history writes
+
+Status: `not-applicable`. Current risk: —.
+
+These specific hoists/coalescing mechanisms remain present; they do not establish constant-time behavior throughout the crate.
+
+Evidence: [crates/shamir-engine/src/table/table_manager_tx_ops.rs:804](../../../../../crates/shamir-engine/src/table/table_manager_tx_ops.rs#L804); [crates/shamir-engine/src/tx/drainer.rs:566](../../../../../crates/shamir-engine/src/tx/drainer.rs#L566).
+
+## Corrections and qualified non-findings
+
+- The DbInstance regression is a registered concurrent hammer, not a deterministic scheduler proof, and does not separately exercise all seven index routes.
+- Yielding on CAS loss improves cooperation; it does not bound completion or release the single-flight lock.
+- Distinguish the repository's approved concurrency primitives from a literal lock-free progress guarantee.
+
+---
+
+<details>
+<summary>Historical report — preserved for provenance; not current status or instructions</summary>
+
 # shamir-engine — Concurrency & lock-free invariants
 
 ## Summary
@@ -53,3 +201,5 @@ Judged against CLAUDE.md's five pillars, `shamir-engine` is in exceptionally goo
 - **scc `len()` discipline:** `Drainer::window_len` (`drainer.rs:243-247`) and `ValidatorRegistry::len` (`registry.rs:230-234`) both carry `#[allow(clippy::disallowed_methods)] // O(N) ack:` comments; `Drainer` keeps an O(1) `window_depth` atomic mirror; `commit.rs:293-315` documents the `is_empty` bucket-walk tradeoff.
 - **Fx-hash pillar:** every `DashMap`/`scc::HashMap` found uses `THasher` (`db_instance.rs:14`, `repo_instance.rs:25-26`, `validator/registry.rs:36-40`, `repo_types.rs:83`, `op_watchdog.rs:65`); no `RandomState` or bare `HashMap::new()` in production code; ordered cases use `TMap`/`TFxMap`/`TFxSet`.
 - **O(x→0):** batch planners snapshot `all_backends()` once per batch (`table_manager_tx_ops.rs:770-800`), `insert_many` snapshots unique defs once per batch (`table_manager_crud.rs:285-291`), the drainer coalesces E×T → T history transacts, and hot-path guards-drop-before-await is systematically documented (`repo_instance.rs:311-320`, `:439-442`).
+
+</details>

@@ -1,3 +1,111 @@
+<!-- revalidation:2026-10-08 source:92ad58266bf57ddea1fa3c8a47affba1a3a9a096 -->
+# shamir-transport-ws — error-handling-lifecycle revalidation
+
+Source snapshot: `92ad58266bf57ddea1fa3c8a47affba1a3a9a096`. Revalidated 2026-10-08 by read-only XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run; no source fix is part of this update. Test registration/assertions are evidence of an oracle, not proof of a passing run.
+
+This section is authoritative for current status. Original titles/IDs are retained for traceability; a refuted title is not a current assertion. The collapsed historical report below is superseded, including its counts, severity, scenarios and fix instructions. Plan IDs preserve historical numbering, not a current release mandate. [Workspace methodology and status definitions](../SUMMARY.md#status-definitions).
+
+Result/thiserror discipline and ownership-based cleanup remain sound. Typed accept classification, exact error-path tests, outbound bounds, and exporter diagnostics remain open.
+
+## Current claim decisions
+
+| Claim decisions | Open | Source-fixed | Partial | Refuted | Unverified | N/A |
+|---:|---:|---:|---:|---:|---:|---:|
+| 7 | 7 | 0 | 0 | 0 | 0 | 0 |
+
+These are decisions on report claims, including repeated roots, bundled observations and non-findings—not a unique-bug census. Closed/N/A rows have no current risk; unverified risk is provisional. Pure style and unmeasured optimization claims do not establish runtime impact.
+
+<a id="review-1"></a>
+
+### Claim 1 — `WsAcceptError::OriginRejected` and `WrongPath` are dead variants — all accept rejections surface as `Handshake`
+
+Status: `confirmed-open`. Current risk: `low`.
+
+Policy rejection remains inside the callback and acceptors propagate only tungstenite errors. Typed variants are not returned; current production callers merely log failures.
+
+Evidence: [crates/shamir-transport-ws/src/server.rs:55](../../../../../crates/shamir-transport-ws/src/server.rs#L55); [crates/shamir-transport-ws/src/server.rs:99](../../../../../crates/shamir-transport-ws/src/server.rs#L99); [crates/shamir-transport-ws/src/server.rs:144](../../../../../crates/shamir-transport-ws/src/server.rs#L144); [crates/shamir-server/src/server/server_launcher.rs:1502](../../../../../crates/shamir-server/src/server/server_launcher.rs#L1502).
+
+<a id="review-2"></a>
+
+### Claim 2 — Error paths of framing and accept have no variant-asserting tests
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+Neither accept rejection paths nor framing malformed-message variants have targeted assertions; the oversize test remains is_err-only. Positive TS browser integration does not detect removed rejection checks.
+
+Evidence: [crates/shamir-transport-ws/src/tests/server_tests.rs:7](../../../../../crates/shamir-transport-ws/src/tests/server_tests.rs#L7); [crates/shamir-transport-ws/tests/framing_round_trip.rs:69](../../../../../crates/shamir-transport-ws/tests/framing_round_trip.rs#L69); [crates/shamir-transport-ws/src/framing.rs:148](../../../../../crates/shamir-transport-ws/src/framing.rs#L148).
+
+Grouping/duplicate: `correctness-tdd.md#2`. This row is not another independent defect.
+
+<a id="review-3"></a>
+
+### Claim 3 — Send path lacks the TCP sibling's size guard; `payload.len() as u32` truncates silently
+
+Status: `confirmed-open`. Current risk: `low`.
+
+The unchecked cast and allocation remain, unlike TCP's local size rejection.
+
+Evidence: [crates/shamir-transport-ws/src/framing.rs:118](../../../../../crates/shamir-transport-ws/src/framing.rs#L118); [crates/shamir-transport-tcp/src/framing.rs:153](../../../../../crates/shamir-transport-tcp/src/framing.rs#L153).
+
+Grouping/duplicate: `api-wire-protocol.md#3`. This row is not another independent defect.
+
+<a id="review-4"></a>
+
+### Claim 4 — Exporter extraction failure is indistinguishable from unavailability (`Option` discards the cause)
+
+Status: `confirmed-open`. Current risk: `low`.
+
+The wrapper still returns Option and the TCP helper erases rustls errors with ok(). Native WSS still converts None into zeros, but this does not automatically change binding_mode.
+
+Evidence: [crates/shamir-transport-ws/src/tls_exporter.rs:20](../../../../../crates/shamir-transport-ws/src/tls_exporter.rs#L20); [crates/shamir-transport-tcp/src/tls.rs:81](../../../../../crates/shamir-transport-tcp/src/tls.rs#L81); [crates/shamir-server/src/server/server_launcher.rs:1391](../../../../../crates/shamir-server/src/server/server_launcher.rs#L1391).
+
+Grouping/duplicate: `security-crypto.md#5`. This row is not another independent defect.
+
+<a id="review-5"></a>
+
+### Claim 5 — Framing error leaves the caller's scratch buffer holding the previous frame
+
+Status: `confirmed-open`. Current risk: `nit`.
+
+Clear remains success-only. Error-path buffer semantics are undocumented, but production callers check errors before decoding; stale-request processing is not demonstrated.
+
+Evidence: [crates/shamir-transport-ws/src/framing.rs:149](../../../../../crates/shamir-transport-ws/src/framing.rs#L149); [crates/shamir-transport-ws/src/framing.rs:169](../../../../../crates/shamir-transport-ws/src/framing.rs#L169); [crates/shamir-server/src/connection/handshake.rs:719](../../../../../crates/shamir-server/src/connection/handshake.rs#L719).
+
+<a id="review-6"></a>
+
+### Claim 6 — Doc attributes the 4 KiB pre-auth check to `ws_recv_into`, which enforces nothing by itself
+
+Status: `confirmed-open`. Current risk: `nit`.
+
+The attribution remains wrong; ws_recv_into does enforce the caller's numeric cap, just not an intrinsic pre-auth 4 KiB policy.
+
+Evidence: [crates/shamir-transport-ws/src/server.rs:27](../../../../../crates/shamir-transport-ws/src/server.rs#L27); [crates/shamir-transport-ws/src/framing.rs:163](../../../../../crates/shamir-transport-ws/src/framing.rs#L163); [crates/shamir-server/src/connection/handshake.rs:717](../../../../../crates/shamir-server/src/connection/handshake.rs#L717).
+
+Grouping/duplicate: `performance-hotpath.md#4`. This row is not another independent defect.
+
+<a id="review-7"></a>
+
+### Claim 7 — `Origin` header containing obs-text bytes is reported as `Missing` rather than rejected-as-present
+
+Status: `confirmed-open`. Current risk: `nit`.
+
+HeaderValue conversion failure still becomes None and then Missing. Rejection remains fail-closed; the diagnostic distinction is lost.
+
+Evidence: [crates/shamir-transport-ws/src/server.rs:132](../../../../../crates/shamir-transport-ws/src/server.rs#L132); [crates/shamir-transport-ws/src/browser.rs:99](../../../../../crates/shamir-transport-ws/src/browser.rs#L99).
+
+## Corrections and qualified non-findings
+
+- Handshake(Error::Http) exposes HTTP status structurally; distinguishing 403 from 404 does not require response-body string matching. Recovering the original typed Origin reason is a separate issue.
+- Returning zero bytes does not turn a native listener into mode 0x02. The original automatic-downgrade scenario is overstated.
+- Source confirms validation before binding, owned-stream cleanup on failed acceptance, no crate-owned production tasks/files/locks, thiserror enums, and no production panic/unwrap/anyhow/Box<dyn Error>.
+- Test manifests and parent registration are correct. Integration framing placement is appropriate, but positive coverage must not be described as proving untested negative guarantees.
+- Buffer retention on Err is a documentation/API-semantics concern, not a proven current replay or memory-safety bug.
+
+---
+
+<details>
+<summary>Historical report — preserved for provenance; not current status or instructions</summary>
+
 # shamir-transport-ws — Error handling & resource lifecycle
 
 ## Summary
@@ -67,3 +175,5 @@ Ranked most severe first.
 - Error-path resource lifecycle is otherwise clean: `bind_validated` validates policy before socket creation (nothing to close on the reject path), and both accept fns take ownership of the stream, so any `Err` drops the socket; the crate spawns no tasks, holds no locks, and owns no files, so there is nothing else to leak on an error path.
 - Library surface hygiene matches CLAUDE.md §Error handling exactly: `thiserror` everywhere, `#[from]` where natural, `?` propagation, no `anyhow`, no `Box<dyn Error>`, no panics in src (the `unwrap`/`expect`/`panic!` hits are all under `tests/`).
 - Test layout follows the documented convention (crate-level `src/tests/` manifest + per-topic files); framing's tests live in the crate-root integration dir instead of a `src/framing/tests/` dir — defensible for wire-level round trips, noted only as an aside to finding 2.
+
+</details>

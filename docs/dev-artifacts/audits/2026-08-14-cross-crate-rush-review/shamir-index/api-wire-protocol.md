@@ -1,3 +1,146 @@
+<!-- revalidation:2026-10-08 source:92ad58266bf57ddea1fa3c8a47affba1a3a9a096 -->
+# shamir-index — api-wire-protocol revalidation
+
+Source snapshot: `92ad58266bf57ddea1fa3c8a47affba1a3a9a096`. Revalidated 2026-10-08 by read-only XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run; no source fix is part of this update. Test registration/assertions are evidence of an oracle, not proof of a passing run.
+
+This section is authoritative for current status. Original titles/IDs are retained for traceability; a refuted title is not a current assertion. The collapsed historical report below is superseded, including its counts, severity, scenarios and fix instructions. Plan IDs preserve historical numbering, not a current release mandate. [Workspace methodology and status definitions](../SUMMARY.md#status-definitions).
+
+Persisted tuning, SQ8 intent, snapshot compatibility, pruning, and error-contract gaps remain. Historical v1 shapes now positively confirm the layout incompatibility. The options field is unused but not intrinsically an API defect.
+
+## Current claim decisions
+
+| Claim decisions | Open | Source-fixed | Partial | Refuted | Unverified | N/A |
+|---:|---:|---:|---:|---:|---:|---:|
+| 11 | 10 | 0 | 0 | 0 | 0 | 1 |
+
+These are decisions on report claims, including repeated roots, bundled observations and non-findings—not a unique-bug census. Closed/N/A rows have no current risk; unverified risk is provisional. Pure style and unmeasured optimization claims do not establish runtime impact.
+
+<a id="review-1"></a>
+
+### Claim 1 — Persisted `VectorConfig.backend` is ignored on the reopen/rebuild path
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+The shared builder never matches cfg.backend; it always constructs default in-process HNSW, including for an External descriptor. Normal engine DDL constructs only InProcessHnsw; valid snapshots can retain actual graph parameters.
+
+Evidence: [crates/shamir-index/src/build_backend.rs:52](../../../../../crates/shamir-index/src/build_backend.rs#L52); [crates/shamir-index/src/kind.rs:190](../../../../../crates/shamir-index/src/kind.rs#L190); [crates/shamir-engine/src/table/table_manager_index_mgmt.rs:348](../../../../../crates/shamir-engine/src/table/table_manager_index_mgmt.rs#L348); [crates/shamir-engine/src/table/table_manager.rs:665](../../../../../crates/shamir-engine/src/table/table_manager.rs#L665).
+
+<a id="review-2"></a>
+
+### Claim 2 — SQ8 quantization opt-in has no durable carrier and is lost on most restarts
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+Descriptor quantization is skipped; builder and nonquantized from_parts produce quantization=None. Fitted v2 snapshots restore SQ8, but absent/corrupt/pre-fit snapshots lose intent. The exact frequency and total-memory multiplier are unmeasured.
+
+Evidence: [crates/shamir-index/src/kind.rs:185](../../../../../crates/shamir-index/src/kind.rs#L185); [crates/shamir-index/src/build_backend.rs:53](../../../../../crates/shamir-index/src/build_backend.rs#L53); [crates/shamir-index/src/vector/hnsw_adapter.rs:549](../../../../../crates/shamir-index/src/vector/hnsw_adapter.rs#L549); [crates/shamir-index/src/vector/hnsw_adapter.rs:618](../../../../../crates/shamir-index/src/vector/hnsw_adapter.rs#L618).
+
+<a id="review-3"></a>
+
+### Claim 3 — Vector snapshot v1 back-compat is claimed but has no working decode path, and the only test is vacuous
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+History at 3ed3069b^ lacks manifest q fields and sidecar vectors_u8. Current positional decoding has no legacy fallback. The registered migration test relabels current structs, so it cannot detect genuine v1 layout incompatibility.
+
+Evidence: [crates/shamir-index/src/vector/snapshot.rs:279](../../../../../crates/shamir-index/src/vector/snapshot.rs#L279); [crates/shamir-index/src/vector/snapshot.rs:723](../../../../../crates/shamir-index/src/vector/snapshot.rs#L723); [crates/shamir-index/src/vector/snapshot.rs:762](../../../../../crates/shamir-index/src/vector/snapshot.rs#L762); [crates/shamir-index/src/vector/tests/quantization_snapshot_tests.rs:384](../../../../../crates/shamir-index/src/vector/tests/quantization_snapshot_tests.rs#L384); [docs/guide-docs/guide/06-search.md:440](../../../../../docs/guide-docs/guide/06-search.md#L440).
+
+<a id="review-4"></a>
+
+### Claim 4 — Persisted posting keys depend on FxHasher output stability, with no version coupling and a caret-pinned dependency
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+Posting identities still use FxHasher under caret 2.1; lockfile resolves 2.1.2. No algorithm identity/self-check is coupled to format version 2. This is upgrade compatibility debt, not proof that the current patch changed output.
+
+Evidence: [crates/shamir-index/Cargo.toml:30](../../../../../crates/shamir-index/Cargo.toml#L30); [Cargo.lock:3007](../../../../../Cargo.lock#L3007); [crates/shamir-index/src/tokenizer.rs:466](../../../../../crates/shamir-index/src/tokenizer.rs#L466); [crates/shamir-index/src/persistence.rs:37](../../../../../crates/shamir-index/src/persistence.rs#L37).
+
+<a id="review-5"></a>
+
+### Claim 5 — `flip_generation` never prunes the old generation's `qgraph`/`qdata` chunks
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+The caller retains only old graph/data counts; flip removes those sections and sidecar, not qgraph/qdata. Quantized old-generation chunks remain orphaned after successful flips.
+
+Evidence: [crates/shamir-index/src/vector/vector_backend.rs:906](../../../../../crates/shamir-index/src/vector/vector_backend.rs#L906); [crates/shamir-index/src/vector/snapshot.rs:1287](../../../../../crates/shamir-index/src/vector/snapshot.rs#L1287); [crates/shamir-index/src/vector/snapshot.rs:1300](../../../../../crates/shamir-index/src/vector/snapshot.rs#L1300).
+
+<a id="review-6"></a>
+
+### Claim 6 — `MetaEnvelope::open` validates magic/version only after deserializing the payload
+
+Status: `confirmed-open`. Current risk: `low`.
+
+open still deserializes MetaEnvelope<T> before inspecting the fixed header. A payload-shape failure can mask an unsupported envelope version as Decode.
+
+Evidence: [crates/shamir-index/src/meta_envelope.rs:54](../../../../../crates/shamir-index/src/meta_envelope.rs#L54); [crates/shamir-index/src/meta_envelope.rs:64](../../../../../crates/shamir-index/src/meta_envelope.rs#L64).
+
+<a id="review-7"></a>
+
+### Claim 7 — Snapshot load path can panic on corrupt-but-decodable persisted data; the sidecar carries no checksum
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+The load path checks the quantization method, but not dimension/mins/scales consistency before synchronous to_quantizer asserts. Sidecar payload metadata is not included in the graph-section checksum.
+
+Evidence: [crates/shamir-index/src/vector/snapshot.rs:822](../../../../../crates/shamir-index/src/vector/snapshot.rs#L822); [crates/shamir-index/src/vector/snapshot.rs:973](../../../../../crates/shamir-index/src/vector/snapshot.rs#L973); [crates/shamir-index/src/vector/quant_meta.rs:73](../../../../../crates/shamir-index/src/vector/quant_meta.rs#L73); [crates/shamir-index/src/vector/sq8.rs:91](../../../../../crates/shamir-index/src/vector/sq8.rs#L91).
+
+<a id="review-8"></a>
+
+### Claim 8 — Bincode ordinal-stability contract is documented on some persisted enums but missing on others
+
+Status: `confirmed-open`. Current risk: `low`.
+
+IndexKind, TokenizerKind, and IndexExpr still lack explicit append-only ordinal contracts, although they are nested in persisted descriptors. No actual enum-reorder corruption is demonstrated.
+
+Evidence: [crates/shamir-index/src/kind.rs:11](../../../../../crates/shamir-index/src/kind.rs#L11); [crates/shamir-index/src/kind.rs:25](../../../../../crates/shamir-index/src/kind.rs#L25); [crates/shamir-index/src/expr.rs:21](../../../../../crates/shamir-index/src/expr.rs#L21); [crates/shamir-index/src/persistence.rs:97](../../../../../crates/shamir-index/src/persistence.rs#L97).
+
+<a id="review-9"></a>
+
+### Claim 9 — `IndexDescriptor.options` is dead public API
+
+Status: `not-applicable`. Current risk: —.
+
+The field is still unused by shipped builders and round-tripped as opaque bytes. Its documented opaque/default-empty nature does not promise interpreted tuning; an extension carrier is not inherently a correctness defect.
+
+Evidence: [crates/shamir-index/src/descriptor.rs:26](../../../../../crates/shamir-index/src/descriptor.rs#L26); [crates/shamir-index/src/descriptor.rs:59](../../../../../crates/shamir-index/src/descriptor.rs#L59); [crates/shamir-index/src/build_backend.rs:28](../../../../../crates/shamir-index/src/build_backend.rs#L28); [crates/shamir-index/src/persistence.rs:212](../../../../../crates/shamir-index/src/persistence.rs#L212).
+
+<a id="review-10"></a>
+
+### Claim 10 — Corrupt FTS posting values are silently replaced with `tf=1, doc_len=1`
+
+Status: `confirmed-open`. Current risk: `low`.
+
+Nonempty posting decode errors still use the same default as legitimate empty legacy postings, without warning or error. This can silently alter ranked scoring.
+
+Evidence: [crates/shamir-index/src/fts_ranked_backend.rs:125](../../../../../crates/shamir-index/src/fts_ranked_backend.rs#L125); [crates/shamir-index/src/fts_ranked_backend.rs:128](../../../../../crates/shamir-index/src/fts_ranked_backend.rs#L128).
+
+<a id="review-11"></a>
+
+### Claim 11 — Stale lifecycle doc contradicts the shipped `IndexState` wire enum; minor `IndexRecordKey` API warts
+
+Status: `confirmed-open`. Current risk: `nit`.
+
+lifecycle still says Failed is unnecessary despite the shipped variant. from_bytes still returns String errors and accepts longer buffers; with_values remains public and only comment-deprecated.
+
+Evidence: [crates/shamir-index/src/lifecycle.rs:31](../../../../../crates/shamir-index/src/lifecycle.rs#L31); [crates/shamir-index/src/state.rs:73](../../../../../crates/shamir-index/src/state.rs#L73); [crates/shamir-index/src/base_index/index_record_key.rs:104](../../../../../crates/shamir-index/src/base_index/index_record_key.rs#L104); [crates/shamir-index/src/base_index/index_record_key.rs:62](../../../../../crates/shamir-index/src/base_index/index_record_key.rs#L62).
+
+## Corrections and qualified non-findings
+
+- Successful snapshot graph loads can preserve HNSW parameters; the builder defect concerns construction/rebuild and unsupported External interpretation.
+- History resolves the v1 caveat: quantization was reserved, but vectors_u8 and all q-manifest fields were not. The advertised genuine-v1 compatibility is unsupported by the current positional layouts.
+- rustc-hash and hnsw_rs declarations are in crates/shamir-index/Cargo.toml, not the workspace Cargo.toml. Resolved pins are rustc-hash 2.1.2, bincode 1.3.3, scc 3.8.4, and hnsw_rs 0.3.4.
+- Exact pinning is useful but does not by itself provide portable persisted-hash semantics or detect format changes. No current algorithm-output regression was established.
+- Do not remove the persisted options field without a codec migration; using it for durable SQ8 intent remains a possible implementation choice.
+- panic=unwind is configured. Data-driven panics can fail an open/query task, but a process-wide abort is not automatic.
+- Typed queries/ops and absence of a direct serde_json dependency remain confirmed. DSL parsers return Option; unknown quantization strings map to None rather than a typed rejection.
+- Base-index shadow-shape decoders and format-version gating remain present; their existence does not establish the missing snapshot v1 fallback.
+
+---
+
+<details>
+<summary>Historical report — preserved for provenance; not current status or instructions</summary>
+
 # shamir-index -- API & wire-protocol design
 
 ## Summary
@@ -81,3 +224,5 @@ The crate's query surface is clean and builder-only by construction: there is no
 ---
 
 **Builder-only rule compliance (theme checklist):** no violations found. The crate has no `serde_json` dependency; queries are constructed exclusively via the `IndexQuery` enum (`Point`/`Range`/`Fts`/`Vector`) and persisted ops via the typed `IndexWriteOp` re-export; the one raw-string parse surface (`StemLanguage::from_dsl`, `VectorQuantization::from_dsl`) returns `Option` rather than erroring, and covers both full names and ISO codes. Wire keys (`_m.idx*` system keys, posting-layout prefixes, `__vec_snap__<id>` keyspaces) are consistently documented with byte-level collision analyses.
+
+</details>

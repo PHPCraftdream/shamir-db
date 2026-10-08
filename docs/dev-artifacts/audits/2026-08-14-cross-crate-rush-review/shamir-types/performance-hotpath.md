@@ -1,3 +1,123 @@
+<!-- revalidation:2026-10-08 source:92ad58266bf57ddea1fa3c8a47affba1a3a9a096 -->
+# shamir-types — performance-hotpath revalidation
+
+Source snapshot: `92ad58266bf57ddea1fa3c8a47affba1a3a9a096`. Revalidated 2026-10-08 by read-only XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run; no source fix is part of this update. Test registration/assertions are evidence of an oracle, not proof of a passing run.
+
+This section is authoritative for current status. Original titles/IDs are retained for traceability; a refuted title is not a current assertion. The collapsed historical report below is superseded, including its counts, severity, scenarios and fix instructions. Plan IDs preserve historical numbering, not a current release mandate. [Workspace methodology and status definitions](../SUMMARY.md#status-definitions).
+
+Projection rescans and several avoidable allocations remain structurally proven. Scratch-buffer finding is refuted by the explicit ownership-transfer contract and registered zero-capacity test. for_each_field currently has no engine caller; latency claims are unmeasured.
+
+## Current claim decisions
+
+| Claim decisions | Open | Source-fixed | Partial | Refuted | Unverified | N/A |
+|---:|---:|---:|---:|---:|---:|---:|
+| 9 | 7 | 0 | 0 | 1 | 0 | 1 |
+
+These are decisions on report claims, including repeated roots, bundled observations and non-findings—not a unique-bug census. Closed/N/A rows have no current risk; unverified risk is provisional. Pure style and unmeasured optimization claims do not establish runtime impact.
+
+<a id="review-1"></a>
+
+### Claim 1 — Projection codec re-scans the whole record once PER selected field id — O(fields x selected) per row
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+Each selected id restarts value_bytes_at's map scan; live S-read callers invoke this per row. Worst-case O(k*f) entry traversal remains. Existing semantic tests do not enforce scaling; numerical marker-count/throughput-collapse examples were not measured.
+
+Evidence: [crates/shamir-types/src/codecs/interned/projection.rs:62](../../../../../crates/shamir-types/src/codecs/interned/projection.rs#L62); [crates/shamir-types/src/record_view/lens.rs:1139](../../../../../crates/shamir-types/src/record_view/lens.rs#L1139); [crates/shamir-engine/src/table/read_exec.rs:1544](../../../../../crates/shamir-engine/src/table/read_exec.rs#L1544); [crates/shamir-engine/src/table/read_exec.rs:1585](../../../../../crates/shamir-engine/src/table/read_exec.rs#L1585).
+
+<a id="review-2"></a>
+
+### Claim 2 — `RecordRef::for_each_field` (lens impl) is O(f^2): one full map re-scan per field
+
+Status: `confirmed-open`. Current risk: `low`.
+
+The method discards the iterated value and scans again for each field. Only tests currently call it; SELECT * uses other lens/de-intern paths. Quadratic complexity is proven, current production latency impact is not.
+
+Evidence: [crates/shamir-types/src/record_view/record_ref.rs:338](../../../../../crates/shamir-types/src/record_view/record_ref.rs#L338); [crates/shamir-types/src/record_view/lens.rs:1139](../../../../../crates/shamir-types/src/record_view/lens.rs#L1139); [crates/shamir-types/src/record_view/tests/record_ref_tests.rs:969](../../../../../crates/shamir-types/src/record_view/tests/record_ref_tests.rs#L969).
+
+<a id="review-3"></a>
+
+### Claim 3 — Zerocopy msgpack decoder allocates an owned `String` per map KEY even though keys go straight into the interner
+
+Status: `confirmed-open`. Current risk: `low`.
+
+Nonempty string keys are copied by read_str before borrowed interner lookup. This decoder accepts external string-keyed form, not stored id-keyed maps, and no current production caller was found. The WAL/storage-hot-path framing is incorrect.
+
+Evidence: [crates/shamir-types/src/codecs/interned/messagepack.rs:130](../../../../../crates/shamir-types/src/codecs/interned/messagepack.rs#L130); [crates/shamir-types/src/codecs/interned/messagepack.rs:139](../../../../../crates/shamir-types/src/codecs/interned/messagepack.rs#L139); [crates/shamir-types/src/codecs/interned/messagepack.rs:324](../../../../../crates/shamir-types/src/codecs/interned/messagepack.rs#L324); [crates/shamir-types/src/codecs/interned/messagepack.rs:341](../../../../../crates/shamir-types/src/codecs/interned/messagepack.rs#L341).
+
+<a id="review-4"></a>
+
+### Claim 4 — `query_value_to_storage_bytes_into` defeats its own scratch-buffer purpose — capacity resets to 0 every call
+
+Status: `refuted`. Current risk: —.
+
+Source explicitly documents consumed Vec ownership, zero-copy Bytes handoff, and regrowth on the next call. A registered test asserts capacity zero and valid repeated output. Reserving a replacement Vec adds another allocation; it does not reuse the transferred allocation.
+
+Evidence: [crates/shamir-types/src/codecs/interned/messagepack.rs:878](../../../../../crates/shamir-types/src/codecs/interned/messagepack.rs#L878); [crates/shamir-types/src/codecs/interned/messagepack.rs:907](../../../../../crates/shamir-types/src/codecs/interned/messagepack.rs#L907); [crates/shamir-types/src/codecs/interned/tests/storage_bytes_tests.rs:516](../../../../../crates/shamir-types/src/codecs/interned/tests/storage_bytes_tests.rs#L516); [crates/shamir-types/src/codecs/interned/tests/storage_bytes_tests.rs:534](../../../../../crates/shamir-types/src/codecs/interned/tests/storage_bytes_tests.rs#L534).
+
+<a id="review-5"></a>
+
+### Claim 5 — Raced `touch_ind` cold-misses permanently leak interned ids — interner memory tracks racing touches, not distinct names
+
+Status: `confirmed-open`. Current risk: `low`.
+
+fetch_add precedes entry arbitration; Occupied losers permanently consume ids. Subsequent ids can enlarge the reverse spine and persistent gaps freeze entries_after's contiguous high-water mark. Temporary Arc/String allocations are dropped, not leaked; production race frequency is unmeasured.
+
+Evidence: [crates/shamir-types/src/core/interner/interner.rs:149](../../../../../crates/shamir-types/src/core/interner/interner.rs#L149); [crates/shamir-types/src/core/interner/interner.rs:157](../../../../../crates/shamir-types/src/core/interner/interner.rs#L157); [crates/shamir-types/src/core/interner/interner.rs:163](../../../../../crates/shamir-types/src/core/interner/interner.rs#L163); [crates/shamir-types/src/core/interner/interner.rs:509](../../../../../crates/shamir-types/src/core/interner/interner.rs#L509); [crates/shamir-types/src/core/interner/interner.rs:554](../../../../../crates/shamir-types/src/core/interner/interner.rs#L554).
+
+<a id="review-6"></a>
+
+### Claim 6 — `merge_storage_bytes` allocates intermediate Vecs per NEW set_map entry before copying into the output buffer
+
+Status: `confirmed-open`. Current risk: `low`.
+
+New keys and values are still independently serialized into temporary buffers and copied. Replaced old values also allocate a temporary buffer. Streaming is a valid optimization opportunity; no measured significance is established.
+
+Evidence: [crates/shamir-types/src/codecs/interned/messagepack.rs:648](../../../../../crates/shamir-types/src/codecs/interned/messagepack.rs#L648); [crates/shamir-types/src/codecs/interned/messagepack.rs:661](../../../../../crates/shamir-types/src/codecs/interned/messagepack.rs#L661); [crates/shamir-types/src/codecs/interned/messagepack.rs:667](../../../../../crates/shamir-types/src/codecs/interned/messagepack.rs#L667); [crates/shamir-engine/src/table/write_exec.rs:738](../../../../../crates/shamir-engine/src/table/write_exec.rs#L738).
+
+<a id="review-7"></a>
+
+### Claim 7 — Authorization helpers allocate fresh Strings + Vecs per check on the access-gate path
+
+Status: `confirmed-open`. Current risk: `low`.
+
+Non-admin authorization calls ancestors, which allocates and clones owned parent segments. System/Admin bypass occurs first. Depth is bounded for database paths but FunctionFolder depth is caller-sized, invalidating the blanket <=5 bound.
+
+Evidence: [crates/shamir-types/src/access.rs:504](../../../../../crates/shamir-types/src/access.rs#L504); [crates/shamir-types/src/access.rs:524](../../../../../crates/shamir-types/src/access.rs#L524); [crates/shamir-types/src/access.rs:550](../../../../../crates/shamir-types/src/access.rs#L550); [crates/shamir-db/src/shamir_db/shamir_db/access_control.rs:840](../../../../../crates/shamir-db/src/shamir_db/shamir_db/access_control.rs#L840); [crates/shamir-db/src/shamir_db/shamir_db/access_control.rs:850](../../../../../crates/shamir-db/src/shamir_db/shamir_db/access_control.rs#L850).
+
+<a id="review-8"></a>
+
+### Claim 8 — Lazy aggregate cursors pay an eager full-subtree validation walk, then walk again when consumed
+
+Status: `not-applicable`. Current risk: —.
+
+The double walk exists and is already described as validation followed by lazy re-walking. It establishes safe slice bounds; no incorrect behavior or measured performance regression is established. An exact ~2x cost is not guaranteed for nested aggregates.
+
+Evidence: [crates/shamir-types/src/record_view/lens.rs:622](../../../../../crates/shamir-types/src/record_view/lens.rs#L622); [crates/shamir-types/src/record_view/lens.rs:641](../../../../../crates/shamir-types/src/record_view/lens.rs#L641); [crates/shamir-types/src/record_view/record_value.rs:80](../../../../../crates/shamir-types/src/record_view/record_value.rs#L80).
+
+<a id="review-9"></a>
+
+### Claim 9 — `QueryValue::set_path` builds the error-message path prefix during successful traversals too
+
+Status: `confirmed-open`. Current risk: `nit`.
+
+walked is still assembled for every segment before success/error branching. It is avoidable success-path string work, not demonstrated latency or correctness failure; String growth does not imply a fresh allocation per segment.
+
+Evidence: [crates/shamir-types/src/types/value.rs:578](../../../../../crates/shamir-types/src/types/value.rs#L578); [crates/shamir-types/src/types/value.rs:590](../../../../../crates/shamir-types/src/types/value.rs#L590); [crates/shamir-types/src/types/value.rs:603](../../../../../crates/shamir-types/src/types/value.rs#L603).
+
+## Corrections and qualified non-findings
+
+- The scratch handoff and its capacity-zero test landed in e15d73f2 before the review; the original review overlooked both.
+- A shared span index must itself bound header-derived preallocation. Reusing RecordView::index unchanged would retain the allocation hazard at lens.rs:1064.
+- FieldIndex stores value starts, not complete byte spans. Extracting raw spans requires a deliberate extension, and aggregate skipping is proportional to subtree content.
+- merge_storage_bytes is not allocation-free overall: it allocates entries, old_ids, new_keys, output, replacement-value buffers, and new-entry buffers.
+- General parity tests are registered, but neither their names nor successful hypothetical runs establish asymptotic scaling.
+
+---
+
+<details>
+<summary>Historical report — preserved for provenance; not current status or instructions</summary>
+
 # shamir-types -- Performance & O(x->0)
 
 ## Summary
@@ -180,3 +300,5 @@ they are strong on parity/round-trip but use small fixtures, so the quadratic pa
 findings 1-2 and the capacity-reset in finding 4 are invisible to the current suite (grep found
 no scaling/capacity assertion). `clippy.toml` bans scc `len()`, not DashMap's — `Interner::len()`
 (:308) is sharded-counter based and compliant.
+
+</details>

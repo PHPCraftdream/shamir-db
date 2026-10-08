@@ -1,3 +1,129 @@
+<!-- revalidation:2026-10-08 source:92ad58266bf57ddea1fa3c8a47affba1a3a9a096 -->
+# shamir-storage — concurrency-lockfree revalidation
+
+Source snapshot: `92ad58266bf57ddea1fa3c8a47affba1a3a9a096`. Revalidated 2026-10-08 by read-only XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run; no source fix is part of this update. Test registration/assertions are evidence of an oracle, not proof of a passing run.
+
+This section is authoritative for current status. Original titles/IDs are retained for traceability; a refuted title is not a current assertion. The collapsed historical report below is superseded, including its counts, severity, scenarios and fix instructions. Plan IDs preserve historical numbering, not a current release mandate. [Workspace methodology and status definitions](../SUMMARY.md#status-definitions).
+
+The concrete cache-ordering, non-atomic mutation, blocking-send, and eager-scan mechanisms remain. Claims about unavailable pinned dependency APIs are not independently verified.
+
+## Current claim decisions
+
+| Claim decisions | Open | Source-fixed | Partial | Refuted | Unverified | N/A |
+|---:|---:|---:|---:|---:|---:|---:|
+| 9 | 8 | 0 | 0 | 0 | 0 | 1 |
+
+These are decisions on report claims, including repeated roots, bundled observations and non-findings—not a unique-bug census. Closed/N/A rows have no current risk; unverified risk is provisional. Pure style and unmeasured optimization claims do not establish runtime impact.
+
+<a id="review-1"></a>
+
+### Claim 1 — CachedStore: unordered, non-atomic cache-mutation sites can leave the cache permanently behind inner
+
+Status: `confirmed-open`. Current risk: `high`.
+
+Sync backing writes and cache updates have independent ordering; cache_upsert and transact population still remove then insert and ignore Duplicate. A stale cache value can persist after all overlapping operations finish, disagreeing with inner. The concurrent test uses distinct writer keys.
+
+Evidence: [crates/shamir-storage/src/storage_cached.rs:151](../../../../../crates/shamir-storage/src/storage_cached.rs#L151); [crates/shamir-storage/src/storage_cached.rs:403](../../../../../crates/shamir-storage/src/storage_cached.rs#L403); [crates/shamir-storage/src/storage_cached.rs:431](../../../../../crates/shamir-storage/src/storage_cached.rs#L431); [crates/shamir-storage/src/storage_cached.rs:471](../../../../../crates/shamir-storage/src/storage_cached.rs#L471); [crates/shamir-storage/src/tests/storage_cached_tests.rs:320](../../../../../crates/shamir-storage/src/tests/storage_cached_tests.rs#L320).
+
+<a id="review-2"></a>
+
+### Claim 2 — MemBufferStore::get_many is missing the #539 tombstone-poisoning guard its sibling get() has
+
+Status: `confirmed-open`. Current risk: `high`.
+
+The post-inner read-fill remains unconditional, unlike single-get's recheck. Ordinary shared-suite coverage exists, but no test controls this concurrent fill window.
+
+Evidence: [crates/shamir-storage/src/storage_membuffer.rs:874](../../../../../crates/shamir-storage/src/storage_membuffer.rs#L874); [crates/shamir-storage/src/storage_membuffer.rs:1246](../../../../../crates/shamir-storage/src/storage_membuffer.rs#L1246); [crates/shamir-storage/src/storage_membuffer.rs:1258](../../../../../crates/shamir-storage/src/storage_membuffer.rs#L1258); [crates/shamir-storage/src/tests/types_tests.rs:124](../../../../../crates/shamir-storage/src/tests/types_tests.rs#L124).
+
+Grouping/duplicate: `correctness-tdd.md#1`. This row is not another independent defect.
+
+<a id="review-3"></a>
+
+### Claim 3 — InMemoryStore::set: remove+re-insert update path built on a false premise — swallows a racing Duplicate
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+The remove/reinsert window and ignored duplicate result are present, allowing transient absence and an acknowledged call whose supplied value was not inserted. The proposed upsert API's existence/semantics are unverified against unavailable scc 3.8.4 sources; overlapping completion order alone is not a correctness oracle.
+
+Evidence: [crates/shamir-storage/src/storage_in_memory.rs:124](../../../../../crates/shamir-storage/src/storage_in_memory.rs#L124); [crates/shamir-storage/src/storage_in_memory.rs:129](../../../../../crates/shamir-storage/src/storage_in_memory.rs#L129); [crates/shamir-storage/src/storage_in_memory.rs:130](../../../../../crates/shamir-storage/src/storage_in_memory.rs#L130); [Cargo.lock:3123](../../../../../Cargo.lock#L3123).
+
+<a id="review-4"></a>
+
+### Claim 4 — FjallStore::submit blocks the tokio executor thread when the 1024-slot worker queue fills
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+async submit directly invokes blocking SyncSender::send on a bounded channel before awaiting its reply. Saturation blocks executing runtime threads, not just tasks; timing and production saturation were not measured.
+
+Evidence: [crates/shamir-storage/src/storage_fjall.rs:92](../../../../../crates/shamir-storage/src/storage_fjall.rs#L92); [crates/shamir-storage/src/storage_fjall.rs:194](../../../../../crates/shamir-storage/src/storage_fjall.rs#L194); [crates/shamir-storage/src/storage_fjall.rs:199](../../../../../crates/shamir-storage/src/storage_fjall.rs#L199); [crates/shamir-storage/src/storage_fjall.rs:330](../../../../../crates/shamir-storage/src/storage_fjall.rs#L330); [crates/shamir-storage/src/storage_fjall.rs:496](../../../../../crates/shamir-storage/src/storage_fjall.rs#L496).
+
+<a id="review-5"></a>
+
+### Claim 5 — moka cache built with default RandomState instead of workspace THasher
+
+Status: `confirmed-open`. Current risk: `low`.
+
+The builder still uses plain build and never supplies THasher, unlike dirty. Exact default-hasher internals, build_with_hasher API support, and any speedup are unverified against the unavailable pinned moka source.
+
+Evidence: [crates/shamir-storage/src/storage_membuffer.rs:142](../../../../../crates/shamir-storage/src/storage_membuffer.rs#L142); [crates/shamir-storage/src/storage_membuffer.rs:232](../../../../../crates/shamir-storage/src/storage_membuffer.rs#L232); [crates/shamir-storage/src/storage_membuffer.rs:255](../../../../../crates/shamir-storage/src/storage_membuffer.rs#L255); [Cargo.lock:2221](../../../../../Cargo.lock#L2221).
+
+<a id="review-6"></a>
+
+### Claim 6 — InMemoryStore iter_stream / scan_prefix_stream eagerly materialize the whole result set before first yield, under one pinned epoch Guard
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+Both methods collect all matching key/value handles before constructing the stream, under one Guard. The Guard ends before yielding; peak result-vector storage remains proportional to all matches.
+
+Evidence: [crates/shamir-storage/src/storage_in_memory.rs:153](../../../../../crates/shamir-storage/src/storage_in_memory.rs#L153); [crates/shamir-storage/src/storage_in_memory.rs:154](../../../../../crates/shamir-storage/src/storage_in_memory.rs#L154); [crates/shamir-storage/src/storage_in_memory.rs:158](../../../../../crates/shamir-storage/src/storage_in_memory.rs#L158); [crates/shamir-storage/src/storage_in_memory.rs:240](../../../../../crates/shamir-storage/src/storage_in_memory.rs#L240).
+
+Grouping/duplicate: `performance-hotpath.md#2`. This row is not another independent defect.
+
+<a id="review-7"></a>
+
+### Claim 7 — CachedStore::reload is non-atomic clear→refill against live traffic
+
+Status: `confirmed-open`. Current risk: `low`.
+
+reload clears live cache and resets size before awaiting streamed refill, with no quiescence precondition or ordering guard. Concurrent writes/read-fills can disagree with refill and its counter. A cache hit does not fall through to inner, so reads are not universally safe.
+
+Evidence: [crates/shamir-storage/src/storage_cached.rs:306](../../../../../crates/shamir-storage/src/storage_cached.rs#L306); [crates/shamir-storage/src/storage_cached.rs:311](../../../../../crates/shamir-storage/src/storage_cached.rs#L311); [crates/shamir-storage/src/storage_cached.rs:318](../../../../../crates/shamir-storage/src/storage_cached.rs#L318); [crates/shamir-storage/src/storage_cached.rs:471](../../../../../crates/shamir-storage/src/storage_cached.rs#L471).
+
+<a id="review-8"></a>
+
+### Claim 8 — NIT: cross-path write ordering inside FjallStore rests only on fjall's internal journal mutex arrival order
+
+Status: `confirmed-open`. Current risk: `nit`.
+
+Worker and spawn_blocking routes remain independent. The broad point-write-ordering comment is unsupported by those routes; dependency-internal journal locking was not independently verified.
+
+Evidence: [crates/shamir-storage/src/storage_fjall.rs:34](../../../../../crates/shamir-storage/src/storage_fjall.rs#L34); [crates/shamir-storage/src/storage_fjall.rs:337](../../../../../crates/shamir-storage/src/storage_fjall.rs#L337); [crates/shamir-storage/src/storage_fjall.rs:494](../../../../../crates/shamir-storage/src/storage_fjall.rs#L494); [crates/shamir-storage/src/storage_fjall.rs:550](../../../../../crates/shamir-storage/src/storage_fjall.rs#L550).
+
+Grouping/duplicate: `correctness-tdd.md#6`. This row is not another independent defect.
+
+<a id="review-nf-pillar-compliance"></a>
+
+### Claim NF-pillar-compliance — Zero direct production Mutex/RwLock/parking_lot and no scc len calls; THasher, ArcSwap, atomic mirrors
+
+Status: `not-applicable`. Current risk: —.
+
+These source-level structural observations hold. They do not prove the entire backend stack is lock-free: DashMap is sharded-lock based, and dependency internals were not available.
+
+Evidence: [crates/shamir-storage/src/storage_membuffer.rs:142](../../../../../crates/shamir-storage/src/storage_membuffer.rs#L142); [crates/shamir-storage/src/storage_membuffer.rs:154](../../../../../crates/shamir-storage/src/storage_membuffer.rs#L154); [crates/shamir-storage/src/storage_cached.rs:194](../../../../../crates/shamir-storage/src/storage_cached.rs#L194); [crates/shamir-storage/src/tests/storage_membuffer_tests.rs:765](../../../../../crates/shamir-storage/src/tests/storage_membuffer_tests.rs#L765).
+
+## Corrections and qualified non-findings
+
+- The repository does not vendor the cited scc/moka sources; pinned external API claims must remain unverified.
+- An atomic tree upsert alone cannot order backing commits against cache publication or prevent stale read-fill.
+- Do not assert that a later-completing overlapping set must win.
+- TableManager's conditional barrier/unique lock does not prove universal same-key serialization.
+- The guard is held during collection, not across stream awaits.
+
+---
+
+<details>
+<summary>Historical report — preserved for provenance; not current status or instructions</summary>
+
 # shamir-storage -- Concurrency & lock-free invariants
 
 ## Summary
@@ -101,3 +227,5 @@ Exposure is bounded by the same engine-level serialization Fjall §B13 leans on 
 **Severity:** nit
 
 **Issue:** Worker-routed ops (`insert`, `transact`, FIFO-submission-ordered) and spawn_blocking-routed ops (`set`/`set_no_flag`/`remove`/`remove_no_flag`, arbitrary pool scheduling) reach fjall in whatever order each path acquires the journal writer mutex — there is no cross-path ordering guarantee, i.e. structurally the same hazard #616 pt.2 eliminated inside CachedStore. The §B13 acknowledgment covers concurrent same-key `set`s via TableManager serialization, which also neutralizes this variant in practice, but the comment never names the worker-vs-spawn_blocking interleave explicitly; add one sentence when that block is next touched so a future routing change doesn't silently widen the assumption.
+
+</details>

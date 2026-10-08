@@ -1,3 +1,78 @@
+<!-- revalidation:2026-10-08 source:92ad58266bf57ddea1fa3c8a47affba1a3a9a096 -->
+# shamir-tunables — api-wire-protocol revalidation
+
+Source snapshot: `92ad58266bf57ddea1fa3c8a47affba1a3a9a096`. Revalidated 2026-10-08 by read-only XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run; no source fix is part of this update. Test registration/assertions are evidence of an oracle, not proof of a passing run.
+
+This section is authoritative for current status. Original titles/IDs are retained for traceability; a refuted title is not a current assertion. The collapsed historical report below is superseded, including its counts, severity, scenarios and fix instructions. Plan IDs preserve historical numbering, not a current release mandate. [Workspace methodology and status definitions](../SUMMARY.md#status-definitions).
+
+The wire-free boundary remains clean. Wiring and setter-domain documentation remain open; mandatory knob symmetry and mandatory relocation of the correctly registered root tests are refuted.
+
+## Current claim decisions
+
+| Claim decisions | Open | Source-fixed | Partial | Refuted | Unverified | N/A |
+|---:|---:|---:|---:|---:|---:|---:|
+| 4 | 2 | 0 | 0 | 2 | 0 | 0 |
+
+These are decisions on report claims, including repeated roots, bundled observations and non-findings—not a unique-bug census. Closed/N/A rows have no current risk; unverified risk is provisional. Pure style and unmeasured optimization claims do not establish runtime impact.
+
+<a id="review-1"></a>
+
+### Claim 1 — `RuntimeTunables` is public and documented as effective, but unwired -- every consumer reads the compiled consts
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+The public object still has no production getter consumers. Deferral exists in server documentation and the roadmap, but not alongside the crate's effective-override claims.
+
+Evidence: [crates/shamir-tunables/src/runtime.rs:4](../../../../../crates/shamir-tunables/src/runtime.rs#L4); [crates/shamir-server/src/server/server_handle.rs:98](../../../../../crates/shamir-server/src/server/server_handle.rs#L98); [crates/shamir-server/src/server/server_launcher.rs:1048](../../../../../crates/shamir-server/src/server/server_launcher.rs#L1048); [docs/dev-artifacts/roadmap/TUNABLES.md:179](../../../../../docs/dev-artifacts/roadmap/TUNABLES.md#L179).
+
+Grouping/duplicate: `correctness-tdd.md#1`. This row is not another independent defect.
+
+<a id="review-2"></a>
+
+### Claim 2 — Setters accept out-of-domain values silently; millisecond truncation is undocumented
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+All setters remain infallible and specify no domain or quantization policy. Zero/sub-ms conversion and large-duration narrowing are unchanged. The relevant issue is an undefined API policy, not that atomic stores themselves require Result.
+
+Evidence: [crates/shamir-tunables/src/runtime.rs:55](../../../../../crates/shamir-tunables/src/runtime.rs#L55); [crates/shamir-tunables/src/runtime.rs:60](../../../../../crates/shamir-tunables/src/runtime.rs#L60); [crates/shamir-tunables/src/runtime.rs:63](../../../../../crates/shamir-tunables/src/runtime.rs#L63); [crates/shamir-tunables/src/runtime.rs:72](../../../../../crates/shamir-tunables/src/runtime.rs#L72).
+
+Grouping/duplicate: `correctness-tdd.md#2`. This row is not another independent defect.
+
+<a id="review-3"></a>
+
+### Claim 3 — Runtime knob selection is asymmetric within a single consumption site
+
+Status: `refuted`. Current risk: —.
+
+Different promotion status is real but does not violate a promised symmetric API. The roadmap positively specifies promotion only on genuine need and explicitly defers consumer wiring. No idle-timeout override is promised. Application timing must be designed if live wiring is chosen.
+
+Evidence: [docs/dev-artifacts/roadmap/TUNABLES.md:113](../../../../../docs/dev-artifacts/roadmap/TUNABLES.md#L113); [docs/dev-artifacts/roadmap/TUNABLES.md:172](../../../../../docs/dev-artifacts/roadmap/TUNABLES.md#L172); [docs/dev-artifacts/roadmap/TUNABLES.md:179](../../../../../docs/dev-artifacts/roadmap/TUNABLES.md#L179); [crates/shamir-tunables/src/runtime.rs:18](../../../../../crates/shamir-tunables/src/runtime.rs#L18).
+
+<a id="review-4"></a>
+
+### Claim 4 — Test directory placement deviates from the per-module `tests/` convention
+
+Status: `refuted`. Current risk: —.
+
+These tests are owned and registered by the crate-root module, which has one tests directory and a manifest-only topic module. The rules do not require root-owned tests to be nested under the implementation file they exercise. Commit dd12593f explicitly migrated this crate into the present convention.
+
+Evidence: [crates/shamir-tunables/src/lib.rs:11](../../../../../crates/shamir-tunables/src/lib.rs#L11); [crates/shamir-tunables/src/tests/mod.rs:1](../../../../../crates/shamir-tunables/src/tests/mod.rs#L1); [AGENTS.md:127](../../../../../AGENTS.md#L127); [CLAUDE.md:575](../../../../../CLAUDE.md#L575).
+
+## Corrections and qualified non-findings
+
+- Clean boundary claims remain valid: no serialization/query construction/dependencies; version 0.1.0-alpha.1 and publish=false are current (crates/shamir-tunables/Cargo.toml:3,4; Cargo.lock:3785).
+- All 17 constants still have production uses, including HISTORY_SCAN_BATCH in crates/shamir-tx/src/mvcc_store/mvcc_history.rs:30 and the vector thresholds in crates/shamir-index/src/vector/vector_backend.rs:143.
+- WAL decoupling remains valid: the caller supplies the threshold, and shamir-wal has no tunables dependency (crates/shamir-engine/src/repo/repo_instance.rs:825,830; crates/shamir-wal/src/segment_set.rs:88; crates/shamir-wal/Cargo.toml:9).
+- Finding 3's per-listener boot snapshot observation is correct, but its semaphore is constructed per connection, not at listener boot (crates/shamir-server/src/server/server_launcher.rs:1023; crates/shamir-server/src/connection/request_loop.rs:154). Replacing only build_ctx's constant read would not enable post-launch changes for new connections.
+- Idle-timeout promotion and test relocation are optional design/style choices, not necessary fixes for demonstrated defects.
+- The suggested wire-up is not merely replacing three sites: there are now five accept-error backoff sites, and the shared object is currently created after listener tasks are launched.
+
+---
+
+<details>
+<summary>Historical report — preserved for provenance; not current status or instructions</summary>
+
 # shamir-tunables -- API & wire-protocol design
 
 ## Summary
@@ -38,3 +113,5 @@ A zero-dependency crate (no serde at all) holding two compile-time const modules
 - **Serialization/versioning:** no serde dependency (`Cargo.toml` has zero dependencies); nothing crosses the wire from this crate; version `0.1.0-alpha.1`, `publish = false`. Nothing to get wrong.
 - **Dead public surface:** every const has at least one live consumer -- `SLOW_CONSUMER_THRESHOLD` (`shamir-server/src/subscriptions/push.rs:101`), `JOURNAL_BACKFILL_LIMIT` (`shamir-server/src/subscriptions/bridge.rs:229`), `VECTOR_SNAPSHOT_DELTA_THRESHOLD` / `VECTOR_COMPACTION_*` (`shamir-index/src/vector/vector_backend.rs:143-147`), the rest per engine/tx/index/storage call sites.
 - **API boundary discipline:** `WAL_SEGMENT_MAX_BYTES`'s doc (`lib.rs:113-115`) explicitly records that `shamir-wal` takes the bound as a parameter to avoid a dependency on this crate -- good decoupling, keep it.
+
+</details>

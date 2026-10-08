@@ -1,3 +1,92 @@
+<!-- revalidation:2026-10-08 source:92ad58266bf57ddea1fa3c8a47affba1a3a9a096 -->
+# shamir-server — security-crypto revalidation
+
+Source snapshot: `92ad58266bf57ddea1fa3c8a47affba1a3a9a096`. Revalidated 2026-10-08 by read-only XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run; no source fix is part of this update. Test registration/assertions are evidence of an oracle, not proof of a passing run.
+
+This section is authoritative for current status. Original titles/IDs are retained for traceability; a refuted title is not a current assertion. The collapsed historical report below is superseded, including its counts, severity, scenarios and fix instructions. Plan IDs preserve historical numbering, not a current release mandate. [Workspace methodology and status definitions](../SUMMARY.md#status-definitions).
+
+All three numbered observations remain open. Replication pinning is missing, but network position alone does not bypass SCRAM mutual authentication and TLS-exporter binding.
+
+## Current claim decisions
+
+| Claim decisions | Open | Source-fixed | Partial | Refuted | Unverified | N/A |
+|---:|---:|---:|---:|---:|---:|---:|
+| 6 | 3 | 0 | 0 | 0 | 2 | 1 |
+
+These are decisions on report claims, including repeated roots, bundled observations and non-findings—not a unique-bug census. Closed/N/A rows have no current risk; unverified risk is provisional. Pure style and unmeasured optimization claims do not establish runtime impact.
+
+<a id="review-1"></a>
+
+### Claim 1 — `ReplicationConfig::replicator_password` is a plain `String` held for the server's lifetime, reachable via `Debug`
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+Debug-derived Config/ReplicationConfig expose Option<String>; factory credentials retain an Arc<str>, with zeroization applied only to the outbound temporary buffer. Config itself is boot-local, not retained in ServerHandle. Debug logging leakage is possible, not an identified current logging call; dump exposure requires local privileged access.
+
+Evidence: [crates/shamir-server/src/config.rs:71](../../../../../crates/shamir-server/src/config.rs#L71); [crates/shamir-server/src/config.rs:120](../../../../../crates/shamir-server/src/config.rs#L120); [crates/shamir-server/src/config.rs:133](../../../../../crates/shamir-server/src/config.rs#L133); [crates/shamir-server/src/replication/prod_factory.rs:47](../../../../../crates/shamir-server/src/replication/prod_factory.rs#L47); [crates/shamir-server/src/replication/prod_factory.rs:67](../../../../../crates/shamir-server/src/replication/prod_factory.rs#L67); [crates/shamir-server/src/replication/prod_factory.rs:112](../../../../../crates/shamir-server/src/replication/prod_factory.rs#L112); [crates/shamir-server/src/server/server_launcher.rs:501](../../../../../crates/shamir-server/src/server/server_launcher.rs#L501); [crates/shamir-server/src/server/server_handle.rs:30](../../../../../crates/shamir-server/src/server/server_handle.rs#L30).
+
+<a id="review-2"></a>
+
+### Claim 2 — Replication client uses trust-on-first-use with no leader-key pinning
+
+Status: `confirmed-open`. Current risk: `low`.
+
+The factory always requests acceptance of a new Ed25519 identity and supplies no saved pin. However, the client first verifies the password-derived server signature over TLS-exporter-bound authentication. Arbitrary identity substitution by a network-only attacker does not establish an authenticated stream; credential/server-key compromise or another authentication defeat is additionally required.
+
+Evidence: [crates/shamir-server/src/replication/prod_factory.rs:115](../../../../../crates/shamir-server/src/replication/prod_factory.rs#L115); [crates/shamir-server/src/replication/prod_factory.rs:116](../../../../../crates/shamir-server/src/replication/prod_factory.rs#L116); [crates/shamir-client/src/client.rs:480](../../../../../crates/shamir-client/src/client.rs#L480); [crates/shamir-client/src/client.rs:615](../../../../../crates/shamir-client/src/client.rs#L615); [crates/shamir-connect/src/client/handshake.rs:226](../../../../../crates/shamir-connect/src/client/handshake.rs#L226); [crates/shamir-connect/src/client/handshake.rs:259](../../../../../crates/shamir-connect/src/client/handshake.rs#L259); [crates/shamir-connect/src/client/handshake.rs:264](../../../../../crates/shamir-connect/src/client/handshake.rs#L264); [docs/guide-docs/client-server-protocol-spec/AUTH_PROTOCOL.md:315](../../../../../docs/guide-docs/client-server-protocol-spec/AUTH_PROTOCOL.md#L315).
+
+<a id="review-3"></a>
+
+### Claim 3 — `bootstrap_password` accepted as a CLI argument
+
+Status: `confirmed-open`. Current risk: `nit`.
+
+The plaintext option remains. Exposure depends on local process-inspection permissions and how the operator launches the process; shell-history retention is not universal. This is an optional hardening concern, not remote credential disclosure.
+
+Evidence: [crates/shamir-server/src/main.rs:48](../../../../../crates/shamir-server/src/main.rs#L48); [crates/shamir-server/src/main.rs:55](../../../../../crates/shamir-server/src/main.rs#L55); [crates/shamir-server/src/main.rs:56](../../../../../crates/shamir-server/src/main.rs#L56).
+
+<a id="review-summary-hmac-constant-time"></a>
+
+### Claim Summary/HMAC constant-time — HMAC verification is constant-time and subtle-backed
+
+Status: `unverified`. Current risk: —.
+
+Application code delegates the tag comparison to Mac::verify_slice. Matching pinned hmac/digest implementation source was unavailable, so the external constant-time assertion was not independently proven. Hex-format rejection also exits early.
+
+Evidence: [crates/shamir-query-types/src/hmac.rs:425](../../../../../crates/shamir-query-types/src/hmac.rs#L425); [crates/shamir-query-types/src/hmac.rs:431](../../../../../crates/shamir-query-types/src/hmac.rs#L431); [crates/shamir-query-types/src/hmac.rs:434](../../../../../crates/shamir-query-types/src/hmac.rs#L434); [Cargo.lock:1638](../../../../../Cargo.lock#L1638); [Cargo.lock:4000](../../../../../Cargo.lock#L4000).
+
+<a id="review-summary-auth-defenses"></a>
+
+### Claim Summary/auth defenses — Latency padding, lockout, fail-closed bootstrap metadata and pre-auth frame ceiling
+
+Status: `unverified`. Current risk: —.
+
+The named defenses exist at source level, including metadata-error rejection and bounded pre-auth reads. Their universal oracle-elimination/spec-conformance guarantee is not established by this read-only review. Successful AuthOk is written before the outer success pad, so padding presence alone is not proof of equal response timing.
+
+Evidence: [crates/shamir-server/src/connection/handshake.rs:375](../../../../../crates/shamir-server/src/connection/handshake.rs#L375); [crates/shamir-server/src/connection/handshake.rs:431](../../../../../crates/shamir-server/src/connection/handshake.rs#L431); [crates/shamir-server/src/connection/handshake.rs:454](../../../../../crates/shamir-server/src/connection/handshake.rs#L454); [crates/shamir-server/src/connection/handshake.rs:646](../../../../../crates/shamir-server/src/connection/handshake.rs#L646); [crates/shamir-server/src/connection/handshake.rs:717](../../../../../crates/shamir-server/src/connection/handshake.rs#L717); [crates/shamir-server/src/connection/handshake.rs:784](../../../../../crates/shamir-server/src/connection/handshake.rs#L784).
+
+<a id="review-summary-unsafe-and-manifest"></a>
+
+### Claim Summary/unsafe-and-manifest — No unsafe blocks and a manifest-path traversal guard
+
+Status: `not-applicable`. Current risk: —.
+
+No unsafe blocks were found by source search. Manifest verification rejects absolute paths, ParentDir components and duplicate entries before hashing. This establishes lexical path validation, not a universal filesystem-containment guarantee against locally manipulated symlinks.
+
+Evidence: [crates/shamir-server/src/backup.rs:420](../../../../../crates/shamir-server/src/backup.rs#L420); [crates/shamir-server/src/backup.rs:421](../../../../../crates/shamir-server/src/backup.rs#L421); [crates/shamir-server/src/backup.rs:472](../../../../../crates/shamir-server/src/backup.rs#L472); [crates/shamir-server/src/lib.rs:17](../../../../../crates/shamir-server/src/lib.rs#L17).
+
+## Corrections and qualified non-findings
+
+- The missing pin is an Ed25519 protocol identity pin, not a persisted TLS-certificate pin.
+- Remove unconditional network-only MITM/read/injection claims; SCRAM mutual authentication and exporter binding remain enforced.
+- Config plaintext copies are boot-local; the Arc<str> credential is the long-lived copy. No current password-printing log call was established.
+- Zeroizing is not mlock and does not itself prevent plaintext from appearing in a live-memory dump.
+
+---
+
+<details>
+<summary>Historical report — preserved for provenance; not current status or instructions</summary>
+
 # shamir-server -- Security & crypto boundary
 
 ## Summary
@@ -46,3 +135,5 @@ No other findings for this theme — the SCRAM/Argon2id handshake, HMAC
 resumption ticket handling, and pre-auth frame-size/rate-limit/lockout
 defenses were all reviewed and are consistent with the documented spec
 sections they cite.
+
+</details>

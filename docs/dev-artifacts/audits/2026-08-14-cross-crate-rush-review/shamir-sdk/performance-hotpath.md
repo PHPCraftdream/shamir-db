@@ -1,3 +1,107 @@
+<!-- revalidation:2026-10-08 source:92ad58266bf57ddea1fa3c8a47affba1a3a9a096 -->
+# shamir-sdk — performance-hotpath revalidation
+
+Source snapshot: `92ad58266bf57ddea1fa3c8a47affba1a3a9a096`. Revalidated 2026-10-08 by read-only XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run; no source fix is part of this update. Test registration/assertions are evidence of an oracle, not proof of a passing run.
+
+This section is authoritative for current status. Original titles/IDs are retained for traceability; a refuted title is not a current assertion. The collapsed historical report below is superseded, including its counts, severity, scenarios and fix instructions. Plan IDs preserve historical numbering, not a current release mandate. [Workspace methodology and status definitions](../SUMMARY.md#status-definitions).
+
+Cumulative guest ABI-buffer retention remains source-proven, as do unpaginated Table queries and avoidable clones. Exact performance and memory multipliers remain unmeasured.
+
+## Current claim decisions
+
+| Claim decisions | Open | Source-fixed | Partial | Refuted | Unverified | N/A |
+|---:|---:|---:|---:|---:|---:|---:|
+| 6 | 5 | 0 | 0 | 0 | 0 | 1 |
+
+These are decisions on report claims, including repeated roots, bundled observations and non-findings—not a unique-bug census. Closed/N/A rows have no current risk; unverified risk is provisional. Pure style and unmeasured optimization claims do not establish runtime impact.
+
+<a id="review-1"></a>
+
+### Claim 1 — Host-import ABI leaks both directions' buffers on every call — unbounded guest linear-memory growth in loops
+
+Status: `confirmed-open`. Current risk: `high`.
+
+encode_leak forgets request Vecs and response allocations are never freed; all macro allocators forget their Vecs. Growth is cumulative within one invocation and ends when the Store drops or a limit fails. db_execute borrows its request rather than leaking it, and getters without a payload do not leak both directions.
+
+Evidence: [crates/shamir-sdk/src/host_imports.rs:60](../../../../../crates/shamir-sdk/src/host_imports.rs#L60); [crates/shamir-sdk/src/host_imports.rs:96](../../../../../crates/shamir-sdk/src/host_imports.rs#L96); [crates/shamir-sdk/src/host_imports.rs:213](../../../../../crates/shamir-sdk/src/host_imports.rs#L213); [crates/shamir-sdk-macros/src/lib.rs:239](../../../../../crates/shamir-sdk-macros/src/lib.rs#L239); [crates/shamir-wasm-host/src/wasm/wasm_function.rs:474](../../../../../crates/shamir-wasm-host/src/wasm/wasm_function.rs#L474).
+
+Grouping/duplicate: `SUMMARY.md#4.1`. This row is not another independent defect.
+
+<a id="review-2"></a>
+
+### Claim 2 — `Table::query` has no limit/pagination — the whole result set is buffered twice and retained
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+Table::query still returns a full Vec without pagination, and its gateway requests Pagination::None. Full host result/encoding, guest encoded bytes, and decoded values coexist during transfer. Only guest ABI bytes are necessarily leaked; host temporaries and decoded values can be dropped. Feature-gated Db::execute offers the builder alternative.
+
+Evidence: [crates/shamir-sdk/src/db.rs:98](../../../../../crates/shamir-sdk/src/db.rs#L98); [crates/shamir-sdk/src/db.rs:135](../../../../../crates/shamir-sdk/src/db.rs#L135); [crates/shamir-sdk/src/host_imports.rs:182](../../../../../crates/shamir-sdk/src/host_imports.rs#L182); [crates/shamir-db/src/shamir_db/shamir_db/db_gateway.rs:230](../../../../../crates/shamir-db/src/shamir_db/shamir_db/db_gateway.rs#L230); [crates/shamir-wasm-host/src/wasm/wasm_function.rs:329](../../../../../crates/shamir-wasm-host/src/wasm/wasm_function.rs#L329).
+
+Grouping/duplicate: `SUMMARY.md#4.2`. This row is not another independent defect.
+
+<a id="review-3"></a>
+
+### Claim 3 — `__rt::block_on` busy-spins forever if a guest future yields `Pending` — unbounded CPU burn
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+Unresolved futures continuously repoll. A future that later returns Ready completes, and production fuel/epoch/deadline limits bound CPU consumption. SDK host imports do not themselves yield guest Pending.
+
+Evidence: [crates/shamir-sdk/src/__rt.rs:50](../../../../../crates/shamir-sdk/src/__rt.rs#L50); [crates/shamir-sdk/src/__rt.rs:57](../../../../../crates/shamir-sdk/src/__rt.rs#L57); [crates/shamir-wasm-host/src/wasm/wasm_function.rs:477](../../../../../crates/shamir-wasm-host/src/wasm/wasm_function.rs#L477); [crates/shamir-wasm-host/src/wasm/wasm_function.rs:487](../../../../../crates/shamir-wasm-host/src/wasm/wasm_function.rs#L487).
+
+Grouping/duplicate: `SUMMARY.md#2.1`. This row is not another independent defect.
+
+<a id="review-4"></a>
+
+### Claim 4 — `Params::get` linear-scans the parameter map on every typed access; `bytes()` clones the payload
+
+Status: `confirmed-open`. Current risk: `low`.
+
+Each accessor still scans the Vec; bytes still allocates/copies Bin or Str payloads. O(P*M) access work and O(payload) copying are structural, but no measured latency or required redesign follows at small P.
+
+Evidence: [crates/shamir-sdk/src/params.rs:26](../../../../../crates/shamir-sdk/src/params.rs#L26); [crates/shamir-sdk/src/params.rs:68](../../../../../crates/shamir-sdk/src/params.rs#L68); [crates/shamir-sdk/src/value.rs:13](../../../../../crates/shamir-sdk/src/value.rs#L13).
+
+Grouping/duplicate: `SUMMARY.md#4.4`. This row is not another independent defect.
+
+<a id="review-5"></a>
+
+### Claim 5 — HTTP path double-copies payloads and triple-scans the response map
+
+Status: `confirmed-open`. Current risk: `low`.
+
+Ctx consumes HttpRequest but calls borrowed to_value, which clones its body and strings before encoding. from_value performs three field searches and clones body/header data. The overhead is source-proven, not benchmarked; consuming conversion would avoid ownership copies, not MessagePack encoding itself.
+
+Evidence: [crates/shamir-sdk/src/context.rs:116](../../../../../crates/shamir-sdk/src/context.rs#L116); [crates/shamir-sdk/src/http.rs:98](../../../../../crates/shamir-sdk/src/http.rs#L98); [crates/shamir-sdk/src/http.rs:109](../../../../../crates/shamir-sdk/src/http.rs#L109); [crates/shamir-sdk/src/http.rs:130](../../../../../crates/shamir-sdk/src/http.rs#L130); [crates/shamir-sdk/src/http.rs:151](../../../../../crates/shamir-sdk/src/http.rs#L151).
+
+Grouping/duplicate: `SUMMARY.md#4.5`. This row is not another independent defect.
+
+<a id="review-6"></a>
+
+### Claim 6 — `Db::table` allocates a fresh `String` per handle
+
+Status: `not-applicable`. Current risk: —.
+
+The allocation remains, but the original report requires no fix and its existing example already hoists the handle. Repeated creation is a caller choice; the owned table name is dropped normally.
+
+Evidence: [crates/shamir-sdk/src/db.rs:26](../../../../../crates/shamir-sdk/src/db.rs#L26); [crates/shamir-sdk/src/db.rs:50](../../../../../crates/shamir-sdk/src/db.rs#L50).
+
+Grouping/duplicate: `SUMMARY.md#4.6`. This row is not another independent defect.
+
+## Corrections and qualified non-findings
+
+- Every host call leaks both directions is too broad: db_execute borrows its request; getter keys are borrowed; absent responses allocate nothing.
+- Describe growth as unreclaimed guest allocations within an invocation, capped by the host, not a cross-invocation leak.
+- The macro allocator uses leaked ordinary Vec allocations; calling it a resettable bump arena is inaccurate.
+- Host encoding buffers and guest decoded Vec<Value> objects are not intrinsically leaked. Exact 2x or 3–4-copy retained-memory multipliers are not proven.
+- The SDK has a feature-gated paginated builder execution path even though Table::query lacks pagination.
+- A proposed static Cell<Vec<u8>> is not directly a valid synchronized Rust static; reclamation design must address storage, capacity/layout, and reentrancy.
+- A sorted index provides logarithmic lookup, not automatically O(1). No benchmark supports replacing the accepted small-N scans.
+
+---
+
+<details>
+<summary>Historical report — preserved for provenance; not current status or instructions</summary>
+
 # shamir-sdk -- Performance & O(x->0)
 
 ## Summary
@@ -54,3 +158,5 @@ The crate's hot paths are the msgpack (de)serialization around every host-import
 - **Failure scenario:** none material — a few bytes per iteration.
 - **Suggested fix:** none needed; if loops are the common shape, show hoisting `let users = ctx.db().table("users");` outside the loop in the docs (`db.rs:22-38` example already implies it).
 
+
+</details>

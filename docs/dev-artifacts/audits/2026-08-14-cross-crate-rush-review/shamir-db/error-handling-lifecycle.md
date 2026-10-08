@@ -1,3 +1,161 @@
+<!-- revalidation:2026-10-08 source:92ad58266bf57ddea1fa3c8a47affba1a3a9a096 -->
+# shamir-db — error-handling-lifecycle revalidation
+
+Source snapshot: `92ad58266bf57ddea1fa3c8a47affba1a3a9a096`. Revalidated 2026-10-08 by read-only XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run; no source fix is part of this update. Test registration/assertions are evidence of an oracle, not proof of a passing run.
+
+This section is authoritative for current status. Original titles/IDs are retained for traceability; a refuted title is not a current assertion. The collapsed historical report below is superseded, including its counts, severity, scenarios and fix instructions. Plan IDs preserve historical numbering, not a current release mandate. [Workspace methodology and status definitions](../SUMMARY.md#status-definitions).
+
+Warn-only catalogue persistence, remove-first artifact renames and ignored cascade errors remain. The report incorrectly claims no SystemStore injection seam: existing ACL tests already replace system tables through the engine test-util seam, although lifecycle write-failure assertions remain missing.
+
+## Current claim decisions
+
+| Claim decisions | Open | Source-fixed | Partial | Refuted | Unverified | N/A |
+|---:|---:|---:|---:|---:|---:|---:|
+| 12 | 12 | 0 | 0 | 0 | 0 | 0 |
+
+These are decisions on report claims, including repeated roots, bundled observations and non-findings—not a unique-bug census. Closed/N/A rows have no current risk; unverified risk is provisional. Pure style and unmeasured optimization claims do not establish runtime impact.
+
+<a id="review-1"></a>
+
+### Claim 1 — Catalogue-persistence failures are swallowed (`warn!` + continue) across the DB/repo/table lifecycle, so multi-step mutations can return `Ok(())` half-migrated
+
+Status: `confirmed-open`. Current risk: `high`.
+
+Create/drop and database/repository/table rename persistence still logs failures and continues. Rename save failure does not stop removal of the old key. Several prerequisite reads do propagate, so not every failure is swallowed.
+
+Evidence: [crates/shamir-db/src/shamir_db/shamir_db/db_management.rs:184](../../../../../crates/shamir-db/src/shamir_db/shamir_db/db_management.rs#L184); [crates/shamir-db/src/shamir_db/shamir_db/db_management.rs:195](../../../../../crates/shamir-db/src/shamir_db/shamir_db/db_management.rs#L195); [crates/shamir-db/src/shamir_db/shamir_db/db_management.rs:534](../../../../../crates/shamir-db/src/shamir_db/shamir_db/db_management.rs#L534); [crates/shamir-db/src/shamir_db/shamir_db/table_management.rs:323](../../../../../crates/shamir-db/src/shamir_db/shamir_db/table_management.rs#L323); [crates/shamir-db/src/shamir_db/shamir_db/table_management.rs:337](../../../../../crates/shamir-db/src/shamir_db/shamir_db/table_management.rs#L337).
+
+<a id="review-2"></a>
+
+### Claim 2 — `rename_function_as` / `rename_validator_as` / `rename_function_folder_as` destroy the durable record *before* writing the new one (remove-before-write)
+
+Status: `confirmed-open`. Current risk: `high`.
+
+Function/validator old-row removal still precedes save. Folder rename deletes every old row before its save loop and still claims no partial state. Reordering alone preserves a copy but does not make multi-row rename atomic.
+
+Evidence: [crates/shamir-db/src/shamir_db/shamir_db/function_management.rs:337](../../../../../crates/shamir-db/src/shamir_db/shamir_db/function_management.rs#L337); [crates/shamir-db/src/shamir_db/shamir_db/validator_management.rs:375](../../../../../crates/shamir-db/src/shamir_db/shamir_db/validator_management.rs#L375); [crates/shamir-db/src/shamir_db/shamir_db/function_management.rs:471](../../../../../crates/shamir-db/src/shamir_db/shamir_db/function_management.rs#L471); [crates/shamir-db/src/shamir_db/shamir_db/function_management.rs:567](../../../../../crates/shamir-db/src/shamir_db/shamir_db/function_management.rs#L567).
+
+<a id="review-3"></a>
+
+### Claim 3 — No error-path test injects a system-store failure into the lifecycle paths above
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+Relevant tests still lack catalogue-write/rename failure assertions. But a system-table injection mechanism already exists: access_meta_tests installs custom databases/groups TableManagers into system_repo. Extend that seam rather than claiming injection is impossible.
+
+Evidence: [crates/shamir-db/src/shamir_db/tests/access_meta_tests.rs:741](../../../../../crates/shamir-db/src/shamir_db/tests/access_meta_tests.rs#L741); [crates/shamir-db/src/shamir_db/tests/access_meta_tests.rs:759](../../../../../crates/shamir-db/src/shamir_db/tests/access_meta_tests.rs#L759); [crates/shamir-db/Cargo.toml:93](../../../../../crates/shamir-db/Cargo.toml#L93); [crates/shamir-db/src/shamir_db/tests/mod.rs:1](../../../../../crates/shamir-db/src/shamir_db/tests/mod.rs#L1).
+
+<a id="review-4"></a>
+
+### Claim 4 — `SystemStore::add_group_member` / `remove_group_member` silently fabricate a phantom group when the id does not exist
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+Both store methods still default absent records and call save_group. Public facade methods reach these under a per-group lock, which prevents lost-update interleavings but does not enforce existence.
+
+Evidence: [crates/shamir-db/src/shamir_db/system_store.rs:713](../../../../../crates/shamir-db/src/shamir_db/system_store.rs#L713); [crates/shamir-db/src/shamir_db/system_store.rs:743](../../../../../crates/shamir-db/src/shamir_db/system_store.rs#L743); [crates/shamir-db/src/shamir_db/shamir_db/access_control.rs:660](../../../../../crates/shamir-db/src/shamir_db/shamir_db/access_control.rs#L660).
+
+Grouping/duplicate: `correctness-tdd.md#2`. This row is not another independent defect.
+
+<a id="review-5"></a>
+
+### Claim 5 — Cascade-drop paths discard per-table drop errors with `let _ =` — not even a log line
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+Database/repository cascades still discard table-cleanup Results; index cascades discard their results too. Stale rows/orphaned data are possible. Table rows alone cannot resurrect a deleted database/repository because boot attaches tables only under existing parent rows.
+
+Evidence: [crates/shamir-db/src/shamir_db/execute/admin_db_repo.rs:130](../../../../../crates/shamir-db/src/shamir_db/execute/admin_db_repo.rs#L130); [crates/shamir-db/src/shamir_db/execute/admin_db_repo.rs:377](../../../../../crates/shamir-db/src/shamir_db/execute/admin_db_repo.rs#L377); [crates/shamir-db/src/shamir_db/execute/admin_table_index.rs:252](../../../../../crates/shamir-db/src/shamir_db/execute/admin_table_index.rs#L252); [crates/shamir-db/src/shamir_db/shamir_db/core.rs:219](../../../../../crates/shamir-db/src/shamir_db/shamir_db/core.rs#L219).
+
+<a id="review-6"></a>
+
+### Claim 6 — Wire error-code classification by substring on the stringified `PortError`
+
+Status: `confirmed-open`. Current risk: `low`.
+
+Grant/revoke still classify the English substring; create/drop map errors to query. Current directory errors contain the expected text, so current classification works but has no typed/stable port contract.
+
+Evidence: [crates/shamir-db/src/shamir_db/execute/admin_users_roles.rs:148](../../../../../crates/shamir-db/src/shamir_db/execute/admin_users_roles.rs#L148); [crates/shamir-db/src/shamir_db/execute/admin_users_roles.rs:187](../../../../../crates/shamir-db/src/shamir_db/execute/admin_users_roles.rs#L187); [crates/shamir-db/src/shamir_db/ports.rs:32](../../../../../crates/shamir-db/src/shamir_db/ports.rs#L32); [crates/shamir-server/src/user_directory.rs:710](../../../../../crates/shamir-server/src/user_directory.rs#L710).
+
+<a id="review-7"></a>
+
+### Claim 7 — Boot path: repo re-attach failure is `warn!` + `continue`, and repo rows for unknown databases are skipped without any log
+
+Status: `confirmed-open`. Current risk: `low`.
+
+Attach errors still permit degraded boot with a warning; missing-parent rows have no diagnostic. Successful attachment followed by failed recovery aborts boot. No structured failed-attach diagnostic reconciles these policies.
+
+Evidence: [crates/shamir-db/src/shamir_db/shamir_db/core.rs:219](../../../../../crates/shamir-db/src/shamir_db/shamir_db/core.rs#L219); [crates/shamir-db/src/shamir_db/shamir_db/core.rs:243](../../../../../crates/shamir-db/src/shamir_db/shamir_db/core.rs#L243); [crates/shamir-db/src/shamir_db/shamir_db/core.rs:263](../../../../../crates/shamir-db/src/shamir_db/shamir_db/core.rs#L263).
+
+Grouping/duplicate: `correctness-tdd.md#4`. This row is not another independent defect.
+
+<a id="review-8"></a>
+
+### Claim 8 — Ambient interner delta attach: errors silently skipped, contradicting the module's own doc
+
+Status: `confirmed-open`. Current risk: `low`.
+
+Both interner error branches still continue without reporting; the helper never returns those errors despite its soft-BatchError promise. Epoch synchronization can lag, but permanent mis-resolution until a full dump is not proven: a later delta request can recover.
+
+Evidence: [crates/shamir-db/src/shamir_db/execute/ambient_interner.rs:20](../../../../../crates/shamir-db/src/shamir_db/execute/ambient_interner.rs#L20); [crates/shamir-db/src/shamir_db/execute/ambient_interner.rs:40](../../../../../crates/shamir-db/src/shamir_db/execute/ambient_interner.rs#L40); [crates/shamir-db/src/shamir_db/execute/ambient_interner.rs:44](../../../../../crates/shamir-db/src/shamir_db/execute/ambient_interner.rs#L44); [crates/shamir-db/src/shamir_db/execute/db_execute.rs:69](../../../../../crates/shamir-db/src/shamir_db/execute/db_execute.rs#L69).
+
+<a id="review-9"></a>
+
+### Claim 9 — `admin_result_with_op_id` panics on wall-clock regression while every other call site defaults
+
+Status: `confirmed-open`. Current risk: `low`.
+
+duration_since(UNIX_EPOCH) is still unwrapped. A pre-epoch time is an environmental failure; ordinary backward clock movement that remains after the epoch does not trigger this panic.
+
+Evidence: [crates/shamir-db/src/shamir_db/execute/helpers.rs:59](../../../../../crates/shamir-db/src/shamir_db/execute/helpers.rs#L59).
+
+Grouping/duplicate: `correctness-tdd.md#10`. This row is not another independent defect.
+
+<a id="review-10"></a>
+
+### Claim 10 — Stringly-typed error collapsing loses error identity on internal mappings
+
+Status: `confirmed-open`. Current risk: `low`.
+
+Implicit transaction BatchErrors and status-resolution DbErrors are still string-wrapped as Internal; gateway errors use Debug Strings. Typed identity is lost, though the gateway Debug text can retain the code text.
+
+Evidence: [crates/shamir-db/src/shamir_db/system_store.rs:156](../../../../../crates/shamir-db/src/shamir_db/system_store.rs#L156); [crates/shamir-db/src/shamir_db/system_store.rs:178](../../../../../crates/shamir-db/src/shamir_db/system_store.rs#L178); [crates/shamir-db/src/shamir_db/shamir_db/core.rs:772](../../../../../crates/shamir-db/src/shamir_db/shamir_db/core.rs#L772); [crates/shamir-db/src/shamir_db/shamir_db/db_gateway.rs:88](../../../../../crates/shamir-db/src/shamir_db/shamir_db/db_gateway.rs#L88).
+
+<a id="review-11"></a>
+
+### Claim 11 — `resolve_in_group` silently converts group-lookup errors into `false` without a log
+
+Status: `confirmed-open`. Current risk: `low`.
+
+The silent unwrap_or(false) remains. It removes group-class grants but is not universally fail-closed: permits selects Other when membership is false, and Other permissions can be broader than Group permissions.
+
+Evidence: [crates/shamir-db/src/shamir_db/shamir_db/access_control.rs:916](../../../../../crates/shamir-db/src/shamir_db/shamir_db/access_control.rs#L916); [crates/shamir-types/src/access.rs:682](../../../../../crates/shamir-types/src/access.rs#L682); [crates/shamir-types/src/access.rs:709](../../../../../crates/shamir-types/src/access.rs#L709).
+
+<a id="review-12"></a>
+
+### Claim 12 — Minor nits (grouped)
+
+Status: `confirmed-open`. Current risk: `nit`.
+
+The guarded itype unwraps and silent response-header file-read fallback remain. Present non_btree guards establish Some, so those unwraps are not a current panic defect; the read error still becomes empty headers.
+
+Evidence: [crates/shamir-db/src/shamir_db/execute/admin_table_index.rs:459](../../../../../crates/shamir-db/src/shamir_db/execute/admin_table_index.rs#L459); [crates/shamir-db/src/shamir_db/execute/admin_table_index.rs:514](../../../../../crates/shamir-db/src/shamir_db/execute/admin_table_index.rs#L514); [crates/shamir-db/src/shamir_db/curl_gateway.rs:228](../../../../../crates/shamir-db/src/shamir_db/curl_gateway.rs#L228).
+
+## Corrections and qualified non-findings
+
+- Existing system_repo/install_table_for_test use positively refutes 'SystemStore has no equivalent seam' and 'unverified by construction'. The missing lifecycle write-failure assertions remain real.
+- Catalogue save failures after the WAL commit point may be committed-but-not-materialized, not aborted. Tests/fixes must discriminate failure timing and outcome instead of assuming every injected storage fault makes set_via_implicit_tx return Err.
+- Write-new-before-remove-old is preservation ordering, not complete multi-row rename atomicity. Old rows are not inert merely because their live registration moved; boot reconstructs registrations from persisted rows.
+- Cascade table rows alone cannot recreate absent database/repository parents; qualify resurrection as requiring stale surviving parent rows.
+- Substring classification currently matches the directory implementation; the concern is fragility, not demonstrated present misclassification.
+- resolve_in_group false is not an unconditional deny. Retain the missing-log finding and correct the stronger fail-closed guarantee.
+- Library source contains the schema expect and guarded unwraps; the blanket 'no expect'/'sole unwrap' descriptions are inaccurate. No facade anyhow/unsafe use was found.
+
+---
+
+<details>
+<summary>Historical report — preserved for provenance; not current status or instructions</summary>
+
 # shamir-db -- Error handling & resource lifecycle
 
 ## Summary
@@ -85,3 +243,5 @@ The crate is broadly faithful to CLAUDE.md's error-handling rules: `Result<T, E>
 - **File:line:** `crates/shamir-db/src/shamir_db/curl_gateway.rs:226-244` — `parse_response_headers` swallows the header-file read error (`if let Ok(bytes)`): an I/O failure is indistinguishable from "no headers". A `log::warn!` would match the module's own "cleanup on every path" diligence.
 - **Severity:** nit
 - **Issue / Suggested fix:** as noted per item; no functional defect today.
+
+</details>

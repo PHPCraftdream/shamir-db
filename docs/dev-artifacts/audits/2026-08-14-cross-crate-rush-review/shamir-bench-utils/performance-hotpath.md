@@ -1,3 +1,70 @@
+<!-- revalidation:2026-10-08 source:92ad58266bf57ddea1fa3c8a47affba1a3a9a096 -->
+# shamir-bench-utils — performance-hotpath revalidation
+
+Source snapshot: `92ad58266bf57ddea1fa3c8a47affba1a3a9a096`. Revalidated 2026-10-08 by read-only XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run; no source fix is part of this update. Test registration/assertions are evidence of an oracle, not proof of a passing run.
+
+This section is authoritative for current status. Original titles/IDs are retained for traceability; a refuted title is not a current assertion. The collapsed historical report below is superseded, including its counts, severity, scenarios and fix instructions. Plan IDs preserve historical numbering, not a current release mandate. [Workspace methodology and status definitions](../SUMMARY.md#status-definitions).
+
+Per-point allocation and fixture cloning are structurally confirmed setup costs. Actual latency, fragmentation, and RSS distortion are unmeasured; RSS is already documented as process-wide rather than vector-payload size.
+
+## Current claim decisions
+
+| Claim decisions | Open | Source-fixed | Partial | Refuted | Unverified | N/A |
+|---:|---:|---:|---:|---:|---:|---:|
+| 3 | 3 | 0 | 0 | 0 | 0 | 0 |
+
+These are decisions on report claims, including repeated roots, bundled observations and non-findings—not a unique-bug census. Closed/N/A rows have no current risk; unverified risk is provisional. Pure style and unmeasured optimization claims do not establish runtime impact.
+
+<a id="review-1"></a>
+
+### Claim 1 — Fixture generator allocates one heap `Vec` per point (allocation-in-loop, n+1 allocations per call)
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+Positive-dimension generation allocates a row Vec inside every point iteration, plus the outer point Vec; centroid storage allocates separately. Consumers clone rows into ingestion batches. A flat layout is absent, but no measured speed or RSS error follows solely from this structure.
+
+Evidence: [crates/shamir-bench-utils/src/vector_data.rs:188](../../../../../crates/shamir-bench-utils/src/vector_data.rs#L188); [crates/shamir-bench-utils/src/vector_data.rs:199](../../../../../crates/shamir-bench-utils/src/vector_data.rs#L199); [crates/shamir-bench-utils/src/vector_data.rs:202](../../../../../crates/shamir-bench-utils/src/vector_data.rs#L202); [crates/shamir-engine/benches/vector_search.rs:125](../../../../../crates/shamir-engine/benches/vector_search.rs#L125).
+
+Grouping/duplicate: `SUMMARY.md#4.1`. This row is not another independent defect.
+
+<a id="review-2"></a>
+
+### Claim 2 — `peak_mem::measure`/`measure_async` reset a single global watermark — overlapping use silently corrupts readings, and the sync variant omits the warning
+
+Status: `confirmed-open`. Current risk: `low`.
+
+The common reset/run/read window remains unguarded, and only the async helper has a partial warning. Current consumers use raw reset/read sequentially; no overlapping current caller was found.
+
+Evidence: [crates/shamir-bench-utils/src/peak_mem.rs:89](../../../../../crates/shamir-bench-utils/src/peak_mem.rs#L89); [crates/shamir-bench-utils/src/peak_mem.rs:98](../../../../../crates/shamir-bench-utils/src/peak_mem.rs#L98); [crates/shamir-bench-utils/src/peak_mem.rs:106](../../../../../crates/shamir-bench-utils/src/peak_mem.rs#L106).
+
+Grouping/duplicate: `SUMMARY.md#2.1`. This row is not another independent defect.
+
+<a id="review-3"></a>
+
+### Claim 3 — `peak_mem` module docs teach the removed Criterion integration; `vector_data` header still cites the "criterion bench"
+
+Status: `confirmed-open`. Current risk: `nit`.
+
+Both stale documentation sites remain, despite live Harness consumers and the explicit workspace convention.
+
+Evidence: [crates/shamir-bench-utils/src/peak_mem.rs:10](../../../../../crates/shamir-bench-utils/src/peak_mem.rs#L10); [crates/shamir-bench-utils/src/vector_data.rs:3](../../../../../crates/shamir-bench-utils/src/vector_data.rs#L3); [crates/shamir-index/benches/create_index_streaming.rs:65](../../../../../crates/shamir-index/benches/create_index_streaming.rs#L65).
+
+Grouping/duplicate: `SUMMARY.md#7.2`. This row is not another independent defect.
+
+## Corrections and qualified non-findings
+
+- n+1 describes point-cloud allocations, not the entire call: centroids also have an outer allocation and per-centroid rows. Vec header sizes depend on target word size.
+- The 1M rung is documented as Cosine/128, but the current main loop registers it across dims and metrics. Neither a 1M run nor its memory consumption was executed.
+- RSS includes live fixtures, ingestion batches, and indexes by design; a process RSS figure is not falsely reporting vector payload bytes merely because fixtures use nested Vecs.
+- One batch clone is visible at the cited call site; further copying belongs to adapter implementation and should not be asserted as two call-site clones.
+- Generation is setup work outside the cited search closures. Removing its allocations would not remove allocations performed by timed query cloning.
+- A row-major flat rewrite can preserve draw order; same-implementation repeatability alone is insufficient to prove old-layout/new-layout byte identity.
+
+---
+
+<details>
+<summary>Historical report — preserved for provenance; not current status or instructions</summary>
+
 # shamir-bench-utils -- Performance & O(x->0)
 
 ## Summary
@@ -29,3 +96,5 @@ The crate is a thin bench-helper (two modules: `vector_data` fixture generation,
 - **Issue:** The workspace migrated off Criterion on 2026-07-07 (CLAUDE.md, "Bench cache isolation": no `criterion_group!`/`criterion_main!`, "do NOT reach for Criterion APIs"); benches use `bench_scale_tool::Harness`. The only documented integration path for this crate's peak-RSS sampler is a Criterion `iter_custom` closure that no longer has a home, so the module's how-to is orphaned.
 - **Failure scenario:** A bench author copies the module-doc example, reaches for Criterion APIs that no longer apply per CLAUDE.md, or wires `measure` into a harness whose measured region doesn't match the reset window — producing numbers attributed to the wrong region. Documentation-only; no runtime cost.
 - **Suggested fix:** Rewrite the `peak_mem` module example in the `bench_scale_tool::Harness` idiom the two live consumers already use (`setup()` once at top of `main`; `reset()` immediately before the cell; `current_peak()` immediately after), and drop the "criterion" wording from `vector_data.rs`'s header (it should reference `benches/vector_search.rs` on the Harness directly).
+
+</details>

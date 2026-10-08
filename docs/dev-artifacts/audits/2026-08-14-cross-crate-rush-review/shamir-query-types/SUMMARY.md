@@ -1,3 +1,1134 @@
+<!-- revalidation:2026-10-08 source:92ad58266bf57ddea1fa3c8a47affba1a3a9a096 -->
+# shamir-query-types — SUMMARY revalidation
+
+Source snapshot: `92ad58266bf57ddea1fa3c8a47affba1a3a9a096`. Revalidated 2026-10-08 by read-only XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run; no source fix is part of this update. Test registration/assertions are evidence of an oracle, not proof of a passing run.
+
+This section is authoritative for current status. Original titles/IDs are retained for traceability; a refuted title is not a current assertion. The collapsed historical report below is superseded, including its counts, severity, scenarios and fix instructions. Plan IDs preserve historical numbering, not a current release mandate. [Workspace methodology and status definitions](../SUMMARY.md#status-definitions).
+
+All consolidated rows were revalidated. The hidden FilterValue depth-walk defect is source-proven fixed; engine iteration clamping, authorization deduplication, and ForEach plan hoisting partially address other claims. Nested confirmation and several wire/accessor defects remain. The unconditional decode-DoS headline, original High style ratings, and several runtime scenarios require correction.
+
+## Current claim decisions
+
+| Claim decisions | Open | Source-fixed | Partial | Refuted | Unverified | N/A |
+|---:|---:|---:|---:|---:|---:|---:|
+| 67 | 51 | 3 | 2 | 9 | 1 | 1 |
+
+These are decisions on report claims, including repeated roots, bundled observations and non-findings—not a unique-bug census. Closed/N/A rows have no current risk; unverified risk is provisional. Pure style and unmeasured optimization claims do not establish runtime impact.
+
+## Parent acceptance refinements
+
+- Parent inspection resolves the previously unavailable codec source: decoding is depth-bounded; universal stack-safety is still not claimed.
+- The pinned MessagePack array visitor rejects unconsumed TableRef elements; local visitor omission alone is not acceptance proof.
+
+<a id="review-1-1"></a>
+
+### Claim 1.1 — `BatchOp::ForEach` missing from `is_admin()` while `Batch` is included — gate-bypass-shaped classification asymmetry, unpinned by any test
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+ForEach still skips the top-level coarse gate; downstream actor-aware DAC contains arbitrary privilege escalation.
+
+Evidence: [crates/shamir-query-types/src/batch/batch_op.rs:577](../../../../../crates/shamir-query-types/src/batch/batch_op.rs#L577); [crates/shamir-db/src/shamir_db/execute/admin_db_repo.rs:95](../../../../../crates/shamir-db/src/shamir_db/execute/admin_db_repo.rs#L95).
+
+Grouping/duplicate: `correctness-tdd.md#1`. This row is not another independent defect.
+
+<a id="review-1-2"></a>
+
+### Claim 1.2 — `QueryResult::op_id` / `DdlOpStatus.op_id` / `request_id` serialize `RecordId` as raw `bin`, contradicting the crate's own base58-string wire convention and the `String`-typed poll request
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+Binary response/correlation IDs still conflict with String polling and TS string declarations.
+
+Evidence: [crates/shamir-query-types/src/read/query_result.rs:190](../../../../../crates/shamir-query-types/src/read/query_result.rs#L190); [crates/shamir-client-ts/src/core/types/batch.ts:269](../../../../../crates/shamir-client-ts/src/core/types/batch.ts#L269).
+
+Grouping/duplicate: `correctness-tdd.md#2`. This row is not another independent defect.
+
+<a id="review-1-3"></a>
+
+### Claim 1.3 — `InsertedRecord` deserialization never restores `id`, and `get_value_owned("_id")` ignores the `_id` entry in `fields`
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+Decoded InsertedRecord still has id=None and its accessor ignores fields._id; normal QueryRecord clients are not universally affected.
+
+Evidence: [crates/shamir-query-types/src/write/inserted_record.rs:98](../../../../../crates/shamir-query-types/src/write/inserted_record.rs#L98); [crates/shamir-query-types/src/write/inserted_record.rs:114](../../../../../crates/shamir-query-types/src/write/inserted_record.rs#L114).
+
+Grouping/duplicate: `api-wire-protocol.md#1`. This row is not another independent defect.
+
+<a id="review-1-4"></a>
+
+### Claim 1.4 — Planner error paths, `PaginationInfo::compute`, `QueryReference::parse`, and `collect_required_access` are owned here but tested only in other crates
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+The enumerated local suites/error regressions remain absent; neighboring registrations preserve transitive coverage.
+
+Evidence: [crates/shamir-query-types/src/batch/tests/mod.rs:1](../../../../../crates/shamir-query-types/src/batch/tests/mod.rs#L1); [crates/shamir-query-types/src/read/tests/mod.rs:1](../../../../../crates/shamir-query-types/src/read/tests/mod.rs#L1).
+
+Grouping/duplicate: `correctness-tdd.md#4`. This row is not another independent defect.
+
+<a id="review-1-5"></a>
+
+### Claim 1.5 — Vacuous test: `fts_default_mode_is_and` asserts a value the test itself supplies
+
+Status: `confirmed-open`. Current risk: `low`.
+
+The test still bypasses serde defaulting entirely.
+
+Evidence: [crates/shamir-query-types/src/filter/tests/filter_enum_tests.rs:29](../../../../../crates/shamir-query-types/src/filter/tests/filter_enum_tests.rs#L29).
+
+Grouping/duplicate: `correctness-tdd.md#5`. This row is not another independent defect.
+
+<a id="review-1-6"></a>
+
+### Claim 1.6 — `Pagination::resolve` multiplication can overflow; `page: 0` silently behaves as page 1 while `current_page` echoes 0
+
+Status: `confirmed-open`. Current risk: `low`.
+
+Unchecked multiplication/addition and zero metadata inconsistency persist.
+
+Evidence: [crates/shamir-query-types/src/read/limit.rs:180](../../../../../crates/shamir-query-types/src/read/limit.rs#L180); [crates/shamir-query-types/src/read/limit.rs:294](../../../../../crates/shamir-query-types/src/read/limit.rs#L294).
+
+Grouping/duplicate: `correctness-tdd.md#6`. This row is not another independent defect.
+
+<a id="review-1-7"></a>
+
+### Claim 1.7 — Inline `#[cfg(test)] mod tests` blocks violate the crate's own test-layout convention
+
+Status: `confirmed-open`. Current risk: `low`.
+
+Both reachable inline modules still coexist with sibling suites.
+
+Evidence: [crates/shamir-query-types/src/read/query_record.rs:302](../../../../../crates/shamir-query-types/src/read/query_record.rs#L302); [crates/shamir-query-types/src/write/inserted_record.rs:135](../../../../../crates/shamir-query-types/src/write/inserted_record.rs#L135).
+
+Grouping/duplicate: `style-claude-md.md#2`. This row is not another independent defect.
+
+<a id="review-1-8"></a>
+
+### Claim 1.8 — Four newest `hmac::canonical_*` helpers have zero tests; `create_scram_user` doc shows a trailing `\0` the implementation does not emit
+
+Status: `confirmed-open`. Current risk: `low`.
+
+The four local byte-layout regressions remain missing and the trailing-separator table mismatch persists.
+
+Evidence: [crates/shamir-query-types/src/hmac.rs:68](../../../../../crates/shamir-query-types/src/hmac.rs#L68); [crates/shamir-query-types/src/tests/hmac_tests.rs:2](../../../../../crates/shamir-query-types/src/tests/hmac_tests.rs#L2).
+
+Grouping/duplicate: `correctness-tdd.md#8`. This row is not another independent defect.
+
+<a id="review-1-9"></a>
+
+### Claim 1.9 — `check_filter_depth` boundary (exactly `MAX_FILTER_DEPTH` passes, +1 fails) is not pinned
+
+Status: `confirmed-open`. Current risk: `nit`.
+
+Exact combined-node 64/65 tests are still absent; the proposed Not-wrapper counts are wrong.
+
+Evidence: [crates/shamir-query-types/src/filter/filter_enum.rs:240](../../../../../crates/shamir-query-types/src/filter/filter_enum.rs#L240); [crates/shamir-query-types/src/filter/tests/filter_enum_tests.rs:236](../../../../../crates/shamir-query-types/src/filter/tests/filter_enum_tests.rs#L236).
+
+Grouping/duplicate: `correctness-tdd.md#9`. This row is not another independent defect.
+
+<a id="review-1-10"></a>
+
+### Claim 1.10 — `TableRef` deserialization silently accepts arrays longer than 2 elements
+
+Status: `refuted`. Current risk: —.
+
+Parent pinned-source check refutes successful trailing-element acceptance: TableRef calls deserialize_any, and rmp-serde 1.3.1's array visitor checks the remaining SeqAccess count after visit_seq, returning LengthMismatch for unconsumed elements. Inspected serde buffered visitors also reject leftovers. The local visitor has no explicit check, but that omission is not this decode defect. A dedicated regression remains coverage debt.
+
+Evidence: [crates/shamir-query-types/src/table_ref.rs:71](../../../../../crates/shamir-query-types/src/table_ref.rs#L71); [Cargo.lock:2949](../../../../../Cargo.lock#L2949).
+
+Pinned dependency evidence: [rmp-serde 1.3.1, src/decode.rs:566](https://docs.rs/crate/rmp-serde/1.3.1/source/src/decode.rs).
+
+Grouping/duplicate: `correctness-tdd.md#10`. This row is not another independent defect.
+
+<a id="review-2"></a>
+
+### Claim 2 — No findings — clean
+
+Status: `not-applicable`. Current risk: —.
+
+No executable concurrency primitives/async/unsafe exist in this crate. Sequential stage execution is source-proven; transitive-dependency and historical measurement guarantees need qualification.
+
+Evidence: [crates/shamir-query-types/Cargo.toml:9](../../../../../crates/shamir-query-types/Cargo.toml#L9); [crates/shamir-query-types/src/batch/planner.rs:13](../../../../../crates/shamir-query-types/src/batch/planner.rs#L13); [crates/shamir-engine/src/query/batch/batch_execute.rs:522](../../../../../crates/shamir-engine/src/query/batch/batch_execute.rs#L522).
+
+<a id="review-3-1"></a>
+
+### Claim 3.1 — No parse-time depth bound on recursive DTO deserialization — remote stack-overflow abort
+
+Status: `refuted`. Current risk: —.
+
+Parent source check of the checksummed rmp-serde 1.3.1 archive finds a default depth counter of 1024, decremented for arrays/maps and rejected with DepthLimitExceeded before unbounded descent. The categorical missing-bound / arbitrary-depth decode mechanism is refuted, not fixed. No project override increases that limit. This does not prove 1024 recursive containers are stack-safe on every target; a lower project limit is separate, unmeasured hardening.
+
+Evidence: [crates/shamir-server/src/db_handler/handler.rs:344](../../../../../crates/shamir-server/src/db_handler/handler.rs#L344); [crates/shamir-transport-tcp/src/framing.rs:56](../../../../../crates/shamir-transport-tcp/src/framing.rs#L56); [Cargo.lock:2949](../../../../../Cargo.lock#L2949).
+
+Pinned dependency evidence: [rmp-serde 1.3.1, src/decode.rs:294](https://docs.rs/crate/rmp-serde/1.3.1/source/src/decode.rs); [rmp-serde 1.3.1, src/decode.rs:566](https://docs.rs/crate/rmp-serde/1.3.1/source/src/decode.rs).
+
+Grouping/duplicate: `security-crypto.md#1`. This row is not another independent defect.
+
+<a id="review-3-2"></a>
+
+### Claim 3.2 — Unbounded recursive walks over already-parsed attacker trees
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+Recursive graph/value walks persist and planning precedes filter-depth validation; crash thresholds remain conditional/unmeasured.
+
+Evidence: [crates/shamir-query-types/src/batch/planner.rs:671](../../../../../crates/shamir-query-types/src/batch/planner.rs#L671); [crates/shamir-engine/src/query/batch/batch_execute.rs:167](../../../../../crates/shamir-engine/src/query/batch/batch_execute.rs#L167).
+
+Grouping/duplicate: `security-crypto.md#2`. This row is not another independent defect.
+
+<a id="review-3-3"></a>
+
+### Claim 3.3 — `check_filter_depth` does not descend into `FilterValue` — contradicts its own `$cond` claim
+
+Status: `fixed`. Current risk: —.
+
+The iterative combined-node checker handles every recursive operand shape; meaningful Array/Cond regressions are wired.
+
+Evidence: [crates/shamir-query-types/src/filter/filter_enum.rs:239](../../../../../crates/shamir-query-types/src/filter/filter_enum.rs#L239); [crates/shamir-query-types/src/filter/filter_enum.rs:321](../../../../../crates/shamir-query-types/src/filter/filter_enum.rs#L321); [crates/shamir-query-types/src/filter/tests/mod.rs:1](../../../../../crates/shamir-query-types/src/filter/tests/mod.rs#L1).
+
+Grouping/duplicate: `security-crypto.md#3`. This row is not another independent defect.
+
+<a id="review-3-4"></a>
+
+### Claim 3.4 — Destructive-op HMAC gate never reaches ops nested in `Batch`/`ForEach`
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+The server confirmation loop remains top-level-only and skips container bodies.
+
+Evidence: [crates/shamir-server/src/db_handler/admin.rs:656](../../../../../crates/shamir-server/src/db_handler/admin.rs#L656); [crates/shamir-server/src/db_handler/admin.rs:758](../../../../../crates/shamir-server/src/db_handler/admin.rs#L758).
+
+Grouping/duplicate: `security-crypto.md#4`. This row is not another independent defect.
+
+<a id="review-3-5"></a>
+
+### Claim 3.5 — Canonical HMAC inputs omit semantically destructive request fields (`cascade`, `dst_path`)
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+Canonicalizers and server recomputation still omit these modifiers, weakening confirmation intent rather than authentication.
+
+Evidence: [crates/shamir-query-types/src/hmac.rs:101](../../../../../crates/shamir-query-types/src/hmac.rs#L101); [crates/shamir-query-types/src/hmac.rs:134](../../../../../crates/shamir-query-types/src/hmac.rs#L134).
+
+Grouping/duplicate: `security-crypto.md#5`. This row is not another independent defect.
+
+<a id="review-3-6"></a>
+
+### Claim 3.6 — Canonical-input encoding ambiguities: interior NULs and empty identifiers
+
+Status: `confirmed-open`. Current risk: `low`.
+
+Distinct accepted DTO tuples/resource shapes still alias canonical bytes.
+
+Evidence: [crates/shamir-query-types/src/hmac.rs:89](../../../../../crates/shamir-query-types/src/hmac.rs#L89); [crates/shamir-query-types/src/hmac.rs:184](../../../../../crates/shamir-query-types/src/hmac.rs#L184).
+
+Grouping/duplicate: `security-crypto.md#6`. This row is not another independent defect.
+
+<a id="review-3-7"></a>
+
+### Claim 3.7 — Destructive-op HMAC coverage has drifted: whole op families are ungated
+
+Status: `confirmed-open`. Current risk: `low`.
+
+Cited families remain outside confirmation coverage; authorization is separate and policy expansion needs an explicit decision.
+
+Evidence: [crates/shamir-query-types/src/admin/types/function_ops.rs:72](../../../../../crates/shamir-query-types/src/admin/types/function_ops.rs#L72); [crates/shamir-server/src/db_handler/admin.rs:758](../../../../../crates/shamir-server/src/db_handler/admin.rs#L758).
+
+Grouping/duplicate: `security-crypto.md#7`. This row is not another independent defect.
+
+<a id="review-3-8"></a>
+
+### Claim 3.8 — `BatchLimits` are fully client-supplied; only 3 of 6 fields are server-clamped, and the crate offers no clamping helper
+
+Status: `partially-fixed`. Current risk: `low`.
+
+Three-field server clamping persists, but engine iteration execution now applies an absolute 100000 ceiling.
+
+Evidence: [crates/shamir-server/src/db_handler/handler.rs:489](../../../../../crates/shamir-server/src/db_handler/handler.rs#L489); [crates/shamir-engine/src/query/batch/query_runner.rs:44](../../../../../crates/shamir-engine/src/query/batch/query_runner.rs#L44).
+
+Grouping/duplicate: `security-crypto.md#8`. This row is not another independent defect.
+
+<a id="review-3-9"></a>
+
+### Claim 3.9 — Derived `Debug` on `DbRequest::ChangePasswordVerify` prints long-term SCRAM credential material
+
+Status: `confirmed-open`. Current risk: `low`.
+
+Credential vectors remain Debug-visible; actual log exposure is conditional, and the claimed immediate client impersonation omits required client_key.
+
+Evidence: [crates/shamir-query-types/src/wire/db_message.rs:159](../../../../../crates/shamir-query-types/src/wire/db_message.rs#L159); [crates/shamir-connect/src/common/scram.rs:72](../../../../../crates/shamir-connect/src/common/scram.rs#L72).
+
+Grouping/duplicate: `security-crypto.md#9`. This row is not another independent defect.
+
+<a id="review-4-1"></a>
+
+### Claim 4.1 — `InsertedRecord::get_value_owned("_id")` returns `None` for every deserialized record, contradicting its own doc
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+The accessor/visitor contradiction persists for InsertedRecord consumers, not all normal QueryRecord clients.
+
+Evidence: [crates/shamir-query-types/src/write/inserted_record.rs:98](../../../../../crates/shamir-query-types/src/write/inserted_record.rs#L98); [crates/shamir-query-types/src/write/inserted_record.rs:114](../../../../../crates/shamir-query-types/src/write/inserted_record.rs#L114).
+
+Grouping/duplicate: `api-wire-protocol.md#1`. This row is not another independent defect.
+
+<a id="review-4-2"></a>
+
+### Claim 4.2 — `FilterValue` silently coerces msgpack `uint64 > i64::MAX` to lossy `Float` — asymmetric with the crate's own u64 contract
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+Direct decoding still coerces large integers; normal BatchOp buffering instead preserves exact decimal strings.
+
+Evidence: [crates/shamir-query-types/src/filter/filter_value.rs:14](../../../../../crates/shamir-query-types/src/filter/filter_value.rs#L14); [crates/shamir-types/src/types/value.rs:73](../../../../../crates/shamir-types/src/types/value.rs#L73); [crates/shamir-query-types/src/wire/db_message.rs:222](../../../../../crates/shamir-query-types/src/wire/db_message.rs#L222).
+
+Grouping/duplicate: `api-wire-protocol.md#2`. This row is not another independent defect.
+
+<a id="review-4-3"></a>
+
+### Claim 4.3 — `BatchOp` dispatch by key-presence + unknown-field tolerance can silently execute a different op than was sent
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+Ambiguous operation maps still resolve by first matching key; blanket field uniqueness would reject intentional update/set overlap.
+
+Evidence: [crates/shamir-query-types/src/batch/batch_op.rs:287](../../../../../crates/shamir-query-types/src/batch/batch_op.rs#L287); [crates/shamir-query-types/src/batch/batch_op.rs:433](../../../../../crates/shamir-query-types/src/batch/batch_op.rs#L433).
+
+Grouping/duplicate: `api-wire-protocol.md#3`. This row is not another independent defect.
+
+<a id="review-4-4"></a>
+
+### Claim 4.4 — The same `RecordId` identifier rides the wire three different ways (`op_id` bin vs `op_id` string vs `after_id`/`_id` base58)
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+No base58 adapter was applied to DDL response/correlation IDs.
+
+Evidence: [crates/shamir-query-types/src/read/ddl.rs:14](../../../../../crates/shamir-query-types/src/read/ddl.rs#L14); [crates/shamir-query-types/src/admin/types/index_ops.rs:125](../../../../../crates/shamir-query-types/src/admin/types/index_ops.rs#L125).
+
+Grouping/duplicate: `correctness-tdd.md#2`. This row is not another independent defect.
+
+<a id="review-4-5"></a>
+
+### Claim 4.5 — HMAC canonical inputs are not injective (NUL/comma/slash aliasing) and don't cover `cascade`/`if_exists`/`replace` modifiers
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+Both ambiguous joins and omitted modifiers remain in confirmation canonicalization.
+
+Evidence: [crates/shamir-query-types/src/hmac.rs:89](../../../../../crates/shamir-query-types/src/hmac.rs#L89); [crates/shamir-query-types/src/hmac.rs:357](../../../../../crates/shamir-query-types/src/hmac.rs#L357).
+
+Grouping/duplicate: `security-crypto.md#5,#6`. This row is not another independent defect.
+
+<a id="review-4-6"></a>
+
+### Claim 4.6 — Closed vocabularies modeled as raw `String` where typed enums are the crate's own established pattern
+
+Status: `confirmed-open`. Current risk: `low`.
+
+String DTO fields remain, but not every vocabulary is closed or safe to tighten compatibly.
+
+Evidence: [crates/shamir-query-types/src/batch/batch_request.rs:64](../../../../../crates/shamir-query-types/src/batch/batch_request.rs#L64); [crates/shamir-query-types/src/admin/types/index_ops.rs:65](../../../../../crates/shamir-query-types/src/admin/types/index_ops.rs#L65).
+
+Grouping/duplicate: `api-wire-protocol.md#6`. This row is not another independent defect.
+
+<a id="review-4-7"></a>
+
+### Claim 4.7 — Depth/nesting caps are post-deserialization checks, but serde deserialization itself recurses unbounded
+
+Status: `refuted`. Current risk: —.
+
+Parent source check of the checksummed rmp-serde 1.3.1 archive finds a default depth counter of 1024, decremented for arrays/maps and rejected with DepthLimitExceeded before unbounded descent. The categorical missing-bound / arbitrary-depth decode mechanism is refuted, not fixed. No project override increases that limit. This does not prove 1024 recursive containers are stack-safe on every target; a lower project limit is separate, unmeasured hardening.
+
+Evidence: [crates/shamir-query-types/src/batch/batch_op.rs:262](../../../../../crates/shamir-query-types/src/batch/batch_op.rs#L262); [Cargo.lock:2949](../../../../../Cargo.lock#L2949).
+
+Pinned dependency evidence: [rmp-serde 1.3.1, src/decode.rs:294](https://docs.rs/crate/rmp-serde/1.3.1/source/src/decode.rs); [rmp-serde 1.3.1, src/decode.rs:566](https://docs.rs/crate/rmp-serde/1.3.1/source/src/decode.rs).
+
+Grouping/duplicate: `security-crypto.md#1`. This row is not another independent defect.
+
+<a id="review-4-8"></a>
+
+### Claim 4.8 — `BatchLimits` rejects partial `limits` maps — the exact wire-compat failure #662 fixed for one field persists for the other five
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+Five fields still lack serde defaults when a limits object is supplied.
+
+Evidence: [crates/shamir-query-types/src/batch/batch_limits.rs:31](../../../../../crates/shamir-query-types/src/batch/batch_limits.rs#L31); [crates/shamir-query-types/src/batch/batch_limits.rs:68](../../../../../crates/shamir-query-types/src/batch/batch_limits.rs#L68).
+
+Grouping/duplicate: `api-wire-protocol.md#8`. This row is not another independent defect.
+
+<a id="review-4-9"></a>
+
+### Claim 4.9 — `$query` path syntax silently reserves `.count`/`.length` — record fields with those names are unreachable
+
+Status: `refuted`. Current risk: —.
+
+Actual execution resolves literal field names, including count/length; standalone parser reservations are documented.
+
+Evidence: [crates/shamir-engine/src/query/filter/resolve.rs:742](../../../../../crates/shamir-engine/src/query/filter/resolve.rs#L742); [crates/shamir-engine/src/query/filter/resolve.rs:751](../../../../../crates/shamir-engine/src/query/filter/resolve.rs#L751).
+
+Grouping/duplicate: `api-wire-protocol.md#9`. This row is not another independent defect.
+
+<a id="review-4-10"></a>
+
+### Claim 4.10 — `InsertedRecord` with a non-map `fields` and no `id` serializes to a shape its own deserializer rejects
+
+Status: `confirmed-open`. Current risk: `low`.
+
+Scalar serialization still conflicts with map-only deserialization.
+
+Evidence: [crates/shamir-query-types/src/write/inserted_record.rs:63](../../../../../crates/shamir-query-types/src/write/inserted_record.rs#L63); [crates/shamir-query-types/src/write/inserted_record.rs:102](../../../../../crates/shamir-query-types/src/write/inserted_record.rs#L102).
+
+Grouping/duplicate: `api-wire-protocol.md#10`. This row is not another independent defect.
+
+<a id="review-4-11"></a>
+
+### Claim 4.11 — `QueryRecord` wire shape aliases `Direct(QueryValue::Bin)` and `IdBytes`; `as_value()` silently substitutes `Null` for opaque rows
+
+Status: `confirmed-open`. Current risk: `low`.
+
+Aliasing/Null conversion remain as explicitly documented and tested representation limitations.
+
+Evidence: [crates/shamir-query-types/src/read/query_record.rs:87](../../../../../crates/shamir-query-types/src/read/query_record.rs#L87); [crates/shamir-query-types/src/read/query_record.rs:184](../../../../../crates/shamir-query-types/src/read/query_record.rs#L184).
+
+Grouping/duplicate: `api-wire-protocol.md#11`. This row is not another independent defect.
+
+<a id="review-4-12"></a>
+
+### Claim 4.12 — Wire tag conventions are inconsistent across the protocol
+
+Status: `confirmed-open`. Current risk: `low`.
+
+Tag/casing differences remain; this is consistency debt, not established runtime breakage.
+
+Evidence: [crates/shamir-query-types/src/read/limit.rs:14](../../../../../crates/shamir-query-types/src/read/limit.rs#L14); [crates/shamir-query-types/src/wire/repl.rs:25](../../../../../crates/shamir-query-types/src/wire/repl.rs#L25).
+
+Grouping/duplicate: `api-wire-protocol.md#12`. This row is not another independent defect.
+
+<a id="review-4-13"></a>
+
+### Claim 4.13 — `FieldPath` accepts a bare string in filters but requires arrays in SELECT/ORDER BY/GROUP BY/aggregate field
+
+Status: `confirmed-open`. Current risk: `low`.
+
+String shorthand remains filter-only.
+
+Evidence: [crates/shamir-query-types/src/filter/filter_enum.rs:370](../../../../../crates/shamir-query-types/src/filter/filter_enum.rs#L370); [crates/shamir-query-types/src/read/select.rs:57](../../../../../crates/shamir-query-types/src/read/select.rs#L57).
+
+Grouping/duplicate: `api-wire-protocol.md#13`. This row is not another independent defect.
+
+<a id="review-4-14"></a>
+
+### Claim 4.14 — `InsertOp` carries two parallel record channels with unspecified result ordering
+
+Status: `confirmed-open`. Current risk: `low`.
+
+DTO order documentation remains absent; engine code already guarantees values-first then idmsgpack.
+
+Evidence: [crates/shamir-query-types/src/write/types.rs:81](../../../../../crates/shamir-query-types/src/write/types.rs#L81); [crates/shamir-engine/src/table/write_exec.rs:407](../../../../../crates/shamir-engine/src/table/write_exec.rs#L407).
+
+Grouping/duplicate: `api-wire-protocol.md#14`. This row is not another independent defect.
+
+<a id="review-4-15"></a>
+
+### Claim 4.15 — `query_version` negotiation coverage is inconsistent within `DbRequest`
+
+Status: `refuted`. Current risk: —.
+
+Query-language version scope intentionally covers query/batch schemas; handle lifecycle and separate subprotocol operations are not new batches.
+
+Evidence: [crates/shamir-query-types/src/wire/db_message.rs:12](../../../../../crates/shamir-query-types/src/wire/db_message.rs#L12); [crates/shamir-query-types/src/wire/db_message.rs:119](../../../../../crates/shamir-query-types/src/wire/db_message.rs#L119).
+
+Grouping/duplicate: `api-wire-protocol.md#15`. This row is not another independent defect.
+
+<a id="review-4-16"></a>
+
+### Claim 4.16 — "Always required" HMAC fields are `Option<String>` — required-ness exists only in prose and runtime gates
+
+Status: `refuted`. Current risk: —.
+
+Optional raw DTOs are specified intentionally; all unconditional handlers reject missing tags.
+
+Evidence: [crates/shamir-server/src/db_handler/admin.rs:121](../../../../../crates/shamir-server/src/db_handler/admin.rs#L121); [crates/shamir-server/src/db_handler/admin.rs:296](../../../../../crates/shamir-server/src/db_handler/admin.rs#L296); [crates/shamir-server/src/db_handler/admin.rs:377](../../../../../crates/shamir-server/src/db_handler/admin.rs#L377).
+
+Grouping/duplicate: `api-wire-protocol.md#16`. This row is not another independent defect.
+
+<a id="review-4-17"></a>
+
+### Claim 4.17 — Doc/wire mismatches and stale references
+
+Status: `confirmed-open`. Current risk: `nit`.
+
+Every cited doc/example/re-export component remains; severities are documentary/discoverability.
+
+Evidence: [crates/shamir-query-types/src/admin/types/validator_ops.rs:59](../../../../../crates/shamir-query-types/src/admin/types/validator_ops.rs#L59); [crates/shamir-query-types/src/read/limit.rs:320](../../../../../crates/shamir-query-types/src/read/limit.rs#L320); [crates/shamir-query-types/src/wire/mod.rs:20](../../../../../crates/shamir-query-types/src/wire/mod.rs#L20).
+
+Grouping/duplicate: `api-wire-protocol.md#17`. This row is not another independent defect.
+
+<a id="review-4-18"></a>
+
+### Claim 4.18 — Inline `#[cfg(test)] mod tests` in implementation files, despite the documented `tests/` layout and existing sibling test files
+
+Status: `confirmed-open`. Current risk: `low`.
+
+Both inline modules remain reachable and organizationally nonconforming.
+
+Evidence: [crates/shamir-query-types/src/read/query_record.rs:302](../../../../../crates/shamir-query-types/src/read/query_record.rs#L302); [crates/shamir-query-types/src/write/inserted_record.rs:135](../../../../../crates/shamir-query-types/src/write/inserted_record.rs#L135).
+
+Grouping/duplicate: `style-claude-md.md#2`. This row is not another independent defect.
+
+<a id="review-5-1"></a>
+
+### Claim 5.1 — Unbounded recursion in `detect_cycle` / `calculate_max_depth` — stack overflow aborts the server
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+Recursive graph algorithms remain; TooDeep validation occurs after traversal, with operator/default/frame qualifications.
+
+Evidence: [crates/shamir-query-types/src/batch/planner.rs:671](../../../../../crates/shamir-query-types/src/batch/planner.rs#L671); [crates/shamir-query-types/src/batch/planner.rs:721](../../../../../crates/shamir-query-types/src/batch/planner.rs#L721).
+
+Grouping/duplicate: `security-crypto.md#2`. This row is not another independent defect.
+
+<a id="review-5-2"></a>
+
+### Claim 5.2 — `check_filter_depth` does not descend into `FilterValue` operands — doc claims `$cond` coverage it doesn't have
+
+Status: `fixed`. Current risk: —.
+
+Combined iterative operand traversal and registered regressions close the original mechanism.
+
+Evidence: [crates/shamir-query-types/src/filter/filter_enum.rs:321](../../../../../crates/shamir-query-types/src/filter/filter_enum.rs#L321); [crates/shamir-query-types/src/filter/tests/filter_enum_tests.rs:256](../../../../../crates/shamir-query-types/src/filter/tests/filter_enum_tests.rs#L256).
+
+Grouping/duplicate: `security-crypto.md#3`. This row is not another independent defect.
+
+<a id="review-5-3"></a>
+
+### Claim 5.3 — `From<QueryValue> for FilterValue` silently substitutes `Null` in release builds
+
+Status: `confirmed-open`. Current risk: `low`.
+
+Debug-only assertion followed by Null remains after failed conversion.
+
+Evidence: [crates/shamir-query-types/src/filter/filter_value.rs:270](../../../../../crates/shamir-query-types/src/filter/filter_value.rs#L270).
+
+Grouping/duplicate: `error-handling-lifecycle.md#3`. This row is not another independent defect.
+
+<a id="review-5-4"></a>
+
+### Claim 5.4 — Non-saturating arithmetic on client-controlled `u64` pagination fields
+
+Status: `confirmed-open`. Current risk: `low`.
+
+Unchecked multiplication/addition remain.
+
+Evidence: [crates/shamir-query-types/src/read/limit.rs:180](../../../../../crates/shamir-query-types/src/read/limit.rs#L180); [crates/shamir-query-types/src/read/limit.rs:294](../../../../../crates/shamir-query-types/src/read/limit.rs#L294).
+
+Grouping/duplicate: `correctness-tdd.md#6`. This row is not another independent defect.
+
+<a id="review-5-5"></a>
+
+### Claim 5.5 — Missing in-crate error-path tests: headline planner errors, `QueryReference::parse`, non-finite float rejection
+
+Status: `confirmed-open`. Current risk: `low`.
+
+The particular local error-path suites remain missing; ForEach TooManyQueries is locally covered.
+
+Evidence: [crates/shamir-query-types/src/batch/tests/mod.rs:1](../../../../../crates/shamir-query-types/src/batch/tests/mod.rs#L1); [crates/shamir-query-types/src/read/query_record.rs:117](../../../../../crates/shamir-query-types/src/read/query_record.rs#L117).
+
+Grouping/duplicate: `correctness-tdd.md#4`. This row is not another independent defect.
+
+<a id="review-5-6"></a>
+
+### Claim 5.6 — thiserror convention deviation: hand-rolled Display/Error impls and `Result<(), String>` public APIs
+
+Status: `confirmed-open`. Current risk: `low`.
+
+The convention/String-validator debt remains; existing manual error enums are still typed.
+
+Evidence: [crates/shamir-query-types/src/batch/batch_error.rs:245](../../../../../crates/shamir-query-types/src/batch/batch_error.rs#L245); [crates/shamir-query-types/src/filter/filter_enum.rs:239](../../../../../crates/shamir-query-types/src/filter/filter_enum.rs#L239).
+
+Grouping/duplicate: `error-handling-lifecycle.md#6`. This row is not another independent defect.
+
+<a id="review-5-7"></a>
+
+### Claim 5.7 — `Pagination`'s `PartialEq` can panic via `key_bytes`' `expect`
+
+Status: `unverified`. Current risk: `nit` (provisional; not a confirmed defect).
+
+The expect is present; the alleged pinned encoder depth error and threshold lack dependency-source proof. The pinned serializer's depth field/setter is explicitly unused, so encoder DepthLimitExceeded is not an established trigger; other fallible allocation or Serialize paths require their own proof.
+
+Evidence: [crates/shamir-query-types/src/read/limit.rs:130](../../../../../crates/shamir-query-types/src/read/limit.rs#L130); [Cargo.lock:2949](../../../../../Cargo.lock#L2949).
+
+Pinned dependency evidence: [rmp-serde 1.3.1, src/encode.rs:147](https://docs.rs/crate/rmp-serde/1.3.1/source/src/encode.rs).
+
+Grouping/duplicate: `error-handling-lifecycle.md#7`. This row is not another independent defect.
+
+<a id="review-5-8"></a>
+
+### Claim 5.8 — `expect` in HMAC tag compute/verify (acceptable, but undocumented-as-invariant)
+
+Status: `refuted`. Current risk: —.
+
+Expect messages name the valid invariant; pinned HMAC accepts arbitrary key lengths, including oversized keys.
+
+Evidence: [crates/shamir-query-types/src/hmac.rs:414](../../../../../crates/shamir-query-types/src/hmac.rs#L414); [Cargo.lock:1638](../../../../../Cargo.lock#L1638).
+
+Grouping/duplicate: `error-handling-lifecycle.md#8`. This row is not another independent defect.
+
+<a id="review-5-9"></a>
+
+### Claim 5.9 — `TableRef` deserialization silently ignores trailing seq elements
+
+Status: `refuted`. Current risk: —.
+
+Parent pinned-source check refutes successful trailing-element acceptance: TableRef calls deserialize_any, and rmp-serde 1.3.1's array visitor checks the remaining SeqAccess count after visit_seq, returning LengthMismatch for unconsumed elements. Inspected serde buffered visitors also reject leftovers. The local visitor has no explicit check, but that omission is not this decode defect. A dedicated regression remains coverage debt.
+
+Evidence: [crates/shamir-query-types/src/table_ref.rs:71](../../../../../crates/shamir-query-types/src/table_ref.rs#L71); [Cargo.lock:3204](../../../../../Cargo.lock#L3204).
+
+Pinned dependency evidence: [rmp-serde 1.3.1, src/decode.rs:566](https://docs.rs/crate/rmp-serde/1.3.1/source/src/decode.rs).
+
+Grouping/duplicate: `correctness-tdd.md#10`. This row is not another independent defect.
+
+<a id="review-6-1"></a>
+
+### Claim 6.1 — `BatchOp::deserialize` — triple codec round-trip + key clones + linear dispatch chain per op
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+The three-stage codec path and key/probe costs remain; no decode benchmark establishes High latency.
+
+Evidence: [crates/shamir-query-types/src/batch/batch_op.rs:262](../../../../../crates/shamir-query-types/src/batch/batch_op.rs#L262); [crates/shamir-query-types/src/batch/batch_op.rs:277](../../../../../crates/shamir-query-types/src/batch/batch_op.rs#L277).
+
+Grouping/duplicate: `performance-hotpath.md#1`. This row is not another independent defect.
+
+<a id="review-6-2"></a>
+
+### Claim 6.2 — `InsertedRecord::serialize` — per-record `Vec` collect + sort + base58, contradicting the "allocation-free" module claim
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+Per-map collection/sorting and present-id string creation remain structurally proven.
+
+Evidence: [crates/shamir-query-types/src/write/inserted_record.rs:32](../../../../../crates/shamir-query-types/src/write/inserted_record.rs#L32); [crates/shamir-query-types/src/write/inserted_record.rs:39](../../../../../crates/shamir-query-types/src/write/inserted_record.rs#L39).
+
+Grouping/duplicate: `performance-hotpath.md#2`. This row is not another independent defect.
+
+<a id="review-6-3"></a>
+
+### Claim 6.3 — Filter depth guard does not cover `FilterValue::Cond` nesting — unbounded deserialize-time recursion
+
+Status: `fixed`. Current risk: —.
+
+The combined iterative Filter/FilterValue depth checker now covers Cond conditions and branches with registered Array/Cond regressions. The separate unlimited-codec claim is refuted by pinned rmp-serde 1.3.1's container counter, not a later fix. Neither result establishes stack safety at every permitted codec depth on every target.
+
+Evidence: [crates/shamir-query-types/src/filter/filter_enum.rs:342](../../../../../crates/shamir-query-types/src/filter/filter_enum.rs#L342); [Cargo.lock:2949](../../../../../Cargo.lock#L2949).
+
+Pinned dependency evidence: [rmp-serde 1.3.1, src/decode.rs:294](https://docs.rs/crate/rmp-serde/1.3.1/source/src/decode.rs); [rmp-serde 1.3.1, src/decode.rs:566](https://docs.rs/crate/rmp-serde/1.3.1/source/src/decode.rs).
+
+Grouping/duplicate: `security-crypto.md#1,#3`. This row is not another independent defect.
+
+<a id="review-6-4"></a>
+
+### Claim 6.4 — `FilterValue` — 13-variant `#[serde(untagged)]` enum: content buffering + ~6 failed map-shaped trials per marker value
+
+Status: `confirmed-open`. Current risk: `low`.
+
+Ordered trial decoding remains; universal trial-count/latency estimates are overstated.
+
+Evidence: [crates/shamir-query-types/src/filter/filter_value.rs:9](../../../../../crates/shamir-query-types/src/filter/filter_value.rs#L9); [Cargo.lock:3233](../../../../../Cargo.lock#L3233).
+
+Grouping/duplicate: `performance-hotpath.md#4`. This row is not another independent defect.
+
+<a id="review-6-5"></a>
+
+### Claim 6.5 — `QueryRecord::get_value_{i64,u64,bool}` — deep-clones the whole `Inserted` record per scalar lookup
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+Inserted scalar access still deep-clones fields via get_value_owned/as_value.
+
+Evidence: [crates/shamir-query-types/src/read/query_record.rs:192](../../../../../crates/shamir-query-types/src/read/query_record.rs#L192); [crates/shamir-query-types/src/read/query_record.rs:246](../../../../../crates/shamir-query-types/src/read/query_record.rs#L246).
+
+Grouping/duplicate: `performance-hotpath.md#5`. This row is not another independent defect.
+
+<a id="review-6-6"></a>
+
+### Claim 6.6 — Batch planner — redundant alias-set clone and repeated String re-cloning through the plan
+
+Status: `confirmed-open`. Current risk: `low`.
+
+Planner copies persist; ForEach no longer repeats planning every iteration.
+
+Evidence: [crates/shamir-query-types/src/batch/planner.rs:163](../../../../../crates/shamir-query-types/src/batch/planner.rs#L163); [crates/shamir-engine/src/query/batch/query_runner.rs:882](../../../../../crates/shamir-engine/src/query/batch/query_runner.rs#L882).
+
+Grouping/duplicate: `performance-hotpath.md#6`. This row is not another independent defect.
+
+<a id="review-6-7"></a>
+
+### Claim 6.7 — Three separate full-tree recursive walks per request: `is_write`, `distinct_repos`, `collect_required_access`
+
+Status: `partially-fixed`. Current risk: `low`.
+
+Walkers remain separate, but authorization checks now deduplicate; fixed-depth passes do not prove quadratic complexity.
+
+Evidence: [crates/shamir-query-types/src/batch/query_entry.rs:102](../../../../../crates/shamir-query-types/src/batch/query_entry.rs#L102); [crates/shamir-engine/src/query/batch/authorized.rs:102](../../../../../crates/shamir-engine/src/query/batch/authorized.rs#L102).
+
+Grouping/duplicate: `performance-hotpath.md#7`. This row is not another independent defect.
+
+<a id="review-6-8"></a>
+
+### Claim 6.8 — `Pagination::eq` (`After`) — two msgpack encodes per equality comparison
+
+Status: `confirmed-open`. Current risk: `low`.
+
+Matching-prefix After comparisons still encode both key tuples.
+
+Evidence: [crates/shamir-query-types/src/read/limit.rs:123](../../../../../crates/shamir-query-types/src/read/limit.rs#L123).
+
+Grouping/duplicate: `performance-hotpath.md#8`. This row is not another independent defect.
+
+<a id="review-6-9"></a>
+
+### Claim 6.9 — Plan-time marker decode pays a msgpack round-trip per `$query`/`$fn`/`$cond`/`$expr` marker
+
+Status: `confirmed-open`. Current risk: `low`.
+
+Marker codec round trips remain; the old per-iteration planning multiplier is removed.
+
+Evidence: [crates/shamir-query-types/src/batch/planner.rs:392](../../../../../crates/shamir-query-types/src/batch/planner.rs#L392); [crates/shamir-engine/src/query/batch/query_runner.rs:882](../../../../../crates/shamir-engine/src/query/batch/query_runner.rs#L882).
+
+Grouping/duplicate: `performance-hotpath.md#9`. This row is not another independent defect.
+
+<a id="review-6-10"></a>
+
+### Claim 6.10 — Per-construction `"main"` String allocations
+
+Status: `confirmed-open`. Current risk: `nit`.
+
+Default owned-string allocation remains; impact is unmeasured.
+
+Evidence: [crates/shamir-query-types/src/table_ref.rs:21](../../../../../crates/shamir-query-types/src/table_ref.rs#L21).
+
+Grouping/duplicate: `performance-hotpath.md#10`. This row is not another independent defect.
+
+<a id="review-7-1"></a>
+
+### Claim 7.1 — Types defined inside mod.rs (re-export-only rule breach)
+
+Status: `confirmed-open`. Current risk: `low`.
+
+Validator and Call types still live in mod.rs; the impact is structural, not runtime High.
+
+Evidence: [crates/shamir-query-types/src/validator/mod.rs:9](../../../../../crates/shamir-query-types/src/validator/mod.rs#L9); [crates/shamir-query-types/src/call/mod.rs:31](../../../../../crates/shamir-query-types/src/call/mod.rs#L31).
+
+Grouping/duplicate: `style-claude-md.md#1`. This row is not another independent defect.
+
+<a id="review-7-2"></a>
+
+### Claim 7.2 — Inline `#[cfg(test)] mod tests { ... }` embedded in implementation files
+
+Status: `confirmed-open`. Current risk: `low`.
+
+Both inline modules remain alongside reachable sibling suites.
+
+Evidence: [crates/shamir-query-types/src/read/query_record.rs:302](../../../../../crates/shamir-query-types/src/read/query_record.rs#L302); [crates/shamir-query-types/src/write/inserted_record.rs:135](../../../../../crates/shamir-query-types/src/write/inserted_record.rs#L135).
+
+Grouping/duplicate: `style-claude-md.md#2`. This row is not another independent defect.
+
+<a id="review-7-3"></a>
+
+### Claim 7.3 — Mid-function `use` statements in implementation files (imports-at-top breach)
+
+Status: `confirmed-open`. Current risk: `low`.
+
+Originally cited local imports remain; statement counts and severity need correction.
+
+Evidence: [crates/shamir-query-types/src/hmac.rs:412](../../../../../crates/shamir-query-types/src/hmac.rs#L412); [crates/shamir-query-types/src/batch/planner.rs:372](../../../../../crates/shamir-query-types/src/batch/planner.rs#L372).
+
+Grouping/duplicate: `style-claude-md.md#3`. This row is not another independent defect.
+
+<a id="review-7-4"></a>
+
+### Claim 7.4 — Mid-function `use` statements in standalone test files
+
+Status: `confirmed-open`. Current risk: `low`.
+
+The cited twelve imports remain in wired standalone test files.
+
+Evidence: [crates/shamir-query-types/src/batch/tests/planner_tests.rs:456](../../../../../crates/shamir-query-types/src/batch/tests/planner_tests.rs#L456); [crates/shamir-query-types/src/wire/tests/repl_tests.rs:22](../../../../../crates/shamir-query-types/src/wire/tests/repl_tests.rs#L22).
+
+Grouping/duplicate: `style-claude-md.md#4`. This row is not another independent defect.
+
+<a id="review-7-5"></a>
+
+### Claim 7.5 — `FieldPath` type alias defined in `filter/mod.rs`
+
+Status: `confirmed-open`. Current risk: `low`.
+
+FieldPath remains a mod.rs definition, contrary to the structural rule.
+
+Evidence: [crates/shamir-query-types/src/filter/mod.rs:21](../../../../../crates/shamir-query-types/src/filter/mod.rs#L21).
+
+Grouping/duplicate: `style-claude-md.md#5`. This row is not another independent defect.
+
+<a id="review-7-6"></a>
+
+### Claim 7.6 — `is_false` helper defined four times with three visibilities and two referencing conventions
+
+Status: `confirmed-open`. Current risk: `low`.
+
+All four identical copies remain without actual behavior divergence.
+
+Evidence: [crates/shamir-query-types/src/admin/types/db_ops.rs:6](../../../../../crates/shamir-query-types/src/admin/types/db_ops.rs#L6); [crates/shamir-query-types/src/admin/types/schema_ops.rs:162](../../../../../crates/shamir-query-types/src/admin/types/schema_ops.rs#L162); [crates/shamir-query-types/src/admin/types/repl_ops.rs:43](../../../../../crates/shamir-query-types/src/admin/types/repl_ops.rs#L43); [crates/shamir-query-types/src/read/read_query.rs:52](../../../../../crates/shamir-query-types/src/read/read_query.rs#L52).
+
+Grouping/duplicate: `style-claude-md.md#6`. This row is not another independent defect.
+
+<a id="review-7-7"></a>
+
+### Claim 7.7 — Duplicated `fk_restrict` entry in `DbResponse::Error` doc vocabulary
+
+Status: `confirmed-open`. Current risk: `nit`.
+
+The duplicated documentation token persists.
+
+Evidence: [crates/shamir-query-types/src/wire/db_message.rs:330](../../../../../crates/shamir-query-types/src/wire/db_message.rs#L330); [crates/shamir-query-types/src/wire/db_message.rs:332](../../../../../crates/shamir-query-types/src/wire/db_message.rs#L332).
+
+Grouping/duplicate: `api-wire-protocol.md#17`. This row is not another independent defect.
+
+<a id="review-7-8"></a>
+
+### Claim 7.8 — `hmac.rs` module doc: second half of the canonical-input table is an orphaned headerless block
+
+Status: `confirmed-open`. Current risk: `nit`.
+
+The second pipe block still lacks a table header after intervening prose.
+
+Evidence: [crates/shamir-query-types/src/hmac.rs:61](../../../../../crates/shamir-query-types/src/hmac.rs#L61).
+
+Grouping/duplicate: `api-wire-protocol.md#17`. This row is not another independent defect.
+
+<a id="review-7-9"></a>
+
+### Claim 7.9 — Inconsistent `//!` module-doc headers
+
+Status: `confirmed-open`. Current risk: `nit`.
+
+The cited subscribe/test headers remain absent.
+
+Evidence: [crates/shamir-query-types/src/subscribe/deliver_mode.rs:1](../../../../../crates/shamir-query-types/src/subscribe/deliver_mode.rs#L1); [crates/shamir-query-types/src/tests/hmac_tests.rs:1](../../../../../crates/shamir-query-types/src/tests/hmac_tests.rs#L1).
+
+Grouping/duplicate: `style-claude-md.md#9`. This row is not another independent defect.
+
+<a id="review-7-10"></a>
+
+### Claim 7.10 — Inconsistent per-file granularity: `types.rs` multi-type buckets vs. per-family splits
+
+Status: `refuted`. Current risk: —.
+
+Related type families fit the explicit closely-coupled-group exception; declaration ordering has no mandatory uniform rule.
+
+Evidence: [CLAUDE.md:489](../../../../../CLAUDE.md#L489); [crates/shamir-query-types/src/write/types.rs:1](../../../../../crates/shamir-query-types/src/write/types.rs#L1); [crates/shamir-query-types/src/auth/types.rs:1](../../../../../crates/shamir-query-types/src/auth/types.rs#L1).
+
+Grouping/duplicate: `style-claude-md.md#10`. This row is not another independent defect.
+
+## Current fix-plan state
+
+| Claim decisions | Open | Source-fixed | Partial | Refuted | Unverified | N/A |
+|---:|---:|---:|---:|---:|---:|---:|
+| 24 | 20 | 1 | 2 | 0 | 0 | 1 |
+
+A source-fixed item closes only its stated mechanism. Partial items retain the obligations named below; proposed fixes must obey the corrections and current contracts, not merely copy the historical recipe.
+
+<a id="plan-1"></a>
+
+### Plan 1 — 1
+
+Status: `not-applicable`. Current risk: —.
+
+The original prerequisite of unbounded codec decoding is false under rmp-serde 1.3.1's 1024-container counter. A lower project-wide limit may still be chosen for target stack budgets, but it is hardening requiring a contract and discriminating oracle, not remediation of the asserted unlimited decoder.
+
+Evidence: [crates/shamir-query-types/src/batch/batch_op.rs:262](../../../../../crates/shamir-query-types/src/batch/batch_op.rs#L262); [crates/shamir-transport-tcp/src/framing.rs:56](../../../../../crates/shamir-transport-tcp/src/framing.rs#L56); [Cargo.lock:2949](../../../../../Cargo.lock#L2949).
+
+Pinned dependency evidence: [rmp-serde 1.3.1, src/decode.rs:294](https://docs.rs/crate/rmp-serde/1.3.1/source/src/decode.rs); [rmp-serde 1.3.1, src/decode.rs:566](https://docs.rs/crate/rmp-serde/1.3.1/source/src/decode.rs).
+
+<a id="plan-2"></a>
+
+### Plan 2 — 2
+
+Status: `confirmed-open`. Current risk: —.
+
+P0 post-parse walks: graph DFS/depth and extract_deps walkers remain recursive. The proposed reference walker is itself bounded recursion, not iterative.
+
+Evidence: [crates/shamir-query-types/src/batch/planner.rs:367](../../../../../crates/shamir-query-types/src/batch/planner.rs#L367); [crates/shamir-query-types/src/batch/planner.rs:671](../../../../../crates/shamir-query-types/src/batch/planner.rs#L671); [crates/shamir-query-types/src/batch/planner.rs:721](../../../../../crates/shamir-query-types/src/batch/planner.rs#L721); [crates/shamir-query-types/src/batch/planner.rs:770](../../../../../crates/shamir-query-types/src/batch/planner.rs#L770).
+
+<a id="plan-3"></a>
+
+### Plan 3 — 3
+
+Status: `confirmed-open`. Current risk: —.
+
+P0 gate classification: ForEach remains excluded, no recursive destructive-op helper drives server gates, and nested HMAC checks remain absent. Existing recursive DAC authorization is not a confirmation fix.
+
+Evidence: [crates/shamir-query-types/src/batch/batch_op.rs:577](../../../../../crates/shamir-query-types/src/batch/batch_op.rs#L577); [crates/shamir-server/src/db_handler/admin.rs:656](../../../../../crates/shamir-server/src/db_handler/admin.rs#L656); [crates/shamir-engine/src/query/batch/authorized.rs:103](../../../../../crates/shamir-engine/src/query/batch/authorized.rs#L103).
+
+<a id="plan-4"></a>
+
+### Plan 4 — 4
+
+Status: `fixed`. Current risk: —.
+
+P0 Cond hole: 66ddbf48's combined iterative checker traverses all operand shapes and Cond condition/branches. Registered Array/Cond regressions detect the old omission; no tests were executed here.
+
+Evidence: [crates/shamir-query-types/src/filter/filter_enum.rs:239](../../../../../crates/shamir-query-types/src/filter/filter_enum.rs#L239); [crates/shamir-query-types/src/filter/filter_enum.rs:321](../../../../../crates/shamir-query-types/src/filter/filter_enum.rs#L321); [crates/shamir-query-types/src/filter/tests/filter_enum_tests.rs:236](../../../../../crates/shamir-query-types/src/filter/tests/filter_enum_tests.rs#L236); [crates/shamir-query-types/src/filter/tests/mod.rs:1](../../../../../crates/shamir-query-types/src/filter/tests/mod.rs#L1).
+
+<a id="plan-5"></a>
+
+### Plan 5 — 5
+
+Status: `confirmed-open`. Current risk: —.
+
+P1 InsertedRecord id: neither extraction nor accessor fallback was implemented; the round-trip test still checks only ordinary fields.
+
+Evidence: [crates/shamir-query-types/src/write/inserted_record.rs:98](../../../../../crates/shamir-query-types/src/write/inserted_record.rs#L98); [crates/shamir-query-types/src/write/inserted_record.rs:114](../../../../../crates/shamir-query-types/src/write/inserted_record.rs#L114); [crates/shamir-query-types/src/write/inserted_record.rs:157](../../../../../crates/shamir-query-types/src/write/inserted_record.rs#L157).
+
+<a id="plan-6"></a>
+
+### Plan 6 — 6
+
+Status: `confirmed-open`. Current risk: —.
+
+P1 FilterValue u64: direct decoding remains lossy and untagged dispatch remains. Preserve the documented decimal-string large-integer contract; normal BatchOp buffering already follows it.
+
+Evidence: [crates/shamir-query-types/src/filter/filter_value.rs:14](../../../../../crates/shamir-query-types/src/filter/filter_value.rs#L14); [crates/shamir-types/src/types/value.rs:73](../../../../../crates/shamir-types/src/types/value.rs#L73); [docs/guide-docs/client-server-protocol-spec/NUMERIC_WIRE_SEMANTICS.md:28](../../../../../docs/guide-docs/client-server-protocol-spec/NUMERIC_WIRE_SEMANTICS.md#L28).
+
+<a id="plan-7"></a>
+
+### Plan 7 — 7
+
+Status: `confirmed-open`. Current risk: —.
+
+P1 base58 IDs: no adapters or string-shape regressions were added for QueryResult, DdlOpStatus, or either index request_id field.
+
+Evidence: [crates/shamir-query-types/src/read/query_result.rs:190](../../../../../crates/shamir-query-types/src/read/query_result.rs#L190); [crates/shamir-query-types/src/read/ddl.rs:14](../../../../../crates/shamir-query-types/src/read/ddl.rs#L14); [crates/shamir-query-types/src/admin/types/index_ops.rs:125](../../../../../crates/shamir-query-types/src/admin/types/index_ops.rs#L125); [crates/shamir-query-types/src/admin/types/index_ops.rs:154](../../../../../crates/shamir-query-types/src/admin/types/index_ops.rs#L154).
+
+<a id="plan-8"></a>
+
+### Plan 8 — 8
+
+Status: `confirmed-open`. Current risk: —.
+
+P1 HMAC hygiene: ambiguous joins, omitted modifiers, missing helper byte tests, and coverage drift remain. Any canonical/domain change requires coordinated client, query-types, and connect session-key handling, not an isolated helper edit.
+
+Evidence: [crates/shamir-query-types/src/hmac.rs:81](../../../../../crates/shamir-query-types/src/hmac.rs#L81); [crates/shamir-query-types/src/hmac.rs:89](../../../../../crates/shamir-query-types/src/hmac.rs#L89); [crates/shamir-query-types/src/hmac.rs:357](../../../../../crates/shamir-query-types/src/hmac.rs#L357); [crates/shamir-connect/src/common/crypto.rs:98](../../../../../crates/shamir-connect/src/common/crypto.rs#L98); [crates/shamir-server/src/db_handler/admin.rs:650](../../../../../crates/shamir-server/src/db_handler/admin.rs#L650).
+
+<a id="plan-9"></a>
+
+### Plan 9 — 9
+
+Status: `partially-fixed`. Current risk: —.
+
+P1 limits: engine iteration clamping is present and tested by registered helper regressions. Five field defaults, a six-field DTO clamp, nesting/dependency server caps, and corrected security-authority docs remain missing.
+
+Evidence: [crates/shamir-query-types/src/batch/batch_limits.rs:31](../../../../../crates/shamir-query-types/src/batch/batch_limits.rs#L31); [crates/shamir-server/src/db_handler/handler.rs:489](../../../../../crates/shamir-server/src/db_handler/handler.rs#L489); [crates/shamir-engine/src/query/batch/query_runner.rs:44](../../../../../crates/shamir-engine/src/query/batch/query_runner.rs#L44); [crates/shamir-engine/src/query/batch/tests/dos_gate_tests.rs:214](../../../../../crates/shamir-engine/src/query/batch/tests/dos_gate_tests.rs#L214).
+
+<a id="plan-10"></a>
+
+### Plan 10 — 10
+
+Status: `confirmed-open`. Current risk: —.
+
+P1 credential Debug: ChangePasswordVerify still contains raw Debug-visible Vec fields; no redacting wrapper/manual enum Debug was introduced.
+
+Evidence: [crates/shamir-query-types/src/wire/db_message.rs:29](../../../../../crates/shamir-query-types/src/wire/db_message.rs#L29); [crates/shamir-query-types/src/wire/db_message.rs:159](../../../../../crates/shamir-query-types/src/wire/db_message.rs#L159).
+
+<a id="plan-11"></a>
+
+### Plan 11 — 11
+
+Status: `confirmed-open`. Current risk: —.
+
+P1 dispatch invariant: no ambiguous-primary-discriminator rejection/test exists. Revise the proposed field-set invariant to accommodate intentional UpdateOp.set overlap rather than enforcing an invalid blanket rule.
+
+Evidence: [crates/shamir-query-types/src/batch/batch_op.rs:287](../../../../../crates/shamir-query-types/src/batch/batch_op.rs#L287); [crates/shamir-query-types/src/batch/batch_op.rs:433](../../../../../crates/shamir-query-types/src/batch/batch_op.rs#L433); [crates/shamir-query-types/src/write/types.rs:114](../../../../../crates/shamir-query-types/src/write/types.rs#L114).
+
+<a id="plan-12"></a>
+
+### Plan 12 — 12
+
+Status: `confirmed-open`. Current risk: —.
+
+P1 test debt: the specified local parser/planner/compute/access/non-finite/default/boundary tests remain missing. Parent source inspection refutes TableRef success-with-extra-elements under the pinned codec; add a discriminating regression without treating optional visitor checks as a current corruption fix. Use exact node-depth boundaries, not 64 Not wrappers.
+
+Evidence: [crates/shamir-query-types/src/batch/tests/mod.rs:1](../../../../../crates/shamir-query-types/src/batch/tests/mod.rs#L1); [crates/shamir-query-types/src/read/tests/mod.rs:1](../../../../../crates/shamir-query-types/src/read/tests/mod.rs#L1); [crates/shamir-query-types/src/filter/tests/filter_enum_tests.rs:29](../../../../../crates/shamir-query-types/src/filter/tests/filter_enum_tests.rs#L29); [crates/shamir-query-types/src/table_ref.rs:71](../../../../../crates/shamir-query-types/src/table_ref.rs#L71).
+
+<a id="plan-13"></a>
+
+### Plan 13 — 13
+
+Status: `confirmed-open`. Current risk: —.
+
+P1 structure: types remain in validator/call mod.rs and inline tests remain in both implementations. This is Low organizational work rather than a runtime release blocker.
+
+Evidence: [crates/shamir-query-types/src/validator/mod.rs:9](../../../../../crates/shamir-query-types/src/validator/mod.rs#L9); [crates/shamir-query-types/src/call/mod.rs:31](../../../../../crates/shamir-query-types/src/call/mod.rs#L31); [crates/shamir-query-types/src/read/query_record.rs:302](../../../../../crates/shamir-query-types/src/read/query_record.rs#L302); [crates/shamir-query-types/src/write/inserted_record.rs:135](../../../../../crates/shamir-query-types/src/write/inserted_record.rs#L135).
+
+<a id="plan-14"></a>
+
+### Plan 14 — 14
+
+Status: `confirmed-open`. Current risk: —.
+
+P1 pagination: multiplication/addition are unchanged and zero is not normalized or rejected. Existing zero-resolve coverage does not pin consistent metadata.
+
+Evidence: [crates/shamir-query-types/src/read/limit.rs:180](../../../../../crates/shamir-query-types/src/read/limit.rs#L180); [crates/shamir-query-types/src/read/limit.rs:294](../../../../../crates/shamir-query-types/src/read/limit.rs#L294); [crates/shamir-engine/src/query/read/tests/pagination_tests.rs:55](../../../../../crates/shamir-engine/src/query/read/tests/pagination_tests.rs#L55).
+
+<a id="plan-15"></a>
+
+### Plan 15 — 15
+
+Status: `confirmed-open`. Current risk: —.
+
+P1 decode performance: cloned keys, sequential probes, and codec bridging remain; only the planner bench is registered. Preserve dispatch priority/ambiguity behavior deliberately during any optimization.
+
+Evidence: [crates/shamir-query-types/src/batch/batch_op.rs:266](../../../../../crates/shamir-query-types/src/batch/batch_op.rs#L266); [crates/shamir-query-types/src/batch/batch_op.rs:277](../../../../../crates/shamir-query-types/src/batch/batch_op.rs#L277); [crates/shamir-query-types/Cargo.toml:47](../../../../../crates/shamir-query-types/Cargo.toml#L47).
+
+<a id="plan-16"></a>
+
+### Plan 16 — 16
+
+Status: `confirmed-open`. Current risk: —.
+
+P2 row serialization: no sorted-key invariant/cache or serialization bench replaces per-call collection/sorting.
+
+Evidence: [crates/shamir-query-types/src/write/inserted_record.rs:39](../../../../../crates/shamir-query-types/src/write/inserted_record.rs#L39); [crates/shamir-query-types/Cargo.toml:47](../../../../../crates/shamir-query-types/Cargo.toml#L47).
+
+<a id="plan-17"></a>
+
+### Plan 17 — 17
+
+Status: `confirmed-open`. Current risk: —.
+
+P2 scalar accessor borrowing: all three Inserted scalar arms still clone through get_value_owned/as_value.
+
+Evidence: [crates/shamir-query-types/src/read/query_record.rs:246](../../../../../crates/shamir-query-types/src/read/query_record.rs#L246); [crates/shamir-query-types/src/read/query_record.rs:261](../../../../../crates/shamir-query-types/src/read/query_record.rs#L261); [crates/shamir-query-types/src/read/query_record.rs:277](../../../../../crates/shamir-query-types/src/read/query_record.rs#L277).
+
+<a id="plan-18"></a>
+
+### Plan 18 — 18
+
+Status: `confirmed-open`. Current risk: —.
+
+P2 planner allocation/marker trims: redundant collections, clones, repeated lookup, and marker codec conversion remain. Neighbor ForEach plan hoisting removes the old per-iteration multiplier but not these requested changes.
+
+Evidence: [crates/shamir-query-types/src/batch/planner.rs:163](../../../../../crates/shamir-query-types/src/batch/planner.rs#L163); [crates/shamir-query-types/src/batch/planner.rs:392](../../../../../crates/shamir-query-types/src/batch/planner.rs#L392); [crates/shamir-query-types/src/batch/planner.rs:816](../../../../../crates/shamir-query-types/src/batch/planner.rs#L816); [crates/shamir-engine/src/query/batch/query_runner.rs:882](../../../../../crates/shamir-engine/src/query/batch/query_runner.rs#L882).
+
+<a id="plan-19"></a>
+
+### Plan 19 — 19
+
+Status: `partially-fixed`. Current risk: —.
+
+P2 fused classification: no fused/bounded DTO traversal exists, but authorization consumers now deduplicate requirements before gate calls. Remaining helper allocations and traversals should not be justified by the refuted fixed-depth quadratic claim.
+
+Evidence: [crates/shamir-query-types/src/batch/query_entry.rs:93](../../../../../crates/shamir-query-types/src/batch/query_entry.rs#L93); [crates/shamir-query-types/src/batch/query_entry.rs:127](../../../../../crates/shamir-query-types/src/batch/query_entry.rs#L127); [crates/shamir-engine/src/query/batch/authorized.rs:102](../../../../../crates/shamir-engine/src/query/batch/authorized.rs#L102).
+
+<a id="plan-20"></a>
+
+### Plan 20 — 20
+
+Status: `confirmed-open`. Current risk: —.
+
+P2 equality: the two codec calls/expect remain. Structural comparison would remove known allocation cost; the alleged encoder-depth panic still needs proof. Do not map all encode failures to equal empty buffers.
+
+Evidence: [crates/shamir-query-types/src/read/limit.rs:123](../../../../../crates/shamir-query-types/src/read/limit.rs#L123); [crates/shamir-query-types/src/read/limit.rs:130](../../../../../crates/shamir-query-types/src/read/limit.rs#L130); [Cargo.lock:2949](../../../../../Cargo.lock#L2949).
+
+<a id="plan-21"></a>
+
+### Plan 21 — 21
+
+Status: `confirmed-open`. Current risk: —.
+
+P2 vocabularies: cited String fields remain. Triage genuinely closed sets separately from extensible function/error vocabularies and documented unknown-value fallback before tightening serde compatibility.
+
+Evidence: [crates/shamir-query-types/src/batch/batch_request.rs:64](../../../../../crates/shamir-query-types/src/batch/batch_request.rs#L64); [crates/shamir-query-types/src/admin/types/index_ops.rs:65](../../../../../crates/shamir-query-types/src/admin/types/index_ops.rs#L65); [crates/shamir-query-types/src/wire/db_message.rs:338](../../../../../crates/shamir-query-types/src/wire/db_message.rs#L338).
+
+<a id="plan-22"></a>
+
+### Plan 22 — 22
+
+Status: `confirmed-open`. Current risk: —.
+
+P2 wire backlog: non-map InsertedRecord asymmetry, FieldPath grammar and DTO-facing ordering documentation remain. QueryRecord lossiness is documented design debt. Runtime count/length unreachability, universal query-version requirements, and missing mandatory HMAC enforcement are refuted premises, not fix obligations.
+
+Evidence: [crates/shamir-query-types/src/write/inserted_record.rs:102](../../../../../crates/shamir-query-types/src/write/inserted_record.rs#L102); [crates/shamir-query-types/src/read/select.rs:57](../../../../../crates/shamir-query-types/src/read/select.rs#L57); [crates/shamir-engine/src/query/filter/resolve.rs:751](../../../../../crates/shamir-engine/src/query/filter/resolve.rs#L751); [crates/shamir-engine/src/table/write_exec.rs:407](../../../../../crates/shamir-engine/src/table/write_exec.rs#L407); [crates/shamir-server/src/db_handler/admin.rs:296](../../../../../crates/shamir-server/src/db_handler/admin.rs#L296).
+
+<a id="plan-23"></a>
+
+### Plan 23 — 23
+
+Status: `confirmed-open`. Current risk: —.
+
+P2 error hygiene: Null fallback and convention/String-validator debt remain. Additional HMAC invariant comments are unnecessary; current expect messages and pinned implementation already establish the invariant, and the proposed oversized-key explanation is false.
+
+Evidence: [crates/shamir-query-types/src/filter/filter_value.rs:270](../../../../../crates/shamir-query-types/src/filter/filter_value.rs#L270); [crates/shamir-query-types/src/filter/filter_enum.rs:239](../../../../../crates/shamir-query-types/src/filter/filter_enum.rs#L239); [crates/shamir-query-types/src/admin/types/retention.rs:40](../../../../../crates/shamir-query-types/src/admin/types/retention.rs#L40); [crates/shamir-query-types/src/hmac.rs:414](../../../../../crates/shamir-query-types/src/hmac.rs#L414).
+
+<a id="plan-24"></a>
+
+### Plan 24 — 24
+
+Status: `confirmed-open`. Current risk: —.
+
+P2 cosmetics: default strings, cited imports, FieldPath placement, helper duplication, and every composite doc drift remain. Generic type-family splitting is optional under the closely-coupled-group exception, not required corrective work.
+
+Evidence: [crates/shamir-query-types/src/table_ref.rs:21](../../../../../crates/shamir-query-types/src/table_ref.rs#L21); [crates/shamir-query-types/src/filter/mod.rs:21](../../../../../crates/shamir-query-types/src/filter/mod.rs#L21); [crates/shamir-query-types/src/admin/types/schema_ops.rs:162](../../../../../crates/shamir-query-types/src/admin/types/schema_ops.rs#L162); [crates/shamir-query-types/src/admin/types/validator_ops.rs:59](../../../../../crates/shamir-query-types/src/admin/types/validator_ops.rs#L59); [crates/shamir-query-types/src/hmac.rs:61](../../../../../crates/shamir-query-types/src/hmac.rs#L61); [CLAUDE.md:489](../../../../../CLAUDE.md#L489).
+
+## Corrections and qualified non-findings
+
+- The historical 66-row/52-dedup census describes the filed review, not the current number of open verified defects. Preserve duplicate mappings while recomputing current status/severity counts.
+- Replace the categorical unbounded-decoder/one-frame-aborts-server headline with an unverified codec/reachability claim; the reports internally disagree about rmp-serde depth limits.
+- Mark 3.3/5.2 and the guard half of 6.3 fixed through source inspection, with registered regressions; do not claim tests were run.
+- Retain 1.1/3.4 as coarse-policy and confirmation defects, but remove arbitrary DAC privilege-escalation implications.
+- Narrow 4.1 to InsertedRecord consumers and 4.2 to direct FilterValue/ReadQuery decoding; the original normal-Execute numeric scenario is contradicted by QueryValue normalization.
+- Update 3.8 for the engine's 100000 iteration ceiling; update 6.6/6.9 for plan hoisting and 6.7 for authorization deduplication.
+- Correct 4.9, 4.15, 4.16, 5.8, and 7.10 as refuted alleged defects.
+- Downgrade runtime-unsupported High style and decode-performance priorities. Keep structural cost proofs separate from measurements.
+- Revise exact-depth test counts, discriminator uniqueness assumptions, encoder-error equality fallback, and HMAC key-length commentary before using the original Fix Plan.
+
+## Current follow-up order
+
+1. Close source-confirmed nested HMAC confirmation omissions and decide an exhaustive recursive coarse-admin policy while preserving downstream DAC.
+2. Bound or make iterative the source-confirmed planner graph/value walks. Keep the pinned 1024-container decoder bound and inactive encoder-depth field distinct from unmeasured target stack budgets.
+3. Fix DDL ID string/bin interoperability and the scoped InsertedRecord accessor/round-trip defects; preserve the documented large-integer decimal-string contract on direct filter decoding.
+4. Complete partial BatchLimits defaults/clamping and pagination overflow/zero semantics; retain the already implemented iteration ceiling.
+5. Add locally registered regressions for the enumerated planner/parser/compute/access/default/non-finite/boundary gaps, with valid test oracles and codec-specific TableRef checks.
+6. Version HMAC canonicalization deliberately across client/server/session-key consumers, including intent modifiers and unambiguous component encoding; decide additional family coverage explicitly.
+7. Treat credential Debug redaction, measured decode/row/accessor optimizations, and Low/nit structural/documentation work at their qualified severities; remove refuted fix obligations.
+
+## Coverage and limitations
+
+- All eight Markdown files were read completely; all 66 original findings, their consolidated counterparts, and all 24 Fix Plan items were evaluated. No TASK_GROUPS.md exists in the assigned directory.
+- Read-only inspection only: no files changed, git mutations, child agents, compilers, tests, benchmarks, scripts, or reproductions. Fixed statuses mean source-proven mechanisms, not executed tests.
+- Cargo.lock pins rmp-serde 1.3.1, serde 1.0.228, serde_bytes 0.11.19, hmac 0.12.1, digest 0.10.7, sha2 0.10.9, indexmap 2.14.0, and num-bigint 0.4.6. Cached serde/HMAC/digest sources were inspected; the parent also inspected the checksummed rmp-serde 1.3.1 archive.
+- Pinned rmp-serde decode bounds and trailing-array checks are source-proven; its encoder depth field is unused. Exact target stack thresholds and historical timing remain unverified.
+
+## Reviewed document inventory
+
+- [correctness-tdd.md](./correctness-tdd.md) — 10 claim decisions; 0 explicit plan items.
+- [concurrency-lockfree.md](./concurrency-lockfree.md) — 0 claim decisions; 0 explicit plan items.
+- [security-crypto.md](./security-crypto.md) — 9 claim decisions; 0 explicit plan items.
+- [api-wire-protocol.md](./api-wire-protocol.md) — 18 claim decisions; 0 explicit plan items.
+- [error-handling-lifecycle.md](./error-handling-lifecycle.md) — 9 claim decisions; 0 explicit plan items.
+- [performance-hotpath.md](./performance-hotpath.md) — 10 claim decisions; 0 explicit plan items.
+- [style-claude-md.md](./style-claude-md.md) — 10 claim decisions; 0 explicit plan items.
+- [SUMMARY.md](./SUMMARY.md) — 67 claim decisions; 24 explicit plan items.
+
+---
+
+<details>
+<summary>Historical report — preserved for provenance; not current status or instructions</summary>
+
 # shamir-query-types — Consolidated 7-lens review (synthesized)
 
 Crate: `crates/shamir-query-types/` — the pure-DTO shared client/server layer for the
@@ -1599,3 +2730,5 @@ panic-on-encode in `Pagination::eq`) · 4.2 vs 6.4 (u64 coercion vs decode cost 
     `batch_limits` doc table, `has_next_hint`, and the `CURRENT_REPL_PROTO_VER`
     re-export (**4.17/7.7/7.8**); `//!` headers for `subscribe/` and test files
     (**7.9**); `types.rs` family splits on next touch (**7.10**).
+
+</details>

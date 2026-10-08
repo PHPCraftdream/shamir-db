@@ -1,3 +1,1128 @@
+<!-- revalidation:2026-10-08 source:92ad58266bf57ddea1fa3c8a47affba1a3a9a096 -->
+# shamir-wasm-host — SUMMARY revalidation
+
+Source snapshot: `92ad58266bf57ddea1fa3c8a47affba1a3a9a096`. Revalidated 2026-10-08 by read-only XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run; no source fix is part of this update. Test registration/assertions are evidence of an oracle, not proof of a passing run.
+
+This section is authoritative for current status. Original titles/IDs are retained for traceability; a refuted title is not a current assertion. The collapsed historical report below is superseded, including its counts, severity, scenarios and fix instructions. Plan IDs preserve historical numbering, not a current release mandate. [Workspace methodology and status definitions](../SUMMARY.md#status-definitions).
+
+All consolidated sections remain traceable. Most structural defects are still open; Argon2 concurrency is refuted, pin/split proposals are optional, boxed-future optimization is unverified, and several security/test narratives require correction.
+
+## Current claim decisions
+
+| Claim decisions | Open | Source-fixed | Partial | Refuted | Unverified | N/A |
+|---:|---:|---:|---:|---:|---:|---:|
+| 69 | 65 | 0 | 0 | 1 | 0 | 3 |
+
+These are decisions on report claims, including repeated roots, bundled observations and non-findings—not a unique-bug census. Closed/N/A rows have no current risk; unverified risk is provisional. Pure style and unmeasured optimization claims do not establish runtime impact.
+
+## Parent acceptance refinements
+
+- Pinned Wasmtime's async linker requires boxed futures; do not retain removing Box::pin as a directly implementable fix.
+
+<a id="review-1-1"></a>
+
+### Claim 1.1 — Aggregate fuel budget is enforced retroactively: in-flight chain can draw (depth+1) × fuel; doc overclaims the bound
+
+Status: `confirmed-open`. Current risk: `high`.
+
+Descendants receive grants before suspended ancestors debit consumption; the counter does not reserve outstanding grants.
+
+Evidence: [crates/shamir-wasm-host/src/wasm/wasm_function.rs:438](../../../../../crates/shamir-wasm-host/src/wasm/wasm_function.rs#L438); [crates/shamir-wasm-host/src/wasm/wasm_function.rs:587](../../../../../crates/shamir-wasm-host/src/wasm/wasm_function.rs#L587).
+
+<a id="review-1-2"></a>
+
+### Claim 1.2 — `fuel > i64::MAX` immediately errors AND makes the wall-clock/epoch test vacuous
+
+Status: `confirmed-open`. Current risk: `high`.
+
+Unchecked signed seeding rejects high-u64 fuel. The u64::MAX deadline test accepts that early rejection as success.
+
+Evidence: [crates/shamir-wasm-host/src/wasm/wasm_function.rs:436](../../../../../crates/shamir-wasm-host/src/wasm/wasm_function.rs#L436); [crates/shamir-wasm-host/src/tests/wasm_tests.rs:246](../../../../../crates/shamir-wasm-host/src/tests/wasm_tests.rs#L246).
+
+<a id="review-1-3"></a>
+
+### Claim 1.3 — `wasm_aggregate_fuel_exhausted_across_nested_calls` cannot distinguish aggregate from per-Store fuel — vacuous regression test
+
+Status: `confirmed-open`. Current risk: `high`.
+
+Unconditional recursion plus expect_err cannot distinguish aggregate accounting from per-Store fuel, depth, or epoch termination.
+
+Evidence: [crates/shamir-wasm-host/src/tests/wasm_tests.rs:140](../../../../../crates/shamir-wasm-host/src/tests/wasm_tests.rs#L140); [crates/shamir-wasm-host/src/tests/wasm_tests.rs:313](../../../../../crates/shamir-wasm-host/src/tests/wasm_tests.rs#L313).
+
+<a id="review-1-4"></a>
+
+### Claim 1.4 — `GlobalVars::seed_env` panics on any non-UTF-8 environment variable
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+Unicode environment enumeration precedes filtering and is reached at initialization. Panic is possible; unconditional process abort is not established.
+
+Evidence: [crates/shamir-wasm-host/src/context.rs:211](../../../../../crates/shamir-wasm-host/src/context.rs#L211); [crates/shamir-db/src/shamir_db/shamir_db/core.rs:168](../../../../../crates/shamir-db/src/shamir_db/shamir_db/core.rs#L168).
+
+<a id="review-1-5"></a>
+
+### Claim 1.5 — Pooling allocator hardcodes `max_memory_size` to `WasmLimits::default()`, silently capping configured limits
+
+Status: `confirmed-open`. Current risk: `low`.
+
+The pool uses a fixed default 64-MiB ceiling while individual functions accept larger public limits.
+
+Evidence: [crates/shamir-wasm-host/src/wasm/wasm_engine.rs:190](../../../../../crates/shamir-wasm-host/src/wasm/wasm_engine.rs#L190); [crates/shamir-wasm-host/src/wasm/wasm_function.rs:458](../../../../../crates/shamir-wasm-host/src/wasm/wasm_function.rs#L458).
+
+<a id="review-1-6"></a>
+
+### Claim 1.6 — Forbidden-macro scanner desyncs on the '\'' char literal
+
+Status: `confirmed-open`. Current risk: `low`.
+
+The escaped quote is mistaken for the literal terminator. Scanner correctness is broken; this specific exploitable bypass remains unverified.
+
+Evidence: [crates/shamir-wasm-host/src/compile.rs:334](../../../../../crates/shamir-wasm-host/src/compile.rs#L334).
+
+<a id="review-1-7"></a>
+
+### Claim 1.7 — blocking `compile_rust_source` on async paths
+
+Status: `confirmed-open`. Current risk: `high`.
+
+Same synchronous source/JIT compilation on async DDL paths as 2.1.
+
+Evidence: [crates/shamir-db/src/shamir_db/shamir_db/function_management.rs:172](../../../../../crates/shamir-db/src/shamir_db/shamir_db/function_management.rs#L172).
+
+Grouping/duplicate: `SUMMARY.md#2.1`. This row is not another independent defect.
+
+<a id="review-1-8"></a>
+
+### Claim 1.8 — non-atomic remove-then-insert in registry/context stores
+
+Status: `confirmed-open`. Current risk: `low`.
+
+Overwrite visibility gaps and failed rename restoration both remain.
+
+Evidence: [crates/shamir-wasm-host/src/registry.rs:52](../../../../../crates/shamir-wasm-host/src/registry.rs#L52); [crates/shamir-wasm-host/src/registry.rs:86](../../../../../crates/shamir-wasm-host/src/registry.rs#L86); [crates/shamir-wasm-host/src/context.rs:166](../../../../../crates/shamir-wasm-host/src/context.rs#L166).
+
+Grouping/duplicate: `SUMMARY.md#2.2`. This row is not another independent defect.
+
+<a id="review-1-9"></a>
+
+### Claim 1.9 — contradictory `net_grants` doc contract
+
+Status: `confirmed-open`. Current risk: `low`.
+
+The options comment is still permissive while actual empty-grant enforcement denies.
+
+Evidence: [crates/shamir-wasm-host/src/meta.rs:189](../../../../../crates/shamir-wasm-host/src/meta.rs#L189); [crates/shamir-db/src/shamir_db/shamir_db/core.rs:841](../../../../../crates/shamir-db/src/shamir_db/shamir_db/core.rs#L841).
+
+Grouping/duplicate: `SUMMARY.md#3.2`. This row is not another independent defect.
+
+<a id="review-1-10"></a>
+
+### Claim 1.10 — `decode_http_request` silent defaults
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+Missing method/url and malformed body/header containers still default silently.
+
+Evidence: [crates/shamir-wasm-host/src/wasm/host_http.rs:33](../../../../../crates/shamir-wasm-host/src/wasm/host_http.rs#L33); [crates/shamir-wasm-host/src/wasm/host_http.rs:64](../../../../../crates/shamir-wasm-host/src/wasm/host_http.rs#L64).
+
+Grouping/duplicate: `SUMMARY.md#5.5`. This row is not another independent defect.
+
+<a id="review-1-11"></a>
+
+### Claim 1.11 — host-import/ABI test-coverage gap
+
+Status: `confirmed-open`. Current risk: `low`.
+
+Local guest batch/global/db/http and Params boundary matrices remain absent; compile tests can skip and doctests are disabled.
+
+Evidence: [crates/shamir-wasm-host/src/tests/mod.rs:1](../../../../../crates/shamir-wasm-host/src/tests/mod.rs#L1); [crates/shamir-wasm-host/Cargo.toml:46](../../../../../crates/shamir-wasm-host/Cargo.toml#L46).
+
+Grouping/duplicate: `SUMMARY.md#6.3`. This row is not another independent defect.
+
+<a id="review-1-12"></a>
+
+### Claim 1.12 — Nits bundle (correctness-tdd finding 12, five items, distributed to their primary lenses)
+
+Status: `confirmed-open`. Current risk: `nit`.
+
+All five constituent patterns remain: call prose duplication, glob duplication, ticker retention, empty path arguments, and silent malformed grant drops.
+
+Evidence: [crates/shamir-wasm-host/src/wasm/host_call.rs:22](../../../../../crates/shamir-wasm-host/src/wasm/host_call.rs#L22); [crates/shamir-wasm-host/src/net_gateway.rs:487](../../../../../crates/shamir-wasm-host/src/net_gateway.rs#L487); [crates/shamir-wasm-host/src/wasm/wasm_engine.rs:158](../../../../../crates/shamir-wasm-host/src/wasm/wasm_engine.rs#L158); [crates/shamir-wasm-host/src/compile.rs:542](../../../../../crates/shamir-wasm-host/src/compile.rs#L542); [crates/shamir-wasm-host/src/meta.rs:129](../../../../../crates/shamir-wasm-host/src/meta.rs#L129).
+
+<a id="review-2-1"></a>
+
+### Claim 2.1 — `compile_rust_source` blocks up to 120 s and is called directly on tokio workers (pillar 2)
+
+Status: `confirmed-open`. Current risk: `high`.
+
+Both async creation paths synchronously compile source and binary modules. The whole pipeline is not bounded by cargo's 120-second wait.
+
+Evidence: [crates/shamir-db/src/shamir_db/shamir_db/function_management.rs:172](../../../../../crates/shamir-db/src/shamir_db/shamir_db/function_management.rs#L172); [crates/shamir-db/src/shamir_db/shamir_db/validator_management.rs:232](../../../../../crates/shamir-db/src/shamir_db/shamir_db/validator_management.rs#L232).
+
+<a id="review-2-2"></a>
+
+### Claim 2.2 — Non-atomic remove-then-insert overwrite in `replace` / `put` / `set`
+
+Status: `confirmed-open`. Current risk: `low`.
+
+Separate removal/insertion permits absence and ignored failed writes. The report's A-inserts-after-B example actually leaves B because A's insertion fails.
+
+Evidence: [crates/shamir-wasm-host/src/registry.rs:52](../../../../../crates/shamir-wasm-host/src/registry.rs#L52); [crates/shamir-wasm-host/src/context.rs:52](../../../../../crates/shamir-wasm-host/src/context.rs#L52); [crates/shamir-wasm-host/src/context.rs:166](../../../../../crates/shamir-wasm-host/src/context.rs#L166).
+
+<a id="review-2-3"></a>
+
+### Claim 2.3 — `FunctionRegistry::rename` rollback can silently drop the function
+
+Status: `confirmed-open`. Current risk: `low`.
+
+Failed restoration is still discarded after source removal and racing target collision.
+
+Evidence: [crates/shamir-wasm-host/src/registry.rs:86](../../../../../crates/shamir-wasm-host/src/registry.rs#L86).
+
+<a id="review-2-4"></a>
+
+### Claim 2.4 — epoch-ticker spawn failure swallowed with `.ok()`
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+Thread spawn errors still disappear without failing engine construction.
+
+Evidence: [crates/shamir-wasm-host/src/wasm/wasm_engine.rs:162](../../../../../crates/shamir-wasm-host/src/wasm/wasm_engine.rs#L162).
+
+Grouping/duplicate: `SUMMARY.md#6.2`. This row is not another independent defect.
+
+<a id="review-2-5"></a>
+
+### Claim 2.5 — cargo child not killed on the `wait_timeout` error path
+
+Status: `confirmed-open`. Current risk: `low`.
+
+The wait error arm performs reader joins but no cargo kill/reap.
+
+Evidence: [crates/shamir-wasm-host/src/compile.rs:607](../../../../../crates/shamir-wasm-host/src/compile.rs#L607).
+
+Grouping/duplicate: `SUMMARY.md#6.8`. This row is not another independent defect.
+
+<a id="review-2-6"></a>
+
+### Claim 2.6 — aggregate fuel budget does not bound the nested-call descent
+
+Status: `confirmed-open`. Current risk: `high`.
+
+Same unreserved outstanding ancestor grants as 1.1.
+
+Evidence: [crates/shamir-wasm-host/src/wasm/wasm_function.rs:447](../../../../../crates/shamir-wasm-host/src/wasm/wasm_function.rs#L447); [crates/shamir-wasm-host/src/wasm/wasm_function.rs:587](../../../../../crates/shamir-wasm-host/src/wasm/wasm_function.rs#L587).
+
+Grouping/duplicate: `SUMMARY.md#1.1`. This row is not another independent defect.
+
+<a id="review-3-1"></a>
+
+### Claim 3.1 — Forbidden-macro scan bypassed by whitespace/comment between macro name and `!`
+
+Status: `confirmed-open`. Current risk: `high`.
+
+The adjacent-bang check still misses valid delimited whitespace/comment macro invocations submitted by actors allowed to compile source.
+
+Evidence: [crates/shamir-wasm-host/src/compile.rs:365](../../../../../crates/shamir-wasm-host/src/compile.rs#L365); [crates/shamir-db/src/shamir_db/shamir_db/function_management.rs:169](../../../../../crates/shamir-db/src/shamir_db/shamir_db/function_management.rs#L169).
+
+<a id="review-3-2"></a>
+
+### Claim 3.2 — Contradictory fail-open vs fail-closed documentation of the `net_grants` default
+
+Status: `confirmed-open`. Current risk: `low`.
+
+The options doc still contradicts fail-closed user-function behavior; no actual empty-grant fail-open implementation was found.
+
+Evidence: [crates/shamir-wasm-host/src/meta.rs:188](../../../../../crates/shamir-wasm-host/src/meta.rs#L188); [crates/shamir-db/src/shamir_db/shamir_db/core.rs:841](../../../../../crates/shamir-db/src/shamir_db/shamir_db/core.rs#L841).
+
+<a id="review-3-3"></a>
+
+### Claim 3.3 — SSRF guard misses `0.0.0.0` (and other non-routable IPv4 ranges) — wildcard allowlist reaches loopback services
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+Specified IPv4 special ranges are absent from the common predicate. Reachability requires matching effective grants/allowlist; local connection behavior was not reproduced.
+
+Evidence: [crates/shamir-wasm-host/src/net_gateway.rs:459](../../../../../crates/shamir-wasm-host/src/net_gateway.rs#L459); [crates/shamir-wasm-host/src/net_gateway.rs:186](../../../../../crates/shamir-wasm-host/src/net_gateway.rs#L186).
+
+<a id="review-3-4"></a>
+
+### Claim 3.4 — No bound on concurrent Argon2id invocations; cost parameters fully caller-supplied at this layer
+
+Status: `refuted`. Current risk: —.
+
+This wrapper reaches the already-gated funclib implementation: 16 concurrent hashes and bounded per-call parameters. The uncapped 512-hash memory scenario does not describe this call chain.
+
+Evidence: [crates/shamir-wasm-host/src/builtin.rs:64](../../../../../crates/shamir-wasm-host/src/builtin.rs#L64); [crates/shamir-wasm-host/src/scalar.rs:20](../../../../../crates/shamir-wasm-host/src/scalar.rs#L20); [crates/shamir-funclib/src/crypto.rs:76](../../../../../crates/shamir-funclib/src/crypto.rs#L76); [crates/shamir-funclib/src/crypto.rs:221](../../../../../crates/shamir-funclib/src/crypto.rs#L221).
+
+<a id="review-3-5"></a>
+
+### Claim 3.5 — `wasm-opt`/toolchain probes run with the full inherited host environment
+
+Status: `confirmed-open`. Current risk: `nit`.
+
+Probe/optimizer Commands still lack cargo-build's environment scrub. A concrete secret leak through those tools is not demonstrated.
+
+Evidence: [crates/shamir-wasm-host/src/compile.rs:650](../../../../../crates/shamir-wasm-host/src/compile.rs#L650); [crates/shamir-wasm-host/src/compile.rs:700](../../../../../crates/shamir-wasm-host/src/compile.rs#L700).
+
+<a id="review-3-6"></a>
+
+### Claim 3.6 — compile timeout kills `cargo` but not its `rustc`/build-script grandchildren
+
+Status: `confirmed-open`. Current risk: `low`.
+
+No process group or Job Object owns compiler descendants; timeout targets cargo alone.
+
+Evidence: [crates/shamir-wasm-host/src/compile.rs:563](../../../../../crates/shamir-wasm-host/src/compile.rs#L563); [crates/shamir-wasm-host/src/compile.rs:598](../../../../../crates/shamir-wasm-host/src/compile.rs#L598).
+
+Grouping/duplicate: `SUMMARY.md#6.8`. This row is not another independent defect.
+
+<a id="review-3-7"></a>
+
+### Claim 3.7 — `seed_env` panics on non-UTF-8 env vars
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+Same unconditional Unicode enumeration during initialization as 1.4.
+
+Evidence: [crates/shamir-wasm-host/src/context.rs:211](../../../../../crates/shamir-wasm-host/src/context.rs#L211).
+
+Grouping/duplicate: `SUMMARY.md#1.4`. This row is not another independent defect.
+
+<a id="review-3-8"></a>
+
+### Claim 3.8 — epoch-ticker spawn failure silently disables the CPU-guest kill switch
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+Same silent loss of epoch interruption as 6.2; finite fuel remains active.
+
+Evidence: [crates/shamir-wasm-host/src/wasm/wasm_engine.rs:162](../../../../../crates/shamir-wasm-host/src/wasm/wasm_engine.rs#L162).
+
+Grouping/duplicate: `SUMMARY.md#6.2`. This row is not another independent defect.
+
+<a id="review-4-1"></a>
+
+### Claim 4.1 — Unbounded process-lifetime growth of `GlobalVars` via guest `global_set`
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+Authorized guest non-env writes retain arbitrary distinct entries without a host quota or guest removal ABI.
+
+Evidence: [crates/shamir-wasm-host/src/wasm/host_globals.rs:55](../../../../../crates/shamir-wasm-host/src/wasm/host_globals.rs#L55); [crates/shamir-wasm-host/src/context.rs:164](../../../../../crates/shamir-wasm-host/src/context.rs#L164).
+
+<a id="review-4-2"></a>
+
+### Claim 4.2 — Per-invocation input prep: deep params clone + msgpack encode + redundant `.to_vec()` copy
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+Deep cloning and an extra encoded-buffer copy remain explicit. No latency or threefold cost measurement was performed.
+
+Evidence: [crates/shamir-wasm-host/src/wasm/wasm_function.rs:407](../../../../../crates/shamir-wasm-host/src/wasm/wasm_function.rs#L407).
+
+<a id="review-4-3"></a>
+
+### Claim 4.3 — Unbounded stdout/stderr buffering of the guest `cargo build`
+
+Status: `confirmed-open`. Current risk: `low`.
+
+Both diagnostic drains retain all bytes. Fixed guest dependencies rule out the report's tenant-added build-script example, but do not bound diagnostic volume.
+
+Evidence: [crates/shamir-wasm-host/src/compile.rs:575](../../../../../crates/shamir-wasm-host/src/compile.rs#L575); [crates/shamir-wasm-host/src/compile.rs:583](../../../../../crates/shamir-wasm-host/src/compile.rs#L583).
+
+<a id="review-4-4"></a>
+
+### Claim 4.4 — Epoch-ticker thread + full engine leaked per `WasmEngine::new()` — no shutdown path
+
+Status: `confirmed-open`. Current risk: `low`.
+
+The permanent ticker retains its Engine clone, and construction is not singleton-limited.
+
+Evidence: [crates/shamir-wasm-host/src/wasm/wasm_engine.rs:155](../../../../../crates/shamir-wasm-host/src/wasm/wasm_engine.rs#L155); [crates/shamir-db/src/shamir_db/shamir_db/core.rs:165](../../../../../crates/shamir-db/src/shamir_db/shamir_db/core.rs#L165).
+
+<a id="review-4-5"></a>
+
+### Claim 4.5 — `host_call` rebuilds the secret-grants set on every nested call instead of cloning the `Arc`
+
+Status: `confirmed-open`. Current risk: `low`.
+
+Inherited grants are cloned into a newly collected set and Arc rather than sharing the existing Arc.
+
+Evidence: [crates/shamir-wasm-host/src/wasm/host_call.rs:119](../../../../../crates/shamir-wasm-host/src/wasm/host_call.rs#L119); [crates/shamir-wasm-host/src/context.rs:395](../../../../../crates/shamir-wasm-host/src/context.rs#L395).
+
+<a id="review-4-6"></a>
+
+### Claim 4.6 — Dead `Arc` clones on every `batch_get` / `global_get` host import
+
+Status: `confirmed-open`. Current risk: `nit`.
+
+Successful read handlers still clone unused batch/global handles and discard them.
+
+Evidence: [crates/shamir-wasm-host/src/wasm/host_batch.rs:54](../../../../../crates/shamir-wasm-host/src/wasm/host_batch.rs#L54); [crates/shamir-wasm-host/src/wasm/host_globals.rs:95](../../../../../crates/shamir-wasm-host/src/wasm/host_globals.rs#L95).
+
+<a id="review-4-7"></a>
+
+### Claim 4.7 — Host-import export re-resolution + `typed()` rebuild per call
+
+Status: `confirmed-open`. Current risk: `nit`.
+
+Repeated lookups and typed wrappers remain. The stated linear export-table scan is unverified for the resolved dependency.
+
+Evidence: [crates/shamir-wasm-host/src/wasm/wasm_function.rs:333](../../../../../crates/shamir-wasm-host/src/wasm/wasm_function.rs#L333); [crates/shamir-wasm-host/src/wasm/host_batch.rs:61](../../../../../crates/shamir-wasm-host/src/wasm/host_batch.rs#L61).
+
+<a id="review-4-8"></a>
+
+### Claim 4.8 — `Box<dyn Future>` heap allocation per nested async host import
+
+Status: `not-applicable`. Current risk: —.
+
+Parent inspection of checksummed Wasmtime 46.0.2 shows Linker::func_wrap_async requires a for<'a> closure returning Box<dyn Future<Output=Args> + Send + 'a>. The visible boxing is required by this pinned API; the proposed direct unboxed closure is incompatible. An alternative API/architecture is optional optimization and has no measured benefit here.
+
+Evidence: [crates/shamir-wasm-host/src/wasm/host_call.rs:44](../../../../../crates/shamir-wasm-host/src/wasm/host_call.rs#L44); [crates/shamir-wasm-host/src/wasm/wasm_function.rs:197](../../../../../crates/shamir-wasm-host/src/wasm/wasm_function.rs#L197); [Cargo.lock:4741](../../../../../Cargo.lock#L4741).
+
+Pinned dependency evidence: [wasmtime 46.0.2, src/runtime/linker.rs:581](https://docs.rs/crate/wasmtime/46.0.2/source/src/runtime/linker.rs).
+
+<a id="review-4-9"></a>
+
+### Claim 4.9 — Redundant artifact copies in `maybe_wasm_opt`
+
+Status: `confirmed-open`. Current risk: `nit`.
+
+Unavailable and failed optimizer branches still copy an already-owned artifact passed by slice.
+
+Evidence: [crates/shamir-wasm-host/src/compile.rs:638](../../../../../crates/shamir-wasm-host/src/compile.rs#L638); [crates/shamir-wasm-host/src/compile.rs:655](../../../../../crates/shamir-wasm-host/src/compile.rs#L655).
+
+<a id="review-4-10"></a>
+
+### Claim 4.10 — `put`/`set` pay two hash ops per write
+
+Status: `confirmed-open`. Current risk: `low`.
+
+Separate remove and insert operations remain, with redundant lookup work and non-atomic visibility.
+
+Evidence: [crates/shamir-wasm-host/src/context.rs:52](../../../../../crates/shamir-wasm-host/src/context.rs#L52); [crates/shamir-wasm-host/src/context.rs:166](../../../../../crates/shamir-wasm-host/src/context.rs#L166).
+
+Grouping/duplicate: `SUMMARY.md#2.2`. This row is not another independent defect.
+
+<a id="review-5-1"></a>
+
+### Claim 5.1 — HTTP wire codec collapses duplicate headers (`Set-Cookie` loss on both directions)
+
+Status: `confirmed-open`. Current risk: `high`.
+
+Host response Map insertion loses duplicate names; requests lose them when SDK Vec-backed map bytes become host QueryValue's unique-key map.
+
+Evidence: [crates/shamir-wasm-host/src/wasm/host_http.rs:89](../../../../../crates/shamir-wasm-host/src/wasm/host_http.rs#L89); [crates/shamir-sdk/src/value.rs:58](../../../../../crates/shamir-sdk/src/value.rs#L58); [crates/shamir-types/src/types/value.rs:269](../../../../../crates/shamir-types/src/types/value.rs#L269).
+
+<a id="review-5-2"></a>
+
+### Claim 5.2 — `FnCtx` docs promise secret-grant gating on `global_get` that only the WASM host import enforces
+
+Status: `confirmed-open`. Current risk: `low`.
+
+Native global_get remains ungated despite the type/builder comments. The guest import separately enforces grants.
+
+Evidence: [crates/shamir-wasm-host/src/context.rs:289](../../../../../crates/shamir-wasm-host/src/context.rs#L289); [crates/shamir-wasm-host/src/context.rs:426](../../../../../crates/shamir-wasm-host/src/context.rs#L426); [crates/shamir-wasm-host/src/wasm/host_globals.rs:79](../../../../../crates/shamir-wasm-host/src/wasm/host_globals.rs#L79).
+
+<a id="review-5-3"></a>
+
+### Claim 5.3 — Stringly-typed errors across the public gateway traits and egress guards
+
+Status: `confirmed-open`. Current risk: `low`.
+
+All gateway/guard boundaries retain String errors; typed matching and causal chains are unavailable.
+
+Evidence: [crates/shamir-wasm-host/src/db_gateway.rs:86](../../../../../crates/shamir-wasm-host/src/db_gateway.rs#L86); [crates/shamir-wasm-host/src/net_gateway.rs:160](../../../../../crates/shamir-wasm-host/src/net_gateway.rs#L160).
+
+<a id="review-5-4"></a>
+
+### Claim 5.4 — Inconsistent guest-facing error contract across sibling host imports (envelope vs uncatchable trap)
+
+Status: `confirmed-open`. Current risk: `low`.
+
+Documented HTTP envelopes and DB/call traps remain asymmetric. This is recoverability/API debt, not an undocumented protocol violation.
+
+Evidence: [crates/shamir-wasm-host/src/wasm/host_http.rs:150](../../../../../crates/shamir-wasm-host/src/wasm/host_http.rs#L150); [crates/shamir-wasm-host/src/wasm/host_db.rs:187](../../../../../crates/shamir-wasm-host/src/wasm/host_db.rs#L187).
+
+<a id="review-5-5"></a>
+
+### Claim 5.5 — `decode_http_request` silently coerces malformed `headers`/`body` to empty while `method`/`url` default to `""`
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+All named silent-default paths remain; accepted header containers have stricter entry validation.
+
+Evidence: [crates/shamir-wasm-host/src/wasm/host_http.rs:33](../../../../../crates/shamir-wasm-host/src/wasm/host_http.rs#L33); [crates/shamir-wasm-host/src/wasm/host_http.rs:64](../../../../../crates/shamir-wasm-host/src/wasm/host_http.rs#L64); [crates/shamir-wasm-host/src/wasm/host_http.rs:69](../../../../../crates/shamir-wasm-host/src/wasm/host_http.rs#L69).
+
+<a id="review-5-6"></a>
+
+### Claim 5.6 — `compile_rust_source` hardwires the SDK path to the build machine's `CARGO_MANIFEST_DIR`
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+No SDK path override exists. Development source compilation still depends on the build-time checkout layout; precompiled guest deployment does not.
+
+Evidence: [crates/shamir-wasm-host/src/compile.rs:485](../../../../../crates/shamir-wasm-host/src/compile.rs#L485); [docs/guide-docs/guide/05-functions.md:369](../../../../../docs/guide-docs/guide/05-functions.md#L369).
+
+<a id="review-5-7"></a>
+
+### Claim 5.7 — Catalogue record decoding has silent fallbacks and no format versioning
+
+Status: `confirmed-open`. Current risk: `low`.
+
+Unknown/malformed fields still silently default or truncate, without metadata versioning or warnings.
+
+Evidence: [crates/shamir-wasm-host/src/meta.rs:113](../../../../../crates/shamir-wasm-host/src/meta.rs#L113); [crates/shamir-wasm-host/src/meta.rs:151](../../../../../crates/shamir-wasm-host/src/meta.rs#L151).
+
+<a id="review-5-8"></a>
+
+### Claim 5.8 — `ResolvedPin::pinned_ips` uses an empty-Vec sentinel for "do not pin"
+
+Status: `not-applicable`. Current risk: —.
+
+The sentinel is documented, tested, and correctly handled by the sole production caller. Option is an optional API refinement.
+
+Evidence: [crates/shamir-wasm-host/src/net_gateway.rs:125](../../../../../crates/shamir-wasm-host/src/net_gateway.rs#L125); [crates/shamir-wasm-host/src/tests/net_gateway_tests.rs:169](../../../../../crates/shamir-wasm-host/src/tests/net_gateway_tests.rs#L169); [crates/shamir-db/src/shamir_db/curl_gateway.rs:197](../../../../../crates/shamir-db/src/shamir_db/curl_gateway.rs#L197).
+
+<a id="review-5-9"></a>
+
+### Claim 5.9 — Internal audit-tracking references leaked into public API docs
+
+Status: `confirmed-open`. Current risk: `nit`.
+
+Public documentation still contains unresolved finding-2c shorthand.
+
+Evidence: [crates/shamir-wasm-host/src/net_gateway.rs:109](../../../../../crates/shamir-wasm-host/src/net_gateway.rs#L109); [crates/shamir-wasm-host/src/net_gateway.rs:148](../../../../../crates/shamir-wasm-host/src/net_gateway.rs#L148).
+
+<a id="review-5-10"></a>
+
+### Claim 5.10 — `glob_matches` duplicated in two security-relevant matchers
+
+Status: `confirmed-open`. Current risk: `low`.
+
+Separate environment and egress implementations remain; actual divergence was not demonstrated.
+
+Evidence: [crates/shamir-wasm-host/src/env_policy.rs:75](../../../../../crates/shamir-wasm-host/src/env_policy.rs#L75); [crates/shamir-wasm-host/src/net_gateway.rs:487](../../../../../crates/shamir-wasm-host/src/net_gateway.rs#L487).
+
+Grouping/duplicate: `SUMMARY.md#7.2`. This row is not another independent defect.
+
+<a id="review-5-11"></a>
+
+### Claim 5.11 — wire codecs, `db_*` imports, and the depth limit have no in-crate tests
+
+Status: `confirmed-open`. Current risk: `low`.
+
+No direct local codec/DB/depth-specific oracle was found in the registered topics.
+
+Evidence: [crates/shamir-wasm-host/src/tests/mod.rs:1](../../../../../crates/shamir-wasm-host/src/tests/mod.rs#L1); [crates/shamir-wasm-host/src/tests/wasm_tests.rs:313](../../../../../crates/shamir-wasm-host/src/tests/wasm_tests.rs#L313).
+
+Grouping/duplicate: `SUMMARY.md#6.3`. This row is not another independent defect.
+
+<a id="review-5-12"></a>
+
+### Claim 5.12 — duplicated doc-comment block on `host_call`
+
+Status: `confirmed-open`. Current risk: `nit`.
+
+The consecutive repeated paragraphs remain.
+
+Evidence: [crates/shamir-wasm-host/src/wasm/host_call.rs:22](../../../../../crates/shamir-wasm-host/src/wasm/host_call.rs#L22).
+
+Grouping/duplicate: `SUMMARY.md#7.3`. This row is not another independent defect.
+
+<a id="review-5-13"></a>
+
+### Claim 5.13 — unused `serde` dependency
+
+Status: `confirmed-open`. Current risk: `nit`.
+
+The direct dependency remains without source use.
+
+Evidence: [crates/shamir-wasm-host/Cargo.toml:14](../../../../../crates/shamir-wasm-host/Cargo.toml#L14).
+
+Grouping/duplicate: `SUMMARY.md#7.5`. This row is not another independent defect.
+
+<a id="review-5-14"></a>
+
+### Claim 5.14 — `CreateFunctionOptions` doc states the opposite of the actual empty-`net_grants` semantics
+
+Status: `confirmed-open`. Current risk: `low`.
+
+Same stale permissive options documentation as 3.2.
+
+Evidence: [crates/shamir-wasm-host/src/meta.rs:189](../../../../../crates/shamir-wasm-host/src/meta.rs#L189).
+
+Grouping/duplicate: `SUMMARY.md#3.2`. This row is not another independent defect.
+
+<a id="review-6-1"></a>
+
+### Claim 6.1 — Aggregate fuel-budget debit is skipped when the call future is cancelled (cancelled task permanently leaks budget)
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+Cancellation skips charging consumed fuel, leaving too much remaining budget. No reserved-capacity leak exists in this debit-on-exit implementation.
+
+Evidence: [crates/shamir-wasm-host/src/wasm/wasm_function.rs:581](../../../../../crates/shamir-wasm-host/src/wasm/wasm_function.rs#L581); [crates/shamir-wasm-host/src/wasm/wasm_function.rs:587](../../../../../crates/shamir-wasm-host/src/wasm/wasm_function.rs#L587).
+
+<a id="review-6-2"></a>
+
+### Claim 6.2 — Epoch-ticker thread spawn failure is swallowed with `.ok()` — wall-clock pre-emption silently disabled, nothing logged
+
+Status: `confirmed-open`. Current risk: `medium`.
+
+Failed thread spawn remains discarded while engine construction succeeds; independent wall-clock interruption can disappear.
+
+Evidence: [crates/shamir-wasm-host/src/wasm/wasm_engine.rs:129](../../../../../crates/shamir-wasm-host/src/wasm/wasm_engine.rs#L129); [crates/shamir-wasm-host/src/wasm/wasm_engine.rs:162](../../../../../crates/shamir-wasm-host/src/wasm/wasm_engine.rs#L162).
+
+<a id="review-6-3"></a>
+
+### Claim 6.3 — No in-crate test coverage for any host-import trap/error path (db/http/batch/global imports, depth limit, OOB result pointers, missing exports)
+
+Status: `confirmed-open`. Current risk: `low`.
+
+Named trap/codec/Params boundary coverage is absent. Successful call imports are exercised by actor tests, contradicting the blanket no-import-invocation statement.
+
+Evidence: [crates/shamir-wasm-host/src/tests/mod.rs:1](../../../../../crates/shamir-wasm-host/src/tests/mod.rs#L1); [crates/shamir-wasm-host/src/tests/nested_actor_tests.rs:85](../../../../../crates/shamir-wasm-host/src/tests/nested_actor_tests.rs#L85); [crates/shamir-wasm-host/src/tests/wasm_sanitizer_tests.rs:93](../../../../../crates/shamir-wasm-host/src/tests/wasm_sanitizer_tests.rs#L93).
+
+<a id="review-6-4"></a>
+
+### Claim 6.4 — public gateway traits return `Result<_, String>`
+
+Status: `confirmed-open`. Current risk: `low`.
+
+Same string-only public gateway error contracts as 5.3.
+
+Evidence: [crates/shamir-wasm-host/src/db_gateway.rs:86](../../../../../crates/shamir-wasm-host/src/db_gateway.rs#L86).
+
+Grouping/duplicate: `SUMMARY.md#5.3`. This row is not another independent defect.
+
+<a id="review-6-5"></a>
+
+### Claim 6.5 — Panic inside the Argon2id blocking task is collapsed into `FunctionError::Cancelled`, discarding the panic payload
+
+Status: `confirmed-open`. Current risk: `low`.
+
+JoinError is still discarded. The returned display mislabels panic, although its variant documentation includes both panic and cancellation.
+
+Evidence: [crates/shamir-wasm-host/src/builtin.rs:83](../../../../../crates/shamir-wasm-host/src/builtin.rs#L83); [crates/shamir-wasm-host/src/error.rs:36](../../../../../crates/shamir-wasm-host/src/error.rs#L36).
+
+<a id="review-6-6"></a>
+
+### Claim 6.6 — `map_wasm_error` classifies traps by substring-matching the error message
+
+Status: `confirmed-open`. Current risk: `low`.
+
+Display substring matching remains and the fuel test does not assert a typed cause or specific message.
+
+Evidence: [crates/shamir-wasm-host/src/wasm/wasm_function.rs:595](../../../../../crates/shamir-wasm-host/src/wasm/wasm_function.rs#L595); [crates/shamir-wasm-host/src/tests/wasm_tests.rs:212](../../../../../crates/shamir-wasm-host/src/tests/wasm_tests.rs#L212).
+
+<a id="review-6-7"></a>
+
+### Claim 6.7 — `compile.rs` degrades invalid-UTF-8 temp paths into `unwrap_or("")` arguments for cargo instead of a typed error
+
+Status: `confirmed-open`. Current risk: `low`.
+
+Both path arguments still silently become empty strings on failed Unicode conversion.
+
+Evidence: [crates/shamir-wasm-host/src/compile.rs:542](../../../../../crates/shamir-wasm-host/src/compile.rs#L542); [crates/shamir-wasm-host/src/compile.rs:544](../../../../../crates/shamir-wasm-host/src/compile.rs#L544).
+
+<a id="review-6-8"></a>
+
+### Claim 6.8 — Compile child-process teardown is incomplete on every abnormal-exit path (no Job Object; kill-failure waits unbounded; error path never kills)
+
+Status: `confirmed-open`. Current risk: `low`.
+
+No compiler-tree ownership exists; timeout ignores kill failure and waits/joins without deadlines; wait-error joins without killing.
+
+Evidence: [crates/shamir-wasm-host/src/compile.rs:563](../../../../../crates/shamir-wasm-host/src/compile.rs#L563); [crates/shamir-wasm-host/src/compile.rs:598](../../../../../crates/shamir-wasm-host/src/compile.rs#L598); [crates/shamir-wasm-host/src/compile.rs:607](../../../../../crates/shamir-wasm-host/src/compile.rs#L607).
+
+<a id="review-6-9"></a>
+
+### Claim 6.9 — `rename`'s error-path rollback insert can itself fail silently
+
+Status: `confirmed-open`. Current risk: `low`.
+
+Same discarded restoration error as 2.3.
+
+Evidence: [crates/shamir-wasm-host/src/registry.rs:86](../../../../../crates/shamir-wasm-host/src/registry.rs#L86).
+
+Grouping/duplicate: `SUMMARY.md#2.3`. This row is not another independent defect.
+
+<a id="review-6-10"></a>
+
+### Claim 6.10 — one leaked OS thread per `WasmEngine`; tests instantiate engines freely
+
+Status: `confirmed-open`. Current risk: `low`.
+
+Same endless detached ticker retaining an Engine as 4.4.
+
+Evidence: [crates/shamir-wasm-host/src/wasm/wasm_engine.rs:158](../../../../../crates/shamir-wasm-host/src/wasm/wasm_engine.rs#L158).
+
+Grouping/duplicate: `SUMMARY.md#4.4`. This row is not another independent defect.
+
+<a id="review-6-11"></a>
+
+### Claim 6.11 — Forbidden-macro scanner fails open (`unwrap_or_default`) on an invariant break
+
+Status: `confirmed-open`. Current risk: `nit`.
+
+The fallback remains but current valid-input transformations preserve UTF-8. This is hypothetical invariant-break handling, not a reachable present bypass.
+
+Evidence: [crates/shamir-wasm-host/src/compile.rs:252](../../../../../crates/shamir-wasm-host/src/compile.rs#L252).
+
+<a id="review-6-12"></a>
+
+### Claim 6.12 — `FunctionMeta::from_record` silently coerces malformed catalogue fields
+
+Status: `confirmed-open`. Current risk: `low`.
+
+Same silent fallback/truncation behavior as 5.7.
+
+Evidence: [crates/shamir-wasm-host/src/meta.rs:113](../../../../../crates/shamir-wasm-host/src/meta.rs#L113).
+
+Grouping/duplicate: `SUMMARY.md#5.7`. This row is not another independent defect.
+
+<a id="review-7-1"></a>
+
+### Claim 7.1 — Mid-body `use` statements violate the "Imports at the top" rule (7 sites)
+
+Status: `confirmed-open`. Current risk: `nit`.
+
+All seven identified imports remain. This is a formatting/convention issue without demonstrated runtime impact.
+
+Evidence: [crates/shamir-wasm-host/src/compile.rs:574](../../../../../crates/shamir-wasm-host/src/compile.rs#L574); [crates/shamir-wasm-host/src/compile.rs:582](../../../../../crates/shamir-wasm-host/src/compile.rs#L582); [crates/shamir-wasm-host/src/tests/compile_tests.rs:111](../../../../../crates/shamir-wasm-host/src/tests/compile_tests.rs#L111); [crates/shamir-wasm-host/src/tests/compile_tests.rs:128](../../../../../crates/shamir-wasm-host/src/tests/compile_tests.rs#L128); [crates/shamir-wasm-host/src/tests/compile_tests.rs:140](../../../../../crates/shamir-wasm-host/src/tests/compile_tests.rs#L140); [crates/shamir-wasm-host/src/tests/compile_tests.rs:153](../../../../../crates/shamir-wasm-host/src/tests/compile_tests.rs#L153); [crates/shamir-wasm-host/src/tests/compile_tests.rs:169](../../../../../crates/shamir-wasm-host/src/tests/compile_tests.rs#L169).
+
+<a id="review-7-2"></a>
+
+### Claim 7.2 — `glob_matches` duplicated in `net_gateway.rs` under a doc comment falsely claiming reuse
+
+Status: `confirmed-open`. Current risk: `low`.
+
+Independent copies remain with misleading reuse prose; current semantic divergence is not established.
+
+Evidence: [crates/shamir-wasm-host/src/net_gateway.rs:483](../../../../../crates/shamir-wasm-host/src/net_gateway.rs#L483); [crates/shamir-wasm-host/src/env_policy.rs:75](../../../../../crates/shamir-wasm-host/src/env_policy.rs#L75).
+
+<a id="review-7-3"></a>
+
+### Claim 7.3 — Verbatim-duplicated doc-comment block on `host_call`
+
+Status: `confirmed-open`. Current risk: `nit`.
+
+The duplicated host-call summary remains unchanged.
+
+Evidence: [crates/shamir-wasm-host/src/wasm/host_call.rs:22](../../../../../crates/shamir-wasm-host/src/wasm/host_call.rs#L22).
+
+<a id="review-7-4"></a>
+
+### Claim 7.4 — `net_gateway.rs` carries two primary concerns (one-file-one-export, borderline)
+
+Status: `not-applicable`. Current risk: —.
+
+The rule allows closely coupled groups, and gateway execution is explicitly coupled to the guards. A split remains optional.
+
+Evidence: [crates/shamir-wasm-host/src/net_gateway.rs:58](../../../../../crates/shamir-wasm-host/src/net_gateway.rs#L58).
+
+<a id="review-7-5"></a>
+
+### Claim 7.5 — Unused direct dependency `serde` in Cargo.toml
+
+Status: `confirmed-open`. Current risk: `nit`.
+
+Direct serde remains unused by source; additional workspace build cost is not proven.
+
+Evidence: [crates/shamir-wasm-host/Cargo.toml:14](../../../../../crates/shamir-wasm-host/Cargo.toml#L14).
+
+<a id="review-7-6"></a>
+
+### Claim 7.6 — security-bearing host imports tested only downstream
+
+Status: `confirmed-open`. Current risk: `low`.
+
+Actual guest env-read/write controls remain tested downstream, with toolchain skips, rather than in local native env tests.
+
+Evidence: [crates/shamir-db/tests/functions_lifecycle.rs:1116](../../../../../crates/shamir-db/tests/functions_lifecycle.rs#L1116); [crates/shamir-db/tests/functions_lifecycle.rs:1228](../../../../../crates/shamir-db/tests/functions_lifecycle.rs#L1228); [crates/shamir-wasm-host/src/tests/env_globals_tests.rs:54](../../../../../crates/shamir-wasm-host/src/tests/env_globals_tests.rs#L54).
+
+Grouping/duplicate: `SUMMARY.md#6.3`. This row is not another independent defect.
+
+<a id="review-7-7"></a>
+
+### Claim 7.7 — `wasm/mod.rs` doc list omits the sanitizer re-exports
+
+Status: `confirmed-open`. Current risk: `nit`.
+
+The public-surface documentation still omits the sanitizer exports present below it.
+
+Evidence: [crates/shamir-wasm-host/src/wasm/mod.rs:3](../../../../../crates/shamir-wasm-host/src/wasm/mod.rs#L3); [crates/shamir-wasm-host/src/wasm/mod.rs:18](../../../../../crates/shamir-wasm-host/src/wasm/mod.rs#L18).
+
+## Current fix-plan state
+
+| Claim decisions | Open | Source-fixed | Partial | Refuted | Unverified | N/A |
+|---:|---:|---:|---:|---:|---:|---:|
+| 30 | 28 | 0 | 1 | 0 | 0 | 1 |
+
+A source-fixed item closes only its stated mechanism. Partial items retain the obligations named below; proposed fixes must obey the corrections and current contracts, not merely copy the historical recipe.
+
+<a id="plan-p0-1"></a>
+
+### Plan P0.1 — P0.1
+
+Status: `confirmed-open`. Current risk: —.
+
+Aggregate and cancellation-safe accounting remain absent. Reserving a parent's entire grant would starve nested calls; design reentrant parent/child accounting before implementing the proposed CAS/Drop pattern.
+
+Evidence: [crates/shamir-wasm-host/src/wasm/wasm_function.rs:447](../../../../../crates/shamir-wasm-host/src/wasm/wasm_function.rs#L447); [crates/shamir-wasm-host/src/wasm/wasm_function.rs:587](../../../../../crates/shamir-wasm-host/src/wasm/wasm_function.rs#L587).
+
+<a id="plan-p0-2"></a>
+
+### Plan P0.2 — P0.2
+
+Status: `confirmed-open`. Current risk: —.
+
+Signed seed overflow and both weak oracles remain. A new aggregate test needs finite successful behavior under per-Store resets and specific aggregate observables; exact existing WAT cost is unverified.
+
+Evidence: [crates/shamir-wasm-host/src/wasm/wasm_function.rs:436](../../../../../crates/shamir-wasm-host/src/wasm/wasm_function.rs#L436); [crates/shamir-wasm-host/src/tests/wasm_tests.rs:258](../../../../../crates/shamir-wasm-host/src/tests/wasm_tests.rs#L258); [crates/shamir-wasm-host/src/tests/wasm_tests.rs:313](../../../../../crates/shamir-wasm-host/src/tests/wasm_tests.rs#L313).
+
+<a id="plan-p0-3"></a>
+
+### Plan P0.3 — P0.3
+
+Status: `confirmed-open`. Current risk: —.
+
+No whitespace/comment-aware macro match or adversarial regression test exists. Planned examples must use valid macro delimiters.
+
+Evidence: [crates/shamir-wasm-host/src/compile.rs:365](../../../../../crates/shamir-wasm-host/src/compile.rs#L365); [crates/shamir-wasm-host/src/tests/compile_tests.rs:68](../../../../../crates/shamir-wasm-host/src/tests/compile_tests.rs#L68).
+
+<a id="plan-p0-4"></a>
+
+### Plan P0.4 — P0.4
+
+Status: `confirmed-open`. Current risk: —.
+
+No async compiler wrapper or DDL offloading is present; synchronous module compilation also remains on both async paths.
+
+Evidence: [crates/shamir-wasm-host/src/lib.rs:36](../../../../../crates/shamir-wasm-host/src/lib.rs#L36); [crates/shamir-db/src/shamir_db/shamir_db/function_management.rs:183](../../../../../crates/shamir-db/src/shamir_db/shamir_db/function_management.rs#L183); [crates/shamir-db/src/shamir_db/shamir_db/validator_management.rs:232](../../../../../crates/shamir-db/src/shamir_db/shamir_db/validator_management.rs#L232).
+
+<a id="plan-p0-5"></a>
+
+### Plan P0.5 — P0.5
+
+Status: `confirmed-open`. Current risk: —.
+
+Host/SDK headers still use Map. The plan must also update SDK response decoding, which currently accepts only Map headers; no duplicate-header round-trip test is registered.
+
+Evidence: [crates/shamir-wasm-host/src/wasm/host_http.rs:94](../../../../../crates/shamir-wasm-host/src/wasm/host_http.rs#L94); [crates/shamir-sdk/src/http.rs:108](../../../../../crates/shamir-sdk/src/http.rs#L108); [crates/shamir-sdk/src/http.rs:139](../../../../../crates/shamir-sdk/src/http.rs#L139).
+
+<a id="plan-p1-6"></a>
+
+### Plan P1.6 — P1.6
+
+Status: `confirmed-open`. Current risk: —.
+
+Compiler-tree ownership, error-path kill, and bounded teardown are all absent. Reader joins require bounds too; killing only cargo does not establish EOF.
+
+Evidence: [crates/shamir-wasm-host/src/compile.rs:563](../../../../../crates/shamir-wasm-host/src/compile.rs#L563); [crates/shamir-wasm-host/src/compile.rs:598](../../../../../crates/shamir-wasm-host/src/compile.rs#L598); [crates/shamir-wasm-host/src/compile.rs:607](../../../../../crates/shamir-wasm-host/src/compile.rs#L607).
+
+<a id="plan-p1-7"></a>
+
+### Plan P1.7 — P1.7
+
+Status: `confirmed-open`. Current risk: —.
+
+Ticker spawn failure is neither logged nor propagated. Logging alone improves visibility but does not restore the lost preemption guarantee.
+
+Evidence: [crates/shamir-wasm-host/src/wasm/wasm_engine.rs:162](../../../../../crates/shamir-wasm-host/src/wasm/wasm_engine.rs#L162).
+
+<a id="plan-p1-8"></a>
+
+### Plan P1.8 — P1.8
+
+Status: `confirmed-open`. Current risk: —.
+
+Both glob implementations and the false reuse description remain.
+
+Evidence: [crates/shamir-wasm-host/src/env_policy.rs:75](../../../../../crates/shamir-wasm-host/src/env_policy.rs#L75); [crates/shamir-wasm-host/src/net_gateway.rs:483](../../../../../crates/shamir-wasm-host/src/net_gateway.rs#L483).
+
+<a id="plan-p1-9"></a>
+
+### Plan P1.9 — P1.9
+
+Status: `confirmed-open`. Current risk: —.
+
+Options documentation is still wrong. A downstream empty-grants denial test already exists; actual denial is catchable, not a missing-gateway trap, and the test can skip.
+
+Evidence: [crates/shamir-wasm-host/src/meta.rs:189](../../../../../crates/shamir-wasm-host/src/meta.rs#L189); [crates/shamir-db/tests/functions_lifecycle.rs:907](../../../../../crates/shamir-db/tests/functions_lifecycle.rs#L907); [crates/shamir-db/src/shamir_db/shamir_db/core.rs:802](../../../../../crates/shamir-db/src/shamir_db/shamir_db/core.rs#L802).
+
+<a id="plan-p1-10"></a>
+
+### Plan P1.10 — P1.10
+
+Status: `confirmed-open`. Current risk: —.
+
+Missing required fields and malformed body/header containers still silently default; no local malformed-input codec matrix is wired.
+
+Evidence: [crates/shamir-wasm-host/src/wasm/host_http.rs:33](../../../../../crates/shamir-wasm-host/src/wasm/host_http.rs#L33); [crates/shamir-wasm-host/src/wasm/host_http.rs:64](../../../../../crates/shamir-wasm-host/src/wasm/host_http.rs#L64); [crates/shamir-wasm-host/src/tests/mod.rs:1](../../../../../crates/shamir-wasm-host/src/tests/mod.rs#L1).
+
+<a id="plan-p1-11"></a>
+
+### Plan P1.11 — P1.11
+
+Status: `confirmed-open`. Current risk: —.
+
+Overwrite entry conversion and lossless rename handling are absent. Logging a failed rollback would expose loss but would not prevent it.
+
+Evidence: [crates/shamir-wasm-host/src/registry.rs:52](../../../../../crates/shamir-wasm-host/src/registry.rs#L52); [crates/shamir-wasm-host/src/registry.rs:86](../../../../../crates/shamir-wasm-host/src/registry.rs#L86); [crates/shamir-wasm-host/src/context.rs:166](../../../../../crates/shamir-wasm-host/src/context.rs#L166).
+
+<a id="plan-p1-12"></a>
+
+### Plan P1.12 — P1.12
+
+Status: `confirmed-open`. Current risk: —.
+
+seed_env still uses vars rather than fallible OS-string conversion.
+
+Evidence: [crates/shamir-wasm-host/src/context.rs:211](../../../../../crates/shamir-wasm-host/src/context.rs#L211).
+
+<a id="plan-p1-13"></a>
+
+### Plan P1.13 — P1.13
+
+Status: `confirmed-open`. Current risk: —.
+
+FnCtx docs still promise gating absent from native getters. Correcting scope is sufficient; adding native gating would change the trusted native API contract.
+
+Evidence: [crates/shamir-wasm-host/src/context.rs:392](../../../../../crates/shamir-wasm-host/src/context.rs#L392); [crates/shamir-wasm-host/src/context.rs:426](../../../../../crates/shamir-wasm-host/src/context.rs#L426).
+
+<a id="plan-p1-14"></a>
+
+### Plan P1.14 — P1.14
+
+Status: `confirmed-open`. Current risk: —.
+
+Gateway/guard typed errors have not been introduced. This is a coordinated public API change, not a demonstrated security correction.
+
+Evidence: [crates/shamir-wasm-host/src/db_gateway.rs:86](../../../../../crates/shamir-wasm-host/src/db_gateway.rs#L86); [crates/shamir-wasm-host/src/net_gateway.rs:160](../../../../../crates/shamir-wasm-host/src/net_gateway.rs#L160).
+
+<a id="plan-p1-15"></a>
+
+### Plan P1.15 — P1.15
+
+Status: `confirmed-open`. Current risk: —.
+
+Named local host-import, HTTP codec, Params, and depth-limit test layers remain unwired/absent. Existing call actor probes should be retained and not described as nonexistent.
+
+Evidence: [crates/shamir-wasm-host/src/tests/mod.rs:1](../../../../../crates/shamir-wasm-host/src/tests/mod.rs#L1); [crates/shamir-wasm-host/src/tests/nested_actor_tests.rs:103](../../../../../crates/shamir-wasm-host/src/tests/nested_actor_tests.rs#L103).
+
+<a id="plan-p1-16"></a>
+
+### Plan P1.16 — P1.16
+
+Status: `confirmed-open`. Current risk: —.
+
+No globals quota, namespace isolation, or guest removal import exists. Reclamation alone cannot stop a malicious guest retaining entries.
+
+Evidence: [crates/shamir-wasm-host/src/context.rs:164](../../../../../crates/shamir-wasm-host/src/context.rs#L164); [crates/shamir-wasm-host/src/wasm/wasm_sanitizer.rs:87](../../../../../crates/shamir-wasm-host/src/wasm/wasm_sanitizer.rs#L87).
+
+<a id="plan-p1-17"></a>
+
+### Plan P1.17 — P1.17
+
+Status: `confirmed-open`. Current risk: —.
+
+The IPv4 predicate still lacks the proposed special-range checks and tests omit unspecified addresses. Establish explicit policy for each additional range rather than calling all of them private.
+
+Evidence: [crates/shamir-wasm-host/src/net_gateway.rs:459](../../../../../crates/shamir-wasm-host/src/net_gateway.rs#L459); [crates/shamir-wasm-host/src/tests/net_gateway_tests.rs:47](../../../../../crates/shamir-wasm-host/src/tests/net_gateway_tests.rs#L47).
+
+<a id="plan-p2-18"></a>
+
+### Plan P2.18 — P2.18
+
+Status: `confirmed-open`. Current risk: —.
+
+No SDK path override exists. The guide already identifies source compilation as a development convenience; public function docs still lack a usable deployment-layout alternative.
+
+Evidence: [crates/shamir-wasm-host/src/compile.rs:485](../../../../../crates/shamir-wasm-host/src/compile.rs#L485); [docs/guide-docs/guide/05-functions.md:369](../../../../../docs/guide-docs/guide/05-functions.md#L369).
+
+<a id="plan-p2-19"></a>
+
+### Plan P2.19 — P2.19
+
+Status: `confirmed-open`. Current risk: —.
+
+db_execute still traps gateway failures. BatchResponse has no existing failure payload; envelope adoption needs a new coordinated host/SDK convention, not simply returning an existing error-bearing response.
+
+Evidence: [crates/shamir-wasm-host/src/wasm/host_db.rs:187](../../../../../crates/shamir-wasm-host/src/wasm/host_db.rs#L187); [crates/shamir-sdk/src/db.rs:142](../../../../../crates/shamir-sdk/src/db.rs#L142); [crates/shamir-query-types/src/batch/batch_response.rs:30](../../../../../crates/shamir-query-types/src/batch/batch_response.rs#L30).
+
+<a id="plan-p2-20"></a>
+
+### Plan P2.20 — P2.20
+
+Status: `confirmed-open`. Current risk: —.
+
+Pipe buffers and final diagnostics remain uncapped. A capped collector must continue draining discarded bytes to avoid blocking the compiler.
+
+Evidence: [crates/shamir-wasm-host/src/compile.rs:575](../../../../../crates/shamir-wasm-host/src/compile.rs#L575); [crates/shamir-wasm-host/src/compile.rs:583](../../../../../crates/shamir-wasm-host/src/compile.rs#L583).
+
+<a id="plan-p2-21"></a>
+
+### Plan P2.21 — P2.21
+
+Status: `confirmed-open`. Current risk: —.
+
+Pool memory remains hardcoded to default while per-function limits are independently configurable; no reconciled public ceiling is documented or validated.
+
+Evidence: [crates/shamir-wasm-host/src/wasm/wasm_engine.rs:190](../../../../../crates/shamir-wasm-host/src/wasm/wasm_engine.rs#L190); [crates/shamir-wasm-host/src/wasm/wasm_engine.rs:217](../../../../../crates/shamir-wasm-host/src/wasm/wasm_engine.rs#L217).
+
+<a id="plan-p2-22"></a>
+
+### Plan P2.22 — P2.22
+
+Status: `confirmed-open`. Current risk: —.
+
+Escaped-quote desynchronization and unwrap_or_default remain. The former is real scanner correctness debt; the latter currently handles an unreachable UTF-8 invariant failure.
+
+Evidence: [crates/shamir-wasm-host/src/compile.rs:334](../../../../../crates/shamir-wasm-host/src/compile.rs#L334); [crates/shamir-wasm-host/src/compile.rs:252](../../../../../crates/shamir-wasm-host/src/compile.rs#L252).
+
+<a id="plan-p2-23"></a>
+
+### Plan P2.23 — P2.23
+
+Status: `confirmed-open`. Current risk: —.
+
+Copies, grants recollection, dead Arcs, repeated handles, and artifact pass-through copies remain. The impl-Future subproposal is separately unverified for the pinned API; lookup complexity/speedups are unmeasured.
+
+Evidence: [crates/shamir-wasm-host/src/wasm/wasm_function.rs:407](../../../../../crates/shamir-wasm-host/src/wasm/wasm_function.rs#L407); [crates/shamir-wasm-host/src/wasm/host_call.rs:119](../../../../../crates/shamir-wasm-host/src/wasm/host_call.rs#L119); [crates/shamir-wasm-host/src/wasm/host_batch.rs:54](../../../../../crates/shamir-wasm-host/src/wasm/host_batch.rs#L54); [crates/shamir-wasm-host/src/compile.rs:655](../../../../../crates/shamir-wasm-host/src/compile.rs#L655).
+
+<a id="plan-p2-24"></a>
+
+### Plan P2.24 — P2.24
+
+Status: `confirmed-open`. Current risk: —.
+
+No shared singleton or shutdown mechanism releases the ticker's retained Engine.
+
+Evidence: [crates/shamir-wasm-host/src/wasm/wasm_engine.rs:155](../../../../../crates/shamir-wasm-host/src/wasm/wasm_engine.rs#L155); [crates/shamir-db/src/shamir_db/shamir_db/core.rs:165](../../../../../crates/shamir-db/src/shamir_db/shamir_db/core.rs#L165).
+
+<a id="plan-p2-25"></a>
+
+### Plan P2.25 — P2.25
+
+Status: `confirmed-open`. Current risk: —.
+
+Metadata decode still has silent fallback/drop paths and no format marker. Warnings should not include secret values unnecessarily.
+
+Evidence: [crates/shamir-wasm-host/src/meta.rs:113](../../../../../crates/shamir-wasm-host/src/meta.rs#L113); [crates/shamir-wasm-host/src/meta.rs:151](../../../../../crates/shamir-wasm-host/src/meta.rs#L151).
+
+<a id="plan-p2-26"></a>
+
+### Plan P2.26 — P2.26
+
+Status: `not-applicable`. Current risk: —.
+
+Option conversion is an optional type refinement: the current sentinel is documented, tested, and correctly consumed, with no demonstrated misuse.
+
+Evidence: [crates/shamir-wasm-host/src/net_gateway.rs:125](../../../../../crates/shamir-wasm-host/src/net_gateway.rs#L125); [crates/shamir-wasm-host/src/tests/net_gateway_tests.rs:169](../../../../../crates/shamir-wasm-host/src/tests/net_gateway_tests.rs#L169); [crates/shamir-db/src/shamir_db/curl_gateway.rs:197](../../../../../crates/shamir-db/src/shamir_db/curl_gateway.rs#L197).
+
+<a id="plan-p2-27"></a>
+
+### Plan P2.27 — P2.27
+
+Status: `confirmed-open`. Current risk: —.
+
+Substring trap mapping and variant-only test remain. Exact typed trap API and cause-chain handling must be verified against Wasmtime 46.0.2 before implementing.
+
+Evidence: [crates/shamir-wasm-host/src/wasm/wasm_function.rs:593](../../../../../crates/shamir-wasm-host/src/wasm/wasm_function.rs#L593); [crates/shamir-wasm-host/src/tests/wasm_tests.rs:212](../../../../../crates/shamir-wasm-host/src/tests/wasm_tests.rs#L212); [Cargo.lock:4741](../../../../../Cargo.lock#L4741).
+
+<a id="plan-p2-28"></a>
+
+### Plan P2.28 — P2.28
+
+Status: `partially-fixed`. Current risk: —.
+
+Effective KDF concurrency/cost bounds already exist in delegated funclib and predate the review, refuting the cap premise. The separate JoinError panic-classification part remains open.
+
+Evidence: [crates/shamir-funclib/src/crypto.rs:203](../../../../../crates/shamir-funclib/src/crypto.rs#L203); [crates/shamir-funclib/src/crypto.rs:221](../../../../../crates/shamir-funclib/src/crypto.rs#L221); [crates/shamir-wasm-host/src/builtin.rs:83](../../../../../crates/shamir-wasm-host/src/builtin.rs#L83).
+
+<a id="plan-p2-29"></a>
+
+### Plan P2.29 — P2.29
+
+Status: `confirmed-open`. Current risk: —.
+
+Empty Unicode-path fallbacks and discarded panic cause remain. Cargo path arguments can instead preserve native OS paths; rejecting all non-Unicode paths is not the only remedy.
+
+Evidence: [crates/shamir-wasm-host/src/compile.rs:542](../../../../../crates/shamir-wasm-host/src/compile.rs#L542); [crates/shamir-wasm-host/src/builtin.rs:83](../../../../../crates/shamir-wasm-host/src/builtin.rs#L83).
+
+<a id="plan-p2-30"></a>
+
+### Plan P2.30 — P2.30
+
+Status: `confirmed-open`. Current risk: —.
+
+Imports, unused serde, omitted sanitizer docs, audit shorthand, repeated call prose, and unsanitized probes remain. The net_guard split is optional, and none is automatically runtime High.
+
+Evidence: [crates/shamir-wasm-host/src/compile.rs:574](../../../../../crates/shamir-wasm-host/src/compile.rs#L574); [crates/shamir-wasm-host/Cargo.toml:14](../../../../../crates/shamir-wasm-host/Cargo.toml#L14); [crates/shamir-wasm-host/src/wasm/mod.rs:3](../../../../../crates/shamir-wasm-host/src/wasm/mod.rs#L3); [crates/shamir-wasm-host/src/net_gateway.rs:109](../../../../../crates/shamir-wasm-host/src/net_gateway.rs#L109); [crates/shamir-wasm-host/src/wasm/host_call.rs:22](../../../../../crates/shamir-wasm-host/src/wasm/host_call.rs#L22); [crates/shamir-wasm-host/src/compile.rs:700](../../../../../crates/shamir-wasm-host/src/compile.rs#L700).
+
+## Corrections and qualified non-findings
+
+- Commit 733cfed8 implemented the existing shared-counter/debit-on-exit mechanism, not a strict aggregate bound; its completion prose is not fix proof.
+- Commit 54cc1825 corrected FunctionMeta documentation only; CreateFunctionOptions remains stale.
+- Argon2 unbounded-hash concurrency was already false when the review was written: commit 190e1f08 predates it and the current wrapper reaches that bounded implementation.
+- Cancellation undercharges consumed instructions; it does not reserve capacity permanently or deplete ordinary reused top-level contexts.
+- A full-grant entry reservation plus exit refund would reject nested calls while the parent holds the entire budget. Rewrite the proposed aggregate-accounting design accordingly.
+- The recursive test's unconditional expect_err cannot prove aggregate enforcement even without knowing exact fuel costs.
+- HTTP request duplicate loss occurs on host map deserialization, not SDK Vec-map construction. Header migration must also change SDK response decoding.
+- Empty net_grants denial is implemented and catchable through a configured gateway; the existing downstream test checks denial text, not a trap, and may skip.
+- The named local ABI/error coverage gaps remain, but no-import-invocation and eight-import claims are false: ten names are registered and nested actor probes invoke call.
+- Finite fuel bounds CPU instructions even without epoch interruption. The independent wall-clock guarantee is what silent ticker failure removes.
+- The depth-zero tokio timeout encloses shamir_call, not source compilation, instantiate_async, or shamir_alloc. Do not describe it as an unconditional bound on every phase or native blocking child computation.
+- Source-compiler rights are not admin-only by default; 0755 deliberately allows other actors to execute the compiler. Uploaded WASM bypasses source compilation.
+- The fixed generated manifest does not admit guest-added build scripts/dependencies; compiler-buffer threats should reference large diagnostics instead.
+- Bounded process teardown must cover pipe joins and descendants as well as direct-child waits.
+- The pin sentinel and net-guard split are optional design choices, not established current defects.
+- Resolved Wasmtime is 46.0.2, not merely the 46.0.1 version mentioned in the dependency commit. Wasmparser has both 0.248.0 and 0.251.0 in the lockfile; the manifest's single-copy comment is stale.
+- No benchmark evidence supports the asserted allocation-to-latency multipliers, O(exports) lookup, exact WAT fuel count, or 768-GiB reservation in this pass.
+- The raw census style row is internally wrong: the original style report has two Medium findings, not two High findings. Recompute counts after these statuses/severity corrections rather than retaining the historical totals.
+- Confirmed clean guarantees are limited to inspected mechanisms: explicit lock/unsafe absence, acknowledged scc len calls, registered topic layout, linker/allowlist name equality, checked guest-memory ranges, matching denied/absent env return values, and RI-7 actor inheritance. They do not prove dependency-level lock-free progress, timing-oracle absence, exhaustive networking safety, or universal wire conformance.
+- The Argon2 worker test and funclib barrier-saturation test are wired, but their scheduling-based assertions are not deterministic proofs under arbitrary interleavings; no tests were run.
+
+## Current follow-up order
+
+1. Repair aggregate fuel accounting with reentrant, cancellation-safe semantics; fix signed seeding and replace both vacuous resource-limit oracles.
+2. Fix whitespace/comment macro recognition with valid adversarial source fixtures, preserving the source-compiler permission threat model.
+3. Offload source and Wasmtime module compilation from async DDL paths; make compiler-tree and pipe-reader teardown genuinely bounded.
+4. Preserve duplicate HTTP headers across both host and SDK encoders/decoders, then reject malformed HTTP request fields explicitly.
+5. Add host quotas for retained globals, fail visibly on ticker spawn failure, and close the confirmed unspecified-IPv4 policy omission.
+6. Add locally registered guest ABI/control tests; repair overwrite/rename races and engine ticker lifecycle.
+7. Correct stale grant/native API documentation and cancellation narratives. Do not add a redundant Argon2 KDF cap or treat optional pin/split changes as fixes.
+8. Keep the boxed future required by pinned Wasmtime's async linker. Verify any alternative architecture or trap-type change separately; remaining copy/import/manifest cleanup is measured or structural low-priority work.
+
+## Coverage and limitations
+
+- All eight assigned documents were read completely; all 69 original findings, 69 SUMMARY finding sections, and 30 Fix Plan items are represented. No TASK_GROUPS document exists in this module directory.
+- Read-only source revalidation only: no files changed, no git mutations, no child agents, and no builds, tests, benchmarks, or reproductions executed. Registered tests were inspected, not reported as passing.
+- HEAD remained 92ad58266bf57ddea1fa3c8a47affba1a3a9a096 and the checkout was clean at the beginning and end.
+- Resolved pins inspected: wasmtime 46.0.2, wasmparser 0.248.0 and 0.251.0, scc 3.8.4, tokio 1.49.0, argon2 0.5.3, bytes 1.11.1, wait-timeout 0.2.1, serde 1.0.228, tempfile 3.25.0.
+- The parent inspected the checksummed Wasmtime 46.0.2 archive and refuted direct unboxed-future substitution. Export-lookup timing/asymptotic and blanket scc lock-free claims are not established by that focused check.
+- OS-specific connections to unspecified IPv4 addresses, actual compiler-descendant survival, exact guest fuel consumption, latency, RSS, and virtual-address reservation amounts were not experimentally verified. Structural omissions and allocations are distinguished from those estimates.
+- Parent resolved the boxed-future API question from the checksummed Wasmtime 46.0.2 archive; other unmeasured runtime/performance claims remain qualified.
+
+## Reviewed document inventory
+
+- [correctness-tdd.md](./correctness-tdd.md) — 12 claim decisions; 0 explicit plan items.
+- [concurrency-lockfree.md](./concurrency-lockfree.md) — 6 claim decisions; 0 explicit plan items.
+- [security-crypto.md](./security-crypto.md) — 8 claim decisions; 0 explicit plan items.
+- [performance-hotpath.md](./performance-hotpath.md) — 10 claim decisions; 0 explicit plan items.
+- [api-wire-protocol.md](./api-wire-protocol.md) — 14 claim decisions; 0 explicit plan items.
+- [error-handling-lifecycle.md](./error-handling-lifecycle.md) — 12 claim decisions; 0 explicit plan items.
+- [style-claude-md.md](./style-claude-md.md) — 7 claim decisions; 0 explicit plan items.
+- [SUMMARY.md](./SUMMARY.md) — 69 claim decisions; 30 explicit plan items.
+
+---
+
+<details>
+<summary>Historical report — preserved for provenance; not current status or instructions</summary>
+
 # shamir-wasm-host — Consolidated 7-lens review (synthesized from the 2026-08-14 cross-crate sweep)
 
 Crate: `crates/shamir-wasm-host/` — the WASM guest-function sandbox: guest compilation
@@ -1097,3 +2222,5 @@ rollback), 6.2/2.4/3.8 (ticker `.ok()`), 4.4/6.10 (engine leak), 7.2/5.10 (glob_
     de-audit-track the public `net_gateway` docs (5.9); delete the duplicated `host_call`
     doc block (7.3); scrub env for `wasm-opt`/toolchain probes (3.5). Closes **7.1, 7.5,
     7.4, 7.7, 5.9, 7.3, 3.5**.
+
+</details>

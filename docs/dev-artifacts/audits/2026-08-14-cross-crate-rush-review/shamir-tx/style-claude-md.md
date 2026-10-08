@@ -1,3 +1,103 @@
+<!-- revalidation:2026-10-08 source:92ad58266bf57ddea1fa3c8a47affba1a3a9a096 -->
+# shamir-tx — style-claude-md revalidation
+
+Source snapshot: `92ad58266bf57ddea1fa3c8a47affba1a3a9a096`. Revalidated 2026-10-08 by read-only XS module review and parent acceptance. No compiler, build, test, benchmark or reproduction was run; no source fix is part of this update. Test registration/assertions are evidence of an oracle, not proof of a passing run.
+
+This section is authoritative for current status. Original titles/IDs are retained for traceability; a refuted title is not a current assertion. The collapsed historical report below is superseded, including its counts, severity, scenarios and fix instructions. Plan IDs preserve historical numbering, not a current release mandate. [Workspace methodology and status definitions](../SUMMARY.md#status-definitions).
+
+The implementation-in-mod.rs, local imports, layout drift and stale documentation remain. These are maintenance issues, not runtime High/Medium defects; the suggested family splits are optional.
+
+## Current claim decisions
+
+| Claim decisions | Open | Source-fixed | Partial | Refuted | Unverified | N/A |
+|---:|---:|---:|---:|---:|---:|---:|
+| 7 | 5 | 0 | 0 | 0 | 0 | 2 |
+
+These are decisions on report claims, including repeated roots, bundled observations and non-findings—not a unique-bug census. Closed/N/A rows have no current risk; unverified risk is provisional. Pure style and unmeasured optimization claims do not establish runtime impact.
+
+<a id="review-1"></a>
+
+### Claim 1 — mvcc_store/mod.rs is a full implementation file, not a re-export manifest
+
+Status: `confirmed-open`. Current risk: `low`.
+
+The 1638-line module still defines helpers, RecordCell, MvccStore and implementations despite the explicit manifest-only convention. No runtime failure follows from this file organization.
+
+Evidence: [crates/shamir-tx/src/mvcc_store/mod.rs:68](../../../../../crates/shamir-tx/src/mvcc_store/mod.rs#L68); [crates/shamir-tx/src/mvcc_store/mod.rs:94](../../../../../crates/shamir-tx/src/mvcc_store/mod.rs#L94); [crates/shamir-tx/src/mvcc_store/mod.rs:125](../../../../../crates/shamir-tx/src/mvcc_store/mod.rs#L125); [CLAUDE.md:503](../../../../../CLAUDE.md#L503).
+
+<a id="review-2"></a>
+
+### Claim 2 — Mid-function use statements in production code
+
+Status: `confirmed-open`. Current risk: `nit`.
+
+Function-local imports remain in the identified production files. cfg(test)-only imports require separate exception treatment; placement is not a demonstrated runtime or semantic defect.
+
+Evidence: [crates/shamir-tx/src/mvcc_store/mod.rs:399](../../../../../crates/shamir-tx/src/mvcc_store/mod.rs#L399); [crates/shamir-tx/src/mvcc_store/mod.rs:1389](../../../../../crates/shamir-tx/src/mvcc_store/mod.rs#L1389); [crates/shamir-tx/src/mvcc_store/mvcc_gc.rs:301](../../../../../crates/shamir-tx/src/mvcc_store/mvcc_gc.rs#L301); [crates/shamir-tx/src/tx_context.rs:538](../../../../../crates/shamir-tx/src/tx_context.rs#L538); [crates/shamir-tx/src/layered_interner.rs:96](../../../../../crates/shamir-tx/src/layered_interner.rs#L96); [CLAUDE.md:617](../../../../../CLAUDE.md#L617).
+
+<a id="review-3"></a>
+
+### Claim 3 — Test placement deviates from documented per-module tests layout
+
+Status: `confirmed-open`. Current risk: `nit`.
+
+Most suites remain crate-root registered, with MVCC tests nested under src/tests. They are reachable and topical; directory placement does not make the tests unexecuted.
+
+Evidence: [crates/shamir-tx/src/lib.rs:33](../../../../../crates/shamir-tx/src/lib.rs#L33); [crates/shamir-tx/src/tests/mod.rs:5](../../../../../crates/shamir-tx/src/tests/mod.rs#L5); [crates/shamir-tx/src/tests/mvcc_store_tests/mod.rs:4](../../../../../crates/shamir-tx/src/tests/mvcc_store_tests/mod.rs#L4); [CLAUDE.md:579](../../../../../CLAUDE.md#L579).
+
+<a id="review-4"></a>
+
+### Claim 4 — Stale and self-contradictory doc comments
+
+Status: `confirmed-open`. Current risk: `nit`.
+
+Stage status, version_cache vocabulary, removed record_ts links and tests-below references remain stale. PendingCommit is retained dead scaffolding; its old leader description needs that qualification.
+
+Evidence: [crates/shamir-tx/src/lib.rs:10](../../../../../crates/shamir-tx/src/lib.rs#L10); [crates/shamir-tx/src/lib.rs:29](../../../../../crates/shamir-tx/src/lib.rs#L29); [crates/shamir-tx/src/repo_tx_gate.rs:888](../../../../../crates/shamir-tx/src/repo_tx_gate.rs#L888); [crates/shamir-tx/src/mvcc_store/version_entry.rs:27](../../../../../crates/shamir-tx/src/mvcc_store/version_entry.rs#L27); [crates/shamir-tx/src/version_codec.rs:30](../../../../../crates/shamir-tx/src/version_codec.rs#L30); [crates/shamir-tx/src/repo_tx_gate.rs:742](../../../../../crates/shamir-tx/src/repo_tx_gate.rs#L742).
+
+<a id="review-5"></a>
+
+### Claim 5 — One-file-one-export stretched in changefeed.rs and repo_tx_gate.rs
+
+Status: `not-applicable`. Current risk: —.
+
+The rule explicitly permits closely coupled groups. Each file's types serve its primary feed/gate abstraction; the report itself frames splitting as direction, not a defect.
+
+Evidence: [CLAUDE.md:505](../../../../../CLAUDE.md#L505); [crates/shamir-tx/src/changefeed.rs:152](../../../../../crates/shamir-tx/src/changefeed.rs#L152); [crates/shamir-tx/src/changefeed.rs:166](../../../../../crates/shamir-tx/src/changefeed.rs#L166); [crates/shamir-tx/src/repo_tx_gate.rs:779](../../../../../crates/shamir-tx/src/repo_tx_gate.rs#L779).
+
+<a id="review-6"></a>
+
+### Claim 6 — metrics.rs has no test coverage in this crate
+
+Status: `confirmed-open`. Current risk: `nit`.
+
+No shamir-tx suite references the metric types. Registered engine tests do exercise counters and snapshots; there is no diff-arithmetic method in the current metrics implementation.
+
+Evidence: [crates/shamir-tx/src/tests/mod.rs:1](../../../../../crates/shamir-tx/src/tests/mod.rs#L1); [crates/shamir-tx/src/metrics.rs:75](../../../../../crates/shamir-tx/src/metrics.rs#L75); [crates/shamir-engine/src/tx/tests/commit_tests.rs:465](../../../../../crates/shamir-engine/src/tx/tests/commit_tests.rs#L465); [crates/shamir-engine/src/tx/tests/commit_phase5_defer_tests.rs:270](../../../../../crates/shamir-engine/src/tx/tests/commit_phase5_defer_tests.rs#L270).
+
+<a id="review-summary-test-organization-positives"></a>
+
+### Claim Summary: test organization positives — No inline test blocks; manifest-only test modules and topical suites
+
+Status: `not-applicable`. Current risk: —.
+
+The three test manifests contain wiring only, with root and changefeed cfg(test) registrations. Their location differs from convention, but registration is intact.
+
+Evidence: [crates/shamir-tx/src/tests/mod.rs:1](../../../../../crates/shamir-tx/src/tests/mod.rs#L1); [crates/shamir-tx/src/tests/mvcc_store_tests/mod.rs:1](../../../../../crates/shamir-tx/src/tests/mvcc_store_tests/mod.rs#L1); [crates/shamir-tx/src/changefeed/tests/mod.rs:1](../../../../../crates/shamir-tx/src/changefeed/tests/mod.rs#L1); [crates/shamir-tx/src/changefeed.rs:657](../../../../../crates/shamir-tx/src/changefeed.rs#L657).
+
+## Corrections and qualified non-findings
+
+- Demote implementation-file organization from High to Low, and import/test-directory concerns from Medium to Nit.
+- Update shifted staging/TxContext references after the borrowed-iteration/A8 change: rewrite_set_bytes is at line 329 and apply_id_remap at line 939.
+- doctest=false disables examples, not rustdoc link diagnostics; it is not evidence that broken intra-doc links are silently accepted.
+- Metrics coverage is absent only within this crate; upstream tests exercise it. Remove the nonexistent snapshot/diff arithmetic description.
+- Do not count the opportunistic family-split recommendation as a proven defect.
+
+---
+
+<details>
+<summary>Historical report — preserved for provenance; not current status or instructions</summary>
+
 # shamir-tx -- Style & CLAUDE.md structural conformance
 
 ## Summary
@@ -56,3 +156,5 @@ The crate is mostly disciplined on the tested-grounds that matter most: no inlin
 - **Severity:** nit
 - **Issue:** `src/tests/` has no `metrics_tests.rs` and no test file references `TxMetrics`/`TxMetricsSnapshot`. The snapshot/diff arithmetic is pure and trivially testable. (`pending_commit.rs` is likewise unreferenced by tests, but that follows from finding 4 — it is documented-dead scaffolding.)
 - **Suggested fix:** A small `metrics_tests.rs` covering `snapshot()`/delta math; fold into finding 4's dead-scaffolding decision for `PendingCommit`.
+
+</details>
