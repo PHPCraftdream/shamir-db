@@ -481,9 +481,31 @@ async fn truncation_ceiling_blocks_segment_removal_when_a5_gate_unsafe() {
         segs_after_safe_drain = shamirwal_seg_count(&repo_dir);
     }
     std::env::remove_var("SHAMIR_WAL_SEGMENT_MAX_BYTES");
+    // TEMP DIAG (#1239): state needed to tell WHY truncation stayed blocked.
+    let diag = {
+        let wal = repo.repo_wal().await.unwrap();
+        let inflight = wal.recover().await.unwrap();
+        let versions: Vec<u64> = inflight.iter().map(|e| e.commit_version).collect();
+        let delta_entries = inflight
+            .iter()
+            .filter(|e| !e.interner_delta.is_empty())
+            .count();
+        format!(
+            "durable={} vis={} window_len={} inflight={} (min={:?} max={:?}) \
+             inflight_with_interner_delta={} has_truncatable(durable)={}",
+            gate.durable_watermark(),
+            gate.last_committed(),
+            drainer.window_len(),
+            versions.len(),
+            versions.iter().min(),
+            versions.iter().max(),
+            delta_entries,
+            wal.has_truncatable(gate.durable_watermark()),
+        )
+    };
     assert!(
         segs_after_safe_drain < segs_before_drain,
         "once the A5 gate is safe again, truncation must proceed and shrink \
-         the segment count (before={segs_before_drain}, after={segs_after_safe_drain})"
+         the segment count (before={segs_before_drain}, after={segs_after_safe_drain}) {diag}"
     );
 }
