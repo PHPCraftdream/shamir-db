@@ -1305,11 +1305,9 @@ fn classify_row(
                     row_action = Some(FkAction::Cascade);
                     break;
                 }
-                FkAction::SetNull => {
-                    if row_action.is_none() {
-                        row_action = Some(FkAction::SetNull);
-                        row_setnull_field = Some((*field_name).to_string());
-                    }
+                FkAction::SetNull if row_action.is_none() => {
+                    row_action = Some(FkAction::SetNull);
+                    row_setnull_field = Some((*field_name).to_string());
                 }
                 _ => {}
             }
