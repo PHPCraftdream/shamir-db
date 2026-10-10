@@ -213,7 +213,7 @@ jobs:
             if [ "$rc" -ne 0 ]; then
               grep -aE "FAIL|TIMEOUT" "int-$i.log" | sort -u | head -10
               grep -a -A4 "panicked at" "int-$i.log" | cut -c1-300 | head -60
-              awk '/^ *(FAIL|TIMEOUT) \[/{c++} c==1{print}' "int-$i.log" | grep -avE "lsm_tree|fjall::" | cut -c1-260 | head -400
+              grep -a "DEBUG shamir_\|WARN \|ERROR " "int-$i.log" | grep -avE "SKIP|PASS|lsm_tree|fjall::" | cut -c1-300 | head -500
             fi
           done
           kill $(jobs -p) 2>/dev/null
