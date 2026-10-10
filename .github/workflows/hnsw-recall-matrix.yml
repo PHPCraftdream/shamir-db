@@ -42,7 +42,7 @@ jobs:
         os: [ubuntu-latest, windows-latest, macos-latest]
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
-      - uses: dtolnay/rust-toolchain@d0befba8b9ddf874327619e84c39b094edd58b66  # 1.94.0
+      - uses: dtolnay/rust-toolchain@eb0a44f258ec94ab9ee0f14f998f4cf332c25d3a  # 1.95.0
       # Same pin as ci.yml's `test` job — see that job's comment for why the
       # version is pinned (the `.cargo/config.toml` perimeter guard gates on
       # the $NEXTEST env var this exact binary sets).
@@ -50,6 +50,31 @@ jobs:
         with:
           tool: nextest@0.9.137
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32  # v2
+      # #1232: `recall_sq8_vs_f32_within_two_percent` (SQ8 u8 graph vs f32
+      # graph) read 0.844 once on a CI ubuntu runner (floor 0.95, usual
+      # 0.97). Runtime SIMD dispatch (avx512f / avx2 / scalar) makes the CPU
+      # model a suspect, so print it next to the per-run recall values.
+      - name: Runner CPU
+        shell: bash
+        run: |
+          if [ -r /proc/cpuinfo ]; then
+            grep -m1 'model name' /proc/cpuinfo
+            grep -m1 -o 'avx512f' /proc/cpuinfo || echo "no avx512f"
+            grep -m1 -o 'avx2' /proc/cpuinfo || echo "no avx2"
+          else
+            sysctl -n machdep.cpu.brand_string 2>/dev/null || echo "$PROCESSOR_IDENTIFIER"
+          fi
+      - name: Run recall_sq8_vs_f32_within_two_percent x N
+        shell: bash
+        run: |
+          set -uo pipefail
+          N="${{ github.event.inputs.runs_per_os || '20' }}"
+          for i in $(seq 1 "$N"); do
+            echo "--- run $i/$N ---"
+            NEXTEST=1 cargo nextest run --locked -p shamir-index --lib \
+              -E 'test(recall_sq8_vs_f32_within_two_percent)' \
+              --success-output=immediate --no-fail-fast || true
+          done
       # Build once — every repeated run below reuses the same test binary.
       # `--success-output=immediate` forces the `println!("#1070
       # recall_at_10=...")` line to appear in the log on a PASSING run too,

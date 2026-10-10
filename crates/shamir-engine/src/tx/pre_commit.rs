@@ -2133,10 +2133,7 @@ async fn rederive_stale_value_ops_post_stage(
                         );
 
                         // Append any ops that weren't already staged
-                        for op in current_removals
-                            .into_iter()
-                            .chain(current_unique_removals.into_iter())
-                        {
+                        for op in current_removals.into_iter().chain(current_unique_removals) {
                             // Bug B fix: handle both owner:Some (unique) and owner:None (regular)
                             // P1 perf fix: O(1) lookup against the precomputed cache instead of
                             // a linear `.any()` rescan of `tx.index_write_set` per op.
@@ -2260,10 +2257,7 @@ async fn rederive_stale_value_ops_post_stage(
                             updated_ops.len(),
                             updated_unique_ops.len()
                         );
-                        for op in updated_ops
-                            .into_iter()
-                            .chain(updated_unique_ops.into_iter())
-                        {
+                        for op in updated_ops.into_iter().chain(updated_unique_ops) {
                             // Bug A fix: make dedup owner-aware and kind-aware for unique indexes
                             // P1 perf fix: O(1) lookups against the precomputed caches instead of
                             // a linear `.any()` rescan of `tx.index_write_set` per op. Each arm

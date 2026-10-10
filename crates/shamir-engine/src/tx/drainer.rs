@@ -343,13 +343,11 @@ impl Drainer {
         let mut window_entries: Vec<Arc<WalEntryV2>> = Vec::new();
         {
             let guard = scc::Guard::new();
-            let mut expected = dur + 1;
-            for (k, v) in self.window.range(expected..=vis, &guard) {
+            for (expected, (k, v)) in (dur + 1..).zip(self.window.range(dur + 1..=vis, &guard)) {
                 if *k != expected {
                     break; // gap — reseed below
                 }
                 window_entries.push(Arc::clone(v));
-                expected += 1;
             }
         }
 
@@ -379,13 +377,11 @@ impl Drainer {
             // Retry the window scan once.
             window_entries.clear();
             let guard2 = scc::Guard::new();
-            let mut expected2 = dur + 1;
-            for (k, v) in self.window.range(expected2..=vis, &guard2) {
+            for (expected2, (k, v)) in (dur + 1..).zip(self.window.range(dur + 1..=vis, &guard2)) {
                 if *k != expected2 {
                     break;
                 }
                 window_entries.push(Arc::clone(v));
-                expected2 += 1;
             }
         }
 
