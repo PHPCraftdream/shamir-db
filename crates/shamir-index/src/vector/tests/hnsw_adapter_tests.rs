@@ -138,16 +138,16 @@ async fn recall_at_10_on_1k_vectors() {
     // `recall` can only land on multiples of 0.1 (0/10..10/10) — this is
     // NOT the same statistical setup as the 50-query 3k-vector test in
     // `crash_recovery_tests.rs`. `.github/workflows/hnsw-recall-matrix.yml`
-    // (run 31472514970) ran this test 20 times on EACH of ubuntu-latest,
-    // windows-latest, macos-latest (60 runs total): every single run landed
-    // on EXACTLY 0.80 or 0.90, split roughly evenly, on all three
-    // platforms — never lower, never a perfect 1.0. This is the actual
-    // basis for the docs' (`docs/guide-docs/guide/06-search.md`) "~95-99%"
-    // claim, which was NEVER true for this test — the real observed range
-    // is 80-90%, not 95-99%; the doc has been corrected accordingly. Floor
-    // set to 0.75, one full quantum (0.1) below the observed worst case
-    // (0.80) across all 60 runs — 0.5 was needlessly loose against real
-    // data. Re-run the matrix workflow before adjusting this floor again.
+    // (run 38074322496, after the #1233 fix below) ran this test 20 times on
+    // EACH of ubuntu-latest, windows-latest, macos-latest (60 runs total):
+    // 58 runs landed on 1.00, 2 on 0.90 (one each on windows and macos),
+    // none lower. The earlier run 31472514970 read only 0.80/0.90 because of
+    // a test bug (#1233): a stray `upsert(rid(0), ..)` in the build loop
+    // re-pointed vecs[0]'s own rid at another vector and left ~1000
+    // tombstoned twins in the graph, capping recall at 0.9 and adding a
+    // 0.6-0.8 tail. Floor 0.75 (== 0.8 at the 0.1 quantum) sits one quantum
+    // below the observed worst case (0.90). Re-run the matrix workflow
+    // before adjusting this floor again.
     let dim = 32;
     let n = 1000;
     let adapter = HnswAdapter::new(

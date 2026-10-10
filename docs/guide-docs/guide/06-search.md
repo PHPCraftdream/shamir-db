@@ -588,8 +588,9 @@ const rows = await db.query('users')
 * **FTS без индекса — работает, но медленно.** Создай индекс, как только
   данных становится больше нескольких сотен записей.
 * **HNSW — approximate.** Recall@10 на 1K векторах — наблюдаемый диапазон
-  80–90% (60 прогонов, 3 платформы, `.github/workflows/hnsw-recall-matrix.yml`
-  запуск 31472514970; тест — `recall_at_10_on_1k_vectors`). Для exact KNN
+  90–100% (60 прогонов, 3 платформы: 58 × 100%, 2 × 90%,
+  `.github/workflows/hnsw-recall-matrix.yml` запуск 38074322496; тест —
+  `recall_at_10_on_1k_vectors`, один запрос). Для exact KNN
   на малых данных (≤256) — автоматический brute-force.
 * **SQ8-квантование** (`vector_quantization: 'sq8'`) экономит ~3–4× RAM
   при <3% loss recall@10 — включай, если индекс в RAM и память важнее
