@@ -164,8 +164,10 @@ async fn recall_at_10_on_1k_vectors() {
     let mut vecs = Vec::with_capacity(n);
     for i in 0..n {
         let v = random_vec(dim, i as u64 + 42);
-        adapter.upsert(rid(0), &v).await.unwrap();
-        // Use unique rids:
+        // Unique rid per vector. (An earlier stray `upsert(rid(0), &v)` here
+        // re-pointed rid 0 — which is also vecs[0]'s rid — at every later
+        // vector and left ~1000 tombstoned twins in the graph, capping
+        // recall at 0.9 and adding the 0.7-0.8 tail; see #1233.)
         let mut a = [0u8; 16];
         a[14] = (i >> 8) as u8;
         a[15] = (i & 0xFF) as u8;
