@@ -465,47 +465,30 @@ async fn truncation_ceiling_blocks_segment_removal_when_a5_gate_unsafe() {
     // Disarming the fault and draining again must now truncate normally —
     // proving the ceiling is a real, liftable gate, not a permanent wedge.
     //
-    // A single `drain_all` call can leave the ceiling one pass short of
-    // converging (this test's own comment above already documents a past
-    // 1/4 flake rate at an earlier assertion point; observed again on a
-    // macOS CI runner — slower filesystem I/O gives the ceiling/segment-
-    // removal bookkeeping less headroom to catch up within one pass than on
-    // an idle dev box). Retry a bounded number of times rather than assume
-    // one pass fully converges.
+    // Truncation is not instantaneous from this test's point of view:
+    // `SegmentSet::truncate_below` CLAIMS the deletable segments under its lock
+    // and unlinks them afterwards on a blocking thread, and the ambient
+    // drainer's own pass can hold that claim — so an explicit `drain_all`
+    // finds nothing left to claim, returns at once, and the files are still on
+    // disk for a few more milliseconds (worse on a loaded runner, where the
+    // earlier fixed 10-retry loop ran out in microseconds; the failure showed
+    // before=11/after=11 although the next look found every sealed segment
+    // gone). Poll for the effect with a bounded wait instead.
     let mut segs_after_safe_drain = shamirwal_seg_count(&repo_dir);
-    for _ in 0..10 {
+    for _ in 0..500 {
         if segs_after_safe_drain < segs_before_drain {
             break;
         }
         drainer.drain_all(&repo).await.unwrap();
         segs_after_safe_drain = shamirwal_seg_count(&repo_dir);
+        if segs_after_safe_drain >= segs_before_drain {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
     }
     std::env::remove_var("SHAMIR_WAL_SEGMENT_MAX_BYTES");
-    // TEMP DIAG (#1239): state needed to tell WHY truncation stayed blocked.
-    let diag = {
-        let wal = repo.repo_wal().await.unwrap();
-        let inflight = wal.recover().await.unwrap();
-        let versions: Vec<u64> = inflight.iter().map(|e| e.commit_version).collect();
-        let delta_entries = inflight
-            .iter()
-            .filter(|e| !e.interner_delta.is_empty())
-            .count();
-        format!(
-            "durable={} vis={} window_len={} inflight={} (min={:?} max={:?}) \
-             inflight_with_interner_delta={} has_truncatable(durable)={}",
-            gate.durable_watermark(),
-            gate.last_committed(),
-            drainer.window_len(),
-            versions.len(),
-            versions.iter().min(),
-            versions.iter().max(),
-            delta_entries,
-            wal.has_truncatable(gate.durable_watermark()),
-        )
-    };
     assert!(
         segs_after_safe_drain < segs_before_drain,
         "once the A5 gate is safe again, truncation must proceed and shrink \
-         the segment count (before={segs_before_drain}, after={segs_after_safe_drain}) {diag}"
+         the segment count (before={segs_before_drain}, after={segs_after_safe_drain})"
     );
 }
