@@ -116,14 +116,21 @@ jobs:
       - name: Full lib suite under load x load_runs (ubuntu)
         if: ${{ matrix.os == 'ubuntu-latest' && (github.event.inputs.load_runs || '0') != '0' }}
         shell: bash
+        env:
+          CARGO_TERM_COLOR: never
         run: |
-          set -uo pipefail
+          # The step shell runs with -e: a failing iteration must not end the loop.
+          set +e
           N="${{ github.event.inputs.load_runs }}"
           for i in $(seq 1 "$N"); do
             echo "--- load run $i/$N ---"
             NEXTEST_SUCCESS_OUTPUT=immediate ./scripts/test.sh --locked > "load-$i.log" 2>&1
             rc=$?
             grep -a "recall_sq8_at_10=" "load-$i.log" || echo "no sq8 value"
-            grep -aE "FAIL|TIMEOUT" "load-$i.log" | grep -av "FAIL_" | sort -u | head -5 || true
             echo "exit=$rc"
+            if [ "$rc" -ne 0 ]; then
+              grep -aE "FAIL|TIMEOUT" "load-$i.log" | sort -u | head -20
+              grep -a -m1 -A40 "FAIL" "load-$i.log" | cut -c1-300
+            fi
           done
+          exit 0
