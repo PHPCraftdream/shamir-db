@@ -24,6 +24,10 @@ on:
         description: "How many times to run each recall test, per OS"
         required: false
         default: "20"
+      load_runs:
+        description: "If > 0: skip the recall loops; on ubuntu run the full lib suite this many times under nextest parallelism (#1232 load repro)"
+        required: false
+        default: "0"
 
 env:
   CARGO_TERM_COLOR: always
@@ -65,6 +69,7 @@ jobs:
             sysctl -n machdep.cpu.brand_string 2>/dev/null || echo "$PROCESSOR_IDENTIFIER"
           fi
       - name: Run recall_sq8_vs_f32_within_two_percent x N
+        if: ${{ (github.event.inputs.load_runs || '0') == '0' }}
         shell: bash
         run: |
           set -uo pipefail
@@ -81,6 +86,7 @@ jobs:
       # not just a failing one (nextest's default only shows captured output
       # on failure).
       - name: Run restart_preserves_recall_at_10_against_brute_force (3k vectors) x N
+        if: ${{ (github.event.inputs.load_runs || '0') == '0' }}
         shell: bash
         run: |
           set -euo pipefail
@@ -92,6 +98,7 @@ jobs:
               --success-output=immediate --no-fail-fast
           done
       - name: Run recall_at_10_on_1k_vectors x N
+        if: ${{ (github.event.inputs.load_runs || '0') == '0' }}
         shell: bash
         run: |
           set -euo pipefail
@@ -101,4 +108,22 @@ jobs:
             NEXTEST=1 cargo nextest run --locked -p shamir-index --lib \
               -E 'test(recall_at_10_on_1k_vectors)' \
               --success-output=immediate --no-fail-fast
+          done
+      # #1232 load repro: the 0.844 read happened inside the full workspace
+      # lib run (6082 tests across 4 vCPUs), never in the isolated loops above
+      # (120 runs, min 0.956). Re-create that load and print the SQ8 recall of
+      # every iteration.
+      - name: Full lib suite under load x load_runs (ubuntu)
+        if: ${{ matrix.os == 'ubuntu-latest' && (github.event.inputs.load_runs || '0') != '0' }}
+        shell: bash
+        run: |
+          set -uo pipefail
+          N="${{ github.event.inputs.load_runs }}"
+          for i in $(seq 1 "$N"); do
+            echo "--- load run $i/$N ---"
+            NEXTEST_SUCCESS_OUTPUT=immediate ./scripts/test.sh --locked > "load-$i.log" 2>&1
+            rc=$?
+            grep -a "recall_sq8_at_10=" "load-$i.log" || echo "no sq8 value"
+            grep -aE "FAIL|TIMEOUT" "load-$i.log" | grep -av "FAIL_" | sort -u | head -5 || true
+            echo "exit=$rc"
           done
