@@ -758,30 +758,61 @@ async fn restore_cli_rolls_back_data_and_invalidates_tickets() {
 
 /// Snapshot every file's relative path + contents under `dir`, so a later
 /// call can assert nothing changed at all (not just "same file count").
-fn snapshot_dir_contents(dir: &std::path::Path) -> std::collections::BTreeMap<String, Vec<u8>> {
+/// `Err` when a file vanishes mid-walk (a store still rewriting its files).
+fn try_snapshot_dir_contents(
+    dir: &std::path::Path,
+) -> std::io::Result<std::collections::BTreeMap<String, Vec<u8>>> {
     fn walk(
         root: &std::path::Path,
         dir: &std::path::Path,
         out: &mut std::collections::BTreeMap<String, Vec<u8>>,
-    ) {
-        for entry in std::fs::read_dir(dir).unwrap() {
-            let entry = entry.unwrap();
-            let path = entry.path();
+    ) -> std::io::Result<()> {
+        for entry in std::fs::read_dir(dir)? {
+            let path = entry?.path();
             if path.is_dir() {
-                walk(root, &path, out);
+                walk(root, &path, out)?;
             } else if path.is_file() {
                 let rel = path
                     .strip_prefix(root)
                     .unwrap()
                     .to_string_lossy()
                     .into_owned();
-                out.insert(rel, std::fs::read(&path).unwrap());
+                out.insert(rel, std::fs::read(&path)?);
             }
         }
+        Ok(())
     }
     let mut out = std::collections::BTreeMap::new();
-    walk(dir, dir, &mut out);
-    out
+    walk(dir, dir, &mut out)?;
+    Ok(out)
+}
+
+fn snapshot_dir_contents(dir: &std::path::Path) -> std::collections::BTreeMap<String, Vec<u8>> {
+    try_snapshot_dir_contents(dir).unwrap()
+}
+
+/// Snapshot `dir` once it has stopped changing. `ServerHandle::shutdown()`
+/// can return while the stopped server's fjall handles are still closing
+/// (the final flush and a compaction pass rewrite SST files for a moment), so
+/// a snapshot taken right after it can differ from the same directory a
+/// moment later although nothing touched it. Wait for 1s of no change.
+async fn quiescent_snapshot(dir: &std::path::Path) -> std::collections::BTreeMap<String, Vec<u8>> {
+    let mut last = None;
+    let mut stable = 0u32;
+    for _ in 0..150 {
+        let now = try_snapshot_dir_contents(dir).ok();
+        if now.is_some() && now == last {
+            stable += 1;
+            if stable >= 5 {
+                return now.unwrap();
+            }
+        } else {
+            stable = 0;
+        }
+        last = now;
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    panic!("data_dir kept changing for 30s after the server shut down");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -812,7 +843,7 @@ async fn restore_failure_at_pre_swap_invalidation_leaves_data_dir_untouched() {
 
     // Snapshot the CURRENT (pre-restore) data_dir contents in full, so we
     // can later assert byte-for-byte that nothing changed.
-    let pre_restore_snapshot = snapshot_dir_contents(&data_dir);
+    let pre_restore_snapshot = quiescent_snapshot(&data_dir).await;
     assert!(
         !pre_restore_snapshot.is_empty(),
         "sanity: data_dir must contain files before the failed restore attempt"
