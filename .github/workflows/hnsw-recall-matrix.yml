@@ -36,6 +36,14 @@ on:
         description: "If > 0: skip the recall loops; on ubuntu run the integration/e2e test binaries (kind(test)) this many times and print every failing test with its panic message (flake census)"
         required: false
         default: "0"
+      int_filter:
+        description: "nextest filterset for int_runs (default kind(test))"
+        required: false
+        default: "kind(test)"
+      int_burners:
+        description: "busy-loop processes started next to int_runs to oversubscribe the CPU"
+        required: false
+        default: "0"
 
 env:
   CARGO_TERM_COLOR: always
@@ -195,9 +203,11 @@ jobs:
         run: |
           set +e
           N="${{ github.event.inputs.int_runs }}"
+          FILTER="${{ github.event.inputs.int_filter || 'kind(test)' }}"
+          for b in $(seq 1 "${{ github.event.inputs.int_burners || '0' }}"); do (while :; do :; done) & done
           for i in $(seq 1 "$N"); do
             echo "--- integration run $i/$N ---"
-            ./scripts/test.sh --full --locked -E 'kind(test)' > "int-$i.log" 2>&1
+            ./scripts/test.sh --full --locked -E "$FILTER" > "int-$i.log" 2>&1
             rc=$?
             echo "exit=$rc"
             if [ "$rc" -ne 0 ]; then
@@ -205,4 +215,5 @@ jobs:
               grep -a -A4 "panicked at" "int-$i.log" | cut -c1-300 | head -60
             fi
           done
+          kill $(jobs -p) 2>/dev/null
           exit 0

@@ -236,11 +236,27 @@ async fn set_null_nulls_child_fk_transactional() {
         "SET NULL: child row should survive parent delete"
     );
     // Its FK is now null (no longer matches dept_id=100).
-    assert_eq!(
-        count_employees(&db, Some(100)).await,
-        0,
-        "SET NULL: child FK should be nulled (not match old parent value)"
-    );
+    // TEMP DIAG (#1237): tell a stale index posting (count drops later) from a
+    // lost SET NULL (count stays 1) before deciding the fix.
+    let first = count_employees(&db, Some(100)).await;
+    if first != 0 {
+        let mut b = Batch::new();
+        b.id(31);
+        b.query("q", Query::from("employees"));
+        let rows = db
+            .execute("testdb", &b.to_request_via_msgpack())
+            .await
+            .map(|r| format!("{:?}", r.results["q"].records))
+            .unwrap_or_else(|e| format!("dump failed: {e}"));
+        let mut later = Vec::new();
+        for ms in [50u64, 500, 2000] {
+            tokio::time::sleep(std::time::Duration::from_millis(ms)).await;
+            later.push((ms, count_employees(&db, Some(100)).await));
+        }
+        panic!(
+            "#1237 SET NULL left dept_id=100 matching: first={first} rows={rows} later={later:?}"
+        );
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════════════
