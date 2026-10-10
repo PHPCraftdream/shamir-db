@@ -328,9 +328,10 @@ async fn drain_on_one_table_does_not_advance_watermark_past_another_undrained_ta
 
 /// #1032: `drain_to_history` holds `drain_exclusive` for its ENTIRE
 /// duration, so a concurrent `write_committed_batch_to_history` (the
-/// background Drainer's periodic path) for the SAME table defers rather
-/// than racing `self.history.transact(...)` against it — the two-callers
-/// race a real CI run showed can hang the underlying store.
+/// background Drainer's periodic path) for the SAME table serializes with it
+/// rather than racing `self.history.transact(...)` against it (see
+/// `batched_write_waits_for_drain_exclusive_instead_of_skipping` for the
+/// other direction).
 ///
 /// Proof, without any pause hook or timing-sensitive assertion beyond the
 /// standard "block until released" shape already used elsewhere in this
@@ -392,7 +393,7 @@ async fn drain_to_history_blocks_concurrent_batched_drain() {
     let _ = v;
 }
 
-/// #1235: a batched drain write that contends with another history writer
+/// #1234: a batched drain write that contends with another history writer
 /// must WAIT for it, never return `Ok` without writing. `Drainer::drain_step`
 /// reads `Ok` as "landed in history" and goes on to `mark_durable`, commit the
 /// WAL marker and GC the overlay, so a silent skip leaves a window (or, if the
@@ -419,7 +420,7 @@ async fn batched_write_waits_for_drain_exclusive_instead_of_skipping() {
     tokio::time::sleep(Duration::from_millis(80)).await;
     assert!(
         !write_task.is_finished(),
-        "#1235: the batched write must park on drain_exclusive while it is held \
+        "#1234: the batched write must park on drain_exclusive while it is held \
          (a try_lock deferral returns Ok(()) here with nothing written)"
     );
     assert_eq!(

@@ -318,20 +318,14 @@ impl MvccStore {
             return Ok(());
         }
 
-        // #1032: back off (not block) if a forced `drain_to_history` (table
-        // RENAME's Phase F.2) is currently draining this table — see
-        // `drain_exclusive`'s field doc (`mvcc_store/mod.rs`). Deferring is
-        // safe: this pass's entries stay un-drained in the WAL/overlay and
-        // are picked up by the next tick, same as any other tick that finds
-        // nothing new to drain.
-        let Ok(_drain_guard) = self.drain_exclusive.try_lock() else {
-            log::debug!(
-                "write_committed_batch_to_history: drain_exclusive held by a \
-                 forced drain_to_history — deferring {} version(s) to the next tick",
-                pass.len()
-            );
-            return Ok(());
-        };
+        // #1032/#1234: serialize against any other history writer for this
+        // table (a forced `drain_to_history`, or a concurrent drain pass) — see
+        // `drain_exclusive`'s field doc (`mvcc_store/mod.rs`). WAIT, never
+        // skip: `Drainer::drain_step` reads `Ok` as "landed in history" and
+        // goes on to `mark_durable`, commit the WAL marker and GC the overlay,
+        // so an `Ok` without a write leaves the commit in neither overlay nor
+        // history until (and unless) the other writer lands it.
+        let _drain_guard = self.drain_exclusive.lock().await;
 
         // Pre-size: each (v, ops) contributes ops.len() data entries + 1 ts entry.
         let total_ops: usize = pass.iter().map(|(_, ops)| ops.len()).sum();
