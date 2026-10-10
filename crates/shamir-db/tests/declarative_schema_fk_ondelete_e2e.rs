@@ -220,6 +220,11 @@ async fn cascade_deletes_child_autocommit() {
 
 #[tokio::test]
 async fn set_null_nulls_child_fk_transactional() {
+    // TEMP DIAG (#1237): debug logs of the commit/drain/index path reach
+    // nextest's captured stderr, printed only for a failing iteration.
+    let _ = env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("debug"))
+        .is_test(true)
+        .try_init();
     let dir = tempfile::tempdir().unwrap();
     let db = setup(dir.path().join("meta.redb")).await;
     set_child_fk_schema(&db, FkAction::SetNull, true).await;
