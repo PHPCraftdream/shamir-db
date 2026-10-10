@@ -391,3 +391,52 @@ async fn drain_to_history_blocks_concurrent_batched_drain() {
     );
     let _ = v;
 }
+
+/// #1235: a batched drain write that contends with another history writer
+/// must WAIT for it, never return `Ok` without writing. `Drainer::drain_step`
+/// reads `Ok` as "landed in history" and goes on to `mark_durable`, commit the
+/// WAL marker and GC the overlay, so a silent skip leaves a window (or, if the
+/// other writer fails, a permanent loss) where neither overlay nor history
+/// holds the commit.
+#[tokio::test]
+async fn batched_write_waits_for_drain_exclusive_instead_of_skipping() {
+    let mvcc = Arc::new(make_mvcc());
+    let version = 7u64;
+    let pass = vec![(
+        version,
+        vec![KvOp::Set(
+            RecordKey::from(Bytes::from_static(b"k1")),
+            Bytes::from_static(b"v1"),
+        )],
+    )];
+
+    let held = mvcc.lock_drain_exclusive_for_test().await;
+
+    let mvcc_spawned = Arc::clone(&mvcc);
+    let write_task =
+        tokio::spawn(async move { mvcc_spawned.write_committed_batch_to_history(&pass).await });
+
+    tokio::time::sleep(Duration::from_millis(80)).await;
+    assert!(
+        !write_task.is_finished(),
+        "#1235: the batched write must park on drain_exclusive while it is held \
+         (a try_lock deferral returns Ok(()) here with nothing written)"
+    );
+    assert_eq!(
+        history_raw(&mvcc, b"k1", version).await,
+        None,
+        "nothing may be in history while the write is parked"
+    );
+
+    drop(held);
+
+    write_task
+        .await
+        .unwrap()
+        .expect("the batched write must complete once drain_exclusive is released");
+    assert_eq!(
+        history_raw(&mvcc, b"k1", version).await,
+        Some(Bytes::from_static(b"v1")),
+        "the batched write must have landed in history"
+    );
+}
