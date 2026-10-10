@@ -148,18 +148,31 @@ fn make_config(data_dir: PathBuf, port: u16) -> Config {
 // Helpers
 // --------------------------------------------------------------------------
 
+/// Boot a server on `data_dir`. Retries while the previous boot's fjall locks
+/// are still held: `ServerHandle::shutdown()` returns before every store
+/// handle is dropped, so an immediate relaunch can hit "FjallError: Locked"
+/// (same release delay the other reopen tests retry through).
 async fn launch(data_dir: PathBuf, port: u16, password: &[u8]) -> ServerHandle {
-    let bootstrap = BootstrapMode::Password {
-        username: "admin".into(),
-        password: Zeroizing::new(password.to_vec()),
-    };
-    ServerLauncher {
-        config: make_config(data_dir, port),
-        bootstrap,
+    for _ in 0..50 {
+        let bootstrap = BootstrapMode::Password {
+            username: "admin".into(),
+            password: Zeroizing::new(password.to_vec()),
+        };
+        match (ServerLauncher {
+            config: make_config(data_dir.clone(), port),
+            bootstrap,
+        })
+        .launch()
+        .await
+        {
+            Ok(handle) => return handle,
+            Err(e) if format!("{e:?}").contains("Locked") => {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+            Err(e) => panic!("launcher boot: {e:?}"),
+        }
     }
-    .launch()
-    .await
-    .expect("launcher boot")
+    panic!("data dir lock was not released within the retry window");
 }
 
 /// Drive a SCRAM client through to authentication, returning the open
