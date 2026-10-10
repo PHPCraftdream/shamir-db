@@ -801,13 +801,14 @@ async fn quiescent_snapshot(dir: &std::path::Path) -> std::collections::BTreeMap
     let mut stable = 0u32;
     for _ in 0..150 {
         let now = try_snapshot_dir_contents(dir).ok();
-        if now.is_some() && now == last {
-            stable += 1;
-            if stable >= 5 {
-                return now.unwrap();
+        match (&now, &last) {
+            (Some(cur), Some(prev)) if cur == prev => {
+                stable += 1;
+                if stable >= 5 {
+                    return cur.clone();
+                }
             }
-        } else {
-            stable = 0;
+            _ => stable = 0,
         }
         last = now;
         tokio::time::sleep(Duration::from_millis(200)).await;
