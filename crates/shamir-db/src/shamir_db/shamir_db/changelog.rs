@@ -147,6 +147,25 @@ impl ShamirDb {
         repo_instance.current_commit_version().await.ok()
     }
 
+    /// Pull-only journal read with field-name bindings and unchanged gap metadata.
+    pub async fn read_changelog_for_replication(
+        &self,
+        db: &str,
+        repo: &str,
+        from_version: u64,
+        limit: usize,
+    ) -> shamir_storage::error::DbResult<
+        Option<(Vec<shamir_engine::tx::ReplicatedEvent>, Option<u64>)>,
+    > {
+        let Some(repo_instance) = self.get_db(db).and_then(|db| db.get_repo(repo)) else {
+            return Ok(None);
+        };
+        repo_instance
+            .read_changelog_for_replication(from_version, limit)
+            .await
+            .map(Some)
+    }
+
     /// Like [`read_changelog_from`](Self::read_changelog_from) but returns the
     /// full [`shamir_engine::JournalRead`] so the caller can inspect `gap_at`
     /// and decide whether a snapshot resync is needed.

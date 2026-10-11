@@ -45,7 +45,7 @@ async fn assert_refused(repo: &RepoInstance, event: &ChangelogEvent, reason: App
     let committed = gate.last_committed();
     let durable = gate.durable_watermark();
     let mut downstream = repo.subscribe_changelog().await.unwrap();
-    let outcome = apply_replicated(repo, event, 0, ApplyPolicy::Trusted)
+    let outcome = apply_replicated(repo, event, &[], 0, ApplyPolicy::Trusted)
         .await
         .unwrap();
     assert_eq!(outcome, ApplyOutcome::Rejected { reason });
