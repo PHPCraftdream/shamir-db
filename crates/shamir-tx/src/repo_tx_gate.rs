@@ -750,8 +750,11 @@ impl RepoTxGate {
         self.publish_committed_max(wm);
     }
 
-    /// Minimum alive snapshot version — for GC. Returns
-    /// `last_committed()` if no snapshots are open.
+    /// Minimum GC floor: `min(active snapshots U {completion watermark})`.
+    /// The contiguous completion watermark W is an always-live snapshot, even
+    /// when no snapshots are registered or all explicit pins are above W.
+    /// `last_committed` is eager and non-contiguous: pruning to it could lose
+    /// history needed at W and the commit-log window `(W, last]` needed by SSI.
     ///
     /// A10 in-flight barrier awareness: while any `open_snapshot` call is
     /// mid-registration (`active_snapshots_opening > 0`), this function
@@ -775,18 +778,14 @@ impl RepoTxGate {
         if self.active_snapshots_opening.load(Ordering::Acquire) > 0 {
             return 0;
         }
-        let mut min = u64::MAX;
+        let mut min = self.completion().watermark();
         self.active_snapshots.iter_sync(|k, _| {
             if *k < min {
                 min = *k;
             }
             true
         });
-        if min == u64::MAX {
-            self.last_committed()
-        } else {
-            min
-        }
+        min
     }
 
     /// True if no transaction has an open snapshot.
