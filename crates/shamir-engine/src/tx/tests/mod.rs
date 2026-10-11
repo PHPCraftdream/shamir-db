@@ -28,6 +28,7 @@ pub mod pessimistic_lock_tests;
 pub mod pessimistic_lost_update_tests;
 pub mod post_wal_cancel_tests;
 pub mod post_wal_orphan_ordering_tests;
+pub mod post_wal_orphan_replay_tests;
 pub mod predicate_range_tests;
 pub mod read_your_own_writes_tests;
 pub mod recovery_gate_tests;
