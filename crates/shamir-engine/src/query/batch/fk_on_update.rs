@@ -785,7 +785,7 @@ pub(crate) async fn discover_on_update_refs(
     let repo_name = parent_table_ref.repo.clone();
     let all_for_parent = repo
         .fk_reverse_cache()
-        .get_or_build_by_parent(&parent_table_ref.table, || {
+        .get_or_build_snapshot(|| {
             // F-36: `Fn` (re-callable) build closure so a
             // generation-mismatched scan can retry under the same
             // single-flight lock. Clone `repo_name` per call.
@@ -797,7 +797,8 @@ pub(crate) async fn discover_on_update_refs(
             alias: String::new(),
             message: format!("fk_on_update: reverse-FK scan failed: {e}"),
             code: Some("fk_on_update".to_string()),
-        })?;
+        })?
+        .by_parent(&parent_table_ref.table);
 
     Ok(all_for_parent
         .iter()
