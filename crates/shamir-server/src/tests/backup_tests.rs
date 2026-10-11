@@ -32,12 +32,22 @@ fn backup_copies_all_files() {
 #[test]
 fn backup_refuses_existing_dest() {
     let src = TempDir::new().unwrap();
-    let dst = TempDir::new().unwrap();
-    // Pre-create the timestamped dir to force collision.
-    let stamp = utc_timestamp();
-    fs::create_dir_all(dst.path().join(stamp)).unwrap();
-    let err = backup(src.path(), dst.path()).unwrap_err();
-    assert!(matches!(err, BackupError::Io(_)));
+    // The destination is named after the wall-clock second, so a collision can only be
+    // forced when the second does not tick between pre-creating the dir and `backup()`'s own
+    // stamp. Check the stamp before and after: an unchanged stamp proves that `backup()`
+    // saw the same one, and the assertion is then exact; otherwise retry with a fresh dir.
+    for _ in 0..10 {
+        let dst = TempDir::new().unwrap();
+        let before = utc_timestamp();
+        fs::create_dir_all(dst.path().join(&before)).unwrap();
+        let outcome = backup(src.path(), dst.path());
+        if utc_timestamp() != before {
+            continue;
+        }
+        assert!(matches!(outcome.unwrap_err(), BackupError::Io(_)));
+        return;
+    }
+    panic!("the clock second ticked during every attempt");
 }
 
 #[test]
