@@ -5,6 +5,7 @@ use super::repo_types::{BoxRepo, BoxRepoFactory, RepoFactory};
 use crate::query::batch::BatchError;
 use crate::query::write::WriteResult;
 use crate::table::interner_manager::InternerManager;
+use crate::tx::CommitTailBarrier;
 use shamir_storage::error::{DbError, DbResult};
 use shamir_storage::types::{fully_unwrap_store, Repo, Store};
 use shamir_types::access::Actor;
@@ -44,6 +45,8 @@ pub struct RepoInstance {
     token_names: Arc<scc::HashMap<u64, String, THasher>>,
     /// Atomic tx telemetry counters.
     tx_metrics: Arc<shamir_tx::TxMetrics>,
+    /// Counts owned inline and detached commits for explicit shutdown waiting.
+    commit_tail: Arc<CommitTailBarrier>,
     /// Group-commit coordinator for `synced` durability flushes.
     /// Shared across all clones so concurrent synced commits on this
     /// repo batch their flush+fsync into a single I/O round.
@@ -139,6 +142,7 @@ impl Clone for RepoInstance {
             per_table_mvcc: Arc::clone(&self.per_table_mvcc),
             token_names: Arc::clone(&self.token_names),
             tx_metrics: Arc::clone(&self.tx_metrics),
+            commit_tail: Arc::clone(&self.commit_tail),
             group_commit: Arc::clone(&self.group_commit),
             changefeed: Arc::clone(&self.changefeed),
             wal_dir: self.wal_dir.clone(),
@@ -196,6 +200,7 @@ impl RepoInstance {
             )),
             token_names: Arc::new(token_names),
             tx_metrics: Arc::new(shamir_tx::TxMetrics::new()),
+            commit_tail: Arc::new(CommitTailBarrier::default()),
             group_commit: Arc::new(GroupCommit::new()),
             changefeed: Arc::new(OnceCell::new()),
             wal_dir,
@@ -207,6 +212,26 @@ impl RepoInstance {
             #[cfg(test)]
             table_init_hook: Arc::new(arc_swap::ArcSwapOption::empty()),
         }
+    }
+
+    pub(crate) fn commit_tail(&self) -> &Arc<CommitTailBarrier> {
+        &self.commit_tail
+    }
+
+    /// cancel-safe: yes — timeout or cancellation only stops this wait.
+    /// Stop commit admission first and keep the runtime alive until this returns.
+    /// Includes inline, detached and separately spawned AsyncIndex commit tails.
+    /// This does not drain WAL history and must not be called by `flush_buffers`
+    /// while commits are running.
+    pub async fn quiesce_commits(&self, timeout: std::time::Duration) -> DbResult<()> {
+        tokio::time::timeout(timeout, self.commit_tail.wait_zero())
+            .await
+            .map_err(|_| {
+                DbError::Internal(format!(
+                    "commit quiescence timed out after {timeout:?} for repo '{}'",
+                    self.name
+                ))
+            })
     }
 
     /// Audit §1.7: mutex guarding the recovery-marker disk write. See the
@@ -1015,14 +1040,14 @@ impl RepoInstance {
         Ok((tx, guard))
     }
 
-    /// cancel-safe: partial — delegates to [`crate::tx::commit_tx`], whose
-    /// commit point is a *successful* Phase 4 `wal.begin` (the durable WAL
-    /// entry IS the commit), not the completion of the whole pipeline. A
-    /// cancellation BEFORE that point is a clean abort — nothing durable.
-    /// A cancellation AT/AFTER it leaves the tx COMMITTED: the inflight WAL
-    /// marker is replayed idempotently by recovery on the next open, which
-    /// reconciles materialization (I.3). See `commit_tx` in `tx/commit.rs`
-    /// for the full rationale.
+    /// cancel-safe: partial — cancellation during prelock (including unique-lock
+    /// waits) is still a clean abort. AFTER prelock, cancellation only stops the
+    /// caller's wait: the exact suspended commit continues on the runtime, even
+    /// before WAL acceptance. Do not blindly retry an unobserved outcome.
+    /// Inline panics propagate; detached panics are logged, with VersionGuard
+    /// orphan recovery as the fallback. Stop admission and await
+    /// [`quiesce_commits`](Self::quiesce_commits) before stopping the runtime.
+    /// See [`crate::tx::commit_tx`] for the full contract.
     ///
     /// Commit a transaction via the 7-phase commit pipeline.
     ///

@@ -20,6 +20,8 @@ pub struct TxMetrics {
     /// the commit path — recovery is the materialization guarantor on the
     /// next open (see `MaterializationState::Deferred`). NOT an abort.
     pub txs_materialization_deferred: AtomicU64,
+    /// Armed post-WAL guard drops that transfer replay to the drainer.
+    pub post_wal_orphans_total: AtomicU64,
     pub gc_runs: AtomicU64,
     pub gc_entries_deleted: AtomicU64,
 }
@@ -65,6 +67,10 @@ impl TxMetrics {
             .fetch_add(1, Ordering::Relaxed);
     }
 
+    pub fn on_post_wal_orphan(&self) {
+        self.post_wal_orphans_total.fetch_add(1, Ordering::Relaxed);
+    }
+
     pub fn on_gc_run(&self, entries_deleted: usize) {
         self.gc_runs.fetch_add(1, Ordering::Relaxed);
         self.gc_entries_deleted
@@ -82,6 +88,7 @@ impl TxMetrics {
             txs_aborted_unique: self.txs_aborted_unique.load(Ordering::Relaxed),
             txs_aborted_phantom: self.txs_aborted_phantom.load(Ordering::Relaxed),
             txs_materialization_deferred: self.txs_materialization_deferred.load(Ordering::Relaxed),
+            post_wal_orphans_total: self.post_wal_orphans_total.load(Ordering::Relaxed),
             gc_runs: self.gc_runs.load(Ordering::Relaxed),
             gc_entries_deleted: self.gc_entries_deleted.load(Ordering::Relaxed),
         }
@@ -98,6 +105,7 @@ pub struct TxMetricsSnapshot {
     pub txs_aborted_unique: u64,
     pub txs_aborted_phantom: u64,
     pub txs_materialization_deferred: u64,
+    pub post_wal_orphans_total: u64,
     pub gc_runs: u64,
     pub gc_entries_deleted: u64,
 }
