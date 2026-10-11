@@ -10,6 +10,7 @@ use crate::filter::Filter;
 use crate::read::ReadQuery;
 
 use super::batch_op::BatchOp;
+use super::tree_visitor::BatchTreeVisitor;
 
 /// Operation entry for batch requests.
 ///
@@ -80,7 +81,7 @@ impl From<ReadQuery> for QueryEntry {
 /// Returns the set of distinct repository names referenced by the
 /// data queries in `queries`. Admin ops (which return `none` from
 /// `BatchOp::table_ref`) do not contribute. `BatchOp::Batch`/`BatchOp::
-/// ForEach` bodies ARE walked recursively (#660): a nested sub-batch/loop
+/// ForEach` bodies ARE walked iteratively (#660): a nested sub-batch/loop
 /// body executes WITHIN the outer transaction (Epic04 ADR Decision 4 — an
 /// iteration failure aborts the whole tx batch), so the repos its ops touch
 /// genuinely participate in the OUTER batch's cross-repo scope and must be
@@ -92,27 +93,15 @@ impl From<ReadQuery> for QueryEntry {
 /// transactional batches (Stage 4.C).
 pub fn distinct_repos(queries: &TMap<String, QueryEntry>) -> TFxSet<String> {
     let mut repos = TFxSet::default();
-    collect_repos(queries, &mut repos);
+    for visit in BatchTreeVisitor::new(queries) {
+        if let Some(tr) = visit.entry.op.table_ref() {
+            repos.insert(tr.repo.clone());
+        }
+    }
     repos
 }
 
-/// Recursive collector behind [`distinct_repos`]: adds each entry's
-/// `table_ref()` repo (when present) and descends into `Batch`/`ForEach`
-/// bodies' `queries` maps so nested levels contribute too.
-fn collect_repos(queries: &TMap<String, QueryEntry>, repos: &mut TFxSet<String>) {
-    for qe in queries.values() {
-        if let Some(tr) = qe.op.table_ref() {
-            repos.insert(tr.repo.clone());
-        }
-        match &qe.op {
-            BatchOp::Batch(sub) => collect_repos(&sub.batch.queries, repos),
-            BatchOp::ForEach(fe) => collect_repos(&fe.batch.queries, repos),
-            _ => {}
-        }
-    }
-}
-
-/// Recursively collect every `(Action, ResourcePath)` authorization
+/// Iteratively collect every `(Action, ResourcePath)` authorization
 /// requirement across the WHOLE query tree — including inside nested
 /// `Batch`/`ForEach` bodies, at any depth. This is the single source of
 /// truth the per-op authorization pre-check loops (`ShamirDb::execute_as` /
@@ -128,28 +117,7 @@ pub fn collect_required_access(
     queries: &TMap<String, QueryEntry>,
     db: &str,
 ) -> Vec<(Action, ResourcePath)> {
-    let mut out = Vec::new();
-    collect_required_access_into(queries, db, &mut out);
-    out
-}
-
-/// Recursive collector behind [`collect_required_access`]: adds each
-/// entry's `required_access()` requirement (when present) and descends
-/// into `Batch`/`ForEach` bodies' `queries` maps so nested levels
-/// contribute too — mirrors [`collect_repos`]'s recursion shape exactly.
-fn collect_required_access_into(
-    queries: &TMap<String, QueryEntry>,
-    db: &str,
-    out: &mut Vec<(Action, ResourcePath)>,
-) {
-    for qe in queries.values() {
-        if let Some(req) = qe.op.required_access(db) {
-            out.push(req);
-        }
-        match &qe.op {
-            BatchOp::Batch(sub) => collect_required_access_into(&sub.batch.queries, db, out),
-            BatchOp::ForEach(fe) => collect_required_access_into(&fe.batch.queries, db, out),
-            _ => {}
-        }
-    }
+    BatchTreeVisitor::new(queries)
+        .filter_map(|visit| visit.entry.op.required_access(db))
+        .collect()
 }

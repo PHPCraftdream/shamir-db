@@ -14,6 +14,8 @@ use shamir_connect::server::session::{Session, SessionStore};
 use shamir_connect::server::user_record::UserRecord;
 use shamir_db::query::batch::{BatchOp, BatchRequest};
 use shamir_query_types::auth::SecretString;
+use shamir_query_types::batch::BatchTreeVisitor;
+use shamir_query_types::hmac as canon;
 use zeroize::Zeroizing;
 
 use crate::tables_registry::TablesRegistry;
@@ -587,13 +589,10 @@ pub(super) async fn change_password_verify(
 /// `admin_schema.rs`) — this predicate only stops the coarse gate from
 /// blocking them outright; it grants nothing by itself.
 ///
-/// `BatchOp::Batch` (nested sub-batch) MUST NEVER be added here: its
-/// `required_access` is `None` (`batch_op.rs:543`), so the per-op
-/// authorization loop never recurses into a sub-batch's nested queries.
-/// Exempting `Batch` would let `Batch{ Read(forbidden_table) }` execute
-/// with zero per-table authorization — reopening the bug class task #510
-/// closed for `Subscribe`. The other 8 ops that `is_write() == false`
-/// covers (`GetBufferConfig`, `MigrationStatus`, `InternerDump`,
+/// The caller applies this allowlist only to leaves of `BatchTreeVisitor`.
+/// Containers are not exemptions: every nested leaf still undergoes the
+/// coarse gate and its own per-resource authorization. The other 8 ops that
+/// `is_write() == false` covers (`GetBufferConfig`, `MigrationStatus`, `InternerDump`,
 /// `ChangesSince`, `ListValidators`, `ListPublications`,
 /// `ListSubscriptions`, `ReplicationStatus`) are deliberately excluded too
 /// — extending the exemption to any of them is a separate, deliberate
@@ -639,8 +638,6 @@ pub(super) fn check_destructive_hmacs(
     db_name: &str,
     batch: &BatchRequest,
 ) -> Result<(), (String, &'static str, String)> {
-    use shamir_query_types::hmac as canon;
-
     // Lazy derive only when there's at least one destructive op.
     let mut key_opt: Option<[u8; 32]> = None;
     let key = |k: &mut Option<[u8; 32]>| -> [u8; 32] {
@@ -652,7 +649,9 @@ pub(super) fn check_destructive_hmacs(
         derived
     };
 
-    for (alias, entry) in &batch.queries {
+    for visit in BatchTreeVisitor::new(&batch.queries).filter(|visit| visit.body_depth().is_none())
+    {
+        let (alias, entry) = (visit.alias, visit.entry);
         let (canonical, supplied): (Vec<u8>, Option<&String>) = match &entry.op {
             BatchOp::DropDb(op) => (canon::canonical_drop_db(&op.drop_db), op.hmac.as_ref()),
             BatchOp::DropRepo(op) => (
@@ -760,14 +759,14 @@ pub(super) fn check_destructive_hmacs(
 
         let Some(tag) = supplied else {
             return Err((
-                alias.clone(),
+                alias.to_owned(),
                 "hmac_required",
                 "destructive op missing `hmac` field".to_string(),
             ));
         };
         if !canon::verify_tag_hex(&key(&mut key_opt), &canonical, tag) {
             return Err((
-                alias.clone(),
+                alias.to_owned(),
                 "hmac_mismatch",
                 "destructive op `hmac` does not match canonical input".to_string(),
             ));

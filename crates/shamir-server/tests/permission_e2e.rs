@@ -1678,13 +1678,13 @@ async fn coarse_gate_access_tree_and_list_semantics() {
 }
 
 /// (e) THE regression test: a nested `Batch{ Read(forbidden_table) }` must
-/// stay DENIED for a non-superuser. `Batch` is deliberately excluded from
-/// the allowlist — if it were exempted (as the rejected `is_write()`-based
-/// relaxation would have done), the nested `Read` would execute with ZERO
-/// per-table authorization, since `required_access(Batch) == None` and the
-/// per-op authorization loop never recurses into `SubBatchOp`.
+/// stay DENIED for a non-superuser. A container carries no policy of its own:
+/// the coarse admin gate classifies the LEAVES (`BatchTreeVisitor`), so the
+/// data-only nested `Read` passes it and is then authorized per resource.
+/// `collect_required_access` walks the whole tree, so the forbidden table is
+/// refused with the structured `access_denied` instead of executing.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn coarse_gate_nested_batch_stays_denied() {
+async fn nested_batch_read_of_forbidden_table_stays_denied() {
     let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
 
     let temp = TempDir::new().expect("tempdir");
@@ -1764,9 +1764,9 @@ async fn coarse_gate_nested_batch_stays_denied() {
     let (carol_sid, mut carol_r, mut carol_w, mut carol_rid) =
         scram_login(server_addr, "carol553e", &carol_pw).await;
 
-    // Carol sends Batch{ sub: Read(secret_table) }. `Batch` is NOT in the
-    // allowlist, so `is_admin(Batch) == true && !exempt` → the whole
-    // request is rejected by the coarse gate itself, exactly as today.
+    // Carol sends Batch{ sub: Read(secret_table) }. The container is not an
+    // admin op, so the coarse gate lets the data-only leaf through and the
+    // per-resource authorization denies the READ on the forbidden table.
     let resp = roundtrip(
         &nested_batch_read_req(db_name, secret_table),
         carol_sid,
@@ -1778,13 +1778,13 @@ async fn coarse_gate_nested_batch_stays_denied() {
     match resp {
         DbResponse::Error { code, message } => {
             assert_eq!(
-                code, "permission_denied",
-                "nested Batch{{Read(forbidden)}} must be rejected by the coarse gate, got code={}, msg={}",
+                code, "access_denied",
+                "nested Batch{{Read(forbidden)}} must be denied by per-resource authorization, got code={}, msg={}",
                 code, message
             );
         }
         other => panic!(
-            "expected permission_denied for nested Batch{{Read(forbidden)}}, got {:?}",
+            "expected access_denied for nested Batch{{Read(forbidden)}}, got {:?}",
             other
         ),
     }

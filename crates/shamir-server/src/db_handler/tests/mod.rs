@@ -1,3 +1,4 @@
+pub mod batch_tree_policy_tests;
 pub mod byte_budget_exhaustion_tests;
 pub mod byte_budget_upfront_reserve_tests;
 pub mod cursor_byte_budget_tests;

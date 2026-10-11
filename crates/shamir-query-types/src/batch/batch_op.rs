@@ -27,6 +27,7 @@ use crate::write::{DeleteOp, InsertOp, SetOp, UpdateOp};
 
 use super::for_each_op::ForEachOp;
 use super::sub_batch_op::SubBatchOp;
+use super::tree_visitor::BatchTreeVisitor;
 
 /// Batch operation - can be a read or a write operation.
 ///
@@ -573,8 +574,15 @@ impl BatchOp {
         }
     }
 
-    /// Returns true if this is an admin (DDL) operation.
+    /// Returns true if this leaf or any descendant leaf is an admin (DDL) op.
     pub fn is_admin(&self) -> bool {
+        if let Some(queries) = BatchTreeVisitor::body_queries(self) {
+            return BatchTreeVisitor::new(queries).any(|visit| visit.entry.op.is_admin_leaf());
+        }
+        self.is_admin_leaf()
+    }
+
+    fn is_admin_leaf(&self) -> bool {
         matches!(
             self,
             BatchOp::CreateDb(_)
@@ -631,7 +639,6 @@ impl BatchOp {
                 | BatchOp::PurgeHistory(_)
                 | BatchOp::SetRetention(_)
                 | BatchOp::ChangesSince(_)
-                | BatchOp::Batch(_)
                 | BatchOp::CreateReplicationProfile(_)
                 | BatchOp::DropReplicationProfile(_)
                 | BatchOp::CreatePublication(_)
@@ -658,6 +665,13 @@ impl BatchOp {
     /// `BatchOp` variant will break compilation here and force the author
     /// to explicitly classify it as read or write.
     pub fn is_write(&self) -> bool {
+        if let Some(queries) = BatchTreeVisitor::body_queries(self) {
+            return BatchTreeVisitor::new(queries).any(|visit| visit.entry.op.is_write_leaf());
+        }
+        self.is_write_leaf()
+    }
+
+    fn is_write_leaf(&self) -> bool {
         match self {
             // ----- pure reads / introspection (write = false) -------------
             BatchOp::Read(_) => false,
@@ -759,16 +773,9 @@ impl BatchOp {
             // Conservative: a WASM host function may mutate state.
             BatchOp::Call(_) => true,
 
-            // ----- nested sub-batch --------------------------------------
-            // Recursive: write if ANY nested op is a write.
-            BatchOp::Batch(sub) => sub.batch.queries.values().any(|qe| qe.op.is_write()),
-
-            // ----- data-dependent loop (Epic04/B, #653) ------------------
-            // Recursive, identical to Batch(sub): write if ANY op in the
-            // loop body is a write, evaluated over the FULL static body,
-            // independent of the runtime iteration count (0, 1, or K) —
-            // per ADR Decision 5 (pessimistic/template authorization).
-            BatchOp::ForEach(fe) => fe.batch.queries.values().any(|qe| qe.op.is_write()),
+            // Containers have no intrinsic policy; the iterative visitor
+            // classifies the FULL static body, even for zero iterations.
+            BatchOp::Batch(_) | BatchOp::ForEach(_) => false,
         }
     }
 }

@@ -60,13 +60,12 @@
 use std::collections::VecDeque;
 
 use crate::batch::alias::split_path_tail;
-use crate::batch::{BatchError, BatchLimits, BatchOp, BatchPlan, EdgeKind, QueryEntry};
+use crate::batch::{
+    BatchError, BatchLimits, BatchOp, BatchPlan, BatchTreeVisitor, EdgeKind, QueryEntry,
+};
 use crate::filter::Filter;
 use shamir_collections::{new_map, new_set, TFxSet, TMap, TSet};
 use shamir_types::types::value::QueryValue;
-
-// Maximum stack depth for the iterative nesting-depth walk (safety cap).
-const NESTING_WALK_LIMIT: usize = 64;
 
 /// Batch query planner.
 ///
@@ -123,8 +122,8 @@ impl BatchPlanner {
             });
         }
 
-        // Check static sub-batch nesting depth (iterative, bounded).
-        let nesting = Self::max_nesting_depth_of_queries(queries);
+        // Check static sub-batch nesting depth using the shared iterative visitor.
+        let nesting = Self::max_nesting_depth_of_ops(queries);
         if nesting > limits.max_nesting_depth {
             return Err(BatchError::NestingTooDeep {
                 depth: nesting,
@@ -753,46 +752,13 @@ impl BatchPlanner {
             .unwrap_or(0)
     }
 
-    /// Compute the maximum static sub-batch nesting depth for a set of queries.
-    ///
-    /// Outer batch = depth 0.  Each `BatchOp::Batch` adds 1 for the batch it
-    /// contains.  Uses an iterative worklist `(ops_slice, current_depth)` so
-    /// a malicious deeply-nested payload cannot blow the call stack.
-    ///
-    /// Returns the deepest nesting found (0 when there are no sub-batches).
-    fn max_nesting_depth_of_queries(queries: &TMap<String, QueryEntry>) -> usize {
-        // Worklist: (list of BatchOp refs to inspect, depth assigned to
-        // the batch that CONTAINS them).
-        let ops: Vec<&BatchOp> = queries.values().map(|e| &e.op).collect();
-        Self::max_nesting_depth_of_ops(&ops, 0)
-    }
-
-    fn max_nesting_depth_of_ops(ops: &[&BatchOp], current_depth: usize) -> usize {
-        if current_depth >= NESTING_WALK_LIMIT {
-            return current_depth;
-        }
-
-        let mut max = current_depth;
-        for op in ops {
-            // ForEach's body nests exactly like Batch(sub)'s — it is
-            // planned once and re-planned recursively at execution time
-            // (Epic04/B, #653), so its static nesting depth must be walked
-            // the same way.
-            let child_batch = match op {
-                BatchOp::Batch(sub) => Some(&sub.batch),
-                BatchOp::ForEach(fe) => Some(&fe.batch),
-                _ => None,
-            };
-            if let Some(batch) = child_batch {
-                let child_depth = current_depth + 1;
-                let child_ops: Vec<&BatchOp> = batch.queries.values().map(|e| &e.op).collect();
-                let d = Self::max_nesting_depth_of_ops(&child_ops, child_depth);
-                if d > max {
-                    max = d;
-                }
-            }
-        }
-        max
+    /// Compute maximum static body nesting depth with the shared visitor.
+    /// Outer batch = 0; Batch and ForEach each add 1, even for empty bodies.
+    fn max_nesting_depth_of_ops(queries: &TMap<String, QueryEntry>) -> usize {
+        BatchTreeVisitor::new(queries)
+            .filter_map(|visit| visit.body_depth())
+            .max()
+            .unwrap_or(0)
     }
 
     /// Topological sort into parallel stages using Kahn's algorithm — O(V+E).

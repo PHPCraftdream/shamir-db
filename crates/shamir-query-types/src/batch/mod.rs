@@ -41,6 +41,7 @@ pub mod reference;
 pub mod result_encoding;
 pub mod sub_batch_op;
 pub mod transaction_info;
+pub mod tree_visitor;
 
 #[cfg(test)]
 mod tests;
@@ -61,3 +62,4 @@ pub use reference::{QueryPath, QueryReference, ReferenceParseError};
 pub use result_encoding::ResultEncoding;
 pub use sub_batch_op::SubBatchOp;
 pub use transaction_info::TransactionInfo;
+pub use tree_visitor::{BatchTreeEntry, BatchTreeVisitor};

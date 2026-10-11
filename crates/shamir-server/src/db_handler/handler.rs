@@ -74,6 +74,7 @@ use shamir_connect::server::session::{Session, SessionStore};
 use shamir_db::access::Actor;
 use shamir_db::query::batch::{BatchError, BatchOp, BatchRequest};
 use shamir_db::ShamirDb;
+use shamir_query_types::batch::BatchTreeVisitor;
 
 use crate::byte_budget::{stash_guard, stash_serialized_response, ByteBudget};
 
@@ -510,7 +511,10 @@ impl ShamirDbHandler {
         // block; each still runs its own real per-table/per-path
         // authorization further down the stack.
         if !session.permissions.is_superuser {
-            for (alias, entry) in &batch.queries {
+            for visit in
+                BatchTreeVisitor::new(&batch.queries).filter(|visit| visit.body_depth().is_none())
+            {
+                let (alias, entry) = (visit.alias, visit.entry);
                 if entry.op.is_admin() && !is_coarse_admin_gate_exempt(&entry.op) {
                     return DbResponse::Error {
                         code: "permission_denied".into(),
@@ -527,7 +531,10 @@ impl ShamirDbHandler {
         // write. This is a no-op when `node_mode == ReadWrite` (the default).
         // R1: include leader_addr for client redirect.
         if self.node_mode == NodeMode::ReadOnly {
-            for (alias, entry) in &batch.queries {
+            for visit in
+                BatchTreeVisitor::new(&batch.queries).filter(|visit| visit.body_depth().is_none())
+            {
+                let (alias, entry) = (visit.alias, visit.entry);
                 if entry.op.is_write() {
                     return DbResponse::Error {
                         code: "read_only_replica".into(),
