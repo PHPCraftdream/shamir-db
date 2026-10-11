@@ -181,29 +181,23 @@ async fn setup_with_validator(validator: Arc<dyn RecordValidator>) -> (TestResol
     reg.register(validator_id, "db_reading_val", validator)
         .unwrap();
 
-    // Persist bindings on the `child` table's info store so the validator
-    // binding is loaded on every `get_table("child")` call.
-    let child_tmp = repo.get_table("child").await.unwrap();
-    let bindings = vec![ValidatorBinding {
-        validator_id,
-        ops: smallvec::smallvec![WriteOp::Insert],
-        priority: 1000,
-    }];
-    // Access the info_store through the table's public API.
-    // The persistence layer writes to the info_store the TableManager was
-    // built with — but since get_table returns a fresh instance each time
-    // (OnceCell), we need to persist BEFORE the OnceCell is initialized.
-    // Use the helper from the persistence module which writes raw metadata.
-    crate::validator::persistence::save_validators_metadata(&bindings, child_tmp.info_store())
-        .await
-        .unwrap();
-
     let resolver = TestResolver {
         repo,
         validators: reg,
     };
-    // Resolve child through the resolver so it picks up the registry.
+    // Resolve child through the resolver so it picks up the registry, then bind the
+    // validator on THAT instance. Persisting the binding to the info store after the table
+    // was already opened (the previous setup) never reached the open table's in-memory
+    // snapshot, so no validator ever ran in these tests.
     let child = resolver.resolve(&TableRef::new("child")).await.unwrap();
+    child
+        .add_validator_binding(ValidatorBinding {
+            validator_id,
+            ops: smallvec::smallvec![WriteOp::Insert],
+            priority: 1000,
+        })
+        .await
+        .unwrap();
     (resolver, child)
 }
 
