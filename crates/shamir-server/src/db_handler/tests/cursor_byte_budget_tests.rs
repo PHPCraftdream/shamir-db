@@ -65,10 +65,11 @@ async fn build_handler(
         .await
         .expect("add repo");
 
-    let handler = ShamirDbHandler::new(Arc::new(shamir))
-        .with_query_limits(query_limits)
-        .with_byte_budget(byte_budget)
-        .with_cursor_limits(CursorLimitsCap::UNLIMITED);
+    let shamir = Arc::new(shamir);
+    // Seed without the tested caps: insert replies are not the cursor page under test.
+    let seed_handler = ShamirDbHandler::new(Arc::clone(&shamir))
+        .with_query_limits(QueryLimitsCap::UNLIMITED)
+        .with_byte_budget(ByteBudget::unbounded());
 
     if n_rows > 0 {
         let padding = "x".repeat(256);
@@ -83,7 +84,7 @@ async fn build_handler(
         }
         let session = alice_session();
         let conn = ConnectionServices::without_push(0);
-        let resp = handler
+        let resp = seed_handler
             .execute(
                 &session,
                 CURRENT_QUERY_LANG_VERSION,
@@ -98,7 +99,10 @@ async fn build_handler(
         );
     }
 
-    handler
+    ShamirDbHandler::new(shamir)
+        .with_query_limits(query_limits)
+        .with_byte_budget(byte_budget)
+        .with_cursor_limits(CursorLimitsCap::UNLIMITED)
 }
 
 /// Same as [`build_handler`], but lets the caller install a bounded
@@ -121,10 +125,11 @@ async fn build_handler_with_cursor_limits(
         .await
         .expect("add repo");
 
-    let handler = ShamirDbHandler::new(Arc::new(shamir))
-        .with_query_limits(query_limits)
-        .with_byte_budget(byte_budget)
-        .with_cursor_limits(cursor_limits);
+    let shamir = Arc::new(shamir);
+    // Seed without the tested caps: insert replies are not the cursor page under test.
+    let seed_handler = ShamirDbHandler::new(Arc::clone(&shamir))
+        .with_query_limits(QueryLimitsCap::UNLIMITED)
+        .with_byte_budget(ByteBudget::unbounded());
 
     if n_rows > 0 {
         let padding = "x".repeat(256);
@@ -139,7 +144,7 @@ async fn build_handler_with_cursor_limits(
         }
         let session = alice_session();
         let conn = ConnectionServices::without_push(0);
-        let resp = handler
+        let resp = seed_handler
             .execute(
                 &session,
                 CURRENT_QUERY_LANG_VERSION,
@@ -154,7 +159,10 @@ async fn build_handler_with_cursor_limits(
         );
     }
 
-    handler
+    ShamirDbHandler::new(shamir)
+        .with_query_limits(query_limits)
+        .with_byte_budget(byte_budget)
+        .with_cursor_limits(cursor_limits)
 }
 
 fn create_cursor_req(page_size: u32) -> DbRequest {
@@ -372,6 +380,8 @@ async fn fetch_next_upfront_reserve_blocks_second_page_before_it_completes() {
     // Tight cap close to the actual page size (not a loose multiple) so the
     // upfront estimate and the actual size stay close together — same
     // rationale as `byte_budget_upfront_reserve_tests`'s cap sizing.
+    // Two 256-byte pads plus record/stats encoding make one_page >= 600 bytes:
+    // 10% >= 60 covers the <= 52-byte CursorPage envelope + 8-byte timing jitter.
     let max_result_size_bytes = one_page + one_page / 10;
     let budget = ByteBudget::new(Some(max_result_size_bytes));
     let query_limits = QueryLimitsCap {

@@ -76,11 +76,13 @@ async fn build_handler(
         .await
         .expect("add repo");
 
-    let handler = ShamirDbHandler::new(Arc::new(shamir))
-        .with_query_limits(query_limits)
-        .with_byte_budget(byte_budget);
+    let shamir = Arc::new(shamir);
+    // Seed without the tested caps: insert replies are not the SELECT under test.
+    let seed_handler = ShamirDbHandler::new(Arc::clone(&shamir))
+        .with_query_limits(QueryLimitsCap::UNLIMITED)
+        .with_byte_budget(ByteBudget::unbounded());
 
-    // Seed rows through the same handler path (execute) so table state is
+    // Seed rows through the handler path (execute) so table state is
     // identical to how a real client would populate it.
     let padding = "x".repeat(256);
     let mut b = Batch::new();
@@ -92,7 +94,7 @@ async fn build_handler(
     }
     let session = alice_session();
     let conn = ConnectionServices::without_push(0);
-    let resp = handler
+    let resp = seed_handler
         .execute(
             &session,
             CURRENT_QUERY_LANG_VERSION,
@@ -105,7 +107,9 @@ async fn build_handler(
         matches!(resp, DbResponse::Batch { .. }),
         "seed insert batch must succeed, got: {resp:?}"
     );
-    handler
+    ShamirDbHandler::new(shamir)
+        .with_query_limits(query_limits)
+        .with_byte_budget(byte_budget)
 }
 
 fn select_all_batch() -> shamir_query_builder::BatchRequest {

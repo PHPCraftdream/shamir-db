@@ -63,9 +63,11 @@ async fn build_handler(
         .await
         .expect("add repo");
 
-    let handler = ShamirDbHandler::new(Arc::new(shamir))
-        .with_query_limits(query_limits)
-        .with_byte_budget(byte_budget);
+    let shamir = Arc::new(shamir);
+    // Seed without the tested caps: insert replies are not the SELECT under test.
+    let seed_handler = ShamirDbHandler::new(Arc::clone(&shamir))
+        .with_query_limits(QueryLimitsCap::UNLIMITED)
+        .with_byte_budget(ByteBudget::unbounded());
 
     if n_rows > 0 {
         let padding = "x".repeat(256);
@@ -78,7 +80,7 @@ async fn build_handler(
         }
         let session = alice_session();
         let conn = ConnectionServices::without_push(0);
-        let resp = handler
+        let resp = seed_handler
             .execute(
                 &session,
                 CURRENT_QUERY_LANG_VERSION,
@@ -93,7 +95,9 @@ async fn build_handler(
         );
     }
 
-    handler
+    ShamirDbHandler::new(shamir)
+        .with_query_limits(query_limits)
+        .with_byte_budget(byte_budget)
 }
 
 fn select_all_batch() -> shamir_query_builder::BatchRequest {

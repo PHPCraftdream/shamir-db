@@ -140,7 +140,7 @@
 mod authorized;
 mod batch_execute;
 mod batch_validate;
-mod exec_scope;
+pub(crate) mod exec_scope;
 mod execution_deadline;
 mod executor_traits;
 mod fk_actions;

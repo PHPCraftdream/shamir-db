@@ -325,21 +325,15 @@ async fn enforce_page_budget(
     if budget_active {
         let guard = match upfront_guard {
             Some(mut guard) => {
-                // Overshoot edge case (CR-B2, mirrors `execute()`'s
-                // handling): the per-page cap and the actual serialized
-                // size are two independently-configured numbers, so in
-                // principle `bytes.len()` could exceed what was reserved
-                // upfront (e.g. an operator changed the cap between the
-                // upfront reserve and this point in a hot-reload scenario) —
-                // guard against that with `grow_unchecked` rather than
-                // assume `shrink_to`'s no-op-on-grow branch is always safe
-                // to silently under-reserve through.
-                if bytes.len() >= guard.bytes_reserved() {
-                    guard.grow_unchecked(bytes.len() - guard.bytes_reserved());
+                if bytes.len() > guard.bytes_reserved() {
+                    // No unchecked growth: release the old reservation before
+                    // acquiring the actual size, avoiding self-deadlock.
+                    drop(guard);
+                    handler.byte_budget.acquire(bytes.len()).await
                 } else {
                     guard.shrink_to(bytes.len());
+                    guard
                 }
-                guard
             }
             None => handler.byte_budget.acquire(bytes.len()).await,
         };
