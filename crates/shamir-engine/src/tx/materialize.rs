@@ -111,14 +111,12 @@ pub(super) async fn materialize(
     // `wal_ops_from_tx`. The happy path also applies it in-memory so
     // callers observe the new count without waiting for recovery.
     //
-    // Recovery idempotency: the matching replay branch in
-    // `recovery::replay_v2_op` for `WalOpV2::CounterDelta` is intentionally
-    // SKIPPED at recovery time. Counter persistence is best-effort; the
-    // durable `last_committed_version` marker (Phase 6.5) is the
-    // authoritative MVCC milestone, and a per-tx counter-applied marker is
-    // overkill for an at-most-by-one drift on a metric counter. Because of
-    // that, a Phase 5b failure does NOT flip `ok` (recovery will not
-    // re-apply the counter, and the doctor reconciles by full data scan).
+    // Cold recovery skips CounterDelta because persisted counts may already
+    // include it. Warm orphan replay instead uses the drainer's per-version,
+    // per-table counter-applied membership: successful inline 5b is not
+    // repeated, while an orphan cancelled before 5b gets a best-effort replay.
+    // Counter failures remain metric-only drift and never flip `ok` or block
+    // orphan durability; the doctor reconciles counts by a full data scan.
     apply_tracked_counter_phase(tx, repo, commit_version).await;
     super::commit::fire_post_wal_pre_publish_test_hook(repo, true).await;
 

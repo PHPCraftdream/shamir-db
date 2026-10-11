@@ -793,25 +793,15 @@ async fn commit_tx_inner_legacy_async(
     // durable for `restore_on_open::replay_delta` to pick up.
     maybe_crash("phase5d_delta_async", repo).await;
 
-    // F-28 Step 5 (S3-C): record the SSI footprint BEFORE publish, mirroring
-    // `materialize.rs`'s documented Phase 6-bis-before-Phase-6 ordering and
-    // the lock-free `commit_tx_lockfree` path (which already got this order
-    // right — see its own `record_commit_writes` call below). `VersionGuard::
-    // commit()` is SYNCHRONOUS: it immediately does `completion.mark(
-    // Materialized)` + `last_committed.fetch_max(watermark)`, advancing the
-    // reader-visible floor with no `.await` in between. If the footprint were
-    // recorded AFTER that publish, a concurrent Serializable validator
-    // reading `last_committed()` in that narrow window could observe this
-    // tx's version as already-visible with NO footprint recorded for it yet —
-    // a missed phantom conflict. Recording first closes that window: by the
-    // time this tx's version becomes visible, its footprint is already in the
-    // lock-free `commit_write_log`.
+    // The SSI footprint was recorded immediately after WAL acceptance,
+    // before any cancellable materialization. Both normal publish and orphan
+    // replay therefore expose a version whose footprint is already recorded.
 
     // P0a: consume the RAII VersionGuard → mark(Materialized) + advance
     // last_committed_version from the watermark (fetch_max). Replaces the
     // prior manual mark + sync_last_committed_from_watermark +
     // publish_committed_max trio (identical watermark semantics). Closes H1:
-    // a panic between WAL-durable and here drops the guard → Aborted.
+    // a panic between WAL-durable and here registers an orphan for replay.
     version_guard.commit();
 
     // A4 (fix a): release Level-3 pessimistic locks AFTER the publish step
@@ -1035,7 +1025,8 @@ async fn commit_tx_lockfree(
 
     maybe_crash("phase4", repo).await;
 
-    // Phase 6-bis: record SSI footprint BEFORE publish (lock-free insert).
+    // SSI footprint already recorded at WAL acceptance above, before replay
+    // could take ownership of a cancelled commit's version.
 
     repo.tx_metrics().on_tx_committed();
 

@@ -1,18 +1,20 @@
+use std::future::{poll_fn, Future};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::task::Poll;
 
 use bytes::Bytes;
 use shamir_tx::{IndexWriteOp, IsolationLevel};
 use shamir_types::types::value::InnerValue;
-use tokio::sync::Notify;
+use tokio::sync::{oneshot, Notify};
 
 use crate::repo::{BoxRepoFactory, RepoInstance};
 use crate::table::table_manager::table_token_for;
 use crate::table::TableConfig;
 use crate::tx::commit::{PostWalPrePublishHook, TEST_POST_WAL_PRE_PUBLISH_HOOK};
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn post_wal_cancel_survives_drain_truncation_and_reopen_with_pre_wal_control() {
     let dir = tempfile::TempDir::new().unwrap();
     let path = dir.path().join("repo");
@@ -45,6 +47,125 @@ async fn post_wal_cancel_survives_drain_truncation_and_reopen_with_pre_wal_contr
         .unwrap();
     repo.commit_tx(tx).await.unwrap();
     drop(snapshot);
+
+    // B1: a present but ACTIVE WAL entry is not a missing-key gap. A later
+    // orphan raises the scan bound: the completed "later" commit alone cannot
+    // advance contiguous visibility past the still-active version.
+    repo.drainer().drain_all(&repo).await.unwrap();
+    hook.armed.store(true, Ordering::Release);
+    let (mut tx, snapshot) = repo.begin_tx(IsolationLevel::Serializable).await.unwrap();
+    let active_rid = tbl
+        .insert_tx(&InnerValue::Str("active".into()), Some(&mut tx))
+        .await
+        .unwrap();
+    let owned = repo.clone();
+    let active_task = tokio::spawn(async move { owned.commit_tx(tx).await });
+    hook.reached.notified().await;
+    let active_version = *repo.drainer().window_keys().last().unwrap();
+    assert!(gate.is_active_post_wal(active_version));
+    let (mut tx, later_snapshot) = repo.begin_tx(IsolationLevel::Serializable).await.unwrap();
+    let later_rid = tbl
+        .insert_tx(&InnerValue::Str("later".into()), Some(&mut tx))
+        .await
+        .unwrap();
+    let later_outcome = repo.commit_tx(tx).await.unwrap();
+    drop(later_snapshot);
+    assert_eq!(active_version, gate.durable_watermark() + 1);
+    assert_eq!(later_outcome.commit_version, active_version + 1);
+    assert_eq!(gate.last_committed(), gate.durable_watermark());
+    assert_eq!(gate.orphan_max(), 0);
+
+    hook.armed.store(true, Ordering::Release);
+    let (mut tx, orphan_snapshot) = repo.begin_tx(IsolationLevel::Serializable).await.unwrap();
+    let scan_orphan_rid = tbl
+        .insert_tx(&InnerValue::Str("scan-orphan".into()), Some(&mut tx))
+        .await
+        .unwrap();
+    let owned = repo.clone();
+    let orphan_task = tokio::spawn(async move { owned.commit_tx(tx).await });
+    hook.reached.notified().await;
+    orphan_task.abort();
+    assert!(orphan_task.await.unwrap_err().is_cancelled());
+    drop(orphan_snapshot);
+    let scan_orphan_version = gate.orphan_max();
+    assert_eq!(scan_orphan_version, later_outcome.commit_version + 1);
+    assert!(gate.is_orphaned_post_wal(scan_orphan_version));
+    assert!(!gate.is_active_post_wal(later_outcome.commit_version));
+    assert!(!gate.is_orphaned_post_wal(later_outcome.commit_version));
+    assert!(gate.is_active_post_wal(active_version));
+    assert_eq!(active_version, gate.durable_watermark() + 1);
+    assert!(repo.drainer().window_entry(active_version).is_some());
+    let scan_bound = gate.last_committed().max(gate.orphan_max());
+    assert!(scan_bound > gate.durable_watermark());
+    assert!(scan_bound > active_version);
+    let recover_before = repo.drainer().recover_calls();
+    let drained = repo.drainer().drain_step(&repo).await.unwrap();
+    let recover_after = repo.drainer().recover_calls();
+    hook.resume.notify_one();
+    active_task.await.unwrap().unwrap();
+    drop(snapshot);
+    assert_eq!(drained, 0);
+    // Red before B1: the empty prefix caused a full WAL recovery here.
+    assert_eq!(recover_after, recover_before);
+    repo.drainer().drain_all(&repo).await.unwrap();
+    assert_eq!(gate.durable_watermark(), scan_orphan_version);
+    assert!(!gate.is_orphaned_post_wal(scan_orphan_version));
+    assert_eq!(gate.durable_watermark(), gate.last_committed());
+    assert_eq!(
+        tbl.get(later_rid).await.unwrap(),
+        InnerValue::Str("later".into()),
+    );
+    assert_eq!(
+        tbl.get(scan_orphan_rid).await.unwrap(),
+        InnerValue::Str("scan-orphan".into()),
+    );
+    assert_eq!(
+        tbl.get(active_rid).await.unwrap(),
+        InnerValue::Str("active".into()),
+    );
+
+    // B2: explicitly poll the spawned drain under a held replay lock; the
+    // handshake rules out a false pass from a task that was never scheduled.
+    let (mut tx, snapshot) = repo.begin_tx(IsolationLevel::Serializable).await.unwrap();
+    tbl.insert_tx(&InnerValue::Str("wait-for-replay".into()), Some(&mut tx))
+        .await
+        .unwrap();
+    let waiting_outcome = repo.commit_tx(tx).await.unwrap();
+    drop(snapshot);
+    let drainer = repo.drainer();
+    // Genuine-gap control for B1: remove only the offered RAM copy. The
+    // accepted WAL entry must be recovered once the waiting pass owns replay.
+    drainer.window_remove_for_test(waiting_outcome.commit_version);
+    let recover_before_gap = drainer.recover_calls();
+    let replay_guard = drainer.replay_lock_for_test().await;
+    let (polled_tx, polled_rx) = oneshot::channel();
+    let owned = repo.clone();
+    let drain_task = tokio::spawn(async move {
+        let drainer = owned.drainer();
+        let drain = drainer.drain_all(&owned);
+        tokio::pin!(drain);
+        let first = poll_fn(|cx| Poll::Ready(drain.as_mut().poll(cx))).await;
+        polled_tx.send(first.is_pending()).unwrap();
+        match first {
+            Poll::Ready(result) => result,
+            Poll::Pending => drain.await,
+        }
+    });
+    let pending = polled_rx.await.unwrap();
+    for _ in 0..16 {
+        tokio::task::yield_now().await;
+    }
+    let finished_while_locked = drain_task.is_finished();
+    let durable_while_locked = gate.durable_watermark();
+    drop(replay_guard);
+    let waiting_drained = drain_task.await.unwrap().unwrap();
+    // Red before B2: CAS contention returned Ok(0), not Pending.
+    assert!(pending);
+    assert!(!finished_while_locked);
+    assert!(durable_while_locked < waiting_outcome.commit_version);
+    assert_eq!(waiting_drained, 1);
+    assert_eq!(drainer.recover_calls(), recover_before_gap + 1);
+    assert_eq!(gate.durable_watermark(), gate.last_committed());
 
     hook.armed.store(true, Ordering::Release);
     let (mut tx, snapshot) = repo.begin_tx(IsolationLevel::Serializable).await.unwrap();
@@ -87,9 +208,9 @@ async fn post_wal_cancel_survives_drain_truncation_and_reopen_with_pre_wal_contr
             .unwrap(),
         posting_value,
     );
-    assert_eq!(tbl.counter().get().await.unwrap(), 3);
+    assert_eq!(tbl.counter().get().await.unwrap(), 7);
     repo.drainer().drain_all(&repo).await.unwrap();
-    assert_eq!(tbl.counter().get().await.unwrap(), 3);
+    assert_eq!(tbl.counter().get().await.unwrap(), 7);
 
     hook.after_counter.store(true, Ordering::Release);
     hook.armed.store(true, Ordering::Release);
@@ -106,18 +227,52 @@ async fn post_wal_cancel_survives_drain_truncation_and_reopen_with_pre_wal_contr
     drop(snapshot);
     let orphan_version = gate.orphan_max();
     hook.fail_orphan_markers.store(true, Ordering::Release);
-    assert!(repo.drainer().drain_all(&repo).await.is_err());
-    assert!(gate.is_orphaned_post_wal(orphan_version));
-    assert!(gate.durable_watermark() < orphan_version);
-    assert_eq!(tbl.counter().get().await.unwrap(), 4);
+    // B3 markers: injected persistence failure is advisory, not a drain error.
+    assert_eq!(repo.drainer().drain_all(&repo).await.unwrap(), 1);
+    assert!(!gate.is_orphaned_post_wal(orphan_version));
+    assert_eq!(gate.durable_watermark(), orphan_version);
+    assert_eq!(tbl.counter().get().await.unwrap(), 8);
     repo.drainer().drain_all(&repo).await.unwrap();
     assert!(!gate.is_orphaned_post_wal(orphan_version));
-    assert_eq!(tbl.counter().get().await.unwrap(), 4);
+    assert_eq!(tbl.counter().get().await.unwrap(), 8);
     assert_eq!(
         tbl.get(after_counter).await.unwrap(),
         InnerValue::Str("counter-applied".into()),
     );
     assert_eq!(gate.durable_watermark(), gate.last_committed());
+
+    // B3 counter: preserve a real WAL Put but inject metric drift so its
+    // negative CounterDelta is refused by the real counter's checked CAS.
+    hook.after_counter.store(false, Ordering::Release);
+    hook.armed.store(true, Ordering::Release);
+    let (mut tx, snapshot) = repo.begin_tx(IsolationLevel::Serializable).await.unwrap();
+    let counter_failed_rid = tbl
+        .insert_tx(&InnerValue::Str("counter-failed".into()), Some(&mut tx))
+        .await
+        .unwrap();
+    tx.counter_deltas.insert(table_token_for("t"), -1);
+    let owned = repo.clone();
+    let task = tokio::spawn(async move { owned.commit_tx(tx).await });
+    hook.reached.notified().await;
+    task.abort();
+    assert!(task.await.unwrap_err().is_cancelled());
+    drop(snapshot);
+    let counter_failed_version = gate.orphan_max();
+    tbl.counter().set_to(0).await.unwrap();
+    let counter_error = tbl.counter().increment(-1).await.unwrap_err();
+    assert!(counter_error.to_string().contains("cannot go below zero"));
+    // Red before B3: increment(-1)? returned Err and wedged durability.
+    assert_eq!(repo.drainer().drain_all(&repo).await.unwrap(), 1);
+    assert!(!gate.is_orphaned_post_wal(counter_failed_version));
+    assert_eq!(gate.durable_watermark(), counter_failed_version);
+    assert_eq!(gate.durable_watermark(), gate.last_committed());
+    assert_eq!(tbl.counter().get().await.unwrap(), 0);
+    assert_eq!(
+        tbl.get(counter_failed_rid).await.unwrap(),
+        InnerValue::Str("counter-failed".into()),
+    );
+    assert_eq!(repo.drainer().drain_all(&repo).await.unwrap(), 0);
+    assert_eq!(tbl.counter().get().await.unwrap(), 0);
 
     hook.pre_wal.store(true, Ordering::Release);
     hook.armed.store(true, Ordering::Release);
@@ -165,6 +320,14 @@ async fn post_wal_cancel_survives_drain_truncation_and_reopen_with_pre_wal_contr
             .iter()
             .any(|op| matches!(op, shamir_wal::WalOpV2::Put { rid, .. } if *rid == b))
     }));
+    // The refused orphan metric must not retain its sealed WAL segment.
+    assert!(gate.durable_watermark() >= counter_failed_version);
+    assert!(!wal
+        .recover()
+        .await
+        .unwrap()
+        .iter()
+        .any(|entry| entry.commit_version == counter_failed_version));
     drop(wal);
     drop(gate);
     drop(tbl);
@@ -178,6 +341,10 @@ async fn post_wal_cancel_survives_drain_truncation_and_reopen_with_pre_wal_contr
     .await
     .unwrap();
     let tbl = reopened.get_table("t").await.unwrap();
+    assert_eq!(
+        tbl.get(counter_failed_rid).await.unwrap(),
+        InnerValue::Str("counter-failed".into()),
+    );
     for (rid, value) in [(a, "A"), (b, "B"), (c, "C")] {
         assert_eq!(tbl.get(rid).await.unwrap(), InnerValue::Str(value.into()));
     }

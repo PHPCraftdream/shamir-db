@@ -563,13 +563,10 @@ impl RepoTxGate {
     /// Allocate the next MVCC version and return a RAII [`VersionGuard`]
     /// that owns the terminal-mark obligation.
     ///
-    /// The guard's `Drop` marks the version `Aborted` (advancing the
-    /// watermark past it) unless [`VersionGuard::commit`] was called first,
-    /// which marks it `Materialized`. Both paths advance
-    /// `last_committed_version` from the resulting watermark — identical to
-    /// the manual `mark` + [`sync_last_committed_from_watermark`] pair this
-    /// replaces. The compiler thus enforces that every allocated version is
-    /// terminally marked exactly once.
+    /// Pre-WAL Drop marks both trackers Aborted; commit marks visibility
+    /// Materialized. After VersionGuard::wal_accepted, an armed Drop instead
+    /// registers an orphan for the engine drainer to replay and complete.
+    /// Visibility completion advances last_committed from the watermark.
     pub fn assign_next_version_guarded(&self) -> VersionGuard {
         let version = self.assign_next_version();
         VersionGuard::new(
@@ -583,22 +580,29 @@ impl RepoTxGate {
         )
     }
 
+    /// Highest version ever registered as a post-WAL orphan (zero if none).
+    /// Monotone scan bound; forgetting an orphan does not lower it.
     pub fn orphan_max(&self) -> u64 {
         self.orphan_max.load(Ordering::Acquire)
     }
 
+    /// Whether a live commit owns this WAL-accepted version's materialization.
+    /// The drainer must stop at it rather than replaying concurrently.
     pub fn is_active_post_wal(&self, version: u64) -> bool {
         self.active_post_wal
             .peek_with(&version, |_, _| ())
             .is_some()
     }
 
+    /// Whether a dropped post-WAL guard transferred this version to replay.
     pub fn is_orphaned_post_wal(&self, version: u64) -> bool {
         self.orphaned_post_wal
             .peek_with(&version, |_, _| ())
             .is_some()
     }
 
+    /// Mark a registered orphan Materialized and advance visibility after
+    /// replay succeeds. Does not mark durability or forget membership.
     pub fn complete_orphaned_post_wal(&self, version: u64) {
         if self.is_orphaned_post_wal(version) {
             self.completion
@@ -607,6 +611,8 @@ impl RepoTxGate {
         }
     }
 
+    /// Remove settled orphan membership after replay and visibility completion.
+    /// The drainer separately marks durability; orphan_max remains monotone.
     pub fn forget_orphaned_post_wal(&self, version: u64) {
         let _ = self.orphaned_post_wal.remove_sync(&version);
     }
