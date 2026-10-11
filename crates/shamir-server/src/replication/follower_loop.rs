@@ -386,6 +386,12 @@ pub async fn run_follower_loop(
                         "follower_loop: event skipped (already applied)"
                     );
                 }
+                Ok(ApplyOutcome::Rejected { reason }) => {
+                    return Err(ReplError::ApplyRejected {
+                        leader_version: ev.commit_version,
+                        reason,
+                    });
+                }
                 Err(e) => {
                     let re = ReplError::Apply {
                         leader_version: ev.commit_version,

@@ -259,6 +259,17 @@ impl SubscriptionSupervisor {
         }
     }
 
+    #[cfg(test)]
+    pub(crate) async fn wait_for_subscription(&self, name: &str) {
+        let (_, handle) = self
+            .registry
+            .remove_sync(name)
+            .expect("subscription must be registered");
+        for join in handle.joins {
+            join.await.expect("subscription task panicked");
+        }
+    }
+
     /// Resolve `sub`'s profile → `pull` streams, then spawn one follower loop
     /// per `pull` stream targeting `(scope.db, scope.repo)`.
     async fn start_subscription(&self, sub: &Subscription) -> Result<(), String> {
@@ -295,19 +306,18 @@ impl SubscriptionSupervisor {
             let join = tokio::spawn(async move {
                 match run_follower_loop(local.clone(), src, cfg, tok).await {
                     Ok(()) => {}
-                    Err(
-                        e @ ReplError::JournalGap {
-                            gap_at,
-                            from_version,
+                    Err(e @ ReplError::JournalGap { gap_at, .. })
+                    | Err(
+                        e @ ReplError::ApplyRejected {
+                            leader_version: gap_at,
+                            ..
                         },
                     ) => {
-                        // Terminal, honest-stop condition (Part 2 of this
-                        // task): persist `resync_required` on the
-                        // subscription's own row so the gap is visible via
-                        // the existing admin surface (`ReplicationStatus` /
-                        // `ListSubscriptions`). Any OTHER `ReplError`
-                        // variant falls through to the generic warn-log
-                        // branch below, unchanged.
+                        let from_version = if let ReplError::JournalGap { from_version, .. } = &e {
+                            *from_version
+                        } else {
+                            gap_at
+                        };
                         if let Err(mark_err) = local
                             .mark_subscription_resync_required(&sub_name, gap_at, from_version)
                             .await
@@ -315,13 +325,13 @@ impl SubscriptionSupervisor {
                             warn!(
                                 subscription = %sub_name,
                                 error = %mark_err,
-                                "supervisor: failed to persist resync_required after journal gap"
+                                "supervisor: failed to persist resync_required after terminal replication rejection"
                             );
                         }
                         warn!(
                             subscription = %sub_name,
                             error = %e,
-                            "follower loop terminated on journal gap; subscription marked resync_required"
+                            "follower loop terminated; subscription marked resync_required"
                         );
                     }
                     Err(e) => {

@@ -6,19 +6,23 @@
 //! apply contract: Put/Delete convergence, idempotency by leader-watermark,
 //! watermark ordering, and downstream changefeed re-emission.
 
+use std::pin::Pin;
 use std::sync::Arc;
 
+use async_trait::async_trait;
 use bytes::Bytes;
-use shamir_storage::error::DbError;
+use futures::Stream;
+use shamir_storage::error::{DbError, DbResult};
 use shamir_storage::storage_in_memory::InMemoryRepo;
-use shamir_storage::types::{Repo, Store};
-use shamir_tx::{IsolationLevel, TxContext, TxId};
+use shamir_storage::types::{RecordKey, Repo, Store};
+use shamir_tx::{IsolationLevel, MvccStore, TxContext, TxId};
 use shamir_types::access::Actor;
 use shamir_types::types::record_id::RecordId;
 use shamir_types::types::value::InnerValue;
 
 use crate::repo::{BoxRepo, RepoInstance};
 use crate::table::TableConfig;
+use crate::tx::apply_replicated::ApplyRejectReason;
 use crate::tx::{apply_replicated, ApplyOutcome, ApplyPolicy};
 
 /// Build an in-memory follower repo with one configured table `items`.
@@ -399,27 +403,27 @@ async fn a12_failure_path_version_marked_aborted_in_completion_tracker() {
     let gate = follower.tx_gate().await.unwrap();
     assert_eq!(gate.completion().watermark(), 0);
 
-    // Build a Put event whose RecordChange carries NO value bytes — this
-    // trips the early `Err(DbError::Internal(...))` return inside
-    // `apply_replicated`'s grouping loop (apply_replicated.rs:154-158) AFTER
-    // the version has been allocated but BEFORE any physical write. Clean,
-    // deterministic failure-path trigger that needs no custom failing store.
-    let bad_event = shamir_tx::ChangelogEvent {
-        repo: "leader".into(),
-        commit_version: 1,
-        tx_id: 1,
-        actor: Actor::User(42),
-        timestamp_ns: 0,
-        changes: vec![shamir_tx::RecordChange {
-            table: "items".into(),
-            key: rid(31).to_bytes(),
-            op: shamir_tx::ChangeOp::Put,
-            value: None, // ← triggers the Internal error
-        }],
-    };
-
-    let err = apply_replicated(&follower, &bad_event, 0, ApplyPolicy::Trusted).await;
-    assert!(err.is_err(), "Put with no value must fail; got {err:?}");
+    let history: Arc<dyn Store> = Arc::new(FailingHistoryStore {
+        inner: Arc::new(InMemoryStore::new()),
+    });
+    let mvcc = Arc::new(MvccStore::new(history, Arc::clone(&gate)));
+    assert!(follower
+        .per_table_mvcc()
+        .remove_sync(&items_token())
+        .is_some());
+    assert!(follower
+        .per_table_mvcc()
+        .insert_sync(items_token(), mvcc)
+        .is_ok());
+    let bad_event = put_event("history-fails", rid(31), 1);
+    let err = apply_replicated(&follower, &bad_event, 0, ApplyPolicy::Trusted)
+        .await
+        .expect_err("history persistence must fail");
+    assert!(
+        matches!(err, DbError::Storage(_)),
+        "unexpected error: {err:?}"
+    );
+    assert_eq!(gate.version_allocation_high_water_mark(), 1);
 
     // The burned version (N = 1) MUST be terminally marked `Aborted` in the
     // completion tracker — the guard's Drop does this automatically. Before
@@ -561,16 +565,12 @@ async fn follower_repo_with_corrupt_items_info() -> (RepoInstance, Arc<InMemoryR
 /// write nor the finalize tail (`version_guard.commit()`, `mark_durable`,
 /// `persist_markers`, downstream changefeed re-emit) ever runs.
 ///
-/// Note: the allocated `local_version` IS still terminally marked `Aborted`
-/// in the gate's completion/durable trackers via the `VersionGuard`'s
-/// `Drop` (the same A12 mechanism `a12_failure_path_version_marked_aborted_in_completion_tracker`
-/// exercises for a different failure) — that is a DELIBERATE, unrelated
-/// contiguous-watermark bookkeeping guarantee, not evidence the write went
-/// through. The absence of a downstream changefeed re-emit is what actually
-/// distinguishes "the finalize tail ran" from "it didn't".
+/// Attach errors now occur in preflight, before any version is allocated.
 #[tokio::test]
 async fn get_table_attach_failure_is_not_swallowed() {
     let (follower, mem) = follower_repo_with_corrupt_items_info().await;
+    let gate = follower.tx_gate().await.unwrap();
+    let allocated = gate.version_allocation_high_water_mark();
     // Subscribe BEFORE the failing apply so a (wrongly) re-emitted
     // downstream event would be observable via `try_recv()` afterward.
     let mut rx = follower.subscribe_changelog().await.unwrap();
@@ -585,6 +585,7 @@ async fn get_table_attach_failure_is_not_swallowed() {
         "expected a genuine attach failure (Codec/Internal), got NotFound: {err:?}"
     );
 
+    assert_eq!(gate.version_allocation_high_water_mark(), allocated);
     // The finalize tail must NOT have run: no downstream changefeed
     // re-emit. `try_recv` is deterministic here (no other task can have
     // produced on this broadcast channel by the time `apply_replicated`
@@ -644,9 +645,11 @@ async fn validate_payload_rejects_undecodable_put_and_consumes_no_version() {
     };
 
     let err = apply_replicated(&follower, &garbage_event, 0, ApplyPolicy::ValidatePayload).await;
-    assert!(
-        err.is_err(),
-        "an undecodable Put payload must be rejected under ValidatePayload; got {err:?}"
+    assert_eq!(
+        err.unwrap(),
+        ApplyOutcome::Rejected {
+            reason: ApplyRejectReason::UndecodablePayload,
+        }
     );
     assert_eq!(
         gate.completion().watermark(),
@@ -663,4 +666,55 @@ async fn validate_payload_rejects_undecodable_put_and_consumes_no_version() {
         matches!(outcome, ApplyOutcome::Applied { .. }),
         "Trusted must apply the same garbage bytes verbatim; got {outcome:?}"
     );
+}
+
+type HistoryStream = Pin<Box<dyn Stream<Item = DbResult<Vec<(RecordKey, Bytes)>>> + Send>>;
+
+struct FailingHistoryStore {
+    inner: Arc<dyn Store>,
+}
+
+#[async_trait]
+impl Store for FailingHistoryStore {
+    async fn insert(&self, value: Bytes) -> DbResult<RecordKey> {
+        self.inner.insert(value).await
+    }
+
+    async fn set(&self, _key: RecordKey, _value: Bytes) -> DbResult<bool> {
+        Err(DbError::Storage("injected history failure".into()))
+    }
+
+    async fn get(&self, key: RecordKey) -> DbResult<Bytes> {
+        self.inner.get(key).await
+    }
+
+    async fn remove(&self, key: RecordKey) -> DbResult<bool> {
+        self.inner.remove(key).await
+    }
+
+    fn iter_stream(&self, batch_size: usize) -> HistoryStream {
+        self.inner.iter_stream(batch_size)
+    }
+
+    fn scan_prefix_stream(&self, prefix: Bytes, batch_size: usize) -> HistoryStream {
+        self.inner.scan_prefix_stream(prefix, batch_size)
+    }
+
+    fn iter_range_stream(
+        &self,
+        start: Option<Bytes>,
+        end: Option<Bytes>,
+        batch_size: usize,
+    ) -> HistoryStream {
+        self.inner.iter_range_stream(start, end, batch_size)
+    }
+
+    fn iter_range_stream_reverse(
+        &self,
+        start: Option<Bytes>,
+        end: Option<Bytes>,
+        batch_size: usize,
+    ) -> HistoryStream {
+        self.inner.iter_range_stream_reverse(start, end, batch_size)
+    }
 }
