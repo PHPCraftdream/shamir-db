@@ -12,6 +12,7 @@ pub(super) mod finalize;
 pub(super) mod materialize;
 pub(super) mod pre_commit;
 pub mod predicate_range;
+pub(super) mod publish_journaled;
 pub mod replicated_event;
 pub use replicated_event::ReplicatedEvent;
 pub mod recovery;
@@ -40,4 +41,4 @@ pub use shamir_tx::{IsolationLevel, SnapshotGuard, TxContext, TxId};
 pub use shamir_tx::{ChangeOp, ChangelogEvent, JournalRead, RecordChange};
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;
