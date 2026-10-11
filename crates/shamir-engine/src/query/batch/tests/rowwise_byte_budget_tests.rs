@@ -189,7 +189,7 @@ async fn select_nested_batch_and_foreach_have_exact_composed_totals() {
                 panic!("expected body field map, got {records:?}");
             };
             assert_eq!(fields.len(), 1);
-            assert_eq!(fields["pad"], QueryValue::Str("x".repeat(10_240).into()));
+            assert_eq!(fields["pad"], QueryValue::Str("x".repeat(10_240)));
         }
         assert_eq!(scope.bytes(), expected);
     }
