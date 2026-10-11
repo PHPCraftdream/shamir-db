@@ -134,9 +134,10 @@ async fn journal_barrier_waits_for_out_of_order_gated_put() {
     assert!(poll!(writer.as_mut()).is_ready());
 }
 
-#[tokio::test]
+// start_paused keeps the clock aligned with the timer wheel; a late pause() can
+// land a whole-ms rounding short of an exact deadline.
+#[tokio::test(start_paused = true)]
 async fn journal_barrier_timeout_returns_previous_prefix() {
-    tokio::time::pause();
     let fake = Arc::new(BarrierStore::default());
     let store: Arc<dyn ChangelogStore> = fake.clone();
     let (feed, rx) = fixture(8);
@@ -155,7 +156,7 @@ async fn journal_barrier_timeout_returns_previous_prefix() {
     tokio::pin!(confirm);
     assert!(poll!(confirm.as_mut()).is_pending());
     assert!(poll!(writer.as_mut()).is_pending());
-    tokio::time::advance(Duration::from_secs(1)).await;
+    tokio::time::advance(Duration::from_millis(1001)).await;
     assert_eq!(poll!(confirm.as_mut()), Poll::Ready(9));
     assert_eq!(feed.confirm_timeouts(), 1);
     assert_eq!(
@@ -172,9 +173,10 @@ async fn journal_barrier_timeout_returns_previous_prefix() {
     assert!(poll!(writer.as_mut()).is_ready());
 }
 
-#[tokio::test]
+// start_paused keeps the clock aligned with the timer wheel; a late pause() can
+// land a whole-ms rounding short of an exact deadline.
+#[tokio::test(start_paused = true)]
 async fn journal_barrier_budget_includes_full_channel_send_and_wait() {
-    tokio::time::pause();
     let store: Arc<dyn ChangelogStore> = Arc::new(BarrierStore::default());
     let (feed, mut rx) = fixture(1);
     feed.journal_enqueue(&Arc::new(event(9)));
@@ -185,7 +187,7 @@ async fn journal_barrier_budget_includes_full_channel_send_and_wait() {
     assert!(matches!(rx.try_recv(), Ok(JournalMsg::Event(_))));
     assert!(poll!(confirm.as_mut()).is_pending());
     assert_eq!(feed.journal_tx.capacity(), 0);
-    tokio::time::advance(Duration::from_millis(250)).await;
+    tokio::time::advance(Duration::from_millis(251)).await;
     assert_eq!(poll!(confirm.as_mut()), Poll::Ready(0));
     assert_eq!(feed.confirm_timeouts(), 1);
     let writer = writer(&feed, rx, store.clone());
@@ -198,15 +200,16 @@ async fn journal_barrier_budget_includes_full_channel_send_and_wait() {
     assert!(poll!(writer.as_mut()).is_ready());
 }
 
-#[tokio::test]
+// start_paused keeps the clock aligned with the timer wheel; a late pause() can
+// land a whole-ms rounding short of an exact deadline.
+#[tokio::test(start_paused = true)]
 async fn journal_barrier_full_send_times_out_without_enqueuing() {
-    tokio::time::pause();
     let (feed, mut rx) = fixture(1);
     feed.journal_enqueue(&Arc::new(event(10)));
     let confirm = feed.confirm_through(10, Duration::from_secs(1));
     tokio::pin!(confirm);
     assert!(poll!(confirm.as_mut()).is_pending());
-    tokio::time::advance(Duration::from_secs(1)).await;
+    tokio::time::advance(Duration::from_millis(1001)).await;
     assert_eq!(poll!(confirm.as_mut()), Poll::Ready(0));
     assert_eq!(feed.confirm_timeouts(), 1);
     assert!(matches!(rx.try_recv(), Ok(JournalMsg::Event(_))));
