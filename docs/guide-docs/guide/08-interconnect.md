@@ -179,9 +179,16 @@ Current correctness limitations:
 * **Map records cannot reliably be read on the follower.** Field keys are
   leader interner ids; events carry no id-to-name bindings, so decoding can
   fail or return wrong field names. Per-event field-name translation is planned.
-* **Secondary indexes and `COUNT(*)` are not maintained.** Index lookups
-  miss replicated rows; `SELECT COUNT(*)` reads an unchanged table counter
-  (0 for a table populated only by replication).
+* **Follower secondary indexes are unsupported and fail closed.** Events
+  touching any indexed table (hash, unique, sorted, FTS, functional or vector)
+  are rejected before any data or version is applied, naming the table and
+  index. Full index maintenance is a later project. **`COUNT(*)` is maintained
+  best effort:** per-table current pre-images and the final operation per key
+  determine the delta; successful data apply is followed by counter increment
+  before the next table. Raw replay and retry after an earlier table succeeded
+  do not double-count. Increment failures are logged, not repaired by replay;
+  counter persistence/crash repair and failures after MVCC overlay publication
+  are not atomic with data apply.
 * **DDL, schema and metadata are not replicated**, only transaction data
   writes. Create the same databases, repos and tables on the follower first;
   **do not create secondary indexes there**. A missing repo causes backoff
