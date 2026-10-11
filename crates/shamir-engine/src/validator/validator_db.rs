@@ -37,7 +37,6 @@
 use bytes::Bytes;
 use futures::StreamExt;
 use shamir_storage::error::{DbError, DbResult};
-use shamir_tx::staging_store::StagedKind;
 use shamir_types::record_view::{RecordRef, RecordView, ScalarRef};
 use shamir_types::types::record_id::RecordId;
 use shamir_types::types::value::{InnerValue, QueryValue};
@@ -187,7 +186,7 @@ impl<'a> ValidatorDb<'a> {
     // ── FK semi-join (cross-table) ──────────────────────────────────────
 
     /// Check whether a record exists in **another** table where `field`
-    /// equals `value`, visible at this tx's snapshot plus its staged overlay.
+    /// equals `value`, visible at this tx's snapshot version.
     ///
     /// This is the `foreign_key` primitive (Phase C2): the validator confirms
     /// that a referenced value exists in the parent table.
@@ -196,9 +195,8 @@ impl<'a> ValidatorDb<'a> {
     ///
     /// 1. Resolve `table` via the [`TableResolver`] → target `TableManager`.
     /// 2. If an index covers `field`, use `lookup_by_index` (O(log n)) and
-    ///    re-check candidates against staged updates and deletes.
-    /// 3. Otherwise, scan via `list_stream`, masking staged ids, and match
-    ///    by field name.
+    ///    confirm the posting set is non-empty.
+    /// 3. Otherwise, scan via `list_stream` and match by field name.
     /// 4. FG-3: additionally probe THIS tx's own `write_set` entry for the
     ///    resolved target table (a staged insert into the parent table,
     ///    earlier in the SAME tx, not yet committed — e.g. insert-parent then
@@ -234,17 +232,6 @@ impl<'a> ValidatorDb<'a> {
         value: &QueryValue,
     ) -> DbResult<bool> {
         let interner = target.interner().get().await?;
-        let target_token = target.table_token();
-        let staging = self.tx.write_set.get(&target_token);
-        let layered = shamir_tx::LayeredInterner::Layered {
-            base: interner,
-            overlay: &self.tx.interner_overlay,
-            next_overlay_id: &self.tx.next_overlay_id,
-        };
-        let staged_field_id = layered
-            .get_id(field)
-            .await
-            .map(shamir_types::core::interner::InternerKey::new);
 
         // Fast path: single-field index lookup.
         if let Some(inner_value) = qv_scalar_to_inner(value) {
@@ -260,32 +247,18 @@ impl<'a> ValidatorDb<'a> {
                         .lookup_by_index(idx_name, std::slice::from_ref(&inner_value))
                         .await?
                     {
-                        for id in ids.iter() {
-                            match staging.and_then(|s| s.staged_op(id.as_bytes())) {
-                                Some(StagedKind::Removed) => continue,
-                                Some(StagedKind::Set(bytes)) => {
-                                    if record_field_matches_by_id(bytes.as_ref(), &field_id, value)?
-                                    {
-                                        return Ok(true);
-                                    }
-                                }
-                                None => return Ok(true),
-                            }
+                        if !ids.is_empty() {
+                            return Ok(true);
                         }
-                        // Index candidates are exhausted after applying staging;
-                        // skip the full-scan fallback below entirely
+                        // Index says no match — authoritative for the COMMITTED
+                        // store, so skip the full-scan fallback below entirely
                         // (it would re-scan the same store the index already
                         // covers and can only agree). The index alone cannot
                         // rule out a same-tx FK match though: a staged insert
                         // into the target table (this tx, not yet committed) is
                         // never in the index (indexing happens at commit), so go
                         // straight to the staged-overlay probe.
-                        return match staged_field_id.as_ref() {
-                            Some(field_id) => {
-                                self.staged_field_matches(target_token, field_id, value)
-                            }
-                            None => Ok(false),
-                        };
+                        return self.staged_field_matches(target.table_token(), &field_id, value);
                     }
                 } else {
                     // Audit group 25 / defect 1: no single-field index covers
@@ -326,10 +299,7 @@ impl<'a> ValidatorDb<'a> {
         futures::pin_mut!(stream);
         while let Some(batch_result) = stream.next().await {
             let batch = batch_result?;
-            for (id, cow) in batch {
-                if staging.is_some_and(|s| s.staged_op(id.as_bytes()).is_some()) {
-                    continue;
-                }
+            for (_, cow) in batch {
                 let bytes: Bytes = match cow {
                     crate::table::record_cow::RecordCow::Borrowed(b) => b,
                     crate::table::record_cow::RecordCow::Owned(tree) => {
@@ -353,8 +323,8 @@ impl<'a> ValidatorDb<'a> {
         // index or the committed-store scan above). Resolved through the
         // TARGET table's token, not `self_table`'s — this is the key
         // difference from `exists_in_self`'s self-table staged probe.
-        if let Some(field_id) = staged_field_id {
-            if self.staged_field_matches(target_token, &field_id, value)? {
+        if let Some(field_id) = interner.get_ind(field) {
+            if self.staged_field_matches(target.table_token(), &field_id, value)? {
                 return Ok(true);
             }
         }
