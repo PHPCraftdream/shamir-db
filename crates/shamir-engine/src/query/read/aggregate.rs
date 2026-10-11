@@ -1151,7 +1151,8 @@ fn resolve_aggregate_input(
 }
 
 /// Expression NULL results are skipped by all aggregates, including COUNT.
-/// Empty SUM/COUNT return 0; empty AVG/MIN/MAX return NULL. Legacy field
+/// Empty SUM/COUNT return 0; empty AVG/MIN/MAX return NULL. Literal NULL
+/// SUM is finalized as NULL by build_aggregate_object. Legacy field
 /// behaviour is unchanged: COUNT(field) counts present NULLs, and MIN/MAX
 /// can retain a NULL extreme. Expression SUM/AVG require numeric values;
 /// MIN/MAX require comparable values (including comparable numeric families).
@@ -1410,8 +1411,17 @@ pub(super) fn build_aggregate_object(
         }
     }
 
-    for (key, acc, _) in agg_slots {
-        obj.insert(key, acc.finish(interner));
+    for (key, acc, input) in agg_slots {
+        // Literal NULL has no non-NULL contributions. Keep legacy SUM's zero
+        // identity unchanged for field inputs and other expression inputs.
+        let value = if matches!(input, Some(FilterValue::Null))
+            && matches!(&acc.state, AggState::Sum { .. })
+        {
+            QueryValue::Null
+        } else {
+            acc.finish(interner)
+        };
+        obj.insert(key, value);
     }
 
     for (key, _, _, agg, _) in fn_slots {

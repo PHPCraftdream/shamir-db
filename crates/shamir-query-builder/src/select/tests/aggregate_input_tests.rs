@@ -108,8 +108,8 @@ fn old_aggregate_wire_payloads_are_unchanged() {
 }
 
 #[test]
-fn explicit_null_input_retains_legacy_field_semantics() {
-    // Raw JSON tests the intentional absent/null normalization of input.
+fn explicit_null_input_overrides_legacy_field_semantics() {
+    // Raw JSON is intentional: this tests explicit NULL on the wire.
     let wire = r#"{
         "type": "aggregate",
         "func": "sum",
@@ -118,7 +118,11 @@ fn explicit_null_input_retains_legacy_field_semantics() {
         "alias": "total"
     }"#;
     let item: SelectItem = serde_json::from_str(wire).unwrap();
-    assert_eq!(item, select::sum("v", "total"));
+    let mut expected = select::sum_of(crate::val::null(), "total");
+    if let SelectItem::Aggregate { field, .. } = &mut expected {
+        *field = AggregateField::Field(vec!["v".into()]);
+    }
+    assert_eq!(item, expected);
     let encoded = serde_json::to_value(item).unwrap();
-    assert!(!encoded.as_object().unwrap().contains_key("input"));
+    assert_eq!(encoded.get("input"), Some(&serde_json::Value::Null));
 }
