@@ -1,3 +1,4 @@
+use crate::completion_tracker::State;
 use crate::predicate_set::{PredicateDep, SORTED_PREFIX_LEN, SORTED_TAG};
 use crate::repo_tx_gate::{
     build_footprint_from_tx, record_conflicts, CommitWriteRecord, RepoTxGate, TableWriteFootprint,
@@ -54,6 +55,9 @@ async fn min_alive_with_no_snapshots() {
 async fn min_alive_with_snapshots() {
     let gate = RepoTxGate::new(10, 1);
     let _g1 = gate.open_snapshot().await; // v=10
+    for version in 11..=15 {
+        gate.completion().mark(version, State::Materialized);
+    }
     gate.publish_committed(15);
     let _g2 = gate.open_snapshot().await; // v=15
     assert_eq!(gate.min_alive(), 10);
@@ -353,8 +357,8 @@ fn commit_log_prune_uses_min_alive_floor() {
     let gate = Arc::new(RepoTxGate::new(0, 1));
     // Publish through v=5 so last_committed=5.
     for _ in 0..5 {
-        let v = gate.assign_next_version();
-        gate.publish_committed(v);
+        let guard = gate.assign_next_version_guarded();
+        let v = guard.version();
         gate.record_commit_writes(CommitWriteRecord {
             commit_version: v,
             per_table: TFxMap::from_iter([(
@@ -365,6 +369,7 @@ fn commit_log_prune_uses_min_alive_floor() {
                 },
             )]),
         });
+        guard.commit();
     }
     assert_eq!(gate.commit_log_len(), 5);
 
@@ -393,6 +398,9 @@ fn a10_min_alive_barrier_protects_commit_log() {
     };
     for v in 1..=5 {
         gate.record_commit_writes(mk(v));
+    }
+    for version in 1..=5 {
+        gate.completion().mark(version, State::Materialized);
     }
     gate.publish_committed(5);
     assert_eq!(gate.commit_log_len(), 5);
@@ -454,6 +462,9 @@ fn prune_commit_write_log_drops_only_at_or_below_min() {
         gate.record_commit_writes(mk(v));
     }
     // Publish through v=5 so all records are in `(snapshot, last_committed]`.
+    for version in 1..=5 {
+        gate.completion().mark(version, State::Materialized);
+    }
     gate.publish_committed(5);
     assert_eq!(gate.commit_log_len(), 5);
 

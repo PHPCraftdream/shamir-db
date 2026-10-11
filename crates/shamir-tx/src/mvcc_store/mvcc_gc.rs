@@ -32,12 +32,13 @@ impl MvccStore {
     /// floor + snapshot invariants).
     ///
     /// Sacred floor (NEVER violated): a version `>= min_alive` (pinned by a
-    /// live snapshot) is never reclaimed regardless of any knob.
+    /// live snapshot or the contiguous completion watermark) is never reclaimed
+    /// regardless of any knob.
     ///
-    /// Anchor: when a live snapshot exists below `current`, the SINGLE largest
-    /// version `< min_alive` is also kept — it serves a snapshot reading a key
-    /// last-written below `min_alive`. When no live snapshot exists, no anchor
-    /// is needed: a fresh snapshot opens at `current` and reads the log directly.
+    /// Anchor: keep the SINGLE largest version `< min_alive` whenever a live
+    /// snapshot exists OR `current > min_alive`. Even with no registered
+    /// snapshots, completion may lag current: a fresh snapshot at W needs the
+    /// anchor rather than the eagerly published latest value.
     ///
     /// When a version is reclaimed, its `ts_key(version)` entry is also removed
     /// (no orphan timestamps). Best-effort: errors are swallowed (a vacuum
@@ -76,27 +77,32 @@ impl MvccStore {
         //
         // Invariants:
         //  • old_v == 0 ⇒ append-only (first write), nothing to defer.
-        //  • active_snapshots_empty() ⇒ no snapshot floor to protect.
+        //  • active_snapshots_empty() ⇒ no explicit snapshot floor to protect.
+        //  • old_v <= W ⇒ old_v can serve every fresh snapshot at W or above.
         //  • !snapshots_opening() ⇒ no reader mid-registration (barrier clear).
         //  • !vacuum_needs_scan ⇒ no accumulated versions from snapshot epochs.
         //  • is_current_only() ⇒ max_count == Some(0), no age axis, no min_count
         //    floor — every old version must go (eventually, after deferral).
         let snapshots_empty = self.gate.active_snapshots_empty();
         let openings_in_flight = self.gate.snapshots_opening();
+        let watermark = self.gate.completion().watermark();
+        // A later old_v cannot replace the deferred anchor needed at W.
+        // Preserve the cell's anchor and scan until completion catches up.
+        if old_v > watermark {
+            self.vacuum_needs_scan.store(true, Ordering::Release);
+        }
         if policy.is_current_only()
             && snapshots_empty
             && !openings_in_flight
+            && old_v <= watermark
             && !self.vacuum_needs_scan.load(Ordering::Acquire)
         {
             if old_v == 0 {
                 return; // append-only, no prior version
             }
-            // A10: atomically swap `old_v` into the cell's `vacuum_anchor`,
-            // retrieving the PREVIOUSLY-deferred version (if any). The
-            // previously-deferred version is now ONE generation stale — safe
-            // to physically delete (the barrier guarantees no reader is
-            // mid-registration that could need it). `old_v` itself is NOT
-            // deleted yet — it stays as the new deferred anchor.
+            // A10: atomically defer old_v. Since old_v <= W, it replaces the
+            // previous anchor for fresh snapshots; the opening barrier also
+            // protects readers mid-registration. old_v itself is not deleted.
             let prev_anchor = self.swap_vacuum_anchor(key, old_v);
             if let Some(deferred) = prev_anchor {
                 if deferred != old_v && deferred > 0 {
@@ -131,6 +137,7 @@ impl MvccStore {
         if policy.is_current_only()
             && snapshots_empty
             && openings_in_flight
+            && old_v <= watermark
             && !self.vacuum_needs_scan.load(Ordering::Acquire)
             && old_v != 0
         {
@@ -187,10 +194,10 @@ impl MvccStore {
         // Sort descending by version (newest first) so `idx` ranks by recency.
         entries.sort_by_key(|b| std::cmp::Reverse(b.0));
 
-        // The anchor: the SINGLE largest version `< min_alive`, kept ONLY when
-        // a live snapshot exists. If already kept by the min_count/count
-        // window, no extra entry is kept.
-        let anchor: Option<u64> = if have_live_snapshot {
+        // The anchor serves explicit snapshots or the completion floor when
+        // current is above min_alive, even with no registered snapshots.
+        // If already kept by the count window, no extra entry is kept.
+        let anchor: Option<u64> = if have_live_snapshot || cur_v > min_alive {
             entries
                 .iter()
                 .map(|(v, _)| *v)
@@ -261,9 +268,13 @@ impl MvccStore {
             }
         }
 
-        // L6: after a full scan-path vacuum with no live snapshots, clear the
-        // flag so subsequent writes can use the targeted fast path.
-        if snapshots_empty {
+        // L6: do not clear while completion-protected history may remain.
+        // The flag is store-wide, so this key catching up is not sufficient:
+        // another key may still have versions above W from the same gap.
+        if snapshots_empty
+            && cur_v <= min_alive
+            && self.gate.version_allocation_high_water_mark() <= self.gate.completion().watermark()
+        {
             self.vacuum_needs_scan.store(false, Ordering::Release);
         }
     }
@@ -283,8 +294,8 @@ impl MvccStore {
     /// All older versions of that key are removed.
     ///
     /// III.3: also prunes `version_cache`. The eviction threshold is the
-    /// gate's `min_alive()` (the oldest live snapshot, or `last_committed`
-    /// if none) — deliberately NOT the `min_version` argument, which only
+    /// gate's `min_alive()` (the minimum of live snapshots and completion W)
+    /// — deliberately NOT the `min_version` argument, which only
     /// governs *history* GC and may be set higher than `min_alive` by a
     /// caller (a higher threshold would wrongly evict cache entries that a
     /// still-live snapshot below `min_version` needs to route to history).
@@ -481,8 +492,8 @@ impl MvccStore {
     /// later GC reclaims. No partial state can violate correctness.
     ///
     /// III.3: evict `version_cache` entries whose cached version is
-    /// `< min_alive`, where `min_alive = gate.min_alive()` (the oldest
-    /// live snapshot, or `last_committed` when no snapshot is open).
+    /// `< min_alive`, where `min_alive = gate.min_alive()` (the minimum of
+    /// live snapshots and the contiguous completion watermark).
     /// Without this, the cache grows unbounded over the repo's lifetime —
     /// `apply_committed_ops` / `set_versioned` / `delete_versioned` upsert
     /// every touched key and nothing ever removes them.

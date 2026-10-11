@@ -2,6 +2,7 @@
 #![allow(clippy::disallowed_methods)]
 
 use super::helpers::{count_history_entries, make_gate, make_mvcc, make_mvcc_with_gate};
+use crate::completion_tracker::State;
 use bytes::Bytes;
 use shamir_storage::types::RecordKey;
 
@@ -118,6 +119,9 @@ async fn gc_evicts_stale_version_cache_entries() {
     let min_alive_target = v_old_b + 1; // > both olds, <= v_fresh
     assert!(min_alive_target <= v_fresh);
     drop(_guard); // no live snapshots → min_alive == last_committed
+    for version in 1..=min_alive_target {
+        gate.completion().mark(version, State::Materialized);
+    }
     gate.publish_committed(min_alive_target);
     assert_eq!(gate.min_alive(), min_alive_target);
 
@@ -234,6 +238,9 @@ async fn gc_preserves_visibility_for_live_snapshot_below_cached_version() {
     // Advance last_committed past v2. But the live reader snapshot pins
     // min_alive down to v1, so the cache entry (cv == v2) is NOT < v1
     // and must NOT be evicted.
+    for version in 1..=v2 + 50 {
+        gate.completion().mark(version, State::Materialized);
+    }
     gate.publish_committed(v2 + 50);
     assert_eq!(
         gate.min_alive(),
@@ -293,6 +300,9 @@ async fn gc_evicted_key_read_at_boundary_snapshot_returns_main() {
     // entry redundant: every surviving/ future snapshot is >= min_alive
     // > v2, so none can observe v1.
     drop(guard);
+    for version in 1..=v2 + 1 {
+        gate.completion().mark(version, State::Materialized);
+    }
     gate.publish_committed(v2 + 1);
     assert_eq!(gate.min_alive(), v2 + 1);
 
