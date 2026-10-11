@@ -589,11 +589,18 @@ pub async fn commit_tx(tx: TxContext, repo: &RepoInstance) -> Result<TxOutcome, 
         Ok(mut outcome) => {
             // The inner driver has settled its own version and released all locks.
             // Cancelling this read-only wait cannot undo or interrupt the commit.
-            let gate = repo.tx_gate().await?;
-            if gate.await_visible(outcome.commit_version).await
-                == shamir_tx::repo_tx_gate::VisibleOutcome::ReopenRequired
-            {
-                outcome.materialization = MaterializationState::Deferred;
+            // A commit that allocated a version is strictly above its snapshot
+            // (snapshots read at W <= the allocation counter); the read-only and
+            // empty-footprint fast paths return commit_version == snapshot_version
+            // and allocated nothing, so there is nothing to wait for (and waiting
+            // on a never-allocated version would never resolve).
+            if outcome.commit_version > outcome.snapshot_version {
+                let gate = repo.tx_gate().await?;
+                if gate.await_visible(outcome.commit_version).await
+                    == shamir_tx::repo_tx_gate::VisibleOutcome::ReopenRequired
+                {
+                    outcome.materialization = MaterializationState::Deferred;
+                }
             }
             // D2 P1e — soft backpressure. The ack-path published only the
             // in-memory overlay; the value is durable in `history` only after
