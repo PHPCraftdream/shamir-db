@@ -45,6 +45,7 @@ pub mod index_scan_tests;
 pub mod insert_tx_tests;
 pub mod interner_manager_tests;
 pub mod keyset_seek_tests;
+pub mod migration_freeze_tests;
 pub mod multi_vector_index_guard_tests;
 pub mod p02_base_index_rederive_tests;
 pub mod p02c_retain_filter_key_collision_tests;
