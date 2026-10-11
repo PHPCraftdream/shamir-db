@@ -11,8 +11,9 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use bytes::Bytes;
+use futures::Stream;
 use shamir_storage::error::{DbError, DbResult};
-use shamir_storage::storage_in_memory::{InMemoryRepo, InMemoryStore};
+use shamir_storage::storage_in_memory::InMemoryRepo;
 use shamir_storage::types::{RecordKey, Repo, Store};
 use shamir_tx::{IsolationLevel, MvccStore, TxContext, TxId};
 use shamir_types::access::Actor;
