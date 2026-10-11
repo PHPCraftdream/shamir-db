@@ -1,6 +1,7 @@
 use crate::query::batch::executor_traits::TableResolver;
 use crate::query::batch::{BatchError, BatchOp, QueryEntry};
 use shamir_collections::TFxSet;
+use shamir_query_types::batch::{BatchLimits, LimitKind};
 use shamir_types::types::common::TMap;
 
 /// Validate that all referenced tables exist before execution.
@@ -14,8 +15,14 @@ use shamir_types::types::common::TMap;
 pub(super) async fn validate_tables(
     queries: &TMap<String, QueryEntry>,
     resolver: &dyn TableResolver,
+    limits: &BatchLimits,
+    root_limits: &BatchLimits,
 ) -> Result<(), BatchError> {
-    validate_pagination(queries)?;
+    if limits == root_limits {
+        validate_pagination(queries, limits)?;
+    } else {
+        validate_pagination_with_root(queries, limits, root_limits)?;
+    }
     // Phase 1: collect tables/repos being created in this batch so we
     // can skip the existence check for them.
     let (created_tables, created_repos) = tables_created_in_batch(queries);
@@ -49,11 +56,20 @@ pub(super) async fn validate_tables(
     Ok(())
 }
 
-pub(super) fn validate_pagination(queries: &TMap<String, QueryEntry>) -> Result<(), BatchError> {
-    const MAX_PAGE_SIZE: u64 = 100_000;
-    const MAX_OFFSET: u64 = 1_000_000;
-    let mut stack = vec![queries.values()];
-    while let Some(entries) = stack.last_mut() {
+pub(super) fn validate_pagination(
+    queries: &TMap<String, QueryEntry>,
+    limits: &BatchLimits,
+) -> Result<(), BatchError> {
+    validate_pagination_with_root(queries, limits, limits)
+}
+
+fn validate_pagination_with_root(
+    queries: &TMap<String, QueryEntry>,
+    limits: &BatchLimits,
+    root_limits: &BatchLimits,
+) -> Result<(), BatchError> {
+    let mut stack = vec![(queries.values(), limits.clone())];
+    while let Some((entries, limits)) = stack.last_mut() {
         let Some(entry) = entries.next() else {
             stack.pop();
             continue;
@@ -61,16 +77,31 @@ pub(super) fn validate_pagination(queries: &TMap<String, QueryEntry>) -> Result<
         match &entry.op {
             BatchOp::Read(query) => {
                 let (offset, limit) = query.pagination.try_resolve()?;
-                if offset > MAX_OFFSET || limit.is_some_and(|limit| limit > MAX_PAGE_SIZE) {
-                    return Err(BatchError::query_coded(
-                        "pagination",
-                        "pagination_too_large",
-                        "pagination exceeds engine page-size or offset ceiling",
-                    ));
+                if offset > limits.max_offset {
+                    return Err(BatchError::LimitExceeded {
+                        kind: LimitKind::Offset,
+                        actual: offset,
+                        max: limits.max_offset,
+                    });
+                }
+                if let Some(limit) = limit {
+                    if limit > limits.max_page_size {
+                        return Err(BatchError::LimitExceeded {
+                            kind: LimitKind::PageSize,
+                            actual: limit,
+                            max: limits.max_page_size,
+                        });
+                    }
                 }
             }
-            BatchOp::Batch(sub) => stack.push(sub.batch.queries.values()),
-            BatchOp::ForEach(loop_op) => stack.push(loop_op.batch.queries.values()),
+            BatchOp::Batch(sub) => stack.push((
+                sub.batch.queries.values(),
+                sub.batch.limits.clamped_to(root_limits),
+            )),
+            BatchOp::ForEach(loop_op) => stack.push((
+                loop_op.batch.queries.values(),
+                loop_op.batch.limits.clamped_to(root_limits),
+            )),
             _ => {}
         }
     }
