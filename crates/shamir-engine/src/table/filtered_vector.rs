@@ -98,6 +98,28 @@ pub(crate) fn try_extract_filtered_vector_query(filter: &Filter) -> Option<Filte
     Some(vec_filter)
 }
 
+/// Extract either supported vector shape for snapshot-aware execution.
+pub(crate) fn snapshot_vector_query(filter: &Filter) -> Option<FilteredVectorQuery> {
+    if let Filter::VectorSimilarity {
+        field,
+        query,
+        k,
+        ef_search,
+        oversample,
+    } = filter
+    {
+        return Some(FilteredVectorQuery {
+            field: field.clone(),
+            query: query.clone(),
+            k: *k,
+            ef_search: *ef_search,
+            oversample: *oversample,
+            residual: None,
+        });
+    }
+    try_extract_filtered_vector_query(filter)
+}
+
 /// Build the residual predicate from the non-vector conjuncts.
 fn build_residual(conjuncts: &[Filter], consumed_idx: usize) -> Option<Filter> {
     let remaining: Vec<Filter> = conjuncts
