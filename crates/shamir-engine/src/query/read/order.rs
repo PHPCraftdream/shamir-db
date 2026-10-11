@@ -228,7 +228,7 @@ impl<'ob> TopKHeap<'ob> {
     /// `with_version` read path sets this so the per-record versions array can
     /// be rebuilt from the surviving heap rows alone).
     pub fn new(order_by: &'ob OrderBy, skip: usize, take: usize, with_ids: bool) -> Self {
-        let k = skip.checked_add(take).unwrap_or(usize::MAX);
+        let k = skip.saturating_add(take);
         Self {
             heap: BinaryHeap::with_capacity(k.min(PREALLOC_CAP)),
             items: &order_by.items[..],
