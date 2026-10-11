@@ -11,8 +11,13 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
 use crate::audit_appender::FjallAuditAppender;
+use crate::conn_limiter::ConnLimiter;
 use crate::scheduler::Scheduler;
 use crate::server::store_release_barrier::wait_stores_released;
+
+/// Upper bound for [`ServerHandle::shutdown`] to wait for connection tasks to
+/// end once they were told to.
+const CONN_DRAIN_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Upper bound for [`ServerHandle::shutdown`] to wait for the stores to drop
 /// their directory locks (a client that stays connected can hold one).
@@ -96,6 +101,10 @@ pub struct ServerHandle {
     /// Data dir the stores live under — scanned by the shutdown barrier that
     /// waits for their directory locks to be released.
     pub(super) data_dir: PathBuf,
+    /// Live-connection tracker: shutdown waits on it until every connection
+    /// task (told to end through `shutdown_token`) has dropped its handler
+    /// context and, with it, its references to the stores.
+    pub(super) conn_limiter: ConnLimiter,
     /// RAII single-instance guard: an advisory OS file lock on
     /// `<data_dir>/.shamir.lock`. The kernel releases it automatically
     /// when this `File` is dropped (or the process crashes), so a second
@@ -123,6 +132,19 @@ impl ServerHandle {
         // 2. Wait for accept loops to finish.
         for task in self.listener_tasks {
             let _ = task.await;
+        }
+        // 2a. Connection tasks watch the same token (see
+        //     `run_until_cancelled`); wait until the last one dropped its
+        //     handler context, which holds references to the stores.
+        if tokio::time::timeout(CONN_DRAIN_TIMEOUT, self.conn_limiter.wait_idle())
+            .await
+            .is_err()
+        {
+            tracing::warn!(
+                live = self.conn_limiter.live(),
+                timeout = ?CONN_DRAIN_TIMEOUT,
+                "shutdown: connections still alive after the drain timeout",
+            );
         }
         // 2b. Stop the follower-replication supervisor: cancel every running
         //     follower loop, then join the reconcile-tick task (already told
