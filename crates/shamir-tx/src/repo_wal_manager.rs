@@ -9,7 +9,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use shamir_storage::error::DbResult;
-use shamir_wal::{WalDurability, WalEntryV2, WalGroupCommit};
+use shamir_wal::{WalAppendError, WalDurability, WalEntryV2, WalGroupCommit, WalTicket};
 
 /// Repo-scoped WAL — one entry per tx/batch, covering all tables.
 ///
@@ -89,6 +89,25 @@ impl RepoWalManager {
         let commit_version = entry.commit_version;
         let encoded = entry.encode()?;
         self.group.append(encoded, commit_version, durability).await
+    }
+
+    /// Encode now and return an independently owned ticket plus lazy completion.
+    /// Nothing is queued until completion's first poll. Retain the entry in a
+    /// `VersionGuard::wal_queued` before polling; cancellation is not undo.
+    /// The future borrows only this manager, not `entry`.
+    /// cancel-safe: NO — inherits `WalGroupCommit::append_ticketed` fate.
+    pub fn begin_grouped_ticketed(
+        &self,
+        entry: &WalEntryV2,
+        durability: WalDurability,
+    ) -> DbResult<(
+        Arc<WalTicket>,
+        impl std::future::Future<Output = Result<(), WalAppendError>> + Send + '_,
+    )> {
+        let encoded = entry.encode()?;
+        Ok(self
+            .group
+            .append_ticketed(encoded, entry.commit_version, durability))
     }
 
     /// Batch WAL begin — appends ALL entries through the group in ONE leader
