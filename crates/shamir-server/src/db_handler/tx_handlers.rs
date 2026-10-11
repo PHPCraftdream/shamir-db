@@ -1,6 +1,6 @@
 use shamir_connect::server::session::Session;
 use shamir_db::query::batch::{BatchError, BatchRequest};
-use shamir_query_types::batch::{BatchLimits, BatchTreeVisitor};
+use shamir_query_types::batch::BatchTreeVisitor;
 
 use crate::tx_registry::{InteractiveTx, TxRegistryError};
 
@@ -85,15 +85,6 @@ impl ShamirDbHandler {
                 message: e.to_string(),
             };
         }
-
-        // Server-side cap on per-batch resources (mirror `execute`).
-        let server_cap = BatchLimits {
-            max_result_size: self.query_limits.max_result_size_bytes,
-            max_execution_time_secs: self.query_limits.max_execution_time_secs,
-            max_queries: self.query_limits.max_queries_per_batch,
-            ..batch.limits.clone()
-        };
-        batch.limits = batch.limits.clamped_to(&server_cap);
 
         // Admin / auth gate. An explicit 4-op allowlist (`List`,
         // `AccessTree`, `DescribeTable`, `GetTableSchema` — task #553, see
@@ -184,7 +175,16 @@ impl ShamirDbHandler {
             let mut guard = it.ctx().lock().await;
             match guard.as_mut() {
                 Some(tx) => {
-                    let r = self.db.tx_execute_as(actor, db_name, &batch, tx).await;
+                    let r = self
+                        .db
+                        .tx_execute_with_policy(
+                            actor,
+                            db_name,
+                            &batch,
+                            tx,
+                            self.query_limits.policy(),
+                        )
+                        .await;
                     // Measure staged size INSIDE the same lock as the engine call.
                     r.map(|resp| (resp, guard.as_ref().map_or(0, |tx| tx.staged_bytes())))
                 }

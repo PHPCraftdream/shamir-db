@@ -3,6 +3,7 @@
 use std::sync::OnceLock;
 
 use shamir_funclib::scalar_resolver::ScalarResolver;
+use shamir_query_types::batch::BatchLimits;
 use shamir_types::core::interner::Interner;
 use shamir_types::types::common::TMap;
 use shamir_types::types::value::QueryValue;
@@ -37,6 +38,7 @@ use crate::query::read::QueryResult;
 /// top level it is an empty shared map (zero allocation on the common
 /// path). Used to resolve `FilterValue::Param { name }` references.
 pub struct FilterContext<'a> {
+    max_accumulator_bytes: Option<usize>,
     pub interner: &'a Interner,
     pub resolved_refs: &'a TMap<String, QueryResult>,
     /// Scalar function resolver for `FnCall` dispatch. Defaults to
@@ -119,6 +121,7 @@ fn builtins_only_resolver() -> ScalarResolver {
 impl<'a> FilterContext<'a> {
     pub fn new(interner: &'a Interner, resolved_refs: &'a TMap<String, QueryResult>) -> Self {
         Self {
+            max_accumulator_bytes: None,
             interner,
             resolved_refs,
             scalars: builtins_only_resolver(),
@@ -128,6 +131,16 @@ impl<'a> FilterContext<'a> {
             query_ref_cache: None,
             local_cond_cache: new_local_cond_cache(),
         }
+    }
+
+    pub fn with_max_accumulator_bytes(mut self, max: usize) -> Self {
+        self.max_accumulator_bytes = Some(max.min(BatchLimits::CEILING.max_result_size));
+        self
+    }
+
+    pub fn max_accumulator_bytes(&self) -> usize {
+        self.max_accumulator_bytes
+            .unwrap_or(BatchLimits::CEILING.max_result_size)
     }
 
     /// Builder: inject a per-DB scalar resolver with user-registered scalars.

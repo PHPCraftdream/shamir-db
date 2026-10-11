@@ -565,6 +565,7 @@ async fn server_query_limits_cap_clamps_max_queries() {
         max_result_size_bytes: usize::MAX,
         max_execution_time_secs: u64::MAX,
         max_queries_per_batch: 2,
+        ..QueryLimitsCap::UNLIMITED
     });
     let session = user_session();
 
