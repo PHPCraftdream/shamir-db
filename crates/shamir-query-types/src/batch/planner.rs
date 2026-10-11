@@ -277,6 +277,26 @@ impl BatchPlanner {
                 if let Some(filter) = &query.r#where {
                     Self::extract_deps_from_filter(filter, &mut deps);
                 }
+                for item in &query.select.items {
+                    match item {
+                        crate::read::SelectItem::Function { args, .. }
+                        | crate::read::SelectItem::AggregateFn { args, .. } => {
+                            for arg in args {
+                                Self::extract_deps_from_filter_value(arg, &mut deps);
+                            }
+                        }
+                        crate::read::SelectItem::Expression { expr, .. } => {
+                            Self::extract_deps_from_filter_value(
+                                &expr.to_filter_value(),
+                                &mut deps,
+                            );
+                        }
+                        crate::read::SelectItem::All
+                        | crate::read::SelectItem::Field { .. }
+                        | crate::read::SelectItem::Aggregate { .. }
+                        | crate::read::SelectItem::CountAll { .. } => {}
+                    }
+                }
             }
             BatchOp::Update(update) => {
                 if let Some(filter) = &update.where_clause {
