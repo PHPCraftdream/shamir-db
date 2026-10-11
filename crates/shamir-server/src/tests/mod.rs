@@ -9,6 +9,7 @@ pub mod connection_tests;
 pub mod cursor_registry_tests;
 pub mod per_ip_limiter_tests;
 pub mod restore_tests;
+pub mod server_limit_policy_config_tests;
 pub mod server_meta_tests;
 pub mod server_tests;
 pub mod store_release_barrier_tests;

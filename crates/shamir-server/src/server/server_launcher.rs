@@ -470,11 +470,7 @@ impl ServerLauncher {
             .with_slow_query(SlowQueryConfig::from_ms(
                 config.logging.slow_query_threshold_ms,
             ))
-            .with_query_limits(QueryLimitsCap {
-                max_result_size_bytes: config.security.query_limits.max_result_size_bytes,
-                max_execution_time_secs: config.security.query_limits.max_execution_time_secs,
-                max_queries_per_batch: config.security.query_limits.max_queries_per_batch,
-            })
+            .with_query_limits(QueryLimitsCap::from(&config.security.query_limits))
             .with_tx_limits(TxLimitsCap {
                 max_tx_bytes: config.security.tx.max_tx_bytes,
             })

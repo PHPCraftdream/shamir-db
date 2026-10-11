@@ -150,7 +150,7 @@ fn large_profile_parses_and_validates() {
     let cfg = Config::from_file(&deploy_path("server.large.example.ktav"))
         .expect("server.large.example.ktav must parse");
     cfg.validate()
-        .expect("server.large.example.ktav must pass Config::validate");
+        .expect("the large profile must stay within the engine ceilings");
 
     // Argon2 auth-RAM ceiling = argon2_concurrent_max × memory_kb (KiB).
     // The large profile mirrors the base example's Argon2 sizing unchanged
@@ -164,7 +164,8 @@ fn large_profile_parses_and_validates() {
     );
 
     // F-44 (#852): the large profile carries the OLD base-example numbers
-    // (10 000 connections, 1 GiB result, 4 GiB in-flight) moved here from
+    // (10 000 connections, 4 GiB in-flight; the result cap is the 100 MiB engine
+    // ceiling since the limit policy became server-owned) moved here from
     // `server.example.ktav` so they are an explicit opt-in, not the
     // accidental first file a new operator copies.
     assert_eq!(
@@ -173,7 +174,7 @@ fn large_profile_parses_and_validates() {
     );
     assert_eq!(
         cfg.security.query_limits.max_result_size_bytes,
-        1024 * 1024 * 1024,
+        100 * 1024 * 1024,
         "large profile max_result_size_bytes"
     );
 

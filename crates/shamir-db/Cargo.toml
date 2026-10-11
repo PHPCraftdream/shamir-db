@@ -39,6 +39,7 @@ futures = "0.3"
 # Foundation crates re-exported under `shamir_db::*` so callers stay
 # stable. The split is purely organisational; nothing about the public
 # surface changed when these moved out.
+shamir-query-types   = { path = "../shamir-query-types" }
 shamir-types       = { path = "../shamir-types" }
 shamir-collections = { path = "../shamir-collections" }
 shamir-storage     = { path = "../shamir-storage", default-features = false }
@@ -102,7 +103,6 @@ shamir-index = { path = "../shamir-index" }
 bench-scale-tool = { workspace = true, features = ["async"] }
 wat         = "1.226"
 shamir-query-builder = { path = "../shamir-query-builder" }
-shamir-query-types   = { path = "../shamir-query-types" }
 # CAS sequenced-write e2e: canonical record hash shared by the validator and
 # the test (so both sides compute the prev-hash identically).
 shamir-funclib = { path = "../shamir-funclib" }

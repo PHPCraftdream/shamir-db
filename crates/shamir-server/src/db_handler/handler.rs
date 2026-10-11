@@ -476,7 +476,7 @@ impl ShamirDbHandler {
         session: &Session,
         query_version: u32,
         db_name: &str,
-        mut batch: BatchRequest,
+        batch: BatchRequest,
         conn: &ConnectionServices,
     ) -> DbResponse {
         // Query-language version dispatch — fast reject before any DB work.
@@ -486,24 +486,6 @@ impl ShamirDbHandler {
                 message: e.to_string(),
             };
         }
-
-        // Server-side cap on `BatchRequest.limits`. Client may shrink any
-        // field, but cannot exceed the operator-configured cap. Applied
-        // BEFORE the planner sees the batch so over-cap requests fail
-        // through `BatchError::TooManyQueries` etc. with the cap as the
-        // reported max — not the client-supplied value.
-        batch.limits.max_result_size = batch
-            .limits
-            .max_result_size
-            .min(self.query_limits.max_result_size_bytes);
-        batch.limits.max_execution_time_secs = batch
-            .limits
-            .max_execution_time_secs
-            .min(self.query_limits.max_execution_time_secs);
-        batch.limits.max_queries = batch
-            .limits
-            .max_queries
-            .min(self.query_limits.max_queries_per_batch);
 
         // Admin / auth gate. An explicit 4-op allowlist (`List`,
         // `AccessTree`, `DescribeTable`, `GetTableSchema` — task #553, see
@@ -562,13 +544,13 @@ impl ShamirDbHandler {
 
         // RI-15 (CR-B2) — reserve an upfront, pessimistic estimate from the
         // global in-flight response-byte budget BEFORE execution begins,
-        // using `batch.limits.max_result_size` (already clamped to the
-        // server-side cap a few lines above) as the estimate. This is what
+        // using min(request result size, server result cap) as the estimate,
+        // without modifying the request. This is what
         // actually bounds EXECUTION-time memory (not just write-path
         // residency): N concurrent requests can no longer all run to
         // completion and materialize their full result before any of them
         // is throttled — the (N+1)-th request now blocks HERE, before
-        // `execute_as` ever runs, once the budget is saturated.
+        // `execute_with_policy` ever runs, once the budget is saturated.
         //
         // Deliberately placed AFTER every cheap, budget-free fast-reject
         // above (version check, admin gate, read-only gate, HMAC gate) —
@@ -577,14 +559,21 @@ impl ShamirDbHandler {
         // ACTUAL serialized size once the final response is known (see the
         // single tail below), rather than stashed immediately: stashing
         // happens exactly once, at the end, same as before this change.
+        let reserve_bytes = batch
+            .limits
+            .max_result_size
+            .min(self.query_limits.max_result_size_bytes);
         let mut budget_guard = if self.byte_budget.cap().is_some() {
-            Some(self.byte_budget.acquire(batch.limits.max_result_size).await)
+            Some(self.byte_budget.acquire(reserve_bytes).await)
         } else {
             None
         };
 
         let actor = session_actor(session);
-        let exec_result = self.db.execute_as(actor.clone(), db_name, &batch).await;
+        let exec_result = self
+            .db
+            .execute_with_policy(actor.clone(), db_name, &batch, self.query_limits.policy())
+            .await;
         let final_response = match exec_result {
             Ok(mut response) => {
                 // Slow-query logging: WARN line for batches whose total
@@ -723,9 +712,9 @@ pub(super) fn error_code(e: &BatchError) -> &str {
             shamir_query_types::batch::LimitKind::Depth => "nesting_too_deep",
             shamir_query_types::batch::LimitKind::Iterations => "too_many_iterations",
         },
+        BatchError::TooManyIterations { .. } => "too_many_iterations",
         BatchError::TooManyQueries { .. }
         | BatchError::TooDeep { .. }
-        | BatchError::TooManyIterations { .. }
         | BatchError::ExecutionTimedOut { .. } => "limits",
         BatchError::CircularDependency { .. }
         | BatchError::UnknownAlias { .. }

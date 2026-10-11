@@ -1,5 +1,7 @@
 //! `impl ShamirDb { execute, execute_as }`.
 
+use shamir_query_types::batch::ExecPolicy;
+
 use crate::access::Actor;
 use crate::query::batch::{execute_batch, Authorized, BatchError, BatchRequest, BatchResponse};
 
@@ -37,7 +39,21 @@ impl ShamirDb {
         db_name: &str,
         request: &BatchRequest,
     ) -> Result<BatchResponse, BatchError> {
-        let auth = Authorized::authorize(request, actor, db_name, self).await?;
+        self.execute_with_policy(actor, db_name, request, ExecPolicy::EMBEDDED)
+            .await
+    }
+
+    /// Execute with an authenticated actor and a server-owned resource policy.
+    pub async fn execute_with_policy(
+        &self,
+        actor: Actor,
+        db_name: &str,
+        request: &BatchRequest,
+        policy: ExecPolicy,
+    ) -> Result<BatchResponse, BatchError> {
+        let auth = Authorized::authorize(request, actor, db_name, self)
+            .await?
+            .with_policy(policy);
         let db = self.get_db(db_name).ok_or_else(|| BatchError::QueryError {
             alias: String::new(),
             message: format!("Database '{}' not found", db_name),

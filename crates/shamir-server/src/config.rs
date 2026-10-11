@@ -66,6 +66,7 @@ use std::net::{IpAddr, SocketAddr};
 use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
+use shamir_query_types::batch::BatchLimits;
 
 /// Top-level configuration as loaded from the `.ktav` file.
 #[derive(Debug, Clone, Deserialize)]
@@ -353,13 +354,14 @@ fn default_max_cursor_page_size() -> u32 {
 
 /// Server-side hard caps on `BatchRequest.limits`.
 ///
-/// Without this block, the limits the server applies come from the client
-/// payload (`BatchRequest.limits`) — meaning a malicious client can ask for
-/// `max_result_size = 1 TB` and the server will trust it. With it, the
-/// server always clamps each field to the configured cap.
+/// Omitted fields use operator defaults; request limits may lower but never
+/// raise these caps or the hard engine ceilings.
 #[derive(Debug, Clone, Deserialize)]
 pub struct QueryLimitsConfig {
-    /// Maximum total result size (bytes) — clamps `BatchLimits::max_result_size`.
+    /// For batches, maximum result-size estimate (bytes) for the RI-15 upfront
+    /// reserve, passed as `BatchLimits::max_result_size`. Policy uses
+    /// `enforce_result_size: false`; engine result-size enforcement is absent.
+    /// Cursor pages retain this hard cap on serialized response bytes.
     /// Default 64 MiB.
     #[serde(default = "default_max_result_size_bytes")]
     pub max_result_size_bytes: usize,
@@ -371,9 +373,32 @@ pub struct QueryLimitsConfig {
     /// Default 100.
     #[serde(default = "default_max_queries_per_batch")]
     pub max_queries_per_batch: usize,
+    /// Maximum sub-batch nesting depth. Zero disables nesting. Default 64.
+    #[serde(default = "default_max_nesting_depth")]
+    pub max_nesting_depth: usize,
+    /// Maximum dependency chain depth. Zero allows independent queries only.
+    #[serde(default = "default_max_dependency_depth")]
+    pub max_dependency_depth: usize,
+    /// Maximum loop iterations. Default 10,000.
+    #[serde(default = "default_max_iterations")]
+    pub max_iterations: usize,
+    /// Maximum queries across the entire batch tree. Default 10,000.
+    #[serde(default = "default_max_total_queries")]
+    pub max_total_queries: usize,
+    /// Maximum statically bounded nested/literal loop work. Default 1,000,000.
+    /// Dynamic repetition is not charged at runtime (engine gap outside W4);
+    /// this is not universal runtime aggregate accounting.
+    #[serde(default = "default_max_total_work")]
+    pub max_total_work: u64,
+    /// Maximum requested query page size. Default 100,000.
+    #[serde(default = "default_max_page_size")]
+    pub max_page_size: u64,
+    /// Maximum pagination offset. Zero disables skipping. Default 1,000,000.
+    #[serde(default = "default_max_offset")]
+    pub max_offset: u64,
     /// RI-15 — global cap (bytes) on the SUM of in-flight response memory
-    /// across every concurrently-executing batch/connection. Only the
-    /// per-batch `max_result_size_bytes` cap gates a single response; without
+    /// across every concurrently-executing batch/connection. The
+    /// per-batch `max_result_size_bytes` supplies the upfront estimate; without
     /// this field nothing bounds the SUM across every concurrent
     /// connection (`crates/shamir-server/src/byte_budget.rs`'s module doc:
     /// worst case ~64 GiB buffered at `max_active_connections = 1000` × a
@@ -416,6 +441,13 @@ impl Default for QueryLimitsConfig {
             max_result_size_bytes: default_max_result_size_bytes(),
             max_execution_time_secs: default_max_execution_time_secs(),
             max_queries_per_batch: default_max_queries_per_batch(),
+            max_nesting_depth: default_max_nesting_depth(),
+            max_dependency_depth: default_max_dependency_depth(),
+            max_iterations: default_max_iterations(),
+            max_total_queries: default_max_total_queries(),
+            max_total_work: default_max_total_work(),
+            max_page_size: default_max_page_size(),
+            max_offset: default_max_offset(),
             max_inflight_response_bytes: default_max_inflight_response_bytes(),
         }
     }
@@ -429,6 +461,30 @@ fn default_max_execution_time_secs() -> u64 {
 }
 fn default_max_queries_per_batch() -> usize {
     100
+}
+
+// Previously uncapped fields default to CEILING, not request defaults:
+// clients may still raise their own limits within the hard engine bounds.
+fn default_max_nesting_depth() -> usize {
+    BatchLimits::CEILING.max_nesting_depth
+}
+fn default_max_dependency_depth() -> usize {
+    BatchLimits::CEILING.max_dependency_depth
+}
+fn default_max_iterations() -> usize {
+    BatchLimits::CEILING.max_iterations
+}
+fn default_max_total_queries() -> usize {
+    BatchLimits::CEILING.max_total_queries
+}
+fn default_max_total_work() -> u64 {
+    BatchLimits::CEILING.max_total_work
+}
+fn default_max_page_size() -> u64 {
+    BatchLimits::CEILING.max_page_size
+}
+fn default_max_offset() -> u64 {
+    BatchLimits::CEILING.max_offset
 }
 
 /// F-29 (#822): finite safe default for `max_inflight_response_bytes`,
@@ -693,6 +749,32 @@ impl Config {
                 "logging.flush_interval_ms must be >= 1".into(),
             ));
         }
+
+        let limits = &self.security.query_limits;
+        // Compare like-typed values without narrowing numeric conversions.
+        macro_rules! validate_query_limit {
+            ($field:ident, $ceiling:ident, $minimum:expr) => {
+                if !($minimum..=BatchLimits::CEILING.$ceiling).contains(&limits.$field) {
+                    return Err(ConfigError::Validation(format!(
+                        "security.query_limits.{} must be in {}..={} (got {})",
+                        stringify!($field),
+                        $minimum,
+                        BatchLimits::CEILING.$ceiling,
+                        limits.$field,
+                    )));
+                }
+            };
+        }
+        validate_query_limit!(max_result_size_bytes, max_result_size, 1);
+        validate_query_limit!(max_execution_time_secs, max_execution_time_secs, 1);
+        validate_query_limit!(max_queries_per_batch, max_queries, 1);
+        validate_query_limit!(max_nesting_depth, max_nesting_depth, 0);
+        validate_query_limit!(max_dependency_depth, max_dependency_depth, 0);
+        validate_query_limit!(max_iterations, max_iterations, 1);
+        validate_query_limit!(max_total_queries, max_total_queries, 1);
+        validate_query_limit!(max_total_work, max_total_work, 1);
+        validate_query_limit!(max_page_size, max_page_size, 1);
+        validate_query_limit!(max_offset, max_offset, 0);
 
         // RI-15: the global in-flight response-byte budget, if set, must be
         // able to admit at least one max-size batch response — otherwise
