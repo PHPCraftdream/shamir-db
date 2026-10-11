@@ -12,6 +12,8 @@ use crate::query::read::{NullsOrder, OrderBy, OrderByItem, OrderDirection};
 use shamir_types::types::record_id::RecordId;
 use shamir_types::types::value::QueryValue;
 
+pub(crate) const PREALLOC_CAP: usize = 1024;
+
 // ============================================================================
 // QueryValue-based ORDER BY
 // ============================================================================
@@ -219,7 +221,8 @@ pub struct TopKHeap<'ob> {
 }
 
 impl<'ob> TopKHeap<'ob> {
-    /// Build a bounded heap capped at `k = skip.saturating_add(take)`.
+    /// Build a heap with a checked `skip + take` window and bounded preallocation.
+    /// An unrepresentable window saturates without changing this constructor's signature.
     ///
     /// `with_ids` selects whether each pushed row carries its `RecordId` (the
     /// `with_version` read path sets this so the per-record versions array can
@@ -227,7 +230,7 @@ impl<'ob> TopKHeap<'ob> {
     pub fn new(order_by: &'ob OrderBy, skip: usize, take: usize, with_ids: bool) -> Self {
         let k = skip.saturating_add(take);
         Self {
-            heap: BinaryHeap::with_capacity(k + 1),
+            heap: BinaryHeap::with_capacity(k.min(PREALLOC_CAP)),
             items: &order_by.items[..],
             k,
             skip,

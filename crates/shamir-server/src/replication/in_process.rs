@@ -93,7 +93,8 @@ impl ReplSource for InProcessReplSource {
 
         // Reuse the same journal-read path as the wire handler.
         // Effective limit floor of 1, mirroring `handle_pull`.
-        let effective_limit = (limit.max(1)) as usize;
+        const MAX_PULL_EVENTS: u32 = 1024;
+        let effective_limit = limit.clamp(1, MAX_PULL_EVENTS) as usize;
         let mut jr = match self
             .leader
             .read_changelog_from_journal(db, repo, from_version, effective_limit)
@@ -113,7 +114,7 @@ impl ReplSource for InProcessReplSource {
         // supplied a positive wait budget, poll until events land or the
         // budget expires. Mirrors `handle_pull`'s behaviour.
         if jr.events.is_empty() {
-            if let Some(ms) = wait_ms {
+            if let Some(ms) = wait_ms.map(|ms| ms.min(30_000)) {
                 if ms > 0 {
                     let deadline =
                         std::time::Instant::now() + std::time::Duration::from_millis(u64::from(ms));
