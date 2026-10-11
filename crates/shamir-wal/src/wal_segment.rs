@@ -28,6 +28,17 @@ use tokio::task::spawn_blocking;
 
 use crate::wal_entry_v2::WalEntryV2;
 
+/// Replay-open retry budget for a transient denial (about 1 s in total).
+const OPEN_DENIED_ATTEMPTS: u32 = 50;
+const OPEN_DENIED_BACKOFF: std::time::Duration = std::time::Duration::from_millis(20);
+
+/// `PermissionDenied`, or on Windows a sharing violation (os error 32): both
+/// are what a scanner or a delete-pending handle produces on a fresh segment.
+fn is_transient_open_denial(e: &std::io::Error) -> bool {
+    e.kind() == std::io::ErrorKind::PermissionDenied
+        || (cfg!(windows) && e.raw_os_error() == Some(32))
+}
+
 /// Fsync the parent directory of `path` so a freshly-created file's
 /// directory entry is durable (audit §1.9). On ext4/xfs, `sync_all()` on
 /// the file does NOT guarantee the directory entry survives power loss — a
@@ -504,25 +515,37 @@ impl WalSegment {
     ) -> DbResult<Vec<WalEntryV2>> {
         let path = self.path.clone();
         spawn_blocking(move || -> DbResult<Vec<WalEntryV2>> {
-            let mut f = match File::open(&path) {
-                Ok(f) => f,
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                    return Ok(Vec::new());
-                }
-                Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
-                    if tolerate_permission_denied {
+            let mut attempt = 0u32;
+            let mut f = loop {
+                match File::open(&path) {
+                    Ok(f) => break f,
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                         return Ok(Vec::new());
                     }
-                    // Audit §2.4: at startup there is no concurrent
-                    // truncation, so PermissionDenied is a real ACL denial
-                    // or an antivirus/backup-held file — NOT an empty WAL.
-                    return Err(DbError::Storage(format!(
-                        "WalSegment replay open {path:?}: PermissionDenied \
+                    Err(e) if is_transient_open_denial(&e) => {
+                        if tolerate_permission_denied {
+                            return Ok(Vec::new());
+                        }
+                        // A just-written segment can be held for a few ms by an
+                        // antivirus / backup scanner or a delete-pending handle
+                        // on Windows: retry a bounded number of times before
+                        // treating the denial as real.
+                        attempt += 1;
+                        if attempt < OPEN_DENIED_ATTEMPTS {
+                            std::thread::sleep(OPEN_DENIED_BACKOFF);
+                            continue;
+                        }
+                        // Audit §2.4: at startup there is no concurrent
+                        // truncation, so PermissionDenied is a real ACL denial
+                        // or an antivirus/backup-held file — NOT an empty WAL.
+                        return Err(DbError::Storage(format!(
+                            "WalSegment replay open {path:?}: PermissionDenied \
                          (startup — no concurrent truncation expected; likely \
                          ACL denial or file held by another process): {e}"
-                    )));
+                        )));
+                    }
+                    Err(e) => return Err(DbError::Storage(format!("WalSegment replay open: {e}"))),
                 }
-                Err(e) => return Err(DbError::Storage(format!("WalSegment replay open: {e}"))),
             };
             let mut buf = Vec::new();
             f.read_to_end(&mut buf)
