@@ -405,6 +405,44 @@ async fn fk_final_staged_state_matrix() {
     );
 }
 
+/// Control for the matrix above: with NO parent row at all the FK validator must reject
+/// the child insert. If this fails, the validator is not bound/run by `execute_insert_tx`
+/// in this harness and the matrix proves nothing.
+#[tokio::test]
+async fn fk_control_missing_parent_is_rejected_through_execute_insert_tx() {
+    for indexed in [false, true] {
+        let (resolver, child) = setup_with_validator(Arc::new(FinalStateFkValidator)).await;
+        if indexed {
+            let parent = resolver.resolve(&TableRef::new("parent")).await.unwrap();
+            parent.create_index("parent_uid", &["uid"]).await.unwrap();
+        }
+        let (mut tx, guard) = resolver
+            .repo
+            .begin_tx(IsolationLevel::Snapshot)
+            .await
+            .unwrap();
+        let op = insert("child").row(doc().set("uid", 1i64)).build();
+        let result = child
+            .execute_insert_tx(
+                &op,
+                &mut tx,
+                true,
+                Some(&resolver),
+                &shamir_types::access::Actor::System,
+            )
+            .await;
+        let err = result.expect_err(&format!(
+            "indexed={indexed}: a child without any parent must be rejected (validator not run?)"
+        ));
+        assert!(
+            matches!(&err, DbError::ValidatorRejected(code) if code.contains("fk_violation")),
+            "indexed={indexed}: {err:?}"
+        );
+        drop(tx);
+        drop(guard);
+    }
+}
+
 #[tokio::test]
 async fn fk_staged_corrupt_parent_fails_closed() {
     for indexed in [false, true] {
