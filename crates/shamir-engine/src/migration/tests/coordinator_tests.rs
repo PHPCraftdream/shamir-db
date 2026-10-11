@@ -4,6 +4,7 @@ use shamir_storage::error::DbResult;
 use shamir_storage::storage_in_memory::InMemoryStore;
 use shamir_storage::types::{RecordKey, Store};
 use shamir_types::types::record_id::RecordId;
+use std::collections::BTreeMap;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering::SeqCst};
 use std::sync::Arc;
@@ -194,9 +195,185 @@ async fn deletes_propagated_to_dst() {
     assert_eq!(dst_count, 4);
 }
 
-/// Tallies `set`/`set_many`/`remove`/`remove_many` calls against a wrapped
-/// `Arc<dyn Store>` — used to prove a drain batch applies via ONE batched
-/// call per op kind, not one round-trip per entry (defect 2).
+async fn assert_shadow_replay(ops: Vec<ShadowOp>, ids: &[RecordId], final_drain: bool) {
+    let (info, src, dst) = make_stores();
+    let shadow = Arc::new(MigrationShadowLog::new("migorder".into(), info));
+    let state = MigrationState::new(
+        "migorder".into(),
+        "t".into(),
+        "main".into(),
+        "cold".into(),
+        "memory".into(),
+        None,
+    );
+    let coord = MigrationCoordinator::new(state, shadow.clone(), src.clone(), dst.clone(), None);
+    let mut model = BTreeMap::new();
+    for id in ids {
+        src.set(
+            RecordKey::from(id.as_bytes().to_vec()),
+            Bytes::from_static(b"snapshot"),
+        )
+        .await
+        .unwrap();
+        model.insert(*id, b"snapshot".to_vec());
+    }
+    assert_eq!(coord.run_snapshot().await.unwrap(), ids.len() as u64);
+    for op in &ops {
+        match op {
+            ShadowOp::Put { record_id, value } => {
+                model.insert(*record_id, value.clone());
+            }
+            ShadowOp::Delete { record_id } => {
+                model.remove(record_id);
+            }
+        }
+    }
+    let expected_applied = ops.len() as u64;
+    let lsns = shadow.append_batch(ops).await.unwrap();
+    let applied = if final_drain {
+        coord.mark_cutover_ready().await.unwrap();
+        coord.final_drain_and_commit().await.unwrap()
+    } else {
+        coord.drain_shadow_log().await.unwrap()
+    };
+    assert_eq!(applied, expected_applied);
+    assert_eq!(coord.state().await.last_lsn_applied, *lsns.last().unwrap());
+    assert_eq!(coord.shadow_lag().await, 0);
+    assert_eq!(
+        coord.phase().await,
+        if final_drain {
+            MigrationPhase::Committed
+        } else {
+            MigrationPhase::Draining
+        },
+    );
+    for id in ids {
+        let actual = dst
+            .get_many(vec![RecordKey::from(id.as_bytes().to_vec())])
+            .await
+            .unwrap();
+        assert_eq!(actual, vec![model.get(id).cloned().map(Bytes::from)]);
+    }
+    if final_drain {
+        assert!(shadow.read_from(1).await.unwrap().is_empty());
+    } else {
+        assert_eq!(
+            shadow.read_from(1).await.unwrap().len() as u64,
+            expected_applied,
+        );
+        assert_eq!(coord.drain_shadow_log().await.unwrap(), 0);
+    }
+}
+
+async fn assert_same_key_sequence(kinds: &[bool]) {
+    let id = RecordId([7; 16]);
+    for final_drain in [false, true] {
+        let ops = kinds
+            .iter()
+            .enumerate()
+            .map(|(i, put)| {
+                if *put {
+                    ShadowOp::Put {
+                        record_id: id,
+                        value: format!("value-{i}").into_bytes(),
+                    }
+                } else {
+                    ShadowOp::Delete { record_id: id }
+                }
+            })
+            .collect();
+        assert_shadow_replay(ops, &[id], final_drain).await;
+    }
+}
+
+#[tokio::test]
+async fn shadow_delete_then_put_preserves_lsn_order() {
+    assert_same_key_sequence(&[false, true]).await;
+}
+
+#[tokio::test]
+async fn shadow_put_then_delete_preserves_lsn_order() {
+    assert_same_key_sequence(&[true, false]).await;
+}
+
+#[tokio::test]
+async fn shadow_put_delete_put_preserves_lsn_order() {
+    assert_same_key_sequence(&[true, false, true]).await;
+}
+
+#[tokio::test]
+async fn shadow_delete_put_delete_preserves_lsn_order() {
+    assert_same_key_sequence(&[false, true, false]).await;
+}
+
+#[tokio::test]
+async fn shadow_duplicate_put_run_is_last_writer_wins() {
+    let ids = [RecordId([8; 16]), RecordId([9; 16])];
+    for final_drain in [false, true] {
+        let ops = [0, 1, 0, 1, 0]
+            .iter()
+            .enumerate()
+            .map(|(i, key)| ShadowOp::Put {
+                record_id: ids[*key],
+                value: format!("overwrite-{i}").into_bytes(),
+            })
+            .collect();
+        assert_shadow_replay(ops, &ids, final_drain).await;
+    }
+}
+
+fn lcg_next(state: &mut u64) -> u64 {
+    *state = state.wrapping_mul(6364136223846793005).wrapping_add(1);
+    *state
+}
+
+async fn assert_lcg_shadow_model(ids: &[RecordId]) {
+    for seed in [1u64, 0x5eed, 0xdead_beef] {
+        let mut rng = seed;
+        for iteration in 0..128 {
+            let mut ops = Vec::with_capacity(66);
+            for step in 0..64 {
+                let key = usize::try_from((lcg_next(&mut rng) >> 32) % ids.len() as u64).unwrap();
+                let id = ids[key];
+                if (lcg_next(&mut rng) >> 32) & 1 == 0 {
+                    ops.push(ShadowOp::Put {
+                        record_id: id,
+                        value: format!("{seed}-{iteration}-{step}").into_bytes(),
+                    });
+                } else {
+                    ops.push(ShadowOp::Delete { record_id: id });
+                }
+            }
+            if iteration % 4 == 0 {
+                ops.push(ShadowOp::Delete { record_id: ids[0] });
+                ops.push(ShadowOp::Put {
+                    record_id: ids[0],
+                    value: b"resurrected".to_vec(),
+                });
+            }
+            assert_shadow_replay(ops, ids, iteration % 2 == 0).await;
+        }
+    }
+}
+
+#[tokio::test]
+async fn shadow_lcg_one_key_matches_sequential_model() {
+    assert_lcg_shadow_model(&[RecordId([10; 16])]).await;
+}
+
+#[tokio::test]
+async fn shadow_lcg_multiple_keys_match_sequential_model() {
+    assert_lcg_shadow_model(&[
+        RecordId([10; 16]),
+        RecordId([11; 16]),
+        RecordId([12; 16]),
+        RecordId([13; 16]),
+    ])
+    .await;
+}
+
+/// Tallies calls and records ordered batches to distinguish adjacent runs
+/// from global partitions and per-entry round trips.
 #[derive(Default)]
 struct CallCounts {
     set: AtomicUsize,
@@ -205,6 +382,13 @@ struct CallCounts {
     remove: AtomicUsize,
     remove_many: AtomicUsize,
     remove_many_items: AtomicUsize,
+    batches: tokio::sync::Mutex<Vec<BatchCall>>,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum BatchCall {
+    Put(Vec<(RecordKey, Bytes)>),
+    Delete(Vec<RecordKey>),
 }
 
 struct CountingStore {
@@ -231,11 +415,21 @@ impl Store for CountingStore {
     async fn set_many(&self, items: Vec<(RecordKey, Bytes)>) -> DbResult<Vec<bool>> {
         self.counts.set_many.fetch_add(1, SeqCst);
         self.counts.set_many_items.fetch_add(items.len(), SeqCst);
+        self.counts
+            .batches
+            .lock()
+            .await
+            .push(BatchCall::Put(items.clone()));
         self.inner.set_many(items).await
     }
     async fn remove_many(&self, keys: Vec<RecordKey>) -> DbResult<Vec<bool>> {
         self.counts.remove_many.fetch_add(1, SeqCst);
         self.counts.remove_many_items.fetch_add(keys.len(), SeqCst);
+        self.counts
+            .batches
+            .lock()
+            .await
+            .push(BatchCall::Delete(keys.clone()));
         self.inner.remove_many(keys).await
     }
     fn iter_stream(&self, batch_size: usize) -> TestStream {
@@ -246,10 +440,7 @@ impl Store for CountingStore {
     }
 }
 
-/// Defect 2 regression: a drain batch with a mix of `Put` and `Delete`
-/// entries must apply all of them correctly via ONE `set_many` call
-/// (all puts) and ONE `remove_many` call (all deletes) — not a
-/// per-entry `set`/`remove` round trip each.
+/// Adjacent runs must be batched without moving puts across deletes.
 #[tokio::test]
 async fn drain_applies_mixed_put_delete_via_batched_calls() {
     let (info, src, _unused_dst) = make_stores();
@@ -273,8 +464,8 @@ async fn drain_applies_mixed_put_delete_via_batched_calls() {
 
     coord.run_snapshot().await.unwrap(); // -> Draining, 0 src rows
 
-    let put_ids: Vec<RecordId> = (0..3).map(|_| RecordId::new()).collect();
-    let del_ids: Vec<RecordId> = (0..2).map(|_| RecordId::new()).collect();
+    let put_ids = [RecordId([1; 16]), RecordId([2; 16]), RecordId([3; 16])];
+    let del_ids = [RecordId([4; 16]), RecordId([5; 16])];
 
     // Pre-seed the delete targets directly on the raw (uncounted) store so
     // the counters below reflect only the drain's own calls.
@@ -288,7 +479,7 @@ async fn drain_applies_mixed_put_delete_via_batched_calls() {
             .unwrap();
     }
 
-    for (i, id) in put_ids.iter().enumerate() {
+    for (i, id) in put_ids[..2].iter().enumerate() {
         shadow
             .append(ShadowOp::Put {
                 record_id: *id,
@@ -304,17 +495,48 @@ async fn drain_applies_mixed_put_delete_via_batched_calls() {
             .unwrap();
     }
 
+    shadow
+        .append(ShadowOp::Put {
+            record_id: put_ids[2],
+            value: b"v-2".to_vec(),
+        })
+        .await
+        .unwrap();
+
     let applied = coord.drain_shadow_log().await.unwrap();
     assert_eq!(applied, 5);
 
-    // Batched, not per-entry: exactly one set_many covering all 3 puts,
-    // one remove_many covering both deletes, zero singular set/remove.
     assert_eq!(counts.set.load(SeqCst), 0);
-    assert_eq!(counts.set_many.load(SeqCst), 1);
+    assert_eq!(counts.set_many.load(SeqCst), 2);
     assert_eq!(counts.set_many_items.load(SeqCst), 3);
     assert_eq!(counts.remove.load(SeqCst), 0);
     assert_eq!(counts.remove_many.load(SeqCst), 1);
     assert_eq!(counts.remove_many_items.load(SeqCst), 2);
+    assert_eq!(
+        *counts.batches.lock().await,
+        vec![
+            BatchCall::Put(vec![
+                (
+                    RecordKey::from(put_ids[0].as_bytes().to_vec()),
+                    Bytes::from_static(b"v-0"),
+                ),
+                (
+                    RecordKey::from(put_ids[1].as_bytes().to_vec()),
+                    Bytes::from_static(b"v-1"),
+                ),
+            ]),
+            BatchCall::Delete(
+                del_ids
+                    .iter()
+                    .map(|id| RecordKey::from(id.as_bytes().to_vec()))
+                    .collect(),
+            ),
+            BatchCall::Put(vec![(
+                RecordKey::from(put_ids[2].as_bytes().to_vec()),
+                Bytes::from_static(b"v-2"),
+            )]),
+        ],
+    );
 
     // Correctness: puts landed with the right values, deletes are gone.
     for (i, id) in put_ids.iter().enumerate() {
