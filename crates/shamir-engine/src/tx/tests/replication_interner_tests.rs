@@ -347,6 +347,12 @@ async fn leader_unresolved_referenced_id_returns_error() {
         )
         .await
         .unwrap();
+    // Journal reads are bounded by the completion watermark: settle the
+    // version the seeded journal row stands for.
+    leader.tx_gate().await.unwrap().completion().mark(
+        source.commit_version,
+        shamir_tx::CompletionState::Materialized,
+    );
     assert_eq!(
         leader.read_changelog_from(0, 100).await.unwrap().events,
         vec![source.clone()],

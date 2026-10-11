@@ -920,6 +920,8 @@ async fn commit_tx_inner_legacy_async(
     let prepared_journal = repo.prepare_journal_event(changefeed_event).await;
 
     apply_data_phase(&mut tx, repo, commit_version).await;
+    #[cfg(test)]
+    fire_post_wal_pre_publish_test_hook(repo, false).await;
     // SSI fix S2 — Phase 5a (`apply_data_phase` → `apply_committed_visible`)
     // finalized every claimed cell (version published, `reserved_by` cleared).
     // Disarm so the guards' `Drop` is a no-op.
