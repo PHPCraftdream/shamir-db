@@ -11,6 +11,8 @@
 //! engine re-export (`crate::engine::tx::*`) — the same concrete `shamir-tx`
 //! types the server names. See `docs/dev-artifacts/roadmap/PHASE_B_INTERACTIVE_TX.md` §5.
 
+use std::time::{Duration, Instant};
+
 use shamir_query_types::batch::ExecPolicy;
 
 use crate::access::{Action, Actor, ResourcePath};
@@ -138,9 +140,29 @@ impl ShamirDb {
         tx: &mut crate::engine::tx::TxContext,
         policy: ExecPolicy,
     ) -> Result<BatchResponse, BatchError> {
-        let auth = Authorized::authorize(request, actor, db_name, self)
+        self.tx_execute_with_policy_and_budget(actor, db_name, request, tx, policy, None)
+            .await
+    }
+
+    /// Execute with an exact caller-owned cap, without changing request limits.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn tx_execute_with_policy_and_budget(
+        &self,
+        actor: Actor,
+        db_name: &str,
+        request: &BatchRequest,
+        tx: &mut crate::engine::tx::TxContext,
+        policy: ExecPolicy,
+        deadline_cap: Option<Duration>,
+    ) -> Result<BatchResponse, BatchError> {
+        // Authorization must consume, not renew, the caller's remaining budget.
+        let started = Instant::now();
+        let mut auth = Authorized::authorize(request, actor, db_name, self)
             .await?
             .with_policy(policy);
+        if let Some(cap) = deadline_cap {
+            auth = auth.with_deadline_cap(cap.saturating_sub(started.elapsed()));
+        }
         let db = self.get_db(db_name).ok_or_else(|| BatchError::QueryError {
             alias: String::new(),
             message: format!("Database '{}' not found", db_name),

@@ -38,6 +38,8 @@
 //! the code (e.g. bench/test harnesses do exactly this), not a silent
 //! omission.
 
+use std::time::{Duration, Instant};
+
 use super::ExecScope;
 use async_trait::async_trait;
 use shamir_collections::TFxSet;
@@ -74,6 +76,7 @@ pub struct Authorized<'a> {
     actor: Actor,
     db_name: &'a str,
     policy: ExecPolicy,
+    deadline_cap: Option<(Instant, Duration)>,
 }
 
 impl<'a> Authorized<'a> {
@@ -118,6 +121,7 @@ impl<'a> Authorized<'a> {
             actor,
             db_name,
             policy: ExecPolicy::EMBEDDED,
+            deadline_cap: None,
         })
     }
 
@@ -136,6 +140,7 @@ impl<'a> Authorized<'a> {
             actor,
             db_name,
             policy: ExecPolicy::EMBEDDED,
+            deadline_cap: None,
         }
     }
 
@@ -145,6 +150,31 @@ impl<'a> Authorized<'a> {
         self
     }
 
+    /// Attach an exact caller-owned budget independently of wire limits.
+    /// The clock starts here, not when the root scope is later constructed.
+    /// Repeated caps can only tighten the deadline; zero expires immediately.
+    pub fn with_deadline_cap(self, cap: Duration) -> Self {
+        self.with_deadline_cap_at(Instant::now(), cap)
+    }
+
+    fn with_deadline_cap_at(mut self, now: Instant, cap: Duration) -> Self {
+        if let Some(deadline) = now.checked_add(cap) {
+            if self
+                .deadline_cap
+                .is_none_or(|(previous, _)| deadline < previous)
+            {
+                self.deadline_cap = Some((deadline, cap));
+            }
+        }
+        self
+    }
+
+    /// Inject an attachment instant while sharing production cap construction.
+    #[cfg(test)]
+    pub(super) fn with_deadline_cap_at_for_test(self, now: Instant, cap: Duration) -> Self {
+        self.with_deadline_cap_at(now, cap)
+    }
+
     /// Borrow the server-owned execution policy.
     pub fn policy(&self) -> &ExecPolicy {
         &self.policy
@@ -152,14 +182,18 @@ impl<'a> Authorized<'a> {
 
     /// Shared root construction used by both execution entry points.
     pub(super) fn root_scope(&self) -> ExecScope {
-        ExecScope::root_with_result_size(
+        let scope = ExecScope::root_with_result_size(
             &self
                 .request
                 .limits
                 .clamped_to(&self.policy().caps)
                 .clamped_to(&BatchLimits::CEILING),
             self.policy.enforce_result_size,
-        )
+        );
+        match self.deadline_cap {
+            Some((deadline, cap)) => scope.with_deadline_cap(deadline, cap),
+            None => scope,
+        }
     }
 
     /// The authorized request.

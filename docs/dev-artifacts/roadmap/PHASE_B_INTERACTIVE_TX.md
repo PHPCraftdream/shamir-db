@@ -146,6 +146,24 @@ State transitions, normatively:
   `read_set`, etc. Read-your-own-writes (RYOW) holds across calls because
   the `TxContext` is the same object (the read path already consults the
   staging overlay — see `read_tx`, `executor.rs:413`).
+  Each call's cooperative deadline is the minimum of the request budget,
+  server policy cap, and the handle's exact remaining absolute lifetime,
+  at full `Duration` precision (no rounding up to whole seconds). The
+  remaining lifetime is sampled after acquiring the parked context lock.
+  Request/policy whole-second zero retains its one-second minimum; an
+  exact zero remaining budget expires immediately. This is an internal
+  seam, not a new wire field. Enforcement happens at safe executor
+  checkpoints, not by cancelling a stalled operation or timing commit/WAL.
+  If the handle is already expired at lookup, the client receives
+  **`tx_expired`** and the handle is removed. If it expires during execution,
+  `ExecutionTimedOut` maps to **`limits`** and removes the handle. Any
+  `LimitExceeded` also removes it: **`work_budget_exceeded`**,
+  **`result_too_large`**, **`pagination_too_large`**, **`nesting_too_deep`**,
+  or **`too_many_iterations`**, depending on the limit kind. The staging
+  cap error **`tx_too_large`** likewise drops the handle. Removal aborts all
+  staged calls and releases the snapshot once outstanding owned references
+  leave scope; a follow-up execute receives **`tx_not_found`**. Ordinary
+  query errors preserve the handle so the client can retry or roll back.
 - **`COMMIT(handle)`** — server removes the `TxContext` from the registry
   and runs the full Phase-A commit pipeline `commit_tx(tx, repo)`
   (`crates/shamir-engine/src/tx/commit.rs:341`). The `SnapshotGuard` is
