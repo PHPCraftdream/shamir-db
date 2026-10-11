@@ -16,9 +16,12 @@ mod bootstrap_mode;
 mod meta_sinks;
 mod server_handle;
 mod server_launcher;
+mod store_release_barrier;
 
 pub use boot_error::BootError;
 pub use bootstrap_mode::BootstrapMode;
 pub use server_handle::ServerHandle;
 pub use server_launcher::audit_store_b_vs_directory;
 pub use server_launcher::ServerLauncher;
+#[cfg(test)]
+pub(crate) use store_release_barrier::wait_stores_released;

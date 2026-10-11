@@ -981,6 +981,8 @@ impl ServerLauncher {
             repl_supervisor: supervisor,
             repl_supervisor_task: Some(repl_supervisor_task),
             shamir,
+            data_dir: config.data_dir.clone(),
+            conn_limiter: conn_limiter.clone(),
             _data_dir_lock: data_dir_lock,
             tunables: Arc::new(RuntimeTunables::new()),
         })
@@ -1071,6 +1073,21 @@ fn build_ctx(
     )
 }
 
+/// Run one connection task until it ends or the server shuts down. Dropping the
+/// connection future releases its limiter guards and every store reference
+/// reachable through its handler context, which is what lets
+/// `ServerHandle::shutdown` return with the stores released.
+async fn run_until_cancelled<F: std::future::Future<Output = ()>>(
+    shutdown: tokio_util::sync::CancellationToken,
+    connection: F,
+) {
+    tokio::select! {
+        biased;
+        _ = shutdown.cancelled() => {}
+        _ = connection => {}
+    }
+}
+
 /// TCP+TLS accept loop. The accept_loop itself never blocks: every step
 /// is async, and per-connection work is `tokio::spawn`'d so multiple
 /// in-flight TLS handshakes / Argon2id verifies don't serialise on the
@@ -1134,7 +1151,7 @@ async fn accept_loop_tcp(
                 };
                 let acceptor = acceptor.clone();
                 let ctx = ctx.clone();
-                tokio::spawn(async move {
+                tokio::spawn(run_until_cancelled(shutdown.clone(), async move {
                     let _guard = guard;  // keep alive for the lifetime of this task
                     let _per_ip_guard = per_ip_guard;
                     // Bound the TLS handshake — without this a client that
@@ -1163,7 +1180,7 @@ async fn accept_loop_tcp(
                     let exporter = extract_tls_exporter(&tls).unwrap_or([0u8; 32]);
                     let framer = TcpFramer::new(tls);
                     handle_connection(ctx, peer_addr, framer, exporter).await;
-                });
+                }));
             }
         }
     }
@@ -1225,12 +1242,12 @@ async fn accept_loop_plain(
                     }
                 };
                 let ctx = ctx.clone();
-                tokio::spawn(async move {
+                tokio::spawn(run_until_cancelled(shutdown.clone(), async move {
                     let _guard = guard; // keep alive for the lifetime of this task
                     let _per_ip_guard = per_ip_guard;
                     let framer = TcpFramer::new(tcp);
                     handle_connection(ctx, peer_addr, framer, [0u8; 32]).await;
-                });
+                }));
             }
         }
     }
@@ -1300,12 +1317,12 @@ async fn accept_loop_ipc(
                     }
                 };
                 let ctx = ctx.clone();
-                tokio::spawn(async move {
+                tokio::spawn(run_until_cancelled(shutdown.clone(), async move {
                     let _guard = guard; // keep alive for the lifetime of this task
                     let _per_ip_guard = per_ip_guard;
                     let framer = TcpFramer::new(stream);
                     handle_connection(ctx, IPC_PEER_ADDR, framer, [0u8; 32]).await;
-                });
+                }));
             }
         }
     }
@@ -1364,7 +1381,7 @@ async fn accept_loop_ws_native(
                 };
                 let acceptor = acceptor.clone();
                 let ctx = ctx.clone();
-                tokio::spawn(async move {
+                tokio::spawn(run_until_cancelled(shutdown.clone(), async move {
                     let _guard = guard;
                     let _per_ip_guard = per_ip_guard;
                     let tls = match tokio::time::timeout(
@@ -1409,7 +1426,7 @@ async fn accept_loop_ws_native(
                     };
                     let framer = WsFramer::new(ws);
                     handle_connection(ctx, peer_addr, framer, exporter).await;
-                });
+                }));
             }
         }
     }
@@ -1470,7 +1487,7 @@ async fn accept_loop_ws_browser(
                 let acceptor = acceptor.clone();
                 let ctx = ctx.clone();
                 let policy = policy.clone();
-                tokio::spawn(async move {
+                tokio::spawn(run_until_cancelled(shutdown.clone(), async move {
                     let _guard = guard;
                     let _per_ip_guard = per_ip_guard;
                     let tls = match tokio::time::timeout(
@@ -1513,7 +1530,7 @@ async fn accept_loop_ws_browser(
                     };
                     let framer = WsFramer::new(ws);
                     handle_connection(ctx, peer_addr, framer, exporter).await;
-                });
+                }));
             }
         }
     }
