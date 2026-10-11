@@ -1174,6 +1174,7 @@ impl<'a> QueryRunner<'a> {
             })?;
 
         let ctx = FilterContext::new(interner, resolved_refs)
+            .with_max_accumulator_bytes(self.scope.limits().max_result_size)
             .with_scalars(self.resolver.scalar_resolver())
             .with_params(self.params);
 
