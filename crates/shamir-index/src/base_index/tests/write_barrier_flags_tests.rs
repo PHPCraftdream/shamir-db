@@ -91,11 +91,8 @@ fn clone_shares_the_same_underlying_word() {
 }
 
 #[test]
-fn all_seven_bits_fit_in_two_bytes_with_room_to_spare() {
-    // Sanity check on the bit-packing budget claim in the module doc:
-    // 7 bits used out of 16 available in AtomicU16, no overlap (if any pair
-    // of the seven constants aliased the same bit, `count_ones()` would be
-    // less than 7 despite OR-ing all seven together).
-    assert_eq!(ALL_BITS.count_ones(), 7);
-    assert_eq!(ALL_BITS, 0b0100_0000 | 0b0011_1111);
+fn all_eight_selectors_fit_in_u8_without_narrowing_atomic_word() {
+    // Eight distinct selectors fill u8; storage remains AtomicU16.
+    assert_eq!(ALL_BITS.count_ones(), 8);
+    assert_eq!(ALL_BITS, u16::from(u8::MAX));
 }

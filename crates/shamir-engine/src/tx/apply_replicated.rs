@@ -55,9 +55,8 @@
 //! — which is itself the pre-D2-cutover composition of
 //! `apply_committed_visible` + `write_committed_to_history`), routing the
 //! raw `(key, value)` pair straight into the version-log at the
-//! follower-local commit version. For unattached tables (no `MvccStore` —
-//! system/test), it falls back to the direct `base.transact`, matching
-//! `replay_v2_op`'s non-MVCC branch.
+//! follower-local commit version. Tables without MVCC or with secondary
+//! indexes are rejected before allocation; there is no base-store fallback.
 //!
 //! ## finalize-tail reuse
 //!
@@ -97,8 +96,8 @@
 use std::sync::Arc;
 
 use shamir_storage::error::{DbError, DbResult};
-use shamir_storage::types::{KvOp, Store};
-use shamir_tx::{ChangeOp, ChangelogEvent};
+use shamir_storage::types::KvOp;
+use shamir_tx::{ChangeOp, ChangelogEvent, MvccStore};
 use shamir_types::record_view::RecordView;
 use shamir_types::types::value::InnerValue;
 
@@ -116,6 +115,19 @@ pub enum ApplyOutcome {
     /// below the caller-supplied `applied_watermark` (already applied in a
     /// prior call — idempotent re-delivery).
     Skipped,
+    /// The event is incompatible with this follower. No version is spent,
+    /// no data is written, and no downstream event is emitted.
+    Rejected { reason: ApplyRejectReason },
+}
+
+/// Permanent incompatibilities detected before allocating a local version.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ApplyRejectReason {
+    UnknownTable,
+    NoMvccStore,
+    IndexedTable,
+    MissingValue,
+    UndecodablePayload,
 }
 
 /// Follower-side trust policy for [`apply_replicated`] (#1199). See
@@ -132,9 +144,8 @@ pub enum ApplyPolicy {
     /// version or touching the store: the same two-step decode
     /// `table/read_exec.rs` uses to classify corrupt records
     /// ([`RecordView::new`], falling back to [`InnerValue::from_bytes`] for
-    /// legacy-encoded rows). Rejects the WHOLE event (`Err`, no version
-    /// consumed — re-delivery retries identically) if any `Put` payload
-    /// decodes as neither.
+    /// legacy-encoded rows). Rejects the WHOLE event (`Rejected`, no version
+    /// consumed) if any `Put` payload decodes as neither.
     ///
     /// This does NOT re-run schema/validator/DAC checks against the
     /// decoded record — see REPLICATION.md §4.4 for why that is explicitly
@@ -161,13 +172,14 @@ pub enum ApplyPolicy {
 /// touching the store.
 ///
 /// `policy` selects the trust model — see [`ApplyPolicy`]'s doc. Passing
-/// [`ApplyPolicy::Trusted`] reproduces the pre-#1199 behavior exactly.
+/// [`ApplyPolicy::Trusted`] skips payload decoding, but not table preflight.
 ///
 /// Returns [`ApplyOutcome::Applied`] with the follower-local commit
 /// version on success. A `Skipped` outcome is returned BEFORE any version
 /// is allocated (a skip consumes no version), so the gate floor is
-/// untouched. On error the caller MUST NOT advance its
-/// `applied_watermark` — re-delivery will retry with a fresh local version.
+/// untouched. `Rejected` is terminal and also consumes no version. Neither a
+/// rejection nor an error permits advancing `applied_watermark`. Storage
+/// errors remain retryable with a fresh local version.
 pub async fn apply_replicated(
     repo: &RepoInstance,
     event: &ChangelogEvent,
@@ -182,28 +194,65 @@ pub async fn apply_replicated(
         return Ok(ApplyOutcome::Skipped);
     }
 
-    // #1199 ApplyPolicy::ValidatePayload: decode every `Put`'s record bytes
-    // BEFORE allocating a version or touching the store. A rejection here
-    // consumes no version (identical to the `Skipped` contract above) —
-    // re-delivery retries the same event unchanged. See `ApplyPolicy`'s doc
-    // for exactly what this does and does not check.
-    if policy == ApplyPolicy::ValidatePayload {
-        for change in &event.changes {
-            if !matches!(change.op, ChangeOp::Put) {
-                continue;
+    let mut by_table: shamir_collections::TFxMap<String, Vec<KvOp>> =
+        shamir_collections::TFxMap::default();
+    for change in &event.changes {
+        let op = match change.op {
+            ChangeOp::Put => {
+                let Some(value) = change.value.as_ref() else {
+                    return Ok(ApplyOutcome::Rejected {
+                        reason: ApplyRejectReason::MissingValue,
+                    });
+                };
+                if policy == ApplyPolicy::ValidatePayload
+                    && RecordView::new(value).is_err()
+                    && InnerValue::from_bytes(value).is_err()
+                {
+                    return Ok(ApplyOutcome::Rejected {
+                        reason: ApplyRejectReason::UndecodablePayload,
+                    });
+                }
+                KvOp::Set(change.key.clone().into(), value.clone())
             }
-            let Some(value) = change.value.as_ref() else {
-                continue; // handled as a hard error by the apply loop below
-            };
-            let decodes = RecordView::new(value).is_ok() || InnerValue::from_bytes(value).is_ok();
-            if !decodes {
-                return Err(DbError::Validation(format!(
-                    "apply_replicated: leader_v {} tx {} table '{}' key {:?} carries \
-                     an undecodable record payload under ApplyPolicy::ValidatePayload",
-                    event.commit_version, event.tx_id, change.table, change.key
-                )));
+            ChangeOp::Delete => KvOp::Remove(change.key.clone().into()),
+        };
+        by_table.entry(change.table.clone()).or_default().push(op);
+    }
+
+    let mut prepared: Vec<(u64, Arc<MvccStore>, Vec<KvOp>)> = Vec::with_capacity(by_table.len());
+    for (table_name, ops) in by_table {
+        let table = match repo.get_table(&table_name).await {
+            Ok(table) => table,
+            Err(DbError::NotFound(_)) => {
+                return Ok(ApplyOutcome::Rejected {
+                    reason: ApplyRejectReason::UnknownTable,
+                });
             }
+            Err(error) => return Err(error),
+        };
+        if table.index_manager_ref().iter_indexes().next().is_some()
+            || table
+                .index_manager_ref()
+                .iter_unique_indexes()
+                .next()
+                .is_some()
+            || !table.sorted_indexes().iter_indexes().is_empty()
+            || !table.index2_registry().is_empty()
+        {
+            return Ok(ApplyOutcome::Rejected {
+                reason: ApplyRejectReason::IndexedTable,
+            });
         }
+        let token = table_token_for(&table_name);
+        let Some(mvcc) = repo
+            .per_table_mvcc()
+            .read_sync(&token, |_, mvcc| Arc::clone(mvcc))
+        else {
+            return Ok(ApplyOutcome::Rejected {
+                reason: ApplyRejectReason::NoMvccStore,
+            });
+        };
+        prepared.push((token, mvcc, ops));
     }
 
     let gate = repo.tx_gate().await?;
@@ -228,140 +277,11 @@ pub async fn apply_replicated(
     let version_guard = gate.assign_next_version_guarded();
     let local_version = version_guard.version();
 
-    // Group changes by table so each table's MvccStore / base store is hit
-    // at most once with a single batched `transact` (O(tables), not
-    // O(changes)). The token is a deterministic hash of the table name —
-    // the same function the leader used to resolve its own tokens — so a
-    // leader's `RecordChange.table` resolves to the same `per_table_mvcc`
-    // entry on the follower.
-    // Group by table NAME (not token): the name is needed to force the
-    // per-table MvccStore attach below, and it uniquely determines the token.
-    let mut by_table: shamir_collections::TFxMap<String, Vec<KvOp>> =
-        shamir_collections::TFxMap::default();
-    for change in &event.changes {
-        let op = match change.op {
-            ChangeOp::Put => {
-                let Some(value) = change.value.as_ref() else {
-                    return Err(DbError::Internal(format!(
-                        "apply_replicated: Put change on table '{}' key {:?} \
-                         carried no value bytes",
-                        change.table, change.key
-                    )));
-                };
-                KvOp::Set(change.key.clone().into(), value.clone())
-            }
-            ChangeOp::Delete => KvOp::Remove(change.key.clone().into()),
-        };
-        by_table.entry(change.table.clone()).or_default().push(op);
-    }
-
     let mut any_failed: Option<(u64, DbError)> = None;
-    for (table_name, ops) in by_table {
-        if any_failed.is_some() {
-            // Stop on the first failure — a partial apply leaves the
-            // follower with a prefix of the event's changes. The caller
-            // MUST NOT advance the watermark; re-delivery re-applies
-            // idempotently (last-write-wins at the data layer).
+    for (token, mvcc, ops) in prepared {
+        if let Err(error) = mvcc.apply_committed_ops(ops, local_version).await {
+            any_failed = Some((token, error));
             break;
-        }
-        let token = table_token_for(&table_name);
-        // Force the per-table MvccStore to ATTACH before we look it up.
-        // `create_table_context` (reached via `get_table`) is what registers
-        // the `per_table_mvcc` entry, and once attached ALL reads/writes for
-        // this table route through the version-log (`history`), never through
-        // `__data__`. A follower that applies replication BEFORE ever serving
-        // a read has no attachment yet; without this the write would take the
-        // base-store fallback and be invisible to a later MVCC read (the
-        // divergence R1-d had to work around with a throwaway SELECT).
-        // `get_table` is a no-op when the context already exists (OnceCell).
-        // NotFound = the table is not configured on this follower (dropped /
-        // never created) — fall through to the base-store branch, which warns
-        // and skips. Any OTHER error (store I/O failure, corrupt on-disk
-        // index metadata, etc.) is a REAL attach failure: falling through to
-        // the base-store branch anyway would silently take the non-MVCC
-        // write path the attach exists to prevent, and — because the caller
-        // only advances its replication bookmark after a successful `Ok`
-        // return — swallowing it here would let the bookmark advance past an
-        // event that was never actually applied through MVCC, so a retry
-        // could never repair it. Propagate instead: the version_guard's
-        // `Drop` (no `.commit()` was called) marks it `Aborted`, and the
-        // caller must not advance its watermark on this `Err`.
-        match repo.get_table(&table_name).await {
-            Ok(_) | Err(DbError::NotFound(_)) => {}
-            Err(e) => {
-                log::error!(
-                    "apply_replicated: forced MVCC attach for table '{}' failed with a \
-                     non-NotFound error (event leader_v {} tx {}): {e}; aborting apply so \
-                     the caller does NOT advance its replication watermark — retry will \
-                     re-attempt the attach",
-                    table_name,
-                    event.commit_version,
-                    event.tx_id
-                );
-                return Err(e);
-            }
-        }
-        // Resolve the MvccStore the SAME way `apply_data_batch` /
-        // `replay_v2_op` do: look up the per-table entry the
-        // `RepoInstance` registers when the `TableManager` is
-        // instantiated. A missing entry means the table is genuinely
-        // unattached (system/test, no MVCC) — fall back to the direct
-        // base store.
-        // DEADLOCK FIX (same class as #589 / `cells` map commit `7a4abf62`,
-        // H1+H2 commit `621776bd`): `read_sync`, NOT `read_async`. The
-        // `per_table_mvcc` map is also touched SYNCHRONOUSLY — `read_sync`
-        // (version_provider.rs, EVERY Serializable `validate_read_set` commit),
-        // `get_sync` (commit.rs pessimistic-lock release; rename-table) and
-        // `iter_sync` (flush_all_history; drainer F6a overlay GC) — and
-        // EXCLUSIVELY by `insert_sync` (table attach) / `remove_sync` (drop
-        // table). `read_async`'s wait is lock-HANDOFF: saa grants the shared
-        // bucket lock to the suspended reader TASK, which then holds it while
-        // unpolled in tokio's run queue. A DDL exclusive writer (attach/drop)
-        // racing a replication-apply history seed can park every worker behind
-        // that unpolled reader → whole-runtime deadlock. `read_sync`'s bucket
-        // lock is held only by a RUNNING thread for a few instructions (an
-        // `Arc::clone`), bounding every wait. The fn stays `async`; this call
-        // no longer suspends.
-        let mvcc_found = repo
-            .per_table_mvcc()
-            .read_sync(&token, |_, mvcc| std::sync::Arc::clone(mvcc));
-        match mvcc_found {
-            Some(mvcc) => {
-                // apply_committed_ops = apply_committed_visible (overlay +
-                // cell + floor) THEN write_committed_to_history (durable
-                // version-log + ts + cell seed). Both halves run inline
-                // here: there is no local WAL entry for the follower to
-                // offer the drainer, so the split-half (ack-path visible +
-                // background drainer durable) does not apply — we do the
-                // pre-cutover "both halves at once" composition that
-                // `apply_committed_ops` was built for.
-                if let Err(e) = mvcc.apply_committed_ops(ops, local_version).await {
-                    any_failed = Some((token, e));
-                }
-            }
-            None => {
-                // Unattached table: resolve the base data store via the
-                // table manager and apply directly, matching
-                // `replay_v2_op`'s non-MVCC Put/Delete branches.
-                let tbl = match repo.table_by_token(token).await? {
-                    Some(t) => t,
-                    None => {
-                        log::warn!(
-                            "apply_replicated: table token {} not found \
-                             in repo {}; skipping its {} changes (table may have \
-                             been dropped on the follower)",
-                            token,
-                            repo.name(),
-                            ops.len(),
-                        );
-                        continue;
-                    }
-                };
-                let base: Arc<dyn Store> = Arc::clone(tbl.data_store());
-                if let Err(e) = base.transact(ops).await {
-                    any_failed = Some((token, e));
-                }
-            }
         }
     }
 

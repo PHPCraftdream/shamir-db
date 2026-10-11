@@ -1,7 +1,7 @@
 //! R1-c — error type for the follower replication pull-loop.
 //!
 //! Splits into two classes:
-//!   * **Terminal** ([`ReplError::StaleLeaderEpoch`], [`ReplError::JournalGap`])
+//!   * **Terminal** (epoch regression, journal gap, or apply rejection)
 //!     — the loop MUST stop. A leader whose epoch regressed is a fencing
 //!     violation (REPLICATION §5.2); continuing would risk applying events
 //!     from a deposed leader. A journal gap means the follower is missing
@@ -12,6 +12,7 @@
 //!     apply errors. The loop logs and backs off, then retries; §5.6 makes
 //!     replication a non-fatal background task.
 
+use shamir_db::engine::tx::apply_replicated::ApplyRejectReason;
 use thiserror::Error;
 
 /// Error returned by [`ReplSource`](super::source::ReplSource) implementations
@@ -54,6 +55,14 @@ pub enum ReplError {
         gap_at: u64,
         /// The `from_version` the follower had requested.
         from_version: u64,
+    },
+
+    /// Permanent follower incompatibility. Stop without advancing the
+    /// bookmark; the supervisor marks the subscription resync_required.
+    #[error("replicated event at leader version {leader_version} rejected: {reason:?}")]
+    ApplyRejected {
+        leader_version: u64,
+        reason: ApplyRejectReason,
     },
 
     /// Transport-level failure (connection drop, decode error, wire error

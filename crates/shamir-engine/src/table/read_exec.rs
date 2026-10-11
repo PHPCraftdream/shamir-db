@@ -22,7 +22,6 @@ use crate::query::read::{
 };
 use bytes::Bytes;
 use serde_bytes::ByteBuf;
-use shamir_funclib::scalar_resolver::ScalarResolver;
 use shamir_query_types::batch::ResultEncoding;
 use shamir_storage::error::{DbError, DbResult};
 use shamir_types::codecs::interned::record_view_to_id_msgpack;
@@ -1195,7 +1194,7 @@ impl TableManager {
             let mut qv_result: Vec<shamir_types::types::value::QueryValue> = if has_group_by {
                 exec::validate_aggregate_select(&query.select)?;
                 let group_by = query.group_by.as_ref().unwrap();
-                exec::apply_group_by(&raw_acc, group_by, &query.select, interner, ctx)
+                exec::try_apply_group_by(&raw_acc, group_by, &query.select, interner, ctx)?
             } else if has_agg {
                 exec::validate_aggregate_select(&query.select)?;
                 crate::query::read::aggregate::apply_aggregate_all_with_context(
@@ -1203,7 +1202,7 @@ impl TableManager {
                     &query.select,
                     interner,
                     ctx,
-                )
+                )?
             } else {
                 rec_acc
                     .into_iter()
@@ -2569,7 +2568,7 @@ pub(super) fn try_project_page_only(
     query: &ReadQuery,
     matched: &[(RecordId, InnerValue)],
     interner: &Interner,
-    scalars: ScalarResolver,
+    ctx: &FilterContext<'_>,
 ) -> DbResult<Option<(Vec<crate::query::read::QueryRecord>, Option<PaginationInfo>)>> {
     // Gate: every condition below disables the push-down.
     if query.order_by.is_some()
@@ -2605,7 +2604,8 @@ pub(super) fn try_project_page_only(
     let page_end = skip.saturating_add(take).min(total_matches);
     let page_slice = &matched[page_start..page_end];
 
-    let proj = exec::SelectProjection::new(&query.select, interner, scalars.clone())?;
+    let proj = exec::SelectProjection::new(&query.select, interner, ctx.scalars.clone())?
+        .with_context(ctx);
     let mut paged: Vec<crate::query::read::QueryRecord> = Vec::with_capacity(page_slice.len());
     for (_, record) in page_slice {
         paged.push(crate::query::read::QueryRecord::Direct(
@@ -2653,7 +2653,7 @@ pub(super) fn try_project_page_only_bytes(
     query: &ReadQuery,
     matched: &[(RecordId, Bytes)],
     interner: &Interner,
-    scalars: ScalarResolver,
+    ctx: &FilterContext<'_>,
     table: &str,
     corrupt: &mut Vec<CorruptRecordRef>,
 ) -> DbResult<Option<(Vec<crate::query::read::QueryRecord>, Option<PaginationInfo>)>> {
@@ -2682,7 +2682,8 @@ pub(super) fn try_project_page_only_bytes(
     let page_end = skip.saturating_add(take).min(total_matches);
     let page_slice = &matched[page_start..page_end];
 
-    let proj = exec::SelectProjection::new(&query.select, interner, scalars.clone())?;
+    let proj = exec::SelectProjection::new(&query.select, interner, ctx.scalars.clone())?
+        .with_context(ctx);
     let mut paged: Vec<crate::query::read::QueryRecord> = Vec::with_capacity(page_slice.len());
     for (rid, bytes) in page_slice {
         let qv = match shamir_types::record_view::RecordView::new(bytes) {
@@ -2738,11 +2739,12 @@ pub(super) fn apply_select_value_bytes(
     matched: &[(RecordId, Bytes)],
     select: &crate::query::read::Select,
     interner: &Interner,
-    scalars: ScalarResolver,
+    ctx: &FilterContext<'_>,
     table: &str,
     corrupt: &mut Vec<CorruptRecordRef>,
 ) -> DbResult<Vec<QueryValue>> {
-    let proj = exec::SelectProjection::new(select, interner, scalars.clone())?;
+    let proj =
+        exec::SelectProjection::new(select, interner, ctx.scalars.clone())?.with_context(ctx);
     Ok(matched
         .iter()
         .map(
