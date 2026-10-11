@@ -118,7 +118,7 @@ async fn finalize_lower_after_higher_keeps_higher_version_and_latest_value() {
 
     // Model the delayed publisher's overlay-before-cell order, then call the
     // primitive directly so no later publish_cell can repair a regression.
-    mvcc.overlay.insert(key.clone(), 11, lower);
+    mvcc.overlay().insert(key.clone(), 11, lower);
     mvcc.finalize_reservation(key.clone(), 11);
 
     assert_eq!(mvcc.version_of(&key), 12);
