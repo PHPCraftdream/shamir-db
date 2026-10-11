@@ -46,7 +46,7 @@ not a durable replication channel. The following is the contract both sides MUST
    any other.
 
 3. **Gap recovery is the application's responsibility.** Events that occurred while a
-   client was disconnected — or that fell behind a `slow_consumer` drop — are
+   client was disconnected — or after a `slow_consumer` closure — are
    **not** retransmitted on reconnect. Applications that need to catch up MUST
    do so explicitly, for example via a one-shot `ChangesSince` query or via
    application-level checkpoints. The `from_version` field on `SubscribeOp` is
@@ -98,7 +98,8 @@ Ordering rules:
 2. If `initial: true`, all snapshot `event` frames precede the single `ready` frame.
 3. Live `event` frames begin only after the snapshot watermark is seeded (see §13).
 4. `seq` is monotonic per subscription. It is only advanced on **successful** push, so
-   the client never observes a hole from transient backpressure drops.
+   the client never observes a hole from transient push backpressure: the same frame
+   is retried, or the subscription is terminated rather than silently skipping it.
 5. `closed` is emitted on bridge exit for any reason (server unsubscribe, slow consumer,
    stream end, internal error). It is best-effort and MAY be missed if the transport
    has already failed.
@@ -297,7 +298,7 @@ byte string; decoding is per-`DeliverMode`.
 | `event`         | A change has been delivered. `data` carries the payload per the negotiated `DeliverMode`.                             |
 | `ready`         | The initial snapshot is complete. Emitted **only** when the grant was issued with `initial: true`. Live events follow. |
 | `gap`           | Events between `gap_at` (or "unknown" if absent) and the current cursor were missed. Consumer SHOULD reconcile out-of-band. |
-| `slow_consumer` | The bridge dropped events because the per-connection push channel was full for `SLOW_CONSUMER_THRESHOLD` consecutive attempts (default `100`). The bridge will emit `closed` next. |
+| `slow_consumer` | A required Event, Ready, or Gap frame could not be accepted after `SLOW_CONSUMER_THRESHOLD` attempts (default `100`), separated by 5 ms delays (495 ms total retry sleep, plus scheduling latency). The subscription closes; no event is silently dropped while it stays open. This notification and the following `closed` are best-effort. See `crates/shamir-server/src/subscriptions/push.rs:76-117` and `crates/shamir-server/src/subscriptions/bridge.rs:588-600`. |
 | `closed`        | Terminal. The subscription is gone server-side; no further pushes will arrive. Consumer SHOULD release local state.   |
 
 `gap` is emitted in two situations:

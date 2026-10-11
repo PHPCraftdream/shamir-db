@@ -507,13 +507,17 @@ artifact).
 - **No durable offsets / resume tokens.** A missed range surfaces as a
   best-effort `gap` push (§9 of the same doc); there is no
   client-presentable resume token that guarantees exactly-once replay.
-- **A slow consumer can experience a gap.** When a per-connection push
-  channel stays full for `SLOW_CONSUMER_THRESHOLD` consecutive attempts,
-  the bridge emits a `slow_consumer` push followed by a best-effort
-  `closed` and tears the subscription down — the client must reconcile
+- **Chronic push backpressure closes the subscription.** Required Event,
+  Ready, and Gap frames retain their serialized bytes for up to
+  `SLOW_CONSUMER_THRESHOLD` attempts (100), with 5 ms between attempts:
+  495 ms of retry sleep per frame, plus executor scheduling latency.
+  No event is silently dropped while the subscription stays open. On
+  exhaustion the bridge attempts `slow_consumer`, then `closed` (both
+  best-effort), and tears the subscription down; the client must reconcile
   out-of-band and re-subscribe. See
-  `crates/shamir-server/src/subscriptions/push.rs:80-115`
-  (guard at lines 99-115).
+  `crates/shamir-server/src/subscriptions/push.rs:76-117` (bounded retry)
+  and `crates/shamir-server/src/subscriptions/bridge.rs:588-600`
+  (best-effort terminal notification).
 
 ## 5. Replication
 

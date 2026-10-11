@@ -25,7 +25,7 @@ use tokio_stream::{StreamExt, StreamMap};
 use super::decode_cache::{cache_evict_up_to, cache_get, cache_insert, CachedBytes};
 use super::deliver_cache::{deliver_cache_evict_up_to, deliver_cache_get, deliver_cache_insert};
 use super::filter_eval::{bytes_to_arc, CompiledFilterSlot};
-use super::push::{make_deliver_data, try_push_event};
+use super::push::{make_deliver_data, push_required, try_push_event};
 use super::registry::SubscriptionRegistry;
 use super::target_match::{any_target_interested_indexed, build_target_index, matches_any_indexed};
 use arc_swap::ArcSwapOption;
@@ -199,7 +199,6 @@ pub(crate) async fn bridge_task(
             }
         }
 
-        let mut consecutive_push_failures: u32 = 0;
         // repo name -> index (built once; repos are fixed at subscribe time).
         let repo_idx: TFxMap<String, usize> = repos
             .iter()
@@ -230,7 +229,7 @@ pub(crate) async fn bridge_task(
                     .await
                 {
                     if let Some(gap) = jr.gap_at {
-                        let s = seq.fetch_add(1, Ordering::Relaxed);
+                        let s = seq.load(Ordering::Relaxed);
                         let gap_env = PushEnvelope {
                             push: PushKind::Gap,
                             sub: sub_id,
@@ -238,8 +237,15 @@ pub(crate) async fn bridge_task(
                             data: None,
                             gap_at: Some(gap),
                         };
-                        if let Ok(frame) = rmp_serde::to_vec_named(&gap_env) {
-                            let _ = push.try_push(frame);
+                        let frame = match rmp_serde::to_vec_named(&gap_env) {
+                            Ok(frame) => frame,
+                            Err(error) => {
+                                tracing::warn!(sub_id, %error, "control serialization failed");
+                                return;
+                            }
+                        };
+                        if !push_required(&push, sub_id, &seq, frame).await {
+                            return;
                         }
                     }
                     for event in &jr.events {
@@ -301,13 +307,7 @@ pub(crate) async fn bridge_task(
                                 &query_limits,
                             )
                             .await;
-                            if !try_push_event(
-                                &push,
-                                sub_id,
-                                &seq,
-                                &data,
-                                &mut consecutive_push_failures,
-                            ) {
+                            if !try_push_event(&push, sub_id, &seq, &data).await {
                                 return;
                             }
                         }
@@ -357,13 +357,7 @@ pub(crate) async fn bridge_task(
                                     commit_version: 0,
                                 };
                                 let data = rmp_serde::to_vec_named(&obj).unwrap_or_default();
-                                if !try_push_event(
-                                    &push,
-                                    sub_id,
-                                    &seq,
-                                    &data,
-                                    &mut consecutive_push_failures,
-                                ) {
+                                if !try_push_event(&push, sub_id, &seq, &data).await {
                                     return;
                                 }
                             }
@@ -375,7 +369,7 @@ pub(crate) async fn bridge_task(
                 }
             }
 
-            let s = seq.fetch_add(1, Ordering::Relaxed);
+            let s = seq.load(Ordering::Relaxed);
             let ready = PushEnvelope {
                 push: PushKind::Ready,
                 sub: sub_id,
@@ -383,8 +377,15 @@ pub(crate) async fn bridge_task(
                 data: None,
                 gap_at: None,
             };
-            if let Ok(frame) = rmp_serde::to_vec_named(&ready) {
-                let _ = push.try_push(frame);
+            let frame = match rmp_serde::to_vec_named(&ready) {
+                Ok(frame) => frame,
+                Err(error) => {
+                    tracing::warn!(sub_id, %error, "control serialization failed");
+                    return;
+                }
+            };
+            if !push_required(&push, sub_id, &seq, frame).await {
+                return;
             }
 
             // Seed watermarks from current commit version to prevent live
@@ -546,13 +547,7 @@ pub(crate) async fn bridge_task(
                             .await;
                             &owned_buf
                         };
-                        if !try_push_event(
-                            &push,
-                            sub_id,
-                            &seq,
-                            data_ref,
-                            &mut consecutive_push_failures,
-                        ) {
+                        if !try_push_event(&push, sub_id, &seq, data_ref).await {
                             return;
                         }
                     }
@@ -565,7 +560,7 @@ pub(crate) async fn bridge_task(
                 }
                 Err(tokio_stream::wrappers::errors::BroadcastStreamRecvError::Lagged(n)) => {
                     tracing::warn!(sub_id, repo = %repo, lagged = n, "changefeed lagged");
-                    let s = seq.fetch_add(1, Ordering::Relaxed);
+                    let s = seq.load(Ordering::Relaxed);
                     let gap = PushEnvelope {
                         push: PushKind::Gap,
                         sub: sub_id,
@@ -573,8 +568,15 @@ pub(crate) async fn bridge_task(
                         data: None,
                         gap_at: None,
                     };
-                    if let Ok(frame) = rmp_serde::to_vec_named(&gap) {
-                        let _ = push.try_push(frame);
+                    let frame = match rmp_serde::to_vec_named(&gap) {
+                        Ok(frame) => frame,
+                        Err(error) => {
+                            tracing::warn!(sub_id, %error, "control serialization failed");
+                            return;
+                        }
+                    };
+                    if !push_required(&push, sub_id, &seq, frame).await {
+                        return;
                     }
                 }
             }
