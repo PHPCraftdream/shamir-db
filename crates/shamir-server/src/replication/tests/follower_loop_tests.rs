@@ -21,23 +21,25 @@
 //! `CancellationToken` as a belt-and-suspenders backstop.
 
 use std::sync::Arc;
-use std::time::Duration;
 
 use async_trait::async_trait;
 use shamir_db::access::principal64_from_username;
 use shamir_db::access::Actor;
 use shamir_db::engine::repo::{BoxRepoFactory, RepoConfig};
 use shamir_db::engine::table::TableConfig;
+use shamir_db::engine::tx::apply_replicated::ApplyRejectReason;
 use shamir_db::engine::ChangelogEvent;
+use shamir_db::query::filter::FilterContext;
+use shamir_db::types::common::new_map;
 use shamir_db::ShamirDb;
 use shamir_query_builder::batch::Batch;
 use shamir_query_builder::ddl::{repl_scope, replication_profile, subscription};
 use shamir_query_builder::doc;
+use shamir_query_builder::query::Query;
 use shamir_query_builder::write::insert;
 use shamir_query_types::admin::{ReplDirection, ReplMode};
 use shamir_query_types::wire::repl::ReplResponse;
-use tokio::sync::{Mutex, Notify};
-use tokio::time::Instant;
+use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 
 use crate::config::ReplicationConfig;
@@ -470,8 +472,7 @@ async fn journal_gap_at_from_version_terminates_loop_without_applying_events() {
 struct MalformedPutSource {
     inner: InProcessReplSource,
     events: Vec<ChangelogEvent>,
-    pulls: Mutex<Vec<(u64, Instant)>>,
-    third_pull: Notify,
+    pulls: Mutex<Vec<u64>>,
 }
 
 #[async_trait]
@@ -488,15 +489,7 @@ impl ReplSource for MalformedPutSource {
         limit: u32,
         wait_ms: Option<u32>,
     ) -> Result<ReplResponse, ReplError> {
-        let pull_count = {
-            let mut pulls = self.pulls.lock().await;
-            pulls.push((from_version, Instant::now()));
-            pulls.len()
-        };
-        if pull_count == 3 {
-            self.third_pull.notify_one();
-            std::future::pending::<()>().await;
-        }
+        self.pulls.lock().await.push(from_version);
         let mut response = self
             .inner
             .pull(db, repo, from_version, limit, wait_ms)
@@ -541,13 +534,12 @@ async fn malformed_put_fixture() -> (ShamirDb, Arc<MalformedPutSource>, u64) {
         inner: InProcessReplSource::new(leader),
         events: vec![(*first).clone(), (*second).clone()],
         pulls: Mutex::new(Vec::new()),
-        third_pull: Notify::new(),
     });
     (build_db("follower").await, source, leader_version)
 }
 
 #[tokio::test(start_paused = true)]
-async fn validate_payload_rejects_malformed_put_before_version_and_retries_same_cursor() {
+async fn validate_payload_rejection_is_terminal_without_bookmark_or_version() {
     let (follower, source, _) = malformed_put_fixture().await;
     let repo = follower.get_db("app").unwrap().get_repo("main").unwrap();
     let gate = repo.tx_gate().await.expect("follower gate");
@@ -558,21 +550,26 @@ async fn validate_payload_rejects_malformed_put_before_version_and_retries_same_
         .with_validate_replicated_payload(true)
         .with_poll_wait_ms(0)
         .with_max_iterations(2);
-    let started = Instant::now();
-    run_follower_loop(
+    let error = run_follower_loop(
         Arc::new(follower.clone()),
         source.clone(),
         cfg,
         CancellationToken::new(),
     )
     .await
-    .expect("bounded retry loop");
+    .expect_err("payload rejection must stop the loop");
+    assert!(
+        matches!(
+            error,
+            ReplError::ApplyRejected {
+                leader_version: 1,
+                reason: ApplyRejectReason::UndecodablePayload,
+            }
+        ),
+        "unexpected error: {error:?}"
+    );
     let pulls = source.pulls.lock().await;
-    assert_eq!(pulls.len(), 2);
-    assert_eq!(pulls[0].0, bookmark_before + 1);
-    assert_eq!(pulls[1].0, pulls[0].0);
-    assert!(pulls[1].1.duration_since(pulls[0].1) >= Duration::from_millis(200));
-    assert!(started.elapsed() >= Duration::from_millis(400));
+    assert_eq!(*pulls, vec![bookmark_before + 1]);
     drop(pulls);
     assert_eq!(gate.version_allocation_high_water_mark(), allocated_before);
     assert_eq!(gate.completion().watermark(), watermark_before);
@@ -610,13 +607,19 @@ async fn trusted_default_applies_malformed_put_and_continues_batch() {
     assert_eq!(gate.completion().watermark(), allocated_before + 2);
     let pulls = source.pulls.lock().await;
     assert_eq!(pulls.len(), 2);
-    assert_eq!(pulls[0].0, 1);
-    assert_eq!(pulls[1].0, leader_version + 1);
+    assert_eq!(pulls[0], 1);
+    assert_eq!(pulls[1], leader_version + 1);
 }
 
-#[tokio::test(start_paused = true)]
-async fn supervisor_forwards_payload_validation_to_follower_loop() {
-    let (follower, source, _) = malformed_put_fixture().await;
+async fn assert_supervisor_rejection_marks_resync(unknown_table: bool) {
+    let (follower, mut source, _) = malformed_put_fixture().await;
+    if unknown_table {
+        for event in &mut Arc::get_mut(&mut source).expect("unshared source").events {
+            for change in &mut event.changes {
+                change.table = "missing".into();
+            }
+        }
+    }
     let follower = Arc::new(follower);
     let mut batch = Batch::new();
     batch.id(1);
@@ -647,19 +650,29 @@ async fn supervisor_forwards_payload_validation_to_follower_loop() {
     let source_for_factory = source.clone();
     let factory: ReplSourceFactory = Arc::new(move |_| source_for_factory.clone());
     let supervisor = SubscriptionSupervisor::new(follower.clone(), factory, "follower-1")
-        .with_validate_replicated_payload(true)
+        .with_validate_replicated_payload(!unknown_table)
         .with_poll_wait_ms(0)
         .with_max_iterations(3);
     supervisor.reconcile().await;
     assert!(supervisor.is_running("payload_validation"));
-    source.third_pull.notified().await;
-    supervisor.stop_all().await;
+    supervisor.wait_for_subscription("payload_validation").await;
+    let subscriptions = follower.system_store().subscriptions_table().await.unwrap();
+    let interner = subscriptions.interner().get().await.unwrap();
+    let refs = new_map();
+    let ctx = FilterContext::new(interner, &refs);
+    let query = Query::from("subscriptions").build();
+    let rows = subscriptions.read(&query, &ctx).await.unwrap();
+    assert_eq!(rows.records.len(), 1);
+    let row = rows.records[0].as_value();
+    assert_eq!(
+        row.get("state").and_then(|v| v.as_str()),
+        Some("resync_required")
+    );
+    supervisor.reconcile().await;
+    assert!(!supervisor.is_running("payload_validation"));
     assert_eq!(supervisor.active_count(), 0);
     let pulls = source.pulls.lock().await;
-    assert_eq!(pulls.len(), 3);
-    assert_eq!(pulls[0].0, 1);
-    assert_eq!(pulls[1].0, 1);
-    assert_eq!(pulls[2].0, 1);
+    assert_eq!(*pulls, vec![1]);
     drop(pulls);
     assert_eq!(gate.version_allocation_high_water_mark(), allocated_before);
     assert_eq!(repo.replication_bookmark().await.unwrap(), 0);
@@ -677,4 +690,51 @@ fn replication_payload_validation_config_defaults_and_opt_in() {
     assert!(!omitted.validate_replicated_payload);
     assert!(!disabled.validate_replicated_payload);
     assert!(enabled.validate_replicated_payload);
+}
+
+#[tokio::test(start_paused = true)]
+async fn unknown_table_rejection_stops_follower_without_bookmark() {
+    let (follower, mut source, _) = malformed_put_fixture().await;
+    let source_mut = Arc::get_mut(&mut source).expect("unshared source");
+    for event in &mut source_mut.events {
+        for change in &mut event.changes {
+            change.table = "missing".into();
+        }
+    }
+    let repo = follower.get_db("app").unwrap().get_repo("main").unwrap();
+    let gate = repo.tx_gate().await.unwrap();
+    let allocated = gate.version_allocation_high_water_mark();
+    let error = run_follower_loop(
+        Arc::new(follower),
+        source.clone(),
+        FollowerLoopConfig::new("follower-1", "app", "main")
+            .with_poll_wait_ms(0)
+            .with_max_iterations(2),
+        CancellationToken::new(),
+    )
+    .await
+    .expect_err("unknown table must stop replication");
+    assert!(
+        matches!(
+            error,
+            ReplError::ApplyRejected {
+                leader_version: 1,
+                reason: ApplyRejectReason::UnknownTable,
+            }
+        ),
+        "unexpected error: {error:?}"
+    );
+    assert_eq!(repo.replication_bookmark().await.unwrap(), 0);
+    assert_eq!(gate.version_allocation_high_water_mark(), allocated);
+    assert_eq!(*source.pulls.lock().await, vec![1]);
+}
+
+#[tokio::test(start_paused = true)]
+async fn supervisor_forwards_payload_validation_and_marks_terminal_resync() {
+    assert_supervisor_rejection_marks_resync(false).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn supervisor_marks_unknown_table_resync_and_does_not_restart() {
+    assert_supervisor_rejection_marks_resync(true).await;
 }
