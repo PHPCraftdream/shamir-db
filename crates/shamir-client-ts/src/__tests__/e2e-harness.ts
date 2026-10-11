@@ -8,7 +8,6 @@
 
 import { spawn, ChildProcess } from 'node:child_process';
 import * as fs from 'node:fs';
-import * as net from 'node:net';
 import * as os from 'node:os';
 import * as path from 'node:path';
 
@@ -142,30 +141,6 @@ export interface ServerHandle {
   port: number;
 }
 
-// ─── ephemeral port ──────────────────────────────────────────────────────────
-
-/**
- * Find a free TCP port by binding to port 0, reading the assigned port,
- * then closing the server. The OS guarantees uniqueness at the moment of
- * allocation; a brief TOCTOU window exists but is negligible in practice
- * for test-local servers.
- */
-async function getFreePort(): Promise<number> {
-  return new Promise((resolve, reject) => {
-    const srv = net.createServer();
-    srv.listen(0, HOST, () => {
-      const addr = srv.address();
-      if (!addr || typeof addr === 'string') {
-        srv.close(() => reject(new Error('unexpected address type')));
-        return;
-      }
-      const port = addr.port;
-      srv.close(() => resolve(port));
-    });
-    srv.on('error', reject);
-  });
-}
-
 // ─── config / cert ───────────────────────────────────────────────────────────
 
 export function writeKtavConfig(
@@ -292,7 +267,11 @@ export async function startServer(opts?: {
   enableExperimentalMigrationApi?: boolean;
 }): Promise<ServerHandle> {
   assertServerBinaryFresh();
-  const port = opts?.port ?? await getFreePort();
+  // Port 0 unless pinned: the server binds an OS-assigned port itself and
+  // logs it, so there is no pick-then-bind window another test file's server
+  // (or an outbound ephemeral socket) can steal the port in ("Address already
+  // in use").
+  const requestedPort = opts?.port ?? 0;
   const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'shamir-ts-e2e-'));
   const hasCert = generateSelfSignedCert(dataDir);
   if (!hasCert) {
@@ -302,7 +281,7 @@ export async function startServer(opts?: {
 
   const configPath = writeKtavConfig(dataDir, {
     host: HOST,
-    port,
+    port: requestedPort,
     origin: ORIGIN,
     cursors: opts?.cursors,
     enableExperimentalMigrationApi: opts?.enableExperimentalMigrationApi,
@@ -317,6 +296,7 @@ export async function startServer(opts?: {
   child.stdout?.on('data', (chunk: Buffer) => { logBuf += chunk.toString(); });
   child.stderr?.on('data', (chunk: Buffer) => { logBuf += chunk.toString(); });
 
+  let port = requestedPort;
   await new Promise<void>((resolve, reject) => {
     let done = false;
     const timer = setTimeout(() => {
@@ -328,7 +308,14 @@ export async function startServer(opts?: {
 
     function check() {
       if (done) return;
-      if (/listener bound/i.test(logBuf)) {
+      const plain = logBuf.replace(/\x1b\[[0-9;]*m/g, '');
+      const boundLine = plain.split('\n').find((l) => /listener bound/i.test(l));
+      if (boundLine !== undefined) {
+        const bound = /local_addr=\S*:(\d+)/.exec(boundLine);
+        // A chunk can end mid-line; with an OS-assigned port wait for the
+        // rest (the 15s timer reports the logs if it never parses).
+        if (bound === null && requestedPort === 0) return;
+        if (bound !== null) port = Number(bound[1]);
         done = true;
         clearTimeout(timer);
         setTimeout(() => resolve(), 150);

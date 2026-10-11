@@ -152,6 +152,23 @@ impl VersionedOverlay {
             .map(|(k, v)| (k.1, v.clone()))
     }
 
+    /// Every `(version, value)` held for `key`, ascending by version.
+    ///
+    /// Range-scans `(key, 0)..=(key, u64::MAX)`. Tombstones are empty `Bytes`
+    /// (same convention as [`Self::get`]). Lets `history_of` list versions that
+    /// are committed and visible but not yet drained into `history`.
+    pub fn versions_of(&self, key: &[u8]) -> Vec<(u64, Bytes)> {
+        let key_rk = RecordKey::from_slice(key);
+        let lo = (key_rk.clone(), 0u64);
+        let hi = (key_rk, u64::MAX);
+
+        let guard = scc::Guard::new();
+        self.tree
+            .range(lo..=hi, &guard)
+            .map(|(k, v)| (k.1, v.clone()))
+            .collect()
+    }
+
     /// Remove all entries with `version <= min(durable_watermark, floor)`.
     ///
     /// `durable_watermark` — the highest version fully persisted to history.

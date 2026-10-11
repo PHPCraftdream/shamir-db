@@ -185,7 +185,7 @@ impl MvccStore {
         let cur_v = self.current_version(key);
 
         // Sort descending by version (newest first) so `idx` ranks by recency.
-        entries.sort_by(|a, b| b.0.cmp(&a.0));
+        entries.sort_by_key(|b| std::cmp::Reverse(b.0));
 
         // The anchor: the SINGLE largest version `< min_alive`, kept ONLY when
         // a live snapshot exists. If already kept by the min_count/count

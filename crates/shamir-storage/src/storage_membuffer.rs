@@ -1246,8 +1246,8 @@ impl Store for MemBufferStore {
             let inner_vals = self.inner.get_many(miss_keys).await?;
             for ((i, k), v) in miss_idxs
                 .into_iter()
-                .zip(miss_keys_for_fill.into_iter())
-                .zip(inner_vals.into_iter())
+                .zip(miss_keys_for_fill)
+                .zip(inner_vals)
             {
                 // Populate cache (clean read-fill — NOT dirty). Tombstone
                 // negative result so subsequent gets short-circuit.

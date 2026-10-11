@@ -324,7 +324,10 @@ async fn boot_tolerates_native_validator_row() {
         db.create_db("testdb").await;
 
         // Use a Fjall-backed repo so table info-twin (bindings) persist.
-        let repo_config = RepoConfig::new("main", BoxRepoFactory::fjall(repo_path.clone()))
+        // `fjall_raw`: the default MemBuffer wrapper buffers the info-twin
+        // write (the validator binding) and does not flush on drop, so the
+        // reopen below could miss it (#1236).
+        let repo_config = RepoConfig::new("main", BoxRepoFactory::fjall_raw(repo_path.clone()))
             .add_table(TableConfig::new("users"));
         db.add_repo("testdb", repo_config).await.unwrap();
 
@@ -401,7 +404,10 @@ async fn boot_native_validator_re_register_works() {
             .await
             .unwrap();
         db.create_db("testdb").await;
-        let repo_config = RepoConfig::new("main", BoxRepoFactory::fjall(repo_path.clone()))
+        // `fjall_raw`: the default MemBuffer wrapper buffers the info-twin
+        // write (the validator binding) and does not flush on drop, so the
+        // reopen below could miss it (#1236).
+        let repo_config = RepoConfig::new("main", BoxRepoFactory::fjall_raw(repo_path.clone()))
             .add_table(TableConfig::new("users"));
         db.add_repo("testdb", repo_config).await.unwrap();
 
@@ -674,7 +680,10 @@ async fn unresolved_native_artifacts_lists_unregistered_after_reopen() {
             .await
             .unwrap();
         db.create_db("testdb").await;
-        let repo_config = RepoConfig::new("main", BoxRepoFactory::fjall(repo_path.clone()))
+        // `fjall_raw`: the default MemBuffer wrapper buffers the info-twin
+        // write (the validator binding) and does not flush on drop, so the
+        // reopen below could miss it (#1236).
+        let repo_config = RepoConfig::new("main", BoxRepoFactory::fjall_raw(repo_path.clone()))
             .add_table(TableConfig::new("users"));
         db.add_repo("testdb", repo_config).await.unwrap();
 

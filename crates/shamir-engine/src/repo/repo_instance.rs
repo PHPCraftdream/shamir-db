@@ -576,7 +576,14 @@ impl RepoInstance {
         //    Idempotent: if the overlay is already drained (all entries are
         //    in history), this is a no-op.
         let from_token = table_token_for(from);
-        if let Some(mvcc) = self.per_table_mvcc.get_sync(&from_token) {
+        // Clone the Arc out: `get_sync`'s entry guard holds the bucket lock,
+        // and the drainer's `iter_sync` over this map parks its thread on it,
+        // so holding it across the awaits below wedges a current-thread
+        // runtime (#589 class).
+        let from_mvcc = self
+            .per_table_mvcc
+            .read_sync(&from_token, |_, mvcc| Arc::clone(mvcc));
+        if let Some(mvcc) = from_mvcc {
             // F-68 (#895) cluster D / task #124: timestamped before/after
             // around `drain_to_history` — this synchronously walks the
             // overlay and writes each drained version to `__history__`, the

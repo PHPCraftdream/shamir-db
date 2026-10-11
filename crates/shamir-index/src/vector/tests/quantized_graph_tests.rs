@@ -240,6 +240,8 @@ async fn recall_sq8_vs_f32_within_two_percent() {
         total_recall += recall_at_k(&truth_rids, &cand_rids);
     }
     let avg_recall = total_recall / 100.0;
+    // Machine-parseable line for `.github/workflows/hnsw-recall-matrix.yml`.
+    println!("#1232 recall_sq8_at_10={avg_recall:.4}");
     // Measured recall@10 for SQ8 (4x compression) vs the f32 graph on this
     // clustered dataset is ~0.97 MEAN, but STOCHASTIC: hnsw_rs 0.3.4 assigns
     // node layers from an unseedable RNG, so the built graph — and hence

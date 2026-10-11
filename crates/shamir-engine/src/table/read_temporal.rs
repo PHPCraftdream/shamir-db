@@ -494,7 +494,7 @@ impl TableManager {
         // ── 3. Order by version (Asc default; Desc reverses).
         match order {
             OrderDirection::Asc => rows.sort_by_key(|(_, v, _, _)| *v),
-            OrderDirection::Desc => rows.sort_by(|a, b| b.1.cmp(&a.1)),
+            OrderDirection::Desc => rows.sort_by_key(|b| std::cmp::Reverse(b.1)),
         }
 
         // ── 4. Limit is applied over the WHOLE flattened result

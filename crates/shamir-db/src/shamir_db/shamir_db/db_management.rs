@@ -649,6 +649,14 @@ impl ShamirDb {
                 }
             }
         }
+        // The system repo (catalogue) is not in `list_dbs`; its writes are
+        // acked from the overlay + WAL like any other repo's.
+        if let Err(e) = self.system_store.flush_buffers().await {
+            log::warn!("flush_all: system store: {}", e);
+            if first_err.is_none() {
+                first_err = Some(e);
+            }
+        }
         match first_err {
             Some(e) => Err(e),
             None => Ok(()),

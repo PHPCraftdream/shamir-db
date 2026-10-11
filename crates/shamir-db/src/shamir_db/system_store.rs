@@ -111,7 +111,23 @@ impl SystemStore {
 
         db.add_repo(repo_config).await?;
 
+        // Replay inflight WAL entries before the first catalogue read, like
+        // every user repo does on open. A catalogue write is acked from the
+        // overlay + WAL and reaches `history` only when the drainer lands it,
+        // so an entry still inflight at the previous close (or crash) is
+        // otherwise invisible to this boot's catalogue loads.
+        if let Some(repo) = db.get_repo(SYSTEM_REPO) {
+            repo.recover_v2_inflight().await?;
+        }
+
         Ok(Self { db })
+    }
+
+    /// Drain the system repo's inflight WAL tail into `history` and flush its
+    /// buffers (graceful-stop counterpart of the per-repo flush in
+    /// [`ShamirDb::flush_all`](crate::ShamirDb::flush_all)).
+    pub(crate) async fn flush_buffers(&self) -> DbResult<()> {
+        self.system_repo()?.flush_buffers().await
     }
 
     /// Get the table manager for a system table.

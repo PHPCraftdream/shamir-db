@@ -1233,7 +1233,7 @@ impl TableManager {
                 // records[i] after pagination. Unzip into the page and the
                 // paged id slice used below to build `versions`.
                 let paired: Vec<(shamir_types::types::value::QueryValue, RecordId)> =
-                    qv_result.into_iter().zip(id_acc.into_iter()).collect();
+                    qv_result.into_iter().zip(id_acc).collect();
                 let (sliced, pg) =
                     exec::apply_pagination(paired, &query.pagination, query.count_total);
                 let mut recs = Vec::with_capacity(sliced.len());
