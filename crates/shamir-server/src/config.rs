@@ -358,9 +358,15 @@ fn default_max_cursor_page_size() -> u32 {
 /// raise these caps or the hard engine ceilings.
 #[derive(Debug, Clone, Deserialize)]
 pub struct QueryLimitsConfig {
-    /// For batches, maximum result-size estimate (bytes) for the RI-15 upfront
-    /// reserve, passed as `BatchLimits::max_result_size`. Policy uses
-    /// `enforce_result_size: false`; engine result-size enforcement is absent.
+    /// Enforce the cumulative bytes materialized by an execution, estimated
+    /// conservatively and checked before commit. Includes intermediates even
+    /// when not returned, and ForEach/nested containers; dropping or filtering
+    /// results never gives bytes back. Not a serialized-response or RSS cap.
+    /// Default true; false keeps reserve-only batch semantics.
+    #[serde(default = "default_enforce_result_size")]
+    pub enforce_result_size: bool,
+    /// Maximum materialized-result budget when enforcement is enabled, and
+    /// the RI-15 upfront reserve estimate passed as `BatchLimits::max_result_size`.
     /// Cursor pages retain this hard cap on serialized response bytes.
     /// Default 64 MiB.
     #[serde(default = "default_max_result_size_bytes")]
@@ -438,6 +444,7 @@ pub struct QueryLimitsConfig {
 impl Default for QueryLimitsConfig {
     fn default() -> Self {
         Self {
+            enforce_result_size: default_enforce_result_size(),
             max_result_size_bytes: default_max_result_size_bytes(),
             max_execution_time_secs: default_max_execution_time_secs(),
             max_queries_per_batch: default_max_queries_per_batch(),
@@ -451,6 +458,10 @@ impl Default for QueryLimitsConfig {
             max_inflight_response_bytes: default_max_inflight_response_bytes(),
         }
     }
+}
+
+fn default_enforce_result_size() -> bool {
+    true
 }
 
 fn default_max_result_size_bytes() -> usize {

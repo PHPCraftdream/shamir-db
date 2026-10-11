@@ -42,13 +42,15 @@ artifact).
   `crates/shamir-engine/src/query/batch/batch_execute.rs:806-819`). Runtime work
   is enforced across nested/dynamic dispatch, but counts aliases, not rows or
   instructions (`exec_scope.rs:85-115`, `batch_execute.rs:560,687`).
-- **Runtime materialization byte enforcement exists but is OFF in the server
-  policy at this base**, as in embedded/WASM facade execution. Server
-  `max_result_size_bytes` remains an upfront reservation estimate, not a hard
-  batch-response length guarantee; cursor pages have a separate serialized cap.
-  When a caller enables `ExecPolicy.enforce_result_size`, intermediates and
-  nested/ForEach containers consume one root budget, with no give-back when
-  results are dropped (`crates/shamir-server/src/db_handler/config.rs:54-70`,
+- **Runtime materialization byte enforcement is ON by default in the server**
+  (`security.query_limits.enforce_result_size`, default `true`) and OFF in
+  embedded/WASM facade execution. It bounds the bytes MATERIALIZED by one
+  execution (a conservative estimate, not the serialized response length or
+  RSS); the server also refuses an encoded response larger than the
+  request/server-clamped `max_result_size`. Cursor pages have a separate
+  serialized cap. Intermediates and nested/ForEach containers consume one root
+  budget, with no give-back when results are dropped
+  (`crates/shamir-server/src/db_handler/config.rs`,
   `crates/shamir-query-types/src/batch/exec_policy.rs`,
   `crates/shamir-engine/src/query/batch/result_size.rs:12-18,143-145`).
 - **Nested string_agg inherits the root accumulator cap.** A smaller nested

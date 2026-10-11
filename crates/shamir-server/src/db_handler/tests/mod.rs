@@ -9,6 +9,7 @@ pub mod pull_cap_tests;
 pub mod repl_handler_tests;
 pub mod rowwise_response_budget_tests;
 pub mod server_limit_policy_tests;
+pub mod server_result_enforcement_tests;
 pub mod session_actor_tests;
 pub mod subscribe_handler_tests;
 pub mod tx_execute_budget_seam_tests;

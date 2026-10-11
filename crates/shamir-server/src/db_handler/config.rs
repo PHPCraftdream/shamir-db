@@ -24,6 +24,7 @@ impl SlowQueryConfig {
 /// don't care about resource limits use [`Self::UNLIMITED`].
 #[derive(Debug, Clone, Copy)]
 pub struct QueryLimitsCap {
+    pub enforce_result_size: bool,
     pub max_result_size_bytes: usize,
     pub max_execution_time_secs: u64,
     pub max_queries_per_batch: usize,
@@ -39,6 +40,7 @@ pub struct QueryLimitsCap {
 impl QueryLimitsCap {
     /// No operator caps; hard engine ceilings still apply.
     pub const UNLIMITED: Self = Self {
+        enforce_result_size: false,
         max_result_size_bytes: usize::MAX,
         max_execution_time_secs: u64::MAX,
         max_queries_per_batch: usize::MAX,
@@ -65,9 +67,7 @@ impl QueryLimitsCap {
                 max_page_size: self.max_page_size,
                 max_offset: self.max_offset,
             },
-            // Preserve existing semantics: result size is a reserve estimate,
-            // not an engine-enforced serialized response limit.
-            enforce_result_size: false,
+            enforce_result_size: self.enforce_result_size,
         }
     }
 }
@@ -75,6 +75,7 @@ impl QueryLimitsCap {
 impl From<&crate::config::QueryLimitsConfig> for QueryLimitsCap {
     fn from(config: &crate::config::QueryLimitsConfig) -> Self {
         Self {
+            enforce_result_size: config.enforce_result_size,
             max_result_size_bytes: config.max_result_size_bytes,
             max_execution_time_secs: config.max_execution_time_secs,
             max_queries_per_batch: config.max_queries_per_batch,
