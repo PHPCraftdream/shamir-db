@@ -126,6 +126,10 @@ fn estimator_metadata_and_serialized_envelope_presence_are_exact() {
     results.insert("r".into(), result);
     // Alias/result/records shells=112; nine optional field entries=216.
     assert_eq!(ResultSize::assembled(&results), 328);
+    // QueryValueSerializer rejects struct variants (Failed); only presence of
+    // the key matters for the envelope, so serialize the same shape with a unit one.
+    results.get_mut("r").unwrap().ddl_status = Some(DdlOpState::InProgress);
+    assert_eq!(ResultSize::assembled(&results), 328);
     let serialized = super::super::query_value_serializer::to_query_value(&results).unwrap();
     let QueryValue::Map(aliases) = serialized else {
         panic!("expected alias map");
