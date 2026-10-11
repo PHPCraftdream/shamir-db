@@ -25,7 +25,7 @@ use crate::kind::VectorMetric;
 use crate::vector::hnsw_adapter::ShamirDist;
 use hnsw_rs::anndists::dist::distances::Distance;
 use hnsw_rs::api::AnnT;
-use hnsw_rs::hnsw::{Hnsw, Neighbour};
+use hnsw_rs::hnsw::{Hnsw, Neighbour, Point, PointId};
 use hnsw_rs::hnswio::HnswIo;
 use shamir_collections::TFxSet;
 use std::sync::Arc;
@@ -558,4 +558,82 @@ fn hnsw_u8_uses_builtin_distl2() {
         0,
         "u8 DistL2 nearest neighbour wrong"
     );
+}
+
+// ============================================================================
+// N. reverse links of upper-level points (#1232)
+// ============================================================================
+//
+// hnsw_rs 0.3.4 `reverse_update_neighborhood_simple` writes the back-link of a
+// new point `P` (top level `L`) into `q.neighbours[L]` for EVERY layer `l <= L`
+// it walks, instead of `q.neighbours[l]`. A level >= 1 point therefore gets no
+// layer-0 back-links, whole regions become unreachable for layer-0 search and
+// recall collapses in roughly one build in a few hundred (0.844 vs 0.956-0.985
+// in CI). Fixed upstream in 0.3.5 (commit 6256b00b11); we carry the one-line
+// fix in `vendor/hnsw_rs` until 0.3.5 passes the dependency cooldown.
+
+/// The point stored at `pid` (layer, rank-in-layer).
+fn point_at(hnsw: &Hnsw<'static, f32, ShamirDist>, pid: PointId) -> Arc<Point<'static, f32>> {
+    hnsw.get_point_indexation()
+        .get_layer_iterator(pid.0 as usize)
+        .nth(pid.1 as usize)
+        .expect("point id must resolve")
+}
+
+/// The point inserted with client id `origin`.
+fn point_by_origin(
+    hnsw: &Hnsw<'static, f32, ShamirDist>,
+    origin: usize,
+) -> Arc<Point<'static, f32>> {
+    (0..16)
+        .flat_map(|layer| hnsw.get_point_indexation().get_layer_iterator(layer))
+        .find(|p| p.get_origin_id() == origin)
+        .expect("inserted point must be indexed")
+}
+
+#[test]
+fn reverse_link_of_upper_level_point_lands_on_layer_0() {
+    const M: usize = 16;
+    // At most 2*M layer-0 neighbours per node (the shrink threshold), so no
+    // later insert can evict a back-link: any missing link is the bug.
+    const N: usize = 2 * M + 1;
+    const WANTED: usize = 10;
+
+    let mut checked = 0;
+    for graph in 0..400u64 {
+        let hnsw: Hnsw<'static, f32, ShamirDist> = Hnsw::new(
+            M,
+            N,
+            16,
+            64,
+            ShamirDist {
+                metric: VectorMetric::L2,
+            },
+        );
+        for i in 0..N {
+            let v = lcg_vec(8, graph * 1000 + i as u64 + 1);
+            hnsw.insert((&v, i)); // sequential: no rayon, fully deterministic given the level draw
+            let p = point_by_origin(&hnsw, i);
+            let pid = p.get_point_id();
+            // P's own layer-0 choices, read before any later insert can touch them.
+            let own_layer0 = p.get_neighborhood_id().swap_remove(0);
+            if pid.0 == 0 || own_layer0.is_empty() {
+                continue;
+            }
+            for q in &own_layer0 {
+                let back = point_at(&hnsw, q.p_id).get_neighborhood_id().swap_remove(0);
+                assert!(
+                    back.iter().any(|n| n.p_id == pid),
+                    "level-{} point {i} chose {} as a layer-0 neighbour but got no layer-0 back-link",
+                    pid.0,
+                    q.d_id,
+                );
+            }
+            checked += 1;
+            if checked >= WANTED {
+                return;
+            }
+        }
+    }
+    panic!("400 graphs produced only {checked} upper-level points with layer-0 neighbours");
 }
