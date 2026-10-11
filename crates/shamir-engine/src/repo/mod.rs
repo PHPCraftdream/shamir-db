@@ -1,3 +1,6 @@
+mod bounded_journal_read;
+pub use bounded_journal_read::BoundedJournalRead;
+
 pub mod changelog_store;
 pub mod fk_reverse_cache;
 pub mod group_commit;
