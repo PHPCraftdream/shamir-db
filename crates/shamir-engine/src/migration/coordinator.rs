@@ -90,6 +90,8 @@ pub struct DrainCatchUpResult {
 
 pub struct MigrationCoordinator {
     state: Mutex<MigrationState>,
+    // Rare admin finalisation only; never taken by record reads/writes.
+    finalisation: Mutex<()>,
     shadow_log: Arc<MigrationShadowLog>,
     src_data: Arc<dyn Store>,
     dst_data: Arc<dyn Store>,
@@ -134,11 +136,17 @@ impl MigrationCoordinator {
     ) -> Self {
         Self {
             state: Mutex::new(state),
+            finalisation: Mutex::new(()),
             shadow_log,
             src_data,
             dst_data,
             src_mvcc,
         }
+    }
+
+    /// Serialize admin retries without holding a map or state guard over I/O.
+    pub async fn lock_finalisation(&self) -> tokio::sync::MutexGuard<'_, ()> {
+        self.finalisation.lock().await
     }
 
     pub async fn state(&self) -> MigrationState {
@@ -147,6 +155,70 @@ impl MigrationCoordinator {
 
     pub async fn phase(&self) -> MigrationPhase {
         self.state.lock().await.phase
+    }
+
+    /// Persist the unchanged bincode state layout under a separate keyspace.
+    pub async fn persist_state(&self) -> DbResult<()> {
+        let state = self.state().await;
+        let bytes = bincode::serialize(&state)
+            .map_err(|e| DbError::Codec(format!("migration state: {e}")))?;
+        let store = self.shadow_log.store();
+        store
+            .set(Self::state_key(&state.id), Bytes::from(bytes))
+            .await?;
+        store.flush().await
+    }
+
+    fn state_key(id: &str) -> RecordKey {
+        RecordKey::from(format!("__migration_state_{id}").into_bytes())
+    }
+
+    pub async fn load_state(store: &Arc<dyn Store>, id: &str) -> DbResult<Option<MigrationState>> {
+        match store.get(Self::state_key(id)).await {
+            Ok(bytes) => bincode::deserialize(&bytes)
+                .map(Some)
+                .map_err(|e| DbError::Codec(format!("migration state: {e}"))),
+            Err(DbError::NotFound(_)) => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Stages are separate one-byte records: no MigrationState layout change.
+    pub async fn finalisation_progress(&self) -> DbResult<u8> {
+        let id = self.migration_id().await;
+        let key = RecordKey::from(format!("__migration_finalise_{id}").into_bytes());
+        match self.shadow_log.store().get(key).await {
+            Ok(bytes) => match bytes.as_ref() {
+                [stage @ 0..=2] => Ok(*stage),
+                _ => Err(DbError::Codec(
+                    "invalid migration finalisation stage".into(),
+                )),
+            },
+            Err(DbError::NotFound(_)) => Ok(0),
+            Err(e) => Err(e),
+        }
+    }
+
+    pub async fn complete_finalisation_step(&self, stage: u8) -> DbResult<()> {
+        if self.phase().await != MigrationPhase::Committed || !(1..=2).contains(&stage) {
+            return Err(DbError::Validation(
+                "invalid migration finalisation step".into(),
+            ));
+        }
+        let current = self.finalisation_progress().await?;
+        if stage <= current {
+            return Ok(());
+        }
+        if stage != current + 1 {
+            return Err(DbError::Validation(
+                "migration finalisation out of order".into(),
+            ));
+        }
+        let id = self.migration_id().await;
+        let key = RecordKey::from(format!("__migration_finalise_{id}").into_bytes());
+        let store = self.shadow_log.store();
+        store.set(key, Bytes::from(vec![stage])).await?;
+        store.flush().await
     }
 
     pub async fn migration_id(&self) -> String {
@@ -317,13 +389,29 @@ impl MigrationCoordinator {
                 s.phase
             )));
         }
+        let residual_lag = self
+            .shadow_log
+            .current_lsn()
+            .saturating_sub(s.last_lsn_applied.max(s.snapshot_lsn));
+        if residual_lag != 0 {
+            return Err(DbError::Conflict(format!(
+                "migration cutover has {residual_lag} unapplied entries; retry draining"
+            )));
+        }
         s.phase = MigrationPhase::CutoverReady;
         Ok(())
     }
 
+    /// Caller must quiesce source writers and serialize coordinator operations.
+    /// Failed page application leaves its cursor unchanged and can be replayed.
     pub async fn final_drain_and_commit(&self) -> DbResult<u64> {
         {
             let s = self.state.lock().await;
+            if s.phase == MigrationPhase::Committed {
+                drop(s);
+                self.persist_state().await?;
+                return Ok(0);
+            }
             if s.phase != MigrationPhase::CutoverReady {
                 return Err(DbError::Internal(format!(
                     "final_drain requires CutoverReady, got {}",
@@ -332,12 +420,28 @@ impl MigrationCoordinator {
             }
         }
 
-        let start_lsn = self.state.lock().await.last_lsn_applied + 1;
-        let entries = self.shadow_log.read_from(start_lsn).await?;
-        let applied = self.apply_shadow_entries(&entries).await?;
-        if let Some(last) = entries.last() {
-            self.state.lock().await.last_lsn_applied = last.lsn;
+        let mut applied = 0u64;
+        loop {
+            let start_lsn = {
+                let s = self.state.lock().await;
+                s.last_lsn_applied
+                    .max(s.snapshot_lsn)
+                    .checked_add(1)
+                    .ok_or_else(|| DbError::Internal("migration LSN exhausted".into()))?
+            };
+            let entries = self.shadow_log.read_from(start_lsn).await?;
+            if entries.is_empty() {
+                break;
+            }
+            applied = applied
+                .checked_add(self.apply_shadow_entries(&entries).await?)
+                .ok_or_else(|| DbError::Internal("migration applied count overflow".into()))?;
+            if let Some(last) = entries.last() {
+                self.state.lock().await.last_lsn_applied = last.lsn;
+            }
         }
+        self.dst_data.flush().await?;
+        self.persist_state().await?;
 
         // Purge before flipping to Committed (mirrors `rollback`'s
         // purge-then-flip order): if purge fails, the migration stays in
@@ -349,6 +453,7 @@ impl MigrationCoordinator {
         // it on disk forever is pure leaked storage.
         self.shadow_log.purge().await?;
         self.state.lock().await.phase = MigrationPhase::Committed;
+        self.persist_state().await?;
         Ok(applied)
     }
 
@@ -359,8 +464,12 @@ impl MigrationCoordinator {
                 "cannot rollback a committed migration".into(),
             ));
         }
+        if phase == MigrationPhase::RolledBack {
+            return Ok(());
+        }
         self.shadow_log.purge().await?;
         self.state.lock().await.phase = MigrationPhase::RolledBack;
+        self.persist_state().await?;
         Ok(())
     }
 
