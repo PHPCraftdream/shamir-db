@@ -4,3 +4,4 @@ pub mod wal_entry_v2_tests;
 pub mod wal_group_commit_tests;
 pub mod wal_segment_poison_tests;
 pub mod wal_segment_tests;
+pub mod wal_ticket_tests;

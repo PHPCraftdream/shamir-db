@@ -194,11 +194,10 @@ impl TableManager {
             None
         };
         let topk_proj = if use_topk {
-            Some(exec::SelectProjection::new(
-                &query.select,
-                interner,
-                ctx.scalars.clone(),
-            )?)
+            Some(
+                exec::SelectProjection::new(&query.select, interner, ctx.scalars.clone())?
+                    .with_context(ctx),
+            )
         } else {
             None
         };
@@ -305,14 +304,9 @@ impl TableManager {
         // (has_group_by / has_agg / corrupt were declared above, before the
         // scan loop, so the inline top-K path could use them.)
 
-        if let Some((paged, pagination)) = try_project_page_only_bytes(
-            query,
-            &matched,
-            interner,
-            ctx.scalars.clone(),
-            self.name(),
-            &mut corrupt,
-        )? {
+        if let Some((paged, pagination)) =
+            try_project_page_only_bytes(query, &matched, interner, ctx, self.name(), &mut corrupt)?
+        {
             let records_returned = paged.len() as u64;
             return Ok(QueryResult::with_stats(
                 paged,
@@ -330,16 +324,16 @@ impl TableManager {
         let mut result_qv = if has_group_by {
             exec::validate_aggregate_select(&query.select)?;
             let group_by = query.group_by.as_ref().unwrap();
-            exec::apply_group_by(&matched, group_by, &query.select, interner, ctx)
+            exec::try_apply_group_by(&matched, group_by, &query.select, interner, ctx)?
         } else if has_agg {
             exec::validate_aggregate_select(&query.select)?;
-            exec::apply_aggregate_all(&matched, &query.select, interner, ctx.scalars.clone())
+            exec::apply_aggregate_all_with_context(&matched, &query.select, interner, ctx)?
         } else {
             apply_select_value_bytes(
                 &matched,
                 &query.select,
                 interner,
-                ctx.scalars.clone(),
+                ctx,
                 self.name(),
                 &mut corrupt,
             )?
@@ -522,7 +516,7 @@ impl TableManager {
                 &[(id, value_bytes)],
                 &query.select,
                 interner,
-                ctx.scalars.clone(),
+                ctx,
                 self.name(),
                 &mut corrupt,
             )?;
