@@ -1044,11 +1044,10 @@ impl TableManager {
             Vec::new()
         };
         let proj = if !needs_raw {
-            Some(exec::SelectProjection::new(
-                &query.select,
-                interner,
-                ctx.scalars.clone(),
-            )?)
+            Some(
+                exec::SelectProjection::new(&query.select, interner, ctx.scalars.clone())?
+                    .with_context(ctx),
+            )
         } else {
             None
         };
@@ -1199,7 +1198,12 @@ impl TableManager {
                 exec::apply_group_by(&raw_acc, group_by, &query.select, interner, ctx)
             } else if has_agg {
                 exec::validate_aggregate_select(&query.select)?;
-                exec::apply_aggregate_all(&raw_acc, &query.select, interner, ctx.scalars.clone())
+                crate::query::read::aggregate::apply_aggregate_all_with_context(
+                    &raw_acc,
+                    &query.select,
+                    interner,
+                    ctx,
+                )
             } else {
                 rec_acc
                     .into_iter()
@@ -1298,7 +1302,8 @@ impl TableManager {
         let skip = skip as usize;
         let limit = take.map(|t| t as usize);
 
-        let proj = exec::SelectProjection::new(&query.select, interner, ctx.scalars.clone())?;
+        let proj = exec::SelectProjection::new(&query.select, interner, ctx.scalars.clone())?
+            .with_context(ctx);
 
         // When a tx context is present, use tx-aware list_stream_tx so SSI
         // read-set recording is fused into this single scan (see read_collecting).
@@ -1464,7 +1469,8 @@ impl TableManager {
         // If projection interning failed, fall back to Name for the whole query.
         let use_id_encoding = use_id_encoding && (id_is_all || id_projection_ids.is_some());
 
-        let proj = exec::SelectProjection::new(&query.select, interner, ctx.scalars.clone())?;
+        let proj = exec::SelectProjection::new(&query.select, interner, ctx.scalars.clone())?
+            .with_context(ctx);
 
         // When a tx context is present, use tx-aware list_stream_tx so SSI
         // read-set recording is fused into this single scan (see read_collecting).
@@ -2034,7 +2040,8 @@ impl TableManager {
 
         // Project survivors into query records — bytes already resolved in the
         // loop, so no second round-trip to the store/staging.
-        let proj = exec::SelectProjection::new(&query.select, interner, ctx.scalars.clone())?;
+        let proj = exec::SelectProjection::new(&query.select, interner, ctx.scalars.clone())?
+            .with_context(ctx);
         let mut records: Vec<QueryRecord> = Vec::with_capacity(last_survivors.len());
         for (rid, bytes) in &last_survivors {
             let qv = match shamir_types::record_view::RecordView::new(bytes) {
@@ -2318,7 +2325,8 @@ impl TableManager {
     ) -> DbResult<QueryResult> {
         let rids: Vec<RecordId> = ranked.iter().map(|(r, _)| *r).collect();
         let raw_records = self.get_many_bytes_tx(&rids, tx).await?;
-        let proj = exec::SelectProjection::new(&query.select, interner, ctx.scalars.clone())?;
+        let proj = exec::SelectProjection::new(&query.select, interner, ctx.scalars.clone())?
+            .with_context(ctx);
         let mut records: Vec<QueryRecord> = Vec::with_capacity(ranked.len());
         for (maybe_bytes, rid) in raw_records.iter().zip(rids.iter()) {
             let bytes = match maybe_bytes {

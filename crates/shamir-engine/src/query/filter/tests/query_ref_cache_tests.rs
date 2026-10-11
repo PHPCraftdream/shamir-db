@@ -27,6 +27,7 @@
 use std::sync::Arc;
 
 use shamir_funclib::scalar_resolver::ScalarResolver;
+use shamir_query_builder::{select, val, Query};
 use shamir_types::core::interner::Interner;
 use shamir_types::types::common::{new_map, TMap};
 use shamir_types::types::value::QueryValue;
@@ -38,7 +39,7 @@ use crate::query::filter::query_ref_cache::{
 };
 use crate::query::filter::{Cond, Filter, FilterValue, FnCall};
 use crate::query::read::select_projection::SelectProjection;
-use crate::query::read::{QueryRecord, QueryResult, Select, SelectItem};
+use crate::query::read::{QueryRecord, QueryResult};
 
 /// A minimal `QueryResult` carrying a Call-result `value` (the value-first
 /// path — `resolve_query_ref_value` applies `path` to `value`, not `records`).
@@ -380,53 +381,38 @@ fn missing_alias_collapses_identically_and_caches_the_miss() {
 // Part D — engine-level integration through the production seam.
 // ---------------------------------------------------------------------
 
-/// Test 6: the real production wiring path — `SelectProjection::new` (which
-/// calls `prescan_query_ref_cache` internally per F2 step 5) builds the cache
-/// ONCE, then `project_value` serves TWO records through the SAME projection.
-///
-/// Note: `SelectProjection::project_value` builds its `FilterContext` with an
-/// EMPTY `resolved_refs` (`empty_refs`), so a `$query` ref resolves to `None`
-/// here — the FnCall arm propagates the `None` and the projection emits
-/// `Null`. This test therefore proves the WIRING is live (prescan runs in
-/// `new()` without panic; `with_query_ref_cache` is threaded in
-/// `project_value`; the cache-HIT path executes per record) and CONSISTENT
-/// across records, rather than asserting a non-Null `$query` value (the
-/// unit tests in Part C cover the meaningful-value case directly). Mirrors
-/// `field_path_cache_tests.rs`'s test 6 shape.
+/// The production cache resolves real refs, not a cached miss. Red before
+/// B14: both rows emitted Null despite the caller supplying @q.
 #[test]
 fn select_projection_wires_query_ref_cache_and_evaluates_per_record() {
     let interner = Arc::new(Interner::new());
 
     // SELECT upper(@q) AS up  — a FnCall wrapping a $query ref.
-    let select = Select {
-        items: vec![SelectItem::Function {
-            name: "strings/upper".to_string(),
-            args: vec![FilterValue::query_ref("q")],
-            alias: Some("up".to_string()),
-        }],
-        distinct: false,
-    };
+    let query = Query::from("rows")
+        .select([select::func("up", "strings/upper", [val::qref_all("q")])])
+        .build();
+    let select = query.select;
+    let refs = refs_of("q", call_result(QueryValue::Str("hello".into())));
+    let ctx = FilterContext::new(&interner, &refs);
 
     // Built ONCE — this populates `funcs_query_ref_cache` internally via
     // `prescan_query_ref_cache`, the real production call site under test.
-    let proj = SelectProjection::new(&select, &interner, ScalarResolver::builtins_only()).unwrap();
+    let proj = SelectProjection::new(&select, &interner, ScalarResolver::builtins_only())
+        .unwrap()
+        .with_context(&ctx);
 
     let rec_a = null_record();
     let rec_b = null_record();
     let qval_a = proj.project_value(&rec_a, &interner);
     let qval_b = proj.project_value(&rec_b, &interner);
 
-    // Both records emit a consistent Null (the $query ref resolves to None
-    // against the projection's empty resolved_refs; upper propagates the
-    // None → Null). The point is that the wired cache path executes without
-    // panic and produces identical, per-record results — NOT a frozen or
-    // panicked state.
+    // Both rows must resolve the same execution-local query reference.
     match &qval_a {
         QueryValue::Map(m) => {
             assert_eq!(
                 m.get("up"),
-                Some(&QueryValue::Null),
-                "first record: @q against empty resolved_refs → upper propagates None → Null"
+                Some(&QueryValue::Str("HELLO".into())),
+                "first record: caller's @q must resolve"
             );
         }
         _ => panic!("expected QueryValue::Map, got {:?}", qval_a),
@@ -435,10 +421,20 @@ fn select_projection_wires_query_ref_cache_and_evaluates_per_record() {
         QueryValue::Map(m) => {
             assert_eq!(
                 m.get("up"),
-                Some(&QueryValue::Null),
+                Some(&QueryValue::Str("HELLO".into())),
                 "second record: same projection, same consistent result via the wired cache path"
             );
         }
         _ => panic!("expected QueryValue::Map, got {:?}", qval_b),
     }
+
+    // Rebind after the old cell was populated. Reusing its HELLO snapshot
+    // would incorrectly make this execution sticky.
+    let refs_next = refs_of("q", call_result(QueryValue::Str("next".into())));
+    let ctx_next = FilterContext::new(&interner, &refs_next);
+    let proj_next = proj.with_context(&ctx_next);
+    let QueryValue::Map(next) = proj_next.project_value(&rec_a, &interner) else {
+        panic!("expected projected map");
+    };
+    assert_eq!(next.get("up"), Some(&QueryValue::Str("NEXT".into())));
 }
