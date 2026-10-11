@@ -12,7 +12,7 @@
 //! returns `None`. The journal itself is sound — every system-store write
 //! goes through `SystemStore::set_via_implicit_tx` →
 //! `RepoInstance::run_implicit_batch_tx` → `commit_tx` →
-//! `emit_changefeed_event`, so the events ARE produced on the underlying
+//! `publish_journaled`, so the events ARE produced on the underlying
 //! `system` repo. This test reaches that repo directly via the
 //! `pub(crate)` `SystemStore::system_repo()` accessor (the test module is
 //! in-crate) and reads its durable journal.
