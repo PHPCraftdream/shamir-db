@@ -1,9 +1,9 @@
-//! Contract tests pinning the REAL public API of `hnsw_rs` 0.3.4.
+//! Contract tests pinning the REAL public API of `hnsw_rs` 0.3.5.
 //!
 //! These tests are a SPIKE artefact: later phases (P2 persist, P3 filtered
 //! ANN, P4 batch ingest, P5 quantization) build on the facts established
 //! here. The source of truth is the crate source at
-//! `~/.cargo/registry/.../hnsw_rs-0.3.4/`. Each test block names the exact
+//! `~/.cargo/registry/.../hnsw_rs-0.3.5/`. Each test block names the exact
 //! signature it pins, so a future hnsw_rs bump that changes a signature
 //! fails HERE with a clear pointer, not in the middle of P2/P3/P5 work.
 //!
@@ -564,13 +564,12 @@ fn hnsw_u8_uses_builtin_distl2() {
 // N. reverse links of upper-level points (#1232)
 // ============================================================================
 //
-// hnsw_rs 0.3.4 `reverse_update_neighborhood_simple` writes the back-link of a
+// hnsw_rs 0.3.4 `reverse_update_neighborhood_simple` wrote the back-link of a
 // new point `P` (top level `L`) into `q.neighbours[L]` for EVERY layer `l <= L`
-// it walks, instead of `q.neighbours[l]`. A level >= 1 point therefore gets no
-// layer-0 back-links, whole regions become unreachable for layer-0 search and
-// recall collapses in roughly one build in a few hundred (0.844 vs 0.956-0.985
-// in CI). Fixed upstream in 0.3.5 (commit 6256b00b11); we carry the one-line
-// fix in `vendor/hnsw_rs` until 0.3.5 passes the dependency cooldown.
+// it walks, instead of `q.neighbours[l]`. A level >= 1 point therefore got no
+// layer-0 back-links, whole regions became unreachable for layer-0 search and
+// recall collapsed in roughly one build in a few hundred (0.844 vs 0.956-0.985
+// in CI). Fixed upstream in 0.3.5 (commit 6256b00b11); this test pins the fix.
 
 /// The point stored at `pid` (layer, rank-in-layer).
 fn point_at(hnsw: &Hnsw<'static, f32, ShamirDist>, pid: PointId) -> Arc<Point<'static, f32>> {

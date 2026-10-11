@@ -11,11 +11,7 @@ resolver = "2"
 # `rust-toolchain.toml` pins MSVC) or `napi build` from `npm`.
 # `shamir-client-ts` is a pure-TypeScript package (no Cargo.toml); exclude it
 # so the `crates/*` glob doesn't try to load it as a workspace member.
-exclude = ["crates/shamir-client-node", "crates/shamir-client-ts", "vendor/hnsw_rs"]
-
-# Temporary: hnsw_rs 0.3.4 with the reverse-edge layer fix (see vendor/hnsw_rs/VENDORED.md).
-[patch.crates-io]
-hnsw_rs = { path = "vendor/hnsw_rs" }
+exclude = ["crates/shamir-client-node", "crates/shamir-client-ts"]
 
 [workspace.dependencies]
 # Published on crates.io (https://crates.io/crates/captrack, repo
