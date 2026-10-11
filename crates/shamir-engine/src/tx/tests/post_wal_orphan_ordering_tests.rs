@@ -17,6 +17,8 @@ pub(super) async fn fixture(name: &str) -> (RepoInstance, Arc<PostWalPrePublishH
         pre_wal: AtomicBool::new(false),
         after_counter: AtomicBool::new(false),
         fail_orphan_markers: AtomicBool::new(false),
+        panic_after_resume: AtomicBool::new(false),
+        panic_resume: Notify::new(),
         reached: Notify::new(),
         resume: Notify::new(),
         armed: AtomicBool::new(false),
@@ -39,22 +41,29 @@ pub(super) async fn fixture(name: &str) -> (RepoInstance, Arc<PostWalPrePublishH
     (repo, hook)
 }
 
-pub(super) async fn cancel_post_wal(
+pub(super) async fn panic_post_wal(
     repo: &RepoInstance,
     hook: &PostWalPrePublishHook,
     tx: TxContext,
 ) -> u64 {
+    // The hook captures panic mode before signalling reached; arm it before
+    // spawning, not after the committing task has parked.
+    hook.panic_after_resume.store(true, Ordering::Release);
     hook.armed.store(true, Ordering::Release);
     let owned = repo.clone();
     let task = tokio::spawn(async move { owned.commit_tx(tx).await });
     // Notify retains the permit even if the spawned task arrives first.
-    // The seam is after data application, before counters/index/publish.
+    // The default seam follows WAL acceptance, window offer and Phase 5a,
+    // but precedes Phase 5b counters, Phase 5c postings and Phase 6 publish.
+    // after_counter instead parks after tracked 5b, still before 5c/publish.
     hook.reached.notified().await;
     let gate = repo.tx_gate().await.unwrap();
     let version = *repo.drainer().window_keys().last().unwrap();
     assert!(gate.is_active_post_wal(version));
-    task.abort();
-    assert!(task.await.unwrap_err().is_cancelled());
+    // Unwind the inline driver: cancellation would detach this same tail
+    // and finish it, rather than transfer replay ownership to the drainer.
+    hook.panic_resume.notify_one();
+    assert!(task.await.unwrap_err().is_panic());
     assert!(!gate.is_active_post_wal(version));
     assert!(gate.is_orphaned_post_wal(version));
     assert_eq!(gate.orphan_max(), version);
@@ -65,7 +74,7 @@ pub(super) async fn cancel_post_wal(
 // Coverage, not a claimed red test: current orphan completion is expected
 // to publish both tables and apply each counter exactly once.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn post_wal_cancel_multi_table_values_counters_and_durability() {
+async fn post_wal_panic_multi_table_values_counters_and_durability() {
     let (repo, hook) = fixture("post_wal_multi_table").await;
     let a = repo.get_table("a").await.unwrap();
     let b = repo.get_table("b").await.unwrap();
@@ -79,7 +88,7 @@ async fn post_wal_cancel_multi_table_values_counters_and_durability() {
         .insert_tx(&InnerValue::Str("orphan-b".into()), Some(&mut tx))
         .await
         .unwrap();
-    let version = cancel_post_wal(&repo, &hook, tx).await;
+    let version = panic_post_wal(&repo, &hook, tx).await;
     drop(snapshot);
     assert_eq!(a.counter().get().await.unwrap(), 0);
     assert_eq!(b.counter().get().await.unwrap(), 0);
@@ -105,7 +114,7 @@ async fn post_wal_cancel_multi_table_values_counters_and_durability() {
 
 // Coverage, not a claimed red test: metric failure is advisory today.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn post_wal_cancel_multi_table_counter_underflow_does_not_block_durability() {
+async fn post_wal_panic_multi_table_counter_underflow_does_not_block_durability() {
     let (repo, hook) = fixture("post_wal_multi_table_underflow").await;
     let a = repo.get_table("a").await.unwrap();
     let b = repo.get_table("b").await.unwrap();
@@ -122,7 +131,7 @@ async fn post_wal_cancel_multi_table_counter_underflow_does_not_block_durability
     // Preserve the real data Put while injecting the same metric drift as
     // the existing single-table test: -1 cannot be applied to a zero count.
     tx.counter_deltas.insert(table_token_for("a"), -1);
-    let version = cancel_post_wal(&repo, &hook, tx).await;
+    let version = panic_post_wal(&repo, &hook, tx).await;
     drop(snapshot);
     assert_eq!(a.counter().get().await.unwrap(), 0);
     let error = a.counter().increment(-1).await.unwrap_err();
@@ -152,7 +161,7 @@ async fn post_wal_cancel_multi_table_counter_underflow_does_not_block_durability
 // is skipped by index_applied. Versioned record history must also keep the
 // later value; the unversioned posting must not regress to the orphan value.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn post_wal_cancel_same_record_later_writer_posting_survives_drain() {
+async fn post_wal_panic_same_record_later_writer_posting_survives_drain() {
     let (repo, hook) = fixture("post_wal_same_record_posting").await;
     let table = repo.get_table("a").await.unwrap();
     let gate = repo.tx_gate().await.unwrap();
@@ -186,10 +195,10 @@ async fn post_wal_cancel_same_record_later_writer_posting_survives_drain() {
             provenance: Default::default(),
         },
     ));
-    let orphan_version = cancel_post_wal(&repo, &hook, tx).await;
+    let orphan_version = panic_post_wal(&repo, &hook, tx).await;
     drop(snapshot);
 
-    // Start only AFTER abort has completed, and do not drain the orphan.
+    // Start only AFTER panic unwind has completed, and do not drain the orphan.
     let (mut tx, snapshot) = repo.begin_tx(IsolationLevel::Snapshot).await.unwrap();
     assert!(table
         .set_tx(rid, &InnerValue::Str("later".into()), Some(&mut tx))

@@ -1,6 +1,8 @@
 pub mod apply_replicated;
 pub mod commit;
+pub(crate) mod commit_driver;
 pub mod commit_phases;
+pub(crate) mod commit_tail_barrier;
 // P1d-2a: additive repo-level drainer (generalized recovery loop). Defined
 // and unit-tested, but NOT wired into the commit path — the cutover that
 // makes it the sole history writer is P1d-2b. `dead_code` until then.
@@ -18,6 +20,8 @@ pub mod tx_outcome;
 pub use apply_replicated::{apply_replicated, ApplyOutcome, ApplyPolicy};
 pub(crate) use commit::release_pessimistic_locks;
 pub use commit::{commit_tx, wal_ops_from_tx, TxError as CommitError};
+pub(crate) use commit_driver::CommitDriver;
+pub(crate) use commit_tail_barrier::CommitTailBarrier;
 pub use recovery::{recover_inflight_v2, replay_v2_entry, replay_v2_op};
 pub use tx_outcome::{BackgroundCommitHandle, MaterializationState, TxOutcome};
 

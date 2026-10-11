@@ -4,7 +4,7 @@ use shamir_types::types::value::InnerValue;
 
 use crate::table::table_manager::table_token_for;
 use crate::table::TableConfig;
-use crate::tx::tests::post_wal_orphan_ordering_tests::{cancel_post_wal, fixture};
+use crate::tx::tests::post_wal_orphan_ordering_tests::{fixture, panic_post_wal};
 
 fn posting(key: &Bytes, value: &'static [u8]) -> IndexWriteOp {
     IndexWriteOp::SetPosting {
@@ -39,7 +39,7 @@ async fn missing_orphan_table_stops_and_restored_registration_retries() {
         .unwrap();
     tx.index_write_set
         .push((table_token_for("a"), posting(&key, b"restored")));
-    let version = cancel_post_wal(&repo, &hook, tx).await;
+    let version = panic_post_wal(&repo, &hook, tx).await;
     drop(snapshot);
     let durable = gate.durable_watermark();
     assert!(repo.remove_table("a"));
@@ -48,7 +48,7 @@ async fn missing_orphan_table_stops_and_restored_registration_retries() {
         .insert_tx(&InnerValue::Str("later-orphan".into()), Some(&mut later_tx))
         .await
         .unwrap();
-    let later = cancel_post_wal(&repo, &hook, later_tx).await;
+    let later = panic_post_wal(&repo, &hook, later_tx).await;
     drop(later_snapshot);
     assert_eq!(gate.durable_watermark(), durable);
     assert_eq!(repo.drainer().drain_step(&repo).await.unwrap(), 1);
@@ -107,7 +107,7 @@ async fn orphan_postings_are_key_scoped_and_survive_backpressure_and_pruning() {
         .push((token, posting(&untouched, b"independent")));
     tx.index_write_set
         .push((table_token_for("b"), posting(&key, b"other-table")));
-    let orphan = cancel_post_wal(&repo, &hook, tx).await;
+    let orphan = panic_post_wal(&repo, &hook, tx).await;
     drop(snapshot);
 
     repo.drainer().set_window_high_watermark(0);
@@ -162,7 +162,7 @@ async fn orphan_postings_are_key_scoped_and_survive_backpressure_and_pruning() {
         .await
         .unwrap();
     tx.index_write_set.push((token, posting(&key, b"new")));
-    let newest = cancel_post_wal(&repo, &hook, tx).await;
+    let newest = panic_post_wal(&repo, &hook, tx).await;
     drop(snapshot);
     assert_eq!(repo.drainer().drain_all(&repo).await.unwrap(), 1);
     assert_eq!(gate.durable_watermark(), newest);
