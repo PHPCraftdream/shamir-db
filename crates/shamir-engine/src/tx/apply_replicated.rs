@@ -74,11 +74,14 @@
 //! on the follower). We therefore reuse the tail's three reusable halves
 //! directly and skip the two that do not apply:
 //!
-//!  - [`RepoInstance::emit_changefeed_event`] — re-emit the event on the
-//!    follower's OWN changefeed so downstream chain replicas can pull it.
-//!    The event is re-projected with the follower-local version so the
-//!    downstream's idempotency watermark keys on the follower's monotonic
-//!    sequence, not the (different) leader version.
+//!  - [`RepoInstance::prepare_journal_event`] + `publish_journaled` — resolve
+//!    the follower's downstream event after all table applies succeed, then
+//!    enqueue it (or record a gap) immediately before publishing the local
+//!    version, with no await or fallible step between enqueue and commit.
+//!    [`RepoInstance::broadcast_changefeed_event`] broadcasts the same Arc
+//!    after publication and recovery markers. The event is re-projected with
+//!    the follower-local version so downstream idempotency keys on this
+//!    follower's monotonic sequence, not the (different) leader version.
 //!  - [`RepoTxGate::mark_durable`] — advance the durable watermark so the
 //!    freshly-written history entry is reported as durable (matches the
 //!    post-cutover drainer contract).
@@ -108,6 +111,7 @@ use crate::repo::RepoInstance;
 use crate::table::table_manager::table_token_for;
 use crate::table::RecordCounter;
 use crate::tx::commit_phases::persist_markers;
+use crate::tx::publish_journaled::publish_journaled;
 
 /// The local outcome of applying one replicated [`ChangelogEvent`].
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -489,6 +493,12 @@ pub async fn apply_replicated(
     // `finalize_sync_post_publish` is not reusable verbatim).
     // ====================================================================
 
+    // Resolve only after the last failure exit: an aborted apply must enqueue
+    // nothing and must not mark a changefeed gap. Preserve translated bytes,
+    // actor and timestamp, but key downstream replication on the local version.
+    let downstream_event = reproject_for_downstream(&rewritten_event, repo.name(), local_version);
+    let prepared = repo.prepare_journal_event(Some(downstream_event)).await;
+
     // A12: discharge the VersionGuard's terminal-mark obligation by calling
     // `commit()` — this marks the version `Materialized` in the gate's
     // VISIBILITY tracker (`completion`) and advances `last_committed_version`
@@ -504,7 +514,8 @@ pub async fn apply_replicated(
     // matches the canonical ordering the rest of the commit pipeline uses
     // (`guard.commit()` first, `gate.mark_durable(v)` second — see
     // `durable_watermark_tests::mixed_tx_and_nontx_durable_equals_visibility_at_end`).
-    version_guard.commit();
+    // S5b-4: enqueue-or-gap and guard.commit() are one synchronous pair.
+    let downstream_event = publish_journaled(repo, version_guard, prepared);
 
     // mark_durable: history was written inline by `apply_committed_ops`,
     // so the version is now durable. Advance the durable watermark so
@@ -527,15 +538,10 @@ pub async fn apply_replicated(
         );
     }
 
-    // emit_changefeed_event: re-emit on the follower's OWN changefeed so
-    // downstream chain replicas can pull it. The event is re-projected
-    // with the follower-local version (the leader's commit_version is
-    // meaningless downstream — the downstream keys its idempotency on the
-    // monotonic sequence of its upstream, which is THIS follower). The
-    // re-emitted event preserves the actor and timestamp, with translated
-    // record bytes and the follower-local commit version and repo name.
-    let downstream_event = reproject_for_downstream(&rewritten_event, repo.name(), local_version);
-    repo.emit_changefeed_event(Some(downstream_event)).await;
+    // Live only: the same Arc was already journaled before publication.
+    #[cfg(test)]
+    repo.fire_post_publish_pre_broadcast_test_hook().await;
+    repo.broadcast_changefeed_event(downstream_event);
 
     Ok(ApplyOutcome::Applied { local_version })
 }
