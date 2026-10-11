@@ -1,8 +1,8 @@
 //! HNSW approximate nearest neighbor adapter using `hnsw_rs`.
 //!
-//! `hnsw_rs::Hnsw` is internally thread-safe (RwLock per layer for
-//! insert, lock-free traversal for search). We wrap it directly —
-//! no actor needed for HNSW itself.
+//! Concurrent `insert` calls are safe only with the workspace's vendored
+//! `hnsw_rs` (`vendor/hnsw_rs`) lock-order fix; see its `VENDORED.md`.
+//! We wrap that patched graph directly — no actor needed for HNSW itself.
 //!
 //! Deletion via soft-delete tombstone set; search over-scans ×2 to
 //! compensate for filtered-out tombstones.
@@ -46,9 +46,9 @@ pub const MAX_EF_SEARCH: u32 = 10_000;
 /// Live-element count at or below which `search` runs an EXACT brute-force
 /// scan instead of the approximate HNSW graph.
 ///
-/// `hnsw_rs` 0.3.x assigns node layers from an internal, **unseedable** RNG,
-/// so a freshly-built graph over a tiny dataset is nondeterministic: recall
-/// can drop below 100% and the same query can return different neighbours
+/// `hnsw_rs` 0.3.5 seeds its layer generator with the fixed seed 397.
+/// HNSW is still approximate: tiny graphs can have recall below 100%, and
+/// concurrent insertion order can change topology and query neighbours
 /// across builds (and across reopen). On a handful of points that surfaces as
 /// flaky / wrong top-k. Brute-force over a few hundred vectors is microseconds
 /// and GUARANTEES exact, stable results; HNSW only earns its keep at larger N
