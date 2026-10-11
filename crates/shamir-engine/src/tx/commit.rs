@@ -917,6 +917,7 @@ async fn commit_tx_inner_legacy_async(
     let snapshot_version = tx.snapshot_version;
     let tx_id_u64 = tx.tx_id.0;
     let changefeed_event = shamir_tx::project_event(&tx, repo.name(), commit_version);
+    let prepared_journal = repo.prepare_journal_event(changefeed_event).await;
 
     apply_data_phase(&mut tx, repo, commit_version).await;
     // SSI fix S2 — Phase 5a (`apply_data_phase` → `apply_committed_visible`)
@@ -956,7 +957,8 @@ async fn commit_tx_inner_legacy_async(
     // prior manual mark + sync_last_committed_from_watermark +
     // publish_committed_max trio (identical watermark semantics). Closes H1:
     // a panic between WAL-durable and here registers an orphan for replay.
-    version_guard.commit();
+    let changefeed_event =
+        super::publish_journaled::publish_journaled(repo, version_guard, prepared_journal);
 
     // A4 (fix a): release Level-3 pessimistic locks AFTER the publish step
     // (`apply_data_phase` + `version_guard.commit()` above) is complete,
@@ -972,7 +974,9 @@ async fn commit_tx_inner_legacy_async(
     maybe_crash("phase6_async", repo).await;
     drop(commit_guard);
 
-    repo.emit_changefeed_event(changefeed_event).await;
+    #[cfg(test)]
+    repo.fire_post_publish_pre_broadcast_test_hook().await;
+    repo.broadcast_changefeed_event(changefeed_event);
 
     let repo_clone = repo.clone();
     let metrics = repo.tx_metrics().clone();
@@ -1208,11 +1212,13 @@ async fn commit_tx_lockfree(
     let snapshot_version = tx.snapshot_version;
     let tx_id_u64 = tx.tx_id.0;
     let changefeed_event = shamir_tx::project_event(&tx, repo.name(), commit_version);
+    let prepared_journal = repo.prepare_journal_event(changefeed_event).await;
 
-    let post_publish = materialize(
+    let (post_publish, changefeed_event) = materialize(
         &mut tx,
         repo,
         version_guard,
+        prepared_journal,
         validated.uwl_guards,
         validated.drain_guards,
     )

@@ -49,6 +49,8 @@
 //! inside `materialize` via `version_guard.commit()`). None of this may
 //! abort the tx.
 
+use std::sync::Arc;
+
 use shamir_tx::{RepoTxGate, TxContext};
 
 use crate::repo::RepoInstance;
@@ -79,7 +81,7 @@ use crate::tx::tx_outcome::MaterializationState;
 pub(super) async fn finalize_sync_post_publish(
     tx: &TxContext,
     post_publish_state: PostPublishState,
-    changefeed_event: Option<shamir_tx::ChangelogEvent>,
+    changefeed_event: Option<Arc<shamir_tx::ChangelogEvent>>,
     repo: &RepoInstance,
     gate: &RepoTxGate,
     commit_version: u64,
@@ -96,7 +98,9 @@ pub(super) async fn finalize_sync_post_publish(
     // here, after the version is published (visibility), so it drains
     // promptly.
     repo.drainer().wake();
-    repo.emit_changefeed_event(changefeed_event).await;
+    #[cfg(test)]
+    repo.fire_post_publish_pre_broadcast_test_hook().await;
+    repo.broadcast_changefeed_event(changefeed_event);
     promote_vectors(tx, repo, commit_version).await;
     materialization
 }

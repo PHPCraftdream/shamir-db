@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use futures::future::join_all;
 use shamir_collections::TFxMap;
 use shamir_tunables::instance_defaults::INTERNER_CHECKPOINT_INTERVAL;
@@ -60,9 +62,13 @@ pub(super) async fn materialize(
     tx: &mut TxContext,
     repo: &RepoInstance,
     version_guard: shamir_tx::VersionGuard,
+    prepared_journal: Option<(
+        Arc<shamir_tx::ChangelogEvent>,
+        Option<Arc<shamir_tx::RepoChangefeed>>,
+    )>,
     uwl_guards: Vec<tokio::sync::OwnedMutexGuard<()>>,
     drain_guards: Vec<crate::table::writer_drain_barrier::WriterDrainGuard>,
-) -> PostPublishState {
+) -> (PostPublishState, Option<Arc<shamir_tx::ChangelogEvent>>) {
     let tx_id = tx.tx_id.0;
     let commit_version = version_guard.version();
     let mut ok = true;
@@ -225,7 +231,8 @@ pub(super) async fn materialize(
     // publish_committed_max trio; the watermark advance is the same
     // monotonic fetch_max, and the guard can no longer be dropped Aborted
     // once committed here (it is moved into `commit`).
-    version_guard.commit();
+    let changefeed_event =
+        super::publish_journaled::publish_journaled(repo, version_guard, prepared_journal);
 
     // Crash seam (test-only): version published in-memory but lost with
     // the process; markers (6.5) not yet persisted and Phase 7 not run.
@@ -242,12 +249,15 @@ pub(super) async fn materialize(
     // Phase 6.5 + 7 (markers + WAL cleanup) are returned as post-lock
     // work — the caller runs them AFTER releasing `commit_lock`. See
     // `post_publish_cleanup`.
-    PostPublishState {
-        tx_id,
-        commit_version,
-        projections_ok: ok,
-        interner_delta_max_id,
-    }
+    (
+        PostPublishState {
+            tx_id,
+            commit_version,
+            projections_ok: ok,
+            interner_delta_max_id,
+        },
+        changefeed_event,
+    )
 }
 
 pub(super) async fn apply_tracked_counter_phase(
