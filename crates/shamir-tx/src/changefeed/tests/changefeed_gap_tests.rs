@@ -5,14 +5,15 @@ use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::task::Poll;
 
+use arc_swap::ArcSwap;
 use bytes::Bytes;
 use futures::poll;
 use shamir_types::access::Actor;
 use tokio::sync::{broadcast, mpsc, Notify};
 
 use super::super::{
-    gap_marker_key, journal_writer_loop, version_key, ChangelogEvent, ChangelogStore, GapMarker,
-    RepoChangefeed, BROADCAST_CAPACITY, JOURNAL_CHANNEL_CAPACITY,
+    decode_gap_marker, gap_marker_key, journal_writer_loop, version_key, ChangelogEvent,
+    ChangelogStore, GapMarker, RepoChangefeed, BROADCAST_CAPACITY, JOURNAL_CHANNEL_CAPACITY,
 };
 
 #[derive(Default)]
@@ -33,13 +34,20 @@ impl GapStore {
     fn marker(&self) -> u64 {
         let rows = self.rows.lock().unwrap();
         let bytes = rows.get(&gap_marker_key()).expect("persisted marker");
-        u64::from_be_bytes(bytes.as_ref().try_into().unwrap())
+        decode_gap_marker(bytes).unwrap().0
     }
 
     async fn wait_marker(&self, version: u64) {
         loop {
             let notified = self.written.notified();
-            if self.rows.lock().unwrap().get(&gap_marker_key()) == Some(&version_key(version)) {
+            // Existing tests assert the minimum; the new range also carries a horizon.
+            let first = self
+                .rows
+                .lock()
+                .unwrap()
+                .get(&gap_marker_key())
+                .map(|bytes| decode_gap_marker(bytes).unwrap().0);
+            if first == Some(version) {
                 return;
             }
             notified.await;
@@ -223,8 +231,8 @@ async fn failed_marker_put_retains_gap_and_retries_on_next_hint() {
     let shutdown = Arc::new(AtomicBool::new(false));
     let watermark = Arc::new(AtomicU64::new(0));
     let gap = Arc::new(GapMarker {
-        first: AtomicU64::new(0),
-        persisted: AtomicU64::new(0),
+        current: ArcSwap::from_pointee(None),
+        persisted: ArcSwap::from_pointee(None),
         notify: notify.clone(),
     });
     let feed = RepoChangefeed {

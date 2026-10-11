@@ -10,6 +10,7 @@ use std::sync::Arc;
 
 use bytes::Bytes;
 use futures::StreamExt;
+use shamir_storage::error::{DbError, DbResult};
 use shamir_storage::types::Store;
 
 /// Per-repo durable changelog journal backed by a `Store`.
@@ -20,6 +21,27 @@ pub struct StoreChangelog {
 impl StoreChangelog {
     pub fn new(store: Arc<dyn Store>) -> Self {
         Self { store }
+    }
+
+    /// Load extended invalidation metadata, accepting legacy single-u64 points.
+    /// Corruption is invalidation of an unknown horizon, never a small point.
+    /// The bool asks init to flush the conservative replacement before seeding.
+    pub(crate) async fn load_gap_marker(&self) -> DbResult<(Option<(u64, u64)>, bool)> {
+        match self
+            .store
+            .get(shamir_tx::changefeed::gap_marker_key().into())
+            .await
+        {
+            Ok(bytes) => match shamir_tx::changefeed::decode_gap_marker(&bytes) {
+                Ok(interval) => Ok((Some(interval), false)),
+                Err(e) => {
+                    log::warn!("invalid changefeed gap marker: {e}; invalidating all versions");
+                    Ok((Some((1, u64::MAX)), true))
+                }
+            },
+            Err(DbError::NotFound(_)) => Ok((None, false)),
+            Err(e) => Err(e),
+        }
     }
 }
 
