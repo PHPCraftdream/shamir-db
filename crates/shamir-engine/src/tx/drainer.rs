@@ -1384,7 +1384,7 @@ impl Drainer {
     /// contract (exactly one task per repo) is the caller's responsibility
     /// (spawn once behind the repo's `OnceCell<Arc<Drainer>>`).
     pub fn spawn(self: &Arc<Self>, repo: RepoInstance, live: Weak<()>, interval: Duration) {
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-util"))]
         if crate::tx::commit::TEST_POST_WAL_PRE_PUBLISH_HOOK
             .get()
             .is_some_and(|hook| hook.repo_name == repo.name())

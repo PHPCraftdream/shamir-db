@@ -20,6 +20,7 @@ mod r0c_cross_family_drop_rename_tests;
 mod replication_ddl_tests;
 mod root_user_group_meta_tests;
 mod shamir_db_tests;
+mod shutdown_quiesce_tests;
 mod system_changefeed_tests;
 mod system_metadata_tests;
 mod user_scalar_tests;
