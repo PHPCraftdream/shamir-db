@@ -26,7 +26,6 @@ use shamir_query_types::batch::ResultEncoding;
 use shamir_storage::error::{DbError, DbResult};
 use shamir_types::codecs::interned::record_view_to_id_msgpack;
 use shamir_types::core::interner::{Interner, InternerKey};
-use shamir_types::record_view::RecordRef;
 use shamir_types::types::common::new_map_wc;
 use shamir_types::types::record_id::RecordId;
 use shamir_types::types::value::{InnerValue, QueryValue};
