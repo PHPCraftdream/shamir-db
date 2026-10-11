@@ -86,11 +86,11 @@ fn legacy_select_preserves_fields_and_null_fallbacks() {
     )
     .unwrap();
     assert_eq!(result.len(), 1);
-    assert_eq!(result[0].get_value_i64("v"), Some(3));
-    assert_eq!(result[0].get_value_i64("total"), Some(10));
     let QueryValue::Map(row) = &result[0] else {
         panic!("expected projected map");
     };
+    assert_eq!(row["v"].as_i64(), Some(3));
+    assert_eq!(row["total"].as_i64(), Some(10));
     assert_eq!(row["missing"], QueryValue::Null);
     assert_eq!(row["unknown"], QueryValue::Null);
 }
