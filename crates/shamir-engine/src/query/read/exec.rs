@@ -6,8 +6,12 @@
 //! Pipeline with GROUP BY:
 //!   WHERE (filter_stream) → GROUP BY → AGG per group → HAVING → SELECT → DISTINCT → ORDER BY → PAGINATION → QueryResult
 
+use crate::query::filter::eval_context::FilterContext;
 pub use crate::query::read::aggregate::{
     apply_aggregate_all, apply_group_by, validate_aggregate_select,
+};
+pub(crate) use crate::query::read::aggregate::{
+    apply_aggregate_all_with_context, try_apply_group_by,
 };
 use crate::query::read::hashable_query_value::HashableQueryValue;
 pub use crate::query::read::order::{
@@ -17,7 +21,8 @@ pub use crate::query::read::select_projection::SelectProjection;
 pub use crate::query::read::{Pagination, PaginationInfo, Select, SelectItem};
 use indexmap::IndexSet;
 use shamir_funclib::scalar_resolver::ScalarResolver;
-use shamir_storage::error::DbResult;
+use shamir_query_types::filter::{Filter, FilterValue};
+use shamir_storage::error::{DbError, DbResult};
 use shamir_types::core::interner::Interner;
 use shamir_types::types::record_id::RecordId;
 use shamir_types::types::value::{InnerValue, QueryValue};
@@ -31,16 +36,104 @@ use shamir_types::types::value::{InnerValue, QueryValue};
 /// QueryValue-native projection. Aggregate items are skipped (handled by the
 /// aggregate pipeline).
 ///
-/// F-26 (#819): fallible — `SelectProjection::new` rejects
-/// `SelectItem::Expression` (computed SELECT expressions have no evaluator
-/// yet) instead of silently dropping the field from the output.
+/// Without an execution context, external query references and parameters are
+/// rejected before projection. Missing fields and scalar Null fallbacks remain
+/// unchanged. Aggregate items are still handled by the aggregate pipeline.
 pub fn apply_select_value(
     records: &[(RecordId, InnerValue)],
     select: &Select,
     interner: &Interner,
     scalars: ScalarResolver,
 ) -> DbResult<Vec<QueryValue>> {
-    let proj = SelectProjection::new(select, interner, scalars)?;
+    if select.items.iter().any(|item| match item {
+        SelectItem::Function { args, .. } => args.iter().any(value_requires_bindings),
+        SelectItem::Expression { expr, .. } => value_requires_bindings(&expr.to_filter_value()),
+        _ => false,
+    }) {
+        return Err(DbError::Validation(
+            "select_bindings_require_context".into(),
+        ));
+    }
+    let refs = shamir_types::types::common::new_map();
+    let ctx = FilterContext::new(interner, &refs).with_scalars(scalars);
+    apply_select_value_with_context(records, select, interner, &ctx)
+}
+
+/// Inspect syntax rather than evaluated values: Null is a valid field/scalar
+/// result, and even an unselected conditional branch can require bindings.
+fn value_requires_bindings(value: &FilterValue) -> bool {
+    match value {
+        FilterValue::QueryRef { .. } | FilterValue::Param { .. } => true,
+        FilterValue::Array(values) => values.iter().any(value_requires_bindings),
+        FilterValue::Expr { expr } => expr.args.iter().any(value_requires_bindings),
+        FilterValue::FnCall { call } => call.args().iter().any(value_requires_bindings),
+        FilterValue::Cond { cond } => {
+            filter_requires_bindings(&cond.condition)
+                || value_requires_bindings(&cond.then)
+                || value_requires_bindings(&cond.or_else)
+        }
+        FilterValue::Null
+        | FilterValue::Bool(_)
+        | FilterValue::Int(_)
+        | FilterValue::Float(_)
+        | FilterValue::Binary(_)
+        | FilterValue::String(_)
+        | FilterValue::FieldRef { .. } => false,
+    }
+}
+
+fn filter_requires_bindings(filter: &Filter) -> bool {
+    match filter {
+        Filter::Eq { value, .. }
+        | Filter::Ne { value, .. }
+        | Filter::Gt { value, .. }
+        | Filter::Gte { value, .. }
+        | Filter::Lt { value, .. }
+        | Filter::Lte { value, .. }
+        | Filter::Contains { value, .. }
+        | Filter::FieldEq { value, .. } => value_requires_bindings(value),
+        Filter::In { values, .. }
+        | Filter::NotIn { values, .. }
+        | Filter::ContainsAny { values, .. }
+        | Filter::ContainsAll { values, .. } => values.iter().any(value_requires_bindings),
+        Filter::Between { from, to, .. } => {
+            value_requires_bindings(from) || value_requires_bindings(to)
+        }
+        Filter::ValueCompare { left, right, .. } => {
+            value_requires_bindings(left) || value_requires_bindings(right)
+        }
+        Filter::And { filters } | Filter::Or { filters } => {
+            filters.iter().any(filter_requires_bindings)
+        }
+        Filter::Not { filter } => filter_requires_bindings(filter),
+        Filter::Computed {
+            expr_args, value, ..
+        } => {
+            value_requires_bindings(value)
+                || expr_args
+                    .as_ref()
+                    .is_some_and(|args| args.iter().any(value_requires_bindings))
+        }
+        Filter::Like { .. }
+        | Filter::ILike { .. }
+        | Filter::Regex { .. }
+        | Filter::IsNull { .. }
+        | Filter::IsNotNull { .. }
+        | Filter::Exists { .. }
+        | Filter::NotExists { .. }
+        | Filter::Fts { .. }
+        | Filter::VectorSimilarity { .. } => false,
+    }
+}
+
+/// Apply SELECT with the read's execution-local references and parameters.
+pub(crate) fn apply_select_value_with_context(
+    records: &[(RecordId, InnerValue)],
+    select: &Select,
+    interner: &Interner,
+    ctx: &FilterContext<'_>,
+) -> DbResult<Vec<QueryValue>> {
+    let proj = SelectProjection::new(select, interner, ctx.scalars.clone())?.with_context(ctx);
     Ok(records
         .iter()
         .map(|(_, record)| proj.project_value(record, interner))

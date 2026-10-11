@@ -1257,9 +1257,26 @@ impl RepoInstance {
         self.changefeed
             .get_or_try_init(|| async {
                 let store: Arc<dyn Store> = self.repo.store_get("__changelog__").await?;
+                let marker = match store
+                    .get(shamir_tx::changefeed::gap_marker_key().into())
+                    .await
+                {
+                    Ok(bytes) => match <[u8; 8]>::try_from(bytes.as_ref()) {
+                        Ok(raw) if u64::from_be_bytes(raw) != 0 => u64::from_be_bytes(raw),
+                        _ => {
+                            log::warn!(
+                                "invalid changefeed gap marker for repo {}; restoring gap at 1",
+                                self.name()
+                            );
+                            1
+                        }
+                    },
+                    Err(DbError::NotFound(_)) => 0,
+                    Err(e) => return Err(e),
+                };
                 let cl_store: Arc<dyn shamir_tx::ChangelogStore> =
                     Arc::new(crate::repo::changelog_store::StoreChangelog::new(store));
-                let feed = shamir_tx::RepoChangefeed::new(Arc::clone(&cl_store));
+                let feed = shamir_tx::RepoChangefeed::new_with_gap(Arc::clone(&cl_store), marker);
                 Ok::<ChangefeedHandle, DbError>(ChangefeedHandle {
                     feed,
                     store: cl_store,
