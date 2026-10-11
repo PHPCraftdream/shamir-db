@@ -29,10 +29,11 @@
 * `ChangelogEvent` = `{ repo, commit_version, tx_id, actor, timestamp_ns,
   changes: Vec<RecordChange> }`.
 * `read_from(version, limit)` — resumable pull API.
-* События упорядочены монотонным `commit_version` — **по дизайну
-  P2P-ready** (issue #179: changefeed version == MVCC version).
-* Gap-маркеры (`gap_at`) для dropped events, watermark для persistence
-  tracking.
+* `commit_version` identifies the MVCC version (issue #179), but journal
+  publication is not guaranteed to follow version order under concurrent
+  writes. A follower can advance past a late event and silently miss it.
+* Gap markers (`gap_at`) and a persistence watermark exist, but gap
+  detection is incomplete; see the replication limitations below.
 * E2E-тесты: `shamir-db/tests/changefeed_e2e.rs`.
 
 Начиналось как **локальный** механизм (внутри одного процесса). Сейчас
@@ -48,15 +49,14 @@
 
 ### Network changefeed (pull API over wire) — реализовано
 
-Это уже не роадмап, а рабочий wire-op: `ReplRequest::Pull`
-(`crates/shamir-query-types/src/wire/repl.rs`). Авторизованный follower
-запрашивает батч changelog-событий для одного репо начиная с
-`from_version`, с опциональным long-poll (`wait_ms`). Ответ
-(`ReplResponse::Pull`) несёт `leader_epoch` (VR-style fencing),
-msgpack-encoded `events`, опциональный `gap_at` (если запрошенный
-`from_version` уже за `journal_floor` — нужен reseed) и
-`current_version` для расчёта лага. Диспетчер —
-`crates/shamir-server/src/db_handler/repl_handler.rs`.
+`ReplRequest::Pull` is an implemented wire operation
+(`crates/shamir-query-types/src/wire/repl.rs`). An authorized follower
+requests changelog events for one repo from `from_version`, optionally
+using long-poll (`wait_ms`). `ReplResponse::Pull` carries `leader_epoch`
+(VR-style fencing), msgpack-encoded `events`, optional `gap_at` for a
+reported journal gap, and `current_version` for lag calculation. A missing
+`gap_at` does not prove a complete journal; no snapshot/reseed is available.
+Dispatcher: `crates/shamir-server/src/db_handler/repl_handler.rs`.
 
 ### Leader-follower репликация — реализовано (Experimental)
 
@@ -132,11 +132,12 @@ REQUEST  → ReplRequest::Pull { db, repo, from_version: 42, limit: 100, wait_ms
 RESPONSE ← ReplResponse::Pull { leader_epoch, events: <msgpack Vec<ChangelogEvent>>, gap_at: None, current_version }
 ```
 
-`from_version` — это `commit_version`. Resumable: follower запоминает
-последний применённый `commit_version`, при переподключении
-продолжает с него. `wait_ms` даёт long-poll вместо busy-pull. `gap_at`
-сигнализирует, что запрошенный `from_version` уже выпал за
-`journal_floor` — follower должен reseed.
+`from_version` is a `commit_version`. The follower records the last
+applied version and requests subsequent events after reconnecting;
+`wait_ms` enables long-poll. This is not a guarantee of complete replay:
+late or missing journal events can be skipped without `gap_at`. A reported
+gap stops replication; recovery is manual, not a snapshot/reseed API
+(see Step 3).
 
 ### Шаг 2: Live subscriptions (server-push) — реализовано
 
@@ -166,31 +167,57 @@ Follower  ◄──ReplResponse::Pull──  Leader   (events, gap_at?, current_
 Follower  ──apply changes───────►  Local store
 ```
 
-Результат: read-replica. Пишет только leader; follower тянет изменения
-через `crates/shamir-server/src/replication/follower_loop.rs` +
-`supervisor.rs` и применяет локально. VR-style epoch fencing защищает
-от применения событий от устаревшего leader'а.
+The intended result is a single-leader async read replica, **not a
+clustering/HA solution and not for production data**. The follower pulls
+and applies changes through
+`crates/shamir-server/src/replication/follower_loop.rs` and `supervisor.rs`.
+VR-style epoch fencing protects against events from a stale leader, but
+**`ReplMode::ReadOnly` is not enforced: followers accept local writes**.
 
-**Это честно экспериментальная async single-leader read-replica
-фича, а не clustering/HA-решение.** Известные ограничения R1:
-один общий `replicator`-аккаунт (username+password) аутентифицирует
-ВСЕ subscription'ы на follower'е — отдельного per-subscription
-credential store пока нет; supervisor **reconcile-driven, а не
-event-driven** — изменение каталога (`system/subscriptions`)
-подхватывается только на очередном вызове `reconcile()`/
-`notify_changed()`, а не непрерывным наблюдением; нет leader election,
-quorum, автоматического failover, multi-primary или sharding. Кроме
-того, journal gap (follower запросил диапазон, которого leader уже не
-хранит) теперь **останавливает** follower-loop и помечает subscription
-`resync_required` вместо тихого пропуска пропавших данных — recovery
-это ручной шаг оператора (проверить/починить данные follower'а, затем
-вызвать существующий admin action `Resume`); полностью автоматический
-snapshot-based reseed остаётся в роадмапе (R2). **Схема не
-реплицируется:** базы, репозитории, таблицы и индексы на follower'е нужно
-создать вручную, иначе follower-loop ждёт с backoff
-(`ReplError::UnknownFollowerRepo`). Отдельного выключателя репликации в
-конфиге нет: лидерский `ReplRequest::Pull` доступен любой сессии с флагом
-superuser/replicator.
+Current correctness limitations:
+
+* **Map records cannot reliably be read on the follower.** Field keys are
+  leader interner ids; events carry no id-to-name bindings, so decoding can
+  fail or return wrong field names. Per-event field-name translation is planned.
+* **Secondary indexes and `COUNT(*)` are not maintained.** Index lookups
+  miss replicated rows; `SELECT COUNT(*)` reads an unchanged table counter
+  (0 for a table populated only by replication).
+* **DDL, schema and metadata are not replicated**, only transaction data
+  writes. Create the same databases, repos and tables on the follower first;
+  **do not create secondary indexes there**. A missing repo causes backoff
+  (`ReplError::UnknownFollowerRepo`), but an event for a missing table is
+  skipped with a warning and its bookmark still advances, losing those writes.
+* **Journal holes can be silent.** Events are queued after version
+  publication, outside the commit lock. Concurrent leader writes can journal
+  11 before 10; once a follower applies 11, it never asks for 10. Persistence
+  failures are only logged, corrupt journal records are silently skipped,
+  the in-memory gap marker is forgotten on leader restart, and a crash can
+  lose the unflushed journal tail. Gap detection does not catch all of these;
+  a follower can silently miss an event under concurrent leader writes.
+* **Detected gaps stop the loop** with `ReplError::JournalGap` and mark the
+  subscription `resync_required` (visible via
+  `ReplicationStatus`/`ListSubscriptions`). There is **no snapshot/reseed
+  and no journal retention**. If behind a gap, recreate the follower from
+  scratch with bookmark 0 and full replay, only if the leader's journal has
+  no hole; otherwise restore the follower from a backup. `Resume` only
+  changes subscription state: it does not repair data or fix journal holes.
+* **Two subscriptions for the same `(db, repo)` start two loops**, and
+  bookmark advancement is not atomic. Bookmarks live in `__tx__` without
+  flush ordering against follower data; after a crash a bookmark may be
+  ahead of the data. This persistence risk is **not verified on the on-disk
+  engine**.
+
+Existing operational limits remain: one shared `replicator` account
+(username+password) authenticates all follower subscriptions; there is no
+per-subscription credential store. The supervisor is **reconcile-driven,
+not event-driven**: catalog changes (`system/subscriptions`) are picked up
+on `reconcile()`/`notify_changed()`, not by continuous observation. There
+is no leader election, quorum, automatic failover, multi-primary or
+sharding. There is no replication on/off configuration switch: the follower
+supervisor always boots, and leader-side `ReplRequest::Pull` is available
+to any superuser/replicator session. Replication is inactive until
+subscriptions and replicator credentials exist. See
+[Known Limitations §5](../KNOWN_LIMITATIONS.md#5-replication).
 
 ### Шаг 4: P2P / gossip → chat
 
@@ -231,16 +258,16 @@ logic (CRDT, last-write-wins, merge-функции).
 
 ## Что важно знать уже сейчас (дозированно)
 
-* **Changefeed, network pull, leader-follower репликация (Experimental)
-  и live subscriptions — реальны, реализованы и покрыты тестами.**
-  Монотонный `commit_version`, resumable journal (`from_version`/
-  `wait_ms`), gap detection (`gap_at`) с honest stop +
-  `resync_required`, VR-style epoch fencing — всё это уже работающий
-  код, а не набросок API. Leader-follower репликация при этом остаётся
-  экспериментальной single-leader read-replica фичей — без election/
-  quorum/failover/multi-primary/sharding, см. §Шаг 3. Если нужна
-  репликация или server-push сегодня — это доступно через
-  `ReplRequest`/`ReplResponse` и `BatchOp::Subscribe`/`Unsubscribe`.
+* **Changefeed and network pull are implemented; leader-follower
+  replication remains experimental and not for production data.** Version
+  ids, `from_version`/`wait_ms`, `gap_at` and VR-style epoch fencing exist,
+  but journal publication is not reliably ordered and gap detection is
+  incomplete. Reported gaps stop the loop with `resync_required`; there is
+  no snapshot/reseed. Follower reads, indexes, counters and bookmarks have
+  the limitations listed in Step 3; no election/quorum/failover/multi-primary/
+  sharding is provided. Replication uses `ReplRequest`/`ReplResponse`.
+  Live subscriptions (server-push) are implemented and covered by tests,
+  using `BatchOp::Subscribe`/`Unsubscribe`.
 * **P2P, gossip, peer discovery и chat — по-прежнему роадмап.** Не жди
   децентрализованного mesh в ближайших релизах.
 * **Смотри роадмап.** `docs/dev-artifacts/roadmap/STAGES.md` и `docs/dev-artifacts/roadmap/PLAN.md`
