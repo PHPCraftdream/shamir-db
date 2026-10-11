@@ -552,6 +552,7 @@ pub(super) async fn execute_plan_impl(
                 continue;
             }
 
+            scope.charge_work(1)?;
             let op_started = Instant::now();
             let _guard = register_op_watchdog(alias);
             let result = execute_single_impl(
@@ -667,6 +668,7 @@ pub(super) async fn execute_plan_tx_impl(
                 continue;
             }
 
+            scope.charge_work(1)?;
             let mut runner = QueryRunner {
                 resolver,
                 admin,
@@ -788,7 +790,11 @@ pub(super) async fn execute_transactional_impl(
     // uncancelled, and its outcome is always observed and reported
     // truthfully (its doc comment forbids racing it under
     // `tokio::select!`/`tokio::time::timeout`).
-    let plan_result = plan_result.and_then(|results| scope.check().map(|()| results));
+    let plan_result = plan_result.and_then(|results| {
+        scope.check()?;
+        scope.check_work(0)?;
+        Ok(results)
+    });
 
     match plan_result {
         Err(plan_err) => {
