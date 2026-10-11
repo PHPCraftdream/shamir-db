@@ -289,12 +289,13 @@ pub async fn run_follower_loop(
         };
 
         // 6. gap-stop (§5.3 / R1 simplification). A gap means the follower
-        // is permanently missing `[from_version, g)` — this is now a
+        // is permanently missing `[from_version, g]` (`g == from_version` is the
+        // first requested version itself) — this is now a
         // terminal condition, NOT a silent skip. Check and return BEFORE
         // decoding/applying any events that may have accompanied this same
         // reply (the events, if any, must not be applied).
         if let Some(g) = gap_at {
-            if g > from_version {
+            if g >= from_version {
                 warn!(
                     node_id = %node_id,
                     gap_at = g,
@@ -309,7 +310,7 @@ pub async fn run_follower_loop(
                     from_version,
                 });
             }
-            // `g <= from_version` — the gap is behind us, ignore and proceed.
+            // `g < from_version` — the gap is behind us, ignore and proceed.
         }
 
         // 7. decode + apply each event in order.
