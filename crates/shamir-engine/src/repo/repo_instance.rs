@@ -17,9 +17,15 @@ use std::hash::{Hash, Hasher};
 use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::OnceCell;
 
 use crate::table::table_manager::table_token_for;
+
+/// Fixed read-side budget, not a tunable: a stalled writer returns an older
+/// safe journal prefix after at most one second of admission + confirmation.
+/// Barriers share the bounded writer channel's slots with journal events.
+const JOURNAL_CONFIRM_BUDGET: Duration = Duration::from_secs(1);
 
 /// Manages a single repository and its tables
 pub struct RepoInstance {
@@ -1519,13 +1525,29 @@ impl RepoInstance {
     /// a `gap_at` field. When `gap_at` is `Some(v)` the journal has a known
     /// gap at version `v` (a prior overflow dropped that event) — callers
     /// should treat the feed as non-contiguous from `from_version`.
+    /// The prefix is bounded by the contiguous completion watermark, not the
+    /// potentially out-of-order last committed version. A stalled writer may
+    /// return an older (possibly empty) prefix; confirmation logs/counts its
+    /// own timeout, so this layer does not log a second warning.
+    /// cancel-safe: yes — gate/feed initialization can be retried; confirmation
+    /// only advances a monotonic prefix, and range reads mutate no data.
     pub async fn read_changelog_from(
         &self,
         from_version: u64,
         limit: usize,
     ) -> DbResult<shamir_tx::JournalRead> {
+        let w = self.tx_gate().await?.completion().watermark();
         let h = self.changefeed().await?;
-        Ok(h.feed.read_from(&h.store, from_version, limit).await)
+        let bound = h.feed.confirm_through(w, JOURNAL_CONFIRM_BUDGET).await;
+        Ok(h.feed
+            .read_from_bounded(&h.store, from_version, limit, bound)
+            .await)
+    }
+
+    /// Test-only read-side observation of writer persistence/confirmation.
+    #[cfg(test)]
+    pub(crate) async fn journal_feed_for_test(&self) -> DbResult<Arc<shamir_tx::RepoChangefeed>> {
+        Ok(self.changefeed().await?.feed)
     }
 
     /// cancel-safe: yes — hands a pre-projected event to the changefeed's
