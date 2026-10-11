@@ -91,6 +91,7 @@ use shamir_types::core::interner::Interner;
 use shamir_types::types::record_id::RecordId;
 
 use crate::query::filter::eval_context::FilterContext;
+use crate::query::read::order::PREALLOC_CAP;
 use crate::query::read::{exec, QueryRecord, QueryResult, QueryStats, ReadQuery};
 use shamir_storage::error::{DbError, DbResult};
 
@@ -206,13 +207,13 @@ impl TableManager {
         // Ordered walk + stale-posting-resume loop — mirrors
         // `read_keyset_seek`'s loop, generalised to also resume past
         // version-filtered candidates (INSERT-after-pin exclusions).
-        let mut matched: Vec<(RecordId, Bytes)> = Vec::with_capacity(limit);
+        let mut matched: Vec<(RecordId, Bytes)> = Vec::with_capacity(limit.min(PREALLOC_CAP));
         let mut after_key: Option<Bytes> = None;
         let mut candidates_examined: u64 = 0;
         let mut concurrent_modified: u64 = 0;
 
         loop {
-            let need = limit - matched.len();
+            let need = (limit - matched.len()).min(PREALLOC_CAP);
             // `after_id` is the fixed client reference (the row the CLIENT
             // already has from a PREVIOUS request). It only affects rows whose
             // encoded value still equals `encoded_key`, so re-passing it on

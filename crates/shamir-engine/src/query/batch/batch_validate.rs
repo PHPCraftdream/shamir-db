@@ -15,6 +15,7 @@ pub(super) async fn validate_tables(
     queries: &TMap<String, QueryEntry>,
     resolver: &dyn TableResolver,
 ) -> Result<(), BatchError> {
+    validate_pagination(queries)?;
     // Phase 1: collect tables/repos being created in this batch so we
     // can skip the existence check for them.
     let (created_tables, created_repos) = tables_created_in_batch(queries);
@@ -43,6 +44,34 @@ pub(super) async fn validate_tables(
                         code: None,
                     })?;
             }
+        }
+    }
+    Ok(())
+}
+
+pub(super) fn validate_pagination(queries: &TMap<String, QueryEntry>) -> Result<(), BatchError> {
+    const MAX_PAGE_SIZE: u64 = 100_000;
+    const MAX_OFFSET: u64 = 1_000_000;
+    let mut stack = vec![queries.values()];
+    while let Some(entries) = stack.last_mut() {
+        let Some(entry) = entries.next() else {
+            stack.pop();
+            continue;
+        };
+        match &entry.op {
+            BatchOp::Read(query) => {
+                let (offset, limit) = query.pagination.try_resolve()?;
+                if offset > MAX_OFFSET || limit.is_some_and(|limit| limit > MAX_PAGE_SIZE) {
+                    return Err(BatchError::query_coded(
+                        "pagination",
+                        "pagination_too_large",
+                        "pagination exceeds engine page-size or offset ceiling",
+                    ));
+                }
+            }
+            BatchOp::Batch(sub) => stack.push(sub.batch.queries.values()),
+            BatchOp::ForEach(loop_op) => stack.push(loop_op.batch.queries.values()),
+            _ => {}
         }
     }
     Ok(())

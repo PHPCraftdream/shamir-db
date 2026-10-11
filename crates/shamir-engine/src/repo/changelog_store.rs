@@ -50,13 +50,22 @@ impl shamir_tx::ChangelogStore for StoreChangelog {
         let batch = limit.clamp(1, 1024);
         let mut stream = self.store.iter_range_stream(Some(from_key), None, batch);
 
-        let mut values: Vec<Bytes> = Vec::with_capacity(limit);
+        let mut values: Vec<Bytes> = Vec::with_capacity(limit.min(1024));
+        let max_bytes = 16 * 1024 * 1024;
+        let mut remaining_bytes = max_bytes;
         while values.len() < limit {
             let Some(chunk) = stream.next().await else {
                 break;
             };
             let chunk = chunk.map_err(|e| format!("changelog store range: {e}"))?;
             for (_, v) in chunk {
+                if v.len() > remaining_bytes {
+                    if values.is_empty() {
+                        return Err(format!("changelog event exceeds {max_bytes} byte budget"));
+                    }
+                    return Ok(values);
+                }
+                remaining_bytes -= v.len();
                 values.push(v);
                 if values.len() >= limit {
                     break;

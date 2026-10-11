@@ -162,7 +162,8 @@ impl ShamirDbHandler {
         // treated as "give me what you can" — we use 1 as the effective
         // floor. (The wire layer allows 0 as "no events requested"; we
         // interpret it as the minimum useful batch.)
-        let effective_limit = limit.max(1) as usize;
+        const MAX_PULL_EVENTS: u32 = 1024;
+        let effective_limit = limit.clamp(1, MAX_PULL_EVENTS) as usize;
 
         // First read — if we get events or the caller didn't ask to wait,
         // return immediately.
@@ -187,7 +188,7 @@ impl ShamirDbHandler {
         // caller supplied a positive wait budget. Deadline-bounded so the
         // handler never hangs.
         if jr.events.is_empty() {
-            if let Some(ms) = wait_ms {
+            if let Some(ms) = wait_ms.map(|ms| ms.min(30_000)) {
                 if ms > 0 {
                     let deadline = Instant::now() + Duration::from_millis(u64::from(ms));
                     while jr.events.is_empty() {

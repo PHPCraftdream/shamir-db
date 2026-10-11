@@ -12,6 +12,7 @@ use crate::index::sorted_index_manager::decode_covering_projection;
 use crate::query::filter::eval::{compile_filter, FilterNode};
 use crate::query::filter::eval_context::FilterContext;
 use crate::query::filter::Filter;
+use crate::query::read::order::PREALLOC_CAP;
 use crate::query::read::{exec, QueryRecord, QueryResult, QueryStats, ReadQuery, SelectItem};
 use shamir_query_types::read::OrderDirection;
 use shamir_storage::error::{DbError, DbResult};
@@ -413,6 +414,11 @@ impl TableManager {
         let want = skip.checked_add(take).ok_or_else(|| {
             shamir_storage::error::DbError::Validation("LIMIT + OFFSET overflow".to_string())
         })?;
+        if want > 1_000_000 {
+            return Err(DbError::Validation(
+                "pagination window exceeds 1000000".into(),
+            ));
+        }
 
         let (ids, label) = match direction {
             OrderDirection::Asc => (
@@ -433,7 +439,7 @@ impl TableManager {
         // S3: zero-copy bytes path — no aggregate in this fast path.
         let needed: Vec<RecordId> = ids.into_iter().skip(skip).collect();
         let fetched = self.get_many_bytes(&needed).await?;
-        let mut matched: Vec<(RecordId, Bytes)> = Vec::with_capacity(take);
+        let mut matched: Vec<(RecordId, Bytes)> = Vec::with_capacity(take.min(PREALLOC_CAP));
         for (id, opt) in needed.iter().zip(fetched) {
             if matched.len() == take {
                 break;
@@ -524,11 +530,11 @@ impl TableManager {
         // exhausted range always returns `cursor == None`.
         let forward = matches!(direction, OrderDirection::Asc);
 
-        let mut matched: Vec<(RecordId, Bytes)> = Vec::with_capacity(limit);
+        let mut matched: Vec<(RecordId, Bytes)> = Vec::with_capacity(limit.min(PREALLOC_CAP));
         let mut after_key: Option<Bytes> = None;
 
         loop {
-            let need = limit - matched.len();
+            let need = (limit - matched.len()).min(PREALLOC_CAP);
             // Task #537 (bug found by adversarial review, fixed here):
             // `after_id` must be passed on EVERY internal-loop iteration, not
             // just the first. This loop resumes multiple times WITHIN A

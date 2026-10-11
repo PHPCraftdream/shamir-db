@@ -174,7 +174,10 @@ impl TableManager {
         // here. `count_total` composes via the independent running counter.
         let has_group_by = query.group_by.is_some();
         let has_agg = exec::has_aggregates(&query.select);
-        let (skip_resolved, take_resolved) = query.pagination.resolve();
+        let (skip_resolved, take_resolved) = query
+            .pagination
+            .try_resolve()
+            .map_err(|e| shamir_storage::error::DbError::Validation(e.to_string()))?;
         let use_topk = query.order_by.is_some()
             && take_resolved.is_some()
             && !query.select.distinct

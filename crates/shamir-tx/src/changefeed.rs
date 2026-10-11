@@ -400,7 +400,7 @@ impl RepoChangefeed {
                 log::warn!("changefeed read_from(store) failed at {from_version}: {e}");
                 return JournalRead {
                     events: Vec::new(),
-                    gap_at: None,
+                    gap_at: Some(from_version),
                 };
             }
         };
