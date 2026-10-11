@@ -1,0 +1,90 @@
+# Vendored copy of hnsw_rs 0.3.5 (crates.io checksum
+# c9b4dcb9840006fae9964e97dfdb354cd00b7a15d69d143caae7eeca0410af9f), manifest
+# trimmed: no examples/tests targets, no hdf5/ndarray/itertools/skiplist
+# dev-dependencies (only the lib's own unit tests are kept). See VENDORED.md.
+
+[package]
+edition = "2024"
+name = "hnsw_rs"
+version = "0.3.5"
+authors = ["jeanpierre.both@gmail.com"]
+build = false
+autolib = false
+autobins = false
+autoexamples = false
+autotests = false
+autobenches = false
+publish = false
+description = "Ann based on Hierarchical Navigable Small World Graphs from Yu.A. Malkov and D.A Yashunin"
+readme = "README.md"
+keywords = [
+    "algorithms",
+    "ann",
+    "hnsw",
+]
+license = "MIT/Apache-2.0"
+repository = "https://github.com/jean-pierreBoth/hnswlib-rs"
+
+[features]
+default = []
+# Upstream forwards both to anndists. Not forwarded here: a workspace member resolves with
+# every feature, which would lock simdeez + the unmaintained `paste` into Cargo.lock
+# (cargo-deny) for features shamir never enables.
+simdeez_f = []
+stdsimd = []
+
+[lib]
+name = "hnsw_rs"
+path = "src/lib.rs"
+
+[dependencies.anndists]
+version = "0.1"
+
+[dependencies.anyhow]
+version = "1.0"
+
+[dependencies.cfg-if]
+version = "1.0"
+
+[dependencies.cpu-time]
+version = "1.0"
+
+[dependencies.env_logger]
+version = "0.11"
+
+[dependencies.hashbrown]
+version = "0.15"
+
+[dependencies.indexmap]
+version = ">= 2.11"
+
+[dependencies.lazy_static]
+version = "1.4"
+
+[dependencies.log]
+version = "0.4"
+
+[dependencies.mmap-rs]
+version = "0.7"
+
+[dependencies.num-traits]
+version = "0.2"
+
+[dependencies.num_cpus]
+version = "1.17"
+
+[dependencies.parking_lot]
+version = "0.12"
+
+[dependencies.rand]
+version = "0.10"
+
+[dependencies.rayon]
+version = "1.12"
+
+[dependencies.serde]
+version = "1.0"
+features = ["derive"]
+
+[dev-dependencies.tempfile]
+version = "3"
