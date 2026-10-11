@@ -37,10 +37,16 @@ use smallvec::smallvec;
 
 use crate::db_instance::db_instance::DbInstance;
 use crate::query::batch::execute_batch_unchecked as execute_batch;
+use crate::query::batch::query_runner::{
+    FkRoleDecisionHook, TEST_CHILD_PRE_ROLE_DECISION_HOOK, TEST_PARENT_PRE_ROLE_DECISION_HOOK,
+};
 use crate::query::batch::TableResolver;
+use crate::query::batch::{
+    implicit_tx_isolation_for_fk_parent, require_footprint_if_fk_child, FkParentOpKind,
+};
 use crate::query::TableRef;
 use crate::repo::repo_types::BoxRepoFactory;
-use crate::repo::RepoConfig;
+use crate::repo::{RepoConfig, ReverseFkEntry, TaggedReverseFkEntry};
 use crate::table::{TableConfig, TableManager};
 use crate::validator::schema::constraints::Constraints;
 use crate::validator::schema::field_rule::FieldRule;
@@ -48,6 +54,84 @@ use crate::validator::schema::foreign_key::ForeignKeyRef;
 use crate::validator::schema::schema_validator::SchemaValidator;
 use crate::validator::schema::type_tag::TypeTag;
 use crate::validator::{ValidatorBinding, ValidatorRegistry, WriteOp};
+
+// B06: seed the graph directly so fixture writes cannot consume the role hook.
+async fn seed_role_graph(resolver: &FkTestResolver) -> crate::repo::RepoInstance {
+    let repo = resolver.db.get_repo(&resolver.repo).unwrap();
+    repo.fk_reverse_cache()
+        .get_or_build_by_parent("parent", || async {
+            Ok::<_, std::convert::Infallible>(vec![TaggedReverseFkEntry {
+                parent_table: "parent".to_string(),
+                entry: ReverseFkEntry {
+                    child_table: "child".to_string(),
+                    child_field: "parent_id".to_string(),
+                    parent_ref_field: "id".to_string(),
+                    on_delete: FkAction::Restrict,
+                    on_update: FkAction::Restrict,
+                },
+            }])
+        })
+        .await
+        .unwrap();
+    repo
+}
+
+// Red before B06: invalidation after warming makes the parent peek false,
+// returning Snapshot instead of Serializable. Exercise both action kinds.
+#[tokio::test]
+async fn parent_role_decision_survives_invalidation() {
+    let resolver = setup_no_fk().await;
+    let hook = Arc::new(FkRoleDecisionHook::new());
+    TEST_PARENT_PRE_ROLE_DECISION_HOOK
+        .set(Arc::clone(&hook))
+        .expect("parent hook must not already be installed");
+    let table_ref = TableRef::with_repo("default", "parent");
+    for op in [FkParentOpKind::Delete, FkParentOpKind::Update] {
+        let repo = seed_role_graph(&resolver).await;
+        hook.armed.store(true, Ordering::Release);
+        let invalidate = async {
+            hook.reached.notified().await;
+            repo.fk_reverse_cache().invalidate();
+            // Exactly one waiter per Notify; early notify_one stores a permit.
+            hook.resume.notify_one();
+        };
+        let (isolation, ()) = tokio::join!(
+            implicit_tx_isolation_for_fk_parent(&resolver, &table_ref, op),
+            invalidate,
+        );
+        assert_eq!(isolation, shamir_tx::IsolationLevel::Serializable);
+    }
+}
+
+// Red before B06: invalidation between warming and the child peek skips the
+// footprint requirement despite the graph identifying this table as a child.
+#[tokio::test]
+async fn child_role_decision_survives_invalidation() {
+    let resolver = setup_no_fk().await;
+    let repo = seed_role_graph(&resolver).await;
+    let hook = Arc::new(FkRoleDecisionHook::new());
+    TEST_CHILD_PRE_ROLE_DECISION_HOOK
+        .set(Arc::clone(&hook))
+        .expect("child hook must not already be installed");
+    let table_ref = TableRef::with_repo("default", "child");
+    let mut tx = shamir_tx::TxContext::new(
+        shamir_tx::TxId::new(1),
+        0,
+        0,
+        shamir_tx::IsolationLevel::Snapshot,
+    );
+    let invalidate = async {
+        hook.reached.notified().await;
+        repo.fk_reverse_cache().invalidate();
+        hook.resume.notify_one();
+    };
+    tokio::join!(
+        require_footprint_if_fk_child(&resolver, &table_ref, 4242, &mut tx),
+        invalidate,
+    );
+    assert!(tx.footprint_tokens.contains(&4242));
+    assert!(!tx.footprint_tokens.contains(&4243));
+}
 
 // ── Test resolver (mirrors fk_restrict_tests / fk_actions_tests) ────────────
 
