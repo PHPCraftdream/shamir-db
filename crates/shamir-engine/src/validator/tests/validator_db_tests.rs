@@ -18,9 +18,11 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 
 use bytes::Bytes;
+use shamir_query_builder::write::{doc, insert};
 use shamir_storage::error::{DbError, DbResult};
 use shamir_storage::types::RecordKey;
 use shamir_tx::IsolationLevel;
+use shamir_types::record_view::RecordRef;
 use shamir_types::types::common::new_map;
 use shamir_types::types::record_id::RecordId;
 use shamir_types::types::value::{InnerValue, QueryValue};
@@ -149,10 +151,22 @@ fn scalar_to_query_value(scalar: &shamir_types::record_view::ScalarRef<'_>) -> Q
 /// Build a repo with two tables (`child` and `parent`), a `DbReadingValidator`
 /// bound to `child`, and return the resolver + table handles.
 async fn setup() -> (TestResolver, TableManager) {
+    setup_with_validator(Arc::new(DbReadingValidator {
+        fk_table: "parent".to_string(),
+        fk_field: "ref_id".to_string(),
+        unique_field: "ref_id".to_string(),
+    }))
+    .await
+}
+
+async fn setup_with_validator(validator: Arc<dyn RecordValidator>) -> (TestResolver, TableManager) {
     let repo_config = RepoConfig {
         name: "default".to_string(),
         factory: BoxRepoFactory::in_memory(),
-        tables: vec![TableConfig::new("parent"), TableConfig::new("child")],
+        tables: vec![
+            TableConfig::new("parent").with_indexes(),
+            TableConfig::new("child"),
+        ],
     };
     let repo = RepoInstance::from_factory(
         repo_config.name.clone(),
@@ -161,13 +175,6 @@ async fn setup() -> (TestResolver, TableManager) {
     )
     .await
     .unwrap();
-
-    // Register the DbReadingValidator on the `child` table.
-    let validator = Arc::new(DbReadingValidator {
-        fk_table: "parent".to_string(),
-        fk_field: "ref_id".to_string(),
-        unique_field: "ref_id".to_string(),
-    }) as Arc<dyn RecordValidator>;
 
     let reg = Arc::new(ValidatorRegistry::new());
     let validator_id = shamir_types::types::record_id::RecordId::system("db_reading_val");
@@ -198,6 +205,224 @@ async fn setup() -> (TestResolver, TableManager) {
     // Resolve child through the resolver so it picks up the registry.
     let child = resolver.resolve(&TableRef::new("child")).await.unwrap();
     (resolver, child)
+}
+
+struct FinalStateFkValidator;
+
+#[async_trait]
+impl RecordValidator for FinalStateFkValidator {
+    async fn validate(
+        &self,
+        new: Option<&dyn RecordFields>,
+        _old: Option<&dyn RecordFields>,
+        ctx: &ValidatorCtx<'_>,
+    ) -> Validation {
+        let Some(db) = ctx.db() else {
+            return Validation::reject("missing_db");
+        };
+        let Some(value) = new.and_then(|row| row.scalar(&["uid"])) else {
+            return Validation::reject("missing_uid");
+        };
+        match db
+            .exists_in(
+                &TableRef::new("parent"),
+                "uid",
+                &scalar_to_query_value(&value),
+            )
+            .await
+        {
+            Ok(true) => Validation::accept(),
+            Ok(false) => Validation::reject("fk_violation"),
+            Err(_) => Validation::reject("fk_read_error"),
+        }
+    }
+}
+
+#[tokio::test]
+async fn fk_final_staged_state_matrix() {
+    for indexed in [false, true] {
+        for isolation in [IsolationLevel::Snapshot, IsolationLevel::Serializable] {
+            for scenario in ["delete", "update_old", "update_new", "insert"] {
+                let (resolver, child) = setup_with_validator(Arc::new(FinalStateFkValidator)).await;
+                let parent = resolver.resolve(&TableRef::new("parent")).await.unwrap();
+                if indexed {
+                    parent.create_index("parent_uid", &["uid"]).await.unwrap();
+                }
+                let parent_id = if scenario == "insert" {
+                    None
+                } else {
+                    let op = insert("parent").row(doc().set("uid", 1i64)).build();
+                    let (mut seed, seed_guard) = resolver
+                        .repo
+                        .begin_tx(IsolationLevel::Snapshot)
+                        .await
+                        .unwrap();
+                    let result = parent
+                        .execute_insert_tx(
+                            &op,
+                            &mut seed,
+                            true,
+                            None,
+                            &shamir_types::access::Actor::System,
+                        )
+                        .await
+                        .unwrap();
+                    assert_eq!(result.affected, 1);
+                    let id = result.records[0].id.unwrap();
+                    resolver.repo.commit_tx(seed).await.unwrap();
+                    drop(seed_guard);
+                    Some(id)
+                };
+                if indexed {
+                    let interner = parent.interner().get().await.unwrap();
+                    let key = interner.get_ind("uid").unwrap();
+                    let name = parent.find_single_field_index(&[key.id()]).unwrap();
+                    let ids = parent
+                        .index_manager_ref()
+                        .lookup_by_index(name, &[InnerValue::Int(1)])
+                        .await
+                        .unwrap()
+                        .unwrap();
+                    if let Some(id) = parent_id {
+                        assert_eq!(ids.as_ref(), &[id]);
+                    } else {
+                        assert!(ids.is_empty());
+                    }
+                }
+                let (mut tx, guard) = resolver.repo.begin_tx(isolation).await.unwrap();
+                match scenario {
+                    "delete" => {
+                        assert!(parent
+                            .delete_tx(parent_id.unwrap(), Some(&mut tx))
+                            .await
+                            .unwrap());
+                    }
+                    "update_old" | "update_new" => {
+                        let interner = parent.interner().get().await.unwrap();
+                        let key = interner.get_ind("uid").unwrap();
+                        let mut fields = new_map();
+                        fields.insert(key, InnerValue::Int(2));
+                        assert!(parent
+                            .update_tx(parent_id.unwrap(), &InnerValue::Map(fields), Some(&mut tx))
+                            .await
+                            .unwrap());
+                    }
+                    "insert" => {
+                        let op = insert("parent").row(doc().set("uid", 1i64)).build();
+                        let result = parent
+                            .execute_insert_tx(
+                                &op,
+                                &mut tx,
+                                true,
+                                None,
+                                &shamir_types::access::Actor::System,
+                            )
+                            .await
+                            .unwrap();
+                        assert_eq!(result.affected, 1);
+                        if !indexed {
+                            assert!(parent
+                                .interner()
+                                .get()
+                                .await
+                                .unwrap()
+                                .get_ind("uid")
+                                .is_none());
+                        }
+                    }
+                    _ => unreachable!(),
+                }
+                let uid = if scenario == "update_new" { 2i64 } else { 1i64 };
+                let op = insert("child").row(doc().set("uid", uid)).build();
+                let result = child
+                    .execute_insert_tx(
+                        &op,
+                        &mut tx,
+                        true,
+                        Some(&resolver),
+                        &shamir_types::access::Actor::System,
+                    )
+                    .await;
+                if scenario == "delete" || scenario == "update_old" {
+                    let err =
+                        result.expect_err("a removed or replaced parent cannot satisfy the FK");
+                    assert!(
+                        matches!(&err, DbError::ValidatorRejected(code) if code.contains("fk_violation")),
+                        "indexed={indexed}, isolation={isolation:?}, scenario={scenario}: {err:?}"
+                    );
+                    assert!(!tx.write_set.contains_key(&child.table_token()));
+                    drop(tx);
+                    drop(guard);
+                    continue;
+                }
+                let result = result.unwrap();
+                assert_eq!(result.affected, 1);
+                assert_eq!(result.records.len(), 1);
+                let child_id = result.records[0].id.unwrap();
+                resolver.repo.commit_tx(tx).await.unwrap();
+                drop(guard);
+                let (read_tx, read_guard) = resolver.repo.begin_tx(isolation).await.unwrap();
+                let row = child.read_one_tx(child_id, Some(&read_tx)).await.unwrap();
+                let interner = child.interner().get().await.unwrap();
+                let key = interner.get_ind("uid").unwrap();
+                assert!(matches!(
+                    row.scalar_at(std::slice::from_ref(&key)),
+                    Some(shamir_types::record_view::ScalarRef::Int(actual)) if actual == uid
+                ));
+                let db = crate::validator::ValidatorDb::new(&read_tx, &child, Some(&resolver));
+                assert!(db
+                    .exists_in(&TableRef::new("parent"), "uid", &QueryValue::Int(uid))
+                    .await
+                    .unwrap());
+                if scenario == "update_new" {
+                    assert!(!db
+                        .exists_in(&TableRef::new("parent"), "uid", &QueryValue::Int(1))
+                        .await
+                        .unwrap());
+                }
+                drop(read_tx);
+                drop(read_guard);
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn fk_staged_corrupt_parent_fails_closed() {
+    for indexed in [false, true] {
+        let (resolver, child) = setup_with_validator(Arc::new(FinalStateFkValidator)).await;
+        let parent = resolver.resolve(&TableRef::new("parent")).await.unwrap();
+        let interner = parent.interner().get().await.unwrap();
+        let key = interner.touch_ind("uid").unwrap().into_key();
+        parent.interner().persist().await.unwrap();
+        let mut fields = new_map();
+        fields.insert(key, InnerValue::Int(1));
+        let id = parent.insert(&InnerValue::Map(fields)).await.unwrap();
+        if indexed {
+            parent.create_index("parent_uid", &["uid"]).await.unwrap();
+        }
+        let (mut tx, guard) = resolver
+            .repo
+            .begin_tx(IsolationLevel::Snapshot)
+            .await
+            .unwrap();
+        assert!(parent.delete_tx(id, Some(&mut tx)).await.unwrap());
+        tx.write_set.get_mut(&parent.table_token()).unwrap().set(
+            RecordKey::from_slice(id.as_bytes()),
+            Bytes::from_static(b"\xc4"),
+        );
+        let db = crate::validator::ValidatorDb::new(&tx, &child, Some(&resolver));
+        let err = db
+            .exists_in(&TableRef::new("parent"), "uid", &QueryValue::Int(1))
+            .await
+            .expect_err("corrupt staged bytes must not satisfy a committed index hit");
+        assert!(
+            matches!(err, DbError::Codec(_)),
+            "unexpected error: {err:?}"
+        );
+        drop(tx);
+        drop(guard);
+    }
 }
 
 // ── Tests ──────────────────────────────────────────────────────────────────
