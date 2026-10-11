@@ -99,24 +99,28 @@ fn main() {
             SelectItem::Aggregate {
                 func: AggFunc::Sum,
                 field: AggregateField::Field(vec!["age".to_string()]),
+                input: None,
                 alias: Some("sum_age".to_string()),
                 distinct: false,
             },
             SelectItem::Aggregate {
                 func: AggFunc::Avg,
                 field: AggregateField::Field(vec!["age".to_string()]),
+                input: None,
                 alias: Some("avg_age".to_string()),
                 distinct: false,
             },
             SelectItem::Aggregate {
                 func: AggFunc::Min,
                 field: AggregateField::Field(vec!["age".to_string()]),
+                input: None,
                 alias: Some("min_age".to_string()),
                 distinct: false,
             },
             SelectItem::Aggregate {
                 func: AggFunc::Max,
                 field: AggregateField::Field(vec!["age".to_string()]),
+                input: None,
                 alias: Some("max_age".to_string()),
                 distinct: false,
             },

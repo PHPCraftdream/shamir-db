@@ -1263,22 +1263,34 @@ fn collect_filter_value_refs(value: &FilterValue, out: &mut Vec<String>) {
 }
 
 /// Collect all `$query` refs from a `Select` projection — `SelectItem`'s
-/// `Function`/`AggregateFn` variants carry `args: Vec<FilterValue>` (dynamic
-/// per-record function arguments, may reference another query's result);
+/// `Function`/`AggregateFn` carry `args: Vec<FilterValue>`; both aggregate
+/// variants also carry an optional per-row `input`, walked by the same collector.
 /// `Expression`'s `SelectExpr` is a closed arithmetic tree over field refs
 /// and literals ONLY (no `$query`/`$fn`/`$ref` capability — verified against
 /// its own definition, `select_expr.rs`) so it needs no walk.
 fn collect_select_refs(select: &Select, out: &mut Vec<String>) {
     for item in &select.items {
         match item {
-            SelectItem::Function { args, .. } | SelectItem::AggregateFn { args, .. } => {
+            SelectItem::Function { args, .. } => {
                 for v in args {
                     collect_filter_value_refs(v, out);
                 }
             }
+            SelectItem::AggregateFn { args, input, .. } => {
+                for v in args {
+                    collect_filter_value_refs(v, out);
+                }
+                if let Some(input) = input {
+                    collect_filter_value_refs(input, out);
+                }
+            }
+            SelectItem::Aggregate { input, .. } => {
+                if let Some(input) = input {
+                    collect_filter_value_refs(input, out);
+                }
+            }
             SelectItem::All
             | SelectItem::Field { .. }
-            | SelectItem::Aggregate { .. }
             | SelectItem::CountAll { .. }
             | SelectItem::Expression { .. } => {}
         }

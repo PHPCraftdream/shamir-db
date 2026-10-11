@@ -362,6 +362,7 @@ impl TableManager {
             if let SelectItem::Aggregate {
                 func: shamir_query_types::read::AggFunc::Min,
                 field: shamir_query_types::read::AggregateField::Field(path),
+                input: None,
                 alias,
                 ..
             } = &query.select.items[0]
@@ -692,6 +693,7 @@ impl TableManager {
             if let SelectItem::Aggregate {
                 func: shamir_query_types::read::AggFunc::Max,
                 field: shamir_query_types::read::AggregateField::Field(path),
+                input: None,
                 alias,
                 ..
             } = &query.select.items[0]
@@ -2408,6 +2410,7 @@ impl TableManager {
             if let SelectItem::Aggregate {
                 func: shamir_query_types::read::AggFunc::Min,
                 field: shamir_query_types::read::AggregateField::Field(path),
+                input: None,
                 ..
             } = &query.select.items[0]
             {
@@ -2479,6 +2482,7 @@ impl TableManager {
             if let SelectItem::Aggregate {
                 func: shamir_query_types::read::AggFunc::Max,
                 field: shamir_query_types::read::AggregateField::Field(path),
+                input: None,
                 ..
             } = &query.select.items[0]
             {

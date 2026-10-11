@@ -167,6 +167,7 @@ async fn read_collecting_aggregate_reports_corrupt_record() {
             items: vec![SelectItem::Aggregate {
                 func: AggFunc::Count,
                 field: AggregateField::All,
+                input: None,
                 alias: Some("cnt".into()),
                 distinct: false,
             }],

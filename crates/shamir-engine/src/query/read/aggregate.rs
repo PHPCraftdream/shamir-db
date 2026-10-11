@@ -29,14 +29,14 @@ use crate::query::filter::eval::{compare_values, resolve_filter_query};
 use crate::query::filter::numeric_cmp::cmp_i64_f64;
 use crate::query::filter::{
     compile_filter, prescan_cond_cache, prescan_field_path_cache, prescan_query_ref_cache,
-    FilterContext, FilterValue, FnCall,
+    FilterContext, FilterExprOp, FilterValue, FnCall,
 };
 use crate::query::read::exec::pre_intern_select_keys;
 use crate::query::read::{AggFunc, AggregateField, GroupBy, QueryResult, Select, SelectItem};
 use shamir_funclib::agg::{Aggregator, DistinctWrapper};
 use shamir_funclib::scalar_resolver::ScalarResolver;
 use shamir_storage::error::{DbError, DbResult};
-use shamir_types::codecs::interned::inner_value_to_query_value;
+use shamir_types::codecs::interned::{inner_value_to_query_value, query_value_to_inner};
 use shamir_types::core::interner::{Interner, InternerKey};
 use shamir_types::record_view::{HavingView, RecordRef, RecordView, ScalarRef};
 use shamir_types::types::common::{new_map_wc, TMap};
@@ -972,6 +972,162 @@ fn make_aggregate_fn(
     }
 }
 
+/// Strict aggregate-input boundary around the Option-returning filter evaluator.
+/// Missing fields are NULL; unresolved bindings and evaluation failures are errors.
+/// Only the selected conditional branch is evaluated. Arithmetic inherits the
+/// filter evaluator's numeric promotion and overflow behaviour. Arithmetic
+/// NULL operands yield NULL (and short-circuit); other operators retain the
+/// filter evaluator's semantics. Conditional predicates retain WHERE's
+/// missing-binding/non-match semantics; only branch values are strict.
+fn resolve_aggregate_input(
+    fv: &FilterValue,
+    record: &dyn RecordRef,
+    ctx: &FilterContext<'_>,
+) -> DbResult<QueryValue> {
+    match fv {
+        FilterValue::Expr { expr } => {
+            let mut params = new_map_wc(expr.args.len());
+            let mut bound = expr.clone();
+            bound.args.clear();
+            for (index, arg) in expr.args.iter().enumerate() {
+                let value = resolve_aggregate_input(arg, record, ctx)?;
+                if matches!(value, QueryValue::Null)
+                    && matches!(
+                        expr.op,
+                        FilterExprOp::Add
+                            | FilterExprOp::Sub
+                            | FilterExprOp::Mul
+                            | FilterExprOp::Div
+                            | FilterExprOp::Mod
+                            | FilterExprOp::Neg
+                    )
+                {
+                    return Ok(QueryValue::Null);
+                }
+                if matches!(
+                    expr.op,
+                    FilterExprOp::Add
+                        | FilterExprOp::Sub
+                        | FilterExprOp::Mul
+                        | FilterExprOp::Div
+                        | FilterExprOp::Mod
+                        | FilterExprOp::Neg
+                ) && !matches!(
+                    value,
+                    QueryValue::Int(_) | QueryValue::F64(_) | QueryValue::Dec(_)
+                ) {
+                    return Err(DbError::Validation("type_mismatch".into()));
+                }
+                let name = index.to_string();
+                params.insert(name.clone(), value);
+                bound.args.push(FilterValue::Param { name });
+            }
+            let fresh = FilterContext::new(ctx.interner, ctx.resolved_refs)
+                .with_params(&params)
+                .with_scalars(ctx.scalars.clone());
+            resolve_filter_query(&FilterValue::Expr { expr: bound }, record, &fresh)
+                .ok_or_else(|| DbError::Validation("agg_input_expression_error".into()))
+        }
+        FilterValue::FnCall { call } => {
+            let args = call
+                .args()
+                .iter()
+                .map(|arg| resolve_aggregate_input(arg, record, ctx))
+                .collect::<DbResult<Vec<_>>>()?;
+            ctx.scalars
+                .call(call.name(), &args)
+                .map_err(|error| DbError::Function(error.to_string()))
+        }
+        FilterValue::Cond { cond } => {
+            let matched = ctx
+                .cond_cache
+                .and_then(|cache| crate::query::filter::cond_cache_get(cache, &cond.condition))
+                .map_or_else(
+                    || compile_filter(&cond.condition, ctx.interner).matches(record, ctx),
+                    |node| node.matches(record, ctx),
+                );
+            resolve_aggregate_input(
+                if matched { &cond.then } else { &cond.or_else },
+                record,
+                ctx,
+            )
+        }
+        FilterValue::Array(values) => values
+            .iter()
+            .map(|value| resolve_aggregate_input(value, record, ctx))
+            .collect::<DbResult<Vec<_>>>()
+            .map(QueryValue::List),
+        FilterValue::FieldRef { .. } => {
+            Ok(resolve_filter_query(fv, record, ctx).unwrap_or(QueryValue::Null))
+        }
+        _ => resolve_filter_query(fv, record, ctx)
+            .ok_or_else(|| DbError::Validation("agg_input_unresolved".into())),
+    }
+}
+
+/// Expression NULL results are skipped by all aggregates, including COUNT.
+/// Empty SUM/COUNT return 0; empty AVG/MIN/MAX return NULL. Legacy field
+/// behaviour is unchanged: COUNT(field) counts present NULLs, and MIN/MAX
+/// can retain a NULL extreme. Expression SUM/AVG require numeric values;
+/// MIN/MAX require comparable values (including comparable numeric families).
+fn step_aggregate_input(
+    acc: &mut AggAccum,
+    value: &QueryValue,
+    interner: &Interner,
+) -> DbResult<()> {
+    if matches!(value, QueryValue::Null) {
+        return Ok(());
+    }
+    let leaf = query_value_to_inner(value, interner)
+        .map_err(|error| DbError::Validation(error.to_string()))?;
+    match &mut acc.state {
+        AggState::Sum { .. } | AggState::Avg { .. } => {
+            if !matches!(
+                value,
+                QueryValue::Int(_) | QueryValue::F64(_) | QueryValue::Dec(_) | QueryValue::Big(_)
+            ) {
+                return Err(DbError::Validation("type_mismatch".into()));
+            }
+        }
+        AggState::Min { current } => {
+            let ordering = match current {
+                Some(OwnedExtreme::Tree(cur)) => compare_values(cur, &leaf),
+                None => compare_values(&leaf, &leaf),
+                Some(OwnedExtreme::Scalar(_)) => unreachable!("expression extrema use leaves"),
+            }
+            .ok_or_else(|| DbError::Validation("type_mismatch".into()))?;
+            if current.is_none() || ordering == Ordering::Greater {
+                *current = Some(OwnedExtreme::Tree(leaf));
+            }
+            return Ok(());
+        }
+        AggState::Max { current } => {
+            let ordering = match current {
+                Some(OwnedExtreme::Tree(cur)) => compare_values(cur, &leaf),
+                None => compare_values(&leaf, &leaf),
+                Some(OwnedExtreme::Scalar(_)) => unreachable!("expression extrema use leaves"),
+            }
+            .ok_or_else(|| DbError::Validation("type_mismatch".into()))?;
+            if current.is_none() || ordering == Ordering::Less {
+                *current = Some(OwnedExtreme::Tree(leaf));
+            }
+            return Ok(());
+        }
+        AggState::Count { .. } => {}
+    }
+    // RecordRef rejects empty paths: wrap the evaluated leaf in a one-field record.
+    let key = interner
+        .touch_ind("agg_input")
+        .map_err(|error| DbError::Validation(error.into()))?
+        .into_key();
+    acc.field_path = Some(vec![key.clone()]);
+    acc.all_field = false;
+    let mut record = new_map_wc(1);
+    record.insert(key, leaf);
+    acc.step(&InnerValue::Map(record));
+    Ok(())
+}
+
 // ============================================================================
 // build_aggregate_object
 // ============================================================================
@@ -1001,7 +1157,7 @@ pub(super) fn build_aggregate_object(
 
     // First pass over select items: allocate accumulators and remember the
     // output key for each one.
-    let mut agg_slots: Vec<(String, AggAccum)> = Vec::new();
+    let mut agg_slots: Vec<(String, AggAccum, Option<&FilterValue>)> = Vec::new();
     let mut field_slots: Vec<(String, &[String])> = Vec::new();
     #[allow(clippy::type_complexity)] // parallel to agg_slots; clarity over brevity
     let mut fn_slots: Vec<(
@@ -1009,6 +1165,7 @@ pub(super) fn build_aggregate_object(
         Option<Vec<InternerKey>>,
         bool,
         Option<Box<dyn Aggregator>>,
+        Option<&FilterValue>,
     )> = Vec::new();
     let mut func_slots: Vec<(String, FilterValue)> = Vec::new();
 
@@ -1019,7 +1176,11 @@ pub(super) fn build_aggregate_object(
                 obj.insert(key.to_string(), QueryValue::Int(group_records.len() as i64));
             }
             SelectItem::Aggregate {
-                func, field, alias, ..
+                func,
+                field,
+                input,
+                alias,
+                ..
             } => {
                 let key = match alias {
                     Some(a) => a.clone(),
@@ -1030,7 +1191,7 @@ pub(super) fn build_aggregate_object(
                         AggregateField::All => format!("{:?}", func).to_lowercase(),
                     },
                 };
-                agg_slots.push((key, AggAccum::new(*func, field, interner)));
+                agg_slots.push((key, AggAccum::new(*func, field, interner), input.as_ref()));
             }
             SelectItem::Field { path, alias } => {
                 let default_key = path.last().map(|s| s.as_str()).unwrap_or("");
@@ -1045,6 +1206,7 @@ pub(super) fn build_aggregate_object(
                 args,
                 alias,
                 distinct,
+                input,
                 ..
             } => {
                 let key = match alias {
@@ -1064,7 +1226,7 @@ pub(super) fn build_aggregate_object(
                 } else {
                     agg
                 };
-                fn_slots.push((key, field_path, all_field, agg));
+                fn_slots.push((key, field_path, all_field, agg, input.as_ref()));
             }
             SelectItem::Function { name, args, alias } => {
                 let key = alias.clone().unwrap_or_else(|| name.clone());
@@ -1092,6 +1254,26 @@ pub(super) fn build_aggregate_object(
         }
     }
 
+    // Fresh per-call caches: never inherit a producer/ForEach snapshot.
+    let mut cond_cache = new_map_wc(0);
+    let mut field_path_cache = new_map_wc(0);
+    let mut query_ref_cache = new_map_wc(0);
+    for input in agg_slots
+        .iter()
+        .filter_map(|slot| slot.2)
+        .chain(fn_slots.iter().filter_map(|slot| slot.4))
+    {
+        prescan_cond_cache(input, interner, &mut cond_cache);
+        prescan_field_path_cache(input, interner, &mut field_path_cache);
+        prescan_query_ref_cache(input, &mut query_ref_cache);
+    }
+    let input_ctx = FilterContext::new(interner, ctx.resolved_refs)
+        .with_params(ctx.params)
+        .with_scalars(ctx.scalars.clone())
+        .with_cond_cache(&cond_cache)
+        .with_field_path_cache(&field_path_cache)
+        .with_query_ref_cache(&query_ref_cache);
+
     // Single walk over the group: build a per-row `RecordRef` (RecordView on
     // the hot path, InnerValue on the bare-scalar fallback) and feed every
     // accumulator + funclib slot at once.
@@ -1111,26 +1293,39 @@ pub(super) fn build_aggregate_object(
                 },
             };
 
-            for (_, acc) in agg_slots.iter_mut() {
-                view.with_ref(|r| acc.step(r));
+            for (_, acc, input) in agg_slots.iter_mut() {
+                if let Some(input) = input {
+                    let value = view.with_ref(|r| resolve_aggregate_input(input, r, &input_ctx))?;
+                    step_aggregate_input(acc, &value, interner)?;
+                } else {
+                    view.with_ref(|r| acc.step(r));
+                }
             }
-            for (_, path, all_field, agg) in fn_slots.iter_mut() {
+            for (_, path, all_field, agg, input) in fn_slots.iter_mut() {
                 if let Some(agg) = agg {
-                    let qv =
-                        view.with_ref(|r| fn_value_for_aggregator(r, path, *all_field, interner));
-                    if let Some(qv) = qv {
-                        let _ = agg.accumulate(&qv);
+                    if let Some(input) = input {
+                        let value =
+                            view.with_ref(|r| resolve_aggregate_input(input, r, &input_ctx))?;
+                        if !matches!(value, QueryValue::Null) {
+                            agg.accumulate(&value)
+                                .map_err(|error| DbError::Function(error.to_string()))?;
+                        }
+                    } else if let Some(value) =
+                        view.with_ref(|r| fn_value_for_aggregator(r, path, *all_field, interner))
+                    {
+                        // Preserve legacy field-input error handling.
+                        let _ = agg.accumulate(&value);
                     }
                 }
             }
         }
     }
 
-    for (key, acc) in agg_slots {
+    for (key, acc, _) in agg_slots {
         obj.insert(key, acc.finish(interner));
     }
 
-    for (key, _, _, agg) in fn_slots {
+    for (key, _, _, agg, _) in fn_slots {
         let qv = match agg {
             Some(agg) => match agg.finalize() {
                 Ok(v) => v,
@@ -1291,7 +1486,8 @@ pub fn apply_group_by(
     interner: &Interner,
     ctx: &FilterContext<'_>,
 ) -> Vec<QueryValue> {
-    try_apply_group_by(records, group_by, select, interner, ctx).unwrap_or_default()
+    try_apply_group_by(records, group_by, select, interner, ctx)
+        .expect("apply_group_by: aggregate execution failed")
 }
 
 /// Fallible grouped execution; legacy callers retain their Vec-returning helper.
@@ -1466,7 +1662,8 @@ pub fn apply_aggregate_all(
 ) -> Vec<QueryValue> {
     let empty_refs: TMap<String, QueryResult> = new_map_wc(0);
     let ctx = FilterContext::new(interner, &empty_refs).with_scalars(scalars);
-    apply_aggregate_all_with_context(records, select, interner, &ctx).unwrap_or_default()
+    apply_aggregate_all_with_context(records, select, interner, &ctx)
+        .expect("apply_aggregate_all: aggregate execution failed")
 }
 
 /// Aggregate one execution with its resolved references and parameters.

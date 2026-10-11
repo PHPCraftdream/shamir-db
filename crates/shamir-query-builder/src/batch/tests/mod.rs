@@ -1,4 +1,5 @@
 pub mod after_tests;
+pub mod aggregate_input_tests;
 pub mod batch_tests;
 pub mod call_tests;
 pub mod ddl_methods_tests;
