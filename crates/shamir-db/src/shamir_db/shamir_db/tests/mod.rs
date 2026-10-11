@@ -1,3 +1,4 @@
+mod bounded_journal_read_tests;
 mod keyset_safe_write_barrier_tests;
 mod schema_parse_tests;
 mod schema_rollback_tests;

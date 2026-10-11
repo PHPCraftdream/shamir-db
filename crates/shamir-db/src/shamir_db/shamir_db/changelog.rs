@@ -166,6 +166,43 @@ impl ShamirDb {
             .map(Some)
     }
 
+    /// Error-preserving bounded journal page. `Ok(None)` means only that
+    /// the database or repo does not exist; init/range failures remain errors.
+    pub async fn read_changelog_bounded(
+        &self,
+        db: &str,
+        repo: &str,
+        from_version: u64,
+        limit: usize,
+    ) -> shamir_storage::error::DbResult<Option<shamir_engine::BoundedJournalRead>> {
+        let Some(repo_instance) = self.get_db(db).and_then(|db| db.get_repo(repo)) else {
+            return Ok(None);
+        };
+        repo_instance
+            .read_changelog_bounded(from_version, limit)
+            .await
+            .map(Some)
+    }
+
+    /// Await completion progress, not journal persistence. Missing db/repo
+    /// returns `Ok(None)`; reopening is reported in the visibility outcome.
+    /// cancel-safe: yes — lookup owns its repo handle (no map guard), then
+    /// delegates to the engine's cancellation-safe completion wait.
+    pub async fn await_changelog_progress(
+        &self,
+        db: &str,
+        repo: &str,
+        target_version: u64,
+    ) -> shamir_storage::error::DbResult<Option<shamir_engine::VisibleOutcome>> {
+        let Some(repo_instance) = self.get_db(db).and_then(|db| db.get_repo(repo)) else {
+            return Ok(None);
+        };
+        repo_instance
+            .await_journal_progress(target_version)
+            .await
+            .map(Some)
+    }
+
     /// Like [`read_changelog_from`](Self::read_changelog_from) but returns the
     /// full [`shamir_engine::JournalRead`] so the caller can inspect `gap_at`
     /// and decide whether a snapshot resync is needed.

@@ -1536,12 +1536,79 @@ impl RepoInstance {
         from_version: u64,
         limit: usize,
     ) -> DbResult<shamir_tx::JournalRead> {
-        let w = self.tx_gate().await?.completion().watermark();
+        Ok(self
+            .read_changelog_bounded_impl(from_version, limit, false)
+            .await?
+            .read)
+    }
+
+    /// Read a page and expose the actual confirmed bound, sampled before
+    /// feed initialization. Store range failures are errors, not empty pages;
+    /// corruption and known holes retain the journal's `gap_at` semantics.
+    /// cancel-safe: yes — initialization is retryable, confirmation advances
+    /// only a monotonic prefix, and the single range read mutates no records.
+    pub async fn read_changelog_bounded(
+        &self,
+        from_version: u64,
+        limit: usize,
+    ) -> DbResult<super::BoundedJournalRead> {
+        self.read_changelog_bounded_impl(from_version, limit, true)
+            .await
+    }
+
+    async fn read_changelog_bounded_impl(
+        &self,
+        from_version: u64,
+        limit: usize,
+        preserve_errors: bool,
+    ) -> DbResult<super::BoundedJournalRead> {
+        let sampled_w = self.tx_gate().await?.completion().watermark();
         let h = self.changefeed().await?;
-        let bound = h.feed.confirm_through(w, JOURNAL_CONFIRM_BUDGET).await;
-        Ok(h.feed
-            .read_from_bounded(&h.store, from_version, limit, bound)
-            .await)
+        let bound = h
+            .feed
+            .confirm_through(sampled_w, JOURNAL_CONFIRM_BUDGET)
+            .await
+            .min(sampled_w);
+        let observed = preserve_errors.then(|| {
+            Arc::new(super::bounded_journal_read::ErrorPreservingJournalStore::new(h.store.clone()))
+        });
+        let store: Arc<dyn shamir_tx::ChangelogStore> = match &observed {
+            Some(store) => store.clone(),
+            None => h.store,
+        };
+        let read = h
+            .feed
+            .read_from_bounded(&store, from_version, limit, bound)
+            .await;
+        if let Some(observed) = observed {
+            if let Some(error) = observed.error() {
+                return Err(DbError::Storage(error.to_owned()));
+            }
+        }
+        Ok(super::BoundedJournalRead {
+            read,
+            sampled_w,
+            bound,
+            confirmed: bound >= sampled_w,
+        })
+    }
+
+    /// Park until the completion prefix reaches `target_version`, including
+    /// aborted/empty versions, or report that this gate requires reopening.
+    /// This is completion progress, not journal persistence confirmation.
+    /// cancel-safe: yes — retryable gate initialization followed by the
+    /// gate's cancellation-safe notification wait; no added polling or state.
+    pub async fn await_journal_progress(
+        &self,
+        target_version: u64,
+    ) -> DbResult<shamir_tx::repo_tx_gate::VisibleOutcome> {
+        Ok(self.tx_gate().await?.await_visible(target_version).await)
+    }
+
+    /// Install an isolated journal fixture before lazy initialization.
+    #[cfg(test)]
+    pub(crate) fn install_journal_for_test(&self, handle: ChangefeedHandle) {
+        assert!(self.changefeed.set(handle).is_ok());
     }
 
     /// Test-only read-side observation of writer persistence/confirmation.

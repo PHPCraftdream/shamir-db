@@ -22,4 +22,6 @@ pub mod validator;
 
 // Phase 3b — surface the changefeed event types at the crate root so the
 // `shamir-db` facade can name `shamir_engine::ChangelogEvent` directly.
+pub use repo::BoundedJournalRead;
+pub use shamir_tx::repo_tx_gate::VisibleOutcome;
 pub use tx::{ChangeOp, ChangelogEvent, JournalRead, RecordChange};
