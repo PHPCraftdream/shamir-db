@@ -306,7 +306,13 @@ replication-эндпоинт, скомпрометированный upstream, �
   doc-комментарий в `apply_replicated.rs`, указывающий сюда; и минимальный
   opt-in **`ApplyPolicy`** (`apply_replicated.rs`) с двумя вариантами:
   - `ApplyPolicy::Trusted` (default, byte-identical к пред-#1199 поведению)
-    — не проверяет ничего, ровно как описано выше.
+    — не проверяет ничего, ровно как описано выше. В сервере это default
+    при отсутствующем или false `replication.validate_replicated_payload`.
+    Opt-in `replication: { validate_replicated_payload: true }` (#1216)
+    передаётся через supervisor в `FollowerLoopConfig`; политика выбирается
+    один раз при старте `run_follower_loop`. Проверка добавляет стоимость
+    декодирования каждого Put; отказ сохраняет bookmark и retry cursor,
+    останавливает batch и использует существующий backoff.
   - `ApplyPolicy::ValidatePayload` — ДО выделения версии (отклонение не
     расходует версию, идентично контракту `Skipped`) декодирует каждый
     `Put`'а `value` тем же двухшаговым декодером, которым
@@ -316,17 +322,8 @@ replication-эндпоинт, скомпрометированный upstream, �
     НИ ОДНИМ из двух способов, отклоняется целиком (`Err`, без частичного
     применения). Это НЕ re-run schema/validator/DAC — только "байты вообще
     похожи на запись, а не на мусор".
-  - Вызов на стороне `shamir-server`'s `follower_loop.rs` сегодня жёстко
-    передаёт `ApplyPolicy::Trusted` — реальный opt-in конфиг-флаг (через
-    `FollowerLoopConfig`/ktav) НЕ подключён в этой задаче (см. "отложено"
-    ниже).
-- **Отложено (не в скоупе #1199):**
-  1. Подключение `ApplyPolicy::ValidatePayload` к реальному
-     конфигурационному флагу оператора (ktav/`FollowerLoopConfig`) — сам
-     механизм в движке готов и протестирован
-     (`tx/tests/apply_replicated_tests.rs::validate_payload_rejects_undecodable_put_and_consumes_no_version`),
-     но никто в `shamir-server` сегодня его не включает.
-  2. Полноценный re-run schema/validator/DAC на follower при приёме —
+- **Отложено (не в скоупе #1199/#1216):**
+  1. Полноценный re-run schema/validator/DAC на follower при приёме —
      НЕ реализован. Обоснование: DAC на follower бессмысленен (actor в
      событии — leader-asserted provenance для истории/аудита, НИКОГДА не
      вход авторизации на follower — у follower нет независимого способа
@@ -341,12 +338,11 @@ replication-эндпоинт, скомпрометированный upstream, �
      `AccessGate`. См.
      `docs/dev-artifacts/audits/2026-08-14-cross-crate-rush-review/shamir-engine/security-crypto.md`
      находка #4 для исходного описания.
-  Deployments, которым нужен нулевой trust к содержимому потока сверх
-  структурной декодируемости, могут уже сегодня передать
-  `ApplyPolicy::ValidatePayload` напрямую (минуя `follower_loop.rs`'s
-  текущий hardcode) через `RepoInstance::apply_replicated`; полный нулевой
-  trust к транспорту как таковому по-прежнему опирается исключительно на
-  аутентификацию соединения (§5.4).
+  Deployments могут включить структурную проверку через
+  `replication.validate_replicated_payload` или передать
+  `ApplyPolicy::ValidatePayload` напрямую через `RepoInstance::apply_replicated`;
+  полный нулевой trust к транспорту как таковому по-прежнему опирается
+  исключительно на аутентификацию соединения (§5.4).
 
 ---
 

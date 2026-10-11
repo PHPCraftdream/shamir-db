@@ -21,23 +21,31 @@
 //! `CancellationToken` as a belt-and-suspenders backstop.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use async_trait::async_trait;
 use shamir_db::access::principal64_from_username;
 use shamir_db::access::Actor;
 use shamir_db::engine::repo::{BoxRepoFactory, RepoConfig};
 use shamir_db::engine::table::TableConfig;
+use shamir_db::engine::ChangelogEvent;
 use shamir_db::ShamirDb;
 use shamir_query_builder::batch::Batch;
+use shamir_query_builder::ddl::{repl_scope, replication_profile, subscription};
 use shamir_query_builder::doc;
 use shamir_query_builder::write::insert;
+use shamir_query_types::admin::{ReplDirection, ReplMode};
 use shamir_query_types::wire::repl::ReplResponse;
+use tokio::sync::{Mutex, Notify};
+use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
+use crate::config::ReplicationConfig;
 use crate::replication::error::ReplError;
 use crate::replication::follower_loop::{run_follower_loop, FollowerLoopConfig};
 use crate::replication::in_process::InProcessReplSource;
 use crate::replication::source::ReplSource;
+use crate::replication::supervisor::{ReplSourceFactory, SubscriptionSupervisor};
 
 // ---------------------------------------------------------------------------
 // Fixture
@@ -60,10 +68,7 @@ async fn build_db(owner_label: &str) -> ShamirDb {
     shamir
 }
 
-/// Write `n` rows into `app/main/items` as `alice`. Each transactional
-/// insert commits → emits one changefeed event. Polls until all `n` events
-/// are durable in the journal.
-async fn write_rows(leader: &ShamirDb, n: usize) {
+async fn write_rows_without_journal_wait(leader: &ShamirDb, n: usize) {
     let owner = Actor::User(principal64_from_username("alice"));
     for i in 0..n {
         let key_str = format!("k{i}");
@@ -86,6 +91,13 @@ async fn write_rows(leader: &ShamirDb, n: usize) {
             "write failed: {resp:?}",
         );
     }
+}
+
+/// Write `n` rows into `app/main/items` as `alice`. Each transactional
+/// insert commits → emits one changefeed event. Polls until all `n` events
+/// are durable in the journal.
+async fn write_rows(leader: &ShamirDb, n: usize) {
+    write_rows_without_journal_wait(leader, n).await;
 
     // The journal writer is async; poll until all n events are durable.
     for _ in 0..200 {
@@ -453,4 +465,216 @@ async fn journal_gap_terminates_loop_without_applying_events() {
 #[tokio::test]
 async fn journal_gap_at_from_version_terminates_loop_without_applying_events() {
     assert_gap_stops_loop(1).await;
+}
+
+struct MalformedPutSource {
+    inner: InProcessReplSource,
+    events: Vec<ChangelogEvent>,
+    pulls: Mutex<Vec<(u64, Instant)>>,
+    third_pull: Notify,
+}
+
+#[async_trait]
+impl ReplSource for MalformedPutSource {
+    async fn hello(&self, node_id: &str) -> Result<ReplResponse, ReplError> {
+        self.inner.hello(node_id).await
+    }
+
+    async fn pull(
+        &self,
+        db: &str,
+        repo: &str,
+        from_version: u64,
+        limit: u32,
+        wait_ms: Option<u32>,
+    ) -> Result<ReplResponse, ReplError> {
+        let pull_count = {
+            let mut pulls = self.pulls.lock().await;
+            pulls.push((from_version, Instant::now()));
+            pulls.len()
+        };
+        if pull_count == 3 {
+            self.third_pull.notify_one();
+            std::future::pending::<()>().await;
+        }
+        let mut response = self
+            .inner
+            .pull(db, repo, from_version, limit, wait_ms)
+            .await?;
+        if let ReplResponse::Pull {
+            events,
+            gap_at,
+            current_version,
+            ..
+        } = &mut response
+        {
+            let mut decoded: Vec<ChangelogEvent> = self
+                .events
+                .iter()
+                .filter(|event| event.commit_version >= from_version)
+                .take(limit as usize)
+                .cloned()
+                .collect();
+            *gap_at = None;
+            *current_version = self.events.last().expect("fixture events").commit_version;
+            if let Some(first) = decoded.first_mut() {
+                let change = first.changes.first_mut().expect("fixture Put");
+                assert!(change.value.is_some());
+                change.value = Some(vec![0xC1].into());
+            }
+            *events = rmp_serde::to_vec_named(&decoded).expect("encode malformed Put");
+        }
+        Ok(response)
+    }
+}
+
+async fn malformed_put_fixture() -> (ShamirDb, Arc<MalformedPutSource>, u64) {
+    let leader = build_db("alice").await;
+    let repo = leader.get_db("app").unwrap().get_repo("main").unwrap();
+    let mut committed = repo.subscribe_changelog().await.expect("leader changefeed");
+    write_rows_without_journal_wait(&leader, 2).await;
+    let first = committed.recv().await.expect("first committed Put");
+    let second = committed.recv().await.expect("second committed Put");
+    assert!(first.commit_version < second.commit_version);
+    let leader_version = second.commit_version;
+    let source = Arc::new(MalformedPutSource {
+        inner: InProcessReplSource::new(leader),
+        events: vec![(*first).clone(), (*second).clone()],
+        pulls: Mutex::new(Vec::new()),
+        third_pull: Notify::new(),
+    });
+    (build_db("follower").await, source, leader_version)
+}
+
+#[tokio::test(start_paused = true)]
+async fn validate_payload_rejects_malformed_put_before_version_and_retries_same_cursor() {
+    let (follower, source, _) = malformed_put_fixture().await;
+    let repo = follower.get_db("app").unwrap().get_repo("main").unwrap();
+    let gate = repo.tx_gate().await.expect("follower gate");
+    let allocated_before = gate.version_allocation_high_water_mark();
+    let watermark_before = gate.completion().watermark();
+    let bookmark_before = repo.replication_bookmark().await.expect("bookmark");
+    let cfg = FollowerLoopConfig::new("follower-1", "app", "main")
+        .with_validate_replicated_payload(true)
+        .with_poll_wait_ms(0)
+        .with_max_iterations(2);
+    let started = Instant::now();
+    run_follower_loop(
+        Arc::new(follower.clone()),
+        source.clone(),
+        cfg,
+        CancellationToken::new(),
+    )
+    .await
+    .expect("bounded retry loop");
+    let pulls = source.pulls.lock().await;
+    assert_eq!(pulls.len(), 2);
+    assert_eq!(pulls[0].0, bookmark_before + 1);
+    assert_eq!(pulls[1].0, pulls[0].0);
+    assert!(pulls[1].1.duration_since(pulls[0].1) >= Duration::from_millis(200));
+    assert!(started.elapsed() >= Duration::from_millis(400));
+    drop(pulls);
+    assert_eq!(gate.version_allocation_high_water_mark(), allocated_before);
+    assert_eq!(gate.completion().watermark(), watermark_before);
+    assert_eq!(repo.replication_bookmark().await.unwrap(), bookmark_before);
+    let journal = follower
+        .read_changelog_from_journal("app", "main", 0, 10)
+        .await
+        .expect("follower journal");
+    assert!(journal.events.is_empty());
+}
+
+#[tokio::test(start_paused = true)]
+async fn trusted_default_applies_malformed_put_and_continues_batch() {
+    let (follower, source, leader_version) = malformed_put_fixture().await;
+    let repo = follower.get_db("app").unwrap().get_repo("main").unwrap();
+    let gate = repo.tx_gate().await.expect("follower gate");
+    let allocated_before = gate.version_allocation_high_water_mark();
+    let cfg = FollowerLoopConfig::new("follower-1", "app", "main")
+        .with_poll_wait_ms(0)
+        .with_max_iterations(2);
+    assert!(!cfg.validate_replicated_payload);
+    run_follower_loop(
+        Arc::new(follower.clone()),
+        source.clone(),
+        cfg,
+        CancellationToken::new(),
+    )
+    .await
+    .expect("Trusted loop");
+    assert_eq!(repo.replication_bookmark().await.unwrap(), leader_version);
+    assert_eq!(
+        gate.version_allocation_high_water_mark(),
+        allocated_before + 2
+    );
+    assert_eq!(gate.completion().watermark(), allocated_before + 2);
+    let pulls = source.pulls.lock().await;
+    assert_eq!(pulls.len(), 2);
+    assert_eq!(pulls[0].0, 1);
+    assert_eq!(pulls[1].0, leader_version + 1);
+}
+
+#[tokio::test(start_paused = true)]
+async fn supervisor_forwards_payload_validation_to_follower_loop() {
+    let (follower, source, _) = malformed_put_fixture().await;
+    let follower = Arc::new(follower);
+    let mut batch = Batch::new();
+    batch.id(1);
+    batch.op(
+        "cp",
+        replication_profile("payload_validation").stream(
+            repl_scope("app").repo("main").build(),
+            ReplDirection::Pull,
+            ReplMode::ReadOnly,
+        ),
+    );
+    batch.op(
+        "cs",
+        subscription(
+            "payload_validation",
+            "tcp://leader:9000",
+            "pub",
+            "payload_validation",
+        ),
+    );
+    follower
+        .execute("app", &batch.to_request_via_msgpack())
+        .await
+        .expect("create profile and subscription");
+    let repo = follower.get_db("app").unwrap().get_repo("main").unwrap();
+    let gate = repo.tx_gate().await.expect("follower gate");
+    let allocated_before = gate.version_allocation_high_water_mark();
+    let source_for_factory = source.clone();
+    let factory: ReplSourceFactory = Arc::new(move |_| source_for_factory.clone());
+    let supervisor = SubscriptionSupervisor::new(follower.clone(), factory, "follower-1")
+        .with_validate_replicated_payload(true)
+        .with_poll_wait_ms(0)
+        .with_max_iterations(3);
+    supervisor.reconcile().await;
+    assert!(supervisor.is_running("payload_validation"));
+    source.third_pull.notified().await;
+    supervisor.stop_all().await;
+    assert_eq!(supervisor.active_count(), 0);
+    let pulls = source.pulls.lock().await;
+    assert_eq!(pulls.len(), 3);
+    assert_eq!(pulls[0].0, 1);
+    assert_eq!(pulls[1].0, 1);
+    assert_eq!(pulls[2].0, 1);
+    drop(pulls);
+    assert_eq!(gate.version_allocation_high_water_mark(), allocated_before);
+    assert_eq!(repo.replication_bookmark().await.unwrap(), 0);
+}
+
+#[test]
+fn replication_payload_validation_config_defaults_and_opt_in() {
+    assert!(!ReplicationConfig::default().validate_replicated_payload);
+    let omitted: ReplicationConfig =
+        ktav::from_str("server_name: localhost").expect("omitted flag");
+    let disabled: ReplicationConfig =
+        ktav::from_str("validate_replicated_payload: false").expect("disabled flag");
+    let enabled: ReplicationConfig =
+        ktav::from_str("validate_replicated_payload: true").expect("enabled flag");
+    assert!(!omitted.validate_replicated_payload);
+    assert!(!disabled.validate_replicated_payload);
+    assert!(enabled.validate_replicated_payload);
 }

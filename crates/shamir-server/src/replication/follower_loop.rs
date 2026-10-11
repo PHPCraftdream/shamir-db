@@ -78,6 +78,7 @@ pub struct FollowerLoopConfig {
     /// up to this long waiting for new events before returning an empty
     /// batch (REPLICATION §5.1).
     pub poll_wait_ms: u32,
+    pub validate_replicated_payload: bool,
     /// Test/bound hook: if `Some(n)`, the loop exits cleanly after `n`
     /// iterations. `None` = run forever (until `cancel` fires). Production
     /// callers pass `None`; tests pass a small cap to avoid relying on
@@ -94,6 +95,7 @@ impl FollowerLoopConfig {
             db: db.into(),
             repo: repo.into(),
             poll_wait_ms: 5000,
+            validate_replicated_payload: false,
             max_iterations: None,
         }
     }
@@ -102,6 +104,12 @@ impl FollowerLoopConfig {
     #[must_use]
     pub fn with_poll_wait_ms(mut self, ms: u32) -> Self {
         self.poll_wait_ms = ms;
+        self
+    }
+
+    #[must_use]
+    pub fn with_validate_replicated_payload(mut self, validate: bool) -> Self {
+        self.validate_replicated_payload = validate;
         self
     }
 
@@ -144,8 +152,14 @@ pub async fn run_follower_loop(
         db: db_name,
         repo,
         poll_wait_ms,
+        validate_replicated_payload,
         max_iterations,
     } = cfg;
+    let apply_policy = if validate_replicated_payload {
+        ApplyPolicy::ValidatePayload
+    } else {
+        ApplyPolicy::Trusted
+    };
     // 1. hello → seed max-seen epoch (§5.2).
     let mut max_seen_epoch = match source.hello(&node_id).await {
         Ok(resp) => leader_epoch_of(&resp),
@@ -335,13 +349,8 @@ pub async fn run_follower_loop(
         }
 
         for ev in &events {
-            // #1199: `ApplyPolicy::Trusted` reproduces pre-#1199 behavior
-            // byte-for-byte. Wiring a real opt-in `ValidatePayload` knob
-            // through server config (`FollowerLoopConfig`/ktav) is deferred
-            // — see `docs/dev-artifacts/roadmap/REPLICATION.md` §4.4 for
-            // what's implemented vs. deferred and why.
             match repo_instance
-                .apply_replicated(ev, bookmark, ApplyPolicy::Trusted)
+                .apply_replicated(ev, bookmark, apply_policy)
                 .await
             {
                 Ok(ApplyOutcome::Applied { .. }) => {

@@ -133,6 +133,7 @@ pub struct SubscriptionSupervisor {
     max_iterations: Option<usize>,
     /// Long-poll budget forwarded to each `pull` (ms).
     poll_wait_ms: u32,
+    validate_replicated_payload: bool,
 }
 
 impl SubscriptionSupervisor {
@@ -151,6 +152,7 @@ impl SubscriptionSupervisor {
             registry: scc::HashMap::with_hasher(THasher::default()),
             max_iterations: None,
             poll_wait_ms: 5000,
+            validate_replicated_payload: false,
         }
     }
 
@@ -166,6 +168,12 @@ impl SubscriptionSupervisor {
     #[must_use]
     pub fn with_poll_wait_ms(mut self, ms: u32) -> Self {
         self.poll_wait_ms = ms;
+        self
+    }
+
+    #[must_use]
+    pub fn with_validate_replicated_payload(mut self, validate: bool) -> Self {
+        self.validate_replicated_payload = validate;
         self
     }
 
@@ -274,7 +282,8 @@ impl SubscriptionSupervisor {
 
         for (db, repo) in pull_targets {
             let mut cfg = FollowerLoopConfig::new(self.node_id.clone(), db, repo)
-                .with_poll_wait_ms(self.poll_wait_ms);
+                .with_poll_wait_ms(self.poll_wait_ms)
+                .with_validate_replicated_payload(self.validate_replicated_payload);
             if let Some(n) = self.max_iterations {
                 cfg = cfg.with_max_iterations(n);
             }

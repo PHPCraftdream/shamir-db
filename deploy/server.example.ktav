@@ -12,6 +12,7 @@
 ## Schema is documented in `crates/shamir-server/src/config.rs`.
 
 data_dir: /var/lib/shamir-db
+## replication: { validate_replicated_payload: true }
 
 logging: {
     level: info
