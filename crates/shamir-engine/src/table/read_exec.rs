@@ -338,6 +338,36 @@ impl TableManager {
             ));
         }
 
+        // Latest-state counters/indexes cannot answer a snapshot + staged overlay.
+        // Snapshot/Serializable reads pay O(N) scans (and sorting when needed);
+        // Pessimistic and non-tx reads retain the latest-committed shortcuts.
+        if tx.is_some_and(|t| {
+            matches!(
+                t.isolation,
+                shamir_tx::IsolationLevel::Snapshot | shamir_tx::IsolationLevel::Serializable
+            )
+        }) {
+            if query
+                .r#where
+                .as_ref()
+                .is_some_and(contains_vector_similarity)
+            {
+                return Err(DbError::Validation(
+                    "snapshot vector reads require snapshot-aware ranking; latest ANN and \
+                     the row-level full-scan predicate cannot preserve vector semantics"
+                        .to_string(),
+                ));
+            }
+            if query.pagination.keyset().is_some() {
+                return self
+                    .read_snapshot_keyset(query, ctx, interner, tx, start)
+                    .await;
+            }
+            return self
+                .read_scan(query, ctx, interner, tx, encoding, batch_size, start)
+                .await;
+        }
+
         // Opt #2 (1000×-class): `SELECT count(*) FROM table` (no WHERE,
         // no GROUP BY, no DISTINCT, no ORDER BY, no pagination, no
         // count_total flag) is answered directly from the persistent
@@ -804,6 +834,21 @@ impl TableManager {
             }
         }
 
+        self.read_scan(query, ctx, interner, tx, encoding, batch_size, start)
+            .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn read_scan(
+        &self,
+        query: &ReadQuery,
+        ctx: &FilterContext<'_>,
+        interner: &Interner,
+        tx: Option<&shamir_tx::TxContext>,
+        encoding: ResultEncoding,
+        batch_size: usize,
+        start: Instant,
+    ) -> DbResult<QueryResult> {
         // Fall back to full scan
         let has_group_by = query.group_by.is_some();
         let has_agg = exec::has_aggregates(&query.select);
@@ -858,6 +903,190 @@ impl TableManager {
             )
             .await
         }
+    }
+
+    /// Compare snapshot rows before projection: skip/take alone loses the cursor.
+    /// Like collecting ORDER BY, results use Name encoding.
+    async fn read_snapshot_keyset(
+        &self,
+        query: &ReadQuery,
+        ctx: &FilterContext<'_>,
+        interner: &Interner,
+        tx: Option<&shamir_tx::TxContext>,
+        start: Instant,
+    ) -> DbResult<QueryResult> {
+        let order = query.order_by.as_ref().ok_or_else(|| {
+            DbError::Validation("keyset pagination requires ORDER BY".to_string())
+        })?;
+        let (key, _) = query.pagination.keyset().expect("keyset dispatch");
+        if key.len() != order.items.len()
+            || key.is_empty()
+            || query.group_by.is_some()
+            || exec::has_aggregates(&query.select)
+            || query.select.distinct
+        {
+            return Err(DbError::Validation(
+                "snapshot keyset requires matching ORDER BY keys and non-collapsing SELECT"
+                    .to_string(),
+            ));
+        }
+        if order
+            .items
+            .iter()
+            .any(|item| item.field.len() == 1 && item.field[0] == "_id")
+        {
+            // resolve_field only walks stored maps; it cannot resolve the
+            // synthetic RecordId. Do not silently return an empty page.
+            return Err(DbError::Validation(
+                "snapshot keyset does not support synthetic _id ordering; use after_id \
+                 as the stored-field tie-breaker"
+                    .to_string(),
+            ));
+        }
+        let seek: Vec<Vec<u8>> = key
+            .iter()
+            .map(|value| {
+                super::read_planner::encode_query_value_for_sort(value).ok_or_else(|| {
+                    DbError::Validation("keyset values must be indexable scalars".to_string())
+                })
+            })
+            .collect::<DbResult<_>>()?;
+        let paths: Vec<_> = order
+            .items
+            .iter()
+            .map(|item| intern_field_path(&item.field, interner))
+            .collect();
+        let compare = |left: &[Vec<u8>], right: &[Vec<u8>]| {
+            for ((a, b), item) in left.iter().zip(right).zip(&order.items) {
+                let cmp = a.cmp(b);
+                let cmp = if item.direction == shamir_query_types::read::OrderDirection::Desc {
+                    cmp.reverse()
+                } else {
+                    cmp
+                };
+                if !cmp.is_eq() {
+                    return cmp;
+                }
+            }
+            std::cmp::Ordering::Equal
+        };
+        let compare_ids = |a: &RecordId, b: &RecordId| {
+            if order.items.last().expect("nonempty order").direction
+                == shamir_query_types::read::OrderDirection::Desc
+            {
+                b.cmp(a)
+            } else {
+                a.cmp(b)
+            }
+        };
+        let filter = query.r#where.as_ref().map(|f| compile_filter(f, interner));
+        let mut rows: Vec<(Vec<Vec<u8>>, RecordId, Bytes)> = Vec::new();
+        let mut scanned = 0;
+        let mut corrupt = Vec::new();
+        let stream = self.list_stream_tx(tx, shamir_tunables::store_defaults::FULL_SCAN_BATCH);
+        futures::pin_mut!(stream);
+        while let Some(batch) = stream.next().await {
+            'rows: for (id, cow) in batch? {
+                scanned += 1;
+                let record = match cow.into_inner() {
+                    Ok(record) => record,
+                    Err(_) => {
+                        corrupt.push(CorruptRecordRef {
+                            table: self.name().to_string(),
+                            id,
+                        });
+                        continue;
+                    }
+                };
+                if filter.as_ref().is_some_and(|f| !f.matches(&record, ctx)) {
+                    continue;
+                }
+                let mut values = Vec::with_capacity(paths.len());
+                for path in &paths {
+                    let Some(value) = path
+                        .as_ref()
+                        .and_then(|p| crate::query::filter::eval::resolve_field(&record, p))
+                    else {
+                        // Absent fields have no sorted-index posting either.
+                        continue 'rows;
+                    };
+                    // Match sorted-index extract_and_encode exactly: only
+                    // these stored scalar types have postings. In particular,
+                    // do not convert maps/sets through the interner first.
+                    let value = match value {
+                        InnerValue::Null => QueryValue::Null,
+                        InnerValue::Bool(value) => QueryValue::Bool(value),
+                        InnerValue::Int(value) => QueryValue::Int(value),
+                        InnerValue::F64(value) => QueryValue::F64(value),
+                        InnerValue::Str(value) => QueryValue::Str(value),
+                        InnerValue::Bin(value) => QueryValue::Bin(value),
+                        _ => continue 'rows,
+                    };
+                    let Some(encoded) = super::read_planner::encode_query_value_for_sort(&value)
+                    else {
+                        // Non-indexable values also have no sorted-index posting.
+                        continue 'rows;
+                    };
+                    values.push(encoded);
+                }
+                let cmp = compare(&values, &seek);
+                if cmp.is_gt()
+                    || (cmp.is_eq()
+                        && query
+                            .pagination
+                            .after_id()
+                            .is_some_and(|after| compare_ids(&id, after).is_gt()))
+                {
+                    let bytes = record
+                        .to_bytes()
+                        .map_err(|e| DbError::Codec(format!("Failed to encode record: {e}")))?;
+                    rows.push((values, id, bytes));
+                }
+            }
+        }
+        rows.sort_unstable_by(|(a, aid, _), (b, bid, _)| {
+            compare(a, b).then_with(|| compare_ids(aid, bid))
+        });
+        let matched: Vec<_> = rows.into_iter().map(|(_, id, bytes)| (id, bytes)).collect();
+        let (page, pagination) =
+            exec::apply_pagination(matched, &query.pagination, query.count_total);
+        let values = apply_select_value_bytes(
+            &page,
+            &query.select,
+            interner,
+            ctx,
+            self.name(),
+            &mut corrupt,
+        )?;
+        let ids: Vec<_> = page.iter().map(|(id, _)| *id).collect();
+        let records: Vec<_> = ids
+            .iter()
+            .copied()
+            .zip(values)
+            .map(|(id, fields)| {
+                QueryRecord::Inserted(shamir_query_types::write::InsertedRecord {
+                    id: Some(id),
+                    fields,
+                })
+            })
+            .collect();
+        let returned = records.len() as u64;
+        Ok(QueryResult::with_stats(
+            records,
+            QueryStats {
+                index_used: None,
+                records_scanned: scanned,
+                records_returned: returned,
+                execution_time_us: start.elapsed().as_micros() as u64,
+            },
+        )
+        .with_pagination(pagination)
+        .with_versions(collect_versions(
+            query.with_version,
+            self.mvcc_store_ref(),
+            &ids,
+        ))
+        .with_corrupt_records(corrupt))
     }
 
     /// Collecting path: streams batches, accumulates what's needed, then applies
@@ -2647,4 +2876,17 @@ pub(super) fn apply_select_value_bytes(
             },
         )
         .collect())
+}
+
+/// Vector predicates have no row-level full-scan representation.
+fn contains_vector_similarity(filter: &crate::query::filter::Filter) -> bool {
+    match filter {
+        crate::query::filter::Filter::VectorSimilarity { .. } => true,
+        crate::query::filter::Filter::And { filters }
+        | crate::query::filter::Filter::Or { filters } => {
+            filters.iter().any(contains_vector_similarity)
+        }
+        crate::query::filter::Filter::Not { filter } => contains_vector_similarity(filter),
+        _ => false,
+    }
 }

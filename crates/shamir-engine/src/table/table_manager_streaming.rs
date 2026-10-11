@@ -300,13 +300,9 @@ impl TableManager {
 
     /// tx-aware streaming variant of [`list_stream`].
     ///
-    /// Forwards to [`list_stream`] for the actual data, then — when `tx` is
-    /// `Some` and the tx is Serializable — records each *materialised*
-    /// record's key into the read-set (HIGH-C). The yielded batches are
-    /// byte-for-byte the same as [`list_stream`]; recording is a pure
-    /// side-effect threaded lazily through the stream, so the lazy-yield
-    /// contract is preserved (a consumer that stops early only records the
-    /// keys it actually pulled).
+    /// Uses the transaction snapshot for Snapshot/Serializable and latest
+    /// committed state for Pessimistic or no transaction, then records each
+    /// materialised Serializable read. Recording remains a lazy side-effect.
     ///
     /// Streaming-scan SSI scope: this records the keys the scan *yields* (of
     /// the RAW committed stream, before the overlay merge below). It does
@@ -347,7 +343,7 @@ impl TableManager {
                 });
             }
         }
-        let inner = self.list_stream(batch_size);
+        let inner = self.committed_stream_tx(tx, batch_size);
         let token = self.table_token();
         let mvcc = self.mvcc_store.clone();
         let recorded = Self::record_scan_reads(inner, tx, token, mvcc);
@@ -355,6 +351,44 @@ impl TableManager {
         // committed stream (unfiltered — no Filter/FilterContext here).
         let overlay = overlay_rows_for_tx(tx, token);
         merge_stream_with_tx_overlay(recorded, overlay, batch_size)
+    }
+
+    /// Committed scan source; staging is merged only after SSI recording.
+    fn committed_stream_tx<'a>(
+        &'a self,
+        tx: Option<&'a shamir_tx::TxContext>,
+        batch_size: usize,
+    ) -> std::pin::Pin<
+        Box<dyn futures::Stream<Item = DbResult<Vec<(RecordId, RecordCow)>>> + Send + 'a>,
+    > {
+        match (self.mvcc_store_ref(), tx) {
+            (Some(mvcc), Some(t))
+                if matches!(
+                    t.isolation,
+                    shamir_tx::IsolationLevel::Snapshot | shamir_tx::IsolationLevel::Serializable
+                ) =>
+            {
+                let mvcc = Arc::clone(mvcc);
+                Box::pin(async_stream::stream! {
+                    let raw = mvcc.snapshot_stream(batch_size, t.snapshot_version);
+                    futures::pin_mut!(raw);
+                    while let Some(batch) = raw.next().await {
+                        match batch {
+                            Ok(bytes) => {
+                                for decoded in Table::decode_raw_batch(bytes) {
+                                    yield decoded;
+                                }
+                            }
+                            Err(e) => {
+                                yield Err(e);
+                                return;
+                            }
+                        }
+                    }
+                })
+            }
+            _ => Box::pin(self.list_stream(batch_size)),
+        }
     }
 
     /// tx-aware streaming variant of [`filter_stream`].
@@ -398,7 +432,38 @@ impl TableManager {
                 }
             }
         }
-        let inner = self.filter_stream(batch_size, filter, ctx).await?;
+        let interner = self.interner().get().await?;
+        let callback = compile_filter(filter, interner);
+        let source = self.committed_stream_tx(tx, batch_size);
+        let inner = async_stream::stream! {
+            futures::pin_mut!(source);
+            while let Some(batch) = source.next().await {
+                match batch {
+                    Err(e) => {
+                        yield Err(e);
+                        return;
+                    }
+                    Ok(rows) => {
+                        let filtered: Vec<_> = rows
+                            .into_iter()
+                            .filter(|(_, cow)| match cow {
+                                RecordCow::Borrowed(b) => match RecordView::new(b) {
+                                    Ok(view) => callback.matches(&view, ctx),
+                                    Err(_) => match InnerValue::from_bytes(b.clone()) {
+                                        Ok(record) => callback.matches(&record, ctx),
+                                        Err(_) => false, // malformed → skip
+                                    },
+                                },
+                                RecordCow::Owned(record) => callback.matches(record, ctx),
+                            })
+                            .collect();
+                        if !filtered.is_empty() {
+                            yield Ok(filtered);
+                        }
+                    }
+                }
+            }
+        };
         let token = self.table_token();
         let mvcc = self.mvcc_store.clone();
         let recorded = Self::record_scan_reads(inner, tx, token, mvcc);
@@ -408,7 +473,7 @@ impl TableManager {
         // committed value did; a staged INSERT was never filtered before).
         let overlay = overlay_rows_for_tx(tx, token);
         if overlay.is_empty() {
-            // Zero-cost pass-through — no compile_filter call needed.
+            // No staged overlay to merge; the committed stream is already filtered.
             return Ok(Box::pin(recorded)
                 as std::pin::Pin<
                     Box<dyn futures::Stream<Item = DbResult<Vec<(RecordId, RecordCow)>>> + 'a>,

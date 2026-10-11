@@ -739,7 +739,8 @@ impl TableManager {
     ///
     /// Falls through to [`get_many_bytes`] when `tx` is `None`. When `tx` is
     /// `Some`, resolves each id against the tx's staging store FIRST (so
-    /// staged inserts are visible as bytes), then the committed data store.
+    /// staged inserts are visible as bytes), then the committed snapshot for
+    /// Snapshot/Serializable or latest committed state for Pessimistic.
     /// A staged `Remove` yields `None` (the record is gone from this tx's
     /// view). This mirrors the `StagingStore::get` read-through contract but
     /// in vectored form.
@@ -753,12 +754,23 @@ impl TableManager {
             None => return self.get_many_bytes(ids).await,
             Some(t) => t,
         };
+        let snapshot_read = matches!(
+            tx.isolation,
+            shamir_tx::IsolationLevel::Snapshot | shamir_tx::IsolationLevel::Serializable
+        );
         let token = self.table_token();
-        // Resolve the per-table staging store. When absent, this tx has no
-        // staged writes for this table → plain vectored read.
+        // Resolve staging first; absent staging still reads the transaction's
+        // snapshot for Snapshot/Serializable, latest state for Pessimistic.
         let staging_opt = tx.write_set.get(&token);
         match staging_opt {
-            None => self.get_many_bytes(ids).await,
+            None => {
+                if let Some(mvcc) = self.mvcc_store_ref().filter(|_| snapshot_read) {
+                    let keys: Vec<Bytes> = ids.iter().map(|id| id.to_bytes()).collect();
+                    mvcc.get_at_many(&keys, tx.snapshot_version).await
+                } else {
+                    self.get_many_bytes(ids).await
+                }
+            }
             Some(staging) => {
                 // For each id: check staging first, then fall through to the
                 // committed store. The staging probe is sync (TMap lookup),
@@ -785,7 +797,12 @@ impl TableManager {
                 // Batch-resolve the non-staged ids from the committed store.
                 if !fallback_keys.is_empty() {
                     let committed = if let Some(mvcc) = self.mvcc_store_ref() {
-                        mvcc.get_current_many(&fallback_keys).await?
+                        if snapshot_read {
+                            mvcc.get_at_many(&fallback_keys, tx.snapshot_version)
+                                .await?
+                        } else {
+                            mvcc.get_current_many(&fallback_keys).await?
+                        }
                     } else {
                         // Boundary: `fallback_keys` is `Bytes` (also fed by-ref
                         // to the mvcc branch); `get_many` takes `RecordKey`.
