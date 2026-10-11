@@ -31,9 +31,9 @@ pub struct SelectProjection {
     /// Evaluated per record via `resolve_filter_value`, reusing the filter
     /// value model (`$ref` / literals / nested `$fn`).
     pub(super) funcs: Vec<(String, FilterValue)>,
-    /// Empty resolved-refs map so `project_value` can build a `FilterContext`
-    /// without `$query` support (projection scalar fns see only the row).
-    pub(super) empty_refs: TMap<String, QueryResult>,
+    /// Execution-local resolved references and parameter bindings.
+    pub(super) resolved_refs: TMap<String, QueryResult>,
+    pub(super) params: TMap<String, QueryValue>,
     /// Pre-compiled `$cond` condition cache (#643) — populated once in
     /// `new()` by pre-scanning every `FilterValue` in `funcs` for nested
     /// `Cond` nodes. `project_value` threads this into the per-record
@@ -204,12 +204,25 @@ impl SelectProjection {
             is_all,
             fields,
             funcs,
-            empty_refs: new_map_wc(0),
+            resolved_refs: new_map_wc(0),
+            params: new_map_wc(0),
             funcs_cond_cache,
             funcs_field_path_cache,
             funcs_query_ref_cache,
             scalars,
         })
+    }
+
+    /// Bind this fresh projection to one execution. Owned snapshots cannot
+    /// borrow a previous ForEach iteration; reset lazy cells on rebinding.
+    pub(crate) fn with_context(mut self, ctx: &FilterContext<'_>) -> Self {
+        self.resolved_refs = ctx.resolved_refs.clone();
+        self.params = ctx.params.clone();
+        self.scalars = ctx.scalars.clone();
+        for cell in self.funcs_query_ref_cache.values_mut() {
+            *cell = std::sync::OnceLock::new();
+        }
+        self
     }
 
     /// Project a single record to QueryValue.
@@ -239,7 +252,8 @@ impl SelectProjection {
             obj.insert(key.clone(), val);
         }
         if !self.funcs.is_empty() {
-            let ctx = FilterContext::new(interner, &self.empty_refs)
+            let ctx = FilterContext::new(interner, &self.resolved_refs)
+                .with_params(&self.params)
                 .with_scalars(self.scalars.clone())
                 .with_cond_cache(&self.funcs_cond_cache)
                 .with_field_path_cache(&self.funcs_field_path_cache)

@@ -27,7 +27,10 @@ use rust_decimal::prelude::ToPrimitive;
 use crate::function::builtin_aggs;
 use crate::query::filter::eval::{compare_values, resolve_filter_query};
 use crate::query::filter::numeric_cmp::cmp_i64_f64;
-use crate::query::filter::{compile_filter, FilterContext, FilterValue, FnCall};
+use crate::query::filter::{
+    compile_filter, prescan_cond_cache, prescan_field_path_cache, prescan_query_ref_cache,
+    FilterContext, FilterValue, FnCall,
+};
 use crate::query::read::exec::pre_intern_select_keys;
 use crate::query::read::{AggFunc, AggregateField, GroupBy, QueryResult, Select, SelectItem};
 use shamir_funclib::agg::{Aggregator, DistinctWrapper};
@@ -920,7 +923,7 @@ pub(super) fn build_aggregate_object(
     select: &Select,
     group_key_values: Option<&[(String, QueryValue)]>,
     interner: &Interner,
-    scalars: ScalarResolver,
+    ctx: &FilterContext<'_>,
 ) -> QueryValue {
     let mut obj: indexmap::IndexMap<String, QueryValue, shamir_collections::THasher> =
         new_map_wc(select.items.len());
@@ -1106,8 +1109,20 @@ pub(super) fn build_aggregate_object(
     // Scalar functions in a group SELECT: evaluate against the group's first
     // record (mirrors the field-projection fallback above).
     if !func_slots.is_empty() {
-        let empty_refs: TMap<String, QueryResult> = new_map_wc(0);
-        let fn_ctx = FilterContext::new(interner, &empty_refs).with_scalars(scalars.clone());
+        let mut cond_cache = new_map_wc(0);
+        let mut field_path_cache = new_map_wc(0);
+        let mut query_ref_cache = new_map_wc(0);
+        for (_, fv) in &func_slots {
+            prescan_cond_cache(fv, interner, &mut cond_cache);
+            prescan_field_path_cache(fv, interner, &mut field_path_cache);
+            prescan_query_ref_cache(fv, &mut query_ref_cache);
+        }
+        let fn_ctx = FilterContext::new(interner, ctx.resolved_refs)
+            .with_params(ctx.params)
+            .with_scalars(ctx.scalars.clone())
+            .with_cond_cache(&cond_cache)
+            .with_field_path_cache(&field_path_cache)
+            .with_query_ref_cache(&query_ref_cache);
         for (key, fv) in func_slots {
             let val = group_records
                 .first()
@@ -1293,7 +1308,7 @@ pub fn apply_group_by(
             select,
             Some(key_vals),
             interner,
-            ctx.scalars.clone(),
+            ctx,
         ));
     }
 
@@ -1367,6 +1382,19 @@ pub fn apply_aggregate_all(
     interner: &Interner,
     scalars: ScalarResolver,
 ) -> Vec<QueryValue> {
-    let obj = build_aggregate_object(records, select, None, interner, scalars);
+    let empty_refs: TMap<String, QueryResult> = new_map_wc(0);
+    let ctx = FilterContext::new(interner, &empty_refs).with_scalars(scalars);
+    apply_aggregate_all_with_context(records, select, interner, &ctx)
+}
+
+/// Aggregate one execution with its resolved references and parameters.
+/// The scalar-only wrapper remains compatible with existing callers.
+pub(crate) fn apply_aggregate_all_with_context(
+    records: &[(RecordId, Bytes)],
+    select: &Select,
+    interner: &Interner,
+    ctx: &FilterContext<'_>,
+) -> Vec<QueryValue> {
+    let obj = build_aggregate_object(records, select, None, interner, ctx);
     vec![obj]
 }

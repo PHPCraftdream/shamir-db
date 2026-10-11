@@ -229,9 +229,11 @@ async fn assert_shadow_replay(ops: Vec<ShadowOp>, ids: &[RecordId], final_drain:
         }
     }
     let expected_applied = ops.len() as u64;
+    if final_drain {
+        coord.mark_cutover_ready().await.unwrap();
+    }
     let lsns = shadow.append_batch(ops).await.unwrap();
     let applied = if final_drain {
-        coord.mark_cutover_ready().await.unwrap();
         coord.final_drain_and_commit().await.unwrap()
     } else {
         coord.drain_shadow_log().await.unwrap()
@@ -575,6 +577,7 @@ async fn committed_migration_purges_shadow_log() {
     let coord = MigrationCoordinator::new(state, shadow.clone(), src, dst, None);
 
     coord.run_snapshot().await.unwrap();
+    coord.mark_cutover_ready().await.unwrap();
     shadow
         .append(ShadowOp::Put {
             record_id: RecordId::new(),
@@ -582,7 +585,6 @@ async fn committed_migration_purges_shadow_log() {
         })
         .await
         .unwrap();
-    coord.mark_cutover_ready().await.unwrap();
     coord.final_drain_and_commit().await.unwrap();
 
     assert_eq!(coord.phase().await, MigrationPhase::Committed);

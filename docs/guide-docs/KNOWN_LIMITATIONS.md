@@ -455,27 +455,48 @@ artifact).
 
 ## 5. Replication
 
-- **Experimental, pull-based, read-only follower.** Leader-follower
-  replication is an async, single-leader read-replica feature, not a
-  clustering/HA solution, and is explicitly labeled Experimental. See the
-  "Leader-follower replication — реализовано (Experimental)" section and
-  its limitations paragraph in
-  [`guide/08-interconnect.md`](guide/08-interconnect.md).
-- **A journal gap is now a terminal, visible error.** When the leader
-  reports a `gap_at` past the follower's requested `from_version`, the
-  follower loop stops (rather than silently skipping past the missing
-  range) with `ReplError::JournalGap`, and the affected subscription is
-  marked `resync_required` via `mark_subscription_resync_required` —
-  visible through the existing `ReplicationStatus`/`ListSubscriptions`
-  admin surface. Recovery is a manual operator step (verify/fix the
-  follower's data, then issue the existing `Resume` admin action); full
-  automated snapshot-based reseed remains planned, see roadmap. See
-  `crates/shamir-server/src/replication/error.rs:38-57` and
+- **Experimental; not for production data.** Pull-based, async,
+  single-leader replication is intended for read replicas, not clustering/HA.
+  **`ReplMode::ReadOnly` is not enforced:** a follower accepts local writes.
+  See [`guide/08-interconnect.md`](guide/08-interconnect.md).
+- **Replicated map records cannot reliably be read.** Field keys are the
+  leader's interner ids; journal events carry no id-to-name bindings. A
+  follower may fail to decode records or read them under wrong field names.
+  Per-event field-name translation is planned.
+- **Secondary indexes and `COUNT(*)` are not maintained.** Index lookups
+  miss replicated rows. `SELECT COUNT(*)` reads a table counter that
+  replication does not update (0 for a table populated only by replication).
+- **DDL, schema and metadata are not replicated; only transaction data
+  writes are.** Create the same databases, repos and tables on the follower
+  first; **do not create secondary indexes there**. A missing follower repo
+  causes backoff with `ReplError::UnknownFollowerRepo`
+  (`crates/shamir-server/src/replication/follower_loop.rs:198-210`), but an
+  event for a missing table is skipped with a warning and the bookmark still
+  advances, losing that table's writes.
+- **Journal holes can be silent; gap detection is incomplete.** Events are
+  queued after version publication, outside the commit lock: concurrent
+  leader writes can journal version 11 before 10, and a follower that has
+  applied 11 never asks for 10. A journal-record persistence failure is only
+  logged; a corrupt record is silently skipped. The in-memory gap marker is
+  forgotten on leader restart, and a crash can lose the unflushed journal
+  tail. **A follower can silently miss an event under concurrent leader
+  writes today.**
+- **Detected gaps stop replication, but `Resume` does not repair data.**
+  When the leader reports a `gap_at` past the requested `from_version`, the
+  loop stops with `ReplError::JournalGap` and marks the subscription
+  `resync_required`, visible via `ReplicationStatus`/`ListSubscriptions`.
+  See `crates/shamir-server/src/replication/error.rs:38-57` and
   `crates/shamir-db/src/shamir_db/execute/admin_replication.rs:563-594`.
-- **Schema is not replicated.** Databases, repos, tables, and indexes must be
-  created on the follower by hand; until then the follower loop backs off with
-  `ReplError::UnknownFollowerRepo`
-  (`crates/shamir-server/src/replication/follower_loop.rs:198-210`).
+  There is **no snapshot/reseed and no journal retention**. If behind a gap,
+  recreate the follower from scratch with bookmark 0 and full replay; this
+  only works if the leader's journal has no hole. Otherwise restore the
+  follower from a backup. `Resume` only changes subscription state; it
+  neither repairs missing data nor fixes journal holes.
+- **Duplicate loops and bookmark crash risk.** Two subscriptions for the
+  same `(db, repo)` start two loops; bookmark advancement is not atomic.
+  The bookmark is stored in `__tx__` without flush ordering against follower
+  data, so after a crash it may be ahead of the data. This persistence risk
+  is **not verified on the on-disk engine**.
 - **No on/off switch.** The follower `SubscriptionSupervisor` always boots and
   the leader-side `ReplRequest::Pull` is served to any superuser/replicator
   session (`crates/shamir-server/src/config.rs:99-106`,
