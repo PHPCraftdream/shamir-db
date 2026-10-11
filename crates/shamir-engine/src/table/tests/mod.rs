@@ -93,6 +93,7 @@ pub mod table_config_tests;
 pub mod table_manager_tests;
 pub mod table_tests;
 pub mod test_helpers;
+pub mod tx_read_shortcut_tests;
 pub mod tx_scan_overlay_tests;
 pub mod update_byte_merge_parity_tests;
 pub mod update_validator_gate_tests;
