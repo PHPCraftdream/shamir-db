@@ -40,6 +40,7 @@ pub mod index2_lifecycle_state_tests;
 pub mod index2_migration_tests;
 pub mod index2_persistence_tests;
 pub mod index2_read_semantics_tests;
+pub mod index_build_explicit_pin_tests;
 pub mod index_create_persist_atomicity_tests;
 pub mod index_rename_concurrency_tests;
 pub mod index_scan_tests;
