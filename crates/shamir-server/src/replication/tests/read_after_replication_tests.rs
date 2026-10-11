@@ -399,7 +399,6 @@ async fn matrix_insert_one_projection() {
 }
 
 #[tokio::test]
-#[ignore = "#1212"]
 async fn matrix_insert_one_count() {
     matrix(Write::InsertOne, Read::Count).await;
 }
@@ -425,7 +424,6 @@ async fn matrix_insert_multi_projection() {
 }
 
 #[tokio::test]
-#[ignore = "#1212"]
 async fn matrix_insert_multi_count() {
     matrix(Write::InsertMulti, Read::Count).await;
 }
@@ -451,7 +449,6 @@ async fn matrix_update_projection() {
 }
 
 #[tokio::test]
-#[ignore = "#1212"]
 async fn matrix_update_count() {
     matrix(Write::Update, Read::Count).await;
 }
@@ -477,7 +474,6 @@ async fn matrix_delete_projection() {
 }
 
 #[tokio::test]
-#[ignore = "#1212"]
 async fn matrix_delete_count() {
     matrix(Write::Delete, Read::Count).await;
 }
@@ -503,7 +499,6 @@ async fn matrix_two_tables_projection() {
 }
 
 #[tokio::test]
-#[ignore = "#1212"]
 async fn matrix_two_tables_count() {
     matrix(Write::TwoTables, Read::Count).await;
 }
@@ -595,7 +590,7 @@ async fn matrix_secondary_index_lookup() {
             error,
             ReplError::ApplyRejected {
                 leader_version,
-                reason: ApplyRejectReason::IndexedTable,
+                reason: ApplyRejectReason::IndexedTable { .. },
             } if leader_version == target
         ),
         "unexpected error: {error:?}"

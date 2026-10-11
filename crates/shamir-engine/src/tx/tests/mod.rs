@@ -1,5 +1,6 @@
 pub mod a8_interner_delta_tests;
 pub mod acceptance_tests;
+pub mod apply_replicated_counter_tests;
 pub mod apply_replicated_preflight_tests;
 pub mod apply_replicated_tests;
 pub mod backpressure_gc_tests;
