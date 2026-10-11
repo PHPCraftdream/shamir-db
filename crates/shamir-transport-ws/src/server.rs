@@ -40,14 +40,11 @@ use tokio_tungstenite::WebSocketStream;
 /// cap and use tungstenite's `set_config` to relax it to 16 MiB only *after*
 /// `auth_ok`, but that is out of scope here.
 pub(crate) fn server_ws_config() -> WebSocketConfig {
-    // Struct-update from `Default` so the deprecated `max_send_queue` field
-    // (and any future additions) keep their default without tripping the
-    // `deprecated` lint under `-D warnings`.
-    WebSocketConfig {
-        max_message_size: Some(MAX_WS_FRAME_SIZE),
-        max_frame_size: Some(MAX_WS_FRAME_SIZE),
-        ..Default::default()
-    }
+    // `WebSocketConfig` is `#[non_exhaustive]`: build from `Default` via the
+    // setters so any other field keeps its default.
+    WebSocketConfig::default()
+        .max_message_size(Some(MAX_WS_FRAME_SIZE))
+        .max_frame_size(Some(MAX_WS_FRAME_SIZE))
 }
 
 /// Errors raised when accepting a WS upgrade.

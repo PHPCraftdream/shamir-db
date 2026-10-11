@@ -119,7 +119,7 @@ where
     let mut buf = Vec::with_capacity(4 + payload.len());
     buf.extend_from_slice(&len.to_be_bytes());
     buf.extend_from_slice(payload);
-    sink.send(Message::Binary(buf)).await?;
+    sink.send(Message::Binary(buf.into())).await?;
     Ok(())
 }
 

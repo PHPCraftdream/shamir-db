@@ -63,11 +63,9 @@ async fn live_accept_rejects_message_over_cap() {
     });
 
     // Client side: uncapped so it emits the oversized frame verbatim.
-    let client_cfg = WebSocketConfig {
-        max_message_size: None,
-        max_frame_size: None,
-        ..Default::default()
-    };
+    let client_cfg = WebSocketConfig::default()
+        .max_message_size(None)
+        .max_frame_size(None);
     let (mut client, _resp) = tokio_tungstenite::client_async_with_config(
         "ws://localhost/shamir/v1",
         client_io,
@@ -80,7 +78,7 @@ async fn live_accept_rejects_message_over_cap() {
     let oversized = vec![0xa5u8; MAX_WS_FRAME_SIZE + 1];
     // The send itself may surface the peer's protocol close; either way
     // the server task must report an error rather than a buffered body.
-    let _ = client.send(Message::Binary(oversized)).await;
+    let _ = client.send(Message::Binary(oversized.into())).await;
 
     let outcome = server.await.expect("server task join");
     assert!(
@@ -109,10 +107,10 @@ async fn live_accept_passes_small_frame() {
             .await
             .expect("client handshake");
     client
-        .send(Message::Binary(b"hello".to_vec()))
+        .send(Message::Binary(b"hello".to_vec().into()))
         .await
         .expect("send");
 
     let got = server.await.expect("join");
-    assert_eq!(got, b"hello");
+    assert_eq!(&got[..], b"hello");
 }
