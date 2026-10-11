@@ -1374,30 +1374,14 @@ impl RepoInstance {
                     }
                 }
                 let store: Arc<dyn Store> = self.repo.store_get("__changelog__").await?;
-                let marker = match store
-                    .get(shamir_tx::changefeed::gap_marker_key().into())
-                    .await
-                {
-                    Ok(bytes) => match <[u8; 8]>::try_from(bytes.as_ref()) {
-                        Ok(raw) if u64::from_be_bytes(raw) != 0 => u64::from_be_bytes(raw),
-                        _ => {
-                            log::warn!(
-                                "invalid changefeed gap marker for repo {}; restoring gap at 1",
-                                self.name()
-                            );
-                            1
-                        }
-                    },
-                    Err(DbError::NotFound(_)) => 0,
-                    Err(e) => return Err(e),
-                };
-                let cl_store: Arc<dyn shamir_tx::ChangelogStore> =
-                    Arc::new(crate::repo::changelog_store::StoreChangelog::new(store));
+                let adapter = crate::repo::changelog_store::StoreChangelog::new(store);
+                let (marker, repair_marker) = adapter.load_gap_marker().await?;
+                let cl_store: Arc<dyn shamir_tx::ChangelogStore> = Arc::new(adapter);
                 let pending = self.pending_changefeed_gap.load(Ordering::Acquire);
                 let restored = match (marker, pending) {
-                    (0, p) => p,
                     (m, 0) => m,
-                    (m, p) => m.min(p),
+                    (None, p) => Some((p, p)),
+                    (Some((first, through)), p) => Some((first.min(p), through.max(p))),
                 };
                 #[cfg(test)]
                 if let Some(hook) = self.journal_publish_hook.load_full() {
@@ -1406,19 +1390,23 @@ impl RepoInstance {
                         hook.resume.notified().await;
                     }
                 }
-                // new_with_gap treats its seed as durable. Persist a pending
-                // minimum during this one-time init before seeding the writer;
-                // failures leave the cell empty and pending intact for retry.
-                if restored != marker {
-                    cl_store
-                        .put(
-                            shamir_tx::changefeed::gap_marker_key(),
-                            shamir_tx::changefeed::version_key(restored),
-                        )
-                        .await
-                        .map_err(DbError::Storage)?;
+                // Seeds claim durability: flush pending/corrupt metadata before
+                // spawning the sole writer. Failed init leaves pending intact.
+                if repair_marker || restored != marker {
+                    if let Some(interval) = restored {
+                        cl_store
+                            .put(
+                                shamir_tx::changefeed::gap_marker_key(),
+                                shamir_tx::changefeed::encode_gap_marker(interval),
+                            )
+                            .await
+                            .map_err(DbError::Storage)?;
+                    }
                 }
-                let feed = shamir_tx::RepoChangefeed::new_with_gap(Arc::clone(&cl_store), restored);
+                let feed = shamir_tx::RepoChangefeed::new_with_gap_interval(
+                    Arc::clone(&cl_store),
+                    restored,
+                );
                 Ok::<ChangefeedHandle, DbError>(ChangefeedHandle {
                     feed,
                     store: cl_store,
