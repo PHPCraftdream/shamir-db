@@ -116,34 +116,39 @@ impl RecordCounter {
     /// the store is NOT touched here — call `persist()` later (or
     /// rely on the engine's existing post-write persist hook) to
     /// flush the new value.
+    ///
+    /// Boundary semantics (both directions are checked CAS loops, a refused
+    /// call leaves the counter untouched): going past `u64::MAX` and going
+    /// below zero are `DbError::Internal`, never a silent wrap; `i64::MIN`
+    /// is handled through `unsigned_abs`, so it neither panics nor wraps.
     pub async fn increment(&self, delta: i64) -> DbResult<()> {
         let cache = self.ensure_cache().await?;
         if delta == 0 {
             return Ok(());
         }
-        if delta > 0 {
-            cache.fetch_add(delta as u64, Ordering::AcqRel);
-        } else {
-            // Saturate at 0 — counter must not go negative.
-            let mag = (-delta) as u64;
-            // CAS loop because fetch_sub would underflow.
-            loop {
-                let cur = cache.load(Ordering::Acquire);
-                if cur < mag {
-                    return Err(DbError::Internal(format!(
+        let mag = delta.unsigned_abs();
+        loop {
+            let cur = cache.load(Ordering::Acquire);
+            let new = if delta > 0 {
+                cur.checked_add(mag).ok_or_else(|| {
+                    DbError::Internal(format!(
+                        "Record count overflow: current={cur}, delta={delta}"
+                    ))
+                })?
+            } else {
+                cur.checked_sub(mag).ok_or_else(|| {
+                    DbError::Internal(format!(
                         "Record count cannot go below zero: current={cur}, delta={delta}"
-                    )));
-                }
-                let new = cur - mag;
-                if cache
-                    .compare_exchange_weak(cur, new, Ordering::AcqRel, Ordering::Acquire)
-                    .is_ok()
-                {
-                    break;
-                }
+                    ))
+                })?
+            };
+            if cache
+                .compare_exchange_weak(cur, new, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok()
+            {
+                return Ok(());
             }
         }
-        Ok(())
     }
 
     /// Set the counter to an absolute value. Used by the doctor to
