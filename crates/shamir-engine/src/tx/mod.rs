@@ -12,6 +12,8 @@ pub(super) mod finalize;
 pub(super) mod materialize;
 pub(super) mod pre_commit;
 pub mod predicate_range;
+pub mod replicated_event;
+pub use replicated_event::ReplicatedEvent;
 pub mod recovery;
 pub mod tx_outcome;
 

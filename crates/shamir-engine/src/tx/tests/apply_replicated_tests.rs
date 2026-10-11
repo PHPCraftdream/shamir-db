@@ -87,7 +87,7 @@ async fn put_convergence() {
 
     let event = put_event("hello", rid(1), 1);
 
-    let outcome = apply_replicated(&follower, &event, 0, ApplyPolicy::Trusted)
+    let outcome = apply_replicated(&follower, &event, &[], 0, ApplyPolicy::Trusted)
         .await
         .unwrap();
     let local_v = match outcome {
@@ -115,7 +115,7 @@ async fn delete_convergence() {
     let put_ev = put_event("tmp", rid(7), 1);
     let del_ev = delete_event(rid(7), 2);
 
-    let _ = apply_replicated(&follower, &put_ev, 0, ApplyPolicy::Trusted)
+    let _ = apply_replicated(&follower, &put_ev, &[], 0, ApplyPolicy::Trusted)
         .await
         .unwrap();
     // Confirm Put landed first.
@@ -123,7 +123,7 @@ async fn delete_convergence() {
     assert!(matches!(got, InnerValue::Str(ref s) if s == "tmp"));
 
     // Apply Delete — watermark is 1 (Put's leader version).
-    let outcome = apply_replicated(&follower, &del_ev, 1, ApplyPolicy::Trusted)
+    let outcome = apply_replicated(&follower, &del_ev, &[], 1, ApplyPolicy::Trusted)
         .await
         .unwrap();
     assert!(matches!(outcome, ApplyOutcome::Applied { .. }));
@@ -148,7 +148,7 @@ async fn idempotent_reapply_is_skip() {
     let event = put_event("v3", rid(3), 5);
 
     // First apply at watermark 0 → Applied.
-    let first = apply_replicated(&follower, &event, 0, ApplyPolicy::Trusted)
+    let first = apply_replicated(&follower, &event, &[], 0, ApplyPolicy::Trusted)
         .await
         .unwrap();
     assert!(matches!(first, ApplyOutcome::Applied { .. }));
@@ -159,7 +159,7 @@ async fn idempotent_reapply_is_skip() {
 
     // Second apply with watermark = event.commit_version (5) → Skipped, no
     // version consumed, no state change.
-    let second = apply_replicated(&follower, &event, 5, ApplyPolicy::Trusted)
+    let second = apply_replicated(&follower, &event, &[], 5, ApplyPolicy::Trusted)
         .await
         .unwrap();
     assert_eq!(second, ApplyOutcome::Skipped);
@@ -187,7 +187,7 @@ async fn watermark_ordering() {
     {
         let follower = follower_repo();
         let follower_tbl = follower.get_table("items").await.unwrap();
-        let outcome = apply_replicated(&follower, &event, 3, ApplyPolicy::Trusted)
+        let outcome = apply_replicated(&follower, &event, &[], 3, ApplyPolicy::Trusted)
             .await
             .unwrap();
         assert!(matches!(outcome, ApplyOutcome::Applied { .. }));
@@ -199,7 +199,7 @@ async fn watermark_ordering() {
     {
         let follower = follower_repo();
         let _ = follower.get_table("items").await.unwrap();
-        let outcome = apply_replicated(&follower, &event, 5, ApplyPolicy::Trusted)
+        let outcome = apply_replicated(&follower, &event, &[], 5, ApplyPolicy::Trusted)
             .await
             .unwrap();
         assert_eq!(outcome, ApplyOutcome::Skipped);
@@ -209,7 +209,7 @@ async fn watermark_ordering() {
     {
         let follower = follower_repo();
         let follower_tbl = follower.get_table("items").await.unwrap();
-        let outcome = apply_replicated(&follower, &event, 4, ApplyPolicy::Trusted)
+        let outcome = apply_replicated(&follower, &event, &[], 4, ApplyPolicy::Trusted)
             .await
             .unwrap();
         assert!(matches!(outcome, ApplyOutcome::Applied { .. }));
@@ -235,7 +235,7 @@ async fn downstream_changefeed_reemit() {
 
     let event = put_event("chain", rid(11), 7);
 
-    let outcome = apply_replicated(&follower, &event, 0, ApplyPolicy::Trusted)
+    let outcome = apply_replicated(&follower, &event, &[], 0, ApplyPolicy::Trusted)
         .await
         .unwrap();
     let local_v = match outcome {
@@ -282,7 +282,7 @@ async fn apply_before_any_read_is_mvcc_visible() {
     // Apply FIRST — the follower has never read `items`, so its MvccStore
     // is not yet attached at the top of apply_replicated.
     let event = put_event("fresh", rid(3), 1);
-    let outcome = apply_replicated(&follower, &event, 0, ApplyPolicy::Trusted)
+    let outcome = apply_replicated(&follower, &event, &[], 0, ApplyPolicy::Trusted)
         .await
         .unwrap();
     assert!(
@@ -334,7 +334,7 @@ async fn a12_success_path_completion_watermark_advances_past_replicated_version(
     // Step 1 — apply_replicated allocates local_version = 1 (N) and (post-fix)
     // marks it `Materialized` in `completion` via the VersionGuard's `commit()`.
     let event = put_event("a12-ok", rid(21), 1);
-    let outcome = apply_replicated(&follower, &event, 0, ApplyPolicy::Trusted)
+    let outcome = apply_replicated(&follower, &event, &[], 0, ApplyPolicy::Trusted)
         .await
         .unwrap();
     let n = match outcome {
@@ -416,7 +416,7 @@ async fn a12_failure_path_version_marked_aborted_in_completion_tracker() {
         .insert_sync(items_token(), mvcc)
         .is_ok());
     let bad_event = put_event("history-fails", rid(31), 1);
-    let err = apply_replicated(&follower, &bad_event, 0, ApplyPolicy::Trusted)
+    let err = apply_replicated(&follower, &bad_event, &[], 0, ApplyPolicy::Trusted)
         .await
         .expect_err("history persistence must fail");
     assert!(
@@ -469,7 +469,7 @@ async fn a12_regression_success_path_preserves_data_changefeed_and_durable() {
     let mut rx = follower.subscribe_changelog().await.unwrap();
 
     let event = put_event("regress", rid(41), 3);
-    let outcome = apply_replicated(&follower, &event, 0, ApplyPolicy::Trusted)
+    let outcome = apply_replicated(&follower, &event, &[], 0, ApplyPolicy::Trusted)
         .await
         .unwrap();
     let n = match outcome {
@@ -577,7 +577,7 @@ async fn get_table_attach_failure_is_not_swallowed() {
 
     let event = put_event("should-not-land", rid(50), 1);
 
-    let err = apply_replicated(&follower, &event, 0, ApplyPolicy::Trusted)
+    let err = apply_replicated(&follower, &event, &[], 0, ApplyPolicy::Trusted)
         .await
         .expect_err("a genuine non-NotFound attach failure must propagate, not be swallowed");
     assert!(
@@ -614,12 +614,7 @@ async fn get_table_attach_failure_is_not_swallowed() {
 
 /// #1199 — `ApplyPolicy::ValidatePayload` rejects a `Put` whose `value`
 /// bytes decode as neither `RecordView` nor `InnerValue`, and consumes NO
-/// version doing so — unlike the `Trusted`-policy failure in
-/// `a12_failure_path_version_marked_aborted_in_completion_tracker` above
-/// (where the watermark DOES advance, because that failure is discovered
-/// AFTER `assign_next_version_guarded`). The identical event, re-applied
-/// under `Trusted`, is accepted verbatim — proving the two policies
-/// genuinely diverge in observable behavior, not just in name.
+/// version doing so. Translation also requires decoding under `Trusted`.
 #[tokio::test]
 async fn validate_payload_rejects_undecodable_put_and_consumes_no_version() {
     let follower = follower_repo();
@@ -644,7 +639,14 @@ async fn validate_payload_rejects_undecodable_put_and_consumes_no_version() {
         }],
     };
 
-    let err = apply_replicated(&follower, &garbage_event, 0, ApplyPolicy::ValidatePayload).await;
+    let err = apply_replicated(
+        &follower,
+        &garbage_event,
+        &[],
+        0,
+        ApplyPolicy::ValidatePayload,
+    )
+    .await;
     assert_eq!(
         err.unwrap(),
         ApplyOutcome::Rejected {
@@ -658,13 +660,15 @@ async fn validate_payload_rejects_undecodable_put_and_consumes_no_version() {
          check runs before assign_next_version_guarded"
     );
 
-    // Same event, Trusted policy: applied verbatim (no decode check).
-    let outcome = apply_replicated(&follower, &garbage_event, 0, ApplyPolicy::Trusted)
+    // Trusted skips optional validation, not decoding required for translation.
+    let outcome = apply_replicated(&follower, &garbage_event, &[], 0, ApplyPolicy::Trusted)
         .await
         .unwrap();
-    assert!(
-        matches!(outcome, ApplyOutcome::Applied { .. }),
-        "Trusted must apply the same garbage bytes verbatim; got {outcome:?}"
+    assert_eq!(
+        outcome,
+        ApplyOutcome::Rejected {
+            reason: ApplyRejectReason::UndecodablePayload,
+        }
     );
 }
 

@@ -1,5 +1,6 @@
 use shamir_query_builder::batch::Batch;
 use shamir_query_builder::query::Query;
+use shamir_query_types::batch::{BatchError, BatchLimits, LimitKind};
 use shamir_query_types::filter::FilterValue;
 
 use crate::query::batch::batch_validate::validate_pagination;
@@ -27,8 +28,17 @@ fn pagination_ceiling_covers_reads_in_nested_batches_and_empty_loops() {
             nested.build(),
         );
         for request in [leaf, loop_batch.build()] {
-            let error = validate_pagination(&request.queries).unwrap_err();
-            assert_eq!(error.code(), Some("pagination_too_large"));
+            let error = validate_pagination(&request.queries, &BatchLimits::default()).unwrap_err();
+            match error {
+                BatchError::LimitExceeded {
+                    kind: LimitKind::PageSize | LimitKind::Offset,
+                    ..
+                } => {}
+                BatchError::QueryError { code, .. } => {
+                    assert_eq!(code.as_deref(), Some("pagination_too_large"));
+                }
+                error => panic!("unexpected pagination error: {error:?}"),
+            }
         }
     }
 }
@@ -42,6 +52,9 @@ fn pagination_ceiling_preserves_normal_and_unpaginated_reads() {
     ] {
         let mut batch = Batch::new();
         batch.query("r", query);
-        assert_eq!(validate_pagination(&batch.build().queries), Ok(()));
+        assert_eq!(
+            validate_pagination(&batch.build().queries, &BatchLimits::default()),
+            Ok(()),
+        );
     }
 }

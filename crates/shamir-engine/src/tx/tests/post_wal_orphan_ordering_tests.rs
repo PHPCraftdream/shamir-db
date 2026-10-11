@@ -11,7 +11,7 @@ use crate::table::table_manager::table_token_for;
 use crate::table::TableConfig;
 use crate::tx::commit::{PostWalPrePublishHook, TEST_POST_WAL_PRE_PUBLISH_HOOK};
 
-async fn fixture(name: &str) -> (RepoInstance, Arc<PostWalPrePublishHook>) {
+pub(super) async fn fixture(name: &str) -> (RepoInstance, Arc<PostWalPrePublishHook>) {
     let hook = Arc::new(PostWalPrePublishHook {
         repo_name: name.into(),
         pre_wal: AtomicBool::new(false),
@@ -41,7 +41,11 @@ async fn fixture(name: &str) -> (RepoInstance, Arc<PostWalPrePublishHook>) {
     (repo, hook)
 }
 
-async fn cancel_post_wal(repo: &RepoInstance, hook: &PostWalPrePublishHook, tx: TxContext) -> u64 {
+pub(super) async fn cancel_post_wal(
+    repo: &RepoInstance,
+    hook: &PostWalPrePublishHook,
+    tx: TxContext,
+) -> u64 {
     hook.armed.store(true, Ordering::Release);
     let owned = repo.clone();
     let task = tokio::spawn(async move { owned.commit_tx(tx).await });
@@ -150,7 +154,6 @@ async fn post_wal_cancel_multi_table_counter_underflow_does_not_block_durability
 // is skipped by index_applied. Versioned record history must also keep the
 // later value; the unversioned posting must not regress to the orphan value.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "#1287"]
 async fn post_wal_cancel_same_record_later_writer_posting_survives_drain() {
     let (repo, hook) = fixture("post_wal_same_record_posting").await;
     let table = repo.get_table("a").await.unwrap();
